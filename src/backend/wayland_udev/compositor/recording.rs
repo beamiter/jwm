@@ -134,6 +134,10 @@ pub(crate) struct RecordingState {
     start_time: Option<Instant>,
     fps: u32,
     last_capture: Instant,
+    /// Captures retired without reading pixels since the last real one. Only
+    /// the first of a run is reported, so a capture source that stays
+    /// unavailable does not write one log line per capture interval.
+    skipped_since_capture: u64,
     /// Packed NV12 target and the passes that fill it. Zero when this recording
     /// fell back to a plain RGBA readback.
     packed_fbo: u32,
@@ -161,6 +165,7 @@ impl RecordingState {
             start_time: None,
             fps: 30,
             last_capture: Instant::now(),
+            skipped_since_capture: 0,
             packed_fbo: 0,
             packed_texture: 0,
             pack_program: 0,
@@ -460,6 +465,7 @@ impl RecordingState {
         self.current_pbo = 0;
         self.start_time = Some(Instant::now());
         self.last_capture = Instant::now();
+        self.skipped_since_capture = 0;
 
         Ok(())
     }
@@ -478,6 +484,7 @@ impl RecordingState {
             return;
         }
         self.last_capture = self.next_capture_anchor();
+        self.skipped_since_capture = 0;
 
         unsafe {
             gl.BindFramebuffer(ffi::READ_FRAMEBUFFER, source_fbo);
@@ -771,6 +778,28 @@ impl RecordingState {
         }
     }
 
+    /// Retire the capture this frame owed without reading any pixels, and say
+    /// whether the caller should report it.
+    ///
+    /// The capture clock has to advance even when the source was unusable.
+    /// `frame_due` is what keeps the compositor rendering for the encoder, so
+    /// a due frame that neither captured nor advanced leaves `frame_due` true
+    /// for good: a full-screen recomposite every loop iteration, on an
+    /// otherwise static desktop, until the recording stops.
+    ///
+    /// Only the first skip of a run answers true. The one failure that reaches
+    /// here — the encoded capture view could not be allocated — repeats every
+    /// frame, and at `fps` reports a second the log is the noisier half of the
+    /// bug.
+    pub(crate) fn skip_frame(&mut self) -> bool {
+        if !self.active || !self.frame_due() {
+            return false;
+        }
+        self.last_capture = self.next_capture_anchor();
+        self.skipped_since_capture = self.skipped_since_capture.saturating_add(1);
+        self.skipped_since_capture == 1
+    }
+
     /// Whether the next capture is due. Recording used to force a full-screen
     /// recomposite on every loop iteration to feed an encoder that only takes
     /// `fps` frames a second; the composite is only worth doing when a frame
@@ -874,6 +903,40 @@ mod tests {
         state.last_capture = Instant::now() - Duration::from_millis(100);
         assert!(state.frame_due());
         assert_eq!(state.frame_deadline(), Some(Duration::ZERO));
+    }
+
+    #[test]
+    fn a_frame_whose_source_was_unusable_still_advances_the_capture_clock() {
+        let mut state = RecordingState::new();
+        state.active = true;
+        state.fps = 30;
+
+        // An unusable capture source must retire the frame it owed: leaving
+        // `frame_due` true holds the compositor at a full-screen recomposite
+        // per loop iteration for the rest of the recording.
+        state.last_capture = Instant::now() - Duration::from_millis(100);
+        assert!(state.frame_due());
+        assert!(state.skip_frame(), "the first skip of a run is reported");
+        assert!(!state.frame_due());
+
+        // The run is reported once, not once per interval.
+        state.last_capture = Instant::now() - Duration::from_millis(100);
+        assert!(state.frame_due());
+        assert!(!state.skip_frame());
+        assert!(!state.frame_due());
+
+        // A frame that is not due skips nothing and reports nothing, and an
+        // idle recorder has no clock to advance at all.
+        assert!(!state.skip_frame());
+        let mut idle = RecordingState::new();
+        idle.last_capture = Instant::now() - Duration::from_millis(100);
+        assert!(!idle.skip_frame());
+        assert!(!idle.frame_due());
+
+        // A capture that succeeds re-arms the report for the next run.
+        state.skipped_since_capture = 0;
+        state.last_capture = Instant::now() - Duration::from_millis(100);
+        assert!(state.skip_frame());
     }
 
     #[test]

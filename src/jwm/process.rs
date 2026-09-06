@@ -513,12 +513,8 @@ impl Jwm {
                 .and_then(|n| n.to_str())
                 .unwrap_or("child");
             let stderr_path = format!("/tmp/jwm-{}-stderr.log", cmd_name);
-            let stderr_file = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&stderr_path)
-                .map(std::process::Stdio::from)
-                .unwrap_or_else(|_| std::process::Stdio::inherit());
+            let stderr_file = open_child_stderr_log(std::path::Path::new(&stderr_path))
+                .map_or_else(std::process::Stdio::inherit, std::process::Stdio::from);
 
             command
                 .stdin(std::process::Stdio::null())
@@ -547,7 +543,30 @@ impl Jwm {
     pub(crate) fn supervise_transient_child(&mut self, child: Child) {
         self.transient_children.supervise(child);
     }
+}
 
+/// Open a launched application's stderr log the way the `/sys` probes open
+/// theirs: never follow a symlink, never block, and hand the child nothing
+/// but a regular file of this user's. `/tmp` is world-writable and the name
+/// follows from the keybindings, so a FIFO planted there would otherwise
+/// park the compositor thread in `open(2)` until a reader appeared, and a
+/// symlink would append the child's stderr wherever it pointed. Anything
+/// untrusted means the child inherits JWM's stderr instead.
+fn open_child_stderr_log(path: &std::path::Path) -> Option<std::fs::File> {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+        .open(path)
+        .ok()?;
+    let metadata = file.metadata().ok()?;
+    (metadata.is_file() && metadata.uid() == unsafe { libc::geteuid() }).then_some(file)
+}
+
+impl Jwm {
     /// Capture every still-owned transient PID before dropping this `Jwm` for
     /// an exec restart. `exec` preserves the process PID and child relation,
     /// allowing the replacement supervisor to reap each PID exactly.
@@ -594,6 +613,46 @@ impl Jwm {
 mod tests {
     use super::*;
     use std::process::Stdio;
+
+    #[test]
+    fn child_stderr_log_never_blocks_on_a_fifo_or_follows_a_symlink() {
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = std::env::temp_dir().join(format!("jwm-child-stderr-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        // A FIFO with no reader: a blocking open would never return.
+        let fifo = root.join("fifo.log");
+        let c_fifo = std::ffi::CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c_fifo.as_ptr(), 0o600) }, 0);
+        let started = Instant::now();
+        assert!(open_child_stderr_log(&fifo).is_none());
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "opening a planted FIFO blocked the caller"
+        );
+
+        // A symlink to somebody else's file: not followed.
+        let victim = root.join("victim.log");
+        std::fs::write(&victim, "unchanged").unwrap();
+        let link = root.join("link.log");
+        std::os::unix::fs::symlink(&victim, &link).unwrap();
+        assert!(open_child_stderr_log(&link).is_none());
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "unchanged");
+
+        // A regular file is created private and accepted.
+        let log = root.join("app.log");
+        assert!(open_child_stderr_log(&log).is_some());
+        assert_eq!(
+            std::fs::metadata(&log).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert!(open_child_stderr_log(&log).is_some());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     fn wait_until_reaped(supervisor: &mut TransientChildSupervisor) {
         let deadline = Instant::now() + Duration::from_secs(2);

@@ -5,6 +5,47 @@
 use crate::core::models::{MonitorGeometry, SizeHints};
 use crate::core::types::Rect;
 
+/// 约束后的边长下限：一个窗口至少要有一个像素。
+pub const MIN_CONSTRAINED_DIMENSION: i32 = 1;
+
+/// 约束后的边长上限。
+///
+/// X11 `ConfigureWindow` 的 width/height 是 CARD16，比这更宽的窗口服务器
+/// 根本配置不了；Wayland 侧的缓冲区只会更小。上限放在这里而不是只放在
+/// hint 解析器里，是因为 [`SizeHints`] 是普通数据——任何 backend、任何
+/// 测试都能直接把 `i32::MAX` 填进去，而结果的每一个下游消费者
+/// （`total_width()`、configure 编码）做的都是朴素的 `i32` 运算。
+pub const MAX_CONSTRAINED_DIMENSION: i32 = u16::MAX as i32;
+
+/// 把任意中间量收进可配置的边长区间。
+fn clamp_dimension(value: i64) -> i32 {
+    value.clamp(
+        i64::from(MIN_CONSTRAINED_DIMENSION),
+        i64::from(MAX_CONSTRAINED_DIMENSION),
+    ) as i32
+}
+
+/// 增量对齐的唯一实现：把 `offset` 落到 `increment` 的整数倍（向零取整）。
+/// 分母为正，所以结果的绝对值不会超过 `offset`。
+fn aligned_offset(offset: i64, increment: i64) -> i64 {
+    if increment > 0 {
+        offset / increment * increment
+    } else {
+        offset
+    }
+}
+
+/// 以 `base` 为原点做增量对齐，并把结果收进可配置区间。
+///
+/// `base`/`increment` 都是客户端写的 hint，`size - base` 与回加 `base`
+/// 在 `i32` 上都会溢出（debug 下 panic，release 下回绕成负数几何），
+/// 所以中间量一律走 `i64`。
+fn increment_aligned_dimension(size: i32, base: i32, increment: i32) -> i32 {
+    let base = i64::from(base);
+    let aligned = aligned_offset(i64::from(size) - base, i64::from(increment));
+    clamp_dimension(aligned + base)
+}
+
 /// 几何约束工具 - 纯函数集合
 pub struct GeometryConstraints;
 
@@ -115,11 +156,7 @@ impl GeometryConstraints {
     /// # 返回
     /// 调整后的尺寸（增量的整数倍）
     pub fn apply_increments(size: i32, increment: i32) -> i32 {
-        if increment > 0 {
-            (size / increment) * increment
-        } else {
-            size
-        }
+        aligned_offset(i64::from(size), i64::from(increment)) as i32
     }
 
     /// 应用宽高比约束
@@ -155,24 +192,28 @@ impl GeometryConstraints {
     ///
     /// # 返回
     /// 完全约束后的 (宽度, 高度)
-    pub fn calculate_constrained_size(mut w: i32, mut h: i32, hints: &SizeHints) -> (i32, i32) {
-        // 应用增量约束
-        w = Self::apply_increments(w - hints.base_w, hints.inc_w) + hints.base_w;
-        h = Self::apply_increments(h - hints.base_h, hints.inc_h) + hints.base_h;
+    pub fn calculate_constrained_size(w: i32, h: i32, hints: &SizeHints) -> (i32, i32) {
+        // 应用增量约束（中间量走 i64，见 `increment_aligned_dimension`）
+        let mut w = increment_aligned_dimension(w, hints.base_w, hints.inc_w);
+        let mut h = increment_aligned_dimension(h, hints.base_h, hints.inc_h);
 
-        // 应用宽高比约束
+        // 应用宽高比约束。入参已经在区间内且非零，所以 `w/h` 不会除零，
+        // `h * aspect` 也只会在比例本身荒谬时饱和——随后立刻被收回来。
         (w, h) = Self::apply_aspect_ratio_constraints(w, h, hints);
+        w = clamp_dimension(i64::from(w));
+        h = clamp_dimension(i64::from(h));
 
-        // 应用最小尺寸约束
-        w = w.max(hints.min_w);
-        h = h.max(hints.min_h);
+        // 应用最小尺寸约束。min 也先收进区间：`min_w = i32::MAX` 表达的是
+        // 「越大越好」，不是要一个服务器配置不了的窗口。
+        w = w.max(clamp_dimension(i64::from(hints.min_w)));
+        h = h.max(clamp_dimension(i64::from(hints.min_h)));
 
-        // 应用最大尺寸约束
+        // 应用最大尺寸约束（<= 0 仍然表示「没有上限」）
         if hints.max_w > 0 {
-            w = w.min(hints.max_w);
+            w = w.min(clamp_dimension(i64::from(hints.max_w)));
         }
         if hints.max_h > 0 {
-            h = h.min(hints.max_h);
+            h = h.min(clamp_dimension(i64::from(hints.max_h)));
         }
 
         (w, h)
@@ -349,6 +390,85 @@ mod tests {
         assert_eq!(h, 600);
     }
 
+    /// `SizeHints` 是普通数据：X11 的 hint 解析器现在把每个词收进了
+    /// CARD16，但 `calculate_constrained_size` 不能靠「唯一的调用者很小心」
+    /// 活着。这里直接注入敌意 hint——`base_w = i32::MIN` 让 `w - base_w`
+    /// 在 i32 上溢出（debug 下 panic），`min_w = i32::MAX` 和 40 亿的宽高比
+    /// 则会把结果顶到 `i32::MAX`——断言结果始终落在服务器配置得了的区间。
+    #[test]
+    fn hostile_size_hints_stay_inside_the_configurable_band() {
+        let hostile = [
+            SizeHints {
+                min_w: i32::MAX,
+                base_w: i32::MIN,
+                min_aspect: 4e9,
+                max_aspect: 4e9,
+                ..Default::default()
+            },
+            SizeHints {
+                base_w: i32::MIN,
+                base_h: i32::MIN,
+                inc_w: i32::MAX,
+                inc_h: i32::MAX,
+                min_w: i32::MAX,
+                min_h: i32::MAX,
+                max_w: i32::MIN,
+                max_h: i32::MIN,
+                min_aspect: f32::MAX,
+                max_aspect: f32::MIN_POSITIVE,
+                hints_valid: true,
+            },
+            SizeHints {
+                base_w: i32::MAX,
+                base_h: i32::MAX,
+                inc_w: 1,
+                inc_h: 1,
+                max_w: i32::MAX,
+                max_h: i32::MAX,
+                min_aspect: f32::MIN_POSITIVE,
+                max_aspect: f32::MAX,
+                ..Default::default()
+            },
+            SizeHints {
+                base_w: i32::MIN,
+                base_h: i32::MAX,
+                inc_w: -1,
+                inc_h: i32::MIN,
+                min_w: i32::MIN,
+                min_h: i32::MIN,
+                min_aspect: f32::NAN,
+                max_aspect: f32::INFINITY,
+                ..Default::default()
+            },
+        ];
+
+        let band = MIN_CONSTRAINED_DIMENSION..=MAX_CONSTRAINED_DIMENSION;
+        for hints in &hostile {
+            for (w, h) in [(800, 600), (1, 1), (i32::MIN, i32::MAX), (0, 0)] {
+                let (cw, ch) = GeometryConstraints::calculate_constrained_size(w, h, hints);
+                assert!(band.contains(&cw), "width {cw} escaped for {hints:?}");
+                assert!(band.contains(&ch), "height {ch} escaped for {hints:?}");
+            }
+        }
+    }
+
+    /// 增量对齐本身也要扛住 `i32::MIN`：`(size / inc) * inc` 只在分母为正
+    /// 时安全，而 `size` 是可以到达边界的。
+    #[test]
+    fn increment_alignment_survives_the_i32_extremes() {
+        for size in [i32::MIN, -1, 0, 1, i32::MAX] {
+            for increment in [i32::MIN, -1, 0, 1, 7, i32::MAX] {
+                let aligned = GeometryConstraints::apply_increments(size, increment);
+                if increment > 0 {
+                    assert_eq!(aligned % increment, 0, "size={size} inc={increment}");
+                    assert!(aligned.unsigned_abs() <= size.unsigned_abs());
+                } else {
+                    assert_eq!(aligned, size, "size={size} inc={increment}");
+                }
+            }
+        }
+    }
+
     #[test]
     fn test_covers_full_monitor() {
         let monitor = Rect::new(0, 0, 1920, 1080);
@@ -409,5 +529,35 @@ mod tests {
         // y 应该被约束到 boundary.y + boundary.h - height = 100 + 600 - 150 = 550
         assert_eq!(x, 700);
         assert_eq!(y, 550);
+    }
+
+    #[test]
+    fn a_half_aspect_pair_constrains_nothing() {
+        // The X11 hint parser records an aspect pair only when both halves
+        // are well-formed and inside its sane band, so a client asking
+        // "never narrower than 4:3, no practical maximum" arrives here as
+        // `(0.0, 0.0)`. That is lossless precisely because this gate needs
+        // both halves: a surviving 4:3 minimum would constrain exactly as
+        // much as the absent pair does, which is nothing. If this gate is
+        // ever split so one half can act alone, the parser has to stop
+        // dropping the pair — that is the other side of the contract, pinned
+        // by `a_half_aspect_pair_is_recorded_absent` beside the parser.
+        let square = |min_aspect: f32, max_aspect: f32| {
+            GeometryConstraints::apply_aspect_ratio_constraints(
+                400,
+                400,
+                &SizeHints {
+                    min_aspect,
+                    max_aspect,
+                    ..Default::default()
+                },
+            )
+        };
+        assert_eq!(square(0.0, 0.0), (400, 400));
+        assert_eq!(square(4.0 / 3.0, 0.0), (400, 400));
+        assert_eq!(square(0.0, 16.0 / 9.0), (400, 400));
+        // With both halves present the same minimum does constrain, so this
+        // would notice if the gate itself changed.
+        assert_eq!(square(4.0 / 3.0, 16.0 / 9.0), (533, 400));
     }
 }

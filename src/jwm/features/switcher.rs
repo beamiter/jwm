@@ -63,11 +63,85 @@ pub(crate) fn switcher_eligible(
 /// Where the highlight starts. Forward opens on the *previous* window — one
 /// tap of Alt+Tab is the classic "go back" — backward on the oldest. `None`
 /// means the gesture is a no-op: nothing to list, or a directionless call.
-pub(crate) fn initial_selection(len: usize, direction: i32) -> Option<usize> {
+///
+/// "Previous" is relative to the focused window, which heads the list when
+/// there is one (`focused_is_first`). When nothing is focused — the
+/// selected monitor's tag is empty, or every window on it is minimized —
+/// the head is not the current window but the most recent one, and that is
+/// where a forward tap lands.
+pub(crate) fn initial_selection(
+    len: usize,
+    direction: i32,
+    focused_is_first: bool,
+) -> Option<usize> {
     if len == 0 || direction == 0 {
         return None;
     }
-    Some(if direction > 0 { 1 % len } else { len - 1 })
+    Some(if direction > 0 {
+        if focused_is_first { 1 % len } else { 0 }
+    } else {
+        len - 1
+    })
+}
+
+/// Whether a key release ends the gesture, given the modifiers `held` when
+/// the panel opened. A gesture modifier the keysym table knows commits when
+/// it was held. Any *other* modifier keysym — `Meta_L` for a Win key under
+/// `altwin:meta_win`, `Hyper_L`, the macintosh layouts' Meta on Mod1 — is
+/// decided by the live modifier mask through `live_mods`, which no layout
+/// can disguise: a modifier held at open that is no longer down commits.
+/// Non-modifier keys never change the mask and never commit, so the mask is
+/// only queried for a modifier keysym; a failed query commits nothing.
+pub(crate) fn release_commits(
+    held: Mods,
+    keysym: u32,
+    live_mods: impl FnOnce() -> Option<Mods>,
+) -> bool {
+    if held.is_empty() {
+        return false;
+    }
+    if let Some(modifier) = modifier_of_keysym(keysym) {
+        return held.contains(modifier);
+    }
+    if !(keys::KEY_Shift_L..=keys::KEY_Hyper_R).contains(&keysym) {
+        return false;
+    }
+    live_mods().is_some_and(|down| (held & down) != held)
+}
+
+/// What a button press over the open switcher panel does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SwitcherPress {
+    /// Button 1: commit the row under the pointer, or cancel when the press
+    /// landed on no row at all.
+    PickRow,
+    /// The wheel: step the highlight by this much without committing, the
+    /// way it browses every other panel the grab hands presses to.
+    Browse(isize),
+    /// The horizontal wheel: not a click, and nothing to browse with.
+    Inert,
+    /// Any other real click: the gesture ends.
+    Cancel,
+}
+
+/// Decide a press from its X11 button number.
+///
+/// The panel holds a button grab, so X11 delivers the wheel (buttons 4-7)
+/// here as presses alongside the real clicks. Folding those into "anything
+/// but button 1 cancels" would let a stray scroll — a touchpad flick while
+/// the modifier is still held — throw away the switch the user is in the
+/// middle of making; a scroll asks to *browse*, which is exactly what the
+/// same wheel does over the control center, the launcher and the layout
+/// picker. Same rule, same reason as `input_handler::toast_press`: the
+/// wheel is not a click.
+pub(crate) fn switcher_press(button: u8) -> SwitcherPress {
+    match button {
+        1 => SwitcherPress::PickRow,
+        4 => SwitcherPress::Browse(-1),
+        5 => SwitcherPress::Browse(1),
+        6 | 7 => SwitcherPress::Inert,
+        _ => SwitcherPress::Cancel,
+    }
 }
 
 /// One row's text, in the launcher's window-row format: icon, the title
@@ -225,12 +299,76 @@ mod tests {
 
     #[test]
     fn initial_selection_points_one_back_or_at_the_oldest() {
-        assert_eq!(initial_selection(0, 1), None);
-        assert_eq!(initial_selection(3, 0), None);
-        assert_eq!(initial_selection(1, 1), Some(0));
-        assert_eq!(initial_selection(3, 1), Some(1));
-        assert_eq!(initial_selection(3, -1), Some(2));
-        assert_eq!(initial_selection(1, -1), Some(0));
+        assert_eq!(initial_selection(0, 1, true), None);
+        assert_eq!(initial_selection(3, 0, true), None);
+        assert_eq!(initial_selection(1, 1, true), Some(0));
+        assert_eq!(initial_selection(3, 1, true), Some(1));
+        assert_eq!(initial_selection(3, -1, true), Some(2));
+        assert_eq!(initial_selection(1, -1, true), Some(0));
+    }
+
+    #[test]
+    fn initial_selection_starts_at_the_head_when_nothing_is_focused() {
+        // The selected monitor's tag is empty, or everything on it is
+        // minimized: the head of the list is already the previous window,
+        // so one tap must land on it rather than skip it.
+        assert_eq!(initial_selection(3, 1, false), Some(0));
+        assert_eq!(initial_selection(1, 1, false), Some(0));
+        // Backward still opens on the oldest.
+        assert_eq!(initial_selection(3, -1, false), Some(2));
+        assert_eq!(initial_selection(0, 1, false), None);
+    }
+
+    #[test]
+    fn the_wheel_browses_the_panel_and_only_a_click_can_end_the_gesture() {
+        // The panel took a button grab so a click on a row can commit it;
+        // on X11 that same grab delivers the wheel as buttons 4-7. Losing an
+        // Alt+Tab to a touchpad flick is the regression this pins.
+        assert_eq!(switcher_press(1), SwitcherPress::PickRow);
+        assert_eq!(switcher_press(4), SwitcherPress::Browse(-1));
+        assert_eq!(switcher_press(5), SwitcherPress::Browse(1));
+        assert_eq!(switcher_press(6), SwitcherPress::Inert);
+        assert_eq!(switcher_press(7), SwitcherPress::Inert);
+        // A real click that is not the picking one still ends it.
+        for button in [2u8, 3, 8, 9] {
+            assert_eq!(
+                switcher_press(button),
+                SwitcherPress::Cancel,
+                "button {button} is a click"
+            );
+        }
+    }
+
+    #[test]
+    fn a_release_commits_by_keysym_or_failing_that_by_the_live_mask() {
+        let held = Mods::SUPER;
+        let never = || -> Option<Mods> { panic!("the mask is not queried for a known keysym") };
+        // A known gesture modifier decides on its own.
+        assert!(release_commits(held, keys::KEY_Super_L, never));
+        assert!(!release_commits(held, keys::KEY_Alt_L, never));
+        // A non-modifier key never commits and never costs a query.
+        assert!(!release_commits(held, keys::KEY_Tab, never));
+        assert!(!release_commits(held, keys::KEY_j, never));
+        // altwin:meta_win — the Win key's keysym is Meta_L. Layout-neutral
+        // evidence decides: Super is no longer down, so it commits...
+        assert!(release_commits(held, keys::KEY_Meta_L, || Some(
+            Mods::empty()
+        )));
+        assert!(release_commits(held, keys::KEY_Hyper_R, || Some(Mods::ALT)));
+        // ...and while Super is still down it does not.
+        assert!(!release_commits(held, keys::KEY_Meta_L, || Some(
+            Mods::SUPER
+        )));
+        // Ctrl+Alt+Tab: letting go of either held modifier commits, as the
+        // keysym path already promises.
+        let both = Mods::ALT | Mods::CONTROL;
+        assert!(release_commits(both, keys::KEY_Meta_R, || Some(
+            Mods::CONTROL
+        )));
+        assert!(!release_commits(both, keys::KEY_Meta_R, || Some(both)));
+        // No answer from the server is no commit; nothing held is no commit.
+        assert!(!release_commits(held, keys::KEY_Meta_L, || None));
+        assert!(!release_commits(Mods::empty(), keys::KEY_Super_L, never));
     }
 
     #[test]

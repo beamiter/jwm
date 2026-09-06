@@ -187,6 +187,40 @@ mod tests {
     }
 
     #[test]
+    fn the_hit_test_follows_the_selected_cells_lift() {
+        // The picker's `selected` is what both renderers lift and what the
+        // WM hands `layout_strip::cell_at`; this pins the pair together, so
+        // a press on the drawn card of the highlighted layout stays on that
+        // layout instead of landing in the gap beside it.
+        use crate::backend::compositor_common::layout_strip;
+
+        let mut picker = LayoutPickerState::new(&LayoutEnum::TILE);
+        let count = picker.layouts.len();
+        assert!(count >= 3, "the strip needs an interior cell to lift");
+        let index = count / 2;
+        picker.select(index);
+        assert_eq!(picker.selected, index);
+
+        let geometry = layout_strip::strip_geometry([0.0, 0.0, 1920.0, 1080.0], count);
+        let cell = &geometry.cells[index];
+        let (film, _) = layout_strip::presented_cell(cell, true);
+        let y = layout_strip::center(cell.cell)[1];
+
+        // A press one pixel into the gap left of the cell is on the lifted
+        // card the user sees, and resolves to the cell they are looking at.
+        let x = cell.cell[0] - 1.0;
+        assert!(film[0] < x, "the lift must overhang its cell");
+        assert_eq!(
+            layout_strip::cell_at(&geometry, Some(picker.selected), x, y),
+            Some(index)
+        );
+        // Re-selecting what is already highlighted is the hover no-op, so
+        // the press commits the layout the strip is already showing.
+        assert_eq!(picker.select(index), None);
+        assert_eq!(picker.selected_layout(), picker.layouts[index]);
+    }
+
+    #[test]
     fn hovering_the_selected_cell_only_restarts_the_delay() {
         let mut picker = LayoutPickerState::new(&LayoutEnum::TILE);
         picker.touched = Instant::now() - AUTO_CONFIRM;

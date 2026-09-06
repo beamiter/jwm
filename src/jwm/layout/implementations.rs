@@ -16,7 +16,7 @@ use crate::core::layout::{
 use crate::core::models::{ClientKey, MonitorKey, ScrollingState};
 use crate::core::types::Rect;
 use crate::jwm::Jwm;
-use log::info;
+use log::debug;
 use std::collections::HashSet;
 
 impl Jwm {
@@ -93,7 +93,10 @@ impl Jwm {
         name: &str,
         calc_fn: fn(&LayoutParams, &[LayoutClient<ClientKey>]) -> Vec<LayoutResult<ClientKey>>,
     ) {
-        info!("[{}] via pure layout engine", name);
+        // A marker, not a diagnostic: one line per monitor per arrange,
+        // and the release default filter is `info`. Keep it out of the
+        // session log — the same treatment `[arrange]` already got.
+        debug!("[{}] via pure layout engine", name);
         let Some((params, raw_clients)) = self.layout_inputs(mon_key) else {
             return;
         };
@@ -150,7 +153,7 @@ impl Jwm {
     }
 
     pub(crate) fn vstack(&mut self, backend: &mut dyn Backend, mon_key: MonitorKey) {
-        info!("[vstack] via pure layout engine");
+        debug!("[vstack] via pure layout engine");
         let Some((params, raw_clients)) = self.layout_inputs(mon_key) else {
             return;
         };
@@ -172,7 +175,7 @@ impl Jwm {
     }
 
     pub(crate) fn scrolling(&mut self, backend: &mut dyn Backend, mon_key: MonitorKey) {
-        info!("[scrolling] via pure layout engine");
+        debug!("[scrolling] via pure layout engine");
         let Some((params, raw_clients)) = self.layout_inputs(mon_key) else {
             return;
         };
@@ -296,7 +299,7 @@ impl Jwm {
     }
 
     pub(crate) fn fullscreen_layout(&mut self, backend: &mut dyn Backend, mon_key: MonitorKey) {
-        info!("[fullscreen_layout] via pure layout engine");
+        debug!("[fullscreen_layout] via pure layout engine");
 
         // 使用完整显示器区域 (m_x, m_y, m_w, m_h)，不是 work area
         let (mx, my, mw, mh) = if let Some(monitor) = self.state.monitors.get(mon_key) {
@@ -342,7 +345,7 @@ impl Jwm {
     }
 
     pub(crate) fn monocle(&mut self, backend: &mut dyn Backend, mon_key: MonitorKey) {
-        info!("[monocle] via pure layout engine");
+        debug!("[monocle] via pure layout engine");
         let (wx, wy, ww, wh, _, _, _monitor_num, _client_y_offset) = self.get_monitor_info(mon_key);
 
         // The layout symbol counts every visible client, floating included.
@@ -381,5 +384,27 @@ impl Jwm {
         };
         let results = core_layout::calculate_monocle(&params, &layout_clients);
         self.apply_layout_results(backend, results);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn layout_markers_stay_below_the_default_log_level() {
+        // Every layout entry point logs one `via pure layout engine` line,
+        // and one of them runs per monitor per arrange — i.e. on every map,
+        // unmap, tag switch and focus cycle, against a release default filter
+        // of `info`. The needle is assembled at runtime, and the haystack
+        // stops at this module, so it cannot match here.
+        const SOURCE: &str = include_str!("implementations.rs");
+        let body = SOURCE
+            .split_once("#[cfg(test)]")
+            .expect("the test module")
+            .0;
+        let needle = format!("{}!(", "info");
+        assert!(
+            !body.contains(&needle),
+            "a layout entry point regained an info-level marker line"
+        );
     }
 }

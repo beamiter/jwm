@@ -77,6 +77,12 @@ const MAX_TIMEOUT: Duration = Duration::from_millis(30_000);
 pub(crate) struct ActiveToast {
     pub(crate) notification: ToastNotification,
     pub(crate) id: u64,
+    /// When the card appeared. The fade-in reads this and nothing moves it,
+    /// so a hover cannot freeze a card half-transparent and leaving cannot
+    /// rewind it.
+    born: Instant,
+    /// Start of the countdown: shifted forward by hover pauses, and reset by
+    /// a replacement, which restarts the timeout for the new text.
     pub(crate) created: Instant,
     pub(crate) timeout: Duration,
     /// Hover pause: while `Some`, the card's age stays frozen at this instant.
@@ -92,21 +98,45 @@ pub(crate) struct ActiveToast {
 impl ActiveToast {
     /// Opacity envelope at `now`: linear fade in, hold, linear fade out. A
     /// dismissed card ignores the envelope and fades out quickly from the
-    /// opacity it had when clicked; a hovered card's age is frozen at its
-    /// pause instant.
+    /// opacity it had when clicked; a hovered card's countdown is frozen at
+    /// its pause instant, but its arrival is not — a card the pointer reaches
+    /// while it is still appearing finishes appearing.
     pub(crate) fn alpha(&self, now: Instant) -> f32 {
         if let Some((dismissed_at, dismiss_alpha)) = self.dismissed {
             let elapsed = now.saturating_duration_since(dismissed_at).as_secs_f32();
             return (dismiss_alpha * (1.0 - elapsed / TOAST_DISMISS_FADE)).max(0.0);
         }
+        let since_born = now.saturating_duration_since(self.born).as_secs_f32();
+        let fade_in = (since_born / TOAST_FADE_IN).clamp(0.0, 1.0);
         let effective_now = self.paused_at.unwrap_or(now);
         let age = effective_now
             .saturating_duration_since(self.created)
             .as_secs_f32();
         let timeout = self.timeout.as_secs_f32();
-        let fade_in = (age / TOAST_FADE_IN).clamp(0.0, 1.0);
         let fade_out = ((timeout - age) / TOAST_FADE_OUT).clamp(0.0, 1.0);
         fade_in.min(fade_out)
+    }
+
+    /// Swap in a newer notification for the same record. The countdown
+    /// restarts on the new timeout (a hovered card stays frozen, at zero),
+    /// the open spring keeps running, and the fade-in resumes from the
+    /// opacity on screen rather than from nothing, so an update landing on a
+    /// half-faded card lifts it back without a blink.
+    fn replace(&mut self, notification: ToastNotification, timeout: Duration, now: Instant) {
+        let alpha = self.alpha(now);
+        self.notification = notification;
+        self.timeout = timeout;
+        self.created = now;
+        if self.paused_at.is_some() {
+            self.paused_at = Some(now);
+        }
+        // The fade-in reads `born`; move it only when the card was already
+        // past its fade-in and fading out, so the curve passes through the
+        // opacity on screen. A card still fading in simply continues.
+        let fade_in_elapsed = Duration::from_secs_f32(alpha * TOAST_FADE_IN);
+        if now.saturating_duration_since(self.born) > fade_in_elapsed {
+            self.born = now.checked_sub(fade_in_elapsed).unwrap_or(self.born);
+        }
     }
 
     fn expired(&self, now: Instant) -> bool {
@@ -174,14 +204,24 @@ fn sanitize_actions(actions: &[NotificationAction]) -> Vec<NotificationAction> {
 }
 
 /// Clamp text to renderer-safe shape: control characters stripped, lines
-/// truncated with an ellipsis, the body capped to a few lines.
+/// truncated with an ellipsis, the body capped to a few lines. Lines that
+/// are blank once cleaned are skipped before the caps are counted: a body
+/// that opens with newlines — common in app-formatted text — would otherwise
+/// spend its whole line budget on nothing and never show its text, and a
+/// title that opens with one would render empty.
 fn sanitize_notification(notification: &mut ToastNotification) {
-    notification.title = sanitize_line(notification.title.lines().next().unwrap_or(""));
+    notification.title = notification
+        .title
+        .lines()
+        .map(sanitize_line)
+        .find(|line| !line.is_empty())
+        .unwrap_or_default();
     notification.body = notification
         .body
         .lines()
-        .take(MAX_BODY_LINES)
         .map(sanitize_line)
+        .filter(|line| !line.is_empty())
+        .take(MAX_BODY_LINES)
         .collect::<Vec<_>>()
         .join("\n");
     notification.urgency = notification.urgency.min(2);
@@ -191,8 +231,10 @@ fn sanitize_notification(notification: &mut ToastNotification) {
 /// One toast card's hit geometry from the last drawn frame.
 ///
 /// Rebuilt every frame by the renderers so hover and click testing never see
-/// stale geometry; shared here so the two backends cannot drift.
-#[derive(Clone, Debug, Default)]
+/// stale geometry; shared here so the two backends cannot drift. Compared by
+/// value, so a backend republishing the list to another thread can tell an
+/// unchanged frame from a moved card and skip the handover.
+#[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct ToastRects {
     pub(crate) id: u64,
     /// Card body `[x, y, w, h]`.
@@ -257,8 +299,17 @@ pub(crate) struct ToastStack {
 }
 
 impl ToastStack {
-    /// Append a toast, evicting expired cards and then the oldest cards
-    /// beyond the visible cap. Returns ids whose resources can be freed.
+    /// Show a toast. A notification already on screen — a live card carrying
+    /// the same non-zero `notification_id` — is updated in place, keeping its
+    /// slot, its open spring and its hover, which is how a progress
+    /// notification stays one card instead of filling the stack with stale
+    /// copies of itself. Anything else is appended; expired cards and then the
+    /// oldest beyond the visible cap are evicted.
+    ///
+    /// Returns the ids whose rasterized resources are stale and must be freed:
+    /// the evicted cards', and a replaced card's own — that card stays in the
+    /// stack, and the renderer rasterizes its new text on the next frame
+    /// because it finds no textures for it.
     pub(crate) fn push(&mut self, mut notification: ToastNotification, now: Instant) -> Vec<u64> {
         sanitize_notification(&mut notification);
         let timeout = if notification.timeout_ms == 0 {
@@ -267,26 +318,57 @@ impl ToastStack {
             Duration::from_millis(u64::from(notification.timeout_ms))
                 .clamp(MIN_TIMEOUT, MAX_TIMEOUT)
         };
-        let id = self.next_id;
-        self.next_id = self.next_id.wrapping_add(1);
-        self.toasts.push(ActiveToast {
-            notification,
-            id,
-            created: now,
-            timeout,
-            paused_at: None,
-            dismissed: None,
-            motion: IslandMotion::default(),
-        });
+        let mut removed = Vec::new();
+        match self.replacement_index(notification.notification_id) {
+            Some(index) => {
+                let existing = &mut self.toasts[index];
+                existing.replace(notification, timeout, now);
+                removed.push(existing.id);
+            }
+            None => {
+                let id = self.next_id;
+                self.next_id = self.next_id.wrapping_add(1);
+                self.toasts.push(ActiveToast {
+                    notification,
+                    id,
+                    born: now,
+                    created: now,
+                    timeout,
+                    paused_at: None,
+                    dismissed: None,
+                    motion: IslandMotion::default(),
+                });
+            }
+        }
 
-        let mut removed = self.prune(now);
+        removed.extend(self.prune(now));
         while self.toasts.len() > MAX_TOASTS {
             removed.push(self.toasts.remove(0).id);
         }
         removed
     }
 
+    /// The card a replacement lands on: the live card for the same record.
+    /// A standalone toast (record zero) is never one, and neither is a card
+    /// the user already clicked away — it finishes fading and the update
+    /// gets a card of its own.
+    fn replacement_index(&self, notification_id: u32) -> Option<usize> {
+        if notification_id == 0 {
+            return None;
+        }
+        self.toasts.iter().position(|toast| {
+            toast.notification.notification_id == notification_id && toast.dismissed.is_none()
+        })
+    }
+
     /// Drop expired toasts, returning their ids for resource cleanup.
+    ///
+    /// The ids are the stack's own card keys, not notification records, and a
+    /// card reaching the end of its timeout closes nothing: the record stays
+    /// in the notification center, where its buttons still work, until it is
+    /// dismissed, closed, or evicted. `docs/notifications.md` carries that
+    /// contract and the reasoning; reporting expiry as a `NotificationClosed`
+    /// would tell senders to forget a notification the center still offers.
     pub(crate) fn prune(&mut self, now: Instant) -> Vec<u64> {
         let mut removed = Vec::new();
         self.toasts.retain(|toast| {
@@ -791,5 +873,147 @@ mod tests {
             ToastClick::Dismissed
         );
         assert_eq!(stack.prune(now + Duration::from_millis(120)), vec![0]);
+    }
+
+    fn progress(title: &str, notification_id: u32) -> ToastNotification {
+        ToastNotification {
+            title: title.into(),
+            timeout_ms: 1000,
+            notification_id,
+            actions: vec![NotificationAction {
+                key: "cancel".into(),
+                label: "Cancel".into(),
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_replacement_updates_the_live_card_in_place() {
+        let now = Instant::now();
+        let mut stack = ToastStack::default();
+        assert!(stack.push(progress("Copying 12%", 7), now).is_empty());
+        stack.set_hovered(Some(0), now + Duration::from_millis(500));
+
+        let mut update = progress("Copying 13%", 7);
+        update.actions.clear();
+        let removed = stack.push(update, now + Duration::from_millis(900));
+        // The card keeps its id — the renderer's key for hover, motion and
+        // hit geometry — and hands it back only so the stale text textures
+        // are rebuilt.
+        assert_eq!(removed, vec![0]);
+        assert_eq!(stack.iter().count(), 1);
+        let card = stack.iter().next().unwrap();
+        assert_eq!(card.id, 0);
+        assert_eq!(card.notification.title, "Copying 13%");
+        assert!(
+            card.notification.actions.is_empty(),
+            "the Cancel chip the update dropped must not linger"
+        );
+        // Still hovered: the countdown stays frozen.
+        assert!(stack.prune(now + Duration::from_millis(5000)).is_empty());
+        // Leaving runs the update's full timeout from here, not the first
+        // push's remainder.
+        stack.set_hovered(None, now + Duration::from_millis(5000));
+        assert!(stack.prune(now + Duration::from_millis(5999)).is_empty());
+        assert_eq!(stack.prune(now + Duration::from_millis(6000)), vec![0]);
+    }
+
+    #[test]
+    fn a_replacement_lifts_a_fading_card_without_a_blink() {
+        let now = Instant::now();
+        let mut stack = ToastStack::default();
+        stack.push(progress("Copying 98%", 7), now);
+        let late = now + Duration::from_millis(900);
+        let before = stack.iter().next().unwrap().alpha(late);
+        assert!(before < 0.5, "the card should be well into its fade-out");
+
+        stack.push(progress("Copying 99%", 7), late);
+        let card = stack.iter().next().unwrap();
+        let after = card.alpha(late);
+        assert!(
+            (after - before).abs() < 0.02,
+            "the envelope must continue from {before}, not restart: {after}"
+        );
+        assert_eq!(card.alpha(late + Duration::from_millis(200)), 1.0);
+    }
+
+    #[test]
+    fn standalone_and_dismissed_cards_are_never_replaced() {
+        let now = Instant::now();
+        let mut stack = ToastStack::default();
+        // Record zero marks a toast with no notification behind it: two of
+        // them are two cards.
+        stack.push(progress("a", 0), now);
+        stack.push(progress("b", 0), now);
+        assert_eq!(stack.iter().count(), 2);
+        // A card the user clicked away finishes fading; the update that
+        // follows gets a card of its own rather than reviving it.
+        stack.push(progress("Copying 12%", 7), now);
+        assert!(stack.dismiss(2, now + Duration::from_millis(500)));
+        let removed = stack.push(progress("Copying 13%", 7), now + Duration::from_millis(510));
+        assert!(removed.is_empty());
+        assert_eq!(stack.iter().count(), 4);
+        assert_eq!(stack.iter().last().unwrap().id, 3);
+    }
+
+    #[test]
+    fn a_hover_during_the_fade_in_lets_the_card_finish_appearing() {
+        let now = Instant::now();
+        let mut stack = ToastStack::default();
+        stack.push(toast("early hover", 1000), now);
+        let hover = now + Duration::from_millis(50);
+        stack.set_hovered(Some(0), hover);
+        let card = stack.iter().next().unwrap();
+        assert!(card.alpha(hover) < 0.5);
+        // The countdown is frozen; the arrival is not.
+        assert_eq!(card.alpha(now + Duration::from_millis(1000)), 1.0);
+        assert!(stack.prune(now + Duration::from_millis(5000)).is_empty());
+        // Leaving keeps the card opaque — the fade-in does not rewind to the
+        // frozen 50 ms — and the timeout runs its course from here.
+        let leave = now + Duration::from_millis(5000);
+        stack.set_hovered(None, leave);
+        assert_eq!(stack.iter().next().unwrap().alpha(leave), 1.0);
+        assert!(stack.prune(leave + Duration::from_millis(949)).is_empty());
+        assert_eq!(stack.prune(leave + Duration::from_millis(950)), vec![0]);
+    }
+
+    #[test]
+    fn card_geometry_compares_by_value() {
+        // The udev backend hands this list to the input thread on every
+        // composited frame while a card is up; comparing the new list against
+        // the published one is what lets it skip the lock and the clone when
+        // nothing moved, so the geometry must answer equality by value.
+        let rects = |x: f32| ToastRects {
+            id: 7,
+            card: [x, 20.0, 300.0, 80.0],
+            buttons: vec![[x + 8.0, 84.0, 60.0, ACTION_BUTTON_H]],
+        };
+        assert_eq!(rects(10.0), rects(10.0));
+        assert_ne!(rects(10.0), rects(11.0), "a moved card is a new frame");
+        let mut without_chip = rects(10.0);
+        without_chip.buttons.clear();
+        assert_ne!(
+            rects(10.0),
+            without_chip,
+            "an action row that came or went must not compare equal"
+        );
+    }
+
+    #[test]
+    fn leading_blank_lines_do_not_consume_the_line_budget() {
+        let now = Instant::now();
+        let mut stack = ToastStack::default();
+        stack.push(
+            ToastNotification {
+                title: "\n  \nAlert".into(),
+                body: "\n\n\nDisk almost full\n\nsecond".into(),
+                ..Default::default()
+            },
+            now,
+        );
+        let card = &stack.iter().next().unwrap().notification;
+        assert_eq!(card.title, "Alert");
+        assert_eq!(card.body, "Disk almost full\nsecond");
     }
 }

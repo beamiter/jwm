@@ -25,6 +25,41 @@ fn adjusted_client_factor(current: f32, delta: f32) -> Option<f32> {
     (candidate.is_finite() && (0.25..=4.0).contains(&candidate)).then_some(candidate)
 }
 
+/// How a tag jump is presented.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TagSwitchMotion {
+    /// The compositor slides the presented scene out and the new tag in;
+    /// the layout animation underneath is suppressed so the windows are in
+    /// place the moment the slide lands.
+    Transition,
+    /// No compositor slide: the arrange's own animation policy applies.
+    Layout,
+    /// Nothing moves — the new tag is simply there.
+    Instant,
+}
+
+/// Decide the motion of a tag jump. The slide needs a compositor, the
+/// animation switch, and a change in which windows show. It is also refused
+/// while a modal shell panel is on screen: the transition snapshots the
+/// *presented* frame as the outgoing scene, and with the tags overview (or
+/// any panel) up that frame is the scrim and the card, not the workspace
+/// being left — the panel would be seen sliding out. A commit from a panel
+/// is therefore instant: the panel drops and the new tag is there.
+pub(crate) fn tag_switch_motion(
+    compositor: bool,
+    animation_enabled: bool,
+    shell_panel_on_screen: bool,
+    membership_changed: bool,
+) -> TagSwitchMotion {
+    if shell_panel_on_screen {
+        return TagSwitchMotion::Instant;
+    }
+    if compositor && animation_enabled && membership_changed {
+        return TagSwitchMotion::Transition;
+    }
+    TagSwitchMotion::Layout
+}
+
 impl Jwm {
     pub(crate) fn can_focus_switch(&self) -> Result<bool, Box<dyn std::error::Error>> {
         let sel_client_key = self.get_selected_client_key().ok_or("No selected client")?;
@@ -562,20 +597,45 @@ impl Jwm {
         }
         // Another modal — a panel, expose, a capture — owns the session. The
         // switcher consumes every key once it is up, so it must never stack
-        // on top of one of those.
+        // on top of one of those. An error rather than a silent `Ok`: over
+        // IPC a script must be able to tell that nothing opened.
         if self.features.has_active_feature() {
-            return Ok(());
+            return Err("window switcher: another panel or mode is active".into());
         }
 
         let entries = self.window_switcher_snapshot();
-        let Some(selected) = switcher::initial_selection(entries.len(), direction) else {
+        // The list leads with the selected monitor's stack, so its head is
+        // the focused window — unless nothing is focused (the selected
+        // monitor's tag is empty, or every window on it is minimized), in
+        // which case the head already *is* the previous window.
+        let focused = self
+            .get_selected_client_key()
+            .and_then(|key| self.state.clients.get(key))
+            .map(|client| client.win.raw());
+        let focused_is_first = entries
+            .first()
+            .is_some_and(|entry| Some(entry.window) == focused);
+        let Some(selected) =
+            switcher::initial_selection(entries.len(), direction, focused_is_first)
+        else {
             return Ok(());
         };
 
-        // Keyboard-only, like the keybinding viewer: the gesture lives on the
-        // held modifier, and the pointer stays free so a click can still pick
-        // a row (commit) or land on the desktop (cancel).
-        self.prepare_system_ui(backend, "window switcher", SystemUiPointerGrab::None)?;
+        // The gesture lives on the held modifier, but the pointer is grabbed
+        // like every other clickable panel's: on X11 a plain click over the
+        // focused client is delivered to that client unless the WM holds the
+        // pointer, and the row a click lands on is drawn over exactly that
+        // window. With the grab every press reaches `on_button_press`, which
+        // commits a row or cancels.
+        //
+        // A pointer another client is holding (a drag in flight, a menu's
+        // own grab) is the one case that must not cost the gesture: Alt+Tab
+        // is a keyboard gesture first, so it opens keyboard-only rather than
+        // refusing, and a click then does what it did before this grab.
+        if !self.prepare_system_ui_deferrable(backend, "window switcher")? {
+            log::info!("Shell: window switcher opens keyboard-only; the pointer is taken");
+            self.prepare_system_ui(backend, "window switcher", SystemUiPointerGrab::None)?;
+        }
 
         // Sampled after the grab landed: if the modifier is already back up,
         // its release went to someone else and waiting for it would wedge the
@@ -813,26 +873,26 @@ impl Jwm {
 
         // 3. 副作用 (Backend / Arrange)
         // Notify compositor to capture old scene for slide transition
-        let mut transitioning = false;
-        if backend.has_compositor() {
-            if cfg.animation_enabled()
-                && self.should_animate_tag_switch(sel_mon_key, old_tag_mask, new_tag_mask)
-            {
-                let direction =
-                    Self::tag_switch_direction(old_tag_mask, new_tag_mask, cfg.tags_length());
-                let mon_rect = self.monitor_rect(sel_mon_key);
-                let exclude_top = self.tag_transition_exclude_top(sel_mon_key);
-                backend.compositor_notify_tag_switch(
-                    cfg.animation_duration(),
-                    direction,
-                    exclude_top,
-                    mon_rect,
-                );
-                transitioning = true;
-            }
+        let motion = tag_switch_motion(
+            backend.has_compositor(),
+            cfg.animation_enabled(),
+            self.features.system_ui.is_active(),
+            self.should_animate_tag_switch(sel_mon_key, old_tag_mask, new_tag_mask),
+        );
+        if motion == TagSwitchMotion::Transition {
+            let direction =
+                Self::tag_switch_direction(old_tag_mask, new_tag_mask, cfg.tags_length());
+            let mon_rect = self.monitor_rect(sel_mon_key);
+            let exclude_top = self.tag_transition_exclude_top(sel_mon_key);
+            backend.compositor_notify_tag_switch(
+                cfg.animation_duration(),
+                direction,
+                exclude_top,
+                mon_rect,
+            );
         }
         self.focus(backend, client_to_focus)?;
-        self.suppress_layout_animation = transitioning;
+        self.suppress_layout_animation = motion != TagSwitchMotion::Layout;
         self.arrange(backend, Some(sel_mon_key));
         self.suppress_layout_animation = false;
         self.update_ewmh_desktop(backend)?;
@@ -1158,9 +1218,61 @@ impl Jwm {
 
 #[cfg(test)]
 mod tests {
-    use super::{ClientKey, adjusted_client_factor};
+    use super::{ClientKey, TagSwitchMotion, adjusted_client_factor, tag_switch_motion};
     use crate::Jwm;
     use slotmap::SlotMap;
+
+    #[test]
+    fn a_tag_jump_slides_only_with_no_shell_panel_on_screen() {
+        use TagSwitchMotion::{Instant, Layout, Transition};
+        // The ordinary jump with the compositor, animations and a change in
+        // what shows: the slide.
+        assert_eq!(tag_switch_motion(true, true, false, true), Transition);
+        // No compositor, animations off, or nothing changes on screen: the
+        // arrange's own policy.
+        assert_eq!(tag_switch_motion(false, true, false, true), Layout);
+        assert_eq!(tag_switch_motion(true, false, false, true), Layout);
+        assert_eq!(tag_switch_motion(true, true, false, false), Layout);
+        // A commit from an open panel (the tags overview's Return, digit or
+        // click) never slides: the presented frame the transition would
+        // slide out is the scrim and the card. It lands at once instead.
+        assert_eq!(tag_switch_motion(true, true, true, true), Instant);
+        assert_eq!(tag_switch_motion(false, false, true, false), Instant);
+    }
+
+    #[test]
+    fn the_window_switcher_asks_for_the_pointer_like_every_clickable_panel() {
+        // X11 delivers a plain click over the focused client to that client
+        // unless the WM holds the pointer, and the switcher's rows are drawn
+        // over exactly that window; "clicking a row commits" needs the grab
+        // every other clickable panel takes. Pinned at the source, since no
+        // headless test reaches X11 event routing.
+        let source = include_str!("navigation.rs");
+        let start = source
+            .find("pub fn window_switcher(")
+            .expect("the switcher opener");
+        let end = source[start..]
+            .find("pub(crate) fn commit_window_switcher(")
+            .expect("the commit follows the opener")
+            + start;
+        let opener = &source[start..end];
+        let grabbed = format!(
+            "prepare_system_ui_deferrable(backend, {:?})",
+            "window switcher"
+        );
+        let asked_at = opener
+            .find(&grabbed)
+            .expect("the switcher must ask for the button grab");
+        // The keyboard-only open survives only as the fallback for a pointer
+        // some other client is holding, never as the first choice.
+        let ungrabbed = format!("SystemUiPointerGrab::{}", "None");
+        for (index, _) in opener.match_indices(&ungrabbed) {
+            assert!(
+                index > asked_at,
+                "the keyboard-only open is only the fallback"
+            );
+        }
+    }
 
     fn keys(n: usize) -> (SlotMap<ClientKey, ()>, Vec<ClientKey>) {
         let mut sm: SlotMap<ClientKey, ()> = SlotMap::new();

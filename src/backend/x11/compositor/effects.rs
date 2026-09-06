@@ -662,6 +662,7 @@ impl<C: CompositorConnection> Compositor<C> {
     }
 
     pub(super) fn incremental_effects_active(&self) -> bool {
+        let close_fade = self.close_fade_driven();
         (!self.particle_systems.is_empty() && self.particle_effects)
             || tilt_animation_pending(
                 self.window_tilt,
@@ -671,8 +672,7 @@ impl<C: CompositorConnection> Compositor<C> {
                 self.tilt_target_y,
             )
             || self.windows.values().any(|wt| {
-                ((self.fading || self.window_animation_uses_fade())
-                    && (wt.fading_out || wt.fade_opacity < 1.0))
+                (close_fade && (wt.fading_out || wt.fade_opacity < 1.0))
                     || (self.window_animation
                         && (wt.anim_scale - wt.anim_scale_target).abs() > 0.001)
             })
@@ -859,7 +859,9 @@ impl<C: CompositorConnection> Compositor<C> {
     /// Advance fade animations.
     pub(super) fn tick_fades(&mut self, dt: f32) -> FadeTick {
         let frame_scale = sanitize_animation_dt(dt) * 60.0;
-        let animation_fades = self.window_animation_uses_fade();
+        // Hoisted: the loop below borrows `self.windows` mutably, so the
+        // predicate cannot be asked per window.
+        let close_fade = self.close_fade_driven();
         let mut tick = FadeTick::default();
         let mut to_remove = Vec::new();
 
@@ -867,7 +869,7 @@ impl<C: CompositorConnection> Compositor<C> {
             let mut window_active = false;
 
             // Fade animation
-            if self.fading || animation_fades {
+            if close_fade {
                 if wt.fading_out {
                     wt.fade_opacity -= self.fade_out_step * frame_scale;
                     if wt.fade_opacity <= 0.0 {

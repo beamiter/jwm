@@ -44,6 +44,63 @@ fn clamp_configure_axis(position: i32, total: i32, origin: i32, span: i32) -> i3
     clamped.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
 }
 
+/// What a button press over a toast card does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ToastPress {
+    /// The card does not answer this button; the press goes on to whatever
+    /// is below it.
+    Ignored,
+    /// Dismiss the card the press lands on, invoking nothing.
+    Dismiss,
+    /// Dismiss, and on an action chip invoke the action.
+    Activate,
+}
+
+/// A card is opaque to every click, not only the left one: it docks right
+/// under the status bar, exactly where a monitor's tab strip lies, so a
+/// middle or right press that fell past it would close or focus the
+/// strip's cell hidden under the card. Only the left button invokes an
+/// action chip; every other button merely dismisses. The wheel (X11
+/// buttons 4-7) is not a click and never dismisses a notification.
+pub(crate) fn toast_press(button: MouseButton) -> ToastPress {
+    match button {
+        MouseButton::Left => ToastPress::Activate,
+        MouseButton::Other(4..=7) => ToastPress::Ignored,
+        MouseButton::Middle | MouseButton::Right | MouseButton::Other(_) => ToastPress::Dismiss,
+    }
+}
+
+/// The argument of the `window_switcher` binding a chord stands for, if it
+/// is one. While the switcher is up every key is routed to the panel, so
+/// the "re-trigger steps the list" branch in `Jwm::window_switcher` is only
+/// reachable from the keyboard through here: the panel's own key handler
+/// asks whether the swallowed chord is the user's switcher binding and, if
+/// so, re-triggers it. Lock modifiers are already stripped from `mods`;
+/// the binding's mask is narrowed the same way the ordinary dispatch does.
+pub(crate) fn switcher_binding_step(
+    bindings: &[crate::jwm::types::WMKey],
+    keysym: u32,
+    mods: Mods,
+) -> Option<WMArgEnum> {
+    let key_mods = Mods::SHIFT
+        | Mods::CONTROL
+        | Mods::ALT
+        | Mods::SUPER
+        | Mods::MOD2
+        | Mods::MOD3
+        | Mods::MOD5;
+    bindings
+        .iter()
+        .find(|binding| {
+            keysym == binding.key_sym
+                && (binding.mask & key_mods) == (mods & key_mods)
+                && binding.func_opt.is_some_and(|func| {
+                    std::ptr::fn_addr_eq(func, Jwm::window_switcher as WMFuncType)
+                })
+        })
+        .map(|binding| binding.arg.clone())
+}
+
 /// A rectangle from two corners in any order, as `[x, y, w, h]`.
 fn normalized_rect(from: (f32, f32), to: (f32, f32)) -> [f32; 4] {
     let x = from.0.min(to.0);
@@ -180,6 +237,14 @@ impl Jwm {
     /// Push a panel that was rebuilt since the last frame. Costs a boolean
     /// test when nothing changed.
     pub(crate) fn flush_system_ui(&mut self, backend: &mut dyn Backend) {
+        // The tags grid describes one monitor. When the selection moved to
+        // another one underneath it — IPC `focus_monitor`, an activation on
+        // the other screen; neither arranges — the cells, the pushed
+        // viewport and the hit-test have to move together, so the rebuild
+        // is queued here, ahead of the dirty test that then pushes it.
+        if self.tags_overview_follows_another_monitor() {
+            self.refresh_tags_overview();
+        }
         if !self.system_ui_dirty {
             return;
         }
@@ -913,7 +978,11 @@ impl Jwm {
                 }
                 ControlKind::DoNotDisturb => {
                     if activate {
-                        self.do_not_disturb = !self.do_not_disturb;
+                        // Through the toggle so the `dnd/toggle` broadcast
+                        // happens here exactly as it does from a keybinding;
+                        // a bar subscribed to it would otherwise keep drawing
+                        // the state this row just left.
+                        let _ = self.toggle_dnd(backend, &WMArgEnum::Int(0));
                         let enabled = self.do_not_disturb;
                         self.features.system_ui.update_control(
                             ControlKind::DoNotDisturb,
@@ -993,7 +1062,14 @@ impl Jwm {
                 self.features.system_ui.move_selection(1);
                 self.sync_system_ui(backend);
             }
-            _ => {}
+            _ => {
+                // The binding that opened the panel, pressed again, steps the
+                // list — for a custom key (Mod4+j, Mod1+grave, ...) just as
+                // for the Tab default above. Anything else stays swallowed.
+                if let Some(arg) = switcher_binding_step(&self.key_bindings, keysym, mods) {
+                    self.window_switcher(backend, &arg)?;
+                }
+            }
         }
         Ok(())
     }
@@ -2263,11 +2339,13 @@ impl Jwm {
             return self.apply_expose_action(backend, expose_plan::plan_click(hit));
         }
 
-        // A left-click on a toast card dismisses it; on an action button it
-        // additionally invokes the action against the notification record.
-        // The click is swallowed here — before any window dispatch — so it is
-        // never replayed to the client underneath the card.
-        if MouseButton::from_u8(detail_btn) == MouseButton::Left {
+        // A click on a toast card dismisses it; a left click on an action
+        // button additionally invokes the action against the notification
+        // record. The click is swallowed here — before any window dispatch —
+        // so it is never replayed to the client underneath the card, nor
+        // resolved against the tab-strip cell the card is docked over.
+        let press = toast_press(MouseButton::from_u8(detail_btn));
+        if press != ToastPress::Ignored {
             let (rx, ry) = self.last_mouse_root;
             match backend.compositor_click_toast(rx as f32, ry as f32) {
                 crate::backend::api::ToastClick::Miss => {}
@@ -2279,7 +2357,9 @@ impl Jwm {
                     // Invoking closes the record (freedesktop order:
                     // ActionInvoked, then NotificationClosed); the compositor
                     // already dismissed the card itself.
-                    self.invoke_notification_action(notification_id, &action_key);
+                    if press == ToastPress::Activate {
+                        self.invoke_notification_action(notification_id, &action_key);
+                    }
                     return Ok(());
                 }
             }
@@ -2430,14 +2510,13 @@ impl Jwm {
         root_y: i16,
         _time: u32,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        // 1. 如果因为键盘操作等原因暂时阻塞了鼠标聚焦，直接返回
-        if self.mouse_focus_blocked() {
-            return Ok(());
-        }
-
         // A left press on a tab cell turns into a reorder drag once the
         // pointer crosses the drag threshold; the release commits the new
-        // slot. No live preview — the commit is a single arrange.
+        // slot. No live preview — the commit is a single arrange. Ahead of
+        // the focus guard below: the guard exists to keep pointer motion
+        // from moving focus for a moment after a keyboard focus change or a
+        // new map, and a drag started inside that moment is not a focus
+        // change — held behind it, a quick flick would silently stay a click.
         if let Some(drag) = self.tab_drag.as_mut() {
             if !drag.activated {
                 let thr = CONFIG.load().drag_threshold_px() as f64;
@@ -2449,6 +2528,11 @@ impl Jwm {
                     drag.activated = true;
                 }
             }
+        }
+
+        // 1. 如果因为键盘操作等原因暂时阻塞了鼠标聚焦，直接返回
+        if self.mouse_focus_blocked() {
+            return Ok(());
         }
 
         // 3. 更新当前鼠标所在的显示器状态
@@ -2849,6 +2933,41 @@ mod tests {
         assert_eq!(
             choose_system_ui_viewport(false, None, (3840, 1440)).rect(),
             [0.0, 0.0, 3840.0, 1440.0]
+        );
+    }
+
+    /// Every writer of `do_not_disturb` broadcasts `dnd/toggle`, because a
+    /// bar subscribed to it has no other way to learn the new state: the
+    /// keybinding and the IPC command through `toggle_dnd`, a reload through
+    /// `apply_config_changes`. The control-center row is the third writer and
+    /// goes through the toggle rather than repeating the broadcast — exactly
+    /// as its Caffeine neighbour does. The needles are built at runtime and
+    /// the haystack is one arm of one function, well above this module, so
+    /// this cannot match its own source.
+    #[test]
+    fn the_do_not_disturb_row_toggles_through_the_broadcasting_path() {
+        const SOURCE: &str = include_str!("input_handler.rs");
+        let arm = SOURCE
+            .split_once(&format!("fn {}(", "handle_control_center_key"))
+            .expect("handle_control_center_key")
+            .1
+            .split_once(&format!("{}::{} =>", "ControlKind", "DoNotDisturb"))
+            .expect("the do-not-disturb arm")
+            .1
+            .split_once(&format!("{}::{} =>", "ControlKind", "Caffeine"))
+            .expect("the arm that follows it")
+            .0;
+        assert!(
+            arm.contains(&format!("{}(", "toggle_dnd")),
+            "the row flips do-not-disturb without the `dnd/toggle` broadcast"
+        );
+        assert!(
+            !arm.contains(&format!("{}.{} = ", "self", "do_not_disturb")),
+            "the row still assigns the field itself instead of using the toggle"
+        );
+        assert!(
+            arm.contains(&format!("{}(", "update_control")),
+            "the row no longer refreshes its own panel entry"
         );
     }
 
@@ -3350,5 +3469,78 @@ mod tests {
                 "echo unsafe".into(),
             ])
         );
+    }
+
+    #[test]
+    fn every_button_but_the_wheel_is_stopped_by_a_toast_card() {
+        use super::{ToastPress, toast_press};
+        use crate::backend::common_define::MouseButton;
+
+        assert_eq!(toast_press(MouseButton::Left), ToastPress::Activate);
+        // Middle and right dismiss without falling through to the tab-strip
+        // cell (or window) under the card — and without invoking a chip.
+        assert_eq!(toast_press(MouseButton::Middle), ToastPress::Dismiss);
+        assert_eq!(toast_press(MouseButton::Right), ToastPress::Dismiss);
+        // So do the side buttons: any real click on a card is the card's.
+        assert_eq!(toast_press(MouseButton::from_u8(8)), ToastPress::Dismiss);
+        assert_eq!(toast_press(MouseButton::from_u8(9)), ToastPress::Dismiss);
+        // The wheel is not a click and never dismisses a card.
+        for wheel in 4..=7 {
+            assert_eq!(
+                toast_press(MouseButton::from_u8(wheel)),
+                ToastPress::Ignored
+            );
+        }
+    }
+
+    #[test]
+    fn the_switcher_binding_steps_the_open_panel_whatever_its_key() {
+        use super::switcher_binding_step;
+        use crate::backend::common_define::{Mods, keys};
+        use crate::jwm::types::{WMArgEnum, WMFuncType, WMKey};
+
+        let bindings = vec![
+            WMKey::new(
+                Mods::SUPER,
+                keys::KEY_j,
+                Some(Jwm::window_switcher as WMFuncType),
+                WMArgEnum::Int(1),
+            ),
+            WMKey::new(
+                Mods::SUPER | Mods::SHIFT,
+                keys::KEY_j,
+                Some(Jwm::window_switcher as WMFuncType),
+                WMArgEnum::Int(-1),
+            ),
+            // The same chord bound to something else is not a step.
+            WMKey::new(
+                Mods::ALT,
+                keys::KEY_j,
+                Some(Jwm::view as WMFuncType),
+                WMArgEnum::UInt(1),
+            ),
+        ];
+        assert_eq!(
+            switcher_binding_step(&bindings, keys::KEY_j, Mods::SUPER),
+            Some(WMArgEnum::Int(1))
+        );
+        assert_eq!(
+            switcher_binding_step(&bindings, keys::KEY_j, Mods::SUPER | Mods::SHIFT),
+            Some(WMArgEnum::Int(-1))
+        );
+        // Lock modifiers are not part of the chord.
+        assert_eq!(
+            switcher_binding_step(&bindings, keys::KEY_j, Mods::SUPER | Mods::CAPS),
+            Some(WMArgEnum::Int(1))
+        );
+        assert_eq!(
+            switcher_binding_step(&bindings, keys::KEY_j, Mods::ALT),
+            None
+        );
+        assert_eq!(
+            switcher_binding_step(&bindings, keys::KEY_k, Mods::SUPER),
+            None
+        );
+        assert_eq!(switcher_binding_step(&[], keys::KEY_j, Mods::SUPER), None);
     }
 }

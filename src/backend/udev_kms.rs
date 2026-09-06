@@ -198,19 +198,41 @@ struct KmsOutputState {
     /// one per assert for the life of the DRM fd, and the reconcile loop
     /// asserts again every time a toast clears. `installed_gamma_lut` and
     /// `installed_ctm` are tracked for exactly the same reason.
+    ///
+    /// This is also the truth of what the *connector* holds, as distinct
+    /// from `output_hdr_metadata_active`, which is the presentation claim.
+    /// The two part company on a dark output (the claim is dropped without
+    /// a commit), and the reconciliation reads both so the connector is
+    /// always brought back in line by a real commit on the first
+    /// participating frame — whichever way the request went meanwhile.
     installed_hdr_metadata_blob: Option<u64>,
+    /// The driver rejected the last connector signalling assert. The
+    /// hardware is unchanged and the frame is correct, so this blocks
+    /// nothing; it is reported as a permanent refusal so the request is
+    /// dropped instead of retried every other frame, and cleared by the next
+    /// explicit enable — the one way to ask for a retry.
+    ///
+    /// Only a commit the driver actually answered arms it (see
+    /// [`hdr_commit_failure_response`]): a commit that never reached a
+    /// verdict — `EACCES` because DRM master is elsewhere around a VT
+    /// switch, `EBUSY`, a device on its way out — says nothing about the
+    /// request, and latching one dropped the user's HDR on the next frame
+    /// with no way back but an explicit re-enable.
+    hdr_connector_commit_rejected: bool,
     /// `VrrSupport::Supported` on this connector, probed once at init.
     /// `vrr_supported` costs two ioctls and rebuilds the connector info for
     /// an answer that only changes on hotplug, so it must not be in the
-    /// per-frame path.
+    /// per-frame path. Demoted at runtime by `apply_vrr` when a toggle turns
+    /// out to need a modeset on this output after all.
     vrr_supported_without_modeset: bool,
-    /// What `use_vrr` was last asked for, and whether it took.
+    /// What `use_vrr` was last asked for, and what actually took.
     ///
     /// `use_vrr` only writes its cached value on success, so comparing the
     /// plan against `vrr_enabled()` would retry a rejected change on every
     /// frame — each retry allocating a mode-size dumb buffer and issuing test
-    /// commits, forever, behind a debug-level log line.
-    vrr_last_attempt: Option<bool>,
+    /// commits, forever, behind a debug-level log line. The attempt is the
+    /// retry guard; `applied` is what the reports read.
+    vrr: VrrApplyRecord,
     /// An explicit `set_vrr_enabled` request. The content policy owns VRR
     /// otherwise.
     vrr_override: Option<bool>,
@@ -307,6 +329,31 @@ fn physical_rects_overlap(a: [i32; 4], b: [i32; 4]) -> bool {
     i64::from(a[0]) < bx1 && i64::from(b[0]) < ax1 && i64::from(a[1]) < by1 && i64::from(b[1]) < ay1
 }
 
+/// Whether one output's placement can be covered by a software delivery
+/// region. The single global framebuffer has no per-output scale or
+/// transform stage, so anything but an unscaled, unrotated, non-negative
+/// placement leaves the texture in an ambiguous colour domain — and rejects
+/// the whole plan, not just this output. The HDR gate reads the same
+/// predicate so a layout the planner can never cover is reported as such,
+/// instead of as a region that merely happens to be missing this frame.
+fn software_region_topology_supported(
+    origin: (i32, i32),
+    mode_size: (i32, i32),
+    scale: f64,
+    transform: Transform,
+) -> bool {
+    let (x, y) = origin;
+    let (width, height) = mode_size;
+    x >= 0
+        && y >= 0
+        && width > 0
+        && height > 0
+        && scale == 1.0
+        && transform == Transform::Normal
+        && x.checked_add(width).is_some()
+        && y.checked_add(height).is_some()
+}
+
 /// Build the software delivery partitions supported by the current single
 /// global framebuffer. Any unsupported topology rejects the entire plan:
 /// partially applying output transforms would leave the texture in mixed or
@@ -321,19 +368,16 @@ fn plan_software_color_regions(
         .iter()
         .filter(|candidate| candidate.participating)
     {
-        let (x, y) = candidate.origin;
-        let (width, height) = candidate.mode_size;
-        if x < 0
-            || y < 0
-            || width <= 0
-            || height <= 0
-            || candidate.scale != 1.0
-            || candidate.transform != Transform::Normal
-            || x.checked_add(width).is_none()
-            || y.checked_add(height).is_none()
-        {
+        if !software_region_topology_supported(
+            candidate.origin,
+            candidate.mode_size,
+            candidate.scale,
+            candidate.transform,
+        ) {
             return None;
         }
+        let (x, y) = candidate.origin;
+        let (width, height) = candidate.mode_size;
 
         let region = OutputColorRegion {
             rect: [x, y, width, height],
@@ -562,6 +606,112 @@ fn build_atomic_color_request(
     Ok(assignments)
 }
 
+/// Which scanout colour state an atomic request touches, and therefore
+/// whether the driver may turn it into a modeset.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AtomicColorCommitScope {
+    /// CRTC DEGAMMA_LUT/CTM/GAMMA_LUT stages: a per-frame property change
+    /// that never needs a modeset. A driver asking for one is a rejection.
+    CrtcStages,
+    /// Connector `Colorspace` + `HDR_OUTPUT_METADATA`. amdgpu forces a full
+    /// modeset when the metadata blob appears or disappears ("only force a
+    /// modeset if we're entering or exiting HDR") and when `Colorspace`
+    /// changes, so the plain TEST_ONLY is refused with EINVAL there and the
+    /// signal could never be asserted — or, worse, withdrawn. Entering and
+    /// leaving HDR is a mode switch on such drivers, and the request is
+    /// retried with ALLOW_MODESET when the plain test is refused.
+    ConnectorSignalling,
+}
+
+/// Whether a failed KMS colour commit is the driver's verdict on the request,
+/// or a symptom of not owning the device at that instant.
+///
+/// The distinction is load bearing wherever a failure is *remembered*: a
+/// verdict will be repeated for the same values, while a commit that never
+/// reached one says nothing about the request and has to be asked again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ColorCommitVerdict {
+    /// The driver evaluated the request and refused it.
+    DriverRefused,
+    /// The request never reached a verdict: DRM master belongs to someone
+    /// else, the device is going away, or the kernel asked for it again.
+    DeviceUnavailable,
+}
+
+/// Classify a commit failure by the kernel's errno.
+///
+/// Every DRM_MASTER ioctl answers `EACCES` while master belongs to another
+/// client, and that window is wider than it looks: jwm learns a VT switch
+/// happened only when `SessionEvent::PauseSession` is dispatched, which is
+/// after the kernel revoked the device, and a session that started under
+/// another compositor is not master at all until it becomes one — the case
+/// `render_if_needed` already recovers from with `activate(false)`.
+/// `ENODEV`/`ENXIO` mean the device is being pulled out from under us and a
+/// hotplug rebuild follows; `EBUSY`/`EAGAIN`/`EINTR` are the kernel asking
+/// for the same request again. Everything else is a verdict — `EINVAL` above
+/// all, which is how a driver rejects values it cannot program — including
+/// our own errors, which carry no errno and describe things (a property this
+/// connector does not have, a legacy-only device) that waiting never changes.
+pub(super) fn color_commit_verdict_from_errno(errno: Option<i32>) -> ColorCommitVerdict {
+    match errno {
+        Some(
+            libc::EACCES
+            | libc::EPERM
+            | libc::ENODEV
+            | libc::ENXIO
+            | libc::EBUSY
+            | libc::EAGAIN
+            | libc::EINTR,
+        ) => ColorCommitVerdict::DeviceUnavailable,
+        _ => ColorCommitVerdict::DriverRefused,
+    }
+}
+
+/// A failed KMS colour commit: the message the logs carry, and whether the
+/// driver actually answered.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct ColorCommitError {
+    message: String,
+    verdict: ColorCommitVerdict,
+}
+
+impl ColorCommitError {
+    fn new(message: String, verdict: ColorCommitVerdict) -> Self {
+        Self { message, verdict }
+    }
+
+    /// A failure with no errno behind it. Every one of them is structural —
+    /// a missing property handle, a device without atomic modesetting, an
+    /// incomplete scanout chain — so they count as verdicts.
+    fn refused(message: impl Into<String>) -> Self {
+        Self::new(message.into(), ColorCommitVerdict::DriverRefused)
+    }
+
+    /// A failure the kernel reported, classified by its errno.
+    fn from_io(context: impl std::fmt::Display, error: &std::io::Error) -> Self {
+        Self::new(
+            format!("{context}: {error:?}"),
+            color_commit_verdict_from_errno(error.raw_os_error()),
+        )
+    }
+
+    pub(super) const fn verdict(&self) -> ColorCommitVerdict {
+        self.verdict
+    }
+
+    /// The message alone, for the callers that only log it and propagate a
+    /// string.
+    fn into_message(self) -> String {
+        self.message
+    }
+}
+
+impl std::fmt::Display for ColorCommitError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
 /// Apply one assembled atomic color request: TEST_ONLY first, then the real
 /// commit. Legacy-only devices are refused instead of falling back to
 /// per-property ioctls — there is no all-or-nothing transaction there, and a
@@ -570,7 +720,8 @@ fn build_atomic_color_request(
 fn commit_atomic_color_request(
     dev: &DrmDevice,
     assignments: &[AtomicColorAssignment],
-) -> Result<(), String> {
+    scope: AtomicColorCommitScope,
+) -> Result<(), ColorCommitError> {
     use smithay::reexports::drm::control::atomic::AtomicModeReq;
     use smithay::reexports::drm::control::{AtomicCommitFlags, RawResourceHandle, from_u32};
 
@@ -578,24 +729,52 @@ fn commit_atomic_color_request(
         return Ok(());
     }
     if !dev.is_atomic() {
-        return Err(format!(
+        return Err(ColorCommitError::refused(format!(
             "refusing {} scanout color assignments without atomic modesetting",
             assignments.len()
-        ));
+        )));
     }
     let mut request = AtomicModeReq::new();
     for assignment in assignments {
-        let object = RawResourceHandle::new(assignment.object)
-            .ok_or("invalid zero object id in atomic color request")?;
+        let object = RawResourceHandle::new(assignment.object).ok_or_else(|| {
+            ColorCommitError::refused("invalid zero object id in atomic color request")
+        })?;
         let property =
             from_u32::<smithay::reexports::drm::control::property::Handle>(assignment.property)
-                .ok_or("invalid zero property handle in atomic color request")?;
+                .ok_or_else(|| {
+                    ColorCommitError::refused(
+                        "invalid zero property handle in atomic color request",
+                    )
+                })?;
         request.add_raw_property(object, property, assignment.value);
     }
-    dev.atomic_commit(AtomicCommitFlags::TEST_ONLY, request.clone())
-        .map_err(|e| format!("test atomic color commit failed: {e:?}"))?;
-    dev.atomic_commit(AtomicCommitFlags::empty(), request)
-        .map_err(|e| format!("atomic color commit failed: {e:?}"))
+    let mut flags = AtomicCommitFlags::empty();
+    if let Err(test_error) = dev.atomic_commit(AtomicCommitFlags::TEST_ONLY, request.clone()) {
+        if scope != AtomicColorCommitScope::ConnectorSignalling {
+            return Err(ColorCommitError::from_io(
+                "test atomic color commit failed",
+                &test_error,
+            ));
+        }
+        dev.atomic_commit(
+            AtomicCommitFlags::ALLOW_MODESET | AtomicCommitFlags::TEST_ONLY,
+            request.clone(),
+        )
+        .map_err(|modeset_error| {
+            ColorCommitError::new(
+                format!(
+                    "test atomic color commit failed without ALLOW_MODESET ({test_error:?}) and with it ({modeset_error:?})"
+                ),
+                color_commit_verdict_from_errno(modeset_error.raw_os_error()),
+            )
+        })?;
+        log::info!(
+            "[kms-cm] the driver requires a modeset to change connector HDR signalling; committing with ALLOW_MODESET"
+        );
+        flags = AtomicCommitFlags::ALLOW_MODESET;
+    }
+    dev.atomic_commit(flags, request)
+        .map_err(|e| ColorCommitError::from_io("atomic color commit failed", &e))
 }
 
 /// Desired CRTC color-stage contents for one output. `None` clears the stage;
@@ -740,6 +919,13 @@ pub(super) enum HdrEnableRefusal {
     /// The sink's EDID advertises no HDR static metadata, so there is nothing
     /// to build a CTA-861.3 blob from that would describe this panel.
     EdidLacksHdrProfile,
+    /// The driver rejected the connector signalling commit the last time it
+    /// was asserted. The hardware is unchanged, so this holds no frame; it
+    /// drops the request instead of retrying every other frame, and the
+    /// next explicit enable is the retry. Only a driver's own answer gets
+    /// here — [`hdr_commit_failure_response`] keeps a commit that never
+    /// reached one out of the latch.
+    ConnectorCommitRejected,
     /// The advanced (ICC/HDR) color-management surface is not enabled, so
     /// clients are told the output is exact sRGB. Signalling HDR while
     /// advertising sRGB is the same lie in the other direction.
@@ -748,6 +934,13 @@ pub(super) enum HdrEnableRefusal {
     SceneLinearTargetInactive,
     /// `kms_color_pipeline_offload` / the scene-linear render path is off.
     ColorPipelineOffloadDisabled,
+    /// A participating output is scaled, rotated, or placed at a negative
+    /// origin, so the software region planner rejects the whole layout and
+    /// no output can take the software route HDR needs. Configuration, not
+    /// content: waiting does not fix it, and latching a request that can
+    /// never be honoured would steer the delivery group off the CRTC pair
+    /// for nothing.
+    SoftwareRegionTopologyUnsupported,
     /// Something in the frame tail — a toast, a session lock, an unimportable
     /// cursor tree — is assembled outside the common-linear pass, so the
     /// frame falls back to exact sRGB.
@@ -787,9 +980,11 @@ impl HdrEnableRefusal {
             Self::OutputNotParticipating => "output_not_participating",
             Self::ScanoutChain(gap) => gap.wire_name(),
             Self::EdidLacksHdrProfile => "edid_lacks_hdr_profile",
+            Self::ConnectorCommitRejected => "connector_commit_rejected",
             Self::AdvancedColorManagementDisabled => "advanced_color_management_disabled",
             Self::SceneLinearTargetInactive => "scene_linear_target_inactive",
             Self::ColorPipelineOffloadDisabled => "color_pipeline_offload_disabled",
+            Self::SoftwareRegionTopologyUnsupported => "software_region_topology_unsupported",
             Self::LinearTailUnsafe => "linear_tail_unsafe",
             Self::LegacyGammaOverrideActive => "legacy_gamma_override_active",
             Self::DeliveryBlocked => "color_delivery_blocked",
@@ -810,8 +1005,15 @@ pub(super) struct HdrEnableEvidence {
     /// `EdidHdrCapabilities` present on the Smithay output and advertising a
     /// PQ or HLG EOTF.
     pub edid_supports_hdr: bool,
+    /// `KmsOutputState::hdr_connector_commit_rejected`: the driver refused
+    /// the last assert — its own answer, not a commit that never reached one
+    /// — and no explicit enable has asked for a retry since.
+    pub connector_commit_rejected: bool,
     /// `color_policy::advanced_color_management_enabled()`.
     pub advanced_color_management: bool,
+    /// `software_region_topology_supported(..)` holds for every
+    /// participating output, so the region planner can cover the layout.
+    pub region_topology_supported: bool,
     /// `WaylandCompositor::scene_linear_color_path_active()`.
     pub scene_linear_active: bool,
     /// The frame-global linear-tail verdict (compositor tail table plus the
@@ -850,18 +1052,93 @@ pub(super) enum HdrSignallingAction {
     Withdraw,
 }
 
+/// `claim_active` is the presentation claim (`output_hdr_metadata_active`:
+/// this output's frames are encoded for the profile the sink is told);
+/// `connector_signalling` is what the connector actually holds
+/// (`installed_hdr_metadata_blob.is_some()`). They agree except after a dark
+/// output dropped its claim without a commit. Whatever the request did in
+/// the meantime, the connector is brought in line with a real commit:
+/// wanted and either half missing is an assert, unwanted and either half
+/// present is a withdrawal. Reading only the claim let a request dropped
+/// while the display was off leave the sink in PQ under sRGB pixels for the
+/// rest of the session — the error this gate exists to prevent, reintroduced
+/// from the other direction.
 pub(super) const fn hdr_signalling_action(
     requested: bool,
     refused: bool,
-    currently_active: bool,
+    claim_active: bool,
+    connector_signalling: bool,
 ) -> HdrSignallingAction {
     let want = requested && !refused;
-    if want == currently_active {
-        HdrSignallingAction::Hold
-    } else if want {
-        HdrSignallingAction::Assert
-    } else {
+    if want {
+        if claim_active && connector_signalling {
+            HdrSignallingAction::Hold
+        } else {
+            HdrSignallingAction::Assert
+        }
+    } else if claim_active || connector_signalling {
         HdrSignallingAction::Withdraw
+    } else {
+        HdrSignallingAction::Hold
+    }
+}
+
+/// Whether a withdrawal is made with a connector commit, or by dropping the
+/// presentation claim alone.
+///
+/// A dark output — DPMS off, or soft-disabled by wlr-output-management — is
+/// withdrawn without a commit: the properties belong to a display that is
+/// off, whether the commit is even accepted is driver-dependent, and a
+/// failure would set `delivery_blocked` for the whole delivery group, so
+/// switching one monitor off could hold presentation on every other one.
+/// Every presenting output commits, because leaving the sink told BT.2020
+/// over sRGB pixels is the error this whole queue exists to prevent. Keyed
+/// on participation itself rather than on which refusal happened to be
+/// reported, so the refusal precedence can change without changing this.
+pub(super) const fn hdr_withdrawal_reaches_connector(participating: bool) -> bool {
+    participating
+}
+
+/// What a failed connector-signalling commit does with the request.
+///
+/// Split out of the frame loop so the whole matrix — an assert or a
+/// withdrawal, a driver's verdict or a device that was not ours to program —
+/// is decided in one pure place instead of inside a `match` arm no test can
+/// reach without a DRM device.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum HdrCommitFailureResponse {
+    /// A rejected assert: record the refusal, so the request is dropped
+    /// rather than retried. `hdr_connector_commit_rejected` is a *permanent*
+    /// refusal — only an explicit enable or a rebuilt KMS state clears it —
+    /// so only an answer the driver actually gave may arm it.
+    LatchRefusal,
+    /// An assert that never reached a verdict: DRM master was elsewhere (a
+    /// VT switch in flight, a session that started under another
+    /// compositor), the device is going away, or the kernel was busy. The
+    /// connector is unchanged and the frame is correct, so nothing is held
+    /// and nothing is latched; the request stands and the next frame that
+    /// owns the device asks again. That is not the retry-every-other-frame
+    /// loop the latch replaced — that one *held presentation*, so every
+    /// second frame was dropped for a commit that changed nothing.
+    RetryTheAssert,
+    /// A failed withdrawal, whatever the driver's answer was: the sink may
+    /// still be told HDR over pixels that are about to be sRGB, so
+    /// presentation is held until the signal can be taken back.
+    HoldPresentation,
+}
+
+/// `asserting` is the direction of the commit that failed (`true` for an
+/// assert, `false` for a withdrawal); `verdict` is what the failure was.
+pub(super) const fn hdr_commit_failure_response(
+    asserting: bool,
+    verdict: ColorCommitVerdict,
+) -> HdrCommitFailureResponse {
+    if !asserting {
+        return HdrCommitFailureResponse::HoldPresentation;
+    }
+    match verdict {
+        ColorCommitVerdict::DriverRefused => HdrCommitFailureResponse::LatchRefusal,
+        ColorCommitVerdict::DeviceUnavailable => HdrCommitFailureResponse::RetryTheAssert,
     }
 }
 
@@ -877,27 +1154,30 @@ pub(super) const fn hdr_enable_refusal_is_permanent(refusal: HdrEnableRefusal) -
         refusal,
         HdrEnableRefusal::ScanoutChain(_)
             | HdrEnableRefusal::EdidLacksHdrProfile
+            | HdrEnableRefusal::ConnectorCommitRejected
             | HdrEnableRefusal::AdvancedColorManagementDisabled
             | HdrEnableRefusal::ColorPipelineOffloadDisabled
+            | HdrEnableRefusal::SoftwareRegionTopologyUnsupported
     )
 }
 
 /// Fail-closed policy for asserting HDR signalling on one output.
 ///
-/// Hardware capability is tested before configuration, and configuration
-/// before frame content, so a permanently incapable output reports the same
-/// reason regardless of what is on screen. This is an *additional* gate:
+/// Hardware capability is tested before configuration, configuration before
+/// participation, and participation before frame content, so a permanently
+/// incapable output reports the same reason whether it is dark or lit and
+/// regardless of what is on screen. This is an *additional* gate:
 /// `set_hdr_metadata_for_output` re-runs the scanout chain validation itself,
 /// precisely so a wrong answer here cannot produce a bad commit.
 pub(super) const fn hdr_enable_refusal(e: &HdrEnableEvidence) -> Option<HdrEnableRefusal> {
-    if !e.participating {
-        return Some(HdrEnableRefusal::OutputNotParticipating);
-    }
     if let Some(gap) = e.chain_gap {
         return Some(HdrEnableRefusal::ScanoutChain(gap));
     }
     if !e.edid_supports_hdr {
         return Some(HdrEnableRefusal::EdidLacksHdrProfile);
+    }
+    if e.connector_commit_rejected {
+        return Some(HdrEnableRefusal::ConnectorCommitRejected);
     }
     if !e.advanced_color_management {
         return Some(HdrEnableRefusal::AdvancedColorManagementDisabled);
@@ -910,6 +1190,15 @@ pub(super) const fn hdr_enable_refusal(e: &HdrEnableEvidence) -> Option<HdrEnabl
     // configuration can never honour.
     if !e.offload_gate_on {
         return Some(HdrEnableRefusal::ColorPipelineOffloadDisabled);
+    }
+    if !e.region_topology_supported {
+        return Some(HdrEnableRefusal::SoftwareRegionTopologyUnsupported);
+    }
+    // Participation after the permanent reasons: `output_not_participating`
+    // is momentary, so testing it first let a dark SDR panel latch a request
+    // it can never honour and count as "enable available".
+    if !e.participating {
+        return Some(HdrEnableRefusal::OutputNotParticipating);
     }
     if !e.scene_linear_active {
         return Some(HdrEnableRefusal::SceneLinearTargetInactive);
@@ -1973,6 +2262,12 @@ pub(super) struct PresentationEvidence {
     pub commit_pending: bool,
     /// The output is on, not soft-disabled, and the session is active.
     pub output_presenting: bool,
+    /// [`SUBMISSION_SUPPORTS_ASYNC_FLIP`], carried as evidence rather than
+    /// read from the constant inside the policy: it is permanent, it is
+    /// therefore tested before every content reason, and a build constant
+    /// tested inline would make the whole chain below it unreachable in the
+    /// unit tests as well as in the build.
+    pub submission_supports_async_flip: bool,
     /// A caller has forced VRR on or off through `set_vrr_enabled`. The
     /// content policy owns VRR otherwise; without this the very next frame
     /// would recompute it and undo an explicit request, which is the same
@@ -2016,11 +2311,21 @@ pub(super) const fn presentation_plan(e: &PresentationEvidence) -> PresentationP
     };
 
     // Hardware and configuration first, so a permanently incapable output
-    // reports the same reason regardless of what is on screen.
+    // reports the same reason regardless of what is on screen. The build
+    // constant and the driver capability are the permanent ones; they used
+    // to be tested last, so a user who asked to tear was told to hide the
+    // cursor, then that a colour retry was pending, and only then — on an
+    // async-capable driver with nothing else on screen — the reason nothing
+    // could ever be done about. Demand stays its own field
+    // (`client_asked_to_tear`), so the report can still say who asked.
     let blocker = if !e.output_presenting {
         Some(PresentationBlocker::OutputNotPresenting)
     } else if !e.tearing_control_enabled {
         Some(PresentationBlocker::TearingControlDisabled)
+    } else if !e.submission_supports_async_flip {
+        Some(PresentationBlocker::SubmissionCannotRequestAsyncFlip)
+    } else if !e.driver_supports_async_flip {
+        Some(PresentationBlocker::DriverCannotFlipAsync)
     } else if !e.client_asked_to_tear {
         Some(PresentationBlocker::NoClientAskedToTear)
     } else if !e.fullscreen_client_covers_output || e.composited_frame_required {
@@ -2029,10 +2334,6 @@ pub(super) const fn presentation_plan(e: &PresentationEvidence) -> PresentationP
         Some(PresentationBlocker::ColorDeliveryRetryPending)
     } else if e.commit_pending {
         Some(PresentationBlocker::ModesetCommitPending)
-    } else if !e.driver_supports_async_flip {
-        Some(PresentationBlocker::DriverCannotFlipAsync)
-    } else if !SUBMISSION_SUPPORTS_ASYNC_FLIP {
-        Some(PresentationBlocker::SubmissionCannotRequestAsyncFlip)
     } else {
         None
     };
@@ -2058,6 +2359,151 @@ fn frame_flags_for_color_delivery(
     } else {
         FrameFlags::DEFAULT
     }
+}
+
+/// One output's VRR toggle as attempted and as taken.
+///
+/// The attempt is the retry guard — a value the driver refused is not asked
+/// for again until the desired value changes, because each attempt costs a
+/// mode-size dumb buffer and test commits — and `applied` is what the
+/// reports read. Reading the attempt as the outcome made `vrr.active` say
+/// `true` on every frame after a single refused `use_vrr`, while the CRTC
+/// property stayed 0: the demand reported as the outcome.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct VrrApplyRecord {
+    pub attempt: Option<bool>,
+    pub applied: bool,
+}
+
+impl VrrApplyRecord {
+    pub(super) const fn should_attempt(&self, want: bool) -> bool {
+        match self.attempt {
+            Some(previous) => previous != want,
+            None => true,
+        }
+    }
+
+    /// Record an attempt; only a successful one moves `applied`.
+    pub(super) const fn record(&mut self, want: bool, took: bool) {
+        self.attempt = Some(want);
+        if took {
+            self.applied = want;
+        }
+    }
+}
+
+/// Whether a `use_vrr` that reported success got there through Smithay's
+/// modeset fallback: its non-modeset TEST_ONLY failed, the ALLOW_MODESET
+/// test passed, and only `pending` was updated — so the surface now has
+/// pending state and the next submission is a full modesetting commit.
+/// `commit_pending` flipping from clear to set across the call is the only
+/// evidence of that available to the caller.
+pub(super) const fn vrr_toggle_needed_a_modeset(
+    commit_pending_before: bool,
+    commit_pending_after: bool,
+) -> bool {
+    !commit_pending_before && commit_pending_after
+}
+
+/// What `get_outputs.vrr.supported` reports. The CRTC exposing `VRR_ENABLED`
+/// is necessary but not sufficient — every amdgpu/i915 CRTC has it whatever
+/// panel is attached — so the report reads the same probe the
+/// `set_vrr_enabled` gate reads, and cannot invite a command it would then
+/// refuse.
+pub(super) const fn reported_vrr_supported(
+    crtc_has_vrr_property: bool,
+    vrr_supported_without_modeset: bool,
+) -> bool {
+    crtc_has_vrr_property && vrr_supported_without_modeset
+}
+
+/// The top-most window in `stack` that `covers` says covers the output.
+///
+/// The stack is stored bottom-to-top (`raise_window` re-pushes at the end
+/// and the hit test walks it in reverse), so the search runs top-down: with
+/// two overlapping fullscreen windows the visible one owns the output, and
+/// its tearing hint is the one that counts.
+fn covering_window_in(
+    stack_bottom_to_top: &[crate::backend::common_define::WindowId],
+    covers: impl Fn(crate::backend::common_define::WindowId) -> bool,
+) -> Option<crate::backend::common_define::WindowId> {
+    stack_bottom_to_top
+        .iter()
+        .rev()
+        .copied()
+        .find(|win| covers(*win))
+}
+
+/// The HDR gate's `linear_tail_safe`, built as the frame loop builds it.
+///
+/// The loop stages the migratable external classes (cursor, drag icon,
+/// top/overlay layer trees) into the common-linear target before deciding,
+/// and reads the *committed* plan. A raw plan has the cursor as
+/// `ExternalAssembly` on any ordinary desktop, so reading it directly made
+/// the report say `linear_tail_unsafe` on every output while the loop was
+/// asserting HDR. Staging is attempted exactly when the compositor tail is
+/// safe, the scene-linear target is up, and internalizing every migratable
+/// class would make the plan safe; this mirrors that, on the assumption the
+/// staging pass succeeds.
+///
+/// That assumption is this gate's one blind spot, and it is narrower than it
+/// used to claim. A class that cannot be *imported* is refused before the
+/// fact — `importable` is a per-frame precheck of the buffer types, so the
+/// next frame's plan is already unsafe and this answers `false` — but a
+/// class that fails while being *staged* (`stage_cursor` finding no bitmap,
+/// a `from_buffer` or composite error) leaves the raw plan looking migratable
+/// for as long as the failure lasts. The frame loop reads the *committed*
+/// plan and withdraws; this keeps answering `true`, so the report names a
+/// different reason than the loop acted on. Closing that needs the caller to
+/// hand this the loop's last *observed* verdict — the `linear_tail_safe`
+/// `record_color_delivery_attempt` already stores in
+/// `last_color_delivery_policy` — instead of the predicted one.
+pub(super) const fn hdr_gate_linear_tail_safe(
+    compositor_tail_safe: bool,
+    scene_linear_active: bool,
+    plan_safe: bool,
+    internalization_could_make_plan_safe: bool,
+) -> bool {
+    compositor_tail_safe
+        && (plan_safe || (scene_linear_active && internalization_could_make_plan_safe))
+}
+
+/// Per-output intent a user latched through IPC, carried across a
+/// `KmsState` rebuild. A VT switch back and every connector hotplug build a
+/// fresh `KmsState`; without this an HDR request or a VRR override was
+/// silently gone afterwards, with the connector reset to SDR by the old
+/// state's teardown and no log line saying so.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct OutputLatchedIntent {
+    pub name: String,
+    pub hdr_requested: bool,
+    pub vrr_override: Option<bool>,
+}
+
+impl OutputLatchedIntent {
+    const fn is_default(&self) -> bool {
+        !self.hdr_requested && self.vrr_override.is_none()
+    }
+}
+
+/// Pair the old outputs' intents with the new outputs by name. Returns the
+/// `(new index, intent)` pairs to apply and the names of outputs that are
+/// gone but carried a non-default intent, so the drop can be logged instead
+/// of silent.
+pub(super) fn carry_latched_intents<'a>(
+    intents: &'a [OutputLatchedIntent],
+    new_names: &[&str],
+) -> (Vec<(usize, &'a OutputLatchedIntent)>, Vec<&'a str>) {
+    let mut carried = Vec::new();
+    let mut dropped = Vec::new();
+    for intent in intents {
+        match new_names.iter().position(|name| *name == intent.name) {
+            Some(index) => carried.push((index, intent)),
+            None if !intent.is_default() => dropped.push(intent.name.as_str()),
+            None => {}
+        }
+    }
+    (carried, dropped)
 }
 
 pub(super) struct KmsState {
@@ -2283,12 +2729,17 @@ impl KmsState {
             .unwrap_or(std::time::Duration::ZERO);
 
         let throttle = out.frame_callback_throttle;
-        let output = out.output.clone();
+        // Shared reborrows, not clones: the loop only reads these, and the
+        // writes below come after it. Cloning the visible set here was a
+        // hash-table allocation plus a refcount bump per visible surface
+        // node, per output, per vblank, in a function that is otherwise
+        // allocation-free.
+        let output = &out.output;
         #[allow(
             clippy::mutable_key_type,
             reason = "Wayland Weak hashes by stable protocol-object identity; its internal liveness flag is not part of Hash or Eq"
         )]
-        let visible = out.frame_callback_visible.clone();
+        let visible = &out.frame_callback_visible;
         let refresh = out.refresh_interval;
         for root in &out.frame_callback_roots {
             let mut root_tree_visible = visible.contains(&root.downgrade());
@@ -2768,9 +3219,10 @@ impl KmsState {
     ) -> Option<crate::backend::api::VrrCapabilities> {
         let output = self.outputs.get(output_idx)?;
         let crtc = output.crtc;
+        let vrr_supported_without_modeset = output.vrr_supported_without_modeset;
         let mgr = self.drm_output_manager.lock();
         let dev = mgr.device();
-        let mut supported = false;
+        let mut crtc_has_vrr_property = false;
         let mut current_enabled = false;
         if let Ok(props) = dev.get_properties(crtc) {
             let (handles, values) = props.as_props_and_values();
@@ -2778,7 +3230,7 @@ impl KmsState {
                 if let Ok(info) = dev.get_property(prop_handle) {
                     let name = info.name().to_str().unwrap_or("");
                     if name == "VRR_ENABLED" {
-                        supported = true;
+                        crtc_has_vrr_property = true;
                         current_enabled = values[i] != 0;
                     }
                 }
@@ -2787,7 +3239,9 @@ impl KmsState {
         let cfg = crate::config::CONFIG.load();
         let b = cfg.behavior();
         Some(crate::backend::api::VrrCapabilities {
-            supported,
+            // The same probe the `set_vrr_enabled` gate reads; the CRTC
+            // property alone is present on every amdgpu/i915 CRTC.
+            supported: reported_vrr_supported(crtc_has_vrr_property, vrr_supported_without_modeset),
             current_enabled,
             min_refresh_hz: b.vrr_min_fps,
             max_refresh_hz: b.vrr_max_fps,
@@ -3809,11 +4263,19 @@ impl KmsState {
     /// and never claims hardware HDR active. (The compositor-level gate in
     /// `set_hdr_metadata` rejects enables earlier; this layer stays correct
     /// even if that gate is lifted.)
+    ///
+    /// `color_manager` is told the output's advertised image description
+    /// changed, so every surface already on the output gets
+    /// `preferred_changed` and every `wp_color_management_output_v1` gets
+    /// `image_description_changed`. Without it only surfaces *entering* the
+    /// output learned of the switch, and a video player mapped before the
+    /// enable kept rendering sRGB into an output now told PQ.
     pub(super) fn set_hdr_metadata_for_output(
         &mut self,
         output_idx: usize,
         blob: Option<&[u8; 32]>,
-    ) -> Result<(), String> {
+        color_manager: Option<&crate::backend::wayland_udev::color_management::ColorManagerState>,
+    ) -> Result<(), ColorCommitError> {
         let (conn_handle, smithay_output, handles, swapchain_fourcc, plane_formats) = self
             .outputs
             .get(output_idx)
@@ -3826,7 +4288,7 @@ impl KmsState {
                     output.primary_plane_formats.clone(),
                 )
             })
-            .ok_or("output index out of range")?;
+            .ok_or_else(|| ColorCommitError::refused("output index out of range"))?;
 
         if blob.is_some()
             && let Some(gap) = hdr_scanout_chain_gap(
@@ -3839,9 +4301,9 @@ impl KmsState {
                 &handles,
             )
         {
-            return Err(format!(
+            return Err(ColorCommitError::refused(format!(
                 "HDR scanout chain incomplete ({gap:?}); keeping software SDR delivery"
-            ));
+            )));
         }
 
         let mgr = self.drm_output_manager.lock();
@@ -3850,10 +4312,14 @@ impl KmsState {
         let blob_id: u64 = if let Some(bytes) = blob {
             let v = dev
                 .create_property_blob(bytes)
-                .map_err(|e| format!("create_property_blob failed: {e:?}"))?;
+                .map_err(|e| ColorCommitError::from_io("create_property_blob failed", &e))?;
             match v {
                 smithay::reexports::drm::control::property::Value::Blob(id) => id,
-                _ => return Err("create_property_blob returned non-Blob value".to_string()),
+                _ => {
+                    return Err(ColorCommitError::refused(
+                        "create_property_blob returned non-Blob value",
+                    ));
+                }
             }
         } else {
             0
@@ -3881,7 +4347,14 @@ impl KmsState {
             },
         }];
         let commit_result = build_atomic_color_request(&plan)
-            .and_then(|assignments| commit_atomic_color_request(dev, &assignments));
+            .map_err(ColorCommitError::refused)
+            .and_then(|assignments| {
+                commit_atomic_color_request(
+                    dev,
+                    &assignments,
+                    AtomicColorCommitScope::ConnectorSignalling,
+                )
+            });
         if let Err(error) = commit_result {
             if blob_id != 0 {
                 let _ = dev.destroy_property_blob(blob_id);
@@ -3903,12 +4376,82 @@ impl KmsState {
             &smithay_output,
             blob.is_some(),
         );
+        if let Some(color_manager) = color_manager {
+            color_manager.on_output_description_changed(&smithay_output);
+        }
         self.invalidate_color_delivery_after_hardware_change(output_idx);
         if !self.refresh_output_color_targets() {
             self.color_pipeline_delivery_blocked = true;
         }
         self.needs_render = true;
         Ok(())
+    }
+
+    /// Drop the presentation claim on an output without touching the
+    /// connector. Used where a commit is not made (a dark output) or failed
+    /// on one; the tracked blob stays so the reconciliation withdraws it
+    /// with a real commit on the first participating frame, and teardown
+    /// still frees it.
+    fn drop_hdr_claim(
+        &mut self,
+        output_idx: usize,
+        color_manager: Option<&crate::backend::wayland_udev::color_management::ColorManagerState>,
+    ) {
+        let Some(output) = self.outputs.get(output_idx) else {
+            return;
+        };
+        if !crate::backend::wayland_udev::color_management::output_hdr_metadata_active(
+            &output.output,
+        ) {
+            return;
+        }
+        crate::backend::wayland_udev::color_management::set_output_hdr_metadata_active(
+            &output.output,
+            false,
+        );
+        if let Some(color_manager) = color_manager {
+            color_manager.on_output_description_changed(&output.output);
+        }
+        self.invalidate_color_delivery_after_hardware_change(output_idx);
+    }
+
+    /// Withdraw HDR signalling outside the frame loop: at DPMS-off, so the
+    /// connector is not left told PQ/BT.2020 while the display is dark, and
+    /// at DPMS-on when a dark-time withdrawal had failed. Best-effort, like
+    /// the LUT/CTM teardown beside it — a failure here must not hold
+    /// presentation for the other outputs. On failure the claim is dropped
+    /// anyway (nothing reports HDR active on an output that is not
+    /// presenting) and the tracked blob stays, so the reconciliation clears
+    /// the connector on the first participating frame.
+    fn withdraw_hdr_signalling_outside_frame_loop(
+        &mut self,
+        output_idx: usize,
+        color_manager: Option<&crate::backend::wayland_udev::color_management::ColorManagerState>,
+        when: &str,
+    ) {
+        let Some(output) = self.outputs.get(output_idx) else {
+            return;
+        };
+        let claim_active =
+            crate::backend::wayland_udev::color_management::output_hdr_metadata_active(
+                &output.output,
+            );
+        if !claim_active && output.installed_hdr_metadata_blob.is_none() {
+            return;
+        }
+        match self.set_hdr_metadata_for_output(output_idx, None, color_manager) {
+            Ok(()) => log::info!(
+                "[kms-cm] HDR signalling withdrawn on {} ({when})",
+                self.outputs[output_idx].output_name
+            ),
+            Err(error) => {
+                log::warn!(
+                    "[kms-cm] {when}: HDR signalling withdrawal failed on {}: {error}; dropping the claim, the connector is cleared on the next participating frame",
+                    self.outputs[output_idx].output_name
+                );
+                self.drop_hdr_claim(output_idx, color_manager);
+            }
+        }
     }
 
     pub(super) fn output_index_by_name(&self, name: &str) -> Option<usize> {
@@ -3919,6 +4462,7 @@ impl KmsState {
         &mut self,
         output_idx: usize,
         on: bool,
+        color_manager: Option<&crate::backend::wayland_udev::color_management::ColorManagerState>,
     ) -> Result<(), String> {
         let output = self
             .outputs
@@ -3987,6 +4531,35 @@ impl KmsState {
                     );
                 }
             }
+            // The connector signalling goes with them: DPMS-off does not
+            // reset `Colorspace`/`HDR_OUTPUT_METADATA`, and on power-on the
+            // driver re-programs the infoframes from that state, so a panel
+            // left signalled would re-enter HDR mode under whatever the next
+            // frame happens to be encoded as. The reconciliation re-asserts
+            // with a fresh commit when the output comes back and the request
+            // still stands.
+            if !on {
+                self.withdraw_hdr_signalling_outside_frame_loop(
+                    output_idx,
+                    color_manager,
+                    "DPMS off",
+                );
+            } else if self.outputs[output_idx]
+                .installed_hdr_metadata_blob
+                .is_some()
+                && !crate::backend::wayland_udev::color_management::output_hdr_metadata_active(
+                    &self.outputs[output_idx].output,
+                )
+            {
+                // A dark-time withdrawal that failed: the display is on now,
+                // and without the effects compositor no reconciliation runs
+                // to clear it.
+                self.withdraw_hdr_signalling_outside_frame_loop(
+                    output_idx,
+                    color_manager,
+                    "DPMS on after a failed dark-time withdrawal",
+                );
+            }
         }
         result
     }
@@ -3996,7 +4569,10 @@ impl KmsState {
     /// Failure keeps the tracked blob alive and blocks scanout so a later
     /// runtime-toggle retry cannot silently feed encoded client buffers
     /// through a stale output transform.
-    pub(super) fn disable_color_pipeline(&mut self) -> Result<(), String> {
+    pub(super) fn disable_color_pipeline(
+        &mut self,
+        color_manager: Option<&crate::backend::wayland_udev::color_management::ColorManagerState>,
+    ) -> Result<(), String> {
         for index in 0..self.outputs.len() {
             // Clear the linear-light matrix first. If that fails, leave the
             // paired OETF and all tracked handles untouched; presentation is
@@ -4015,13 +4591,30 @@ impl KmsState {
             }
         }
         for index in 0..self.outputs.len() {
-            if crate::backend::wayland_udev::color_management::output_hdr_metadata_active(
-                &self.outputs[index].output,
-            ) {
-                if let Err(error) = self.set_hdr_metadata_for_output(index, None) {
-                    self.color_pipeline_delivery_blocked = true;
-                    return Err(error);
+            // Withdraw from every connector that holds the signal, not only
+            // from outputs whose claim is up: a dark output drops its claim
+            // without a commit, and with the compositor gone nothing would
+            // reconcile the connector when the display comes back.
+            let claim_active =
+                crate::backend::wayland_udev::color_management::output_hdr_metadata_active(
+                    &self.outputs[index].output,
+                );
+            if !claim_active && self.outputs[index].installed_hdr_metadata_blob.is_none() {
+                continue;
+            }
+            if let Err(error) = self.set_hdr_metadata_for_output(index, None, color_manager) {
+                if self.outputs[index].dpms_off {
+                    // A dark display's refusal must not hold the group; the
+                    // DPMS-on path retries the withdrawal.
+                    log::warn!(
+                        "[kms-cm] HDR signalling withdrawal failed on dark output {}: {error}; retried at power-on",
+                        self.outputs[index].output_name
+                    );
+                    self.drop_hdr_claim(index, color_manager);
+                    continue;
                 }
+                self.color_pipeline_delivery_blocked = true;
+                return Err(error.into_message());
             }
         }
         self.color_pipeline_delivery_blocked = false;
@@ -4134,7 +4727,8 @@ impl KmsState {
                     });
                 }
                 let assignments = build_atomic_color_request(&plans)?;
-                commit_atomic_color_request(dev, &assignments)
+                commit_atomic_color_request(dev, &assignments, AtomicColorCommitScope::CrtcStages)
+                    .map_err(ColorCommitError::into_message)
             };
             commit_result.map(|_| plans.len())
         })(self);
@@ -4285,10 +4879,14 @@ impl KmsState {
         scene_linear_active: bool,
     ) -> bool {
         let mut ready = true;
+        let color_manager = state.color_manager.as_ref();
         for index in 0..self.outputs.len() {
-            let active = crate::backend::wayland_udev::color_management::output_hdr_metadata_active(
-                &self.outputs[index].output,
-            );
+            let claim_active =
+                crate::backend::wayland_udev::color_management::output_hdr_metadata_active(
+                    &self.outputs[index].output,
+                );
+            let connector_signalling = self.outputs[index].installed_hdr_metadata_blob.is_some();
+            let participating = Self::output_participates(&self.outputs[index], state);
             let refusal = self.hdr_enable_refusal_for_output(
                 index,
                 state,
@@ -4313,31 +4911,25 @@ impl KmsState {
                 );
                 self.outputs[index].hdr_requested = false;
             }
-            let action =
-                hdr_signalling_action(self.outputs[index].hdr_requested, refusal.is_some(), active);
+            let action = hdr_signalling_action(
+                self.outputs[index].hdr_requested,
+                refusal.is_some(),
+                claim_active,
+                connector_signalling,
+            );
             let want = match action {
                 HdrSignallingAction::Hold => continue,
                 HdrSignallingAction::Assert => true,
                 HdrSignallingAction::Withdraw => false,
             };
             // A dark output is withdrawn by dropping the claim, not by
-            // committing to it.
-            //
-            // The connector properties belong to a display that is off or
-            // soft-disabled; whether that commit is even accepted is
-            // driver-dependent, and a failure here would set
-            // `delivery_blocked` for the whole delivery group — so switching
-            // one monitor off could hold presentation on every other one.
-            // Clearing the tracked flag is the honest half: nothing claims
-            // HDR is active on an output that is not presenting, and the
-            // reconciliation re-asserts with a fresh commit when it comes
-            // back.
-            if !want && refusal == Some(HdrEnableRefusal::OutputNotParticipating) {
-                crate::backend::wayland_udev::color_management::set_output_hdr_metadata_active(
-                    &self.outputs[index].output,
-                    false,
-                );
-                self.invalidate_color_delivery_after_hardware_change(index);
+            // committing to it (see `hdr_withdrawal_reaches_connector`).
+            // The connector keeps whatever it holds; `connector_signalling`
+            // stays true, so the first participating frame withdraws it with
+            // a real commit if the request was dropped meanwhile, or
+            // re-asserts with a fresh one if it still stands.
+            if !want && !hdr_withdrawal_reaches_connector(participating) {
+                self.drop_hdr_claim(index, color_manager);
                 continue;
             }
             let blob = if want {
@@ -4354,36 +4946,73 @@ impl KmsState {
             } else {
                 None
             };
-            if let Err(error) = self.set_hdr_metadata_for_output(index, blob.as_ref()) {
-                log::warn!(
-                    "[kms-cm] failed to {} HDR signalling on {}: {error}",
-                    if want { "assert" } else { "withdraw" },
-                    self.outputs[index].output_name
-                );
-                ready = false;
-            } else {
-                log::info!(
+            match self.set_hdr_metadata_for_output(index, blob.as_ref(), color_manager) {
+                Ok(()) => log::info!(
                     "[kms-cm] HDR signalling {} on {}",
                     if want { "asserted" } else { "withdrawn" },
                     self.outputs[index].output_name
-                );
+                ),
+                Err(error) => match hdr_commit_failure_response(want, error.verdict()) {
+                    HdrCommitFailureResponse::LatchRefusal => {
+                        // A rejected assert changed nothing: the connector is
+                        // still SDR and the frame is correct, so there is
+                        // nothing to hold presentation for. Holding it made
+                        // every second frame drop, forever — blocked this
+                        // frame, `Hold` under the momentary `DeliveryBlocked`
+                        // the next, retried the one after. The rejection is
+                        // recorded instead, reported as a permanent refusal
+                        // that drops the request, and retried only by the
+                        // next explicit enable.
+                        log::warn!(
+                            "[kms-cm] the driver rejected asserting HDR signalling on {}: {error}; not retried until asked again",
+                            self.outputs[index].output_name
+                        );
+                        self.outputs[index].hdr_connector_commit_rejected = true;
+                    }
+                    HdrCommitFailureResponse::RetryTheAssert => {
+                        // The commit never reached the driver's judgement, so
+                        // there is nothing to remember about it. Latching
+                        // here dropped the user's request on the next frame
+                        // over a VT switch or a session that had not become
+                        // DRM master yet, and only an explicit re-enable
+                        // could bring it back.
+                        log::warn!(
+                            "[kms-cm] could not assert HDR signalling on {}: {error}; the device was not ours to program, so the request stands and the next frame that owns it asks again",
+                            self.outputs[index].output_name
+                        );
+                    }
+                    HdrCommitFailureResponse::HoldPresentation => {
+                        log::warn!(
+                            "[kms-cm] failed to withdraw HDR signalling on {}: {error}",
+                            self.outputs[index].output_name
+                        );
+                        ready = false;
+                    }
+                },
             }
         }
         ready
     }
 
-    /// Assemble one output's evidence and run the policy. `None` means the
-    /// assertion is legal for this frame.
-    pub(super) fn hdr_enable_refusal_for_output(
+    /// `!dpms_off && !soft_disabled`: the one definition of "participating"
+    /// the reconciliation, the evidence, and the dark-withdrawal rule share.
+    fn output_participates(
+        output: &KmsOutputState,
+        state: &crate::backend::wayland::state::JwmWaylandState,
+    ) -> bool {
+        !output.dpms_off && !state.soft_disabled_outputs.contains(&output.output_name)
+    }
+
+    /// Assemble one output's evidence for [`hdr_enable_refusal`]. `None`
+    /// for an index that names no output.
+    fn hdr_enable_evidence_for_output(
         &self,
         index: usize,
         state: &crate::backend::wayland::state::JwmWaylandState,
         linear_tail_safe: bool,
         scene_linear_active: bool,
-    ) -> Option<HdrEnableRefusal> {
-        let Some(output) = self.outputs.get(index) else {
-            return Some(HdrEnableRefusal::OutputNotParticipating);
-        };
+    ) -> Option<HdrEnableEvidence> {
+        let output = self.outputs.get(index)?;
         let behavior = crate::config::CONFIG.load();
         let offload_gate_on = behavior.behavior().kms_color_pipeline_offload
             && crate::config::scene_linear_render_path_requested(
@@ -4391,7 +5020,7 @@ impl KmsState {
                 behavior.behavior().scene_linear_compositing,
             );
         drop(behavior);
-        hdr_enable_refusal(&HdrEnableEvidence {
+        Some(HdrEnableEvidence {
             chain_gap: hdr_scanout_chain_gap(
                 true,
                 output.swapchain_fourcc,
@@ -4405,22 +5034,33 @@ impl KmsState {
                 // PQ or HLG: the two EOTFs a CTA-861.3 blob can name. A panel
                 // with neither has no HDR profile to describe.
                 .is_some_and(|caps| caps.supports_pq || caps.supports_hlg),
+            connector_commit_rejected: output.hdr_connector_commit_rejected,
             advanced_color_management:
                 crate::backend::color_policy::advanced_color_management_enabled(),
+            // The region planner rejects the whole layout on one bad output,
+            // so this is a group fact: every participating output's placement
+            // has to be coverable.
+            region_topology_supported: self.outputs.iter().all(|other| {
+                !Self::output_participates(other, state)
+                    || software_region_topology_supported(
+                        other.origin,
+                        other.mode_size,
+                        other.output.current_scale().fractional_scale(),
+                        other.output.current_transform(),
+                    )
+            }),
             scene_linear_active,
             linear_tail_safe,
             offload_gate_on,
             legacy_gamma_override: output.legacy_gamma_override,
-            participating: !output.dpms_off
-                && !state.soft_disabled_outputs.contains(&output.output_name),
+            participating: Self::output_participates(output, state),
             software_region_planned: output.last_software_region_planned,
             hardware_pair_active: output.last_hardware_pair_active,
             delivery_blocked: self.color_pipeline_delivery_blocked,
             overlaps_participating_output: self.outputs.iter().enumerate().any(
                 |(other_index, other)| {
                     other_index != index
-                        && !other.dpms_off
-                        && !state.soft_disabled_outputs.contains(&other.output_name)
+                        && Self::output_participates(other, state)
                         && rect_overlaps_output(
                             other.origin,
                             other.mode_size,
@@ -4432,6 +5072,51 @@ impl KmsState {
         })
     }
 
+    /// Assemble one output's evidence and run the policy, as the frame loop
+    /// sees it. `None` means the assertion is legal for this frame.
+    pub(super) fn hdr_enable_refusal_for_output(
+        &self,
+        index: usize,
+        state: &crate::backend::wayland::state::JwmWaylandState,
+        linear_tail_safe: bool,
+        scene_linear_active: bool,
+    ) -> Option<HdrEnableRefusal> {
+        let Some(evidence) = self.hdr_enable_evidence_for_output(
+            index,
+            state,
+            linear_tail_safe,
+            scene_linear_active,
+        ) else {
+            return Some(HdrEnableRefusal::OutputNotParticipating);
+        };
+        hdr_enable_refusal(&evidence)
+    }
+
+    /// The same policy as an explicit enable command sees it. A driver
+    /// rejection the frame loop recorded is forgiven here, because the
+    /// command is the one way to ask for a retry (`set_hdr_requested` clears
+    /// it) — so the command's permanence check and the "enable available"
+    /// report answer the same question, whether the request would be
+    /// accepted, and cannot drift apart on this reason.
+    pub(super) fn hdr_enable_command_refusal_for_output(
+        &self,
+        index: usize,
+        state: &crate::backend::wayland::state::JwmWaylandState,
+        linear_tail_safe: bool,
+        scene_linear_active: bool,
+    ) -> Option<HdrEnableRefusal> {
+        let Some(mut evidence) = self.hdr_enable_evidence_for_output(
+            index,
+            state,
+            linear_tail_safe,
+            scene_linear_active,
+        ) else {
+            return Some(HdrEnableRefusal::OutputNotParticipating);
+        };
+        evidence.connector_commit_rejected = false;
+        hdr_enable_refusal(&evidence)
+    }
+
     /// Report an output the frame loop skipped, so the per-output verdicts
     /// describe every output rather than only the ones that rendered.
     fn record_skipped_presentation(&mut self, index: usize, blocker: PresentationBlocker) {
@@ -4441,7 +5126,7 @@ impl KmsState {
         let status = crate::backend::api::PresentationOutputStatus {
             output_name: output.output_name.clone(),
             client_asked_to_tear: false,
-            vrr: output.vrr_last_attempt.unwrap_or(false),
+            vrr: output.vrr.applied,
             tearing: false,
             blocker: Some(blocker.wire_name().to_string()),
         };
@@ -4455,7 +5140,7 @@ impl KmsState {
             return;
         };
         let name = output.output_name.clone();
-        let vrr = output.vrr_last_attempt.unwrap_or(false);
+        let vrr = output.vrr.applied;
         let previous = self
             .previous_presentation_outputs
             .iter()
@@ -4477,42 +5162,92 @@ impl KmsState {
     }
 
     /// Drive one output's `VRR_ENABLED` to `want`, through Smithay so the
-    /// value survives the next page flip.
+    /// value survives the next page flip. Returns whether an attempt was
+    /// made, so the caller knows to re-read the surface's pending state.
     ///
     /// Edge-triggered against the last *attempt*, not against Smithay's
     /// cached value: `use_vrr` leaves that cache untouched when it fails, so
     /// comparing against it would repeat a rejected change every frame — and
     /// each attempt allocates a mode-size dumb buffer and runs test commits.
     /// A rejected value is not retried until the desired value changes.
-    fn apply_vrr(&mut self, index: usize, want: bool) {
+    ///
+    /// "Without a modeset" is Smithay's interface heuristic: its
+    /// `vrr_supported` never test-commits, and its `use_vrr` falls back to a
+    /// modeset test on any non-modeset failure, leaving only `pending`
+    /// updated — so the frame after would be a full modesetting commit, the
+    /// outcome the probe exists to refuse. That fallback is detected here by
+    /// `commit_pending` flipping across the call; the previous value is
+    /// restored and VRR control is withdrawn from this output for the life
+    /// of the KMS state.
+    fn apply_vrr(&mut self, index: usize, want: bool) -> bool {
         let Some(output) = self.outputs.get(index) else {
-            return;
+            return false;
         };
-        if !output.vrr_supported_without_modeset || output.vrr_last_attempt == Some(want) {
-            return;
+        if !output.vrr_supported_without_modeset || !output.vrr.should_attempt(want) {
+            return false;
         }
         let crtc = output.crtc;
+        let pending_before = output
+            .drm_output
+            .with_compositor(|c| c.surface().commit_pending());
         let result = output.drm_output.with_compositor(|c| c.use_vrr(want));
-        if let Err(error) = result {
-            log::warn!("[kms] could not set VRR on crtc {crtc:?}: {error:?}");
-        } else {
-            log::info!(
-                "[kms] VRR {} on crtc {crtc:?}",
-                if want { "enabled" } else { "disabled" }
-            );
+        let pending_after = output
+            .drm_output
+            .with_compositor(|c| c.surface().commit_pending());
+        let took = match result {
+            Err(error) => {
+                log::warn!("[kms] could not set VRR on crtc {crtc:?}: {error:?}");
+                false
+            }
+            Ok(()) => {
+                log::info!(
+                    "[kms] VRR {} on crtc {crtc:?}",
+                    if want { "enabled" } else { "disabled" }
+                );
+                true
+            }
+        };
+        let needs_modeset = took && vrr_toggle_needed_a_modeset(pending_before, pending_after);
+        let mut applied = took;
+        if needs_modeset {
+            let restored = output.drm_output.with_compositor(|c| c.use_vrr(!want));
+            match restored {
+                Ok(()) => {
+                    log::warn!(
+                        "[kms] VRR on crtc {crtc:?} cannot change without a modeset; restored the previous value and withdrew VRR control from this output"
+                    );
+                    applied = false;
+                }
+                Err(error) => {
+                    // The modeset is going to happen on the next frame and
+                    // carries `want` with it; report that, and stop here.
+                    log::warn!(
+                        "[kms] VRR on crtc {crtc:?} cannot change without a modeset and the restore failed ({error:?}); the next frame commits the modeset and VRR control is withdrawn from this output"
+                    );
+                }
+            }
         }
         // Recorded either way: a driver that refuses this value will refuse
         // it again, and a per-frame retry is a per-frame allocation.
         if let Some(output) = self.outputs.get_mut(index) {
-            output.vrr_last_attempt = Some(want);
+            output.vrr.record(want, applied);
+            if needs_modeset {
+                output.vrr_supported_without_modeset = false;
+            }
         }
+        true
     }
 
     /// Latch (or drop) the user's HDR request for one output. The commit
-    /// itself belongs to the next frame's reconciliation.
+    /// itself belongs to the next frame's reconciliation. An explicit enable
+    /// is also the one thing that retries a connector commit the driver
+    /// rejected.
     pub(super) fn set_hdr_requested(&mut self, index: usize, requested: bool) {
         if let Some(output) = self.outputs.get_mut(index) {
             output.hdr_requested = requested;
+            if requested {
+                output.hdr_connector_commit_rejected = false;
+            }
             self.needs_render = true;
         }
     }
@@ -4916,6 +5651,7 @@ impl KmsState {
         &mut self,
         snapshot: &OutputConfigurationSnapshot,
         touched_outputs: &[String],
+        color_manager: Option<&crate::backend::wayland_udev::color_management::ColorManagerState>,
     ) -> Result<usize, String> {
         let snapshot_names: Vec<_> = snapshot
             .entries
@@ -4955,7 +5691,7 @@ impl KmsState {
             // originally-off output is blanked again after its mode and
             // advertised state have been restored.
             if mode_changed && self.outputs[output_idx].dpms_off {
-                if let Err(error) = self.set_dpms_for_output(output_idx, true) {
+                if let Err(error) = self.set_dpms_for_output(output_idx, true, color_manager) {
                     operation_errors.push(format!("temporary DPMS-on failed: {error}"));
                 }
             }
@@ -4976,7 +5712,8 @@ impl KmsState {
 
             let dpms_on = !self.outputs[output_idx].dpms_off;
             if dpms_on != entry.state.dpms_on
-                && let Err(error) = self.set_dpms_for_output(output_idx, entry.state.dpms_on)
+                && let Err(error) =
+                    self.set_dpms_for_output(output_idx, entry.state.dpms_on, color_manager)
             {
                 operation_errors.push(format!("DPMS restore failed: {error}"));
             }
@@ -6273,6 +7010,58 @@ impl KmsState {
             .collect()
     }
 
+    /// Snapshot every output's latched intent, taken from the old state
+    /// before a rebuild replaces it.
+    pub(super) fn latched_intents(&self) -> Vec<OutputLatchedIntent> {
+        self.outputs
+            .iter()
+            .map(|output| OutputLatchedIntent {
+                name: output.output_name.clone(),
+                hdr_requested: output.hdr_requested,
+                vrr_override: output.vrr_override,
+            })
+            .collect()
+    }
+
+    /// Re-apply intents snapshotted from the previous state, by output name.
+    /// A carried HDR request is re-asserted by the first reconciliation on
+    /// the fresh connector; an intent whose output is gone is logged, not
+    /// lost silently.
+    pub(super) fn restore_latched_intents(&mut self, intents: &[OutputLatchedIntent]) {
+        let names: Vec<&str> = self
+            .outputs
+            .iter()
+            .map(|output| output.output_name.as_str())
+            .collect();
+        let (carried, dropped) = carry_latched_intents(intents, &names);
+        let carried: Vec<(usize, OutputLatchedIntent)> = carried
+            .into_iter()
+            .map(|(index, intent)| (index, intent.clone()))
+            .collect();
+        for name in dropped {
+            log::info!(
+                "[kms] output {name} is gone after the rebuild; its latched HDR request / VRR override is dropped"
+            );
+        }
+        let mut changed = false;
+        for (index, intent) in carried {
+            let output = &mut self.outputs[index];
+            if intent.hdr_requested && !output.hdr_requested {
+                log::info!(
+                    "[kms-cm] carrying the HDR request on {} across the rebuild",
+                    output.output_name
+                );
+            }
+            changed |= output.hdr_requested != intent.hdr_requested
+                || output.vrr_override != intent.vrr_override;
+            output.hdr_requested = intent.hdr_requested;
+            output.vrr_override = intent.vrr_override;
+        }
+        if changed {
+            self.needs_render = true;
+        }
+    }
+
     pub(super) fn presentation_timing_status(
         &self,
     ) -> crate::backend::api::PresentationTimingStatus {
@@ -6651,6 +7440,9 @@ impl KmsState {
                 .is_ok_and(|support| {
                     matches!(support, smithay::backend::drm::VrrSupport::Supported)
                 });
+            // Smithay reads the CRTC's current `VRR_ENABLED` into its state
+            // at surface creation; start the record from what it holds.
+            let vrr_applied = drm_output.with_compositor(|compositor| compositor.vrr_enabled());
             let output_params =
                 crate::backend::wayland_udev::color_management::params_for_output(&p.output);
             let (output_tf, output_ctm) = output_color_target(&output_params);
@@ -6687,8 +7479,12 @@ impl KmsState {
                 output_ctm,
                 legacy_gamma_override: false,
                 installed_hdr_metadata_blob: None,
+                hdr_connector_commit_rejected: false,
                 vrr_supported_without_modeset,
-                vrr_last_attempt: None,
+                vrr: VrrApplyRecord {
+                    attempt: None,
+                    applied: vrr_applied,
+                },
                 vrr_override: None,
                 hdr_requested: false,
                 last_software_region_planned: false,
@@ -6862,6 +7658,12 @@ impl KmsState {
         // explicit no-allocation, no-churn contract.
         let tearing_control_enabled = state.tearing_hints.is_some();
         let vrr_configured = crate::config::CONFIG.load().behavior().vrr_enabled;
+        // Same rule: the IME anchors are global — they are built from the
+        // parent window's geometry, never from the output's — so they are
+        // resolved once per frame. Per output they cost a `Vec` and a
+        // `WlSurface` clone per popup, on every output, for as long as a
+        // candidate window is up.
+        let im_popups = state.im_popup_positions();
         let mut any_skipped = false;
         let mut any_failed = false;
         for out_idx in 0..self.outputs.len() {
@@ -6881,8 +7683,14 @@ impl KmsState {
                 .contains(&self.outputs[out_idx].output_name)
                 && !self.outputs[out_idx].dpms_off;
             if !presenting {
-                // A dark output keeps no adaptive refresh rate.
-                self.apply_vrr(out_idx, false);
+                // VRR is left alone while the output is dark. No commit
+                // reaches a dark CRTC, so `use_vrr(false)` here changed
+                // nothing on the hardware; what it did was allocate a
+                // mode-size dumb buffer and, on a DPMS-off CRTC (inactive,
+                // while Smithay's request always says ACTIVE=1), fall through
+                // to the modeset test and leave pending state behind for the
+                // wake-up frame. The row reports what took last, and the
+                // policy re-applies on the first presenting frame.
                 self.record_skipped_presentation(out_idx, PresentationBlocker::OutputNotPresenting);
                 continue;
             }
@@ -7243,14 +8051,14 @@ impl KmsState {
             // direct-scanout verdict: that one is global in its window test
             // and false whenever a cursor is up, and neither of those is a
             // reason to change a refresh rate.
-            let covering_window = state.window_stack.iter().copied().find(|win| {
-                state.mapped_windows.contains(win)
+            let covering_window = covering_window_in(&state.window_stack, |win| {
+                state.mapped_windows.contains(&win)
                     && state
                         .window_is_fullscreen
-                        .get(win)
+                        .get(&win)
                         .copied()
                         .unwrap_or(false)
-                    && state.window_geometry.get(win).is_some_and(|geo| {
+                    && state.window_geometry.get(&win).is_some_and(|geo| {
                         rect_overlaps_output(
                             (geo.x, geo.y),
                             (
@@ -7280,7 +8088,7 @@ impl KmsState {
             let commit_pending = out
                 .drm_output
                 .with_compositor(|compositor| compositor.surface().commit_pending());
-            let plan = presentation_plan(&PresentationEvidence {
+            let evidence = PresentationEvidence {
                 vrr_configured,
                 vrr_supported_without_modeset,
                 tearing_control_enabled,
@@ -7291,14 +8099,34 @@ impl KmsState {
                 color_delivery_retry_required,
                 commit_pending,
                 output_presenting: true,
+                submission_supports_async_flip: SUBMISSION_SUPPORTS_ASYNC_FLIP,
                 vrr_override: out.vrr_override,
-            });
-            self.apply_vrr(out_idx, plan.vrr);
+            };
+            let mut plan = presentation_plan(&evidence);
+            if self.apply_vrr(out_idx, plan.vrr) {
+                // An attempt can leave the surface with pending state (the
+                // modeset fallback whose restore failed), and the evidence
+                // above was read before it. The row must name the submission
+                // branch this frame actually takes.
+                let commit_pending = self.outputs[out_idx]
+                    .drm_output
+                    .with_compositor(|compositor| compositor.surface().commit_pending());
+                if commit_pending != evidence.commit_pending {
+                    plan = presentation_plan(&PresentationEvidence {
+                        commit_pending,
+                        ..evidence
+                    });
+                }
+            }
+            let out = &self.outputs[out_idx];
             self.last_presentation_outputs
                 .push(crate::backend::api::PresentationOutputStatus {
-                    output_name: self.outputs[out_idx].output_name.clone(),
+                    output_name: out.output_name.clone(),
                     client_asked_to_tear,
-                    vrr: plan.vrr,
+                    // What took, not what was asked for: a refused `use_vrr`
+                    // is cached so it is not retried, and reading that cache
+                    // as the outcome said `true` for the rest of the session.
+                    vrr: out.vrr.applied,
                     tearing: plan.tearing,
                     blocker: plan.blocker.map(|blocker| blocker.wire_name().to_string()),
                 });
@@ -7567,8 +8395,8 @@ impl KmsState {
                 }
 
                 // IME popup surfaces (candidate windows) above normal windows.
-                for anchor in state.im_popup_positions() {
-                    let im_surface = anchor.surface;
+                for anchor in &im_popups {
+                    let im_surface = anchor.surface.clone();
                     frame_roots.push(im_surface.clone());
                     with_surface_tree_downward(
                         &im_surface,
@@ -7778,6 +8606,30 @@ impl KmsState {
             }
 
             // ── Screenshot capture (offscreen render) ───────────────────────
+            if out_idx == 0 && capture_unavailable {
+                // The capture view could not be allocated this frame, and it
+                // is the same allocation next frame. Leaving the queue armed
+                // kept `any_failed` — and with it `needs_render` — set, so an
+                // otherwise static desktop re-rendered forever while the file
+                // the user asked for never appeared. Fail them now, loudly,
+                // exactly as the compositor path does (render.rs section 19);
+                // this is the queue the udev backend actually uses.
+                for request in self.screenshot_requests.take_all() {
+                    let path = match &request {
+                        crate::backend::compositor_common::screenshot::ScreenshotRequest::Full(
+                            path,
+                        )
+                        | crate::backend::compositor_common::screenshot::ScreenshotRequest::Region {
+                            path,
+                            ..
+                        } => path,
+                    };
+                    log::error!(
+                        "[kms] screenshot {} dropped: encoded capture view unavailable",
+                        path.display()
+                    );
+                }
+            }
             if out_idx == 0 && !capture_unavailable {
                 for request in self.screenshot_requests.take_all() {
                     match request {
@@ -7853,8 +8705,6 @@ impl KmsState {
             // Re-borrow for render_frame + queue_frame.
             let flush_tx = self.flush_tx.clone();
             let flush_pending = self.flush_pending.clone();
-            let composited_color_delivery = self.color_delivery_plan_for_output(out_idx, false);
-            let direct_color_delivery = self.color_delivery_plan_for_output(out_idx, true);
             let out = &mut self.outputs[out_idx];
 
             if out.color_delivery_retry_required {
@@ -7898,13 +8748,17 @@ impl KmsState {
                         continue;
                     }
 
-                    let frame_data = QueuedFrameData {
-                        color_delivery: if client_direct_scanout {
-                            direct_color_delivery
-                        } else {
-                            composited_color_delivery
-                        },
-                    };
+                    // Built only now, for the route actually taken. Both
+                    // plans used to be assembled for every output on every
+                    // frame — six owned strings each, plus the output-params
+                    // lookups behind `output_primaries_name` — and one was
+                    // always discarded; on an empty frame, both. The render
+                    // result borrows only `elements`, so the output borrow
+                    // can be dropped and re-taken around the lookup.
+                    let color_delivery =
+                        self.color_delivery_plan_for_output(out_idx, client_direct_scanout);
+                    let out = &mut self.outputs[out_idx];
+                    let frame_data = QueuedFrameData { color_delivery };
                     // Sample both DRM timestamp domains before submitting: a
                     // flip can happen immediately after the ioctl returns.
                     let queue_boundary = FrameQueueBoundary::now();
@@ -8288,7 +9142,9 @@ mod compositor_texture_ownership_tests {
         HdrEnableEvidence {
             chain_gap: None,
             edid_supports_hdr: true,
+            connector_commit_rejected: false,
             advanced_color_management: true,
+            region_topology_supported: true,
             scene_linear_active: true,
             linear_tail_safe: true,
             offload_gate_on: true,
@@ -8314,11 +9170,8 @@ mod compositor_texture_ownership_tests {
         };
 
         // Hardware first, so a permanently incapable output reports the same
-        // reason regardless of what is on screen.
-        assert_eq!(
-            spoil(|e| e.participating = false),
-            Some(R::OutputNotParticipating)
-        );
+        // reason regardless of what is on screen — and, since dc6adaf's
+        // successor, regardless of whether it is lit.
         assert_eq!(
             spoil(|e| e.chain_gap = Some(HdrScanoutChainGap::FramebufferBitDepth)),
             Some(R::ScanoutChain(HdrScanoutChainGap::FramebufferBitDepth))
@@ -8326,6 +9179,10 @@ mod compositor_texture_ownership_tests {
         assert_eq!(
             spoil(|e| e.edid_supports_hdr = false),
             Some(R::EdidLacksHdrProfile)
+        );
+        assert_eq!(
+            spoil(|e| e.connector_commit_rejected = true),
+            Some(R::ConnectorCommitRejected)
         );
         // Then configuration.
         assert_eq!(
@@ -8339,6 +9196,21 @@ mod compositor_texture_ownership_tests {
         assert_eq!(
             spoil(|e| e.offload_gate_on = false),
             Some(R::ColorPipelineOffloadDisabled)
+        );
+        // A scaled, rotated or negatively-placed participating output makes
+        // the region planner reject the whole layout, so no output can take
+        // the software route HDR needs. That is configuration, and naming it
+        // is the difference between "change your scale" and a region that
+        // merely happens to be missing this frame.
+        assert_eq!(
+            spoil(|e| e.region_topology_supported = false),
+            Some(R::SoftwareRegionTopologyUnsupported)
+        );
+        // Participation is momentary, so it comes after everything the user
+        // would have to change something to fix.
+        assert_eq!(
+            spoil(|e| e.participating = false),
+            Some(R::OutputNotParticipating)
         );
         // Then this frame. A toast, a session lock, or an unimportable
         // cursor tree puts encoded sRGB on the wire; signalling PQ over it is
@@ -8386,34 +9258,122 @@ mod compositor_texture_ownership_tests {
 
     #[test]
     fn a_dark_output_is_withdrawn_without_a_commit_to_a_display_that_is_off() {
-        use super::HdrEnableRefusal as R;
-        use super::HdrSignallingAction as A;
-        use super::hdr_signalling_action as act;
+        use super::hdr_withdrawal_reaches_connector as commits;
 
         // DPMS off or soft-disabled is the one withdrawal that must not
         // reach the connector: the commit's acceptance is driver-dependent
         // with the output down, and a failure sets delivery_blocked for the
         // whole group — switching one monitor off would hold presentation on
         // every other one. The claim is dropped instead.
-        let mut dark = hdr_ready();
-        dark.participating = false;
-        assert_eq!(
-            hdr_enable_refusal(&dark),
-            Some(R::OutputNotParticipating),
-            "the reconciliation keys the no-commit path on exactly this reason"
-        );
-        assert_eq!(act(true, true, true), A::Withdraw);
-
+        assert!(!commits(false));
         // Every other withdrawal still commits: those are outputs that are
         // presenting, where leaving the sink told BT.2020 over sRGB pixels is
-        // the error this whole queue exists to prevent.
-        for spoiled in [
-            R::LinearTailUnsafe,
-            R::LegacyGammaOverrideActive,
-            R::SceneLinearTargetInactive,
-        ] {
-            assert_ne!(spoiled, R::OutputNotParticipating);
-        }
+        // the error this whole queue exists to prevent. Keyed on
+        // participation itself, not on which refusal happened to be
+        // reported — the previous version asserted `assert_ne!` between two
+        // distinct enum literals, which cannot fail and pinned nothing.
+        assert!(commits(true));
+    }
+
+    #[test]
+    fn a_request_dropped_while_the_display_was_dark_still_clears_the_connector() {
+        use super::HdrSignallingAction as A;
+        use super::hdr_signalling_action as act;
+        use super::hdr_withdrawal_reaches_connector as commits;
+
+        // The sequence that used to leave a panel in PQ mode under sRGB
+        // pixels for the rest of the session.
+        //
+        // 1. HDR is up: the claim and the connector agree.
+        assert_eq!(act(true, false, true, true), A::Hold);
+        // 2. The display goes dark. The refusal is momentary, so the request
+        //    stands; the withdrawal drops the claim without a commit, so the
+        //    connector still holds BT.2020 + the metadata blob.
+        assert_eq!(act(true, true, true, true), A::Withdraw);
+        assert!(!commits(false));
+        // 3. While it is dark the user disables HDR. Nothing commits — and
+        //    with only the claim to read, this was `Hold` forever after.
+        assert_eq!(act(false, false, false, true), A::Withdraw);
+        // 4. The display comes back. The connector bit is what makes this a
+        //    real withdrawal commit rather than a no-op.
+        assert!(commits(true));
+        // 5. And once the connector is clear, it stays quiet.
+        assert_eq!(act(false, false, false, false), A::Hold);
+
+        // The mirror image: a request that survived the dark period
+        // re-asserts, because the claim is down even though the connector
+        // is still signalling. Reading only the claim would have said
+        // `Assert` too, but reading only the connector would have said
+        // `Hold` and left the presentation claim false forever.
+        assert_eq!(act(true, false, false, true), A::Assert);
+        assert_eq!(act(true, false, true, false), A::Assert);
+    }
+
+    #[test]
+    fn a_rejected_assert_is_reported_and_dropped_rather_than_retried_every_other_frame() {
+        use super::HdrEnableRefusal as R;
+        use super::HdrSignallingAction as A;
+        use super::hdr_signalling_action as act;
+
+        // A driver that refuses the connector commit changed nothing: the
+        // connector is still SDR and the frame is correct. Blocking delivery
+        // for it dropped every second frame forever — blocked, then `Hold`
+        // under the momentary `DeliveryBlocked`, then retried.
+        let mut rejected = hdr_ready();
+        rejected.connector_commit_rejected = true;
+        assert_eq!(
+            hdr_enable_refusal(&rejected),
+            Some(R::ConnectorCommitRejected)
+        );
+        assert!(super::hdr_enable_refusal_is_permanent(
+            R::ConnectorCommitRejected
+        ));
+        // Permanent, so the reconciliation drops the request; with nothing
+        // asked for and nothing installed there is nothing left to do.
+        assert_eq!(act(false, true, false, false), A::Hold);
+
+        // It masks nothing permanent that came before it — an SDR panel is
+        // still reported as an SDR panel — and it is only reached once the
+        // hardware itself is capable.
+        rejected.edid_supports_hdr = false;
+        assert_eq!(hdr_enable_refusal(&rejected), Some(R::EdidLacksHdrProfile));
+    }
+
+    #[test]
+    fn an_unsupported_region_layout_is_named_instead_of_latched_as_a_missing_region() {
+        use super::HdrEnableRefusal as R;
+        use super::software_region_topology_supported as supported;
+
+        // The predicate the region planner rejects the whole layout on.
+        assert!(supported((0, 0), (1920, 1080), 1.0, Transform::Normal));
+        assert!(!supported((0, 0), (1920, 1080), 2.0, Transform::Normal));
+        assert!(!supported((0, 0), (1920, 1080), 1.0, Transform::_90));
+        assert!(!supported((-1, 0), (1920, 1080), 1.0, Transform::Normal));
+        assert!(!supported((0, 0), (0, 1080), 1.0, Transform::Normal));
+        assert!(!supported(
+            (i32::MAX, 0),
+            (1920, 1080),
+            1.0,
+            Transform::Normal
+        ));
+
+        // Reported as configuration, so the command fails with something the
+        // user can act on instead of latching a request that steers the whole
+        // delivery group off the CRTC pair for nothing. `no_software_delivery_region`
+        // is the downstream consequence and must not be the reported reason.
+        let mut scaled = hdr_ready();
+        scaled.region_topology_supported = false;
+        scaled.software_region_planned = false;
+        assert_eq!(
+            hdr_enable_refusal(&scaled),
+            Some(R::SoftwareRegionTopologyUnsupported)
+        );
+        assert!(super::hdr_enable_refusal_is_permanent(
+            R::SoftwareRegionTopologyUnsupported
+        ));
+        assert!(!super::hdr_enable_refusal_is_permanent(
+            R::NoSoftwareDeliveryRegion
+        ));
     }
 
     #[test]
@@ -8497,45 +9457,60 @@ mod compositor_texture_ownership_tests {
         use super::HdrSignallingAction as A;
         use super::hdr_signalling_action as act;
 
+        // The claim and the connector agree except after a dark output
+        // dropped its claim without a commit, which
+        // `a_request_dropped_while_the_display_was_dark_still_clears_the_connector`
+        // covers; here both halves move together.
         // Nobody asked: nothing to do, and nothing to withdraw.
-        assert_eq!(act(false, false, false), A::Hold);
-        assert_eq!(act(false, true, false), A::Hold);
+        assert_eq!(act(false, false, false, false), A::Hold);
+        assert_eq!(act(false, true, false, false), A::Hold);
 
         // Asked, allowed, not yet on: assert. Then hold.
-        assert_eq!(act(true, false, false), A::Assert);
-        assert_eq!(act(true, false, true), A::Hold);
+        assert_eq!(act(true, false, false, false), A::Assert);
+        assert_eq!(act(true, false, true, true), A::Hold);
 
         // A toast appears — the frame tail is no longer safe, so the signal
         // comes off even though the request stands. That is the whole reason
         // the request is latched separately from the state.
-        assert_eq!(act(true, true, true), A::Withdraw);
+        assert_eq!(act(true, true, true, true), A::Withdraw);
         // It stays off while the toast is up...
-        assert_eq!(act(true, true, false), A::Hold);
+        assert_eq!(act(true, true, false, false), A::Hold);
         // ...and comes back on its own when the toast clears. Without the
         // latch the first toast would drop HDR until the user re-issued the
         // command.
-        assert_eq!(act(true, false, false), A::Assert);
+        assert_eq!(act(true, false, false, false), A::Assert);
 
         // The user turns it off while it is on: withdraw, then hold.
-        assert_eq!(act(false, false, true), A::Withdraw);
-        assert_eq!(act(false, false, false), A::Hold);
+        assert_eq!(act(false, false, true, true), A::Withdraw);
+        assert_eq!(act(false, false, false, false), A::Hold);
 
         // Turning it off while a refusal is already keeping it off is a
         // no-op, not a redundant commit every frame.
-        assert_eq!(act(false, true, false), A::Hold);
+        assert_eq!(act(false, true, false, false), A::Hold);
     }
 
     #[test]
     fn hdr_refusal_precedence_names_the_condition_that_explains_the_rest() {
         use super::HdrEnableRefusal as R;
 
-        // A dark output reports being dark, not the five other things that
-        // are also true of a dark output.
+        // A dark output that is also an SDR panel reports the SDR panel.
+        // Testing participation first — a momentary reason — let a
+        // soft-disabled or DPMS-off output latch a request configuration can
+        // never honour, count as "enable available", and report
+        // `output_not_participating` where the real answer never changes.
         let mut off = hdr_ready();
         off.participating = false;
         off.edid_supports_hdr = false;
         off.linear_tail_safe = false;
-        assert_eq!(hdr_enable_refusal(&off), Some(R::OutputNotParticipating));
+        assert_eq!(hdr_enable_refusal(&off), Some(R::EdidLacksHdrProfile));
+
+        // A dark output with nothing permanent wrong still reports being
+        // dark, not the frame-content reasons that are also true of it.
+        let mut dark = hdr_ready();
+        dark.participating = false;
+        dark.linear_tail_safe = false;
+        dark.software_region_planned = false;
+        assert_eq!(hdr_enable_refusal(&dark), Some(R::OutputNotParticipating));
 
         // An SDR panel reports having no HDR profile, not a route problem it
         // could never reach anyway.
@@ -8558,6 +9533,8 @@ mod compositor_texture_ownership_tests {
         assert!(permanent(R::ScanoutChain(
             HdrScanoutChainGap::ConnectorHdrMetadataMissing
         )));
+        assert!(permanent(R::ConnectorCommitRejected));
+        assert!(permanent(R::SoftwareRegionTopologyUnsupported));
 
         // These are momentary, and the latch is exactly what carries the
         // request across them — failing the command would make enabling HDR
@@ -8569,6 +9546,316 @@ mod compositor_texture_ownership_tests {
         assert!(!permanent(R::HardwareLutRouteClipsHdrHeadroom));
         assert!(!permanent(R::NoSoftwareDeliveryRegion));
         assert!(!permanent(R::OutputNotParticipating));
+    }
+
+    #[test]
+    fn the_documented_refusal_table_is_the_order_and_the_permanence_the_policy_uses() {
+        use super::hdr_enable_refusal_is_permanent as permanent;
+
+        // `docs/hdr.md`'s table is what a user reads to learn which reason
+        // wins and whether waiting helps, and the prose above it makes each
+        // row's *position* load bearing: everything above
+        // `output_not_participating` is permanent — it fails the enable
+        // command and drops a latched request — and everything from that row
+        // down is momentary, carried across by the latch. A row on the wrong
+        // side of that boundary tells the user to change a setting for
+        // something that clears itself, or to wait out something that never
+        // will; a row in the wrong place names a reason the gate would never
+        // report there. The table is parsed and driven rather than restated,
+        // so it cannot be satisfied by a literal of its own.
+        const DOC: &str = include_str!("../../docs/hdr.md");
+        let table = DOC
+            .split_once("| Reason | Meaning |")
+            .expect("docs/hdr.md carries the refusal table")
+            .1
+            .split_once("\n\n")
+            .expect("the table ends at a blank line")
+            .0;
+        let documented: Vec<&str> = table
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("| `"))
+            .filter_map(|row| row.split_once('`').map(|(name, _)| name))
+            .collect();
+
+        // (documented name, make this condition true, make it false again).
+        type Edit = fn(&mut HdrEnableEvidence);
+        let steps: Vec<(&str, Edit, Edit)> = vec![
+            (
+                "scanout_chain_*",
+                |e| e.chain_gap = Some(HdrScanoutChainGap::FramebufferBitDepth),
+                |e| e.chain_gap = None,
+            ),
+            (
+                "edid_lacks_hdr_profile",
+                |e| e.edid_supports_hdr = false,
+                |e| e.edid_supports_hdr = true,
+            ),
+            (
+                "connector_commit_rejected",
+                |e| e.connector_commit_rejected = true,
+                |e| e.connector_commit_rejected = false,
+            ),
+            (
+                "advanced_color_management_disabled",
+                |e| e.advanced_color_management = false,
+                |e| e.advanced_color_management = true,
+            ),
+            (
+                "color_pipeline_offload_disabled",
+                |e| e.offload_gate_on = false,
+                |e| e.offload_gate_on = true,
+            ),
+            (
+                "software_region_topology_unsupported",
+                |e| e.region_topology_supported = false,
+                |e| e.region_topology_supported = true,
+            ),
+            (
+                "output_not_participating",
+                |e| e.participating = false,
+                |e| e.participating = true,
+            ),
+            (
+                "scene_linear_target_inactive",
+                |e| e.scene_linear_active = false,
+                |e| e.scene_linear_active = true,
+            ),
+            (
+                "linear_tail_unsafe",
+                |e| e.linear_tail_safe = false,
+                |e| e.linear_tail_safe = true,
+            ),
+            (
+                "legacy_gamma_override_active",
+                |e| e.legacy_gamma_override = true,
+                |e| e.legacy_gamma_override = false,
+            ),
+            (
+                "color_delivery_blocked",
+                |e| e.delivery_blocked = true,
+                |e| e.delivery_blocked = false,
+            ),
+            (
+                "overlapping_output_profile_conflict",
+                |e| e.overlaps_participating_output = true,
+                |e| e.overlaps_participating_output = false,
+            ),
+            (
+                "hardware_lut_route_clips_hdr_headroom",
+                |e| e.hardware_pair_active = true,
+                |e| e.hardware_pair_active = false,
+            ),
+            (
+                "no_software_delivery_region",
+                |e| e.software_region_planned = false,
+                |e| e.software_region_planned = true,
+            ),
+        ];
+
+        assert_eq!(
+            documented,
+            steps.iter().map(|(name, _, _)| *name).collect::<Vec<_>>(),
+            "docs/hdr.md's table and this evidence map must name the same reasons in the same order"
+        );
+        let boundary = documented
+            .iter()
+            .position(|name| *name == "output_not_participating")
+            .expect("the boundary row the prose names");
+
+        // Everything wrong at once; repairing one condition at a time must
+        // uncover exactly the next documented row.
+        let mut evidence = hdr_ready();
+        for (_, spoil, _) in &steps {
+            spoil(&mut evidence);
+        }
+        for (index, (name, _, repair)) in steps.iter().enumerate() {
+            let reported = hdr_enable_refusal(&evidence).expect("something is still wrong");
+            if *name == "scanout_chain_*" {
+                assert!(
+                    reported.wire_name().starts_with("scanout_chain_"),
+                    "docs/hdr.md row {index} says a chain gap wins here, got {}",
+                    reported.wire_name()
+                );
+            } else {
+                assert_eq!(
+                    reported.wire_name(),
+                    *name,
+                    "docs/hdr.md row {index} says `{name}` wins here"
+                );
+            }
+            assert_eq!(
+                permanent(reported),
+                index < boundary,
+                "docs/hdr.md puts `{name}` {} `output_not_participating`, so the policy must call it {}",
+                if index < boundary {
+                    "above"
+                } else {
+                    "at or below"
+                },
+                if index < boundary {
+                    "permanent"
+                } else {
+                    "momentary"
+                }
+            );
+            repair(&mut evidence);
+        }
+        assert_eq!(
+            hdr_enable_refusal(&evidence),
+            None,
+            "every documented reason repaired leaves the assertion legal"
+        );
+    }
+
+    #[test]
+    fn a_commit_the_driver_never_answered_is_not_a_refusal() {
+        use super::ColorCommitVerdict as V;
+        use super::color_commit_verdict_from_errno as verdict;
+
+        // Nothing about the request is known to be wrong here: DRM master
+        // belongs to another client for the whole VT-switch window (and from
+        // startup until we become master), the device is being pulled out, or
+        // the kernel wants the same request again.
+        for errno in [
+            libc::EACCES,
+            libc::EPERM,
+            libc::ENODEV,
+            libc::ENXIO,
+            libc::EBUSY,
+            libc::EAGAIN,
+            libc::EINTR,
+        ] {
+            assert_eq!(
+                verdict(Some(errno)),
+                V::DeviceUnavailable,
+                "errno {errno} is not the driver refusing the values"
+            );
+        }
+
+        // The driver evaluated the request and said no. `EINVAL` is how it
+        // says it.
+        for errno in [libc::EINVAL, libc::ENOSPC, libc::ERANGE, libc::EOPNOTSUPP] {
+            assert_eq!(
+                verdict(Some(errno)),
+                V::DriverRefused,
+                "errno {errno} is an answer"
+            );
+        }
+
+        // Our own failures carry no errno and describe permanent facts — a
+        // property this connector does not have, a legacy-only device.
+        assert_eq!(verdict(None), V::DriverRefused);
+    }
+
+    #[test]
+    fn only_a_driver_verdict_latches_the_permanent_hdr_refusal() {
+        use super::ColorCommitVerdict as V;
+        use super::HdrCommitFailureResponse as R;
+        use super::HdrEnableRefusal;
+        use super::hdr_commit_failure_response as response;
+
+        // What the latch costs: it is a *permanent* refusal, so the very
+        // next reconciliation drops the user's request, and only an explicit
+        // enable or a rebuilt KMS state can bring it back.
+        assert!(super::hdr_enable_refusal_is_permanent(
+            HdrEnableRefusal::ConnectorCommitRejected
+        ));
+        let mut latched = hdr_ready();
+        latched.connector_commit_rejected = true;
+        assert_eq!(
+            hdr_enable_refusal(&latched),
+            Some(HdrEnableRefusal::ConnectorCommitRejected)
+        );
+
+        // So only an answer the driver gave may arm it.
+        assert_eq!(response(true, V::DriverRefused), R::LatchRefusal);
+        // A VT switch in flight, a session that has not become DRM master
+        // yet, an EBUSY racing a modeset: the request stands, and the next
+        // frame that owns the device asks again. Nothing is held either —
+        // holding was the every-other-frame drop this replaced.
+        assert_eq!(response(true, V::DeviceUnavailable), R::RetryTheAssert);
+        // A failed withdrawal blocks whatever the answer was: the sink may
+        // still be told HDR over pixels that are about to be sRGB.
+        assert_eq!(response(false, V::DriverRefused), R::HoldPresentation);
+        assert_eq!(response(false, V::DeviceUnavailable), R::HoldPresentation);
+    }
+
+    #[test]
+    fn the_frame_loop_latches_the_refusal_only_under_the_driver_verdict_arm() {
+        // The decision above is only worth having if the reconciliation's one
+        // assignment to `hdr_connector_commit_rejected` is reached through
+        // it. `reconcile_hdr_signalling` needs a DRM device, so this is a
+        // source scan: the haystack is narrowed to that one function and the
+        // needles are assembled at runtime, so it cannot match its own text.
+        const SOURCE: &str = include_str!("udev_kms.rs");
+        let body = SOURCE
+            .split_once("fn reconcile_hdr_signalling(")
+            .expect("the reconciliation exists")
+            .1
+            .split_once("fn output_participates(")
+            .expect("the reconciliation ends before `output_participates`")
+            .0;
+
+        let latch = format!("hdr_connector_commit_rejected = {}", true);
+        let arm = format!("HdrCommitFailureResponse::{} =>", "LatchRefusal");
+        assert_eq!(
+            body.matches(latch.as_str()).count(),
+            1,
+            "one latch site in the reconciliation, or this proves nothing"
+        );
+        let arm_at = body.find(arm.as_str()).expect("the driver-verdict arm");
+        let latch_at = body.find(latch.as_str()).expect("the latch");
+        assert!(
+            arm_at < latch_at,
+            "the latch must sit under the driver-verdict arm"
+        );
+        let next_arm = body[arm_at + arm.len()..]
+            .find("HdrCommitFailureResponse::")
+            .map(|offset| arm_at + arm.len() + offset)
+            .expect("another response arm follows the first");
+        assert!(
+            latch_at < next_arm,
+            "the latch must stay inside that arm, not fall through to the next"
+        );
+    }
+
+    #[test]
+    fn an_unavailable_capture_view_fails_the_queued_screenshots_loudly() {
+        // `capture_unavailable` means the compositor could not allocate its
+        // encoded capture view this frame — the same allocation, and the same
+        // failure, on the next one. Leaving the queue armed kept `any_failed`
+        // set, and with it `needs_render`, so an otherwise static desktop
+        // re-rendered every frame while the file the user asked for never
+        // appeared and nothing said so above `warn`. The compositor path
+        // already fails them loudly (render.rs section 19); this queue is the
+        // one the udev backend actually routes screenshots through.
+        //
+        // The frame body needs a GL context and a DRM device, so this is a
+        // source scan: the haystack is narrowed to `render_if_needed` and the
+        // needles are assembled at runtime, so it cannot match its own text.
+        const SOURCE: &str = include_str!("udev_kms.rs");
+        let body = SOURCE
+            .split_once("pub(super) fn render_if_needed(")
+            .expect("the frame loop exists")
+            .1
+            .split_once("pub(super) fn on_vblank(")
+            .expect("the frame loop ends before `on_vblank`")
+            .0;
+
+        let drain = format!("screenshot_requests.{}()", "take_all");
+        assert_eq!(
+            body.matches(drain.as_str()).count(),
+            2,
+            "the queue is drained on both sides of the capture-view branch: captured, or failed"
+        );
+        let dropped = format!(
+            "screenshot {{}} dropped: {}",
+            "encoded capture view unavailable"
+        );
+        assert!(
+            body.contains(dropped.as_str()),
+            "the dropped requests must name the file the user asked for"
+        );
     }
 
     #[test]
@@ -8584,9 +9871,11 @@ mod compositor_texture_ownership_tests {
             R::ScanoutChain(HdrScanoutChainGap::ConnectorColorspaceMissing),
             R::ScanoutChain(HdrScanoutChainGap::ConnectorHdrMetadataMissing),
             R::EdidLacksHdrProfile,
+            R::ConnectorCommitRejected,
             R::AdvancedColorManagementDisabled,
             R::SceneLinearTargetInactive,
             R::ColorPipelineOffloadDisabled,
+            R::SoftwareRegionTopologyUnsupported,
             R::LinearTailUnsafe,
             R::LegacyGammaOverrideActive,
             R::DeliveryBlocked,
@@ -8608,6 +9897,199 @@ mod compositor_texture_ownership_tests {
             }),
             "{names:?}"
         );
+    }
+
+    #[test]
+    fn every_signalling_change_tells_the_clients_on_the_output() {
+        // `params_for_output` flips from sRGB to the EDID PQ/BT.2020 profile
+        // the moment the claim goes up, but the only emitter of
+        // `preferred_changed` used to be `on_surface_enters_output`, which
+        // returns early when the output is already in the surface's bucket.
+        // A player mapped before the enable therefore kept rendering sRGB
+        // into an output now told PQ, and never learned of the withdrawal
+        // either. Both the commit path and the claim-only path have to
+        // notify. `set_hdr_metadata_for_output` needs a device, so this is a
+        // source scan: the haystack is narrowed to each function and the
+        // needle assembled at runtime, so it cannot match its own literal.
+        const SOURCE: &str = include_str!("udev_kms.rs");
+        let needle = format!("color_manager.{}(", "on_output_description_changed");
+        for (start, end) in [
+            (
+                "pub(super) fn set_hdr_metadata_for_output(",
+                "fn drop_hdr_claim(",
+            ),
+            (
+                "fn drop_hdr_claim(",
+                "fn withdraw_hdr_signalling_outside_frame_loop(",
+            ),
+        ] {
+            let body = SOURCE
+                .split_once(start)
+                .unwrap_or_else(|| panic!("{start} exists"))
+                .1
+                .split_once(end)
+                .unwrap_or_else(|| panic!("{end} follows {start}"))
+                .0;
+            assert!(body.contains(&needle), "{start} must notify the clients");
+        }
+        assert!(
+            !SOURCE
+                .split_once("pub(super) fn set_hdr_metadata_for_output(")
+                .expect("split")
+                .0
+                .contains(&needle),
+            "the needle must not appear before the first function, or this proves nothing"
+        );
+    }
+
+    #[test]
+    fn a_refused_vrr_toggle_is_reported_as_refused_and_not_retried() {
+        use super::VrrApplyRecord;
+
+        // Fresh state: nothing attempted, and the record starts from what
+        // Smithay read off the CRTC.
+        let mut record = VrrApplyRecord::default();
+        assert!(record.should_attempt(true));
+
+        // The driver refuses. The attempt is remembered so the next frame
+        // does not repeat it — each attempt allocates a mode-size dumb buffer
+        // and runs test commits — but `applied` must not move: reading the
+        // attempt as the outcome made `vrr.active` say true for the rest of
+        // the session while `VRR_ENABLED` stayed 0.
+        record.record(true, false);
+        assert!(!record.applied);
+        assert!(
+            !record.should_attempt(true),
+            "a refused value is not retried"
+        );
+        // Only a change of desired value asks again.
+        assert!(record.should_attempt(false));
+
+        // A success moves the outcome.
+        let mut ok = VrrApplyRecord::default();
+        ok.record(true, true);
+        assert!(ok.applied);
+        assert!(!ok.should_attempt(true));
+
+        // And a later failure leaves the last successful value standing,
+        // because that is what the hardware still holds.
+        ok.record(false, false);
+        assert!(ok.applied);
+    }
+
+    #[test]
+    fn the_vrr_capability_report_reads_the_probe_the_enable_command_gates_on() {
+        use super::reported_vrr_supported as reported;
+
+        // Every amdgpu/i915 CRTC exposes VRR_ENABLED whatever panel is
+        // attached, so the property alone invited a `set_vrr_enabled` the
+        // gate then refused with "VRR is unsupported on this output".
+        assert!(!reported(true, false));
+        assert!(!reported(false, true));
+        assert!(reported(true, true));
+        assert!(!reported(false, false));
+    }
+
+    #[test]
+    fn a_vrr_toggle_that_leaves_pending_state_is_a_modeset_in_disguise() {
+        use super::vrr_toggle_needed_a_modeset as needed;
+
+        // Smithay's `use_vrr` reports Ok both when the non-modeset test
+        // passed and when it fell back to the ALLOW_MODESET test and only
+        // updated `pending` — the second leaves `commit_pending()` set, so
+        // the next submission is a full modesetting commit. The flip across
+        // the call is the only evidence the caller has.
+        assert!(needed(false, true));
+        assert!(!needed(false, false));
+        assert!(!needed(true, true));
+        // Already pending before the call: this frame was going to commit
+        // anyway, so nothing is attributable to the toggle.
+        assert!(!needed(true, false));
+    }
+
+    #[test]
+    fn the_covering_window_is_the_one_the_user_can_see() {
+        use super::covering_window_in;
+        use crate::backend::common_define::WindowId;
+
+        // `window_stack` is bottom-to-top: `raise_window` re-pushes at the
+        // end and the hit test walks it in reverse. Searching from the front
+        // returned the occluded window, so `client_asked_to_tear` read the
+        // hint of the client nobody can see.
+        let bottom = WindowId::from_raw(11);
+        let top = WindowId::from_raw(22);
+        let stack = [bottom, top];
+        assert_eq!(covering_window_in(&stack, |_| true), Some(top));
+        assert_eq!(
+            covering_window_in(&stack, |win| win == bottom),
+            Some(bottom)
+        );
+        assert_eq!(covering_window_in(&stack, |_| false), None);
+        assert_eq!(covering_window_in(&[], |_| true), None);
+    }
+
+    #[test]
+    fn latched_intent_survives_a_rebuild_for_an_output_that_is_still_there() {
+        use super::{OutputLatchedIntent, carry_latched_intents};
+
+        let intents = [
+            OutputLatchedIntent {
+                name: "DP-1".to_string(),
+                hdr_requested: true,
+                vrr_override: Some(true),
+            },
+            OutputLatchedIntent {
+                name: "HDMI-A-1".to_string(),
+                hdr_requested: false,
+                vrr_override: None,
+            },
+            OutputLatchedIntent {
+                name: "DP-2".to_string(),
+                hdr_requested: true,
+                vrr_override: None,
+            },
+        ];
+
+        // A dock hotplug rebuilds KmsState wholesale. DP-1 is still there and
+        // must keep the request the user latched; the new eDP-1 starts clean.
+        let (carried, dropped) = carry_latched_intents(&intents, &["eDP-1", "DP-1", "HDMI-A-1"]);
+        assert_eq!(
+            carried
+                .iter()
+                .map(|(index, intent)| (*index, intent.name.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(1, "DP-1"), (2, "HDMI-A-1")]
+        );
+        assert!(carried[0].1.hdr_requested);
+        assert_eq!(carried[0].1.vrr_override, Some(true));
+
+        // An output that is gone and carried something is logged, not lost
+        // in silence; one that carried nothing is not worth a line.
+        assert_eq!(dropped, vec!["DP-2"]);
+        let (_, quiet) = carry_latched_intents(&intents[1..2], &[]);
+        assert!(quiet.is_empty());
+    }
+
+    #[test]
+    fn the_hdr_gate_evidence_answers_what_the_frame_loop_answers() {
+        use super::hdr_gate_linear_tail_safe as gate;
+
+        // The frame loop stages the migratable classes before deciding and
+        // reads the *committed* plan. A raw plan has an ordinary desktop
+        // cursor as `ExternalAssembly`, so reading it directly made the IPC
+        // report say `linear_tail_unsafe` on every output at the same moment
+        // the loop was asserting HDR — and, because that refusal precedes
+        // them, masked every momentary reason after it.
+        assert!(gate(true, true, false, true));
+        // Already safe without staging: still safe.
+        assert!(gate(true, false, true, false));
+        // A blocker staging cannot migrate — a session lock — is unsafe
+        // either way.
+        assert!(!gate(true, true, false, false));
+        // Without the scene-linear target there is nothing to stage into.
+        assert!(!gate(true, false, false, true));
+        // And the compositor's own tail verdict is a veto.
+        assert!(!gate(false, true, true, true));
     }
 
     #[test]
@@ -8688,6 +10170,9 @@ mod compositor_texture_ownership_tests {
             color_delivery_retry_required: false,
             commit_pending: false,
             output_presenting: true,
+            // The one field that is false in every real build. Held as
+            // evidence so the rest of the chain is still reachable here.
+            submission_supports_async_flip: true,
             vrr_override: None,
         }
     }
@@ -8696,14 +10181,12 @@ mod compositor_texture_ownership_tests {
     fn tearing_is_refused_for_one_named_reason_at_a_time() {
         use super::PresentationBlocker as B;
 
-        // The whole point of the slice: everything else is satisfied and the
-        // frame still does not tear, because jwm's submission path cannot ask
-        // for an async flip. Reporting that is what stops `active: true` from
-        // describing a frame that never happened.
+        // With every clause satisfied — including a submission path that
+        // could ask for an async flip — the frame tears and nothing is
+        // reported. Every case below spoils exactly one field.
         let ready = presentation_plan(&tearing_ready());
-        assert!(!ready.tearing);
-        assert_eq!(ready.blocker, Some(B::SubmissionCannotRequestAsyncFlip));
-        assert!(!SUBMISSION_SUPPORTS_ASYNC_FLIP, "flip this when it can");
+        assert!(ready.tearing);
+        assert_eq!(ready.blocker, None);
 
         let spoil = |mutate: fn(&mut PresentationEvidence)| {
             let mut evidence = tearing_ready();
@@ -8721,6 +10204,10 @@ mod compositor_texture_ownership_tests {
         assert_eq!(
             spoil(|e| e.tearing_control_enabled = false),
             Some(B::TearingControlDisabled)
+        );
+        assert_eq!(
+            spoil(|e| e.submission_supports_async_flip = false),
+            Some(B::SubmissionCannotRequestAsyncFlip)
         );
         assert_eq!(
             spoil(|e| e.client_asked_to_tear = false),
@@ -8755,6 +10242,76 @@ mod compositor_texture_ownership_tests {
             spoil(|e| e.driver_supports_async_flip = false),
             Some(B::DriverCannotFlipAsync)
         );
+    }
+
+    #[test]
+    fn a_permanently_impossible_flip_reports_the_permanent_reason_whatever_is_on_screen() {
+        use super::PresentationBlocker as B;
+
+        // This is the build every user runs: the submission path cannot ask
+        // for `PAGE_FLIP_ASYNC` at all, so nothing on screen can change the
+        // answer. Reporting a content reason there — "hide the cursor", "a
+        // colour retry is pending" — invites the user to chase a fix that
+        // does not exist, and hides the one true reason behind whatever
+        // happened to be composited.
+        assert!(!SUBMISSION_SUPPORTS_ASYNC_FLIP, "flip this when it can");
+        let mut incapable = tearing_ready();
+        incapable.submission_supports_async_flip = SUBMISSION_SUPPORTS_ASYNC_FLIP;
+        for spoil in [
+            |e: &mut PresentationEvidence| e.client_asked_to_tear = false,
+            |e: &mut PresentationEvidence| e.composited_frame_required = true,
+            |e: &mut PresentationEvidence| e.fullscreen_client_covers_output = false,
+            |e: &mut PresentationEvidence| e.color_delivery_retry_required = true,
+            |e: &mut PresentationEvidence| e.commit_pending = true,
+            |e: &mut PresentationEvidence| e.driver_supports_async_flip = false,
+        ] {
+            let mut evidence = incapable;
+            spoil(&mut evidence);
+            let plan = presentation_plan(&evidence);
+            assert!(!plan.tearing);
+            assert!(
+                matches!(
+                    plan.blocker,
+                    Some(B::SubmissionCannotRequestAsyncFlip | B::DriverCannotFlipAsync)
+                ),
+                "content must not mask the permanent reason: {:?}",
+                plan.blocker
+            );
+        }
+
+        // Only the two reasons that make the question moot come first: a
+        // dark output, and a protocol global nobody could have asked
+        // through.
+        let mut dark = incapable;
+        dark.output_presenting = false;
+        assert_eq!(
+            presentation_plan(&dark).blocker,
+            Some(B::OutputNotPresenting)
+        );
+        let mut disabled = incapable;
+        disabled.tearing_control_enabled = false;
+        assert_eq!(
+            presentation_plan(&disabled).blocker,
+            Some(B::TearingControlDisabled)
+        );
+
+        // And the frame loop feeds the real constant, so the report cannot
+        // claim a capability the build does not have. The needle is built at
+        // runtime and the haystack narrowed to the evidence assembly, so it
+        // cannot match its own literal.
+        const SOURCE: &str = include_str!("udev_kms.rs");
+        let body = SOURCE
+            .split_once("let evidence = PresentationEvidence {")
+            .expect("the frame loop assembles the evidence")
+            .1
+            .split_once("};")
+            .expect("the initializer closes")
+            .0;
+        let needle = format!(
+            "submission_supports_async_flip: {}",
+            "SUBMISSION_SUPPORTS_ASYNC_FLIP"
+        );
+        assert!(body.contains(&needle), "{body}");
     }
 
     #[test]

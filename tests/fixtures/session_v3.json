@@ -24,13 +24,14 @@
     {
       "monitor_num": 0,
       "clients": [
-        { "class": "Alacritty", "instance": "alacritty" },
-        { "class": "Firefox", "instance": "Navigator" }
+        { "class": "Alacritty", "instance": "alacritty" }
       ]
     },
     {
       "monitor_num": 1,
-      "clients": []
+      "clients": [
+        { "class": "Firefox", "instance": "Navigator" }
+      ]
     }
   ]
 }

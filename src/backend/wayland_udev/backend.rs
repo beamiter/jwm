@@ -220,6 +220,77 @@ fn handler_wakeup_timeout(can_present: bool, next_wakeup: Option<Duration>) -> O
     if can_present { next_wakeup } else { None }
 }
 
+/// True when a pointer press at `(x, y)` lands on one of the toast cards the
+/// compositor drew last frame — card body or action chip, the same geometry
+/// the window manager's own intercept resolves the click against.
+fn press_hits_toast(
+    cards: &[crate::backend::compositor_common::toast::ToastRects],
+    x: f64,
+    y: f64,
+) -> bool {
+    cards.iter().any(|card| {
+        crate::backend::compositor_common::toast::hit_test(card, x as f32, y as f32).is_some()
+    })
+}
+
+/// Whether one pointer button event must be kept away from Wayland clients
+/// because it belongs to a toast card, remembering a swallowed press so its
+/// release is swallowed with it.
+///
+/// A release whose press was delivered is always delivered too: no client is
+/// ever left holding a press that never ends. The window manager still gets
+/// the event — it is the actor that dismisses the card and invokes the
+/// action — this only stops the client under the card from also getting it.
+///
+/// The press is the only event that decides a button's fate, so it also
+/// discards whatever the previous press left behind. A release can be lost
+/// before it ever reaches this dispatcher — `SessionEvent::PauseSession`
+/// calls `libinput.suspend()`, which drops every device without synthesising
+/// releases for the buttons that were down, and unplugging a mouse mid-click
+/// does the same. Latching the code until *some* release arrives would then
+/// swallow the release of the next, delivered press and leave the client
+/// holding a button that never comes up.
+fn swallow_toast_button(
+    swallowed: &mut HashSet<u32>,
+    button_code: u32,
+    pressed: bool,
+    on_card: bool,
+) -> bool {
+    if pressed {
+        if on_card {
+            swallowed.insert(button_code);
+        } else {
+            swallowed.remove(&button_code);
+        }
+        on_card
+    } else {
+        swallowed.remove(&button_code)
+    }
+}
+
+/// Whether an `xdg_popup` under the pointer keeps one button event from the
+/// window manager.
+///
+/// A press inside a client's popup belongs to that client alone: handing it to
+/// the WM as well would focus, restack or hit-test the tab strip behind the
+/// open menu. A toast card is the exception, because it is drawn *above* every
+/// client surface including their popups: the press has already been kept from
+/// the client by [`swallow_toast_button`], so the WM is the only consumer
+/// left. Suppressing it there would leave the click with no consumer at all
+/// and the card with no way to be dismissed.
+fn wm_button_hidden_by_popup(popup_hit: bool, on_toast: bool) -> bool {
+    popup_hit && !on_toast
+}
+
+/// The VRR the hardware actually ran this frame: true when any output
+/// presented with `VRR_ENABLED` programmed. The compositor's own
+/// `game_window_focused` answers a different question and cannot stand in for
+/// it — a windowed game sets it with VRR off, a fullscreen video leaves it
+/// clear with VRR on.
+fn any_output_vrr_active(statuses: &[crate::backend::api::PresentationOutputStatus]) -> bool {
+    statuses.iter().any(|status| status.vrr)
+}
+
 fn should_run_handler_update(
     can_present: bool,
     handled_any: bool,
@@ -330,6 +401,10 @@ struct SharedState {
     screenshot_grab_active: bool,
     /// True while JWM's built-in launcher or lock screen owns all input.
     system_ui_grab_active: bool,
+    /// The toast cards the compositor drew on the last composited frame, in
+    /// the same coordinates as the pointer. A press that lands on one belongs
+    /// to the card, not to the client it is drawn over.
+    toast_rects: Vec<crate::backend::compositor_common::toast::ToastRects>,
 }
 
 impl Default for SharedState {
@@ -357,6 +432,7 @@ impl Default for SharedState {
             session_active: true,
             screenshot_grab_active: false,
             system_ui_grab_active: false,
+            toast_rects: Vec::new(),
         }
     }
 }
@@ -1229,6 +1305,14 @@ pub struct UdevBackend {
     /// this gate.
     minimized_capture_attempts: MinimizedCaptureAttemptGate,
     minimized_capture_frame: u64,
+    /// The shared input state currently carries toast card geometry. Lets an
+    /// idle session (the common case: no notification on screen) skip the
+    /// lock entirely instead of publishing an empty list every frame.
+    toast_rects_published: bool,
+    /// When the VRR metric was last read back from KMS. The read clones the
+    /// presentation statuses, and a HUD row repainted at frame rate cannot
+    /// tell a quarter-second-old answer from a fresh one.
+    last_output_vrr_poll: Instant,
 }
 
 // NOTE: smithay state + calloop handle types are not thread-safe.
@@ -1405,25 +1489,41 @@ impl UdevBackend {
     ///
     /// `linear_tail_safe` is the compositor's tail verdict **and** the
     /// external-element plan. Omitting the second half made the report
-    /// disagree with the frame loop in the ordinary case: a normal desktop
-    /// cursor is KMS-external and cannot be internalized, so the frame loop
-    /// refuses with `linear_tail_unsafe` every frame while the gate reported
-    /// "signalling permitted" and the session policy advertised the enable as
-    /// available. The point of one policy function is that the gate and the
-    /// frame loop cannot drift apart; they can still drift if they are handed
-    /// different evidence.
+    /// disagree with the frame loop in the ordinary case; taking the *raw*
+    /// plan made it disagree in the opposite direction, which is what this
+    /// reads. The loop stages the migratable classes (cursor, drag icon,
+    /// top/overlay layer trees) into the common-linear target before deciding
+    /// and reads the committed plan, where an ordinary desktop cursor is
+    /// `Internalized`. Reading the pre-staging plan here classified that same
+    /// cursor as `ExternalAssembly`, so the report said `linear_tail_unsafe`
+    /// for every output at the same moment the connector was signalling PQ —
+    /// and, because that refusal precedes them, masked every momentary reason
+    /// the previous round made nameable. The point of one policy function is
+    /// that the gate and the frame loop cannot drift apart; they can still
+    /// drift if they are handed different evidence.
+    ///
+    /// The mirroring assumes the staging pass succeeds. It usually does, and
+    /// when it does not the next frame's `record_color_delivery_attempt`
+    /// reports the import-blocked class — which
+    /// [`kms::hdr_gate_linear_tail_safe`] already answers `false` for,
+    /// because an import-blocked tree is not migratable.
     fn hdr_gate_frame_evidence(&self) -> (bool, bool) {
         let Some(compositor) = self.compositor.as_ref() else {
             return (false, false);
         };
         let scene_linear_active = compositor.scene_linear_color_path_active();
-        let external_safe = self.kms.as_ref().is_some_and(|kms| {
-            kms.borrow()
-                .external_element_color_plan(&self.state)
-                .is_safe()
-        });
+        let compositor_tail_safe = compositor.linear_tail_status().linear_tail_safe();
+        let Some(kms) = self.kms.as_ref() else {
+            return (false, scene_linear_active);
+        };
+        let plan = kms.borrow().external_element_color_plan(&self.state);
         (
-            compositor.linear_tail_status().linear_tail_safe() && external_safe,
+            kms::hdr_gate_linear_tail_safe(
+                compositor_tail_safe,
+                scene_linear_active,
+                plan.is_safe(),
+                plan.internalization_could_make_safe(),
+            ),
             scene_linear_active,
         )
     }
@@ -1534,7 +1634,11 @@ impl UdevBackend {
 
         self.state.outputs = kms.borrow().outputs();
         self.state.gamma_sizes = kms.borrow_mut().gamma_sizes().into_iter().collect();
-        attach_edid_caps_to_outputs(&self.state.outputs, &self.shared.lock_safe().outputs);
+        attach_edid_caps_to_outputs(
+            &self.state.outputs,
+            &self.shared.lock_safe().outputs,
+            self.state.color_manager.as_ref(),
+        );
         kms.borrow_mut().refresh_output_color_targets();
         if resize_compositor && let Some(compositor) = self.compositor.as_mut() {
             let (width, height) = kms.borrow().total_screen_size();
@@ -1600,6 +1704,55 @@ impl UdevBackend {
             .set_capture_counters(self.state.capture_counters.clone());
     }
 
+    /// Hand the input dispatcher the toast card geometry of the frame just
+    /// drawn. Without it the client under a card sees the press, the release
+    /// and the keyboard focus before the window manager's intercept ever
+    /// runs — clicking a notification's action chip also clicked the browser
+    /// underneath. The dispatcher's only other swallow guard is the
+    /// screenshot / system-UI grab, which a toast never takes.
+    fn publish_toast_hit_rects(&mut self) {
+        let published = self.toast_rects_published;
+        let Some(compositor) = self.compositor.as_ref() else {
+            if published {
+                self.shared.lock_safe().toast_rects.clear();
+                self.toast_rects_published = false;
+            }
+            return;
+        };
+        let cards = compositor.toast_hit_rects();
+        if cards.is_empty() && !published {
+            return;
+        }
+        {
+            let mut shared = self.shared.lock_safe();
+            shared.toast_rects.clear();
+            shared.toast_rects.extend(cards.iter().cloned());
+        }
+        self.toast_rects_published = !cards.is_empty();
+    }
+
+    /// Read the VRR the hardware actually ran back from KMS, so the HUD row
+    /// and `get_metrics().vrr_active` report the programmed state instead of
+    /// the focused window's class.
+    fn refresh_output_vrr_metric(&mut self) {
+        const POLL_INTERVAL: Duration = Duration::from_millis(250);
+        if self.compositor.is_none() || self.kms.is_none() {
+            return;
+        }
+        let now = Instant::now();
+        if now.duration_since(self.last_output_vrr_poll) < POLL_INTERVAL {
+            return;
+        }
+        self.last_output_vrr_poll = now;
+        let active = self
+            .kms
+            .as_ref()
+            .is_some_and(|kms| any_output_vrr_active(&kms.borrow().presentation_output_statuses()));
+        if let Some(compositor) = self.compositor.as_mut() {
+            compositor.set_output_vrr_active(active);
+        }
+    }
+
     fn recreate_compositor_for_current_kms(&mut self) {
         // These backend-owned textures were allocated by the same old EGL
         // context as the compositor. Reusing a same-sized offscreen entry with
@@ -1612,6 +1765,7 @@ impl UdevBackend {
         }
 
         self.compositor = None;
+        self.publish_toast_hit_rects();
         let recreated = if let Some(kms) = &self.kms {
             let mut kms_ref = kms.borrow_mut();
             let (w, h) = kms_ref.total_screen_size();
@@ -1663,6 +1817,19 @@ impl UdevBackend {
 
         let output_layout = output_layout_from_shared(&self.shared);
 
+        // Everything the user latched through IPC, taken before the rebuild
+        // replaces the outputs it lives on. A VT switch back and every
+        // connector hotplug build a fresh `KmsState` whose outputs start with
+        // `hdr_requested: false` and `vrr_override: None`; without this an
+        // HDR request or a VRR override was silently gone afterwards, with
+        // the connector reset to SDR by the old state's teardown and nothing
+        // in the log saying why.
+        let latched_intents = self
+            .kms
+            .as_ref()
+            .map(|kms| kms.borrow().latched_intents())
+            .unwrap_or_default();
+
         let display_handle = self.display_handle.clone();
         match KmsState::new(
             &mut self.session,
@@ -1679,6 +1846,9 @@ impl UdevBackend {
                 self.drop_kms();
 
                 self.kms = Some(new_kms);
+                if let Some(kms) = self.kms.as_ref() {
+                    kms.borrow_mut().restore_latched_intents(&latched_intents);
+                }
                 self.state.needs_redraw = true;
                 // The rebuilt KMS state owns a fresh EGL context. Never use it
                 // to resize/delete raw names from the old compositor; the next
@@ -2111,7 +2281,11 @@ impl UdevBackend {
         if let Some(kms) = &kms {
             state.outputs = kms.borrow().outputs();
             state.gamma_sizes = kms.borrow_mut().gamma_sizes().into_iter().collect();
-            attach_edid_caps_to_outputs(&state.outputs, &shared.lock_safe().outputs);
+            attach_edid_caps_to_outputs(
+                &state.outputs,
+                &shared.lock_safe().outputs,
+                state.color_manager.as_ref(),
+            );
             kms.borrow_mut().refresh_output_color_targets();
 
             // Keep linux-dmabuf opt-in for now. Electron/VSCode binds
@@ -2188,6 +2362,10 @@ impl UdevBackend {
             let shared = shared.clone();
             let flush_tx = flush_tx.clone();
             let flush_pending = flush_pending.clone();
+            // Button codes whose press landed on a toast card and was kept
+            // from the clients: their release must be kept back with them, or
+            // a client would hold a press that never ends.
+            let mut toast_swallowed_buttons: HashSet<u32> = HashSet::new();
             event_loop
                 .handle()
                 .insert_source(libinput_backend, move |event, _, state| {
@@ -2385,7 +2563,7 @@ impl UdevBackend {
                                 276 => 9, // BTN_EXTRA
                                 _ => (button_code & 0xFF) as u8,
                             };
-                            let (x, y, output, in_screenshot) = {
+                            let (x, y, output, in_screenshot, on_toast_card) = {
                                 let s = shared.lock_safe();
                                 let x = s.pointer_x;
                                 let y = s.pointer_y;
@@ -2395,8 +2573,24 @@ impl UdevBackend {
                                     .iter()
                                     .find(|o| (x as i32) >= o.x && (y as i32) >= o.y && (x as i32) < (o.x + o.width) && (y as i32) < (o.y + o.height))
                                     .map(|o| o.id);
-                                (x, y, output, s.screenshot_grab_active || s.system_ui_grab_active)
+                                (
+                                    x,
+                                    y,
+                                    output,
+                                    s.screenshot_grab_active || s.system_ui_grab_active,
+                                    press_hits_toast(&s.toast_rects, x, y),
+                                )
                             };
+                            // A card is drawn over the client, so it absorbs
+                            // its own clicks. The WM still receives the event
+                            // below and remains the actor that dismisses the
+                            // card and invokes the action.
+                            let on_toast = swallow_toast_button(
+                                &mut toast_swallowed_buttons,
+                                button_code,
+                                pressed,
+                                on_toast_card,
+                            );
 
                             let location: Point<f64, Logical> = (x, y).into();
 
@@ -2436,7 +2630,7 @@ impl UdevBackend {
                             };
                             let focus = under.map(|(_win, surface, origin)| (surface, origin));
 
-                            if !in_screenshot {
+                            if !in_screenshot && !on_toast {
                                 if let Some(pointer) = state.seat.get_pointer() {
                                     // Ensure focus is up-to-date before sending the button.
                                     pointer.motion(
@@ -2500,7 +2694,7 @@ impl UdevBackend {
                                 }
                             }
 
-                            if popup_hit {
+                            if wm_button_hidden_by_popup(popup_hit, on_toast) {
                                 if std::env::var("JWM_DEBUG_BUTTONS")
                                     .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                                     .unwrap_or(false)
@@ -3376,6 +3570,8 @@ impl UdevBackend {
             offscreen_window_textures: HashMap::new(),
             minimized_capture_attempts: MinimizedCaptureAttemptGate::default(),
             minimized_capture_frame: 0,
+            toast_rects_published: false,
+            last_output_vrr_poll: Instant::now(),
         })
     }
 }
@@ -3684,8 +3880,13 @@ impl BackendDiagnostics for UdevBackend {
         };
         let (linear_tail_safe, scene_linear_active) = self.hdr_gate_frame_evidence();
         let kms = kms.borrow();
+        // The command's policy, not the frame loop's: this answers "would an
+        // enable be accepted", and an enable is exactly what clears a
+        // recorded driver rejection. Asking the frame-loop question here
+        // would advertise the enable as unavailable on an output the very
+        // next `set_hdr_metadata` would accept.
         (0..kms.output_names().len()).any(|index| {
-            kms.hdr_enable_refusal_for_output(
+            kms.hdr_enable_command_refusal_for_output(
                 index,
                 &self.state,
                 linear_tail_safe,
@@ -4404,7 +4605,7 @@ impl DisplayControl for UdevBackend {
 
         if enabled {
             let (linear_tail_safe, scene_linear_active) = self.hdr_gate_frame_evidence();
-            if let Some(refusal) = kms.borrow().hdr_enable_refusal_for_output(
+            if let Some(refusal) = kms.borrow().hdr_enable_command_refusal_for_output(
                 index,
                 &self.state,
                 linear_tail_safe,
@@ -4762,7 +4963,7 @@ impl Backend for UdevBackend {
                     "failed to acquire the KMS GL context for compositor teardown preflight: {error}"
                 ))
             })?;
-            if let Err(error) = kms_ref.disable_color_pipeline() {
+            if let Err(error) = kms_ref.disable_color_pipeline(self.state.color_manager.as_ref()) {
                 if let Some(compositor) = self.compositor.as_mut() {
                     compositor.force_full_redraw();
                 }
@@ -4816,6 +5017,7 @@ impl Backend for UdevBackend {
                 "live compositor GPU resources were already released"
             );
             self.compositor = None;
+            self.publish_toast_hit_rects();
             self.minimized_capture_attempts.clear();
             self.scratch_tex_updates.clear();
             self.offscreen_window_textures.clear();
@@ -5421,11 +5623,19 @@ impl Backend for UdevBackend {
                         // fold it into the anchor so subsurfaces land correctly, then
                         // clamp so the candidate box stays on the parent's monitor.
                         let (sx, sy) = place_popup(anchor, cw, ch, bbox.loc.x, bbox.loc.y);
-                        log::info!(
-                            "[ime] popup composited tex={} {cw}x{ch} children={} abs=({sx},{sy})",
-                            texture.tex_id(),
-                            get_children(im_surface).len()
-                        );
+                        // Once per second at debug, like every other
+                        // diagnostic in this function. Unthrottled at info it
+                        // formatted and wrote a line per popup per frame for
+                        // as long as a candidate window was open — 60 Hz
+                        // while anything else on screen animated, on the
+                        // frame thread, under the default `info` filter.
+                        if crf_log_this {
+                            log::debug!(
+                                "[ime] popup composited tex={} {cw}x{ch} children={} abs=({sx},{sy})",
+                                texture.tex_id(),
+                                get_children(im_surface).len()
+                            );
+                        }
                         tex_updates.push((
                             im_win_id,
                             texture,
@@ -5463,10 +5673,12 @@ impl Backend for UdevBackend {
                         let w = tex_size.w as u32;
                         let h = tex_size.h as u32;
                         let (px, py) = place_popup(anchor, w as i32, h as i32, 0, 0);
-                        log::info!(
-                            "[ime] popup texture tex={} size={w}x{h} abs=({px},{py})",
-                            texture.tex_id()
-                        );
+                        if crf_log_this {
+                            log::debug!(
+                                "[ime] popup texture tex={} size={w}x{h} abs=({px},{py})",
+                                texture.tex_id()
+                            );
+                        }
                         if w > 0 && h > 0 {
                             tex_updates.push((
                                 im_win_id,
@@ -5481,10 +5693,15 @@ impl Backend for UdevBackend {
                         }
                     }
                     None => {
-                        log::warn!(
-                            "[ime] popup {:?} has no texture (no buffer committed yet)",
-                            im_surface.id()
-                        );
+                        // Normal for the frame between map and first commit,
+                        // and it repeated every frame while an input method
+                        // held a popup open with nothing in it.
+                        if crf_log_this {
+                            log::warn!(
+                                "[ime] popup {:?} has no texture (no buffer committed yet)",
+                                im_surface.id()
+                            );
+                        }
                     }
                 }
             }
@@ -5846,6 +6063,10 @@ impl Backend for UdevBackend {
             }
         };
 
+        // The cards this frame drew are the ones a click must be resolved
+        // against, so the dispatcher is fed from the same pass that drew them.
+        self.publish_toast_hit_rects();
+
         // A subsurface/wp_viewport client uses a backend-created offscreen
         // texture. Once a minimized window has left the drawable scene and
         // the compositor has cloned/cached that texture, keeping this second
@@ -5921,11 +6142,13 @@ impl Backend for UdevBackend {
                             let mut kms = kms.borrow_mut();
                             let idx = kms.output_index_by_name(output_name);
                             if let Some(idx) = idx {
-                                match kms.set_dpms_for_output(idx, on).backend_context(
-                                    "wayland-udev",
-                                    ErrorBoundary::Device,
-                                    "set DPMS output power state",
-                                ) {
+                                match kms
+                                    .set_dpms_for_output(idx, on, self.state.color_manager.as_ref())
+                                    .backend_context(
+                                        "wayland-udev",
+                                        ErrorBoundary::Device,
+                                        "set DPMS output power state",
+                                    ) {
                                     Ok(()) => power_changed = true,
                                     Err(e) => log::warn!("{e}"),
                                 }
@@ -6099,7 +6322,13 @@ impl Backend for UdevBackend {
                                     let result = kms
                                         .output_index_by_name(&change.name)
                                         .ok_or_else(|| format!("unknown output '{}'", change.name))
-                                        .and_then(|index| kms.set_dpms_for_output(index, false));
+                                        .and_then(|index| {
+                                            kms.set_dpms_for_output(
+                                                index,
+                                                false,
+                                                self.state.color_manager.as_ref(),
+                                            )
+                                        });
                                     if let Err(error) = result {
                                         log::warn!("[output-mgmt] '{}': {error}", change.name);
                                         failed_outputs.push(output_management_failure(
@@ -6123,7 +6352,13 @@ impl Backend for UdevBackend {
                                     let result = kms
                                         .output_index_by_name(&change.name)
                                         .ok_or_else(|| format!("unknown output '{}'", change.name))
-                                        .and_then(|index| kms.set_dpms_for_output(index, true));
+                                        .and_then(|index| {
+                                            kms.set_dpms_for_output(
+                                                index,
+                                                true,
+                                                self.state.color_manager.as_ref(),
+                                            )
+                                        });
                                     if let Err(error) = result {
                                         log::warn!("[output-mgmt] '{}': {error}", change.name);
                                         failed_outputs.push(output_management_failure(
@@ -6175,10 +6410,11 @@ impl Backend for UdevBackend {
                             self.state.soft_disabled_outputs = soft_disabled_before;
                             match (self.kms.as_ref(), configuration_before.as_ref()) {
                                 (Some(kms), Some(snapshot)) => {
-                                    match kms
-                                        .borrow_mut()
-                                        .rollback_output_configuration(snapshot, &touched_outputs)
-                                    {
+                                    match kms.borrow_mut().rollback_output_configuration(
+                                        snapshot,
+                                        &touched_outputs,
+                                        self.state.color_manager.as_ref(),
+                                    ) {
                                         Ok(restored) => {
                                             rollback_reason = Some(format!(
                                                 "restored soft-disabled membership and mode/refresh/position/scale/transform/DPMS for {restored} touched output(s) in reverse order"
@@ -6317,6 +6553,7 @@ impl Backend for UdevBackend {
                     );
                 }
             }
+            self.refresh_output_vrr_metric();
 
             if handler.should_exit() {
                 break;
@@ -6858,6 +7095,56 @@ mod udev_backend_selection_tests {
     }
 
     #[test]
+    fn the_ime_popup_pass_logs_at_the_frame_rate_of_nothing() {
+        // The candidate window of an input method is alive for as long as the
+        // user is typing, and `compositor_render_frame` runs for every frame
+        // the compositor needs — a cursor blink, a toast fading, any
+        // animation. Two unthrottled `log::info!` lines per popup per frame
+        // under the default `info,jwm=info` filter meant a formatted String,
+        // an `ObjectId` Debug and a `write(2)` per line on the frame thread.
+        // Every other diagnostic in this function is behind the once-a-second
+        // `crf_log_this`; these are now too.
+        let source = include_str!("backend.rs");
+        let popup_pass = source
+            .split_once("for anchor in &im_popups {")
+            .expect("the IME popup pass exists")
+            .1
+            .split_once("// Phase 2: Update compositor window textures")
+            .expect("Phase 2 follows the popup pass")
+            .0;
+
+        let info = format!("log::{}!(", "info");
+        assert!(
+            !popup_pass.contains(&info),
+            "the IME popup pass must not log at info on every frame"
+        );
+        // `error!` stays unconditional — a failed offscreen create/bind/render
+        // is a real fault, not a per-frame observation. Everything else in
+        // the pass is throttled.
+        let warn = format!("log::{}!(", "warn");
+        let gate = format!("if {} {{", "crf_log_this");
+        for (index, _) in popup_pass.match_indices(&warn) {
+            let before = &popup_pass[..index];
+            assert!(
+                before.trim_end().ends_with(&gate),
+                "an unthrottled warn! in the IME popup pass"
+            );
+        }
+        let debug = format!("log::{}!(", "debug");
+        assert!(
+            popup_pass.matches(&debug).count() >= 2,
+            "the two per-popup diagnostics should survive at debug"
+        );
+        for (index, _) in popup_pass.match_indices(&debug) {
+            let before = &popup_pass[..index];
+            assert!(
+                before.trim_end().ends_with(&gate),
+                "an unthrottled debug! in the IME popup pass"
+            );
+        }
+    }
+
+    #[test]
     fn gesture_swipe_intercept_requires_configured_finger_count() {
         assert!(!gesture_swipe_should_intercept(3, &[]));
         assert!(!gesture_swipe_should_intercept(
@@ -7001,6 +7288,140 @@ mod udev_backend_selection_tests {
         );
     }
 
+    fn toast_card(
+        id: u64,
+        card: [f32; 4],
+        buttons: Vec<[f32; 4]>,
+    ) -> crate::backend::compositor_common::toast::ToastRects {
+        crate::backend::compositor_common::toast::ToastRects { id, card, buttons }
+    }
+
+    fn presentation_status(name: &str, vrr: bool) -> crate::backend::api::PresentationOutputStatus {
+        crate::backend::api::PresentationOutputStatus {
+            output_name: name.to_string(),
+            client_asked_to_tear: false,
+            vrr,
+            tearing: false,
+            blocker: None,
+        }
+    }
+
+    #[test]
+    fn a_press_on_a_card_belongs_to_the_card_not_the_client_under_it() {
+        let cards = [
+            toast_card(
+                1,
+                [100.0, 10.0, 300.0, 90.0],
+                vec![[110.0, 70.0, 60.0, 24.0]],
+            ),
+            toast_card(2, [100.0, 110.0, 300.0, 90.0], Vec::new()),
+        ];
+        // The action chip, the body around it, and the second card.
+        assert!(press_hits_toast(&cards, 120.0, 80.0));
+        assert!(press_hits_toast(&cards, 380.0, 20.0));
+        assert!(press_hits_toast(&cards, 200.0, 150.0));
+        // Just outside the stack, and with nothing on screen at all.
+        assert!(!press_hits_toast(&cards, 99.0, 20.0));
+        assert!(!press_hits_toast(&cards, 200.0, 205.0));
+        assert!(!press_hits_toast(&[], 200.0, 20.0));
+    }
+
+    #[test]
+    fn a_swallowed_press_takes_its_release_with_it_and_only_its_own() {
+        let mut swallowed = HashSet::new();
+        // Press on a card: swallowed, and its release with it.
+        assert!(swallow_toast_button(&mut swallowed, 272, true, true));
+        assert!(swallow_toast_button(&mut swallowed, 272, false, false));
+        // The release is swallowed exactly once; a stray second one is not.
+        assert!(!swallow_toast_button(&mut swallowed, 272, false, false));
+        assert!(swallowed.is_empty());
+
+        // A press that missed every card is delivered, and so is its release
+        // even if a card has since slid under the pointer.
+        assert!(!swallow_toast_button(&mut swallowed, 272, true, false));
+        assert!(!swallow_toast_button(&mut swallowed, 272, false, true));
+
+        // Buttons are tracked independently.
+        assert!(swallow_toast_button(&mut swallowed, 273, true, true));
+        assert!(!swallow_toast_button(&mut swallowed, 274, false, false));
+        assert!(swallow_toast_button(&mut swallowed, 273, false, false));
+        assert!(swallowed.is_empty());
+    }
+
+    #[test]
+    fn a_press_whose_release_was_lost_does_not_eat_the_next_one() {
+        let mut swallowed = HashSet::new();
+        // Press on a card, then the release never arrives: `PauseSession`
+        // suspends libinput on a VT switch, and an unplugged mouse takes its
+        // held buttons with it. Neither synthesises a release.
+        assert!(swallow_toast_button(&mut swallowed, 272, true, true));
+
+        // The next press misses every card, so it reaches the client — and
+        // its release has to reach the client too. The entry the lost release
+        // never consumed must not outlive the press that replaced it.
+        assert!(!swallow_toast_button(&mut swallowed, 272, true, false));
+        assert!(!swallow_toast_button(&mut swallowed, 272, false, false));
+        assert!(swallowed.is_empty());
+
+        // The other direction still latches: a stale entry is replaced, not
+        // merely dropped.
+        assert!(swallow_toast_button(&mut swallowed, 272, true, true));
+        assert!(swallow_toast_button(&mut swallowed, 272, true, true));
+        assert!(swallow_toast_button(&mut swallowed, 272, false, false));
+        assert!(swallowed.is_empty());
+    }
+
+    #[test]
+    fn a_card_over_an_open_popup_still_reaches_the_window_manager() {
+        // A press inside a client's popup is that client's alone; the WM must
+        // not also resolve it against the tab strip behind the menu.
+        assert!(wm_button_hidden_by_popup(true, false));
+        // But a toast card is drawn above every client surface, popups
+        // included, and the press was already withheld from the client. If
+        // the WM were skipped too, the click would reach nobody and the card
+        // could never be dismissed.
+        assert!(!wm_button_hidden_by_popup(true, true));
+        // Nothing under the pointer changes with no popup at all.
+        assert!(!wm_button_hidden_by_popup(false, false));
+        assert!(!wm_button_hidden_by_popup(false, true));
+    }
+
+    #[test]
+    fn the_vrr_metric_follows_the_presentation_statuses() {
+        assert!(!any_output_vrr_active(&[]));
+        assert!(!any_output_vrr_active(&[
+            presentation_status("DP-1", false),
+            presentation_status("HDMI-A-1", false),
+        ]));
+        assert!(any_output_vrr_active(&[
+            presentation_status("DP-1", false),
+            presentation_status("HDMI-A-1", true),
+        ]));
+        assert!(any_output_vrr_active(&[presentation_status("DP-1", true)]));
+    }
+
+    #[test]
+    fn the_vrr_metric_is_read_back_from_kms_after_the_frame() {
+        let source = include_str!("backend.rs");
+        let start = source
+            .find(&format!("fn {}(&mut self)", "refresh_output_vrr_metric"))
+            .expect("the VRR metric feed is missing");
+        let end = start
+            + source[start..]
+                .find("\n    fn ")
+                .expect("metric feed body terminator missing");
+        let body = &source[start..end];
+        let reader = format!(
+            "{}(&kms.borrow().{}())",
+            "any_output_vrr_active", "presentation_output_statuses"
+        );
+        assert!(
+            body.contains(&reader),
+            "the metric must come from the KMS presentation statuses"
+        );
+        assert!(body.contains(&format!("compositor.{}(active)", "set_output_vrr_active")));
+    }
+
     #[test]
     fn due_handler_deadline_is_ignored_while_presentation_is_unavailable() {
         assert_eq!(handler_wakeup_timeout(false, Some(Duration::ZERO)), None);
@@ -7096,6 +7517,29 @@ mod udev_backend_selection_tests {
 
         b = a.clone();
         b.hdr_capable = true;
+        assert!(!output_info_equivalent(&a, &b));
+
+        // Every field the HDR_OUTPUT_METADATA blob is built from has to move
+        // the verdict, MaxFALL included: a rescan that misses it leaves the
+        // old blob programmed for the new display.
+        let caps = crate::backend::edid::EdidHdrCapabilities {
+            max_luminance_nits: 1000.0,
+            min_luminance_nits: 0.05,
+            max_frame_average_nits: 400.0,
+            supports_bt2020: true,
+            supports_pq: true,
+            supports_hlg: false,
+        };
+        let mut a = test_output(OutputId(1), "HDMI-A-1");
+        a.hdr_metadata = Some(caps.clone());
+        let mut b = a.clone();
+        assert!(output_info_equivalent(&a, &b));
+        b.hdr_metadata = Some(crate::backend::edid::EdidHdrCapabilities {
+            max_frame_average_nits: 565.0,
+            ..caps
+        });
+        assert!(!output_info_equivalent(&a, &b));
+        b.hdr_metadata = None;
         assert!(!output_info_equivalent(&a, &b));
     }
 
@@ -7448,6 +7892,11 @@ fn hdr_metadata_equivalent(
         (Some(a), Some(b)) => {
             a.max_luminance_nits.to_bits() == b.max_luminance_nits.to_bits()
                 && a.min_luminance_nits.to_bits() == b.min_luminance_nits.to_bits()
+                // MaxFALL is load-bearing: `hdr_metadata::build_from_edid`
+                // puts it into the HDR_OUTPUT_METADATA blob KMS programs, so
+                // two EDIDs that differ only here describe two different
+                // blobs and the rescan must report the change.
+                && a.max_frame_average_nits.to_bits() == b.max_frame_average_nits.to_bits()
                 && a.supports_bt2020 == b.supports_bt2020
                 && a.supports_pq == b.supports_pq
                 && a.supports_hlg == b.supports_hlg
@@ -7566,6 +8015,7 @@ fn scan_drm_outputs(dev_id: u64, path: &Path) -> Result<Vec<(u64, OutputInfo)>, 
 fn attach_edid_caps_to_outputs(
     smithay_outputs: &[smithay::output::Output],
     shared_outputs: &[OutputInfo],
+    color_manager: Option<&crate::backend::wayland_udev::color_management::ColorManagerState>,
 ) {
     for info in shared_outputs {
         let Some(out) = smithay_outputs.iter().find(|o| o.name() == info.name) else {
@@ -7575,6 +8025,15 @@ fn attach_edid_caps_to_outputs(
             out,
             info.hdr_metadata.clone(),
         );
+        // The caps are one of the two inputs to the advertised image
+        // description; a hotplug that replaces the panel behind a live HDR
+        // signal changes it. `on_output_description_changed` compares against
+        // what the output is already advertising, so the common case — an
+        // sRGB output whose caps were re-attached unchanged — costs one
+        // comparison and emits nothing.
+        if let Some(color_manager) = color_manager {
+            color_manager.on_output_description_changed(out);
+        }
     }
 }
 

@@ -32,6 +32,13 @@ const MIN_SUPPORTED_SESSION_VERSION: u32 = 1;
 const MAX_SESSION_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_SESSION_CLIENTS: usize = 16_384;
 const MAX_SESSION_MONITORS: usize = 64;
+/// Temporaries are `<prefix><pid>-<sequence>`: unique per writer, so a crash
+/// between create and rename leaves one behind that nothing would ever reuse
+/// or delete without the sweep in `atomic_write_session`.
+const SESSION_TEMPORARY_PREFIX: &str = ".session.json.tmp-";
+/// The state directory holds the snapshot and a handful of temporaries at
+/// most; a sweep never walks further than this.
+const MAX_SESSION_SWEEP_ENTRIES: usize = 1024;
 static SESSION_WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// 单个客户端的会话条目（按 class/instance 匹配，不持久化 WindowId）。
@@ -392,6 +399,64 @@ fn ensure_private_directory(path: &Path) -> io::Result<()> {
     fs::set_permissions(path, fs::Permissions::from_mode(0o700))
 }
 
+/// Whether a leftover temporary in the state directory belongs to a writer
+/// that is gone. The name carries the writer's pid: a living writer's file
+/// is mid-rename and left alone, and so is this process's own.
+fn orphaned_session_temporary(
+    name: &str,
+    own_pid: u32,
+    process_alive: impl Fn(u32) -> bool,
+) -> bool {
+    let Some(rest) = name.strip_prefix(SESSION_TEMPORARY_PREFIX) else {
+        return false;
+    };
+    let Some((pid, _sequence)) = rest.split_once('-') else {
+        return false;
+    };
+    let Ok(pid) = pid.parse::<u32>() else {
+        return false;
+    };
+    pid != own_pid && !process_alive(pid)
+}
+
+fn process_alive(pid: u32) -> bool {
+    // A pid outside the signal range counts as alive: a malformed name must
+    // never turn into `kill(-1, 0)`, which asks about every process.
+    let Ok(pid) = i32::try_from(pid) else {
+        return true;
+    };
+    if pid <= 0 {
+        return true;
+    }
+    if unsafe { libc::kill(pid, 0) } == 0 {
+        return true;
+    }
+    io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+/// Remove temporaries left by writers that died between create and rename.
+/// Best effort: a sweep that cannot read the directory or unlink a file has
+/// nothing to add to the write that follows.
+fn sweep_orphaned_session_temporaries(parent: &Path) {
+    let Ok(entries) = fs::read_dir(parent) else {
+        return;
+    };
+    let own_pid = std::process::id();
+    for entry in entries.flatten().take(MAX_SESSION_SWEEP_ENTRIES) {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !orphaned_session_temporary(name, own_pid, process_alive) {
+            continue;
+        }
+        let path = entry.path();
+        if fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.is_file()) {
+            let _ = fs::remove_file(&path);
+        }
+    }
+}
+
 fn atomic_write_session(path: &Path, contents: &[u8]) -> io::Result<()> {
     if contents.len() as u64 > MAX_SESSION_BYTES {
         return Err(io::Error::new(
@@ -401,6 +466,7 @@ fn atomic_write_session(path: &Path, contents: &[u8]) -> io::Result<()> {
     }
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     ensure_private_directory(parent)?;
+    sweep_orphaned_session_temporaries(parent);
 
     if fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
         return Err(io::Error::new(
@@ -411,7 +477,7 @@ fn atomic_write_session(path: &Path, contents: &[u8]) -> io::Result<()> {
 
     let sequence = SESSION_WRITE_COUNTER.fetch_add(1, Ordering::Relaxed);
     let temporary = parent.join(format!(
-        ".session.json.tmp-{}-{sequence}",
+        "{SESSION_TEMPORARY_PREFIX}{}-{sequence}",
         std::process::id()
     ));
     let result = (|| {
@@ -1064,6 +1130,63 @@ mod tests {
     }
 
     #[test]
+    fn a_successful_write_sweeps_temporaries_left_by_dead_writers() {
+        // pid_max never reaches i32::MAX, so this writer is certainly gone.
+        let dead_pid = i32::MAX as u32;
+        assert!(!process_alive(dead_pid));
+        assert!(process_alive(std::process::id()));
+        // Out of range is "alive": never `kill(-1, 0)`.
+        assert!(process_alive(u32::MAX));
+
+        assert!(orphaned_session_temporary(
+            ".session.json.tmp-4242-7",
+            1,
+            |_| false
+        ));
+        // A living writer, this process, and anything not a temporary stay.
+        assert!(!orphaned_session_temporary(
+            ".session.json.tmp-4242-7",
+            1,
+            |_| true
+        ));
+        assert!(!orphaned_session_temporary(
+            ".session.json.tmp-4242-7",
+            4242,
+            |_| false
+        ));
+        assert!(!orphaned_session_temporary("session.json", 1, |_| false));
+        assert!(!orphaned_session_temporary(
+            ".session.json.tmp-abc-7",
+            1,
+            |_| false
+        ));
+
+        let root = TestDir::new("sweep");
+        let dir = root.0.join("state");
+        fs::create_dir_all(&dir).unwrap();
+        let orphan = dir.join(format!("{SESSION_TEMPORARY_PREFIX}{dead_pid}-0"));
+        fs::write(&orphan, "half-written").unwrap();
+        let own = dir.join(format!(
+            "{SESSION_TEMPORARY_PREFIX}{}-999999",
+            std::process::id()
+        ));
+        fs::write(&own, "in flight").unwrap();
+
+        let path = dir.join("session.json");
+        atomic_write_session(&path, br#"{"version":2,"clients":[]}"#).unwrap();
+
+        assert!(!orphan.exists(), "the dead writer's temporary was kept");
+        assert!(
+            own.exists(),
+            "a temporary this process may still be renaming was removed"
+        );
+        assert_eq!(
+            load_session_snapshot(&path).unwrap().version,
+            SESSION_VERSION
+        );
+    }
+
+    #[test]
     fn session_loader_keeps_using_the_inode_it_opened() {
         let root = TestDir::new("read-inode");
         let path = root.0.join("state").join("session.json");
@@ -1231,13 +1354,74 @@ mod tests {
         assert_eq!(snapshot.monitor_orders[0].monitor_num, 0);
         assert_eq!(
             snapshot.monitor_orders[0].clients,
-            vec![
-                identity("Alacritty", "alacritty"),
-                identity("Firefox", "Navigator"),
-            ]
+            vec![identity("Alacritty", "alacritty")]
         );
         assert_eq!(snapshot.monitor_orders[1].monitor_num, 1);
-        assert!(snapshot.monitor_orders[1].clients.is_empty());
+        assert_eq!(
+            snapshot.monitor_orders[1].clients,
+            vec![identity("Firefox", "Navigator")]
+        );
+
+        // `capture_snapshot` derives both lists from the same monitor
+        // relation, so the frozen file must agree with itself: every ordered
+        // identity is an entry that says it lives on that monitor.
+        for order in &snapshot.monitor_orders {
+            for identity in &order.clients {
+                assert!(
+                    snapshot.clients.iter().any(|entry| {
+                        entry.class == identity.class
+                            && entry.instance == identity.instance
+                            && entry.monitor_num == order.monitor_num
+                    }),
+                    "{}/{} is ordered on monitor {} but no entry lives there",
+                    identity.class,
+                    identity.instance,
+                    order.monitor_num
+                );
+            }
+        }
+    }
+
+    /// The recorded fixture above agrees with itself because
+    /// `capture_snapshot` derives both lists from one monitor relation. A
+    /// file on disk need not: it can be hand-edited, or written before a
+    /// monitor was unplugged. Ordering an identity on a monitor its own
+    /// entry does not claim is not a reason to throw the whole session away
+    /// — `restore_monitor_client_order` intersects the saved order with what
+    /// is actually on the monitor, so the mismatch simply orders nothing.
+    #[test]
+    fn a_monitor_order_that_disagrees_with_its_entries_still_loads() {
+        let document = r#"{
+            "version": 3,
+            "clients": [
+                {
+                    "class": "Firefox",
+                    "instance": "Navigator",
+                    "name": "Reference page",
+                    "tags": 5,
+                    "is_floating": false,
+                    "monitor_num": 1,
+                    "floating": null
+                }
+            ],
+            "monitor_orders": [
+                {
+                    "monitor_num": 0,
+                    "clients": [{ "class": "Firefox", "instance": "Navigator" }]
+                }
+            ]
+        }"#;
+
+        let snapshot = migrate_session_json(document).expect("a disagreeing v3 file still loads");
+        snapshot
+            .validate()
+            .expect("a cross-monitor disagreement is not a validation failure");
+        assert_eq!(snapshot.clients[0].monitor_num, 1);
+        assert_eq!(snapshot.monitor_orders[0].monitor_num, 0);
+        assert_eq!(
+            snapshot.monitor_orders[0].clients,
+            vec![identity("Firefox", "Navigator")]
+        );
     }
 
     #[test]

@@ -18,6 +18,37 @@ use std::sync::Arc;
 #[allow(unused_imports)]
 use std::sync::mpsc;
 
+/// Toast hover targets for a pointer at `(x, y)` against the card geometry of
+/// the last drawn frame: the hovered card (its timeout pauses) and, when the
+/// pointer sits on one of its chips, that card's action index (the chip
+/// brightens). Cards never overlap, so the first hit is the only hit.
+///
+/// A modal system UI overlay takes the pointer: the window manager answers
+/// motion from the panel and never forwards it to the compositor, so the
+/// stored position is wherever the pointer was when the panel opened. Cards
+/// under the panel are therefore not hoverable — otherwise a card the pointer
+/// happened to be over when the idle lock engaged would stay paused, frozen at
+/// the same age, for the whole locked session.
+fn toast_hover_targets(
+    rects: &[crate::backend::compositor_common::toast::ToastRects],
+    x: f32,
+    y: f32,
+    system_ui_active: bool,
+) -> (Option<u64>, Option<(u64, usize)>) {
+    use crate::backend::compositor_common::toast::{ToastHit, hit_test};
+    if system_ui_active {
+        return (None, None);
+    }
+    for rects in rects {
+        match hit_test(rects, x, y) {
+            Some(ToastHit::Button(index)) => return (Some(rects.id), Some((rects.id, index))),
+            Some(ToastHit::Card) => return (Some(rects.id), None),
+            None => {}
+        }
+    }
+    (None, None)
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum StaticMinimizedCapturePlan {
     Ignore,
@@ -198,6 +229,13 @@ impl<C: CompositorConnection> Compositor<C> {
             self.system_ui_highlight.reset();
             self.system_ui_hovered = None;
         }
+        // The tags overview's label cache belongs to the grid: an overlay
+        // that is not a grid — or no overlay at all — must not leave its
+        // textures behind. Freeing here rather than at the next paint keeps
+        // the cache's lifetime tied to the thing it caches.
+        if !overlay.as_ref().is_some_and(|ui| ui.tags_grid.is_some()) {
+            self.free_tags_grid_labels();
+        }
         self.system_ui = overlay.map(Arc::new);
         self.needs_render = true;
     }
@@ -287,6 +325,9 @@ impl<C: CompositorConnection> Compositor<C> {
     pub(crate) fn set_mouse_position(&mut self, x: f32, y: f32) {
         self.mouse_x = x;
         self.mouse_y = y;
+        // From here on the stored coordinates describe the pointer rather than
+        // the initial value, so pointer-driven highlights may trust them.
+        self.pointer_seen = true;
         self.forward_waterlily_pointer(x, y);
         if self.edge_glow {
             self.edge_glow_tick(x, y);
@@ -308,23 +349,29 @@ impl<C: CompositorConnection> Compositor<C> {
         // Hovering a toast card pauses its timeout; same compare-then-repaint
         // pattern as the tab bar above. A hovered action button additionally
         // brightens, so the exact chip under the pointer is tracked too.
-        let toast_hover = self.toast_rects.iter().find_map(|rects| {
-            crate::backend::compositor_common::toast::hit_test(rects, x, y).map(|_| rects.id)
-        });
+        self.refresh_toast_hover(std::time::Instant::now());
+    }
+
+    /// Re-derive the toast hover state from the stored pointer position, the
+    /// card geometry of the last drawn frame and whether a system UI overlay
+    /// owns the pointer. Runs on pointer motion and once per drawn toast
+    /// frame: the stack re-flows when a neighbour expires, so a card can slide
+    /// under — or out from under — a motionless pointer, and its pause must
+    /// follow the geometry rather than the last motion event. A card that slid
+    /// away from a still pointer used to stay paused forever, never expiring
+    /// and forcing composition for as long as it lived.
+    pub(super) fn refresh_toast_hover(&mut self, now: std::time::Instant) {
+        let (toast_hover, button_hover) = toast_hover_targets(
+            &self.toast_rects,
+            self.mouse_x,
+            self.mouse_y,
+            self.system_ui.is_some(),
+        );
         if toast_hover != self.toast_hover {
             self.toast_hover = toast_hover;
-            self.toast_stack
-                .set_hovered(toast_hover, std::time::Instant::now());
+            self.toast_stack.set_hovered(toast_hover, now);
             self.needs_render = true;
         }
-        let button_hover = self.toast_rects.iter().find_map(|rects| {
-            match crate::backend::compositor_common::toast::hit_test(rects, x, y) {
-                Some(crate::backend::compositor_common::toast::ToastHit::Button(index)) => {
-                    Some((rects.id, index))
-                }
-                _ => None,
-            }
-        });
         if button_hover != self.toast_button_hover {
             self.toast_button_hover = button_hover;
             self.needs_render = true;
@@ -2241,6 +2288,72 @@ mod recording_pacing_tests {
         let last = Instant::now();
         let now = last + Duration::from_millis(500);
         assert_eq!(advance_recording_deadline(Some(last), THIRTY_FPS, now), now);
+    }
+}
+
+#[cfg(test)]
+mod toast_hover_tests {
+    use super::toast_hover_targets;
+    use crate::backend::compositor_common::toast::ToastRects;
+
+    fn stack() -> Vec<ToastRects> {
+        vec![
+            ToastRects {
+                id: 1,
+                card: [100.0, 20.0, 300.0, 120.0],
+                buttons: vec![[130.0, 100.0, 80.0, 24.0], [220.0, 100.0, 80.0, 24.0]],
+            },
+            ToastRects {
+                id: 2,
+                card: [100.0, 160.0, 300.0, 120.0],
+                buttons: Vec::new(),
+            },
+        ]
+    }
+
+    #[test]
+    fn the_card_and_the_chip_under_the_pointer_are_reported_together() {
+        let rects = stack();
+        // Card body of the first card: it pauses, no chip is lit.
+        assert_eq!(
+            toast_hover_targets(&rects, 120.0, 50.0, false),
+            (Some(1), None)
+        );
+        // A chip pauses its own card and brightens itself.
+        assert_eq!(
+            toast_hover_targets(&rects, 250.0, 110.0, false),
+            (Some(1), Some((1, 1)))
+        );
+        // The second card, which has no chips at all.
+        assert_eq!(
+            toast_hover_targets(&rects, 150.0, 200.0, false),
+            (Some(2), None)
+        );
+        assert_eq!(toast_hover_targets(&rects, 10.0, 10.0, false), (None, None));
+    }
+
+    #[test]
+    fn a_system_ui_overlay_releases_every_toast_hover() {
+        // A modal panel takes the pointer, so the stored position is stale:
+        // a card the pointer happened to be over when the lock engaged would
+        // otherwise stay paused, never expiring, for the whole session.
+        let rects = stack();
+        assert_eq!(
+            toast_hover_targets(&rects, 120.0, 50.0, false),
+            (Some(1), None)
+        );
+        assert_eq!(toast_hover_targets(&rects, 120.0, 50.0, true), (None, None));
+    }
+
+    #[test]
+    fn a_card_that_slides_out_from_under_a_still_pointer_stops_being_hovered() {
+        // The re-flow that follows an expiry is exactly the case motion
+        // events cannot report: the pointer never moved, only the geometry.
+        let (x, y) = (150.0, 200.0);
+        let before = stack();
+        assert_eq!(toast_hover_targets(&before, x, y, false).0, Some(2));
+        let after = vec![before[0].clone()];
+        assert_eq!(toast_hover_targets(&after, x, y, false).0, None);
     }
 }
 

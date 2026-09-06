@@ -304,6 +304,26 @@ impl<T> CompositorConnection for T where
 {
 }
 
+/// Everything the tags-grid cell labels' pixels are made of. The digit comes
+/// from the tag index and the ink from `occupied`, so the cell sequence
+/// covers the content; the font description and its pixel size cover a font
+/// change; the two inks cover a theme change under a grid that is still open
+/// (the palette is read at raster time, and `apply_config` cannot reach a
+/// cache it does not know about). Nothing else scales the labels: they are
+/// drawn at their raster size, and only their origin follows the selected
+/// cell's lift.
+#[derive(PartialEq)]
+pub(crate) struct TagsGridLabelKey {
+    /// `(tag_index, occupied)` for every cell, in grid order.
+    cells: Vec<(usize, bool)>,
+    font: String,
+    /// Pixel size as bits, so a degenerate (NaN) size still compares equal to
+    /// itself instead of missing the cache on every single frame.
+    size_bits: u32,
+    item_ink: [u8; 4],
+    hint_ink: [u8; 4],
+}
+
 /// Cached textures for one toast card: title/body in fixed slots, plus one
 /// label texture per action button.
 pub(crate) struct ToastTextureSet {
@@ -320,6 +340,15 @@ where
     conn: Arc<C>,
     graphics: GraphicsPlatform,
     overlay_window: u32,
+    /// The overlay's INPUT shape as last accepted by the server: one
+    /// rectangle per toast card the click hit-test can claim, and empty
+    /// while the overlay is fully click-through.
+    ///
+    /// Kept here so the shape is pushed only when the card set actually
+    /// changes — a toast frame runs at the client's damage rate — and so a
+    /// request the server refused is retried on the next frame instead of
+    /// being believed.
+    overlay_input_shape: Vec<(i16, i16, u16, u16)>,
     /// Window that owns the _NET_WM_CM_Sn selection, advertising this
     /// compositor to other clients (screenshot tools, etc.).
     cm_selection_owner: u32,
@@ -579,6 +608,13 @@ where
     // --- Mouse position (shared by magnifier, tilt, edge glow) ---
     mouse_x: f32,
     mouse_y: f32,
+    /// Whether a pointer position was ever pushed in. `(0.0, 0.0)` is a legal
+    /// place for the pointer to be, so the coordinates alone cannot say
+    /// whether they describe the pointer or the initial value; anything that
+    /// would paint a pointer-driven highlight (the tab strip's hover chip)
+    /// must ask this first, or a strip that happens to contain the origin
+    /// lights a cell nobody is pointing at.
+    pointer_seen: bool,
 
     // --- Screen edge glow ---
     edge_glow_program: glow::Program,
@@ -724,6 +760,13 @@ where
     /// when the groups change; see `Compositor::refresh_tab_titles`.
     tab_title_textures: Vec<Vec<Option<(glow::Texture, u32, u32)>>>,
     tab_titles_dirty: bool,
+    /// The tags overview's cell labels, one `(cell index, texture, w, h)` per
+    /// rasterised digit, and the key they were rasterised from. Same bargain
+    /// `tab_title_textures` strikes: the grid repaints on every client damage
+    /// and every pointer motion while it is open, so rasterising, uploading
+    /// and deleting one texture per cell per frame is pure waste.
+    tags_grid_label_textures: Vec<(usize, glow::Texture, u32, u32)>,
+    tags_grid_labels_key: Option<TagsGridLabelKey>,
     /// The (group, tab) cell under the pointer, if any. Kept out of
     /// `window_groups` on purpose: a motion event must never force the title
     /// textures to rebuild, so hover lives here and only costs a repaint.
@@ -919,6 +962,13 @@ where
 
     // --- VRR (Variable Refresh Rate) ---
     is_game_window: HashMap<u32, bool>,
+    /// "VRR is enabled *and* the focused window's class looks like a game" —
+    /// a guess, made by `rules::update_vrr_state`, whose only consumer is
+    /// `get_vrr_refresh_rate`'s choice of internal frame-pacing target. It is
+    /// deliberately *not* what `get_metrics` reports as `vrr_active`: X11
+    /// gives the compositor no way to read back what the display actually
+    /// ran, and the wayland-udev backend means the KMS `VRR_ENABLED` it
+    /// programmed by that field.
     vrr_active: bool,
     vrr_last_check: std::time::Instant,
 
@@ -1081,6 +1131,10 @@ impl<C: CompositorConnection> Drop for Compositor<C> {
             for (tex, _, _) in self.tab_title_textures.drain(..).flatten().flatten() {
                 self.gl.delete_texture(tex);
             }
+            for (_, tex, _, _) in self.tags_grid_label_textures.drain(..) {
+                self.gl.delete_texture(tex);
+            }
+            self.tags_grid_labels_key = None;
             self.gl.delete_program(self.transition_program);
             self.gl.delete_program(self.portal_program);
             self.gl.delete_program(self.edge_glow_program);
@@ -1218,6 +1272,14 @@ impl<C: CompositorConnection> Drop for Compositor<C> {
         }
         // Undo the MANUAL redirect so the X server renders windows normally again
         let _ = self.conn.unredirect_subwindows_manual(self.root);
+        // Hand the shaped-in card regions back before letting go of the
+        // overlay: the composite overlay window is reference-counted per
+        // client, so a release is not guaranteed to destroy it, and an
+        // overlay that outlived this compositor must not keep swallowing
+        // presses for cards nothing draws any more.
+        if !self.overlay_input_shape.is_empty() {
+            let _ = self.conn.set_overlay_input_shape(self.overlay_window, &[]);
+        }
         let _ = self.conn.release_overlay_window(self.root);
         let _ = self.conn.flush_x11();
         self.graphics.shutdown();

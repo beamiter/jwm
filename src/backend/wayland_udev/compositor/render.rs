@@ -67,6 +67,62 @@ unsafe fn rasterize_toast_text(
     }
 }
 
+/// Shadow quad for a window at scene rect `(x, y, w, h)` in animation frame
+/// `anim`: the animated window rect (centre-scaled by `anim.scale`, shifted
+/// down by `anim.dy` — exactly the rect the window quad draws) moved by the
+/// configured `offset` and expanded by the blur `spread` on every side.
+/// Returns the quad `[x, y, w, h]` and the unexpanded window size the SDF
+/// shader measures its penumbra against.
+fn shadow_quad(
+    rect: (i32, i32, u32, u32),
+    anim: WindowAnimationFrame,
+    offset: [f32; 2],
+    spread: f32,
+) -> ([f32; 4], [f32; 2]) {
+    let (x, y, w, h) = rect;
+    let draw_w = w as f32 * anim.scale;
+    let draw_h = h as f32 * anim.scale;
+    let draw_x = x as f32 + (w as f32 - draw_w) * 0.5;
+    let draw_y = y as f32 + (h as f32 - draw_h) * 0.5 + anim.dy;
+    (
+        [
+            draw_x + offset[0] - spread,
+            draw_y + offset[1] - spread,
+            draw_w + 2.0 * spread,
+            draw_h + 2.0 * spread,
+        ],
+        [draw_w, draw_h],
+    )
+}
+
+/// Whether section 18c derives the encoded capture view this frame. A
+/// recording reads the view only on the frames its encoder consumes
+/// (`recording_frame_due`), so an active recorder between two captures must
+/// not pay a full-screen OETF pass per rendered frame. The frame that starts
+/// a recording still derives one, but not because that frame is captured —
+/// `Recording::start` anchors the capture clock at `now`, so the first frame
+/// the encoder takes is a whole interval later and derives its own view. The
+/// term stays because it is the frame that sizes and allocates the capture
+/// target, keeping that allocation off the first captured frame.
+const fn capture_view_needed(
+    kms_capture_pending: bool,
+    screenshot_pending: bool,
+    recording_frame_due: bool,
+    recording_start_pending: bool,
+) -> bool {
+    kms_capture_pending || screenshot_pending || recording_frame_due || recording_start_pending
+}
+
+/// The file a queued screenshot request will be written to.
+fn screenshot_request_path(
+    request: &crate::backend::compositor_common::screenshot::ScreenshotRequest,
+) -> &std::path::Path {
+    use crate::backend::compositor_common::screenshot::ScreenshotRequest;
+    match request {
+        ScreenshotRequest::Full(path) | ScreenshotRequest::Region { path, .. } => path.as_path(),
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum OverviewRenderRoute {
     LegacyEncoded,
@@ -102,6 +158,37 @@ const fn frame_output_route(
         return FrameOutputRoute::DeferredRegions;
     }
     FrameOutputRoute::EarlySrgbFallback
+}
+
+/// Where a frame draws the staged KMS external elements (cursor above drag
+/// icon above overlay/top layer trees). They are the top-most content of the
+/// scene, so they must land above every common-linear-aware overlay:
+///
+/// - the deferred routes keep the linear target bound through those overlays
+///   and draw the elements at the delivery point (section 18b), so the single
+///   per-output matrix + OETF applies to them exactly once;
+/// - the early-sRGB fallback route encodes at the section 11/12 boundary,
+///   *before* snap preview, overview, expose and peek; drawing the elements
+///   ahead of that encode would bury the cursor under those overlays, so the
+///   route blits the (already encoded) textures after the last linear-aware
+///   class instead (section 15b/15c boundary — every later class is
+///   encoded-only and therefore absent whenever elements were staged);
+/// - the legacy route never stages elements.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ExternalElementPass {
+    Skipped,
+    EncodedAfterLinearAwareOverlays,
+    LinearAtDelivery,
+}
+
+const fn external_element_pass(output_route: FrameOutputRoute) -> ExternalElementPass {
+    match output_route {
+        FrameOutputRoute::LegacyEncoded => ExternalElementPass::Skipped,
+        FrameOutputRoute::EarlySrgbFallback => ExternalElementPass::EncodedAfterLinearAwareOverlays,
+        FrameOutputRoute::DeferredHardware | FrameOutputRoute::DeferredRegions => {
+            ExternalElementPass::LinearAtDelivery
+        }
+    }
 }
 
 const fn overview_render_route(output_route: FrameOutputRoute) -> OverviewRenderRoute {
@@ -296,13 +383,15 @@ fn is_opaque_output_occluder(candidate: OcclusionCandidate) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        FrameOutputRoute, OcclusionCandidate, OutputColorFrameState, OverviewRenderRoute,
-        RetainedTexturePass, RetainedTextureProgram, attention_requires_continuous_frames,
-        edge_glow_requires_continuous_frames, frame_output_route, intersect_scissors,
-        is_opaque_output_occluder, oriented_content_uv, overview_monitor_scissor,
-        overview_render_route, postprocess_requires_continuous_frames, premultiplied_blend_factors,
-        previous_frame_requires_srgb_transition_snapshot, retained_color_plan,
-        snap_preview_allows_partial_damage, transform_for_encoded_srgb,
+        ExternalElementPass, FrameOutputRoute, OcclusionCandidate, OutputColorFrameState,
+        OverviewRenderRoute, RetainedTexturePass, RetainedTextureProgram, WindowAnimationFrame,
+        attention_requires_continuous_frames, capture_view_needed,
+        edge_glow_requires_continuous_frames, external_element_pass, frame_output_route,
+        intersect_scissors, is_opaque_output_occluder, oriented_content_uv,
+        overview_monitor_scissor, overview_render_route, postprocess_requires_continuous_frames,
+        premultiplied_blend_factors, previous_frame_requires_srgb_transition_snapshot,
+        retained_color_plan, shadow_quad, snap_preview_allows_partial_damage,
+        transform_for_encoded_srgb,
     };
     use crate::backend::wayland_udev::color_pipeline::{ColorTransform, TransferKind};
     use smithay::backend::renderer::gles::ffi;
@@ -374,6 +463,204 @@ mod tests {
         assert_eq!(
             overview_render_route(FrameOutputRoute::DeferredRegions),
             OverviewRenderRoute::DirectLinear
+        );
+    }
+
+    #[test]
+    fn staged_external_elements_land_above_every_linear_aware_overlay() {
+        // The deferred routes hold the linear target open through snap
+        // preview, overview, expose and peek, so the elements go in at the
+        // delivery point. The early-sRGB fallback encodes *before* those four
+        // classes, so drawing there would bury the cursor under them: that
+        // route blits the already-encoded textures after the last of them
+        // instead. The legacy route never receives staged elements.
+        assert_eq!(
+            external_element_pass(FrameOutputRoute::LegacyEncoded),
+            ExternalElementPass::Skipped
+        );
+        assert_eq!(
+            external_element_pass(FrameOutputRoute::EarlySrgbFallback),
+            ExternalElementPass::EncodedAfterLinearAwareOverlays
+        );
+        for route in [
+            FrameOutputRoute::DeferredHardware,
+            FrameOutputRoute::DeferredRegions,
+        ] {
+            assert_eq!(
+                external_element_pass(route),
+                ExternalElementPass::LinearAtDelivery
+            );
+        }
+    }
+
+    #[test]
+    fn the_early_srgb_fallback_draws_its_elements_after_the_encode_not_before() {
+        // Source parity with the frame body: on the fallback route the call
+        // must sit below the linear-aware overlays. The needles are assembled
+        // at runtime and matched against the production half of the file only,
+        // so this test cannot satisfy itself with its own text.
+        let source = include_str!("render.rs");
+        let encode = format!(
+            "if output_route == {}::EarlySrgbFallback",
+            "FrameOutputRoute"
+        );
+        let peek = format!(
+            "self.render_{}(gl, &projection, focused, scene",
+            "peek_mode"
+        );
+        let blit = format!(
+            "self.render_external_elements_{}(gl, &projection)",
+            "encoded"
+        );
+        let at = |needle: &str| {
+            source
+                .find(needle)
+                .unwrap_or_else(|| panic!("the frame body must contain `{needle}`"))
+        };
+        assert!(
+            at(&encode) < at(&peek) && at(&peek) < at(&blit),
+            "the cursor blit must follow the encode and every linear-aware overlay"
+        );
+    }
+
+    #[test]
+    fn the_shadow_quad_travels_with_the_window_it_belongs_to() {
+        let rect = (100, 200, 40u32, 20u32);
+        let offset = [2.0, 4.0];
+        let spread = 5.0;
+
+        // A settled window keeps the historical quad: rect + offset, grown by
+        // the spread on every side, measured against its unscaled size.
+        assert_eq!(
+            shadow_quad(rect, WindowAnimationFrame::REST, offset, spread),
+            ([97.0, 199.0, 50.0, 30.0], [40.0, 20.0])
+        );
+
+        // Slide: the shadow drops by exactly the window's own dy, so no band
+        // is left behind above the travelling body.
+        let slide = WindowAnimationFrame {
+            scale: 1.0,
+            alpha: 0.0,
+            dy: 24.0,
+        };
+        let ([sx, sy, sw, sh], size) = shadow_quad(rect, slide, offset, spread);
+        assert_eq!(
+            ([sx, sy, sw, sh], size),
+            ([97.0, 223.0, 50.0, 30.0], [40.0, 20.0])
+        );
+
+        // Scale: the quad shrinks around the same centre the window quad uses
+        // and the SDF measures the penumbra against the drawn size.
+        let zoom = WindowAnimationFrame {
+            scale: 0.5,
+            alpha: 1.0,
+            dy: 0.0,
+        };
+        let ([zx, zy, zw, zh], zsize) = shadow_quad(rect, zoom, offset, spread);
+        assert_eq!(
+            ([zx, zy, zw, zh], zsize),
+            ([107.0, 204.0, 30.0, 20.0], [20.0, 10.0])
+        );
+    }
+
+    #[test]
+    fn capture_view_derivation_skips_frames_the_recorder_will_not_read() {
+        // An active recorder between two captures reads nothing, so the
+        // full-screen OETF pass must not run for it.
+        assert!(!capture_view_needed(false, false, false, false));
+        assert!(capture_view_needed(false, false, true, false));
+        // The frame that starts a recording still derives one — it allocates
+        // the capture target ahead of the first captured frame — and the
+        // other two consumers are unchanged.
+        assert!(capture_view_needed(false, false, false, true));
+        assert!(capture_view_needed(true, false, false, false));
+        assert!(capture_view_needed(false, true, false, false));
+    }
+
+    /// The source text of one item's body: everything between the `{` that
+    /// opens it and the `}` that closes it. Used to narrow a source scan to a
+    /// single function so a needle cannot match an unrelated site.
+    fn body_of<'a>(source: &'a str, needle: &str) -> &'a str {
+        let start = source
+            .find(needle)
+            .unwrap_or_else(|| panic!("missing `{needle}`"));
+        let body_start = source[start..]
+            .find('{')
+            .map(|offset| start + offset + 1)
+            .unwrap_or_else(|| panic!("missing body for `{needle}`"));
+        let mut depth = 1usize;
+        for (offset, ch) in source[body_start..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return &source[body_start..body_start + offset];
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("unterminated body for `{needle}`");
+    }
+
+    #[test]
+    fn the_toast_pass_re_derives_hover_from_the_geometry_it_just_recorded() {
+        // Hover used to be derived from motion events alone, so a card that
+        // slid under — or out from under — a motionless pointer kept the
+        // wrong paused state, and a paused card never expires. The pass that
+        // rebuilds the geometry must re-ask: on the emptied-stack path, which
+        // has to release the hover its last geometry implied, and again after
+        // the drawn cards are recorded. Every needle is assembled at runtime
+        // and the haystack is narrowed to the `render_toasts` body, so this
+        // test cannot satisfy itself with its own text.
+        let source = include_str!("render.rs");
+        let body = body_of(source, &format!("unsafe fn render_{}(", "toasts"));
+        let refresh = format!("self.{}(now)", "refresh_toast_hover");
+        let record = format!("self.{}.push(toast::ToastRects", "toast_rects");
+        let recorded = body
+            .find(&record)
+            .expect("render_toasts records each drawn card's hit geometry");
+        assert!(
+            body[..recorded].contains(&refresh),
+            "an emptied stack must release the hover its last geometry implied"
+        );
+        assert!(
+            body[recorded..].contains(&refresh),
+            "the drawn stack must re-derive hover from the geometry it just recorded"
+        );
+    }
+
+    #[test]
+    fn every_pass_that_stops_drawing_the_tags_grid_frees_its_baked_labels() {
+        // The tag-number labels are cached across frames now, and both the
+        // panel closing (`set_system_ui(None)`) and a panel swap happen
+        // without a current GL context. Deleting them is therefore the render
+        // pass's job: the frame body's *no overlay* branch, plus the two
+        // `render_system_ui` branches that draw something other than a grid.
+        // Needles are assembled at runtime and the haystacks are narrowed to
+        // the two production bodies, so this test cannot match its own text.
+        let source = include_str!("render.rs");
+        let free = format!("self.{}(gl)", "clear_tags_grid_labels");
+
+        let frame = body_of(source, &format!("pub(crate) fn render_{}(", "frame"));
+        let freed_at = frame
+            .find(&free)
+            .expect("a frame with no system UI overlay must free the baked labels");
+        let guard = format!("if self.{}.is_some() {{", "system_ui");
+        let guard_at = frame[..freed_at]
+            .rfind(&guard)
+            .expect("the free belongs under the system-UI branch");
+        assert!(
+            frame[guard_at..freed_at].contains("} else {"),
+            "the labels must be freed where no overlay draws, not beside the one that does"
+        );
+
+        let panel = body_of(source, &format!("unsafe fn render_system_{}(", "ui"));
+        assert_eq!(
+            panel.matches(&free).count(),
+            2,
+            "the filmstrip branch and the non-grid fall-through each free the cache"
         );
     }
 
@@ -944,18 +1231,43 @@ impl WaylandCompositor {
     /// the frame's per-output matrix + OETF applies to them exactly once.
     /// Blending stays the canonical premultiplied state.
     fn render_external_elements_into_linear(&self, gl: &ffi::Gles2, projection: &[f32; 16]) {
-        if self.external_elements.is_empty() || self.linear_fbo == 0 {
+        if self.linear_fbo == 0 {
+            return;
+        }
+        self.render_external_elements_into(gl, projection, self.linear_fbo, true);
+    }
+
+    /// Draw the staged external elements onto the already-encoded output
+    /// target. The early-sRGB fallback route runs its encode pass before the
+    /// common-linear-aware overlays (snap preview, overview, expose, peek),
+    /// so on that route the elements are drawn after those overlays instead
+    /// of before the encode: the cursor stays top-most exactly as it does at
+    /// the deferred routes' delivery point. The staged textures are
+    /// premultiplied encoded sRGB, so with `u_scene_linear = 0` this is a
+    /// plain blit — no transfer is applied a second time.
+    fn render_external_elements_encoded(&self, gl: &ffi::Gles2, projection: &[f32; 16]) {
+        self.render_external_elements_into(gl, projection, self.output_fbo, false);
+    }
+
+    fn render_external_elements_into(
+        &self,
+        gl: &ffi::Gles2,
+        projection: &[f32; 16],
+        target_fbo: u32,
+        scene_linear: bool,
+    ) {
+        if self.external_elements.is_empty() {
             return;
         }
         unsafe {
-            gl.BindFramebuffer(ffi::FRAMEBUFFER, self.linear_fbo);
+            gl.BindFramebuffer(ffi::FRAMEBUFFER, target_fbo);
             gl.Viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
             self.enable_premultiplied_blend(gl);
             gl.UseProgram(self.program);
             self.set_projection_uniform(gl, self.win_uniforms.projection, projection);
             gl.Uniform1i(self.win_uniforms.texture, 0);
             gl.Uniform1i(self.win_uniforms.color_managed, 0);
-            gl.Uniform1i(self.win_uniforms.scene_linear, 1);
+            gl.Uniform1i(self.win_uniforms.scene_linear, i32::from(scene_linear));
             gl.Uniform1f(self.win_uniforms.dim, 1.0);
             gl.Uniform1f(self.win_uniforms.desat, 0.0);
             gl.Uniform1f(self.win_uniforms.radius, 0.0);
@@ -2280,14 +2592,17 @@ impl WaylandCompositor {
                     let win_radius = wt.corner_radius_override.unwrap_or(self.corner_radius);
                     gl.Uniform1f(self.shadow_uniforms.radius, win_radius);
 
-                    // Shadow rect: expanded by spread + offset
-                    let sx = x as f32 + ox - spread;
-                    let sy = y as f32 + oy - spread;
-                    let sw = w as f32 + 2.0 * spread;
-                    let sh = h as f32 + 2.0 * spread;
+                    // Shadow rect: the animated window rect (open/close zoom
+                    // and slide — the same frame the window quad draws with)
+                    // shifted by the offset and expanded by the spread, so the
+                    // shadow travels with the window instead of staying at
+                    // its rest position while the body slides or zooms.
+                    let anim = self.window_animation_frame_for(wt);
+                    let ([sx, sy, sw, sh], [size_w, size_h]) =
+                        shadow_quad((x, y, w, h), anim, [ox, oy], spread);
 
                     self.set_rect_uniform(gl, self.shadow_uniforms.rect, sx, sy, sw, sh);
-                    gl.Uniform2f(self.shadow_uniforms.size, w as f32, h as f32);
+                    gl.Uniform2f(self.shadow_uniforms.size, size_w, size_h);
 
                     gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
                 }
@@ -2877,6 +3192,12 @@ impl WaylandCompositor {
                 }
             }
 
+            // The per-window dim/desat writes above must not outlive the
+            // scene: every later pass that reuses this program (expose, peek,
+            // tags-grid live cells) draws its windows at full saturation, and
+            // whichever window happened to be front-most must not decide it.
+            gl.Uniform1f(self.win_uniforms.dim, 1.0);
+            gl.Uniform1f(self.win_uniforms.desat, 0.0);
             gl.BindVertexArray(0);
             gl.UseProgram(0);
         }
@@ -2901,12 +3222,14 @@ impl WaylandCompositor {
         );
         // The staged external elements only land in the persistent FBO chain
         // when this frame's route still flows through the linear target.
-        // `LegacyEncoded` never touches it; the other three routes each call
-        // `render_external_elements_into_linear` just before their conversion
-        // point.
+        // `LegacyEncoded` never touches it; the deferred routes draw them into
+        // the linear target at the delivery point and the early-sRGB fallback
+        // blits them encoded after the last linear-aware overlay
+        // (`external_element_pass`).
+        let external_elements_pass = external_element_pass(output_route);
         let drew_external_elements = !self.external_elements.is_empty()
             && scene_linear_active
-            && !matches!(output_route, FrameOutputRoute::LegacyEncoded);
+            && external_elements_pass != ExternalElementPass::Skipped;
         // Retained-window and border passes are color-domain aware, so keep
         // them in the common FP16 target even when a later encoded-only effect
         // will force the global-sRGB fallback. Encoding at the old main-window
@@ -3213,12 +3536,13 @@ impl WaylandCompositor {
 
         if output_route == FrameOutputRoute::EarlySrgbFallback {
             use crate::backend::wayland_udev::color_pipeline::{IDENTITY_CTM, TransferKind};
-            // Internalized external elements still belong above every
-            // linear-aware pass; drawing them before this encode keeps them
-            // on the same single linear→sRGB conversion as the rest of the
-            // scene. (This route only coexists with staged elements on
-            // topologies where neither hardware nor region delivery exists.)
-            self.render_external_elements_into_linear(gl, &projection);
+            // Internalized external elements are not drawn here: the
+            // linear-aware overlays below (13–15b) draw after this encode, and
+            // the cursor belongs above them. They are blitted encoded at the
+            // 15b/15c boundary instead (`external_element_pass`). This route
+            // only coexists with staged elements on topologies where neither
+            // hardware nor region delivery exists.
+            //
             // The passes above are linear-aware. Convert only at the first
             // encoded-only layer so their existing z-order remains intact and
             // all following effects see the historical global-sRGB domain.
@@ -3327,6 +3651,15 @@ impl WaylandCompositor {
         // the expose overlay above.
         if self.peek_opacity > 0.0 {
             self.render_peek_mode(gl, &projection, focused, scene, tail_draws_linear);
+        }
+
+        // Early-sRGB fallback: the staged external elements go above the
+        // linear-aware overlays that just drew into the encoded output, and
+        // below nothing — every class from 15c on is encoded-only, so none of
+        // them is visible on a frame that staged elements (the staging
+        // condition is the compositor's own linear-tail verdict).
+        if external_elements_pass == ExternalElementPass::EncodedAfterLinearAwareOverlays {
+            self.render_external_elements_encoded(gl, &projection);
         }
 
         // =================================================================
@@ -3475,10 +3808,7 @@ impl WaylandCompositor {
         // common-linear scene (cursor above drag icon above overlay above
         // top-layer). Draw them at the end of the linear passes so the final
         // per-output matrix + OETF below applies to them exactly once.
-        if matches!(
-            output_route,
-            FrameOutputRoute::DeferredHardware | FrameOutputRoute::DeferredRegions
-        ) {
+        if external_elements_pass == ExternalElementPass::LinearAtDelivery {
             self.render_external_elements_into_linear(gl, &projection);
         }
         // Linear-tail-safe frames remain in the common FP16 target through
@@ -3528,11 +3858,13 @@ impl WaylandCompositor {
         // semantics, so derive the canonical view with one identity-matrix
         // sRGB OETF pass into the dedicated capture target. The derivation is
         // downstream of the route decision and never feeds back into it.
-        let capture_view_needed = capture_view_required
-            || self.screenshot_requests.has_pending()
-            || self.recording.is_active()
-            || self.pending_recording_start.is_some();
-        if tail_draws_linear && capture_view_needed {
+        let derive_capture_view = capture_view_needed(
+            capture_view_required,
+            self.screenshot_requests.has_pending(),
+            recording_frame_due,
+            self.pending_recording_start.is_some(),
+        );
+        if tail_draws_linear && derive_capture_view {
             self.encode_capture_view(gl, &projection);
         }
         self.capture_view = if !tail_draws_linear {
@@ -3570,11 +3902,18 @@ impl WaylandCompositor {
                     self.capture_pending_screenshots(gl);
                 },
                 // A deferred route without a fresh capture view (allocation
-                // failure) must not read output-referred pixels; keep the
-                // requests queued and retry on the next frame.
+                // failure) must not read output-referred pixels. Retrying on
+                // every frame would repeat the same allocation failure while
+                // keeping an otherwise static desktop rendering forever, so
+                // the queued requests fail now, loudly, instead of silently
+                // never completing.
                 None => {
-                    log::warn!("[compositor] screenshot delayed: encoded capture view unavailable");
-                    self.needs_render = true;
+                    for request in self.screenshot_requests.take_all() {
+                        log::error!(
+                            "[compositor] screenshot {} dropped: encoded capture view unavailable",
+                            screenshot_request_path(&request).display()
+                        );
+                    }
                 }
             }
         }
@@ -3635,6 +3974,11 @@ impl WaylandCompositor {
             unsafe {
                 self.render_system_ui(gl, &projection);
             }
+        } else {
+            // The overlay is gone: `set_system_ui(None)` runs without a GL
+            // context, so the labels it baked are freed on the first frame
+            // that has one.
+            unsafe { self.clear_tags_grid_labels(gl) };
         }
 
         // =================================================================
@@ -3666,7 +4010,11 @@ impl WaylandCompositor {
                 }
             }
         }
-        if self.recording.is_active() {
+        // Gated on the same `recording_frame_due` snapshot that decided
+        // whether section 18c derived the capture view: a deadline that
+        // expires mid-frame waits for the next frame (`needs_render` keeps
+        // reporting it due) instead of reading a view this frame never made.
+        if self.recording.is_active() && recording_frame_due {
             // When the cursor class was internalized this frame, the capture
             // source already carries the real pointer image; the recorder's
             // synthesised arrow would draw a second cursor on top of it.
@@ -3684,10 +4032,17 @@ impl WaylandCompositor {
                 // Deferring delivery left the scanout texture output-referred
                 // and the capture view allocation failed: drop this recording
                 // frame rather than encode pixels in the wrong color domain.
+                // The dropped frame is still retired against the capture
+                // clock — an allocation failure repeats, and a due frame that
+                // never advances holds the compositor at a full-screen
+                // recomposite (and one log line) per loop iteration for the
+                // rest of the recording.
                 None => {
-                    log::warn!(
-                        "[compositor] recording frame skipped: encoded capture view unavailable"
-                    )
+                    if self.recording.skip_frame() {
+                        log::warn!(
+                            "[compositor] recording frame skipped: encoded capture view unavailable"
+                        );
+                    }
                 }
             }
         }
@@ -3901,7 +4256,9 @@ impl WaylandCompositor {
         rows.stat("FPS", format!("{:.1}", self.fps));
         rows.stat("Frame time", format!("{frame_ms:.2} ms"));
         rows.stat("Frames", self.frame_count);
-        rows.stat("VRR", if self.vrr_active { "on" } else { "off" });
+        // What the hardware is running, not what the focused window's class
+        // suggested: the KMS presentation status feeds `output_vrr_active`.
+        rows.stat("VRR", if self.output_vrr_active { "on" } else { "off" });
         rows.section("Scene");
         rows.stat("Windows", self.windows.len());
         rows.stat("Monitors", self.monitors.len());
@@ -4773,26 +5130,48 @@ impl WaylandCompositor {
         let [panel_x, panel_y, panel_w, panel_h] = geometry.panel;
         let accent = self.border_gradient_color_a;
 
-        // The panel repaints only when the overview changes, so the cell
-        // labels are rasterized per redraw instead of living in a cache.
+        // The panel repaints on every rendered frame while it is up — the
+        // backend forces a redraw on every pointer motion, and dragging is
+        // this overlay's primary interaction — so the cell labels are baked
+        // per key, not per frame. The key carries every input their pixels
+        // depend on: `sysui_text_dirty` cannot be the trigger here because
+        // `update_system_ui_textures` consumes it before the grid draws.
         let config = crate::config::CONFIG.load();
         let description = config.system_ui_font();
         let text_size = crate::backend::compositor_font::ui_font_pixel_size(description);
-        let mut labels: Vec<(usize, u32, u32, u32)> = Vec::new();
-        for (index, content) in grid.cells.iter().enumerate() {
-            if index >= geometry.cells.len() {
-                break;
+        let inks = [ui.item_ink, ui.hint_ink];
+        let drawn = grid.cells.len().min(geometry.cells.len());
+        let label_cells = || {
+            grid.cells[..drawn]
+                .iter()
+                .map(|content| (content.tag_index, content.occupied))
+        };
+        if !self
+            .tags_grid_labels_key
+            .matches(description, text_size, &inks, label_cells())
+        {
+            unsafe { self.clear_tags_grid_labels(gl) };
+            let mut baked = 0usize;
+            for (index, content) in grid.cells[..drawn].iter().enumerate() {
+                let color = if content.occupied {
+                    ui.item_ink
+                } else {
+                    ui.hint_ink
+                };
+                let text = format!("{}", content.tag_index + 1);
+                if let Some((tex, w, h)) =
+                    unsafe { rasterize_toast_text(gl, &text, description, text_size, color) }
+                {
+                    self.tags_grid_labels.push((index, tex, w, h));
+                    baked += 1;
+                }
             }
-            let color = if content.occupied {
-                ui.item_ink
-            } else {
-                ui.hint_ink
-            };
-            let text = format!("{}", content.tag_index + 1);
-            if let Some((tex, w, h)) =
-                unsafe { rasterize_toast_text(gl, &text, description, text_size, color) }
-            {
-                labels.push((index, tex, w, h));
+            // Only a complete set is worth remembering. A cell whose raster
+            // came back empty is retried next frame — the cleared key already
+            // matches nothing — rather than cached as permanently unlabeled.
+            if baked == drawn {
+                self.tags_grid_labels_key
+                    .refresh(description, text_size, inks, label_cells());
             }
         }
 
@@ -4973,8 +5352,10 @@ impl WaylandCompositor {
             gl.Uniform1i(text_tex, 0);
             gl.Uniform1f(text_opacity, 1.0);
             gl.ActiveTexture(ffi::TEXTURE0);
-            for (index, tex, w, h) in &labels {
-                let cell = &geometry.cells[*index];
+            for (index, tex, w, h) in &self.tags_grid_labels {
+                let Some(cell) = geometry.cells.get(*index) else {
+                    continue;
+                };
                 let scale = if *index == grid.selected {
                     film::SELECTED_SCALE
                 } else {
@@ -5011,11 +5392,20 @@ impl WaylandCompositor {
             }
             gl.BindVertexArray(0);
             gl.UseProgram(0);
+        }
+    }
 
-            for (_, tex, _, _) in labels {
-                gl.DeleteTextures(1, &tex);
+    /// Delete the cached tag-number labels and forget the key they were baked
+    /// for. Requires a current GL context; every caller runs inside the render
+    /// pass. The key is cleared with the textures so the pair can never
+    /// disagree about what is on the GPU.
+    pub(crate) unsafe fn clear_tags_grid_labels(&mut self, gl: &ffi::Gles2) {
+        for (_, texture, _, _) in self.tags_grid_labels.drain(..) {
+            if texture != 0 {
+                unsafe { gl.DeleteTextures(1, &texture) };
             }
         }
+        self.tags_grid_labels_key.forget();
     }
 
     /// The on-screen tag's live cell content: every window's texture scaled
@@ -5062,6 +5452,7 @@ impl WaylandCompositor {
                 gl.Uniform1f(self.win_uniforms.radius, 6.0);
                 gl.Uniform2f(self.win_uniforms.size, rect[2], rect[3]);
                 gl.Uniform1f(self.win_uniforms.dim, 1.0);
+                gl.Uniform1f(self.win_uniforms.desat, 0.0);
 
                 // Use content_uv to crop out CSD shadows/decorations.
                 let [cu, cv, cw, ch] = win.content_uv;
@@ -5121,6 +5512,9 @@ impl WaylandCompositor {
         unsafe { self.update_system_ui_textures(gl, &overlay) };
         let viewport = overlay.effective_viewport(self.screen_w as i32, self.screen_h as i32);
         if let Some(strip) = &overlay.filmstrip {
+            // Any other panel means the baked tag-number labels have no next
+            // frame to be reused by: free them while a context is current.
+            unsafe { self.clear_tags_grid_labels(gl) };
             unsafe { self.render_layout_filmstrip(gl, projection, strip, viewport) };
             return;
         }
@@ -5128,6 +5522,7 @@ impl WaylandCompositor {
             unsafe { self.render_tags_grid(gl, projection, grid, viewport) };
             return;
         }
+        unsafe { self.clear_tags_grid_labels(gl) };
         let dims = |slot: usize| -> (f32, f32) {
             self.sysui_textures[slot]
                 .map(|(_, w, h)| (w as f32, h as f32))
@@ -5553,19 +5948,36 @@ impl WaylandCompositor {
         unsafe { self.free_toast_textures(gl, &removed) };
         if self.toast_stack.is_empty() {
             self.toast_rects.clear();
+            self.refresh_toast_hover(now);
             return;
         }
         // Rebuilt below from the cards actually drawn this frame, so
         // hover/click hit-testing never sees stale geometry.
         self.toast_rects.clear();
 
-        let toasts: Vec<(u64, crate::backend::api::ToastNotification, f32)> = self
+        use crate::backend::compositor_common::toast;
+
+        // The stack keeps the render loop at display rate for every card's
+        // whole lifetime, so the per-frame working set is the Copy triple
+        // only. A notification's strings are cloned once, on the frame that
+        // rasterizes its textures, never per frame.
+        let toasts: Vec<(u64, u8, f32)> = self
             .toast_stack
             .iter()
-            .map(|toast| (toast.id, toast.notification.clone(), toast.alpha(now)))
+            .map(|toast| (toast.id, toast.notification.urgency, toast.alpha(now)))
             .collect();
-        for (id, notification, _) in &toasts {
-            unsafe { self.update_toast_textures(gl, *id, notification) };
+        for &(id, _, _) in &toasts {
+            if self.toast_textures.contains_key(&id) {
+                continue;
+            }
+            let Some(notification) = self
+                .toast_stack
+                .get(id)
+                .map(|toast| toast.notification.clone())
+            else {
+                continue;
+            };
+            unsafe { self.update_toast_textures(gl, id, &notification) };
         }
 
         let ui = ui_theme::palette();
@@ -5575,8 +5987,6 @@ impl WaylandCompositor {
         let pad = 18.0;
         let pad_left = 30.0;
         let stripe_w = 3.0;
-
-        use crate::backend::compositor_common::toast;
 
         // The stack hangs off the bar; the shared geometry owns the OSD slot
         // reservation and the per-card offsets so both backends place the
@@ -5591,30 +6001,37 @@ impl WaylandCompositor {
             let text_tex = super::get_uniform_loc(gl, self.sysui_text_program, "u_texture");
             let text_opacity = super::get_uniform_loc(gl, self.sysui_text_program, "u_opacity");
 
-            for (id, notification, alpha) in &toasts {
+            for &(id, urgency, alpha) in &toasts {
                 let slots = self
                     .toast_textures
-                    .get(id)
+                    .get(&id)
                     .map(|set| set.text)
                     .unwrap_or([None, None]);
-                let button_slots: Vec<Option<(u32, u32, u32)>> = self
-                    .toast_textures
-                    .get(id)
-                    .map(|set| set.buttons.clone())
-                    .unwrap_or_default();
+                // The chip row is a fixed array: the stack caps actions at
+                // `MAX_TOAST_ACTIONS` before anyone sees them.
+                let mut button_slots = [None; toast::MAX_TOAST_ACTIONS];
+                let mut button_count = 0;
+                if let Some(set) = self.toast_textures.get(&id) {
+                    for (slot, texture) in button_slots.iter_mut().zip(&set.buttons) {
+                        *slot = *texture;
+                        button_count += 1;
+                    }
+                }
+                let button_slots = &button_slots[..button_count];
                 let (title_w, title_h) = slots[0]
                     .map(|(_, w, h)| (w as f32, h as f32))
                     .unwrap_or((0.0, 0.0));
                 let (body_w, body_h) = slots[1]
                     .map(|(_, w, h)| (w as f32, h as f32))
                     .unwrap_or((0.0, 0.0));
-                let button_widths: Vec<f32> = button_slots
-                    .iter()
-                    .map(|slot| slot.map(|(_, w, _)| w as f32).unwrap_or(0.0))
-                    .collect();
+                let mut button_widths = [0.0f32; toast::MAX_TOAST_ACTIONS];
+                for (width, slot) in button_widths.iter_mut().zip(button_slots) {
+                    *width = slot.map(|(_, w, _)| w as f32).unwrap_or(0.0);
+                }
+                let button_widths = &button_widths[..button_count];
                 let content_w = title_w
                     .max(body_w)
-                    .max(toast::action_row_width(&button_widths))
+                    .max(toast::action_row_width(button_widths))
                     .clamp(
                         220.0,
                         crate::backend::compositor_common::toast::MAX_TEXT_WIDTH_PX as f32,
@@ -5624,13 +6041,13 @@ impl WaylandCompositor {
                 if body_h > 0.0 {
                     target_h += 6.0 + body_h;
                 }
-                if !button_slots.is_empty() {
+                if button_count > 0 {
                     target_h += toast::ACTIONS_ROW_EXTRA_H;
                 }
 
                 let (card_w, card_h) = self
                     .toast_stack
-                    .motion_for(*id)
+                    .motion_for(id)
                     .map_or((target_w, target_h), |motion| {
                         motion.advance_with_motion(now, target_w, target_h, motion_enabled)
                     });
@@ -5638,22 +6055,17 @@ impl WaylandCompositor {
                 // The chip row hangs under the text block, aligned with it.
                 let text_bottom = pad + title_h + if body_h > 0.0 { 6.0 + body_h } else { 0.0 };
                 let button_rects = toast::action_row_layout(
-                    &button_widths,
+                    button_widths,
                     x + pad_left,
                     y + text_bottom + toast::ACTION_ROW_TOP_GAP,
                 );
-                self.toast_rects.push(toast::ToastRects {
-                    id: *id,
-                    card: [x, y, card_w, card_h],
-                    buttons: button_rects.clone(),
-                });
                 // Only the card actually touching the bar squares off; the
                 // dock also refuses to square anything when there is no bar.
                 let (radius_top, radius) = dock.radii(card_h, ui.toast_radius, top);
-                let a = *alpha;
+                let a = alpha;
                 let opened = (card_w / target_w.max(1.0)).clamp(0.0, 1.0);
                 let content_a = a * opened * opened;
-                let accent = match notification.urgency {
+                let accent = match urgency {
                     2 => [0.95, 0.30, 0.30, 1.0],
                     0 => [0.45, 0.50, 0.62, 1.0],
                     _ => self.border_gradient_color_a,
@@ -5676,7 +6088,7 @@ impl WaylandCompositor {
                 // Action chips: raised chip fill with an accent hairline; the
                 // hovered chip trades its fill for an accent wash.
                 for (index, rect) in button_rects.iter().enumerate() {
-                    let hovered = button_hover == Some((*id, index));
+                    let hovered = button_hover == Some((id, index));
                     let fill = if hovered {
                         [accent[0], accent[1], accent[2], 0.45 * content_a]
                     } else {
@@ -5739,11 +6151,23 @@ impl WaylandCompositor {
                     }
                 }
 
+                // Recorded after the chip labels drew from it, so the layout
+                // moves into the hit-test geometry instead of being cloned.
+                self.toast_rects.push(toast::ToastRects {
+                    id,
+                    card: [x, y, card_w, card_h],
+                    buttons: button_rects,
+                });
+
                 top = toast::stack_next(top, target_h);
             }
             gl.BindVertexArray(0);
             gl.UseProgram(0);
         }
+        // Cards re-flow when a neighbour expires, so one can slide under — or
+        // out from under — a motionless pointer. The pause follows the
+        // geometry just recorded, not the last motion event.
+        self.refresh_toast_hover(now);
     }
 
     /// Rasterize (and cache) the OSD label texture; re-render only when the

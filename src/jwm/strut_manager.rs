@@ -56,7 +56,9 @@ fn edge_depth(advertised: u32, distance_to_desktop_edge: i64, extent: i32) -> i3
     (i64::from(advertised) - distance_to_desktop_edge.max(0)).clamp(0, limit) as i32
 }
 
-fn clamp_opposing_edges(first: i32, second: i32, extent: i32) -> (i32, i32) {
+/// Shared with the layer-shell dock path in `layout::helpers`, which trusts
+/// a client-owned exclusive zone exactly as much as this trusts a strut.
+pub(crate) fn clamp_opposing_edges(first: i32, second: i32, extent: i32) -> (i32, i32) {
     // A client-owned property is untrusted. Preserve the near edge first, but
     // never allow two malformed reservations to create a zero/negative work
     // area that later turns into enormous u32 ConfigureWindow dimensions.

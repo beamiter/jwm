@@ -23,8 +23,11 @@
 //! hands to the helper through its environment:
 //!
 //! - helper → jwm commands: `bluetooth_pairing_prompt` (bluez asked
-//!   something; only updates the panel) and `bluetooth_pairing_done`
-//!   (terminal outcome).
+//!   something; only updates the panel), `bluetooth_pairing_done` (terminal
+//!   outcome for a device, so it names one) and [`FAILED_COMMAND`] (the
+//!   session died before there was a device to name — no system bus, no
+//!   adapter, an agent bluez refused — which is why it carries a cookie and
+//!   nothing else).
 //! - jwm → helper event on the `bluetooth` topic: `bluetooth/pairing_response`
 //!   carrying the user's answer, or a cancellation. jwm broadcasts responses
 //!   only while a session is active; a late answer for a dead session never
@@ -67,6 +70,19 @@ pub const INBOUND_WINDOW: Duration = Duration::from_secs(60);
 
 /// The event name jwm broadcasts pairing answers on.
 pub const RESPONSE_EVENT: &str = "bluetooth/pairing_response";
+
+/// The command a helper sends when its session died before it could name a
+/// device — the address-less counterpart of `bluetooth_pairing_done`.
+///
+/// `done` is the report of an *outcome for a device* and its address is what
+/// binds it to a session, so a helper that never reached the bus (or never
+/// found an adapter, or whose agent bluez refused) has nothing to put in that
+/// field: an armed inbound window has no address until something rings it.
+/// Without this frame such a helper exits in milliseconds while the picker
+/// goes on claiming an armed sixty-second window, and the user watches a
+/// countdown for a window that does not exist. Scoped by cookie alone, which
+/// is what identifies the session in either direction.
+pub const FAILED_COMMAND: &str = "bluetooth_pairing_failed";
 
 /// What bluez is asking for, as named on the `bluetooth_pairing_prompt` wire.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -262,6 +278,21 @@ impl PairingSession {
         }
     }
 
+    /// Whether an address-less [`FAILED_COMMAND`] may end this session.
+    ///
+    /// Stricter than [`Self::matches`], because the frame carries less: the
+    /// cookie must be this session's, the session must be an inbound window
+    /// (an outbound helper knows its address from the start and reports
+    /// through `bluetooth_pairing_done`), and the window must still be
+    /// unbound. A window something already rang has a live helper behind it
+    /// — that is what pinned the address — so a frame claiming otherwise is
+    /// not describing this session, and letting it through would tear down a
+    /// prompt the user is looking at.
+    #[must_use]
+    pub fn matches_failure(&self, cookie: &str) -> bool {
+        self.cookie == cookie && self.kind == PairingKind::Inbound && self.address.is_none()
+    }
+
     /// Bind an inbound window to the device that called into it, and give the
     /// panel something to name. Returns false when the session is already
     /// bound to a different device — the caller must refuse that message.
@@ -448,6 +479,15 @@ pub struct DoneCommand {
     pub connected: Option<bool>,
 }
 
+/// A validated [`FAILED_COMMAND`] command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FailedCommand {
+    pub cookie: String,
+    /// Why the helper gave up, bounded and control-stripped exactly like
+    /// [`DoneCommand::error`]: it lands on the same picker status row.
+    pub error: Option<String>,
+}
+
 fn required_str<'a>(args: &'a Value, field: &str) -> Result<&'a str, String> {
     args.get(field)
         .and_then(Value::as_str)
@@ -579,15 +619,16 @@ pub fn service_label(uuid: &str) -> String {
     .to_string()
 }
 
-/// Parse and validate a `bluetooth_pairing_done` command. The error text is
-/// condensed to one bounded line: it lands on the picker's status row.
-pub fn parse_done_command(args: &Value) -> Result<DoneCommand, String> {
-    let ok = args
-        .get("ok")
-        .and_then(Value::as_bool)
-        .ok_or_else(|| "expected boolean field 'ok'".to_string())?;
-    let error = args
-        .get("error")
+/// One bounded, single-line failure reason, or `None` when the helper sent
+/// none.
+///
+/// The text is remote-controlled — it can be a bluez error carrying a device's
+/// own name — and it lands on the picker's status row: `lines()` stops a
+/// newline, but a tab, ESC, DEL or a C1 control would otherwise reach the row
+/// unfiltered. Shared by both terminal frames so neither can drift into a
+/// weaker bound than the other.
+fn error_field(args: &Value) -> Option<String> {
+    args.get("error")
         .and_then(Value::as_str)
         .map(|error| {
             error
@@ -596,15 +637,51 @@ pub fn parse_done_command(args: &Value) -> Result<DoneCommand, String> {
                 .unwrap_or_default()
                 .trim()
                 .chars()
+                .filter(|ch| !ch.is_control())
                 .take(MAX_ERROR_CHARS)
                 .collect::<String>()
         })
-        .filter(|error| !error.is_empty());
+        .filter(|error| !error.is_empty())
+}
+
+/// Parse and validate a [`FAILED_COMMAND`] command.
+///
+/// Deliberately no address: the frame exists precisely for a helper that died
+/// before there was a device to name, and demanding one would make it
+/// unsendable. The cookie is what binds it to a session, and
+/// [`PairingSession::matches_failure`] is what decides whether it may end one.
+pub fn parse_failed_command(args: &Value) -> Result<FailedCommand, String> {
+    Ok(FailedCommand {
+        cookie: cookie_field(args)?,
+        error: error_field(args),
+    })
+}
+
+/// The picker's status line after a helper reported it could not arm the
+/// window it was spawned for.
+///
+/// Not "pairing failed": nothing was being paired. The user pressed `a` and
+/// the machine could not offer the window, which is a different thing to say.
+#[must_use]
+pub fn inbound_failed_message(error: Option<&str>) -> String {
+    match error {
+        Some(reason) => format!("Cannot accept incoming requests \u{2014} {reason}"),
+        None => "Cannot accept incoming requests".to_string(),
+    }
+}
+
+/// Parse and validate a `bluetooth_pairing_done` command. The error text is
+/// condensed to one bounded line: it lands on the picker's status row.
+pub fn parse_done_command(args: &Value) -> Result<DoneCommand, String> {
+    let ok = args
+        .get("ok")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| "expected boolean field 'ok'".to_string())?;
     Ok(DoneCommand {
         address: address_field(args)?,
         cookie: cookie_field(args)?,
         ok,
-        error,
+        error: error_field(args),
         // A pairing that failed has nothing to connect; a helper that does
         // not send the field leaves the verdict unknown rather than false.
         connected: ok
@@ -923,6 +1000,16 @@ mod tests {
         assert!(!done.ok);
         assert_eq!(done.error.as_deref(), Some("first line"));
 
+        // A tab, DEL or C1 control survives `lines()` (which only stops a
+        // newline) but must never reach the picker's status row.
+        let done = parse_done_command(&serde_json::json!({
+            "address": ADDR, "cookie": "c", "ok": false,
+            "error": "first\tline\u{7f}\u{1b}",
+        }))
+        .unwrap();
+        assert_eq!(done.error.as_deref(), Some("firstline"));
+        assert!(!done.error.unwrap().chars().any(char::is_control));
+
         let ok = parse_done_command(&serde_json::json!({
             "address": ADDR, "cookie": "c", "ok": true,
         }))
@@ -949,6 +1036,75 @@ mod tests {
         ] {
             assert!(parse_done_command(&args).is_err(), "accepted {args}");
         }
+    }
+
+    #[test]
+    fn a_failure_frame_needs_no_address_and_only_ends_an_unrung_window() {
+        let now = Instant::now();
+        let cookie = "0123456789abcdef";
+
+        // The whole point of the frame: a helper that died before anything
+        // rang has no address to send, and demanding one would make the
+        // report unsendable — which is exactly how an armed window used to
+        // outlive the helper holding it by a full sixty seconds.
+        let failed = parse_failed_command(&serde_json::json!({
+            "cookie": cookie, "error": "no system bus",
+        }))
+        .unwrap();
+        assert_eq!(failed.cookie, cookie);
+        assert_eq!(failed.error.as_deref(), Some("no system bus"));
+
+        // The reason is bounded and stripped exactly like `done`'s: it lands
+        // on the same status row and comes from the same place.
+        let noisy = parse_failed_command(&serde_json::json!({
+            "cookie": cookie, "error": "first\tline\u{7f}\nsecond",
+        }))
+        .unwrap();
+        assert_eq!(noisy.error.as_deref(), Some("firstline"));
+        let long = parse_failed_command(&serde_json::json!({
+            "cookie": cookie, "error": "x".repeat(400),
+        }))
+        .unwrap();
+        assert_eq!(long.error.as_ref().map(String::len), Some(MAX_ERROR_CHARS));
+        let silent = parse_failed_command(&serde_json::json!({ "cookie": cookie })).unwrap();
+        assert_eq!(silent.error, None);
+
+        // A cookie is still mandatory: without one the frame names no
+        // session, and every session record is keyed by exactly that.
+        for args in [
+            serde_json::json!({}),
+            serde_json::json!({ "error": "no system bus" }),
+            serde_json::json!({ "cookie": "" }),
+            serde_json::json!({ "cookie": "x".repeat(MAX_COOKIE_CHARS + 1) }),
+        ] {
+            assert!(parse_failed_command(&args).is_err(), "accepted {args}");
+        }
+
+        // An unrung inbound window is the one thing it may end.
+        let mut window = PairingSession::inbound(cookie.to_string(), now);
+        assert!(window.matches_failure(cookie));
+        assert!(!window.matches_failure("someone-elses-cookie"));
+
+        // Once something has rung, a live helper is what pinned the address,
+        // so a frame claiming the session never started is not this session's
+        // — and letting it through would tear down a prompt on screen.
+        assert!(window.pin_address(ADDR, "MX Master 3S"));
+        assert!(!window.matches_failure(cookie));
+
+        // An outbound session reports through `done`, which has an address
+        // from the moment it is created.
+        let outbound = PairingSession::new(ADDR, "MX Master 3S", cookie.to_string(), now).unwrap();
+        assert!(!outbound.matches_failure(cookie));
+    }
+
+    #[test]
+    fn the_failed_window_message_says_what_actually_happened() {
+        // Nothing was being paired, so this must not read as a pairing
+        // failure; and the helper's reason is what tells the two apart.
+        let with_reason = inbound_failed_message(Some("no system bus"));
+        assert!(with_reason.contains("no system bus"), "{with_reason}");
+        assert!(!with_reason.to_lowercase().contains("pairing"));
+        assert!(!inbound_failed_message(None).contains('\u{2014}'));
     }
 
     #[test]

@@ -536,6 +536,12 @@ pub struct ControlCenterSnapshot {
     pub volume: Option<AudioState>,
     pub brightness: Option<u8>,
     pub audio_defaults: AudioDefaults,
+    /// Both full device lists, not just the two in use: `get_audio_devices`
+    /// answers with the whole inventory, and a query that had to fork
+    /// `wpctl status` to build it would stall a frame every time a bar
+    /// polled. The defaults above are derived from this same read, so the
+    /// row and the query can never disagree.
+    pub audio_inventory: AudioInventory,
     pub power_profiles: Option<(Vec<String>, String)>,
 }
 
@@ -545,10 +551,16 @@ impl ControlCenterSnapshot {
     /// established fallback order and error semantics.
     #[must_use]
     pub fn read() -> Self {
+        // One inventory read feeds both fields: the `AudioDefaults` reader is
+        // itself an inventory read plus `defaults()`, so asking for it
+        // separately would fork the audio tool twice per worker pass and
+        // could return two views of a topology that changed in between.
+        let audio_inventory = audio_inventory();
         Self {
             volume: volume_state(),
             brightness: brightness_percent(),
-            audio_defaults: AudioDefaults::read(),
+            audio_defaults: audio_inventory.defaults(),
+            audio_inventory,
             power_profiles: crate::jwm::features::power::profiles(),
         }
     }
@@ -790,11 +802,67 @@ pub fn audio_inventory_json(inventory: &AudioInventory) -> serde_json::Value {
     })
 }
 
+/// The `get_audio_devices` answer: the cached inventory plus the flag that
+/// tells an empty answer apart from an unread one.
+///
+/// Two empty lists are ambiguous on their own — this session may have no
+/// switchable audio at all (no wpctl, no pactl), or the control-center
+/// worker may simply not have read yet. `pending` is the discriminator, and
+/// its evidence is `read_completed` — whether a worker read has ever landed
+/// — never the mere existence of a snapshot, which `mutate_control_snapshot`
+/// creates the first time a volume key is pressed.
+///
+/// Devices in hand are an answer whatever the worker has done, exactly as
+/// `power_profile_report` treats profiles in hand: a post-switch cache write
+/// is as real a read as the worker's own.
+#[must_use]
+pub fn audio_devices_payload(
+    inventory: Option<&AudioInventory>,
+    read_completed: bool,
+) -> serde_json::Value {
+    let empty = AudioInventory::default();
+    let inventory = inventory.unwrap_or(&empty);
+    let known = !inventory.output.is_empty() || !inventory.input.is_empty();
+    let mut payload = audio_inventory_json(inventory);
+    payload["pending"] = serde_json::Value::Bool(!known && !read_completed);
+    payload
+}
+
 impl crate::jwm::Jwm {
     /// Both device lists, with the one in use marked. Bars and scripts use
     /// this to build their own audio menus.
+    ///
+    /// A read of memory only: the inventory is what the control-center
+    /// worker last sampled, never a `wpctl status` forked here. The
+    /// `get_audio_devices` arm asks `ensure_control_snapshot_refresh` first,
+    /// so the next poll is current, and `pending` says whether an empty
+    /// answer is "nothing to switch" or "not read yet".
     pub(crate) fn audio_devices_json(&self) -> serde_json::Value {
-        audio_inventory_json(&audio_inventory())
+        audio_devices_payload(
+            self.features
+                .control_snapshot
+                .as_ref()
+                .map(|snapshot| &snapshot.audio_inventory),
+            self.features.control_snapshot_refreshed_at.is_some(),
+        )
+    }
+
+    /// Adopt an inventory a command path already read, so the next
+    /// `get_audio_devices` does not answer with the pre-switch default
+    /// marker while the worker catches up.
+    ///
+    /// The epoch bump is what every other user mutation of this snapshot
+    /// does (`mutate_control_snapshot`): a worker read that was already in
+    /// flight when this landed is discarded rather than rolling the marker
+    /// back to what it saw before the switch.
+    pub(crate) fn cache_control_audio_inventory(&mut self, inventory: AudioInventory) {
+        self.features.control_snapshot_epoch = self.features.control_snapshot_epoch.wrapping_add(1);
+        let snapshot = self
+            .features
+            .control_snapshot
+            .get_or_insert_with(Default::default);
+        snapshot.audio_defaults = inventory.defaults();
+        snapshot.audio_inventory = inventory;
     }
 }
 
@@ -1071,6 +1139,107 @@ Source #51
                 "input3::capslock,leds,0,0%,1\nintel_backlight,backlight,2400,25%,9600\n"
             ),
             Some(25)
+        );
+    }
+
+    /// An empty `get_audio_devices` answer is two different sessions: one
+    /// with no switchable audio at all, and one whose worker has not read
+    /// yet. `pending` is the only thing that tells them apart, and its
+    /// evidence must be a completed read, never a snapshot object that a
+    /// volume key created.
+    #[test]
+    fn an_empty_audio_answer_says_whether_anybody_has_looked() {
+        let cold = audio_devices_payload(None, false);
+        assert_eq!(cold["output"], serde_json::json!([]));
+        assert_eq!(cold["input"], serde_json::json!([]));
+        assert_eq!(
+            cold["pending"],
+            serde_json::json!(true),
+            "an empty answer before the first read must not read as 'no audio control'"
+        );
+
+        // A volume key inserts a default snapshot long before any worker read
+        // lands, so an all-default inventory is not evidence of a read.
+        let nudged = audio_devices_payload(Some(&AudioInventory::default()), false);
+        assert_eq!(nudged["pending"], serde_json::json!(true));
+
+        let read_but_empty = audio_devices_payload(Some(&AudioInventory::default()), true);
+        assert_eq!(
+            read_but_empty["pending"],
+            serde_json::json!(false),
+            "a completed read with no devices is the real answer"
+        );
+
+        let inventory = AudioInventory {
+            output: vec![AudioDevice {
+                id: "49".to_string(),
+                description: "Speakers".to_string(),
+                is_default: true,
+            }],
+            input: Vec::new(),
+        };
+        let switched = audio_devices_payload(Some(&inventory), false);
+        assert_eq!(
+            switched["pending"],
+            serde_json::json!(false),
+            "devices in hand are an answer even before a worker read lands"
+        );
+        assert_eq!(switched["output"][0]["id"], "49");
+        assert_eq!(switched["output"][0]["default"], serde_json::json!(true));
+        assert_eq!(
+            inventory.defaults().name(AudioDirection::Output),
+            Some("Speakers")
+        );
+    }
+
+    /// `get_audio_devices` is polled by bars. The answer has to come out of
+    /// the control-center snapshot; a `wpctl status` forked here would stall
+    /// the frame on every poll. The needle is assembled at runtime and the
+    /// haystack is the accessor alone, so this cannot match its own text.
+    #[test]
+    fn audio_devices_json_never_forks_the_audio_tool_on_the_compositor_thread() {
+        const SOURCE: &str = include_str!("system_controls.rs");
+        let body = SOURCE
+            .split_once("fn audio_devices_json")
+            .expect("audio_devices_json")
+            .1
+            .split_once("\n    }\n")
+            .expect("the end of audio_devices_json")
+            .0;
+        assert!(
+            body.contains("control_snapshot"),
+            "audio_devices_json no longer serves the control-center snapshot"
+        );
+        let needle = format!("{}()", "audio_inventory");
+        assert!(
+            !body.contains(&needle),
+            "audio_devices_json regained an inline inventory read"
+        );
+    }
+
+    /// One worker pass must fork the audio tool once: the `AudioDefaults`
+    /// reader is itself an inventory read plus `defaults()`, so asking for
+    /// both separately would pay for two `wpctl status` runs and could return
+    /// two views of a topology that changed in between. Needle built at
+    /// runtime; haystack is the reader alone.
+    #[test]
+    fn the_control_snapshot_reads_the_audio_topology_once() {
+        const SOURCE: &str = include_str!("system_controls.rs");
+        let body = SOURCE
+            .split_once("impl ControlCenterSnapshot")
+            .expect("the snapshot reader")
+            .1
+            .split_once("\n}\n")
+            .expect("the end of the impl block")
+            .0;
+        let separate = format!("AudioDefaults::{}()", "read");
+        assert!(
+            !body.contains(&separate),
+            "ControlCenterSnapshot::read regained a second audio-tool fork"
+        );
+        assert!(
+            body.contains("audio_inventory.defaults()"),
+            "the snapshot's defaults must be derived from the inventory it read"
         );
     }
 }

@@ -49,8 +49,11 @@ pub const CELL_RADIUS: f32 = 6.0;
 pub const WINDOW_RADIUS: f32 = 2.5;
 /// Stroke width of the thumbnail outlines.
 pub const LINE_WIDTH: f32 = 1.25;
-/// How much larger the selected cell is drawn. Hit rectangles stay uniform, so
-/// this is presentation only.
+/// How much larger the selected cell is drawn. Both renderers lift that cell's
+/// film and exposed frame about the cell's own centre by this factor, and
+/// [`cell_at`] hit-tests the very same rectangles ([`presented_cell`]), so a
+/// press lands on the card the eye sees rather than on the film's resting
+/// place underneath it.
 pub const SELECTED_SCALE: f32 = 1.12;
 
 /// Padding between the panel edge and its contents.
@@ -181,15 +184,53 @@ fn sprockets(x: f32, y: f32, w: f32, h: f32, margin: f32) -> Vec<Rect> {
     holes
 }
 
-/// Which cell contains `(x, y)`, if any.
+fn rect_contains(rect: Rect, x: f32, y: f32) -> bool {
+    let [rx, ry, rw, rh] = rect;
+    x >= rx && x < rx + rw && y >= ry && y < ry + rh
+}
+
+/// A cell's film and its exposed frame as they are presented. The selected
+/// cell is lifted by [`SELECTED_SCALE`] about its own centre — film, frame,
+/// thumbnail and gate ring together — and that is exactly what both renderers
+/// draw. The hit-test has to read the same rectangles: against the unscaled
+/// ones every press along the edge of the lifted cell (which, since the hover
+/// moves the highlight, is the cell under the pointer) is tested against
+/// geometry nobody drew.
+pub fn presented_cell(cell: &Cell, selected: bool) -> (Rect, Rect) {
+    if !selected {
+        return (cell.cell, cell.frame);
+    }
+    let pivot = center(cell.cell);
+    (
+        scaled_about(cell.cell, pivot, SELECTED_SCALE),
+        scaled_about(cell.frame, pivot, SELECTED_SCALE),
+    )
+}
+
+/// Which cell contains `(x, y)`, if any, with `selected` the cell drawn
+/// lifted (see [`presented_cell`]).
 ///
 /// The whole cell is the target, not just its exposed frame, so the gaps
-/// between cells are the only dead space.
-pub fn cell_at(geometry: &StripGeometry, x: f32, y: f32) -> Option<usize> {
-    geometry.cells.iter().position(|cell| {
-        let [cx, cy, cw, ch] = cell.cell;
-        x >= cx && x < cx + cw && y >= cy && y < cy + ch
-    })
+/// between cells are the only dead space — and the lift reaches into the two
+/// gaps beside the selected cell, which is where a press has to follow it.
+///
+/// Cells are painted in index order, so the answer is the *last* one whose
+/// presented film covers the point: the card the eye sees on top. At every
+/// cell width [`strip_geometry`] produces the lift stays narrower than
+/// `CELL_GAP`, so it never actually reaches a neighbour's film and the order
+/// cannot matter today; taking it from the paint order anyway keeps the rule
+/// honest if those constants ever move, and matches the grid's
+/// ([`crate::backend::compositor_common::tags_grid::cell_at`]).
+pub fn cell_at(geometry: &StripGeometry, selected: Option<usize>, x: f32, y: f32) -> Option<usize> {
+    geometry
+        .cells
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(index, cell)| {
+            let (film, _) = presented_cell(cell, Some(index) == selected);
+            rect_contains(film, x, y).then_some(index)
+        })
 }
 
 /// Place one thumbnail window inside a cell's exposed frame.
@@ -228,6 +269,10 @@ mod tests {
 
     fn geom(count: usize) -> StripGeometry {
         strip_geometry([0.0, 0.0, 1920.0, 1080.0], count)
+    }
+
+    fn rects_overlap(a: Rect, b: Rect) -> bool {
+        a[0] < b[0] + b[2] && b[0] < a[0] + a[2] && a[1] < b[1] + b[3] && b[1] < a[1] + a[3]
     }
 
     #[test]
@@ -284,14 +329,174 @@ mod tests {
         let g = geom(13);
         for (index, cell) in g.cells.iter().enumerate() {
             let [x, y] = center(cell.cell);
-            assert_eq!(cell_at(&g, x, y), Some(index));
+            assert_eq!(cell_at(&g, None, x, y), Some(index));
+            // The lift is about the cell's own centre, so it leaves that
+            // point exactly where it was.
+            assert_eq!(cell_at(&g, Some(index), x, y), Some(index));
         }
         let [px, py, _, _] = g.panel;
         assert_eq!(
-            cell_at(&g, px + 1.0, py + 1.0),
+            cell_at(&g, None, px + 1.0, py + 1.0),
             None,
             "the title band is not a cell"
         );
+    }
+
+    #[test]
+    fn the_selected_cell_is_hit_where_its_lift_draws_it() {
+        let g = geom(13);
+        let index = 6;
+        let cell = &g.cells[index];
+        let (film, frame) = presented_cell(cell, true);
+        // The presented rectangles are the renderers' own transform.
+        let pivot = center(cell.cell);
+        assert_eq!(film, scaled_about(cell.cell, pivot, SELECTED_SCALE));
+        assert_eq!(frame, scaled_about(cell.frame, pivot, SELECTED_SCALE));
+        assert_eq!(presented_cell(cell, false), (cell.cell, cell.frame));
+        // The lift grows the film past its resting edges on every side.
+        assert!(film[0] < cell.cell[0] && film[1] < cell.cell[1]);
+        assert!(film[0] + film[2] > cell.cell[0] + cell.cell[2]);
+        assert!(film[1] + film[3] > cell.cell[1] + cell.cell[3]);
+
+        let [mid_x, mid_y] = center(cell.cell);
+        // A point in the inter-cell gap left of the cell — dead space as far
+        // as the resting strip is concerned — is under the drawn overhang, so
+        // it belongs to the selected cell.
+        let x = cell.cell[0] - 1.0;
+        assert!(film[0] < x, "the overhang reaches into the gap");
+        assert_eq!(cell_at(&g, None, x, mid_y), None, "unscaled: the gap");
+        assert_eq!(cell_at(&g, Some(index), x, mid_y), Some(index));
+
+        // Same above the film base, where the lift stands out of the strip.
+        let above = cell.cell[1] - 1.0;
+        assert!(film[1] < above);
+        assert_eq!(cell_at(&g, None, mid_x, above), None);
+        assert_eq!(cell_at(&g, Some(index), mid_x, above), Some(index));
+
+        // Past the overhang the gap is dead space again, and the lift never
+        // reaches the neighbour's own film.
+        let outside = film[0] - 1.0;
+        let left = g.cells[index - 1].cell;
+        assert!(
+            outside > left[0] + left[2],
+            "the probe must stay in the gap, not on the neighbour"
+        );
+        assert_eq!(cell_at(&g, Some(index), outside, mid_y), None);
+    }
+
+    #[test]
+    fn the_lift_changes_the_answer_only_under_the_selected_cells_own_film() {
+        // Sweeps the whole film base and a band around it: an unselected cell
+        // must answer exactly as it did before the lift existed, and the lift
+        // may only claim points that were dead gap — never a pixel the eye
+        // still sees as a neighbour's card.
+        let g = geom(13);
+        let selected = 6;
+        let (film, _) = presented_cell(&g.cells[selected], true);
+        let [sx, sy, sw, sh] = g.strip;
+        let mut claimed = 0usize;
+        let mut y = sy - 12.0;
+        while y < sy + sh + 12.0 {
+            let mut x = sx - 12.0;
+            while x < sx + sw + 12.0 {
+                let resting = cell_at(&g, None, x, y);
+                let lifted = cell_at(&g, Some(selected), x, y);
+                if lifted != resting {
+                    assert!(
+                        rect_contains(film, x, y),
+                        "({x}, {y}) changed outside the lifted film"
+                    );
+                    assert_eq!(lifted, Some(selected));
+                    assert_eq!(resting, None, "the lift must not steal a drawn card");
+                    claimed += 1;
+                }
+                x += 1.0;
+            }
+            y += 1.0;
+        }
+        assert!(claimed > 0, "the lift has to claim some of the gap");
+    }
+
+    #[test]
+    fn the_lift_stays_inside_the_gap_at_every_size_the_strip_lays_out() {
+        // What lets the two neighbours keep every pixel of their own film:
+        // the lift is narrower than CELL_GAP at both ends of the cell-width
+        // clamp. If a constant ever breaks this, the paint-order rule in
+        // `cell_at` is what decides the overlap — pinned separately below.
+        for (w, h) in [
+            (320.0, 240.0),
+            (1024.0, 768.0),
+            (1366.0, 768.0),
+            (1920.0, 1080.0),
+            (3840.0, 2160.0),
+        ] {
+            for count in [1usize, 2, 5, 7, 13, 20, 31] {
+                let g = strip_geometry([0.0, 0.0, w, h], count);
+                for index in 0..count {
+                    let (film, _) = presented_cell(&g.cells[index], true);
+                    for (other, cell) in g.cells.iter().enumerate() {
+                        if other == index {
+                            continue;
+                        }
+                        assert!(
+                            !rects_overlap(film, cell.cell),
+                            "{w}x{h} count={count}: cell {index}'s lift covers cell {other}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn where_films_overlap_the_one_painted_last_wins() {
+        // Both renderers walk `geometry.cells` in index order. Squeeze the
+        // gap out of a strip so the lift genuinely crosses into both
+        // neighbours, and the hit-test must answer with the card drawn on
+        // top: the lift covers the cell painted before it, and the cell
+        // painted after covers the lift.
+        let mut g = geom(3);
+        let [_, y, w, h] = g.cells[0].cell;
+        for (index, cell) in g.cells.iter_mut().enumerate() {
+            let x = index as f32 * w;
+            cell.cell = [x, y, w, h];
+            cell.frame = [x, y, w, h];
+        }
+        let index = 1;
+        let (film, _) = presented_cell(&g.cells[index], true);
+        let mid_y = center(g.cells[index].cell)[1];
+
+        let left = g.cells[0].cell;
+        let lx = left[0] + left[2] - 1.0;
+        assert!(film[0] < lx, "the lift must reach the earlier neighbour");
+        assert_eq!(cell_at(&g, None, lx, mid_y), Some(0));
+        assert_eq!(cell_at(&g, Some(index), lx, mid_y), Some(index));
+
+        let right = g.cells[2].cell;
+        let rx = right[0] + 1.0;
+        assert!(
+            film[0] + film[2] > rx,
+            "the lift must reach the later neighbour"
+        );
+        assert_eq!(cell_at(&g, None, rx, mid_y), Some(2));
+        assert_eq!(
+            cell_at(&g, Some(index), rx, mid_y),
+            Some(2),
+            "the film painted last owns the pixel"
+        );
+    }
+
+    #[test]
+    fn an_out_of_range_selection_lifts_nothing() {
+        let g = geom(5);
+        for (index, cell) in g.cells.iter().enumerate() {
+            let [x, y] = center(cell.cell);
+            assert_eq!(cell_at(&g, Some(99), x, y), Some(index));
+        }
+        let gap = g.cells[2].cell[0] - 1.0;
+        let mid_y = center(g.cells[2].cell)[1];
+        assert_eq!(cell_at(&g, Some(99), gap, mid_y), None);
+        assert_eq!(cell_at(&g, None, gap, mid_y), None);
     }
 
     #[test]
@@ -305,9 +510,9 @@ mod tests {
         assert!(py + ph <= viewport[1] + viewport[3] + 0.5);
 
         let [x, y] = center(g.cells[3].cell);
-        assert_eq!(cell_at(&g, x, y), Some(3));
+        assert_eq!(cell_at(&g, Some(3), x, y), Some(3));
         assert_eq!(
-            cell_at(&g, x - viewport[0], y - viewport[1]),
+            cell_at(&g, Some(3), x - viewport[0], y - viewport[1]),
             None,
             "monitor-local coordinates must not hit global film geometry"
         );

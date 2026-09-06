@@ -457,6 +457,86 @@ fn dirty_below_requires_full_blur_redraw(
         })
 }
 
+/// Everything the tags-grid cell labels are rasterised from, in one
+/// comparable value: the digit each cell draws (`tag_index + 1`) and the ink
+/// its occupancy picks, the system-UI font description and its pixel size.
+/// The two inks are carried whole rather than as a theme name, because they
+/// are what actually reaches the rasteriser — a palette edit that changed the
+/// ink without changing the theme's name would otherwise leave stale pixels
+/// on screen.
+///
+/// Nothing else moves the pixels: a label is drawn at its raster size, and
+/// only its origin follows the selected cell's lift.
+fn tags_grid_label_key(
+    cells: &[crate::backend::api::TagsGridCell],
+    font: &str,
+    size: f32,
+    item_ink: [u8; 4],
+    hint_ink: [u8; 4],
+) -> TagsGridLabelKey {
+    TagsGridLabelKey {
+        cells: cells
+            .iter()
+            .map(|cell| (cell.tag_index, cell.occupied))
+            .collect(),
+        font: font.to_string(),
+        size_bits: size.to_bits(),
+        item_ink,
+        hint_ink,
+    }
+}
+
+/// The composite overlay's INPUT shape for the toast cards drawn last frame:
+/// one server rectangle per card, in root coordinates.
+///
+/// The overlay is bootstrapped fully click-through (an empty INPUT region),
+/// which is right for a compositing surface and wrong for the one thing the
+/// compositor draws that a click means something to. JWM selects no button
+/// events on client windows and grabs only the configured modifier
+/// combinations on the *focused* one, so today a plain Button1 on a card that
+/// overlaps the focused client goes to the app and the WM's toast intercept
+/// never runs — whether a card is clickable depends on which window happens
+/// to be beneath it. Shaping the overlay to the cards puts the press on the
+/// overlay, which selects nothing and so propagates it to the root window the
+/// WM does select `ButtonPress` on, where the intercept already lives.
+///
+/// Only [`crate::backend::compositor_common::toast::ToastRects::card`] is
+/// shaped in — the same rectangle `hit_test` matches, chips included because
+/// they sit inside it. A card's drop shadow is drawn outside that rectangle
+/// and stays click-through, as does every other pixel of the screen.
+///
+/// Each rectangle is rounded *inwards* (`ceil` the origin, `floor` the far
+/// edge) so the shaped region is a subset of what the hit-test claims: every
+/// press the overlay takes is one `compositor_click_toast` will answer, and a
+/// half-pixel card edge is left to the client rather than swallowed and
+/// reported as a miss. Non-finite and degenerate rectangles contribute
+/// nothing, and the band is INT16/CARD16 because that is what an XFixes
+/// rectangle carries.
+fn toast_input_shape(
+    rects: &[crate::backend::compositor_common::toast::ToastRects],
+) -> Vec<(i16, i16, u16, u16)> {
+    const MIN: f32 = i16::MIN as f32;
+    const MAX: f32 = i16::MAX as f32;
+    let mut shape = Vec::with_capacity(rects.len());
+    for entry in rects {
+        let [x, y, w, h] = entry.card;
+        let (left, top, right, bottom) = (x.ceil(), y.ceil(), (x + w).floor(), (y + h).floor());
+        if !(left.is_finite() && top.is_finite() && right.is_finite() && bottom.is_finite()) {
+            continue;
+        }
+        let left = left.clamp(MIN, MAX) as i32;
+        let top = top.clamp(MIN, MAX) as i32;
+        let right = right.clamp(MIN, MAX) as i32;
+        let bottom = bottom.clamp(MIN, MAX) as i32;
+        let (width, height) = (right - left, bottom - top);
+        if width <= 0 || height <= 0 {
+            continue;
+        }
+        shape.push((left as i16, top as i16, width as u16, height as u16));
+    }
+    shape
+}
+
 impl<C: CompositorConnection> Compositor<C> {
     /// Arm or disarm the interactive screenshot scene freeze. The actual copy
     /// is deferred until the next completed scene, so the selection overlay
@@ -1139,8 +1219,18 @@ impl<C: CompositorConnection> Compositor<C> {
             dirty_fraction_percent: dirty_fraction * 100.0,
             window_count: self.windows.len(),
             blur_quality: format!("{:?}", self.blur_quality),
-            vrr_enabled: self.vrr_active,
-            vrr_active: self.vrr_active,
+            // `vrr_enabled` is the configured intent and `vrr_active` is what
+            // the hardware ran, and one IPC payload cannot mean two different
+            // things depending on which backend answered it. `self.vrr_active`
+            // is neither: it is "the focused window's class looks like a game",
+            // a guess this backend uses to pick an internal refresh target and
+            // has no way to check against the display. Reporting it as the
+            // hardware state is what made the two backends disagree.
+            vrr_enabled: crate::config::CONFIG.load().behavior().vrr_enabled,
+            // X11 has no equivalent of the KMS `VRR_ENABLED` the wayland-udev
+            // backend reads back per presented frame, so there is nothing
+            // honest to report but "not observed".
+            vrr_active: false,
             current_refresh_rate: self.get_vrr_refresh_rate(),
             input_latency_avg_ms: latency_stats.0,
             input_latency_p50_ms: latency_stats.1,
@@ -2034,28 +2124,11 @@ impl<C: CompositorConnection> Compositor<C> {
         let [panel_x, panel_y, panel_w, panel_h] = geometry.panel;
         let accent = self.border_gradient_color_a;
 
-        // The panel repaints only when the overview changes, so the cell
-        // labels are rasterized per redraw instead of living in a cache.
-        let config = crate::config::CONFIG.load();
-        let description = config.system_ui_font();
-        let text_size = crate::backend::compositor_font::ui_font_pixel_size(description);
-        let mut labels: Vec<(usize, glow::Texture, u32, u32)> = Vec::new();
-        for (index, content) in grid.cells.iter().enumerate() {
-            if index >= geometry.cells.len() {
-                break;
-            }
-            let color = if content.occupied {
-                ui.item_ink
-            } else {
-                ui.hint_ink
-            };
-            let text = format!("{}", content.tag_index + 1);
-            if let Some((tex, w, h)) =
-                self.rasterize_toast_text(&text, description, text_size, color)
-            {
-                labels.push((index, tex, w, h));
-            }
-        }
+        // The grid repaints on every client damage and every pointer motion
+        // while it is open — its live cell shows real window textures — so the
+        // labels are cached and only re-rasterised when what they are made of
+        // changes.
+        self.refresh_tags_grid_labels(&grid.cells);
 
         unsafe {
             self.gl.bind_vertex_array(Some(self.quad_vao));
@@ -2244,9 +2317,14 @@ impl<C: CompositorConnection> Compositor<C> {
             self.gl
                 .uniform_1_f32(self.hud_text_uniforms.opacity.as_ref(), 1.0);
             self.gl.active_texture(glow::TEXTURE0);
-            for (index, tex, w, h) in &labels {
-                let cell = &geometry.cells[*index];
-                let scale = if *index == grid.selected {
+            for &(index, tex, w, h) in &self.tags_grid_label_textures {
+                // The cache is keyed on the cell sequence, not on the panel
+                // geometry, so a label is drawn only where this frame's layout
+                // still has a cell for it.
+                let Some(cell) = geometry.cells.get(index) else {
+                    continue;
+                };
+                let scale = if index == grid.selected {
                     film::SELECTED_SCALE
                 } else {
                     1.0
@@ -2258,10 +2336,10 @@ impl<C: CompositorConnection> Compositor<C> {
                     self.hud_text_uniforms.rect.as_ref(),
                     tx,
                     ty,
-                    *w as f32,
-                    *h as f32,
+                    w as f32,
+                    h as f32,
                 );
-                self.gl.bind_texture(glow::TEXTURE_2D, Some(*tex));
+                self.gl.bind_texture(glow::TEXTURE_2D, Some(tex));
                 self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
             }
 
@@ -2292,11 +2370,57 @@ impl<C: CompositorConnection> Compositor<C> {
             }
             self.gl.bind_vertex_array(None);
             self.gl.use_program(None);
+        }
+    }
 
-            for (_, tex, _, _) in labels {
+    /// Rasterise and upload the tags-grid cell labels, once per change, the
+    /// same bargain `refresh_tab_titles` strikes for the tab strip. The
+    /// overview is not a still picture: its live cell draws the on-screen
+    /// tag's real windows, so the panel repaints on client damage, and the
+    /// backend forces a repaint on pointer motion — a rasterise + upload +
+    /// delete per cell per frame is pure waste.
+    ///
+    /// [`tags_grid_label_key`] names everything the pixels are made of, so a
+    /// theme or font reload under an open grid still rebuilds.
+    fn refresh_tags_grid_labels(&mut self, cells: &[crate::backend::api::TagsGridCell]) {
+        let ui = ui_theme::palette();
+        let config = crate::config::CONFIG.load();
+        let description = config.system_ui_font();
+        let size = crate::backend::compositor_font::ui_font_pixel_size(description);
+        let key = tags_grid_label_key(cells, description, size, ui.item_ink, ui.hint_ink);
+        if self.tags_grid_labels_key.as_ref() == Some(&key) {
+            return;
+        }
+        self.free_tags_grid_labels();
+        let mut labels = Vec::with_capacity(cells.len());
+        for (index, content) in cells.iter().enumerate() {
+            let color = if content.occupied {
+                ui.item_ink
+            } else {
+                ui.hint_ink
+            };
+            let text = format!("{}", content.tag_index + 1);
+            if let Some((tex, w, h)) = self.rasterize_toast_text(&text, description, size, color) {
+                labels.push((index, tex, w, h));
+            }
+        }
+        self.tags_grid_label_textures = labels;
+        self.tags_grid_labels_key = Some(key);
+    }
+
+    /// Drop the cached tags-grid labels and forget their key. Every path that
+    /// retires the overview calls this, so a texture can never outlive the
+    /// grid it belongs to and the next open rasterises fresh.
+    pub(super) fn free_tags_grid_labels(&mut self) {
+        if self.tags_grid_label_textures.is_empty() && self.tags_grid_labels_key.is_none() {
+            return;
+        }
+        unsafe {
+            for (_, tex, _, _) in self.tags_grid_label_textures.drain(..) {
                 self.gl.delete_texture(tex);
             }
         }
+        self.tags_grid_labels_key = None;
     }
 
     /// The on-screen tag's live cell content: every window's texture scaled
@@ -2324,6 +2448,15 @@ impl<C: CompositorConnection> Compositor<C> {
             self.gl
                 .uniform_4_f32(self.win_uniforms.uv_rect.as_ref(), 0.0, 0.0, 1.0, 1.0);
             self.gl.active_texture(glow::TEXTURE0);
+            // The window program's uniforms are sticky: the main pass leaves
+            // the last window's `desat` (and any ripple) behind, so a
+            // thumbnail drawn without resetting them inherits whatever was
+            // on top — the reset `capture_window_thumbnail` also performs.
+            self.gl.uniform_1_f32(self.win_uniforms.desat.as_ref(), 0.0);
+            self.gl
+                .uniform_1_f32(self.win_uniforms.ripple_progress.as_ref(), -1.0);
+            self.gl
+                .uniform_1_f32(self.win_uniforms.ripple_amplitude.as_ref(), 0.0);
 
             let mut outlines = Vec::new();
             for (window, norm) in &live.windows {
@@ -2864,20 +2997,31 @@ impl<C: CompositorConnection> Compositor<C> {
         self.free_toast_textures(&removed);
         if self.toast_stack.is_empty() {
             self.toast_rects.clear();
+            self.refresh_toast_hover(now);
+            self.sync_toast_input_shape();
             return;
         }
         // Rebuilt below from the cards actually drawn this frame, so
         // hover/click hit-testing never sees stale geometry.
         self.toast_rects.clear();
 
-        let toasts: Vec<(u64, crate::backend::api::ToastNotification, f32)> = self
+        // A card's textures are rasterized once, so only a card without a
+        // set yet needs its strings; in the steady state nothing is cloned.
+        let missing: Vec<(u64, crate::backend::api::ToastNotification)> = self
             .toast_stack
             .iter()
-            .map(|toast| (toast.id, toast.notification.clone(), toast.alpha(now)))
+            .filter(|toast| !self.toast_textures.contains_key(&toast.id))
+            .map(|toast| (toast.id, toast.notification.clone()))
             .collect();
-        for (id, notification, _) in &toasts {
+        for (id, notification) in &missing {
             self.update_toast_textures(*id, notification);
         }
+        // The draw loop reads plain data off each card: id, urgency, alpha.
+        let toasts: Vec<(u64, u8, f32)> = self
+            .toast_stack
+            .iter()
+            .map(|toast| (toast.id, toast.notification.urgency, toast.alpha(now)))
+            .collect();
 
         let ui = ui_theme::palette();
         self.ensure_glass_backdrop(ui);
@@ -2897,27 +3041,25 @@ impl<C: CompositorConnection> Compositor<C> {
 
         unsafe {
             self.gl.bind_vertex_array(Some(self.quad_vao));
-            for (id, notification, alpha) in &toasts {
-                let slots = self
-                    .toast_textures
-                    .get(id)
-                    .map(|set| set.text)
-                    .unwrap_or([None, None]);
-                let button_slots: Vec<Option<(glow::Texture, u32, u32)>> = self
-                    .toast_textures
-                    .get(id)
-                    .map(|set| set.buttons.clone())
-                    .unwrap_or_default();
+            for &(id, urgency, alpha) in &toasts {
+                // Borrowed for the whole card: the texture set is keyed by id
+                // and read in place, so no per-frame copy of the button Vec.
+                let set = self.toast_textures.get(&id);
+                let slots = set.map(|set| set.text).unwrap_or([None, None]);
                 let (title_w, title_h) = slots[0]
                     .map(|(_, w, h)| (w as f32, h as f32))
                     .unwrap_or((0.0, 0.0));
                 let (body_w, body_h) = slots[1]
                     .map(|(_, w, h)| (w as f32, h as f32))
                     .unwrap_or((0.0, 0.0));
-                let button_widths: Vec<f32> = button_slots
-                    .iter()
-                    .map(|slot| slot.map(|(_, w, _)| w as f32).unwrap_or(0.0))
-                    .collect();
+                let button_widths: Vec<f32> = set
+                    .map(|set| {
+                        set.buttons
+                            .iter()
+                            .map(|slot| slot.map(|(_, w, _)| w as f32).unwrap_or(0.0))
+                            .collect()
+                    })
+                    .unwrap_or_default();
                 let content_w = title_w
                     .max(body_w)
                     .max(toast::action_row_width(&button_widths))
@@ -2930,13 +3072,13 @@ impl<C: CompositorConnection> Compositor<C> {
                 if body_h > 0.0 {
                     target_h += 6.0 + body_h;
                 }
-                if !button_slots.is_empty() {
+                if !button_widths.is_empty() {
                     target_h += toast::ACTIONS_ROW_EXTRA_H;
                 }
 
                 let (card_w, card_h) = self
                     .toast_stack
-                    .motion_for(*id)
+                    .motion_for(id)
                     .map_or((target_w, target_h), |motion| {
                         motion.advance_with_motion(now, target_w, target_h, motion_enabled)
                     });
@@ -2948,18 +3090,13 @@ impl<C: CompositorConnection> Compositor<C> {
                     x + pad_left,
                     y + text_bottom + toast::ACTION_ROW_TOP_GAP,
                 );
-                self.toast_rects.push(toast::ToastRects {
-                    id: *id,
-                    card: [x, y, card_w, card_h],
-                    buttons: button_rects.clone(),
-                });
                 // Only the card actually touching the bar squares off; the
                 // dock also refuses to square anything when there is no bar.
                 let (radius_top, radius) = dock.radii(card_h, ui.toast_radius, top);
-                let a = *alpha;
+                let a = alpha;
                 let opened = (card_w / target_w.max(1.0)).clamp(0.0, 1.0);
                 let content_a = a * opened * opened;
-                let accent = match notification.urgency {
+                let accent = match urgency {
                     2 => [0.95, 0.30, 0.30, 1.0],
                     0 => [0.45, 0.50, 0.62, 1.0],
                     _ => self.border_gradient_color_a,
@@ -2981,7 +3118,7 @@ impl<C: CompositorConnection> Compositor<C> {
                 // Action chips: raised chip fill with an accent hairline; the
                 // hovered chip trades its fill for an accent wash.
                 for (index, rect) in button_rects.iter().enumerate() {
-                    let hovered = button_hover == Some((*id, index));
+                    let hovered = button_hover == Some((id, index));
                     let fill = if hovered {
                         [accent[0], accent[1], accent[2], 0.45 * content_a]
                     } else {
@@ -3040,7 +3177,9 @@ impl<C: CompositorConnection> Compositor<C> {
                     self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
                 }
                 for (index, rect) in button_rects.iter().enumerate() {
-                    if let Some((tex, w, h)) = button_slots.get(index).copied().flatten() {
+                    if let Some((tex, w, h)) =
+                        set.and_then(|set| set.buttons.get(index).copied().flatten())
+                    {
                         // Centered in the chip.
                         self.gl.uniform_4_f32(
                             self.hud_text_uniforms.rect.as_ref(),
@@ -3054,10 +3193,50 @@ impl<C: CompositorConnection> Compositor<C> {
                     }
                 }
 
+                // Recorded after the last draw that reads them, so the rects
+                // move into the hit-test table instead of being cloned.
+                self.toast_rects.push(toast::ToastRects {
+                    id,
+                    card: [x, y, card_w, card_h],
+                    buttons: button_rects,
+                });
+
                 top = toast::stack_next(top, target_h);
             }
             self.gl.bind_vertex_array(None);
             self.gl.use_program(None);
+        }
+        // Cards re-flow when a neighbour expires, so one can slide under — or
+        // out from under — a motionless pointer. The pause follows the
+        // geometry just recorded, not the last motion event.
+        self.refresh_toast_hover(now);
+        self.sync_toast_input_shape();
+    }
+
+    /// Give the overlay the INPUT shape [`toast_input_shape`] derives from the
+    /// cards just recorded, when that set changed.
+    ///
+    /// Called from both exits of the toast pass, so the shaped region is
+    /// always exactly the geometry `compositor_click_toast` hit-tests
+    /// against: the overlay never takes a press the hit-test would call a
+    /// miss, and an emptied stack hands every pixel back to the clients on
+    /// the same frame that stops drawing the last card.
+    ///
+    /// A refused request leaves the recorded shape alone, so the next toast
+    /// frame retries rather than believing a shape the server never applied.
+    fn sync_toast_input_shape(&mut self) {
+        let shape = toast_input_shape(&self.toast_rects);
+        if shape == self.overlay_input_shape {
+            return;
+        }
+        let applied = self
+            .conn
+            .set_overlay_input_shape(self.overlay_window, &shape);
+        match applied {
+            Ok(()) => self.overlay_input_shape = shape,
+            Err(error) => {
+                log::warn!("compositor: could not shape the overlay to the toast cards: {error}");
+            }
         }
     }
 
@@ -3882,8 +4061,12 @@ impl<C: CompositorConnection> Compositor<C> {
         // the compositor's fade-out finishes. Keep such compositor-owned
         // textures in a small closing layer so the fade is actually visible
         // instead of ticking an off-screen state until it is freed.
+        // Alpha-driven close animations (`fade`, `slide`) ride the same
+        // `fading_out` carrier whether standalone fading is on or not — the
+        // gate `retire_window` marks the texture with — so the layer must
+        // accept both, or the close is ticked down invisibly.
         let mut closing_scene = Vec::new();
-        let has_detached_fade = self.fading
+        let has_detached_fade = self.close_fade_driven()
             && self.windows.iter().any(|(&id, wt)| {
                 wt.fading_out && !scene.iter().any(|&(scene_id, ..)| scene_id == id)
             });
@@ -7098,10 +7281,152 @@ mod tests {
         edge_effects_require_composition, focus_highlight_style, intersect_gl_scissors,
         is_opaque_occluder, minimized_dock_requires_composition, presented_scene_copy_plan,
         rect_covers_output, resolve_and_draw_each, screenshot_freeze_change_needed,
-        screenshot_freeze_requires_composition, tfp_refresh_is_latency_critical,
+        screenshot_freeze_requires_composition, tags_grid_label_key,
+        tfp_refresh_is_latency_critical, toast_input_shape,
         transformed_overlays_require_full_redraw, transition_capture_plan, wallpaper_blend_plan,
         window_prefers_direct_presentation,
     };
+
+    fn toast_card(id: u64, card: [f32; 4]) -> crate::backend::compositor_common::toast::ToastRects {
+        crate::backend::compositor_common::toast::ToastRects {
+            id,
+            card,
+            buttons: Vec::new(),
+        }
+    }
+
+    /// Every point the shaped region hands to the overlay must be a point the
+    /// click hit-test claims, or the WM swallows a press and reports a miss.
+    fn shape_is_claimed_by_the_hit_test(card: [f32; 4], shaped: (i16, i16, u16, u16)) -> bool {
+        use crate::backend::compositor_common::toast::hit_test;
+        let rects = toast_card(1, card);
+        let (x, y, w, h) = shaped;
+        [
+            (f32::from(x), f32::from(y)),
+            (f32::from(x) + f32::from(w), f32::from(y)),
+            (f32::from(x), f32::from(y) + f32::from(h)),
+            (f32::from(x) + f32::from(w), f32::from(y) + f32::from(h)),
+        ]
+        .into_iter()
+        .all(|(px, py)| hit_test(&rects, px, py).is_some())
+    }
+
+    #[test]
+    fn the_overlay_input_shape_is_the_cards_and_only_the_cards() {
+        // Nothing on screen: the overlay is handed back whole, which is what
+        // keeps every other pixel click-through.
+        assert!(toast_input_shape(&[]).is_empty());
+
+        // A whole-pixel card is shaped in exactly.
+        let card = [100.0, 20.0, 300.0, 120.0];
+        let shape = toast_input_shape(&[toast_card(1, card)]);
+        assert_eq!(shape, vec![(100, 20, 300, 120)]);
+        assert!(shape_is_claimed_by_the_hit_test(card, shape[0]));
+
+        // One rectangle per card, in the drawn order, and the chips inside a
+        // card add none of their own: they already sit in the card body.
+        let two = toast_input_shape(&[
+            toast_card(1, card),
+            crate::backend::compositor_common::toast::ToastRects {
+                id: 2,
+                card: [100.0, 160.0, 300.0, 120.0],
+                buttons: vec![[130.0, 240.0, 80.0, 24.0]],
+            },
+        ]);
+        assert_eq!(two, vec![(100, 20, 300, 120), (100, 160, 300, 120)]);
+    }
+
+    #[test]
+    fn a_half_pixel_card_is_shaped_inwards_so_the_overlay_never_steals_a_miss() {
+        // An odd-width output centres the dock on a half pixel. Rounding
+        // outwards would put a sliver of the shape outside the rectangle
+        // `hit_test` matches: the overlay would take that press and the WM
+        // would answer `Miss`, dropping the click into background handling.
+        let card = [492.5, 30.5, 380.0, 96.0];
+        let shape = toast_input_shape(&[toast_card(1, card)]);
+        assert_eq!(shape, vec![(493, 31, 379, 95)]);
+        assert!(shape_is_claimed_by_the_hit_test(card, shape[0]));
+    }
+
+    #[test]
+    fn shapeless_cards_contribute_no_rectangle() {
+        // A card mid-open animation is a zero-width rectangle, and the
+        // envelope's `f32` arithmetic can hand over a non-finite one; neither
+        // is a region the server can be asked for.
+        for degenerate in [
+            [100.0, 20.0, 0.0, 120.0],
+            [100.0, 20.0, 300.0, 0.0],
+            [100.0, 20.0, -300.0, 120.0],
+            [f32::NAN, 20.0, 300.0, 120.0],
+            [100.0, f32::INFINITY, 300.0, 120.0],
+            [100.0, 20.0, f32::NAN, 120.0],
+            // Sub-pixel: `ceil` and `floor` meet, so there is no interior.
+            [100.25, 20.0, 0.5, 120.0],
+        ] {
+            assert!(
+                toast_input_shape(&[toast_card(1, degenerate)]).is_empty(),
+                "{degenerate:?} must not become a region"
+            );
+        }
+
+        // Off the left of an INT16 coordinate space: the visible remainder is
+        // still shaped in, and its origin stays inside the band a server
+        // rectangle can carry.
+        let clamped = toast_input_shape(&[toast_card(1, [-1.0e9, 20.0, 2.0e9, 120.0])]);
+        assert_eq!(clamped, vec![(i16::MIN, 20, u16::MAX, 120)]);
+    }
+
+    fn tags_cell(tag_index: usize, occupied: bool) -> crate::backend::api::TagsGridCell {
+        crate::backend::api::TagsGridCell {
+            tag_index,
+            windows: Vec::new(),
+            occupied,
+            urgent: false,
+            active: false,
+        }
+    }
+
+    #[test]
+    fn the_tags_grid_label_key_moves_with_every_input_that_moves_the_pixels() {
+        const INK: [u8; 4] = [200, 210, 220, 255];
+        const DIM: [u8; 4] = [110, 120, 130, 255];
+        let cells = vec![tags_cell(0, true), tags_cell(1, false)];
+        let base = tags_grid_label_key(&cells, "Sans 11", 14.0, INK, DIM);
+
+        // Identical inputs must reuse the cache; the whole point is that a
+        // steady grid does not re-rasterise while it repaints.
+        assert!(base == tags_grid_label_key(&cells, "Sans 11", 14.0, INK, DIM));
+
+        // The digit comes from the tag index...
+        let renumbered = vec![tags_cell(0, true), tags_cell(4, false)];
+        assert!(base != tags_grid_label_key(&renumbered, "Sans 11", 14.0, INK, DIM));
+        // ...the ink from occupancy...
+        let filled = vec![tags_cell(0, true), tags_cell(1, true)];
+        assert!(base != tags_grid_label_key(&filled, "Sans 11", 14.0, INK, DIM));
+        // ...and a cell appearing or disappearing changes the sequence.
+        assert!(base != tags_grid_label_key(&cells[..1], "Sans 11", 14.0, INK, DIM));
+
+        // Font, size and both theme inks are inputs the raster reads, so a
+        // reload under an open grid must not leave the old pixels up.
+        assert!(base != tags_grid_label_key(&cells, "Serif 11", 14.0, INK, DIM));
+        assert!(base != tags_grid_label_key(&cells, "Sans 11", 18.0, INK, DIM));
+        assert!(base != tags_grid_label_key(&cells, "Sans 11", 14.0, DIM, DIM));
+        assert!(base != tags_grid_label_key(&cells, "Sans 11", 14.0, INK, INK));
+
+        // A font description whose size parses as NaN must still hit its own
+        // cache; comparing the raw f32 would rebuild on every frame instead.
+        let degenerate = tags_grid_label_key(&cells, "Sans", f32::NAN, INK, DIM);
+        assert!(degenerate == tags_grid_label_key(&cells, "Sans", f32::NAN, INK, DIM));
+        assert!(degenerate != base);
+
+        // Fields the labels do not draw must not churn the cache: a window
+        // moving inside a cell, an urgency dot, the tag becoming current.
+        let mut noisy = cells.clone();
+        noisy[0].windows.push([0.1, 0.1, 0.4, 0.4]);
+        noisy[0].urgent = true;
+        noisy[1].active = true;
+        assert!(base == tags_grid_label_key(&noisy, "Sans 11", 14.0, INK, DIM));
+    }
 
     #[test]
     fn status_bar_texture_refresh_is_latency_critical() {

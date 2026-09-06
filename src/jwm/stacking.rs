@@ -6,7 +6,7 @@ use crate::backend::api::Backend;
 use crate::backend::common_define::WindowId;
 use crate::core::models::{ClientKey, MonitorKey};
 use crate::jwm::Jwm;
-use log::info;
+use log::debug;
 
 impl Jwm {
     /// 将窗口提升到堆叠顶部并聚焦
@@ -42,7 +42,10 @@ impl Jwm {
         backend: &mut dyn Backend,
         mon_key_opt: Option<MonitorKey>,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        info!("[restack]");
+        // A marker, not a diagnostic: `arrange` calls this once per monitor
+        // and every focus change calls it again, while the release default
+        // filter is `info`. Keep it out of the session log.
+        debug!("[restack]");
 
         let mon_key = mon_key_opt.ok_or("Monitor is required for restack operation")?;
         let monitor = self
@@ -130,7 +133,31 @@ impl Jwm {
 
         self.mark_bar_update_needed_if_visible(Some(monitor_num));
 
-        info!("[restack] finish");
+        debug!("[restack] finish");
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn restack_markers_stay_below_the_default_log_level() {
+        // `restack` runs on every arrange, every focus change and every
+        // stacking request; a bare marker at `info` is a write(2) into the
+        // journal for each. The needle is assembled at runtime, and the
+        // haystack stops at this module, so it cannot match here.
+        const SOURCE: &str = include_str!("stacking.rs");
+        let body = SOURCE
+            .split_once("fn restack")
+            .expect("restack")
+            .1
+            .split_once("#[cfg(test)]")
+            .expect("the test module")
+            .0;
+        let needle = format!("{}!(", "info");
+        assert!(
+            !body.contains(&needle),
+            "restack regained an info-level marker line"
+        );
     }
 }

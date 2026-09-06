@@ -50,30 +50,40 @@ fn decode_i32_bits(value: u32) -> i32 {
     i32::from_ne_bytes(value.to_ne_bytes())
 }
 
+/// Whether a rectangle is one X11 can actually be asked for.
+///
+/// The rule belongs to the shared value, not to this codec: the producer in
+/// the WM decides what to persist from the same band, and a producer one
+/// bound more generous than the encoder loses the whole minimize rather than
+/// one rectangle. Decoding shares it too — JWM must never write a property
+/// that the next JWM process would refuse to adopt.
+fn rect_is_configurable(rect: MinimizedRestoreRect) -> bool {
+    rect.is_configurable()
+}
+
 fn encode_rect(rect: MinimizedRestoreRect) -> Option<[u32; 4]> {
-    let w = u32::try_from(rect.w).ok()?;
-    let h = u32::try_from(rect.h).ok()?;
-    if w == 0 || h == 0 {
+    if !rect_is_configurable(rect) {
         return None;
     }
-    Some([encode_i32_bits(rect.x), encode_i32_bits(rect.y), w, h])
+    Some([
+        encode_i32_bits(rect.x),
+        encode_i32_bits(rect.y),
+        rect.w as u32,
+        rect.h as u32,
+    ])
 }
 
 fn decode_rect(words: &[u32]) -> Option<MinimizedRestoreRect> {
     let [x, y, w, h] = words else {
         return None;
     };
-    let w = i32::try_from(*w).ok()?;
-    let h = i32::try_from(*h).ok()?;
-    if w <= 0 || h <= 0 {
-        return None;
-    }
-    Some(MinimizedRestoreRect {
+    let rect = MinimizedRestoreRect {
         x: decode_i32_bits(*x),
         y: decode_i32_bits(*y),
-        w,
-        h,
-    })
+        w: i32::try_from(*w).ok()?,
+        h: i32::try_from(*h).ok()?,
+    };
+    rect_is_configurable(rect).then_some(rect)
 }
 
 fn decode_optional_rect(words: &[u32], present: bool) -> Option<Option<MinimizedRestoreRect>> {
@@ -226,6 +236,15 @@ pub(crate) fn decode_minimized_restore_v1<A: Copy + Eq>(
 mod tests {
     use super::*;
 
+    /// Coordinate band and extent ceiling of a restore rectangle, named for
+    /// the tests that walk their edges. `ConfigureWindow` carries x/y as
+    /// INT16 and width/height as CARD16; the rule itself lives on
+    /// [`MinimizedRestoreRect::is_configurable`], which both this codec and
+    /// the WM-side producer apply.
+    const MIN_RESTORE_COORDINATE: i32 = MinimizedRestoreRect::MIN_COORDINATE;
+    const MAX_RESTORE_COORDINATE: i32 = MinimizedRestoreRect::MAX_COORDINATE;
+    const MAX_RESTORE_DIMENSION: i32 = MinimizedRestoreRect::MAX_DIMENSION;
+
     const CARDINAL: u32 = 6;
 
     fn rect(x: i32, y: i32, w: i32, h: i32) -> MinimizedRestoreRect {
@@ -369,7 +388,63 @@ mod tests {
             let mut too_large = words;
             too_large[dimension] = (i32::MAX as u32) + 1;
             assert!(decode(&too_large).is_none(), "dimension word {dimension}");
+
+            // `apply_minimized_restore_before_adjust` copies the decoded
+            // rectangle into `client.geometry` unchecked, and this property
+            // is writable by the very client it describes. One pixel past
+            // what `ConfigureWindow` can carry is a forgery, not a window.
+            let mut past_card16 = words;
+            past_card16[dimension] = MAX_RESTORE_DIMENSION as u32 + 1;
+            assert!(decode(&past_card16).is_none(), "dimension word {dimension}");
+
+            let mut at_the_edge = words;
+            at_the_edge[dimension] = MAX_RESTORE_DIMENSION as u32;
+            assert!(decode(&at_the_edge).is_some(), "dimension word {dimension}");
         }
+    }
+
+    #[test]
+    fn every_present_rectangle_requires_an_int16_origin() {
+        let words = encode_minimized_restore_v1(snapshot()).expect("valid snapshot");
+        for coordinate in [4usize, 5, 8, 9, 12, 13] {
+            for forged in [
+                i32::MIN,
+                MIN_RESTORE_COORDINATE - 1,
+                MAX_RESTORE_COORDINATE + 1,
+                i32::MAX,
+            ] {
+                let mut out_of_band = words;
+                out_of_band[coordinate] = encode_i32_bits(forged);
+                assert!(
+                    decode(&out_of_band).is_none(),
+                    "coordinate word {coordinate} = {forged}"
+                );
+            }
+            for edge in [MIN_RESTORE_COORDINATE, MAX_RESTORE_COORDINATE] {
+                let mut at_the_edge = words;
+                at_the_edge[coordinate] = encode_i32_bits(edge);
+                assert!(
+                    decode(&at_the_edge).is_some(),
+                    "coordinate word {coordinate} = {edge}"
+                );
+            }
+        }
+    }
+
+    /// The encoder and the decoder answer "is this rectangle configurable?"
+    /// with one predicate, so a snapshot JWM writes is always one the next
+    /// JWM process can adopt.
+    #[test]
+    fn the_edge_of_the_configurable_band_still_round_trips() {
+        let mut state = snapshot();
+        state.visible_rect = rect(
+            MIN_RESTORE_COORDINATE,
+            MAX_RESTORE_COORDINATE,
+            MAX_RESTORE_DIMENSION,
+            1,
+        );
+        let words = encode_minimized_restore_v1(state).expect("edge of the band");
+        assert_eq!(decode(&words), Some(state));
     }
 
     #[test]
@@ -428,6 +503,18 @@ mod tests {
 
         let mut state = snapshot();
         state.fullscreen_restore_rect = Some(rect(0, 0, 1, 0));
+        assert!(encode_minimized_restore_v1(state).is_none());
+
+        let mut state = snapshot();
+        state.visible_rect.w = MAX_RESTORE_DIMENSION + 1;
+        assert!(encode_minimized_restore_v1(state).is_none());
+
+        let mut state = snapshot();
+        state.floating_rect = Some(rect(MAX_RESTORE_COORDINATE + 1, 0, 100, 100));
+        assert!(encode_minimized_restore_v1(state).is_none());
+
+        let mut state = snapshot();
+        state.fullscreen_restore_rect = Some(rect(0, MIN_RESTORE_COORDINATE - 1, 100, 100));
         assert!(encode_minimized_restore_v1(state).is_none());
     }
 }

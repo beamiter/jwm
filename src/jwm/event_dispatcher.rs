@@ -336,8 +336,19 @@ impl WMController for Jwm {
         let Ok(keysym) = backend.key_ops_mut().keysym_from_keycode(keycode) else {
             return;
         };
-        let commits = crate::jwm::features::switcher::modifier_of_keysym(keysym)
-            .is_some_and(|modifier| self.features.window_switcher_mods.contains(modifier));
+        // A gesture modifier the keysym table knows decides on its own; a
+        // modifier keysym it does not (Meta_L for a Win key under
+        // altwin:meta_win, Hyper_L, ...) is decided by the live mask, read
+        // back from the server now that the release has been processed —
+        // the event's own state field is the mask *before* the release.
+        let held = self.features.window_switcher_mods;
+        let commits = crate::jwm::features::switcher::release_commits(held, keysym, || {
+            let (_, _, mask, _) = backend.input_ops().query_pointer_root().ok()?;
+            Some(
+                backend.key_ops().clean_mods(mask)
+                    & crate::jwm::features::switcher::release_commit_mods(),
+            )
+        });
         if commits {
             if let Err(e) = self.commit_window_switcher(backend) {
                 error!(
@@ -356,27 +367,51 @@ impl WMController for Jwm {
         detail: u8,
         time: u32,
     ) {
-        // The Alt+Tab switcher holds no pointer grab, so only some clicks
-        // ever reach here — the desktop, the bar, Alt+click on a client.
-        // Whichever it is, the gesture ends: a row picks that window, any
-        // other press cancels.
+        // The switcher holds the pointer like every other clickable panel, so
+        // every press reaches here rather than the client its rows are drawn
+        // over — the wheel included, which X11 delivers as buttons 4-7. A
+        // click ends the gesture (button 1 on a row picks that window,
+        // anything else cancels); the wheel browses the list the way it does
+        // on every other panel, because a scroll asks for the next row, not
+        // for the switch in flight to be thrown away.
         if self.features.system_ui.is_window_switcher() {
             use crate::backend::api::SystemUiHitTarget;
-            if detail == 1 {
-                let (x, y) = backend
-                    .input_ops()
-                    .get_pointer_position()
-                    .unwrap_or(self.last_mouse_root);
-                if let SystemUiHitTarget::Item(row) = backend.compositor_system_ui_hit_test(x, y) {
-                    if self.features.system_ui.select_visible_row(row).is_some() {
+            use crate::jwm::features::switcher::SwitcherPress;
+            match crate::jwm::features::switcher::switcher_press(detail) {
+                SwitcherPress::PickRow => {
+                    let (x, y) = backend
+                        .input_ops()
+                        .get_pointer_position()
+                        .unwrap_or(self.last_mouse_root);
+                    if let SystemUiHitTarget::Item(row) =
+                        backend.compositor_system_ui_hit_test(x, y)
+                        && self.features.system_ui.select_visible_row(row).is_some()
+                    {
                         if let Err(e) = self.commit_window_switcher(backend) {
                             error!("Error committing window switcher from pointer: {:?}", e);
                         }
                         return;
                     }
+                    self.cancel_window_switcher(backend);
                 }
+                SwitcherPress::Browse(step) => {
+                    let (x, y) = backend
+                        .input_ops()
+                        .get_pointer_position()
+                        .unwrap_or(self.last_mouse_root);
+                    // The scrim stays inert, exactly as it does for the
+                    // panels below: a scroll nowhere near the card must not
+                    // move a selection the pointer is not on.
+                    if !matches!(
+                        backend.compositor_system_ui_hit_test(x, y),
+                        SystemUiHitTarget::Outside | SystemUiHitTarget::Unavailable
+                    ) {
+                        self.scroll_system_ui_from_pointer(backend, step);
+                    }
+                }
+                SwitcherPress::Inert => {}
+                SwitcherPress::Cancel => self.cancel_window_switcher(backend),
             }
-            self.cancel_window_switcher(backend);
             return;
         }
         if self.features.system_ui.is_layout_picker() {
@@ -470,6 +505,14 @@ impl WMController for Jwm {
     }
 
     fn on_button_release(&mut self, backend: &mut dyn Backend, _target: HitTarget, _time: u32) {
+        // A tab reorder drag ends with this release whatever consumes it.
+        // The drag holds no grab, so a modal — a capture, expose, a panel —
+        // can be entered mid-drag and swallow the release below; a drag left
+        // armed past that would commit on the next release anywhere, with
+        // that release's pointer as the drop. Taken first, ahead of every
+        // early return, it is committed only on the ordinary path and
+        // dropped on every other.
+        let tab_drag = self.tab_drag.take();
         if self.features.capture.take_swallowed_button_release() {
             return;
         }
@@ -564,10 +607,11 @@ impl WMController for Jwm {
 
         // Window-tab reorder drag: its press armed neither a backend
         // interaction nor `drag_ctl`, so the commit paths below have nothing
-        // to do for it. Commit an activated drag, discard a dormant one (a
-        // plain click), and clear the state either way.
-        if let Some(drag) = self.tab_drag.take() {
-            if drag.activated {
+        // to do for it. Commit an activated drag — unless expose took the
+        // screen mid-drag, whose overlay is no place to drop a cell — and
+        // discard a dormant one (a plain click); the state was cleared above.
+        if let Some(drag) = tab_drag {
+            if drag.activated && !self.features.expose_active {
                 let (rx, ry) = self.last_mouse_root;
                 if let Err(e) = self.commit_window_tab_reorder(backend, drag, rx, ry) {
                     error!("Error committing window tab reorder: {:?}", e);
@@ -1161,6 +1205,9 @@ impl WMController for Jwm {
                             .and_then(|key| self.state.monitors.get(key))
                             .map(|monitor| monitor.num);
                         self.mark_bar_update_needed_if_visible(monitor_num);
+                        // The grid's attention dot follows the same flag as
+                        // the bar's urgent mask, and nothing here arranges.
+                        self.refresh_tags_overview();
                     }
                 }
                 NetWmState::Above => {
@@ -4528,6 +4575,359 @@ mod tests {
 
         jwm.close_system_ui(&mut backend);
         assert!(!jwm.system_ui_dirty);
+    }
+
+    #[test]
+    fn a_press_on_the_lifted_cells_drawn_wireframe_arms_the_drag() {
+        use crate::backend::compositor_common::{layout_strip, tags_grid};
+
+        let (mut jwm, _client_key, win) =
+            jwm_with_overview_drag_source(0b001, [100, 100, 800, 600]);
+        let mut backend = RenderSpyBackend::new();
+
+        jwm.toggle_tags_overview(&mut backend, &WMArgEnum::Int(0))
+            .unwrap();
+        let (cells, cols, selected, outline) = {
+            let overview = jwm.features.system_ui.tags_overview().unwrap();
+            (
+                overview.cells.len(),
+                overview.cols,
+                overview.selected,
+                overview.cells[0].windows[0],
+            )
+        };
+        assert_eq!(selected, 0, "the on-screen tag opens highlighted");
+        let geometry = tags_grid::grid_geometry([0.0, 0.0, 1920.0, 1080.0], cells, cols);
+
+        // Both renderers lift the highlighted cell by SELECTED_SCALE about
+        // its own centre, wireframes included, so that is where the window
+        // is drawn — and the hover puts the highlight under the pointer, so
+        // the cell being pressed is always the lifted one.
+        let (_, frame) = tags_grid::presented_cell(&geometry.cells[0], true);
+        let drawn = layout_strip::window_rect(frame, outline);
+        let unscaled = layout_strip::window_rect(geometry.cells[0].frame, outline);
+        let press_x = drawn[0] + 2.0;
+        let press_y = drawn[1] + drawn[3] * 0.5;
+        assert!(
+            press_x < unscaled[0],
+            "the press must sit in the band the lift adds, which the \
+             unscaled hit-test does not cover"
+        );
+
+        jwm.press_tags_overview(&mut backend, press_x as f64, press_y as f64);
+        assert_eq!(
+            jwm.features.system_ui.tags_overview().unwrap().pending,
+            Some(crate::jwm::features::tags_overview::PendingCellPress {
+                cell: 0,
+                window: Some(win.raw()),
+                dragging: false,
+            }),
+            "the drawn edge of the wireframe is what arms the drag"
+        );
+    }
+
+    #[test]
+    fn urgency_moves_the_grids_attention_dot_without_an_arrange() {
+        let (mut jwm, client_key, _win) =
+            jwm_with_overview_drag_source(0b010, [100, 100, 800, 600]);
+        let mut backend = RenderSpyBackend::new();
+
+        jwm.toggle_tags_overview(&mut backend, &WMArgEnum::Int(0))
+            .unwrap();
+        assert!(!jwm.features.system_ui.tags_overview().unwrap().cells[1].urgent);
+
+        // The grid is modal, so the user cannot clear the flag by focusing
+        // the window; nothing on the urgency path arranges either. The dot
+        // still has to follow the status bar's mask.
+        jwm.system_ui_dirty = false;
+        jwm.seturgent(&mut backend, client_key, true).unwrap();
+        assert!(
+            jwm.features.system_ui.tags_overview().unwrap().cells[1].urgent,
+            "the cell of the tag that wants attention gains the dot"
+        );
+        assert!(jwm.system_ui_dirty, "and the panel is queued for a repaint");
+
+        jwm.seturgent(&mut backend, client_key, false).unwrap();
+        assert!(
+            !jwm.features.system_ui.tags_overview().unwrap().cells[1].urgent,
+            "clearing it takes the dot away again"
+        );
+    }
+
+    #[test]
+    fn the_open_grid_follows_the_selection_to_another_monitor() {
+        use crate::core::models::WMClient;
+
+        let mut jwm = empty_jwm();
+        let mut keys = Vec::new();
+        for x in [0, 1920] {
+            let mut monitor = jwm.createmon(true);
+            monitor.geometry.m_x = x;
+            monitor.geometry.m_w = 1920;
+            monitor.geometry.m_h = 1080;
+            monitor.geometry.w_x = x;
+            monitor.geometry.w_w = 1920;
+            monitor.geometry.w_h = 1080;
+            keys.push(jwm.insert_monitor(monitor));
+        }
+        let (first, second) = (keys[0], keys[1]);
+        jwm.state.sel_mon = Some(first);
+        jwm.s_w = 3840;
+        jwm.s_h = 1080;
+
+        // One window per monitor, on tags that tell the two grids apart.
+        let mut placed = Vec::new();
+        for (index, (&mon_key, tags)) in keys.iter().zip([0b0001u32, 0b1000]).enumerate() {
+            let win = WindowId::from_raw(0xa00u64 + index as u64);
+            let mut client = WMClient::new(win);
+            client.mon = Some(mon_key);
+            client.state.tags = tags;
+            client.geometry.x = if index == 0 { 100 } else { 2020 };
+            client.geometry.y = 100;
+            client.geometry.w = 800;
+            client.geometry.h = 600;
+            let client_key = jwm.insert_client(client);
+            jwm.attach_to_monitor(client_key, mon_key);
+            placed.push(win.raw());
+        }
+        let mut backend = RenderSpyBackend::new();
+
+        jwm.toggle_tags_overview(&mut backend, &WMArgEnum::Int(0))
+            .unwrap();
+        let overview = jwm.features.system_ui.tags_overview().unwrap();
+        assert_eq!(overview.monitor, Some(first));
+        assert_eq!(overview.window_ids[0], vec![placed[0]]);
+        assert!(overview.window_ids[3].is_empty());
+
+        // `focusmon` (and an activation of a window on the other head) moves
+        // `sel_mon` without arranging. The hit-test reads the live viewport,
+        // so the cells have to move with it or a click on the drawn card
+        // resolves against a grid nobody is looking at.
+        jwm.state.sel_mon = Some(second);
+        assert!(jwm.tags_overview_follows_another_monitor());
+        jwm.flush_system_ui(&mut backend);
+
+        let overview = jwm.features.system_ui.tags_overview().unwrap();
+        assert_eq!(overview.monitor, Some(second));
+        assert_eq!(overview.window_ids[3], vec![placed[1]]);
+        assert!(overview.window_ids[0].is_empty());
+        assert!(!jwm.tags_overview_follows_another_monitor());
+    }
+
+    #[test]
+    fn a_groups_only_change_opens_the_gate_on_the_tick() {
+        let (mut jwm, _mon_key, _first, second) = jwm_with_tab_group();
+        let mut backend = RenderSpyBackend::new();
+        // Wayland's only delivery point is this tick: the udev loop never
+        // calls render_compositor_immediate. A change that dirties nothing
+        // in the compositor — an xdg_toplevel title change carries no new
+        // buffer — must open the gate here, or the strip paints the old
+        // title until unrelated damage happens along.
+        backend.needs_render = false;
+
+        jwm.tick_animations(&mut backend);
+        assert_eq!(backend.window_groups_pushes.len(), 1);
+        assert_eq!(backend.rendered_frames, 1);
+
+        // Nothing changed: the gate stays shut.
+        jwm.tick_animations(&mut backend);
+        assert_eq!(backend.window_groups_pushes.len(), 1);
+        assert_eq!(backend.rendered_frames, 1);
+
+        if let Some(client) = jwm.state.clients.get_mut(second) {
+            client.name = "renamed with no new buffer".to_string();
+        }
+        jwm.tick_animations(&mut backend);
+        assert_eq!(backend.window_groups_pushes.len(), 2);
+        assert_eq!(backend.rendered_frames, 2);
+        assert_eq!(
+            backend.window_groups_pushes[1][0].tabs[1].title,
+            "renamed with no new buffer"
+        );
+    }
+
+    #[test]
+    fn a_modal_that_swallows_the_release_disarms_the_tab_drag() {
+        use crate::jwm::window_tabs::TabDragCtl;
+
+        let (mut jwm, mon_key, first, _second) = jwm_with_tab_group();
+        let mut backend = RenderSpyBackend::new();
+        let order_before = jwm.state.monitor_clients[mon_key].clone();
+
+        // The strip drag holds no grab, so the keyboard is free and a
+        // capture can take the screen mid-drag. Its early return swallows
+        // the release that should have ended the gesture; a drag left armed
+        // past that would commit on the next release anywhere at all.
+        jwm.tab_drag = Some(TabDragCtl {
+            client: first,
+            mon: mon_key,
+            start_root: (100.0, 10.0),
+            activated: true,
+        });
+        jwm.features.screenshot.active = true;
+        <Jwm as WMController>::on_button_release(
+            &mut jwm,
+            &mut backend,
+            HitTarget::Background { output: None },
+            0,
+        );
+        assert!(
+            jwm.tab_drag.is_none(),
+            "the modal release must take the drag with it"
+        );
+        assert_eq!(jwm.state.monitor_clients[mon_key], order_before);
+
+        // The later, unrelated release finds nothing parked and reorders
+        // nothing.
+        jwm.features.screenshot.active = false;
+        jwm.last_mouse_root = (400.0, 10.0);
+        <Jwm as WMController>::on_button_release(
+            &mut jwm,
+            &mut backend,
+            HitTarget::Background { output: None },
+            0,
+        );
+        assert_eq!(jwm.state.monitor_clients[mon_key], order_before);
+    }
+
+    #[test]
+    fn a_flick_inside_the_post_focus_window_still_activates_the_tab_drag() {
+        use crate::jwm::window_tabs::TabDragCtl;
+
+        let (mut jwm, mon_key, first, _second) = jwm_with_tab_group();
+        let mut backend = RenderSpyBackend::new();
+        // Alt+j, an explicit activation and every new map suppress
+        // pointer-driven focus for 200-300 ms. A reorder drag is not a focus
+        // change, so its threshold has to be crossed inside that window too
+        // — behind the guard a quick flick silently stayed a click.
+        jwm.suppress_mouse_focus_until =
+            Some(std::time::Instant::now() + std::time::Duration::from_secs(5));
+        jwm.tab_drag = Some(TabDragCtl {
+            client: first,
+            mon: mon_key,
+            start_root: (100.0, 10.0),
+            activated: false,
+        });
+
+        jwm.on_motion_notify_internal(&mut backend, None, 400, 10, 0)
+            .unwrap();
+
+        assert!(
+            jwm.tab_drag
+                .expect("the drag survives the motion")
+                .activated,
+            "the threshold must be read before the focus guard"
+        );
+    }
+
+    #[test]
+    fn the_switcher_refuses_while_another_modal_owns_the_session() {
+        let (mut jwm, ..) = jwm_with_tab_group();
+        let mut backend = RenderSpyBackend::new();
+        // Over IPC a silent `Ok` tells the caller the switcher opened when
+        // nothing happened at all; the other unsatisfiable openers all
+        // report the refusal.
+        jwm.features.expose_active = true;
+
+        let error = jwm
+            .window_switcher(&mut backend, &WMArgEnum::Int(1))
+            .expect_err("a modal session must be reported, not swallowed");
+
+        assert!(error.to_string().contains("window switcher"));
+        assert!(!jwm.features.system_ui.is_window_switcher());
+    }
+
+    #[test]
+    fn the_wheel_steps_the_switcher_while_a_click_still_ends_it() {
+        use crate::jwm::features::system_ui::{ListRow, RowData, SystemUiState};
+
+        let mut jwm = empty_jwm();
+        let mut backend = RenderSpyBackend::new();
+        let rows = (0..3u64)
+            .map(|n| ListRow {
+                key: n.to_string(),
+                text: format!("window {n}"),
+                data: RowData::WindowSwitcher { window: 0x900 + n },
+            })
+            .collect();
+        jwm.features.system_ui = SystemUiState::window_switcher(rows, 0);
+
+        // The panel took a button grab so a click on a row can commit it, and
+        // on X11 that same grab delivers the wheel as buttons 4-7. A scroll
+        // asks for the next row; folding it into "anything but button 1
+        // cancels" threw away a gesture whose modifier was still held.
+        backend.system_ui_hit = SystemUiHitTarget::Panel;
+        <Jwm as WMController>::on_button_press(
+            &mut jwm,
+            &mut backend,
+            HitTarget::Background { output: None },
+            0,
+            5,
+            0,
+        );
+        assert!(
+            jwm.features.system_ui.is_window_switcher(),
+            "a scroll must not end the gesture"
+        );
+        assert_eq!(
+            jwm.features.system_ui.selected_switcher_window(),
+            Some(0x901)
+        );
+        <Jwm as WMController>::on_button_press(
+            &mut jwm,
+            &mut backend,
+            HitTarget::Background { output: None },
+            0,
+            4,
+            0,
+        );
+        assert_eq!(
+            jwm.features.system_ui.selected_switcher_window(),
+            Some(0x900)
+        );
+
+        // The horizontal wheel is neither a click nor something to browse
+        // with, so it leaves the panel exactly as it was.
+        <Jwm as WMController>::on_button_press(
+            &mut jwm,
+            &mut backend,
+            HitTarget::Background { output: None },
+            0,
+            6,
+            0,
+        );
+        assert!(jwm.features.system_ui.is_window_switcher());
+        assert_eq!(
+            jwm.features.system_ui.selected_switcher_window(),
+            Some(0x900)
+        );
+
+        // A scroll away from the card moves nothing, the way it does not on
+        // any other panel.
+        backend.system_ui_hit = SystemUiHitTarget::Outside;
+        <Jwm as WMController>::on_button_press(
+            &mut jwm,
+            &mut backend,
+            HitTarget::Background { output: None },
+            0,
+            5,
+            0,
+        );
+        assert_eq!(
+            jwm.features.system_ui.selected_switcher_window(),
+            Some(0x900)
+        );
+
+        // A real click that is not the picking one still cancels.
+        <Jwm as WMController>::on_button_press(
+            &mut jwm,
+            &mut backend,
+            HitTarget::Background { output: None },
+            0,
+            3,
+            0,
+        );
+        assert!(!jwm.features.system_ui.is_active());
     }
 
     #[test]

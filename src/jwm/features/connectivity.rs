@@ -272,6 +272,29 @@ fn bluetooth_tool() -> Option<BluetoothTool> {
     })
 }
 
+/// Peek, without initialising, whether the detected Bluetooth tool is
+/// bluetoothctl: `Some(true)`/`Some(false)` once detection has run, `None`
+/// before it has. The scan starters use this so their frame-thread gate never
+/// triggers [`bluetooth_tool`]'s `get_or_init`, which execs `bluetoothctl
+/// show` (and possibly `rfkill`) — precisely the fork a worker exists to keep
+/// off the compositor.
+///
+/// `None` therefore errs toward spawning, and the worker it spawns is what
+/// initialises the lock: the periodic state read primes it too, but nothing
+/// guarantees one has run before the first picker opens, and a gate that
+/// peeked and a worker that never looked would leave such a session reporting
+/// an empty list instead of "no tool" on every open.
+fn peek_bluetoothctl() -> Option<bool> {
+    BLUETOOTH_TOOL
+        .get()
+        .map(|tool| *tool == Some(BluetoothTool::Bluetoothctl))
+}
+
+/// The Wi-Fi counterpart of [`peek_bluetoothctl`].
+fn peek_nmcli() -> Option<bool> {
+    WIFI_TOOL.get().map(|tool| *tool == Some(WifiTool::Nmcli))
+}
+
 /// Read the current network state, or `None` when this machine has no
 /// wireless radio to report on.
 #[must_use]
@@ -440,6 +463,8 @@ impl WifiNetwork {
 #[derive(Debug)]
 pub struct BackgroundJob<T> {
     slot: std::sync::Arc<std::sync::Mutex<BackgroundJobState<T>>>,
+    /// Whether the OS actually gave this job a thread. See [`Self::started`].
+    started: bool,
 }
 
 #[derive(Debug)]
@@ -455,23 +480,42 @@ impl<T: Send + 'static> BackgroundJob<T> {
             notifier: None,
         }));
         let handle = std::sync::Arc::clone(&slot);
-        std::thread::spawn(move || {
-            let value = work();
-            let notifier = {
-                let mut guard = handle
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                // Publish the result while holding the mutex, then clone the
-                // notifier and release the mutex before signalling. A handler
-                // woken by the eventfd can therefore take the value at once.
-                guard.result = Some(value);
-                guard.notifier.clone()
-            };
-            if let Some(notifier) = notifier {
-                notifier.notify();
+        // `std::thread::spawn` panics if the OS refuses a thread (a pids
+        // cgroup limit, RLIMIT_NPROC, memory pressure). On the compositor
+        // thread that panic would take the whole session down — every window
+        // — for what is at worst one stale picker. A named `Builder` turns
+        // the failure into a logged warning; the slot then simply never
+        // fills, and a coalesced job's caller retries on its next tick.
+        let spawned = std::thread::Builder::new()
+            .name("jwm-background-job".into())
+            .spawn(move || {
+                let value = work();
+                let notifier = {
+                    let mut guard = handle
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    // Publish the result while holding the mutex, then clone
+                    // the notifier and release the mutex before signalling. A
+                    // handler woken by the eventfd can take the value at once.
+                    guard.result = Some(value);
+                    guard.notifier.clone()
+                };
+                if let Some(notifier) = notifier {
+                    notifier.notify();
+                }
+            });
+        // A refused thread is remembered rather than only logged: the slot
+        // this returns will never fill, and every caller that coalesces on
+        // "a handle exists" would otherwise hold that guard shut for the
+        // rest of the session.
+        let started = match spawned {
+            Ok(_) => true,
+            Err(error) => {
+                log::warn!("could not spawn a background job thread: {error}");
+                false
             }
-        });
-        Self { slot }
+        };
+        Self { slot, started }
     }
 
     /// Attach this job to one JWM event loop.
@@ -524,6 +568,47 @@ impl<T: Send + 'static> BackgroundJob<T> {
     }
 }
 
+impl<T> BackgroundJob<T> {
+    /// Whether the worker thread actually started.
+    ///
+    /// `false` means the OS refused it (a pids cgroup limit, `RLIMIT_NPROC`,
+    /// memory pressure) and [`Self::take`] will therefore never yield a
+    /// value. Any guard that treats "the slot holds a handle" as "work is in
+    /// flight" — the `s`/`r` picker keys, the periodic connectivity read, the
+    /// post-action re-reads — has to read this too, or one refused thread
+    /// freezes that feature until the session ends. The frame tick's poll
+    /// helpers drop such a handle so the guards recover on their own.
+    #[must_use]
+    pub fn started(&self) -> bool {
+        self.started
+    }
+
+    /// A handle whose thread the OS refused, for tests that pin how the
+    /// guards behave around one. There is no other way to build it: a real
+    /// spawn failure needs the process to be out of threads.
+    #[cfg(test)]
+    fn refused() -> Self {
+        Self {
+            slot: std::sync::Arc::new(std::sync::Mutex::new(BackgroundJobState {
+                result: None,
+                notifier: None,
+            })),
+            started: false,
+        }
+    }
+}
+
+/// Whether a slot holding a background job counts as work in flight.
+///
+/// Every picker and poll coalesces on "is there already a handle here?", and
+/// the answer has to be no for a handle whose thread the OS refused: that job
+/// never publishes anything, so treating it as running holds the guard shut
+/// and the feature frozen for the rest of the session.
+#[must_use]
+pub fn job_in_flight<T>(job: Option<&BackgroundJob<T>>) -> bool {
+    job.is_some_and(BackgroundJob::started)
+}
+
 impl<T> Drop for BackgroundJob<T> {
     fn drop(&mut self) {
         // A closed picker deliberately detaches its in-flight worker. Avoid a
@@ -556,6 +641,15 @@ pub fn parse_networks(output: &str) -> Vec<WifiNetwork> {
         if ssid.is_empty() || ssid.len() > MAX_WIFI_SSID_BYTES {
             continue;
         }
+        // The SSID is kept byte-exact: unlike a Bluetooth name, which is a
+        // label beside an address, this string *is* the identity — it is what
+        // `has_saved_profile` looks up and what `nmcli … connect` is handed,
+        // and two SSIDs differing only in a control byte are two networks.
+        // Control bytes are dropped where the string is painted instead; see
+        // [`display_ssid`]. The same goes for `security`, which never reaches
+        // a row at all: its only reader is `is_open`, and stripping a control
+        // byte out of it could empty it and turn a secured network into one
+        // jwm tries to join without asking for a passphrase.
         let signal = signal.trim().parse::<u8>().unwrap_or(0).min(100);
         let security = fields.get(3).map_or("", String::as_str).trim();
         let network = WifiNetwork {
@@ -598,6 +692,19 @@ pub fn signal_icon(signal: u8) -> &'static str {
     }
 }
 
+/// An SSID as it may be drawn.
+///
+/// The stored SSID stays byte-exact — it is the join key, so mutating it there
+/// would make a legal network unreachable and merge two that differ only in a
+/// control byte. But an access point's owner chooses those bytes, and the row
+/// below pads by character count, so a tab or an ESC would draw as tofu and
+/// shift the lock and signal columns off their row. Strip them here, at the
+/// one boundary where the string becomes pixels rather than an identity.
+#[must_use]
+pub fn display_ssid(ssid: &str) -> String {
+    ssid.chars().filter(|ch| !ch.is_control()).collect()
+}
+
 /// One picker row: signal, SSID, a lock for secured networks, and a marker
 /// for the network already in use.
 #[must_use]
@@ -611,7 +718,7 @@ pub fn picker_row(network: &WifiNetwork) -> String {
     format!(
         "{} {marker} {:<32} {lock}  {:>3}%",
         signal_icon(network.signal),
-        network.ssid,
+        display_ssid(&network.ssid),
         network.signal
     )
 }
@@ -1044,10 +1151,23 @@ fn bridge_devices(seconds: u64) -> Option<Vec<BluetoothDevice>> {
 /// thread.
 #[must_use]
 pub fn start_device_scan() -> Option<BackgroundJob<Vec<BluetoothDevice>>> {
-    if bluetooth_tool() != Some(BluetoothTool::Bluetoothctl) && !bridge_discovery_installed() {
+    // Peek, never initialise, on the frame thread: initialising the tool lock
+    // execs `bluetoothctl show`/`rfkill`, and a wedged bus must not stall a
+    // frame. `bridge_discovery_installed` is a cheap PATH walk; a not-yet-
+    // detected tool errs toward spawning so the worker decides off-thread.
+    if peek_bluetoothctl() == Some(false) && !bridge_discovery_installed() {
         return None;
     }
     Some(BackgroundJob::spawn(|| {
+        // Decide off-thread what the gate could not. Without this the tool
+        // lock is never initialised from this path at all, so a session whose
+        // first picker predates the periodic state read would keep showing an
+        // empty list instead of "bluetoothctl is not available" — forever.
+        // The `PATH` walk comes first: with the helper installed the answer is
+        // yes whatever the lock says, and there is no reason to exec for it.
+        if !bridge_discovery_installed() && bluetooth_tool() != Some(BluetoothTool::Bluetoothctl) {
+            return Vec::new();
+        }
         // Zero seconds: list what bluez remembers without powering up a scan.
         if let Some(mut devices) = bridge_devices(0) {
             sort_devices(&mut devices);
@@ -1076,10 +1196,19 @@ pub fn start_device_scan() -> Option<BackgroundJob<Vec<BluetoothDevice>>> {
 /// headroom for process startup and the follow-up work.
 #[must_use]
 pub fn start_discovery_scan() -> Option<BackgroundJob<Vec<BluetoothDevice>>> {
-    if bluetooth_tool() != Some(BluetoothTool::Bluetoothctl) && !bridge_discovery_installed() {
+    // Peek, never initialise, on the frame thread: initialising the tool lock
+    // execs `bluetoothctl show`/`rfkill`, and a wedged bus must not stall a
+    // frame. `bridge_discovery_installed` is a cheap PATH walk; a not-yet-
+    // detected tool errs toward spawning so the worker decides off-thread.
+    if peek_bluetoothctl() == Some(false) && !bridge_discovery_installed() {
         return None;
     }
     Some(BackgroundJob::spawn(|| {
+        // As in `start_device_scan`: the frame-thread gate could only peek, so
+        // the worker is where the tool lock is actually initialised.
+        if !bridge_discovery_installed() && bluetooth_tool() != Some(BluetoothTool::Bluetoothctl) {
+            return Vec::new();
+        }
         if let Some(mut devices) = bridge_devices(BRIDGE_DISCOVERY_SECONDS) {
             sort_devices(&mut devices);
             return devices;
@@ -1139,7 +1268,10 @@ pub fn summarize_bluetoothctl_error(output: &str) -> String {
         .map(str::trim)
         .find(|line| line.starts_with("Failed to") || line.contains("not available"))
         .unwrap_or("the device did not respond");
-    line.chars().take(72).collect()
+    line.chars()
+        .filter(|ch| !ch.is_control())
+        .take(72)
+        .collect()
 }
 
 /// What activating the control center's Network row should do.
@@ -1225,10 +1357,22 @@ pub fn has_saved_profile(ssid: &str) -> bool {
 /// with — the picker then reports that instead of showing an empty list.
 #[must_use]
 pub fn start_scan() -> Option<BackgroundJob<Vec<WifiNetwork>>> {
-    if wifi_tool() != Some(WifiTool::Nmcli) {
+    // Peek, never initialise, on the frame thread: initialising the tool lock
+    // execs `nmcli radio wifi`/`rfkill`, which must not stall a frame. A
+    // not-yet-detected tool errs toward spawning so the worker decides
+    // off-thread.
+    if peek_nmcli() == Some(false) {
         return None;
     }
     Some(BackgroundJob::spawn(|| {
+        // Decide off-thread what the gate could not, and initialise the tool
+        // lock while doing it: this path is otherwise the only one that can
+        // reach the picker on a session whose periodic state read has not run
+        // yet, and it would then report an empty list rather than "nmcli is
+        // not available" on every open.
+        if wifi_tool() != Some(WifiTool::Nmcli) {
+            return Vec::new();
+        }
         run(
             "nmcli",
             &[
@@ -1304,7 +1448,10 @@ pub fn summarize_nmcli_error(stderr: &str) -> String {
         .find(|line| !line.is_empty())
         .unwrap_or("connection failed");
     let line = line.strip_prefix("Error:").map_or(line, str::trim);
-    line.chars().take(72).collect()
+    line.chars()
+        .filter(|ch| !ch.is_control())
+        .take(72)
+        .collect()
 }
 
 /// Read Wi-Fi and Bluetooth state on a worker thread.
@@ -1332,8 +1479,12 @@ impl crate::jwm::Jwm {
     /// Start a read only when none is already in flight. Passive UI openings
     /// coalesce here so rapid close/reopen cycles do not detach a trail of
     /// still-running nmcli workers.
+    ///
+    /// "In flight" means a handle whose thread actually started: a job the OS
+    /// refused a thread for never fills its slot, so keying the guard on the
+    /// handle alone would freeze connectivity for the rest of the session.
     pub(crate) fn ensure_connectivity_refresh(&mut self) {
-        if self.features.connectivity_poll.is_none() {
+        if !job_in_flight(self.features.connectivity_poll.as_ref()) {
             self.features.connectivity_poll = Some(self.track_background_job(start_state_read()));
         }
     }
@@ -1353,6 +1504,17 @@ impl crate::jwm::Jwm {
     /// control center. Called from the frame tick; does nothing while the
     /// read is still running.
     pub(crate) fn poll_connectivity_job(&mut self) {
+        // A job whose thread the OS refused will never publish anything, and
+        // the periodic re-read in the frame tick coalesces on this slot being
+        // empty. Drop the dead handle here so that guard — and every other
+        // one keyed on the slot — recovers on the next tick instead of
+        // leaving the session with frozen Wi-Fi and Bluetooth state.
+        if let Some(job) = &self.features.connectivity_poll
+            && !job.started()
+        {
+            self.features.connectivity_poll = None;
+            return;
+        }
         let Some(state) = self
             .features
             .connectivity_poll
@@ -1632,6 +1794,83 @@ mod tests {
         assert_eq!(networks.len(), 1);
         assert_eq!(networks[0].ssid, valid_ssid);
         assert_eq!(networks[0].security.len(), MAX_WIFI_SECURITY_BYTES);
+    }
+
+    #[test]
+    fn control_bytes_leave_the_row_without_rewriting_the_join_key() {
+        // A legal 802.11 SSID (<=32 octets) carrying a tab: it would draw as
+        // tofu and shift the padded lock/signal columns off the row, so the
+        // row drops it — but the parsed SSID keeps it, because that string is
+        // what `has_saved_profile` looks up and what `nmcli … connect` is
+        // handed. Sanitising it here would leave the network on screen and
+        // unjoinable.
+        let networks = parse_networks(" :Cafe\tWiFi:60:WPA2\n");
+        assert_eq!(networks.len(), 1);
+        assert_eq!(networks[0].ssid, "Cafe\tWiFi", "the join key stays exact");
+        assert!(!picker_row(&networks[0]).chars().any(char::is_control));
+        assert_eq!(display_ssid(&networks[0].ssid), "CafeWiFi");
+
+        // Two SSIDs that differ only by a control byte are two networks, not
+        // one: merging them would leave one of them unreachable behind a row
+        // that joins the other.
+        let both = parse_networks(" :CafeWiFi:60:WPA2\n :Cafe\tWiFi:40:WPA2\n");
+        assert_eq!(both.len(), 2, "{both:?}");
+
+        // `security` never reaches a row — `is_open` is its only reader — so
+        // it is not filtered either: emptying it would turn a secured network
+        // into one jwm tries to join without asking for a passphrase.
+        let secured = parse_networks(" :Guest:60:WPA\u{1b}2\n");
+        assert_eq!(secured.len(), 1);
+        assert!(!secured[0].is_open(), "a secured network stays secured");
+    }
+
+    #[test]
+    fn the_scan_starters_peek_the_tool_lock_and_leave_initialising_to_the_worker() {
+        // The gate that decides whether there is a job runs on the frame
+        // thread, so it must peek the OnceLock, never `get_or_init` it:
+        // initialisation execs bluetoothctl/nmcli/rfkill, the very fork a
+        // worker exists to keep off the compositor. But *something* has to
+        // initialise it, or a session whose periodic state read has not run
+        // yet reports an empty list forever instead of "no tool" — so the
+        // worker the gate spawns has to make the call the gate could not.
+        // Assert both halves: absent before the spawn, present after it. The
+        // needles are assembled at runtime so this test cannot match its own
+        // source, and each haystack is one function's body.
+        const SOURCE: &str = include_str!("connectivity.rs");
+        let bt_needle = format!("{}{}", "bluetooth_tool", "()");
+        let wifi_needle = format!("{}{}", "wifi_tool", "()");
+        for (starter, next_item, needle) in [
+            (
+                "fn start_device_scan",
+                "fn start_discovery_scan",
+                bt_needle.as_str(),
+            ),
+            (
+                "fn start_discovery_scan",
+                "fn start_device_action",
+                bt_needle.as_str(),
+            ),
+            ("fn start_scan", "fn start_connect", wifi_needle.as_str()),
+        ] {
+            let body = SOURCE
+                .split_once(starter)
+                .unwrap_or_else(|| panic!("{starter} not found"))
+                .1
+                .split_once(next_item)
+                .unwrap_or_else(|| panic!("{starter} is no longer followed by {next_item}"))
+                .0;
+            let (gate, worker) = body
+                .split_once("BackgroundJob::spawn")
+                .unwrap_or_else(|| panic!("{starter} has no worker spawn"));
+            assert!(
+                !gate.contains(needle),
+                "{starter} initialises the tool lock on the frame thread ({needle})"
+            );
+            assert!(
+                worker.contains(needle),
+                "{starter}'s worker never initialises the tool lock ({needle})"
+            );
+        }
     }
 
     #[test]
@@ -2233,6 +2472,33 @@ mod tests {
             Some(73),
             "a wake must never precede result publication"
         );
+    }
+
+    #[test]
+    fn a_job_the_os_refused_a_thread_is_never_in_flight() {
+        // A real job holds its guard shut while it runs, which is the whole
+        // point of the coalescing: a second `s` must not start a second
+        // `Adapter1.StartDiscovery` session over the first.
+        let (release, wait) = std::sync::mpsc::channel();
+        let running: BackgroundJob<()> = BackgroundJob::spawn(move || {
+            wait.recv().unwrap();
+        });
+        assert!(running.started());
+        assert!(job_in_flight(Some(&running)));
+
+        // A handle the OS refused a thread for publishes nothing, ever. It
+        // must read as "no work in flight" or the guard it sits behind stays
+        // shut for the rest of the session — the picker's `s`/`r` keys, the
+        // periodic connectivity read and the post-action re-reads all key on
+        // exactly that.
+        let refused: BackgroundJob<()> = BackgroundJob::refused();
+        assert!(!refused.started());
+        assert!(refused.take().is_none());
+        assert!(!job_in_flight(Some(&refused)));
+
+        // And an empty slot is not work either.
+        assert!(!job_in_flight(None::<&BackgroundJob<()>>));
+        release.send(()).unwrap();
     }
 
     #[test]

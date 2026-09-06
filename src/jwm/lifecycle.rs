@@ -962,6 +962,10 @@ impl Jwm {
             // remaining X11/system teardown stages.
             warn!("[cleanup] could not flush pending layout persistence: {error}");
         }
+        // Same reason for the notification history: its writer thread holds
+        // the newest snapshot for up to a second, and the next process reads
+        // the file.
+        self.features.notifications.flush();
         // Shut down IPC server (also handled by Drop, but explicit is clearer)
         if let Some(ref mut ipc) = self.ipc_server {
             ipc.shutdown();
@@ -1249,13 +1253,19 @@ impl Jwm {
             Ok(()) => {
                 self.record_config_reload_result(true, None);
                 self.apply_config_changes(backend);
-                backend.compositor_push_toast(crate::backend::api::ToastNotification {
-                    title: "\u{f021}  Configuration reloaded".into(),
-                    body: String::new(),
-                    urgency: 1,
-                    timeout_ms: 2500,
-                    ..Default::default()
-                });
+                // Under the notification DND rule: a quiet screen stays quiet
+                // for a reload that worked (the `config/reload` event below
+                // still tells the bars), while a failure is critical and shows.
+                self.push_system_toast(
+                    backend,
+                    crate::backend::api::ToastNotification {
+                        title: "\u{f021}  Configuration reloaded".into(),
+                        body: String::new(),
+                        urgency: 1,
+                        timeout_ms: 2500,
+                        ..Default::default()
+                    },
+                );
                 self.broadcast_ipc_event(
                     "config/reload",
                     serde_json::json!({
@@ -1269,13 +1279,16 @@ impl Jwm {
             Err(e) => {
                 let error = format!("config reload failed: {e}");
                 self.record_config_reload_result(false, Some(error.clone()));
-                backend.compositor_push_toast(crate::backend::api::ToastNotification {
-                    title: "\u{f071}  Configuration reload failed".into(),
-                    body: e.to_string(),
-                    urgency: 2,
-                    timeout_ms: 8000,
-                    ..Default::default()
-                });
+                self.push_system_toast(
+                    backend,
+                    crate::backend::api::ToastNotification {
+                        title: "\u{f071}  Configuration reload failed".into(),
+                        body: e.to_string(),
+                        urgency: 2,
+                        timeout_ms: 8000,
+                        ..Default::default()
+                    },
+                );
                 self.broadcast_ipc_event(
                     "config/reload",
                     serde_json::json!({
@@ -1373,10 +1386,20 @@ impl Jwm {
         if let Err(e) = self.grabkeys(backend) {
             warn!("[config] failed to re-grab keys: {e}");
         }
-        // Pick up DND default from config (without overriding a runtime toggle: only
-        // when the config value differs from our default-on-startup, refresh).
-        // Simpler: trust config — reload reflects user's saved preference.
-        self.do_not_disturb = cfg.behavior().do_not_disturb;
+        // Do-Not-Disturb: the runtime toggle is the user's most recent word
+        // and outlives a reload that did not touch the setting; a
+        // configuration whose value moved — an edit, a `set_config` — wins,
+        // and bars hear about it the same way they hear about the toggle.
+        let dnd = self
+            .features
+            .notifications
+            .reconcile_do_not_disturb(self.do_not_disturb, cfg.behavior().do_not_disturb);
+        if dnd != self.do_not_disturb {
+            self.do_not_disturb = dnd;
+            info!("[config] DND {}", if dnd { "ON" } else { "OFF" });
+            self.broadcast_ipc_event("dnd/toggle", serde_json::json!({ "enabled": dnd }));
+            self.refresh_open_control_center();
+        }
 
         // Config hot-disable must close already-active modal features as well
         // as gate future entry. Otherwise JWM can keep an invisible keyboard
@@ -2652,5 +2675,39 @@ mod normal_exit_transaction_tests {
                 .contains("query map state after rolling back")
         );
         assert!(!backend.window_ops.snapshot(window).viewable);
+    }
+
+    #[test]
+    fn an_ipc_close_or_clear_repaints_the_open_notification_center() {
+        use crate::jwm::features::notifications::CloseReason;
+        use crate::jwm::features::{NotificationCenter, NotificationRequest, SystemUiState};
+
+        let mut backend = ExitBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test-x11").unwrap();
+        // An in-memory history: the test must not touch the user's file.
+        jwm.features.notifications = NotificationCenter::new();
+        let request = NotificationRequest {
+            summary: "Update ready".into(),
+            ..Default::default()
+        };
+        let first = jwm.features.notifications.push(&request, 0, false);
+        let second = jwm.features.notifications.push(&request, 0, false);
+        jwm.features.system_ui = SystemUiState::notification_center(&jwm.features.notifications, 0);
+
+        // The keyboard paths sync the panel themselves; an application
+        // cancelling its own notification over IPC has no such follow-up, so
+        // the close itself must request the repaint.
+        jwm.system_ui_dirty = false;
+        assert!(jwm.close_notification(first, CloseReason::Requested));
+        assert!(
+            jwm.system_ui_dirty,
+            "a row left the open panel in memory; the tick must push it"
+        );
+        assert!(jwm.features.system_ui.is_notification_center());
+
+        jwm.system_ui_dirty = false;
+        assert_eq!(jwm.clear_notifications(), 1);
+        assert!(jwm.system_ui_dirty, "the emptied panel must be pushed too");
+        assert!(jwm.features.notifications.get(second).is_none());
     }
 }

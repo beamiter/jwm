@@ -48,6 +48,53 @@ pub const UNLOCK_GRACE: Duration = Duration::from_secs(60);
 /// the rest of the idle period because of it.
 pub const LOCK_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 
+/// How many times in a row a refusal whose cause the backend did not explain
+/// is retried before it is treated as settled for this idle period. At
+/// [`LOCK_RETRY_INTERVAL`] apart this is a minute of asking, which outlasts a
+/// VT switch or a compositor restart, while costing a backend that genuinely
+/// cannot start one a bounded handful of attempts rather than one every five
+/// seconds until morning.
+pub const UNEXPLAINED_LOCK_RETRIES: u32 = 12;
+
+/// Why a lock attempt failed, as far as retrying is concerned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LockFailure {
+    /// Something that passes on its own — a menu holding the pointer grab,
+    /// another panel open. Worth asking again in a moment.
+    Transient,
+    /// The backend tried to start a compositor for the lock screen and the
+    /// attempt came back with an error whose cause travels as prose this
+    /// module cannot read. A VT switch, a DRM master handed to somebody
+    /// else, a momentary GLX failure all land here and all clear on their
+    /// own, so this is retried — but only [`UNEXPLAINED_LOCK_RETRIES`]
+    /// times, because a backend with no working renderer at all would
+    /// otherwise be asked all night.
+    Unexplained,
+    /// Nothing this session can change: the backend reported the compositor
+    /// reconciled and there is still none to draw the lock screen on. That
+    /// is a statement about this backend's capability rather than about this
+    /// moment, so the next attempt waits for the next idle period.
+    Permanent,
+}
+
+/// Whether a lock refusal is worth asking about again inside this idle
+/// period. `failures_in_a_row` counts this failure too, so the first call
+/// after a refusal passes `1`.
+///
+/// The whole point of retrying at all is that an unattended session which
+/// stops asking stays unlocked until somebody touches the keyboard — so only
+/// a refusal that names a capability the backend does not have gives up at
+/// once, and a refusal whose cause is unknown gets a bounded budget rather
+/// than the benefit of neither doubt.
+#[must_use]
+pub const fn lock_failure_retries(failure: LockFailure, failures_in_a_row: u32) -> bool {
+    match failure {
+        LockFailure::Transient => true,
+        LockFailure::Unexplained => failures_in_a_row < UNEXPLAINED_LOCK_RETRIES,
+        LockFailure::Permanent => false,
+    }
+}
+
 /// One thing the idle policy wants done.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum IdleAction {
@@ -132,6 +179,10 @@ pub struct IdleTracker {
     unlocked_at: Option<Instant>,
     lock_retry_at: Option<Instant>,
     lock_failures: u32,
+    /// The backend answered the last clock read with nothing. There is then
+    /// nothing to poll for, and the wakeup timer stands down until a read
+    /// succeeds again.
+    clock_unavailable: bool,
 }
 
 impl IdleTracker {
@@ -211,14 +262,21 @@ impl IdleTracker {
             .is_some_and(|at| now.saturating_duration_since(at) < UNLOCK_GRACE)
     }
 
-    /// The lock attempt did not take. Arms a retry instead of leaving the
-    /// session unlocked for the rest of the idle period, and reports how many
-    /// times in a row it has failed so the caller can log the first loudly
-    /// and the rest quietly.
-    pub fn note_lock_failed(&mut self, now: Instant) -> u32 {
-        self.lock_asked = false;
-        self.lock_retry_at = Some(now + LOCK_RETRY_INTERVAL);
+    /// The lock attempt did not take. A failure still worth retrying arms a
+    /// retry instead of leaving the session unlocked for the rest of the idle
+    /// period; one that is not is over for this idle period, and `wake`
+    /// re-arms it for the next. Reports how many times in a row it has failed
+    /// so the caller can log the first loudly and the rest quietly, and so it
+    /// can re-derive the same decision through [`lock_failure_retries`].
+    pub fn note_lock_failed(&mut self, now: Instant, failure: LockFailure) -> u32 {
         self.lock_failures = self.lock_failures.saturating_add(1);
+        if lock_failure_retries(failure, self.lock_failures) {
+            self.lock_asked = false;
+            self.lock_retry_at = Some(now + LOCK_RETRY_INTERVAL);
+        } else {
+            self.lock_asked = true;
+            self.lock_retry_at = None;
+        }
         self.lock_failures
     }
 
@@ -251,6 +309,17 @@ impl IdleTracker {
     pub fn is_screen_off(&self) -> bool {
         self.screen_off
     }
+
+    /// Record whether the backend could read its idle clock this poll.
+    pub fn note_clock(&mut self, available: bool) {
+        self.clock_unavailable = !available;
+    }
+
+    /// Whether the last clock read came back empty.
+    #[must_use]
+    pub fn clock_unavailable(&self) -> bool {
+        self.clock_unavailable
+    }
 }
 
 /// How often the idle clock is read. The session's event loop already wakes
@@ -261,6 +330,7 @@ fn configured_idle_settings() -> IdleSettings {
     let cfg = crate::config::CONFIG.load();
     let behavior = cfg.behavior();
     warn_about_a_short_lock_timeout(behavior.idle_lock_secs);
+    warn_about_an_unusable_dim_level(behavior.idle_dim_level);
     IdleSettings::from_secs(
         behavior.idle_dim_secs,
         behavior.idle_dim_level,
@@ -289,13 +359,37 @@ fn warn_about_a_short_lock_timeout(lock_secs: u64) {
     }
 }
 
+/// Say once, per value, that a dim level outside `[0, 1]` was replaced by
+/// [`DEFAULT_DIM_LEVEL`]. `--check-config` warns about the same value; this
+/// is for the session that never ran it and would otherwise dim to a
+/// brightness nobody configured without a word in the log.
+fn warn_about_an_unusable_dim_level(dim_level: f32) {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    // All bits set is a NaN payload no parser produces: the "nothing said
+    // yet" mark.
+    static WARNED_FOR: AtomicU32 = AtomicU32::new(u32::MAX);
+    let bits = dim_level.to_bits();
+    if WARNED_FOR.swap(bits, Ordering::Relaxed) == bits {
+        return;
+    }
+    if !(0.0..=1.0).contains(&dim_level) {
+        log::warn!(
+            "Idle: behavior.idle_dim_level={dim_level} is outside [0, 1]; dimming to \
+             {DEFAULT_DIM_LEVEL} instead"
+        );
+    }
+}
+
 fn idle_poll_wakeup(
     enabled: bool,
+    clock_available: bool,
     restore_pending: bool,
     last_poll: Option<std::time::Instant>,
     now: std::time::Instant,
 ) -> Option<Duration> {
-    if !enabled {
+    // Nothing configured, or nothing to measure it with: the only reason
+    // left to wake is a dim or a screen-off that still has to be undone.
+    if !enabled || !clock_available {
         return restore_pending.then_some(Duration::ZERO);
     }
     Some(last_poll.map_or(Duration::ZERO, |last| {
@@ -308,6 +402,7 @@ impl crate::jwm::Jwm {
         let settings = configured_idle_settings();
         idle_poll_wakeup(
             settings.is_enabled(),
+            !self.idle.clock_unavailable(),
             self.idle.is_dimmed() || self.idle.is_screen_off(),
             self.last_idle_poll,
             now,
@@ -338,8 +433,24 @@ impl crate::jwm::Jwm {
         }
         self.last_idle_poll = Some(now);
 
+        // The clock before anything else. A backend that cannot measure
+        // idleness gets no policy — guessing would dim the screen of somebody
+        // who is working — and must keep the display server's own blanker,
+        // or a server without the screensaver extension ends up with neither.
+        let clock = backend.idle_millis();
+        self.idle.note_clock(clock.is_some());
+        let Some(idle_millis) = clock else {
+            // Whatever an earlier clock dimmed is put back rather than left
+            // dark, now that nothing can notice the activity that undoes it.
+            let locked = self.features.system_ui.is_locked();
+            for action in self.idle.poll(&settings, Duration::ZERO, true, locked, now) {
+                self.apply_idle_action(backend, action);
+            }
+            return;
+        };
+
         // Two idle policies in one session do not share the work, they fight:
-        // the X server's blanker resets the very clock read below, so a stage
+        // the X server's blanker resets the very clock read above, so a stage
         // later than the server's own timeout would never be reached. Once
         // this session has a policy, it is the only one.
         if !self.server_saver_suppressed {
@@ -349,11 +460,6 @@ impl crate::jwm::Jwm {
             }
         }
 
-        // No idle clock: this backend cannot tell activity from absence, and
-        // guessing would dim the screen of somebody who is working.
-        let Some(idle_millis) = backend.idle_millis() else {
-            return;
-        };
         let inhibited = self.idle_inhibited
             || backend.idle_inhibited_by_client()
             // Recording an unattended screen is exactly when the machine
@@ -421,13 +527,34 @@ impl crate::jwm::Jwm {
                 log::info!("Idle: locking");
                 if let Err(error) = self.lock_screen(backend, &crate::jwm::types::WMArgEnum::Int(0))
                 {
-                    // Something transient — a menu holding the pointer grab —
-                    // must not leave the session unlocked until the next time
-                    // somebody touches the keyboard. The first failure is
-                    // worth a warning; a menu left open all night is not.
-                    let failures = self.idle.note_lock_failed(std::time::Instant::now());
+                    let failure = classify_lock_failure(&error.to_string());
+                    let failures = self
+                        .idle
+                        .note_lock_failed(std::time::Instant::now(), failure);
                     let retry = LOCK_RETRY_INTERVAL.as_secs();
-                    if failures == 1 {
+                    // The same predicate the tracker just used, re-derived
+                    // from its inputs so the log can never claim a retry the
+                    // tracker did not arm.
+                    if !lock_failure_retries(failure, failures) {
+                        // Nothing more will be tried this idle period: said
+                        // once, not once per interval all night.
+                        if failure == LockFailure::Permanent {
+                            log::warn!(
+                                "Idle: cannot lock this session; not retrying until it is next \
+                                 idle: {error}"
+                            );
+                        } else {
+                            log::warn!(
+                                "Idle: could not lock after {failures} attempts; not retrying \
+                                 until this session is next idle: {error}"
+                            );
+                        }
+                    } else if failures == 1 {
+                        // Something that passes on its own — a menu holding
+                        // the pointer grab — must not leave the session
+                        // unlocked until the next time somebody touches the
+                        // keyboard. The first failure is worth a warning; a
+                        // menu left open all night is not.
                         log::warn!("Idle: could not lock, retrying in {retry}s: {error}");
                     } else {
                         log::debug!(
@@ -484,17 +611,13 @@ impl crate::jwm::Jwm {
 
     /// The idle policy's state, for `get_idle_status` and the `idle` topic.
     pub(crate) fn idle_status_json(&self) -> serde_json::Value {
-        let cfg = crate::config::CONFIG.load();
-        let behavior = cfg.behavior();
-        serde_json::json!({
-            "inhibited": self.idle_inhibited,
-            "dimmed": self.idle.is_dimmed(),
-            "screen_off": self.idle.is_screen_off(),
-            "locked": self.features.system_ui.is_locked(),
-            "dim_secs": behavior.idle_dim_secs,
-            "lock_secs": behavior.idle_lock_secs,
-            "screen_off_secs": behavior.idle_screen_off_secs,
-        })
+        idle_status_payload(
+            &configured_idle_settings(),
+            self.idle_inhibited,
+            self.idle.is_dimmed(),
+            self.idle.is_screen_off(),
+            self.features.system_ui.is_locked(),
+        )
     }
 
     fn broadcast_idle_state(&mut self) {
@@ -506,6 +629,63 @@ impl crate::jwm::Jwm {
 /// The brightness the session runs at when it is not dimmed.
 fn configured_brightness() -> f32 {
     crate::config::CONFIG.load().behavior().brightness
+}
+
+/// The `get_idle_status` payload. The timeouts are the ones the policy acts
+/// on — a lock timeout raised to [`MIN_LOCK_SECS`], a screen-off stage with
+/// no command reported as off — rather than the configured numbers, so a bar
+/// that counts down to the lock counts down to the lock that will happen.
+fn idle_status_payload(
+    settings: &IdleSettings,
+    inhibited: bool,
+    dimmed: bool,
+    screen_off: bool,
+    locked: bool,
+) -> serde_json::Value {
+    let secs = |stage: Option<Duration>| stage.map_or(0, |after| after.as_secs());
+    serde_json::json!({
+        "inhibited": inhibited,
+        "dimmed": dimmed,
+        "screen_off": screen_off,
+        "locked": locked,
+        "dim_secs": secs(settings.dim_after),
+        "lock_secs": secs(settings.lock_after),
+        "screen_off_secs": secs(settings.screen_off_after),
+    })
+}
+
+/// The lock screen's refusals that no retry can change.
+///
+/// This is the arm where the compositor reconciler reported *success* and
+/// the backend still has no compositor — a capability statement about this
+/// backend, true a second from now as well. Matched on the message because a
+/// message is all the lock screen sends; the parity test
+/// `lock_refusals_are_classified_from_the_messages_the_lock_screen_sends`
+/// keeps this list and those messages in step.
+const PERMANENT_LOCK_REFUSALS: [&str; 1] =
+    ["requires the JWM compositor, and this backend could not start it"];
+
+/// The refusals where the backend *tried* to start a compositor and the
+/// attempt returned an error.
+///
+/// The cause is carried in prose appended after this prefix, and nothing
+/// here can read it: a VT switch, a DRM master briefly held by somebody
+/// else, a transient GLX failure and a machine with no working renderer at
+/// all produce the same shape. Classifying the whole class as permanent is
+/// what leaves an unattended session unlocked for the rest of the idle
+/// period over something that clears in seconds, so it is retried on a
+/// budget instead — see [`LockFailure::Unexplained`].
+const UNEXPLAINED_LOCK_REFUSALS: [&str; 1] = ["could not start compositor for"];
+
+fn classify_lock_failure(error: &str) -> LockFailure {
+    let says = |refusals: &[&str]| refusals.iter().any(|refusal| error.contains(refusal));
+    if says(&PERMANENT_LOCK_REFUSALS) {
+        LockFailure::Permanent
+    } else if says(&UNEXPLAINED_LOCK_REFUSALS) {
+        LockFailure::Unexplained
+    } else {
+        LockFailure::Transient
+    }
 }
 
 fn run_idle_command(what: &str, command: &str) -> Option<std::process::Child> {
@@ -550,17 +730,18 @@ mod tests {
     #[test]
     fn poll_wakeup_is_exact_and_disabled_policy_settles() {
         let now = std::time::Instant::now();
-        assert_eq!(idle_poll_wakeup(false, false, None, now), None);
+        assert_eq!(idle_poll_wakeup(false, true, false, None, now), None);
         assert_eq!(
-            idle_poll_wakeup(false, true, Some(now), now),
+            idle_poll_wakeup(false, true, true, Some(now), now),
             Some(Duration::ZERO)
         );
         assert_eq!(
-            idle_poll_wakeup(true, false, None, now),
+            idle_poll_wakeup(true, true, false, None, now),
             Some(Duration::ZERO)
         );
         assert_eq!(
             idle_poll_wakeup(
+                true,
                 true,
                 false,
                 Some(now),
@@ -569,13 +750,82 @@ mod tests {
             Some(Duration::from_nanos(1))
         );
         assert_eq!(
-            idle_poll_wakeup(true, false, Some(now), now + POLL_INTERVAL),
+            idle_poll_wakeup(true, true, false, Some(now), now + POLL_INTERVAL),
             Some(Duration::ZERO)
         );
         assert_eq!(
-            idle_poll_wakeup(true, false, Some(now + Duration::from_secs(2)), now,),
+            idle_poll_wakeup(true, true, false, Some(now + Duration::from_secs(2)), now,),
             Some(POLL_INTERVAL)
         );
+    }
+
+    #[test]
+    fn a_missing_clock_stands_the_poll_timer_down() {
+        // A nested backend with no idle clock: waking every second to read
+        // nothing keeps the process from ever going quiet.
+        let now = std::time::Instant::now();
+        assert_eq!(idle_poll_wakeup(true, false, false, Some(now), now), None);
+        assert_eq!(idle_poll_wakeup(true, false, false, None, now), None);
+        // A dim an earlier clock caused is still worth one wake to undo.
+        assert_eq!(
+            idle_poll_wakeup(true, false, true, Some(now), now),
+            Some(Duration::ZERO)
+        );
+
+        let mut tracker = IdleTracker::default();
+        assert!(!tracker.clock_unavailable());
+        tracker.note_clock(false);
+        assert!(tracker.clock_unavailable());
+        tracker.note_clock(true);
+        assert!(!tracker.clock_unavailable());
+    }
+
+    #[test]
+    fn the_server_blanker_is_only_taken_away_from_a_session_with_a_clock() {
+        // A server without the screensaver extension has no clock to hand
+        // over; switching its blanker off first would leave it with neither
+        // policy. The probe therefore comes before the suppression.
+        const SOURCE: &str = include_str!("idle.rs");
+        let poll = SOURCE
+            .split_once("fn poll_idle")
+            .expect("poll_idle")
+            .1
+            .split_once("fn reapply_idle_dim")
+            .expect("the function after poll_idle")
+            .0;
+        let probe = format!("{}()", "idle_millis");
+        let suppress = format!("{}()", "suppress_server_screensaver");
+        let probe_at = poll.find(&probe).expect("poll_idle reads the clock");
+        let suppress_at = poll
+            .find(&suppress)
+            .expect("poll_idle suppresses the server blanker");
+        assert!(
+            probe_at < suppress_at,
+            "poll_idle must read the idle clock before touching the server's blanker"
+        );
+        let after_probe = &poll[probe_at..suppress_at];
+        assert!(
+            after_probe.contains("return;"),
+            "a missing clock must return before the server's blanker is touched"
+        );
+    }
+
+    #[test]
+    fn idle_status_reports_the_timeouts_the_policy_acts_on() {
+        // `idle_lock_secs = 1` locks after the floor, and a screen-off stage
+        // without a command never runs: the report says so, as the gate does.
+        let settings = IdleSettings::from_secs(120, 0.3, 1, 900, false);
+        let payload = idle_status_payload(&settings, true, false, false, false);
+        assert_eq!(payload["inhibited"], true);
+        assert_eq!(payload["dim_secs"], 120u64);
+        assert_eq!(payload["lock_secs"], MIN_LOCK_SECS);
+        assert_eq!(payload["screen_off_secs"], 0u64);
+
+        let settings = IdleSettings::from_secs(0, 0.3, 600, 900, true);
+        let payload = idle_status_payload(&settings, false, false, false, false);
+        assert_eq!(payload["dim_secs"], 0u64);
+        assert_eq!(payload["lock_secs"], 600u64);
+        assert_eq!(payload["screen_off_secs"], 900u64);
     }
 
     #[test]
@@ -894,7 +1144,7 @@ mod tests {
                 .contains(&IdleAction::Lock)
         );
         // A menu held the pointer grab, so nothing was locked.
-        assert_eq!(tracker.note_lock_failed(start), 1);
+        assert_eq!(tracker.note_lock_failed(start, LockFailure::Transient), 1);
         // Not retried every frame...
         assert!(
             !tracker
@@ -914,10 +1164,192 @@ mod tests {
                 )
                 .contains(&IdleAction::Lock)
         );
-        assert_eq!(tracker.note_lock_failed(start + LOCK_RETRY_INTERVAL), 2);
+        assert_eq!(
+            tracker.note_lock_failed(start + LOCK_RETRY_INTERVAL, LockFailure::Transient),
+            2
+        );
         // A lock that finally lands clears the streak, and activity does too.
         tracker.poll(&settings, secs(400), false, true, start + secs(20));
-        assert_eq!(tracker.note_lock_failed(start + secs(20)), 1);
+        assert_eq!(
+            tracker.note_lock_failed(start + secs(20), LockFailure::Transient),
+            1
+        );
+    }
+
+    #[test]
+    fn a_permanent_lock_refusal_waits_for_the_next_idle_period() {
+        let settings = settings();
+        let mut tracker = IdleTracker::default();
+        let start = origin();
+
+        assert!(
+            tracker
+                .poll(&settings, secs(300), false, false, start)
+                .contains(&IdleAction::Lock)
+        );
+        // No compositor to draw the lock screen on, and none could be
+        // started: a retry in five seconds would only try to start one again.
+        assert_eq!(tracker.note_lock_failed(start, LockFailure::Permanent), 1);
+        assert!(
+            !tracker
+                .poll(
+                    &settings,
+                    secs(305),
+                    false,
+                    false,
+                    start + LOCK_RETRY_INTERVAL
+                )
+                .contains(&IdleAction::Lock)
+        );
+        assert!(
+            !tracker
+                .poll(&settings, secs(9000), false, false, start + secs(9000))
+                .contains(&IdleAction::Lock)
+        );
+        // The next idle period asks once more, in case the session has a
+        // compositor by then.
+        tracker.poll(&settings, secs(0), false, false, start + secs(9001));
+        assert!(
+            tracker
+                .poll(&settings, secs(300), false, false, start + secs(9301))
+                .contains(&IdleAction::Lock)
+        );
+    }
+
+    #[test]
+    fn lock_refusals_are_classified_from_the_messages_the_lock_screen_sends() {
+        assert_eq!(
+            classify_lock_failure("another system UI panel is open"),
+            LockFailure::Transient
+        );
+        assert_eq!(
+            classify_lock_failure("could not grab pointer for lock screen"),
+            LockFailure::Transient
+        );
+        assert_eq!(
+            classify_lock_failure(
+                "lock screen requires the JWM compositor, and this backend could not start it"
+            ),
+            LockFailure::Permanent
+        );
+        // The backend tried and the attempt failed with a cause this module
+        // cannot read. A VT switch produces exactly this, so it must not be
+        // the reason an unattended session stops asking to lock.
+        assert_eq!(
+            classify_lock_failure("could not start compositor for lock screen: no EGL"),
+            LockFailure::Unexplained
+        );
+
+        // The messages live in the system UI opener. A reworded refusal must
+        // fail here rather than quietly turn one class into another.
+        const TOGGLES: &str = include_str!("toggles.rs");
+        let opener = TOGGLES
+            .split_once("fn prepare_system_ui_inner")
+            .expect("the system UI opener")
+            .1
+            .split_once("fn release_temporary_system_ui_compositor")
+            .expect("the function after the opener")
+            .0;
+        for refusal in PERMANENT_LOCK_REFUSALS
+            .iter()
+            .chain(UNEXPLAINED_LOCK_REFUSALS.iter())
+        {
+            assert!(
+                opener.contains(refusal),
+                "prepare_system_ui_inner no longer says {refusal:?}"
+            );
+        }
+        // The two classes must stay distinguishable: a needle that also
+        // matched the other arm's message would silently merge them.
+        for permanent in PERMANENT_LOCK_REFUSALS {
+            assert_eq!(
+                classify_lock_failure(permanent),
+                LockFailure::Permanent,
+                "{permanent:?} is no longer classified as a capability statement"
+            );
+        }
+        for unexplained in UNEXPLAINED_LOCK_REFUSALS {
+            assert_eq!(
+                classify_lock_failure(unexplained),
+                LockFailure::Unexplained,
+                "{unexplained:?} is no longer classified as an unread cause"
+            );
+        }
+    }
+
+    /// A backend that tried to start a compositor and failed says so with a
+    /// cause nothing here can read. Treating that as permanent is how an
+    /// unattended session ends up never locking: a VT switch, or a
+    /// compositor restarting under it, produces the same message as a
+    /// machine that will never manage it. Retry on a budget, then stop.
+    #[test]
+    fn an_unreadable_lock_refusal_is_retried_before_it_is_believed() {
+        let settings = settings();
+        let mut tracker = IdleTracker::default();
+        let start = origin();
+
+        assert!(
+            tracker
+                .poll(&settings, secs(300), false, false, start)
+                .contains(&IdleAction::Lock)
+        );
+        assert_eq!(tracker.note_lock_failed(start, LockFailure::Unexplained), 1);
+        // Asked again, exactly as a transient refusal would be.
+        assert!(
+            tracker
+                .poll(
+                    &settings,
+                    secs(305),
+                    false,
+                    false,
+                    start + LOCK_RETRY_INTERVAL
+                )
+                .contains(&IdleAction::Lock)
+        );
+
+        // ...but not for ever: the budget runs out and the idle period ends
+        // rather than rebuilding a compositor every five seconds all night.
+        let mut at = start + LOCK_RETRY_INTERVAL;
+        let mut failures = 1;
+        while lock_failure_retries(LockFailure::Unexplained, failures) {
+            failures = tracker.note_lock_failed(at, LockFailure::Unexplained);
+            at += LOCK_RETRY_INTERVAL;
+        }
+        assert_eq!(failures, UNEXPLAINED_LOCK_RETRIES);
+        assert!(
+            !tracker
+                .poll(&settings, secs(9000), false, false, at + secs(9000))
+                .contains(&IdleAction::Lock),
+            "the budget is spent; this idle period is over"
+        );
+
+        // The next idle period asks once more, in case the VT came back.
+        tracker.poll(&settings, secs(0), false, false, at + secs(9001));
+        assert!(
+            tracker
+                .poll(&settings, secs(300), false, false, at + secs(9301))
+                .contains(&IdleAction::Lock)
+        );
+    }
+
+    /// The retry rule itself, at its edges. A transient refusal is never
+    /// abandoned, a capability statement is never retried, and the unknown
+    /// cause sits between them with a bounded budget.
+    #[test]
+    fn the_lock_retry_rule_gives_up_only_where_asking_again_cannot_help() {
+        assert!(lock_failure_retries(LockFailure::Transient, 1));
+        assert!(lock_failure_retries(LockFailure::Transient, u32::MAX));
+        assert!(!lock_failure_retries(LockFailure::Permanent, 1));
+        assert!(lock_failure_retries(LockFailure::Unexplained, 1));
+        assert!(lock_failure_retries(
+            LockFailure::Unexplained,
+            UNEXPLAINED_LOCK_RETRIES - 1
+        ));
+        assert!(!lock_failure_retries(
+            LockFailure::Unexplained,
+            UNEXPLAINED_LOCK_RETRIES
+        ));
+        assert!(!lock_failure_retries(LockFailure::Unexplained, u32::MAX));
     }
 
     #[test]
@@ -927,7 +1359,7 @@ mod tests {
         let start = origin();
 
         tracker.poll(&settings, secs(300), false, false, start);
-        tracker.note_lock_failed(start);
+        tracker.note_lock_failed(start, LockFailure::Transient);
         // Somebody came back: the pending retry is about an idle period that
         // is over, and the next one starts its own timing.
         tracker.poll(&settings, secs(0), false, false, start + secs(1));

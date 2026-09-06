@@ -623,14 +623,20 @@ fn color_session_policy_json(
     // signalling is not asserted. Before it existed this pushed one fixed
     // string, which stayed in the payload long after the condition it named
     // was addressed.
-    let hdr_refusal_blockers: Vec<&str> = hdr_refusals
-        .iter()
-        .filter_map(|(_, refusal)| refusal.as_deref())
-        .collect::<std::collections::BTreeSet<_>>()
-        .into_iter()
-        .collect();
+    // One reason is one entry: the gate's configuration refusal serialises
+    // under the same wire name as the static entry above, and a consumer
+    // counting or diffing this array must not see a phantom second blocker.
+    // Static entries keep their place; gate names follow in a stable order.
     if hdr_postprocess_requested {
-        blockers.extend(hdr_refusal_blockers.iter().copied());
+        for name in hdr_refusals
+            .iter()
+            .filter_map(|(_, refusal)| refusal.as_deref())
+            .collect::<std::collections::BTreeSet<_>>()
+        {
+            if !blockers.contains(&name) {
+                blockers.push(name);
+            }
+        }
     }
     // "Available" means the enable *command* would be accepted, which is what
     // a toggle needs to know. It is not "nothing is blocking right now":
@@ -1721,7 +1727,24 @@ impl Jwm {
                             ),
                         );
                     }
-                    if let Some(scan) = crate::jwm::features::connectivity::start_device_scan() {
+                    // Re-read so the row shows the bond that actually took —
+                    // unless a scan is already running. Replacing its handle
+                    // only drops the notifier: the worker (and a real
+                    // `Adapter1.StartDiscovery` session behind it) runs on
+                    // with nowhere to land, and what it heard is thrown away.
+                    // The running read lands with the bond state bluez holds
+                    // by then, which is what the `s`/`r` keys rely on too.
+                    //
+                    // `job_in_flight`, not "the slot holds a handle": a job
+                    // whose thread the OS refused never publishes anything,
+                    // and coalescing on its mere presence would hold this
+                    // re-read shut for as long as that handle sits there.
+                    let scanning = crate::jwm::features::connectivity::job_in_flight(
+                        self.features.bluetooth_scan.as_ref(),
+                    );
+                    if !scanning
+                        && let Some(scan) = crate::jwm::features::connectivity::start_device_scan()
+                    {
                         self.features.bluetooth_scan = Some(self.track_background_job(scan));
                     }
                     self.refresh_connectivity();
@@ -1809,17 +1832,20 @@ impl Jwm {
             // Re-read rather than trust the exit code: sound servers accept a
             // switch to an unavailable device and then quietly revert it.
             let post = system_controls::audio_inventory();
-            let defaults = post.defaults();
             let kept = post
                 .devices(direction)
                 .iter()
                 .any(|device| device.id == id && device.is_default);
-            self.cache_control_audio_defaults(defaults);
-            self.refresh_open_control_center();
             self.broadcast_ipc_event(
                 "audio/devices",
                 system_controls::audio_inventory_json(&post),
             );
+            // The whole inventory, not just the two defaults: this is the
+            // read `get_audio_devices` answers from, and a bar polling right
+            // after a switch must not be told the pre-switch marker until the
+            // worker's next pass catches up.
+            self.cache_control_audio_inventory(post);
+            self.refresh_open_control_center();
             if !kept {
                 return IpcResponse::err(format!(
                     "the sound server did not keep {id:?} as the {} device; it is likely unavailable",
@@ -2146,14 +2172,32 @@ impl Jwm {
             }))),
             "get_notifications" => IpcResponse::ok(Some(self.notifications_json())),
             "get_media_status" => IpcResponse::ok(Some(self.media_status_json())),
-            "get_power_status" => IpcResponse::ok(Some(self.power_status_json())),
+            "get_power_status" => {
+                // Warm the Shell Hub's coalesced snapshot before answering,
+                // the `get_connectivity` shape. The contract for the read
+                // below is to answer from `features.control_snapshot`
+                // (stale-while-revalidate: this call makes the next poll
+                // fresh) and to fork nothing — a bar polling every few
+                // seconds must never stall a frame on powerprofilesctl.
+                self.ensure_control_snapshot_refresh(std::time::Instant::now());
+                IpcResponse::ok(Some(self.power_status_json()))
+            }
             "get_connectivity" => IpcResponse::ok(Some(self.connectivity_json())),
             "get_bluetooth_pairing" => {
                 IpcResponse::ok(Some(crate::jwm::features::pairing::session_json(
                     self.features.bluetooth_pairing.as_ref(),
                 )))
             }
-            "get_audio_devices" => IpcResponse::ok(Some(self.audio_devices_json())),
+            "get_audio_devices" => {
+                // Same contract as `get_power_status`, now that the snapshot
+                // carries the whole `AudioInventory` and not just the two
+                // devices in use: warm the coalesced read so the next poll is
+                // current, then answer from memory. The reply's `pending`
+                // flag is what tells an empty inventory ("this session has
+                // nothing to switch") from an unread one.
+                self.ensure_control_snapshot_refresh(std::time::Instant::now());
+                IpcResponse::ok(Some(self.audio_devices_json()))
+            }
             "get_wallpaper_colors" => IpcResponse::ok(Some(self.wallpaper_theme_json())),
             "get_idle_status" => IpcResponse::ok(Some(self.idle_status_json())),
             "get_resources" => IpcResponse::ok(Some(self.resources_json())),
@@ -2263,6 +2307,9 @@ impl Jwm {
                             serde_json::json!({
                                 "max_luminance_nits": m.max_luminance_nits,
                                 "min_luminance_nits": m.min_luminance_nits,
+                                // 0.0 means the EDID stated none; the blob
+                                // sends that on as "unknown".
+                                "max_frame_average_nits": m.max_frame_average_nits,
                                 "supports_pq": m.supports_pq,
                                 "supports_hlg": m.supports_hlg,
                                 "supports_bt2020": m.supports_bt2020,
@@ -2502,6 +2549,9 @@ impl Jwm {
                     serde_json::json!({
                         "max_luminance_nits": m.max_luminance_nits,
                         "min_luminance_nits": m.min_luminance_nits,
+                        // 0.0 means the EDID stated none; the blob sends that
+                        // on as "unknown".
+                        "max_frame_average_nits": m.max_frame_average_nits,
                         "supports_pq": m.supports_pq,
                         "supports_hlg": m.supports_hlg,
                         "supports_bt2020": m.supports_bt2020,
@@ -2739,11 +2789,15 @@ impl Jwm {
         })
     }
 
-    /// Apply a single in-memory config override (does not touch the file).
-    /// args: { "key": "appearance.border_px", "value": <json> }
     /// args: { "output": "<name>", "enabled": true|false }
-    /// Clears HDR_OUTPUT_METADATA. Enable requests fail closed until KMS-side
-    /// external elements participate in the color pipeline.
+    ///
+    /// `enabled: false` clears HDR_OUTPUT_METADATA. `enabled: true` latches a
+    /// request that the per-output gate reconciles every frame: the command
+    /// itself fails only for a permanent refusal (hardware or configuration,
+    /// see `hdr_enable_refusal_is_permanent`), while a momentary one — a
+    /// toast on screen, this frame's delivery route — is what the latch
+    /// carries across, so it is accepted here and reported through
+    /// `get_wayland_status.color_management.session_policy`.
     fn handle_set_hdr_metadata_command(
         &mut self,
         backend: &mut dyn Backend,
@@ -2781,6 +2835,8 @@ impl Jwm {
         }
     }
 
+    /// Apply a single in-memory config override (does not touch the file).
+    /// args: { "key": "appearance.border_px", "value": <json> }
     fn handle_set_config_command(
         &mut self,
         backend: &mut dyn Backend,
@@ -3773,6 +3829,7 @@ mod tests {
             &output(Some(EdidHdrCapabilities {
                 max_luminance_nits: 1000.0,
                 min_luminance_nits: 0.05,
+                max_frame_average_nits: 400.0,
                 supports_bt2020: true,
                 supports_pq: true,
                 supports_hlg: false,
@@ -3796,6 +3853,7 @@ mod tests {
             &output(Some(EdidHdrCapabilities {
                 max_luminance_nits: 1000.0,
                 min_luminance_nits: 0.05,
+                max_frame_average_nits: 400.0,
                 supports_bt2020: true,
                 supports_pq: true,
                 supports_hlg: false,
@@ -3917,6 +3975,7 @@ mod tests {
         let hdr = EdidHdrCapabilities {
             max_luminance_nits: 1000.0,
             min_luminance_nits: 0.05,
+            max_frame_average_nits: 400.0,
             supports_bt2020: true,
             supports_pq: true,
             supports_hlg: false,
@@ -4005,6 +4064,7 @@ mod tests {
         let hdr = output(Some(EdidHdrCapabilities {
             max_luminance_nits: 1000.0,
             min_luminance_nits: 0.05,
+            max_frame_average_nits: 400.0,
             supports_bt2020: true,
             supports_pq: true,
             supports_hlg: false,
@@ -4162,6 +4222,7 @@ mod tests {
         let pq = output(Some(EdidHdrCapabilities {
             max_luminance_nits: 1000.0,
             min_luminance_nits: 0.05,
+            max_frame_average_nits: 400.0,
             supports_bt2020: true,
             supports_pq: true,
             supports_hlg: false,
@@ -4169,6 +4230,7 @@ mod tests {
         let mut hlg = output(Some(EdidHdrCapabilities {
             max_luminance_nits: 1000.0,
             min_luminance_nits: 0.05,
+            max_frame_average_nits: 400.0,
             supports_bt2020: true,
             supports_pq: false,
             supports_hlg: true,
@@ -4943,5 +5005,140 @@ mod tests {
         );
         assert_eq!(decisions["hdr"]["active"], serde_json::Value::Null);
         assert_eq!(decisions["hdr"]["reason"], "partial_output_observation");
+    }
+
+    /// The gate's configuration refusal serialises under the same wire name
+    /// as the static advanced-colour-management entry; the session-level
+    /// array names that reason once, static entries first, while the
+    /// per-output list still reports every output.
+    #[test]
+    fn session_policy_blockers_name_each_reason_once() {
+        let hdr = output(Some(EdidHdrCapabilities {
+            max_luminance_nits: 1000.0,
+            min_luminance_nits: 0.05,
+            max_frame_average_nits: 400.0,
+            supports_bt2020: true,
+            supports_pq: true,
+            supports_hlg: false,
+        }));
+        let refusals = [
+            (
+                "HDMI-A-1".to_string(),
+                Some("advanced_color_management_disabled".to_string()),
+            ),
+            ("DP-1".to_string(), Some("linear_tail_unsafe".to_string())),
+            (
+                "DP-2".to_string(),
+                Some("advanced_color_management_disabled".to_string()),
+            ),
+        ];
+        let policy = color_session_policy_json(
+            std::slice::from_ref(&hdr),
+            true,
+            true,
+            true,
+            false,
+            true,
+            &refusals,
+            false,
+            false,
+        );
+        assert_eq!(
+            policy["blockers"],
+            serde_json::json!(["advanced_color_management_disabled", "linear_tail_unsafe"])
+        );
+        assert_eq!(
+            policy["hdr_enable_refusals"].as_array().map(Vec::len),
+            Some(3)
+        );
+
+        // With the static reason absent the gate's name is still reported,
+        // once, so the dedup did not swallow the gate.
+        let gate_only = color_session_policy_json(
+            std::slice::from_ref(&hdr),
+            true,
+            true,
+            true,
+            true,
+            true,
+            &refusals[..1],
+            false,
+            false,
+        );
+        assert_eq!(
+            gate_only["blockers"],
+            serde_json::json!(["advanced_color_management_disabled"])
+        );
+    }
+
+    /// `bluetooth_pairing_done` re-reads the device list so the row shows
+    /// the bond that took, but never over a scan already in flight: the
+    /// replaced handle would detach a live discovery and drop its result.
+    ///
+    /// The guard has to ask whether work is really running, not whether the
+    /// slot holds a handle: a job whose thread the OS refused never publishes
+    /// anything, and coalescing on its presence would hold the re-read shut
+    /// for as long as that handle sat there. Needles are assembled at runtime
+    /// and the haystack is the handler alone, so this cannot match its own
+    /// text.
+    #[test]
+    fn pairing_done_reread_coalesces_on_a_running_scan() {
+        const SOURCE: &str = include_str!("ipc_handler.rs");
+        let handler = SOURCE
+            .split_once(&format!("if name == \"{}\"", "bluetooth_pairing_done"))
+            .expect("bluetooth_pairing_done handler")
+            .1
+            .split_once(&format!("if name == \"{}\"", "clipboard_record"))
+            .expect("the command handled after bluetooth_pairing_done")
+            .0;
+        let guard = format!("connectivity::{}(", "job_in_flight");
+        let stale = format!("bluetooth_scan.{}()", "is_none");
+        let reread = format!("connectivity::{}()", "start_device_scan");
+        assert!(
+            !handler.contains(&stale),
+            "the re-read coalesces on a handle existing, not on work running"
+        );
+        let guard_at = handler.find(&guard).expect("the re-read is guarded");
+        let reread_at = handler
+            .find(&reread)
+            .expect("the post-pairing re-read is still started");
+        assert!(
+            guard_at < reread_at,
+            "bluetooth_pairing_done must test for a running scan before starting the re-read"
+        );
+    }
+
+    /// The two control reads a bar polls warm the Shell Hub's coalesced
+    /// snapshot before answering, so each reply can come from memory and no
+    /// query forks `powerprofilesctl` or `wpctl` under the frame. Warming is
+    /// only honest once the snapshot carries what the query returns:
+    /// `power_status_json` reads `power_profiles` and `audio_devices_json`
+    /// reads `audio_inventory`, both of which `ControlCenterSnapshot::read`
+    /// samples on the worker.
+    #[test]
+    fn control_read_queries_warm_the_control_snapshot() {
+        const SOURCE: &str = include_str!("ipc_handler.rs");
+        let queries = SOURCE
+            .split_once(&format!("pub(crate) fn {}(", "handle_ipc_query"))
+            .expect("query dispatcher")
+            .1;
+        let refresh = format!("{}(", "ensure_control_snapshot_refresh");
+        // Every arm of this match starts on its own line at the same indent;
+        // an arm's body ends where the next one begins.
+        let arm_of = |query: &str| {
+            let arm = queries
+                .split_once(&format!("\"{query}\" =>"))
+                .unwrap_or_else(|| panic!("{query} arm"))
+                .1;
+            arm.split_once("\n            \"")
+                .map_or(arm, |(body, _)| body)
+                .to_string()
+        };
+        for query in ["get_power_status", "get_audio_devices"] {
+            assert!(
+                arm_of(query).contains(&refresh),
+                "{query} must start the coalesced snapshot refresh before answering"
+            );
+        }
     }
 }

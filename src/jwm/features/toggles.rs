@@ -109,6 +109,25 @@ const fn control_snapshot_epoch_matches(spawn_epoch: u64, current_epoch: u64) ->
     spawn_epoch == current_epoch
 }
 
+/// Whether closing a Bluetooth pairing session should kick a fresh device
+/// read.
+///
+/// Only an inbound window a device actually rang can have left a new bond
+/// behind — an outbound session re-reads from `bluetooth_pairing_done`, and a
+/// window nothing rang has no address to refresh for. And never while a read
+/// is already in flight: replacing that handle only drops the notifier, so the
+/// worker — and the real `Adapter1.StartDiscovery` session behind an `s`-key
+/// scan — runs on with nowhere to land and what it heard is thrown away. The
+/// `bluetooth_pairing_done` handler and the `s`/`r` keys coalesce for exactly
+/// that reason; a close must not be the one path that does not.
+const fn should_refresh_after_pairing_close(
+    inbound: bool,
+    bound: bool,
+    scan_in_flight: bool,
+) -> bool {
+    inbound && bound && !scan_in_flight
+}
+
 fn finalize_concat_segments(
     list_path: &std::path::Path,
     list_content: &str,
@@ -970,12 +989,26 @@ impl Jwm {
         let now = std::time::Instant::now();
         if let Some(session) = &self.features.bluetooth_pairing {
             if session.session_timed_out(now) {
-                // The helper vanished without a `done`: end the session.
-                log::warn!("Bluetooth: pairing helper never reported back");
-                self.cancel_bluetooth_pairing();
-                self.features
-                    .system_ui
-                    .set_bluetooth_message("Pairing timed out");
+                let inbound = session.kind() == crate::jwm::features::pairing::PairingKind::Inbound;
+                if inbound {
+                    // An armed window reaching its deadline is the expected way
+                    // it ends, not a helper that vanished — the inbound
+                    // helper's own `done` only ever arrives at teardown, after
+                    // this timer has already fired. Keep
+                    // `cancel_bluetooth_pairing`'s "Not accepting incoming
+                    // requests" rather than overwriting it with a "Pairing
+                    // timed out" that describes a pairing nothing asked for; a
+                    // device that did ring and bind is refreshed from there.
+                    log::info!("Bluetooth: inbound window closed");
+                    self.cancel_bluetooth_pairing();
+                } else {
+                    // The helper vanished without a `done`: end the session.
+                    log::warn!("Bluetooth: pairing helper never reported back");
+                    self.cancel_bluetooth_pairing();
+                    self.features
+                        .system_ui
+                        .set_bluetooth_message("Pairing timed out");
+                }
                 changed = true;
             } else if session.prompt_timed_out(now) {
                 // An unanswered prompt: withdraw it and cancel the helper's
@@ -1002,6 +1035,15 @@ impl Jwm {
             }
         }
 
+        // A job the OS refused a thread for will never publish a list, and
+        // the picker's `s`/`r` keys coalesce on this slot being empty. Drop
+        // the dead handle so those keys work again instead of reading as "a
+        // scan is already running" for as long as the picker stays open.
+        if let Some(job) = &self.features.bluetooth_scan
+            && !job.started()
+        {
+            self.features.bluetooth_scan = None;
+        }
         if let Some(devices) = self
             .features
             .bluetooth_scan
@@ -1023,8 +1065,19 @@ impl Jwm {
             match result {
                 Ok(address) => {
                     log::info!("Bluetooth: {address} done");
-                    // Re-read so the row shows the state that actually took.
-                    if let Some(scan) = crate::jwm::features::connectivity::start_device_scan() {
+                    // Re-read so the row shows the state that actually took —
+                    // unless a scan is already running. Replacing its handle
+                    // only drops the notifier: the worker, and the real
+                    // `Adapter1.StartDiscovery` session behind an `s`-key
+                    // scan, runs on with nowhere to land and what it heard is
+                    // thrown away. `bluetooth_pairing_done` and the `s`/`r`
+                    // keys coalesce for exactly that reason.
+                    let scanning = crate::jwm::features::connectivity::job_in_flight(
+                        self.features.bluetooth_scan.as_ref(),
+                    );
+                    if !scanning
+                        && let Some(scan) = crate::jwm::features::connectivity::start_device_scan()
+                    {
                         self.features.bluetooth_scan = Some(self.track_background_job(scan));
                     }
                     self.refresh_connectivity();
@@ -1263,6 +1316,16 @@ impl Jwm {
             return;
         };
         let inbound = session.kind() == pairing::PairingKind::Inbound;
+        // A device rang this window and bound it, so a bond may just have
+        // landed; once the window is gone, re-read the list so the newly
+        // paired device shows without the user pressing `r`.
+        let refresh_after_bind = should_refresh_after_pairing_close(
+            inbound,
+            session.address().is_some(),
+            crate::jwm::features::connectivity::job_in_flight(
+                self.features.bluetooth_scan.as_ref(),
+            ),
+        );
         log::info!(
             "Bluetooth: {} session with {} cancelled",
             session.kind().as_str(),
@@ -1285,6 +1348,14 @@ impl Jwm {
         } else {
             "Pairing cancelled"
         });
+        // The scan is adopted by `poll_bluetooth_jobs`; if the picker has
+        // already closed (this is also called from `close_system_ui`) that
+        // poll drops the handle, which is harmless.
+        if refresh_after_bind
+            && let Some(scan) = crate::jwm::features::connectivity::start_device_scan()
+        {
+            self.features.bluetooth_scan = Some(self.track_background_job(scan));
+        }
     }
 
     /// Adopt a finished scan or connection attempt. Called from the frame
@@ -1319,7 +1390,14 @@ impl Jwm {
             self.features.wifi_connect = None;
             match result {
                 Ok(ssid) => {
-                    log::info!("Wi-Fi: joined {ssid}");
+                    // The SSID is byte-exact so `nmcli` gets what it needs;
+                    // a log line is a place it is *read*, and an access
+                    // point's owner chooses those bytes, so an ESC in one
+                    // would reach whatever terminal is tailing the journal.
+                    log::info!(
+                        "Wi-Fi: joined {}",
+                        crate::jwm::features::connectivity::display_ssid(&ssid)
+                    );
                     self.refresh_connectivity();
                     self.close_system_ui(backend);
                     return;
@@ -1366,9 +1444,12 @@ impl Jwm {
             return;
         }
 
-        self.features
-            .system_ui
-            .set_wifi_message(format!("Connecting to {ssid}\u{2026}"));
+        // The SSID handed to nmcli stays byte-exact; the copy on the status
+        // row does not, so an access point's control bytes cannot draw there.
+        self.features.system_ui.set_wifi_message(format!(
+            "Connecting to {}\u{2026}",
+            connectivity::display_ssid(&ssid)
+        ));
         let job = connectivity::start_connect(&ssid, &plan, passphrase.clone());
         self.features.wifi_connect = Some(self.track_background_job(job));
         if let Some(secret) = passphrase.as_mut() {
@@ -1518,6 +1599,31 @@ impl Jwm {
         // way — otherwise it would linger past the panel and commit on some
         // later release.
         self.tab_drag = None;
+
+        // Expose, the tag overview and annotation are not system-UI panels,
+        // but each holds its own keyboard/pointer grab and draws its own
+        // overlay. A shell key reaches this common opener while one of them is
+        // up (the expose key branch deliberately falls through for unhandled
+        // keys), and the grab a panel takes below would silently replace
+        // theirs; then `close_system_ui`'s ungrab drops it, leaving the mode
+        // still drawn with no grabs and no way out but its own toggle. Tear
+        // them down first, exactly as `prepare_for_compositor_disable` does.
+        // Each is guarded by its own flag, so this is a no-op when inactive.
+        if self.features.overview.active {
+            self.features.overview.deactivate();
+            backend.compositor_set_overview_mode(false, &[]);
+            let _ = backend.key_ops().ungrab_keyboard();
+        }
+        if self.features.expose_active {
+            self.apply_expose_action(backend, expose_plan::ExposeAction::Exit { focus: None })?;
+        }
+        if self.features.annotation_active {
+            self.features.annotation_active = false;
+            self.features.annotation_drawing = false;
+            backend.compositor_set_annotation_mode(false);
+            let _ = backend.key_ops().ungrab_keyboard();
+            let _ = backend.input_ops().ungrab_pointer();
+        }
 
         // Any other panel still on screen at this point means a hand-over: one
         // shell key pressed while another key's panel was up. The keyboard and
@@ -3363,7 +3469,8 @@ mod recording_finalization_tests {
 #[cfg(test)]
 mod shell_entry_tests {
     use super::{
-        ShellEntry, control_snapshot_epoch_matches, shell_entry, should_start_control_snapshot,
+        ShellEntry, control_snapshot_epoch_matches, shell_entry,
+        should_refresh_after_pairing_close, should_start_control_snapshot,
     };
 
     #[test]
@@ -3396,6 +3503,77 @@ mod shell_entry_tests {
         for mine in [false, true] {
             assert_eq!(shell_entry(true, true, mine), ShellEntry::Refuse);
         }
+    }
+
+    #[test]
+    fn a_closed_inbound_window_refreshes_only_when_it_bound_and_nothing_is_scanning() {
+        // A window a device rang may have left a bond behind, so the list is
+        // re-read once the window is gone.
+        assert!(should_refresh_after_pairing_close(true, true, false));
+        // An outbound session re-reads from `bluetooth_pairing_done`, and a
+        // window nothing rang has nothing to refresh for.
+        assert!(!should_refresh_after_pairing_close(false, true, false));
+        assert!(!should_refresh_after_pairing_close(true, false, false));
+        // And never on top of a read already running: `s` starts a real
+        // `Adapter1.StartDiscovery` session, and replacing its handle only
+        // drops the notifier — the worker runs on with nowhere to land while
+        // a second `jwm-bridge discover` overlaps it.
+        assert!(!should_refresh_after_pairing_close(true, true, true));
+    }
+
+    /// The connect/disconnect completion re-reads the device list the way
+    /// `bluetooth_pairing_done` does, and never over a read already running:
+    /// replacing that handle only drops the notifier, so the worker — and the
+    /// real `Adapter1.StartDiscovery` session behind an `s`-key scan — runs on
+    /// with nowhere to land. The needles are assembled at runtime and the
+    /// haystack is one function's body, so this cannot match its own source.
+    #[test]
+    fn the_post_action_reread_coalesces_on_a_running_scan() {
+        const SOURCE: &str = include_str!("toggles.rs");
+        let poll = SOURCE
+            .split_once(&format!("fn {}(", "poll_bluetooth_jobs"))
+            .expect("poll_bluetooth_jobs")
+            .1
+            .split_once(&format!("fn {}(", "activate_selected_bluetooth"))
+            .expect("the function that follows poll_bluetooth_jobs")
+            .0;
+        let guard = format!("{}(", "job_in_flight");
+        let reread = format!("{}()", "start_device_scan");
+        let guard_at = poll.find(&guard).expect("the re-read is guarded");
+        let reread_at = poll
+            .find(&reread)
+            .expect("the post-action re-read is still started");
+        assert!(
+            guard_at < reread_at,
+            "the connect/disconnect re-read must test for a running scan first"
+        );
+    }
+
+    /// An SSID reaches the compositor byte-exact because it is the join key,
+    /// so every place it is *read* rather than used has to strip it — the
+    /// picker row, the status line, and this log line, which an access point's
+    /// owner could otherwise fill with terminal escapes. The needle is
+    /// assembled at runtime and the haystack is one function's body, so this
+    /// cannot match its own source.
+    #[test]
+    fn the_joined_log_line_does_not_replay_an_access_points_control_bytes() {
+        const SOURCE: &str = include_str!("toggles.rs");
+        let poll = SOURCE
+            .split_once(&format!("fn {}(", "poll_wifi_jobs"))
+            .expect("poll_wifi_jobs")
+            .1
+            .split_once(&format!("fn {}(", "join_selected_wifi"))
+            .expect("the function that follows poll_wifi_jobs")
+            .0;
+        let raw = format!("joined {{{}}}", "ssid");
+        assert!(
+            !poll.contains(&raw),
+            "the joined log line interpolates the raw SSID ({raw})"
+        );
+        assert!(
+            poll.contains(&format!("{}(", "display_ssid")),
+            "the joined log line no longer goes through the display helper"
+        );
     }
 
     #[test]

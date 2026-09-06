@@ -108,6 +108,14 @@ impl<C: CompositorConnection> Compositor<C> {
             self.gl
                 .uniform_4_f32(self.win_uniforms.uv_rect.as_ref(), 0.0, 0.0, 1.0, 1.0);
             self.gl.active_texture(glow::TEXTURE0);
+            // The window program's uniforms are sticky: the main pass leaves
+            // the last window's `desat` (and any ripple) behind, so the
+            // thumbnails would take on whatever was on top of the stack.
+            self.gl.uniform_1_f32(self.win_uniforms.desat.as_ref(), 0.0);
+            self.gl
+                .uniform_1_f32(self.win_uniforms.ripple_progress.as_ref(), -1.0);
+            self.gl
+                .uniform_1_f32(self.win_uniforms.ripple_amplitude.as_ref(), 0.0);
 
             for entry in &self.expose_entries {
                 let wt = match self.windows.get(&entry.id) {
@@ -525,7 +533,10 @@ impl<C: CompositorConnection> Compositor<C> {
         self.window_groups = groups;
         // Re-derive the hovered cell against the new layout: the tab under
         // the pointer may sit at another index now, or be gone entirely.
-        self.tab_hover = window_tabs::tab_hover_at(&self.window_groups, self.mouse_x, self.mouse_y);
+        self.tab_hover = tab_hover_for_pointer(
+            &self.window_groups,
+            self.pointer_seen.then_some((self.mouse_x, self.mouse_y)),
+        );
         // A group change is the only thing that can invalidate a title: the
         // text, the cell width and the focus flag all live in it.
         self.tab_titles_dirty = true;
@@ -774,6 +785,22 @@ impl<C: CompositorConnection> Compositor<C> {
     }
 }
 
+/// The tab cell to paint as hovered. `pointer` is `None` until a real pointer
+/// position has been reported: `(0.0, 0.0)` is both the field's initial value
+/// and a perfectly legal place for the pointer to be, so the coordinates alone
+/// cannot tell "never saw the pointer" from "pointer at the origin". Without
+/// the distinction, the first groups a freshly created compositor is handed
+/// light the first cell of any strip that contains the origin — a hidden
+/// status bar, or a bar that is not at the top — and the phantom hover sits
+/// there until the user moves the mouse.
+fn tab_hover_for_pointer(
+    groups: &[TabGroup],
+    pointer: Option<(f32, f32)>,
+) -> Option<(usize, usize)> {
+    let (x, y) = pointer?;
+    window_tabs::tab_hover_at(groups, x, y)
+}
+
 fn snap_preview_animation_state(
     elapsed_ms: f32,
     duration_ms: f32,
@@ -786,7 +813,50 @@ fn snap_preview_animation_state(
 
 #[cfg(test)]
 mod tests {
-    use super::snap_preview_animation_state;
+    use super::{TabGroup, snap_preview_animation_state, tab_hover_for_pointer};
+    use crate::backend::compositor_common::window_tabs::Tab;
+
+    fn strip_at(bar: [f32; 4]) -> Vec<TabGroup> {
+        vec![TabGroup {
+            bar,
+            tabs: vec![
+                Tab {
+                    title: "left".to_string(),
+                    active: true,
+                },
+                Tab {
+                    title: "right".to_string(),
+                    active: false,
+                },
+            ],
+        }]
+    }
+
+    #[test]
+    fn an_unseen_pointer_hovers_no_tab_even_when_the_strip_holds_the_origin() {
+        // A hidden status bar (or one anchored anywhere but the top) puts the
+        // strip over (0, 0), which is also the compositor's initial pointer
+        // value. Until a real position arrives, no cell may light up.
+        let groups = strip_at([0.0, 0.0, 800.0, 24.0]);
+        assert_eq!(tab_hover_for_pointer(&groups, None), None);
+        assert_eq!(
+            tab_hover_for_pointer(&groups, Some((0.0, 0.0))),
+            Some((0, 0))
+        );
+    }
+
+    #[test]
+    fn a_seen_pointer_still_reports_the_cell_it_is_over() {
+        let groups = strip_at([100.0, 40.0, 800.0, 24.0]);
+        assert_eq!(
+            tab_hover_for_pointer(&groups, Some((700.0, 50.0))),
+            Some((0, 1))
+        );
+        assert_eq!(tab_hover_for_pointer(&groups, Some((10.0, 10.0))), None);
+        // A strip away from the origin cannot be hovered by the initial
+        // value either, so the gate changes nothing for the common case.
+        assert_eq!(tab_hover_for_pointer(&groups, None), None);
+    }
 
     #[test]
     fn snap_preview_stops_animating_at_steady_state() {

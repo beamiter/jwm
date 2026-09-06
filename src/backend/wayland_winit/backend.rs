@@ -2,7 +2,8 @@ use crate::backend::api::{
     Backend, BackendDiagnostics, BackendEvent, Capabilities, ColorAllocator, CompositorAnnotation,
     CompositorBenchmark, CompositorControl, CompositorMedia, CompositorWindowEffects,
     CompositorWorkspaceEffects, CursorProvider, DisplayControl, EventHandler, HitTarget, InputOps,
-    KeyOps, NetWmState, OutputInfo, OutputOps, PropertyOps, RenderScheduler, ScreenInfo, WindowOps,
+    KeyOps, NetWmState, OutputInfo, OutputOps, PropertyOps, RenderScheduler, ScreenInfo,
+    SystemUiOverlay, WindowOps,
 };
 use crate::backend::common_define::{KeySym, Mods, OutputId, WindowId};
 use crate::backend::error::BackendError;
@@ -77,6 +78,10 @@ struct SharedState {
     pointer_x: f64,
     pointer_y: f64,
     mods_state: u16,
+    /// A system-UI overlay is on screen, so the WM owns the keyboard the way
+    /// an X11 keyboard grab would and needs to see key releases too — the
+    /// held-modifier window switcher commits on nothing else.
+    system_ui_grab_active: bool,
     /// Cached key bindings (mods, keysym) for key event suppression.
     key_bindings: Vec<(Mods, KeySym)>,
     /// xkb keycode (0..=255) -> base (unmodified) keysym.
@@ -95,6 +100,7 @@ impl Default for SharedState {
             pointer_x: 0.0,
             pointer_y: 0.0,
             mods_state: 0,
+            system_ui_grab_active: false,
             key_bindings: Vec::new(),
             keysym_table: vec![0; 256],
             suppressed_keycodes: HashSet::new(),
@@ -1382,6 +1388,22 @@ impl WaylandWinitBackend {
             shared: backend.shared.clone(),
         });
 
+        // Answer the pointer/modifier query from the state the input handler
+        // already keeps, the way `UdevInputOps` does. A zero modifier mask
+        // reads to `Jwm::window_switcher` as "nothing held", which commits
+        // Alt+Tab in the same call that opens it.
+        backend.input_ops = Box::new(wayland_dummy_ops::SharedInputOps::new({
+            let shared = backend.shared.clone();
+            move || {
+                let s = shared.lock_safe();
+                wayland_dummy_ops::SharedInputSnapshot {
+                    pointer_x: s.pointer_x,
+                    pointer_y: s.pointer_y,
+                    mods: s.mods_state,
+                }
+            }
+        }));
+
         backend.key_ops = Box::new(wayland_key_ops::UdevKeyOps::new()?);
 
         let state_ptr: *mut JwmWaylandState = &mut *backend.state;
@@ -1822,6 +1844,25 @@ fn process_input_event_windowed<B: InputBackend>(
                             time,
                         });
                 }
+
+                // ...except the Alt+Tab switcher, which ends when the modifier
+                // it opened on goes back up. That release belongs to a key
+                // whose press predates the overlay, so no binding match can
+                // carry it: mirror every release while the overlay is up.
+                let (system_ui_grab_active, mods_state) = {
+                    let s = shared.lock_safe();
+                    (s.system_ui_grab_active, s.mods_state)
+                };
+                if wayland_dummy_ops::mirrors_key_release_to_wm(pressed, system_ui_grab_active) {
+                    let keycode_u8 = u8::try_from(u32::from(keycode)).unwrap_or(0);
+                    pending_events
+                        .lock_safe()
+                        .push_back(BackendEvent::KeyRelease {
+                            keycode: keycode_u8,
+                            state: mods_state,
+                            time,
+                        });
+                }
             }
         }
 
@@ -1833,7 +1874,22 @@ impl CompositorBenchmark for WaylandWinitBackend {}
 impl BackendDiagnostics for WaylandWinitBackend {}
 impl CompositorControl for WaylandWinitBackend {}
 impl CompositorMedia for WaylandWinitBackend {}
-impl CompositorWorkspaceEffects for WaylandWinitBackend {}
+impl CompositorWorkspaceEffects for WaylandWinitBackend {
+    /// The nested backend has no system-UI renderer, but the flag is not
+    /// about drawing: while a panel is up the WM is the keyboard's owner, and
+    /// `Jwm::on_key_release` — the only way the held-modifier switcher can
+    /// commit — never runs unless releases are queued for it.
+    fn compositor_set_system_ui(&mut self, overlay: Option<SystemUiOverlay>) {
+        // Same rule the udev backend applies: a press queued before the lock
+        // card went up must not be handled as a shortcut behind it.
+        if overlay.as_ref().is_some_and(|overlay| overlay.locked) {
+            self.pending_events
+                .lock_safe()
+                .retain(|event| !matches!(event, BackendEvent::KeyPress { .. }));
+        }
+        self.shared.lock_safe().system_ui_grab_active = overlay.is_some();
+    }
+}
 impl CompositorWindowEffects for WaylandWinitBackend {}
 impl CompositorAnnotation for WaylandWinitBackend {}
 impl DisplayControl for WaylandWinitBackend {}

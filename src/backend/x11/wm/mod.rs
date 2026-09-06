@@ -717,6 +717,68 @@ pub fn parse_wm_hints(values: &[u32]) -> Option<WmHints> {
     })
 }
 
+/// Largest width or height an X11 `ConfigureWindow` accepts (a CARD16).
+///
+/// `WM_NORMAL_HINTS` words are client-written INT32s with no server-side
+/// validation, and the size-hint consumers (`calculate_constrained_size`,
+/// `total_width()`) do plain `i32` arithmetic on them. A hint the server could
+/// never satisfy is therefore recorded as absent (`0`, the convention every
+/// consumer already uses) instead of being carried as `i32::MAX` into a
+/// subtraction that overflows or a `ConfigureWindow` the server rejects.
+const MAX_NORMAL_HINT_DIMENSION: u32 = u16::MAX as u32;
+
+/// Widest aspect band a hint may ask for, as `w/h` and `h/w`. Real clients
+/// stay within a few to one; the bound exists so `h * aspect` for any
+/// displayable `h` stays far inside `i32` instead of saturating to `i32::MAX`
+/// when a client writes a ratio like `0xFFFF_FFFF : 1`.
+const MAX_NORMAL_HINT_ASPECT: f32 = 256.0;
+
+/// One `WM_NORMAL_HINTS` dimension word, or `0` (absent) when it exceeds what
+/// the X server could ever configure. Negative INT32s arrive as words above
+/// `i32::MAX` and land in the same bucket.
+fn bounded_normal_hint_dimension(word: u32) -> i32 {
+    if word > MAX_NORMAL_HINT_DIMENSION {
+        0
+    } else {
+        word as i32
+    }
+}
+
+/// The `PAspect` pair, or `(0.0, 0.0)` (absent) unless both ratios are
+/// well-formed and inside the sane band. The two are only ever applied
+/// together, so a bad half disables the pair the same way a zero denominator
+/// always has.
+///
+/// Dropping both when only one is out of band looks lossy — a client asking
+/// "never narrower than 4:3, no practical maximum" appears to lose its
+/// minimum too — but the only consumer is the WM's aspect-ratio constraint,
+/// whose gate is `min_aspect > 0.0 && max_aspect > 0.0`. A surviving half
+/// would be read by nobody, while making `0.0` mean "absent" in one field and
+/// "the pair is half-present" in the other. Keeping the halves independent is
+/// therefore a change to that gate, not to this parser: this side is pinned
+/// by `a_half_aspect_pair_is_recorded_absent`, and the gate that makes it
+/// harmless by `a_half_aspect_pair_constrains_nothing` beside the consumer.
+fn bounded_normal_hint_aspects(
+    min_num: u32,
+    min_den: u32,
+    max_num: u32,
+    max_den: u32,
+) -> (f32, f32) {
+    fn ratio(num: u32, den: u32) -> Option<f32> {
+        if num == 0 || den == 0 {
+            return None;
+        }
+        let value = num as f32 / den as f32;
+        (1.0 / MAX_NORMAL_HINT_ASPECT..=MAX_NORMAL_HINT_ASPECT)
+            .contains(&value)
+            .then_some(value)
+    }
+    match (ratio(min_num, min_den), ratio(max_num, max_den)) {
+        (Some(min_aspect), Some(max_aspect)) => (min_aspect, max_aspect),
+        _ => (0.0, 0.0),
+    }
+}
+
 pub fn parse_normal_hints(values: &[u32]) -> Option<NormalHints> {
     if values.len() < 18 {
         return None;
@@ -741,37 +803,37 @@ pub fn parse_normal_hints(values: &[u32]) -> Option<NormalHints> {
     let mut max_aspect = 0.0;
 
     if flags & P_RESIZE_INC != 0 {
-        inc_w = values[9] as i32;
-        inc_h = values[10] as i32;
+        inc_w = bounded_normal_hint_dimension(values[9]);
+        inc_h = bounded_normal_hint_dimension(values[10]);
     }
     if flags & P_MAX_SIZE != 0 {
-        max_w = values[7] as i32;
-        max_h = values[8] as i32;
+        max_w = bounded_normal_hint_dimension(values[7]);
+        max_h = bounded_normal_hint_dimension(values[8]);
     }
     match (flags & P_BASE_SIZE != 0, flags & P_MIN_SIZE != 0) {
         (true, true) => {
-            base_w = values[15] as i32;
-            base_h = values[16] as i32;
-            min_w = values[5] as i32;
-            min_h = values[6] as i32;
+            base_w = bounded_normal_hint_dimension(values[15]);
+            base_h = bounded_normal_hint_dimension(values[16]);
+            min_w = bounded_normal_hint_dimension(values[5]);
+            min_h = bounded_normal_hint_dimension(values[6]);
         }
         (true, false) => {
-            base_w = values[15] as i32;
-            base_h = values[16] as i32;
+            base_w = bounded_normal_hint_dimension(values[15]);
+            base_h = bounded_normal_hint_dimension(values[16]);
             min_w = base_w;
             min_h = base_h;
         }
         (false, true) => {
-            min_w = values[5] as i32;
-            min_h = values[6] as i32;
+            min_w = bounded_normal_hint_dimension(values[5]);
+            min_h = bounded_normal_hint_dimension(values[6]);
             base_w = min_w;
             base_h = min_h;
         }
         (false, false) => {}
     }
-    if flags & P_ASPECT != 0 && values[12] != 0 && values[14] != 0 {
-        min_aspect = values[11] as f32 / values[12] as f32;
-        max_aspect = values[13] as f32 / values[14] as f32;
+    if flags & P_ASPECT != 0 {
+        (min_aspect, max_aspect) =
+            bounded_normal_hint_aspects(values[11], values[12], values[13], values[14]);
     }
 
     Some(NormalHints {
@@ -1089,6 +1151,89 @@ mod tests {
         assert_eq!(hints.base_h, 480);
         assert_eq!(hints.min_w, 640);
         assert_eq!(hints.min_h, 480);
+    }
+
+    #[test]
+    fn normal_hints_treat_sizes_the_server_cannot_configure_as_absent() {
+        // PMinSize | PMaxSize | PResizeInc | PBaseSize with every word past
+        // what a ConfigureWindow can carry: `min == max > 0` would otherwise
+        // float the client as fixed-size at i32::MAX and every later
+        // `w + 2 * border_w` would overflow.
+        let mut values = vec![0u32; 18];
+        values[0] = (1 << 4) | (1 << 5) | (1 << 6) | (1 << 8);
+        values[5] = 0x7fff_ffff;
+        values[6] = 0x7fff_ffff;
+        values[7] = 0x7fff_ffff;
+        values[8] = 0x7fff_ffff;
+        values[9] = 0xffff_ffff;
+        values[10] = 0xffff_ffff;
+        values[15] = 0x8000_0000;
+        values[16] = 0x8000_0000;
+        let hints = parse_normal_hints(&values).expect("normal hints");
+        assert_eq!((hints.min_w, hints.min_h), (0, 0));
+        assert_eq!((hints.max_w, hints.max_h), (0, 0));
+        assert_eq!((hints.inc_w, hints.inc_h), (0, 0));
+        assert_eq!((hints.base_w, hints.base_h), (0, 0));
+
+        // The CARD16 ceiling itself is still a hint.
+        let mut values = vec![0u32; 18];
+        values[0] = (1 << 4) | (1 << 5);
+        values[5] = 65535;
+        values[6] = 1;
+        values[7] = 65535;
+        values[8] = 1;
+        let hints = parse_normal_hints(&values).expect("normal hints");
+        assert_eq!((hints.min_w, hints.max_w), (65535, 65535));
+
+        // A rejected base word does not leak into the min fallback either.
+        let mut values = vec![0u32; 18];
+        values[0] = 1 << 8;
+        values[15] = 70_000;
+        values[16] = 480;
+        let hints = parse_normal_hints(&values).expect("normal hints");
+        assert_eq!((hints.min_w, hints.min_h), (0, 480));
+    }
+
+    #[test]
+    fn normal_hints_drop_aspect_pairs_outside_the_sane_band() {
+        let with_aspect = |min: (u32, u32), max: (u32, u32)| {
+            let mut values = vec![0u32; 18];
+            values[0] = 1 << 7;
+            values[11] = min.0;
+            values[12] = min.1;
+            values[13] = max.0;
+            values[14] = max.1;
+            let hints = parse_normal_hints(&values).expect("normal hints");
+            (hints.min_aspect, hints.max_aspect)
+        };
+        // `0xFFFF_FFFF : 1` saturates `h * aspect` to i32::MAX downstream.
+        assert_eq!(with_aspect((0xffff_ffff, 1), (16, 9)), (0.0, 0.0));
+        assert_eq!(with_aspect((4, 3), (1, 0xffff_ffff)), (0.0, 0.0));
+        // A zero anywhere disables the pair exactly as it always did.
+        assert_eq!(with_aspect((0, 3), (16, 9)), (0.0, 0.0));
+        assert_eq!(with_aspect((4, 3), (16, 0)), (0.0, 0.0));
+        // Ordinary ratios survive untouched.
+        let (min_aspect, max_aspect) = with_aspect((4, 3), (16, 9));
+        assert!((min_aspect - 4.0 / 3.0).abs() < 1e-6);
+        assert!((max_aspect - 16.0 / 9.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_half_aspect_pair_is_recorded_absent() {
+        // "Never narrower than 4:3, no practical maximum" is the case that
+        // looks like it loses something: the maximum is far outside the band
+        // the parser will carry, so the pair is recorded absent. That this
+        // costs a window nothing is the consumer's half of the contract,
+        // pinned by `a_half_aspect_pair_constrains_nothing` beside the gate —
+        // the transport may not reach into policy to assert it here.
+        let mut values = vec![0u32; 18];
+        values[0] = 1 << 7;
+        values[11] = 4;
+        values[12] = 3;
+        values[13] = 1_000_000;
+        values[14] = 1;
+        let hints = parse_normal_hints(&values).expect("normal hints");
+        assert_eq!((hints.min_aspect, hints.max_aspect), (0.0, 0.0));
     }
 
     #[test]

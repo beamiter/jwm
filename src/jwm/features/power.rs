@@ -463,6 +463,14 @@ impl crate::jwm::Jwm {
     }
 
     /// JSON snapshot for the `get_power_status` query.
+    ///
+    /// The profiles are what the control-center worker last read, never a
+    /// `powerprofilesctl` run here: that is a Python D-Bus client, and a bar
+    /// polling this query would stall the compositor on every poll. This is
+    /// a read of memory only; the `get_power_status` arm asks
+    /// `ensure_control_snapshot_refresh` first so the next answer is
+    /// current, and until the first read lands `profile_pending` says the
+    /// `null` is not an answer yet.
     pub(crate) fn power_status_json(&self) -> serde_json::Value {
         let battery = match self.features.battery {
             Some(state) => serde_json::json!({
@@ -473,15 +481,43 @@ impl crate::jwm::Jwm {
             }),
             None => serde_json::json!({ "present": false }),
         };
-        let profile = match profiles() {
-            Some((available, active)) => serde_json::json!({
-                "available": available,
-                "active": active,
-            }),
-            None => serde_json::Value::Null,
-        };
-        serde_json::json!({ "battery": battery, "profile": profile })
+        let (profile, profile_pending) = power_profile_report(
+            self.features.control_snapshot.as_ref(),
+            self.features.control_snapshot_refreshed_at.is_some(),
+        );
+        serde_json::json!({
+            "battery": battery,
+            "profile": profile,
+            "profile_pending": profile_pending,
+        })
     }
+}
+
+/// The `profile` field of `get_power_status`, and whether it is still
+/// pending. `null` already means "this machine has no profile control", so a
+/// null that only means "nobody has looked yet" has to be told apart from it.
+///
+/// The evidence for that is `read_completed` — whether a control-center
+/// worker read has ever landed — and never the mere existence of a snapshot:
+/// `mutate_control_snapshot` inserts a default one the first time a volume or
+/// brightness key is pressed, so a session where somebody nudged the volume
+/// before the first read would otherwise answer "no profiles on this machine"
+/// with nothing having been read at all.
+fn power_profile_report(
+    snapshot: Option<&super::system_controls::ControlCenterSnapshot>,
+    read_completed: bool,
+) -> (serde_json::Value, bool) {
+    let profiles = snapshot.and_then(|snapshot| snapshot.power_profiles.as_ref());
+    let Some((available, active)) = profiles else {
+        return (serde_json::Value::Null, !read_completed);
+    };
+    (
+        serde_json::json!({
+            "available": available,
+            "active": active,
+        }),
+        false,
+    )
 }
 
 #[cfg(test)]
@@ -494,6 +530,84 @@ mod tests {
             status,
             time_remaining_mins: None,
         }
+    }
+
+    #[test]
+    fn get_power_status_serves_the_worker_snapshot_and_says_when_none_exists() {
+        use super::super::system_controls::ControlCenterSnapshot;
+
+        let (profile, pending) = power_profile_report(None, false);
+        assert!(profile.is_null());
+        assert!(
+            pending,
+            "a null before the first read must not read as 'no profiles'"
+        );
+
+        // A volume or brightness key inserts a default snapshot long before
+        // any worker read lands (`mutate_control_snapshot` uses
+        // `get_or_insert_with`). The snapshot existing is therefore not
+        // evidence that the profiles were read.
+        let (profile, pending) =
+            power_profile_report(Some(&ControlCenterSnapshot::default()), false);
+        assert!(profile.is_null());
+        assert!(
+            pending,
+            "a snapshot created by a volume key is not a completed profile read"
+        );
+
+        let snapshot = ControlCenterSnapshot {
+            power_profiles: Some((
+                vec!["power-saver".to_string(), "balanced".to_string()],
+                "balanced".to_string(),
+            )),
+            ..Default::default()
+        };
+        let (profile, pending) = power_profile_report(Some(&snapshot), false);
+        assert!(
+            !pending,
+            "profiles in hand are an answer even before a worker read lands"
+        );
+        assert_eq!(profile["active"], "balanced");
+        assert_eq!(profile["available"][0], "power-saver");
+
+        let (profile, pending) =
+            power_profile_report(Some(&ControlCenterSnapshot::default()), true);
+        assert!(profile.is_null());
+        assert!(
+            !pending,
+            "a completed read with no profiles is the real answer"
+        );
+    }
+
+    #[test]
+    fn get_power_status_never_runs_the_profile_tool_on_the_compositor_thread() {
+        // The control center already reads `profiles()` on a worker; the IPC
+        // query must serve that snapshot rather than fork `powerprofilesctl`
+        // inline. The needle is assembled at runtime so this test cannot
+        // match its own text.
+        const SOURCE: &str = include_str!("power.rs");
+        let body = SOURCE
+            .split_once("fn power_status_json")
+            .expect("power_status_json")
+            .1
+            .split_once("\n    }\n")
+            .expect("the end of power_status_json")
+            .0;
+        assert!(
+            body.contains("control_snapshot"),
+            "power_status_json no longer serves the control-center snapshot"
+        );
+        // The pending flag has to be evidence of a completed read, not of a
+        // snapshot object that a volume key may have created.
+        assert!(
+            body.contains("control_snapshot_refreshed_at"),
+            "power_status_json no longer derives 'pending' from a completed read"
+        );
+        let needle = format!("{}()", "profiles");
+        assert!(
+            !body.contains(&needle),
+            "power_status_json regained an inline profile read"
+        );
     }
 
     #[test]

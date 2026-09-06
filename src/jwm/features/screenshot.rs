@@ -1315,27 +1315,47 @@ impl Jwm {
     ) {
         let use_wl_copy = Self::is_udev_backend(backend);
         let image_sender = backend.clipboard_image_sender();
-        std::thread::spawn(move || {
-            if !Self::wait_for_screenshot_file(&png_path) {
-                error!(
-                    "[take_screenshot] screenshot file did not appear: {}",
-                    png_path
-                );
-                if to_clipboard {
-                    let _ = std::fs::remove_file(&png_path);
+        // The path is only needed again if the OS refuses the thread, and
+        // only when it names a clipboard staging file: a saved screenshot
+        // belongs to the user either way.
+        let staging_path = to_clipboard.then(|| png_path.clone());
+        let spawned = std::thread::Builder::new()
+            .name("jwm-screenshot-bake".into())
+            .spawn(move || {
+                if !Self::wait_for_screenshot_file(&png_path) {
+                    error!(
+                        "[take_screenshot] screenshot file did not appear: {}",
+                        png_path
+                    );
+                    if to_clipboard {
+                        let _ = std::fs::remove_file(&png_path);
+                    }
+                    return;
                 }
-                return;
-            }
 
-            match Self::bake_annotations_into_png(&png_path, region_origin, &annotations) {
-                Ok(()) => info!("[take_screenshot] annotations baked into {}", png_path),
-                Err(e) => error!("[take_screenshot] failed to bake annotations: {e}"),
-            }
+                match Self::bake_annotations_into_png(&png_path, region_origin, &annotations) {
+                    Ok(()) => info!("[take_screenshot] annotations baked into {}", png_path),
+                    Err(e) => error!("[take_screenshot] failed to bake annotations: {e}"),
+                }
 
-            if to_clipboard {
-                Self::publish_image_path_to_clipboard(&png_path, image_sender, use_wl_copy);
+                if to_clipboard {
+                    Self::publish_image_path_to_clipboard(&png_path, image_sender, use_wl_copy);
+                }
+            });
+        if let Err(error) = spawned {
+            // `std::thread::spawn` panics when the OS refuses a thread (a
+            // pids cgroup limit, RLIMIT_NPROC, memory pressure). On the
+            // compositor thread that panic takes the whole session down —
+            // every window — for one screenshot. Losing the annotations is
+            // the acceptable failure; the capture itself is already on disk.
+            error!("[take_screenshot] could not spawn the annotation baking thread: {error}");
+            if let Some(path) = staging_path {
+                // Best effort only, and for the same reason as in
+                // `copy_image_path_to_clipboard`: the capture is queued, not
+                // written, so this usually finds nothing.
+                let _ = std::fs::remove_file(&path);
             }
-        });
+        }
     }
 
     fn bake_annotations_into_png(
@@ -1824,17 +1844,32 @@ impl Jwm {
         let png_path = png_path.to_string();
         info!("[take_screenshot] clipboard copy scheduled: {}", png_path);
 
-        std::thread::spawn(move || {
-            if !Self::wait_for_screenshot_file(&png_path) {
-                error!(
-                    "[take_screenshot] clipboard source file did not appear: {}",
-                    png_path
-                );
-                let _ = std::fs::remove_file(&png_path);
-                return;
-            }
-            Self::publish_image_path_to_clipboard(&png_path, image_sender, use_wl_copy);
-        });
+        let staging_path = png_path.clone();
+        let spawned = std::thread::Builder::new()
+            .name("jwm-clipboard-copy".into())
+            .spawn(move || {
+                if !Self::wait_for_screenshot_file(&png_path) {
+                    error!(
+                        "[take_screenshot] clipboard source file did not appear: {}",
+                        png_path
+                    );
+                    let _ = std::fs::remove_file(&png_path);
+                    return;
+                }
+                Self::publish_image_path_to_clipboard(&png_path, image_sender, use_wl_copy);
+            });
+        if let Err(error) = spawned {
+            // A refused thread must not panic the compositor (see
+            // `bake_annotations_then_maybe_copy`). The staging file holds
+            // private screen contents and nothing will read it now, so unlink
+            // what is there. The capture itself is only *queued* at this
+            // point, so most of the time there is nothing yet to remove and a
+            // PNG the compositor writes a moment later is left behind: the
+            // worker that would have waited for it is exactly what the OS
+            // just refused, and waiting here would block the frame.
+            error!("[take_screenshot] could not spawn the clipboard copy thread: {error}");
+            let _ = std::fs::remove_file(&staging_path);
+        }
     }
 
     fn wait_for_screenshot_file(png_path: &str) -> bool {
@@ -1976,6 +2011,41 @@ mod tests {
     impl Drop for ScratchDir {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn the_screenshot_workers_survive_an_os_that_refuses_a_thread() {
+        // Both helpers run on the compositor thread, and the plain
+        // `spawn` panics when the OS refuses a thread (a pids cgroup limit,
+        // RLIMIT_NPROC, memory pressure) — which on that thread ends the
+        // session, every window, for one screenshot. Each must go through a
+        // `Builder` and handle the `Err`. Needles are assembled at runtime
+        // and the haystack stops at this module, so neither can match here.
+        const SOURCE: &str = include_str!("screenshot.rs");
+        let shipped = SOURCE
+            .split_once("#[cfg(test)]")
+            .expect("the test module")
+            .0;
+        let panicking = format!("{}{}", "std::thread::", "spawn(");
+        let fallible = format!("{}{}", "thread::", "Builder::new()");
+        for worker in [
+            "fn bake_annotations_then_maybe_copy",
+            "fn copy_image_path_to_clipboard",
+        ] {
+            let tail = shipped
+                .split_once(worker)
+                .unwrap_or_else(|| panic!("{worker} not found"))
+                .1;
+            let body = tail.split_once("\n    fn ").map_or(tail, |(head, _)| head);
+            assert!(
+                !body.contains(&panicking),
+                "{worker} regained a compositor-killing thread spawn"
+            );
+            assert!(
+                body.contains(&fallible),
+                "{worker} no longer spawns through a fallible builder"
+            );
         }
     }
 

@@ -4,11 +4,11 @@ use crate::backend::api::Backend;
 use crate::core::layout::LayoutEnum;
 use crate::core::models::MonitorKey;
 use crate::jwm::Jwm;
-use log::{info, warn};
+use log::{debug, warn};
 
 impl Jwm {
     pub(crate) fn arrangemon(&mut self, backend: &mut dyn Backend, mon_key: MonitorKey) {
-        info!("[arrangemon]");
+        debug!("[arrangemon]");
 
         let (layout_type, layout_symbol) = if let Some(monitor) = self.state.monitors.get(mon_key) {
             let layout = &monitor.lt;
@@ -20,7 +20,7 @@ impl Jwm {
 
         if let Some(monitor) = self.state.monitors.get_mut(mon_key) {
             monitor.lt_symbol = layout_symbol;
-            info!("ltsymbol: {:?}", monitor.lt_symbol);
+            debug!("ltsymbol: {:?}", monitor.lt_symbol);
         }
 
         match *layout_type {
@@ -41,7 +41,10 @@ impl Jwm {
     }
 
     pub(crate) fn arrange(&mut self, backend: &mut dyn Backend, m_target: Option<MonitorKey>) {
-        info!("[arrange]");
+        // A marker, not a diagnostic: this runs on every map, unmap, tag
+        // switch and focus cycle, and the release default filter is `info`.
+        // Keep it out of the session log.
+        debug!("[arrange]");
 
         let monitors_to_process: Vec<MonitorKey> = match m_target {
             Some(monitor_key) => vec![monitor_key],
@@ -68,5 +71,28 @@ impl Jwm {
         // Window moves the arrange just made are the overview's content:
         // rebuild the open grid's cells so it never shows stale wireframes.
         self.refresh_tags_overview();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn arrange_markers_stay_below_the_default_log_level() {
+        // `arrange` runs per window event and `arrangemon` per monitor of
+        // it; a bare marker at `info` is a write(2) into the journal for
+        // each. The needle is assembled at runtime so it cannot match here.
+        const SOURCE: &str = include_str!("arrange.rs");
+        let body = SOURCE
+            .split_once("fn arrangemon")
+            .expect("arrangemon")
+            .1
+            .split_once("#[cfg(test)]")
+            .expect("the test module")
+            .0;
+        let needle = format!("{}!(", "info");
+        assert!(
+            !body.contains(&needle),
+            "arrange/arrangemon regained an info-level marker line"
+        );
     }
 }

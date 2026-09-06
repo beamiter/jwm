@@ -39,8 +39,15 @@ pub struct CompositorMetrics {
     pub dirty_fraction_percent: f32,
     pub window_count: usize,
     pub blur_quality: String,
+    /// The configured intent — `behavior.vrr_enabled` — on the wayland-udev
+    /// backend; the X11 compositor still reports its focused-game guess here.
     pub vrr_enabled: bool,
-    pub vrr_active: bool, // VRR currently active for focused game window
+    /// VRR as the hardware ran it for the last presented frame on the
+    /// wayland-udev backend: the per-output `VRR_ENABLED` the KMS toggle
+    /// actually took. The X11 compositor still reports a guess made from the
+    /// focused window's class, so the two backends do not yet mean the same
+    /// thing by this field.
+    pub vrr_active: bool,
     pub current_refresh_rate: u32, // Current target refresh rate (Hz)
     // Task 8: Input latency metrics
     pub input_latency_avg_ms: f32,
@@ -244,7 +251,11 @@ pub struct PresentationOutputStatus {
     pub output_name: String,
     /// A client on this output holds a committed `Async` tearing hint.
     pub client_asked_to_tear: bool,
-    /// `VRR_ENABLED` as the policy asked for it this frame.
+    /// `VRR_ENABLED` as the toggle actually took on this output, not as the
+    /// policy asked for it this frame: a `use_vrr` the driver refused is
+    /// cached so it is not retried every frame, and reporting the request
+    /// instead said `true` for the rest of the session. A frame the loop
+    /// skipped, or repeated, carries the same programmed value forward.
     pub vrr: bool,
     /// Whether this frame was submitted as an asynchronous (tearing) flip.
     pub tearing: bool,
@@ -1544,6 +1555,43 @@ pub struct MinimizedRestoreRect {
     pub y: i32,
     pub w: i32,
     pub h: i32,
+}
+
+impl MinimizedRestoreRect {
+    /// Coordinate band of a restore rectangle: `ConfigureWindow` carries x/y
+    /// as INT16, so nothing outside this could be put on screen.
+    pub const MIN_COORDINATE: i32 = i16::MIN as i32;
+    /// Upper end of [`Self::MIN_COORDINATE`]'s band.
+    pub const MAX_COORDINATE: i32 = i16::MAX as i32;
+    /// Widest or tallest restore rectangle the X server could ever configure:
+    /// `ConfigureWindow` width/height are CARD16.
+    pub const MAX_DIMENSION: i32 = u16::MAX as i32;
+
+    /// Whether this is a rectangle X11 can actually be asked for.
+    ///
+    /// Both sides of the minimize/restore round trip need this same answer,
+    /// and they used to spell it out separately: the producer in
+    /// `jwm::window_state` decided what to persist, the transport's codec in
+    /// `backend::x11::wm::minimized_restore` decided what to encode and what
+    /// to accept back, and a comment in the first pointed at the second. A
+    /// producer that is one bound more generous than the codec does not write
+    /// a slightly wrong property — the encode fails and the whole minimize
+    /// fails with it — so the rule lives here, on the value both layers
+    /// already share, and neither can drift from the other.
+    ///
+    /// The property lives on the client's own window, so any client may write
+    /// it, and the decoded `visible_rect` is copied straight into
+    /// `client.geometry`, where every consumer does plain `i32` arithmetic on
+    /// it (`x + w`, `w + 2 * border`). A forged `w = i32::MAX` is therefore
+    /// not "a very large window" but a malformed property.
+    #[must_use]
+    pub fn is_configurable(self) -> bool {
+        let coordinates = Self::MIN_COORDINATE..=Self::MAX_COORDINATE;
+        coordinates.contains(&self.x)
+            && coordinates.contains(&self.y)
+            && (1..=Self::MAX_DIMENSION).contains(&self.w)
+            && (1..=Self::MAX_DIMENSION).contains(&self.h)
+    }
 }
 
 /// JWM-owned state needed to adopt a minimized X11 client across an exec

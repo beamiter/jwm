@@ -1396,18 +1396,6 @@ fn jwm_install_plan(jwm_dir: &Path) -> Vec<InstallPlanEntry> {
     ]
 }
 
-#[cfg(test)]
-fn session_install_targets(jwm_dir: &Path) -> [(PathBuf, &'static str); 3] {
-    [
-        (jwm_dir.join("jwm-x11rb.desktop"), "/usr/share/xsessions/"),
-        (jwm_dir.join("jwm-xcb.desktop"), "/usr/share/xsessions/"),
-        (
-            jwm_dir.join("jwm-wayland.desktop"),
-            "/usr/share/wayland-sessions/",
-        ),
-    ]
-}
-
 fn install_jwm(jwm_dir: &str) -> io::Result<()> {
     let jwm_dir = Path::new(jwm_dir);
     let install_plan = jwm_install_plan(jwm_dir);
@@ -2881,10 +2869,10 @@ mod tests {
         parse_daemon_pidfile, parse_legacy_daemon_pidfile, parse_linux_proc_stat_identity,
         parse_msg_args, parse_subscription_topics, parse_v1_daemon_pidfile, process_identity,
         process_identity_matches, response_data, response_flock_path, response_lock_path,
-        rotated_log_path, session_install_targets, should_attempt_wayland_status_fallback,
-        smoke_artifacts_json, smoke_ci_profile_json, smoke_manual_kms_checklist_json,
-        smoke_target_json, split_path_list, successful_query_data, validate_daemon_response,
-        validate_ipc_response, write_fifo_nonblock,
+        rotated_log_path, should_attempt_wayland_status_fallback, smoke_artifacts_json,
+        smoke_ci_profile_json, smoke_manual_kms_checklist_json, smoke_target_json, split_path_list,
+        successful_query_data, validate_daemon_response, validate_ipc_response,
+        write_fifo_nonblock,
     };
     use clap::Parser;
     use std::collections::HashSet;
@@ -3512,17 +3500,6 @@ mod tests {
         assert!(started.elapsed() < std::time::Duration::from_secs(1));
 
         std::fs::remove_file(fifo).unwrap();
-    }
-
-    #[test]
-    fn session_install_plan_uses_the_correct_display_manager_directories() {
-        let plan = session_install_targets(std::path::Path::new("/src/jwm"));
-        assert!(plan[0].0.ends_with("jwm-x11rb.desktop"));
-        assert_eq!(plan[0].1, "/usr/share/xsessions/");
-        assert!(plan[1].0.ends_with("jwm-xcb.desktop"));
-        assert_eq!(plan[1].1, "/usr/share/xsessions/");
-        assert!(plan[2].0.ends_with("jwm-wayland.desktop"));
-        assert_eq!(plan[2].1, "/usr/share/wayland-sessions/");
     }
 }
 

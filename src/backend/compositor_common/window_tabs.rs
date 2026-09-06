@@ -237,7 +237,12 @@ pub fn tab_hover_at(groups: &[TabGroup], px: f32, py: f32) -> Option<(usize, usi
 /// so the hit test cannot round to a different cell than the one drawn.
 #[must_use]
 pub fn tab_at(bar: Rect, count: usize, px: f32, py: f32) -> Option<usize> {
-    if count == 0 || !bar_is_drawable(bar) {
+    // A NaN coordinate fails every comparison, so the bounds test below
+    // would let it through and the walk would fall off the end — reporting
+    // a hover on the *last* tab of the first group, for a pointer that is
+    // nowhere. `bar_is_drawable` guards the rectangle's half of the same
+    // input; this is the point's half.
+    if count == 0 || !bar_is_drawable(bar) || !px.is_finite() || !py.is_finite() {
         return None;
     }
     let [x, y, w, h] = bar;
@@ -309,6 +314,31 @@ mod tests {
         assert_eq!(tab_at(BAR, 3, x + 1.0, y - 1.0), None);
         assert_eq!(tab_at(BAR, 3, x + 1.0, y + h + 1.0), None);
         assert_eq!(tab_at(BAR, 0, x + 1.0, y + 1.0), None);
+    }
+
+    #[test]
+    fn a_pointer_that_is_nowhere_hits_nothing() {
+        // NaN loses every comparison, so an unguarded hit test would walk
+        // past the last cell and answer `Some(count - 1)`.
+        let [x, y, ..] = BAR;
+        for (px, py) in [
+            (f32::NAN, y + 1.0),
+            (x + 1.0, f32::NAN),
+            (f32::NAN, f32::NAN),
+            (f32::INFINITY, y + 1.0),
+            (x + 1.0, f32::NEG_INFINITY),
+        ] {
+            assert_eq!(tab_at(BAR, 3, px, py), None, "({px}, {py})");
+        }
+
+        let groups = vec![TabGroup {
+            bar: BAR,
+            tabs: vec![Tab {
+                title: "only".to_string(),
+                active: true,
+            }],
+        }];
+        assert_eq!(tab_hover_at(&groups, f32::NAN, f32::NAN), None);
     }
 
     #[test]

@@ -964,6 +964,67 @@ pub(crate) struct ToastTextureSet {
     pub(crate) buttons: Vec<Option<(u32, u32, u32)>>,
 }
 
+/// Everything one rasterized tags-grid label depends on, so the cache can
+/// answer "are these textures still the right pixels?" without consulting a
+/// dirty flag it cannot see: `sysui_text_dirty` is consumed by the panel's own
+/// text pass (`update_system_ui_textures`) before the grid draws.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct TagsGridLabelKey {
+    /// Font description the labels were rasterized with.
+    font: String,
+    /// Pixel size, as bits so a degenerate (NaN) size still compares equal to
+    /// itself instead of forcing a rebuild every frame.
+    size_bits: u32,
+    /// The occupied and empty inks, in that order; a theme change moves them.
+    inks: [[u8; 4]; 2],
+    /// `(tag_index, occupied)` per drawn cell, in draw order: the label text
+    /// and which of the two inks it took.
+    cells: Vec<(usize, bool)>,
+}
+
+impl TagsGridLabelKey {
+    /// True when labels baked for this key are still exactly right for a grid
+    /// about to be drawn with `font`/`size`/`inks` over `cells`.
+    pub(crate) fn matches<I>(&self, font: &str, size: f32, inks: &[[u8; 4]; 2], cells: I) -> bool
+    where
+        I: ExactSizeIterator<Item = (usize, bool)>,
+    {
+        self.font == font
+            && self.size_bits == size.to_bits()
+            && self.inks == *inks
+            && self.cells.len() == cells.len()
+            && self
+                .cells
+                .iter()
+                .copied()
+                .zip(cells)
+                .all(|(old, new)| old == new)
+    }
+
+    /// Record the key the freshly rasterized labels belong to, reusing the
+    /// allocations the previous key already owns.
+    pub(crate) fn refresh<I>(&mut self, font: &str, size: f32, inks: [[u8; 4]; 2], cells: I)
+    where
+        I: Iterator<Item = (usize, bool)>,
+    {
+        self.font.clear();
+        self.font.push_str(font);
+        self.size_bits = size.to_bits();
+        self.inks = inks;
+        self.cells.clear();
+        self.cells.extend(cells);
+    }
+
+    /// Forget the key so the next grid frame rasterizes from scratch. Called
+    /// wherever the textures it describes are deleted.
+    pub(crate) fn forget(&mut self) {
+        self.font.clear();
+        self.cells.clear();
+        self.size_bits = 0;
+        self.inks = [[0; 4]; 2];
+    }
+}
+
 #[allow(dead_code)]
 pub(crate) struct WaylandCompositor {
     // Shader programs
@@ -1190,6 +1251,13 @@ pub(crate) struct WaylandCompositor {
     // Mouse position
     mouse_x: f32,
     mouse_y: f32,
+    /// Whether a pointer position was ever pushed in. `(0.0, 0.0)` is a legal
+    /// place for the pointer to be, so the coordinates alone cannot say
+    /// whether they describe the pointer or the initial value; anything that
+    /// would paint a pointer-driven highlight (the tab strip's hover chip)
+    /// must ask this first, or a strip that happens to contain the origin
+    /// lights a cell nobody is pointing at.
+    pointer_seen: bool,
 
     // Tilt
     tilt_x: f32,
@@ -1387,7 +1455,14 @@ pub(crate) struct WaylandCompositor {
 
     // --- VRR ---
     is_game_window: HashMap<u64, bool>,
-    vrr_active: bool,
+    /// The focused window's class matched `game_classes`. A hint the refresh
+    /// suggestion is derived from — never a statement about the hardware,
+    /// which programs VRR from per-output fullscreen coverage in KMS.
+    game_window_focused: bool,
+    /// VRR as KMS actually programmed it for the last presented frame, fed
+    /// from the presentation statuses. This is what the HUD row and
+    /// `get_metrics().vrr_active` report.
+    output_vrr_active: bool,
     vrr_last_check: Instant,
 
     // --- Temporal blur ---
@@ -1447,6 +1522,13 @@ pub(crate) struct WaylandCompositor {
     /// Text/font/theme or screen-width changes require a new raster. Geometry
     /// changes such as selection motion deliberately do not.
     sysui_text_dirty: bool,
+    /// Rasterized tag-number labels for the tags-grid overlay, in draw order:
+    /// `(cell index, texture, width, height)`. The overlay repaints on every
+    /// pointer motion, so these are baked per key rather than per frame.
+    tags_grid_labels: Vec<(usize, u32, u32, u32)>,
+    /// The key `tags_grid_labels` were baked for. Empty whenever the textures
+    /// are, so a stale label can never be drawn for a different grid.
+    tags_grid_labels_key: TagsGridLabelKey,
 
     // --- Toast notifications (cards stacked below the bar dock) ---
     toast_stack: crate::backend::compositor_common::toast::ToastStack,
@@ -2588,9 +2670,11 @@ impl WaylandCompositor {
                 edge_glow_active: false,
                 edge_glow_suppressed: false,
 
-                // Mouse position
+                // Mouse position. `pointer_seen` stays false until a real
+                // position arrives, so the origin is not mistaken for one.
                 mouse_x: 0.0,
                 mouse_y: 0.0,
+                pointer_seen: false,
 
                 // Tilt
                 tilt_x: 0.0,
@@ -2749,7 +2833,8 @@ impl WaylandCompositor {
 
                 // VRR
                 is_game_window: HashMap::new(),
-                vrr_active: false,
+                game_window_focused: false,
+                output_vrr_active: false,
                 vrr_last_check: now,
 
                 // Temporal blur (default-on; config may override via apply_config)
@@ -2801,6 +2886,8 @@ impl WaylandCompositor {
                 hud_textures: [None; 4],
                 sysui_textures: [None; 4],
                 sysui_text_dirty: true,
+                tags_grid_labels: Vec::new(),
+                tags_grid_labels_key: TagsGridLabelKey::default(),
                 toast_stack: Default::default(),
                 toast_textures: HashMap::new(),
                 toast_rects: Vec::new(),
@@ -2976,6 +3063,12 @@ impl WaylandCompositor {
                     gl.DeleteTextures(1, &texture);
                 }
             }
+            for (_, texture, _, _) in self.tags_grid_labels.drain(..) {
+                if texture != 0 {
+                    gl.DeleteTextures(1, &texture);
+                }
+            }
+            self.tags_grid_labels_key.forget();
             for slot in self
                 .hud_textures
                 .iter_mut()
@@ -3119,6 +3212,118 @@ impl Drop for WaylandCompositor {
 }
 
 #[cfg(test)]
+mod vrr_report_contract_tests {
+    use super::TagsGridLabelKey;
+
+    /// The compact source of one `fn`/`struct` item, without whitespace.
+    fn compact_item(source: &str, needle: &str) -> String {
+        let start = source.find(needle).expect("source item missing");
+        let open = start
+            + source[start..]
+                .find('{')
+                .expect("source item has no opening brace");
+        let mut depth = 0usize;
+        for (offset, byte) in source[open..].bytes().enumerate() {
+            match byte {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return source[start..open + offset + 1]
+                            .chars()
+                            .filter(|character| !character.is_whitespace())
+                            .collect();
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("source item has no closing brace");
+    }
+
+    #[test]
+    fn the_reported_vrr_state_is_the_hardware_one_not_the_game_guess() {
+        let source = include_str!("mod.rs");
+        let metrics = compact_item(source, &format!("pub(crate) fn {}(", "get_metrics"));
+        let hardware = format!("vrr_active:self.{}", "output_vrr_active");
+        let guess = format!("vrr_active:self.{}", "game_window_focused");
+        assert!(
+            metrics.contains(&hardware),
+            "the metric must report the VRR the hardware ran"
+        );
+        assert!(
+            !metrics.contains(&guess),
+            "the focused window's class is not the hardware's answer"
+        );
+        // `vrr_enabled` is the configured intent, which no compositor field
+        // stands for either.
+        assert!(metrics.contains(&format!(
+            "vrr_enabled:crate::config::CONFIG.load().behavior().{}",
+            "vrr_enabled"
+        )));
+    }
+
+    #[test]
+    fn the_class_derived_flag_only_feeds_the_refresh_rate_suggestion() {
+        let source = include_str!("rules.rs");
+        let refresh = compact_item(
+            source,
+            &format!("pub(crate) fn {}(", "get_vrr_refresh_rate"),
+        );
+        assert!(refresh.contains(&format!("self.{}", "game_window_focused")));
+        let update = compact_item(source, &format!("pub(crate) fn {}(", "update_vrr_state"));
+        assert!(!update.contains(&format!("self.{}", "output_vrr_active")));
+    }
+
+    #[test]
+    fn a_tags_grid_label_key_covers_every_input_its_pixels_have() {
+        let inks = [[255, 255, 255, 255], [128, 128, 128, 255]];
+        let cells = [(0usize, true), (1, false), (2, true)];
+        let mut key = TagsGridLabelKey::default();
+        // A fresh key matches nothing: the labels have not been baked yet.
+        assert!(!key.matches("Sans 12", 19.2, &inks, cells.iter().copied()));
+
+        key.refresh("Sans 12", 19.2, inks, cells.iter().copied());
+        assert!(key.matches("Sans 12", 19.2, &inks, cells.iter().copied()));
+
+        // Font, size, either ink, an occupancy flip, a different tag, and a
+        // shorter or longer grid each change the pixels.
+        assert!(!key.matches("Serif 12", 19.2, &inks, cells.iter().copied()));
+        assert!(!key.matches("Sans 12", 24.0, &inks, cells.iter().copied()));
+        let dim_ink = [inks[0], [64, 64, 64, 255]];
+        assert!(!key.matches("Sans 12", 19.2, &dim_ink, cells.iter().copied()));
+        let flipped = [(0usize, false), (1, false), (2, true)];
+        assert!(!key.matches("Sans 12", 19.2, &inks, flipped.iter().copied()));
+        let renumbered = [(3usize, true), (1, false), (2, true)];
+        assert!(!key.matches("Sans 12", 19.2, &inks, renumbered.iter().copied()));
+        assert!(!key.matches("Sans 12", 19.2, &inks, cells[..2].iter().copied()));
+
+        // Forgetting the key is what freeing the textures does, and it must
+        // leave no key a later grid could match against.
+        key.forget();
+        assert!(!key.matches("Sans 12", 19.2, &inks, cells.iter().copied()));
+    }
+
+    #[test]
+    fn the_tag_labels_are_freed_wherever_the_overlay_stops_drawing_them() {
+        let source = include_str!("render.rs");
+        let free = format!("self.{}(gl)", "clear_tags_grid_labels");
+        let panel = compact_item(source, &format!("unsafe fn {}(", "render_system_ui"));
+        assert!(
+            panel.matches(free.as_str()).count() >= 2,
+            "a filmstrip or a plain panel must not leave grid labels on the GPU"
+        );
+        let teardown = include_str!("mod.rs");
+        let release = compact_item(
+            teardown,
+            &format!("pub(crate) unsafe fn {}(", "release_gpu_resources"),
+        );
+        assert!(release.contains(&format!("self.{}.drain(..)", "tags_grid_labels")));
+        assert!(release.contains(&format!("self.{}.forget()", "tags_grid_labels_key")));
+    }
+}
+
+#[cfg(test)]
 mod gpu_release_contract_tests {
     use std::collections::BTreeSet;
 
@@ -3176,6 +3381,7 @@ mod gpu_release_contract_tests {
         "tab_title_textures",
         "annotation_label_textures",
         "screenshot_toolbar_icons",
+        "tags_grid_labels",
         "hud_textures",
         "sysui_textures",
         "toast_textures",
@@ -4085,8 +4291,8 @@ impl WaylandCompositor {
             dirty_fraction_percent: self.dirty_region_tracker.current_dirty_fraction() * 100.0,
             window_count: self.windows.len(),
             blur_quality: format!("{:?}", self.blur_quality),
-            vrr_enabled: self.vrr_active,
-            vrr_active: self.vrr_active,
+            vrr_enabled: crate::config::CONFIG.load().behavior().vrr_enabled,
+            vrr_active: self.output_vrr_active,
             current_refresh_rate: 0,
             input_latency_avg_ms: 0.0,
             input_latency_p50_ms: 0.0,

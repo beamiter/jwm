@@ -10,16 +10,20 @@
 //!
 //! The history survives a restart (see [`HISTORY_FILE`]): loading and saving
 //! are a thin file-IO shell around the pure [`serialize_history`] /
-//! [`parse_history`] pair. Everything else here is pure: no backend, no clock
-//! of its own (callers pass the timestamp), so it is exercised directly by
-//! unit tests.
+//! [`parse_history`] pair, with the writes themselves on a thread of their
+//! own (see `HistoryWriter`) so the compositor never waits on an fsync.
+//! Everything else here is pure: no backend, no clock of its own (callers
+//! pass the timestamp), so it is exercised directly by unit tests.
 
 use std::collections::VecDeque;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, mpsc};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
@@ -35,11 +39,13 @@ pub const HISTORY_FILE: &str = "notification-history";
 /// future migration starts from a clean, explicit break.
 const HISTORY_FILE_VERSION: u32 = 1;
 
-/// Generous per-record allowance, used only to size the file check on load:
-/// a record holds at most three [`MAX_TEXT_CHARS`]-character texts, six
-/// actions, and small scalar fields, so this mostly bounds sender-controlled
-/// action keys.
-const MAX_HISTORY_RECORD_BYTES: u64 = 4096;
+/// Per-record allowance the file size check on load is built from. A record
+/// holds at most three [`MAX_TEXT_CHARS`]-character texts, [`MAX_ACTIONS`]
+/// [`MAX_LABEL_CHARS`]-character labels and as many
+/// [`MAX_ACTION_KEY_CHARS`]-character keys, which at the widest JSON escaping
+/// comes to a little over 4 KiB (`history_written_by_this_version_always_loads`
+/// pins it) — so the writer can never produce a file the loader refuses.
+const MAX_HISTORY_RECORD_BYTES: u64 = 8192;
 
 /// Largest history file read back; a larger one is rejected like any other
 /// special or damaged source.
@@ -57,6 +63,14 @@ pub const MAX_ACTIONS: usize = 6;
 
 /// Longest action label kept, for the same reason.
 const MAX_LABEL_CHARS: usize = 20;
+
+/// Longest action key kept. A key goes back to its sender verbatim over
+/// `ActionInvoked`, so an over-long one is dropped rather than truncated — a
+/// truncated key would name an action the sender never offered. Keys in the
+/// wild are short identifiers; the cap is what lets a single record never
+/// outgrow `MAX_HISTORY_RECORD_BYTES` and take the whole persisted history
+/// with it on the next load.
+pub const MAX_ACTION_KEY_CHARS: usize = 64;
 
 /// The key the specification reserves for "the notification itself was
 /// activated", rather than one of its buttons.
@@ -129,6 +143,17 @@ pub struct NotificationRequest {
 pub struct NotificationCenter {
     records: VecDeque<NotificationRecord>,
     next_id: u32,
+    /// Identifiers the cap pushed out since the last [`Self::take_evicted`].
+    /// Each still owes its sender a close.
+    evicted: Vec<u32>,
+    /// The configuration's Do-Not-Disturb value the runtime toggle was last
+    /// reconciled with; `None` until the configuration has been seen.
+    config_do_not_disturb: Option<bool>,
+    /// Where the history is written back. `None` for an in-memory center —
+    /// tests, or one that never loaded — which persists nothing.
+    path: Option<PathBuf>,
+    /// The thread that owns the file, started by the first save.
+    writer: Option<HistoryWriter>,
 }
 
 fn sanitize(text: &str) -> String {
@@ -192,13 +217,20 @@ fn sanitize_actions(actions: &[NotificationAction]) -> Vec<NotificationAction> {
     sanitize_action_iter(actions.iter())
 }
 
+/// Whether a sender's key can be kept: trimmed, non-empty, and short enough
+/// to persist. Shared by the flat-list decoder and the record sanitizer so
+/// both count the same entries against the cap and the `default` rescue.
+fn action_key_is_usable(trimmed_key: &str) -> bool {
+    !trimmed_key.is_empty() && trimmed_key.chars().nth(MAX_ACTION_KEY_CHARS).is_none()
+}
+
 fn sanitize_action_iter<'a>(
     actions: impl IntoIterator<Item = &'a NotificationAction>,
 ) -> Vec<NotificationAction> {
     let mut kept = Vec::with_capacity(MAX_ACTIONS);
     for action in actions {
         let key = action.key.trim();
-        if key.is_empty() {
+        if !action_key_is_usable(key) {
             continue;
         }
 
@@ -273,7 +305,7 @@ fn parse_flat_actions(items: &[serde_json::Value]) -> Vec<NotificationAction> {
     for pair in items.chunks(2) {
         let key = pair[0].as_str().unwrap_or_default();
         let trimmed_key = key.trim();
-        if trimmed_key.is_empty() {
+        if !action_key_is_usable(trimmed_key) {
             continue;
         }
         if kept.len() == MAX_ACTIONS && trimmed_key != DEFAULT_KEY {
@@ -330,6 +362,32 @@ pub fn action_strip(actions: &[NotificationAction], cursor: usize) -> String {
         })
         .collect();
     format!("      \u{f0a9} {}", chips.join("   "))
+}
+
+/// Where the runtime Do-Not-Disturb toggle lands once the configuration is
+/// (re)applied. The toggle is the user's most recent word and survives a
+/// reload that did not touch the setting; a configuration whose value moved
+/// — an edit to the file, a `set_config` — is newer than the toggle and wins.
+/// With no earlier value to compare against, the configuration is adopted.
+#[must_use]
+pub fn do_not_disturb_after_config_apply(
+    runtime: bool,
+    previous_config: Option<bool>,
+    config: bool,
+) -> bool {
+    match previous_config {
+        Some(previous) if previous == config => runtime,
+        _ => config,
+    }
+}
+
+/// Whether one of jwm's own toasts — a reload result, a recording state —
+/// may be shown. Do-Not-Disturb holds back everything but critical news: the
+/// user asked for a quiet screen, and a reload that failed is the one thing
+/// they would rather hear now than find in a log.
+#[must_use]
+pub fn system_toast_allowed(do_not_disturb: bool, urgency: u8) -> bool {
+    !do_not_disturb || urgency >= 2
 }
 
 impl NotificationCenter {
@@ -390,9 +448,28 @@ impl NotificationCenter {
             actions: sanitize_actions(&request.actions),
         });
         while self.records.len() > MAX_HISTORY {
-            self.records.pop_front();
+            if let Some(evicted) = self.records.pop_front() {
+                self.evicted.push(evicted.id);
+            }
         }
         id
+    }
+
+    /// Identifiers the history cap evicted since the last call. None of them
+    /// was closed on its way out — a toast expiring closes nothing — and the
+    /// executor owes each sender the one `notification/closed` the contract
+    /// promises.
+    pub fn take_evicted(&mut self) -> Vec<u32> {
+        std::mem::take(&mut self.evicted)
+    }
+
+    /// Reconcile the runtime Do-Not-Disturb toggle with a freshly applied
+    /// configuration (see [`do_not_disturb_after_config_apply`]) and remember
+    /// the configuration's value as the baseline for the next apply.
+    pub fn reconcile_do_not_disturb(&mut self, runtime: bool, config: bool) -> bool {
+        let next = do_not_disturb_after_config_apply(runtime, self.config_do_not_disturb, config);
+        self.config_do_not_disturb = Some(config);
+        next
     }
 
     /// Drop one record. Returns false when the identifier is unknown, which
@@ -435,13 +512,21 @@ impl NotificationCenter {
     /// Read the history back from disk. A missing file is an empty history,
     /// and so is an unreadable or malformed one — with a warning, because
     /// the notification center must work regardless of what is on disk.
+    ///
+    /// Also notes the configuration's Do-Not-Disturb value: the runtime
+    /// toggle starts on it (`Jwm::new`), and a later configuration apply
+    /// must compare against what the toggle started from.
     #[must_use]
     pub fn load() -> Self {
-        Self::load_from_path(&history_path())
+        let mut center = Self::load_from_path(&history_path());
+        let config = crate::config::CONFIG.load();
+        center.config_do_not_disturb = Some(config.behavior().do_not_disturb);
+        center
     }
 
+    /// The center writes back to where it was read from.
     fn load_from_path(path: &Path) -> Self {
-        match read_history(path) {
+        let mut center = match read_history(path) {
             Ok(text) => parse_history(&text).unwrap_or_else(|| {
                 log::warn!(
                     "notification history at {} is not a v{HISTORY_FILE_VERSION} file; starting empty",
@@ -457,16 +542,56 @@ impl NotificationCenter {
                 );
                 Self::default()
             }
+        };
+        center.path = Some(path.to_path_buf());
+        center
+    }
+
+    /// Queue the history for its writer thread. A write is a rename plus an
+    /// fsync of the file and of its directory — tens of milliseconds on a
+    /// busy disk — and the posting path used to run one inline, on the
+    /// compositor thread, for every notification, close and clear. Now it
+    /// only copies the records: the thread folds a burst (a progress
+    /// notification updating ten times a second) into one write per
+    /// `HISTORY_WRITE_WINDOW`, and [`Self::flush`] lands the last one at
+    /// shutdown. An in-memory center has nowhere to write and does nothing.
+    pub fn save(&mut self) {
+        let Some(path) = self.path.clone() else {
+            return;
+        };
+        let snapshot = HistorySnapshot {
+            records: self.records.iter().cloned().collect(),
+            next_id: self.next_id,
+        };
+        if self.writer.is_none() {
+            match HistoryWriter::spawn(path.clone()) {
+                Ok(writer) => self.writer = Some(writer),
+                Err(error) => {
+                    log::warn!("notifications: no history writer thread ({error}); writing inline");
+                    write_history_now(&path, &snapshot);
+                    return;
+                }
+            }
+        }
+        let rejected = match self.writer.as_ref() {
+            Some(writer) => writer.send(snapshot).err(),
+            None => Some(snapshot),
+        };
+        if let Some(snapshot) = rejected {
+            // The thread only ends when its channel closes, so this is one
+            // that died. Do not lose the change; the next save starts anew.
+            self.writer = None;
+            write_history_now(&path, &snapshot);
         }
     }
 
-    /// Write the history back. Failures are logged and dropped — losing a
-    /// snapshot is not worth interrupting a notification over.
-    pub fn save(&self) {
-        let path = history_path();
-        let serialized = serialize_history(&self.records, self.next_id);
-        if let Err(error) = atomic_write_history(&path, serialized.as_bytes()) {
-            log::debug!("notifications: {}: {error}", path.display());
+    /// Land whatever the writer thread still holds. Shutdown and restart call
+    /// this so a notification posted a moment earlier is in the file the next
+    /// process reads.
+    pub fn flush(&mut self) {
+        if let Some(writer) = self.writer.take() {
+            let written = writer.finish();
+            log::debug!("notifications: history writer landed {written} snapshot(s)");
         }
     }
 }
@@ -531,6 +656,22 @@ pub fn panel_row(record: &NotificationRecord, now_unix_ms: u64) -> String {
         " \u{f0a9}"
     };
     format!("{icon}  {app}{headline}{detail}{muted}{has_actions}   {age}")
+}
+
+/// The `notification/posted` payload: the record as the history keeps it,
+/// never the request's raw text. The event fans out to every subscriber, and
+/// a body near the IPC message limit would push each of their outbound
+/// buffers over it and disconnect the bar and the bridge alike.
+#[must_use]
+pub fn posted_event_payload(record: &NotificationRecord) -> serde_json::Value {
+    serde_json::json!({
+        "id": record.id,
+        "app": record.app,
+        "summary": record.summary,
+        "body": record.body,
+        "urgency": record.urgency,
+        "suppressed": record.suppressed,
+    })
 }
 
 /// Wall-clock milliseconds since the Unix epoch, saturating at zero if the
@@ -612,7 +753,11 @@ pub fn parse_history(text: &str) -> Option<NotificationCenter> {
         record.actions = sanitize_actions(&record.actions);
         records.push_back(record);
     }
-    Some(NotificationCenter { records, next_id })
+    Some(NotificationCenter {
+        records,
+        next_id,
+        ..NotificationCenter::default()
+    })
 }
 
 fn read_history(path: &Path) -> io::Result<String> {
@@ -683,6 +828,122 @@ fn atomic_write_history(path: &Path, contents: &[u8]) -> io::Result<()> {
     result
 }
 
+/// Longest a change waits to reach the disk. Changes inside one window share
+/// a write, so a burst costs the disk one rename-and-fsync rather than one
+/// per notification; a crash inside the window loses at most that much.
+const HISTORY_WRITE_WINDOW: Duration = Duration::from_secs(1);
+
+/// The records as handed to the writer thread.
+#[derive(Debug)]
+struct HistorySnapshot {
+    records: Vec<NotificationRecord>,
+    next_id: u32,
+}
+
+/// The thread that owns the history file. It takes snapshots over a channel,
+/// collects whatever else arrives within [`HISTORY_WRITE_WINDOW`] of the
+/// first, and writes only the newest; a closed channel ends the wait early
+/// and the final snapshot lands before the thread exits, which is how
+/// [`NotificationCenter::flush`] — and a plain drop — flush.
+#[derive(Debug)]
+struct HistoryWriter {
+    sender: Option<mpsc::Sender<HistorySnapshot>>,
+    thread: Option<thread::JoinHandle<()>>,
+    /// Snapshots that reached the disk.
+    writes: Arc<AtomicU64>,
+}
+
+impl HistoryWriter {
+    fn spawn(path: PathBuf) -> io::Result<Self> {
+        let (sender, receiver) = mpsc::channel();
+        let writes = Arc::new(AtomicU64::new(0));
+        let written = Arc::clone(&writes);
+        let thread = thread::Builder::new()
+            .name("jwm-notification-history".to_string())
+            .spawn(move || write_history_snapshots(&path, &receiver, &written))?;
+        Ok(Self {
+            sender: Some(sender),
+            thread: Some(thread),
+            writes,
+        })
+    }
+
+    /// Hand the thread a snapshot. It comes back when the thread is gone.
+    fn send(&self, snapshot: HistorySnapshot) -> Result<(), HistorySnapshot> {
+        match &self.sender {
+            Some(sender) => sender.send(snapshot).map_err(|error| error.0),
+            None => Err(snapshot),
+        }
+    }
+
+    /// Close the channel, wait for the last snapshot to land, and report how
+    /// many were written.
+    fn finish(mut self) -> u64 {
+        self.join();
+        self.writes.load(Ordering::Relaxed)
+    }
+
+    fn join(&mut self) {
+        // Dropping the sender is what ends the loop, so it goes first.
+        self.sender = None;
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+impl Drop for HistoryWriter {
+    fn drop(&mut self) {
+        self.join();
+    }
+}
+
+fn write_history_snapshots(
+    path: &Path,
+    receiver: &mpsc::Receiver<HistorySnapshot>,
+    writes: &AtomicU64,
+) {
+    while let Ok(first) = receiver.recv() {
+        let latest = newest_snapshot_within(first, receiver, Instant::now() + HISTORY_WRITE_WINDOW);
+        if write_history_now(path, &latest) {
+            writes.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Keep taking snapshots until `deadline`, or until the channel closes; the
+/// newest is the one worth writing.
+fn newest_snapshot_within(
+    mut latest: HistorySnapshot,
+    receiver: &mpsc::Receiver<HistorySnapshot>,
+    deadline: Instant,
+) -> HistorySnapshot {
+    loop {
+        let now = Instant::now();
+        if now >= deadline {
+            return latest;
+        }
+        match receiver.recv_timeout(deadline - now) {
+            Ok(newer) => latest = newer,
+            // Timed out, or the channel closed: either way, write what we have.
+            Err(_) => return latest,
+        }
+    }
+}
+
+/// Serialize and write one snapshot. Failures are logged and dropped —
+/// losing a snapshot is not worth interrupting a notification over.
+fn write_history_now(path: &Path, snapshot: &HistorySnapshot) -> bool {
+    let serialized = serialize_history(&snapshot.records, snapshot.next_id);
+    match atomic_write_history(path, serialized.as_bytes()) {
+        Ok(()) => true,
+        Err(error) => {
+            log::debug!("notifications: {}: {error}", path.display());
+            false
+        }
+    }
+}
+
 fn history_path() -> std::path::PathBuf {
     let base = std::env::var_os("XDG_DATA_HOME")
         .map(std::path::PathBuf::from)
@@ -710,6 +971,16 @@ impl crate::jwm::Jwm {
             .features
             .notifications
             .push(request, now_unix_ms(), suppressed);
+        // The cap evicts silently in the pure history. An evicted record was
+        // never closed — its toast expiring closes nothing — and its sender
+        // is still owed the one `NotificationClosed` the contract promises;
+        // a later `CloseNotification` for it would find nothing to close.
+        for evicted in self.features.notifications.take_evicted() {
+            self.broadcast_ipc_event(
+                "notification/closed",
+                serde_json::json!({ "id": evicted, "reason": CloseReason::Undefined.code() }),
+            );
+        }
         self.features.notifications.save();
 
         if !suppressed {
@@ -736,22 +1007,35 @@ impl crate::jwm::Jwm {
             });
         }
 
-        self.broadcast_ipc_event(
-            "notification/posted",
-            serde_json::json!({
-                "id": id,
-                "app": request.app,
-                "summary": request.summary,
-                "body": request.body,
-                "urgency": request.urgency.min(2),
-                "suppressed": suppressed,
-            }),
-        );
+        // The record, not the request: see `posted_event_payload`.
+        let payload = self
+            .features
+            .notifications
+            .get(id)
+            .map(posted_event_payload)
+            .unwrap_or_else(|| serde_json::json!({ "id": id, "suppressed": suppressed }));
+        self.broadcast_ipc_event("notification/posted", payload);
         // A center left open while a notification arrives would otherwise show
         // a stale list.
         self.refresh_open_notification_center();
         self.refresh_open_control_center();
         id
+    }
+
+    /// Show one of jwm's own toasts — no record, no sender — under the same
+    /// Do-Not-Disturb rule a notification gets (see [`system_toast_allowed`]).
+    /// Returns whether it was shown.
+    pub(crate) fn push_system_toast(
+        &mut self,
+        backend: &mut dyn crate::backend::api::Backend,
+        toast: crate::backend::api::ToastNotification,
+    ) -> bool {
+        if !system_toast_allowed(self.do_not_disturb, toast.urgency) {
+            log::debug!("toast {:?} held back by do-not-disturb", toast.title);
+            return false;
+        }
+        backend.compositor_push_toast(toast);
+        true
     }
 
     /// Drop one notification from the history and tell subscribers why, so the
@@ -767,6 +1051,7 @@ impl crate::jwm::Jwm {
         );
         self.features.system_ui.remove_notification(id);
         self.refresh_open_control_center();
+        self.repaint_open_notification_center();
         true
     }
 
@@ -789,7 +1074,20 @@ impl crate::jwm::Jwm {
         }
         self.features.system_ui.clear_notifications();
         self.refresh_open_control_center();
+        self.repaint_open_notification_center();
         count
+    }
+
+    /// The open notification center lost rows in memory; the frame tick must
+    /// push the new list. The keyboard paths sync the panel themselves, but a
+    /// close that arrives over IPC — an application cancelling its own
+    /// notification — has no such follow-up, and until something else
+    /// repainted, the screen kept the old rows under the old highlight while
+    /// Return acted on whatever had slid into the selected slot.
+    fn repaint_open_notification_center(&mut self) {
+        if self.features.system_ui.is_notification_center() {
+            self.mark_system_ui_dirty();
+        }
     }
 
     /// Report an action so the sending application can run it. The
@@ -1524,5 +1822,219 @@ mod tests {
         assert_eq!(restored.records, center.records);
         assert_eq!(restored.next_id, center.next_id);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn saves_are_coalesced_off_the_posting_path_and_flushed_at_the_end() {
+        let root = history_temp_root("writer");
+        let path = root.join(HISTORY_FILE);
+        let mut center = NotificationCenter::load_from_path(&path);
+        for index in 0..10 {
+            center.push(&request(&format!("n{index}")), index, false);
+            center.save();
+        }
+        // The posting path only copied the records. The thread writes at
+        // most once per window, and finishing lands the newest snapshot
+        // before returning.
+        let written = center
+            .writer
+            .take()
+            .expect("the first save starts the writer")
+            .finish();
+        assert!(
+            (1..10).contains(&written),
+            "ten saves inside one window wrote {written} times"
+        );
+        let restored = NotificationCenter::load_from_path(&path);
+        assert_eq!(restored.records, center.records);
+        assert_eq!(restored.next_id, center.next_id);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn an_in_memory_center_persists_nothing() {
+        let mut center = NotificationCenter::new();
+        center.push(&request("unsaved"), 0, false);
+        center.save();
+        assert!(center.writer.is_none());
+        assert!(center.path.is_none());
+    }
+
+    #[test]
+    fn an_over_long_key_is_dropped_rather_than_truncated() {
+        let long = "k".repeat(MAX_ACTION_KEY_CHARS + 1);
+        let exact = "k".repeat(MAX_ACTION_KEY_CHARS);
+        let kept = sanitize_actions(&[action(&long, "Too long"), action(&exact, "Fits")]);
+        assert_eq!(kept, [action(&exact, "Fits")]);
+        // The flat decoder applies the same rule, so the two count the same
+        // entries against the cap.
+        let parsed = parse_action_args(&serde_json::json!({
+            "actions": [long, "Too long", exact, "Fits"]
+        }));
+        assert_eq!(parsed, [action(&exact, "Fits")]);
+    }
+
+    #[test]
+    fn history_written_by_this_version_always_loads() {
+        // The widest record the sanitizers let through: four-byte characters
+        // wherever text is allowed, and keys of a control character, which
+        // JSON escapes to six bytes apiece.
+        let text = "\u{1F600}".repeat(MAX_TEXT_CHARS);
+        let label = "\u{1F600}".repeat(MAX_LABEL_CHARS);
+        let key = "\u{1}".repeat(MAX_ACTION_KEY_CHARS);
+        let mut center = NotificationCenter::new();
+        center.next_id = u32::MAX - MAX_HISTORY as u32 - 1;
+        for _ in 0..MAX_HISTORY {
+            center.push(
+                &NotificationRequest {
+                    app: text.clone(),
+                    summary: text.clone(),
+                    body: text.clone(),
+                    urgency: 2,
+                    replaces_id: 0,
+                    actions: (0..MAX_ACTIONS).map(|_| action(&key, &label)).collect(),
+                },
+                u64::MAX,
+                true,
+            );
+        }
+        let record = center.recent().next().expect("records present");
+        assert_eq!(record.actions.len(), MAX_ACTIONS);
+        assert_eq!(record.actions[0].key, key, "the widest key must survive");
+        let record_bytes = serde_json::to_string(record).expect("serializable").len() as u64;
+        assert!(
+            record_bytes <= MAX_HISTORY_RECORD_BYTES,
+            "a record can reach {record_bytes} bytes, over the {MAX_HISTORY_RECORD_BYTES} budget"
+        );
+
+        let serialized = serialize_history(&center.records, center.next_id);
+        assert!(
+            serialized.len() as u64 <= MAX_HISTORY_BYTES,
+            "a full history can reach {} bytes, over the {MAX_HISTORY_BYTES} limit",
+            serialized.len()
+        );
+        let restored = parse_history(&serialized).expect("a v1 file parses");
+        assert_eq!(restored.records, center.records);
+    }
+
+    #[test]
+    fn eviction_reports_the_identifiers_that_still_owe_a_close() {
+        let mut center = NotificationCenter::new();
+        let first = center.push(&request("first"), 0, false);
+        for index in 0..MAX_HISTORY {
+            center.push(&request(&format!("n{index}")), index as u64, false);
+        }
+        assert_eq!(center.take_evicted(), vec![first]);
+        assert!(center.take_evicted().is_empty(), "reported once");
+        assert!(center.get(first).is_none());
+    }
+
+    #[test]
+    fn the_posted_event_carries_the_record_not_the_request() {
+        let mut center = NotificationCenter::new();
+        let mut huge = request("big");
+        huge.body = "x".repeat(200 * 1024);
+        let id = center.push(&huge, 1_000, true);
+        let payload = posted_event_payload(center.get(id).expect("record"));
+        assert_eq!(payload["id"], id);
+        assert_eq!(
+            payload["body"].as_str().expect("body").chars().count(),
+            MAX_TEXT_CHARS
+        );
+        assert_eq!(payload["suppressed"], true);
+    }
+
+    #[test]
+    fn a_reload_that_did_not_touch_dnd_keeps_the_runtime_toggle() {
+        assert!(do_not_disturb_after_config_apply(true, Some(false), false));
+        assert!(!do_not_disturb_after_config_apply(false, Some(true), true));
+    }
+
+    #[test]
+    fn a_configuration_change_to_dnd_wins_over_the_toggle() {
+        assert!(do_not_disturb_after_config_apply(false, Some(false), true));
+        assert!(!do_not_disturb_after_config_apply(true, Some(true), false));
+        // No baseline to compare against: the configuration is adopted.
+        assert!(!do_not_disturb_after_config_apply(true, None, false));
+    }
+
+    #[test]
+    fn reconciling_remembers_the_configuration_it_saw() {
+        let mut center = NotificationCenter::new();
+        // First sight: the configuration (off) is adopted.
+        assert!(!center.reconcile_do_not_disturb(false, false));
+        // The user toggles on; a reload that left the setting alone keeps it.
+        assert!(center.reconcile_do_not_disturb(true, false));
+        // `set_config` turns it on in the configuration: adopted.
+        assert!(center.reconcile_do_not_disturb(true, true));
+        // The user toggles off again; the next unchanged reload keeps that.
+        assert!(!center.reconcile_do_not_disturb(false, true));
+    }
+
+    #[test]
+    fn system_toasts_respect_dnd_except_critical_ones() {
+        assert!(system_toast_allowed(false, 1));
+        assert!(!system_toast_allowed(true, 0));
+        assert!(!system_toast_allowed(true, 1));
+        assert!(system_toast_allowed(true, 2));
+    }
+
+    #[test]
+    fn the_documented_close_reasons_are_the_codes_senders_receive() {
+        // `docs/notifications.md`'s table is the contract a sender reads: the
+        // number in a row leaves the process unchanged — the bridge forwards
+        // whatever `notification/closed` carries straight into
+        // `NotificationClosed`'s reason argument. The table is parsed and
+        // driven rather than restated, so this cannot be satisfied by a
+        // literal of its own.
+        const DOC: &str = include_str!("../../../docs/notifications.md");
+        let table = DOC
+            .split_once("| Reason | What closed the record |")
+            .expect("docs/notifications.md carries the close-reason table")
+            .1
+            .split_once("\n\n")
+            .expect("the table ends at a blank line")
+            .0;
+        let documented: Vec<(u32, String)> = table
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("| `"))
+            .filter_map(|row| row.split_once('`'))
+            .filter_map(|(code, rest)| {
+                let code = code.parse::<u32>().ok()?;
+                let name = rest.trim_start().split_whitespace().next()?;
+                Some((code, name.to_string()))
+            })
+            .collect();
+        assert_eq!(documented.len(), 4, "one row per reason: {documented:?}");
+        for (code, name) in &documented {
+            let reason = match name.as_str() {
+                "expired" => CloseReason::Expired,
+                "dismissed" => CloseReason::Dismissed,
+                "requested" => CloseReason::Requested,
+                "undefined" => CloseReason::Undefined,
+                other => panic!("the table names a close reason the code lacks: {other}"),
+            };
+            assert_eq!(reason.code(), *code, "documented reason `{name}`");
+        }
+        // The cap is the backstop that bounds a `notify-send --wait`, so the
+        // number the table quotes has to be the live one.
+        assert!(
+            table.contains(&format!("{MAX_HISTORY}-record cap")),
+            "the eviction row must name the live history cap"
+        );
+
+        // The action bullet names the key cap; moving the constant without
+        // the prose would tell senders a rule jwm does not apply.
+        let bullet = DOC
+            .split_once("**An action with no key is dropped**")
+            .expect("docs/notifications.md carries the action sanitation bullet")
+            .1
+            .split_once("\n- ")
+            .expect("the bullet ends where the next one starts")
+            .0;
+        assert!(
+            bullet.contains(&format!("longer than {MAX_ACTION_KEY_CHARS} characters")),
+            "the action bullet must name the live key cap"
+        );
     }
 }

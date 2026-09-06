@@ -101,14 +101,21 @@ pub fn build_from_edid(caps: &EdidHdrCapabilities, configured_peak_nits: u16) ->
         configured_peak_nits
     };
     let min_lum_units = (caps.min_luminance_nits * 10_000.0).round().max(0.0) as u16;
-    build_hdr_static_metadata_blob(
-        eotf,
-        primaries,
-        max_nits,
-        min_lum_units,
-        max_nits,
-        max_nits / 2,
-    )
+    // MaxFALL is the EDID's Desired Content Max Frame-average Luminance, not a
+    // share of the peak: `max_nits / 2` used to be sent to every sink as if
+    // the panel had stated it. When the panel states nothing (a zero code
+    // value, or a block that stops before that byte), CTA-861.3 and the
+    // HDR_OUTPUT_METADATA infoframe both define 0 as "unknown", so the
+    // fallback forwards the unknown and lets the sink apply its own default
+    // rather than assert a number the display never claimed. MaxFALL must
+    // also be <= MaxCLL, so a malformed EDID that puts the frame average
+    // above the peak is clamped instead of producing an invalid infoframe.
+    let max_fall = if caps.max_frame_average_nits > 0.0 {
+        (caps.max_frame_average_nits.round() as u16).min(max_nits)
+    } else {
+        0
+    };
+    build_hdr_static_metadata_blob(eotf, primaries, max_nits, min_lum_units, max_nits, max_fall)
 }
 
 pub fn build_sdr_clear_blob() -> [u8; 32] {
@@ -176,6 +183,7 @@ mod tests {
         let caps = EdidHdrCapabilities {
             max_luminance_nits: 1000.0,
             min_luminance_nits: 0.005,
+            max_frame_average_nits: 400.0,
             supports_bt2020: true,
             supports_pq: true,
             supports_hlg: false,
@@ -201,6 +209,7 @@ mod tests {
         let pq_only = EdidHdrCapabilities {
             max_luminance_nits: 600.0,
             min_luminance_nits: 0.01,
+            max_frame_average_nits: 0.0,
             supports_bt2020: false,
             supports_pq: true,
             supports_hlg: false,
@@ -214,6 +223,7 @@ mod tests {
         let sdr = EdidHdrCapabilities {
             max_luminance_nits: 0.0,
             min_luminance_nits: 0.0,
+            max_frame_average_nits: 0.0,
             supports_bt2020: false,
             supports_pq: false,
             supports_hlg: false,
@@ -222,10 +232,82 @@ mod tests {
     }
 
     #[test]
+    fn max_fall_is_the_edid_frame_average_not_half_the_peak() {
+        // The blob used to carry `max_nits / 2` — a number no display ever
+        // stated — in the field the sink tone-maps against.
+        let caps = EdidHdrCapabilities {
+            max_luminance_nits: 1000.0,
+            min_luminance_nits: 0.005,
+            max_frame_average_nits: 565.0,
+            supports_bt2020: true,
+            supports_pq: true,
+            supports_hlg: false,
+        };
+        let blob = build_from_edid(&caps, 400);
+        assert_eq!(
+            u16::from_ne_bytes([blob[28], blob[29]]),
+            565,
+            "MaxFALL is what the EDID said"
+        );
+        assert_ne!(
+            u16::from_ne_bytes([blob[28], blob[29]]),
+            500,
+            "half the peak is a fabrication"
+        );
+    }
+
+    #[test]
+    fn an_unstated_frame_average_is_sent_as_unknown() {
+        // CTA-861.3 code value 0 means "not indicated", and 0 in the
+        // infoframe means the same thing to the sink, so the unknown is
+        // forwarded rather than replaced with a guess derived from the peak.
+        let caps = EdidHdrCapabilities {
+            max_luminance_nits: 1000.0,
+            min_luminance_nits: 0.005,
+            max_frame_average_nits: 0.0,
+            supports_bt2020: true,
+            supports_pq: true,
+            supports_hlg: false,
+        };
+        let blob = build_from_edid(&caps, 400);
+        assert_eq!(
+            u16::from_ne_bytes([blob[22], blob[23]]),
+            1000,
+            "the peak is still stated"
+        );
+        assert_eq!(
+            u16::from_ne_bytes([blob[28], blob[29]]),
+            0,
+            "MaxFALL unknown, not half the peak"
+        );
+    }
+
+    #[test]
+    fn a_frame_average_above_the_peak_is_clamped_to_it() {
+        // MaxFALL <= MaxCLL is a requirement of the infoframe, and MaxCLL
+        // here is the panel peak; a malformed EDID must not make us emit an
+        // invalid descriptor.
+        let caps = EdidHdrCapabilities {
+            max_luminance_nits: 600.0,
+            min_luminance_nits: 0.01,
+            max_frame_average_nits: 4000.0,
+            supports_bt2020: true,
+            supports_pq: true,
+            supports_hlg: false,
+        };
+        let blob = build_from_edid(&caps, 400);
+        let max_cll = u16::from_ne_bytes([blob[26], blob[27]]);
+        let max_fall = u16::from_ne_bytes([blob[28], blob[29]]);
+        assert_eq!(max_cll, 600);
+        assert_eq!(max_fall, 600, "clamped to MaxCLL");
+    }
+
+    #[test]
     fn build_from_edid_falls_back_to_config_peak() {
         let caps = EdidHdrCapabilities {
             max_luminance_nits: 0.0,
             min_luminance_nits: 0.0,
+            max_frame_average_nits: 0.0,
             supports_bt2020: false,
             supports_pq: false,
             supports_hlg: true,

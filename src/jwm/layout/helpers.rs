@@ -6,6 +6,37 @@ use crate::core::types::Rect;
 use crate::jwm::Jwm;
 use log::{info, warn};
 use std::collections::HashMap;
+use std::sync::OnceLock;
+
+/// `JWM_DEBUG_WORKAREA=1` traces every work-area decision. Read once: the
+/// work area is computed per monitor on every frame and per client on every
+/// arrange, and an environment lookup takes the process-wide environment
+/// lock and allocates each time.
+fn workarea_debug_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+
+    *ENABLED.get_or_init(|| {
+        std::env::var("JWM_DEBUG_WORKAREA")
+            .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+    })
+}
+
+/// Pixels one dock takes off its edge of the work area. The depth is a
+/// client-owned number — a layer-shell exclusive zone, or a geometry the
+/// client chose — so, like an X11 strut, it is bounded by the output before
+/// it is trusted, and the padding is added without overflowing.
+///
+/// The padded depth, not the depth, is what is floored at zero: a dock whose
+/// geometry places it entirely outside the work area reserves nothing, which
+/// is what leaves `top`/`bottom`/`left`/`right` all zero and lets the
+/// historical status-bar offset below stand in. Flooring the depth first
+/// would turn such a dock into a `pad`-pixel reservation and suppress that
+/// fallback, hiding the bar's own offset behind a five-pixel gap.
+fn bounded_dock_reservation(depth: i64, pad: i32, extent: i32) -> i32 {
+    let limit = i64::from(extent.max(1));
+    depth.saturating_add(i64::from(pad.max(0))).clamp(0, limit) as i32
+}
 
 impl Jwm {
     pub(crate) fn nexttiled(
@@ -216,9 +247,7 @@ impl Jwm {
     pub(crate) fn monitor_work_area_untabbed(&self, mon_key: MonitorKey) -> Option<Rect> {
         let monitor = self.state.monitors.get(mon_key)?;
 
-        let debug_workarea = std::env::var("JWM_DEBUG_WORKAREA")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
+        let debug_workarea = workarea_debug_enabled();
 
         let wx = monitor.geometry.w_x;
         let wy = monitor.geometry.w_y;
@@ -350,14 +379,14 @@ impl Jwm {
                     })
                     .unwrap_or(true);
 
-                let zone_px = if exclusive_zone == -1 {
+                let zone_px: i64 = if exclusive_zone == -1 {
                     match edge {
-                        "top" | "bottom" => dh,
-                        "left" | "right" => dw,
+                        "top" | "bottom" => i64::from(dh),
+                        "left" | "right" => i64::from(dw),
                         _ => 0,
                     }
                 } else if exclusive_zone > 0 {
-                    exclusive_zone
+                    i64::from(exclusive_zone)
                 } else {
                     0
                 };
@@ -380,41 +409,48 @@ impl Jwm {
                     );
                 }
 
+                // The zone wins only where the client anchored the surface;
+                // otherwise the visible geometry says how deep the dock is.
+                let (dx, dy, dw, dh) = (i64::from(dx), i64::from(dy), i64::from(dw), i64::from(dh));
                 match edge {
                     "top" => {
                         if dist_top <= threshold {
-                            if zone_px > 0 && anchor_ok {
-                                top = top.max(zone_px + pad);
+                            let depth = if zone_px > 0 && anchor_ok {
+                                zone_px
                             } else {
-                                top = top.max((dy + dh - wy) + pad);
-                            }
+                                dy + dh - i64::from(wy)
+                            };
+                            top = top.max(bounded_dock_reservation(depth, pad, wh));
                         }
                     }
                     "bottom" => {
                         if dist_bottom <= threshold {
-                            if zone_px > 0 && anchor_ok {
-                                bottom = bottom.max(zone_px + pad);
+                            let depth = if zone_px > 0 && anchor_ok {
+                                zone_px
                             } else {
-                                bottom = bottom.max(((wy + wh) - dy) + pad);
-                            }
+                                i64::from(wy) + i64::from(wh) - dy
+                            };
+                            bottom = bottom.max(bounded_dock_reservation(depth, pad, wh));
                         }
                     }
                     "left" => {
                         if dist_left <= threshold {
-                            if zone_px > 0 && anchor_ok {
-                                left = left.max(zone_px + pad);
+                            let depth = if zone_px > 0 && anchor_ok {
+                                zone_px
                             } else {
-                                left = left.max((dx + dw - wx) + pad);
-                            }
+                                dx + dw - i64::from(wx)
+                            };
+                            left = left.max(bounded_dock_reservation(depth, pad, ww));
                         }
                     }
                     "right" => {
                         if dist_right <= threshold {
-                            if zone_px > 0 && anchor_ok {
-                                right = right.max(zone_px + pad);
+                            let depth = if zone_px > 0 && anchor_ok {
+                                zone_px
                             } else {
-                                right = right.max(((wx + ww) - dx) + pad);
-                            }
+                                i64::from(wx) + i64::from(ww) - dx
+                            };
+                            right = right.max(bounded_dock_reservation(depth, pad, ww));
                         }
                     }
                     _ => {}
@@ -427,10 +463,16 @@ impl Jwm {
             top = self.get_client_y_offset(monitor);
         }
 
-        let x = wx + left;
-        let y = wy + top;
-        let w = (ww - left - right).max(0);
-        let h = (wh - top - bottom).max(0);
+        // Every reservation above came from a client. As with X11 struts,
+        // two of them must never meet in the middle and leave a zero or
+        // negative work area for the layouts to hand out.
+        let (top, bottom) = crate::jwm::strut_manager::clamp_opposing_edges(top, bottom, wh);
+        let (left, right) = crate::jwm::strut_manager::clamp_opposing_edges(left, right, ww);
+
+        let x = wx.saturating_add(left);
+        let y = wy.saturating_add(top);
+        let w = ww.saturating_sub(left).saturating_sub(right).max(0);
+        let h = wh.saturating_sub(top).saturating_sub(bottom).max(0);
 
         if debug_workarea {
             info!(
@@ -506,5 +548,63 @@ impl Jwm {
             }
         }
         layout
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::bounded_dock_reservation;
+    use crate::jwm::strut_manager::clamp_opposing_edges;
+
+    #[test]
+    fn a_dock_reservation_is_bounded_by_the_output_and_never_overflows() {
+        // An ordinary 30 px bar with 4 px of padding.
+        assert_eq!(bounded_dock_reservation(30, 4, 1080), 34);
+        // `set_exclusive_zone(i32::MAX)` plus padding: no wrap, no more
+        // than the output itself.
+        assert_eq!(bounded_dock_reservation(i64::from(i32::MAX), 8, 1080), 1080);
+        // A geometry-derived depth that puts the dock outside the work area
+        // reserves nothing at all — not the padding — so the all-zero
+        // fallback to the historical bar offset still fires.
+        assert_eq!(bounded_dock_reservation(-20, 8, 1080), 0);
+        // Padding still counts once the dock is actually inside.
+        assert_eq!(bounded_dock_reservation(-2, 8, 1080), 6);
+        assert_eq!(bounded_dock_reservation(0, -3, 1080), 0);
+        assert_eq!(bounded_dock_reservation(50, 0, 0), 1);
+    }
+
+    #[test]
+    fn opposing_dock_zones_leave_the_layouts_at_least_one_pixel() {
+        // Two absurd zones, one per edge, on a second output at y = 1080:
+        // the work area stays representable and non-empty.
+        let wy = 1080i32;
+        let wh = 1080i32;
+        let top = bounded_dock_reservation(i64::from(i32::MAX), 0, wh);
+        let bottom = bounded_dock_reservation(2_000_000_000, 0, wh);
+        let (top, bottom) = clamp_opposing_edges(top, bottom, wh);
+        assert_eq!((top, bottom), (1079, 0));
+        let y = wy.saturating_add(top);
+        let h = wh.saturating_sub(top).saturating_sub(bottom).max(0);
+        assert_eq!((y, h), (2159, 1));
+    }
+
+    #[test]
+    fn the_work_area_never_reads_the_environment_per_call() {
+        // The work area is computed on every frame and every arrange; the
+        // debug switch is read once at first use, as the compositor's is.
+        const SOURCE: &str = include_str!("helpers.rs");
+        let body = SOURCE
+            .split_once("fn monitor_work_area_untabbed")
+            .expect("monitor_work_area_untabbed")
+            .1
+            .split_once("fn build_overview_layout")
+            .expect("the function after monitor_work_area_untabbed")
+            .0;
+        let needle = format!("{}::var(", "env");
+        assert!(
+            !body.contains(&needle),
+            "monitor_work_area_untabbed reads the environment on every call"
+        );
+        assert!(body.contains("workarea_debug_enabled()"));
     }
 }

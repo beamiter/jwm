@@ -13,7 +13,7 @@ use crate::jwm::Jwm;
 use crate::jwm::statusbar::StatusBarBuilder;
 use crate::jwm::types::WMArgEnum;
 use crate::jwm::visibility::hidden_x_left_of_desktop;
-use log::info;
+use log::{debug, info};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
@@ -788,7 +788,10 @@ impl Jwm {
         backend: &mut dyn Backend,
         mut client_key_opt: Option<ClientKey>,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        info!("[focus]");
+        // A marker, not a diagnostic: every pointer crossing, every tag
+        // switch and every arrange lands here, and the release default filter
+        // is `info`. Keep it out of the session log.
+        debug!("[focus]");
 
         let is_visible = match client_key_opt {
             Some(client_key) => self.is_client_visible_by_key(client_key),
@@ -1456,6 +1459,31 @@ mod scratchpad_reveal_tests {
                 .all(|(_, target)| target.is_none()),
             "a Dock-ineligible scratchpad must remain targetless when its cross-monitor restore rolls back: {:?}",
             backend.dock_targets
+        );
+    }
+}
+
+#[cfg(test)]
+mod focus_marker_tests {
+    #[test]
+    fn the_focus_marker_stays_below_the_default_log_level() {
+        // `focus` runs on every pointer crossing, tag switch and arrange; a
+        // bare marker at `info` is a write(2) into the journal for each. The
+        // named `[focus_window]`/`[focus_tab]` lines carry an argument and
+        // fire per user action, so only this function is pinned. The needle
+        // is assembled at runtime and the haystack is one function body.
+        const SOURCE: &str = include_str!("focus_manager.rs");
+        let body = SOURCE
+            .split_once("fn focus(")
+            .expect("focus")
+            .1
+            .split_once("#[cfg(test)]")
+            .expect("the test module")
+            .0;
+        let needle = format!("{}!(", "info");
+        assert!(
+            !body.contains(&needle),
+            "focus regained an info-level marker line"
         );
     }
 }

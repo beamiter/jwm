@@ -4,6 +4,7 @@ use crate::backend::compositor_common::wallpaper::{
     parse_wallpaper_mode, resolve_wallpaper_for_tag,
 };
 use crate::config::CONFIG;
+use crate::core::animation::AnimationSpeed;
 
 #[allow(clippy::too_many_arguments)]
 fn postprocess_is_active(
@@ -36,6 +37,69 @@ fn mouse_position_requires_render(
     window_tilt_enabled: bool,
 ) -> bool {
     old_position != new_position && (magnifier_enabled || edge_glow_visible || window_tilt_enabled)
+}
+
+/// Toast hover targets for a pointer at `(x, y)` against the card geometry of
+/// the last drawn frame: the hovered card (its timeout pauses) and, when the
+/// pointer sits on one of its chips, that card's action index (the chip
+/// brightens). Cards never overlap, so the first hit is the only hit.
+///
+/// A modal system UI overlay takes the pointer: the dispatcher answers motion
+/// from the panel and never forwards it to the compositor, so the stored
+/// position is wherever the pointer was when the panel opened. Cards under
+/// the panel are therefore not hoverable — otherwise a card the pointer
+/// happened to be over when the idle lock engaged would stay paused, frozen
+/// at the same age, for the whole locked session.
+fn toast_hover_targets(
+    rects: &[crate::backend::compositor_common::toast::ToastRects],
+    x: f32,
+    y: f32,
+    system_ui_active: bool,
+) -> (Option<u64>, Option<(u64, usize)>) {
+    use crate::backend::compositor_common::toast::{ToastHit, hit_test};
+    if system_ui_active {
+        return (None, None);
+    }
+    for rects in rects {
+        match hit_test(rects, x, y) {
+            Some(ToastHit::Button(index)) => return (Some(rects.id), Some((rects.id, index))),
+            Some(ToastHit::Card) => return (Some(rects.id), None),
+            None => {}
+        }
+    }
+    (None, None)
+}
+
+/// The tab-strip cell a pointer hovers, or `None` when no pointer position has
+/// ever arrived.
+///
+/// `(0.0, 0.0)` is both the compositor's initial `mouse_x`/`mouse_y` and a
+/// perfectly legal place for the pointer to be, so the coordinates alone
+/// cannot tell "never saw the pointer" from "pointer at the origin". Without
+/// the distinction, the first groups a freshly created compositor is handed
+/// light the first cell of any strip that contains the origin — a hidden
+/// status bar, or a bar that is not at the top — and the phantom hover sits
+/// there until the user moves the mouse.
+fn tab_hover_for_pointer(
+    groups: &[crate::backend::compositor_common::window_tabs::TabGroup],
+    pointer: Option<(f32, f32)>,
+) -> Option<(usize, usize)> {
+    let (x, y) = pointer?;
+    crate::backend::compositor_common::window_tabs::tab_hover_at(groups, x, y)
+}
+
+/// The zoom start factor the scale carrier animates from. `[animation]
+/// speed` is documented as multiplying every animation timing, and X11 runs
+/// its zoom on the fade steps so the multiplier reaches it there; the Wayland
+/// zoom carrier eases at a fixed rate in `tick_fades` instead, so an instant
+/// speed collapses the span: windows are seeded at, and close to, scale 1.0,
+/// `scale_carrier_progress` reports them settled from their first frame, and
+/// no composition or animation gate ever sees a transient scale.
+fn effective_window_animation_scale(configured: f32, speed: AnimationSpeed) -> f32 {
+    match speed {
+        AnimationSpeed::Instant => 1.0,
+        AnimationSpeed::Slow | AnimationSpeed::Normal | AnimationSpeed::Fast => configured,
+    }
 }
 
 fn collect_absent_auxiliary_window_ids(
@@ -321,6 +385,16 @@ impl WaylandCompositor {
         self.needs_render = true;
     }
 
+    /// The card geometry of the last drawn frame — the very list
+    /// [`Self::click_toast`] resolves against. The backend publishes it to the
+    /// input dispatcher so a press on a card is kept away from the client the
+    /// card is drawn over; the window manager remains the actor.
+    pub(crate) fn toast_hit_rects(
+        &self,
+    ) -> &[crate::backend::compositor_common::toast::ToastRects] {
+        &self.toast_rects
+    }
+
     /// Hit-test last frame's toast geometry through the shared stack: a card
     /// hit dismisses it, a button hit also reports the action for the WM to
     /// invoke. Anything but `Miss` is swallowed by the WM rather than
@@ -380,6 +454,7 @@ impl WaylandCompositor {
         self.sysui_text_dirty = true;
         let cfg = CONFIG.load();
         let b = cfg.behavior();
+        let anim_speed = cfg.animation_speed();
         let window_animation_style = WindowAnimationStyle::from_name(&b.window_animation_style);
         // The open/close fade machinery is driven by the standalone `fading`
         // feature and by alpha-driven animation styles. When a reload leaves
@@ -415,8 +490,21 @@ impl WaylandCompositor {
         self.active_opacity = finite_clamp(b.active_opacity, 0.0, 1.0, 1.0);
         self.inactive_dim = finite_clamp(b.inactive_dim, 0.0, 1.0, 1.0);
         self.inactive_desaturate = finite_clamp(b.inactive_desaturate, 0.0, 1.0, 0.0);
-        self.fade_in_step = finite_clamp(b.fade_in_step, 0.0001, 1.0, 0.03);
-        self.fade_out_step = finite_clamp(b.fade_out_step, 0.0001, 1.0, 0.03);
+        // `[animation] speed` multiplies the open/close carriers exactly as
+        // on X11: the fade steps directly, and the zoom span through
+        // `effective_window_animation_scale` below.
+        self.fade_in_step = finite_clamp(
+            anim_speed.apply_fade_step(b.fade_in_step),
+            0.0001,
+            1.0,
+            0.03,
+        );
+        self.fade_out_step = finite_clamp(
+            anim_speed.apply_fade_step(b.fade_out_step),
+            0.0001,
+            1.0,
+            0.03,
+        );
 
         // --- Post-processing pipeline ---
         self.color_temperature = b.color_temperature;
@@ -493,7 +581,9 @@ impl WaylandCompositor {
             .set_enabled(b.direct_scanout_enabled && b.fullscreen_unredirect);
 
         // --- VRR ---
-        // vrr_active is managed by update_vrr_state(), we just note config is read
+        // `game_window_focused` is managed by update_vrr_state() and
+        // `output_vrr_active` by the KMS presentation status; the config value
+        // itself is read straight from CONFIG where it is reported.
 
         // --- Temporal blur ---
         self.temporal_blur_enabled = b.blur_temporal_enabled;
@@ -568,7 +658,10 @@ impl WaylandCompositor {
         self.focus_highlight_duration_ms = b.focus_highlight_duration_ms.clamp(1, 30_000);
         self.pip_border_color = b.pip_border_color;
         self.pip_border_width = b.pip_border_width;
-        self.window_animation_scale = finite_clamp(b.window_animation_scale, 0.1, 2.0, 0.92);
+        self.window_animation_scale = effective_window_animation_scale(
+            finite_clamp(b.window_animation_scale, 0.1, 2.0, 0.92),
+            anim_speed,
+        );
 
         // --- Wallpaper ---
         self.wallpaper_crossfade = b.wallpaper_crossfade;
@@ -727,6 +820,20 @@ impl WaylandCompositor {
         self.needs_render = true;
     }
 
+    /// Record the VRR state KMS actually programmed for the last presented
+    /// frame. The class-name guess in `update_vrr_state` answers a different
+    /// question (does the focused window look like a game), and the two
+    /// disagree in both directions — a windowed game, a fullscreen video —
+    /// so the HUD row and `get_metrics().vrr_active` read this one.
+    pub(crate) fn set_output_vrr_active(&mut self, active: bool) {
+        if self.output_vrr_active != active {
+            self.output_vrr_active = active;
+            // The HUD row only repaints with the rest of the frame; nothing
+            // else observes this, so it does not force a redraw of its own.
+            self.needs_render |= self.debug_hud_enabled;
+        }
+    }
+
     pub(crate) fn set_debug_hud_extended(&mut self, enabled: bool) {
         self.debug_hud_extended = enabled;
         self.frame_profiler.set_enabled(enabled);
@@ -784,6 +891,9 @@ impl WaylandCompositor {
         );
         self.mouse_x = x;
         self.mouse_y = y;
+        // From here on the stored coordinates describe the pointer rather than
+        // the initial value, so pointer-driven highlights may trust them.
+        self.pointer_seen = true;
         if requires_render {
             self.needs_render = true;
         }
@@ -792,8 +902,7 @@ impl WaylandCompositor {
         }
         // The tab bar's hover cell follows the same channel: hit-test the
         // groups and repaint only when the hovered cell actually changes.
-        let tab_hover =
-            crate::backend::compositor_common::window_tabs::tab_hover_at(&self.window_groups, x, y);
+        let tab_hover = tab_hover_for_pointer(&self.window_groups, Some((x, y)));
         if tab_hover != self.tab_hover {
             self.tab_hover = tab_hover;
             self.needs_render = true;
@@ -801,23 +910,29 @@ impl WaylandCompositor {
         // Hovering a toast card pauses its timeout; same compare-then-repaint
         // pattern as the tab bar above. A hovered action button additionally
         // brightens, so the exact chip under the pointer is tracked too.
-        let toast_hover = self.toast_rects.iter().find_map(|rects| {
-            crate::backend::compositor_common::toast::hit_test(rects, x, y).map(|_| rects.id)
-        });
+        self.refresh_toast_hover(std::time::Instant::now());
+    }
+
+    /// Re-derive the toast hover state from the stored pointer position, the
+    /// card geometry of the last drawn frame and whether a system UI overlay
+    /// owns the pointer. Runs on pointer motion and once per drawn toast
+    /// frame: the stack re-flows when a neighbour expires, so a card can
+    /// slide under — or out from under — a motionless pointer, and its pause
+    /// must follow the geometry rather than the last motion event (a card
+    /// that slid away, or that a lock screen covered, used to stay paused
+    /// forever).
+    pub(crate) fn refresh_toast_hover(&mut self, now: std::time::Instant) {
+        let (toast_hover, button_hover) = toast_hover_targets(
+            &self.toast_rects,
+            self.mouse_x,
+            self.mouse_y,
+            self.system_ui.is_some(),
+        );
         if toast_hover != self.toast_hover {
             self.toast_hover = toast_hover;
-            self.toast_stack
-                .set_hovered(toast_hover, std::time::Instant::now());
+            self.toast_stack.set_hovered(toast_hover, now);
             self.needs_render = true;
         }
-        let button_hover = self.toast_rects.iter().find_map(|rects| {
-            match crate::backend::compositor_common::toast::hit_test(rects, x, y) {
-                Some(crate::backend::compositor_common::toast::ToastHit::Button(index)) => {
-                    Some((rects.id, index))
-                }
-                _ => None,
-            }
-        });
         if button_hover != self.toast_button_hover {
             self.toast_button_hover = button_hover;
             self.needs_render = true;
@@ -1525,10 +1640,9 @@ impl WaylandCompositor {
         self.window_groups = groups;
         // Re-derive the hovered cell against the new layout: the tab under
         // the pointer may sit at another index now, or be gone entirely.
-        self.tab_hover = crate::backend::compositor_common::window_tabs::tab_hover_at(
+        self.tab_hover = tab_hover_for_pointer(
             &self.window_groups,
-            self.mouse_x,
-            self.mouse_y,
+            self.pointer_seen.then_some((self.mouse_x, self.mouse_y)),
         );
         // A group change is the only thing that can invalidate a title: the
         // text, the cell width and the focus flag all live in it.
@@ -2541,7 +2655,7 @@ mod tests {
         postprocess_is_active, retained_color_generation_action,
         retained_color_plan_context_changed, retained_color_plan_geometry,
         retained_output_profiles_compatible, retirement_uses_genie,
-        should_request_static_minimized_capture,
+        should_request_static_minimized_capture, tab_hover_for_pointer,
     };
     use crate::backend::compositor_common::genie::GenieDirection;
     use crate::backend::wayland_udev::color_pipeline::TransferKind;
@@ -2972,5 +3086,211 @@ mod tests {
             Some(DisabledGenieAction::CompleteRestore)
         );
         assert_eq!(disabled_genie_action(None, false), None);
+    }
+
+    #[test]
+    fn instant_animation_speed_collapses_the_zoom_span() {
+        use super::effective_window_animation_scale;
+        use crate::backend::compositor_common::window_animation::scale_carrier_progress;
+        use crate::core::animation::AnimationSpeed;
+
+        assert_eq!(
+            effective_window_animation_scale(0.92, AnimationSpeed::Instant),
+            1.0
+        );
+        for speed in [
+            AnimationSpeed::Slow,
+            AnimationSpeed::Normal,
+            AnimationSpeed::Fast,
+        ] {
+            assert_eq!(effective_window_animation_scale(0.92, speed), 0.92);
+        }
+        // A collapsed span reports every carrier value as settled, so a new
+        // window's very first frame is already the rest frame.
+        assert_eq!(scale_carrier_progress(0.92, 1.0), 1.0);
+        assert_eq!(scale_carrier_progress(1.0, 1.0), 1.0);
+    }
+
+    #[test]
+    fn open_close_fade_steps_honor_animation_speed_like_x11() {
+        // Both compositors derive their fade steps through the same
+        // `AnimationSpeed::apply_fade_step`, so `[animation] speed` means the
+        // same thing on either backend. The needles are assembled at runtime
+        // so this test cannot satisfy itself with its own text.
+        let wayland = include_str!("config.rs");
+        let x11 = include_str!("../../x11/compositor/config.rs");
+        for (source, behavior) in [(wayland, "b"), (x11, "behavior")] {
+            for step in ["fade_in_step", "fade_out_step"] {
+                let needle = format!("anim_speed.apply_fade_step({behavior}.{step})");
+                assert!(source.contains(&needle), "missing `{needle}`");
+            }
+        }
+    }
+
+    fn toast_rects(
+        id: u64,
+        card: [f32; 4],
+        buttons: Vec<[f32; 4]>,
+    ) -> crate::backend::compositor_common::toast::ToastRects {
+        crate::backend::compositor_common::toast::ToastRects { id, card, buttons }
+    }
+
+    #[test]
+    fn toast_hover_targets_report_the_card_and_the_chip_under_the_pointer() {
+        use super::toast_hover_targets;
+        let rects = [
+            toast_rects(
+                1,
+                [100.0, 10.0, 200.0, 60.0],
+                vec![[110.0, 40.0, 40.0, 20.0]],
+            ),
+            toast_rects(2, [100.0, 80.0, 200.0, 60.0], Vec::new()),
+        ];
+        assert_eq!(
+            toast_hover_targets(&rects, 120.0, 50.0, false),
+            (Some(1), Some((1, 0)))
+        );
+        assert_eq!(
+            toast_hover_targets(&rects, 250.0, 20.0, false),
+            (Some(1), None)
+        );
+        assert_eq!(
+            toast_hover_targets(&rects, 150.0, 100.0, false),
+            (Some(2), None)
+        );
+        assert_eq!(toast_hover_targets(&rects, 10.0, 10.0, false), (None, None));
+    }
+
+    #[test]
+    fn a_system_ui_overlay_releases_every_toast_hover() {
+        use super::toast_hover_targets;
+        // Motion stops reaching the compositor while a panel or the lock
+        // screen is up, so the stored pointer sits still on top of whatever
+        // card it last touched. Reporting no hover is what lets that card's
+        // countdown resume and expire under the lock instead of reappearing
+        // at the same age after the unlock.
+        let rects = [toast_rects(
+            1,
+            [100.0, 10.0, 200.0, 60.0],
+            vec![[110.0, 40.0, 40.0, 20.0]],
+        )];
+        assert_eq!(
+            toast_hover_targets(&rects, 120.0, 50.0, false),
+            (Some(1), Some((1, 0)))
+        );
+        assert_eq!(
+            toast_hover_targets(&rects, 120.0, 50.0, true),
+            (None, None),
+            "a card under a system UI overlay is not hoverable"
+        );
+    }
+
+    #[test]
+    fn a_card_that_slides_away_from_a_still_pointer_loses_its_hover() {
+        use super::toast_hover_targets;
+        // The pointer never moves. Card 1 expires, the stack re-flows and
+        // card 2 takes its slot: re-deriving from the new geometry is what
+        // ends card 2's pause — a motion-only derivation kept it forever.
+        let (x, y) = (150.0, 100.0);
+        let before = [
+            toast_rects(1, [100.0, 10.0, 200.0, 60.0], Vec::new()),
+            toast_rects(2, [100.0, 80.0, 200.0, 60.0], Vec::new()),
+        ];
+        assert_eq!(toast_hover_targets(&before, x, y, false).0, Some(2));
+        let after = [toast_rects(2, [100.0, 10.0, 200.0, 60.0], Vec::new())];
+        assert_eq!(toast_hover_targets(&after, x, y, false).0, None);
+    }
+
+    fn tab_strip_at(
+        bar: [f32; 4],
+    ) -> Vec<crate::backend::compositor_common::window_tabs::TabGroup> {
+        use crate::backend::compositor_common::window_tabs::{Tab, TabGroup};
+        vec![TabGroup {
+            bar,
+            tabs: vec![
+                Tab {
+                    title: "left".to_string(),
+                    active: true,
+                },
+                Tab {
+                    title: "right".to_string(),
+                    active: false,
+                },
+            ],
+        }]
+    }
+
+    /// The source text between the `{` that opens one item and the `}` that
+    /// closes it, so a source scan cannot match a needle at an unrelated site.
+    fn item_body<'a>(source: &'a str, needle: &str) -> &'a str {
+        let start = source
+            .find(needle)
+            .unwrap_or_else(|| panic!("missing `{needle}`"));
+        let body_start = source[start..]
+            .find('{')
+            .map(|offset| start + offset + 1)
+            .unwrap_or_else(|| panic!("missing body for `{needle}`"));
+        let mut depth = 1usize;
+        for (offset, character) in source[body_start..].char_indices() {
+            match character {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return &source[body_start..body_start + offset];
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("unterminated body for `{needle}`");
+    }
+
+    #[test]
+    fn the_first_groups_are_hit_tested_only_once_a_pointer_position_arrived() {
+        // The decision above only helps if `set_window_groups` actually asks
+        // it whether a pointer was ever seen: the compositor's very first
+        // groups arrive before any motion event, with `mouse_x`/`mouse_y`
+        // still at their initial origin. Every needle is assembled at runtime
+        // and each haystack is narrowed to one production body, so this test
+        // cannot satisfy itself with its own text.
+        let source = include_str!("config.rs");
+        let groups = item_body(source, &format!("pub(crate) fn set_window_{}(", "groups"));
+        assert!(
+            groups.contains(&format!(
+                "self.{}.then_some((self.mouse_x, self.mouse_y))",
+                "pointer_seen"
+            )),
+            "the hover a group update derives must be gated on a seen pointer"
+        );
+        // And the pointer setter is the only thing that opens that gate.
+        let motion = item_body(source, &format!("pub(crate) fn set_mouse_{}(", "position"));
+        assert!(motion.contains(&format!("self.{} = true;", "pointer_seen")));
+    }
+
+    #[test]
+    fn an_unseen_pointer_hovers_no_tab_even_when_the_strip_holds_the_origin() {
+        // A hidden status bar (or one anchored anywhere but the top) puts the
+        // strip over (0, 0), which is also the compositor's initial pointer
+        // value. Until a real position arrives, no cell may light up.
+        let groups = tab_strip_at([0.0, 0.0, 800.0, 24.0]);
+        assert_eq!(tab_hover_for_pointer(&groups, None), None);
+        assert_eq!(
+            tab_hover_for_pointer(&groups, Some((0.0, 0.0))),
+            Some((0, 0))
+        );
+    }
+
+    #[test]
+    fn a_seen_pointer_still_reports_the_cell_it_is_over() {
+        let groups = tab_strip_at([100.0, 40.0, 800.0, 24.0]);
+        assert_eq!(
+            tab_hover_for_pointer(&groups, Some((700.0, 50.0))),
+            Some((0, 1))
+        );
+        assert_eq!(tab_hover_for_pointer(&groups, Some((10.0, 10.0))), None);
+        // A strip away from the origin cannot be hovered by the initial
+        // value either, so the gate changes nothing for the common case.
+        assert_eq!(tab_hover_for_pointer(&groups, None), None);
     }
 }

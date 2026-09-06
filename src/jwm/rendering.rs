@@ -406,9 +406,14 @@ impl Jwm {
             self.last_battery_poll = Some(now);
             self.poll_battery(backend);
             // Periodic re-read; skip while one is in flight so a hung nmcli
-            // cannot pile up worker threads.
-            if backend.has_compositor() && self.features.connectivity_poll.is_none() {
-                self.refresh_connectivity();
+            // cannot pile up worker threads. "In flight" is the shared
+            // predicate, not the bare handle: a job the OS refused a thread
+            // for never publishes and never clears its slot, and keying on
+            // the handle alone would leave this poll — and with it every
+            // passive connectivity refresh — shut for the rest of the
+            // session.
+            if backend.has_compositor() {
+                self.ensure_connectivity_refresh();
             }
         }
         // Adopt whatever background connectivity read has finished, whether
@@ -457,14 +462,17 @@ impl Jwm {
         let composited = backend.has_compositor();
 
         if !self.animations.has_active() {
-            if composited && backend.compositor_needs_render() {
+            // Deliver tab groups ahead of the render gate, as
+            // `render_pending_frame` does, and let a groups change open it.
+            // This tick is the only delivery point on Wayland (the udev loop
+            // never calls `render_compositor_immediate`), and a change that
+            // dirties nothing in the compositor — a title-only
+            // xdg_toplevel change, say — would otherwise sit unpainted in
+            // the strip until unrelated damage arrived.
+            let groups_changed = composited && self.sync_window_groups(backend);
+            if composited && (groups_changed || backend.compositor_needs_render()) {
                 // No animations but compositor has dirty windows (damage, add/remove, resize)
                 let scene = self.build_compositor_scene(backend, &HashMap::new());
-                // Damage frames are the ones window add/remove actually
-                // produce, so they must carry tab groups too — otherwise the
-                // strip keeps the previous set until render_pending_frame
-                // happens to run with the gate open.
-                self.sync_window_groups(backend);
                 if scene.is_empty() {
                     // Log once per second at most
                     static LAST_EMPTY: std::sync::atomic::AtomicU64 =
@@ -738,5 +746,39 @@ impl Jwm {
     ) -> Result<(), Box<dyn std::error::Error>> {
         backend.window_ops().set_position(win, x, y)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod maintenance_tick_tests {
+    /// The periodic connectivity re-read has to coalesce on the same "is a
+    /// read actually running?" predicate the passive openers use. Keying it
+    /// on the handle alone reads as harmless — the slot is empty almost all
+    /// the time — but a job whose thread the OS refused never publishes and
+    /// never clears the slot, so that guard latches shut and the session
+    /// stops re-reading Wi-Fi and Bluetooth entirely. Driving the tick for
+    /// real would fork `nmcli`, so the pin is textual: the needles are
+    /// assembled at runtime and the haystack is this one function body, so
+    /// neither can match this test.
+    #[test]
+    fn the_periodic_connectivity_read_coalesces_on_the_shared_guard() {
+        const SOURCE: &str = include_str!("rendering.rs");
+        let body = SOURCE
+            .split_once("fn tick_animations")
+            .expect("the maintenance tick")
+            .1
+            .split_once("fn build_compositor_scene")
+            .expect("the function after it")
+            .0;
+        let bare_handle = format!("connectivity_poll{}", ".is_none()");
+        assert!(
+            !body.contains(&bare_handle),
+            "the tick's connectivity guard is back on the bare handle"
+        );
+        let shared_guard = format!("{}()", "ensure_connectivity_refresh");
+        assert!(
+            body.contains(&shared_guard),
+            "the tick no longer asks for a periodic connectivity read"
+        );
     }
 }

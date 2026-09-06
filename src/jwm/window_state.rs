@@ -93,6 +93,23 @@ fn valid_restore_rect(x: i32, y: i32, w: i32, h: i32) -> Option<MinimizedRestore
     (w > 0 && h > 0).then_some(MinimizedRestoreRect { x, y, w, h })
 }
 
+/// A restore rectangle the wire codec will also accept, or `None`.
+///
+/// [`valid_restore_rect`] is the live-geometry rule — a positive extent — and
+/// stays that for the callers that only hand the rectangle back to the layout
+/// (leaving PiP, say). The persisted snapshot has a second consumer, and that
+/// one refuses the *whole* property when a single rectangle falls outside the
+/// X11 band: `set_minimized_restore_state` then fails with "invalid minimized
+/// restore state" and takes the entire minimize down with it. Deciding it
+/// here keeps the optional rectangles optional — a remembered floating slot
+/// no X server could ever be configured to is simply not persisted — and
+/// leaves the required ones failing at the producer, where the message names
+/// the geometry rather than the property.
+fn persistable_restore_rect(x: i32, y: i32, w: i32, h: i32) -> Option<MinimizedRestoreRect> {
+    let rect = valid_restore_rect(x, y, w, h)?;
+    rect.is_configurable().then_some(rect)
+}
+
 fn minimized_restore_snapshot(
     client: &WMClient,
     monitor_num: Option<i32>,
@@ -110,8 +127,8 @@ fn minimized_restore_snapshot(
         client.geometry.w,
         client.geometry.h,
     ));
-    let visible_rect = valid_restore_rect(visible.x, visible.y, visible.w, visible.h)?;
-    let floating_rect = valid_restore_rect(
+    let visible_rect = persistable_restore_rect(visible.x, visible.y, visible.w, visible.h)?;
+    let floating_rect = persistable_restore_rect(
         client.geometry.floating_x,
         client.geometry.floating_y,
         client.geometry.floating_w,
@@ -121,7 +138,7 @@ fn minimized_restore_snapshot(
         return None;
     }
     let fullscreen_restore_rect = if client.state.is_fullscreen {
-        Some(valid_restore_rect(
+        Some(persistable_restore_rect(
             client.geometry.old_x,
             client.geometry.old_y,
             client.geometry.old_w,
@@ -1364,6 +1381,10 @@ impl Jwm {
             let is_focused = self.get_selected_client_key() == Some(client_key);
             self.update_client_decoration(backend, client_key, is_focused)?;
         }
+        // An open tags grid shows the flag as its attention dot; urgency
+        // changes arrange nothing, so the rebuild has to be asked for here
+        // (the dirty flag pushes it once, on the next flush).
+        self.refresh_tags_overview();
         Ok(win)
     }
 
@@ -1855,6 +1876,126 @@ impl Jwm {
             self.clear_hidden_client_park_retry(client_key);
         }
         Ok(true)
+    }
+}
+
+#[cfg(test)]
+mod restore_rect_tests {
+    use super::{minimized_restore_snapshot, persistable_restore_rect, valid_restore_rect};
+    use crate::backend::api::MinimizedRestoreRect;
+
+    /// The band a restore rectangle has to be inside to survive the private
+    /// restart property, named for the tests that walk its edges. The rule
+    /// itself is [`MinimizedRestoreRect::is_configurable`], which the
+    /// transport's wire codec applies to the same value: `ConfigureWindow`
+    /// carries the origin as INT16 and the extent as CARD16, so a rectangle
+    /// outside this is one no X server could ever be asked for.
+    const MIN_PERSISTED_RESTORE_COORDINATE: i32 = MinimizedRestoreRect::MIN_COORDINATE;
+    const MAX_PERSISTED_RESTORE_COORDINATE: i32 = MinimizedRestoreRect::MAX_COORDINATE;
+    const MAX_PERSISTED_RESTORE_DIMENSION: i32 = MinimizedRestoreRect::MAX_DIMENSION;
+    use crate::backend::common_define::WindowId;
+    use crate::core::models::WMClient;
+
+    fn parked_client() -> WMClient {
+        // A window whose remembered floating slot picked up the coordinate a
+        // hidden tag parks clients at: `hidden_x_left_of_desktop` is
+        // `desktop_left - 2 * total_width`, so any desktop wider than 16384
+        // px puts it past INT16, and several `floating_x = geometry.x`
+        // assignments copy it straight into the floating slot.
+        let mut client = WMClient::new(WindowId::from_raw(0x4242));
+        client.geometry.x = 100;
+        client.geometry.y = 120;
+        client.geometry.w = 800;
+        client.geometry.h = 600;
+        client.geometry.floating_x = -46_080;
+        client.geometry.floating_y = 120;
+        client.geometry.floating_w = 800;
+        client.geometry.floating_h = 600;
+        client.state.minimized_order = 1;
+        client
+    }
+
+    #[test]
+    fn only_a_rectangle_x11_could_be_asked_for_is_persisted() {
+        // The live-geometry rule is deliberately untouched: leaving PiP still
+        // accepts any positive-extent rectangle, because it hands that back
+        // to the layout rather than to the wire.
+        assert!(valid_restore_rect(-46_080, 10, 800, 600).is_some());
+        assert!(persistable_restore_rect(-46_080, 10, 800, 600).is_none());
+
+        // Both edges of the band the codec accepts.
+        for coordinate in [
+            MIN_PERSISTED_RESTORE_COORDINATE,
+            MAX_PERSISTED_RESTORE_COORDINATE,
+        ] {
+            assert!(persistable_restore_rect(coordinate, 0, 1, 1).is_some());
+            assert!(persistable_restore_rect(0, coordinate, 1, 1).is_some());
+        }
+        assert!(persistable_restore_rect(MIN_PERSISTED_RESTORE_COORDINATE - 1, 0, 1, 1).is_none());
+        assert!(persistable_restore_rect(MAX_PERSISTED_RESTORE_COORDINATE + 1, 0, 1, 1).is_none());
+        assert!(persistable_restore_rect(0, MIN_PERSISTED_RESTORE_COORDINATE - 1, 1, 1).is_none());
+        assert!(persistable_restore_rect(0, MAX_PERSISTED_RESTORE_COORDINATE + 1, 1, 1).is_none());
+
+        let widest = MAX_PERSISTED_RESTORE_DIMENSION;
+        assert!(persistable_restore_rect(0, 0, widest, widest).is_some());
+        assert!(persistable_restore_rect(0, 0, widest + 1, 1).is_none());
+        assert!(persistable_restore_rect(0, 0, 1, widest + 1).is_none());
+        // The positive-extent rule still comes first.
+        assert!(persistable_restore_rect(0, 0, 0, 600).is_none());
+        assert!(persistable_restore_rect(0, 0, 800, -1).is_none());
+    }
+
+    #[test]
+    fn an_unencodable_floating_slot_is_dropped_instead_of_failing_the_minimize() {
+        let client = parked_client();
+        let snapshot = minimized_restore_snapshot(&client, Some(0), 1)
+            .expect("a window with a usable visible rect can still be minimized");
+        assert_eq!(
+            snapshot.floating_rect, None,
+            "a floating slot the codec would refuse is left out of the property"
+        );
+        assert_eq!(snapshot.visible_rect.x, 100);
+
+        // A PiP window's floating slot is its restore geometry, so an
+        // unencodable one is still fatal — the snapshot refuses rather than
+        // persisting a PiP with nowhere to go back to.
+        let mut pip = parked_client();
+        pip.state.is_pip = true;
+        pip.state.is_floating = true;
+        assert_eq!(minimized_restore_snapshot(&pip, Some(0), 1), None);
+    }
+
+    #[test]
+    fn the_producer_and_the_wire_codec_accept_the_same_rectangles() {
+        // The codec lives in the X11 transport, which policy may not import,
+        // and the transport may not import policy — so neither side can test
+        // the agreement directly. It is structural instead: both call
+        // `MinimizedRestoreRect::is_configurable` on the value they share, and
+        // this walks the producer against that same predicate so a future
+        // extra condition on either side shows up here.
+        use crate::backend::api::MinimizedRestoreRect;
+
+        let encodes =
+            |rect: MinimizedRestoreRect| rect.is_configurable() && rect.w > 0 && rect.h > 0;
+        for (x, y, w, h) in [
+            (100, 120, 800, 600),
+            (MIN_PERSISTED_RESTORE_COORDINATE, 0, 1, 1),
+            (MAX_PERSISTED_RESTORE_COORDINATE, 0, 1, 1),
+            (MIN_PERSISTED_RESTORE_COORDINATE - 1, 0, 1, 1),
+            (0, MAX_PERSISTED_RESTORE_COORDINATE + 1, 1, 1),
+            (-46_080, 120, 800, 600),
+            (0, 0, MAX_PERSISTED_RESTORE_DIMENSION, 1),
+            (0, 0, MAX_PERSISTED_RESTORE_DIMENSION + 1, 1),
+            (0, 0, 1, MAX_PERSISTED_RESTORE_DIMENSION + 1),
+            (0, 0, 0, 600),
+        ] {
+            let produced = persistable_restore_rect(x, y, w, h);
+            assert_eq!(
+                produced.is_some(),
+                encodes(MinimizedRestoreRect { x, y, w, h }),
+                "({x}, {y}, {w}, {h}): the producer and the codec disagree"
+            );
+        }
     }
 }
 

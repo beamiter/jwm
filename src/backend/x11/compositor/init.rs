@@ -900,6 +900,9 @@ impl<C: CompositorConnection> Compositor<C> {
             conn,
             graphics,
             overlay_window,
+            // `bootstrap_state` just set the empty INPUT region, so the
+            // recorded shape starts as the server's.
+            overlay_input_shape: Vec::new(),
             cm_selection_owner,
             gl,
             gl_renderer,
@@ -1093,9 +1096,11 @@ impl<C: CompositorConnection> Compositor<C> {
             // Dim inactive
             inactive_dim: finite_clamp(behavior.inactive_dim, 0.0, 1.0, 1.0),
             inactive_desaturate: finite_clamp(behavior.inactive_desaturate, 0.0, 1.0, 0.0),
-            // Mouse position
+            // Mouse position. `pointer_seen` stays false until a real
+            // position arrives, so the origin is not mistaken for one.
             mouse_x: 0.0,
             mouse_y: 0.0,
+            pointer_seen: false,
             // Edge glow
             edge_glow_program,
             edge_glow_uniforms,
@@ -1220,6 +1225,8 @@ impl<C: CompositorConnection> Compositor<C> {
             window_groups: Vec::new(),
             tab_title_textures: Vec::new(),
             tab_titles_dirty: false,
+            tags_grid_label_textures: Vec::new(),
+            tags_grid_labels_key: None,
             tab_hover: None,
             // Particle effects
             particle_program,

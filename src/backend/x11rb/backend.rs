@@ -499,6 +499,10 @@ impl X11rbBackend {
             Ok(mut tray) => match tray.acquire_selection() {
                 Ok(true) => {
                     log::info!("[systray] Acquired system tray selection");
+                    // Tray clients address `_NET_SYSTEM_TRAY_OPCODE` to this
+                    // window; ClientMessage translation only resolves ids
+                    // already known, so make it known before any can arrive.
+                    backend.ids.intern(tray.tray_window());
                     backend.systray = Some(tray);
                 }
                 Ok(false) => {
@@ -2942,6 +2946,14 @@ mod event_source {
                     })
                 }
                 XEvent::ClientMessage(e) => {
+                    // A ClientMessage names whatever XID its sender wrote into
+                    // it, and no DestroyNotify ever evicts a window that never
+                    // existed: interning here would let one client grow the
+                    // id table without bound. A message about a window this
+                    // backend has never seen cannot be acted on anyway, so it
+                    // is dropped instead. (The tray selection window is
+                    // interned when the selection is acquired.)
+                    let window = self.ids.existing_window(e.window)?;
                     let data32 = e.data.as_data32();
                     let data = [
                         data32.first().copied().unwrap_or(0),
@@ -2961,7 +2973,6 @@ mod event_source {
                             first,
                             second,
                         } => {
-                            let window = self.ids.intern(e.window);
                             let mut events = expand_net_wm_state_requests(
                                 window,
                                 action,
@@ -2984,36 +2995,35 @@ mod event_source {
                             }
                         }
                         ClientMessageKind::ActiveWindow => {
-                            Some(BackendEvent::ActiveWindowMessage {
-                                window: self.ids.intern(e.window),
-                            })
+                            Some(BackendEvent::ActiveWindowMessage { window })
                         }
-                        ClientMessageKind::CloseWindow => Some(BackendEvent::CloseWindowRequest {
-                            window: self.ids.intern(e.window),
-                        }),
+                        ClientMessageKind::CloseWindow => {
+                            Some(BackendEvent::CloseWindowRequest { window })
+                        }
                         ClientMessageKind::MoveResize { direction, button } => {
                             Some(BackendEvent::MoveResizeRequest {
-                                window: self.ids.intern(e.window),
+                                window,
                                 direction,
                                 button,
                             })
                         }
-                        ClientMessageKind::PingResponse { window } => {
-                            Some(BackendEvent::PingResponse {
-                                window: self.ids.intern(window),
-                            })
-                        }
+                        // The pinged window travels in the payload, addressed
+                        // to the root: resolve it the same non-allocating way.
+                        ClientMessageKind::PingResponse { window } => self
+                            .ids
+                            .existing_window(window)
+                            .map(|window| BackendEvent::PingResponse { window }),
                         // An iconify request is a minimise request; it reaches
                         // the window manager as the same state change a pager's
                         // `_NET_WM_STATE_HIDDEN` would, so both arrive at one
                         // handler.
                         ClientMessageKind::Iconify => Some(BackendEvent::WindowStateRequest {
-                            window: self.ids.intern(e.window),
+                            window,
                             action: NetWmAction::Add,
                             state: NetWmState::Hidden,
                         }),
                         ClientMessageKind::Other => Some(BackendEvent::ClientMessage {
-                            window: self.ids.intern(e.window),
+                            window,
                             type_: e.type_,
                             data,
                             format: e.format,

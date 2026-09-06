@@ -30,6 +30,45 @@ pub(super) fn stage_hidden_geometry(geometry: &mut ClientGeometry, restore: Rect
     geometry.hidden_x = Some(hidden_x);
 }
 
+/// Where a parked geometry goes back to, decided before anything is touched
+/// so a caller can see whether it needs the legacy fallback at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum HiddenRestore {
+    /// The semantic slot `hide_client` filled.
+    Slot(Rect),
+    /// An older JWM left only `old_x`, and it is on-screen.
+    OldX,
+    /// An older JWM left `old_x` off-screen too; the caller supplies a
+    /// visible x.
+    LegacyFallback,
+}
+
+/// Plan the restore of a parked geometry, or `None` when it is not parked.
+/// Pure and cheap: `show_client` runs it for every client on every arrange,
+/// and only a [`HiddenRestore::LegacyFallback`] answer is worth computing a
+/// work area for.
+pub(super) fn plan_hidden_restore(
+    geometry: &ClientGeometry,
+    desktop_left: i32,
+) -> Option<HiddenRestore> {
+    let total_width = geometry
+        .w
+        .saturating_add(geometry.border_w.saturating_mul(2));
+    let was_parked = geometry.hidden_x.is_some()
+        || geometry.hidden_restore_rect.is_some()
+        || is_fully_left_of_desktop(geometry.x, total_width, desktop_left);
+    if !was_parked {
+        return None;
+    }
+    Some(match geometry.hidden_restore_rect {
+        Some(restore) => HiddenRestore::Slot(restore),
+        None if is_fully_left_of_desktop(geometry.old_x, total_width, desktop_left) => {
+            HiddenRestore::LegacyFallback
+        }
+        None => HiddenRestore::OldX,
+    })
+}
+
 /// Consume a parked geometry. `legacy_fallback_x` is used only for a client
 /// left by an older JWM whose overloaded `old_x` is itself off-screen.
 pub(super) fn restore_hidden_geometry(
@@ -37,26 +76,17 @@ pub(super) fn restore_hidden_geometry(
     desktop_left: i32,
     legacy_fallback_x: i32,
 ) -> Option<Rect> {
-    let total_width = geometry
-        .w
-        .saturating_add(geometry.border_w.saturating_mul(2));
-    let had_hidden_marker = geometry.hidden_x.take().is_some();
-    let restore = geometry.hidden_restore_rect.take();
-    let was_parked = had_hidden_marker
-        || restore.is_some()
-        || is_fully_left_of_desktop(geometry.x, total_width, desktop_left);
-    if !was_parked {
-        return None;
-    }
+    let plan = plan_hidden_restore(geometry, desktop_left)?;
+    geometry.hidden_x = None;
+    geometry.hidden_restore_rect = None;
 
-    let restore = restore.unwrap_or_else(|| {
-        let x = if is_fully_left_of_desktop(geometry.old_x, total_width, desktop_left) {
-            legacy_fallback_x
-        } else {
-            geometry.old_x
-        };
-        Rect::new(x, geometry.y, geometry.w, geometry.h)
-    });
+    let restore = match plan {
+        HiddenRestore::Slot(restore) => restore,
+        HiddenRestore::OldX => Rect::new(geometry.old_x, geometry.y, geometry.w, geometry.h),
+        HiddenRestore::LegacyFallback => {
+            Rect::new(legacy_fallback_x, geometry.y, geometry.w, geometry.h)
+        }
+    };
     geometry.x = restore.x;
     geometry.y = restore.y;
     geometry.w = restore.w;
@@ -131,15 +161,22 @@ impl Jwm {
         // clients hidden by an older JWM that only left `old_x` plus an
         // off-screen coordinate. Comparing with the desktop's true left edge
         // keeps legitimate negative-origin windows from being mistaken for
-        // hidden clients.
+        // hidden clients. The fallback needs the monitor's work area, which
+        // walks every client on the monitor: computed only for the client
+        // that will use it, or every arrange would be quadratic.
         let desktop_left = self.desktop_left_edge();
-        let legacy_fallback_x = self
-            .state
-            .clients
-            .get(client_key)
-            .and_then(|client| client.mon)
-            .and_then(|monitor| self.monitor_work_area(monitor))
-            .map_or(desktop_left, |area| area.x);
+        let plan = self.state.clients.get(client_key).map(|client| {
+            (
+                client.mon,
+                plan_hidden_restore(&client.geometry, desktop_left),
+            )
+        });
+        let legacy_fallback_x = match plan {
+            Some((monitor, Some(HiddenRestore::LegacyFallback))) => monitor
+                .and_then(|monitor| self.monitor_work_area(monitor))
+                .map_or(desktop_left, |area| area.x),
+            _ => desktop_left,
+        };
         if let Some(client) = self.state.clients.get_mut(client_key) {
             restore_hidden_geometry(&mut client.geometry, desktop_left, legacy_fallback_x);
         }
@@ -255,8 +292,8 @@ impl Jwm {
 #[cfg(test)]
 mod tests {
     use super::{
-        hidden_x_left_of_desktop, is_fully_left_of_desktop, restore_hidden_geometry,
-        stage_hidden_geometry,
+        HiddenRestore, hidden_x_left_of_desktop, is_fully_left_of_desktop, plan_hidden_restore,
+        restore_hidden_geometry, stage_hidden_geometry,
     };
     use crate::core::models::ClientGeometry;
     use crate::core::types::Rect;
@@ -346,5 +383,62 @@ mod tests {
         );
         assert!(geometry.hidden_x.is_none());
         assert!(geometry.hidden_restore_rect.is_none());
+    }
+
+    #[test]
+    fn only_a_legacy_offscreen_client_needs_the_work_area_fallback() {
+        // A window on screen is not parked: nothing to restore.
+        let visible = ClientGeometry {
+            x: 100,
+            y: 70,
+            w: 800,
+            h: 600,
+            ..Default::default()
+        };
+        assert_eq!(plan_hidden_restore(&visible, 0), None);
+
+        // Parked by this JWM: the slot answers, whatever `old_x` says.
+        let slot = Rect::new(240, 120, 960, 720);
+        let mut parked = ClientGeometry {
+            x: 100,
+            y: 70,
+            w: 800,
+            h: 600,
+            old_x: -4000,
+            ..Default::default()
+        };
+        stage_hidden_geometry(&mut parked, slot, -3840);
+        assert_eq!(
+            plan_hidden_restore(&parked, 0),
+            Some(HiddenRestore::Slot(slot))
+        );
+
+        // Left by an older JWM with `old_x` on screen.
+        let legacy = ClientGeometry {
+            x: -4000,
+            y: 70,
+            w: 800,
+            h: 600,
+            old_x: 120,
+            hidden_x: Some(-4000),
+            ..Default::default()
+        };
+        assert_eq!(plan_hidden_restore(&legacy, 0), Some(HiddenRestore::OldX));
+
+        // Left by an older JWM with `old_x` off screen too: the one case
+        // that costs a work-area computation.
+        let legacy_offscreen = ClientGeometry {
+            old_x: -4000,
+            ..legacy
+        };
+        assert_eq!(
+            plan_hidden_restore(&legacy_offscreen, 0),
+            Some(HiddenRestore::LegacyFallback)
+        );
+        let mut restored = legacy_offscreen;
+        assert_eq!(
+            restore_hidden_geometry(&mut restored, 0, 0),
+            Some(Rect::new(0, 70, 800, 600))
+        );
     }
 }

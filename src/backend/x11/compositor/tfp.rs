@@ -317,7 +317,7 @@ impl<C: CompositorConnection> Compositor<C> {
         };
 
         let ordinary_add = disposition == AddWindowMinimizeDisposition::TrackNormally;
-        let initial_fade = if ordinary_add && (self.fading || self.window_animation_uses_fade()) {
+        let initial_fade = if ordinary_add && self.close_fade_driven() {
             0.0
         } else {
             1.0
@@ -673,7 +673,7 @@ impl<C: CompositorConnection> Compositor<C> {
         }
 
         // If fading is enabled and the window exists, start fade-out instead of immediate remove
-        if self.fading || self.window_animation_uses_fade() {
+        if self.close_fade_driven() {
             if let Some(wt) = self.windows.get_mut(&x11_win) {
                 if !wt.fading_out && wt.fade_opacity > 0.0 {
                     wt.fading_out = true;

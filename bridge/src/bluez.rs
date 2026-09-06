@@ -218,6 +218,12 @@ struct Shared {
     /// Set when a user-side rejection/cancel was seen, so the exit code says
     /// "cancelled" rather than reporting bluez's resulting error as failure.
     ended_by_user: AtomicBool,
+    /// Set when the user actually granted an inbound request (a `Confirmed`
+    /// or `Pin` reply resolved a pending one). An inbound window's `done`
+    /// report is `ok` only when this is true: closing the window is *not* a
+    /// refusal, so `!ended_by_user` — which `SessionClosed` also flips —
+    /// would report every allowed bond as "refused".
+    authorized: AtomicBool,
     ipc: JwmIpc,
 }
 
@@ -296,14 +302,7 @@ impl PairingAgent {
         let Some(objects) = managed_objects(connection).await else {
             return String::new();
         };
-        devices_from_managed_objects(&objects)
-            .into_iter()
-            .find(|device| device.address.eq_ignore_ascii_case(address))
-            // `devices_from_managed_objects` already falls back to the
-            // address, which is not a name worth sending.
-            .filter(|device| !device.name.eq_ignore_ascii_case(address))
-            .map(|device| device.name)
-            .unwrap_or_default()
+        device_name_from_managed_objects(&objects, address).unwrap_or_default()
     }
 
     /// Relay a display-only callback to jwm's picker. Nothing comes back; a
@@ -581,6 +580,41 @@ fn device_path_from_managed_objects(
         device_address
             .eq_ignore_ascii_case(address)
             .then(|| path.clone())
+    })
+}
+
+/// The name bluez knows the device at `address` by, sanitized for the panel.
+///
+/// Looked up straight from the `ManagedObjects` map by address, *not* through
+/// [`devices_from_managed_objects`], whose sort-and-cap-to-64 exists for the
+/// picker and would drop the very device that just rang an inbound window —
+/// an unpaired device with no RSSI sorts into the tail — leaving the prompt
+/// to name a bare MAC in a crowded room. `None` when bluez has no better
+/// name than the address itself.
+fn device_name_from_managed_objects(
+    objects: &zbus::fdo::ManagedObjects,
+    address: &str,
+) -> Option<String> {
+    let iface = zbus::names::InterfaceName::try_from(DEVICE_IFACE).ok()?;
+    objects.iter().find_map(|(_, interfaces)| {
+        let properties = interfaces.get(&iface)?;
+        let device_address = managed_string(properties, "Address")?;
+        if !device_address.eq_ignore_ascii_case(address) {
+            return None;
+        }
+        managed_string(properties, "Alias")
+            .or_else(|| managed_string(properties, "Name"))
+            .map(|name| {
+                name.trim()
+                    .chars()
+                    .filter(|ch| !ch.is_control())
+                    .take(MAX_DEVICE_NAME_CHARS)
+                    .collect::<String>()
+                    .trim()
+                    .to_string()
+            })
+            // The address is not a name worth sending: jwm falls back to it.
+            .filter(|name| !name.is_empty() && !name.eq_ignore_ascii_case(address))
     })
 }
 
@@ -989,6 +1023,7 @@ pub async fn pair_session(ipc: JwmIpc, connection: Connection, address: &str, co
         pending: Mutex::new(None),
         next_request_id: std::sync::atomic::AtomicU64::new(1),
         ended_by_user: AtomicBool::new(false),
+        authorized: AtomicBool::new(false),
         ipc: ipc.clone(),
     });
     if let Err(error) = connection
@@ -1146,6 +1181,38 @@ fn managed_string(
     properties
         .get(key)
         .and_then(|value| String::try_from(value.clone()).ok())
+}
+
+fn managed_u32(
+    properties: &std::collections::HashMap<String, zbus::zvariant::OwnedValue>,
+    key: &str,
+) -> Option<u32> {
+    properties
+        .get(key)
+        .and_then(|value| u32::try_from(value.clone()).ok())
+}
+
+/// The controller's current `PairableTimeout` / `DiscoverableTimeout`, read
+/// out of the `GetManagedObjects` tree the window already fetched to find the
+/// adapter — so no extra `Properties.Get` round trip. `None` for a property
+/// bluez did not publish, which the exposure treats as "value unknown".
+fn adapter_timeouts(
+    objects: &zbus::fdo::ManagedObjects,
+    adapter: &OwnedObjectPath,
+) -> (Option<u32>, Option<u32>) {
+    let Ok(iface) = zbus::names::InterfaceName::try_from(ADAPTER_IFACE) else {
+        return (None, None);
+    };
+    let Some(properties) = objects
+        .get(adapter)
+        .and_then(|interfaces| interfaces.get(&iface))
+    else {
+        return (None, None);
+    };
+    (
+        managed_u32(properties, "PairableTimeout"),
+        managed_u32(properties, "DiscoverableTimeout"),
+    )
 }
 
 /// Pick the controller to scan with: a powered adapter if there is one,
@@ -1371,12 +1438,19 @@ async fn set_adapter_u32(
     }
 }
 
+/// Set a `bool` `Adapter1` property, reporting whether the write landed.
+///
+/// The answer matters on the way *in*: a window whose `Pairable` or
+/// `Discoverable` write bluez refused is armed, on screen, and reachable by
+/// nothing, and the user has no way to tell that from a window nothing has
+/// rung yet. On the way out it is only logged — teardown has nothing better
+/// to do about a refusal than say so.
 async fn set_adapter_flag(
     connection: &Connection,
     adapter: &OwnedObjectPath,
     name: &str,
     value: bool,
-) {
+) -> bool {
     let body = (ADAPTER_IFACE, name, zbus::zvariant::Value::Bool(value));
     let call = connection.call_method(
         Some(bluez_name()),
@@ -1385,8 +1459,16 @@ async fn set_adapter_flag(
         "Set",
         &body,
     );
-    if let Ok(Err(error)) = tokio::time::timeout(DISCOVERY_CALL_TIMEOUT, call).await {
-        log::warn!("accept: could not set {name}: {error}");
+    match tokio::time::timeout(DISCOVERY_CALL_TIMEOUT, call).await {
+        Ok(Ok(_)) => true,
+        Ok(Err(error)) => {
+            log::warn!("accept: could not set {name}: {error}");
+            false
+        }
+        Err(_) => {
+            log::warn!("accept: setting {name} timed out");
+            false
+        }
     }
 }
 
@@ -1408,30 +1490,163 @@ async fn set_adapter_flag(
 /// SIGKILL, or the session ending underneath the helper. BlueZ counts them
 /// down itself and clears both flags, so a helper that dies without
 /// unwinding still cannot leave the controller open past its own window.
+///
+/// But `PairableTimeout`/`DiscoverableTimeout` are adapter-wide settings
+/// bluez persists to disk, not per-client state, so shortening them and
+/// walking away would silently cut *every other tool's* discoverable/pairable
+/// window on this machine to sixty seconds, permanently. So a normal teardown
+/// restores whatever it found — while still only ever *lowering* a value that
+/// was longer than the window (or the "forever" 0), never re-imposing a value
+/// a previous killed helper already shortened as if it were the original.
 struct AdapterExposure {
     adapter: OwnedObjectPath,
+    /// The original timeout to write back on the way out, when the window
+    /// changed it. `None` means "leave it": either the value was already at
+    /// or below the window (nothing to lower), or bluez never published it.
+    pairable_timeout: Option<u32>,
+    discoverable_timeout: Option<u32>,
+    /// Whether bluez actually took each flag. A window that could not raise
+    /// them is unreachable, and saying so is the difference between the user
+    /// waiting out sixty seconds and being told to look at their adapter.
+    pairable: bool,
+    discoverable: bool,
 }
 
 impl AdapterExposure {
-    async fn open(connection: &Connection, adapter: OwnedObjectPath) -> AdapterExposure {
-        let exposure = AdapterExposure { adapter };
-        let seconds = INBOUND_WINDOW.as_secs().min(u64::from(u32::MAX)) as u32;
-        set_adapter_u32(connection, &exposure.adapter, "PairableTimeout", seconds).await;
-        set_adapter_u32(
+    async fn open(
+        connection: &Connection,
+        adapter: OwnedObjectPath,
+        pairable_timeout: Option<u32>,
+        discoverable_timeout: Option<u32>,
+    ) -> AdapterExposure {
+        let window = INBOUND_WINDOW.as_secs().min(u64::from(u32::MAX)) as u32;
+        let pairable_timeout = clamp_timeout(
             connection,
-            &exposure.adapter,
-            "DiscoverableTimeout",
-            seconds,
+            &adapter,
+            "PairableTimeout",
+            pairable_timeout,
+            window,
         )
         .await;
-        set_adapter_flag(connection, &exposure.adapter, "Pairable", true).await;
-        set_adapter_flag(connection, &exposure.adapter, "Discoverable", true).await;
-        exposure
+        let discoverable_timeout = clamp_timeout(
+            connection,
+            &adapter,
+            "DiscoverableTimeout",
+            discoverable_timeout,
+            window,
+        )
+        .await;
+        let pairable = set_adapter_flag(connection, &adapter, "Pairable", true).await;
+        let discoverable = set_adapter_flag(connection, &adapter, "Discoverable", true).await;
+        AdapterExposure {
+            adapter,
+            pairable_timeout,
+            discoverable_timeout,
+            pairable,
+            discoverable,
+        }
     }
 
     async fn close(&self, connection: &Connection) {
-        set_adapter_flag(connection, &self.adapter, "Pairable", false).await;
-        set_adapter_flag(connection, &self.adapter, "Discoverable", false).await;
+        let _ = set_adapter_flag(connection, &self.adapter, "Pairable", false).await;
+        let _ = set_adapter_flag(connection, &self.adapter, "Discoverable", false).await;
+        // Put the adapter-wide countdowns back the way they were, so one jwm
+        // window does not permanently shorten every other tool's window.
+        if let Some(original) = self.pairable_timeout {
+            set_adapter_u32(connection, &self.adapter, "PairableTimeout", original).await;
+        }
+        if let Some(original) = self.discoverable_timeout {
+            set_adapter_u32(connection, &self.adapter, "DiscoverableTimeout", original).await;
+        }
+    }
+}
+
+/// What one adapter-wide timeout should become while the window is open, and
+/// what to put back at teardown: `(write, restore)`.
+///
+/// Only a value that is `0` ("forever") or longer than the window is
+/// shortened. A value already within the window is left untouched *and* not
+/// remembered — that is the guard against the snapshot compounding: a timeout
+/// a previous killed helper already dropped to the window must never be taken
+/// for the user's own and written back as if it were.
+const fn plan_timeout(current: Option<u32>, window: u32) -> (Option<u32>, Option<u32>) {
+    match current {
+        // Already short enough: leave it, and nothing to restore.
+        Some(value) if value != 0 && value <= window => (None, None),
+        // 0 (forever), longer than the window, or unknown: shorten to the
+        // window and restore the original at close (`None` restores nothing).
+        other => (Some(window), other),
+    }
+}
+
+/// Thin executor for [`plan_timeout`]: write the planned value, if any, and
+/// report what `close` should restore.
+async fn clamp_timeout(
+    connection: &Connection,
+    adapter: &OwnedObjectPath,
+    name: &str,
+    current: Option<u32>,
+    window: u32,
+) -> Option<u32> {
+    let (write, restore) = plan_timeout(current, window);
+    if let Some(value) = write {
+        set_adapter_u32(connection, adapter, name, value).await;
+    }
+    restore
+}
+
+/// Why an armed window cannot be rung, or `None` when it can.
+///
+/// Every arm of this is a state the old code held the window open through for
+/// the full sixty seconds: jwm's picker counted down an armed window while the
+/// helper sat on an adapter that did not exist, or one that had refused to
+/// become pairable or discoverable, with nothing on screen saying so.
+///
+/// Both flags are required, not just `Pairable`. A window is armed by pressing
+/// `a` in front of a device that has never seen this controller — that is the
+/// whole gesture — and such a device cannot ring a controller it cannot find.
+/// A pairable-but-hidden window would work only for a device that already
+/// knows the address, which is not what the panel promised.
+const fn window_failure(adapter: bool, pairable: bool, discoverable: bool) -> Option<&'static str> {
+    if !adapter {
+        Some("no Bluetooth adapter")
+    } else if !pairable {
+        Some("the adapter refused to become pairable")
+    } else if !discoverable {
+        Some("the adapter refused to become discoverable")
+    } else {
+        None
+    }
+}
+
+/// The `bluetooth_pairing_failed` payload: a cookie and a reason, and
+/// deliberately no address.
+///
+/// `done` reports an outcome *for a device* and is bound to its session by
+/// the address it names; a window nothing has rung has no address to name, so
+/// the terminal report for a helper that died before it armed anything needs
+/// a shape of its own. See `jwm::features::pairing::parse_failed_command`.
+fn failed_args(cookie: &str, error: &str) -> Value {
+    serde_json::json!({
+        "cookie": cookie,
+        "error": error,
+    })
+}
+
+/// Tell jwm this session never got off the ground, so the picker stops
+/// claiming an armed window the helper is not holding.
+///
+/// A jwm too old to know the verb answers with an error, which is logged and
+/// changes nothing: the picker then times the window out as it did before.
+async fn report_failed(ipc: &JwmIpc, cookie: &str, error: &str) {
+    let args = failed_args(cookie, error);
+    let ipc = ipc.clone();
+    let sent =
+        tokio::task::spawn_blocking(move || ipc.command("bluetooth_pairing_failed", args)).await;
+    match sent {
+        Ok(Ok(_)) => {}
+        Ok(Err(error)) => log::warn!("jwm rejected the window failure report: {error}"),
+        Err(error) => log::warn!("could not report the window failure: {error}"),
     }
 }
 
@@ -1473,6 +1688,7 @@ pub async fn accept_session(ipc: JwmIpc, connection: Connection, cookie: &str) -
         pending: Mutex::new(None),
         next_request_id: std::sync::atomic::AtomicU64::new(1),
         ended_by_user: AtomicBool::new(false),
+        authorized: AtomicBool::new(false),
         ipc: ipc.clone(),
     });
     if let Err(error) = connection
@@ -1487,6 +1703,7 @@ pub async fn accept_session(ipc: JwmIpc, connection: Connection, cookie: &str) -
         .await
     {
         log::warn!("accept: could not serve the agent: {error}");
+        report_failed(&ipc, cookie, "could not register the pairing agent").await;
         return EXIT_ERROR;
     }
 
@@ -1500,34 +1717,68 @@ pub async fn accept_session(ipc: JwmIpc, connection: Connection, cookie: &str) -
     .await
     {
         log::warn!("accept: RegisterAgent failed: {error}");
+        // The object server is still holding the agent; drop it before
+        // leaving, the same way the normal teardown below does. Nothing has
+        // been registered with bluez, so there is no UnregisterAgent to
+        // pair with it.
+        connection
+            .object_server()
+            .remove::<PairingAgent, _>(INBOUND_AGENT_PATH)
+            .await
+            .ok();
+        report_failed(&ipc, cookie, "bluez refused the pairing agent").await;
         return EXIT_FAILED;
     }
     // Inbound requests go to the *default* agent, so without this the window
     // is registered and never called.
     let _ = agent_manager_call_path(&connection, "RequestDefaultAgent", agent_path.clone()).await;
 
-    let exposure = match managed_objects(&connection)
-        .await
-        .as_ref()
-        .and_then(adapter_from_managed_objects)
-    {
-        Some(adapter) => Some(AdapterExposure::open(&connection, adapter).await),
+    let objects = managed_objects(&connection).await;
+    let exposure = match objects.as_ref().and_then(adapter_from_managed_objects) {
+        Some(adapter) => {
+            // Read the current adapter-wide timeouts out of the same tree, so
+            // teardown can put them back rather than leaving the machine's
+            // discoverable/pairable window permanently cut to sixty seconds.
+            let (pairable, discoverable) = objects
+                .as_ref()
+                .map(|objects| adapter_timeouts(objects, &adapter))
+                .unwrap_or((None, None));
+            Some(AdapterExposure::open(&connection, adapter, pairable, discoverable).await)
+        }
         None => {
             log::warn!("accept: no bluez adapter to make discoverable");
             None
         }
     };
 
+    // An armed window nothing can reach is worse than no window: jwm's picker
+    // counts down sixty seconds the user could have spent on a controller
+    // that works. Report it and unwind through the same teardown a normal
+    // close uses, rather than returning early past it.
+    let failure = window_failure(
+        exposure.is_some(),
+        exposure.as_ref().is_some_and(|exposure| exposure.pairable),
+        exposure
+            .as_ref()
+            .is_some_and(|exposure| exposure.discoverable),
+    );
+
     // Nothing to drive: wait for a callback to arrive and be answered, or for
     // jwm to cancel, or for the window to close on its own. `pump_responses`
     // needs a device path for `CancelPairing`; an inbound window has none
     // until something rings, so cancellation is handled inline here.
-    let window = tokio::time::timeout(
-        INBOUND_WINDOW,
-        pump_inbound_responses(shared.clone(), responses),
-    )
-    .await;
-    let cancelled = window.is_ok();
+    let cancelled = if let Some(reason) = failure {
+        log::warn!("accept: {reason}; giving the window back");
+        report_failed(&ipc, cookie, reason).await;
+        false
+    } else {
+        tokio::time::timeout(
+            INBOUND_WINDOW,
+            pump_inbound_responses(shared.clone(), responses),
+        )
+        .await
+        .is_ok()
+    };
 
     if let Some(exposure) = exposure.as_ref() {
         exposure.close(&connection).await;
@@ -1540,12 +1791,19 @@ pub async fn accept_session(ipc: JwmIpc, connection: Connection, cookie: &str) -
         .ok();
 
     // The window is not a pairing attempt, so there is no pairing outcome to
-    // report unless something actually rang and bound a device.
+    // report unless something actually rang and bound a device. Closing the
+    // window is not a refusal — only an explicit `n` is — so the report reads
+    // `ok` off what the user actually granted, not off whether the session
+    // ended by the user's hand (which a close always makes true).
     if let Some(address) = shared.target() {
-        let ok = !shared.ended_by_user.load(Ordering::Relaxed);
+        let ok = shared.authorized.load(Ordering::Relaxed);
         report_done(&ipc, &address, cookie, ok, (!ok).then_some("refused"), None).await;
     }
-    if cancelled { EXIT_CANCELLED } else { EXIT_OK }
+    match (failure, cancelled) {
+        (Some(_), _) => EXIT_FAILED,
+        (None, true) => EXIT_CANCELLED,
+        (None, false) => EXIT_OK,
+    }
 }
 
 /// Turn jwm's answers into agent replies for an inbound window. Returns when
@@ -1568,6 +1826,13 @@ async fn pump_inbound_responses(shared: Arc<Shared>, mut responses: mpsc::Receiv
         // reply rather than a dropped channel. An answer whose request is
         // already gone resolves nothing.
         if let Some(reply) = response.request_id.and_then(|id| shared.take_pending(id)) {
+            // A granted request is what makes the window's outcome a success;
+            // record it so `done` reports `ok` on its own merits rather than
+            // on "the user did not end the session", which the close itself
+            // would falsify.
+            if matches!(response.reply, UserReply::Confirmed | UserReply::Pin(_)) {
+                shared.authorized.store(true, Ordering::Relaxed);
+            }
             let _ = reply.send(response.reply);
         }
         // Closing the window has to happen here even when it answered an
@@ -1589,16 +1854,23 @@ async fn pump_inbound_responses(shared: Arc<Shared>, mut responses: mpsc::Receiv
 /// inbound window open.
 pub async fn run_accept(cookie: &str) -> i32 {
     let ipc = JwmIpc::new();
+    // The IPC socket is independent of D-Bus, so a bus that cannot be reached
+    // must still be reported — otherwise the picker counts down an armed
+    // sixty-second window while the helper that was supposed to hold it open
+    // has already exited. The report carries no address because there is none
+    // to carry: nothing has rung this window, and nothing now can.
     let connection = match zbus::connection::Builder::system() {
         Ok(builder) => match builder.build().await {
             Ok(connection) => connection,
             Err(error) => {
                 log::warn!("accept: cannot reach the system bus: {error}");
+                report_failed(&ipc, cookie, "no system bus").await;
                 return EXIT_ERROR;
             }
         },
         Err(error) => {
             log::warn!("accept: no system bus address: {error}");
+            report_failed(&ipc, cookie, "no system bus").await;
             return EXIT_ERROR;
         }
     };
@@ -1612,6 +1884,9 @@ pub async fn run_accept(cookie: &str) -> i32 {
     {
         Ok(code) => code,
         Err(_) => {
+            // No report here, unlike the pairing wall clock: this one is
+            // thirty-five seconds past the window jwm itself drops at sixty,
+            // so there is no session left for a report to name.
             log::warn!("accept: exceeded the inbound window wall clock");
             EXIT_ERROR
         }
@@ -1626,16 +1901,22 @@ pub async fn run(address: &str, cookie: &str) -> i32 {
         return EXIT_USAGE;
     }
     let ipc = JwmIpc::new();
+    // The IPC socket is independent of D-Bus, so a bus that cannot be reached
+    // must still be reported — otherwise the picker sits on "Pairing with X…"
+    // for the full 95s session timeout before jwm gives up on a helper that
+    // died in its first fifty milliseconds.
     let connection = match zbus::connection::Builder::system() {
         Ok(builder) => match builder.build().await {
             Ok(connection) => connection,
             Err(error) => {
                 log::warn!("pair {address}: cannot reach the system bus: {error}");
+                report_done(&ipc, address, cookie, false, Some("no system bus"), None).await;
                 return EXIT_ERROR;
             }
         },
         Err(error) => {
             log::warn!("pair {address}: no system bus address: {error}");
+            report_done(&ipc, address, cookie, false, Some("no system bus"), None).await;
             return EXIT_ERROR;
         }
     };
@@ -1891,17 +2172,169 @@ mod tests {
                 )
             })
             .collect();
-        let borrowed: Vec<ManagedEntry<'_>> = properties
+        let mut borrowed: Vec<ManagedEntry<'_>> = properties
             .iter()
             .map(|(path, props)| (*path, DEVICE_IFACE, props.as_slice()))
             .collect();
+
+        // A connected, paired device whose MAC sorts to the very end of the
+        // object tree. Truncating in path order — i.e. MAC order, the way the
+        // code did before it sorted first — would drop it behind the sixty-
+        // four nameless beacons, which is exactly the connected headset the
+        // cap exists to keep. Sorting before the cap floats it to the front.
+        let connected_path = "/org/bluez/hci0/dev_F0_FF_FF_FF_FF_FF";
+        let connected_props: OwnedProperties<'_> = vec![
+            ("Address", text("F0:FF:FF:FF:FF:FF")),
+            ("Alias", text("Studio Headphones")),
+            ("Connected", OwnedValue::from(true)),
+            ("Paired", OwnedValue::from(true)),
+        ];
+        borrowed.push((connected_path, DEVICE_IFACE, connected_props.as_slice()));
+
         let devices = devices_from_managed_objects(&managed_tree(&borrowed));
         assert_eq!(devices.len(), MAX_DISCOVERED_DEVICES);
+        assert_eq!(
+            devices[0].address, "F0:FF:FF:FF:FF:FF",
+            "the connected device survives the cap and leads the list"
+        );
+        assert_eq!(devices[0].name, "Studio Headphones");
         assert!(
             devices
                 .iter()
                 .all(|device| device.name.chars().count() <= MAX_DEVICE_NAME_CHARS)
         );
+    }
+
+    #[test]
+    fn a_ringing_device_is_named_even_when_the_picker_cap_would_drop_it() {
+        // The device that rings an inbound window is unpaired and, without a
+        // scan running, has no RSSI, so it sorts into the tail — past the
+        // 64-device cap `devices_from_managed_objects` applies for the picker.
+        // The prompt must still name it, so the label comes straight out of
+        // the tree by address rather than through the capped list.
+        let mut entries: Vec<(String, Vec<(&str, OwnedValue)>)> = Vec::new();
+        // The target: last in MAC order, unpaired, no RSSI — the worst case.
+        entries.push((
+            "/org/bluez/hci0/dev_FF_FF_FF_FF_FF_FF".to_string(),
+            vec![
+                ("Address", text("FF:FF:FF:FF:FF:FF")),
+                ("Alias", text("Ringing Phone")),
+            ],
+        ));
+        // Enough connected, paired devices to fill the cap and outrank it.
+        for index in 0..(MAX_DISCOVERED_DEVICES + 4) {
+            let address = format!(
+                "00:00:00:{:02X}:{:02X}:{:02X}",
+                index / 256,
+                index % 256,
+                index % 7
+            );
+            entries.push((
+                format!(
+                    "/org/bluez/hci0/dev_00_00_00_{:02X}_{:02X}_{:02X}",
+                    index / 256,
+                    index % 256,
+                    index % 7
+                ),
+                vec![
+                    ("Address", text(&address)),
+                    ("Connected", OwnedValue::from(true)),
+                    ("Paired", OwnedValue::from(true)),
+                ],
+            ));
+        }
+        let borrowed: Vec<ManagedEntry<'_>> = entries
+            .iter()
+            .map(|(path, props)| (path.as_str(), DEVICE_IFACE, props.as_slice()))
+            .collect();
+        let tree = managed_tree(&borrowed);
+
+        // The picker cap would indeed have dropped the target...
+        let capped = devices_from_managed_objects(&tree);
+        assert_eq!(capped.len(), MAX_DISCOVERED_DEVICES);
+        assert!(
+            !capped
+                .iter()
+                .any(|device| device.address == "FF:FF:FF:FF:FF:FF"),
+            "the target sorts past the cap, so the capped list cannot name it"
+        );
+        // ...but the direct lookup names it regardless, case-folding the
+        // address the way every other comparison on this wire does.
+        assert_eq!(
+            device_name_from_managed_objects(&tree, "FF:FF:FF:FF:FF:FF").as_deref(),
+            Some("Ringing Phone")
+        );
+        assert_eq!(
+            device_name_from_managed_objects(&tree, "ff:ff:ff:ff:ff:ff").as_deref(),
+            Some("Ringing Phone")
+        );
+        // A device bluez knows only by address yields no name: jwm falls
+        // back to the MAC rather than showing it twice.
+        let bare = managed_tree(&[(DEVICE_PATH, DEVICE_IFACE, &[("Address", text(ADDR))])]);
+        assert_eq!(device_name_from_managed_objects(&bare, ADDR), None);
+    }
+
+    #[test]
+    fn an_adapter_timeout_is_only_ever_lowered_and_only_a_lowered_one_is_restored() {
+        let window = INBOUND_WINDOW.as_secs() as u32;
+
+        // A default session: pairable forever, discoverable for three
+        // minutes. Both are longer than the window, so both are shortened to
+        // it and both are put back at teardown.
+        assert_eq!(plan_timeout(Some(0), window), (Some(window), Some(0)));
+        assert_eq!(plan_timeout(Some(180), window), (Some(window), Some(180)));
+
+        // Already within the window: nothing is written, so there is nothing
+        // to restore. This is the arm that stops the snapshot compounding —
+        // a value a previous killed helper left at the window is never taken
+        // for the user's own and written back as if it were.
+        assert_eq!(plan_timeout(Some(window), window), (None, None));
+        assert_eq!(plan_timeout(Some(30), window), (None, None));
+        assert_eq!(plan_timeout(Some(1), window), (None, None));
+
+        // A property bluez never published: shorten it as the belt for a
+        // SIGKILL, but restore nothing — the original is not knowable, and
+        // inventing one would be worse than leaving the belt on.
+        assert_eq!(plan_timeout(None, window), (Some(window), None));
+    }
+
+    #[test]
+    fn an_unreachable_window_is_reported_rather_than_held_open() {
+        // Everything in place: the window is real, so there is nothing to
+        // report and the helper waits for something to ring.
+        assert_eq!(window_failure(true, true, true), None);
+
+        // Each of these was a sixty-second countdown on the picker for a
+        // window nothing could ever ring. The adapter is checked first
+        // because without one the other two are meaningless.
+        assert_eq!(
+            window_failure(false, false, false),
+            Some("no Bluetooth adapter")
+        );
+        assert_eq!(
+            window_failure(true, false, true),
+            Some("the adapter refused to become pairable")
+        );
+        assert_eq!(
+            window_failure(true, true, false),
+            Some("the adapter refused to become discoverable")
+        );
+        // Both refused reports the first: one message, and pairable is the
+        // one bluez needs to accept a bond at all.
+        assert_eq!(
+            window_failure(true, false, false),
+            Some("the adapter refused to become pairable")
+        );
+    }
+
+    #[test]
+    fn a_failure_report_names_the_session_by_cookie_and_carries_no_address() {
+        let failed = failed_args(COOKIE, "no system bus");
+        assert_eq!(failed["cookie"], COOKIE);
+        assert_eq!(failed["error"], "no system bus");
+        // The whole point of the frame: an unrung window has no address, so
+        // demanding one — as `done` does — would make it unsendable.
+        assert!(failed.get("address").is_none(), "{failed}");
     }
 
     #[test]
@@ -2044,6 +2477,7 @@ mod tests {
             pending: Mutex::new(None),
             next_request_id: std::sync::atomic::AtomicU64::new(1),
             ended_by_user: AtomicBool::new(false),
+            authorized: AtomicBool::new(false),
             ipc: JwmIpc::with_socket(PathBuf::from("/nonexistent/jwm-ipc.sock")),
         };
 
@@ -2137,6 +2571,20 @@ mod tests {
         }))
         .expect("cancel answer");
         assert_eq!(cancelled.reply, UserReply::Cancelled);
+
+        // `reason: "closed"` is the one answer that ends an inbound window,
+        // as opposed to withdrawing a single prompt. It is otherwise only
+        // exercised by the bus-backed integration tests, which skip when
+        // dbus-daemon is absent, so pin the wire mapping here where nothing
+        // can skip it.
+        let closed = parse_response_event(&serde_json::json!({
+            "event": "bluetooth/pairing_response",
+            "payload": {"cookie": COOKIE, "accepted": false, "reason": "closed"},
+        }))
+        .expect("closed answer");
+        assert_eq!(closed.reply, UserReply::SessionClosed);
+        assert!(closed.reply.ends_the_session());
+        assert!(closed.reply.is_user_termination());
     }
 
     #[test]
@@ -2176,21 +2624,60 @@ mod tests {
 
     // --- Integration tests over a private bus and a fake jwm ---
 
+    /// Whether a runner has demanded the bus-backed tests actually run, the
+    /// way `JWM_REQUIRE_HEADLESS_GL` guards the GL tests. When set (and not
+    /// "0") a missing dbus-daemon is a hard failure, not a silent skip, so CI
+    /// cannot go green on the ten integration tests that are the only
+    /// executed coverage of the `SessionClosed`/timeout-restore paths.
+    fn dbus_daemon_required() -> bool {
+        std::env::var_os("JWM_REQUIRE_DBUS_DAEMON").is_some_and(|value| value != "0")
+    }
+
     /// A private `dbus-daemon` session bus, or `None` on machines without one
-    /// (the tests then skip rather than fail).
+    /// (the tests then skip rather than fail, unless `JWM_REQUIRE_DBUS_DAEMON`
+    /// turns the skip into a failure).
     fn spawn_private_bus() -> Option<(String, std::process::Child)> {
-        let mut child = std::process::Command::new("dbus-daemon")
+        let require = dbus_daemon_required();
+        let mut child = match std::process::Command::new("dbus-daemon")
             .args(["--session", "--print-address=1", "--nofork"])
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
             .spawn()
-            .ok()?;
-        let stdout = child.stdout.take()?;
+        {
+            Ok(child) => child,
+            Err(error) => {
+                assert!(
+                    !require,
+                    "JWM_REQUIRE_DBUS_DAEMON is set but dbus-daemon could not be spawned: {error}"
+                );
+                return None;
+            }
+        };
+        // Every remaining way out of this function is also a skip, so each
+        // one answers to the same demand: a guard that only covers the
+        // easiest failure is a guard CI can still walk around.
+        let Some(stdout) = child.stdout.take() else {
+            assert!(
+                !require,
+                "JWM_REQUIRE_DBUS_DAEMON is set but dbus-daemon's stdout was not captured"
+            );
+            return None;
+        };
         let mut address = String::new();
-        BufReader::new(stdout).read_line(&mut address).ok()?;
+        if BufReader::new(stdout).read_line(&mut address).is_err() {
+            assert!(
+                !require,
+                "JWM_REQUIRE_DBUS_DAEMON is set but dbus-daemon's bus address could not be read"
+            );
+            return None;
+        }
         let address = address.trim().to_string();
         if address.is_empty() {
+            assert!(
+                !require,
+                "JWM_REQUIRE_DBUS_DAEMON is set but dbus-daemon printed no bus address"
+            );
             return None;
         }
         Some((address, child))
@@ -2217,6 +2704,9 @@ mod tests {
         discoverable: Mutex<bool>,
         pairable_timeout: Mutex<u32>,
         discoverable_timeout: Mutex<u32>,
+        /// When set, `Discoverable` refuses to be written, standing in for an
+        /// adapter that cannot be made reachable — a window nothing can ring.
+        discoverable_fails: Mutex<bool>,
     }
 
     impl FakeBluezState {
@@ -2286,8 +2776,14 @@ mod tests {
         }
 
         #[zbus(property)]
-        fn set_discoverable(&self, value: bool) {
+        fn set_discoverable(&self, value: bool) -> zbus::Result<()> {
+            if *FakeBluezState::lock(&self.state.discoverable_fails) {
+                return Err(zbus::Error::FDO(Box::new(zbus::fdo::Error::Failed(
+                    "adapter refused".into(),
+                ))));
+            }
             *FakeBluezState::lock(&self.state.discoverable) = value;
+            Ok(())
         }
 
         /// BlueZ's own countdown. The window sets it so a helper that is
@@ -2554,8 +3050,15 @@ mod tests {
                 .is_test(true)
                 .try_init();
         let (address, mut bus) = spawn_private_bus()?;
-        // A dead-on-arrival daemon reads as a skipped test too.
-        if bus.try_wait().ok()?.is_some() {
+        // A dead-on-arrival daemon reads as a skipped test too — unless a
+        // runner demanded the bus, in which case it is a failure. A `wait`
+        // that itself fails is treated as death, so it cannot become a
+        // silent third way out.
+        if !matches!(bus.try_wait(), Ok(None)) {
+            assert!(
+                !dbus_daemon_required(),
+                "JWM_REQUIRE_DBUS_DAEMON is set but dbus-daemon exited on startup"
+            );
             return None;
         }
         let state = Arc::new(FakeBluezState::default());
@@ -2698,6 +3201,12 @@ mod tests {
         let connection = helper_connection(&setup.bus_address).await;
         let bluez = helper_connection(&setup.bus_address).await;
 
+        // Seed the adapter-wide timeouts to a real default session's values
+        // (Pairable forever = 0, Discoverable = 180) so the restore path is
+        // exercised: the window must lower them and put them back, not leave
+        // the machine's discoverable window permanently cut to sixty seconds.
+        *FakeBluezState::lock(&setup.state.discoverable_timeout) = 180;
+
         let session = tokio::spawn(accept_session(ipc, connection, COOKIE));
         let agent = await_registered_agent(&setup.state).await;
         // The window advertises itself, or nothing could ever ring it.
@@ -2706,6 +3215,17 @@ mod tests {
             Some(INBOUND_AGENT_PATH)
         );
         await_adapter_exposed(&setup.state).await;
+        // While the window is open both countdowns are at the window length —
+        // the belt a helper killed outright leaves behind. `open` writes them
+        // before it raises the flags, so waiting on the flags is enough. The
+        // restore asserted at the end would pass just as well if nothing had
+        // ever been lowered, so pin the lowering here.
+        let window = INBOUND_WINDOW.as_secs() as u32;
+        assert_eq!(*FakeBluezState::lock(&setup.state.pairable_timeout), window);
+        assert_eq!(
+            *FakeBluezState::lock(&setup.state.discoverable_timeout),
+            window
+        );
 
         let device = OwnedObjectPath::try_from(DEVICE_PATH).expect("device path");
         let call = tokio::spawn({
@@ -2736,6 +3256,15 @@ mod tests {
         jwm.send_response(
             serde_json::json!({"cookie": COOKIE, "accepted": false, "reason": "closed"}),
         );
+
+        // Closing the window after the user allowed the bond is not a
+        // refusal: the teardown report says the request was granted, so jwm
+        // can refresh the list rather than flash "refused" for a device that
+        // paired.
+        let done = jwm.recv_command("bluetooth_pairing_done");
+        assert_eq!(done["args"]["ok"], true);
+        assert!(done["args"]["error"].is_null());
+
         let code = session.await.expect("session task");
         assert_eq!(code, EXIT_CANCELLED);
         assert_eq!(
@@ -2746,14 +3275,67 @@ mod tests {
         // behind the user.
         assert!(!*FakeBluezState::lock(&setup.state.pairable));
         assert!(!*FakeBluezState::lock(&setup.state.discoverable));
-        // BlueZ's own countdown was armed too, so a helper killed outright
-        // could not have left it open either.
-        let window = INBOUND_WINDOW.as_secs() as u32;
-        assert_eq!(*FakeBluezState::lock(&setup.state.pairable_timeout), window);
+        // The adapter-wide countdowns are restored to what the window found,
+        // so one jwm window does not permanently shorten every other tool's
+        // discoverable/pairable window (Pairable back to 0 = forever,
+        // Discoverable back to 180). A killed helper — which never reaches
+        // this teardown — still leaves them at the window as the belt.
+        assert_eq!(*FakeBluezState::lock(&setup.state.pairable_timeout), 0);
         assert_eq!(
             *FakeBluezState::lock(&setup.state.discoverable_timeout),
-            window
+            180
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_window_the_adapter_refuses_is_handed_back_instead_of_held_open() {
+        let Some(setup) = fake_setup(PairScript::Confirm(1)).await else {
+            eprintln!("dbus-daemon unavailable; skipping the inbound integration test");
+            return;
+        };
+        let jwm = FakeJwm::start(serde_json::json!({
+            "active": true, "address": null, "cookie": COOKIE,
+            "state": "working", "kind": "inbound",
+        }));
+        let ipc = JwmIpc::with_socket(jwm.socket.clone());
+        let connection = helper_connection(&setup.bus_address).await;
+
+        // The controller refuses to become discoverable: the window would be
+        // armed, on screen, counting down, and findable by nothing. The
+        // helper used to hold it for the full sixty seconds and say nothing.
+        *FakeBluezState::lock(&setup.state.discoverable_fails) = true;
+
+        let started = std::time::Instant::now();
+        let session = tokio::spawn(accept_session(ipc, connection, COOKIE));
+
+        // The report names the session by cookie and carries no address —
+        // nothing rang this window, so there is no device to name, which is
+        // exactly why this is not a `done`.
+        let failed = jwm.recv_command("bluetooth_pairing_failed");
+        assert_eq!(failed["args"]["cookie"], COOKIE);
+        assert!(
+            failed["args"]["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("discoverable")),
+            "{failed}"
+        );
+        assert!(failed["args"].get("address").is_none(), "{failed}");
+
+        let code = session.await.expect("session task");
+        assert_eq!(code, EXIT_FAILED);
+        assert!(
+            started.elapsed() < INBOUND_WINDOW,
+            "the window was handed back, not waited out"
+        );
+
+        // And it unwound through the same teardown a normal close uses,
+        // rather than returning early past it: the agent is unregistered and
+        // the one flag that did take is off again.
+        assert_eq!(
+            FakeBluezState::lock(&setup.state.unregistered).as_deref(),
+            Some(INBOUND_AGENT_PATH)
+        );
+        assert!(!*FakeBluezState::lock(&setup.state.pairable));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -856,8 +856,27 @@ impl Config {
                 1.0,
                 256.0,
             ),
+            // The same range `set_config` refuses and the dim stage falls
+            // back from; the checker must not be the one path that is silent.
+            ("behavior.idle_dim_level", behavior.idle_dim_level, 0.0, 1.0),
         ] {
             validate_f32_range(&mut diagnostics, path, value, min, max);
+        }
+        {
+            use crate::jwm::features::idle::MIN_LOCK_SECS;
+            let lock_secs = behavior.idle_lock_secs;
+            if (1..MIN_LOCK_SECS).contains(&lock_secs) {
+                diagnostics.warning(
+                    "behavior.idle_lock_secs",
+                    format!(
+                        "{lock_secs}s is below the {MIN_LOCK_SECS}s floor and the session \
+                         will lock after {MIN_LOCK_SECS}s instead"
+                    ),
+                    Some(format!(
+                        "use 0 to switch idle locking off, or at least {MIN_LOCK_SECS}"
+                    )),
+                );
+            }
         }
 
         for (path, value, supported_max) in [
@@ -1529,6 +1548,48 @@ mod tests {
         diagnostics.issues().iter().any(|issue| {
             issue.path == format!("rules[{index}]") && issue.message.contains("unreachable")
         })
+    }
+
+    #[test]
+    fn idle_keys_are_checked_the_way_set_config_and_the_runtime_read_them() {
+        use crate::jwm::features::idle::MIN_LOCK_SECS;
+
+        let mut config = Config::default();
+        config.inner.behavior.idle_dim_level = 1.5;
+        config.inner.behavior.idle_lock_secs = 1;
+        let diagnostics = config.diagnostics();
+
+        let dim = diagnostics
+            .issues()
+            .iter()
+            .find(|issue| issue.path == "behavior.idle_dim_level")
+            .expect(
+                "an out-of-range idle_dim_level is refused by set_config; the checker must say so",
+            );
+        assert_eq!(dim.level, ConfigDiagnosticLevel::Warning);
+
+        let lock = diagnostics
+            .issues()
+            .iter()
+            .find(|issue| issue.path == "behavior.idle_lock_secs")
+            .expect("a lock timeout below the floor is raised at runtime; the checker must say so");
+        assert_eq!(lock.level, ConfigDiagnosticLevel::Warning);
+        assert!(lock.message.contains(&MIN_LOCK_SECS.to_string()));
+
+        // Off, at the floor, and in range are all quiet.
+        for (dim_level, lock_secs) in [(0.35, 0), (0.0, MIN_LOCK_SECS), (1.0, 600)] {
+            let mut config = Config::default();
+            config.inner.behavior.idle_dim_level = dim_level;
+            config.inner.behavior.idle_lock_secs = lock_secs;
+            assert!(
+                !config
+                    .diagnostics()
+                    .issues()
+                    .iter()
+                    .any(|issue| issue.path.starts_with("behavior.idle_")),
+                "idle_dim_level={dim_level} idle_lock_secs={lock_secs} should be quiet"
+            );
+        }
     }
 
     #[test]

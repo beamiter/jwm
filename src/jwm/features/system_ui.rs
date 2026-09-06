@@ -319,9 +319,15 @@ impl ListKind {
             return match prompt {
                 PromptKind::Passphrase(_) => "Enter  join    Esc  cancel",
                 PromptKind::Pin { .. } => "Enter  submit    Esc  cancel pairing",
-                PromptKind::Confirm { .. } => "y/Enter  confirm    n/Esc  reject",
+                // `n` and `Esc` are not the same key: `n` answers this one
+                // request, `Esc` ends the session. For an inbound window that
+                // is the difference between refusing one device and closing
+                // the whole armed window, so the hints name them apart.
+                PromptKind::Confirm { .. } => {
+                    "y/Enter  confirm    n  reject    Esc  cancel pairing"
+                }
                 PromptKind::Display { .. } => "Esc  cancel pairing",
-                PromptKind::Authorize { .. } => "y/Enter  allow    n/Esc  refuse",
+                PromptKind::Authorize { .. } => "y/Enter  allow    n  refuse    Esc  close window",
             };
         }
         match self {
@@ -665,6 +671,26 @@ impl ControlEntry {
             enabled,
             label: String::new(),
         }
+    }
+}
+
+/// Name the network a passphrase is being asked for.
+///
+/// The picker's row key is the byte-exact SSID — the join key handed to
+/// `nmcli`, not a label — so it goes through the same paint-time filter the
+/// picker row uses instead of reaching the screen as stored. A key that is
+/// gone, or that is nothing but control bytes, leaves the question with no
+/// subject at all; both fall back to the generic word rather than to a blank.
+#[must_use]
+fn passphrase_prompt_subject(key: Option<&str>) -> String {
+    let shown = key.map_or_else(
+        String::new,
+        crate::jwm::features::connectivity::display_ssid,
+    );
+    if shown.is_empty() {
+        "network".to_string()
+    } else {
+        shown
     }
 }
 
@@ -2954,9 +2980,9 @@ impl SystemUiState {
                             // Name the network: the selection highlight is
                             // dropped while prompting, so the row alone would
                             // not say which passphrase is being asked for.
-                            let subject = rows
-                                .get(*selected)
-                                .map_or("network", |row| row.key.as_str());
+                            let subject = passphrase_prompt_subject(
+                                rows.get(*selected).map(|row| row.key.as_str()),
+                            );
                             items.push(format!(
                                 "\u{f084}  Passphrase for {subject}  {}",
                                 "*".repeat(typed.chars().count())
@@ -3962,6 +3988,49 @@ mod tests {
         assert_eq!(panel.take_wifi_passphrase().as_deref(), Some("xq"));
     }
 
+    /// The picker's row key is the SSID byte-exact, because it is what
+    /// `nmcli` is handed rather than a label — and the passphrase prompt
+    /// draws that key. So the strip has to happen here too, at the paint
+    /// boundary, exactly as `picker_row` does it, while the stored key stays
+    /// intact: a stripped join key reaches a different network, or none.
+    #[test]
+    fn the_passphrase_prompt_names_the_network_without_its_control_bytes() {
+        let raw = "Cafe\u{1b}[31mWiFi\u{7}";
+        let mut panel = SystemUiState::wifi_picker("");
+        panel.set_wifi_networks(&[wifi(raw, false)]);
+        panel.prompt_wifi_passphrase();
+
+        let parts = panel.overlay_parts();
+        let prompt = parts.items.last().expect("prompt row");
+        assert!(
+            prompt.contains("Cafe[31mWiFi"),
+            "the prompt still names the network: {prompt}"
+        );
+        assert!(
+            !parts
+                .items
+                .iter()
+                .any(|item| item.chars().any(char::is_control)),
+            "an access point's control bytes reached the screen: {parts:?}"
+        );
+        assert_eq!(
+            panel.selected_wifi().map(|(ssid, _)| ssid).as_deref(),
+            Some(raw),
+            "the join key itself stays byte-exact"
+        );
+    }
+
+    #[test]
+    fn a_prompt_subject_with_nothing_drawable_left_falls_back_to_the_generic_word() {
+        assert_eq!(passphrase_prompt_subject(Some("Alpha")), "Alpha");
+        assert_eq!(passphrase_prompt_subject(Some("Ca\u{1b}fe")), "Cafe");
+        // An SSID that is nothing but control bytes survives the scan parser
+        // (it is not empty and `trim` leaves it alone), but there is nothing
+        // of it left to draw.
+        assert_eq!(passphrase_prompt_subject(Some("\u{1b}\u{7}")), "network");
+        assert_eq!(passphrase_prompt_subject(None), "network");
+    }
+
     #[test]
     fn cancelling_a_prompt_keeps_the_list() {
         let mut panel = SystemUiState::wifi_picker("");
@@ -4148,8 +4217,21 @@ mod tests {
             parts.items
         );
         // Same keys as the numeric comparison, different words: this one is
-        // not confirming a code, it is granting access.
-        assert_eq!(parts.hint, "y/Enter  allow    n/Esc  refuse");
+        // not confirming a code, it is granting access. `n` and `Esc` are
+        // named apart because they do different things — `n` refuses this one
+        // request and leaves the window armed, `Esc` closes the window — so
+        // the hint must not equate them the way the doc used to.
+        assert_eq!(
+            parts.hint,
+            "y/Enter  allow    n  refuse    Esc  close window"
+        );
+        // Built at runtime so this parity check cannot match its own literal.
+        let equated = format!("n{}Esc", "/");
+        assert!(
+            !parts.hint.contains(equated.as_str()),
+            "the hint must not equate `n` with `Esc`: {}",
+            parts.hint
+        );
 
         panel.prompt_bluetooth_pairing(
             &crate::jwm::features::pairing::PairingPrompt::Authorize {

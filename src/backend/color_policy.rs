@@ -30,9 +30,26 @@ pub const PRIMARIES_BT2020: [i32; 8] = [
     708_000, 292_000, 170_000, 797_000, 131_000, 46_000, 312_700, 329_000,
 ];
 
+/// Whether the experimental ICC/HDR half of wp-color-management is enabled
+/// (`JWM_COLOR_MANAGEMENT_ADVANCED=1`).
+///
+/// Read once. The environment is fixed before the compositor starts — this is
+/// a launch switch, not configuration, and there is no reload path that could
+/// change it — while the readers are on the frame thread: `params_for_output`
+/// alone reaches this per output per frame from the colour-target refresh, the
+/// HDR refusal evidence, the backend's per-frame output cache and
+/// `output_primaries_name`. Each raw call took the process-wide environment
+/// lock, walked `environ` and allocated an `OsString` to answer the same
+/// constant, so any library thread calling `getenv`/`setenv` contended with
+/// the frame loop for it. Same treatment as `JWM_DEBUG_COMPOSITOR`.
 #[must_use]
 pub fn advanced_color_management_enabled() -> bool {
-    std::env::var_os("JWM_COLOR_MANAGEMENT_ADVANCED").as_deref() == Some(std::ffi::OsStr::new("1"))
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+    *ENABLED.get_or_init(|| {
+        std::env::var_os("JWM_COLOR_MANAGEMENT_ADVANCED").as_deref()
+            == Some(std::ffi::OsStr::new("1"))
+    })
 }
 
 /// Accumulated parametric properties (collected by a creator object before
@@ -150,6 +167,7 @@ mod tests {
         EdidHdrCapabilities {
             max_luminance_nits: max_nits,
             min_luminance_nits: min_nits,
+            max_frame_average_nits: 0.0,
             supports_bt2020: bt2020,
             supports_pq: pq,
             supports_hlg: hlg,

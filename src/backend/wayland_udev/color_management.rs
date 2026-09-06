@@ -192,6 +192,28 @@ pub struct ColorManagerState {
     /// last-emitted preferred description. Created lazily when a client first
     /// calls get_surface_feedback.
     feedback: Arc<Mutex<HashMap<ObjectId, FeedbackBucket>>>,
+    /// Live `wp_color_management_output_v1` objects, keyed by the Smithay
+    /// output name they were created for. The protocol requires an
+    /// `image_description_changed` event whenever the output's advertised
+    /// description changes; without this registry there was nothing to send
+    /// it on, and a client that had already called `get_image_description`
+    /// never learned that the output had entered or left HDR.
+    output_resources: Arc<Mutex<HashMap<String, Vec<OutputCmResource>>>>,
+    /// The image description each output is currently advertising, by output
+    /// name. `image_description_changed` carries no payload, so a client
+    /// answers it with a fresh `get_image_description` round trip; sending it
+    /// when nothing moved would make every output-state sync cost one per
+    /// bound object. Seeded when the first object for an output binds.
+    output_advertised: Arc<Mutex<HashMap<String, ParametricParams>>>,
+}
+
+/// One bound `wp_color_management_output_v1` and the `wl_output` it
+/// describes. The `wl_output` is kept so the `wl_output.done` the protocol
+/// requires after `image_description_changed` can be sent on the same object
+/// the client bound.
+struct OutputCmResource {
+    resource: WpColorManagementOutputV1,
+    wl_output: WlOutput,
 }
 
 impl ColorManagerState {
@@ -201,6 +223,8 @@ impl ColorManagerState {
             surface_description_generation: AtomicU64::new(1),
             surface_descriptions: Arc::new(Mutex::new(HashMap::new())),
             feedback: Arc::new(Mutex::new(HashMap::new())),
+            output_resources: Arc::new(Mutex::new(HashMap::new())),
+            output_advertised: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -372,6 +396,124 @@ impl ColorManagerState {
         }
     }
 
+    /// The output's own advertised image description changed — KMS asserted
+    /// or withdrew HDR signalling, or a hotplug replaced its EDID.
+    ///
+    /// [`Self::on_surface_enters_output`] cannot carry this: it returns early
+    /// when the output is already in the surface's bucket, and the render
+    /// loop only calls it for surfaces *newly* appearing on an output. So a
+    /// player mapped before the enable kept its sRGB `preferred`, and
+    /// `get_preferred` kept answering sRGB while
+    /// `wp_color_management_output_v1.get_image_description` answered PQ. The
+    /// protocol requires both halves on a change, so every bucket that
+    /// contains this output is re-evaluated and every live output object is
+    /// told.
+    pub fn on_output_description_changed(&self, output: &Output) {
+        let name = output.name();
+        let new_params = params_for_output(output);
+        {
+            // Idempotent: the reconciliation calls this on every assert and
+            // every withdrawal, and the output-state sync calls it whenever
+            // EDID caps are re-attached, which is most of the time a no-op.
+            let mut advertised = self.output_advertised.lock_safe();
+            if !output_description_change_is_visible(advertised.get(&name), &new_params) {
+                return;
+            }
+            advertised.insert(name.clone(), new_params.clone());
+        }
+        {
+            let mut feedback = self.feedback.lock_safe();
+            for bucket in feedback.values_mut() {
+                if !bucket.outputs.contains(&name) {
+                    continue;
+                }
+                if let Some((_, last_params)) = &bucket.last_preferred
+                    && params_match(last_params, &new_params)
+                {
+                    continue;
+                }
+                let id = self.next_id();
+                bucket.last_preferred = Some((id, new_params.clone()));
+                bucket.resources.retain(|r| r.is_alive());
+                for r in &bucket.resources {
+                    r.preferred_changed(id as u32);
+                }
+            }
+        }
+        self.notify_output_image_description_changed(&name);
+    }
+
+    /// Emit `image_description_changed` on every live output object for
+    /// `output_name`, each followed by the `wl_output.done` the protocol
+    /// requires (once per `wl_output`, however many colour objects a client
+    /// bound against it).
+    fn notify_output_image_description_changed(&self, output_name: &str) {
+        let mut registry = self.output_resources.lock_safe();
+        let Some(entries) = registry.get_mut(output_name) else {
+            return;
+        };
+        entries.retain(|entry| entry.resource.is_alive());
+        if entries.is_empty() {
+            registry.remove(output_name);
+            return;
+        }
+        #[allow(
+            clippy::mutable_key_type,
+            reason = "Wayland ObjectId hashes by stable protocol-object identity; its internal liveness flag is not part of Hash or Eq"
+        )]
+        let mut done_sent: HashSet<ObjectId> = HashSet::new();
+        for entry in entries.iter() {
+            entry.resource.image_description_changed();
+            // `wl_output.done` arrived in version 2; a version-1 binding has
+            // no such event and sending it would be a protocol violation.
+            if entry.wl_output.is_alive()
+                && entry.wl_output.version() >= 2
+                && done_sent.insert(entry.wl_output.id())
+            {
+                entry.wl_output.done();
+            }
+        }
+    }
+
+    /// Track a freshly bound `wp_color_management_output_v1`.
+    fn register_output_resource(
+        &self,
+        output_name: String,
+        advertised: ParametricParams,
+        resource: WpColorManagementOutputV1,
+        wl_output: WlOutput,
+    ) {
+        // Seed what this output is advertising *now*, so the first real
+        // change is detected as a change rather than compared against
+        // nothing.
+        self.output_advertised
+            .lock_safe()
+            .entry(output_name.clone())
+            .or_insert(advertised);
+        self.output_resources
+            .lock_safe()
+            .entry(output_name)
+            .or_default()
+            .push(OutputCmResource {
+                resource,
+                wl_output,
+            });
+    }
+
+    /// Drop one destroyed output object, and the map entry with it once the
+    /// last object for that output is gone — so a client that binds and
+    /// destroys in a loop cannot grow this map.
+    fn forget_output_resource(&self, output_name: &str, resource: &WpColorManagementOutputV1) {
+        let mut registry = self.output_resources.lock_safe();
+        let Some(entries) = registry.get_mut(output_name) else {
+            return;
+        };
+        entries.retain(|entry| entry.resource.is_alive() && entry.resource.id() != resource.id());
+        if entries.is_empty() {
+            registry.remove(output_name);
+        }
+    }
+
     /// A surface lost a frame on `output`. If the lost output was driving the
     /// current preferred and there are other outputs left, picks one of them
     /// and emits preferred_changed; if none remain, leaves last_preferred
@@ -430,6 +572,24 @@ pub(crate) fn output_edid_hdr_capabilities(output: &Output) -> Option<EdidHdrCap
         .user_data()
         .get::<std::sync::Mutex<Option<EdidHdrCapabilities>>>()
         .and_then(|slot| slot.lock_safe().clone())
+}
+
+/// Whether an output's advertised image description actually moved, and is
+/// therefore worth an `image_description_changed` / `preferred_changed` pair.
+///
+/// `image_description_changed` carries no payload: a client answers it with a
+/// fresh `get_image_description` round trip. Emitting it whenever something
+/// merely *might* have changed — every EDID re-attach, every withdrawal of a
+/// signal that was already down — would put that round trip on every output
+/// sync. `None` means nothing is known about what this output was
+/// advertising, which is treated as a change so the first observation is
+/// never swallowed.
+#[must_use]
+pub(crate) fn output_description_change_is_visible(
+    previously_advertised: Option<&ParametricParams>,
+    now: &ParametricParams,
+) -> bool {
+    !previously_advertised.is_some_and(|previous| params_match(previous, now))
 }
 
 fn params_for_output_policy(
@@ -582,7 +742,21 @@ impl Dispatch<WpColorManagerV1, ()> for JwmWaylandState {
         match request {
             wp_color_manager_v1::Request::Destroy => {}
             wp_color_manager_v1::Request::GetOutput { id, output } => {
-                data_init.init(id, OutputCmData { wl_output: output });
+                let output_name = Output::from_resource(&output).map(|o| o.name());
+                let resource = data_init.init(
+                    id,
+                    OutputCmData {
+                        wl_output: output.clone(),
+                        output_name: output_name.clone(),
+                    },
+                );
+                // Registered so a later HDR assert/withdraw can send
+                // `image_description_changed`; an object bound against an
+                // output smithay no longer knows is inert and stays untracked.
+                if let (Some(name), Some(cm)) = (output_name, state.color_manager.as_ref()) {
+                    let advertised = params_for_wl_output(&output);
+                    cm.register_output_resource(name, advertised, resource, output);
+                }
             }
             wp_color_manager_v1::Request::GetSurface { id, surface } => {
                 data_init.init(id, SurfaceCmData { surface });
@@ -635,6 +809,10 @@ impl Dispatch<WpColorManagerV1, ()> for JwmWaylandState {
 
 pub struct OutputCmData {
     pub wl_output: WlOutput,
+    /// The Smithay output name this object was created for, resolved once at
+    /// bind time. The `wl_output` may already be dead in the destroyed hook,
+    /// so the key has to be captured while it still resolves.
+    pub output_name: Option<String>,
 }
 unsafe impl Send for OutputCmData {}
 unsafe impl Sync for OutputCmData {}
@@ -662,6 +840,18 @@ impl Dispatch<WpColorManagementOutputV1, OutputCmData> for JwmWaylandState {
             _ => {}
         }
     }
+
+    fn destroyed(
+        state: &mut Self,
+        _client: smithay::reexports::wayland_server::backend::ClientId,
+        resource: &WpColorManagementOutputV1,
+        data: &OutputCmData,
+    ) {
+        if let (Some(name), Some(cm)) = (data.output_name.as_deref(), state.color_manager.as_ref())
+        {
+            cm.forget_output_resource(name, resource);
+        }
+    }
 }
 
 // === wp_color_management_surface_v1 ===
@@ -682,6 +872,15 @@ impl Dispatch<WpColorManagementSurfaceV1, SurfaceCmData> for JwmWaylandState {
         _dh: &DisplayHandle,
         _data_init: &mut DataInit<'_, Self>,
     ) {
+        // An object whose wl_surface is already gone is inert per protocol:
+        // its requests change nothing. Acting on them re-created the latch
+        // entry `CompositorHandler::destroyed` had just purged, keyed by a
+        // dead id that no commit can ever drain — it then lived, and was
+        // walked by every `snapshot_surface_params`, until the client got
+        // round to destroying the inert object.
+        if !data.surface.is_alive() {
+            return;
+        }
         match request {
             wp_color_management_surface_v1::Request::Destroy => {
                 // Protocol: destroy "does the same as unset_image_description",
@@ -1295,6 +1494,37 @@ mod tests {
     }
 
     #[test]
+    fn an_output_only_announces_a_description_that_actually_moved() {
+        use super::output_description_change_is_visible as visible;
+        use crate::backend::color_policy::params_from_edid;
+        use crate::backend::edid::EdidHdrCapabilities;
+
+        let srgb = srgb_params();
+        let pq = params_from_edid(&EdidHdrCapabilities {
+            max_luminance_nits: 800.0,
+            min_luminance_nits: 0.126,
+            max_frame_average_nits: 400.0,
+            supports_bt2020: true,
+            supports_pq: true,
+            supports_hlg: false,
+        });
+
+        // Nothing known yet: announce, so the first observation of a change
+        // is never swallowed by an empty map.
+        assert!(visible(None, &srgb));
+        // The reconciliation calls this on every assert and every withdrawal,
+        // and the output sync calls it on every EDID re-attach.
+        // `image_description_changed` carries no payload, so each one costs
+        // the client a `get_image_description` round trip; announcing an
+        // unchanged description would put that on every output sync.
+        assert!(!visible(Some(&srgb), &srgb));
+        assert!(!visible(Some(&pq), &pq));
+        // The two transitions that matter: an HDR assert and its withdrawal.
+        assert!(visible(Some(&srgb), &pq));
+        assert!(visible(Some(&pq), &srgb));
+    }
+
+    #[test]
     fn color_manager_destroy_purges_pending_and_current() {
         let cm = ColorManagerState::new();
         let surface = ObjectId::null();
@@ -1408,6 +1638,7 @@ mod tests {
         let hdr = EdidHdrCapabilities {
             max_luminance_nits: 1000.0,
             min_luminance_nits: 0.05,
+            max_frame_average_nits: 400.0,
             supports_bt2020: true,
             supports_pq: true,
             supports_hlg: false,

@@ -104,8 +104,21 @@ impl Jwm {
 
     /// The strip itself, in screen pixels — the band `monitor_work_area` took
     /// off the top.
-    pub(crate) fn monitor_tab_bar(&self, mon_key: MonitorKey) -> Option<tabs::Rect> {
-        let reserved = self.tab_bar_reserved(mon_key);
+    ///
+    /// `group_len` is the monitor's tab group size, as
+    /// [`Self::tab_group_clients`] returned it. Every caller already holds
+    /// the group (it decides whether there is a strip at all), so taking the
+    /// length rather than re-deriving it keeps the per-frame and per-click
+    /// paths to a single walk of the monitor's clients.
+    pub(crate) fn monitor_tab_bar(
+        &self,
+        mon_key: MonitorKey,
+        group_len: usize,
+    ) -> Option<tabs::Rect> {
+        if !tabs::wants_bar(group_len) {
+            return None;
+        }
+        let reserved = tabs::bar_height(CONFIG.load().behavior().tab_bar_height).round() as i32;
         if reserved <= 0 {
             return None;
         }
@@ -122,7 +135,7 @@ impl Jwm {
             if group.is_empty() {
                 continue;
             }
-            let Some(bar) = self.monitor_tab_bar(mon_key) else {
+            let Some(bar) = self.monitor_tab_bar(mon_key, group.len()) else {
                 continue;
             };
             let cells = group
@@ -150,7 +163,7 @@ impl Jwm {
             if group.is_empty() {
                 continue;
             }
-            let Some(bar) = self.monitor_tab_bar(mon_key) else {
+            let Some(bar) = self.monitor_tab_bar(mon_key, group.len()) else {
                 continue;
             };
             if let Some(index) = tabs::tab_at(bar, group.len(), x as f32, y as f32) {
@@ -286,7 +299,7 @@ impl Jwm {
             if group.is_empty() {
                 continue;
             }
-            let Some(bar) = self.monitor_tab_bar(mon_key) else {
+            let Some(bar) = self.monitor_tab_bar(mon_key, group.len()) else {
                 continue;
             };
             if let Some(index) = tabs::tab_at(bar, group.len(), x as f32, y as f32) {
@@ -298,7 +311,7 @@ impl Jwm {
         if group.is_empty() {
             return None;
         }
-        let bar = self.monitor_tab_bar(mon_key)?;
+        let bar = self.monitor_tab_bar(mon_key, group.len())?;
         let [bx, by, bw, bh] = bar;
         let cx = (x as f32).clamp(bx, bx + bw);
         let cy = (y as f32).clamp(by, by + bh);

@@ -86,12 +86,21 @@ pub struct TagsOverviewState {
     /// carries no identity, so the drag gesture keeps its map here, on the
     /// WM side of the snapshot.
     pub window_ids: Vec<Vec<u64>>,
+    /// The sticky windows of the snapshot. They draw in every cell and go
+    /// live like any other outline, but a wireframe drag never arms on one:
+    /// `move_client_to_tag` would rewrite a mask that stickiness ignores
+    /// and the next `view` puts back — a gesture with no observable effect.
+    pub sticky_windows: Vec<u64>,
     /// Columns of the grid the cells are walked (and drawn) in.
     pub cols: u32,
     /// Highlighted cell: a tag index, stable across rebuilds.
     pub selected: usize,
     /// The pointer press waiting for its release, if one is down.
     pub pending: Option<PendingCellPress>,
+    /// The monitor the cells describe and the viewport was pushed for.
+    /// `None` for a snapshot built without one (tests); the flush treats
+    /// that like any other mismatch with the selected monitor.
+    pub monitor: Option<MonitorKey>,
 }
 
 impl TagsOverviewState {
@@ -110,13 +119,29 @@ impl TagsOverviewState {
         } else {
             (active_tags.trailing_zeros() as usize).min(cells.len().saturating_sub(1))
         };
+        let sticky_windows = clients
+            .iter()
+            .filter(|client| client.sticky)
+            .map(|client| client.win)
+            .collect();
         Self {
             cells,
             window_ids,
+            sticky_windows,
             cols,
             selected,
             pending: None,
+            monitor: None,
         }
+    }
+
+    /// The window a press on `cells[cell].windows[outline]` can drag, if
+    /// that outline is draggable at all. Every outline has an id (the live
+    /// cell needs them all), but a sticky window's is withheld here so its
+    /// press settles as the click and never as a no-op drop.
+    pub fn drag_source(&self, cell: usize, outline: usize) -> Option<u64> {
+        let window = *self.window_ids.get(cell)?.get(outline)?;
+        (!self.sticky_windows.contains(&window)).then_some(window)
     }
 
     /// Move the highlight one step through the grid. Movement clamps at row
@@ -531,7 +556,8 @@ impl Jwm {
     /// The cell a global pointer position sits on, if any. The hit-test reads
     /// the same geometry the compositors draw: `grid_geometry` over the
     /// viewport `sync_system_ui` pushes with the overlay and the state's own
-    /// cell count and column count.
+    /// cell count and column count, with the highlighted cell lifted the way
+    /// it is painted (`tags_grid::presented_cell`).
     fn tags_overview_cell_at(&self, x: f64, y: f64) -> Option<usize> {
         let overview = self.features.system_ui.tags_overview()?;
         let geometry = tags_grid::grid_geometry(
@@ -539,12 +565,14 @@ impl Jwm {
             overview.cells.len(),
             overview.cols,
         );
-        tags_grid::cell_at(&geometry, x as f32, y as f32)
+        tags_grid::cell_at(&geometry, Some(overview.selected), x as f32, y as f32)
     }
 
     /// The window whose wireframe a point inside `cell_index` lands on, if
     /// any: the drawn topmost outline under the point, resolved to its raw
-    /// id through the snapshot's parallel [`TagsOverviewState::window_ids`].
+    /// id through the snapshot's parallel [`TagsOverviewState::window_ids`]
+    /// — minus the outlines a drag must not arm on
+    /// ([`TagsOverviewState::drag_source`]).
     fn tags_overview_window_at(&self, cell_index: usize, x: f64, y: f64) -> Option<u64> {
         let overview = self.features.system_ui.tags_overview()?;
         let geometry = tags_grid::grid_geometry(
@@ -553,9 +581,10 @@ impl Jwm {
             overview.cols,
         );
         let grid_cell = geometry.cells.get(cell_index)?;
+        let (_, frame) = tags_grid::presented_cell(grid_cell, cell_index == overview.selected);
         let outlines = &overview.cells.get(cell_index)?.windows;
-        let hit = tags_grid::frame_window_at(grid_cell.frame, outlines, x as f32, y as f32)?;
-        overview.window_ids.get(cell_index)?.get(hit).copied()
+        let hit = tags_grid::frame_window_at(frame, outlines, x as f32, y as f32)?;
+        overview.drag_source(cell_index, hit)
     }
 
     /// A press's full hit-test: the cell under the point and whether the
@@ -569,9 +598,21 @@ impl Jwm {
         );
         let (x, y) = (x as f32, y as f32);
         Some(plan_press(
-            tags_grid::cell_at(&geometry, x, y),
+            tags_grid::cell_at(&geometry, Some(overview.selected), x, y),
             tags_grid::panel_contains(&geometry, x, y),
         ))
+    }
+
+    /// Whether the open grid describes a monitor other than the selected
+    /// one. `sel_mon` can move underneath the panel without an arrange —
+    /// IPC `focus_monitor`, an activation of a window on the other screen —
+    /// and then the drawn card, the cells and the hit-test (which reads the
+    /// live viewport) would disagree; `flush_system_ui` re-syncs on it.
+    pub(crate) fn tags_overview_follows_another_monitor(&self) -> bool {
+        self.features
+            .system_ui
+            .tags_overview()
+            .is_some_and(|overview| overview.monitor != self.state.sel_mon)
     }
 
     /// Rebuild the cells after window changes while the panel is open (the
@@ -616,12 +657,14 @@ impl Jwm {
                 )
             })
             .unwrap_or((0, [0, 0, 1, 1]));
-        TagsOverviewState::new(
+        let mut state = TagsOverviewState::new(
             &self.tags_overview_frames(mon_key),
             active_tags,
             work,
             tags_length,
-        )
+        );
+        state.monitor = Some(mon_key);
+        state
     }
 
     /// Snapshot the monitor's clients as wireframe frames, back to front.
@@ -1044,6 +1087,31 @@ mod tests {
             TagsOverviewState::new(&[win_frame(7, 0b001, [0, 0, 400, 300])], 0b001, WORK, 9);
         assert_eq!(state.window_ids[0], vec![7]);
         assert_eq!(state.pending, None);
+        assert_eq!(state.monitor, None);
+    }
+
+    #[test]
+    fn a_sticky_wireframe_draws_and_goes_live_but_never_arms_a_drag() {
+        let sticky = TagClientFrame {
+            sticky: true,
+            ..win_frame(9, 0b001, [100, 100, 400, 300])
+        };
+        let plain = win_frame(7, 0b001, [500, 500, 400, 300]);
+        let state = TagsOverviewState::new(&[sticky, plain], 0b001, WORK, 9);
+        // Ids stay parallel to the outlines in every cell: the live cell
+        // pairs each outline with its window, sticky included.
+        assert_eq!(state.window_ids[0], vec![9, 7]);
+        assert_eq!(state.window_ids[4], vec![9]);
+        let live = live_cell(&state).expect("the on-screen tag goes live");
+        assert_eq!(live.windows.len(), 2);
+        assert_eq!(live.windows[0].0, WindowId::from_raw(9));
+        // But the sticky outline is not a drag source, in any cell; the
+        // press on it settles as the click. The plain one is.
+        assert_eq!(state.drag_source(0, 0), None);
+        assert_eq!(state.drag_source(4, 0), None);
+        assert_eq!(state.drag_source(0, 1), Some(7));
+        assert_eq!(state.drag_source(0, 2), None, "past the outlines");
+        assert_eq!(state.drag_source(9, 0), None, "past the cells");
     }
 
     #[test]

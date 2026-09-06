@@ -156,8 +156,13 @@ impl WaylandCompositor {
     // VRR (Variable Refresh Rate) state management
     // -----------------------------------------------------------------------
 
-    /// Update VRR active state based on the currently focused window.
+    /// Track whether the focused window looks like a game, from its class.
     /// Gated by a 1-second cooldown to avoid excessive polling.
+    ///
+    /// This is a hint for [`Self::get_vrr_refresh_rate`], not the state of the
+    /// hardware: KMS programs `VRR_ENABLED` from per-output fullscreen
+    /// coverage, and what it programmed arrives through
+    /// `set_output_vrr_active`. The HUD row and the metrics report that one.
     pub(crate) fn update_vrr_state(&mut self, focused: Option<u64>) {
         let now = Instant::now();
         if now.duration_since(self.vrr_last_check) < Duration::from_secs(1) {
@@ -169,9 +174,9 @@ impl WaylandCompositor {
         let b = cfg.behavior();
 
         if !b.vrr_enabled {
-            if self.vrr_active {
+            if self.game_window_focused {
                 log::debug!("VRR disabled by config, deactivating");
-                self.vrr_active = false;
+                self.game_window_focused = false;
             }
             return;
         }
@@ -194,20 +199,20 @@ impl WaylandCompositor {
             false
         };
 
-        if is_game != self.vrr_active {
+        if is_game != self.game_window_focused {
             log::debug!(
-                "VRR state changed: {} -> {} (focused: {:?})",
-                self.vrr_active,
+                "focused game window changed: {} -> {} (focused: {:?})",
+                self.game_window_focused,
                 is_game,
                 focused
             );
-            self.vrr_active = is_game;
+            self.game_window_focused = is_game;
         }
     }
 
     #[allow(dead_code)]
     pub(crate) fn get_vrr_refresh_rate(&self) -> u32 {
-        if self.vrr_active {
+        if self.game_window_focused {
             let cfg = CONFIG.load();
             let b = cfg.behavior();
             b.vrr_max_fps

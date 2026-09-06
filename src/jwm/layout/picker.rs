@@ -203,11 +203,18 @@ impl Jwm {
             .map(|picker| picker.remaining(now))
     }
 
+    /// The cell a global pointer position sits on, if any. The hit-test reads
+    /// the same geometry the compositors draw: `strip_geometry` over the
+    /// viewport `sync_system_ui` pushes with the overlay and the picker's own
+    /// layout count, with the highlighted cell lifted the way it is painted
+    /// (`layout_strip::presented_cell`). Passing the selection is what keeps
+    /// a press on the lifted card from being tested against the film's
+    /// resting place twelve percent smaller.
     fn layout_picker_cell_at(&self, x: f64, y: f64) -> Option<usize> {
         let picker = self.features.system_ui.layout_picker()?;
         let geometry =
             layout_strip::strip_geometry(self.system_ui_viewport().rect(), picker.layouts.len());
-        layout_strip::cell_at(&geometry, x as f32, y as f32)
+        layout_strip::cell_at(&geometry, Some(picker.selected), x as f32, y as f32)
     }
 
     /// Switch the selected monitor to `layout`. Re-selecting the highlighted

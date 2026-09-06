@@ -130,7 +130,7 @@ impl<C: CompositorConnection> Compositor<C> {
             }
         }
         // Also need render if any fade animations are in progress
-        if self.fading || self.window_animation_uses_fade() {
+        if self.close_fade_driven() {
             for wt in self.windows.values() {
                 if wt.fading_out || wt.fade_opacity < 1.0 {
                     return true;
@@ -261,6 +261,23 @@ impl<C: CompositorConnection> Compositor<C> {
     /// fade machinery must run for it even when standalone `fading` is off.
     pub(super) fn window_animation_uses_fade(&self) -> bool {
         self.window_animation && self.window_animation_style.uses_fade()
+    }
+
+    /// Whether an unmapped window's texture is kept alive and ticked down on
+    /// the `fade_opacity` carrier: standalone fading, or an alpha-driven
+    /// open/close animation style (`fade`, `slide`) that rides the same
+    /// carrier whether standalone fading is on or not.
+    ///
+    /// One name for one predicate on purpose. `retire_window` marks the
+    /// texture with it, `tick_fades` advances it, `render_frame`'s closing
+    /// layer must draw it, `needs_render`/`incremental_effects_active` must
+    /// keep asking for frames while it runs, and `add_window` must seed the
+    /// fade-in it implies — six sites that used to spell it out, one of which
+    /// had already drifted: a `fade` close with standalone fading off was
+    /// ticked down invisibly because the closing layer spelled a narrower
+    /// gate.
+    pub(super) fn close_fade_driven(&self) -> bool {
+        self.fading || self.window_animation_uses_fade()
     }
 
     /// Resolve a window's current open/close animation transform from its
@@ -405,8 +422,14 @@ impl<C: CompositorConnection> Compositor<C> {
         // feature and by alpha-driven animation styles. When a reload leaves
         // no driver behind, in-flight fades would freeze mid-decay (nothing
         // advances `fade_opacity` any more), so they are settled below.
-        let fade_was_driven =
-            self.fading || (self.window_animation && self.window_animation_style.uses_fade());
+        //
+        // `fading`, `window_animation` and `window_animation_style` are all
+        // still the pre-reload values at this point (they are assigned further
+        // down), so the "was" side is the named predicate itself rather than a
+        // second spelling of it — a spelling a source scan for the canonical
+        // one would not see, which is exactly where the drift this predicate
+        // exists to prevent would land next.
+        let fade_was_driven = self.close_fade_driven();
         let fade_now_driven =
             behavior.fading || (behavior.window_animation && window_animation_style.uses_fade());
         let settling_fades = fade_was_driven && !fade_now_driven;
@@ -1041,6 +1064,236 @@ mod tests {
         assert!(overview_animation_pending_state(
             true, false, 1.0, 0.8, 0.0, 0.0,
         ));
+    }
+
+    /// The body of the first item whose header matches `needle`, by brace
+    /// walk — the same narrowing the cross-backend source scans use, so a
+    /// needle can never match a mention in another function.
+    fn body_of<'a>(src: &'a str, needle: &str) -> &'a str {
+        let start = src
+            .find(needle)
+            .unwrap_or_else(|| panic!("missing `{needle}`"));
+        let body_start = src[start..]
+            .find('{')
+            .map(|idx| start + idx + 1)
+            .unwrap_or_else(|| panic!("missing body for `{needle}`"));
+        let mut depth = 1usize;
+        let mut end = body_start;
+        for (offset, ch) in src[body_start..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = body_start + offset;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        &src[body_start..end]
+    }
+
+    #[test]
+    fn every_close_fade_site_asks_the_one_named_predicate() {
+        // Six sites decide whether a closing window's texture is kept alive
+        // and ticked down on the alpha carrier. When they spelled the
+        // predicate out one by one, one of them drifted: `render_frame`'s
+        // closing layer took a narrower gate than `retire_window` marked the
+        // texture with, so a `fade`/`slide` close ran invisibly with
+        // standalone fading off. Only `close_fade_driven` may spell it out.
+        const CONFIG_SRC: &str = include_str!("config.rs");
+        const EFFECTS_SRC: &str = include_str!("effects.rs");
+        const RENDER_SRC: &str = include_str!("render.rs");
+        const TFP_SRC: &str = include_str!("tfp.rs");
+
+        let predicate = format!("self.{}()", "close_fade_driven");
+        let spelled_out = format!("self.fading || self.{}()", "window_animation_uses_fade");
+        // The same gate written through the fields instead of the helper.
+        // `apply_config` used to carry this form, which the `spelled_out`
+        // needle cannot see — a second spelling that no scan was watching is
+        // precisely where the next drift lands, so both forms are pinned.
+        let expanded = format!(
+            "self.fading || (self.window_animation && self.{}.uses_fade())",
+            "window_animation_style"
+        );
+
+        for (label, src, function) in [
+            ("needs_render", CONFIG_SRC, "pub(crate) fn needs_render"),
+            (
+                "incremental_effects_active",
+                EFFECTS_SRC,
+                "pub(super) fn incremental_effects_active",
+            ),
+            ("tick_fades", EFFECTS_SRC, "pub(super) fn tick_fades"),
+            ("render_frame", RENDER_SRC, "pub(crate) fn render_frame"),
+            ("add_window", TFP_SRC, "pub(crate) fn add_window("),
+            ("retire_window", TFP_SRC, "fn retire_window"),
+        ] {
+            let body = body_of(src, function);
+            assert!(
+                body.contains(&predicate),
+                "{label} must ask the named close-fade predicate"
+            );
+            assert!(
+                !body.contains(&spelled_out),
+                "{label} must not spell the close-fade predicate out again"
+            );
+        }
+
+        // The one place it is spelled out is its own definition, and nowhere
+        // else in the four files that gate on it.
+        let definition = body_of(CONFIG_SRC, "pub(super) fn close_fade_driven");
+        assert!(
+            definition.contains(&spelled_out),
+            "close_fade_driven must be the standalone-fading-or-alpha-style gate"
+        );
+        assert_eq!(
+            CONFIG_SRC.matches(spelled_out.as_str()).count(),
+            1,
+            "config.rs must spell the close-fade gate out exactly once, in its definition"
+        );
+        // `apply_config` reads the pre-reload fields, so it can — and must —
+        // ask the helper too; the expanded form must appear nowhere.
+        let apply_config = body_of(CONFIG_SRC, "pub(crate) fn apply_config");
+        assert!(
+            apply_config.contains(&predicate),
+            "apply_config's \"was it driven before this reload\" must ask the named predicate"
+        );
+        for (label, src) in [
+            ("config.rs", CONFIG_SRC),
+            ("effects.rs", EFFECTS_SRC),
+            ("render.rs", RENDER_SRC),
+            ("tfp.rs", TFP_SRC),
+        ] {
+            assert!(
+                !src.contains(expanded.as_str()),
+                "{label} must ask `close_fade_driven` instead of expanding the gate by hand"
+            );
+        }
+        for (label, src) in [
+            ("effects.rs", EFFECTS_SRC),
+            ("render.rs", RENDER_SRC),
+            ("tfp.rs", TFP_SRC),
+        ] {
+            assert!(
+                !src.contains(spelled_out.as_str()),
+                "{label} must ask `close_fade_driven` instead of respelling the gate"
+            );
+        }
+    }
+
+    #[test]
+    fn the_tags_grid_label_cache_is_freed_on_every_path_that_drops_the_grid() {
+        // A texture cache is only correct if nothing can outlive what it
+        // caches. The tags overview's labels are freed when the compositor
+        // goes away, when the overlay stops being a grid (closing it
+        // included), and when a key change replaces them.
+        const MOD_SRC: &str = include_str!("mod.rs");
+        const FEATURES_SRC: &str = include_str!("features.rs");
+        const RENDER_SRC: &str = include_str!("render.rs");
+
+        let free = format!("self.{}()", "free_tags_grid_labels");
+        let cache = format!("self.{}", "tags_grid_label_textures");
+
+        let dropped = body_of(MOD_SRC, "fn drop(&mut self)");
+        assert!(
+            dropped.contains(&format!("{cache}.drain(..)")),
+            "the compositor's Drop must delete the tags-grid label textures"
+        );
+
+        let overlay = body_of(FEATURES_SRC, "pub(crate) fn set_system_ui(");
+        assert!(
+            overlay.contains(&free),
+            "set_system_ui must free the label cache when the overlay is not a grid"
+        );
+
+        let refresh = body_of(RENDER_SRC, "fn refresh_tags_grid_labels");
+        assert!(
+            refresh.contains(&free),
+            "a key change must free the previous labels before uploading new ones"
+        );
+    }
+
+    #[test]
+    fn the_toast_pass_re_derives_hover_from_the_geometry_it_just_recorded() {
+        // Hover used to be derived only from motion events, so a card that
+        // slid under — or out from under — a motionless pointer kept the
+        // wrong paused state: a paused card never expires and keeps forcing
+        // composition. The pass that rebuilds the geometry must re-ask.
+        const RENDER_SRC: &str = include_str!("render.rs");
+        let refresh = format!("self.{}(now)", "refresh_toast_hover");
+        let record = format!("self.{}.push(toast::ToastRects", "toast_rects");
+
+        let body = body_of(RENDER_SRC, "fn render_toasts");
+        let recorded = body
+            .find(&record)
+            .expect("render_toasts records each drawn card's hit geometry");
+        assert!(
+            body[..recorded].contains(&refresh),
+            "an emptied stack must release the hover its last geometry implied"
+        );
+        assert!(
+            body[recorded..].contains(&refresh),
+            "the drawn stack must re-derive hover from the geometry it just recorded"
+        );
+    }
+
+    #[test]
+    fn the_toast_pass_shapes_the_overlay_from_the_geometry_it_just_recorded() {
+        // The overlay's INPUT shape is what makes a card clickable at all:
+        // without it a press on a card over the *focused* client goes to the
+        // client, because the WM selects no button events there. The shape
+        // must therefore be exactly the geometry `compositor_click_toast`
+        // hit-tests against — pushed on the frame that records it, and given
+        // back on the frame that stops drawing the last card, or the overlay
+        // keeps swallowing presses for cards that are gone.
+        const RENDER_SRC: &str = include_str!("render.rs");
+        let sync = format!("self.{}()", "sync_toast_input_shape");
+        let record = format!("self.{}.push(toast::ToastRects", "toast_rects");
+
+        let body = body_of(RENDER_SRC, "fn render_toasts");
+        let recorded = body
+            .find(&record)
+            .expect("render_toasts records each drawn card's hit geometry");
+        assert!(
+            body[..recorded].contains(&sync),
+            "an emptied stack must hand the whole overlay back to the clients"
+        );
+        assert!(
+            body[recorded..].contains(&sync),
+            "the drawn stack must shape the overlay to the cards it just recorded"
+        );
+    }
+
+    #[test]
+    fn the_metrics_payload_never_reports_the_game_guess_as_hardware_vrr() {
+        // `vrr_enabled` (configured intent) and `vrr_active` (what the
+        // hardware ran) are one IPC payload read by tools/metrics_dashboard.sh
+        // and tools/generate_report.sh, so they cannot mean different things
+        // per backend. `self.vrr_active` is neither: it is a focused-window
+        // class guess that only picks this backend's internal frame-pacing
+        // target, and reporting it in either field is what made the X11 and
+        // wayland-udev backends disagree.
+        const RENDER_SRC: &str = include_str!("render.rs");
+        let guess = format!("self.{}", "vrr_active");
+        let intent = format!("crate::config::CONFIG.load().behavior().{}", "vrr_enabled");
+
+        let body = body_of(RENDER_SRC, "pub(crate) fn get_metrics");
+        assert!(
+            body.contains(&format!("vrr_enabled: {intent}")),
+            "vrr_enabled must be the configured intent, like the wayland-udev backend"
+        );
+        assert!(
+            body.contains(&format!("vrr_active: {}", "false")),
+            "X11 cannot read back what the display ran, so vrr_active is not observed"
+        );
+        assert!(
+            !body.contains(&format!("vrr_enabled: {guess}"))
+                && !body.contains(&format!("vrr_active: {guess}")),
+            "neither VRR field may carry the focused-window-class guess"
+        );
     }
 
     #[test]

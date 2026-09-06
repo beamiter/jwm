@@ -167,15 +167,55 @@ pub fn grid_geometry(viewport: Rect, count: usize, cols: u32) -> TagsGridGeometr
     }
 }
 
-/// Which cell contains `(x, y)`, if any.
+/// A cell's card and frame as they are presented. The selected cell is
+/// lifted by [`layout_strip::SELECTED_SCALE`] about its own centre — card,
+/// frame, wireframes and live thumbnails together — and that is exactly
+/// what both renderers draw. The hit-test has to read the same rectangles:
+/// against the unscaled ones every press on the lifted cell (which, since
+/// the hover moves the highlight, is the cell under the pointer) lands
+/// twelve percent off what the eye sees.
+pub fn presented_cell(cell: &GridCell, selected: bool) -> (Rect, Rect) {
+    if !selected {
+        return (cell.cell, cell.frame);
+    }
+    let pivot = layout_strip::center(cell.cell);
+    (
+        layout_strip::scaled_about(cell.cell, pivot, layout_strip::SELECTED_SCALE),
+        layout_strip::scaled_about(cell.frame, pivot, layout_strip::SELECTED_SCALE),
+    )
+}
+
+fn rect_contains(rect: Rect, x: f32, y: f32) -> bool {
+    let [rx, ry, rw, rh] = rect;
+    x >= rx && x < rx + rw && y >= ry && y < ry + rh
+}
+
+/// Which cell contains `(x, y)`, if any, with `selected` the cell drawn
+/// lifted (see [`presented_cell`]).
 ///
 /// The whole cell is the target, not just its frame, so the gaps between
-/// cells are the only dead space.
-pub fn cell_at(geometry: &TagsGridGeometry, x: f32, y: f32) -> Option<usize> {
-    geometry.cells.iter().position(|cell| {
-        let [cx, cy, cw, ch] = cell.cell;
-        x >= cx && x < cx + cw && y >= cy && y < cy + ch
-    })
+/// cells are the only dead space. Cells are painted in index order, so the
+/// answer is the *last* one whose presented card covers the point: the
+/// lifted cell wins the gaps around it and the few pixels it overhangs its
+/// earlier neighbour, while the neighbour painted after it covers that
+/// overhang again and is what the eye sees there. Testing the lifted cell
+/// first instead would hand a press on the drawn neighbour to the selected
+/// tag.
+pub fn cell_at(
+    geometry: &TagsGridGeometry,
+    selected: Option<usize>,
+    x: f32,
+    y: f32,
+) -> Option<usize> {
+    geometry
+        .cells
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(index, cell)| {
+            let (card, _) = presented_cell(cell, Some(index) == selected);
+            rect_contains(card, x, y).then_some(index)
+        })
 }
 
 /// Whether `(x, y)` falls inside the panel card at all. The hit-test splits
@@ -320,14 +360,99 @@ mod tests {
         let g = geom(13, 4);
         for (index, cell) in g.cells.iter().enumerate() {
             let [x, y] = center(cell.cell);
-            assert_eq!(cell_at(&g, x, y), Some(index));
+            assert_eq!(cell_at(&g, None, x, y), Some(index));
+            // The lift keeps the centre where it is.
+            assert_eq!(cell_at(&g, Some(index), x, y), Some(index));
         }
         let [px, py, _, _] = g.panel;
         assert_eq!(
-            cell_at(&g, px + 1.0, py + 1.0),
+            cell_at(&g, None, px + 1.0, py + 1.0),
             None,
             "the title band is not a cell"
         );
+    }
+
+    #[test]
+    fn the_selected_cell_is_hit_where_its_lift_draws_it() {
+        use crate::backend::compositor_common::layout_strip::{SELECTED_SCALE, scaled_about};
+
+        let g = geom(9, 4);
+        let index = 5;
+        let cell = &g.cells[index];
+        let (card, frame) = presented_cell(cell, true);
+        // The presented rectangles are the renderers' own transform.
+        let pivot = center(cell.cell);
+        assert_eq!(card, scaled_about(cell.cell, pivot, SELECTED_SCALE));
+        assert_eq!(frame, scaled_about(cell.frame, pivot, SELECTED_SCALE));
+        assert_eq!(presented_cell(cell, false), (cell.cell, cell.frame));
+        // The lift grows the card past its unscaled edges on every side.
+        assert!(card[0] < cell.cell[0] && card[1] < cell.cell[1]);
+        assert!(card[0] + card[2] > cell.cell[0] + cell.cell[2]);
+
+        // A point in the inter-cell gap left of the cell — dead space as far
+        // as the unscaled grid is concerned — is under the drawn overhang,
+        // so it is the selected cell.
+        let (x, y) = (cell.cell[0] - 2.0, card[1] + card[3] * 0.5);
+        assert!(card[0] < x, "the overhang covers the gap");
+        assert_eq!(cell_at(&g, None, x, y), None, "unscaled: the gap");
+        assert_eq!(cell_at(&g, Some(index), x, y), Some(index));
+
+        // The lifted card is on top of the neighbour it overhangs; past the
+        // card's own edge the neighbour answers again.
+        let neighbour = &g.cells[index - 1];
+        let nx = neighbour.cell[0] + neighbour.cell[2] - 1.0;
+        assert_eq!(cell_at(&g, None, nx, y), Some(index - 1));
+        assert!(card[0] <= nx, "the lift must reach into the neighbour");
+        assert_eq!(cell_at(&g, Some(index), nx, y), Some(index));
+        assert_eq!(cell_at(&g, Some(index), card[0] - 2.0, y), Some(index - 1));
+
+        // A wireframe on the lifted cell is hit at its drawn rectangle: the
+        // left edge of a left-half window sits left of the unscaled frame.
+        let windows = [[0.0, 0.0, 0.5, 1.0]];
+        let wire = layout_strip::window_rect(frame, windows[0]);
+        assert!(wire[0] < cell.frame[0]);
+        assert_eq!(
+            frame_window_at(frame, &windows, wire[0] + 2.0, wire[1] + 2.0),
+            Some(0)
+        );
+        assert_eq!(
+            frame_window_at(cell.frame, &windows, wire[0] + 2.0, wire[1] + 2.0),
+            None,
+            "the unscaled frame misses what is drawn"
+        );
+    }
+
+    #[test]
+    fn the_neighbour_painted_after_the_lifted_cell_keeps_its_own_edge() {
+        // Both renderers walk `geometry.cells` in index order, so cell
+        // `index + 1` is painted over the lift's rightward overhang while
+        // cell `index - 1` is painted under it. Answering the selected cell
+        // first would hand that strip — visibly the neighbour's card — to
+        // the selected tag, and a press there would jump to the wrong tag.
+        let g = geom(9, 4);
+        let index = 5;
+        let (card, _) = presented_cell(&g.cells[index], true);
+        let right = &g.cells[index + 1];
+        let y = card[1] + card[3] * 0.5;
+        assert!(y > right.cell[1] && y < right.cell[1] + right.cell[3]);
+        let overhang = card[0] + card[2] - right.cell[0];
+        assert!(
+            overhang > 1.0,
+            "the lift must reach into the later neighbour"
+        );
+        let x = right.cell[0] + overhang * 0.5;
+        assert_eq!(cell_at(&g, None, x, y), Some(index + 1));
+        assert_eq!(
+            cell_at(&g, Some(index), x, y),
+            Some(index + 1),
+            "the card painted last owns the pixel"
+        );
+
+        // The earlier neighbour is painted first, so there the lift wins.
+        let left = &g.cells[index - 1];
+        let lx = left.cell[0] + left.cell[2] - 1.0;
+        assert_eq!(cell_at(&g, None, lx, y), Some(index - 1));
+        assert_eq!(cell_at(&g, Some(index), lx, y), Some(index));
     }
 
     #[test]
@@ -358,9 +483,9 @@ mod tests {
         assert!(py + ph <= viewport[1] + viewport[3] + 0.5);
 
         let [x, y] = center(g.cells[3].cell);
-        assert_eq!(cell_at(&g, x, y), Some(3));
+        assert_eq!(cell_at(&g, None, x, y), Some(3));
         assert_eq!(
-            cell_at(&g, x - viewport[0], y - viewport[1]),
+            cell_at(&g, None, x - viewport[0], y - viewport[1]),
             None,
             "monitor-local coordinates must not hit global grid geometry"
         );

@@ -2727,7 +2727,11 @@ impl JwmWaylandState {
             let abs_x = geo.x + loc.x;
             let cursor_top = geo.y + loc.y;
             let cursor_bottom = cursor_top + cursor_rect.size.h;
-            log::info!(
+            // Debug, not info: the manual KMS path calls this once per output
+            // per frame and the compositor path once per frame, so at info
+            // (the default release filter) an open candidate window formatted
+            // and wrote a line per popup per frame for as long as it was up.
+            log::debug!(
                 "[ime-pos] popup {:?} parent={parent_win:?} loc=({},{}) cursor_h={} -> x={abs_x} cursor_top={cursor_top} cursor_bottom={cursor_bottom}",
                 popup.wl_surface().id(),
                 loc.x,
@@ -4240,15 +4244,51 @@ mod xwayland_legacy_assoc_tests {
         assert!(!mapped.contains(&visible));
     }
 
+    /// The source text of one item: from `needle` through the closing brace
+    /// that matches its first opening brace.
+    fn braced_item_after<'a>(source: &'a str, needle: &str) -> &'a str {
+        let start = source.find(needle).expect("source item missing");
+        let open = start
+            + source[start..]
+                .find('{')
+                .expect("source item has no opening brace");
+        let mut depth = 0usize;
+        for (offset, byte) in source[open..].bytes().enumerate() {
+            match byte {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return &source[start..open + offset + 1];
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("source item has no closing brace");
+    }
+
     #[test]
     fn udev_window_ops_publish_manager_mapping_to_shared_state() {
         let backend = include_str!("backend.rs");
-        assert!(backend.contains("state.set_manager_window_mapped(win, true)"));
-        assert!(backend.contains("state.set_manager_window_mapped(win, false)"));
-        assert!(
-            backend.matches("self.request_flush();").count() >= 2,
-            "map and unmap operations must wake the native render loop"
-        );
+        // Each verdict is pinned inside its own method body: the flush the
+        // message names is the one that follows that method's mapping write,
+        // not any of the two dozen other `request_flush` calls in the file.
+        for (method, mapped) in [("map_window", "true"), ("unmap_window", "false")] {
+            let body = braced_item_after(backend, &format!("fn {method}(&self, win: WindowId)"));
+            let publish = format!("state.set_manager_window_mapped(win, {mapped})");
+            let publish_at = body
+                .find(&publish)
+                .unwrap_or_else(|| panic!("{method} must publish the manager mapping"));
+            let flush = format!("self.{}();", "request_flush");
+            let flush_at = body
+                .find(&flush)
+                .unwrap_or_else(|| panic!("{method} must wake the native render loop"));
+            assert!(
+                publish_at < flush_at,
+                "{method}: the wake must follow the mapping write so the loop sees it"
+            );
+        }
     }
 
     #[test]
@@ -4269,17 +4309,33 @@ mod xwayland_legacy_assoc_tests {
     fn initial_configure_fallback_is_per_toplevel_and_one_shot() {
         let state = include_str!("state.rs");
         let production = state.split_once("#[cfg(test)]").unwrap().0;
-        assert!(production.contains("Timer::from_duration(INITIAL_CONFIGURE_TIMEOUT)"));
+        let arm = format!("Timer::from_duration({})", "INITIAL_CONFIGURE_TIMEOUT");
+        assert_eq!(
+            production.matches(&arm).count(),
+            1,
+            "exactly one arming site: the toplevel constructor"
+        );
         assert!(production.contains("state.ensure_initial_configure_fallback(win)"));
         assert!(production.contains("TimeoutAction::Drop"));
 
+        // The backends neither arm the timer nor claim the fallback
+        // themselves; a second, per-backend timer firing for every toplevel
+        // is the duplicate this test exists to keep out.
         for backend in [
             include_str!("backend.rs"),
             include_str!("../wayland_x11/backend.rs"),
             include_str!("../wayland_winit/backend.rs"),
         ] {
-            assert!(!backend.contains("ensure_initial_configure_timeout"));
-            assert!(!backend.contains("insert_source(initial configure timer)"));
+            for needle in [
+                "ensure_initial_configure_timeout".to_string(),
+                "INITIAL_CONFIGURE_TIMEOUT".to_string(),
+                format!("ensure_initial_configure_{}(", "fallback"),
+            ] {
+                assert!(
+                    !backend.contains(&needle),
+                    "backends must not arm or claim the initial configure fallback: `{needle}`"
+                );
+            }
         }
     }
 

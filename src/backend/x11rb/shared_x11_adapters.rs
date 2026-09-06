@@ -76,6 +76,42 @@ where
         Ok(())
     }
 
+    fn set_overlay_input_shape(
+        &self,
+        overlay_window: u32,
+        rects: &[(i16, i16, u16, u16)],
+    ) -> Result<(), String> {
+        let rectangles: Vec<xproto::Rectangle> = rects
+            .iter()
+            .map(|&(x, y, width, height)| xproto::Rectangle {
+                x,
+                y,
+                width,
+                height,
+            })
+            .collect();
+        let region = self.generate_id().map_err(|e| format!("gen id: {e}"))?;
+        self.xfixes_create_region(region, &rectangles)
+            .map_err(|e| format!("create_region: {e}"))?;
+        let applied = self.xfixes_set_window_shape_region(
+            overlay_window,
+            x11rb::protocol::shape::SK::INPUT,
+            0,
+            0,
+            region,
+        );
+        // The region is a server resource, so it is destroyed whether or not
+        // the shape request went out: a toast stack that re-flows once a
+        // second would otherwise leak one region per re-flow on the error
+        // path, and `?` here would take that path.
+        let destroyed = self.xfixes_destroy_region(region);
+        applied.map_err(|e| format!("set_window_shape_region: {e}"))?;
+        destroyed.map_err(|e| format!("destroy_region: {e}"))?;
+        self.flush()
+            .map_err(|e| format!("flush after input shape: {e}"))?;
+        Ok(())
+    }
+
     fn set_overlay_window_type_notification(&self, overlay_window: u32) -> Result<(), String> {
         let wm_type_atom = self
             .intern_atom(false, b"_NET_WM_WINDOW_TYPE")
