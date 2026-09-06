@@ -4,6 +4,90 @@
 
 ---
 
+## 2026-09-06：十三轮（全面进化：118 条候选 → 130 处修复，含 32 处本轮自伤）
+
+这一轮的形状和十二轮不同：**审查、修复、复查是三批互不相同的智能体**，而复查
+的对象是**本轮自己刚写下的 diff**。结论值得记住：修复者对自己领到的发现「反驳
+率为 0」，而独立复查在同一批改动里找出 **26 条本轮新引入的缺陷**。让修复者顺手
+验证自己的任务，不构成独立检查。
+
+**规模**：81 个文件，+12111 / -1142；lib 测试 2691 → 2857，bridge 56 → 62。
+门禁全绿：fmt / clippy -D warnings / check --all-targets / 八组 backend feature
+profile（薄 profile 的既有警告数与 HEAD 逐一比对，未新增）/ surfaceless EGL 57
+个无头 GL 测试 / bridge。
+
+### 流程
+
+1. **审查**：16 个按视角切分的 finder（切换器、通知、tags 网格、tabs/expose、
+   会话/idle/config、蓝牙、KMS/VRR/tearing、HDR/颜色、IPC 契约、两个渲染器、
+   热路径性能、并发/子进程、跨后端一致性与死配置、测试完整性、非受信输入），
+   每条发现再配 3 个不同视角的反驳者。**118 条候选**。
+2. **修复**：按文件所有权切成互不重叠的 8 组并行落地，编译门禁由集成方统一跑
+   （并行 cargo 会争锁）。98 条确认修复、21 条延后、0 条反驳。
+3. **交接**：修复者只能改自己拥有的文件，跨文件的部分写成 58 条交接注记，第三
+   波按同样的分组落地 25 项。
+4. **复查**：9 个复查者读本轮 diff 找**本轮引入**的缺陷 → 28 条（26 条为新引
+   入），修 17、深查后撤回 11。
+5. **收口**：7 个代理复查「第三、四波还没被审过的增量」并关闭延后项 → 又 31 条
+   （6 条 high），修 15，交接项完成 41。最后一波关掉剩余 3 条 medium 与全部文档。
+
+### 复查抓到的、本轮自己造成的（选摘）
+
+- **修复从另一个方向复活**（和十二轮同一形状）：`cancel_bluetooth_pairing` 的
+  「关窗后重读设备表」无条件覆写 `features.bluetooth_scan`，把正在跑的 15 s
+  discovery 连同它的 `Adapter1.StartDiscovery` 会话一起丢掉——正是同一轮里
+  `ipc_handler` 那条刚修好的合并逻辑，从另一个调用点漏回来。
+- **清洗被用在身份键上**：SSID 的控制字符过滤加进了 `parse_networks`，而 SSID
+  **就是** `nmcli … connect` 和 `has_saved_profile` 的键（蓝牙那条是「名字是标
+  签、地址才是键」，方向正好相反）。带制表符的热点从此永远连不上，两个同名热点
+  还会在解析期被去重合并。改为解析期保持字节精确、绘制期用 `display_ssid` 过滤；
+  收尾一波补掉了漏网的密码提示与 `Wi-Fi: joined` 日志两处绘制点。
+- **抓取顺手吞掉了滚轮**：切换器为「点击行即提交」新加了 Buttons 抓取，X11 把
+  滚轮报成 button 4-7，于是一格滚轮走进「非 1 键即取消」分支。现在由纯函数
+  `switcher_press` 分派：1 键提交/取消，4/5 浏览列表。
+- **吞掉的按下留下了悬空闩锁**：toast 吞掉一次 press 后把按钮码记进
+  `toast_swallowed_buttons`，若这次 release 丢了（VT 切换时 libinput 不补 release），
+  下一次无关的 release 会被它吃掉，客户端从此按着一个永不松开的键。
+- **一时性错误被闩成永久**：`hdr_connector_commit_rejected` 对**任何** commit
+  失败置位，而它是永久性拒绝，下一帧就丢掉用户的 HDR 请求。渲染门禁只保证
+  「jwm 自认为 session active」，而这份自认滞后于内核——启动时未持有 DRM master、
+  PauseSession 派发前，EACCES 类失败都会到达这条闩锁。现按 errno 分类，只有真正
+  的驱动拒绝才闩住。
+
+### 结构性的两处
+
+- **架构边界不能靠放宽来满足**：本轮有代理为了验证跨层契约，在 backend 的测试
+  里 `use crate::jwm::…`、在 policy 的测试里 `use crate::backend::x11::…`，两条
+  `tests/architecture_boundaries.rs` 因此变红。正确的解法不是放宽扫描，而是把
+  **规则本身**挪到两层共有的那个值上：`MinimizedRestoreRect::is_configurable`
+  现在同时是 WM 侧「哪些矩形值得持久化」和 X11 侧「哪些矩形可编码/可解码」的唯
+  一判据（此前是两份等价实现，其中一份的注释写着「mirrors 另一份」——正是路线图
+  要消灭的手工同步）。aspect 那条拆成两半：解析侧测「半对被记为缺席」，消费侧测
+  「半对约束不了任何东西」。
+- **同一个缺陷的姊妹版本**：tags 网格的命中测试忽略选中格的 `SELECTED_SCALE`
+  抬升，修完后 `layout_strip`（胶片选择器）里一模一样的缺陷还在。两处现在都按
+  **绘制顺序反向**解析命中点，与眼睛看到的一致。
+
+### 仍然开着的
+
+- `bridge/src/bluez.rs`：`PairingAgent::cancel` 撤回的 prompt 不会从面板上撤下，
+  需要一个新的 `bluetooth_pairing_withdraw` 命令（wire 两侧 + ipc_handler）。
+- `src/jwm.rs`：`sync_window_groups` 仍在每次 dispatch 迭代无条件重建 tab 组。
+  加 `window_groups_dirty` 的提案在交接注记里，但**没有落地**：漏掉任何一个失效
+  点就是一条陈旧的 tab 条，复查者判断自己无法枚举全部失效点，据此拒绝实现。
+- 嵌套 Wayland 后端的切换器：修饰键掩码（`SharedInputOps`）和 KeyRelease 镜像
+  都已就位，但 `has_compositor()` 默认 false，`prepare_system_ui_inner` 直接拒绝
+  开面板——所以这条路径在嵌套后端上依然走不通，两个零件是为将来准备的。
+  docs/compatibility.md 已按事实写明。
+- toast 过期仍不发 `NotificationClosed(1)`（历史淘汰现在发 reason 4）；
+  `notify-send --wait` 会一直阻塞到该行被手动关掉。docs/notifications.md 已按事
+  实描述，不再宣称发了。
+- 若干 low：evdev 4..=7 低字节与 WM 的 toast_press 规则不一致、`[ime-pos]` 失败
+  路径仍每帧 warn、`hdr_metadata_equivalent` 不比较 `max_frame_average_nits`、
+  DND 的 set_config 与运行时切换在「配置值没动」时谁赢。
+
+---
+
 ## 2026-09-04：十二轮复查（对抗式评审：21 条确认缺陷，全部修完）
 
 四条主线落地后跑了一轮对抗式代码评审（4 个维度并行审 + 每条发现 3 个不同视角
