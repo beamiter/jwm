@@ -165,9 +165,9 @@ dependencies = [
 
 [[package]]
 name = "cairo-rs"
-version = "0.22.0"
+version = "0.22.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5cc8d9aa793480744cd9a0524fef1a2e197d9eaa0f739cde19d16aba530dcb95"
+checksum = "df683f1d30b457964673a5541a4603208ef95ab6873d2a55871895cf310f3b56"
 dependencies = [
  "bitflags 2.13.1",
  "cairo-sys-rs 0.22.0",
@@ -1402,9 +1402,9 @@ dependencies = [
 
 [[package]]
 name = "log"
-version = "0.4.33"
+version = "0.4.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
+checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 
 [[package]]
 name = "memchr"
@@ -1762,9 +1762,9 @@ dependencies = [
 
 [[package]]
 name = "pango"
-version = "0.22.8"
+version = "0.22.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5d800d8d0de2ad5d0fb046f5344dbaba14a003cf3dd27cc21d85893d35ea316c"
+checksum = "0b2022dbbd82e1c42bd950a6f1df9b98c796e725dce5ec275e03cbf9772e4efa"
 dependencies = [
  "gio 0.22.8",
  "glib 0.22.8",
@@ -1801,9 +1801,9 @@ version = "0.22.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "738a2ef690f51487814ff7172e0417c8e4fa2d7567571e5eb299d38b47b543ab"
 dependencies = [
- "cairo-rs 0.22.0",
+ "cairo-rs 0.22.9",
  "glib 0.22.8",
- "pango 0.22.8",
+ "pango 0.22.9",
  "pangocairo-sys",
 ]
 
@@ -2443,11 +2443,11 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bytemuck",
- "cairo-rs 0.22.0",
+ "cairo-rs 0.22.9",
  "glow",
  "glutin",
  "log",
- "pango 0.22.8",
+ "pango 0.22.9",
  "raw-window-handle",
  "softbuffer",
  "tao",
@@ -3369,13 +3369,13 @@ version = "0.9.1"
 dependencies = [
  "alsa",
  "anyhow",
- "cairo-rs 0.22.0",
+ "cairo-rs 0.22.9",
  "chrono",
  "flexi_logger",
  "image",
  "libc",
  "log",
- "pango 0.22.8",
+ "pango 0.22.9",
  "pangocairo",
  "serde",
  "shared_structures",
