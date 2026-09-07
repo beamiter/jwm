@@ -2617,7 +2617,16 @@ impl<C: CompositorConnection> Compositor<C> {
                 );
                 self.gl.clear(glow::COLOR_BUFFER_BIT);
             } else {
-                // Scrim: dim the desktop behind the panel.
+                // Scrim: dim the desktop behind the panel. The dim rides the
+                // card's own open envelope — `content_a` is the eased opened²
+                // the contents fade in with — so the room darkens as the card
+                // springs open instead of popping to full dim while the card
+                // is still a seed. The lock card never reaches this branch:
+                // its backdrop is the opaque clear above, which must hide the
+                // desktop immediately. With motion off the spring snaps to
+                // target, the envelope is exactly 1.0, and the alpha is the
+                // old instant value.
+                let scrim = UiPalette::faded(ui.scrim, content_a);
                 self.gl.use_program(Some(self.hud_program));
                 self.gl.uniform_matrix_4_f32_slice(
                     self.hud_uniforms.projection.as_ref(),
@@ -2626,10 +2635,10 @@ impl<C: CompositorConnection> Compositor<C> {
                 );
                 self.gl.uniform_4_f32(
                     self.hud_uniforms.bg_color.as_ref(),
-                    ui.scrim[0],
-                    ui.scrim[1],
-                    ui.scrim[2],
-                    ui.scrim[3],
+                    scrim[0],
+                    scrim[1],
+                    scrim[2],
+                    scrim[3],
                 );
                 self.gl
                     .uniform_2_f32(self.hud_uniforms.size.as_ref(), viewport_w, viewport_h);

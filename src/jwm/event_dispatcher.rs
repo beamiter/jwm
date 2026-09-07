@@ -399,14 +399,20 @@ impl WMController for Jwm {
                         .input_ops()
                         .get_pointer_position()
                         .unwrap_or(self.last_mouse_root);
+                    let hit = backend.compositor_system_ui_hit_test(x, y);
                     // The scrim stays inert, exactly as it does for the
                     // panels below: a scroll nowhere near the card must not
                     // move a selection the pointer is not on.
                     if !matches!(
-                        backend.compositor_system_ui_hit_test(x, y),
+                        hit,
                         SystemUiHitTarget::Outside | SystemUiHitTarget::Unavailable
                     ) {
-                        self.scroll_system_ui_from_pointer(backend, step);
+                        let row = if let SystemUiHitTarget::Item(row) = hit {
+                            Some(row)
+                        } else {
+                            None
+                        };
+                        self.scroll_system_ui_from_pointer(backend, step, row);
                     }
                 }
                 SwitcherPress::Inert => {}
@@ -454,6 +460,11 @@ impl WMController for Jwm {
                 .unwrap_or(self.last_mouse_root);
             let hit = backend.compositor_system_ui_hit_test(x, y);
             use crate::backend::api::SystemUiHitTarget;
+            let wheel_row = if let SystemUiHitTarget::Item(row) = hit {
+                Some(row)
+            } else {
+                None
+            };
             match detail {
                 // Wheel anywhere on the card browses the current page. The
                 // scrim stays inert so an accidental scroll never changes a
@@ -463,14 +474,14 @@ impl WMController for Jwm {
                     SystemUiHitTarget::Outside | SystemUiHitTarget::Unavailable
                 ) =>
                 {
-                    self.scroll_system_ui_from_pointer(backend, -1);
+                    self.scroll_system_ui_from_pointer(backend, -1, wheel_row);
                 }
                 5 if !matches!(
                     hit,
                     SystemUiHitTarget::Outside | SystemUiHitTarget::Unavailable
                 ) =>
                 {
-                    self.scroll_system_ui_from_pointer(backend, 1);
+                    self.scroll_system_ui_from_pointer(backend, 1, wheel_row);
                 }
                 1 => match hit {
                     SystemUiHitTarget::Item(row) => {
@@ -2480,6 +2491,96 @@ mod tests {
         assert!(
             jwm.features.system_ui.is_locked(),
             "the lock screen must ignore scrim clicks"
+        );
+    }
+
+    #[test]
+    fn the_wheel_adjusts_the_slider_under_the_pointer_instead_of_browsing() {
+        use crate::jwm::features::{ControlCenterInputs, ControlKind, SystemUiState};
+
+        let mut jwm = empty_jwm();
+        let mut backend = RenderSpyBackend::new();
+        jwm.features.system_ui = SystemUiState::control_center(&ControlCenterInputs {
+            volume: Some((45, false)),
+            brightness: Some(60),
+            ..Default::default()
+        });
+        // Flat list order: volume, brightness, night light, DND, … Park the
+        // selection two rows away so "the wheel browsed" and "the wheel
+        // adjusted the row under the pointer" land on different rows.
+        jwm.features.system_ui.move_selection(2);
+        assert_eq!(
+            jwm.features.system_ui.selected_control(),
+            Some(ControlKind::NightLight)
+        );
+
+        backend.system_ui_hit = SystemUiHitTarget::Item(1);
+        <Jwm as WMController>::on_button_press(
+            &mut jwm,
+            &mut backend,
+            HitTarget::Background { output: None },
+            0,
+            5,
+            0,
+        );
+        assert_eq!(
+            jwm.features.system_ui.selected_control(),
+            Some(ControlKind::Brightness),
+            "scroll-on-slider selects the row under the pointer, not the next row"
+        );
+        assert_eq!(backend.system_ui_hover_updates.last(), Some(&None));
+
+        // A wheel click over a row that is not a slider still browses —
+        // relative to the selection, not to the row under the pointer.
+        backend.system_ui_hit = SystemUiHitTarget::Item(3);
+        <Jwm as WMController>::on_button_press(
+            &mut jwm,
+            &mut backend,
+            HitTarget::Background { output: None },
+            0,
+            5,
+            0,
+        );
+        assert_eq!(
+            jwm.features.system_ui.selected_control(),
+            Some(ControlKind::NightLight),
+            "browsing moves one row down from the selected brightness row"
+        );
+    }
+
+    #[test]
+    fn the_screenshot_wheel_swallow_pairs_press_with_release() {
+        // The screenshot stroke-width wheel arms a one-shot release swallow
+        // (capture.rs), which on X11 the wheel's real paired release clears.
+        // A backend synthesizing only the press would leave the latch armed
+        // to eat the next unrelated release — pin the contract from the
+        // consumer's side.
+        let mut jwm = empty_jwm();
+        let mut backend = RenderSpyBackend::new();
+        jwm.features.screenshot.active = true;
+        jwm.features.screenshot.committed = true;
+        let width_before = jwm.features.screenshot.stroke_width();
+
+        <Jwm as WMController>::on_button_press(
+            &mut jwm,
+            &mut backend,
+            HitTarget::Background { output: None },
+            0,
+            4,
+            0,
+        );
+        assert_eq!(jwm.features.screenshot.stroke_width(), width_before + 1);
+
+        <Jwm as WMController>::on_button_release(
+            &mut jwm,
+            &mut backend,
+            HitTarget::Background { output: None },
+            0,
+        );
+        assert!(
+            !jwm.features.capture.take_swallowed_button_release(),
+            "the wheel's paired release consumed the swallow — a leftover \
+             latch would eat the next real release"
         );
     }
 

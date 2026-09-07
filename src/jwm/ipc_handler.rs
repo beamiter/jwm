@@ -1760,6 +1760,44 @@ impl Jwm {
             return IpcResponse::ok(None);
         }
 
+        // Special command: bluetooth_pairing_withdraw — bluez cancelled the
+        // request behind the prompt on screen (the remote gave up, or bluez
+        // withdrew it), so the prompt is no longer answerable and comes down
+        // now rather than at the prompt timeout. Only the prompt: the session
+        // stays alive — an outbound pairing still owes a `done` from the Pair
+        // unwind, an inbound window keeps its own clock — so this touches
+        // neither the session record nor the picker's status line.
+        if name == "bluetooth_pairing_withdraw" {
+            use crate::jwm::features::pairing;
+
+            let withdraw = match pairing::parse_withdraw_command(args) {
+                Ok(withdraw) => withdraw,
+                Err(error) => {
+                    return IpcResponse::err(format!("bluetooth_pairing_withdraw: {error}"));
+                }
+            };
+            let Some(session) = &mut self.features.bluetooth_pairing else {
+                return IpcResponse::err(
+                    "bluetooth_pairing_withdraw: no pairing session is active".to_string(),
+                );
+            };
+            if !session.matches(&withdraw.address, &withdraw.cookie) {
+                return IpcResponse::err(
+                    "bluetooth_pairing_withdraw: not the active pairing session".to_string(),
+                );
+            }
+            // Nothing showing — or a withdraw for a prompt a newer one
+            // already replaced: the end state it asks for already holds, so
+            // this is a no-op rather than an error. A late user answer is
+            // refused the same way: the answer paths match on a prompting
+            // phase, and a withdrawn prompt leaves the session Working.
+            if session.withdraw_prompt(withdraw.request_id) {
+                self.features.system_ui.cancel_pairing_prompt();
+                self.sync_system_ui(backend);
+            }
+            return IpcResponse::ok(None);
+        }
+
         // Special command: clipboard_record — how a backend helper or a
         // script feeds the history. Offers marked secret must be dropped
         // before calling this, not here.

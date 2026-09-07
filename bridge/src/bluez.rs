@@ -527,7 +527,7 @@ impl PairingAgent {
         self.authorize(device, Some(uuid)).await
     }
 
-    fn cancel(&self, device: OwnedObjectPath) {
+    async fn cancel(&self, device: OwnedObjectPath) {
         if !self.device_matches(&device) {
             return;
         }
@@ -535,7 +535,25 @@ impl PairingAgent {
         // answer it, so the pending callback resolves as cancelled and the
         // Pair call unwinds. Whatever is pending is what bluez withdrew, so
         // this takes it by identity rather than by id.
-        if let Some((_, reply)) = self.shared.lock_pending().take() {
+        let pending = self.shared.lock_pending().take();
+        let request_id = pending.as_ref().map(|(id, _)| *id);
+        // The prompt the cancelled request raised stays on jwm's panel until
+        // told otherwise — resolving the callback does not reach the picker.
+        // Report the withdrawal even when nothing was pending (a display-only
+        // prompt carries no reply channel, and a spurious cancel is possible
+        // too): jwm no-ops when it is showing none. Awaited like every other
+        // send, so the frame cannot be cut off by the Pair unwind racing the
+        // process to its exit, and so it lands before any request bluez
+        // raises next. It is also reported BEFORE the callback resolves: the
+        // unwind that resolution sets off ends in `report_done`, and the two
+        // frames must land in this order — withdraw first, outcome second —
+        // or the outcome would be processed against a panel still showing
+        // the stale prompt. The device is bound by `device_matches` above,
+        // so a missing target is not a real arm.
+        if let Some(target) = self.shared.target() {
+            report_withdraw(&self.shared.ipc, &target, &self.shared.cookie, request_id).await;
+        }
+        if let Some((_, reply)) = pending {
             let _ = reply.send(UserReply::Cancelled);
         }
     }
@@ -677,6 +695,24 @@ fn done_args(
     })
 }
 
+/// Build the `bluetooth_pairing_withdraw` command arguments.
+///
+/// BlueZ cancelling the outstanding agent request resolves the helper's side
+/// of it, but the prompt that request raised stays on jwm's panel until it is
+/// told — the resolved callback never reaches the picker. `request_id` names
+/// the cancelled request when one was pending; a cancel can also arrive with
+/// nothing outstanding (a display-only prompt carries no reply channel, or
+/// jwm's own timeout answered first), and then the field is null — like
+/// `done`'s nulls — and jwm drops whatever prompt it is showing, the same
+/// by-identity reading the cancel itself uses.
+fn withdraw_args(address: &str, cookie: &str, request_id: Option<u64>) -> Value {
+    serde_json::json!({
+        "address": address,
+        "cookie": cookie,
+        "request_id": request_id,
+    })
+}
+
 /// How long the post-pair `Connect` may run, given how much of the session
 /// wall clock the pairing itself already spent.
 ///
@@ -760,6 +796,23 @@ fn inbound_session_matches(value: &Value, cookie: &str) -> bool {
 // ---------------------------------------------------------------------------
 // Session driver
 // ---------------------------------------------------------------------------
+
+/// Tell jwm bluez withdrew the outstanding request, so the panel takes the
+/// prompt down instead of waiting out its own timeout. Best effort like
+/// [`report_done`]: a jwm that is gone or rejects the frame still has its
+/// prompt timeout as the backstop, so a failure here is worth a log line,
+/// never a failed session.
+async fn report_withdraw(ipc: &JwmIpc, address: &str, cookie: &str, request_id: Option<u64>) {
+    let args = withdraw_args(address, cookie, request_id);
+    let ipc = ipc.clone();
+    let sent =
+        tokio::task::spawn_blocking(move || ipc.command("bluetooth_pairing_withdraw", args)).await;
+    match sent {
+        Ok(Ok(_)) => {}
+        Ok(Err(error)) => log::warn!("jwm rejected the withdraw report: {error}"),
+        Err(error) => log::warn!("could not report the withdrawn prompt: {error}"),
+    }
+}
 
 /// Report the terminal outcome to jwm. Best effort by definition: when jwm
 /// is gone there is nothing left to inform.
@@ -2519,6 +2572,23 @@ mod tests {
     }
 
     #[test]
+    fn withdraw_args_name_the_cancelled_request_when_one_was_pending() {
+        let withdraw = withdraw_args(ADDR, COOKIE, Some(7));
+        assert_eq!(withdraw["address"], ADDR);
+        assert_eq!(withdraw["cookie"], COOKIE);
+        assert_eq!(withdraw["request_id"], 7);
+
+        // A cancel with nothing outstanding still reports — a display-only
+        // prompt on the panel has no pending request to name — and null,
+        // not an absent field, is what jwm reads as "whatever is showing",
+        // exactly like `done`'s null `error`/`connected`.
+        let bare = withdraw_args(ADDR, COOKIE, None);
+        assert_eq!(bare["address"], ADDR);
+        assert!(bare["request_id"].is_null());
+        assert!(bare.get("request_id").is_some());
+    }
+
+    #[test]
     fn the_connect_borrows_only_what_the_wall_clock_has_left() {
         // A prompt-free pairing leaves the whole budget.
         assert_eq!(connect_budget(Duration::ZERO), Some(CONNECT_WAIT));
@@ -2627,7 +2697,7 @@ mod tests {
     /// Whether a runner has demanded the bus-backed tests actually run, the
     /// way `JWM_REQUIRE_HEADLESS_GL` guards the GL tests. When set (and not
     /// "0") a missing dbus-daemon is a hard failure, not a silent skip, so CI
-    /// cannot go green on the ten integration tests that are the only
+    /// cannot go green on the fourteen integration tests that are the only
     /// executed coverage of the `SessionClosed`/timeout-restore paths.
     fn dbus_daemon_required() -> bool {
         std::env::var_os("JWM_REQUIRE_DBUS_DAEMON").is_some_and(|value| value != "0")
@@ -2916,6 +2986,11 @@ mod tests {
         dir: PathBuf,
         socket: PathBuf,
         requests: std::sync::mpsc::Receiver<Value>,
+        /// Frames that arrived while a different command was being awaited.
+        /// Sends that race each other (a withdraw and the done from the Pair
+        /// unwind it sets off) may land in either order, and a frame dropped
+        /// for arriving at the wrong wait never comes back.
+        backlog: std::cell::RefCell<Vec<Value>>,
         subscription: Arc<Mutex<Option<UnixStream>>>,
     }
 
@@ -2971,6 +3046,7 @@ mod tests {
                 dir,
                 socket,
                 requests,
+                backlog: std::cell::RefCell::new(Vec::new()),
                 subscription,
             }
         }
@@ -3022,6 +3098,16 @@ mod tests {
         fn recv_command(&self, name: &str) -> Value {
             let deadline = std::time::Instant::now() + Duration::from_secs(15);
             loop {
+                // The stash is searched first: a frame that arrived while a
+                // different command was awaited is still a valid answer to
+                // this wait.
+                if let Some(at) =
+                    self.backlog.borrow_mut().iter().position(|frame| {
+                        frame.get("command").and_then(Value::as_str) == Some(name)
+                    })
+                {
+                    return self.backlog.borrow_mut().remove(at);
+                }
                 let remaining = deadline.saturating_duration_since(std::time::Instant::now());
                 assert!(!remaining.is_zero(), "no {name} command within 15s");
                 let frame = self
@@ -3031,7 +3117,9 @@ mod tests {
                 if frame.get("command").and_then(Value::as_str) == Some(name) {
                     return frame;
                 }
-                // Queries (the liveness self-heal) are not what we wait for.
+                // Queries (the liveness self-heal) and racing commands are
+                // not what we wait for; stash them for later waits.
+                self.backlog.borrow_mut().push(frame);
             }
         }
     }
@@ -3646,6 +3734,153 @@ mod tests {
             1,
             "a bare cancel must reach bluez as CancelPairing"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_request_bluez_cancels_withdraws_the_prompt_from_the_panel() {
+        let Some(setup) = fake_setup(PairScript::Confirm(123_456)).await else {
+            eprintln!("dbus-daemon unavailable; skipping the pairing integration test");
+            return;
+        };
+        let jwm = FakeJwm::start(serde_json::json!({
+            "active": true, "address": ADDR, "cookie": COOKIE, "state": "working",
+        }));
+        let ipc = JwmIpc::with_socket(jwm.socket.clone());
+        let connection = helper_connection(&setup.bus_address).await;
+        let bluez = helper_connection(&setup.bus_address).await;
+
+        let session = tokio::spawn(pair_session(ipc, connection, ADDR, COOKIE));
+        let agent = await_registered_agent(&setup.state).await;
+
+        // BlueZ asked; the prompt is on the panel.
+        let prompt = jwm.recv_command("bluetooth_pairing_prompt");
+        assert_eq!(prompt["args"]["kind"], "confirm");
+
+        // The remote side gives up before the user answers, so bluez
+        // withdraws the request. The prompt must come down now, not when
+        // jwm's own prompt timeout notices it has gone unanswered.
+        let device = OwnedObjectPath::try_from(DEVICE_PATH).expect("device path");
+        call_agent(&bluez, &agent, "Cancel", &(device,))
+            .await
+            .expect("Cancel returns unit");
+        let withdraw = jwm.recv_command("bluetooth_pairing_withdraw");
+        assert_eq!(withdraw["command"], "bluetooth_pairing_withdraw");
+        assert_eq!(withdraw["args"]["address"], ADDR);
+        assert_eq!(withdraw["args"]["cookie"], COOKIE);
+        assert_eq!(
+            withdraw["args"]["request_id"], prompt["args"]["request_id"],
+            "the withdraw names the request that raised the prompt"
+        );
+
+        // The cancelled request unwinds the Pair, and the session reports its
+        // outcome as usual — the withdraw replaced no part of that path. A
+        // cancel bluez initiated is a failure, not a user cancel: no answer
+        // broadcast ever set `ended_by_user`.
+        let done = jwm.recv_command("bluetooth_pairing_done");
+        assert_eq!(done["args"]["ok"], false);
+        assert_eq!(session.await.expect("session task"), EXIT_FAILED);
+        let seen = FakeBluezState::lock(&setup.state.agent_error_seen).clone();
+        assert!(
+            seen.as_deref()
+                .is_some_and(|error| error.contains("org.bluez.Error.Canceled")),
+            "expected org.bluez.Error.Canceled, got {seen:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_cancelled_inbound_request_withdraws_the_prompt_and_the_window_lives_on() {
+        let Some(setup) = fake_setup(PairScript::Confirm(1)).await else {
+            eprintln!("dbus-daemon unavailable; skipping the inbound integration test");
+            return;
+        };
+        let jwm = FakeJwm::start(serde_json::json!({
+            "active": true, "address": null, "cookie": COOKIE,
+            "state": "working", "kind": "inbound",
+        }));
+        let ipc = JwmIpc::with_socket(jwm.socket.clone());
+        let connection = helper_connection(&setup.bus_address).await;
+        let bluez = helper_connection(&setup.bus_address).await;
+
+        let session = tokio::spawn(accept_session(ipc, connection, COOKIE));
+        let agent = await_registered_agent(&setup.state).await;
+        await_adapter_exposed(&setup.state).await;
+
+        let device = OwnedObjectPath::try_from(DEVICE_PATH).expect("device path");
+        let call = tokio::spawn({
+            let bluez = bluez.clone();
+            let device = device.clone();
+            let agent = agent.clone();
+            async move { call_agent(&bluez, &agent, "RequestAuthorization", &(device,)).await }
+        });
+        let prompt = jwm.recv_command("bluetooth_pairing_prompt");
+        assert_eq!(prompt["args"]["kind"], "authorize");
+
+        // The device gives up before the user answers: bluez cancels the
+        // request. The prompt it raised comes down, but the window was the
+        // user's gesture — it stays armed for whatever rings next.
+        call_agent(&bluez, &agent, "Cancel", &(device,))
+            .await
+            .expect("Cancel returns unit");
+        let withdraw = jwm.recv_command("bluetooth_pairing_withdraw");
+        assert_eq!(withdraw["args"]["address"], ADDR);
+        assert_eq!(withdraw["args"]["cookie"], COOKIE);
+        assert_eq!(withdraw["args"]["request_id"], prompt["args"]["request_id"]);
+        assert!(
+            call.await.expect("agent call task").is_err(),
+            "a cancelled request still fails for bluez"
+        );
+
+        // The window really did live on: it still takes jwm's close to end
+        // it, exactly as if nothing had ever been asked.
+        jwm.send_response(serde_json::json!({
+            "cookie": COOKIE, "accepted": false, "reason": "closed",
+        }));
+        let done = jwm.recv_command("bluetooth_pairing_done");
+        assert_eq!(done["args"]["ok"], false);
+        assert_eq!(session.await.expect("session task"), EXIT_CANCELLED);
+        assert!(!*FakeBluezState::lock(&setup.state.pairable));
+        assert!(!*FakeBluezState::lock(&setup.state.discoverable));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_cancel_with_nothing_pending_still_reports_the_withdrawal() {
+        let Some(setup) = fake_setup(PairScript::UntilCancelled).await else {
+            eprintln!("dbus-daemon unavailable; skipping the pairing integration test");
+            return;
+        };
+        let jwm = FakeJwm::start(serde_json::json!({
+            "active": true, "address": ADDR, "cookie": COOKIE, "state": "working",
+        }));
+        let ipc = JwmIpc::with_socket(jwm.socket.clone());
+        let connection = helper_connection(&setup.bus_address).await;
+        let bluez = helper_connection(&setup.bus_address).await;
+
+        let session = tokio::spawn(pair_session(ipc, connection, ADDR, COOKIE));
+        let agent = await_registered_agent(&setup.state).await;
+
+        // No request was ever outstanding — the panel is showing "Pairing…",
+        // not a prompt. The withdraw still reports, naming no request: jwm
+        // no-ops on no match, and a display-only prompt would still come
+        // down, which is the case this frame exists for.
+        let device = OwnedObjectPath::try_from(DEVICE_PATH).expect("device path");
+        call_agent(&bluez, &agent, "Cancel", &(device,))
+            .await
+            .expect("Cancel returns unit");
+        let withdraw = jwm.recv_command("bluetooth_pairing_withdraw");
+        assert_eq!(withdraw["args"]["cookie"], COOKIE);
+        assert!(
+            withdraw["args"]["request_id"].is_null(),
+            "nothing pending, so no request to name: {withdraw}"
+        );
+
+        // The pairing itself is untouched by it; a bare cancel from jwm still
+        // ends the session the usual way.
+        jwm.send_response(serde_json::json!({
+            "cookie": COOKIE, "accepted": false, "reason": "cancelled",
+        }));
+        let done = jwm.recv_command("bluetooth_pairing_done");
+        assert_eq!(done["args"]["ok"], false);
+        assert_eq!(session.await.expect("session task"), EXIT_CANCELLED);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

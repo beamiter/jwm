@@ -169,6 +169,33 @@ pub fn mirrors_key_release_to_wm(pressed: bool, system_ui_grab_active: bool) -> 
     !pressed && system_ui_grab_active
 }
 
+/// Whole vertical wheel clicks accumulated from one axis event, as a signed
+/// count plus the fractional remainder to carry into the next event.
+///
+/// libinput reports wheel rotation in two units: `v120` (120 per click) for
+/// wheel devices — high-resolution wheels report a fraction per event — and,
+/// for smooth/touchpad scrolling, a pixel-style amount taken here at 15 per
+/// click. Both share the cursor's coordinate system, where positive means
+/// down (libinput.h: "the positive direction being down or right"), so a
+/// negative count is X11's button 4 (up) and a positive one button 5 (down).
+/// The remainder is what lets a touchpad's stream of tiny events add up to
+/// whole clicks instead of each rounding to zero on its own.
+pub fn wheel_steps(accumulator: f64, amount_v120: Option<f64>, amount: Option<f64>) -> (i32, f64) {
+    let clicks = match amount_v120 {
+        Some(v120) => v120 / 120.0,
+        None => amount.unwrap_or(0.0) / 15.0,
+    };
+    let total = accumulator + clicks;
+    let whole = total.trunc() as i32;
+    (whole, total - f64::from(whole))
+}
+
+/// The X11 button detail a signed click count from [`wheel_steps`] reports:
+/// 4 for up, 5 for down — the numbers every WM wheel branch matches on.
+pub fn wheel_click_detail(clicks: i32) -> u8 {
+    if clicks < 0 { 4 } else { 5 }
+}
+
 pub struct DummyPropertyOps;
 impl PropertyOps for DummyPropertyOps {
     fn get_title(&self, _win: WindowId) -> String {
@@ -306,7 +333,10 @@ impl ColorAllocator for DummyColorAllocator {
 
 #[cfg(test)]
 mod tests {
-    use super::{DummyInputOps, SharedInputOps, SharedInputSnapshot, mirrors_key_release_to_wm};
+    use super::{
+        DummyInputOps, SharedInputOps, SharedInputSnapshot, mirrors_key_release_to_wm,
+        wheel_click_detail, wheel_steps,
+    };
     use crate::backend::api::InputOps;
     use crate::backend::common_define::Mods;
     use std::sync::{Arc, Mutex};
@@ -428,6 +458,17 @@ mod tests {
                 handler.contains(&gate) && handler.contains(&release),
                 "{name}: releases never reach the WM, so a held modifier can never come up"
             );
+
+            // The wheel is the other input the host compositor only delivers
+            // as an axis event: without this arm it reached neither the
+            // clients nor, during a panel grab, the WM.
+            let axis_arm = format!("InputEvent::Pointer{}", "Axis");
+            let steps = format!("wheel_{}", "steps");
+            assert!(
+                handler.contains(&axis_arm) && handler.contains(&steps),
+                "{name}: the wheel reaches nobody — the client gets no axis \
+                 frame and a panel grab gets no button 4/5"
+            );
         }
     }
 
@@ -439,5 +480,48 @@ mod tests {
         // Presses keep their own path, overlay or not.
         assert!(!mirrors_key_release_to_wm(true, true));
         assert!(!mirrors_key_release_to_wm(true, false));
+    }
+
+    #[test]
+    fn wheel_v120_maps_whole_clicks_to_x11_details() {
+        // 120 v120 units per click, up being negative — libinput shares the
+        // cursor's coordinates, where positive is down — so -120 is one X11
+        // button-4 press and +120 one button-5 press.
+        assert_eq!(wheel_steps(0.0, Some(-120.0), None), (-1, 0.0));
+        assert_eq!(wheel_steps(0.0, Some(120.0), None), (1, 0.0));
+        assert_eq!(wheel_steps(0.0, Some(-240.0), None), (-2, 0.0));
+        assert_eq!(wheel_click_detail(-2), 4);
+        assert_eq!(wheel_click_detail(-1), 4);
+        assert_eq!(wheel_click_detail(1), 5);
+        assert_eq!(wheel_click_detail(3), 5);
+        // The v120 unit wins over the pixel amount when both are present.
+        assert_eq!(wheel_steps(0.0, Some(-120.0), Some(-1.0)), (-1, 0.0));
+        // No rotation on the vertical axis emits nothing.
+        assert_eq!(wheel_steps(0.0, None, None), (0, 0.0));
+    }
+
+    #[test]
+    fn wheel_amount_fallback_clicks_at_fifteen_per_click() {
+        // Exactly one click, just under it, just over it.
+        assert_eq!(wheel_steps(0.0, None, Some(-15.0)), (-1, 0.0));
+        let (clicks, remainder) = wheel_steps(0.0, None, Some(-14.0));
+        assert_eq!(clicks, 0);
+        assert!((remainder - (-14.0 / 15.0)).abs() < 1e-12);
+        let (clicks, remainder) = wheel_steps(0.0, None, Some(-16.0));
+        assert_eq!(clicks, -1);
+        assert!((remainder - (-1.0 / 15.0)).abs() < 1e-12);
+    }
+
+    #[test]
+    fn wheel_remainder_carries_across_events() {
+        // Two half-click touchpad events add up to one click instead of each
+        // rounding to zero on its own.
+        let (clicks, remainder) = wheel_steps(0.0, Some(-60.0), None);
+        assert_eq!((clicks, remainder), (0, -0.5));
+        let (clicks, remainder) = wheel_steps(remainder, Some(-60.0), None);
+        assert_eq!((clicks, remainder), (-1, 0.0));
+        // A direction reversal spends the carried half-click first.
+        let (clicks, remainder) = wheel_steps(-0.5, Some(120.0), None);
+        assert_eq!((clicks, remainder), (0, 0.5));
     }
 }

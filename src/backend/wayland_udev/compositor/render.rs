@@ -5610,14 +5610,23 @@ impl WaylandCompositor {
                 );
                 gl.Clear(ffi::COLOR_BUFFER_BIT);
             } else {
-                // Scrim: dim the desktop behind the panel.
+                // Scrim: dim the desktop behind the panel. The dim rides the
+                // card's own open envelope — `content_a` is the eased opened²
+                // the contents fade in with — so the room darkens as the card
+                // springs open instead of popping to full dim while the card
+                // is still a seed. The lock card never reaches this branch:
+                // its backdrop is the opaque clear above, which must hide the
+                // desktop immediately. With motion off the spring snaps to
+                // target, the envelope is exactly 1.0, and the alpha is the
+                // old instant value.
                 let rect = super::get_uniform_loc(gl, self.hud_program, "u_rect");
                 let proj = super::get_uniform_loc(gl, self.hud_program, "u_projection");
                 let bg = super::get_uniform_loc(gl, self.hud_program, "u_bg_color");
                 let size = super::get_uniform_loc(gl, self.hud_program, "u_size");
+                let scrim = UiPalette::faded(ui.scrim, content_a);
                 gl.UseProgram(self.hud_program);
                 gl.UniformMatrix4fv(proj, 1, ffi::FALSE as u8, projection.as_ptr());
-                gl.Uniform4f(bg, ui.scrim[0], ui.scrim[1], ui.scrim[2], ui.scrim[3]);
+                gl.Uniform4f(bg, scrim[0], scrim[1], scrim[2], scrim[3]);
                 gl.Uniform2f(size, viewport_w, viewport_h);
                 gl.Uniform4f(rect, viewport_x, viewport_y, viewport_w, viewport_h);
                 gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);

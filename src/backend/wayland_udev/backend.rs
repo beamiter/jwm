@@ -242,6 +242,14 @@ fn press_hits_toast(
 /// the event — it is the actor that dismisses the card and invokes the
 /// action — this only stops the client under the card from also getting it.
 ///
+/// The wheel (X11 details 4-7, reached through the `button_code & 0xFF`
+/// fallback for BTN_4..BTN_7) is exempt: the WM's own toast rule
+/// (`toast_press` in input_handler.rs) ignores it because a wheel rotation
+/// is not a click and never dismisses a notification, so keeping it from
+/// the client as well would make it dead input. Such a press is treated as
+/// one that missed every card — delivered, never latched, its release
+/// delivered with it.
+///
 /// The press is the only event that decides a button's fate, so it also
 /// discards whatever the previous press left behind. A release can be lost
 /// before it ever reaches this dispatcher — `SessionEvent::PauseSession`
@@ -253,9 +261,11 @@ fn press_hits_toast(
 fn swallow_toast_button(
     swallowed: &mut HashSet<u32>,
     button_code: u32,
+    detail: u8,
     pressed: bool,
     on_card: bool,
 ) -> bool {
+    let on_card = on_card && !matches!(detail, 4..=7);
     if pressed {
         if on_card {
             swallowed.insert(button_code);
@@ -401,6 +411,12 @@ struct SharedState {
     screenshot_grab_active: bool,
     /// True while JWM's built-in launcher or lock screen owns all input.
     system_ui_grab_active: bool,
+    /// Fractional vertical wheel rotation, in clicks, not yet reported to
+    /// the WM. While one of the grabs above owns the pointer, rotation is
+    /// converted into synthetic button 4/5 presses one whole click at a
+    /// time; this carries the sub-click remainder across events so smooth
+    /// touchpad scrolling still adds up.
+    wheel_remainder: f64,
     /// The toast cards the compositor drew on the last composited frame, in
     /// the same coordinates as the pointer. A press that lands on one belongs
     /// to the card, not to the client it is drawn over.
@@ -432,6 +448,7 @@ impl Default for SharedState {
             session_active: true,
             screenshot_grab_active: false,
             system_ui_grab_active: false,
+            wheel_remainder: 0.0,
             toast_rects: Vec::new(),
         }
     }
@@ -630,6 +647,12 @@ impl InputOps for UdevInputOps {
             // cursor renderer immediately after our raw GLES frame, and some
             // drivers are sensitive to inherited VAO/VBO state during that path.
             let mut shared = self.shared.lock_safe();
+            if !shared.screenshot_grab_active {
+                // A grab that is just opening starts with a fresh wheel: a
+                // half-turn of touchpad scroll from before it must not leak
+                // in as clicks.
+                shared.wheel_remainder = 0.0;
+            }
             shared.screenshot_grab_active = true;
         }
         Ok(true)
@@ -2588,6 +2611,7 @@ impl UdevBackend {
                             let on_toast = swallow_toast_button(
                                 &mut toast_swallowed_buttons,
                                 button_code,
+                                detail_btn,
                                 pressed,
                                 on_toast_card,
                             );
@@ -3152,7 +3176,68 @@ impl UdevBackend {
                         }
                         InputEvent::PointerAxis { event, .. } => {
                             let time = InputEventExt::time_msec(&event);
-                            if let Some(pointer) = state.seat.get_pointer() {
+                            // While a system-UI or screenshot grab owns the
+                            // pointer the way an X11 grab would, the wheel
+                            // belongs to the window manager, not to the
+                            // client the panel is drawn over. X11 delivers
+                            // rotation through the grab as button 4/5
+                            // press/release pairs and every WM wheel behavior
+                            // — switcher browsing, panel scrolling, the
+                            // screenshot stroke-width adjustment — hangs off
+                            // that press path (event_dispatcher.rs:461), so
+                            // the vertical axis becomes one synthetic pair
+                            // per whole click. The release half is not
+                            // optional: the screenshot wheel path arms a
+                            // one-shot release swallow
+                            // (capture.rs `swallow_next_button_release`) that
+                            // only the paired release clears — a press alone
+                            // would leave the latch armed to eat the next
+                            // unrelated release, like the one ending a region
+                            // drag. The horizontal axis stays inert, exactly
+                            // as X11 buttons 6/7 are no-ops in every one of
+                            // those branches.
+                            let (grab_active, clicks, x, y, output, mods_state) = {
+                                let mut s = shared.lock_safe();
+                                let grab_active =
+                                    s.screenshot_grab_active || s.system_ui_grab_active;
+                                let mut clicks = 0;
+                                if grab_active {
+                                    let (steps, remainder) = wheel_steps(
+                                        s.wheel_remainder,
+                                        event.amount_v120(Axis::Vertical),
+                                        event.amount(Axis::Vertical),
+                                    );
+                                    s.wheel_remainder = remainder;
+                                    clicks = steps;
+                                }
+                                let (x, y) = (s.pointer_x, s.pointer_y);
+                                (
+                                    grab_active,
+                                    clicks,
+                                    x,
+                                    y,
+                                    output_at(&s.outputs, x, y),
+                                    s.mods_state,
+                                )
+                            };
+                            if grab_active {
+                                let detail = wheel_click_detail(clicks);
+                                for _ in 0..clicks.unsigned_abs() {
+                                    let mut pending = pending_events.lock_safe();
+                                    pending.push_back(BackendEvent::ButtonPress {
+                                        target: HitTarget::Background { output },
+                                        state: mods_state,
+                                        detail,
+                                        time,
+                                        root_x: x,
+                                        root_y: y,
+                                    });
+                                    pending.push_back(BackendEvent::ButtonRelease {
+                                        target: HitTarget::Background { output },
+                                        time,
+                                    });
+                                }
+                            } else if let Some(pointer) = state.seat.get_pointer() {
                                 let mut frame = AxisFrame::new(time).source(event.source());
                                 for axis in [Axis::Horizontal, Axis::Vertical] {
                                     if let Some(val) = event.amount(axis) {
@@ -4126,7 +4211,16 @@ impl CompositorWorkspaceEffects for UdevBackend {
                 .lock_safe()
                 .retain(|event| !matches!(event, BackendEvent::KeyPress { .. }));
         }
-        self.shared.lock_safe().system_ui_grab_active = overlay.is_some();
+        {
+            let mut shared = self.shared.lock_safe();
+            // Same fresh-wheel rule as the screenshot grab, but only on the
+            // rising edge: re-arming the same overlay mid-scroll must not
+            // eat the half-click the user has already accumulated.
+            if overlay.is_some() && !shared.system_ui_grab_active {
+                shared.wheel_remainder = 0.0;
+            }
+            shared.system_ui_grab_active = overlay.is_some();
+        }
         if let Some(compositor) = self.compositor.as_mut() {
             compositor.set_system_ui(overlay);
         }
@@ -7330,21 +7424,21 @@ mod udev_backend_selection_tests {
     fn a_swallowed_press_takes_its_release_with_it_and_only_its_own() {
         let mut swallowed = HashSet::new();
         // Press on a card: swallowed, and its release with it.
-        assert!(swallow_toast_button(&mut swallowed, 272, true, true));
-        assert!(swallow_toast_button(&mut swallowed, 272, false, false));
+        assert!(swallow_toast_button(&mut swallowed, 272, 1, true, true));
+        assert!(swallow_toast_button(&mut swallowed, 272, 1, false, false));
         // The release is swallowed exactly once; a stray second one is not.
-        assert!(!swallow_toast_button(&mut swallowed, 272, false, false));
+        assert!(!swallow_toast_button(&mut swallowed, 272, 1, false, false));
         assert!(swallowed.is_empty());
 
         // A press that missed every card is delivered, and so is its release
         // even if a card has since slid under the pointer.
-        assert!(!swallow_toast_button(&mut swallowed, 272, true, false));
-        assert!(!swallow_toast_button(&mut swallowed, 272, false, true));
+        assert!(!swallow_toast_button(&mut swallowed, 272, 1, true, false));
+        assert!(!swallow_toast_button(&mut swallowed, 272, 1, false, true));
 
         // Buttons are tracked independently.
-        assert!(swallow_toast_button(&mut swallowed, 273, true, true));
-        assert!(!swallow_toast_button(&mut swallowed, 274, false, false));
-        assert!(swallow_toast_button(&mut swallowed, 273, false, false));
+        assert!(swallow_toast_button(&mut swallowed, 273, 3, true, true));
+        assert!(!swallow_toast_button(&mut swallowed, 274, 2, false, false));
+        assert!(swallow_toast_button(&mut swallowed, 273, 3, false, false));
         assert!(swallowed.is_empty());
     }
 
@@ -7354,20 +7448,68 @@ mod udev_backend_selection_tests {
         // Press on a card, then the release never arrives: `PauseSession`
         // suspends libinput on a VT switch, and an unplugged mouse takes its
         // held buttons with it. Neither synthesises a release.
-        assert!(swallow_toast_button(&mut swallowed, 272, true, true));
+        assert!(swallow_toast_button(&mut swallowed, 272, 1, true, true));
 
         // The next press misses every card, so it reaches the client — and
         // its release has to reach the client too. The entry the lost release
         // never consumed must not outlive the press that replaced it.
-        assert!(!swallow_toast_button(&mut swallowed, 272, true, false));
-        assert!(!swallow_toast_button(&mut swallowed, 272, false, false));
+        assert!(!swallow_toast_button(&mut swallowed, 272, 1, true, false));
+        assert!(!swallow_toast_button(&mut swallowed, 272, 1, false, false));
         assert!(swallowed.is_empty());
 
         // The other direction still latches: a stale entry is replaced, not
         // merely dropped.
-        assert!(swallow_toast_button(&mut swallowed, 272, true, true));
-        assert!(swallow_toast_button(&mut swallowed, 272, true, true));
-        assert!(swallow_toast_button(&mut swallowed, 272, false, false));
+        assert!(swallow_toast_button(&mut swallowed, 272, 1, true, true));
+        assert!(swallow_toast_button(&mut swallowed, 272, 1, true, true));
+        assert!(swallow_toast_button(&mut swallowed, 272, 1, false, false));
+        assert!(swallowed.is_empty());
+    }
+
+    #[test]
+    fn the_wheel_is_never_swallowed_from_the_client() {
+        let mut swallowed = HashSet::new();
+        // BTN_4..BTN_7 map to details 4..=7 through the `& 0xFF` fallback.
+        // The WM ignores the wheel on a card, so the press must reach the
+        // client instead of becoming dead input — on the card or off it.
+        for (code, detail) in [(0x104u32, 4u8), (0x105, 5), (0x106, 6), (0x107, 7)] {
+            assert!(!swallow_toast_button(
+                &mut swallowed,
+                code,
+                detail,
+                true,
+                true
+            ));
+            // Its release is delivered with it, wherever the pointer is then.
+            assert!(!swallow_toast_button(
+                &mut swallowed,
+                code,
+                detail,
+                false,
+                true
+            ));
+            assert!(!swallow_toast_button(
+                &mut swallowed,
+                code,
+                detail,
+                false,
+                false
+            ));
+        }
+        assert!(swallowed.is_empty());
+
+        // Like every press, a wheel press discards whatever a previous press
+        // of the same code left behind.
+        swallowed.insert(0x104);
+        assert!(!swallow_toast_button(&mut swallowed, 0x104, 4, true, true));
+        assert!(swallowed.is_empty());
+
+        // The real buttons on a card still latch exactly as before.
+        assert!(swallow_toast_button(&mut swallowed, 272, 1, true, true));
+        assert!(swallow_toast_button(&mut swallowed, 273, 3, true, true));
+        assert!(swallow_toast_button(&mut swallowed, 274, 2, true, true));
+        assert!(swallow_toast_button(&mut swallowed, 272, 1, false, false));
+        assert!(swallow_toast_button(&mut swallowed, 273, 3, false, false));
+        assert!(swallow_toast_button(&mut swallowed, 274, 2, false, false));
         assert!(swallowed.is_empty());
     }
 

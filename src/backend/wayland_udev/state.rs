@@ -430,6 +430,10 @@ pub struct JwmWaylandState {
 
     pub im_popups: Vec<ImPopupSurface>,
     pub im_client_id: Option<ObjectId>,
+    /// (popup surface, failure kind) pairs `im_popup_positions` has already
+    /// warned about; the warn-once contract lives with that function. `Mutex`
+    /// because the position query — and therefore the gate — only has `&self`.
+    im_popup_warned: Mutex<HashSet<(ObjectId, ImPopupWarn)>>,
 
     pub active_toplevel: Option<WindowId>,
     pub popup_grab_toplevel: Option<WindowId>,
@@ -534,6 +538,31 @@ fn take_window_mapping_state(
     let was_manager_unmapped = manager_unmapped_windows.remove(&win);
     let was_mapped = mapped_windows.remove(&win);
     was_manager_unmapped || was_mapped
+}
+
+/// The distinct ways `im_popup_positions` can fail to place a popup. Part of
+/// the warn-once key, so a popup that degrades from one failure into the next
+/// warns once for each.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum ImPopupWarn {
+    NoParent,
+    ParentUnmapped,
+    NoGeometry,
+}
+
+/// Warn-once gate for `im_popup_positions`. Records `key` among this call's
+/// failures and reports whether a warn is due — only when the previous call
+/// had not already failed the same way. The caller swaps its warned set for
+/// the recorded failures after the pass, so a failure that clears, or a popup
+/// that goes away, warns again on its next occurrence, while one that
+/// persists warns once instead of once per frame.
+fn ime_popup_warn_due<K>(warned: &HashSet<K>, failing: &mut HashSet<K>, key: K) -> bool
+where
+    K: Eq + std::hash::Hash,
+{
+    let due = !warned.contains(&key);
+    failing.insert(key);
+    due
 }
 
 impl JwmWaylandState {
@@ -2027,6 +2056,7 @@ impl JwmWaylandState {
 
                 im_popups: Vec::new(),
                 im_client_id: None,
+                im_popup_warned: Mutex::new(HashSet::new()),
 
                 popup_grab_toplevel: None,
                 popup_grab_prev_kbd_focus: None,
@@ -2690,6 +2720,18 @@ impl JwmWaylandState {
 
     pub fn im_popup_positions(&self) -> Vec<ImPopupAnchor> {
         let mut result = Vec::new();
+        // The render paths call this once per frame, so a persistently broken
+        // popup must not warn per frame: each (popup surface, failure kind)
+        // pair warns the first time it fails and is then held in
+        // `im_popup_warned`, which this call's failures replace at the end —
+        // a popup that goes away or whose condition clears may warn again on
+        // its next failure.
+        let mut warned = self.im_popup_warned.lock_safe();
+        #[allow(
+            clippy::mutable_key_type,
+            reason = "ObjectId hashes by stable protocol-object identity; its internal liveness flag is not part of Hash or Eq"
+        )]
+        let mut failing = HashSet::new();
         for popup in &self.im_popups {
             // Dead popups are pruned in `new_popup`/`dismiss_popup`; skip silently here.
             if !popup.alive() {
@@ -2700,27 +2742,36 @@ impl JwmWaylandState {
             let parent = match popup.get_parent() {
                 Some(p) => p,
                 None => {
-                    log::warn!(
-                        "[ime-pos] popup {:?} has no parent",
-                        popup.wl_surface().id()
-                    );
+                    let key = (popup.wl_surface().id(), ImPopupWarn::NoParent);
+                    if ime_popup_warn_due(&warned, &mut failing, key) {
+                        log::warn!(
+                            "[ime-pos] popup {:?} has no parent",
+                            popup.wl_surface().id()
+                        );
+                    }
                     continue;
                 }
             };
             let parent_win = match self.surface_to_window.get(&parent.surface.id()) {
                 Some(&w) => w,
                 None => {
-                    log::warn!(
-                        "[ime-pos] parent surface {:?} not mapped to a window",
-                        parent.surface.id()
-                    );
+                    let key = (popup.wl_surface().id(), ImPopupWarn::ParentUnmapped);
+                    if ime_popup_warn_due(&warned, &mut failing, key) {
+                        log::warn!(
+                            "[ime-pos] parent surface {:?} not mapped to a window",
+                            parent.surface.id()
+                        );
+                    }
                     continue;
                 }
             };
             let geo = match self.window_geometry.get(&parent_win) {
                 Some(g) => g,
                 None => {
-                    log::warn!("[ime-pos] window {parent_win:?} has no geometry");
+                    let key = (popup.wl_surface().id(), ImPopupWarn::NoGeometry);
+                    if ime_popup_warn_due(&warned, &mut failing, key) {
+                        log::warn!("[ime-pos] window {parent_win:?} has no geometry");
+                    }
                     continue;
                 }
             };
@@ -2749,6 +2800,9 @@ impl JwmWaylandState {
                 area_bottom: geo.y + geo.h as i32,
             });
         }
+        // Retire every warned pair this call did not fail again: gone popups
+        // and cleared conditions leave the set, so their next failure warns.
+        *warned = failing;
         result
     }
 }
@@ -4368,6 +4422,65 @@ mod xwayland_legacy_assoc_tests {
     #[test]
     fn unparented_dialog_hint_is_not_popup_like() {
         assert!(!JwmWaylandState::should_honor_dialog_hint(false));
+    }
+}
+
+#[cfg(test)]
+mod ime_popup_warn_tests {
+    use super::ime_popup_warn_due;
+    use std::collections::HashSet;
+
+    // `im_popup_positions` swaps its warned set for the failures of the
+    // current call at the end of the pass; these tests model that swap
+    // directly with plain integer keys (a real key is a popup's `ObjectId`
+    // plus the failure kind, and `ObjectId` has no test constructor).
+
+    #[test]
+    fn a_persistent_failure_warns_once_not_once_per_frame() {
+        let mut warned = HashSet::new();
+        // First frame the failure occurs: the warn is due.
+        let mut failing = HashSet::new();
+        assert!(ime_popup_warn_due(&warned, &mut failing, 7u32));
+        warned = failing;
+        // Every later frame while it persists: silent, and the key stays.
+        for _ in 0..3 {
+            let mut failing = HashSet::new();
+            assert!(!ime_popup_warn_due(&warned, &mut failing, 7u32));
+            warned = failing;
+        }
+        assert!(warned.contains(&7u32));
+    }
+
+    #[test]
+    fn a_cleared_failure_may_warn_again() {
+        let mut warned = HashSet::new();
+        let mut failing = HashSet::new();
+        assert!(ime_popup_warn_due(&warned, &mut failing, 7u32));
+        warned = failing;
+        assert!(warned.contains(&7u32));
+        // A call on which the popup no longer fails — or is gone — records
+        // nothing, so the swap drops the key...
+        warned = HashSet::new();
+        assert!(warned.is_empty());
+        // ...and the failure's next occurrence warns again.
+        let mut failing = HashSet::new();
+        assert!(ime_popup_warn_due(&warned, &mut failing, 7u32));
+        warned = failing;
+        assert!(warned.contains(&7u32));
+    }
+
+    #[test]
+    fn distinct_failures_of_one_popup_warn_independently() {
+        let mut warned = HashSet::new();
+        let mut failing = HashSet::new();
+        assert!(ime_popup_warn_due(&warned, &mut failing, (7u32, 0u8)));
+        assert!(ime_popup_warn_due(&warned, &mut failing, (7u32, 1u8)));
+        warned = failing;
+        let mut failing = HashSet::new();
+        assert!(!ime_popup_warn_due(&warned, &mut failing, (7u32, 0u8)));
+        assert!(!ime_popup_warn_due(&warned, &mut failing, (7u32, 1u8)));
+        warned = failing;
+        assert_eq!(warned.len(), 2);
     }
 }
 

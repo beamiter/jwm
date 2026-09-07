@@ -23,8 +23,11 @@
 //! hands to the helper through its environment:
 //!
 //! - helper → jwm commands: `bluetooth_pairing_prompt` (bluez asked
-//!   something; only updates the panel), `bluetooth_pairing_done` (terminal
-//!   outcome for a device, so it names one) and [`FAILED_COMMAND`] (the
+//!   something; only updates the panel), `bluetooth_pairing_withdraw` (bluez
+//!   cancelled the request behind the prompt on screen; clears only the
+//!   prompt — the session, and whatever `done` it still owes, lives on),
+//!   `bluetooth_pairing_done` (terminal outcome for a device, so it names
+//!   one) and [`FAILED_COMMAND`] (the
 //!   session died before there was a device to name — no system bus, no
 //!   adapter, an agent bluez refused — which is why it carries a cookie and
 //!   nothing else).
@@ -342,6 +345,32 @@ impl PairingSession {
         self.request_id = None;
     }
 
+    /// bluez cancelled the request behind the prompt on screen (a
+    /// `bluetooth_pairing_withdraw` command): the user can no longer answer
+    /// it, so the prompt comes down. Only the prompt — the session lives on.
+    /// An outbound pairing still has its `done` coming from the Pair unwind,
+    /// and an inbound window keeps its own clock for whatever rings next.
+    ///
+    /// Returns whether a prompt was actually showing (and is now gone), so
+    /// the caller knows whether the panel needs a redraw. A withdraw naming a
+    /// request other than the one on screen is stale — the prompt it meant is
+    /// already gone, replaced by a newer question — and changes nothing. One
+    /// naming no request at all withdraws whatever is showing: the helper's
+    /// own cancel path takes the pending request by identity, and so does
+    /// this.
+    pub fn withdraw_prompt(&mut self, request_id: Option<u64>) -> bool {
+        if let (Some(withdrawn), Some(current)) = (request_id, self.request_id)
+            && withdrawn != current
+        {
+            return false;
+        }
+        if !self.phase.is_prompting() {
+            return false;
+        }
+        self.clear_prompt();
+        true
+    }
+
     /// Whether the current prompt has outlived [`PROMPT_TIMEOUT`].
     #[must_use]
     pub fn prompt_timed_out(&self, now: Instant) -> bool {
@@ -477,6 +506,19 @@ pub struct DoneCommand {
     /// a plain `bool`: "did not connect" and "was never asked to" put
     /// different words on the picker's status line.
     pub connected: Option<bool>,
+}
+
+/// A validated `bluetooth_pairing_withdraw` command: bluez cancelled the
+/// request behind the prompt, so the prompt comes down and the session
+/// lives on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WithdrawCommand {
+    pub address: String,
+    pub cookie: String,
+    /// The request bluez cancelled, when the helper still had it pending.
+    /// `None` names whatever prompt is on screen — see
+    /// [`PairingSession::withdraw_prompt`].
+    pub request_id: Option<u64>,
 }
 
 /// A validated [`FAILED_COMMAND`] command.
@@ -690,6 +732,18 @@ pub fn parse_done_command(args: &Value) -> Result<DoneCommand, String> {
     })
 }
 
+/// Parse and validate a `bluetooth_pairing_withdraw` command. Carries no
+/// prompt material — it only ever takes a prompt down — so the address and
+/// cookie that scope it to a session are the whole validation, with the
+/// request id optional exactly as the helper sends it.
+pub fn parse_withdraw_command(args: &Value) -> Result<WithdrawCommand, String> {
+    Ok(WithdrawCommand {
+        address: address_field(args)?,
+        cookie: cookie_field(args)?,
+        request_id: args.get("request_id").and_then(Value::as_u64),
+    })
+}
+
 /// The picker's status line after a pairing succeeded.
 ///
 /// The bond is what the command asked for and it landed either way, so this
@@ -860,6 +914,54 @@ mod tests {
 
         session.clear_prompt();
         assert!(!session.prompt_timed_out(now + PROMPT_TIMEOUT + Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn a_withdrawn_prompt_comes_down_and_the_session_lives_on() {
+        let now = Instant::now();
+        let mut session = session(now);
+        session.apply_prompt(PairingPrompt::Confirm { passkey: 42 }, Some(7), now);
+
+        // The withdraw names the request on screen: the prompt goes, the
+        // session record stays (its `done` is still to come from the Pair
+        // unwind), and the panel is back to waiting on the helper.
+        assert!(session.withdraw_prompt(Some(7)));
+        assert_eq!(session.phase(), &PairingPhase::Working);
+        assert_eq!(session.request_id(), None);
+        assert!(session.matches(ADDR, "0123456789abcdef"));
+        assert!(!session.session_timed_out(now));
+
+        // The prompt clock stopped with the prompt, so the timeout tick
+        // cannot fire a second cancel for a request bluez already withdrew —
+        // and the only deadline left to wake for is the session's own.
+        assert!(!session.prompt_timed_out(now + PROMPT_TIMEOUT + Duration::from_secs(1)));
+        assert_eq!(session.next_timeout_in(now), Some(SESSION_TIMEOUT));
+    }
+
+    #[test]
+    fn a_withdraw_for_a_replaced_prompt_or_no_prompt_changes_nothing() {
+        let now = Instant::now();
+        let mut session = session(now);
+        // Nothing on screen: there is nothing to withdraw, whoever asks.
+        assert!(!session.withdraw_prompt(Some(7)));
+        assert!(!session.withdraw_prompt(None));
+
+        session.apply_prompt(PairingPrompt::Pin, Some(8), now);
+        // Stale: the request it names is already gone, replaced by the one
+        // showing — a newer question must not be cleared by an old cancel.
+        assert!(!session.withdraw_prompt(Some(7)));
+        assert_eq!(session.phase(), &PairingPhase::AwaitingPin);
+        assert_eq!(session.request_id(), Some(8));
+
+        // A withdraw naming no request withdraws whatever is showing: the
+        // helper's cancel takes the pending request by identity (a
+        // display-only prompt carries no reply channel to name), and so does
+        // this.
+        assert!(session.withdraw_prompt(None));
+        assert_eq!(session.phase(), &PairingPhase::Working);
+        // A late answer now finds no pending prompt: the answer paths all
+        // match on a prompting phase, and this session is Working.
+        assert!(!session.phase().is_prompting());
     }
 
     #[test]
@@ -1035,6 +1137,43 @@ mod tests {
             serde_json::json!({"address": "nope", "cookie": "c", "ok": true}),
         ] {
             assert!(parse_done_command(&args).is_err(), "accepted {args}");
+        }
+    }
+
+    #[test]
+    fn withdraw_commands_parse_and_validate_like_done() {
+        let withdraw = parse_withdraw_command(&serde_json::json!({
+            "address": ADDR, "cookie": "c", "request_id": 7,
+        }))
+        .unwrap();
+        assert_eq!(withdraw.address, ADDR);
+        assert_eq!(withdraw.cookie, "c");
+        assert_eq!(withdraw.request_id, Some(7));
+
+        // The id is optional — a cancel with nothing pending still reports —
+        // and a null parses the same as an absent field.
+        let bare = parse_withdraw_command(&serde_json::json!({
+            "address": ADDR.to_lowercase(), "cookie": "c",
+        }))
+        .unwrap();
+        assert_eq!(bare.address, ADDR, "addresses normalize as everywhere else");
+        assert_eq!(bare.request_id, None);
+        let nulled = parse_withdraw_command(&serde_json::json!({
+            "address": ADDR, "cookie": "c", "request_id": null,
+        }))
+        .unwrap();
+        assert_eq!(nulled.request_id, None);
+
+        // The frame only ever takes a prompt down, but it is still scoped to
+        // a session by address and cookie, so both are mandatory and shaped.
+        for args in [
+            serde_json::json!({}),
+            serde_json::json!({"cookie": "c"}),
+            serde_json::json!({"address": "nope", "cookie": "c"}),
+            serde_json::json!({"address": ADDR}),
+            serde_json::json!({"address": ADDR, "cookie": "x".repeat(MAX_COOKIE_CHARS + 1)}),
+        ] {
+            assert!(parse_withdraw_command(&args).is_err(), "accepted {args}");
         }
     }
 

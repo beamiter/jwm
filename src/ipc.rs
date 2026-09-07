@@ -257,6 +257,7 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "benchmark",
         "bluetooth_pairing_done",
         "bluetooth_pairing_prompt",
+        "bluetooth_pairing_withdraw",
         "clear_clipboard",
         "clear_notifications",
         "clipboard_copy",

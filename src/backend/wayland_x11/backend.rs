@@ -25,8 +25,8 @@ use smithay::backend::allocator::dmabuf::DmabufAllocator;
 use smithay::backend::allocator::gbm::{GbmAllocator, GbmBufferFlags};
 use smithay::backend::egl::{EGLContext, EGLDisplay};
 use smithay::backend::input::{
-    AbsolutePositionEvent, Event as InputEventExt, InputBackend, InputEvent, KeyboardKeyEvent,
-    PointerButtonEvent, PointerMotionEvent,
+    AbsolutePositionEvent, Axis, Event as InputEventExt, InputBackend, InputEvent,
+    KeyboardKeyEvent, PointerAxisEvent, PointerButtonEvent, PointerMotionEvent,
 };
 use smithay::backend::renderer::damage::OutputDamageTracker;
 use smithay::backend::renderer::element::solid::SolidColorRenderElement;
@@ -39,7 +39,7 @@ use smithay::desktop::layer_map_for_output;
 use smithay::desktop::space::SurfaceTree;
 use smithay::desktop::utils::send_frames_surface_tree;
 use smithay::input::keyboard::{FilterResult, ModifiersState};
-use smithay::input::pointer::{ButtonEvent, MotionEvent};
+use smithay::input::pointer::{AxisFrame, ButtonEvent, MotionEvent};
 use smithay::output::{Mode as WlMode, Output, PhysicalProperties, Subpixel};
 use smithay::reexports::calloop::channel::{self, Sender};
 use smithay::reexports::calloop::generic::Generic;
@@ -85,6 +85,11 @@ struct SharedState {
     /// an X11 keyboard grab would and needs to see key releases too — the
     /// held-modifier window switcher commits on nothing else.
     system_ui_grab_active: bool,
+    /// Fractional wheel rotation carried between axis events, so a
+    /// touchpad's stream of sub-click deltas still adds up to whole button
+    /// 4/5 presses for the WM while a grab is up. Reset on the grab's rising
+    /// edge in `compositor_set_system_ui`.
+    wheel_remainder: f64,
     /// Cached key bindings (mods, keysym) for key event suppression.
     key_bindings: Vec<(Mods, KeySym)>,
     /// xkb keycode (0..=255) -> base (unmodified) keysym.
@@ -104,6 +109,7 @@ impl Default for SharedState {
             pointer_y: 0.0,
             mods_state: 0,
             system_ui_grab_active: false,
+            wheel_remainder: 0.0,
             key_bindings: Vec::new(),
             keysym_table: vec![0; 256],
             suppressed_keycodes: HashSet::new(),
@@ -2032,6 +2038,81 @@ fn process_input_event_windowed<B: InputBackend>(
             }
         }
 
+        InputEvent::PointerAxis { event, .. } => {
+            let time = InputEventExt::time_msec(&event);
+            // smithay's X11 backend turns the host's wheel buttons (4-7)
+            // into PointerAxis and drops the paired releases, so without
+            // this arm the wheel reached neither the clients nor the WM.
+            // While a system-UI grab owns the pointer, the wheel belongs to
+            // the WM: one synthetic button-4/5 press/release pair per whole
+            // vertical click — the same synthesis the udev backend runs,
+            // hanging off the press path every WM wheel behavior uses
+            // (event_dispatcher.rs:461). The release half is not optional:
+            // the screenshot wheel path arms a one-shot release swallow
+            // (capture.rs `swallow_next_button_release`) that only the
+            // paired release clears — a press alone would leave the latch
+            // armed to eat the next unrelated release. The horizontal axis
+            // stays inert, exactly as X11 buttons 6/7 are no-ops in those
+            // branches.
+            let (grab_active, clicks, x, y, output, mods_state) = {
+                let mut s = shared.lock_safe();
+                let grab_active = s.system_ui_grab_active;
+                let mut clicks = 0;
+                if grab_active {
+                    let (steps, remainder) = wayland_dummy_ops::wheel_steps(
+                        s.wheel_remainder,
+                        event.amount_v120(Axis::Vertical),
+                        event.amount(Axis::Vertical),
+                    );
+                    s.wheel_remainder = remainder;
+                    clicks = steps;
+                }
+                let (x, y) = (s.pointer_x, s.pointer_y);
+                let output = s
+                    .outputs
+                    .iter()
+                    .find(|o| {
+                        (x as i32) >= o.x
+                            && (y as i32) >= o.y
+                            && (x as i32) < (o.x + o.width)
+                            && (y as i32) < (o.y + o.height)
+                    })
+                    .map(|o| o.id);
+                (grab_active, clicks, x, y, output, s.mods_state)
+            };
+            if grab_active {
+                let detail = wayland_dummy_ops::wheel_click_detail(clicks);
+                for _ in 0..clicks.unsigned_abs() {
+                    let mut pending = pending_events.lock_safe();
+                    pending.push_back(BackendEvent::ButtonPress {
+                        target: HitTarget::Background { output },
+                        state: mods_state,
+                        detail,
+                        time,
+                        root_x: x,
+                        root_y: y,
+                    });
+                    pending.push_back(BackendEvent::ButtonRelease {
+                        target: HitTarget::Background { output },
+                        time,
+                    });
+                }
+            } else if let Some(pointer) = state.seat.get_pointer() {
+                let mut frame = AxisFrame::new(time).source(event.source());
+                for axis in [Axis::Horizontal, Axis::Vertical] {
+                    if let Some(val) = event.amount(axis) {
+                        frame = frame.value(axis, val);
+                    }
+                    if let Some(v120) = event.amount_v120(axis) {
+                        frame = frame.v120(axis, v120 as i32);
+                    }
+                    frame = frame.relative_direction(axis, event.relative_direction(axis));
+                }
+                pointer.axis(state, frame);
+                pointer.frame(state);
+            }
+        }
+
         _ => {}
     }
 }
@@ -2053,7 +2134,13 @@ impl CompositorWorkspaceEffects for WaylandX11Backend {
                 .lock_safe()
                 .retain(|event| !matches!(event, BackendEvent::KeyPress { .. }));
         }
-        self.shared.lock_safe().system_ui_grab_active = overlay.is_some();
+        let mut shared = self.shared.lock_safe();
+        if overlay.is_some() && !shared.system_ui_grab_active {
+            // A half-turn accumulated before the panel opened must not leak
+            // into its first scroll.
+            shared.wheel_remainder = 0.0;
+        }
+        shared.system_ui_grab_active = overlay.is_some();
     }
 }
 impl CompositorWindowEffects for WaylandX11Backend {}

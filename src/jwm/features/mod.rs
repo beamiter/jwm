@@ -73,7 +73,7 @@ pub use session::SessionAction;
 pub use shell_hub::ShellHubRoute;
 pub use system_ui::{
     ControlCenterInputs, ControlKind, MonitorDirection, MonitorLayoutEntry, PromptKind,
-    SystemUiState,
+    SLIDER_STEP, SystemUiState,
 };
 pub use tags_overview::{TagClientFrame, TagsOverviewState};
 

@@ -753,7 +753,7 @@ impl Jwm {
         keysym: u32,
         mods: Mods,
     ) {
-        use crate::jwm::features::{ControlKind, ShellHubRoute, system_controls};
+        use crate::jwm::features::{ControlKind, SLIDER_STEP, ShellHubRoute, system_controls};
 
         let command_mods = Mods::CONTROL | Mods::ALT | Mods::SUPER;
         let route = (!mods.intersects(command_mods))
@@ -768,8 +768,8 @@ impl Jwm {
         }
 
         let slider_delta = match keysym {
-            keys::KEY_Left => Some(-5),
-            keys::KEY_Right => Some(5),
+            keys::KEY_Left => Some(-SLIDER_STEP),
+            keys::KEY_Right => Some(SLIDER_STEP),
             _ => None,
         };
         let activate = keysym == keys::KEY_Return || keysym == keys::KEY_space;
@@ -808,32 +808,22 @@ impl Jwm {
                     }
                 }
                 ControlKind::Volume => {
-                    let state = if let Some(delta) = slider_delta {
-                        system_controls::volume_adjust(delta)
+                    if let Some(delta) = slider_delta {
+                        self.adjust_control_slider(ControlKind::Volume, delta);
                     } else if activate || keysym == keys::KEY_m {
-                        system_controls::volume_toggle_mute()
-                    } else {
-                        None
-                    };
-                    if let Some(state) = state {
-                        self.cache_control_volume(state);
-                        self.features.system_ui.update_control(
-                            ControlKind::Volume,
-                            state.percent,
-                            state.muted,
-                        );
+                        if let Some(state) = system_controls::volume_toggle_mute() {
+                            self.cache_control_volume(state);
+                            self.features.system_ui.update_control(
+                                ControlKind::Volume,
+                                state.percent,
+                                state.muted,
+                            );
+                        }
                     }
                 }
                 ControlKind::Brightness => {
                     if let Some(delta) = slider_delta {
-                        if let Some(percent) = system_controls::brightness_adjust(delta) {
-                            self.cache_control_brightness(percent);
-                            self.features.system_ui.update_control(
-                                ControlKind::Brightness,
-                                percent,
-                                false,
-                            );
-                        }
+                        self.adjust_control_slider(ControlKind::Brightness, delta);
                     }
                 }
                 ControlKind::Network => {
@@ -1379,8 +1369,21 @@ impl Jwm {
         &mut self,
         backend: &mut dyn Backend,
         direction: isize,
+        hit_row: Option<usize>,
     ) {
         backend.compositor_set_system_ui_hover(None);
+        // Scroll-on-slider: a wheel click over a Volume/Brightness row
+        // adjusts the value under the pointer instead of browsing the list.
+        // The selection pill follows, so a subsequent Left/Right acts on
+        // the row the pointer is on.
+        if let Some(row) = hit_row
+            && let Some((kind, delta)) = self.features.system_ui.wheel_slider_step(row, direction)
+        {
+            let _ = self.features.system_ui.select_visible_row(row);
+            self.adjust_control_slider(kind, delta);
+            self.sync_system_ui(backend);
+            return;
+        }
         if self.features.system_ui.is_calendar() {
             self.features
                 .system_ui
@@ -1389,6 +1392,33 @@ impl Jwm {
             self.features.system_ui.move_selection(direction.signum());
         }
         self.sync_system_ui(backend);
+    }
+
+    /// The slider side effect shared by Left/Right and scroll-on-slider:
+    /// nudge the real control, then write the read-back value into the row.
+    fn adjust_control_slider(&mut self, kind: crate::jwm::features::ControlKind, delta: i32) {
+        use crate::jwm::features::{ControlKind, system_controls};
+        match kind {
+            ControlKind::Volume => {
+                if let Some(state) = system_controls::volume_adjust(delta) {
+                    self.cache_control_volume(state);
+                    self.features.system_ui.update_control(
+                        ControlKind::Volume,
+                        state.percent,
+                        state.muted,
+                    );
+                }
+            }
+            ControlKind::Brightness => {
+                if let Some(percent) = system_controls::brightness_adjust(delta) {
+                    self.cache_control_brightness(percent);
+                    self.features
+                        .system_ui
+                        .update_control(ControlKind::Brightness, percent, false);
+                }
+            }
+            _ => {}
+        }
     }
 
     pub(crate) fn dismiss_system_ui_from_pointer(&mut self, backend: &mut dyn Backend) {

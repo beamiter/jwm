@@ -405,6 +405,10 @@ pub struct ListRow {
     pub data: RowData,
 }
 
+/// Step (in percent) that Left/Right and scroll-on-slider apply to a
+/// slider row.
+pub const SLIDER_STEP: i32 = 5;
+
 /// One row of the control center: sliders react to Left/Right, toggles and
 /// actions to Return.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2054,6 +2058,34 @@ impl SystemUiState {
             return None;
         };
         entries.get(*selected).map(|entry| entry.kind)
+    }
+
+    /// The control rendered at a visible row, when this panel is the control
+    /// center and the row carries an entry (section headings have none).
+    #[must_use]
+    pub fn control_at_visible_row(&self, visual_row: usize) -> Option<ControlKind> {
+        let Self::ControlCenter { entries, .. } = self else {
+            return None;
+        };
+        let target = self.visible_row_target(visual_row)?;
+        entries.get(target).map(|entry| entry.kind)
+    }
+
+    /// What a wheel click does in the control center: over a slider row it
+    /// adjusts that row's value (scroll-on-slider, the pointer counterpart
+    /// of Left/Right); anywhere else the caller browses the list. Wheel-up
+    /// arrives as `direction < 0` and raises the value, matching the keys.
+    #[must_use]
+    pub fn wheel_slider_step(
+        &self,
+        visual_row: usize,
+        direction: isize,
+    ) -> Option<(ControlKind, i32)> {
+        let kind = self.control_at_visible_row(visual_row)?;
+        if !matches!(kind, ControlKind::Volume | ControlKind::Brightness) {
+            return None;
+        }
+        Some((kind, -direction.signum() as i32 * SLIDER_STEP))
     }
 
     /// Write back the live value of one control row after a side effect.
@@ -4856,6 +4888,65 @@ mod tests {
         assert!(parts.items[0].contains("mute"));
         // A muted slider renders an empty bar.
         assert!(!parts.items[0].contains('\u{2588}'));
+    }
+
+    #[test]
+    fn wheel_over_a_slider_row_adjusts_it_instead_of_browsing() {
+        let state = SystemUiState::control_center(&ControlCenterInputs {
+            volume: Some((45, false)),
+            brightness: Some(60),
+            ..Default::default()
+        });
+        // Flat list order: volume, brightness, then the toggles/actions.
+        assert_eq!(state.control_at_visible_row(0), Some(ControlKind::Volume));
+        assert_eq!(
+            state.control_at_visible_row(1),
+            Some(ControlKind::Brightness)
+        );
+        assert_eq!(
+            state.control_at_visible_row(2),
+            Some(ControlKind::NightLight)
+        );
+
+        // Wheel-up arrives as a negative direction and raises the value, the
+        // same sign convention as the Left/Right keys.
+        assert_eq!(
+            state.wheel_slider_step(0, -1),
+            Some((ControlKind::Volume, SLIDER_STEP))
+        );
+        assert_eq!(
+            state.wheel_slider_step(1, 1),
+            Some((ControlKind::Brightness, -SLIDER_STEP))
+        );
+        // Rows that are not sliders keep the browsing behavior, and a row
+        // past the end is nobody's slider.
+        assert_eq!(state.wheel_slider_step(2, -1), None);
+        assert_eq!(state.wheel_slider_step(99, -1), None);
+    }
+
+    #[test]
+    fn wheel_slider_step_tracks_rows_through_section_headings() {
+        let state = SystemUiState::control_center(&ControlCenterInputs {
+            shell_hub: true,
+            volume: Some((45, false)),
+            ..Default::default()
+        });
+        // Section headings shift the volume row's visual index; the mapping
+        // must follow entries, not positions. Heading rows map to no entry
+        // and are never sliders.
+        let volume_row =
+            (0..32).find(|row| state.control_at_visible_row(*row) == Some(ControlKind::Volume));
+        let volume_row = volume_row.expect("the hub lists a volume row");
+        assert_eq!(
+            state.wheel_slider_step(volume_row, -1),
+            Some((ControlKind::Volume, SLIDER_STEP))
+        );
+    }
+
+    #[test]
+    fn wheel_slider_step_is_none_outside_the_control_center() {
+        let state = SystemUiState::lock();
+        assert_eq!(state.wheel_slider_step(0, -1), None);
     }
 
     #[test]
