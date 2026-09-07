@@ -28,7 +28,10 @@ pages still close with one `Esc`.
 
 The same surface is pointer-operable: hover shows a quiet cue without moving
 keyboard focus or making the list jump, a left click performs the row's `Enter` action, and the
-wheel browses the current list. Clicking the dimmed area outside the card acts
+wheel browses the current list — except over a Volume or Brightness slider row,
+where it adjusts that value by 5% per click instead (the pointer counterpart of
+`Left`/`Right`, and the selection pill follows so a later keypress stays on the
+row you scrolled). Clicking the dimmed area outside the card acts
 like `Esc` (cancel a passphrase first, return to the Hub from a child page, then
 close). Section headings, status/empty rows, notification button strips and
 secret prompts deliberately do not become accidental click targets. The lock
@@ -257,8 +260,12 @@ Three prompt shapes exist, all naming the device:
 
 `Esc` (or closing/replacing the panel in any way) cancels the pairing: JWM
 broadcasts the cancel, the helper fails its outstanding BlueZ request or calls
-`CancelPairing`, and the picker stays open with a one-line status. An
-unanswered prompt times out after 25 seconds; a helper that never reports back
+`CancelPairing`, and the picker stays open with a one-line status. A prompt
+BlueZ withdraws before an answer — the device gave up, or its request was
+superseded — comes down as soon as the helper reports the cancellation
+(`bluetooth_pairing_withdraw`); the session itself lives on, and the
+25-second prompt timeout is only the backstop for a helper that never
+reports. A helper that never reports back
 is given up on after 95 seconds. A successful pairing re-reads the device
 list; a failure leaves the reason on the status line and can be retried.
 
@@ -285,11 +292,11 @@ refuses inbound `RequestAuthorization`/`AuthorizeService` outright — it holds
 the default agent registration for its whole session precisely so nothing else
 answers its callbacks, and letting it also bless whatever rings during that
 window would turn one chosen device into an open door. Accepting an incoming
-request is a separate, explicitly armed thing (below). Prompts and outcomes
-travel over two IPC commands (`bluetooth_pairing_prompt`,
-`bluetooth_pairing_done`) matched to the session by a cookie JWM mints and
-passes through the helper's environment; answers go back as
-`bluetooth/pairing_response` events on the `bluetooth` topic, which JWM
+request is a separate, explicitly armed thing (below). Prompts, withdrawals
+and outcomes travel over three IPC commands (`bluetooth_pairing_prompt`,
+`bluetooth_pairing_withdraw`, `bluetooth_pairing_done`) matched to the session
+by a cookie JWM mints and passes through the helper's environment; answers go
+back as `bluetooth/pairing_response` events on the `bluetooth` topic, which JWM
 broadcasts only while a session is active. PINs and passkeys are never logged
 by either side, and JWM wipes the typed buffer once the answer is sent.
 
@@ -328,7 +335,10 @@ whose question BlueZ already withdrew resolves nothing rather than landing on
 whatever replaced it. Closing the window and withdrawing one unanswered prompt
 are different answers on the wire, not the same one told apart by timing:
 answering leaves the window armed for the device it bound to, while `Esc`
-closes it. Teardown turns `Pairable` and `Discoverable` off rather than
+closes it. A request BlueZ cancels before you answer is withdrawn from the
+panel the moment the helper reports it — the window stays armed for its
+sixty seconds, only the question comes down; the prompt timeout is the
+backstop for a helper that never reports, not the normal path. Teardown turns `Pairable` and `Discoverable` off rather than
 restoring what it found — off is the only safe direction to be wrong in, and
 JWM turns them on by no other route. It also lowers BlueZ's own
 `PairableTimeout`/`DiscoverableTimeout` to the window length while the window

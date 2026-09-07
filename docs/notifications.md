@@ -38,7 +38,8 @@ never falls through to the client underneath the card. Every button
 dismisses, not only the left one: the stack docks exactly where a monitor's
 tab strip lies, so a middle or right press falling past the card would close
 or focus the strip cell hidden under it. Only the left button invokes an
-action chip. The wheel (X11 buttons 4-7) is not a click — it dismisses
+action chip. The wheel (X11 buttons 4-7; on Wayland the axis events and the
+physical buttons whose codes map there) is not a click — it dismisses
 nothing and goes to whatever is under the card. Dismissing a card is not
 closing the notification: the row stays in the center (see
 [closes](#the-d-bus-bridge)).

@@ -7,6 +7,19 @@ monorepo use independent Semantic Versions.
 
 ### Added
 
+- The control centre's Volume and Brightness rows now answer the wheel:
+  scrolling over a slider row adjusts that value by 5% per click — the
+  pointer counterpart of `Left`/`Right` — and the selection pill follows the
+  pointer's row, so a later keypress keeps acting on the row you scrolled.
+  Scrolling anywhere else still browses the list. See
+  [docs/control-center.md](docs/control-center.md).
+
+- The modal dim behind shell panels now fades in with the card's own open
+  spring instead of snapping to full darkness in one frame. The lock screen
+  is exempt on purpose — hiding the desktop instantly is its job.
+
+### Changed
+
 - HDR signalling can now be enabled per output on the Wayland/KMS backend,
   behind a fail-closed gate that is re-evaluated every frame:
   `set_hdr_metadata` latches the request and the compositor asserts BT.2020 +
@@ -670,6 +683,33 @@ monorepo use independent Semantic Versions.
   errors and explicitly tests the Linux action and D-Bus provider adapters.
 
 ### Fixed
+
+- The scroll wheel now reaches the window manager on the Wayland backends.
+  Wheel rotation arrives there as axis events, which were only ever forwarded
+  to the focused client — so while a shell panel, the window switcher, or a
+  screenshot selection held the pointer, the wheel did nothing at all. During
+  those grabs the vertical axis now becomes the same button-4/5 presses X11
+  delivers (one press/release pair per detent, with the remainder carried so
+  a touchpad's smooth scroll still adds up to clicks): panels browse, the
+  switcher steps, the calendar pages, and the screenshot stroke width
+  adjusts, on every Wayland backend. The nested X11/winit backends also
+  forward the wheel to clients now — it previously reached nobody there at
+  all.
+
+- A Bluetooth prompt BlueZ withdraws before you answer — the device gave up
+  or its request was superseded — now leaves the panel immediately instead of
+  lingering until the 25-second prompt timeout. The helper reports the
+  cancellation over a new `bluetooth_pairing_withdraw` IPC command; the
+  session itself (including an armed inbound window) lives on.
+
+- A toast card no longer swallows the physical buttons whose evdev codes map
+  to 4-7 on the Wayland backend. The WM treats those codes as the wheel —
+  never a click, never a dismissal — but the backend was withholding them
+  from the client underneath the card as well, so the press went to nobody.
+
+- The IME popup positioning failure logs no longer warn once per frame for a
+  persistently broken popup; each failure kind warns once per popup and may
+  warn again after the condition clears.
 
 - The window switcher takes the same pointer grab every other clickable panel
   takes, so `Alt+Tab`'s documented click behaviour is finally the real one: a
