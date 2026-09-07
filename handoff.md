@@ -4,6 +4,97 @@
 
 ---
 
+## 2026-09-07：UI/UX 十轮（指针一致性：Wayland 滚轮贯通 / 滑块滚轮 / 配对撤回 / scrim 淡入）
+
+主题取自九轮后的全景盘点：**同一手势在两组后端上的语义差**是最大的体验债。
+五项落地，另修掉两个本轮自己发现的缺陷（一个在评审阶段、一个在验收阶段）。
+
+1. **Wayland 滚轮贯通（此前 WM 面板在 Wayland 上完全没有滚轮）。**
+   `InputEvent::PointerAxis` 原来只转发客户端座位，system_ui/screenshot 抓取
+   期间面板收不到滚轮——X11 上滚轮经抓取以 button 4/5 到达，切换器浏览、
+   面板翻页、截图线宽、日历翻月全挂在 `event_dispatcher.rs:461` 的 press 路
+   径。现在抓取激活时垂直轴合成为每个整格一对 `ButtonPress{detail:4/5}` +
+   `ButtonRelease`，不转发客户端；无抓取时逐字节保持原转发。换算是共享纯函
+   数 `wayland_dummy_ops::wheel_steps`（v120 优先、120/格；回退 amount、
+   15/格；余数跨事件进位，触控板平滑滚动攒成整格；**libinput 正方向为下，
+   负=上=detail 4**——实现代理抓住了简报里写反的符号，有 libinput.h 与
+   smithay 源码佐证）。水平轴保持惰性（对齐 X11 6/7 的 no-op）。抓取上升沿
+   清零累加器，开面板前攒的半格不漏进第一次滚动。
+2. **release 必须成对合成（验收阶段抓到的、本轮差点引入的缺陷）**。只发
+   press 会让截图滚轮路径 arm 的一次性 release 吞咽闩锁
+   （`capture.rs::swallow_next_button_release`）悬空，吃掉下一个无关
+   release——正是十三轮 toast `toast_swallowed_buttons` 那一类缺陷的形状。
+   X11 的滚轮本就是 press+release 对，WM 的闩锁机制就是按成对事件设计的；
+   补齐 release 后两后端事件流逐点同构。WM 侧回归测试
+   `the_screenshot_wheel_swallow_pairs_press_with_release` 从消费端钉住配对
+   契约。
+3. **嵌套后端滚轮此前彻底死亡**（调查顺手发现）：smithay 的 X11/winit 前端
+   把宿主滚轮转成 PointerAxis 并丢掉成对 release，而两个嵌套后端的输入分派
+   根本没有 PointerAxis 臂——客户端和 WM 都收不到。两臂补上（抓取时同上合
+   成，否则 axis frame 原样转发客户端），`wheel_remainder` 进两个嵌套
+   SharedState；`wayland_dummy_ops` 的源码钉住测试扩展为同时钉两个嵌套后端
+   的滚轮臂与按键镜像，防回归。
+4. **evdev 4..=7 吞键与 WM toast 规则对齐**（十三轮遗留 #4 关闭）：
+   `swallow_toast_button` 改按映射后的 detail 判定，4..=7 落在卡片上正常送达
+   客户端、也不进吞咽闩锁（此前客户端收不到 + WM 不理 = 死输入）。
+5. **控制中心 scroll-on-slider**（两后端同时获得）：滚轮落在
+   Volume/Brightness 行 = 按 ±5 调值（`SLIDER_STEP` 与 Left/Right 同源），选中
+   pill 跟随指针行，后续 Left/Right 作用在同一行；其余行仍是浏览。纯决策
+   `wheel_slider_step` + `control_at_visible_row`（shell hub 的分节标题行映射
+   不到 entry、永不是滑块），副作用抽成 `adjust_control_slider` 与键路径共
+   用。刻意不做点击/拖拽音轨：滑块是 20 格 unicode 文本条，命中换算要复制渲
+   染端的文本度量，不值。
+6. **蓝牙 `bluetooth_pairing_withdraw` 贯通**（十三轮遗留 #1 关闭）：bluez
+   取消未答 prompt 时 helper 即时报 withdraw（outbound/inbound 共用一个
+   `PairingAgent::cancel`，一处改动覆盖两个方向；`request_id` 为 null 表示
+   「面板上的那个 prompt」，与 cancel 的 by-identity 语义一致）。jwm 侧只撤
+   prompt：会话保留、入站窗口继续走自己的 60s、迟到应答在两层被拒、25s 超时
+   闩不再对已撤 prompt 触发。wire 为追加命令，schema 不升版（先例 f418a1f）。
+   cancel 改 async 并 **await** 上报——一次性会话进程在 Pair 解卷后立刻退
+   出，detached 线程的上报可能被掐掉。
+7. **验收阶段修掉的第二个本轮缺陷：withdraw/done 竞态**。cancel 原来先
+   resolve pending 再 await withdraw——resolve 触发 Pair 解卷 →
+   `report_done`，与在途的 withdraw 是两条并发连接，done 可能先于 withdraw
+   到达；测试桩 `recv_command` 又会丢弃不匹配的帧，于是 done 被吃掉、等
+   withdraw 的循环 15s 超时（全套件约 1/3 概率复现，单跑不复现）。双修：
+   cancel 改为**先 withdraw 后 resolve**（wire 顺序确定：撤下先于结果；
+   jwm 也不会再在面板还挂着旧 prompt 时处理 done），测试桩改为暂存不匹配
+   帧而不是丢弃。修复后全套件 6/6 + `JWM_REQUIRE_DBUS_DAEMON=1` 1/1 全绿。
+8. **scrim 淡入**（两端渲染器）：模态遮罩 alpha 乘上卡片自己的
+   `content_a = opened²`（IslandMotion 同一进度，不发明第二条曲线）；motion
+   关 = 瞬间满 alpha；关闭本就无 spring-out，遮罩同帧消失；锁屏分支独立、仍
+   瞬间不透明（安全属性）；tags 网格/胶片条的自有遮罩不在本轮。X11 帧调度
+   复用弹簧既有的 needs_render 循环，无新增 ticker。
+9. **ime-pos 失败 warn 节流**（十三轮遗留 #5 收尾）：三条失败路径按（popup
+   表面， 失败类别）warn-once，本帧失败集整体替换上帧——消失/恢复后再失败会
+   重新 warn，持续坏掉的只 warn 一次。clippy `mutable_key_type` 按仓库既有 9
+   处先例加带理由的 allow（ObjectId 的内部活性标志不参与 Hash/Eq）。
+
+**本轮发现的既有缺口（未修，记录在案）**：`bluetooth_pairing_failed` 有
+bridge 发送端、解析器和测试，但没有 ipc_handler 分派、也不在
+`IPC_REGISTRY`——jwm 现在答 "unknown command"，bridge 把它容忍为「jwm 太
+旧」。
+
+**仍然开着的**（沿用十三轮）：`sync_window_groups` 的 dirty 门控（失效点枚
+举困难，十三轮复查者据此拒绝实现，本轮未再尝试）；嵌套 Wayland 后端无 shell
+面板渲染（`has_compositor()` 默认 false，compat 已写明）；toast 自然过期不发
+`NotificationClosed(1)` 是成文的设计决定（toast.rs 的契约注释 +
+docs/notifications.md）。已知小边界：grab=None 的面板（键位查看器）在
+Wayland 上滚轮现在总会浏览列表（X11 上只有指针在根窗口上才浏览）——差异在
+「无抓取时滚轮是否穿透到面板下的客户端」，无害且方向是增强。
+
+验证：fmt / clippy -D warnings / `check --all-targets` / `--no-default-features`
+（仍是那 5 个既有 X11 clipboard dead-code 警告，逐一比对未新增）/ 7 组
+feature profile 全绿；`cargo test --locked` lib **2872 passed / 0 failed**
+（基线 2857 + 净增 15：wheel 纯函数 3、toast 吞键 1、滑块 4、闩锁配对 1、
+配对撤回 3、ime 节流 3）；bridge **66 passed / 0 failed**（基线 62 + 4：纯
+函数 1、dbus-daemon 集成 3）。**无真机显示会话**：Wayland 滚轮链路的行为验
+证全部来自纯函数单测 + 与 X11 事件流的逐点同构。真机验证时优先试：面板内
+滚轮翻页、触控板平滑滚动攒格、截图线宽滚轮、滑块行滚轮、配对中被对端取消
+时 prompt 是否即撤。
+
+---
+
 ## 2026-09-06：十三轮（全面进化：118 条候选 → 130 处修复，含 32 处本轮自伤）
 
 这一轮的形状和十二轮不同：**审查、修复、复查是三批互不相同的智能体**，而复查
