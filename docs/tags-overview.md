@@ -5,7 +5,9 @@ current monitor at once, so you can see which workspace holds what instead of
 walking tags blind. Each cell carries the tag's number and a line-drawn
 wireframe of its windows; the tags currently on screen keep a persistent
 accent frame. The key is a toggle — pressing it again closes the grid without
-changing the view.
+changing the view. The dim behind the panel fades in on the same `opened²`
+envelope the other shell panels' scrims ride — instantly full when animations
+are disabled — while closing stays instant, since no panel fades out.
 
 ```toml
 [behavior]

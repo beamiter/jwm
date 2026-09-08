@@ -73,8 +73,12 @@ while notifications are muted.
 Pointer input follows the same model: hover highlights a notification, click
 invokes its current/default action (or dismisses an action-less row), the wheel
 browses history, and clicking outside closes the card. The numbered action
-strip remains a keyboard cursor target rather than pretending each glyph is a
-separate pointer button.
+strip is clickable too: a click on a chip invokes that action directly —
+through the same pipeline as its digit key — with the hit geometry measured
+off the exact drawn string in the configured UI font, so the gutter and the
+gaps between chips are deliberate no-ops rather than near-misses that fire a
+neighbour. Hovering a chip moves the row's ✓ cursor onto it, so a following
+`Enter` or digit acts on what the pointer was over.
 
 `Up`/`Down` always move *between* rows and `Left`/`Right` always move *within*
 the highlighted one — the same rule the control center and the calendar follow.

@@ -5,6 +5,9 @@ and now brings up a strip of film while it does: one cell per layout, each
 holding a line-drawn thumbnail of what that layout does with a screenful of
 windows. `Alt+Shift+Space` steps the other way. The strip commits on its own a
 moment after you stop, so a single tap still behaves like a plain layout switch.
+The dim behind the strip fades in on the same `opened²` envelope the other
+shell panels' scrims ride — instantly full when animations are disabled —
+while closing stays instant, since no panel fades out.
 
 On a multi-monitor desktop the strip is laid out in the selected monitor's
 global viewport, its scrim covers that output only, and pointer hit-testing

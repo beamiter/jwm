@@ -31,9 +31,13 @@ keyboard focus or making the list jump, a left click performs the row's `Enter` 
 wheel browses the current list — except over a Volume or Brightness slider row,
 where it adjusts that value by 5% per click instead (the pointer counterpart of
 `Left`/`Right`, and the selection pill follows so a later keypress stays on the
-row you scrolled). Clicking the dimmed area outside the card acts
+row you scrolled). A slider's 20-cell bar itself takes press-and-drag: pressing
+on the bar sets the value to the pointed position and tracks the pointer until
+release, while pressing anywhere else on the row keeps the row's `Enter`
+action — so a click beside the bar still toggles mute on Volume, and setting a
+level on a muted sink unmutes it. Clicking the dimmed area outside the card acts
 like `Esc` (cancel a passphrase first, return to the Hub from a child page, then
-close). Section headings, status/empty rows, notification button strips and
+close). Section headings, status/empty rows and
 secret prompts deliberately do not become accidental click targets. The lock
 screen ignores outside clicks.
 
@@ -293,8 +297,9 @@ the default agent registration for its whole session precisely so nothing else
 answers its callbacks, and letting it also bless whatever rings during that
 window would turn one chosen device into an open door. Accepting an incoming
 request is a separate, explicitly armed thing (below). Prompts, withdrawals
-and outcomes travel over three IPC commands (`bluetooth_pairing_prompt`,
-`bluetooth_pairing_withdraw`, `bluetooth_pairing_done`) matched to the session
+and outcomes travel over four IPC commands (`bluetooth_pairing_prompt`,
+`bluetooth_pairing_withdraw`, `bluetooth_pairing_done`,
+`bluetooth_pairing_failed`) matched to the session
 by a cookie JWM mints and passes through the helper's environment; answers go
 back as `bluetooth/pairing_response` events on the `bluetooth` topic, which JWM
 broadcasts only while a session is active. PINs and passkeys are never logged
@@ -338,7 +343,14 @@ answering leaves the window armed for the device it bound to, while `Esc`
 closes it. A request BlueZ cancels before you answer is withdrawn from the
 panel the moment the helper reports it — the window stays armed for its
 sixty seconds, only the question comes down; the prompt timeout is the
-backstop for a helper that never reports, not the normal path. Teardown turns `Pairable` and `Discoverable` off rather than
+backstop for a helper that never reports, not the normal path. A helper that
+dies before its window ever armed — no system bus, no adapter, BlueZ refusing
+the agent — reports `bluetooth_pairing_failed`, and JWM closes the armed
+window at once with the reason on the status line (`Cannot accept incoming
+requests — <reason>`) instead of letting the sixty seconds run down to the
+generic "Not accepting incoming requests". The report is scoped by the
+session cookie alone, and only an inbound window nothing has bound to yet can
+be ended this way. Teardown turns `Pairable` and `Discoverable` off rather than
 restoring what it found — off is the only safe direction to be wrong in, and
 JWM turns them on by no other route. It also lowers BlueZ's own
 `PairableTimeout`/`DiscoverableTimeout` to the window length while the window

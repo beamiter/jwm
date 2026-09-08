@@ -14,9 +14,28 @@ monorepo use independent Semantic Versions.
   Scrolling anywhere else still browses the list. See
   [docs/control-center.md](docs/control-center.md).
 
+- The bars themselves now take press-and-drag: pressing on the 20-cell bar
+  sets the value to the pointed position and tracks the pointer until
+  release, with the external tool calls throttled to actual percent
+  changes. Pressing anywhere else on the row keeps its `Enter` action, so a
+  click beside the bar still toggles mute on Volume — and setting a level
+  on a muted sink unmutes it. The hit geometry is measured off the exact
+  drawn strings in the configured UI font, not a guessed cell width.
+
+- The notification centre's numbered action strip is pointer-clickable: a
+  click on a chip invokes that action directly through the same pipeline as
+  its digit key, the gutter and the gaps between chips are deliberate
+  no-ops rather than near-misses that fire a neighbour, and hovering a chip
+  moves the row's ✓ cursor onto it so a following `Enter` or digit acts on
+  what the pointer was over. See
+  [docs/notifications.md](docs/notifications.md).
+
 - The modal dim behind shell panels now fades in with the card's own open
-  spring instead of snapping to full darkness in one frame. The lock screen
-  is exempt on purpose — hiding the desktop instantly is its job.
+  spring instead of snapping to full darkness in one frame — and the layout
+  filmstrip's and tags overview's own dims now ride the same `opened²`
+  envelope. Fade-in only: closing any panel is still instant, and with
+  animations disabled every dim is full from the first frame. The lock
+  screen is exempt on purpose — hiding the desktop instantly is its job.
 
 ### Changed
 
@@ -683,6 +702,15 @@ monorepo use independent Semantic Versions.
   errors and explicitly tests the Linux action and D-Bus provider adapters.
 
 ### Fixed
+
+- A Bluetooth pairing helper that dies before its inbound window ever armed
+  — no system bus, no adapter, BlueZ refusing the agent — no longer leaves
+  you watching the sixty-second countdown for a window that never existed.
+  The helper's `bluetooth_pairing_failed` report is now dispatched instead
+  of falling through to "unknown command", closing the armed window
+  immediately with the reason on the picker's status line. The report is
+  scoped by the session cookie, and only an inbound window nothing has
+  bound to yet can be ended this way.
 
 - The scroll wheel now reaches the window manager on the Wayland backends.
   Wheel rotation arrives there as axis events, which were only ever forwarded
