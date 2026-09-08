@@ -4,6 +4,99 @@
 
 ---
 
+## 2026-09-08：UI/UX 十三轮（流畅与反馈闭环：热路径去阻塞 / hover 弹簧 / snap_window / 截图录制反馈 / 切换器 Delete）
+
+主题来自新一轮全景盘点（三个 explore：窗口操作导航 / 系统反馈工具 / 动效与感知
+性能），挑出每个会话都会撞到的五项。两波（wave 1 三路并行：热路径 + hover +
+snap；wave 2 两路并行：capture 反馈 + 切换器），集成阶段修掉 3 个波边界/可见性
+小缺口。
+
+1. **热路径子进程去阻塞（感知性能最大项）**。音量/亮度键与滑块输入原来在 WM 事
+   件线程上跑阻塞子进程：每次调整 = set + read-back 两次串行 spawn，
+   `HELPER_TIMEOUT = 5s`——挂起的 wpctl 能冻结整个会话；一次拖拽全行程 ≈ 200
+   次 spawn。现在五个变更原语私有化、只跑在单一 controls worker（OnceLock 线程
+   + mpsc + latest-wins 折叠）：adjust 求和（saturating）、set 吸收 adjust、
+   adjust 跟在 set 后重定向到域边界（音量 0..=100、亮度 1..=100）；**mute
+   toggle 是事件不是值**——永不跨 toggle 折叠（十一轮 set-on-muted→unmute 链依
+   赖顺序），唯一允许折叠的是相邻 toggle 对（两次翻转 = 不翻转），且被取消对的
+   seq 仍被批次 read-back 覆盖。OSD/行即时画乐观估计（adjust 需基数且保持
+   mute、set 无需基数且估计 unmuted、toggle 翻转）；read-back 只在值真的漂移时
+   纠正（`decide_feedback`：Adopt / KeepEstimate / Revert(previous)）。完成通
+   知走 publish-before-signal + `AsyncUpdateNotifier` eventfd，骑既有
+   `poll_control_snapshot_job` 每 tick 轮询——event_dispatcher 零改动。sysfs 亮
+   度走同一 worker（本就不 spawn，图的是单一路径）。工具缺失的稳态错误路径用
+   OnceLock peek 保持逐字节一致。实现 agent 用独立 rustc harness 真跑了折叠/排
+   序/风暴场景（51 次拖拽提交 → ≤8 spawn）。ripple：osd.rs +5 行
+   （`OSD_VISIBLE_WINDOW`：读回纠正只刷新仍可见的 OSD 卡，不在信封结束后弹新
+   卡）。
+2. **hover 弹簧（键盘选择有弹簧、指针悬停原来是瞬变）**。新增共享
+   `HoverEase<K: Copy + PartialEq>`（dynamic_island.rs）：120ms ease-out quad
+   渐入、离开当帧即清（仓库无 fade-out 约定）、motion 关 = 首帧即满、目标切换
+   重新起。刻意用钳位时间线而非物理 Spring（后者阻尼 ≈0.75 会过冲，alpha 乘子
+   不能要过冲）。三个面两后端逐点镜像：系统面板 hover 行预览、exposé cell
+   1.00→1.05 + ring（**X11 只有 ring 没有缩放**——原有视觉特征不扩，只做
+   easing）、tab 条 hover alpha。hit-test parity：exposé 命中仍用 base
+   geometry，只有绘制缩放 easing（与 instant-scale 时代同语义）。needs_render
+   泵 6 处（3 面 × 2 后端）。
+3. **`snap_window` 命令**（键盘/脚本可绑的吸附）：`snap_rect` 纯函数从鼠标路径
+   逐字节提取（1080p/超宽/小屏/非零原点钉住）。**注意：鼠标路径用的是
+   monitor_rect 全屏而非 work area**——吸附浮窗本来就盖 bar 区，文档照实写。
+   tiled/fullscreen/无焦点 = 刻意 no-op；方向参数缺失/多余/未知 = Err。默认绑
+   定 Alt+Shift+Left/Right/Up（默认表全表验证无方向键 chord 冲突）。IPC：
+   `dispatch_commands` 追加 + `parse_snap_direction_arg`（裸 JSON 字符串或
+   `{"direction":…}`，大小写不敏感）。已知重复：方向名单在 ipc.rs 与
+   `SnapDirection::from_name` 各一份（`layout` 模块私有性所限，`parse_layout_arg`
+   同先例），两边测试互钉。
+4. **截图/录制反馈闭环**。截图完成原来只有日志：现在每个 capture 一个
+   `BackgroundJob` watcher（等 PNG 落盘，复用 `wait_for_screenshot_file`
+   30s/25ms），完成 toast 带路径（或剪贴板确认），失败 urgency 2 穿透 DND；**顺
+   带闭了一个真缺口**：纯文件目的地的区域截图此前连后续线程都没有。录制：开始
+   toast（镜像既有停止 toast）+ 持久 REC chip（红点 + `REC m:ss`，右下 16px，
+   `ui.osd` 平涂——不用玻璃，玻璃每帧重模糊不值）；chip 状态**派生**自合成器
+   自己的 recording 状态（编码器没起来就不显示），因此零新 backend trait API；
+   label 纹理只在显示秒翻转时重光栅。**不漏进视频**：X11 画在
+   `capture_recording_frame` 之后（与 crop outline 同槽）；Wayland 画在合并
+   post-delivery chrome 块，为此把 tail_domain 线性尾 blocker 谓词扩到
+   `recording.is_active()`（否则 deferred/HDR 路由上 chip 不可见；副作用：录制
+   中持有 exact-sRGB 回退路由，与可见 toast 同待遇）。**DND 门一致性**：
+   toggles.rs 两处 `compositor_push_toast` 直调改走 `push_system_toast`——停止
+   toast（urgency 1）现在会被 DND 压住，unavailable（urgency 2）仍穿透。
+5. **切换器 Delete/BackSpace 关窗**（Alt+Tab 手势中）：解析**高亮行**（不是焦
+   点窗，手势中通常不同）→ 与 killclient 同一个 `close_window` 调用；行移除保
+   持索引（次旧滑到光标下）、尾行钳位、幸存者不重排（unmanage 不碰
+   system_ui，快照稳定）；关到空 = `cancel_window_switcher` 结束手势（与开门时
+   `initial_selection` None 拒绝同式）；之后松开 Alt 不会提交死窗
+   （`on_key_release` 先查 `is_window_switcher`）。鼠标语义逐字节不动
+   （middle-click-cancel 是钉住的成文决定）。
+
+**集成阶段修掉的本轮缺口（3 个，都是波边界/可见性）**：`func_name`（jwm.rs）缺
+snap_window 臂会打 "<unknown>" 日志；`ScreenshotCompletion` 的 pub(crate) 与
+`FeatureStates` 的 pub 字段触发 private_interfaces 警告（按 sibling payload 惯例
+改 pub）；切换器 hint 行未提 Del（system_ui.rs 在两波文件集外，集成方补）。
+
+**验证**：fmt / clippy -D warnings（修后 0 警告）/ check --all-targets /
+no-default + 7 组 profile 全绿（警告清单与十二轮逐行一致）；lib **2963 passed /
+0 failed**（本轮净 +48：wave 1 +34、wave 2 +14）；bridge **66/0**（未碰）。
+**无真机显示会话**。真机优先验证：按住音量键与拖滑块的跟手度、乐观估计被读回
+纠正的瞬间、wpctl 缺失机器的按键错误路径、hover 渐入三个面、snap 三向与 tiled
+no-op、截图完成 toast 的三条路径（文件/剪贴板/失败）、**录一段视频回放检查
+REC chip 不在画面里**、切换器连续 Delete 关窗。
+
+**仍然开着的**（十四轮候选，均有探索 sketch 在案）：launcher/switcher 行图标
+（medium；`xbar_core::app_icon` 现成，desktop 扫描未解析 `Icon=`，
+`OverlayParts.items` 是 Vec<String> 需扩 schema）；tab 条截断标题 tooltip
+（medium，hover 态已在合成器侧）；媒体进度 `m:ss / m:ss`（medium；bridge
+mpris.rs 只推 identity/status/title/artist/can_go_*，需加 Position 轮询；不做
+seek 不做封面）；剪贴板历史 type-to-filter（small/medium；50 条只有方向键，
+launcher query 机制可借）；quarter-tiling（角落 drop 目前归并半屏）。**成文/
+记录在案勿再提**：toast 与 OSD 会进录制画面（pre-existing，两后端 capture
+readback 都在 toast 绘制之后，改捕获顺序风险高）；caps 不影响密码字符
+（pre-existing，十二轮）；`show_keybindings` 对 snap_window 打印原始函数名
+（cosmetic）；sync_window_groups dirty 门控；嵌套后端无面板；toast
+NotificationClosed(1)；clear-all 指针路径。
+
+---
+
 ## 2026-09-08：UI/UX 十二轮（识别性与环境信息：expose 标题 / 锁屏时钟+caps / 壁纸高亮预览）
 
 主题：每个面板都该能回答「这是哪个窗口 / 现在几点 / 这张图长什么样」。两波
