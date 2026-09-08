@@ -15,12 +15,17 @@ fn snap_preview_colors(color: [f32; 4], opacity: f32) -> ([f32; 4], [f32; 4]) {
     ([r, g, b, alpha], [r * 1.5, g * 1.5, b * 1.5, alpha * 2.0])
 }
 
-/// The rect an expose cell's thumbnail is drawn with this frame: hovered
-/// cells read 5% larger, centred on the cell. The hover ring and the title
-/// label must agree with the thumbnail on it, so all three ask here.
-fn expose_thumb_rect(entry: &ExposeEntry) -> (f32, f32, f32, f32) {
+/// Scale a fully-arrived hover gives an expose cell's thumbnail.
+const EXPOSE_HOVER_SCALE: f32 = 1.05;
+
+/// The rect an expose cell's thumbnail is drawn with this frame: the hovered
+/// cell reads larger, centred on the cell, by the eased-in `hover_scale`
+/// (1.0 while the cue is still arriving, [`EXPOSE_HOVER_SCALE`] once it has).
+/// The hover ring and the title label must agree with the thumbnail on it, so
+/// all three ask here. Hit-testing keeps using the unscaled entry geometry.
+fn expose_thumb_rect(entry: &ExposeEntry, hover_scale: f32) -> (f32, f32, f32, f32) {
     if entry.is_hovered {
-        let scale = 1.05f32;
+        let scale = hover_scale.clamp(1.0, EXPOSE_HOVER_SCALE);
         let sw = entry.current_w * scale;
         let sh = entry.current_h * scale;
         let sx = entry.current_x - (sw - entry.current_w) * 0.5;
@@ -67,6 +72,20 @@ impl WaylandCompositor {
         // actually draws the grid rebuilds the title textures while the
         // context is current — the same bargain the tab titles strike.
         self.refresh_expose_title_textures(gl);
+
+        // The hover cue eases in on the cell under the pointer rather than
+        // snapping to full scale; hover leaving snaps it off the same frame.
+        // Only the drawn scale eases — hit-testing keeps the base geometry.
+        let hovered_id = self.expose_selected();
+        let hover_p = self.expose_hover_ease.advance_with_motion(
+            std::time::Instant::now(),
+            hovered_id,
+            crate::config::CONFIG.load().motion_enabled(),
+        );
+        if self.expose_hover_ease.animating() {
+            self.needs_render = true;
+        }
+        let hover_scale = 1.0 + (EXPOSE_HOVER_SCALE - 1.0) * hover_p;
 
         unsafe {
             // Dark backdrop
@@ -136,8 +155,9 @@ impl WaylandCompositor {
                     None => continue,
                 };
 
-                // Apply hover scale: hovered windows get 1.05x centered scale
-                let (x, y, w, h) = expose_thumb_rect(entry);
+                // Apply the eased hover scale: the hovered window grows
+                // toward 1.05x, centred, as its cue arrives.
+                let (x, y, w, h) = expose_thumb_rect(entry, hover_scale);
 
                 // Draw shadow behind each window. The shadow color is fixed
                 // black, whose RGB is identical in the encoded and linear
@@ -216,8 +236,9 @@ impl WaylandCompositor {
                 gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
                 self.reset_window_color_transform(gl);
 
-                // Highlight border if hovered (blue, 3px)
-                if entry.is_hovered {
+                // Highlight border while hovered (blue, 3px), fading in with
+                // the same envelope as the scale and snapping off with it.
+                if entry.is_hovered && hover_p > 0.0 {
                     gl.UseProgram(self.border_program);
                     gl.UniformMatrix4fv(
                         self.border_uniforms.projection,
@@ -226,7 +247,13 @@ impl WaylandCompositor {
                         projection.as_ptr(),
                     );
                     gl.Uniform1f(self.border_uniforms.border_width, 3.0);
-                    gl.Uniform4f(self.border_uniforms.border_color, 0.4, 0.6, 1.0, opacity);
+                    gl.Uniform4f(
+                        self.border_uniforms.border_color,
+                        0.4,
+                        0.6,
+                        1.0,
+                        opacity * hover_p,
+                    );
                     gl.Uniform1f(self.border_uniforms.radius, 6.0);
                     gl.Uniform1f(self.border_uniforms.radius_top, 6.0);
                     gl.Uniform2f(self.border_uniforms.size, w, h);
@@ -247,7 +274,7 @@ impl WaylandCompositor {
             // Title labels come last, under one text-program bind for the
             // whole grid: a label must never end up under a neighbour's
             // thumbnail or hover ring while cells are still flying in.
-            self.render_expose_titles(gl, projection, opacity);
+            self.render_expose_titles(gl, projection, opacity, hover_scale);
         }
     }
 
@@ -259,7 +286,13 @@ impl WaylandCompositor {
     /// geometry. Cells whose in-flight thumbnail is still narrower than the
     /// rasterised label draw nothing until they settle
     /// ([`expose_label_origin`]).
-    fn render_expose_titles(&self, gl: &ffi::Gles2, projection: &[f32; 16], opacity: f32) {
+    fn render_expose_titles(
+        &self,
+        gl: &ffi::Gles2,
+        projection: &[f32; 16],
+        opacity: f32,
+        hover_scale: f32,
+    ) {
         if self.expose_title_textures.is_empty() {
             return;
         }
@@ -286,7 +319,7 @@ impl WaylandCompositor {
                 if texture == 0 {
                     continue;
                 }
-                let (x, y, w, _) = expose_thumb_rect(entry);
+                let (x, y, w, _) = expose_thumb_rect(entry, hover_scale);
                 let Some((lx, ly)) = expose_label_origin(x, y, w, tw as f32) else {
                     continue;
                 };
@@ -312,6 +345,11 @@ impl WaylandCompositor {
             return;
         }
         self.expose_titles_dirty = false;
+        // The dirty flag is the one place a new entry set announces itself on
+        // the draw path, so the hover cue's envelope resets with it: a cell
+        // the previous exposé left hovered must not resume at full strength
+        // under a re-entered grid, easing in from nothing instead.
+        self.expose_hover_ease.clear();
 
         let stale = std::mem::take(&mut self.expose_title_textures);
         unsafe {
@@ -747,6 +785,17 @@ impl WaylandCompositor {
     /// the blurred scene, and that capture has to happen before the first
     /// cell is filled.
     pub(crate) fn render_tab_bar(&mut self, gl: &ffi::Gles2, projection: &[f32; 16]) {
+        // The hover chip eases in under the pointer like the other cues and
+        // snaps off the frame the hover leaves. Advanced ahead of the empty
+        // early-return so a cleared strip still releases the envelope.
+        let hover_p = self.tab_hover_ease.advance_with_motion(
+            std::time::Instant::now(),
+            self.tab_hover,
+            crate::config::CONFIG.load().motion_enabled(),
+        );
+        if self.tab_hover_ease.animating() {
+            self.needs_render = true;
+        }
         if self.window_groups.is_empty() {
             return;
         }
@@ -754,7 +803,7 @@ impl WaylandCompositor {
         self.ensure_glass_backdrop(gl, ui, projection);
         let accent = self.border_gradient_color_a;
         let tab_hover = self.tab_hover;
-        let hover_scale = ui_theme::TAB_HOVER_ALPHA_SCALE;
+        let hover_scale = ui_theme::TAB_HOVER_ALPHA_SCALE * hover_p;
 
         let (text_rect, text_proj, text_tex, text_opacity) = unsafe {
             (
@@ -798,11 +847,12 @@ impl WaylandCompositor {
                 for (index, tab) in group.tabs.iter().enumerate() {
                     // The focused cell is drawn raised; the hovered one takes
                     // the same chip at half strength so the pointer's target
-                    // shows without competing with the focus. Anything else
-                    // is the track showing through, which is what makes the
-                    // raised cells read as lifted out of it. A hover index
-                    // that outlived its group simply matches nothing here.
-                    let hovered = tab_hover == Some((group_index, index));
+                    // shows without competing with the focus, easing in with
+                    // the envelope above. Anything else is the track showing
+                    // through, which is what makes the raised cells read as
+                    // lifted out of it. A hover index that outlived its group
+                    // simply matches nothing here.
+                    let hovered = tab_hover == Some((group_index, index)) && hover_p > 0.0;
                     if !tab.active && !hovered {
                         continue;
                     }

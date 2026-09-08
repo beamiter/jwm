@@ -9,6 +9,7 @@ use crate::backend::compositor_common::screenshot_toolbar::{
 use crate::core::types::Rect;
 use crate::jwm::features::capture::CaptureTarget;
 use crate::jwm::features::capture_plan::execute_fullscreen_capture;
+use crate::jwm::features::connectivity;
 use crate::jwm::features::deferred_grab::{DeferredGrab, DeferredGrabAction};
 use crate::jwm::types::WMArgEnum;
 use image::{Rgba, RgbaImage};
@@ -23,6 +24,69 @@ const CLIPBOARD_HELPER_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_CLIPBOARD_HELPER_STDERR_BYTES: usize = 64 * 1024;
 const SCREENSHOT_FILE_TIMEOUT: Duration = Duration::from_secs(30);
 const SCREENSHOT_FILE_POLL_INTERVAL: Duration = Duration::from_millis(25);
+/// Completion watchers in flight at most; a burst of captures drops the
+/// oldest waiter (its toast is the least useful) rather than piling threads.
+const MAX_SCREENSHOT_WATCHERS: usize = 4;
+
+/// What one queued capture eventually did, reported by its watcher job and
+/// turned into a toast by the frame tick.
+///
+/// The compositor's readback/encode workers report through logs only, so
+/// without this the user got no feedback at all for a finished screenshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScreenshotCompletion {
+    /// The PNG landed (file destination); carries the published path.
+    Saved(String),
+    /// The image was handed to the system clipboard (clipboard destination).
+    CopiedToClipboard,
+    /// The capture never produced its file, or the clipboard publish failed.
+    /// Carries what the toast body should say.
+    Failed(String),
+}
+
+/// What a failed capture's toast body says. The file destination names the
+/// PNG that never landed; the clipboard destination's staging path is a
+/// private temp file — deleted by the time the failure is reported — so the
+/// body says what failed instead of showing a meaningless path.
+fn capture_failure_detail(to_clipboard: bool, save_path: &str) -> String {
+    if to_clipboard {
+        "the capture could not be copied to the clipboard".to_string()
+    } else {
+        save_path.to_string()
+    }
+}
+
+/// The user-facing card for one capture outcome.
+///
+/// Successes are ordinary toasts held back by Do-Not-Disturb; a failure is
+/// critical so it surfaces even then — silent data loss is the one thing a
+/// quiet screen must not hide (see `notifications::system_toast_allowed`).
+pub(crate) fn screenshot_completion_toast(
+    completion: &ScreenshotCompletion,
+) -> crate::backend::api::ToastNotification {
+    match completion {
+        ScreenshotCompletion::Saved(path) => crate::backend::api::ToastNotification {
+            title: "\u{f030}  Screenshot saved".into(),
+            body: path.clone(),
+            urgency: 1,
+            timeout_ms: 5000,
+            ..Default::default()
+        },
+        ScreenshotCompletion::CopiedToClipboard => crate::backend::api::ToastNotification {
+            title: "\u{f030}  Screenshot copied to clipboard".into(),
+            urgency: 1,
+            timeout_ms: 5000,
+            ..Default::default()
+        },
+        ScreenshotCompletion::Failed(detail) => crate::backend::api::ToastNotification {
+            title: "\u{f030}  Screenshot failed".into(),
+            body: detail.clone(),
+            urgency: 2,
+            timeout_ms: 8000,
+            ..Default::default()
+        },
+    }
+}
 
 fn clipboard_helper_output(
     program: &str,
@@ -1137,6 +1201,29 @@ impl Jwm {
         self.features.deferred_grab.is_some()
     }
 
+    /// Adopt finished screenshot watchers and tell the user what became of
+    /// each capture. Called from the frame tick; costs nothing while no
+    /// watcher is in flight.
+    pub(crate) fn poll_screenshot_completion_jobs(&mut self, backend: &mut dyn Backend) {
+        if self.features.screenshot_completions.is_empty() {
+            return;
+        }
+        let mut waiting = Vec::new();
+        for job in std::mem::take(&mut self.features.screenshot_completions) {
+            match job.take() {
+                Some(completion) => {
+                    self.push_system_toast(backend, screenshot_completion_toast(&completion));
+                }
+                // A job the OS refused a thread for never fills; drop it so
+                // the watcher set recovers exactly like the connectivity
+                // polls do.
+                None if job.started() => waiting.push(job),
+                None => {}
+            }
+        }
+        self.features.screenshot_completions = waiting;
+    }
+
     /// Alt+Shift+S: 立即截取全屏
     pub fn take_screenshot_fullscreen(
         &mut self,
@@ -1149,20 +1236,34 @@ impl Jwm {
     /// Submit a full-screen capture and return the destination selected for it.
     ///
     /// A successful return means the compositor accepted the request. The GL
-    /// readback and PNG encoding remain asynchronous and report their eventual
-    /// completion through logs rather than this command result.
+    /// readback and PNG encoding remain asynchronous; a watcher job follows
+    /// the publish and the frame tick reports the outcome as a toast.
     pub(crate) fn submit_screenshot_fullscreen(
         &mut self,
         backend: &mut dyn Backend,
     ) -> Result<PathBuf, Box<dyn std::error::Error>> {
         let path = Self::prepare_screenshot_path()?;
-        execute_fullscreen_capture(backend, &path).map_err(|error| {
+        if let Err(error) = execute_fullscreen_capture(backend, &path) {
             error!("[take_screenshot_fullscreen] compositor screenshot failed: {error}");
-            Box::new(error) as Box<dyn std::error::Error>
-        })?;
+            self.push_system_toast(
+                backend,
+                screenshot_completion_toast(&ScreenshotCompletion::Failed(
+                    path.display().to_string(),
+                )),
+            );
+            return Err(Box::new(error) as Box<dyn std::error::Error>);
+        }
         info!(
             "[take_screenshot_fullscreen] compositor screenshot queued → {}",
             path.display()
+        );
+        self.track_screenshot_completion(
+            backend,
+            path.display().to_string(),
+            Vec::new(),
+            (0, 0),
+            false,
+            false,
         );
         Ok(path)
     }
@@ -1283,78 +1384,121 @@ impl Jwm {
             }
         };
 
-        if plan.to_clipboard && captured {
-            if plan.bake_annotations {
-                Self::bake_annotations_then_maybe_copy(
-                    backend,
-                    plan.save_path,
-                    (x, y),
-                    annotations,
-                    true,
-                );
-            } else {
-                Self::copy_image_to_clipboard(backend, &plan.save_path);
-            }
-        } else if captured && plan.bake_annotations {
-            Self::bake_annotations_then_maybe_copy(
+        if captured {
+            self.track_screenshot_completion(
                 backend,
                 plan.save_path,
-                (x, y),
                 annotations,
-                false,
+                (x, y),
+                plan.to_clipboard,
+                plan.bake_annotations,
+            );
+        } else {
+            // The capture was never even queued: report the failure now
+            // rather than after the watcher's timeout.
+            self.push_system_toast(
+                backend,
+                screenshot_completion_toast(&ScreenshotCompletion::Failed(plan.save_path)),
             );
         }
     }
 
-    fn bake_annotations_then_maybe_copy(
+    /// Arm the completion watcher for a capture the compositor just accepted.
+    ///
+    /// The GL readback and PNG encode run on compositor workers that report
+    /// through logs only, so without this a finished screenshot was invisible
+    /// to the user. The watcher waits for the published PNG (the same poll
+    /// the clipboard copy already ran), runs the post-capture steps — the
+    /// annotation bake and the clipboard publish — and reports an outcome the
+    /// frame tick turns into a toast.
+    fn track_screenshot_completion(
+        &mut self,
         backend: &dyn Backend,
-        png_path: String,
+        save_path: String,
+        annotations: Vec<ScreenshotAnnotation>,
+        region_origin: (i32, i32),
+        to_clipboard: bool,
+        bake_annotations: bool,
+    ) {
+        let annotations = if bake_annotations {
+            annotations
+        } else {
+            Vec::new()
+        };
+        let image_sender = if to_clipboard {
+            backend.clipboard_image_sender()
+        } else {
+            None
+        };
+        let use_wl_copy = Self::is_udev_backend(backend);
+        // The path needs pre-cleanup only when the OS refuses the watcher
+        // thread *and* it names a clipboard staging file: a saved screenshot
+        // belongs to the user either way, but the staging file holds private
+        // screen contents nothing else will read. The capture itself is only
+        // *queued* at this point, so the unlink usually finds nothing yet.
+        let staging_path = to_clipboard.then(|| save_path.clone());
+        let job = connectivity::BackgroundJob::spawn(move || {
+            Self::complete_capture(
+                save_path,
+                region_origin,
+                annotations,
+                to_clipboard,
+                image_sender,
+                use_wl_copy,
+            )
+        });
+        if !job.started() {
+            if let Some(path) = staging_path {
+                let _ = std::fs::remove_file(path);
+            }
+            return;
+        }
+        if self.features.screenshot_completions.len() >= MAX_SCREENSHOT_WATCHERS {
+            self.features.screenshot_completions.remove(0);
+        }
+        self.features
+            .screenshot_completions
+            .push(self.track_background_job(job));
+    }
+
+    /// The watcher's worker half: wait for the compositor to publish the PNG,
+    /// bake any annotations into it, then hand it to the clipboard when that
+    /// was the destination. Returns what the user should be told.
+    fn complete_capture(
+        save_path: String,
         region_origin: (i32, i32),
         annotations: Vec<ScreenshotAnnotation>,
         to_clipboard: bool,
-    ) {
-        let use_wl_copy = Self::is_udev_backend(backend);
-        let image_sender = backend.clipboard_image_sender();
-        // The path is only needed again if the OS refuses the thread, and
-        // only when it names a clipboard staging file: a saved screenshot
-        // belongs to the user either way.
-        let staging_path = to_clipboard.then(|| png_path.clone());
-        let spawned = std::thread::Builder::new()
-            .name("jwm-screenshot-bake".into())
-            .spawn(move || {
-                if !Self::wait_for_screenshot_file(&png_path) {
-                    error!(
-                        "[take_screenshot] screenshot file did not appear: {}",
-                        png_path
-                    );
-                    if to_clipboard {
-                        let _ = std::fs::remove_file(&png_path);
-                    }
-                    return;
-                }
-
-                match Self::bake_annotations_into_png(&png_path, region_origin, &annotations) {
-                    Ok(()) => info!("[take_screenshot] annotations baked into {}", png_path),
-                    Err(e) => error!("[take_screenshot] failed to bake annotations: {e}"),
-                }
-
-                if to_clipboard {
-                    Self::publish_image_path_to_clipboard(&png_path, image_sender, use_wl_copy);
-                }
-            });
-        if let Err(error) = spawned {
-            // `std::thread::spawn` panics when the OS refuses a thread (a
-            // pids cgroup limit, RLIMIT_NPROC, memory pressure). On the
-            // compositor thread that panic takes the whole session down —
-            // every window — for one screenshot. Losing the annotations is
-            // the acceptable failure; the capture itself is already on disk.
-            error!("[take_screenshot] could not spawn the annotation baking thread: {error}");
-            if let Some(path) = staging_path {
-                // Best effort only, and for the same reason as in
-                // `copy_image_path_to_clipboard`: the capture is queued, not
-                // written, so this usually finds nothing.
-                let _ = std::fs::remove_file(&path);
+        image_sender: Option<crate::backend::clipboard_offer::ClipboardImageSender>,
+        use_wl_copy: bool,
+    ) -> ScreenshotCompletion {
+        if !Self::wait_for_screenshot_file(&save_path) {
+            error!(
+                "[take_screenshot] screenshot file did not appear: {}",
+                save_path
+            );
+            if to_clipboard {
+                let _ = std::fs::remove_file(&save_path);
             }
+            return ScreenshotCompletion::Failed(capture_failure_detail(to_clipboard, &save_path));
+        }
+
+        if !annotations.is_empty() {
+            // The capture is on disk either way: a bake failure loses the
+            // ink, not the screenshot.
+            match Self::bake_annotations_into_png(&save_path, region_origin, &annotations) {
+                Ok(()) => info!("[take_screenshot] annotations baked into {}", save_path),
+                Err(e) => error!("[take_screenshot] failed to bake annotations: {e}"),
+            }
+        }
+
+        if !to_clipboard {
+            return ScreenshotCompletion::Saved(save_path);
+        }
+        if Self::publish_image_path_to_clipboard(&save_path, image_sender, use_wl_copy) {
+            ScreenshotCompletion::CopiedToClipboard
+        } else {
+            ScreenshotCompletion::Failed(capture_failure_detail(true, &save_path))
         }
     }
 
@@ -1823,55 +1967,6 @@ impl Jwm {
         }
     }
 
-    /// Publish a PNG through the backend's native clipboard owner.
-    ///
-    /// X11 goes straight to JWM's selection thread, including ICCCM INCR for
-    /// large payloads. Wayland keeps `wl-copy` as the platform fallback until
-    /// its data-device offer is routed through the compositor event loop.
-    fn copy_image_to_clipboard(backend: &dyn Backend, png_path: &str) {
-        Self::copy_image_path_to_clipboard(
-            png_path,
-            backend.clipboard_image_sender(),
-            Self::is_udev_backend(backend),
-        );
-    }
-
-    fn copy_image_path_to_clipboard(
-        png_path: &str,
-        image_sender: Option<crate::backend::clipboard_offer::ClipboardImageSender>,
-        use_wl_copy: bool,
-    ) {
-        let png_path = png_path.to_string();
-        info!("[take_screenshot] clipboard copy scheduled: {}", png_path);
-
-        let staging_path = png_path.clone();
-        let spawned = std::thread::Builder::new()
-            .name("jwm-clipboard-copy".into())
-            .spawn(move || {
-                if !Self::wait_for_screenshot_file(&png_path) {
-                    error!(
-                        "[take_screenshot] clipboard source file did not appear: {}",
-                        png_path
-                    );
-                    let _ = std::fs::remove_file(&png_path);
-                    return;
-                }
-                Self::publish_image_path_to_clipboard(&png_path, image_sender, use_wl_copy);
-            });
-        if let Err(error) = spawned {
-            // A refused thread must not panic the compositor (see
-            // `bake_annotations_then_maybe_copy`). The staging file holds
-            // private screen contents and nothing will read it now, so unlink
-            // what is there. The capture itself is only *queued* at this
-            // point, so most of the time there is nothing yet to remove and a
-            // PNG the compositor writes a moment later is left behind: the
-            // worker that would have waited for it is exactly what the OS
-            // just refused, and waiting here would block the frame.
-            error!("[take_screenshot] could not spawn the clipboard copy thread: {error}");
-            let _ = std::fs::remove_file(&staging_path);
-        }
-    }
-
     fn wait_for_screenshot_file(png_path: &str) -> bool {
         let deadline = std::time::Instant::now() + SCREENSHOT_FILE_TIMEOUT;
         loop {
@@ -1888,36 +1983,45 @@ impl Jwm {
         }
     }
 
+    /// Publish a PNG through the backend's native clipboard owner, returning
+    /// whether the image actually reached the clipboard.
+    ///
+    /// X11 goes straight to JWM's selection thread, including ICCCM INCR for
+    /// large payloads. Wayland keeps `wl-copy` as the platform fallback until
+    /// its data-device offer is routed through the compositor event loop.
+    /// Clipboard staging files contain private screen contents, so the file
+    /// is unlinked on every path — success and failure alike.
     fn publish_image_path_to_clipboard(
         png_path: &str,
         image_sender: Option<crate::backend::clipboard_offer::ClipboardImageSender>,
         use_wl_copy: bool,
-    ) {
+    ) -> bool {
         if let Some(image_sender) = image_sender {
             let result = std::fs::read(png_path);
-            // Clipboard staging files contain private screen contents. Once
-            // the bytes are memory-owned, unlink the file on both success and
-            // failure so an unavailable clipboard cannot leak it in /tmp.
+            // Once the bytes are memory-owned the staging file has served its
+            // purpose; an unavailable clipboard must not leak it in /tmp.
             let _ = std::fs::remove_file(png_path);
-            match result {
+            return match result {
                 Ok(png) => {
                     if image_sender.send_png(png) {
                         info!("[take_screenshot] copied image to native X11 clipboard");
+                        true
                     } else {
                         error!("[take_screenshot] native X11 clipboard owner is unavailable");
+                        false
                     }
                 }
                 Err(error) => {
                     error!("[take_screenshot] clipboard source read failed: {error}");
+                    false
                 }
-            }
-            return;
+            };
         }
 
         if !use_wl_copy || !Self::path_has_executable("wl-copy") {
             error!("[take_screenshot] clipboard copy failed: native owner unavailable");
             let _ = std::fs::remove_file(png_path);
-            return;
+            return false;
         }
 
         let file = match std::fs::File::open(png_path) {
@@ -1925,7 +2029,7 @@ impl Jwm {
             Err(error) => {
                 error!("[take_screenshot] clipboard source open failed: {error}");
                 let _ = std::fs::remove_file(png_path);
-                return;
+                return false;
             }
         };
 
@@ -1941,6 +2045,7 @@ impl Jwm {
         match output {
             Ok(output) if output.status.success() => {
                 info!("[take_screenshot] copied image to clipboard via wl-copy");
+                true
             }
             Ok(output) => {
                 let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1949,9 +2054,11 @@ impl Jwm {
                     output.status,
                     stderr.trim()
                 );
+                false
             }
             Err(error) => {
                 error!("[take_screenshot] failed to run clipboard helper wl-copy: {error}");
+                false
             }
         }
     }
@@ -2016,37 +2123,75 @@ mod tests {
 
     #[test]
     fn the_screenshot_workers_survive_an_os_that_refuses_a_thread() {
-        // Both helpers run on the compositor thread, and the plain
+        // The completion watcher spawns from the event loop, and a plain
         // `spawn` panics when the OS refuses a thread (a pids cgroup limit,
         // RLIMIT_NPROC, memory pressure) — which on that thread ends the
-        // session, every window, for one screenshot. Each must go through a
-        // `Builder` and handle the `Err`. Needles are assembled at runtime
-        // and the haystack stops at this module, so neither can match here.
+        // session, every window, for one screenshot. All capture follow-up
+        // work therefore runs through `BackgroundJob`, whose named `Builder`
+        // turns a refusal into a logged warning and a slot that never fills.
+        // Needles are assembled at runtime and the haystack stops at this
+        // module, so neither can match here.
         const SOURCE: &str = include_str!("screenshot.rs");
         let shipped = SOURCE
             .split_once("#[cfg(test)]")
             .expect("the test module")
             .0;
         let panicking = format!("{}{}", "std::thread::", "spawn(");
-        let fallible = format!("{}{}", "thread::", "Builder::new()");
-        for worker in [
-            "fn bake_annotations_then_maybe_copy",
-            "fn copy_image_path_to_clipboard",
-        ] {
-            let tail = shipped
-                .split_once(worker)
-                .unwrap_or_else(|| panic!("{worker} not found"))
-                .1;
-            let body = tail.split_once("\n    fn ").map_or(tail, |(head, _)| head);
-            assert!(
-                !body.contains(&panicking),
-                "{worker} regained a compositor-killing thread spawn"
-            );
-            assert!(
-                body.contains(&fallible),
-                "{worker} no longer spawns through a fallible builder"
-            );
-        }
+        assert!(
+            !shipped.contains(&panicking),
+            "a screenshot worker regained a compositor-killing thread spawn"
+        );
+        let tracked = format!("{}{}", "BackgroundJob::", "spawn");
+        assert!(
+            shipped.contains(&tracked),
+            "capture completion is no longer watched through a BackgroundJob"
+        );
+    }
+
+    #[test]
+    fn completion_toasts_follow_the_destination_and_only_failures_break_dnd() {
+        use crate::jwm::features::notifications::system_toast_allowed;
+
+        // File destination: the saved path is the whole point of the card.
+        let saved = screenshot_completion_toast(&ScreenshotCompletion::Saved(
+            "/home/u/Pictures/shot.png".into(),
+        ));
+        assert_eq!(saved.title, "\u{f030}  Screenshot saved");
+        assert_eq!(saved.body, "/home/u/Pictures/shot.png");
+        assert_eq!(saved.urgency, 1);
+        assert!(saved.actions.is_empty() && saved.notification_id == 0);
+
+        // Clipboard destination: the private staging path must not surface.
+        let copied = screenshot_completion_toast(&ScreenshotCompletion::CopiedToClipboard);
+        assert_eq!(copied.title, "\u{f030}  Screenshot copied to clipboard");
+        assert!(copied.body.is_empty());
+        assert!(!copied.body.contains("/tmp/.jwm-screenshot-clipboard"));
+
+        // Failures are critical so Do-Not-Disturb cannot hide them; the
+        // success cards stay quiet exactly like any system toast.
+        let failed = screenshot_completion_toast(&ScreenshotCompletion::Failed(
+            "/home/u/Pictures/shot.png".into(),
+        ));
+        assert_eq!(failed.title, "\u{f030}  Screenshot failed");
+        assert_eq!(failed.urgency, 2);
+        assert!(system_toast_allowed(true, failed.urgency));
+        assert!(!system_toast_allowed(true, saved.urgency));
+        assert!(!system_toast_allowed(true, copied.urgency));
+        assert!(system_toast_allowed(false, saved.urgency));
+    }
+
+    #[test]
+    fn failure_mapping_names_the_file_but_not_the_private_staging_path() {
+        // File destination: the body is the PNG that never landed.
+        assert_eq!(
+            capture_failure_detail(false, "/home/u/Pictures/shot.png"),
+            "/home/u/Pictures/shot.png"
+        );
+        // Clipboard destination: the staging path is a private /tmp file that
+        // is gone by report time; the body must say what failed instead.
+        let detail = capture_failure_detail(true, "/tmp/.jwm-screenshot-clipboard-1-2.png");
+        assert_eq!(detail, "the capture could not be copied to the clipboard");
+        assert!(!detail.contains("/tmp/"));
     }
 
     #[test]

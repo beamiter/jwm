@@ -525,6 +525,10 @@ where
     osd_slot: crate::backend::compositor_common::osd::OsdSlot,
     /// Cached OSD label texture keyed by its text ("icon  label").
     osd_texture: Option<(String, glow::Texture, u32, u32)>,
+    /// Cached REC-chip label texture keyed by its text ("REC m:ss"); redrawn
+    /// only when the shown second flips. Drawn after the recording readback so
+    /// it never lands in the encoded video.
+    recording_indicator_texture: Option<(String, glow::Texture, u32, u32)>,
     hud_text_cache: String,
     /// An Arc makes the render snapshot cheap while input may replace the
     /// owned overlay between frames; cloning the old value copied every row.
@@ -533,6 +537,9 @@ where
     system_ui_island: crate::backend::compositor_common::dynamic_island::IslandMotion,
     /// Slide of the selection pill between rows of the open list.
     system_ui_highlight: crate::backend::compositor_common::dynamic_island::RowHighlight,
+    /// Fade-in of the quiet pointer-hover cue, keyed by the hovered row. It
+    /// previews under the pointer; the pill above owns the real selection.
+    system_ui_hover_ease: crate::backend::compositor_common::dynamic_island::HoverEase<usize>,
     /// Widest the open panel has been. The card never narrows while it is up,
     /// so a launcher list re-measured on every keystroke cannot resize it.
     /// Zero also doubles as the filmstrip's and tags grid's first-frame
@@ -753,6 +760,9 @@ where
     /// `Compositor::refresh_expose_title_textures`, the same bargain
     /// `tab_title_textures` strikes.
     expose_title_textures: Vec<Option<(glow::Texture, u32, u32)>>,
+    /// Fade-in of the hovered cell's ring, keyed by the hovered window id.
+    /// Hit-testing never sees it: only the drawn overlay eases.
+    expose_hover_ease: crate::backend::compositor_common::dynamic_island::HoverEase<u32>,
 
     // --- Phase 5: Smart Snap Preview ---
     snap_preview_enabled: bool,
@@ -792,6 +802,8 @@ where
     /// `window_groups` on purpose: a motion event must never force the title
     /// textures to rebuild, so hover lives here and only costs a repaint.
     tab_hover: Option<(usize, usize)>,
+    /// Fade-in of the hovered cell's chip, keyed by the same (group, tab).
+    tab_hover_ease: crate::backend::compositor_common::dynamic_island::HoverEase<(usize, usize)>,
 
     // --- Particle effects ---
     particle_program: glow::Program,
@@ -1145,6 +1157,9 @@ impl<C: CompositorConnection> Drop for Compositor<C> {
                 }
             }
             if let Some((_, tex, _, _)) = self.osd_texture.take() {
+                self.gl.delete_texture(tex);
+            }
+            if let Some((_, tex, _, _)) = self.recording_indicator_texture.take() {
                 self.gl.delete_texture(tex);
             }
             for slot in &mut self.hud_textures {

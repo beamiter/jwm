@@ -2844,19 +2844,19 @@ impl<C: CompositorConnection> Compositor<C> {
                     total: s.total,
                 }),
             );
-            let hover_selection = self
+            let hover_row = self
                 .system_ui_hovered
-                .filter(|row| overlay.selected != Some(*row))
-                .and_then(|row| {
-                    panel::contents(
-                        [x, y, panel_w, panel_h],
-                        &sizes,
-                        overlay.items.len(),
-                        Some(row),
-                        None,
-                    )
-                    .selection
-                });
+                .filter(|row| overlay.selected != Some(*row));
+            let hover_selection = hover_row.and_then(|row| {
+                panel::contents(
+                    [x, y, panel_w, panel_h],
+                    &sizes,
+                    overlay.items.len(),
+                    Some(row),
+                    None,
+                )
+                .selection
+            });
             // The wallpaper picker's side preview: purely additive, off the
             // card's right edge. Its painted frame registers as a dead zone
             // so a press there is swallowed like one on the card's body
@@ -2884,7 +2884,18 @@ impl<C: CompositorConnection> Compositor<C> {
                     UiPalette::faded(ui.field, content_a),
                 );
             }
-            if let Some(hover) = hover_selection {
+            // The quiet cue eases in where the pointer lands instead of
+            // popping on beside the springing keyboard pill; the hover
+            // leaving clears it the same frame (JWM draws no fade-outs).
+            let hover_p = self.system_ui_hover_ease.advance_with_motion(
+                std::time::Instant::now(),
+                hover_row.filter(|_| hover_selection.is_some()),
+                motion_enabled,
+            );
+            if self.system_ui_hover_ease.animating() {
+                self.needs_render = true;
+            }
+            if let Some(hover) = hover_selection.filter(|_| hover_p > 0.0) {
                 // Hover is a quiet preview, distinct from the keyboard's
                 // persistent selection below. Keeping both visible avoids a
                 // stationary pointer stealing focus from arrow-key input.
@@ -2898,7 +2909,7 @@ impl<C: CompositorConnection> Compositor<C> {
                         accent[0],
                         accent[1],
                         accent[2],
-                        ui.selection_alpha * 0.32 * content_a,
+                        ui.selection_alpha * 0.32 * content_a * hover_p,
                     ],
                 );
             }
@@ -3547,6 +3558,139 @@ impl<C: CompositorConnection> Compositor<C> {
                 y + (card_h - text_h as f32) / 2.0,
                 text_w as f32,
                 text_h as f32,
+            );
+            self.gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+            self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+
+            self.gl.bind_vertex_array(None);
+            self.gl.use_program(None);
+        }
+    }
+
+    /// Rasterize (and cache) the REC-chip label texture; re-render only when
+    /// the shown second flips. Same text-keyed caching rule as the OSD label.
+    fn update_recording_indicator_texture(&mut self, text: &str) {
+        if self
+            .recording_indicator_texture
+            .as_ref()
+            .is_some_and(|(cached, _, _, _)| cached == text)
+        {
+            return;
+        }
+        if let Some((_, tex, _, _)) = self.recording_indicator_texture.take() {
+            unsafe { self.gl.delete_texture(tex) };
+        }
+        let config = crate::config::CONFIG.load();
+        let description = config.system_ui_font();
+        let size = crate::backend::compositor_font::ui_font_pixel_size(description);
+        let (pixels, w, h) = crate::backend::compositor_font::render_ui_text_to_rgba(
+            text,
+            description,
+            size,
+            ui_theme::palette().osd_ink,
+        );
+        if w == 0 || h == 0 {
+            return;
+        }
+        unsafe {
+            if let Ok(tex) = self.gl.create_texture() {
+                self.gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+                self.gl.tex_image_2d(
+                    glow::TEXTURE_2D,
+                    0,
+                    glow::RGBA8 as i32,
+                    w as i32,
+                    h as i32,
+                    0,
+                    glow::RGBA,
+                    glow::UNSIGNED_BYTE,
+                    glow::PixelUnpackData::Slice(Some(&pixels)),
+                );
+                for filter in [glow::TEXTURE_MIN_FILTER, glow::TEXTURE_MAG_FILTER] {
+                    self.gl
+                        .tex_parameter_i32(glow::TEXTURE_2D, filter, glow::LINEAR as i32);
+                }
+                self.gl.bind_texture(glow::TEXTURE_2D, None);
+                self.recording_indicator_texture = Some((text.to_string(), tex, w, h));
+            }
+        }
+    }
+
+    /// The persistent "recording in progress" chip: a red dot and a running
+    /// clock parked in the bottom-right corner of the screen. The call site is
+    /// after the frame's PBO capture, so the cue is visible locally but never
+    /// lands in the encoded video; screenshots read the framebuffer earlier
+    /// still, so it cannot leak into a PNG either.
+    fn render_recording_indicator(&mut self, proj: &[f32; 16]) {
+        use crate::backend::compositor_common::recording_indicator as indicator;
+
+        let Some(label) = indicator::recording_indicator_label(
+            self.recording_active,
+            self.recording_started_at.map(|started| started.elapsed()),
+        ) else {
+            // Recording stopped (or a broken encoder pipe cleared the flag
+            // mid-recording): the label texture goes with the chip.
+            if let Some((_, tex, _, _)) = self.recording_indicator_texture.take() {
+                unsafe { self.gl.delete_texture(tex) };
+            }
+            return;
+        };
+        self.update_recording_indicator_texture(&label);
+        let Some((tex, text_w, text_h)) = self
+            .recording_indicator_texture
+            .as_ref()
+            .map(|&(_, tex, w, h)| (tex, w, h))
+        else {
+            return;
+        };
+
+        let ui = ui_theme::palette();
+        let layout = indicator::recording_indicator_layout(
+            self.screen_w as f32,
+            self.screen_h as f32,
+            text_w as f32,
+            text_h as f32,
+        );
+        let [chip_x, chip_y, chip_w, chip_h] = layout.chip;
+
+        unsafe {
+            self.gl.use_program(Some(self.border_program));
+            self.gl.uniform_matrix_4_f32_slice(
+                self.border_uniforms.projection.as_ref(),
+                false,
+                proj,
+            );
+            self.gl.bind_vertex_array(Some(self.quad_vao));
+            // Flat pill rather than frosted glass: the chip is up for the
+            // whole recording, and a glass backdrop re-blurs the screen on
+            // every one of those frames.
+            self.sysui_fill_rounded(chip_x, chip_y, chip_w, chip_h, chip_h / 2.0, ui.osd);
+            self.sysui_fill_rounded(
+                layout.dot[0],
+                layout.dot[1],
+                layout.dot[2],
+                layout.dot[3],
+                indicator::CHIP_DOT / 2.0,
+                indicator::DOT_COLOR,
+            );
+
+            self.gl.use_program(Some(self.hud_text_program));
+            self.gl.uniform_matrix_4_f32_slice(
+                self.hud_text_uniforms.projection.as_ref(),
+                false,
+                proj,
+            );
+            self.gl
+                .uniform_1_i32(self.hud_text_uniforms.texture.as_ref(), 0);
+            self.gl
+                .uniform_1_f32(self.hud_text_uniforms.opacity.as_ref(), 1.0);
+            self.gl.active_texture(glow::TEXTURE0);
+            self.gl.uniform_4_f32(
+                self.hud_text_uniforms.rect.as_ref(),
+                layout.text[0],
+                layout.text[1],
+                layout.text[2],
+                layout.text[3],
             );
             self.gl.bind_texture(glow::TEXTURE_2D, Some(tex));
             self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
@@ -7275,6 +7419,9 @@ impl<C: CompositorConnection> Compositor<C> {
         if self.recording_region_overlay.is_some() {
             self.render_recording_region_overlay(&proj);
         }
+        // The REC chip follows the same rule: on screen now, never in the
+        // video or a screenshot (both read the frame before this point).
+        self.render_recording_indicator(&proj);
 
         // Preserve the exact final composited image while the default back
         // buffer is still defined. A valid persistent texture follows partial

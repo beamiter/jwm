@@ -13,6 +13,11 @@ use std::time::{Duration, Instant};
 const OSD_HOLD: Duration = Duration::from_millis(1400);
 /// Fade-out length after the hold expires.
 const OSD_FADE_OUT: f32 = 0.25;
+/// Hold plus fade-out (1650 ms): how long after the last event the card may
+/// still be on screen. jwm's control-feedback path reads it to tell "refresh
+/// the visible card" from "the card is gone; showing now would pop a new
+/// one".
+pub(crate) const OSD_VISIBLE_WINDOW: Duration = Duration::from_millis(1650);
 /// Fade-in length when the card first appears.
 const OSD_FADE_IN: f32 = 0.12;
 

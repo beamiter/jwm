@@ -216,6 +216,7 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "setcfact",
         "setlayout",
         "setmfact",
+        "snap_window",
         "spawn",
         "tag",
         "tagmon",
@@ -582,6 +583,10 @@ pub fn dispatch_command(name: &str, args: &Value) -> Result<(WMFuncType, WMArgEn
             Ok((Jwm::focus_tab, WMArgEnum::StringVec(cmd)))
         }
         "refocus" => Ok((Jwm::refocus, parse_int_arg(args, 0)?)),
+        "snap_window" => {
+            let direction = parse_snap_direction_arg(args)?;
+            Ok((Jwm::snap_window, WMArgEnum::StringVec(vec![direction])))
+        }
 
         // --- Layout ---
         "setmfact" => Ok((Jwm::setmfact, parse_float_arg(args, 0.0)?)),
@@ -828,6 +833,32 @@ fn parse_window_id_arg(args: &Value) -> Result<WMArgEnum, String> {
     match v {
         Some(id) => Ok(WMArgEnum::UInt64(id)),
         None => Err("focus_window requires an \"id\" argument (window id as u64)".into()),
+    }
+}
+
+/// Snap directions accepted by `snap_window` — the keyboard/IPC form of the
+/// mouse drop zones (left/right halves, top-edge maximize). Kept in sync with
+/// `SnapDirection::from_name` in `jwm::layout::drag_attach`; both sides pin
+/// the accepted names in their tests. Unlike most commands the direction is
+/// required: snapping has no sensible default.
+fn parse_snap_direction_arg(args: &Value) -> Result<String, String> {
+    let Some(value) = scalar_arg_value(args, &["direction", "value", "v"], "a snap direction")?
+    else {
+        return Err(
+            "snap_window requires a direction: \"left\", \"right\", or \"maximize\"".to_string(),
+        );
+    };
+    let Value::String(name) = value else {
+        return Err(format!(
+            "snap_window expected a direction string, got {value}"
+        ));
+    };
+    let normalized = name.to_lowercase();
+    match normalized.as_str() {
+        "left" | "right" | "maximize" => Ok(normalized),
+        _ => Err(format!(
+            "snap_window unknown direction {name:?}; expected \"left\", \"right\", or \"maximize\""
+        )),
     }
 }
 
@@ -1178,6 +1209,44 @@ mod tests {
             panic!("expected layout arg");
         };
         assert_eq!(*layout, LayoutEnum::SCROLLING);
+    }
+
+    #[test]
+    fn dispatch_snap_window_command() {
+        for (args, expected) in [
+            (serde_json::json!("left"), "left"),
+            (serde_json::json!({"direction": "right"}), "right"),
+            (serde_json::json!({"direction": "Right"}), "right"),
+            (serde_json::json!({"value": "maximize"}), "maximize"),
+            (serde_json::json!({"v": "LEFT"}), "left"),
+        ] {
+            let (func, arg) = dispatch_command("snap_window", &args).unwrap();
+            assert!(std::ptr::fn_addr_eq(func, Jwm::snap_window as WMFuncType));
+            assert_eq!(arg, WMArgEnum::StringVec(vec![expected.to_string()]));
+        }
+    }
+
+    #[test]
+    fn snap_window_arguments_reject_missing_unknown_and_misshapen_directions() {
+        for args in [
+            serde_json::Value::Null,
+            serde_json::json!({}),
+            serde_json::json!({"direction": null}),
+            serde_json::json!("bottom"),
+            serde_json::json!({"direction": ""}),
+            serde_json::json!({"direction": "maximize!"}),
+            serde_json::json!(7),
+            serde_json::json!(["left", "right"]),
+            serde_json::json!({"dir": "left"}),
+        ] {
+            assert!(
+                dispatch_command("snap_window", &args).is_err(),
+                "accepted invalid snap_window argument: {args}"
+            );
+        }
+
+        // A malformed direction is a caller error, but the command stays known.
+        assert!(is_known_command("snap_window"));
     }
 
     #[test]

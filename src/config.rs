@@ -2604,6 +2604,26 @@ impl Config {
                 function: "scrolling_expel".to_string(),
                 argument: ArgumentConfig::Int(1),
             },
+            // Floating-window edge snapping: the keyboard form of dropping a
+            // dragged window on a monitor edge (left/right halves, maximize).
+            KeyConfig {
+                modifier: vec!["Mod1".to_string(), "Shift".to_string()],
+                key: "Left".to_string(),
+                function: "snap_window".to_string(),
+                argument: ArgumentConfig::String("left".to_string()),
+            },
+            KeyConfig {
+                modifier: vec!["Mod1".to_string(), "Shift".to_string()],
+                key: "Right".to_string(),
+                function: "snap_window".to_string(),
+                argument: ArgumentConfig::String("right".to_string()),
+            },
+            KeyConfig {
+                modifier: vec!["Mod1".to_string(), "Shift".to_string()],
+                key: "Up".to_string(),
+                function: "snap_window".to_string(),
+                argument: ArgumentConfig::String("maximize".to_string()),
+            },
             KeyConfig {
                 modifier: vec!["Mod1".to_string(), "Shift".to_string()],
                 key: "q".to_string(),
@@ -3179,6 +3199,7 @@ impl Config {
             "killclient" => Some(Jwm::killclient),
             "minimize" => Some(Jwm::minimize),
             "zoom" => Some(Jwm::zoom),
+            "snap_window" => Some(Jwm::snap_window),
 
             "setlayout" => Some(Jwm::setlayout),
             "lastlayout" => Some(Jwm::lastlayout),
@@ -4469,6 +4490,72 @@ mod tests {
         let canonical = config.parse_function("toggle_waterlily").unwrap();
         let deprecated = config.parse_function("toggle_slime").unwrap();
         assert!(std::ptr::fn_addr_eq(canonical, deprecated));
+    }
+
+    #[test]
+    fn snap_window_is_bindable_and_converts_a_direction_string() {
+        let config = Config::default();
+        assert!(config.parse_function("snap_window").is_some());
+
+        let key = config
+            .convert_key_config(&KeyConfig {
+                modifier: vec!["Mod1".into(), "Shift".into()],
+                key: "Left".into(),
+                function: "snap_window".into(),
+                argument: ArgumentConfig::String("left".into()),
+            })
+            .expect("snap_window binding should convert");
+        assert_eq!(key.mask, Mods::ALT | Mods::SHIFT);
+        assert_eq!(
+            key.arg,
+            crate::jwm::WMArgEnum::StringVec(vec!["left".to_string()])
+        );
+    }
+
+    #[test]
+    fn default_keybindings_bind_snap_window_to_shifted_arrows() {
+        // Alt+Shift+arrows were an uncontested family in the default table;
+        // pin the wiring so a future default cannot silently take it over
+        // (the duplicate-shortcut diagnostic only fires when two bindings
+        // collide, not when one disappears).
+        let config = Config::default();
+        let mut snaps: Vec<(Vec<String>, String, String)> = config
+            .inner
+            .keybindings
+            .keys
+            .iter()
+            .filter(|key| key.function == "snap_window")
+            .map(|key| {
+                (
+                    key.modifier.clone(),
+                    key.key.clone(),
+                    format!("{:?}", key.argument),
+                )
+            })
+            .collect();
+        snaps.sort_by(|a, b| a.1.cmp(&b.1));
+
+        let modifier = || vec!["Mod1".to_string(), "Shift".to_string()];
+        assert_eq!(
+            snaps,
+            vec![
+                (
+                    modifier(),
+                    "Left".to_string(),
+                    r#"String("left")"#.to_string()
+                ),
+                (
+                    modifier(),
+                    "Right".to_string(),
+                    r#"String("right")"#.to_string()
+                ),
+                (
+                    modifier(),
+                    "Up".to_string(),
+                    r#"String("maximize")"#.to_string()
+                ),
+            ]
+        );
     }
 
     #[test]

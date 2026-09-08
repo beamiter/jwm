@@ -795,6 +795,8 @@ impl Jwm {
             "monitor_layout"
         } else if eq!(Jwm::lock_screen) {
             "lock_screen"
+        } else if eq!(Jwm::snap_window) {
+            "snap_window"
         } else if eq!(Jwm::focusstack) {
             "focusstack"
         } else if eq!(Jwm::focusmon) {

@@ -159,7 +159,10 @@ fn finalize_concat_segments(
 
 impl Jwm {
     /// Adjust the default sink volume by the binding's Int argument
-    /// (percentage points) and show the OSD with the result.
+    /// (percentage points) and show the OSD with the estimate at once. The
+    /// controls worker applies the real change off the event thread; its
+    /// read-back refreshes the card if the estimate drifted, or takes it
+    /// back if the change failed.
     pub(crate) fn volume_adjust(
         &mut self,
         backend: &mut dyn Backend,
@@ -169,30 +172,50 @@ impl Jwm {
             WMArgEnum::Int(delta) if *delta != 0 => *delta,
             _ => 5,
         };
-        let Some(state) = crate::jwm::features::system_controls::volume_adjust(delta) else {
+        let Some((seq, estimate)) = self.queue_volume_request(
+            crate::jwm::features::system_controls::ControlRequest::VolumeAdjust(delta),
+        ) else {
             return Err("no working volume control (wpctl/pactl/amixer)".into());
         };
-        self.cache_control_volume(state);
-        self.show_volume_osd(backend, state);
+        match estimate {
+            Some(state) => self.show_volume_osd(backend, state),
+            // Nothing has ever been read to estimate from: the read-back
+            // covering this submission draws the first card.
+            None => self.features.control_feedback.owe_osd(
+                crate::jwm::features::system_controls::ControlDomain::Volume,
+                seq,
+            ),
+        }
         Ok(())
     }
 
-    /// Toggle the default sink's mute state and show the OSD with the result.
+    /// Toggle the default sink's mute state and show the OSD with the
+    /// estimate; the worker performs the toggle off the event thread. A
+    /// toggle is an event, not a value: the worker never folds it into a
+    /// level (only an adjacent twin cancels it — two flips are no flip).
     pub(crate) fn volume_mute(
         &mut self,
         backend: &mut dyn Backend,
         _arg: &WMArgEnum,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let Some(state) = crate::jwm::features::system_controls::volume_toggle_mute() else {
+        let Some((seq, estimate)) = self.queue_volume_request(
+            crate::jwm::features::system_controls::ControlRequest::VolumeToggleMute,
+        ) else {
             return Err("no working volume control (wpctl/pactl/amixer)".into());
         };
-        self.cache_control_volume(state);
-        self.show_volume_osd(backend, state);
+        match estimate {
+            Some(state) => self.show_volume_osd(backend, state),
+            None => self.features.control_feedback.owe_osd(
+                crate::jwm::features::system_controls::ControlDomain::Volume,
+                seq,
+            ),
+        }
         Ok(())
     }
 
-    /// Adjust the backlight by the binding's Int argument (percentage points)
-    /// and show the OSD with the result.
+    /// Adjust the backlight by the binding's Int argument (percentage
+    /// points) and show the OSD with the estimate; the worker applies the
+    /// real change off the event thread.
     pub(crate) fn brightness_adjust(
         &mut self,
         backend: &mut dyn Backend,
@@ -202,12 +225,181 @@ impl Jwm {
             WMArgEnum::Int(delta) if *delta != 0 => *delta,
             _ => 5,
         };
-        let Some(percent) = crate::jwm::features::system_controls::brightness_adjust(delta) else {
+        let Some((seq, estimate)) = self.queue_brightness_request(
+            crate::jwm::features::system_controls::ControlRequest::BrightnessAdjust(delta),
+        ) else {
             return Err("no backlight control (brightnessctl or /sys/class/backlight)".into());
         };
-        self.cache_control_brightness(percent);
-        backend.compositor_show_osd(crate::backend::api::OsdKind::Brightness, percent);
+        match estimate {
+            Some(percent) => {
+                self.features.control_feedback.note_osd_shown(
+                    crate::jwm::features::system_controls::ControlDomain::Brightness,
+                    percent,
+                    false,
+                    std::time::Instant::now(),
+                );
+                backend.compositor_show_osd(crate::backend::api::OsdKind::Brightness, percent);
+            }
+            None => self.features.control_feedback.owe_osd(
+                crate::jwm::features::system_controls::ControlDomain::Brightness,
+                seq,
+            ),
+        }
         Ok(())
+    }
+
+    /// Queue a volume mutation on the controls worker and draw the estimate
+    /// into the control snapshot (through which the control-center row reads
+    /// it). Returns the submission's sequence and the estimate.
+    ///
+    /// `None` when no working volume tool is known to exist or the worker
+    /// thread does not — the cases the synchronous path returned `None` for,
+    /// so callers keep their old error/no-op behavior. A `None` estimate
+    /// means nothing was ever read to estimate from; the caller may owe the
+    /// OSD to the read-back instead of inventing a level.
+    pub(crate) fn queue_volume_request(
+        &mut self,
+        request: crate::jwm::features::system_controls::ControlRequest,
+    ) -> Option<(
+        u64,
+        Option<crate::jwm::features::system_controls::AudioState>,
+    )> {
+        use crate::jwm::features::system_controls;
+        if system_controls::volume_tool_known_absent() {
+            return None;
+        }
+        let confirmed = self
+            .features
+            .control_snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.volume);
+        // A chain of quick presses estimates from the estimate already on
+        // screen, so a repeat storm follows its own display.
+        let base = self.features.control_feedback.volume_shown().or(confirmed);
+        let estimate = system_controls::optimistic_volume(base, request);
+        let seq =
+            system_controls::queue_control_request(request, self.async_update_notifier.clone())?;
+        if let Some(estimate) = estimate {
+            self.features
+                .control_feedback
+                .note_volume_estimate(seq, estimate, confirmed);
+            self.cache_control_volume(estimate);
+        }
+        Some((seq, estimate))
+    }
+
+    /// The brightness counterpart of [`Self::queue_volume_request`].
+    pub(crate) fn queue_brightness_request(
+        &mut self,
+        request: crate::jwm::features::system_controls::ControlRequest,
+    ) -> Option<(u64, Option<u8>)> {
+        use crate::jwm::features::system_controls;
+        if system_controls::brightness_tool_known_absent() {
+            return None;
+        }
+        let confirmed = self
+            .features
+            .control_snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.brightness);
+        let base = self
+            .features
+            .control_feedback
+            .brightness_shown()
+            .or(confirmed);
+        let estimate = system_controls::optimistic_brightness(base, request);
+        let seq =
+            system_controls::queue_control_request(request, self.async_update_notifier.clone())?;
+        if let Some(estimate) = estimate {
+            self.features
+                .control_feedback
+                .note_brightness_estimate(seq, estimate, confirmed);
+            self.cache_control_brightness(estimate);
+        }
+        Some((seq, estimate))
+    }
+
+    /// Adopt the controls worker's newest read-backs: confirm the estimate
+    /// on screen, correct it when the true value drifted, or revert it when
+    /// the change failed outright. Runs from the frame tick; never blocks,
+    /// and only re-syncs an open panel when a confirmed value actually moved.
+    pub(crate) fn poll_control_feedback(&mut self) {
+        use crate::jwm::features::system_controls::{self, FeedbackAction};
+
+        let Some(report) = system_controls::take_control_report() else {
+            return;
+        };
+        let now = std::time::Instant::now();
+        let mut panel_changed = false;
+
+        if let Some(volume) = report.volume {
+            match self.features.control_feedback.resolve_volume(volume, now) {
+                FeedbackAction::Adopt(state) => {
+                    let current = self
+                        .features
+                        .control_snapshot
+                        .as_ref()
+                        .and_then(|snapshot| snapshot.volume);
+                    if current != Some(state) {
+                        self.cache_control_volume(state);
+                        panel_changed = true;
+                    }
+                }
+                FeedbackAction::Revert(previous) => {
+                    // A failed change must not leave its estimate on screen:
+                    // restore the last confirmed value, which may be "no
+                    // row" when nothing was ever read.
+                    let current = self
+                        .features
+                        .control_snapshot
+                        .as_ref()
+                        .and_then(|snapshot| snapshot.volume);
+                    if current != previous {
+                        self.mutate_control_snapshot(|snapshot| snapshot.volume = previous);
+                        panel_changed = true;
+                    }
+                    log::debug!("[controls] volume change did not take; estimate reverted");
+                }
+                FeedbackAction::KeepEstimate => {}
+            }
+        }
+
+        if let Some(brightness) = report.brightness {
+            match self
+                .features
+                .control_feedback
+                .resolve_brightness(brightness, now)
+            {
+                FeedbackAction::Adopt(percent) => {
+                    let current = self
+                        .features
+                        .control_snapshot
+                        .as_ref()
+                        .and_then(|snapshot| snapshot.brightness);
+                    if current != Some(percent) {
+                        self.cache_control_brightness(percent);
+                        panel_changed = true;
+                    }
+                }
+                FeedbackAction::Revert(previous) => {
+                    let current = self
+                        .features
+                        .control_snapshot
+                        .as_ref()
+                        .and_then(|snapshot| snapshot.brightness);
+                    if current != previous {
+                        self.mutate_control_snapshot(|snapshot| snapshot.brightness = previous);
+                        panel_changed = true;
+                    }
+                    log::debug!("[controls] brightness change did not take; estimate reverted");
+                }
+                FeedbackAction::KeepEstimate => {}
+            }
+        }
+
+        if panel_changed {
+            self.refresh_open_control_center();
+        }
     }
 
     fn show_volume_osd(
@@ -220,6 +412,12 @@ impl Jwm {
         } else {
             crate::backend::api::OsdKind::Volume
         };
+        self.features.control_feedback.note_osd_shown(
+            crate::jwm::features::system_controls::ControlDomain::Volume,
+            state.percent,
+            state.muted,
+            std::time::Instant::now(),
+        );
         backend.compositor_show_osd(kind, state.percent);
     }
 
@@ -318,6 +516,9 @@ impl Jwm {
     /// A user mutation increments the epoch, so an older worker result is
     /// discarded instead of rolling the visible value back.
     pub(crate) fn poll_control_snapshot_job(&mut self) {
+        // The controls worker's read-backs are the other writer of this
+        // snapshot; adopting them rides the same per-tick poll.
+        self.poll_control_feedback();
         let Some((epoch, snapshot)) = self
             .features
             .control_snapshot_job
@@ -2513,13 +2714,16 @@ impl Jwm {
                 return Ok(());
             }
             if let Err(error) = Self::require_recording_runtime() {
-                backend.compositor_push_toast(crate::backend::api::ToastNotification {
-                    title: "\u{f03d}  Recording unavailable".into(),
-                    body: error.clone(),
-                    urgency: 2,
-                    timeout_ms: 8000,
-                    ..Default::default()
-                });
+                self.push_system_toast(
+                    backend,
+                    crate::backend::api::ToastNotification {
+                        title: "\u{f03d}  Recording unavailable".into(),
+                        body: error.clone(),
+                        urgency: 2,
+                        timeout_ms: 8000,
+                        ..Default::default()
+                    },
+                );
                 return Err(error.into());
             }
             let output_path = self.prepare_recording_output_path()?;
@@ -2872,6 +3076,18 @@ impl Jwm {
             region.w, region.h, region.x, region.y
         );
         backend.compositor_start_recording_region(output_path, region_tuple);
+        // Mirror the stop toast: the request was accepted, and the persistent
+        // REC chip (compositor-drawn while frames flow) confirms the rest.
+        self.push_system_toast(
+            backend,
+            crate::backend::api::ToastNotification {
+                title: "\u{f03d}  Recording started".into(),
+                body: output_path.to_string(),
+                urgency: 1,
+                timeout_ms: 5000,
+                ..Default::default()
+            },
+        );
         Ok(())
     }
 
@@ -2910,13 +3126,16 @@ impl Jwm {
             "[recording] stop → {output_path} ({} segments)",
             segments.len()
         );
-        backend.compositor_push_toast(crate::backend::api::ToastNotification {
-            title: "\u{f03d}  Recording stopped".into(),
-            body: output_path.clone(),
-            urgency: 1,
-            timeout_ms: 5000,
-            ..Default::default()
-        });
+        self.push_system_toast(
+            backend,
+            crate::backend::api::ToastNotification {
+                title: "\u{f03d}  Recording stopped".into(),
+                body: output_path.clone(),
+                urgency: 1,
+                timeout_ms: 5000,
+                ..Default::default()
+            },
+        );
         Self::finalize_recording(segments, output_path);
         Ok(())
     }
@@ -3539,6 +3758,30 @@ mod shell_entry_tests {
         assert!(!should_refresh_after_pairing_close(true, true, true));
     }
 
+    /// System toasts (recording started/stopped/unavailable) must all pass
+    /// the same Do-Not-Disturb gate a notification gets: pushing one straight
+    /// into the compositor used to make the recording cards ignore quiet
+    /// hours entirely. The needle is assembled at runtime and the haystack
+    /// excludes the test modules, so this cannot match its own source.
+    #[test]
+    fn system_toasts_go_through_the_do_not_disturb_gate() {
+        const SOURCE: &str = include_str!("toggles.rs");
+        let shipped = SOURCE
+            .split_once("#[cfg(test)]")
+            .expect("the first test module")
+            .0;
+        let direct = format!("backend.compositor_{}", "push_toast");
+        assert!(
+            !shipped.contains(&direct),
+            "a system toast bypassed push_system_toast's do-not-disturb gate"
+        );
+        let gated = format!("self.{}(", "push_system_toast");
+        assert!(
+            shipped.contains(&gated),
+            "the recording toasts no longer go through push_system_toast"
+        );
+    }
+
     /// The connect/disconnect completion re-reads the device list the way
     /// `bluetooth_pairing_done` does, and never over a read already running:
     /// replacing that handle only drops the notifier, so the worker — and the
@@ -3635,5 +3878,74 @@ mod shell_entry_tests {
             .unwrap()
             .0;
         assert!(!open_paths.contains("AudioDefaults::read()"));
+    }
+
+    /// The volume/brightness key handlers used to run the session's tools on
+    /// the event thread — two bounded-but-blocking spawns per press, seconds
+    /// of WM stall behind a hung wpctl. They must only queue the change and
+    /// draw the estimate; the controls worker runs the tools. The haystack is
+    /// the three handlers alone, and the needles are assembled at runtime so
+    /// this test cannot match its own source.
+    #[test]
+    fn control_keys_queue_instead_of_shelling_out() {
+        const SOURCE: &str = include_str!("toggles.rs");
+        let handlers = SOURCE
+            .split_once("pub(crate) fn volume_adjust")
+            .expect("volume_adjust")
+            .1
+            .split_once("fn show_volume_osd")
+            .expect("the end of the key handlers")
+            .0;
+        for primitive in [
+            "volume_adjust",
+            "volume_set",
+            "volume_toggle_mute",
+            "volume_state",
+            "brightness_adjust",
+            "brightness_set",
+            "brightness_percent",
+        ] {
+            let needle = format!("system_controls::{primitive}(");
+            assert!(
+                !handlers.contains(&needle),
+                "a control key regained a blocking tool call: {needle}"
+            );
+        }
+        for helper in ["queue_volume_request", "queue_brightness_request"] {
+            let needle = format!("self.{helper}(");
+            assert!(
+                handlers.contains(&needle),
+                "a control key no longer queues on the controls worker ({needle})"
+            );
+        }
+    }
+
+    /// The read-back adoption itself must not call the tools either: the
+    /// report arrives by value. Same construction as the key-handler pin.
+    #[test]
+    fn the_feedback_poll_adopts_without_shelling_out() {
+        const SOURCE: &str = include_str!("toggles.rs");
+        let poll = SOURCE
+            .split_once("pub(crate) fn poll_control_feedback")
+            .expect("poll_control_feedback")
+            .1
+            .split_once("fn show_volume_osd")
+            .expect("the end of poll_control_feedback")
+            .0;
+        for primitive in [
+            "volume_adjust",
+            "volume_set",
+            "volume_toggle_mute",
+            "volume_state",
+            "brightness_adjust",
+            "brightness_set",
+            "brightness_percent",
+        ] {
+            let needle = format!("system_controls::{primitive}(");
+            assert!(
+                !poll.contains(&needle),
+                "the feedback poll regained a blocking tool call: {needle}"
+            );
+        }
     }
 }

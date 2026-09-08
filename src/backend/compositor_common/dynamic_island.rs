@@ -49,6 +49,12 @@ const MAX_SPRING_SUBSTEPS: usize = 32;
 const SETTLE_DISTANCE: f32 = 0.4;
 const SETTLE_VELOCITY: f32 = 4.0;
 
+/// Seconds a pointer-hover cue takes to ease in once its target appears,
+/// from the toast family's quick fades (`TOAST_DISMISS_FADE` is 0.12): long
+/// enough to read as motion next to the keyboard's springing pill, short
+/// enough that the pointer never waits on its own feedback.
+const HOVER_EASE_IN: f32 = 0.12;
+
 /// Where docked panels attach: the strip they drop out of.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct IslandDock {
@@ -417,6 +423,97 @@ impl RowHighlight {
     /// instead of sliding in from another panel's row.
     pub(crate) fn reset(&mut self) {
         *self = Self::default();
+    }
+}
+
+/// Ease-out curve for the hover envelope: the cue reads immediately and then
+/// settles, rather than creeping up on the pointer.
+fn hover_ease_out(t: f32) -> f32 {
+    let t = finite_clamp(t, 0.0, 1.0, 0.0);
+    1.0 - (1.0 - t) * (1.0 - t)
+}
+
+/// Fade-in envelope for a pointer-hover cue, keyed to the hovered target.
+///
+/// Pointer hover used to flip on in a single frame while the keyboard's
+/// selection pill springs smoothly beside it, so one panel read as two kinds
+/// of motion at once. This is the hover half of that bargain: when the
+/// hovered target (a list row, an expose cell, a tab) appears or changes, the
+/// cue eases in over [`HOVER_EASE_IN`]; when the hover leaves, the cue is
+/// gone the same frame — JWM draws no fade-outs.
+///
+/// A key change restarts the envelope from zero rather than travelling from
+/// the old target: the cue is a property of what is under the pointer, not a
+/// thing that moves. Both compositors advance through this one type so the
+/// two backends cannot drift apart on any of it.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct HoverEase<K> {
+    key: Option<K>,
+    progress: f32,
+    last_tick: Option<Instant>,
+}
+
+impl<K: Copy + PartialEq> HoverEase<K> {
+    /// Advance to `now` for the currently hovered `key` and return the eased
+    /// `0.0..=1.0` strength the cue should draw with.
+    #[cfg(test)]
+    pub(crate) fn advance(&mut self, now: Instant, hover: Option<K>) -> f32 {
+        self.advance_with_motion(now, hover, true)
+    }
+
+    /// Advance the envelope, or snap it when motion is disabled.
+    ///
+    /// `None` — the hover left — clears the envelope outright: the cue
+    /// disappears on the very frame that reports it, like every other cue in
+    /// the compositor. With motion off a present hover draws at full strength
+    /// immediately and [`Self::animating`] stays false, so a reduced-motion
+    /// desktop renders one frame and no more.
+    pub(crate) fn advance_with_motion(
+        &mut self,
+        now: Instant,
+        hover: Option<K>,
+        motion_enabled: bool,
+    ) -> f32 {
+        let Some(key) = hover else {
+            self.clear();
+            return 0.0;
+        };
+        if self.key != Some(key) {
+            // A new target starts the envelope over. The first frame consumes
+            // no time — the discipline `IslandMotion` keeps — so a long idle
+            // gap before it cannot finish the fade before it is drawn.
+            self.key = Some(key);
+            self.progress = if motion_enabled { 0.0 } else { 1.0 };
+            self.last_tick = Some(now);
+            return hover_ease_out(self.progress);
+        }
+        if !motion_enabled {
+            // Snap the stored envelope as well as the returned value, so
+            // `animating` is false and no invisible follow-up frames tick.
+            self.progress = 1.0;
+            self.last_tick = Some(now);
+            return 1.0;
+        }
+        let dt = self.last_tick.replace(now).map_or(0.0, |last| {
+            now.saturating_duration_since(last).as_secs_f32()
+        });
+        let dt = clamp_effect_dt(dt);
+        self.progress = finite_clamp(self.progress + dt / HOVER_EASE_IN, 0.0, 1.0, 1.0);
+        hover_ease_out(self.progress)
+    }
+
+    /// Whether the envelope is still easing toward full strength.
+    #[must_use]
+    pub(crate) fn animating(&self) -> bool {
+        self.key.is_some() && self.progress < 1.0
+    }
+
+    /// Forget the current target, so the next hover eases in from nothing
+    /// instead of resuming where a previous surface left off.
+    pub(crate) fn clear(&mut self) {
+        self.key = None;
+        self.progress = 0.0;
+        self.last_tick = None;
     }
 }
 
@@ -804,5 +901,135 @@ mod tests {
             assert!(w.is_finite() && h.is_finite(), "{w} {h}");
             assert!(h >= 0.0, "height went negative: {h}");
         }
+    }
+
+    #[test]
+    fn a_hover_cue_eases_in_monotonically_and_settles_at_full_strength() {
+        let mut ease = HoverEase::default();
+        let mut t = Instant::now();
+
+        // The first frame of a new target consumes no time: the cue is not
+        // drawn yet, as with the island's seed frame.
+        assert_eq!(ease.advance(t, Some(3usize)), 0.0);
+        assert!(ease.animating());
+
+        let mut last = 0.0;
+        let mut frames = 0;
+        while ease.animating() && frames < 60 {
+            t += FRAME;
+            let p = ease.advance(t, Some(3));
+            assert!(
+                p > last,
+                "strength must grow monotonically: {p} after {last}"
+            );
+            last = p;
+            frames += 1;
+        }
+        assert!(frames < 60, "still easing after {frames} frames");
+        assert_eq!(ease.advance(t, Some(3)), 1.0);
+        assert!(!ease.animating());
+    }
+
+    #[test]
+    fn the_hover_envelope_reads_immediately_and_settles_gently() {
+        // Ease-out: halfway through the fade the cue is already three
+        // quarters drawn.
+        assert_eq!(hover_ease_out(0.0), 0.0);
+        assert_eq!(hover_ease_out(0.5), 0.75);
+        assert_eq!(hover_ease_out(1.0), 1.0);
+        // Stray out-of-range progress cannot push a cue past full strength,
+        // and a NaN reads as "nothing to draw" rather than leaking through.
+        assert_eq!(hover_ease_out(1.2), 1.0);
+        assert_eq!(hover_ease_out(f32::NAN), 0.0);
+    }
+
+    #[test]
+    fn disabled_motion_draws_hover_at_full_strength_without_follow_up_frames() {
+        let mut ease = HoverEase::default();
+        let now = Instant::now();
+        assert_eq!(ease.advance_with_motion(now, Some(2usize), false), 1.0);
+        assert!(!ease.animating());
+
+        // Turning motion off mid-fade snaps the stored envelope too, so no
+        // invisible animation keeps asking for frames.
+        let mut t = now;
+        ease.advance_with_motion(t, Some(5usize), true);
+        t += FRAME;
+        ease.advance_with_motion(t, Some(5), true);
+        assert!(ease.animating());
+        t += FRAME;
+        assert_eq!(ease.advance_with_motion(t, Some(5), false), 1.0);
+        assert!(!ease.animating());
+    }
+
+    #[test]
+    fn a_departing_hover_clears_the_cue_the_same_frame() {
+        let mut ease = HoverEase::default();
+        let mut t = Instant::now();
+        ease.advance(t, Some(1usize));
+        t += FRAME;
+        let p = ease.advance(t, Some(1));
+        assert!(p > 0.0 && p < 1.0);
+
+        // No fade-out anywhere in the compositor: the frame that reports the
+        // leave draws nothing.
+        t += FRAME;
+        assert_eq!(ease.advance(t, None), 0.0);
+        assert!(!ease.animating());
+
+        // Re-hovering the same target starts over from nothing, not from
+        // where the departed cue left off.
+        t += FRAME;
+        assert_eq!(ease.advance(t, Some(1)), 0.0);
+        assert!(ease.animating());
+    }
+
+    #[test]
+    fn moving_to_another_target_restarts_the_envelope_there() {
+        let mut ease = HoverEase::default();
+        let mut t = Instant::now();
+        ease.advance(t, Some(0usize));
+        for _ in 0..60 {
+            t += FRAME;
+            ease.advance(t, Some(0));
+        }
+        assert!(!ease.animating());
+
+        t += FRAME;
+        assert_eq!(
+            ease.advance(t, Some(1)),
+            0.0,
+            "the cue eases in where the pointer is rather than travelling"
+        );
+        assert!(ease.animating());
+    }
+
+    #[test]
+    fn a_stall_cannot_finish_the_hover_fade_before_it_is_drawn() {
+        let mut ease = HoverEase::default();
+        let start = Instant::now();
+        ease.advance(start, Some(7usize));
+
+        // The compositor was asleep for a minute; the clamped step keeps the
+        // cue near its start instead of completing unseen.
+        let p = ease.advance(start + Duration::from_secs(60), Some(7));
+        assert!(p < 1.0, "a stall finished the fade: {p}");
+        assert!(ease.animating());
+    }
+
+    #[test]
+    fn degenerate_hover_ticks_stay_finite() {
+        let mut ease = HoverEase::default();
+        let t = Instant::now();
+        // Zero-dt ticks (the same instant twice) neither advance nor divide
+        // by zero.
+        assert_eq!(ease.advance(t, Some(0usize)), 0.0);
+        assert_eq!(ease.advance(t, Some(0)), 0.0);
+        assert!(ease.animating());
+        for i in 0..200 {
+            let p = ease.advance(t + FRAME * i, Some(0));
+            assert!((0.0..=1.0).contains(&p), "{p}");
+        }
+        assert_eq!(ease.advance(t + FRAME * 200, Some(0)), 1.0);
     }
 }

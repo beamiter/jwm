@@ -353,7 +353,7 @@ impl ListKind {
                 "Click/Enter  use    \u{f062}/\u{f063}  select    Esc  close"
             }
             Self::WindowSwitcher => {
-                "Tab/Shift+Tab  move    Enter / release Alt  switch    Esc  cancel"
+                "Tab/Shift+Tab  move    Enter / release Alt  switch    Del  close    Esc  cancel"
             }
         }
     }

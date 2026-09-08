@@ -52,8 +52,9 @@ fn clamp_configure_axis(position: i32, total: i32, origin: i32, span: i32) -> i3
 pub(crate) struct ControlSliderDrag {
     /// The slider being dragged.
     pub(crate) kind: crate::jwm::features::ControlKind,
-    /// The last value written to the hardware. Motion pays the side effect —
-    /// a shell-out plus a read-back — only when the rounded percent changes.
+    /// The last value queued on the controls worker. Motion pays the
+    /// submission only when the rounded percent changes, and the worker folds
+    /// a drag's worth of queued levels into the newest one.
     pub(crate) last_percent: u8,
     /// Root-x of the list texture's left edge: `root_x − text_x` at the last
     /// hit that carried an x. Cached because a drag can run off the card,
@@ -256,6 +257,22 @@ impl Jwm {
     /// Push a panel that was rebuilt since the last frame. Costs a boolean
     /// test when nothing changed.
     pub(crate) fn flush_system_ui(&mut self, backend: &mut dyn Backend) {
+        // A control read-back that contradicts the OSD card on screen — or
+        // the first card for a press that had nothing to estimate from — is
+        // queued by the frame tick's control-feedback poll, which has no
+        // backend; this flush is its backend-carrying counterpart. Runs ahead
+        // of the dirty test: the OSD is not the panel.
+        if let Some(correction) = self.features.control_feedback.take_pending_osd() {
+            use crate::jwm::features::system_controls::ControlDomain;
+            let kind = match correction.domain {
+                ControlDomain::Volume if correction.muted => {
+                    crate::backend::api::OsdKind::VolumeMuted
+                }
+                ControlDomain::Volume => crate::backend::api::OsdKind::Volume,
+                ControlDomain::Brightness => crate::backend::api::OsdKind::Brightness,
+            };
+            backend.compositor_show_osd(kind, correction.percent);
+        }
         // The tags grid describes one monitor. When the selection moved to
         // another one underneath it — IPC `focus_monitor`, an activation on
         // the other screen; neither arranges — the cells, the pushed
@@ -845,15 +862,15 @@ impl Jwm {
                 ControlKind::Volume => {
                     if let Some(delta) = slider_delta {
                         self.adjust_control_slider(ControlKind::Volume, delta);
-                    } else if activate || keysym == keys::KEY_m {
-                        if let Some(state) = system_controls::volume_toggle_mute() {
-                            self.cache_control_volume(state);
-                            self.features.system_ui.update_control(
-                                ControlKind::Volume,
-                                state.percent,
-                                state.muted,
-                            );
-                        }
+                    } else if (activate || keysym == keys::KEY_m)
+                        && let Some((_, Some(state))) = self
+                            .queue_volume_request(system_controls::ControlRequest::VolumeToggleMute)
+                    {
+                        self.features.system_ui.update_control(
+                            ControlKind::Volume,
+                            state.percent,
+                            state.muted,
+                        );
                     }
                 }
                 ControlKind::Brightness => {
@@ -1057,9 +1074,10 @@ impl Jwm {
     /// Return invokes the sender's default action, `d`/Delete dismisses one
     /// row, `c` clears the history.
     /// Key handling while the Alt+Tab switcher is up: Tab and the arrows
-    /// walk the list (wrapping), Return commits, Escape cancels, and every
-    /// other key is swallowed — the modifier is still down, so nothing else
-    /// may fire.
+    /// walk the list (wrapping), Return commits, Delete or BackSpace closes
+    /// the highlighted window without leaving the gesture, Escape cancels,
+    /// and every other key is swallowed — the modifier is still down, so
+    /// nothing else may fire.
     fn handle_window_switcher_key(
         &mut self,
         backend: &mut dyn Backend,
@@ -1072,6 +1090,7 @@ impl Jwm {
         match keysym {
             keys::KEY_Escape => self.cancel_window_switcher(backend),
             keys::KEY_Return | keys::KEY_KP_Enter => self.commit_window_switcher(backend)?,
+            keys::KEY_Delete | keys::KEY_BackSpace => self.close_window_switcher_row(backend)?,
             keys::KEY_Tab | keys::KEY_ISO_Left_Tab => {
                 let backwards = mods.contains(Mods::SHIFT) || keysym == keys::KEY_ISO_Left_Tab;
                 self.features
@@ -1095,6 +1114,38 @@ impl Jwm {
                     self.window_switcher(backend, &arg)?;
                 }
             }
+        }
+        Ok(())
+    }
+
+    /// Delete or BackSpace with the switcher up: close the highlighted window
+    /// without leaving the gesture. The close is the one `killclient` sends —
+    /// the graceful WM_DELETE request, falling back to killing the client —
+    /// then the row leaves the snapshot and the next-oldest window slides
+    /// under the highlight, so a commit never lands on the window just
+    /// closed. Closing the last row ends the gesture outright: the opener
+    /// refuses an empty list, so the panel never sits open over one either.
+    /// The grabs stay until then — the close is a request to the client, not
+    /// a panel hand-over, and the gesture's modifier is still down.
+    fn close_window_switcher_row(
+        &mut self,
+        backend: &mut dyn Backend,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let Some(window) = self.features.system_ui.selected_switcher_window() else {
+            return Ok(());
+        };
+        // The snapshot can name a window that already died mid-gesture; only
+        // a live client can take the close, but the stale row leaves either
+        // way.
+        if let Some(client_key) = self.wintoclient(WindowId::from_raw(window))
+            && let Some(client) = self.state.clients.get(client_key)
+        {
+            backend.window_ops().close_window(client.win)?;
+        }
+        if let Some((_, true)) = self.features.system_ui.remove_selected_switcher_row() {
+            self.cancel_window_switcher(backend);
+        } else {
+            self.sync_system_ui(backend);
         }
         Ok(())
     }
@@ -1472,13 +1523,16 @@ impl Jwm {
     }
 
     /// The slider side effect shared by Left/Right and scroll-on-slider:
-    /// nudge the real control, then write the read-back value into the row.
+    /// draw the estimate into the row at once and queue the real change on
+    /// the controls worker; its read-back corrects the row if the estimate
+    /// drifted.
     fn adjust_control_slider(&mut self, kind: crate::jwm::features::ControlKind, delta: i32) {
         use crate::jwm::features::{ControlKind, system_controls};
         match kind {
             ControlKind::Volume => {
-                if let Some(state) = system_controls::volume_adjust(delta) {
-                    self.cache_control_volume(state);
+                if let Some((_, Some(state))) =
+                    self.queue_volume_request(system_controls::ControlRequest::VolumeAdjust(delta))
+                {
                     self.features.system_ui.update_control(
                         ControlKind::Volume,
                         state.percent,
@@ -1487,8 +1541,9 @@ impl Jwm {
                 }
             }
             ControlKind::Brightness => {
-                if let Some(percent) = system_controls::brightness_adjust(delta) {
-                    self.cache_control_brightness(percent);
+                if let Some((_, Some(percent))) = self.queue_brightness_request(
+                    system_controls::ControlRequest::BrightnessAdjust(delta),
+                ) {
                     self.features
                         .system_ui
                         .update_control(ControlKind::Brightness, percent, false);
@@ -1500,9 +1555,10 @@ impl Jwm {
 
     /// The absolute-set counterpart of [`Self::adjust_control_slider`], for
     /// click-to-position and slider drags. A level set on a muted sink
-    /// unmutes it: pointing at a level is an explicit ask for that much
+    /// unmutes it — pointing at a level is an explicit ask for that much
     /// sound, and both wpctl and pactl keep the mute flag on a plain
-    /// set-volume.
+    /// set-volume — so the estimate is unmuted and the worker runs the
+    /// unmute chain before its read-back.
     fn set_control_slider_from_pointer(
         &mut self,
         kind: crate::jwm::features::ControlKind,
@@ -1511,13 +1567,9 @@ impl Jwm {
         use crate::jwm::features::{ControlKind, system_controls};
         match kind {
             ControlKind::Volume => {
-                if let Some(state) = system_controls::volume_set(percent) {
-                    let state = if state.muted {
-                        system_controls::volume_toggle_mute().unwrap_or(state)
-                    } else {
-                        state
-                    };
-                    self.cache_control_volume(state);
+                if let Some((_, Some(state))) =
+                    self.queue_volume_request(system_controls::ControlRequest::VolumeSet(percent))
+                {
                     self.features.system_ui.update_control(
                         ControlKind::Volume,
                         state.percent,
@@ -1526,8 +1578,9 @@ impl Jwm {
                 }
             }
             ControlKind::Brightness => {
-                if let Some(percent) = system_controls::brightness_set(percent) {
-                    self.cache_control_brightness(percent);
+                if let Some((_, Some(percent))) = self.queue_brightness_request(
+                    system_controls::ControlRequest::BrightnessSet(percent),
+                ) {
                     self.features
                         .system_ui
                         .update_control(ControlKind::Brightness, percent, false);
@@ -1575,13 +1628,14 @@ impl Jwm {
     }
 
     /// Motion with a slider drag armed: recompute the value from the
-    /// pointer's x and write it, but only when the rounded percent actually
-    /// changed — every write shells out to wpctl/brightnessctl plus a
-    /// read-back. `hit_text_x` is the x the compositor's hit-test carried,
-    /// `None` when the pointer left the list: a drag that runs off the card
-    /// keeps tracking from the cached origin. Returns `false` when no drag
-    /// is armed — or the panel stopped being a control center — so the
-    /// caller falls back to ordinary hover.
+    /// pointer's x and queue it on the controls worker, but only when the
+    /// rounded percent actually changed — the worker folds the queued storm
+    /// into the newest level, and its read-back corrects the row if the
+    /// estimate drifted. `hit_text_x` is the x the compositor's hit-test
+    /// carried, `None` when the pointer left the list: a drag that runs off
+    /// the card keeps tracking from the cached origin. Returns `false` when
+    /// no drag is armed — or the panel stopped being a control center — so
+    /// the caller falls back to ordinary hover.
     pub(crate) fn drag_control_center_slider(
         &mut self,
         backend: &mut dyn Backend,
@@ -3241,6 +3295,7 @@ mod tests {
     struct ConfigureReplyWindowOps {
         replies: Mutex<Vec<ConfigureReply>>,
         applied: Mutex<Vec<(WindowId, WindowChanges)>>,
+        closed: Mutex<Vec<WindowId>>,
     }
 
     impl WindowOps for ConfigureReplyWindowOps {
@@ -3292,7 +3347,8 @@ mod tests {
             Ok(())
         }
 
-        fn close_window(&self, _win: WindowId) -> Result<CloseResult, BackendError> {
+        fn close_window(&self, win: WindowId) -> Result<CloseResult, BackendError> {
+            self.closed.lock().expect("closed windows lock").push(win);
             Ok(CloseResult::Graceful)
         }
 
@@ -3784,5 +3840,159 @@ mod tests {
             None
         );
         assert_eq!(switcher_binding_step(&[], keys::KEY_j, Mods::SUPER), None);
+    }
+
+    /// A switcher panel over `windows`, highlighting `selected`.
+    fn open_switcher(jwm: &mut Jwm, windows: &[u64], selected: usize) {
+        use crate::jwm::features::system_ui::{ListRow, RowData, SystemUiState};
+        let rows = windows
+            .iter()
+            .map(|&window| ListRow {
+                key: window.to_string(),
+                text: format!("window {window:#x}"),
+                data: RowData::WindowSwitcher { window },
+            })
+            .collect();
+        jwm.features.system_ui = SystemUiState::window_switcher(rows, selected);
+    }
+
+    #[test]
+    fn delete_with_the_switcher_up_closes_the_highlighted_window_mid_gesture() {
+        use crate::backend::common_define::{Mods, keys};
+
+        let mut backend = ConfigureReplyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let monitor = jwm.state.monitor_order[0];
+        let closing = WindowId::from_raw(0x7f10);
+        let survivor = WindowId::from_raw(0x7f11);
+        add_floating_configure_client(&mut jwm, closing, monitor, 0, false);
+        add_floating_configure_client(&mut jwm, survivor, monitor, 0, false);
+        open_switcher(&mut jwm, &[closing.raw(), survivor.raw()], 0);
+
+        jwm.handle_window_switcher_key(&mut backend, keys::KEY_Delete, Mods::empty())
+            .unwrap();
+
+        // The close is the one killclient sends: window_ops().close_window on
+        // the row's live window.
+        assert_eq!(
+            backend
+                .window_ops
+                .closed
+                .lock()
+                .expect("closed windows lock")
+                .as_slice(),
+            &[closing]
+        );
+        // The highlight keeps its index over the shortened list — the
+        // next-oldest window slides under it — and the gesture, grabs and
+        // all, is still up.
+        assert!(jwm.features.system_ui.is_window_switcher());
+        assert_eq!(
+            jwm.features.system_ui.selected_switcher_window(),
+            Some(survivor.raw())
+        );
+    }
+
+    #[test]
+    fn backspace_drops_a_dead_row_without_a_close_request() {
+        use crate::backend::common_define::{Mods, keys};
+
+        let mut backend = ConfigureReplyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let monitor = jwm.state.monitor_order[0];
+        let survivor = WindowId::from_raw(0x7f12);
+        add_floating_configure_client(&mut jwm, survivor, monitor, 0, false);
+        // The tail row names no live client: the snapshot can outlive a
+        // window, and the gesture must survive that.
+        open_switcher(&mut jwm, &[survivor.raw(), 0x7f13], 1);
+
+        jwm.handle_window_switcher_key(&mut backend, keys::KEY_BackSpace, Mods::empty())
+            .unwrap();
+
+        assert!(
+            backend
+                .window_ops
+                .closed
+                .lock()
+                .expect("closed windows lock")
+                .is_empty(),
+            "no live client, no close request"
+        );
+        // The tail's highlight clamped onto the new tail, and the gesture
+        // goes on.
+        assert!(jwm.features.system_ui.is_window_switcher());
+        assert_eq!(
+            jwm.features.system_ui.selected_switcher_window(),
+            Some(survivor.raw())
+        );
+    }
+
+    #[test]
+    fn closing_the_last_switcher_row_ends_the_gesture() {
+        use crate::backend::common_define::{Mods, keys};
+
+        let mut backend = ConfigureReplyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let monitor = jwm.state.monitor_order[0];
+        let window = WindowId::from_raw(0x7f14);
+        add_floating_configure_client(&mut jwm, window, monitor, 0, false);
+        open_switcher(&mut jwm, &[window.raw()], 0);
+
+        jwm.handle_window_switcher_key(&mut backend, keys::KEY_Delete, Mods::empty())
+            .unwrap();
+
+        assert_eq!(
+            backend
+                .window_ops
+                .closed
+                .lock()
+                .expect("closed windows lock")
+                .as_slice(),
+            &[window]
+        );
+        // The opener refuses an empty list, so the panel never shows one
+        // either: the gesture is over, and a later modifier release finds no
+        // switcher to commit.
+        assert!(!jwm.features.system_ui.is_window_switcher());
+        assert!(!jwm.features.system_ui.is_active());
+    }
+
+    /// The slider paths used to shell out to the session's tools — plus a
+    /// read-back — for every motion event of a drag. They queue the level on
+    /// the controls worker now, and the worker folds the storm. The haystack
+    /// is the control-center input region alone, and the needles are built
+    /// at runtime so this test cannot match its own source.
+    #[test]
+    fn control_center_input_queues_instead_of_shelling_out() {
+        const SOURCE: &str = include_str!("input_handler.rs");
+        let region = SOURCE
+            .split_once("fn handle_control_center_key")
+            .expect("handle_control_center_key")
+            .1
+            .split_once("fn dismiss_system_ui_from_pointer")
+            .expect("the end of the control-center input region")
+            .0;
+        for primitive in [
+            "volume_adjust",
+            "volume_set",
+            "volume_toggle_mute",
+            "volume_state",
+            "brightness_adjust",
+            "brightness_set",
+            "brightness_percent",
+        ] {
+            let needle = format!("system_controls::{primitive}(");
+            assert!(
+                !region.contains(&needle),
+                "control-center input regained a blocking tool call: {needle}"
+            );
+        }
+        for helper in ["queue_volume_request", "queue_brightness_request"] {
+            let needle = format!("self.{helper}(");
+            assert!(
+                region.contains(&needle),
+                "a slider path no longer queues on the controls worker ({needle})"
+            );
+        }
     }
 }

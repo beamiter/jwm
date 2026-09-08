@@ -15,8 +15,79 @@ use crate::core::layout::{
 };
 use crate::core::models::{ClientKey, MonitorKey};
 use crate::core::types::Rect;
-use crate::jwm::Jwm;
+use crate::jwm::{Jwm, WMArgEnum};
 use log::info;
+
+/// Edge-snap targets shared by the mouse drop below and the bindable
+/// `snap_window` command. There is deliberately no `Bottom` (the mouse path
+/// never snaps to the bottom edge) and no quarter-tiling: corner drops
+/// resolve to a horizontal half, left winning over right.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SnapDirection {
+    Left,
+    Right,
+    Maximize,
+}
+
+impl SnapDirection {
+    /// The names accepted by the `snap_window` command, case-insensitively.
+    /// The IPC dispatch in `crate::ipc` validates against the same list;
+    /// both sides pin the accepted set in their tests.
+    pub(crate) fn from_name(name: &str) -> Option<Self> {
+        Some(match name.to_ascii_lowercase().as_str() {
+            "left" => SnapDirection::Left,
+            "right" => SnapDirection::Right,
+            "maximize" => SnapDirection::Maximize,
+            _ => return None,
+        })
+    }
+
+    pub(crate) fn as_name(self) -> &'static str {
+        match self {
+            SnapDirection::Left => "left",
+            SnapDirection::Right => "right",
+            SnapDirection::Maximize => "maximize",
+        }
+    }
+
+    /// Parse a `snap_window` binding/IPC argument: exactly one direction
+    /// string (a plain config string arrives as a one-element vector).
+    /// Anything else is a caller error, never a silent no-op.
+    pub(crate) fn from_arg(arg: &WMArgEnum) -> Result<Self, String> {
+        let WMArgEnum::StringVec(values) = arg else {
+            return Err(format!(
+                "snap_window takes a direction string (\"left\", \"right\", \"maximize\"), got {arg:?}"
+            ));
+        };
+        let [name] = values.as_slice() else {
+            return Err(format!(
+                "snap_window takes exactly one direction, got {}",
+                values.len()
+            ));
+        };
+        Self::from_name(name).ok_or_else(|| {
+            format!(
+                "unknown snap direction {name:?}; expected \"left\", \"right\", or \"maximize\""
+            )
+        })
+    }
+}
+
+/// The snap geometry of the classic mouse float snap, extracted so the
+/// keyboard command produces the same rect: left/right halves of the monitor
+/// and the full monitor for a top-edge maximize.
+pub(crate) fn snap_rect(monitor: Rect, direction: SnapDirection) -> Rect {
+    match direction {
+        SnapDirection::Left => Rect::new(monitor.x, monitor.y, monitor.w / 2, monitor.h),
+        SnapDirection::Right => Rect::new(
+            monitor.x + monitor.w / 2,
+            monitor.y,
+            monitor.w / 2,
+            monitor.h,
+        ),
+        SnapDirection::Maximize => monitor,
+    }
+}
 
 /// What a drop at the current pointer position would do.
 pub(crate) enum DragSnapPlan {
@@ -140,16 +211,19 @@ impl Jwm {
             return self.plan_layout_attach(mon_key, drag_key, &layout, px, py);
         }
 
-        // Classic float snap: left/right halves, top edge maximizes.
-        let rect = if near_left {
-            Rect::new(mx, my, mw / 2, mh)
+        // Classic float snap: left/right halves, top edge maximizes. Corner
+        // drops resolve to the horizontal half (left before right); the
+        // bottom edge has no zone.
+        let direction = if near_left {
+            SnapDirection::Left
         } else if near_right {
-            Rect::new(mx + mw / 2, my, mw / 2, mh)
+            SnapDirection::Right
         } else if near_top {
-            Rect::new(mx, my, mw, mh)
+            SnapDirection::Maximize
         } else {
             return None;
         };
+        let rect = snap_rect(Rect::new(mx, my, mw, mh), direction);
         Some(DragSnapPlan::Float { rect })
     }
 
@@ -342,21 +416,7 @@ impl Jwm {
     ) {
         match plan {
             DragSnapPlan::Float { rect } => {
-                let bw = self
-                    .state
-                    .clients
-                    .get(drag_key)
-                    .map(|c| c.geometry.border_w)
-                    .unwrap_or(0);
-                self.resize_client(
-                    backend,
-                    drag_key,
-                    rect.x + bw,
-                    rect.y + bw,
-                    rect.w - 2 * bw,
-                    rect.h - 2 * bw,
-                    false,
-                );
+                self.apply_float_snap_rect(backend, drag_key, rect);
             }
             DragSnapPlan::Attach {
                 mon_key,
@@ -399,6 +459,82 @@ impl Jwm {
                 }
             }
         }
+    }
+
+    /// Move/resize a floating client to a snap rect (outer geometry including
+    /// the border) through the same hint-respecting path a mouse drop uses.
+    fn apply_float_snap_rect(
+        &mut self,
+        backend: &mut dyn Backend,
+        client_key: ClientKey,
+        rect: Rect,
+    ) {
+        let bw = self
+            .state
+            .clients
+            .get(client_key)
+            .map(|c| c.geometry.border_w)
+            .unwrap_or(0);
+        self.resize_client(
+            backend,
+            client_key,
+            rect.x + bw,
+            rect.y + bw,
+            rect.w - 2 * bw,
+            rect.h - 2 * bw,
+            false,
+        );
+    }
+
+    /// `snap_window` command: the keyboard/IPC form of dropping a dragged
+    /// window on a monitor edge — snap the focused window to a half or the
+    /// full monitor rect, using the same geometry as the mouse float snap.
+    ///
+    /// Snapping is a floating-geometry operation: a focused *tiled* window is
+    /// a deliberate no-op (tile it to floating first with `togglefloating`),
+    /// as are a fullscreen window, an empty focus, or a missing monitor. A
+    /// malformed direction argument is an error, never a no-op.
+    pub(crate) fn snap_window(
+        &mut self,
+        backend: &mut dyn Backend,
+        arg: &WMArgEnum,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let direction = SnapDirection::from_arg(arg)?;
+
+        let Some(client_key) = self.get_selected_client_key() else {
+            return Ok(());
+        };
+        let Some(client) = self.state.clients.get(client_key) else {
+            return Ok(());
+        };
+        if !client.state.is_floating || client.state.is_fullscreen {
+            return Ok(());
+        }
+        let Some(mon_key) = client.mon.or(self.state.sel_mon) else {
+            return Ok(());
+        };
+
+        let (mx, my, mw, mh) = self.monitor_rect(mon_key);
+        let rect = snap_rect(Rect::new(mx, my, mw as i32, mh as i32), direction);
+        info!(
+            "[snap_window] snapping client {:?} {} -> {:?}",
+            client_key,
+            direction.as_name(),
+            rect
+        );
+        self.apply_float_snap_rect(backend, client_key, rect);
+
+        // Remember the snapped geometry as the floating geometry a later
+        // tile→float toggle restores — the state-side half of what
+        // sync_focused_floating_geometry does after a mouse drop (a backend
+        // round-trip here could read the animation's starting rect instead).
+        if let Some(client) = self.state.clients.get_mut(client_key) {
+            client.geometry.floating_x = client.geometry.x;
+            client.geometry.floating_y = client.geometry.y;
+            client.geometry.floating_w = client.geometry.w;
+            client.geometry.floating_h = client.geometry.h;
+        }
+        Ok(())
     }
 
     /// Shared attach tail: move to the target monitor if needed, drop the
@@ -567,5 +703,126 @@ mod tests {
         let (index, rect) = pick_best_candidate(&candidates, 5, 540).unwrap();
         assert_eq!(index, 0);
         assert_eq!(rect.x, params.screen_area.x + params.gap);
+    }
+
+    /// Pin the extraction: these are the exact rects the inline math in
+    /// `plan_drag_snap` produced before `snap_rect` existed, for the
+    /// geometries that exercise the math (ultrawide, small, offset origin).
+    #[test]
+    fn snap_rect_matches_the_classic_mouse_drop_geometry() {
+        // Plain 1080p at the origin.
+        let mon = Rect::new(0, 0, 1920, 1080);
+        assert_eq!(
+            snap_rect(mon, SnapDirection::Left),
+            Rect::new(0, 0, 960, 1080)
+        );
+        assert_eq!(
+            snap_rect(mon, SnapDirection::Right),
+            Rect::new(960, 0, 960, 1080)
+        );
+        assert_eq!(snap_rect(mon, SnapDirection::Maximize), mon);
+
+        // Ultrawide.
+        let mon = Rect::new(0, 0, 3440, 1440);
+        assert_eq!(
+            snap_rect(mon, SnapDirection::Left),
+            Rect::new(0, 0, 1720, 1440)
+        );
+        assert_eq!(
+            snap_rect(mon, SnapDirection::Right),
+            Rect::new(1720, 0, 1720, 1440)
+        );
+        assert_eq!(snap_rect(mon, SnapDirection::Maximize), mon);
+
+        // Small monitor.
+        let mon = Rect::new(0, 0, 1024, 600);
+        assert_eq!(
+            snap_rect(mon, SnapDirection::Left),
+            Rect::new(0, 0, 512, 600)
+        );
+        assert_eq!(
+            snap_rect(mon, SnapDirection::Right),
+            Rect::new(512, 0, 512, 600)
+        );
+        assert_eq!(snap_rect(mon, SnapDirection::Maximize), mon);
+
+        // Non-zero origin: a right-hand output in a dual-monitor setup.
+        let mon = Rect::new(1920, 40, 2560, 1440);
+        assert_eq!(
+            snap_rect(mon, SnapDirection::Left),
+            Rect::new(1920, 40, 1280, 1440)
+        );
+        assert_eq!(
+            snap_rect(mon, SnapDirection::Right),
+            Rect::new(3200, 40, 1280, 1440)
+        );
+        assert_eq!(snap_rect(mon, SnapDirection::Maximize), mon);
+    }
+
+    #[test]
+    fn snap_rect_halves_odd_widths_the_way_the_mouse_path_did() {
+        // Odd widths floor the half and start the right half there, leaving
+        // the last column uncovered — the pre-extraction integer math.
+        let mon = Rect::new(0, 0, 1921, 1080);
+        assert_eq!(
+            snap_rect(mon, SnapDirection::Left),
+            Rect::new(0, 0, 960, 1080)
+        );
+        assert_eq!(
+            snap_rect(mon, SnapDirection::Right),
+            Rect::new(960, 0, 960, 1080)
+        );
+    }
+
+    #[test]
+    fn snap_direction_names_are_case_insensitive() {
+        assert_eq!(SnapDirection::from_name("left"), Some(SnapDirection::Left));
+        assert_eq!(
+            SnapDirection::from_name("Right"),
+            Some(SnapDirection::Right)
+        );
+        assert_eq!(
+            SnapDirection::from_name("MAXIMIZE"),
+            Some(SnapDirection::Maximize)
+        );
+    }
+
+    #[test]
+    fn snap_direction_rejects_unknown_names() {
+        // No bottom/quarter directions exist; nothing silently maps to a half.
+        for name in ["", "bottom", "up", "max", "full", "quarter", "top"] {
+            assert_eq!(SnapDirection::from_name(name), None, "accepted {name:?}");
+        }
+    }
+
+    #[test]
+    fn snap_window_argument_must_be_exactly_one_direction_string() {
+        assert_eq!(
+            SnapDirection::from_arg(&WMArgEnum::StringVec(vec!["left".into()])).unwrap(),
+            SnapDirection::Left
+        );
+        assert_eq!(
+            SnapDirection::from_arg(&WMArgEnum::StringVec(vec!["Right".into()])).unwrap(),
+            SnapDirection::Right
+        );
+        assert_eq!(
+            SnapDirection::from_arg(&WMArgEnum::StringVec(vec!["maximize".into()])).unwrap(),
+            SnapDirection::Maximize
+        );
+
+        // Missing, extra, non-string, and unknown arguments are all errors.
+        for arg in [
+            WMArgEnum::Int(0),
+            WMArgEnum::UInt(2),
+            WMArgEnum::Float(0.5),
+            WMArgEnum::StringVec(Vec::new()),
+            WMArgEnum::StringVec(vec!["left".into(), "right".into()]),
+            WMArgEnum::StringVec(vec!["bottom".into()]),
+        ] {
+            assert!(
+                SnapDirection::from_arg(&arg).is_err(),
+                "accepted invalid snap_window argument: {arg:?}"
+            );
+        }
     }
 }

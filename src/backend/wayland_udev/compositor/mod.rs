@@ -1236,6 +1236,9 @@ pub(crate) struct WaylandCompositor {
     /// Entry changes are recorded without touching GL; the first drawn frame
     /// rebuilds the label textures while the compositor context is current.
     expose_titles_dirty: bool,
+    /// Fade-in of the hovered cell's scale/ring, keyed by the hovered window
+    /// id. Hit-testing never sees it: only the drawn rect eases.
+    expose_hover_ease: crate::backend::compositor_common::dynamic_island::HoverEase<u64>,
 
     // Snap preview
     snap_preview_enabled: bool,
@@ -1359,6 +1362,8 @@ pub(crate) struct WaylandCompositor {
     /// `window_groups` on purpose: a motion event must never force the title
     /// textures to rebuild, so hover lives here and only costs a repaint.
     tab_hover: Option<(usize, usize)>,
+    /// Fade-in of the hovered cell's chip, keyed by the same (group, tab).
+    tab_hover_ease: crate::backend::compositor_common::dynamic_island::HoverEase<(usize, usize)>,
 
     // Monitors info
     monitors: Vec<(u32, i32, i32, u32, u32, u32)>,
@@ -1550,6 +1555,10 @@ pub(crate) struct WaylandCompositor {
     osd_slot: crate::backend::compositor_common::osd::OsdSlot,
     /// Cached OSD label texture keyed by its text ("icon  label").
     osd_texture: Option<(String, u32, u32, u32)>,
+    /// Cached REC-chip label texture keyed by its text ("REC m:ss"); redrawn
+    /// only when the shown second flips. Drawn after the recording readback so
+    /// it never lands in the encoded video.
+    recording_indicator_texture: Option<(String, u32, u32, u32)>,
     /// Toast ids evicted outside the render pass; their textures are freed
     /// on the next frame while a GL context is current.
     toast_retired: Vec<u64>,
@@ -1561,6 +1570,9 @@ pub(crate) struct WaylandCompositor {
     system_ui_island: crate::backend::compositor_common::dynamic_island::IslandMotion,
     /// Slide of the selection pill between rows of the open list.
     system_ui_highlight: crate::backend::compositor_common::dynamic_island::RowHighlight,
+    /// Fade-in of the quiet pointer-hover cue, keyed by the hovered row. It
+    /// previews under the pointer; the pill above owns the real selection.
+    system_ui_hover_ease: crate::backend::compositor_common::dynamic_island::HoverEase<usize>,
     /// Widest the open panel has been. The card never narrows while it is up,
     /// so a launcher list re-measured on every keystroke cannot resize it.
     /// Zero also doubles as the filmstrip's and tags grid's first-frame
@@ -2678,6 +2690,7 @@ impl WaylandCompositor {
                 expose_entries: Vec::new(),
                 expose_title_textures: Vec::new(),
                 expose_titles_dirty: false,
+                expose_hover_ease: Default::default(),
 
                 // Snap preview
                 snap_preview_enabled: false,
@@ -2767,6 +2780,7 @@ impl WaylandCompositor {
                 tab_title_textures: Vec::new(),
                 tab_titles_dirty: false,
                 tab_hover: None,
+                tab_hover_ease: Default::default(),
 
                 // Monitors
                 monitors: Vec::new(),
@@ -2922,10 +2936,12 @@ impl WaylandCompositor {
                 toast_retired: Vec::new(),
                 osd_slot: Default::default(),
                 osd_texture: None,
+                recording_indicator_texture: None,
                 hud_text_cache: String::new(),
                 system_ui: None,
                 system_ui_island: Default::default(),
                 system_ui_highlight: Default::default(),
+                system_ui_hover_ease: Default::default(),
                 system_ui_width_floor: 0.0,
                 system_ui_identity: String::new(),
                 system_ui_hit_geometry: None,
@@ -3127,6 +3143,11 @@ impl WaylandCompositor {
                 }
             }
             if let Some((_, texture, _, _)) = self.osd_texture.take()
+                && texture != 0
+            {
+                gl.DeleteTextures(1, &texture);
+            }
+            if let Some((_, texture, _, _)) = self.recording_indicator_texture.take()
                 && texture != 0
             {
                 gl.DeleteTextures(1, &texture);
@@ -3427,6 +3448,7 @@ mod gpu_release_contract_tests {
         "system_ui_preview",
         "toast_textures",
         "osd_texture",
+        "recording_indicator_texture",
         "wallpaper_texture",
         "old_wallpaper_texture",
         "monitor_wallpapers",

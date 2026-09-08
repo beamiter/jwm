@@ -44,6 +44,10 @@ impl<C: CompositorConnection> Compositor<C> {
                 self.expose_gap,
                 windows,
             );
+            // A new entry set is a new grid: the hover cue starts over from
+            // nothing rather than resuming at full strength on a cell the
+            // previous exposé left hovered.
+            self.expose_hover_ease.clear();
             // The label textures derive from the entry set, so they rebuild
             // with it; the fly-in animation itself never invalidates them
             // (the raster is fitted to the settled cell width).
@@ -80,9 +84,22 @@ impl<C: CompositorConnection> Compositor<C> {
     }
 
     /// Render expose overlay. Called from render_frame after borders, before post-process.
-    pub(super) fn render_expose(&self, proj: &[f32; 16]) {
+    pub(super) fn render_expose(&mut self, proj: &[f32; 16]) {
         if self.expose_entries.is_empty() || self.expose_opacity <= 0.0 {
             return;
+        }
+
+        // The hover ring eases in on the cell under the pointer rather than
+        // snapping on; hover leaving snaps it off the same frame. Overlay
+        // only — hit-testing keeps the unscaled entry geometry.
+        let hovered_id = self.expose_selected();
+        let hover_p = self.expose_hover_ease.advance_with_motion(
+            std::time::Instant::now(),
+            hovered_id,
+            crate::config::CONFIG.load().motion_enabled(),
+        );
+        if self.expose_hover_ease.animating() {
+            self.needs_render = true;
         }
 
         unsafe {
@@ -159,8 +176,9 @@ impl<C: CompositorConnection> Compositor<C> {
                 self.gl.bind_texture(glow::TEXTURE_2D, Some(wt.gl_texture));
                 self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
 
-                // Highlight border if hovered
-                if entry.is_hovered {
+                // Highlight border while hovered, fading in with the ease
+                // above and snapping off with it.
+                if entry.is_hovered && hover_p > 0.0 {
                     self.gl.use_program(Some(self.border_program));
                     self.gl.uniform_matrix_4_f32_slice(
                         self.border_uniforms.projection.as_ref(),
@@ -174,7 +192,7 @@ impl<C: CompositorConnection> Compositor<C> {
                         0.4,
                         0.6,
                         1.0,
-                        opacity,
+                        opacity * hover_p,
                     );
                     self.set_border_radii(self.corner_radius, self.corner_radius);
                     self.gl.uniform_2_f32(
@@ -747,11 +765,21 @@ impl<C: CompositorConnection> Compositor<C> {
     /// the blurred scene, and that capture has to happen before the first
     /// cell is filled.
     pub(super) fn render_tab_bar(&mut self, proj: &[f32; 16]) {
+        // The hover chip eases in under the pointer like the other cues and
+        // snaps off the frame the hover leaves.
+        let hover_p = self.tab_hover_ease.advance_with_motion(
+            std::time::Instant::now(),
+            self.tab_hover,
+            crate::config::CONFIG.load().motion_enabled(),
+        );
+        if self.tab_hover_ease.animating() {
+            self.needs_render = true;
+        }
         let ui = ui_theme::palette();
         self.ensure_glass_backdrop(ui);
         let accent = self.border_gradient_color_a;
         let tab_hover = self.tab_hover;
-        let hover_scale = ui_theme::TAB_HOVER_ALPHA_SCALE;
+        let hover_scale = ui_theme::TAB_HOVER_ALPHA_SCALE * hover_p;
 
         unsafe {
             self.gl.bind_vertex_array(Some(self.quad_vao));
@@ -785,11 +813,12 @@ impl<C: CompositorConnection> Compositor<C> {
                 for (index, tab) in group.tabs.iter().enumerate() {
                     // The focused cell is drawn raised; the hovered one takes
                     // the same chip at half strength so the pointer's target
-                    // shows without competing with the focus. Anything else
-                    // is the track showing through, which is what makes the
-                    // raised cells read as lifted out of it. A hover index
-                    // that outlived its group simply matches nothing here.
-                    let hovered = tab_hover == Some((group_index, index));
+                    // shows without competing with the focus, easing in with
+                    // the envelope above. Anything else is the track showing
+                    // through, which is what makes the raised cells read as
+                    // lifted out of it. A hover index that outlived its group
+                    // simply matches nothing here.
+                    let hovered = tab_hover == Some((group_index, index)) && hover_p > 0.0;
                     if !tab.active && !hovered {
                         continue;
                     }

@@ -1046,10 +1046,12 @@ impl<C: CompositorConnection> Compositor<C> {
             toast_button_hover: None,
             osd_slot: Default::default(),
             osd_texture: None,
+            recording_indicator_texture: None,
             hud_text_cache: String::new(),
             system_ui: None,
             system_ui_island: Default::default(),
             system_ui_highlight: Default::default(),
+            system_ui_hover_ease: Default::default(),
             system_ui_width_floor: 0.0,
             system_ui_identity: String::new(),
             system_ui_hit_geometry: None,
@@ -1210,6 +1212,7 @@ impl<C: CompositorConnection> Compositor<C> {
             expose_opacity: 0.0,
             expose_start: None,
             expose_title_textures: Vec::new(),
+            expose_hover_ease: Default::default(),
             // Phase 5: Smart Snap Preview
             snap_preview_enabled: behavior.snap_preview,
             snap_preview_color: behavior.snap_preview_color,
@@ -1232,6 +1235,7 @@ impl<C: CompositorConnection> Compositor<C> {
             tags_grid_label_textures: Vec::new(),
             tags_grid_labels_key: None,
             tab_hover: None,
+            tab_hover_ease: Default::default(),
             // Particle effects
             particle_program,
             particle_uniforms,

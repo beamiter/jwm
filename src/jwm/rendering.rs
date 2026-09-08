@@ -452,6 +452,10 @@ impl Jwm {
         // Wallpaper colour extraction decodes an image; the same applies.
         self.poll_wallpaper_theme(backend);
 
+        // Screenshot captures publish off-thread; push the completion toast
+        // for any watcher whose PNG landed (or whose wait timed out).
+        self.poll_screenshot_completion_jobs(backend);
+
         // Dim, lock, or blank a session nobody is at.
         self.poll_idle(backend);
 

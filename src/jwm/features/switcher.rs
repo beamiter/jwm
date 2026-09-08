@@ -1,16 +1,18 @@
 //! The Alt-Tab MRU window switcher.
 //!
 //! Hold Alt, tap Tab to walk the most-recently-used windows, let go of Alt
-//! to switch to the highlighted one; Escape or a click elsewhere cancels.
+//! to switch to the highlighted one; Escape or a click elsewhere cancels,
+//! and Delete closes the highlighted window without leaving the gesture.
 //! This file carries the gesture's pure logic — eligibility, the first
-//! selection, row text, commit validation — and the `Jwm` snapshot builder.
-//! The panel is an ordinary system-UI list panel; the grabs and the key
-//! routing live in `navigation.rs`, `input_handler.rs` and
-//! `event_dispatcher.rs`.
+//! selection, row text, commit validation, row removal — and the `Jwm`
+//! snapshot builder. The panel is an ordinary system-UI list panel; the
+//! grabs and the key routing live in `navigation.rs`, `input_handler.rs`
+//! and `event_dispatcher.rs`.
 
 use crate::backend::common_define::{Mods, keys};
 use crate::core::models::MonitorKey;
 use crate::jwm::Jwm;
+use crate::jwm::features::system_ui::{ListKind, RowData, SystemUiState};
 
 /// One window the gesture can land on. The list is built once when the
 /// switcher opens: a window created mid-gesture gets no row, and one that
@@ -194,6 +196,39 @@ pub(crate) fn commit_disposition(
         Some((window, CommitWindowState::Visible)) => CommitDisposition::Focus(window),
         Some((window, CommitWindowState::Minimized)) => CommitDisposition::RestoreAndFocus(window),
         None => CommitDisposition::Cancel,
+    }
+}
+
+impl SystemUiState {
+    /// Drop the highlighted row because Delete closed its window mid-gesture.
+    /// The highlight keeps its index, so the next-oldest window slides under
+    /// it — a highlight on the closed tail clamps onto the new tail — and
+    /// the surviving rows keep their MRU-snapshot order. Returns the row's
+    /// window and whether that emptied the list: the opener refuses an empty
+    /// list, so the caller ends the gesture rather than show one. `None`
+    /// means this panel is not the switcher and nothing was touched.
+    pub(crate) fn remove_selected_switcher_row(&mut self) -> Option<(u64, bool)> {
+        let Self::ListPanel {
+            kind,
+            rows,
+            selected,
+            ..
+        } = self
+        else {
+            return None;
+        };
+        if *kind != ListKind::WindowSwitcher {
+            return None;
+        }
+        let window = match rows.get(*selected).map(|row| &row.data) {
+            Some(RowData::WindowSwitcher { window }) => *window,
+            _ => return None,
+        };
+        rows.remove(*selected);
+        if *selected >= rows.len() {
+            *selected = rows.len().saturating_sub(1);
+        }
+        Some((window, rows.is_empty()))
     }
 }
 
@@ -395,6 +430,79 @@ mod tests {
         let mut empty = switcher_panel(0, 0);
         empty.move_selection(1);
         assert_eq!(selected_window(&empty), None);
+    }
+
+    #[test]
+    fn removing_a_row_slides_the_next_oldest_window_under_the_highlight() {
+        // The highlight keeps its index, so the row after the closed one —
+        // the next-oldest window — is where a commit now lands.
+        let mut panel = switcher_panel(3, 1);
+        assert_eq!(panel.remove_selected_switcher_row(), Some((1, false)));
+        assert_eq!(selected_window(&panel), Some(2));
+
+        let mut panel = switcher_panel(3, 0);
+        assert_eq!(panel.remove_selected_switcher_row(), Some((0, false)));
+        assert_eq!(selected_window(&panel), Some(1));
+
+        // The survivors keep their MRU-snapshot order: nothing re-sorts
+        // mid-gesture, whatever the close goes on to focus.
+        let SystemUiState::ListPanel { rows, .. } = &panel else {
+            panic!("the switcher is a list panel");
+        };
+        let order: Vec<u64> = rows
+            .iter()
+            .map(|row| match &row.data {
+                RowData::WindowSwitcher { window } => *window,
+                _ => panic!("switcher rows carry windows"),
+            })
+            .collect();
+        assert_eq!(order, [1, 2]);
+    }
+
+    #[test]
+    fn removing_the_tail_row_clamps_the_highlight_onto_the_new_tail() {
+        let mut panel = switcher_panel(3, 2);
+        assert_eq!(panel.remove_selected_switcher_row(), Some((2, false)));
+        assert_eq!(selected_window(&panel), Some(1));
+    }
+
+    #[test]
+    fn removing_the_only_row_reports_the_gesture_empty() {
+        let mut panel = switcher_panel(1, 0);
+        assert_eq!(panel.remove_selected_switcher_row(), Some((0, true)));
+        assert_eq!(selected_window(&panel), None);
+        // Until the caller closes the panel it still steps without panicking
+        // and without inventing a selection.
+        panel.move_selection(1);
+        assert_eq!(selected_window(&panel), None);
+    }
+
+    #[test]
+    fn only_the_switcher_loses_a_row_to_a_close() {
+        let mut inactive = SystemUiState::default();
+        assert_eq!(inactive.remove_selected_switcher_row(), None);
+
+        let mut notifications = SystemUiState::ListPanel {
+            kind: ListKind::Notifications,
+            rows: vec![ListRow {
+                key: "1".to_string(),
+                text: "notification".to_string(),
+                data: RowData::Notification {
+                    id: 1,
+                    actions: Vec::new(),
+                    cursor: 0,
+                },
+            }],
+            selected: 0,
+            message: String::new(),
+            prompt: None,
+            empty: "No notifications".to_string(),
+        };
+        assert_eq!(notifications.remove_selected_switcher_row(), None);
+        assert!(
+            matches!(&notifications, SystemUiState::ListPanel { rows, .. } if rows.len() == 1),
+            "another panel's rows are untouched"
+        );
     }
 
     #[test]

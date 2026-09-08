@@ -42,8 +42,9 @@ pub(crate) enum TailOverlayStage {
     LinearTarget,
     /// Drawn into the encoded output target after the delivery point (debug
     /// HUD, annotation, screenshot toolbar, toasts, OSD, system UI, recording
-    /// crop outline). Migrating such a class additionally requires moving its
-    /// draw ahead of the delivery point, so these stay encoded-only for now.
+    /// crop outline and its REC chip). Migrating such a class additionally
+    /// requires moving its draw ahead of the delivery point, so these stay
+    /// encoded-only for now.
     PostDelivery,
 }
 
@@ -95,7 +96,8 @@ pub(crate) enum TailOverlayClass {
     Osd,
     /// Modal system UI (launcher, lock shield, prompts, ...).
     SystemUi,
-    /// Recording crop outline, deliberately kept out of the encoded stream.
+    /// Recording crop outline and the REC chip, deliberately kept out of the
+    /// encoded stream.
     RecordingRegionOverlay,
 }
 
@@ -338,7 +340,8 @@ impl WaylandCompositor {
             toast: !self.toast_stack.is_empty(),
             osd: !self.osd_slot.is_empty(),
             system_ui: self.system_ui.is_some(),
-            recording_region_overlay: self.recording_region_overlay.is_some(),
+            recording_region_overlay: self.recording_region_overlay.is_some()
+                || self.recording.is_active(),
         }
     }
 

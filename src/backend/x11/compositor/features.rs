@@ -1910,6 +1910,14 @@ impl<C: CompositorConnection> Compositor<C> {
         }
         self.recording_last_cursor = None;
         self.recording_started_at = None;
+        // The REC chip stops drawing once `recording_active` clears; make the
+        // frame that removes it happen even when nothing else dirties the
+        // screen, and free its label texture with the rest of the recording
+        // GPU state.
+        if let Some((_, tex, _, _)) = self.recording_indicator_texture.take() {
+            unsafe { self.gl.delete_texture(tex) };
+        }
+        self.needs_render = true;
         self.release_recording_gpu();
         // Joins its worker, which the condvar wakes immediately.
         self.recording_cursor_sampler = None;

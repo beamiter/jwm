@@ -122,6 +122,10 @@ pub struct FeatureStates {
     /// status bar mid-click, most often — lets go. See `deferred_grab`.
     pub deferred_grab: Option<DeferredGrab>,
     pub screenshot: ScreenshotState,
+    /// Completion watchers for queued screenshot captures, one per capture.
+    /// The workers only wait for the compositor's PNG publish (and run the
+    /// clipboard hand-off); the frame tick turns their outcomes into toasts.
+    pub screenshot_completions: Vec<connectivity::BackgroundJob<screenshot::ScreenshotCompletion>>,
     pub overview: OverviewState,
     pub recording: RecordingState,
     pub magnifier: MagnifierState,
@@ -144,6 +148,11 @@ pub struct FeatureStates {
         Option<connectivity::BackgroundJob<(u64, system_controls::ControlCenterSnapshot)>>,
     pub control_snapshot_refreshed_at: Option<std::time::Instant>,
     pub control_snapshot_epoch: u64,
+    /// Optimistic volume/brightness values on screen while the controls
+    /// worker applies the real change off the event thread, plus the OSD
+    /// bookkeeping its read-backs resolve against. See
+    /// `system_controls::ControlFeedback`.
+    pub control_feedback: system_controls::ControlFeedback,
     /// Latest Wi-Fi/Bluetooth reading, refreshed on the same poll and
     /// whenever the control center opens.
     pub connectivity: ConnectivityState,

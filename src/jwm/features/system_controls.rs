@@ -1,15 +1,25 @@
 //! Volume and backlight control for the OSD and control center.
 //!
-//! Mutations shell out to the session's native tools with a fallback chain —
-//! volume: `wpctl` (PipeWire) → `pactl` (PulseAudio) → `amixer` (ALSA);
-//! brightness: `brightnessctl` → direct sysfs. The first tool that works is
-//! cached for the rest of the session so a key repeat spawns one process, not
-//! three. All output parsing lives in pure functions so it stays testable
-//! without the tools installed.
+//! Mutations never run on the event thread: a key press or slider motion
+//! queues a [`ControlRequest`] on one session-wide worker and draws an
+//! optimistic estimate at once, while the worker shells out to the session's
+//! native tools with a fallback chain — volume: `wpctl` (PipeWire) → `pactl`
+//! (PulseAudio) → `amixer` (ALSA); brightness: `brightnessctl` → direct
+//! sysfs. The worker folds everything still queued into the newest level
+//! before running, so a key-repeat storm or slider drag costs one write, not
+//! one spawn per repeat, and its read-back confirms or corrects the estimate
+//! from the frame tick. The first tool that works is cached for the rest of
+//! the session so each step spawns one process, not three. All output
+//! parsing — and the queue folding, estimates, and feedback decisions —
+//! lives in pure functions so it stays testable without the tools installed.
 
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc;
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
+
+use crate::backend::update_notifier::AsyncUpdateNotifier;
 
 use super::sysfs::{bounded_paths, read_attribute};
 
@@ -159,8 +169,9 @@ pub fn volume_state() -> Option<AudioState> {
 }
 
 /// Adjust the default sink by `delta` percentage points (clamped at 100%),
-/// returning the resulting state for the OSD.
-pub fn volume_adjust(delta: i32) -> Option<AudioState> {
+/// returning the resulting state. Runs on the controls worker; the event
+/// thread queues a [`ControlRequest`] instead.
+fn volume_adjust(delta: i32) -> Option<AudioState> {
     let magnitude = delta.unsigned_abs();
     let ok = match detect_volume_tool()? {
         VolumeTool::Wpctl => {
@@ -193,7 +204,8 @@ pub fn volume_adjust(delta: i32) -> Option<AudioState> {
 }
 
 /// Toggle the default sink's mute state, returning the resulting state.
-pub fn volume_toggle_mute() -> Option<AudioState> {
+/// Runs on the controls worker.
+fn volume_toggle_mute() -> Option<AudioState> {
     let ok = match detect_volume_tool()? {
         VolumeTool::Wpctl => run_ok("wpctl", &["set-mute", "@DEFAULT_AUDIO_SINK@", "toggle"]),
         VolumeTool::Pactl => run_ok("pactl", &["set-sink-mute", "@DEFAULT_SINK@", "toggle"]),
@@ -205,9 +217,10 @@ pub fn volume_toggle_mute() -> Option<AudioState> {
     volume_state()
 }
 
-/// Set the default sink to an absolute percent (0..=100). Used by the
-/// control-center slider.
-pub fn volume_set(percent: u8) -> Option<AudioState> {
+/// Set the default sink to an absolute percent (0..=100). Runs on the
+/// controls worker; the slider's round-11 unmute chain wraps this in
+/// [`volume_set_unmuting`].
+fn volume_set(percent: u8) -> Option<AudioState> {
     let percent = percent.min(100);
     let ok = match detect_volume_tool()? {
         VolumeTool::Wpctl => run_ok(
@@ -746,7 +759,9 @@ fn sysfs_set_percent(percent: u8) -> Option<u8> {
 }
 
 /// Adjust the backlight by `delta` percentage points, returning the result.
-pub fn brightness_adjust(delta: i32) -> Option<u8> {
+/// Runs on the controls worker (the sysfs half spawns nothing, but it rides
+/// the same queue so every mutation keeps one ordered path).
+fn brightness_adjust(delta: i32) -> Option<u8> {
     match detect_brightness_tool()? {
         BrightnessTool::Brightnessctl => {
             let magnitude = delta.unsigned_abs();
@@ -769,8 +784,8 @@ pub fn brightness_adjust(delta: i32) -> Option<u8> {
     }
 }
 
-/// Set the backlight to an absolute percent. Used by the control-center slider.
-pub fn brightness_set(percent: u8) -> Option<u8> {
+/// Set the backlight to an absolute percent. Runs on the controls worker.
+fn brightness_set(percent: u8) -> Option<u8> {
     match detect_brightness_tool()? {
         BrightnessTool::Brightnessctl => {
             if !run_brightnessctl_ok(&["-n1", "set", &format!("{}%", percent.min(100))]) {
@@ -779,6 +794,704 @@ pub fn brightness_set(percent: u8) -> Option<u8> {
             brightness_percent()
         }
         BrightnessTool::Sysfs => sysfs_set_percent(percent.max(1)),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Off-thread control mutations
+// ---------------------------------------------------------------------------
+//
+// Every mutation above blocks on a session tool for up to the helper timeout
+// — a set plus its read-back, sometimes twice for the unmute chain — so none
+// of them may run on the event thread. Key presses and slider drags queue a
+// `ControlRequest` here and draw an optimistic estimate at once; the worker
+// drains the queue, folds what it finds pending so only the newest level is
+// applied, and publishes the read-back for the frame tick to confirm or
+// correct the estimate.
+
+/// One requested change, in the order the user asked for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ControlRequest {
+    /// Relative nudge in percentage points (volume keys, arrows,
+    /// scroll-on-slider).
+    VolumeAdjust(i32),
+    /// Absolute level from click-to-position and slider drags. On a muted
+    /// sink the worker unmutes after the set — pointing at a level is an
+    /// explicit ask for that much sound.
+    VolumeSet(u8),
+    /// An event, not a value: it is never folded into a level, and only an
+    /// adjacent twin cancels it (two flips with nothing between are no flip).
+    VolumeToggleMute,
+    BrightnessAdjust(i32),
+    BrightnessSet(u8),
+}
+
+/// Which control a request, an estimate, or a report concerns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ControlDomain {
+    Volume,
+    Brightness,
+}
+
+impl ControlRequest {
+    fn domain(self) -> ControlDomain {
+        match self {
+            Self::VolumeAdjust(_) | Self::VolumeSet(_) | Self::VolumeToggleMute => {
+                ControlDomain::Volume
+            }
+            Self::BrightnessAdjust(_) | Self::BrightnessSet(_) => ControlDomain::Brightness,
+        }
+    }
+}
+
+/// A request plus its submission sequence. Reports carry the sequence of the
+/// newest request they cover, so the event thread can tell a read-back that
+/// confirms the estimate on screen from one that predates it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct QueuedRequest {
+    seq: u64,
+    request: ControlRequest,
+}
+
+/// `percent + delta` within a domain's on-screen bounds: the floor is 0 for
+/// volume and 1 for brightness — both brightness backends floor a decrease
+/// at a nonzero level (`brightnessctl -n1`, sysfs's `max(1)`).
+fn adjusted_level(percent: u8, delta: i32, floor: u8) -> u8 {
+    (i32::from(percent) + delta).clamp(i32::from(floor), 100) as u8
+}
+
+/// Fold two queued value requests for one domain into the single write that
+/// reaches the same end state. Only ever applied to requests still queued —
+/// nothing has run yet, so the fold itself is unobservable.
+fn merge_value_requests(pending: ControlRequest, next: ControlRequest) -> ControlRequest {
+    match (pending, next) {
+        // Relative nudges add up: ten queued repeats of +5 are one +50.
+        (ControlRequest::VolumeAdjust(a), ControlRequest::VolumeAdjust(b)) => {
+            ControlRequest::VolumeAdjust(a.saturating_add(b))
+        }
+        (ControlRequest::BrightnessAdjust(a), ControlRequest::BrightnessAdjust(b)) => {
+            ControlRequest::BrightnessAdjust(a.saturating_add(b))
+        }
+        // A nudge after a queued set retargets the set itself.
+        (ControlRequest::VolumeSet(percent), ControlRequest::VolumeAdjust(delta)) => {
+            ControlRequest::VolumeSet(adjusted_level(percent, delta, 0))
+        }
+        (ControlRequest::BrightnessSet(percent), ControlRequest::BrightnessAdjust(delta)) => {
+            ControlRequest::BrightnessSet(adjusted_level(percent, delta, 1))
+        }
+        // An absolute set makes whatever level was queued before it moot.
+        (_, ControlRequest::VolumeSet(_)) => next,
+        (_, ControlRequest::BrightnessSet(_)) => next,
+        // Toggles never reach here and cross-domain pairs are never merged;
+        // the folder below guarantees both.
+        _ => pending,
+    }
+}
+
+/// Fold a queued request into the batch the worker is about to run.
+///
+/// Latest value wins: a value request merges into the batch's last pending
+/// value for its domain. A mute toggle is an event, not a value — it never
+/// merges and never drops, and a value behind a toggle queues instead of
+/// merging across it, because the set-on-muted unmute chain depends on the
+/// order. The one fold a toggle allows is against its own adjacent twin:
+/// two flips with nothing between are no flip, and cancelling the pair keeps
+/// a toggle flood from piling up behind a hung helper. `cancelled_seq`
+/// records the newest sequence folded away this drain so the worker can
+/// still publish a read-back covering it.
+fn fold_request(
+    batch: &mut Vec<QueuedRequest>,
+    cancelled_seq: &mut Option<u64>,
+    next: QueuedRequest,
+) {
+    let domain = next.request.domain();
+    let last = batch
+        .iter()
+        .rposition(|queued| queued.request.domain() == domain);
+    match (next.request, last) {
+        (ControlRequest::VolumeToggleMute, Some(index))
+            if batch[index].request == ControlRequest::VolumeToggleMute =>
+        {
+            let cancelled = batch.remove(index);
+            *cancelled_seq = Some(cancelled.seq.max(next.seq));
+        }
+        (ControlRequest::VolumeToggleMute, _) => batch.push(next),
+        (_, Some(index)) if batch[index].request != ControlRequest::VolumeToggleMute => {
+            let merged = merge_value_requests(batch[index].request, next.request);
+            batch[index] = QueuedRequest {
+                seq: batch[index].seq.max(next.seq),
+                request: merged,
+            };
+        }
+        // The first request for a domain, or a value behind a toggle.
+        _ => batch.push(next),
+    }
+}
+
+/// What the worker confirmed after applying a batch: per domain, the
+/// read-back after its newest executed request — or that request's failure.
+/// A domain left `None` was untouched by the batch.
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct ControlReport {
+    pub volume: Option<VolumeReport>,
+    pub brightness: Option<BrightnessReport>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum VolumeReport {
+    /// Read-back after the newest applied request; the sequence says which
+    /// submissions this answer covers.
+    Applied(u64, AudioState),
+    /// The change or its read-back did not take — the same `None` the
+    /// synchronous path returned.
+    Failed(u64),
+}
+
+impl VolumeReport {
+    fn split(self) -> (u64, Option<AudioState>) {
+        match self {
+            Self::Applied(seq, state) => (seq, Some(state)),
+            Self::Failed(seq) => (seq, None),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BrightnessReport {
+    Applied(u64, u8),
+    Failed(u64),
+}
+
+impl BrightnessReport {
+    fn split(self) -> (u64, Option<u8>) {
+        match self {
+            Self::Applied(seq, percent) => (seq, Some(percent)),
+            Self::Failed(seq) => (seq, None),
+        }
+    }
+}
+
+/// The one session-wide control queue. An unbounded channel is still bounded
+/// in practice — the worker folds everything pending each time it finishes a
+/// step — but the fold, not the channel, is what guarantees a drag never
+/// piles up a backlog of stale levels.
+struct ControlsWorker {
+    sender: mpsc::Sender<QueuedRequest>,
+    report: Arc<Mutex<ControlReport>>,
+    notifier: Arc<Mutex<Option<AsyncUpdateNotifier>>>,
+    next_seq: AtomicU64,
+    /// Whether the OS gave the worker a thread. When it did not, every
+    /// submission fails fast and callers keep their old error paths rather
+    /// than queueing work nothing will ever run.
+    started: bool,
+}
+
+static CONTROLS_WORKER: OnceLock<ControlsWorker> = OnceLock::new();
+
+fn controls_worker() -> &'static ControlsWorker {
+    CONTROLS_WORKER.get_or_init(ControlsWorker::start)
+}
+
+impl ControlsWorker {
+    fn start() -> Self {
+        let (sender, receiver) = mpsc::channel();
+        let report = Arc::new(Mutex::new(ControlReport::default()));
+        let notifier = Arc::new(Mutex::new(None));
+        // `std::thread::spawn` panics when the OS refuses a thread (a pids
+        // cgroup limit, RLIMIT_NPROC); a named Builder turns that into a
+        // logged warning, like `BackgroundJob::spawn`.
+        let spawned = std::thread::Builder::new()
+            .name("jwm-controls".into())
+            .spawn({
+                let report = Arc::clone(&report);
+                let notifier = Arc::clone(&notifier);
+                move || run_control_queue(&receiver, &report, &notifier)
+            });
+        if let Err(error) = &spawned {
+            log::warn!("[controls] could not spawn the controls worker thread: {error}");
+        }
+        Self {
+            sender,
+            report,
+            notifier,
+            next_seq: AtomicU64::new(1),
+            started: spawned.is_ok(),
+        }
+    }
+}
+
+/// `volume_set` plus the round-11 unmute chain: a level set on a muted sink
+/// unmutes it, because pointing at a level is an explicit ask for that much
+/// sound, and both wpctl and pactl keep the mute flag on a plain set-volume.
+/// The state after the unmute is the one adopted — the same end state the
+/// synchronous slider path produced.
+fn volume_set_unmuting(percent: u8) -> Option<AudioState> {
+    let state = volume_set(percent)?;
+    if state.muted {
+        volume_toggle_mute().or(Some(state))
+    } else {
+        Some(state)
+    }
+}
+
+fn run_control_queue(
+    receiver: &mpsc::Receiver<QueuedRequest>,
+    report: &Mutex<ControlReport>,
+    notifier: &Mutex<Option<AsyncUpdateNotifier>>,
+) {
+    while let Ok(first) = receiver.recv() {
+        let mut batch = vec![first];
+        let mut cancelled_seq = None;
+        // Everything submitted while the previous step ran — a slider drag's
+        // worth of levels — folds into the newest one before any of it runs.
+        while let Ok(next) = receiver.try_recv() {
+            fold_request(&mut batch, &mut cancelled_seq, next);
+        }
+
+        let mut outcome = ControlReport::default();
+        for queued in batch {
+            match queued.request {
+                ControlRequest::VolumeAdjust(delta) => {
+                    outcome.volume = Some(
+                        volume_adjust(delta).map_or(VolumeReport::Failed(queued.seq), |state| {
+                            VolumeReport::Applied(queued.seq, state)
+                        }),
+                    );
+                }
+                ControlRequest::VolumeSet(percent) => {
+                    outcome.volume = Some(
+                        volume_set_unmuting(percent)
+                            .map_or(VolumeReport::Failed(queued.seq), |state| {
+                                VolumeReport::Applied(queued.seq, state)
+                            }),
+                    );
+                }
+                ControlRequest::VolumeToggleMute => {
+                    outcome.volume = Some(
+                        volume_toggle_mute().map_or(VolumeReport::Failed(queued.seq), |state| {
+                            VolumeReport::Applied(queued.seq, state)
+                        }),
+                    );
+                }
+                ControlRequest::BrightnessAdjust(delta) => {
+                    outcome.brightness = Some(
+                        brightness_adjust(delta)
+                            .map_or(BrightnessReport::Failed(queued.seq), |percent| {
+                                BrightnessReport::Applied(queued.seq, percent)
+                            }),
+                    );
+                }
+                ControlRequest::BrightnessSet(percent) => {
+                    outcome.brightness = Some(
+                        brightness_set(percent)
+                            .map_or(BrightnessReport::Failed(queued.seq), |percent| {
+                                BrightnessReport::Applied(queued.seq, percent)
+                            }),
+                    );
+                }
+            }
+        }
+        // A batch reduced to nothing by a cancelled toggle pair changed no
+        // state, but the estimate on screen still needs a read-back whose
+        // sequence covers the cancelled submissions. When the batch did run
+        // a volume command, its answer — success or failure — already ran
+        // after everything the cancelled pair could have toggled, so it
+        // covers those submissions too.
+        if let Some(cancelled) = cancelled_seq {
+            match &mut outcome.volume {
+                Some(report) => {
+                    let seq = match report {
+                        VolumeReport::Applied(seq, _) | VolumeReport::Failed(seq) => seq,
+                    };
+                    *seq = (*seq).max(cancelled);
+                }
+                None => {
+                    outcome.volume = Some(
+                        volume_state().map_or(VolumeReport::Failed(cancelled), |state| {
+                            VolumeReport::Applied(cancelled, state)
+                        }),
+                    );
+                }
+            }
+        }
+        if outcome.volume.is_none() && outcome.brightness.is_none() {
+            continue;
+        }
+
+        let notifier = {
+            let mut guard = report.lock().unwrap_or_else(PoisonError::into_inner);
+            // Only the newest answer per domain is worth waking for; one the
+            // tick has not collected yet is simply overwritten.
+            if outcome.volume.is_some() {
+                guard.volume = outcome.volume;
+            }
+            if outcome.brightness.is_some() {
+                guard.brightness = outcome.brightness;
+            }
+            // Publish before signalling, mirroring `BackgroundJob`: a handler
+            // woken by the eventfd must find the value already visible.
+            notifier
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone()
+        };
+        if let Some(notifier) = notifier {
+            notifier.notify();
+        }
+    }
+}
+
+/// Queue a mutation on the controls worker and (re)attach the event loop's
+/// wakeup. Returns the submission's sequence number — the report that covers
+/// it carries one at least as new — or `None` when no worker thread exists
+/// to run it, in which case nothing was queued.
+pub(crate) fn queue_control_request(
+    request: ControlRequest,
+    notifier: Option<AsyncUpdateNotifier>,
+) -> Option<u64> {
+    let worker = controls_worker();
+    if !worker.started {
+        return None;
+    }
+    {
+        let mut guard = worker
+            .notifier
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        *guard = notifier;
+    }
+    let seq = worker.next_seq.fetch_add(1, Ordering::Relaxed);
+    // The send cannot fail while the worker holds the receiver, but if a
+    // panic ever took that thread down, fail the submission here instead of
+    // queueing work nothing will run.
+    worker.sender.send(QueuedRequest { seq, request }).ok()?;
+    Some(seq)
+}
+
+/// The newest uncollected read-backs, if the worker published any since the
+/// last poll. Never spawns the worker just to ask.
+pub(crate) fn take_control_report() -> Option<ControlReport> {
+    let worker = CONTROLS_WORKER.get()?;
+    let mut guard = worker.report.lock().unwrap_or_else(PoisonError::into_inner);
+    let taken = std::mem::take(&mut *guard);
+    (taken.volume.is_some() || taken.brightness.is_some()).then_some(taken)
+}
+
+/// Whether detection already concluded that no volume tool works — the one
+/// answer the event thread may read without spawning anything, so the key
+/// binding keeps its old error path instead of drawing an estimate the
+/// worker would only have to take back.
+pub(crate) fn volume_tool_known_absent() -> bool {
+    matches!(VOLUME_TOOL.get(), Some(None))
+}
+
+/// The brightness counterpart of [`volume_tool_known_absent`].
+pub(crate) fn brightness_tool_known_absent() -> bool {
+    matches!(BRIGHTNESS_TOOL.get(), Some(None))
+}
+
+// ---------------------------------------------------------------------------
+// Optimistic on-screen feedback
+// ---------------------------------------------------------------------------
+
+/// The volume to show before the worker confirms. A `None` base means no
+/// read has ever landed — show nothing rather than invent a level; the
+/// read-back then owns the first card.
+pub(crate) fn optimistic_volume(
+    base: Option<AudioState>,
+    request: ControlRequest,
+) -> Option<AudioState> {
+    match request {
+        // A set needs no base, and the worker's unmute chain makes the
+        // estimate unmuted: pointing at a level is an ask for that much sound.
+        ControlRequest::VolumeSet(percent) => Some(AudioState {
+            percent: percent.min(100),
+            muted: false,
+        }),
+        // A plain adjust never unmutes, and every backend caps the result of
+        // an adjust at 100 — including one that started above it.
+        ControlRequest::VolumeAdjust(delta) => base.map(|base| AudioState {
+            percent: adjusted_level(base.percent, delta, 0),
+            muted: base.muted,
+        }),
+        ControlRequest::VolumeToggleMute => base.map(|base| AudioState {
+            muted: !base.muted,
+            ..base
+        }),
+        ControlRequest::BrightnessAdjust(_) | ControlRequest::BrightnessSet(_) => None,
+    }
+}
+
+/// The brightness to show before the worker confirms; same rules as
+/// [`optimistic_volume`], with the brightness floor of 1.
+pub(crate) fn optimistic_brightness(base: Option<u8>, request: ControlRequest) -> Option<u8> {
+    match request {
+        ControlRequest::BrightnessSet(percent) => Some(percent.clamp(1, 100)),
+        ControlRequest::BrightnessAdjust(delta) => base.map(|base| adjusted_level(base, delta, 1)),
+        ControlRequest::VolumeAdjust(_)
+        | ControlRequest::VolumeSet(_)
+        | ControlRequest::VolumeToggleMute => None,
+    }
+}
+
+/// An estimate drawn ahead of the worker's confirmation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct OptimisticValue<T> {
+    /// Submission the estimate came from. A read-back with a smaller
+    /// sequence does not cover it.
+    pub(crate) seq: u64,
+    /// What is on screen right now.
+    pub(crate) shown: T,
+    /// The last confirmed value — what a failed change reverts to. Kept
+    /// across chained estimates so a storm of repeats reverts to the truth,
+    /// not to an intermediate guess.
+    pub(crate) previous: Option<T>,
+}
+
+/// What the frame tick does with one worker report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FeedbackAction<T> {
+    /// The read-back covers the estimate: show the confirmed value.
+    Adopt(T),
+    /// The change failed: restore the last confirmed value (which may be
+    /// "no row" when nothing was ever read).
+    Revert(Option<T>),
+    /// The read-back predates the estimate on screen; the worker's next
+    /// report resolves it.
+    KeepEstimate,
+}
+
+/// The one decision rule for a worker report: sequence numbers decide
+/// whether the report covers what is on screen, and a covered failure
+/// restores the last confirmed value instead of leaving the estimate up.
+pub(crate) fn decide_feedback<T: Copy>(
+    optimistic: Option<OptimisticValue<T>>,
+    outcome_seq: u64,
+    result: Option<T>,
+) -> FeedbackAction<T> {
+    if let Some(estimate) = optimistic
+        && estimate.seq > outcome_seq
+    {
+        return FeedbackAction::KeepEstimate;
+    }
+    match result {
+        Some(value) => FeedbackAction::Adopt(value),
+        None => FeedbackAction::Revert(optimistic.and_then(|estimate| estimate.previous)),
+    }
+}
+
+/// A queued OSD refresh: the confirmed value to put on the card, consumed by
+/// the frame tick's panel flush (the poll that resolves feedback has no
+/// backend to show it with).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct OsdCorrection {
+    pub(crate) domain: ControlDomain,
+    pub(crate) percent: u8,
+    pub(crate) muted: bool,
+}
+
+/// The card currently on screen, if one is: the OSD is a single
+/// replace-in-place card, so only the latest domain owns it, and a
+/// contradicting read-back for the other domain must not yank it.
+#[derive(Debug, Clone, Copy)]
+struct LastOsd {
+    domain: ControlDomain,
+    percent: u8,
+    muted: bool,
+    shown_at: Instant,
+}
+
+/// Optimistic control values and OSD bookkeeping, owned by the event thread.
+///
+/// A key press or slider motion draws the estimate immediately and queues
+/// the real change; the frame tick adopts the worker's read-back when it
+/// covers the estimate (re-syncing the panel only when the value actually
+/// moved) or reverts to the last confirmed value when the change failed.
+#[derive(Debug, Default)]
+pub struct ControlFeedback {
+    volume: Option<OptimisticValue<AudioState>>,
+    brightness: Option<OptimisticValue<u8>>,
+    /// A press that had nothing to estimate from is owed its first card from
+    /// the read-back; the sequence keeps a stale report from paying the debt.
+    volume_osd_owed: Option<u64>,
+    brightness_osd_owed: Option<u64>,
+    last_osd: Option<LastOsd>,
+    /// A read-back that contradicts the visible card queues a re-show here.
+    pending_osd: Option<OsdCorrection>,
+}
+
+impl ControlFeedback {
+    /// The estimate on screen, ahead of any confirmed value. Chained presses
+    /// estimate from it, so a repeat storm follows its own display.
+    pub(crate) fn volume_shown(&self) -> Option<AudioState> {
+        self.volume.map(|estimate| estimate.shown)
+    }
+
+    /// The brightness counterpart of [`Self::volume_shown`].
+    pub(crate) fn brightness_shown(&self) -> Option<u8> {
+        self.brightness.map(|estimate| estimate.shown)
+    }
+
+    /// Record an estimate just drawn. A chained estimate keeps the original
+    /// `previous`, so reverting a storm of repeats restores the last
+    /// confirmed value, not an intermediate guess.
+    pub(crate) fn note_volume_estimate(
+        &mut self,
+        seq: u64,
+        shown: AudioState,
+        confirmed: Option<AudioState>,
+    ) {
+        match &mut self.volume {
+            Some(estimate) => {
+                estimate.seq = seq;
+                estimate.shown = shown;
+            }
+            None => {
+                self.volume = Some(OptimisticValue {
+                    seq,
+                    shown,
+                    previous: confirmed,
+                });
+            }
+        }
+    }
+
+    /// The brightness counterpart of [`Self::note_volume_estimate`].
+    pub(crate) fn note_brightness_estimate(&mut self, seq: u64, shown: u8, confirmed: Option<u8>) {
+        match &mut self.brightness {
+            Some(estimate) => {
+                estimate.seq = seq;
+                estimate.shown = shown;
+            }
+            None => {
+                self.brightness = Some(OptimisticValue {
+                    seq,
+                    shown,
+                    previous: confirmed,
+                });
+            }
+        }
+    }
+
+    /// The card a key press just drew, so a contradicting read-back can
+    /// refresh it in place.
+    pub(crate) fn note_osd_shown(
+        &mut self,
+        domain: ControlDomain,
+        percent: u8,
+        muted: bool,
+        shown_at: Instant,
+    ) {
+        self.last_osd = Some(LastOsd {
+            domain,
+            percent,
+            muted,
+            shown_at,
+        });
+    }
+
+    /// A press that had nothing to estimate from owes its first card to the
+    /// read-back covering this submission.
+    pub(crate) fn owe_osd(&mut self, domain: ControlDomain, seq: u64) {
+        match domain {
+            ControlDomain::Volume => self.volume_osd_owed = Some(seq),
+            ControlDomain::Brightness => self.brightness_osd_owed = Some(seq),
+        }
+    }
+
+    /// The queued OSD refresh, if any.
+    pub(crate) fn take_pending_osd(&mut self) -> Option<OsdCorrection> {
+        self.pending_osd.take()
+    }
+
+    /// Resolve a volume report against the estimate on screen, clearing the
+    /// estimate when the report covers it and queueing any OSD correction.
+    pub(crate) fn resolve_volume(
+        &mut self,
+        report: VolumeReport,
+        now: Instant,
+    ) -> FeedbackAction<AudioState> {
+        let (seq, result) = report.split();
+        let action = decide_feedback(self.volume, seq, result);
+        if matches!(action, FeedbackAction::KeepEstimate) {
+            return action;
+        }
+        self.volume = None;
+        let value = match action {
+            FeedbackAction::Adopt(state) => Some((state.percent, state.muted)),
+            FeedbackAction::Revert(previous) => previous.map(|state| (state.percent, state.muted)),
+            FeedbackAction::KeepEstimate => None,
+        };
+        self.resolve_osd(ControlDomain::Volume, seq, value, now);
+        action
+    }
+
+    /// The brightness counterpart of [`Self::resolve_volume`].
+    pub(crate) fn resolve_brightness(
+        &mut self,
+        report: BrightnessReport,
+        now: Instant,
+    ) -> FeedbackAction<u8> {
+        let (seq, result) = report.split();
+        let action = decide_feedback(self.brightness, seq, result);
+        if matches!(action, FeedbackAction::KeepEstimate) {
+            return action;
+        }
+        self.brightness = None;
+        let value = match action {
+            FeedbackAction::Adopt(percent) => Some((percent, false)),
+            FeedbackAction::Revert(previous) => previous.map(|percent| (percent, false)),
+            FeedbackAction::KeepEstimate => None,
+        };
+        self.resolve_osd(ControlDomain::Brightness, seq, value, now);
+        action
+    }
+
+    /// Queue an OSD refresh when the report calls for one: an owed first
+    /// card, or a live card whose value the read-back just contradicted.
+    fn resolve_osd(
+        &mut self,
+        domain: ControlDomain,
+        seq: u64,
+        value: Option<(u8, bool)>,
+        now: Instant,
+    ) {
+        // The debt is paid only by a report that covers the owed submission,
+        // and a failed change pays nothing — the binding's old error path
+        // showed no card either.
+        let owed = match domain {
+            ControlDomain::Volume => &mut self.volume_osd_owed,
+            ControlDomain::Brightness => &mut self.brightness_osd_owed,
+        };
+        if owed.is_some_and(|owed_seq| owed_seq <= seq) {
+            *owed = None;
+            if let Some((percent, muted)) = value {
+                self.note_osd_shown(domain, percent, muted, now);
+                self.pending_osd = Some(OsdCorrection {
+                    domain,
+                    percent,
+                    muted,
+                });
+            }
+            return;
+        }
+        // A live card the read-back contradicted is re-shown in place. Past
+        // the envelope the card is gone, and showing now would pop a new one.
+        let (Some((percent, muted)), Some(last)) = (value, self.last_osd) else {
+            return;
+        };
+        if last.domain == domain
+            && (last.percent, last.muted) != (percent, muted)
+            && now.saturating_duration_since(last.shown_at)
+                <= crate::backend::compositor_common::osd::OSD_VISIBLE_WINDOW
+        {
+            self.note_osd_shown(domain, percent, muted, now);
+            self.pending_osd = Some(OsdCorrection {
+                domain,
+                percent,
+                muted,
+            });
+        }
     }
 }
 
@@ -1241,5 +1954,554 @@ Source #51
             body.contains("audio_inventory.defaults()"),
             "the snapshot's defaults must be derived from the inventory it read"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // Controls worker: queue folding, estimates, feedback decisions
+    // ------------------------------------------------------------------
+
+    fn queued(seq: u64, request: ControlRequest) -> QueuedRequest {
+        QueuedRequest { seq, request }
+    }
+
+    fn fold_all(
+        requests: impl IntoIterator<Item = QueuedRequest>,
+    ) -> (Vec<QueuedRequest>, Option<u64>) {
+        let mut batch = Vec::new();
+        let mut cancelled_seq = None;
+        for request in requests {
+            fold_request(&mut batch, &mut cancelled_seq, request);
+        }
+        (batch, cancelled_seq)
+    }
+
+    #[test]
+    fn queued_adjusts_sum_into_one_write() {
+        // A key-repeat storm applies the same total as pressing each key
+        // after the worker caught up — but as one write, not a backlog.
+        let (batch, cancelled_seq) = fold_all([
+            queued(1, ControlRequest::VolumeAdjust(5)),
+            queued(2, ControlRequest::VolumeAdjust(5)),
+            queued(3, ControlRequest::VolumeAdjust(-12)),
+        ]);
+        assert_eq!(batch, [queued(3, ControlRequest::VolumeAdjust(-2))]);
+        assert_eq!(cancelled_seq, None);
+
+        // The sum cannot overflow no matter how long the worker is busy.
+        let (batch, _) = fold_all([
+            queued(1, ControlRequest::VolumeAdjust(i32::MAX)),
+            queued(2, ControlRequest::VolumeAdjust(i32::MAX)),
+        ]);
+        assert_eq!(batch, [queued(2, ControlRequest::VolumeAdjust(i32::MAX))]);
+    }
+
+    #[test]
+    fn a_queued_set_makes_an_earlier_level_moot() {
+        // A slider drag is a stream of absolute levels; only the newest is
+        // ever applied.
+        let (batch, _) = fold_all([
+            queued(1, ControlRequest::VolumeAdjust(5)),
+            queued(2, ControlRequest::VolumeSet(40)),
+            queued(3, ControlRequest::VolumeSet(60)),
+        ]);
+        assert_eq!(batch, [queued(3, ControlRequest::VolumeSet(60))]);
+    }
+
+    #[test]
+    fn an_adjust_after_a_queued_set_retargets_the_set() {
+        let (batch, _) = fold_all([
+            queued(1, ControlRequest::VolumeSet(40)),
+            queued(2, ControlRequest::VolumeAdjust(5)),
+        ]);
+        assert_eq!(batch, [queued(2, ControlRequest::VolumeSet(45))]);
+
+        // …within the domain's bounds: volume at 0..=100, brightness at
+        // 1..=100 (both brightness backends floor a decrease at nonzero).
+        let (batch, _) = fold_all([
+            queued(1, ControlRequest::VolumeSet(98)),
+            queued(2, ControlRequest::VolumeAdjust(5)),
+        ]);
+        assert_eq!(batch, [queued(2, ControlRequest::VolumeSet(100))]);
+        let (batch, _) = fold_all([
+            queued(1, ControlRequest::VolumeSet(2)),
+            queued(2, ControlRequest::VolumeAdjust(-5)),
+        ]);
+        assert_eq!(batch, [queued(2, ControlRequest::VolumeSet(0))]);
+        let (batch, _) = fold_all([
+            queued(1, ControlRequest::BrightnessSet(2)),
+            queued(2, ControlRequest::BrightnessAdjust(-5)),
+        ]);
+        assert_eq!(batch, [queued(2, ControlRequest::BrightnessSet(1))]);
+    }
+
+    #[test]
+    fn a_mute_toggle_between_levels_is_never_folded_away() {
+        // The toggle is an event: the set-on-muted unmute chain depends on
+        // whether it ran, so the levels on either side must not merge across
+        // it.
+        let (batch, cancelled_seq) = fold_all([
+            queued(1, ControlRequest::VolumeSet(30)),
+            queued(2, ControlRequest::VolumeToggleMute),
+            queued(3, ControlRequest::VolumeSet(60)),
+        ]);
+        assert_eq!(
+            batch,
+            [
+                queued(1, ControlRequest::VolumeSet(30)),
+                queued(2, ControlRequest::VolumeToggleMute),
+                queued(3, ControlRequest::VolumeSet(60)),
+            ]
+        );
+        assert_eq!(cancelled_seq, None);
+
+        let (batch, _) = fold_all([
+            queued(1, ControlRequest::VolumeAdjust(5)),
+            queued(2, ControlRequest::VolumeToggleMute),
+            queued(3, ControlRequest::VolumeAdjust(5)),
+        ]);
+        assert_eq!(
+            batch,
+            [
+                queued(1, ControlRequest::VolumeAdjust(5)),
+                queued(2, ControlRequest::VolumeToggleMute),
+                queued(3, ControlRequest::VolumeAdjust(5)),
+            ]
+        );
+    }
+
+    #[test]
+    fn adjacent_mute_toggles_cancel_in_pairs() {
+        // Two flips with nothing between are no flip; the newest cancelled
+        // sequence still earns a read-back so the estimate can resolve.
+        let (batch, cancelled_seq) = fold_all([
+            queued(1, ControlRequest::VolumeToggleMute),
+            queued(2, ControlRequest::VolumeToggleMute),
+        ]);
+        assert!(batch.is_empty());
+        assert_eq!(cancelled_seq, Some(2));
+
+        // …and once the pair is gone, the levels around it merge — the end
+        // state of set-flip-flip-set is the one set.
+        let (batch, cancelled_seq) = fold_all([
+            queued(1, ControlRequest::VolumeSet(30)),
+            queued(2, ControlRequest::VolumeToggleMute),
+            queued(3, ControlRequest::VolumeToggleMute),
+            queued(4, ControlRequest::VolumeSet(60)),
+        ]);
+        assert_eq!(batch, [queued(4, ControlRequest::VolumeSet(60))]);
+        assert_eq!(cancelled_seq, Some(3));
+
+        // An odd run of toggles keeps exactly one — the parity is the event.
+        let (batch, cancelled_seq) = fold_all([
+            queued(1, ControlRequest::VolumeToggleMute),
+            queued(2, ControlRequest::VolumeToggleMute),
+            queued(3, ControlRequest::VolumeToggleMute),
+        ]);
+        assert_eq!(batch, [queued(3, ControlRequest::VolumeToggleMute)]);
+        assert_eq!(cancelled_seq, Some(2));
+    }
+
+    #[test]
+    fn volume_and_brightness_fold_independently() {
+        let (batch, _) = fold_all([
+            queued(1, ControlRequest::VolumeAdjust(5)),
+            queued(2, ControlRequest::BrightnessAdjust(5)),
+            queued(3, ControlRequest::VolumeAdjust(5)),
+            queued(4, ControlRequest::BrightnessSet(50)),
+        ]);
+        assert_eq!(
+            batch,
+            [
+                queued(3, ControlRequest::VolumeAdjust(10)),
+                queued(4, ControlRequest::BrightnessSet(50)),
+            ]
+        );
+    }
+
+    #[test]
+    fn optimistic_volume_estimates_follow_the_tools_bounds() {
+        let base = Some(AudioState {
+            percent: 45,
+            muted: false,
+        });
+        // An adjust keeps the mute flag and clamps at the 100 every backend
+        // caps an adjust's result at.
+        assert_eq!(
+            optimistic_volume(base, ControlRequest::VolumeAdjust(10)),
+            Some(AudioState {
+                percent: 55,
+                muted: false
+            })
+        );
+        assert_eq!(
+            optimistic_volume(base, ControlRequest::VolumeAdjust(900)),
+            Some(AudioState {
+                percent: 100,
+                muted: false
+            })
+        );
+        let quiet = Some(AudioState {
+            percent: 5,
+            muted: false,
+        });
+        assert_eq!(
+            optimistic_volume(quiet, ControlRequest::VolumeAdjust(-30)),
+            Some(AudioState {
+                percent: 0,
+                muted: false
+            })
+        );
+        // A level that started above 100 comes back down through the
+        // ceiling, like the `-l 1.0` clamp of the result and the read-back
+        // dance for the backend without a limit flag.
+        let loud = Some(AudioState {
+            percent: 120,
+            muted: false,
+        });
+        assert_eq!(
+            optimistic_volume(loud, ControlRequest::VolumeAdjust(-5)),
+            Some(AudioState {
+                percent: 100,
+                muted: false
+            })
+        );
+
+        // Setting a level unmutes: the worker runs the unmute chain, so the
+        // estimate already shows it.
+        let muted = Some(AudioState {
+            percent: 45,
+            muted: true,
+        });
+        assert_eq!(
+            optimistic_volume(muted, ControlRequest::VolumeSet(60)),
+            Some(AudioState {
+                percent: 60,
+                muted: false
+            })
+        );
+        // A toggle flips the flag and keeps the level.
+        assert_eq!(
+            optimistic_volume(muted, ControlRequest::VolumeToggleMute),
+            Some(AudioState {
+                percent: 45,
+                muted: false
+            })
+        );
+
+        // Nothing ever read: no invented level for relative changes — but an
+        // absolute set still knows exactly what to show.
+        assert_eq!(
+            optimistic_volume(None, ControlRequest::VolumeAdjust(5)),
+            None
+        );
+        assert_eq!(
+            optimistic_volume(None, ControlRequest::VolumeToggleMute),
+            None
+        );
+        assert_eq!(
+            optimistic_volume(None, ControlRequest::VolumeSet(160)),
+            Some(AudioState {
+                percent: 100,
+                muted: false
+            })
+        );
+    }
+
+    #[test]
+    fn optimistic_brightness_never_leaves_the_visible_range() {
+        assert_eq!(
+            optimistic_brightness(Some(45), ControlRequest::BrightnessAdjust(10)),
+            Some(55)
+        );
+        assert_eq!(
+            optimistic_brightness(Some(95), ControlRequest::BrightnessAdjust(10)),
+            Some(100)
+        );
+        // Both backends floor a decrease at a nonzero level, so the estimate
+        // does too.
+        assert_eq!(
+            optimistic_brightness(Some(5), ControlRequest::BrightnessAdjust(-30)),
+            Some(1)
+        );
+        assert_eq!(
+            optimistic_brightness(None, ControlRequest::BrightnessAdjust(5)),
+            None
+        );
+        assert_eq!(
+            optimistic_brightness(None, ControlRequest::BrightnessSet(0)),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn a_readback_covering_the_estimate_is_adopted() {
+        let estimate = Some(OptimisticValue {
+            seq: 5,
+            shown: AudioState {
+                percent: 60,
+                muted: false,
+            },
+            previous: Some(AudioState {
+                percent: 55,
+                muted: false,
+            }),
+        });
+        let truth = AudioState {
+            percent: 59,
+            muted: false,
+        };
+        assert_eq!(
+            decide_feedback(estimate, 5, Some(truth)),
+            FeedbackAction::Adopt(truth)
+        );
+        // A folded batch reports its newest member's sequence, which covers
+        // every estimate folded into it.
+        assert_eq!(
+            decide_feedback(estimate, 7, Some(truth)),
+            FeedbackAction::Adopt(truth)
+        );
+    }
+
+    #[test]
+    fn a_readback_older_than_the_estimate_is_ignored() {
+        let estimate = Some(OptimisticValue {
+            seq: 8,
+            shown: AudioState {
+                percent: 60,
+                muted: false,
+            },
+            previous: None,
+        });
+        let stale = AudioState {
+            percent: 40,
+            muted: false,
+        };
+        // The estimate came from a submission this read-back does not cover;
+        // adopting it would drag the row backwards mid-storm.
+        assert_eq!(
+            decide_feedback(estimate, 5, Some(stale)),
+            FeedbackAction::<AudioState>::KeepEstimate
+        );
+        // A stale failure must not revert either: the worker is still going
+        // to answer for what is on screen.
+        assert_eq!(
+            decide_feedback(estimate, 5, None),
+            FeedbackAction::<AudioState>::KeepEstimate
+        );
+    }
+
+    #[test]
+    fn a_failed_change_reverts_to_the_last_confirmed_value() {
+        let confirmed = AudioState {
+            percent: 55,
+            muted: false,
+        };
+        let estimate = Some(OptimisticValue {
+            seq: 5,
+            shown: AudioState {
+                percent: 60,
+                muted: false,
+            },
+            previous: Some(confirmed),
+        });
+        // The estimate may not stick when the real change failed.
+        assert_eq!(
+            decide_feedback(estimate, 5, None),
+            FeedbackAction::Revert(Some(confirmed))
+        );
+        // Nothing confirmed ever: revert to "no row", the state before the
+        // first press.
+        let estimate = Some(OptimisticValue {
+            seq: 5,
+            shown: confirmed,
+            previous: None,
+        });
+        assert_eq!(
+            decide_feedback(estimate, 5, None::<AudioState>),
+            FeedbackAction::Revert(None)
+        );
+        // And with no estimate pending at all, failure changes nothing.
+        assert_eq!(
+            decide_feedback(None, 5, None::<AudioState>),
+            FeedbackAction::Revert(None)
+        );
+    }
+
+    #[test]
+    fn chained_estimates_keep_the_first_confirmed_value_for_revert() {
+        let mut feedback = ControlFeedback::default();
+        let confirmed = AudioState {
+            percent: 50,
+            muted: false,
+        };
+        let shown = |percent| AudioState {
+            percent,
+            muted: false,
+        };
+        feedback.note_volume_estimate(1, shown(55), Some(confirmed));
+        feedback.note_volume_estimate(2, shown(60), Some(confirmed));
+        let estimate = feedback.volume.expect("the estimate is pending");
+        assert_eq!(estimate.seq, 2);
+        assert_eq!(estimate.shown, shown(60));
+        // Reverting the storm restores the truth, not the intermediate 55.
+        assert_eq!(estimate.previous, Some(confirmed));
+    }
+
+    #[test]
+    fn a_contradicted_live_card_is_refreshed_and_a_dead_one_is_not() {
+        let mut feedback = ControlFeedback::default();
+        let now = Instant::now();
+        feedback.note_osd_shown(ControlDomain::Volume, 60, false, now);
+
+        // A read-back that agrees with the card changes nothing.
+        let action = feedback.resolve_volume(
+            VolumeReport::Applied(
+                1,
+                AudioState {
+                    percent: 60,
+                    muted: false,
+                },
+            ),
+            now,
+        );
+        assert_eq!(
+            action,
+            FeedbackAction::Adopt(AudioState {
+                percent: 60,
+                muted: false
+            })
+        );
+        assert_eq!(feedback.take_pending_osd(), None);
+
+        // One that contradicts it re-shows in place.
+        feedback.resolve_volume(
+            VolumeReport::Applied(
+                2,
+                AudioState {
+                    percent: 55,
+                    muted: false,
+                },
+            ),
+            now,
+        );
+        assert_eq!(
+            feedback.take_pending_osd(),
+            Some(OsdCorrection {
+                domain: ControlDomain::Volume,
+                percent: 55,
+                muted: false,
+            })
+        );
+
+        // Past the card's envelope the same correction would pop a new card
+        // long after the last press — the old one is left to fade.
+        feedback.note_osd_shown(ControlDomain::Volume, 60, false, now);
+        let late = now
+            + crate::backend::compositor_common::osd::OSD_VISIBLE_WINDOW
+            + Duration::from_millis(1);
+        feedback.resolve_volume(
+            VolumeReport::Applied(
+                3,
+                AudioState {
+                    percent: 55,
+                    muted: false,
+                },
+            ),
+            late,
+        );
+        assert_eq!(feedback.take_pending_osd(), None);
+
+        // The other domain's card owns the slot now; a volume read-back must
+        // not yank the brightness card off the screen.
+        feedback.note_osd_shown(ControlDomain::Brightness, 80, false, now);
+        feedback.resolve_volume(
+            VolumeReport::Applied(
+                4,
+                AudioState {
+                    percent: 55,
+                    muted: false,
+                },
+            ),
+            now,
+        );
+        assert_eq!(feedback.take_pending_osd(), None);
+    }
+
+    #[test]
+    fn a_press_with_nothing_to_estimate_from_is_owed_its_first_card() {
+        let mut feedback = ControlFeedback::default();
+        let now = Instant::now();
+        feedback.owe_osd(ControlDomain::Volume, 3);
+
+        // A report predating the owed submission pays nothing.
+        feedback.resolve_volume(
+            VolumeReport::Applied(
+                2,
+                AudioState {
+                    percent: 40,
+                    muted: false,
+                },
+            ),
+            now,
+        );
+        assert_eq!(feedback.take_pending_osd(), None);
+
+        // The covering read-back draws the card…
+        feedback.resolve_volume(
+            VolumeReport::Applied(
+                3,
+                AudioState {
+                    percent: 45,
+                    muted: false,
+                },
+            ),
+            now,
+        );
+        assert_eq!(
+            feedback.take_pending_osd(),
+            Some(OsdCorrection {
+                domain: ControlDomain::Volume,
+                percent: 45,
+                muted: false,
+            })
+        );
+
+        // …while a failed change pays nothing, matching the binding's old
+        // no-card error path.
+        feedback.owe_osd(ControlDomain::Volume, 5);
+        let action = feedback.resolve_volume(VolumeReport::Failed(5), now);
+        assert_eq!(action, FeedbackAction::Revert(None));
+        assert_eq!(feedback.take_pending_osd(), None);
+    }
+
+    /// The event thread must never call the blocking primitives: every
+    /// mutation goes through the queue. The haystack is the worker-side
+    /// section alone — the folder, reports, and feedback — so the needles
+    /// are built at runtime and this test cannot match its own source.
+    #[test]
+    fn the_worker_side_has_no_submission_shortcut() {
+        const SOURCE: &str = include_str!("system_controls.rs");
+        let queue = SOURCE
+            .split_once("fn queue_control_request")
+            .expect("queue_control_request")
+            .1
+            .split_once("fn take_control_report")
+            .expect("the end of queue_control_request")
+            .0;
+        for primitive in [
+            "volume_adjust",
+            "volume_set",
+            "volume_toggle_mute",
+            "brightness_adjust",
+            "brightness_set",
+        ] {
+            let needle = format!("{primitive}(");
+            // The only allowed call shape inside the queue is on
+            // `ControlRequest` variants, never the primitives themselves.
+            assert!(
+                !queue.contains(&needle),
+                "queue_control_request runs {needle} inline instead of queueing"
+            );
+        }
     }
 }
