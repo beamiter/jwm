@@ -4,6 +4,99 @@
 
 ---
 
+## 2026-09-08：UI/UX 十一轮（交互对称收尾：滑块点击拖拽 / 通知动作条点击 / pairing_failed 闭环 / tags 遮罩淡入）
+
+主题取自十轮后的候选清单：**键盘与指针的镜像缺口**。两波并行（wave 1 按文件
+所有权互不重叠：滑块全栈 + pairing_failed；wave 2 在合并树上：通知动作条 +
+tags/胶片条遮罩），四项落地，集成阶段修掉一个本轮测试设施 bug。
+
+1. **控制中心滑块 click-to-position + press-drag**（十轮「不做点击/拖拽」的反对
+   理由被本轮探索推翻）：「命中换算要复制渲染端文本度量」已不成立——
+   `compositor_font::measure_ui_text_width` 与栅格化共用 `resolved_line_width`
+   （含 fontconfig 回退），bar 起点 = `measure(prefix) − TEXT_PAD` 是精确值。
+   落点：`control_row_text` 滑块臂重构为共享 `slider_row_parts`（行字符串字节
+   级钉住）；纯函数 `slider_value_from_x`（strict/clamp 两模式）+
+   `slider_press_at_visible_row` / `slider_drag_value`；命中链路
+   `SystemUiHitTarget::Item(usize)` → `Item(usize, f32)` 携带行内纹理 x 偏移
+   （`Hit::Item` 同步，两渲染器仅透传）。决策：bar 内 press = 绝对定位 + arm
+   drag，bar 外保持原 Enter 行为（Volume 仍是 mute 切换）；**muted 上拖拽/点击
+   设值自动 unmute**（wpctl/pactl 的 set-volume 不清 mute 位，读回后补
+   `volume_toggle_mute`）；motion 按取整 percent 变化节流（每次 apply 都是一次
+   外部工具调用 + 读回）。X11 控制中心抓取 Buttons → `ButtonsAndMotion`（tags
+   overview 既有先例），键绑定与状态栏 shell 两个 opener 都升级；Wayland 无改
+   动（抓取下 motion 本就转发）。拖拽缓存 `root_x − text_x` 并在每次命中刷新，
+   卡片中途变宽（mute→percent 后缀）不移位。**坐标坑**：text_x 保留栅格化
+   2px margin，因为 measure 公式里已扣 TEXT_PAD，减两次会让 bar 左移 2px。
+2. **`bluetooth_pairing_failed` 分派闭环**（十轮遗留关闭）：arm 在 withdraw 旁，
+   复用 pairing.rs 既有的 `parse_failed_command`/`matches_failure`（cookie 匹配、
+   inbound-only、unbound）/`inbound_failed_message`，pairing.rs 零改动；取走会
+   话后 60s INBOUND_WINDOW 与 25s prompt 闩锁都 gated 在
+   `features.bluetooth_pairing` 上、不可能再触发（代码阅读核实）；无
+   pairing_response 广播（helper 已死）、无设备重扫（从未绑定）。IPC_REGISTRY
+   补齐（追加式，schema 不升版）。效果：helper 在 arm 窗口之前死掉（无 system
+   bus / 无 adapter / bluez 拒绝 agent）时，picker 状态行立即显示
+   「Cannot accept incoming requests — 原因」，不再让用户看 60s 倒计时后以
+   「Not accepting incoming requests」收尾。
+3. **通知中心动作条可点击**（镜像缺口的指针半边；键盘半边本就完整）：strip 改
+   由结构化 `action_strip_parts`（gutter/chips/gap）构建、字节级钉住；
+   `notification_chip_at_x` 用同一 measure 路径量 chip 跨度（✓ 光标标记也参与
+   测量，与栅格化逐字节一致）；gutter 与 chip 间隙刻意 no-op（pinned）；
+   hover 移动 ✓ 光标（`hover_notification_action` 绝对设置，同步 Left/Right 守
+   卫），后续 Enter/数字键作用在指针悬停的 chip 上。`visible_row_target` 不动
+   （strip 仍映射 None，其 Option<usize> 行号契约喂 select/scroll/hover），新增
+   并行映射 `notification_strip_visible_row` +
+   `notification_strip_chip_at_visible_row`；旧钉住测试
+   `pointer_rows_skip_a_notification_action_strip` 替换为新语义。**toast 键盘路
+   径缺口经核实不成立**：`post_notification` 无条件入 history，中心 `recent()`
+   列出全部记录（含 DnD 压制的），toast 在屏时同一通知的动作在中心键盘可达—
+   —toast 是指针面、中心是键盘面，这是成文形状而不是缺口。
+4. **tags 网格/胶片条 scrim 淡入**（十轮「自有遮罩不在本轮」遗留关闭）：共享
+   `open_envelope`（dynamic_island.rs）= `(w/panel_w)²`，与列表卡同一条曲线；
+   **复用现有 `system_ui_island` 字段**（零新字段——compositor 结构体不在该
+   agent 文件集内），`system_ui_width_floor == 0.0` 兼任「本面板首帧」哨兵
+   （`set_system_ui` 在 overlay identity 变化时清零；同面板 re-sync 不重新淡入；
+   filmstrip↔grid 直换重新淡入；两个 mod.rs 的字段注释已补记这一双重角色）。
+   只淡 scrim 不淡内容：grid 的活窗口纹理走 window shader 独立 uniform 路径，
+   内容 alpha 不便宜；无 spring-out（成文约定）；motion 关 = 首帧即满 alpha。
+   选择/缩放动画刻意不做——grid 命中测试读 lifted cell（`presented_cell`），动
+   缩放要命中测试同步parity。
+
+**集成阶段修掉的本轮缺陷（1 个，测试设施而非产品代码）**：scrim 淡入的
+`disabled_motion_makes_the_open_envelope_exactly_one` 把「mid-travel」搭错——第
+一步 `advance_with_motion(_, false)` 已把弹簧钉在终点（`Spring::at(target)`），
+后续开 motion 的 advance 无行程可动，`animating` 断言必败。补 `close()` 重新播
+种后再行进。教训形状同十三轮：测试名描述的场景要与状态机的真实前置一致。
+
+**验证**：fmt / clippy -D warnings / check --all-targets / no-default + 7 组
+feature profile 全绿（23 行警告逐条比对：既有 X11 clipboard×N + media.rs 既有 1
+条，未新增）；lib **2895 passed / 0 failed**（基线 2872 +23：滑块 8、
+pairing_failed 4、动作条 6、envelope 4、hit x 偏移 1）；bridge **66 passed /
+0 failed**（本轮未碰 bridge）。**无真机显示会话**：滑块 bar 命中有纯函数单测
+但正路径的 dispatcher 级测试受真实字体所限只能测 gutter miss（与十轮滑块滚轮同
+一限制）。真机优先验证：滑条点击定位与拖拽（X11 的 POINTER_MOTION 抓取升级是新
+行为面）、muted 上拖拽自动 unmute、动作条 chip 点击与 ✓ 跟随、配对失败即撤、
+tags/胶片条淡入。
+
+**仍然开着的**（沿用 + 本轮新增）：`sync_window_groups` dirty 门控（十三轮复查
+者拒绝，未再尝试）；嵌套后端无 shell 面板渲染；toast 过期不发
+NotificationClosed(1) 是成文设计。**expose 窗口标题**：成文设计决定
+（docs/expose.md「thumbnails alone carry the identification」），但探索发现文本
+管线现成（tab-bar 标题与 cube-overview 标题共用 render_ui_text_to_rgba + 脏标记
+纹理缓存），加标题是 medium 规模，要做得先推翻该设计决定并同步 docs/expose.md。
+**锁屏时钟/caps-lock 提示**：WM 侧 items 行可做（chrono 已是依赖），但 modal 面
+板按需重绘、没有 redraw-while-locked ticker，时钟需要先建这条基建。
+**壁纸选择器缩略图**：image/png crate 已在、两渲染器壁纸异步解码管线可复用；
+全网格 medium-large，「仅高亮项侧预览」是 medium 中间档。**通知中心
+clear-all 无指针路径**（c 键 only，刻意不做 footer 以免扰动行映射与键盘导航）。
+**滑块已知小边界**：行被 `fit_ui_text_lines` 截断到 bar 中间会高估跨度（实际不
+可达，行短且宽度下限 360px+）；measure 的 ceil 有亚像素 slack；拖拽中到达的滚轮
+press/release 对会提前 disarm（与 tab_drag 的 any-release 同语义）。**陈旧
+toast**（pre-existing，本轮记录）：中心里 invoke/关闭通知后其 toast 卡片留屏到
+自然过期，点陈旧 chip 会在 invoke 处 warn——toast API 只有 push+click，无编程
+dismiss。
+
+---
+
 ## 2026-09-07：UI/UX 十轮（指针一致性：Wayland 滚轮贯通 / 滑块滚轮 / 配对撤回 / scrim 淡入）
 
 主题取自九轮后的全景盘点：**同一手势在两组后端上的语义差**是最大的体验债。
