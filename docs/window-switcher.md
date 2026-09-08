@@ -50,7 +50,8 @@ The list is a snapshot taken when the switcher opens: a window created
 mid-gesture gets no row, and one that dies or loses its tag while you hold
 the modifier fails the commit-time re-check and degrades the gesture to a
 cancel rather than focusing nothing. A restore that fails mid-gesture
-degrades the same way.
+degrades the same way. The one mid-gesture edit is yours: `Delete` removes
+a row as its window closes, and the survivors keep their MRU order.
 
 ## Keys while the panel is up
 
@@ -58,6 +59,7 @@ degrades the same way.
 | --- | --- |
 | `Tab` / `Shift+Tab`, `Up` / `Down` | move the highlight, wrapping around both ends |
 | `Return` | commit the highlighted window |
+| `Delete` / `BackSpace` | close the highlighted window without leaving the gesture — the next-oldest window slides under the highlight; closing the last row ends the gesture |
 | `Esc` | cancel |
 | release `Alt` (or `Super`/`Ctrl`) | commit the highlighted window |
 | release `Shift` | nothing — letting Shift go first in `Alt+Shift+Tab` must not end the gesture early |

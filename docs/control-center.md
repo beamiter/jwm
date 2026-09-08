@@ -35,7 +35,12 @@ row you scrolled). A slider's 20-cell bar itself takes press-and-drag: pressing
 on the bar sets the value to the pointed position and tracks the pointer until
 release, while pressing anywhere else on the row keeps the row's `Enter`
 action — so a click beside the bar still toggles mute on Volume, and setting a
-level on a muted sink unmutes it. Clicking the dimmed area outside the card acts
+level on a muted sink unmutes it. However a change is made, the row and the
+OSD redraw instantly from an optimistic estimate while the real adjustment
+runs on a background controls worker that coalesces to the newest level — a
+full drag sweep costs a couple of tool invocations, not two per percent —
+and the worker's read-back quietly corrects the shown value only if it
+drifted. Clicking the dimmed area outside the card acts
 like `Esc` (cancel a passphrase first, return to the Hub from a child page, then
 close). Section headings, status/empty rows and
 secret prompts deliberately do not become accidental click targets. The lock

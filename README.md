@@ -183,6 +183,8 @@ The default modifier is Alt (`Mod1`). Useful built-in bindings include:
 | Alt+Control+R | Interactively choose a source and start/stop screen recording |
 | Alt+Control+Shift+R | Move, resize, or replace the active recording source |
 | Alt+Shift+C | Close focused client |
+| Alt+Shift+Left / Alt+Shift+Right | Snap the focused floating window to that half of its monitor |
+| Alt+Shift+Up | Maximize the focused floating window |
 | Alt+Control+C | Calculator scratchpad |
 | Alt+Control+S | Toggle sticky window |
 | Alt+Shift+F11 | Toggle the WaterLily simulation |
@@ -241,6 +243,14 @@ socket (the `take_screenshot` IPC command) rather than launching an external
 grabber. X11 clipboard copies are served natively by JWM, including large
 ICCCM INCR transfers; Wayland clipboard copies currently use `wl-copy`.
 `take_screenshot_fullscreen` captures the whole desktop with no interaction.
+
+A finished capture announces itself: a toast carries the saved path (or
+confirms the clipboard copy), and a failed one surfaces even while Do Not
+Disturb is on. While a recording runs, a small `REC` chip with the running
+time sits in the bottom-right corner of the recorded output — drawn after
+the frame's pixels are read, so it never lands in the video or in
+screenshots — and starting and stopping both raise a toast with the output
+path.
 
 The X11 compositor freezes the desktop behind the interactive selector/editor
 by default. To keep clients and animations live instead, set this in the

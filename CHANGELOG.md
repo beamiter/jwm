@@ -59,6 +59,48 @@ monorepo use independent Semantic Versions.
   list exactly as it was. No placeholder or spinner — until the thumbnail
   lands the picker looks unchanged. See [docs/wallpaper.md](docs/wallpaper.md).
 
+- `snap_window <left|right|maximize>` is a new bindable and IPC command —
+  the keyboard/scripting equivalent of dragging a floating window to a
+  screen edge, using the exact mouse-drop geometry (full monitor rect, size
+  hints respected, and the snapped rect becomes what a later
+  `togglefloating` restores). Tiled and fullscreen windows are deliberate
+  no-ops; an invalid direction is an error. Default bindings:
+  `Alt+Shift+Left` / `Alt+Shift+Right` / `Alt+Shift+Up`; over IPC:
+  `jwm-tool msg snap_window --args '"left"'`.
+
+- Screenshots and screen recordings announce themselves now. A finished
+  capture raises a toast with the saved path (or confirms the clipboard
+  copy), and a failed one surfaces even under Do Not Disturb; starting and
+  stopping a recording both toast the output path. While a recording runs,
+  a small `REC` chip with the running time sits in the bottom-right corner
+  of the recorded output — drawn after the frame's pixels are read, so it
+  never lands in the video or in screenshots.
+
+- The window switcher closes windows mid-gesture: with the list up,
+  `Delete` / `BackSpace` closes the highlighted window through the same
+  path as `killclient`, the next-oldest window slides under the highlight,
+  and closing the last row ends the gesture. Pointer semantics are
+  unchanged. See [docs/window-switcher.md](docs/window-switcher.md).
+
+### Changed
+
+- Volume and brightness input no longer blocks the WM on subprocesses.
+  Keys, scrolls and slider drags queue onto a single controls worker that
+  coalesces to the newest pending level — a full slider sweep costs a
+  couple of tool invocations instead of two sequential spawns per percent —
+  while the OSD and the slider row redraw instantly from an optimistic
+  estimate, and the worker's read-back corrects the shown value only if it
+  actually drifted. A hung `wpctl` (up to the 5 s helper timeout) no longer
+  freezes the session. Mute-toggle ordering and set-on-muted-unmutes are
+  preserved exactly.
+
+- Pointer hover eases in everywhere the keyboard selection springs: the
+  panels' quiet row preview, the exposé cell lift and ring, and the
+  tab-strip hover fade in over ~120 ms with an ease-out curve instead of
+  snapping. Hover-leave still clears in the same frame (nothing in the
+  shell fades out), exposé hit-testing keeps using the base geometry, and
+  with animations disabled everything snaps as before.
+
 ### Changed
 
 - HDR signalling can now be enabled per output on the Wayland/KMS backend,
