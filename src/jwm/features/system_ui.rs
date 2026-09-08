@@ -713,6 +713,128 @@ fn slider_bar(percent: u8) -> String {
     bar
 }
 
+/// Transparent margin the text rasterizer leaves around every texture
+/// (`compositor_font::TEXT_PAD`). `measure_ui_text_width` includes it twice,
+/// so it comes back out when a measured width becomes a glyph offset.
+const TEXT_PAD: f32 = 2.0;
+
+/// The (prefix, bar, suffix) a slider row is drawn from. Pointer positioning
+/// measures these pieces, so they must stay exactly what
+/// [`SystemUiState::control_row_text`] joins and draws.
+fn slider_row_parts(
+    kind: ControlKind,
+    percent: u8,
+    enabled: bool,
+) -> Option<(String, String, String)> {
+    match kind {
+        ControlKind::Volume => {
+            let icon = if enabled {
+                "\u{f026}" // fa-volume-off (muted)
+            } else {
+                "\u{f028}" // fa-volume-up
+            };
+            let value = if enabled {
+                "  mute".to_string()
+            } else {
+                format!("{percent:>4}%")
+            };
+            Some((
+                format!("{icon}  Volume       "),
+                slider_bar(if enabled { 0 } else { percent }),
+                format!("  {value}"),
+            ))
+        }
+        ControlKind::Brightness => Some((
+            "\u{f185}  Brightness   ".to_string(),
+            slider_bar(percent),
+            format!("  {percent:>4}%"),
+        )),
+        _ => None,
+    }
+}
+
+/// The row a slider draws: prefix, bar and suffix joined. Empty for
+/// non-slider kinds, which [`SystemUiState::control_row_text`] never asks.
+fn slider_row_text(kind: ControlKind, percent: u8, enabled: bool) -> String {
+    let Some((prefix, bar, suffix)) = slider_row_parts(kind, percent, enabled) else {
+        return String::new();
+    };
+    format!("{prefix}{bar}{suffix}")
+}
+
+/// The percent a pointer at `text_x` sets on a slider.
+///
+/// `text_x` is the pointer's offset into the row's text texture. The bar's
+/// geometry there is measured, never derived from cell counts: it starts at
+/// `measure(prefix) − TEXT_PAD` and spans `measure(bar) − 2·TEXT_PAD`, where
+/// the measured strings are the exact ones [`SystemUiState::control_row_text`]
+/// drew (a muted Volume row's bar is the all-empty one). With `clamp` off, a
+/// position outside the bar is `None`, so a press on the row's icon, label or
+/// value keeps the row's ordinary click; with it on, such positions peg to
+/// the near end, which is what a drag holding the slider wants.
+#[must_use]
+fn slider_value_from_x(
+    kind: ControlKind,
+    percent: u8,
+    enabled: bool,
+    text_x: f32,
+    font_description: &str,
+    pixel_size: f32,
+    clamp: bool,
+) -> Option<u8> {
+    let (prefix, bar, _) = slider_row_parts(kind, percent, enabled)?;
+    let measure = |text: &str| {
+        crate::backend::compositor_font::measure_ui_text_width(text, font_description, pixel_size)
+            as f32
+    };
+    let bar_start = measure(&prefix) - TEXT_PAD;
+    let bar_span = measure(&bar) - 2.0 * TEXT_PAD;
+    if bar_span <= 0.0 {
+        return None;
+    }
+    let offset = text_x - bar_start;
+    if !clamp && !(0.0..=bar_span).contains(&offset) {
+        return None;
+    }
+    Some(((offset / bar_span).clamp(0.0, 1.0) * 100.0).round() as u8)
+}
+
+/// The chip a pointer at `text_x` names on a notification action strip, when
+/// it lands on one.
+///
+/// `text_x` is the pointer's offset into the strip row's text texture. The
+/// chips' geometry there is measured, never derived from character counts:
+/// chip `i` starts where the glyphs drawn before it end —
+/// `measure(drawn) − TEXT_PAD` — and spans its own glyphs, with `drawn`
+/// rebuilt from the exact pieces
+/// [`crate::jwm::features::notifications::action_strip`] joins (the cursor's
+/// check mark included). The gutter and the gaps between chips name nothing,
+/// so a press there keeps its fallback rather than firing a neighbor it
+/// missed.
+#[must_use]
+fn notification_chip_at_x(
+    parts: &crate::jwm::features::notifications::ActionStripParts,
+    text_x: f32,
+    font_description: &str,
+    pixel_size: f32,
+) -> Option<usize> {
+    let measure = |text: &str| {
+        crate::backend::compositor_font::measure_ui_text_width(text, font_description, pixel_size)
+            as f32
+    };
+    let mut drawn = parts.gutter.clone();
+    for (index, chip) in parts.chips.iter().enumerate() {
+        let start = measure(&drawn) - TEXT_PAD;
+        drawn.push_str(chip);
+        let end = measure(&drawn) - TEXT_PAD;
+        if (start..=end).contains(&text_x) {
+            return Some(index);
+        }
+        drawn.push_str(parts.gap);
+    }
+    None
+}
+
 impl Clone for SystemUiState {
     fn clone(&self) -> Self {
         match self {
@@ -1340,6 +1462,28 @@ impl SystemUiState {
         *cursor = (*cursor as isize + delta).rem_euclid(count) as usize;
     }
 
+    /// Point the selected row's action cursor at `index`, as hovering the
+    /// chip does — the pointer counterpart of Left/Right, under the same
+    /// guard: a row with fewer than two actions has nowhere to move. Returns
+    /// whether the cursor moved; when it did, the strip redraws to show the
+    /// mark's new home.
+    pub fn hover_notification_action(&mut self, index: usize) -> bool {
+        let Some(row) = self.selected_row_mut(ListKind::Notifications) else {
+            return false;
+        };
+        let RowData::Notification {
+            actions, cursor, ..
+        } = &mut row.data
+        else {
+            return false;
+        };
+        if actions.len() < 2 || index >= actions.len() || *cursor == index {
+            return false;
+        }
+        *cursor = index;
+        true
+    }
+
     /// The action a digit key names on the selected row, if the row offers
     /// that many. A digit beyond the offered count names nothing.
     pub fn notification_action_at(&self, index: usize) -> Option<(u32, String)> {
@@ -1952,27 +2096,9 @@ impl SystemUiState {
             | ControlKind::Bluetooth
             | ControlKind::AudioOutput
             | ControlKind::AudioInput => entry.label.clone(),
-            ControlKind::Volume => {
-                let icon = if entry.enabled {
-                    "\u{f026}" // fa-volume-off (muted)
-                } else {
-                    "\u{f028}" // fa-volume-up
-                };
-                let value = if entry.enabled {
-                    "  mute".to_string()
-                } else {
-                    format!("{:>4}%", entry.percent)
-                };
-                format!(
-                    "{icon}  Volume       {}  {value}",
-                    slider_bar(if entry.enabled { 0 } else { entry.percent })
-                )
+            ControlKind::Volume | ControlKind::Brightness => {
+                slider_row_text(entry.kind, entry.percent, entry.enabled)
             }
-            ControlKind::Brightness => format!(
-                "\u{f185}  Brightness   {}  {:>4}%",
-                slider_bar(entry.percent),
-                entry.percent
-            ),
             ControlKind::NightLight => format!(
                 "\u{f186}  Night Light{:>26}",
                 if entry.enabled { "[ on ]" } else { "[ off ]" }
@@ -2086,6 +2212,62 @@ impl SystemUiState {
             return None;
         }
         Some((kind, -direction.signum() as i32 * SLIDER_STEP))
+    }
+
+    /// Click-to-position: the value a pointer press at `text_x` — the press's
+    /// offset into the row's text texture — sets on the slider at
+    /// `visual_row`, when the press lands on the bar itself. `None` for
+    /// non-slider rows and for presses on the row's icon, label or value,
+    /// which keep the row's ordinary click (Volume's mute toggle).
+    #[must_use]
+    pub fn slider_press_at_visible_row(
+        &self,
+        visual_row: usize,
+        text_x: f32,
+        font_description: &str,
+        pixel_size: f32,
+    ) -> Option<(ControlKind, u8)> {
+        let Self::ControlCenter { entries, .. } = self else {
+            return None;
+        };
+        let entry = entries.get(self.visible_row_target(visual_row)?)?;
+        let value = slider_value_from_x(
+            entry.kind,
+            entry.percent,
+            entry.enabled,
+            text_x,
+            font_description,
+            pixel_size,
+            false,
+        )?;
+        Some((entry.kind, value))
+    }
+
+    /// The value a drag's `text_x` implies for `kind`'s slider, pegged to the
+    /// bar's ends so a drag that runs off the bar — or off the card — keeps
+    /// tracking. Read from the entry's current state, so the geometry follows
+    /// the icon swap of a mid-drag unmute.
+    #[must_use]
+    pub fn slider_drag_value(
+        &self,
+        kind: ControlKind,
+        text_x: f32,
+        font_description: &str,
+        pixel_size: f32,
+    ) -> Option<u8> {
+        let Self::ControlCenter { entries, .. } = self else {
+            return None;
+        };
+        let entry = entries.iter().find(|entry| entry.kind == kind)?;
+        slider_value_from_x(
+            kind,
+            entry.percent,
+            entry.enabled,
+            text_x,
+            font_description,
+            pixel_size,
+            true,
+        )
     }
 
     /// Write back the live value of one control row after a side effect.
@@ -2464,7 +2646,9 @@ impl SystemUiState {
 
     /// Resolve an `items` index to the underlying interactive row. `None`
     /// means an empty-state line, section heading, status message, or
-    /// notification action strip.
+    /// notification action strip. The strip is not a row, but the pointer
+    /// can reach its chips: [`Self::notification_strip_visible_row`] keeps
+    /// that mapping.
     pub fn visible_row_target(&self, visual_row: usize) -> Option<usize> {
         match self {
             Self::Launcher {
@@ -2536,6 +2720,67 @@ impl SystemUiState {
             | Self::Locked { .. }
             | Self::Calendar { .. } => None,
         }
+    }
+
+    /// The visible row the selected notification's action strip is drawn at —
+    /// the line right under its row — when the panel draws one. This is the
+    /// strip's own mapping; [`Self::visible_row_target`] keeps answering for
+    /// the real rows, and keeps returning `None` here, so a scroll or a
+    /// press the chips did not claim falls through to the list unchanged.
+    #[must_use]
+    pub fn notification_strip_visible_row(&self) -> Option<usize> {
+        let Self::ListPanel {
+            kind,
+            rows,
+            selected,
+            prompt,
+            ..
+        } = self
+        else {
+            return None;
+        };
+        if *kind != ListKind::Notifications || prompt.is_some() || rows.is_empty() {
+            return None;
+        }
+        if !matches!(
+            rows.get(*selected).map(|row| &row.data),
+            Some(RowData::Notification { actions, .. }) if !actions.is_empty()
+        ) {
+            return None;
+        }
+        let window = kind.window();
+        let start = selected.saturating_sub(window.saturating_sub(1));
+        Some(*selected - start + 1)
+    }
+
+    /// The chip a pointer at `text_x` hits on the action strip drawn at
+    /// `visual_row`: the notification's identifier, the action's key, and
+    /// the chip's index. `None` when no strip is drawn at `visual_row` —
+    /// every other row keeps its ordinary meaning — or when the position
+    /// lands on the gutter or a gap, where the press keeps its fallback
+    /// rather than firing a neighbor it missed.
+    #[must_use]
+    pub fn notification_strip_chip_at_visible_row(
+        &self,
+        visual_row: usize,
+        text_x: f32,
+        font_description: &str,
+        pixel_size: f32,
+    ) -> Option<(u32, String, usize)> {
+        if self.notification_strip_visible_row() != Some(visual_row) {
+            return None;
+        }
+        let RowData::Notification {
+            id,
+            actions,
+            cursor,
+        } = &self.selected_row(ListKind::Notifications)?.data
+        else {
+            return None;
+        };
+        let parts = crate::jwm::features::notifications::action_strip_parts(actions, *cursor);
+        let chip = notification_chip_at_x(&parts, text_x, font_description, pixel_size)?;
+        Some((*id, actions.get(chip)?.key.clone(), chip))
     }
 
     /// Select a row by its index in the currently rendered `items` slice.
@@ -4313,7 +4558,7 @@ mod tests {
     }
 
     #[test]
-    fn pointer_rows_skip_a_notification_action_strip() {
+    fn the_action_strip_is_not_a_row_but_has_a_pointer_mapping() {
         use crate::jwm::features::notifications::NotificationAction;
 
         let row = |id: u32, actions: Vec<NotificationAction>| ListRow {
@@ -4344,11 +4589,68 @@ mod tests {
             empty: String::new(),
         };
 
+        // Row selection keeps skipping the strip's line — the pill, a scroll
+        // and a press the chips did not claim all treat it as not-a-row...
         assert_eq!(panel.visible_row_target(0), Some(0));
         assert_eq!(panel.visible_row_target(1), None, "the action strip");
         assert_eq!(panel.visible_row_target(2), Some(1));
+        // ...while the pointer mapping names it the strip: the line under
+        // the selected row, drawn for as long as that row offers actions.
+        assert_eq!(panel.notification_strip_visible_row(), Some(1));
+
+        // A prompt owns every line of the panel, the strip's included.
+        if let SystemUiState::ListPanel { prompt, .. } = &mut panel {
+            *prompt = Some(PromptKind::Passphrase(String::new()));
+        }
+        assert_eq!(panel.notification_strip_visible_row(), None);
+        if let SystemUiState::ListPanel { prompt, .. } = &mut panel {
+            *prompt = None;
+        }
+
+        // Selecting a row without actions draws no strip; outside the
+        // notification center there is never one.
         assert_eq!(panel.select_visible_row(2), Some(true));
         assert_eq!(panel.selected_notification().unwrap().0, 2);
+        assert_eq!(panel.notification_strip_visible_row(), None);
+        assert_eq!(SystemUiState::lock().notification_strip_visible_row(), None);
+    }
+
+    #[test]
+    fn the_strips_visible_row_tracks_the_selection_through_the_scroll_window() {
+        use crate::jwm::features::notifications::NotificationAction;
+
+        let rows: Vec<ListRow> = (1u32..=16)
+            .map(|id| ListRow {
+                key: id.to_string(),
+                text: format!("notification {id}"),
+                data: RowData::Notification {
+                    id,
+                    actions: vec![NotificationAction {
+                        key: "open".into(),
+                        label: "Open".into(),
+                    }],
+                    cursor: 0,
+                },
+            })
+            .collect();
+        let mut panel = SystemUiState::ListPanel {
+            kind: ListKind::Notifications,
+            rows,
+            selected: 15,
+            message: String::new(),
+            prompt: None,
+            empty: String::new(),
+        };
+
+        // The window shows 14 rows, here 2..=15, so the strip is line 14:
+        // past the last row's line, exactly where `overlay_parts` inserts it.
+        assert_eq!(panel.notification_strip_visible_row(), Some(14));
+        assert_eq!(panel.visible_row_target(13), Some(15));
+        assert_eq!(panel.visible_row_target(14), None, "the action strip");
+
+        // Back at the top of the list the strip is line 1 again.
+        panel.move_selection(-15);
+        assert_eq!(panel.notification_strip_visible_row(), Some(1));
     }
 
     #[test]
@@ -4636,6 +4938,36 @@ mod tests {
             rebuilt.selected_notification().expect("row").1.as_deref(),
             Some("notes")
         );
+    }
+
+    #[test]
+    fn hovering_a_chip_points_the_action_cursor_at_it() {
+        let mut panel = SystemUiState::notification_center(&center_with_actions(), 3_000);
+        // The cursor starts on the reserved `default` key, chip 1.
+        assert_eq!(
+            panel.selected_notification().expect("row").1.as_deref(),
+            Some("default")
+        );
+
+        assert!(!panel.hover_notification_action(1), "already there");
+        assert!(panel.hover_notification_action(0));
+        assert_eq!(
+            panel.selected_notification().expect("row").1.as_deref(),
+            Some("later")
+        );
+        assert!(panel.hover_notification_action(2));
+        assert_eq!(
+            panel.selected_notification().expect("row").1.as_deref(),
+            Some("notes")
+        );
+
+        // A chip past the end names nothing, and a row with fewer than two
+        // actions has nowhere to move — the guard Left/Right live under.
+        assert!(!panel.hover_notification_action(3));
+        panel.move_selection(1); // the older, action-less row
+        assert!(!panel.hover_notification_action(0));
+        // A panel that is not the notification center has no cursor at all.
+        assert!(!SystemUiState::lock().hover_notification_action(0));
     }
 
     #[test]
@@ -4957,6 +5289,257 @@ mod tests {
         assert_eq!(slider_bar(0).matches('\u{2588}').count(), 0);
         assert_eq!(slider_bar(100).matches('\u{2588}').count(), 20);
         assert_eq!(slider_bar(50).matches('\u{2588}').count(), 10);
+    }
+
+    #[test]
+    fn slider_rows_are_built_from_the_parts_pointer_math_measures() {
+        let (prefix, bar, suffix) = slider_row_parts(ControlKind::Volume, 45, false).unwrap();
+        assert_eq!(prefix, "\u{f028}  Volume       ");
+        assert_eq!(bar, slider_bar(45));
+        assert_eq!(suffix, "    45%");
+        let volume = ControlEntry::simple(ControlKind::Volume, 45, false);
+        assert_eq!(
+            SystemUiState::control_row_text(&volume),
+            format!("{prefix}{bar}{suffix}")
+        );
+
+        // A muted row keeps the value it had but draws the muted icon, an
+        // empty bar and the word — exactly what the pre-refactor arm built.
+        let muted = ControlEntry::simple(ControlKind::Volume, 45, true);
+        let row = SystemUiState::control_row_text(&muted);
+        assert!(row.starts_with('\u{f026}'));
+        assert!(row.ends_with("mute"));
+        assert!(!row.contains('\u{2588}'));
+
+        let (prefix, bar, suffix) = slider_row_parts(ControlKind::Brightness, 60, false).unwrap();
+        assert_eq!(prefix, "\u{f185}  Brightness   ");
+        assert_eq!(bar, slider_bar(60));
+        assert_eq!(suffix, "    60%");
+        let brightness = ControlEntry::simple(ControlKind::Brightness, 60, false);
+        assert_eq!(
+            SystemUiState::control_row_text(&brightness),
+            format!("{prefix}{bar}{suffix}")
+        );
+
+        // Non-slider rows have no parts to measure.
+        assert!(slider_row_parts(ControlKind::NightLight, 0, true).is_none());
+    }
+
+    /// An over-long font description skips fontconfig entirely
+    /// (`compositor_font`'s own tests pin that), so measuring drops to the
+    /// bitmap fallback of 12 px a glyph and no margin — deterministic on any
+    /// machine. The 16-glyph slider prefix then puts the bar's start at
+    /// 192 − TEXT_PAD = 190 px, spanning 240 − 2·TEXT_PAD = 236 px.
+    fn fallback_font() -> String {
+        "x".repeat(1100)
+    }
+
+    #[test]
+    fn slider_press_maps_the_bar_span_onto_percent() {
+        let font = fallback_font();
+        let at = |text_x| {
+            slider_value_from_x(ControlKind::Volume, 45, false, text_x, &font, 18.0, false)
+        };
+        assert_eq!(at(190.0), Some(0));
+        assert_eq!(at(190.0 + 11.8), Some(5), "one cell in twenty is 5%");
+        assert_eq!(at(190.0 + 118.0), Some(50));
+        assert_eq!(at(190.0 + 236.0), Some(100));
+        // Off the bar the press is not the slider's: the label side and the
+        // value side keep the row's ordinary click.
+        assert_eq!(at(0.0), None);
+        assert_eq!(at(189.9), None);
+        assert_eq!(at(426.1), None);
+        // The muted row draws the other icon and an all-empty bar; the
+        // measured strings must be the ones actually drawn.
+        let muted_at =
+            |text_x| slider_value_from_x(ControlKind::Volume, 45, true, text_x, &font, 18.0, false);
+        assert_eq!(muted_at(190.0 + 236.0), Some(100));
+        assert_eq!(muted_at(189.9), None);
+    }
+
+    #[test]
+    fn slider_drag_pegs_positions_off_the_bar_to_its_ends() {
+        let font = fallback_font();
+        let at = |text_x| {
+            slider_value_from_x(
+                ControlKind::Brightness,
+                60,
+                false,
+                text_x,
+                &font,
+                18.0,
+                true,
+            )
+        };
+        assert_eq!(at(190.0 + 118.0), Some(50));
+        assert_eq!(at(0.0), Some(0));
+        assert_eq!(at(189.9), Some(0));
+        assert_eq!(at(426.1), Some(100));
+        assert_eq!(at(9000.0), Some(100));
+    }
+
+    #[test]
+    fn slider_value_is_none_for_non_slider_rows() {
+        let font = fallback_font();
+        for clamp in [false, true] {
+            assert_eq!(
+                slider_value_from_x(ControlKind::NightLight, 0, true, 300.0, &font, 18.0, clamp),
+                None
+            );
+            assert_eq!(
+                slider_value_from_x(ControlKind::Media, 0, false, 300.0, &font, 18.0, clamp),
+                None
+            );
+        }
+    }
+
+    /// The fallback font measures 12 px a glyph with no margin, so the
+    /// strip's gutter (8 glyphs) ends at 96 − TEXT_PAD = 94 px and every
+    /// chip's span follows from its own glyph count.
+    #[test]
+    fn the_chip_under_a_pointer_is_measured_not_guessed() {
+        use crate::jwm::features::notifications::{NotificationAction, action_strip_parts};
+
+        let act = |key: &str, label: &str| NotificationAction {
+            key: key.into(),
+            label: label.into(),
+        };
+        // " 1 Later" (8), "\u{f00c}2 Restart now" (14), " 3 Release notes"
+        // (16), three glyphs of gap between neighbors.
+        let parts = action_strip_parts(
+            &[
+                act("later", "Later"),
+                act("default", "Restart now"),
+                act("notes", "Release notes"),
+            ],
+            1,
+        );
+        let font = fallback_font();
+        let at = |text_x| notification_chip_at_x(&parts, text_x, &font, 18.0);
+        assert_eq!(at(0.0), None);
+        assert_eq!(at(93.9), None, "the gutter names nothing");
+        assert_eq!(at(94.0), Some(0));
+        assert_eq!(at(190.0), Some(0));
+        assert_eq!(at(190.1), None, "the gap between chips names nothing");
+        assert_eq!(at(225.9), None);
+        assert_eq!(at(226.0), Some(1));
+        assert_eq!(at(394.0), Some(1));
+        assert_eq!(at(394.1), None);
+        assert_eq!(at(430.0), Some(2));
+        assert_eq!(at(622.0), Some(2));
+        assert_eq!(at(622.1), None, "past the last chip is nobody's");
+
+        // The spans come from the strings actually drawn, cursor mark
+        // included: with the cursor on chip 0 the measured chips start with
+        // the check mark. (The fallback font draws every glyph 12 px wide,
+        // so the mark moves nothing here; with a real face it is wider than
+        // the blank it replaces, and measuring the drawn pieces is what
+        // keeps the spans right.)
+        let marked = action_strip_parts(
+            &[
+                act("later", "Later"),
+                act("default", "Restart now"),
+                act("notes", "Release notes"),
+            ],
+            0,
+        );
+        assert!(marked.chips[0].starts_with('\u{f00c}'));
+        assert_eq!(notification_chip_at_x(&marked, 94.0, &font, 18.0), Some(0));
+        assert_eq!(notification_chip_at_x(&marked, 190.0, &font, 18.0), Some(0));
+
+        // No chips, no hit.
+        let empty = action_strip_parts(&[], 0);
+        assert_eq!(notification_chip_at_x(&empty, 94.0, &font, 18.0), None);
+    }
+
+    #[test]
+    fn a_press_on_the_strip_names_the_chip_and_its_notification() {
+        let panel = SystemUiState::notification_center(&center_with_actions(), 3_000);
+        let font = fallback_font();
+        let id = panel.selected_notification().expect("row").0;
+        // The strip is the line under the selected row; its spans are the
+        // ones `the_chip_under_a_pointer_is_measured_not_guessed` measured.
+        assert_eq!(panel.notification_strip_visible_row(), Some(1));
+        let at = |visual_row, text_x| {
+            panel.notification_strip_chip_at_visible_row(visual_row, text_x, &font, 18.0)
+        };
+        assert_eq!(at(1, 94.0), Some((id, "later".to_string(), 0)));
+        assert_eq!(at(1, 226.0), Some((id, "default".to_string(), 1)));
+        assert_eq!(at(1, 622.0), Some((id, "notes".to_string(), 2)));
+        assert_eq!(at(1, 0.0), None, "the gutter");
+        assert_eq!(at(1, 200.0), None, "the gap between the first two chips");
+        // Rows that are not the strip — the notification's own row included
+        // — keep their ordinary click.
+        assert_eq!(at(0, 94.0), None);
+        assert_eq!(at(2, 94.0), None);
+        assert_eq!(at(99, 94.0), None);
+        let lock = SystemUiState::lock();
+        assert_eq!(
+            lock.notification_strip_chip_at_visible_row(0, 94.0, &font, 18.0),
+            None
+        );
+    }
+
+    #[test]
+    fn slider_press_at_visible_row_follows_entries_through_section_headings() {
+        let state = SystemUiState::control_center(&ControlCenterInputs {
+            shell_hub: true,
+            volume: Some((45, false)),
+            brightness: Some(60),
+            ..Default::default()
+        });
+        let font = fallback_font();
+        let volume_row =
+            (0..32).find(|row| state.control_at_visible_row(*row) == Some(ControlKind::Volume));
+        let volume_row = volume_row.expect("the hub lists a volume row");
+        assert_eq!(
+            state.slider_press_at_visible_row(volume_row, 190.0 + 118.0, &font, 18.0),
+            Some((ControlKind::Volume, 50))
+        );
+        // The row's label area is not the bar, and a section-heading row is
+        // nobody's slider.
+        assert_eq!(
+            state.slider_press_at_visible_row(volume_row, 10.0, &font, 18.0),
+            None
+        );
+        assert_eq!(
+            state.slider_press_at_visible_row(0, 190.0 + 118.0, &font, 18.0),
+            None
+        );
+        assert_eq!(
+            state.slider_press_at_visible_row(99, 190.0 + 118.0, &font, 18.0),
+            None
+        );
+        let lock = SystemUiState::lock();
+        assert_eq!(
+            lock.slider_press_at_visible_row(0, 300.0, &font, 18.0),
+            None
+        );
+    }
+
+    #[test]
+    fn slider_drag_value_reads_the_entrys_current_state() {
+        let mut state = SystemUiState::control_center(&ControlCenterInputs {
+            volume: Some((45, true)),
+            ..Default::default()
+        });
+        let font = fallback_font();
+        assert_eq!(
+            state.slider_drag_value(ControlKind::Volume, 190.0 + 236.0, &font, 18.0),
+            Some(100)
+        );
+        // No brightness row exists, so there is nothing to drag.
+        assert_eq!(
+            state.slider_drag_value(ControlKind::Brightness, 300.0, &font, 18.0),
+            None
+        );
+        // After a mid-drag unmute the entry changed; the next motion's value
+        // is computed from what the row now draws.
+        state.update_control(ControlKind::Volume, 80, false);
+        assert_eq!(
+            state.slider_drag_value(ControlKind::Volume, 190.0 + 118.0, &font, 18.0),
+            Some(50)
+        );
     }
 
     #[test]

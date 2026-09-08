@@ -44,6 +44,25 @@ fn clamp_configure_axis(position: i32, total: i32, origin: i32, span: i32) -> i3
     clamped.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
 }
 
+/// An in-flight pointer drag on a control-center slider (Volume/Brightness):
+/// armed by an in-bar press (click-to-position), driven by motion, disarmed
+/// by the button release. Lives on [`Jwm`] rather than in the panel state
+/// because it is a gesture, not panel content.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ControlSliderDrag {
+    /// The slider being dragged.
+    pub(crate) kind: crate::jwm::features::ControlKind,
+    /// The last value written to the hardware. Motion pays the side effect —
+    /// a shell-out plus a read-back — only when the rounded percent changes.
+    pub(crate) last_percent: u8,
+    /// Root-x of the list texture's left edge: `root_x − text_x` at the last
+    /// hit that carried an x. Cached because a drag can run off the card,
+    /// where no hit arrives; refreshed from every motion over a row, so a
+    /// card that widens mid-drag (a muted row's "mute" suffix becoming a
+    /// percentage) cannot shift the bar out from under the pointer.
+    pub(crate) text_origin_x: f64,
+}
+
 /// What a button press over a toast card does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ToastPress {
@@ -1313,12 +1332,24 @@ impl Jwm {
     }
 
     /// Pointer counterpart of Return: select the visible row under the mouse,
-    /// then run the same action path used by the keyboard.
+    /// then run the same action path used by the keyboard. The one exception
+    /// is the action strip under the selected notification: a press there
+    /// fires the chip under the pointer directly — never the row's Return
+    /// replay, which would invoke whatever the cursor happens to sit on —
+    /// and a press on the gutter or between chips fires nothing.
     pub(crate) fn activate_system_ui_pointer_row(
         &mut self,
         backend: &mut dyn Backend,
         row: usize,
+        text_x: f32,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        if self.features.system_ui.notification_strip_visible_row() == Some(row) {
+            if let Some((id, action, _)) = self.notification_strip_chip_at(row, text_x) {
+                self.invoke_notification_action(id, &action);
+                self.sync_system_ui(backend);
+            }
+            return Ok(());
+        }
         let direct_command_row =
             row == 0 && direct_command_from_launcher(&self.features.system_ui).is_some();
         let Some(changed) = self.features.system_ui.select_visible_row(row) else {
@@ -1353,15 +1384,45 @@ impl Jwm {
         Ok(())
     }
 
+    /// The chip under a pointer at `text_x` on the selected notification's
+    /// action strip: the notification's identifier, the action's key and the
+    /// chip's index, measured with the panel's configured font — the numbers
+    /// the rasterizer drew. `None` when `row` is not the strip's row, or the
+    /// pointer rests on the gutter or a gap between chips.
+    fn notification_strip_chip_at(&self, row: usize, text_x: f32) -> Option<(u32, String, usize)> {
+        let config = CONFIG.load();
+        let description = config.system_ui_font();
+        let pixel_size = crate::backend::compositor_font::ui_font_pixel_size(description);
+        self.features
+            .system_ui
+            .notification_strip_chip_at_visible_row(row, text_x, description, pixel_size)
+    }
+
     pub(crate) fn hover_system_ui_pointer_row(
         &mut self,
         backend: &mut dyn Backend,
-        row: Option<usize>,
+        hit: Option<(usize, f32)>,
     ) {
         // Keep motion allocation- and I/O-free. Direct command validation can
         // stat an explicit path, so that exceptional synthetic row is checked
         // only on click; ordinary and calculator rows resolve from memory.
-        let row = row.filter(|row| self.features.system_ui.visible_row_target(*row).is_some());
+        //
+        // Over the selected notification's action strip the row's action
+        // cursor follows the chip under the pointer, so a Return or a digit
+        // right after acts on what the pointer is over — the within-row
+        // counterpart of the switcher's pill following the pointer row. Only
+        // a cursor that really moved repaints, and only the strip's row ever
+        // measures text: ordinary rows keep hover free of both.
+        if let Some((row, text_x)) = hit
+            && self.features.system_ui.notification_strip_visible_row() == Some(row)
+            && let Some((_, _, chip)) = self.notification_strip_chip_at(row, text_x)
+            && self.features.system_ui.hover_notification_action(chip)
+        {
+            self.sync_system_ui(backend);
+        }
+        let row = hit
+            .map(|(row, _)| row)
+            .filter(|row| self.features.system_ui.visible_row_target(*row).is_some());
         backend.compositor_set_system_ui_hover(row);
     }
 
@@ -1419,6 +1480,125 @@ impl Jwm {
             }
             _ => {}
         }
+    }
+
+    /// The absolute-set counterpart of [`Self::adjust_control_slider`], for
+    /// click-to-position and slider drags. A level set on a muted sink
+    /// unmutes it: pointing at a level is an explicit ask for that much
+    /// sound, and both wpctl and pactl keep the mute flag on a plain
+    /// set-volume.
+    fn set_control_slider_from_pointer(
+        &mut self,
+        kind: crate::jwm::features::ControlKind,
+        percent: u8,
+    ) {
+        use crate::jwm::features::{ControlKind, system_controls};
+        match kind {
+            ControlKind::Volume => {
+                if let Some(state) = system_controls::volume_set(percent) {
+                    let state = if state.muted {
+                        system_controls::volume_toggle_mute().unwrap_or(state)
+                    } else {
+                        state
+                    };
+                    self.cache_control_volume(state);
+                    self.features.system_ui.update_control(
+                        ControlKind::Volume,
+                        state.percent,
+                        state.muted,
+                    );
+                }
+            }
+            ControlKind::Brightness => {
+                if let Some(percent) = system_controls::brightness_set(percent) {
+                    self.cache_control_brightness(percent);
+                    self.features
+                        .system_ui
+                        .update_control(ControlKind::Brightness, percent, false);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// A left press on a control-center row. When the press lands on the
+    /// row's slider bar it positions the slider (click-to-position) and arms
+    /// a drag; it returns `false` for everything else — non-slider rows and
+    /// the icon/label/value parts of a slider row — so the caller runs the
+    /// row's ordinary click, Volume's mute toggle included.
+    pub(crate) fn press_control_center_slider(
+        &mut self,
+        backend: &mut dyn Backend,
+        row: usize,
+        text_x: f32,
+        root_x: f64,
+    ) -> bool {
+        let config = CONFIG.load();
+        let description = config.system_ui_font();
+        let pixel_size = crate::backend::compositor_font::ui_font_pixel_size(description);
+        let Some((kind, percent)) = self.features.system_ui.slider_press_at_visible_row(
+            row,
+            text_x,
+            description,
+            pixel_size,
+        ) else {
+            return false;
+        };
+        // The selection pill follows the pointer, so a Left/Right right after
+        // acts on the row being dragged — scroll-on-slider selects the same
+        // way.
+        let _ = self.features.system_ui.select_visible_row(row);
+        self.control_slider_drag = Some(ControlSliderDrag {
+            kind,
+            last_percent: percent,
+            text_origin_x: root_x - f64::from(text_x),
+        });
+        self.set_control_slider_from_pointer(kind, percent);
+        self.sync_system_ui(backend);
+        true
+    }
+
+    /// Motion with a slider drag armed: recompute the value from the
+    /// pointer's x and write it, but only when the rounded percent actually
+    /// changed — every write shells out to wpctl/brightnessctl plus a
+    /// read-back. `hit_text_x` is the x the compositor's hit-test carried,
+    /// `None` when the pointer left the list: a drag that runs off the card
+    /// keeps tracking from the cached origin. Returns `false` when no drag
+    /// is armed — or the panel stopped being a control center — so the
+    /// caller falls back to ordinary hover.
+    pub(crate) fn drag_control_center_slider(
+        &mut self,
+        backend: &mut dyn Backend,
+        root_x: f64,
+        hit_text_x: Option<f32>,
+    ) -> bool {
+        let Some(mut drag) = self.control_slider_drag else {
+            return false;
+        };
+        if !self.features.system_ui.is_control_center() {
+            self.control_slider_drag = None;
+            return false;
+        }
+        if let Some(text_x) = hit_text_x {
+            drag.text_origin_x = root_x - f64::from(text_x);
+        }
+        let text_x = (root_x - drag.text_origin_x) as f32;
+        let config = CONFIG.load();
+        let description = config.system_ui_font();
+        let pixel_size = crate::backend::compositor_font::ui_font_pixel_size(description);
+        let percent =
+            self.features
+                .system_ui
+                .slider_drag_value(drag.kind, text_x, description, pixel_size);
+        if let Some(percent) = percent
+            && percent != drag.last_percent
+        {
+            drag.last_percent = percent;
+            self.set_control_slider_from_pointer(drag.kind, percent);
+            self.sync_system_ui(backend);
+        }
+        self.control_slider_drag = Some(drag);
+        true
     }
 
     pub(crate) fn dismiss_system_ui_from_pointer(&mut self, backend: &mut dyn Backend) {

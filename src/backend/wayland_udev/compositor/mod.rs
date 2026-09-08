@@ -1556,6 +1556,10 @@ pub(crate) struct WaylandCompositor {
     system_ui_highlight: crate::backend::compositor_common::dynamic_island::RowHighlight,
     /// Widest the open panel has been. The card never narrows while it is up,
     /// so a launcher list re-measured on every keystroke cannot resize it.
+    /// Zero also doubles as the filmstrip's and tags grid's first-frame
+    /// marker: `set_system_ui` zeroes the field when the overlay's identity
+    /// changes, and their scrim envelope restarts the island spring from the
+    /// seed on a zero before stamping the panel's own width here.
     system_ui_width_floor: f32,
     /// The open panel's title, which is what "a different panel" means to the
     /// two pieces of state above: both have to forget what they knew when the

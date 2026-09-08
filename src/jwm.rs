@@ -146,6 +146,11 @@ pub struct Jwm {
     /// `drag_ctl`. See [`window_tabs::TabDragCtl`].
     pub(crate) tab_drag: Option<window_tabs::TabDragCtl>,
 
+    /// A press-drag on a control-center Volume/Brightness slider, armed by
+    /// an in-bar press and disarmed by the release. See
+    /// [`input_handler::ControlSliderDrag`].
+    pub(crate) control_slider_drag: Option<input_handler::ControlSliderDrag>,
+
     pub message: SharedMessage,
 
     // Per-monitor status bars
@@ -1146,6 +1151,7 @@ impl Jwm {
             last_mouse_root: (0.0, 0.0),
             drag_ctl: None,
             tab_drag: None,
+            control_slider_drag: None,
 
             ipc_server,
             update_readiness,

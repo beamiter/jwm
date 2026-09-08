@@ -1012,6 +1012,7 @@ mod scratchpad_reveal_tests {
             last_mouse_root: (0.0, 0.0),
             drag_ctl: None,
             tab_drag: None,
+            control_slider_drag: None,
             message: SharedMessage::default(),
             secondary_bars: HashMap::new(),
             secondary_bar_failures: HashMap::new(),

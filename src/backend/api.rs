@@ -1124,7 +1124,7 @@ pub struct SystemUiOverlay {
 /// card's spring), while JWM owns what activating a row means.  Keeping this
 /// tiny semantic boundary lets mouse input land on exactly what was painted
 /// without moving any policy into a renderer.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub enum SystemUiHitTarget {
     /// No system-UI frame has been painted yet (or this backend has no
     /// compositor hit map). Input should be left untouched.
@@ -1134,8 +1134,11 @@ pub enum SystemUiHitTarget {
     Outside,
     /// Inside the card, but not on a selectable list row.
     Panel,
-    /// A visible row in [`SystemUiOverlay::items`].
-    Item(usize),
+    /// A visible row in [`SystemUiOverlay::items`], with the pointer's x as
+    /// an offset into the row's text texture (the card's padding removed,
+    /// the rasterizer's margin kept) so a row can tell a press on its slider
+    /// bar from one on its label. Consumers that only want the row ignore it.
+    Item(usize, f32),
 }
 
 impl SystemUiOverlay {

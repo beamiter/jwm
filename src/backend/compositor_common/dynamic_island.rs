@@ -320,6 +320,24 @@ impl IslandMotion {
     }
 }
 
+/// The fade-in envelope a modal surface's dim rides while its panel opens:
+/// the eased square of how far the open spring has travelled toward the
+/// panel's final width.
+///
+/// opened² rather than opened — the dim lingers low while the panel is still
+/// a seed and catches up quickly as the spring arrives, and the clamp keeps
+/// the spring's slight overshoot from pushing the alpha past full. The
+/// docked card's contents and scrim introduced the curve; the layout
+/// filmstrip and the tags grid, which never spring their own geometry, dim
+/// their scrims with the very same one. It lives here rather than in a
+/// renderer because all three panels and both compositors must agree on it
+/// exactly.
+#[must_use]
+pub(crate) fn open_envelope(spring_width: f32, panel_width: f32) -> f32 {
+    let opened = (spring_width / panel_width.max(1.0)).clamp(0.0, 1.0);
+    opened * opened
+}
+
 /// The selection pill's travel between rows of a list panel.
 ///
 /// The pill used to be placed straight from the selected index, so it
@@ -692,6 +710,87 @@ mod tests {
         assert_eq!(island_radii(20.0, 24.0), (0.0, 10.0));
         assert_eq!(island_radii(0.0, 24.0), (0.0, 0.0));
         assert_eq!(island_radii(f32::NAN, f32::NAN), (0.0, 0.0));
+    }
+
+    #[test]
+    fn the_open_envelope_is_the_square_of_the_springs_travel() {
+        assert_eq!(open_envelope(0.0, 400.0), 0.0);
+        // Halfway open is a quarter dim: the fade lags the spring early and
+        // catches up as it arrives.
+        assert_eq!(open_envelope(200.0, 400.0), 0.25);
+        assert_eq!(open_envelope(400.0, 400.0), 1.0);
+        // The spring overshoots its target slightly; the dim must not follow
+        // it past full alpha.
+        assert_eq!(open_envelope(460.0, 400.0), 1.0);
+    }
+
+    #[test]
+    fn the_open_envelope_stays_finite_for_a_degenerate_panel() {
+        // The width floor keeps a zero-width target from dividing by zero;
+        // any real spring width then reads as fully open.
+        assert_eq!(open_envelope(0.0, 0.0), 0.0);
+        assert_eq!(open_envelope(50.0, 0.0), 1.0);
+        // A NaN panel width is floored away the same way; only a NaN spring
+        // width could still leak through, and the springs never produce one.
+        assert_eq!(open_envelope(50.0, f32::NAN), 1.0);
+        assert!(open_envelope(f32::NAN, 400.0).is_nan());
+    }
+
+    #[test]
+    fn a_panels_scrim_fades_in_on_the_same_curve_the_card_opens_with() {
+        // The filmstrip and the tags grid advance the system-UI island toward
+        // their own panel's size and dim with this envelope, so a fresh
+        // appearance starts at the seed's share of the panel, squared.
+        let mut motion = IslandMotion::default();
+        let mut t = Instant::now();
+        let (w, _) = motion.advance(t, 1200.0, 300.0);
+        let first = open_envelope(w, 1200.0);
+        assert_eq!(first, (SEED_WIDTH / 1200.0) * (SEED_WIDTH / 1200.0));
+
+        t += FRAME;
+        let (w, _) = motion.advance(t, 1200.0, 300.0);
+        let mid = open_envelope(w, 1200.0);
+        assert!(mid > first && mid < 1.0, "envelope {mid}");
+        assert!(motion.animating(1200.0, 300.0));
+
+        let mut frames = 0;
+        while motion.animating(1200.0, 300.0) && frames < 60 {
+            t += FRAME;
+            motion.advance(t, 1200.0, 300.0);
+            frames += 1;
+        }
+        assert!(frames < 60, "still moving after {frames} frames");
+        let (w, _) = motion.advance(t, 1200.0, 300.0);
+        assert!(open_envelope(w, 1200.0) > 0.99, "settled dim");
+
+        // Closing forgets the travel, so the next appearance fades in again
+        // rather than resuming at full dim.
+        motion.close();
+        t += FRAME;
+        let (w, _) = motion.advance(t, 1200.0, 300.0);
+        assert_eq!(open_envelope(w, 1200.0), first);
+    }
+
+    #[test]
+    fn disabled_motion_makes_the_open_envelope_exactly_one() {
+        let mut motion = IslandMotion::default();
+        let now = Instant::now();
+        let (w, _) = motion.advance_with_motion(now, 1200.0, 300.0, false);
+        assert_eq!(open_envelope(w, 1200.0), 1.0);
+        assert!(!motion.animating(1200.0, 300.0));
+
+        // Turned off mid-travel the spring snaps, so the dim jumps to full
+        // and no follow-up frames are requested.
+        motion.close();
+        let mut t = now;
+        motion.advance_with_motion(t, 1200.0, 300.0, true);
+        t += FRAME;
+        motion.advance_with_motion(t, 1200.0, 300.0, true);
+        assert!(motion.animating(1200.0, 300.0));
+        t += FRAME;
+        let (w, _) = motion.advance_with_motion(t, 1200.0, 300.0, false);
+        assert_eq!(open_envelope(w, 1200.0), 1.0);
+        assert!(!motion.animating(1200.0, 300.0));
     }
 
     #[test]

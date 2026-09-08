@@ -383,7 +383,7 @@ impl WMController for Jwm {
                         .input_ops()
                         .get_pointer_position()
                         .unwrap_or(self.last_mouse_root);
-                    if let SystemUiHitTarget::Item(row) =
+                    if let SystemUiHitTarget::Item(row, _) =
                         backend.compositor_system_ui_hit_test(x, y)
                         && self.features.system_ui.select_visible_row(row).is_some()
                     {
@@ -407,7 +407,7 @@ impl WMController for Jwm {
                         hit,
                         SystemUiHitTarget::Outside | SystemUiHitTarget::Unavailable
                     ) {
-                        let row = if let SystemUiHitTarget::Item(row) = hit {
+                        let row = if let SystemUiHitTarget::Item(row, _) = hit {
                             Some(row)
                         } else {
                             None
@@ -460,7 +460,7 @@ impl WMController for Jwm {
                 .unwrap_or(self.last_mouse_root);
             let hit = backend.compositor_system_ui_hit_test(x, y);
             use crate::backend::api::SystemUiHitTarget;
-            let wheel_row = if let SystemUiHitTarget::Item(row) = hit {
+            let wheel_row = if let SystemUiHitTarget::Item(row, _) = hit {
                 Some(row)
             } else {
                 None
@@ -484,9 +484,19 @@ impl WMController for Jwm {
                     self.scroll_system_ui_from_pointer(backend, 1, wheel_row);
                 }
                 1 => match hit {
-                    SystemUiHitTarget::Item(row) => {
-                        if let Err(error) = self.activate_system_ui_pointer_row(backend, row) {
-                            error!("Error activating system UI row: {error}");
+                    SystemUiHitTarget::Item(row, text_x) => {
+                        // Click-to-position: a press that lands on a slider
+                        // row's bar sets the value and arms a drag; a press
+                        // on the selected notification's action strip fires
+                        // the chip under the pointer; the rest keeps the
+                        // keyboard's Return behavior (Volume's mute toggle
+                        // included).
+                        if !self.press_control_center_slider(backend, row, text_x, x) {
+                            if let Err(error) =
+                                self.activate_system_ui_pointer_row(backend, row, text_x)
+                            {
+                                error!("Error activating system UI row: {error}");
+                            }
                         }
                     }
                     SystemUiHitTarget::Outside => {
@@ -524,6 +534,11 @@ impl WMController for Jwm {
         // early return, it is committed only on the ordinary path and
         // dropped on every other.
         let tab_drag = self.tab_drag.take();
+        // A control-center slider drag applies its value live on press and
+        // motion, so a release only disarms it. Taken ahead of the early
+        // returns for the same reason as the tab drag: a modal entered
+        // mid-drag must not leave it armed for a later release.
+        self.control_slider_drag = None;
         if self.features.capture.take_swallowed_button_release() {
             return;
         }
@@ -780,11 +795,28 @@ impl WMController for Jwm {
                 // highlight, and a click takes the cell under it.
                 self.hover_tags_overview(backend, root_x, root_y);
             } else {
-                let row = match backend.compositor_system_ui_hit_test(root_x, root_y) {
-                    crate::backend::api::SystemUiHitTarget::Item(row) => Some(row),
+                let hit = backend.compositor_system_ui_hit_test(root_x, root_y);
+                // An armed slider drag owns the pointer until the release:
+                // the bar tracks x, and rows the pointer crosses are not
+                // hovered.
+                if self.control_slider_drag.is_some() {
+                    let text_x = match hit {
+                        crate::backend::api::SystemUiHitTarget::Item(_, text_x) => Some(text_x),
+                        _ => None,
+                    };
+                    if self.drag_control_center_slider(backend, root_x, text_x) {
+                        return;
+                    }
+                }
+                // The hover wants the row and, for the notification action
+                // strip's chips, the pointer's x inside the row's text.
+                let hover = match hit {
+                    crate::backend::api::SystemUiHitTarget::Item(row, text_x) => {
+                        Some((row, text_x))
+                    }
                     _ => None,
                 };
-                self.hover_system_ui_pointer_row(backend, row);
+                self.hover_system_ui_pointer_row(backend, hover);
             }
             return;
         }
@@ -2081,6 +2113,7 @@ mod tests {
             last_mouse_root: (0.0, 0.0),
             drag_ctl: None,
             tab_drag: None,
+            control_slider_drag: None,
             message: SharedMessage::default(),
             secondary_bars: HashMap::new(),
             secondary_bar_failures: HashMap::new(),
@@ -2421,7 +2454,7 @@ mod tests {
             Some(ControlKind::NightLight)
         );
 
-        backend.system_ui_hit = SystemUiHitTarget::Item(1);
+        backend.system_ui_hit = SystemUiHitTarget::Item(1, 0.0);
         <Jwm as WMController>::on_motion_notify(
             &mut jwm,
             &mut backend,
@@ -2514,7 +2547,7 @@ mod tests {
             Some(ControlKind::NightLight)
         );
 
-        backend.system_ui_hit = SystemUiHitTarget::Item(1);
+        backend.system_ui_hit = SystemUiHitTarget::Item(1, 0.0);
         <Jwm as WMController>::on_button_press(
             &mut jwm,
             &mut backend,
@@ -2532,7 +2565,7 @@ mod tests {
 
         // A wheel click over a row that is not a slider still browses —
         // relative to the selection, not to the row under the pointer.
-        backend.system_ui_hit = SystemUiHitTarget::Item(3);
+        backend.system_ui_hit = SystemUiHitTarget::Item(3, 0.0);
         <Jwm as WMController>::on_button_press(
             &mut jwm,
             &mut backend,
@@ -2546,6 +2579,159 @@ mod tests {
             Some(ControlKind::NightLight),
             "browsing moves one row down from the selected brightness row"
         );
+    }
+
+    #[test]
+    fn a_press_off_the_slider_bar_keeps_the_rows_ordinary_click() {
+        use crate::jwm::features::{ControlCenterInputs, ControlKind, SystemUiState};
+
+        let mut jwm = empty_jwm();
+        let mut backend = RenderSpyBackend::new();
+        jwm.features.system_ui = SystemUiState::control_center(&ControlCenterInputs {
+            volume: Some((45, false)),
+            brightness: Some(60),
+            ..Default::default()
+        });
+        jwm.features.system_ui.move_selection(1);
+        assert_eq!(
+            jwm.features.system_ui.selected_control(),
+            Some(ControlKind::Brightness)
+        );
+
+        // text_x 0 is the row's left edge — its icon, never the bar, whatever
+        // the configured font measured — so the press runs the row's ordinary
+        // click (the keyboard's Return) rather than positioning a slider.
+        backend.system_ui_hit = SystemUiHitTarget::Item(0, 0.0);
+        <Jwm as WMController>::on_button_press(
+            &mut jwm,
+            &mut backend,
+            HitTarget::Background { output: None },
+            0,
+            1,
+            0,
+        );
+        assert!(jwm.control_slider_drag.is_none());
+        assert_eq!(
+            jwm.features.system_ui.selected_control(),
+            Some(ControlKind::Volume),
+            "the click still selects and activates the row under the pointer"
+        );
+    }
+
+    fn notification_center_with_chips(jwm: &mut Jwm) -> u32 {
+        use crate::jwm::features::notifications::{NotificationAction, NotificationRequest};
+
+        let act = |key: &str, label: &str| NotificationAction {
+            key: key.into(),
+            label: label.into(),
+        };
+        let id = jwm.features.notifications.push(
+            &NotificationRequest {
+                app: "updater".into(),
+                summary: "Update ready".into(),
+                actions: vec![act("later", "Later"), act("default", "Restart now")],
+                ..Default::default()
+            },
+            1_000,
+            false,
+        );
+        jwm.features.system_ui = crate::jwm::features::SystemUiState::notification_center(
+            &jwm.features.notifications,
+            2_000,
+        );
+        id
+    }
+
+    #[test]
+    fn a_press_off_the_action_chips_fires_nothing() {
+        let mut jwm = empty_jwm();
+        let mut backend = RenderSpyBackend::new();
+        let id = notification_center_with_chips(&mut jwm);
+        // Row 0 is the notification, row 1 the action strip under it.
+        assert_eq!(
+            jwm.features.system_ui.notification_strip_visible_row(),
+            Some(1)
+        );
+
+        // text_x 0 is the strip's left edge — its gutter, never a chip,
+        // whatever the configured font measured — so the press fires nothing:
+        // not the action the keyboard cursor sits on, not a dismissal.
+        backend.system_ui_hit = SystemUiHitTarget::Item(1, 0.0);
+        <Jwm as WMController>::on_button_press(
+            &mut jwm,
+            &mut backend,
+            HitTarget::Background { output: None },
+            0,
+            1,
+            0,
+        );
+        assert!(
+            jwm.features.notifications.get(id).is_some(),
+            "a press off the chips must not invoke the action under the cursor"
+        );
+        assert_eq!(
+            jwm.features.system_ui.selected_notification(),
+            Some((id, Some("default".to_string()))),
+            "the row and its action cursor are untouched"
+        );
+
+        // Hovering the gutter likewise moves nothing: the cursor stays on
+        // `default` and the strip keeps the compositor's hover cue off.
+        <Jwm as WMController>::on_motion_notify(
+            &mut jwm,
+            &mut backend,
+            HitTarget::Background { output: None },
+            100.0,
+            100.0,
+            0,
+        );
+        assert_eq!(backend.system_ui_hover_updates.last(), Some(&None));
+        assert_eq!(
+            jwm.features.system_ui.selected_notification(),
+            Some((id, Some("default".to_string())))
+        );
+    }
+
+    #[test]
+    fn an_armed_slider_drag_tracks_motion_and_disarms_on_release() {
+        use crate::jwm::features::{ControlCenterInputs, ControlKind, SystemUiState};
+
+        let mut jwm = empty_jwm();
+        let mut backend = RenderSpyBackend::new();
+        // No volume row on purpose: the drag then computes nothing and the
+        // test never reaches for the machine's real audio tools.
+        jwm.features.system_ui = SystemUiState::control_center(&ControlCenterInputs::default());
+
+        jwm.control_slider_drag = Some(crate::jwm::input_handler::ControlSliderDrag {
+            kind: ControlKind::Volume,
+            last_percent: 45,
+            text_origin_x: 0.0,
+        });
+        backend.system_ui_hit = SystemUiHitTarget::Item(0, 190.0);
+        <Jwm as WMController>::on_motion_notify(
+            &mut jwm,
+            &mut backend,
+            HitTarget::Background { output: None },
+            190.0,
+            100.0,
+            0,
+        );
+        assert!(
+            jwm.control_slider_drag.is_some(),
+            "motion keeps the drag armed until the release"
+        );
+        assert!(
+            backend.system_ui_hover_updates.is_empty(),
+            "a drag does not hover the rows it crosses"
+        );
+
+        <Jwm as WMController>::on_button_release(
+            &mut jwm,
+            &mut backend,
+            HitTarget::Background { output: None },
+            0,
+        );
+        assert!(jwm.control_slider_drag.is_none());
     }
 
     #[test]

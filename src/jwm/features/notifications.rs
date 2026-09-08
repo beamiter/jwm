@@ -349,11 +349,25 @@ pub fn default_action_index(actions: &[NotificationAction]) -> usize {
         .unwrap_or(0)
 }
 
-/// The chip line drawn under the selected row: numbered labels, with the one
-/// under the cursor marked.
+/// The pieces an action strip is drawn from. Pointer hit-testing measures
+/// these (see `system_ui::notification_chip_at_x`), so [`action_strip`] must
+/// stay exactly their concatenation: the gutter, then the chips with `gap`
+/// between neighbors.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActionStripParts {
+    /// Everything drawn before the first chip.
+    pub gutter: String,
+    /// One entry per action, in the order the chips are drawn.
+    pub chips: Vec<String>,
+    /// What separates two chips.
+    pub gap: &'static str,
+}
+
+/// The parts [`action_strip`] joins: gutter, chips, and the gap between
+/// them.
 #[must_use]
-pub fn action_strip(actions: &[NotificationAction], cursor: usize) -> String {
-    let chips: Vec<String> = actions
+pub fn action_strip_parts(actions: &[NotificationAction], cursor: usize) -> ActionStripParts {
+    let chips = actions
         .iter()
         .enumerate()
         .map(|(index, action)| {
@@ -361,7 +375,19 @@ pub fn action_strip(actions: &[NotificationAction], cursor: usize) -> String {
             format!("{marker}{} {}", index + 1, action.label)
         })
         .collect();
-    format!("      \u{f0a9} {}", chips.join("   "))
+    ActionStripParts {
+        gutter: "      \u{f0a9} ".to_string(),
+        chips,
+        gap: "   ",
+    }
+}
+
+/// The chip line drawn under the selected row: numbered labels, with the one
+/// under the cursor marked.
+#[must_use]
+pub fn action_strip(actions: &[NotificationAction], cursor: usize) -> String {
+    let parts = action_strip_parts(actions, cursor);
+    format!("{}{}", parts.gutter, parts.chips.join(parts.gap))
 }
 
 /// Where the runtime Do-Not-Disturb toggle lands once the configuration is
@@ -1400,6 +1426,27 @@ mod tests {
         {
             assert!((ch as u32) < 0xf600, "{ch:?} is outside FontAwesome 4");
         }
+    }
+
+    #[test]
+    fn the_strip_is_its_parts_joined_byte_for_byte() {
+        // The pointer resolver measures the parts, so the drawn strip must be
+        // exactly their concatenation — and exactly what it always was.
+        let actions = [action("a", "Reply"), action("b", "Later")];
+        let parts = action_strip_parts(&actions, 1);
+        assert_eq!(parts.gutter, "      \u{f0a9} ");
+        assert_eq!(parts.chips, [" 1 Reply", "\u{f00c}2 Later"]);
+        assert_eq!(parts.gap, "   ");
+        assert_eq!(
+            action_strip(&actions, 1),
+            "      \u{f0a9}  1 Reply   \u{f00c}2 Later"
+        );
+        assert_eq!(
+            action_strip(&actions, 1),
+            format!("{}{}", parts.gutter, parts.chips.join(parts.gap))
+        );
+        // No actions: the gutter alone, as before the split into parts.
+        assert_eq!(action_strip(&[], 0), "      \u{f0a9} ");
     }
 
     #[test]

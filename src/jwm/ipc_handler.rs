@@ -1798,6 +1798,54 @@ impl Jwm {
             return IpcResponse::ok(None);
         }
 
+        // Special command: bluetooth_pairing_failed — the helper's terminal
+        // report when the window it was spawned to hold never armed: no
+        // system bus, no adapter, or an agent bluez refused. The frame names
+        // no address because nothing ever rang, so the cookie alone decides,
+        // and only an inbound window nothing has called into yet may end this
+        // way (`matches_failure`). The session closes now rather than at the
+        // sixty-second inbound deadline, and the status line says what
+        // actually happened. No `bluetooth/pairing_response` goes back — the
+        // helper that sent this holds nothing outstanding to answer, that is
+        // what the frame means — and nothing was ever bound, so there is no
+        // device list to re-read either.
+        if name == "bluetooth_pairing_failed" {
+            use crate::jwm::features::pairing;
+
+            let failed = match pairing::parse_failed_command(args) {
+                Ok(failed) => failed,
+                Err(error) => {
+                    return IpcResponse::err(format!("bluetooth_pairing_failed: {error}"));
+                }
+            };
+            let Some(session) = &self.features.bluetooth_pairing else {
+                return IpcResponse::err(
+                    "bluetooth_pairing_failed: no pairing session is active".to_string(),
+                );
+            };
+            if !session.matches_failure(&failed.cookie) {
+                return IpcResponse::err(
+                    "bluetooth_pairing_failed: not the active pairing session".to_string(),
+                );
+            }
+            self.features.bluetooth_pairing = None;
+            let reason = failed.error.as_deref().unwrap_or("the helper gave up");
+            log::warn!("Bluetooth: inbound window never armed: {reason}");
+            // An unrung window can have no prompt on screen — prompting binds
+            // the address first — but take one down defensively, as `done`
+            // does for a prompt bluez cancelled behind itself.
+            self.features.system_ui.cancel_pairing_prompt();
+            if self.features.system_ui.is_bluetooth_picker() {
+                self.features
+                    .system_ui
+                    .set_bluetooth_message(pairing::inbound_failed_message(
+                        failed.error.as_deref(),
+                    ));
+            }
+            self.sync_system_ui(backend);
+            return IpcResponse::ok(None);
+        }
+
         // Special command: clipboard_record — how a backend helper or a
         // script feeds the history. Offers marked secret must be dropped
         // before calling this, not here.
@@ -3556,14 +3604,28 @@ mod tests {
     /// refusals at all — which is *not* the same as "no refusals", and the
     /// policy object must not read it as one.
     const REFUSED: [(String, Option<String>); 0] = [];
+    use crate::Jwm;
     use crate::application::BenchmarkRequest;
-    use crate::backend::api::{ColorManagedSurfaceInfo, OutputIdentity, OutputInfo};
+    use crate::backend::api::{
+        Backend, BackendDiagnostics, Capabilities, ColorAllocator, ColorManagedSurfaceInfo,
+        CompositorAnnotation, CompositorBenchmark, CompositorControl, CompositorMedia,
+        CompositorWindowEffects, CompositorWorkspaceEffects, DisplayControl, EventHandler,
+        OutputIdentity, OutputInfo, RenderScheduler,
+    };
     use crate::backend::common_define::{OutputId, WindowId};
     use crate::backend::edid::EdidHdrCapabilities;
+    use crate::backend::error::BackendError;
+    use crate::backend::wayland_dummy_ops::{
+        DummyColorAllocator, DummyCursorProvider, DummyInputOps, DummyKeyOps, DummyOutputOps,
+        DummyPropertyOps, DummyWindowOps,
+    };
     use crate::core::layout::LayoutEnum;
     use crate::core::models::{Pertag, WMClient, WMMonitor};
     use crate::core::state::WMState;
     use crate::ipc::RuntimeHealthStatus;
+    use crate::jwm::features::SystemUiState;
+    use crate::jwm::features::pairing::{PairingPrompt, PairingSession};
+    use std::any::Any;
     use std::rc::Rc;
 
     #[test]
@@ -5176,6 +5238,203 @@ mod tests {
             assert!(
                 arm_of(query).contains(&refresh),
                 "{query} must start the coalesced snapshot refresh before answering"
+            );
+        }
+    }
+
+    /// A backend built from the shared dummy ops, so the pairing IPC arms can
+    /// be driven end to end without a display.
+    struct PairingIpcBackend {
+        window_ops: DummyWindowOps,
+        input_ops: DummyInputOps,
+        property_ops: DummyPropertyOps,
+        output_ops: DummyOutputOps,
+        key_ops: DummyKeyOps,
+        cursor_provider: DummyCursorProvider,
+        color_allocator: DummyColorAllocator,
+    }
+
+    impl PairingIpcBackend {
+        fn new() -> Self {
+            Self {
+                window_ops: DummyWindowOps,
+                input_ops: DummyInputOps,
+                property_ops: DummyPropertyOps,
+                output_ops: DummyOutputOps,
+                key_ops: DummyKeyOps,
+                cursor_provider: DummyCursorProvider,
+                color_allocator: DummyColorAllocator,
+            }
+        }
+    }
+
+    impl CompositorBenchmark for PairingIpcBackend {}
+    impl BackendDiagnostics for PairingIpcBackend {}
+    impl CompositorControl for PairingIpcBackend {}
+    impl CompositorMedia for PairingIpcBackend {}
+    impl CompositorWorkspaceEffects for PairingIpcBackend {}
+    impl CompositorWindowEffects for PairingIpcBackend {}
+    impl CompositorAnnotation for PairingIpcBackend {}
+    impl DisplayControl for PairingIpcBackend {}
+    impl RenderScheduler for PairingIpcBackend {}
+
+    impl Backend for PairingIpcBackend {
+        fn capabilities(&self) -> Capabilities {
+            Capabilities::default()
+        }
+
+        fn root_window(&self) -> Option<WindowId> {
+            Some(WindowId::from_raw(0))
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+
+        fn check_existing_wm(&self) -> Result<(), BackendError> {
+            Ok(())
+        }
+
+        fn window_ops(&self) -> &dyn crate::backend::api::WindowOps {
+            &self.window_ops
+        }
+
+        fn input_ops(&self) -> &dyn crate::backend::api::InputOps {
+            &self.input_ops
+        }
+
+        fn property_ops(&self) -> &dyn crate::backend::api::PropertyOps {
+            &self.property_ops
+        }
+
+        fn output_ops(&self) -> &dyn crate::backend::api::OutputOps {
+            &self.output_ops
+        }
+
+        fn key_ops(&self) -> &dyn crate::backend::api::KeyOps {
+            &self.key_ops
+        }
+
+        fn key_ops_mut(&mut self) -> &mut dyn crate::backend::api::KeyOps {
+            &mut self.key_ops
+        }
+
+        fn cursor_provider(&mut self) -> &mut dyn crate::backend::api::CursorProvider {
+            &mut self.cursor_provider
+        }
+
+        fn color_allocator(&mut self) -> &mut dyn ColorAllocator {
+            &mut self.color_allocator
+        }
+
+        fn run(&mut self, _handler: &mut dyn EventHandler) -> Result<(), BackendError> {
+            Ok(())
+        }
+    }
+
+    /// A jwm with the Bluetooth picker open and an inbound window armed — the
+    /// state the picker's `a` key leaves behind while `jwm-bridge accept` runs.
+    fn jwm_with_armed_inbound_window(cookie: &str) -> (PairingIpcBackend, Jwm) {
+        let mut backend = PairingIpcBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        jwm.features.system_ui =
+            SystemUiState::bluetooth_picker("Accepting incoming requests (60s)");
+        jwm.features.bluetooth_pairing = Some(PairingSession::inbound(
+            cookie.to_string(),
+            std::time::Instant::now(),
+        ));
+        (backend, jwm)
+    }
+
+    #[test]
+    fn bluetooth_pairing_failed_closes_the_armed_window_and_says_why() {
+        let (mut backend, mut jwm) = jwm_with_armed_inbound_window("cookie-1");
+        // Not reachable over the wire — a real prompt binds the window to its
+        // device, and `matches_failure` then refuses the frame — but the
+        // prompt cancel is unconditional, exactly like `done`'s.
+        jwm.features
+            .system_ui
+            .prompt_bluetooth_pairing(&PairingPrompt::Confirm { passkey: 42 }, "MX Master 3S");
+        assert!(jwm.features.system_ui.pairing_prompt().is_some());
+
+        let response = jwm.handle_ipc_command(
+            &mut backend,
+            "bluetooth_pairing_failed",
+            &serde_json::json!({"cookie": "cookie-1", "error": "no system bus"}),
+        );
+
+        assert!(response.success, "{response:?}");
+        assert!(jwm.features.bluetooth_pairing.is_none());
+        assert!(jwm.features.system_ui.pairing_prompt().is_none());
+        let items = jwm.features.system_ui.overlay_parts().items;
+        assert!(
+            items.iter().any(|row| {
+                row.contains("Cannot accept incoming requests") && row.contains("no system bus")
+            }),
+            "the picker says why the window never armed: {items:?}"
+        );
+    }
+
+    #[test]
+    fn bluetooth_pairing_failed_with_another_cookie_keeps_the_window_armed() {
+        let (mut backend, mut jwm) = jwm_with_armed_inbound_window("cookie-1");
+
+        let response = jwm.handle_ipc_command(
+            &mut backend,
+            "bluetooth_pairing_failed",
+            &serde_json::json!({"cookie": "someone-elses-cookie", "error": "no system bus"}),
+        );
+
+        assert!(!response.success);
+        assert_eq!(
+            response.error.as_deref(),
+            Some("bluetooth_pairing_failed: not the active pairing session")
+        );
+        assert!(jwm.features.bluetooth_pairing.is_some());
+        let items = jwm.features.system_ui.overlay_parts().items;
+        assert!(
+            items
+                .iter()
+                .any(|row| row.contains("Accepting incoming requests")),
+            "the picker still claims the armed window: {items:?}"
+        );
+    }
+
+    #[test]
+    fn bluetooth_pairing_failed_without_a_session_is_refused() {
+        let mut backend = PairingIpcBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+
+        let response = jwm.handle_ipc_command(
+            &mut backend,
+            "bluetooth_pairing_failed",
+            &serde_json::json!({"cookie": "cookie-1", "error": "no system bus"}),
+        );
+
+        assert!(!response.success);
+        assert_eq!(
+            response.error.as_deref(),
+            Some("bluetooth_pairing_failed: no pairing session is active")
+        );
+    }
+
+    #[test]
+    fn bluetooth_pairing_failed_rejects_malformed_frames() {
+        let (mut backend, mut jwm) = jwm_with_armed_inbound_window("cookie-1");
+
+        for args in [
+            serde_json::json!({}),
+            serde_json::json!({"error": "no system bus"}),
+            serde_json::json!({"cookie": ""}),
+            serde_json::json!({"cookie": 7}),
+        ] {
+            let response = jwm.handle_ipc_command(&mut backend, "bluetooth_pairing_failed", &args);
+            assert!(!response.success, "accepted {args}");
+            let error = response.error.unwrap_or_default();
+            assert!(error.starts_with("bluetooth_pairing_failed: "), "{error}");
+            assert!(
+                jwm.features.bluetooth_pairing.is_some(),
+                "a malformed frame ended the window: {args}"
             );
         }
     }

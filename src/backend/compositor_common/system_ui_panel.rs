@@ -171,11 +171,15 @@ pub(crate) struct HitGeometry {
     rows: usize,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Hit {
     Outside,
     Panel,
-    Item(usize),
+    /// The row, plus the pointer's x inside the list's text texture: the
+    /// card's left padding removed, the rasterizer's own margin kept, so
+    /// `compositor_font::measure_ui_text_width` numbers (pad included) line
+    /// up with it directly. Consumers that only care about the row ignore it.
+    Item(usize, f32),
 }
 
 impl HitGeometry {
@@ -211,7 +215,10 @@ impl HitGeometry {
             return Hit::Panel;
         }
         let row = ((y - items[1]) / self.row_height).floor().max(0.0) as usize;
-        Hit::Item(row.min(self.rows.saturating_sub(1)))
+        // The list texture is drawn at panel_x + PAD; the offset into it is
+        // what a row consumer (a slider bar at a known text position) wants.
+        let text_x = x - self.panel[0] - PAD;
+        Hit::Item(row.min(self.rows.saturating_sub(1)), text_x)
     }
 }
 
@@ -663,10 +670,10 @@ mod tests {
         let hit = HitGeometry::new(panel, &contents, 10);
         let items_y = contents.items.unwrap()[1];
 
-        assert_eq!(hit.hit_test(130.0, items_y as f64 + 1.0), Hit::Item(0));
+        assert_eq!(hit.hit_test(130.0, items_y as f64 + 1.0), Hit::Item(0, 0.0));
         assert_eq!(
             hit.hit_test(130.0, items_y as f64 + contents.row_height as f64 * 6.5),
-            Hit::Item(6)
+            Hit::Item(6, 0.0)
         );
         assert_eq!(hit.hit_test(101.0, items_y as f64), Hit::Panel);
         assert_eq!(hit.hit_test(99.0, 100.0), Hit::Outside);
@@ -683,7 +690,29 @@ mod tests {
 
         assert_eq!(
             hit.hit_test(300.0, (items_y + s.items.1 - 0.5) as f64),
-            Hit::Item(9)
+            Hit::Item(9, 270.0)
+        );
+    }
+
+    #[test]
+    fn hit_testing_carries_the_offset_into_the_rows_text() {
+        let s = sizes((40.0, 24.0), (0.0, 0.0), (300.0, 204.0), (0.0, 0.0));
+        let panel = [100.0, 50.0, 600.0, 400.0];
+        let contents = contents(panel, &s, 10, None, None);
+        let hit = HitGeometry::new(panel, &contents, 10);
+        let items_y = contents.items.unwrap()[1];
+
+        // The list texture is drawn at panel_x + PAD; the carried x is the
+        // pointer's offset into that texture, so a row can tell its slider
+        // bar from its label. A press in the pill's bleed lands at a small
+        // negative offset, left of the text.
+        assert_eq!(
+            hit.hit_test(172.0, items_y as f64 + 1.0),
+            Hit::Item(0, 42.0)
+        );
+        assert_eq!(
+            hit.hit_test(122.0, items_y as f64 + 1.0),
+            Hit::Item(0, -8.0)
         );
     }
 }

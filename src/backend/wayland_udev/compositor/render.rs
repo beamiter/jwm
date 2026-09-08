@@ -6,7 +6,9 @@ use crate::backend::compositor_common::attention::{
 };
 use crate::backend::compositor_common::capture::clip_region;
 use crate::backend::compositor_common::debug_hud as hud;
-use crate::backend::compositor_common::dynamic_island::{IslandDock, clip_bar_to_viewport};
+use crate::backend::compositor_common::dynamic_island::{
+    IslandDock, clip_bar_to_viewport, open_envelope,
+};
 use crate::backend::compositor_common::effects::MotionTrailParams;
 use crate::backend::compositor_common::genie::{
     dock_item_preview_target, genie_progress, output_bounds_for_anchor, preview_rect,
@@ -4877,6 +4879,44 @@ impl WaylandCompositor {
         }
     }
 
+    /// The scrim fade-in envelope for the system-UI panels that draw their
+    /// own card — the layout filmstrip and the tags grid. They never run the
+    /// docked card's geometry spring, so this advances the system-UI island
+    /// toward the panel's own size purely as a timer and dims the scrim with
+    /// the card's [`open_envelope`] curve: opened² of the spring's travel.
+    ///
+    /// Every appearance fades in from the seed, including a direct swap from
+    /// the other panel: `set_system_ui` closes the island as an overlay
+    /// appears or vanishes, and zeroes `system_ui_width_floor` whenever the
+    /// overlay's identity or viewport changes. Only the docked list card
+    /// otherwise writes that floor, so a zero on this path means the panel
+    /// was just swapped in and the spring is closed to restart the fade;
+    /// the panel's own width then stands in the floor as the
+    /// not-the-first-frame marker until the next identity change clears it.
+    /// Closing stays instant — there is no fade-out anywhere by design. As
+    /// with the card, the spring has to keep asking for frames until it
+    /// settles; with motion off it snaps to target and the envelope is
+    /// exactly 1.0 — the old instant scrim.
+    fn overlay_scrim_envelope(&mut self, panel_w: f32, panel_h: f32) -> f32 {
+        if self.system_ui_width_floor == 0.0 {
+            self.system_ui_island.close();
+        }
+        self.system_ui_width_floor = panel_w;
+        let motion_enabled = crate::config::CONFIG.load().motion_enabled();
+        let (w, _) = self.system_ui_island.advance_with_motion(
+            std::time::Instant::now(),
+            panel_w,
+            panel_h,
+            motion_enabled,
+        );
+        // Unlike the OSD, a modal panel only redraws when something asks it
+        // to, so the spring has to keep asking until it settles.
+        if self.system_ui_island.animating(panel_w, panel_h) {
+            self.needs_render = true;
+        }
+        open_envelope(w, panel_w)
+    }
+
     /// The layout picker: a strip of 35mm film across the panel, one cell per
     /// layout, each holding a line-drawn thumbnail of what that layout does
     /// with a screenful of windows. The selected cell lifts out of the strip
@@ -4895,18 +4935,21 @@ impl WaylandCompositor {
         let geometry = film::strip_geometry(viewport, strip.cells.len());
         let [panel_x, panel_y, panel_w, panel_h] = geometry.panel;
         let accent = self.border_gradient_color_a;
+        let scrim_a = self.overlay_scrim_envelope(panel_w, panel_h);
 
         unsafe {
             gl.BindVertexArray(self.quad_vao);
 
-            // Scrim: dim the desktop the strip is describing.
+            // Scrim: dim the desktop the strip is describing, fading in with
+            // the open envelope rather than snapping to full alpha.
             let rect = super::get_uniform_loc(gl, self.hud_program, "u_rect");
             let proj = super::get_uniform_loc(gl, self.hud_program, "u_projection");
             let bg = super::get_uniform_loc(gl, self.hud_program, "u_bg_color");
             let size = super::get_uniform_loc(gl, self.hud_program, "u_size");
+            let scrim = UiPalette::faded(ui.scrim, scrim_a);
             gl.UseProgram(self.hud_program);
             gl.UniformMatrix4fv(proj, 1, ffi::FALSE as u8, projection.as_ptr());
-            gl.Uniform4f(bg, ui.scrim[0], ui.scrim[1], ui.scrim[2], ui.scrim[3]);
+            gl.Uniform4f(bg, scrim[0], scrim[1], scrim[2], scrim[3]);
             gl.Uniform2f(size, viewport_w, viewport_h);
             gl.Uniform4f(rect, viewport_x, viewport_y, viewport_w, viewport_h);
             gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
@@ -5129,6 +5172,7 @@ impl WaylandCompositor {
         let geometry = grid_layout::grid_geometry(viewport, grid.cells.len(), grid.cols);
         let [panel_x, panel_y, panel_w, panel_h] = geometry.panel;
         let accent = self.border_gradient_color_a;
+        let scrim_a = self.overlay_scrim_envelope(panel_w, panel_h);
 
         // The panel repaints on every rendered frame while it is up — the
         // backend forces a redraw on every pointer motion, and dragging is
@@ -5178,14 +5222,16 @@ impl WaylandCompositor {
         unsafe {
             gl.BindVertexArray(self.quad_vao);
 
-            // Scrim: dim the desktop the grid is describing.
+            // Scrim: dim the desktop the grid is describing, fading in with
+            // the open envelope rather than snapping to full alpha.
             let rect = super::get_uniform_loc(gl, self.hud_program, "u_rect");
             let proj = super::get_uniform_loc(gl, self.hud_program, "u_projection");
             let bg = super::get_uniform_loc(gl, self.hud_program, "u_bg_color");
             let size = super::get_uniform_loc(gl, self.hud_program, "u_size");
+            let scrim = UiPalette::faded(ui.scrim, scrim_a);
             gl.UseProgram(self.hud_program);
             gl.UniformMatrix4fv(proj, 1, ffi::FALSE as u8, projection.as_ptr());
-            gl.Uniform4f(bg, ui.scrim[0], ui.scrim[1], ui.scrim[2], ui.scrim[3]);
+            gl.Uniform4f(bg, scrim[0], scrim[1], scrim[2], scrim[3]);
             gl.Uniform2f(size, viewport_w, viewport_h);
             gl.Uniform4f(rect, viewport_x, viewport_y, viewport_w, viewport_h);
             gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);

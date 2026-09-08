@@ -8,7 +8,9 @@ use crate::backend::compositor_common::attention::{
     attention_border_style, attention_signal_active,
 };
 use crate::backend::compositor_common::debug_hud as hud;
-use crate::backend::compositor_common::dynamic_island::{IslandDock, clip_bar_to_viewport};
+use crate::backend::compositor_common::dynamic_island::{
+    IslandDock, clip_bar_to_viewport, open_envelope,
+};
 use crate::backend::compositor_common::genie::{
     GenieDirection, dock_item_preview_target, output_bounds_for_anchor, preview_rect,
 };
@@ -1863,6 +1865,44 @@ impl<C: CompositorConnection> Compositor<C> {
         }
     }
 
+    /// The scrim fade-in envelope for the system-UI panels that draw their
+    /// own card — the layout filmstrip and the tags grid. They never run the
+    /// docked card's geometry spring, so this advances the system-UI island
+    /// toward the panel's own size purely as a timer and dims the scrim with
+    /// the card's [`open_envelope`] curve: opened² of the spring's travel.
+    ///
+    /// Every appearance fades in from the seed, including a direct swap from
+    /// the other panel: `set_system_ui` closes the island as an overlay
+    /// appears or vanishes, and zeroes `system_ui_width_floor` whenever the
+    /// overlay's identity or viewport changes. Only the docked list card
+    /// otherwise writes that floor, so a zero on this path means the panel
+    /// was just swapped in and the spring is closed to restart the fade;
+    /// the panel's own width then stands in the floor as the
+    /// not-the-first-frame marker until the next identity change clears it.
+    /// Closing stays instant — there is no fade-out anywhere by design. As
+    /// with the card, the spring has to keep asking for frames until it
+    /// settles; with motion off it snaps to target and the envelope is
+    /// exactly 1.0 — the old instant scrim.
+    fn overlay_scrim_envelope(&mut self, panel_w: f32, panel_h: f32) -> f32 {
+        if self.system_ui_width_floor == 0.0 {
+            self.system_ui_island.close();
+        }
+        self.system_ui_width_floor = panel_w;
+        let motion_enabled = crate::config::CONFIG.load().motion_enabled();
+        let (w, _) = self.system_ui_island.advance_with_motion(
+            std::time::Instant::now(),
+            panel_w,
+            panel_h,
+            motion_enabled,
+        );
+        // Unlike the OSD, a modal panel only redraws when something asks it
+        // to, so the spring has to keep asking until it settles.
+        if self.system_ui_island.animating(panel_w, panel_h) {
+            self.needs_render = true;
+        }
+        open_envelope(w, panel_w)
+    }
+
     /// The layout picker: a strip of 35mm film across the panel, one cell per
     /// layout, each holding a line-drawn thumbnail of what that layout does
     /// with a screenful of windows. The selected cell lifts out of the strip
@@ -1880,20 +1920,23 @@ impl<C: CompositorConnection> Compositor<C> {
         let geometry = film::strip_geometry(viewport, strip.cells.len());
         let [panel_x, panel_y, panel_w, panel_h] = geometry.panel;
         let accent = self.border_gradient_color_a;
+        let scrim_a = self.overlay_scrim_envelope(panel_w, panel_h);
 
         unsafe {
             self.gl.bind_vertex_array(Some(self.quad_vao));
 
-            // Scrim: dim the desktop the strip is describing.
+            // Scrim: dim the desktop the strip is describing, fading in with
+            // the open envelope rather than snapping to full alpha.
+            let scrim = UiPalette::faded(ui.scrim, scrim_a);
             self.gl.use_program(Some(self.hud_program));
             self.gl
                 .uniform_matrix_4_f32_slice(self.hud_uniforms.projection.as_ref(), false, proj);
             self.gl.uniform_4_f32(
                 self.hud_uniforms.bg_color.as_ref(),
-                ui.scrim[0],
-                ui.scrim[1],
-                ui.scrim[2],
-                ui.scrim[3],
+                scrim[0],
+                scrim[1],
+                scrim[2],
+                scrim[3],
             );
             self.gl
                 .uniform_2_f32(self.hud_uniforms.size.as_ref(), viewport_w, viewport_h);
@@ -2123,6 +2166,7 @@ impl<C: CompositorConnection> Compositor<C> {
         let geometry = grid_layout::grid_geometry(viewport, grid.cells.len(), grid.cols);
         let [panel_x, panel_y, panel_w, panel_h] = geometry.panel;
         let accent = self.border_gradient_color_a;
+        let scrim_a = self.overlay_scrim_envelope(panel_w, panel_h);
 
         // The grid repaints on every client damage and every pointer motion
         // while it is open — its live cell shows real window textures — so the
@@ -2133,16 +2177,18 @@ impl<C: CompositorConnection> Compositor<C> {
         unsafe {
             self.gl.bind_vertex_array(Some(self.quad_vao));
 
-            // Scrim: dim the desktop the grid is describing.
+            // Scrim: dim the desktop the grid is describing, fading in with
+            // the open envelope rather than snapping to full alpha.
+            let scrim = UiPalette::faded(ui.scrim, scrim_a);
             self.gl.use_program(Some(self.hud_program));
             self.gl
                 .uniform_matrix_4_f32_slice(self.hud_uniforms.projection.as_ref(), false, proj);
             self.gl.uniform_4_f32(
                 self.hud_uniforms.bg_color.as_ref(),
-                ui.scrim[0],
-                ui.scrim[1],
-                ui.scrim[2],
-                ui.scrim[3],
+                scrim[0],
+                scrim[1],
+                scrim[2],
+                scrim[3],
             );
             self.gl
                 .uniform_2_f32(self.hud_uniforms.size.as_ref(), viewport_w, viewport_h);

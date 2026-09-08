@@ -545,8 +545,11 @@ impl Jwm {
         // for this is still going on" — retryable, not a failure. This is the
         // only caller that wants that distinction; the other fourteen are
         // keyboard-invoked, where a busy pointer really is an error.
+        // Motion comes with the grab, exactly as in the key-bound opener: the
+        // hub's slider rows take press-drags, and without POINTER_MOTION in
+        // the mask an X11 grab would never deliver a drag's movement.
         let label = route.map_or("shell hub (status bar)", |_| "shell page (status bar)");
-        if !self.prepare_system_ui_deferrable(backend, label)? {
+        if !self.prepare_system_ui_inner(backend, label, SystemUiPointerGrab::ButtonsAndMotion)? {
             return Ok(false);
         }
         let Some(route) = route else {
@@ -596,7 +599,14 @@ impl Jwm {
         if self.toggle_off_system_ui(backend, |state| in_shell || state.is_control_center()) {
             return Ok(());
         }
-        self.prepare_system_ui(backend, "control center", SystemUiPointerGrab::Buttons)?;
+        // Buttons and motion: the slider rows take press-drags, and without
+        // POINTER_MOTION in the mask an X11 grab would never deliver the
+        // drag's motion to the WM (the tags overview grabs the same way).
+        self.prepare_system_ui(
+            backend,
+            "control center",
+            SystemUiPointerGrab::ButtonsAndMotion,
+        )?;
         self.ensure_control_snapshot_refresh(std::time::Instant::now());
         // Open with the cached connectivity reading — read_state() shells out
         // to nmcli and can block for seconds — and re-read in the background;
@@ -1770,6 +1780,9 @@ impl Jwm {
         // The Alt+Tab switcher's commit modifiers die with its panel, however
         // the panel went away.
         self.features.window_switcher_mods = Mods::empty();
+        // So does an armed control-center slider drag: once the pointer grab
+        // is gone its release may never reach the WM.
+        self.control_slider_drag = None;
         // A Bluetooth pairing session belongs to the Bluetooth picker; the
         // picker going away cancels the pairing before the panel drops.
         self.cancel_bluetooth_pairing();
@@ -1831,6 +1844,8 @@ impl Jwm {
         self.features.system_ui_return_to_hub = false;
         // So do the Alt+Tab switcher's commit modifiers.
         self.features.window_switcher_mods = Mods::empty();
+        // And an armed slider drag: it belongs to the outgoing panel.
+        self.control_slider_drag = None;
         // A Bluetooth pairing session belongs to the outgoing Bluetooth
         // picker; it is cancelled before the panel state drops.
         self.cancel_bluetooth_pairing();
