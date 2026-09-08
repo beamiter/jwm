@@ -4,6 +4,72 @@
 
 ---
 
+## 2026-09-08：UI/UX 十二轮（识别性与环境信息：expose 标题 / 锁屏时钟+caps / 壁纸高亮预览）
+
+主题：每个面板都该能回答「这是哪个窗口 / 现在几点 / 这张图长什么样」。两波
+（wave 1 并行：expose 标题 + 锁屏时钟；wave 2 单 agent：壁纸预览，踩 wave 1 合
+并后的 api.rs），三项落地，集成阶段补掉一个波边界缺口。
+
+1. **expose 窗口标题（推翻一条成文设计决定）**。docs/expose.md 原有「thumbnails
+   alone carry the identification」——十一轮探索发现文本管线早已共享（tab 标题
+   与 cube overview 标题都是 `render_ui_text_to_rgba` + 脏标记纹理缓存），标题是
+   GNOME/KDE/macOS 的 parity 期望，故推翻并同步了文档。数据链：
+   `ExposeCandidate`/`ExposeEntry` 加 `title: String`；toggles.rs 从
+   `ClientState.name` 填（tab bar 同源）；`expose_plan::sanitize_title` 纯函数清
+   洗（控制字符→空格 + trim，先例 launcher `one_line`、notifications
+   `sanitize_chars`）。渲染：每 entry 一个纹理槽、仅在新 entry 集到达时重建、按
+   settled 宽度拟合（几何动画/hover 不打抖缓存）；Wayland 延到首帧
+   （`overview_titles_dirty` 模式），X11 在 `set_expose_mode` eager
+   （`create_overview_title_textures` 模式）；共享 `expose_label_origin` 放置规
+   则（水平居中、缩略图顶边内 6px、比 cell 宽或几何非有限则返回 None 不画）；
+   alpha 跟随 `expose_opacity`；hit-testing 零改动。**波边界缺口**：agent 的文
+   件集不含 event_dispatcher.rs，里面两个测试字面量仍是 5 元组 → E0308，集成方
+   补 `String::new()`。类型签名变更的机械涟漪（backend.rs 委托、两个 mod.rs 字
+   段 + GPU 释放清单、headless_render.rs 探针字面量）都是最小穿透。
+2. **锁屏时钟 + caps 提示**（纯 WM 侧，安全属性零改动：backdrop 仍瞬间不透
+   明、PAM 路径未碰）。`Locked` 加 `clock/date/caps_lock` 字段；`locked_at(now)`
+   开锁即捕获（首帧正确）；格式与 calendar 卡一致（24h、chrono 的 %A/%B 恒英
+   文——仓库无 locale 设置可循）。ticker：纯函数 `lock_screen_clock_wakeup` 并
+   入 `maintenance_next_wakeup_at`，仅在 locked 时调度到下一分钟边界 +250ms
+   margin（防早触双醒）；`tick_lock_screen_clock` 只在渲染分钟变化时 re-sync，
+   解锁即停止（两项都有测试）。**caps 读 live mask 而非事件 state**：X11 协议里
+   KeyPress 带的是事件*前*的 mask，按 caps 那一次会读反——改用
+   `query_pointer_root` + `clean_mods`（窗口切换器修饰键释放的既有先例），Wayland
+   侧是 mutex 读。caps 行独立成行、不与错误消息互斥共存。**发现（pre-existing，
+   未修）**：`clean_mask` 剥掉 `Mods::CAPS`，caps 对密码输入字符实际无影响——
+   指示器仍然诚实；让 caps 真正大写密码输入要碰密码路径，本轮禁碰，记录在案。
+3. **壁纸选择器高亮侧预览**（medium 中间档，不是全网格）。payload 加
+   `side_preview: Option<String>`——跨界只过路径字符串，像素不过界；后端复用
+   `load_wallpaper_async` 的 worker 模式异步解码（DecodePermit 门、Lanczos3 ≤
+   480px），latest-wins 由共享纯函数 `preview_request`（Keep/Clear/Reload）决
+   策，两后端不可能分叉；按住方向键不积压（superseded worker 的 send 落空）。
+   frame：卡右侧 24px、480×360 上限、letterbox 保比例**不放大**、viewport 内收
+   32px、剩余空隙 <96px 直接 None（窄输出保持纯文本列表）；frame 从当帧实际绘
+   制的卡矩形推导（弹簧中跟随、随 content_a 淡入）；无 placeholder/spinner，解
+   码失败安静无预览（debug 级日志）。点击死区：`HitGeometry::with_side_preview`
+   把预览区映射为 `Hit::Panel` 而非 Outside，不误触发 outside-dismiss；未绘制
+   的帧不保护任何区域。GPU 生命周期三处释放（替换/关板/teardown）；Wayland 按
+   tags-grid labels 先例延到下一帧有 GL 上下文时释放，`RAW_GPU_OWNER_FIELDS`
+   补登 `"system_ui_preview"`。
+
+**验证**：fmt / clippy -D warnings / check --all-targets / no-default + 7 组
+profile 全绿（警告清单与十一轮逐行一致：X11 clipboard ×N + media.rs 既有 1
+条）；lib **2915 passed / 0 failed**（本轮 +20：expose 消毒/放置 5、锁屏 4、预
+览 payload/geometry/letterbox/hit/preview_request 等 11）；bridge **66/0**（本
+轮未碰）。**无真机显示会话**。真机优先验证：expose 标题渲染与省略号、锁屏分
+钟翻转与 caps 行、壁纸预览在窄输出上的消失、按住方向键浏览时的 latest-wins 与
+纹理替换。
+
+**仍然开着的**（沿用十一轮 + 本轮新增）：`sync_window_groups` dirty 门控；嵌套
+后端无 shell 面板渲染；toast 过期不发 NotificationClosed(1) 与中心 clear-all 无
+指针路径（均为成文决定）；陈旧 toast 留屏到自然过期（pre-existing，toast API
+无编程 dismiss）；**caps 不影响密码字符**（pre-existing，见上）；expose 标题
+hover 增亮未做（ink 烘进纹理，需要第二纹理或新 opacity 规则，agent 标记为 easy
+follow-up）；expose 标题是进入时快照，打开期间改题下次进入才更新（与窗口列表
+本身同语义）；壁纸全网格缩略图仍是 medium-large（侧预览已落地中间档）。
+
+---
+
 ## 2026-09-08：UI/UX 十一轮（交互对称收尾：滑块点击拖拽 / 通知动作条点击 / pairing_failed 闭环 / tags 遮罩淡入）
 
 主题取自十轮后的候选清单：**键盘与指针的镜像缺口**。两波并行（wave 1 按文件
