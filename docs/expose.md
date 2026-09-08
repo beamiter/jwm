@@ -8,6 +8,14 @@ they are on an active tag (or sticky), not minimized or hidden, and not
 nothing. The key is a toggle — pressing it again exits without changing
 focus.
 
+Every thumbnail carries its window's title, centered just inside the
+thumbnail's top edge and ellipsized to the cell width in the system-UI
+font — the same text pipeline and typography as the tab strip's and cube
+overview's titles. A window without a usable name simply shows no label.
+Labels fade with the grid, are pure overlay (hit-testing ignores them), and
+their textures rebuild per activation and are freed on rebuild and at
+compositor teardown.
+
 Expose needs the compositor; in a deliberately non-composited session the
 key reports an error rather than faking the grid.
 
@@ -49,8 +57,8 @@ a stray keystroke does not leak to a window behind the grid.
   hold-the-modifier MRU list — faster when you know the window is recent.
 - The overview (`Alt+Ctrl+Tab`, `toggle_overview`) is the Compiz-style lit
   prism with labeled faces, documented in [cube effects](cube-effects.md).
-  Unlike the overview, the expose grid draws no window titles — thumbnails
-  alone carry the identification.
+  The exposé grid labels its thumbnails the same way — titles above, one
+  line each — so the two overview surfaces read alike.
 
 ## Where it lives
 

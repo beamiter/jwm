@@ -8,6 +8,14 @@ While locked, `Backspace` removes one character and `Esc` securely clears the
 whole entered password plus any previous authentication error; neither key
 unlocks or closes the surface.
 
+The locked card leads with the current time (`HH:MM`, 24-hour like the
+calendar card) and the spelled-out date above the password row; the clock
+repaints on each wall-clock minute through a wakeup that is scheduled only
+while the lock is up. A quiet "Caps Lock is on" row appears under the
+password row while caps lock is active — informational, not an error, and it
+coexists with the wrong-password message. Both rows are information-only:
+the backdrop, the grabs, and the PAM exchange are unchanged.
+
 ```toml
 [behavior]
 idle_dim_secs = 120           # 0 switches the stage off

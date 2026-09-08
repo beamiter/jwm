@@ -37,6 +37,28 @@ monorepo use independent Semantic Versions.
   animations disabled every dim is full from the first frame. The lock
   screen is exempt on purpose — hiding the desktop instantly is its job.
 
+- Exposé thumbnails now carry window-title labels on both compositors:
+  every cell draws the window's title centered just inside its top edge,
+  ellipsized to the cell width in the same system-UI typography as the tab
+  strip and cube overview titles. Empty titles draw nothing, labels fade
+  with the grid, and hit-testing is unaffected. See
+  [docs/expose.md](docs/expose.md).
+
+- The lock screen now leads with the current time (`HH:MM`, 24-hour) and
+  the spelled-out date above the password row, repainting on each
+  wall-clock minute through a wakeup scheduled only while the lock is up,
+  and shows a quiet "Caps Lock is on" row under the password row while caps
+  lock is active. Information-only: the backdrop, grabs, and PAM exchange
+  are unchanged. See [docs/idle.md](docs/idle.md).
+
+- The wallpaper picker shows a live thumbnail of the highlighted candidate
+  on a card to the right of the list, tracking arrow-key and pointer
+  selection. Decodes run asynchronously on the wallpaper loader's worker
+  pool with latest-highlight-wins, are aspect-fit into a 480×360 frame and
+  never upscaled, and outputs too narrow to fit the frame keep the text
+  list exactly as it was. No placeholder or spinner — until the thumbnail
+  lands the picker looks unchanged. See [docs/wallpaper.md](docs/wallpaper.md).
+
 ### Changed
 
 - HDR signalling can now be enabled per output on the Wayland/KMS backend,

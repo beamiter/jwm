@@ -5,6 +5,17 @@ and applies the one you pick. `Up`/`Down` select, `Enter` applies and closes,
 `Esc` — or `Alt+Ctrl+W` again — closes without changing anything. The wallpaper already in use is marked
 and starts selected, so reopening the panel does not lose your place.
 
+The highlighted candidate is also shown: a thumbnail card sits to the right
+of the list, vertically centered on it, and tracks both arrow-key and
+pointer selection. Thumbnails decode asynchronously on the wallpaper
+loader's worker pool, downscaled to a 480-pixel long edge, so held-down
+arrows never queue decodes — the latest highlight wins. The image is
+aspect-fit into a 480×360 frame and never upscaled, and on outputs too
+narrow to fit the frame the picker stays exactly the text list it always
+was. There is no placeholder or spinner: until the thumbnail lands — or if
+the file cannot be decoded — the picker looks unchanged, and clicks on the
+preview are inert.
+
 ## Which directory
 
 ```toml
