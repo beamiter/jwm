@@ -2152,8 +2152,8 @@ impl Config {
                 argument: ArgumentConfig::Int(0),
             },
             KeyConfig {
-                modifier: vec!["Mod1".to_string(), "Control".to_string()],
-                key: "F12".to_string(),
+                modifier: vec!["Mod1".to_string(), "Control".to_string(), "Shift".to_string()],
+                key: "b".to_string(),
                 function: "bluetooth_picker".to_string(),
                 argument: ArgumentConfig::Int(0),
             },

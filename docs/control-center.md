@@ -214,7 +214,7 @@ mistyped passphrase can be retried without rescanning.
 
 ## Bluetooth picker
 
-`Alt+Ctrl+F12` (`bluetooth_picker`), or `Enter` on the Bluetooth row, lists
+`Ctrl+Alt+Shift+B` (`bluetooth_picker`), or `Enter` on the Bluetooth row, lists
 the devices the controller knows: connected first, then paired, then — among
 devices in the same state — strongest signal first, then by name. `Enter`
 connects the selected device, or disconnects it if it is already connected;
