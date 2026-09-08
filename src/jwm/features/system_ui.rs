@@ -160,6 +160,15 @@ pub enum SystemUiState {
     Locked {
         password: String,
         message: String,
+        /// The "HH:MM" row, refreshed on the wall-clock minute by the event
+        /// loop's lock-clock tick. Formatted 24-hour, matching the calendar
+        /// card's clock line.
+        clock: String,
+        /// The spelled-out date row under the clock, refreshed with it.
+        date: String,
+        /// Whether the "Caps Lock is on" row is showing. Read back from the
+        /// live modifier mask on every key event the lock receives.
+        caps_lock: bool,
     },
     ControlCenter {
         entries: Vec<ControlEntry>,
@@ -885,9 +894,18 @@ impl Clone for SystemUiState {
                 message: message.clone(),
             },
             // Never duplicate credentials into another allocation.
-            Self::Locked { message, .. } => Self::Locked {
+            Self::Locked {
+                message,
+                clock,
+                date,
+                caps_lock,
+                ..
+            } => Self::Locked {
                 password: String::new(),
                 message: message.clone(),
+                clock: clock.clone(),
+                date: date.clone(),
+                caps_lock: *caps_lock,
             },
             Self::ControlCenter {
                 entries,
@@ -931,6 +949,20 @@ impl Clone for SystemUiState {
             },
         }
     }
+}
+
+/// The lock screen's clock row: `15:42`, zero-padded and 24-hour — the same
+/// convention the calendar card's `clock_line` uses (the shell hardcodes one
+/// format rather than following a locale setting).
+fn lock_clock_line(now: &chrono::NaiveDateTime) -> String {
+    now.format("%H:%M").to_string()
+}
+
+/// The lock screen's date row: `Monday, 27 July 2026`, spelled out like the
+/// calendar card's date (chrono's `%A`/`%B` are always English, as are the
+/// calendar's own name tables).
+fn lock_date_line(now: &chrono::NaiveDateTime) -> String {
+    now.format("%A, %-d %B %Y").to_string()
 }
 
 impl SystemUiState {
@@ -1087,9 +1119,19 @@ impl SystemUiState {
     }
 
     pub fn lock() -> Self {
+        Self::locked_at(chrono::Local::now().naive_local())
+    }
+
+    /// The lock screen with its clock and date rows captured at `now`, so the
+    /// first paint already shows the current minute. Split from [`Self::lock`]
+    /// so tests can pin the wall clock.
+    pub fn locked_at(now: chrono::NaiveDateTime) -> Self {
         Self::Locked {
             password: String::new(),
             message: String::new(),
+            clock: lock_clock_line(&now),
+            date: lock_date_line(&now),
+            caps_lock: false,
         }
     }
 
@@ -1922,7 +1964,9 @@ impl SystemUiState {
         self.is_list(ListKind::Wallpaper)
     }
 
-    /// The wallpaper the selection rests on.
+    /// The wallpaper the selection rests on. This is both what Enter applies
+    /// and the path the overlay payload ships as the side preview's decode
+    /// request, so the thumbnail always shows exactly what a commit would.
     pub fn selected_wallpaper(&self) -> Option<&str> {
         Some(self.selected_row(ListKind::Wallpaper)?.key.as_str())
     }
@@ -2542,7 +2586,9 @@ impl SystemUiState {
                 }
                 return;
             }
-            Self::Locked { password, message } => {
+            Self::Locked {
+                password, message, ..
+            } => {
                 password.push(ch);
                 message.clear();
             }
@@ -2574,7 +2620,9 @@ impl SystemUiState {
                 }
                 return;
             }
-            Self::Locked { password, message } => {
+            Self::Locked {
+                password, message, ..
+            } => {
                 password.pop();
                 message.clear();
             }
@@ -2979,7 +3027,10 @@ impl SystemUiState {
     }
 
     pub fn take_password(&mut self) -> Option<String> {
-        let Self::Locked { password, message } = self else {
+        let Self::Locked {
+            password, message, ..
+        } = self
+        else {
             return None;
         };
         message.clear();
@@ -2992,7 +3043,10 @@ impl SystemUiState {
     /// The footer advertises `Esc  clear`; overwriting before truncating keeps
     /// that action from leaving the old password bytes in the allocation.
     pub fn clear_lock_password(&mut self) -> bool {
-        let Self::Locked { password, message } = self else {
+        let Self::Locked {
+            password, message, ..
+        } = self
+        else {
             return false;
         };
         unsafe { password.as_bytes_mut().fill(0) };
@@ -3002,11 +3056,44 @@ impl SystemUiState {
     }
 
     pub fn authentication_failed(&mut self) {
-        if let Self::Locked { password, message } = self {
+        if let Self::Locked {
+            password, message, ..
+        } = self
+        {
             unsafe { password.as_bytes_mut().fill(0) };
             password.clear();
             *message = "Authentication failed".into();
         }
+    }
+
+    /// Refresh the lock screen's clock and date rows from `now`. Returns true
+    /// when either row's text changed, meaning the overlay needs a re-sync;
+    /// always false outside the lock screen, so the caller's per-minute tick
+    /// costs one state check once the session is unlocked again.
+    pub fn refresh_lock_clock(&mut self, now: chrono::NaiveDateTime) -> bool {
+        let Self::Locked { clock, date, .. } = self else {
+            return false;
+        };
+        let new_clock = lock_clock_line(&now);
+        let new_date = lock_date_line(&now);
+        if *clock == new_clock && *date == new_date {
+            return false;
+        }
+        *clock = new_clock;
+        *date = new_date;
+        true
+    }
+
+    /// Show or hide the lock screen's caps-lock row. Returns true only on an
+    /// actual change, so callers can tell a re-sync is warranted; always false
+    /// outside the lock screen.
+    pub fn set_lock_caps_lock(&mut self, on: bool) -> bool {
+        let Self::Locked { caps_lock, .. } = self else {
+            return false;
+        };
+        let changed = *caps_lock != on;
+        *caps_lock = on;
+        changed
     }
 
     /// Structured overlay content the compositor renders as a styled panel:
@@ -3041,22 +3128,40 @@ impl SystemUiState {
                     .into(),
                 scroll: None,
             },
-            Self::Locked { password, message } => {
+            // The clock and date rows lead: the time is the glanceable reason
+            // to look at a locked screen at all. Status and the password row
+            // follow as before; the caps-lock note sits directly under the
+            // password row it applies to, as its own row — never the message
+            // row — so a wrong-password error and the indicator can be on
+            // screen together without either clearing the other.
+            Self::Locked {
+                password,
+                message,
+                clock,
+                date,
+                caps_lock,
+            } => {
                 let status = if message.is_empty() {
                     "Enter password to unlock"
                 } else {
                     message
                 };
+                let mut items = vec![
+                    format!("\u{f017}  {clock}"),
+                    date.clone(),
+                    status.to_string(),
+                    format!(
+                        "\u{f084}  Password  {}",
+                        "*".repeat(password.chars().count())
+                    ),
+                ];
+                if *caps_lock {
+                    items.push("\u{f11c}  Caps Lock is on".into());
+                }
                 OverlayParts {
                     title: "\u{f023}  JWM LOCKED".into(),
                     query: None,
-                    items: vec![
-                        status.to_string(),
-                        format!(
-                            "\u{f084}  Password  {}",
-                            "*".repeat(password.chars().count())
-                        ),
-                    ],
+                    items,
                     selected: None,
                     hint: "Enter  unlock    Esc  clear".into(),
                     scroll: None,
@@ -4676,6 +4781,40 @@ mod tests {
     }
 
     #[test]
+    fn the_side_preview_payload_is_the_highlighted_candidates_path() {
+        let paths: Vec<std::path::PathBuf> =
+            ["/walls/alps.jpg", "/walls/beach.png", "/walls/city.webp"]
+                .iter()
+                .map(std::path::PathBuf::from)
+                .collect();
+        // The current wallpaper is preselected, so its preview is what a
+        // freshly opened picker asks for.
+        let mut panel = SystemUiState::wallpaper_picker(&paths, "/walls/beach.png", "/walls");
+        assert_eq!(panel.selected_wallpaper(), Some("/walls/beach.png"));
+
+        // The path tracks the highlight on every move, byte-identical to the
+        // key Enter would apply.
+        panel.move_selection(1);
+        assert_eq!(panel.selected_wallpaper(), Some("/walls/city.webp"));
+        panel.move_selection(-1);
+        panel.move_selection(-1);
+        assert_eq!(panel.selected_wallpaper(), Some("/walls/alps.jpg"));
+    }
+
+    #[test]
+    fn the_side_preview_payload_is_absent_without_a_highlighted_candidate() {
+        // An empty scan has no candidate to preview.
+        let empty = SystemUiState::wallpaper_picker(&[], "", "/walls");
+        assert!(empty.is_wallpaper_picker());
+        assert!(empty.selected_wallpaper().is_none());
+
+        // Other panels never carry one, and neither does a closed panel.
+        let wifi = SystemUiState::wifi_picker("");
+        assert!(wifi.selected_wallpaper().is_none());
+        assert!(SystemUiState::Inactive.selected_wallpaper().is_none());
+    }
+
+    #[test]
     fn switching_bluetooth_off_needs_a_second_enter() {
         let powered = crate::jwm::features::BluetoothState {
             present: true,
@@ -5988,6 +6127,9 @@ mod tests {
         let mut state = SystemUiState::Locked {
             password: "hunter2".into(),
             message: "Authentication failed".into(),
+            clock: "15:42".into(),
+            date: "Monday, 27 July 2026".into(),
+            caps_lock: false,
         };
 
         assert!(state.clear_lock_password());
@@ -5997,6 +6139,74 @@ mod tests {
         assert!(!parts.items.iter().any(|line| line.contains('*')));
         assert!(!parts.items.iter().any(|line| line.contains("failed")));
         assert!(!SystemUiState::Inactive.clear_lock_password());
+    }
+
+    /// A fixed wall-clock moment for the lock-screen rows: 15:42 on Monday,
+    /// 27 July 2026 — the same instant the calendar card's tests pin.
+    fn lock_test_time() -> chrono::NaiveDateTime {
+        chrono::NaiveDate::from_ymd_opt(2026, 7, 27)
+            .and_then(|date| date.and_hms_opt(15, 42, 0))
+            .expect("valid test time")
+    }
+
+    #[test]
+    fn the_lock_overlay_leads_with_the_clock_and_date() {
+        let state = SystemUiState::locked_at(lock_test_time());
+        let parts = state.overlay_parts();
+        assert_eq!(parts.items[0], "\u{f017}  15:42");
+        // The date row spells out exactly what the calendar card's clock line
+        // spells out for the same moment.
+        assert_eq!(parts.items[1], "Monday, 27 July 2026");
+        let calendar_line = crate::jwm::features::calendar::clock_line(&lock_test_time());
+        assert!(calendar_line.starts_with(parts.items[1].as_str()));
+        // Status and password rows keep their places underneath, and the caps
+        // row stays hidden until the modifier is actually on.
+        assert_eq!(parts.items[2], "Enter password to unlock");
+        assert!(parts.items[3].contains("Password"));
+        assert_eq!(parts.items.len(), 4);
+    }
+
+    #[test]
+    fn the_lock_clock_repaints_only_when_the_rendered_minute_changes() {
+        let mut state = SystemUiState::locked_at(lock_test_time());
+        let same_minute = lock_test_time() + chrono::Duration::seconds(45);
+        assert!(!state.refresh_lock_clock(same_minute));
+        let next_minute = lock_test_time() + chrono::Duration::minutes(1);
+        assert!(state.refresh_lock_clock(next_minute));
+        assert_eq!(state.overlay_parts().items[0], "\u{f017}  15:43");
+        // A midnight crossing updates the date row together with the clock.
+        let before_midnight = chrono::NaiveDate::from_ymd_opt(2026, 7, 27)
+            .and_then(|date| date.and_hms_opt(23, 59, 10))
+            .expect("valid test time");
+        assert!(state.refresh_lock_clock(before_midnight));
+        assert!(state.refresh_lock_clock(before_midnight + chrono::Duration::minutes(1)));
+        let parts = state.overlay_parts();
+        assert_eq!(parts.items[0], "\u{f017}  00:00");
+        assert_eq!(parts.items[1], "Tuesday, 28 July 2026");
+        // Outside the lock there is nothing to refresh.
+        assert!(!SystemUiState::Inactive.refresh_lock_clock(lock_test_time()));
+    }
+
+    #[test]
+    fn the_caps_lock_row_appears_with_the_modifier_and_coexists_with_errors() {
+        let mut state = SystemUiState::locked_at(lock_test_time());
+        state.authentication_failed();
+        // Only a real change reports one.
+        assert!(!state.set_lock_caps_lock(false));
+        assert!(state.set_lock_caps_lock(true));
+        assert!(!state.set_lock_caps_lock(true));
+        let parts = state.overlay_parts();
+        assert_eq!(parts.items[0], "\u{f017}  15:42");
+        assert_eq!(parts.items[2], "Authentication failed");
+        assert_eq!(parts.items[4], "\u{f11c}  Caps Lock is on");
+        assert!(state.set_lock_caps_lock(false));
+        let parts = state.overlay_parts();
+        assert!(!parts.items.iter().any(|line| line.contains("Caps Lock")));
+        // The clock and the error row survived both toggles, and non-lock
+        // states ignore the setter entirely.
+        assert_eq!(parts.items[0], "\u{f017}  15:42");
+        assert_eq!(parts.items[2], "Authentication failed");
+        assert!(!SystemUiState::Inactive.set_lock_caps_lock(true));
     }
 
     #[test]

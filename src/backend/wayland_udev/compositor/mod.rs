@@ -1229,6 +1229,13 @@ pub(crate) struct WaylandCompositor {
     expose_active: bool,
     expose_opacity: f32,
     expose_entries: Vec<ExposeEntry>,
+    /// One (texture, w, h) per expose entry, in `expose_entries` order; a 0
+    /// texture is the "no label" slot. Rebuilt only when a new entry set
+    /// arrives, the same bargain `tab_title_textures` strikes.
+    expose_title_textures: Vec<(u32, u32, u32)>,
+    /// Entry changes are recorded without touching GL; the first drawn frame
+    /// rebuilds the label textures while the compositor context is current.
+    expose_titles_dirty: bool,
 
     // Snap preview
     snap_preview_enabled: bool,
@@ -1569,6 +1576,19 @@ pub(crate) struct WaylandCompositor {
     system_ui_hit_geometry: Option<crate::backend::compositor_common::system_ui_panel::HitGeometry>,
     /// Visible row under the pointer; it only affects the quiet hover cue.
     system_ui_hovered: Option<usize>,
+    /// The wallpaper picker's side preview: `(path, texture, w, h)`. The path
+    /// is the payload's, so a texture never draws for a highlight it was not
+    /// decoded from. `set_system_ui` runs without a GL context, so a texture
+    /// the payload has moved on from is deleted on the next rendered frame.
+    system_ui_preview: Option<(String, u32, u32, u32)>,
+    /// The path last requested through the overlay payload. `set_system_ui`
+    /// compares on every sync: a new highlight kicks a new decode, a payload
+    /// without the field retires the texture.
+    system_ui_preview_path: String,
+    /// In-flight decode for the side preview. Replaced on every new request;
+    /// the dropped receiver makes the superseded worker's send a no-op, so
+    /// held-down arrow keys never queue a backlog.
+    pending_system_ui_preview: Option<std::sync::mpsc::Receiver<WallpaperImageData>>,
     /// Open/morph spring for the docked debug HUD card.
     hud_island: crate::backend::compositor_common::dynamic_island::IslandMotion,
     compositor_start_time: Instant,
@@ -2656,6 +2676,8 @@ impl WaylandCompositor {
                 expose_active: false,
                 expose_opacity: 0.0,
                 expose_entries: Vec::new(),
+                expose_title_textures: Vec::new(),
+                expose_titles_dirty: false,
 
                 // Snap preview
                 snap_preview_enabled: false,
@@ -2908,6 +2930,9 @@ impl WaylandCompositor {
                 system_ui_identity: String::new(),
                 system_ui_hit_geometry: None,
                 system_ui_hovered: None,
+                system_ui_preview: None,
+                system_ui_preview_path: String::new(),
+                pending_system_ui_preview: None,
                 hud_island: Default::default(),
                 compositor_start_time: now,
 
@@ -3050,6 +3075,11 @@ impl WaylandCompositor {
             self.external_elements_include_cursor = false;
 
             self.clear_overview_textures(gl);
+            for (texture, _, _) in self.expose_title_textures.drain(..) {
+                if texture != 0 {
+                    gl.DeleteTextures(1, &texture);
+                }
+            }
             for row in self.tab_title_textures.drain(..) {
                 for (texture, _, _) in row.into_iter().flatten() {
                     if texture != 0 {
@@ -3083,6 +3113,11 @@ impl WaylandCompositor {
                 {
                     gl.DeleteTextures(1, &texture);
                 }
+            }
+            if let Some((_, texture, _, _)) = self.system_ui_preview.take()
+                && texture != 0
+            {
+                gl.DeleteTextures(1, &texture);
             }
             for (_, set) in self.toast_textures.drain() {
                 for (texture, _, _) in set.text.into_iter().chain(set.buttons).flatten() {
@@ -3382,12 +3417,14 @@ mod gpu_release_contract_tests {
         "blur_blit_src_fbo",
         "glass_backdrop",
         "overview_title_textures",
+        "expose_title_textures",
         "tab_title_textures",
         "annotation_label_textures",
         "screenshot_toolbar_icons",
         "tags_grid_labels",
         "hud_textures",
         "sysui_textures",
+        "system_ui_preview",
         "toast_textures",
         "osd_texture",
         "wallpaper_texture",

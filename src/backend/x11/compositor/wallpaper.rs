@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::sync::mpsc;
 use std::sync::{Condvar, Mutex, OnceLock};
 
-use crate::backend::x11::compositor_common::wallpaper::parse_wallpaper_mode;
+use crate::backend::x11::compositor_common::wallpaper::{PREVIEW_THUMB_EDGE, parse_wallpaper_mode};
 
 fn uses_global_wallpaper_fallback(
     resolved_path: &str,
@@ -218,6 +218,70 @@ impl<C: CompositorConnection> Compositor<C> {
                 data.height
             );
             Some((tex, data.width, data.height))
+        }
+    }
+
+    /// Decode a wallpaper picker's side-preview thumbnail on a background
+    /// thread. Same worker pattern as [`Self::load_wallpaper_async`] — decode
+    /// gate, Lanczos3 downscale, channel back — but bounded to a thumbnail
+    /// and quiet about it: an unreadable candidate is a no-preview, not a
+    /// warning the user cannot act on.
+    pub(super) fn load_system_ui_preview_async(path: &str) -> mpsc::Receiver<WallpaperImageData> {
+        let (tx, rx) = mpsc::channel();
+        let path = path.to_string();
+        std::thread::spawn(move || {
+            // Bound concurrent decodes; released when this thread exits.
+            let _permit = DecodePermit::acquire();
+            let img = match image::open(&path) {
+                Ok(img) => img,
+                Err(e) => {
+                    log::debug!("compositor: no side preview for '{}': {}", path, e);
+                    return;
+                }
+            };
+            let img = if img.width() > PREVIEW_THUMB_EDGE || img.height() > PREVIEW_THUMB_EDGE {
+                img.resize(
+                    PREVIEW_THUMB_EDGE,
+                    PREVIEW_THUMB_EDGE,
+                    image::imageops::FilterType::Lanczos3,
+                )
+            } else {
+                img
+            };
+            let rgba = img.to_rgba8();
+            let (w, h) = (rgba.width(), rgba.height());
+            let _ = tx.send(WallpaperImageData {
+                rgba: rgba.into_raw(),
+                width: w,
+                height: h,
+                mode: WallpaperMode::Fit,
+            });
+        });
+        rx
+    }
+
+    /// Poll the side preview's decode: on arrival, upload and ask for the
+    /// frame that draws it. A superseded request's receiver is gone, so only
+    /// the latest highlight's decode can land here.
+    pub(super) fn poll_system_ui_preview(&mut self) {
+        let Some(rx) = &self.pending_system_ui_preview else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(data) => {
+                if let Some((tex, w, h)) = Self::upload_wallpaper_texture(&self.gl, &data) {
+                    self.free_system_ui_preview();
+                    self.system_ui_preview = Some((self.system_ui_preview_path.clone(), tex, w, h));
+                }
+                self.pending_system_ui_preview = None;
+                self.needs_render = true;
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            // The worker finished without sending (decode failed, logged
+            // there): no preview, no retry until the highlight moves.
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.pending_system_ui_preview = None;
+            }
         }
     }
 

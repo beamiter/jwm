@@ -56,6 +56,28 @@ fn ping_schedule_next_wakeup(
     min_optional_duration(send, timeout)
 }
 
+/// How far past the wall-clock minute boundary the lock-screen clock wakeup
+/// lands: a timer may fire a hair early, and landing exactly on :00.000 risks
+/// recomputing the minute that is still ending and scheduling a second wake a
+/// second later.
+const LOCK_SCREEN_CLOCK_MARGIN: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// The next moment the lock screen's clock row must repaint: the upcoming
+/// wall-clock minute boundary plus the margin. Unlike the other maintenance
+/// terms this is a wall-clock deadline, so it reads `SystemTime` rather than
+/// the loop's `Instant`. `None` while the lock screen is not up — the minute
+/// wakeups stop with it.
+fn lock_screen_clock_wakeup(
+    locked: bool,
+    now: std::time::SystemTime,
+) -> Option<std::time::Duration> {
+    if !locked {
+        return None;
+    }
+    let seconds_into_minute = now.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs() % 60;
+    Some(std::time::Duration::from_secs(60 - seconds_into_minute) + LOCK_SCREEN_CLOCK_MARGIN)
+}
+
 fn requested_hidden_state(action: NetWmAction, currently_hidden: bool) -> bool {
     match action {
         NetWmAction::Add => true,
@@ -2361,6 +2383,44 @@ mod tests {
     }
 
     #[test]
+    fn the_lock_screen_clock_wakes_at_the_next_minute_boundary_only_while_locked() {
+        let half_past_the_minute = std::time::UNIX_EPOCH + std::time::Duration::from_secs(90);
+        assert_eq!(
+            lock_screen_clock_wakeup(true, half_past_the_minute),
+            Some(std::time::Duration::from_secs(30) + LOCK_SCREEN_CLOCK_MARGIN)
+        );
+        // Exactly on the boundary the wait is a full minute, never zero — the
+        // row already shows this minute.
+        let on_the_minute = std::time::UNIX_EPOCH + std::time::Duration::from_secs(120);
+        assert_eq!(
+            lock_screen_clock_wakeup(true, on_the_minute),
+            Some(std::time::Duration::from_secs(60) + LOCK_SCREEN_CLOCK_MARGIN)
+        );
+        // Unlocked sessions schedule nothing: the minute wakeups stop with
+        // the lock.
+        assert_eq!(lock_screen_clock_wakeup(false, half_past_the_minute), None);
+    }
+
+    #[test]
+    fn the_lock_screen_clock_term_joins_maintenance_only_while_locked() {
+        use crate::jwm::features::SystemUiState;
+
+        let mut jwm = empty_jwm();
+        assert_eq!(jwm.lock_screen_clock_next_wakeup(), None);
+
+        jwm.features.system_ui = SystemUiState::lock();
+        let wakeup = jwm.lock_screen_clock_next_wakeup();
+        assert!(
+            wakeup.is_some_and(|delay| delay > std::time::Duration::ZERO
+                && delay <= std::time::Duration::from_secs(60) + LOCK_SCREEN_CLOCK_MARGIN),
+            "a locked session wakes at the next minute boundary, got {wakeup:?}"
+        );
+
+        jwm.features.system_ui = SystemUiState::Inactive;
+        assert_eq!(jwm.lock_screen_clock_next_wakeup(), None);
+    }
+
+    #[test]
     fn launcher_and_lock_lease_a_disabled_compositor_then_restore_black_mode() {
         let mut jwm = empty_jwm();
         let mut backend = RenderSpyBackend::new();
@@ -3205,7 +3265,7 @@ mod tests {
         jwm.apply_expose_action(
             &mut backend,
             crate::jwm::features::ExposeAction::Enter {
-                windows: vec![(WindowId::from_raw(0xe001), 10, 10, 640, 480)],
+                windows: vec![(WindowId::from_raw(0xe001), 10, 10, 640, 480, String::new())],
             },
         )
         .unwrap();
@@ -3300,7 +3360,7 @@ mod tests {
         jwm.apply_expose_action(
             &mut backend,
             crate::jwm::features::ExposeAction::Enter {
-                windows: vec![(WindowId::from_raw(0xe002), 20, 20, 500, 400)],
+                windows: vec![(WindowId::from_raw(0xe002), 20, 20, 500, 400, String::new())],
             },
         )
         .unwrap();
@@ -5467,6 +5527,9 @@ impl Jwm {
         next = min_optional_duration(next, self.secondary_bar_next_wakeup(now));
         next = min_optional_duration(next, self.ping_next_wakeup(now));
         next = min_optional_duration(next, self.idle_next_wakeup(now));
+        // The lock screen's clock row repaints when the wall-clock minute
+        // flips; unlike the other terms this deadline comes from `SystemTime`.
+        next = min_optional_duration(next, self.lock_screen_clock_next_wakeup());
         // A live Bluetooth pairing session owns two deadlines (prompt and
         // whole-session); wake exactly when `poll_bluetooth_jobs` must
         // enforce them.
@@ -5763,6 +5826,11 @@ impl EventHandler for Jwm {
         // _NET_WM_PING: send pings every 2 seconds, check for timeouts
         self.tick_ping_check(backend, now);
 
+        // The lock screen's clock row flips with the wall-clock minute; the
+        // wakeup that lands here on the flip is the lock term of
+        // `maintenance_next_wakeup_at`. Costs one state check when unlocked.
+        self.tick_lock_screen_clock(backend);
+
         // Poll pointer position when magnifier is active.  X11 MotionNotify
         // events are only delivered to the deepest window that selects
         // PointerMotion, so when the pointer is over a client's internal
@@ -5862,6 +5930,29 @@ impl Jwm {
             self.pending_pings.values().copied(),
             now,
         )
+    }
+
+    fn lock_screen_clock_next_wakeup(&self) -> Option<std::time::Duration> {
+        lock_screen_clock_wakeup(
+            self.features.system_ui.is_locked(),
+            std::time::SystemTime::now(),
+        )
+    }
+
+    /// Push a fresh lock-screen overlay when the rendered minute changed.
+    /// The wakeups that make this fire are conditional on the lock, and so is
+    /// the early return: an unlocked session never reads the clock here.
+    fn tick_lock_screen_clock(&mut self, backend: &mut dyn Backend) {
+        if !self.features.system_ui.is_locked() {
+            return;
+        }
+        if self
+            .features
+            .system_ui
+            .refresh_lock_clock(chrono::Local::now().naive_local())
+        {
+            self.sync_system_ui(backend);
+        }
     }
 
     fn tick_ping_check(&mut self, backend: &mut dyn Backend, now: std::time::Instant) {

@@ -2469,6 +2469,91 @@ impl<C: CompositorConnection> Compositor<C> {
         self.tags_grid_labels_key = None;
     }
 
+    /// Drop the wallpaper picker's side-preview texture, if one is uploaded.
+    pub(super) fn free_system_ui_preview(&mut self) {
+        if let Some((_, tex, _, _)) = self.system_ui_preview.take() {
+            unsafe {
+                self.gl.delete_texture(tex);
+            }
+        }
+    }
+
+    /// The wallpaper picker's side preview: the highlighted candidate's
+    /// thumbnail on a panel-tinted card to the right of the list, vertically
+    /// centered on it. Purely additive — the list card's geometry and hit
+    /// regions are computed before and independent of this — so the picker
+    /// looks and clicks exactly as without it until a texture lands (and
+    /// forever, for a candidate that does not decode). Returns the painted
+    /// frame so the caller can register it as a hit-test dead zone; `None`
+    /// means nothing was drawn and nothing is protected.
+    #[allow(clippy::too_many_arguments)]
+    fn render_system_ui_side_preview(
+        &self,
+        proj: &[f32; 16],
+        overlay: &crate::backend::api::SystemUiOverlay,
+        viewport: [f32; 4],
+        card: [f32; 4],
+        content_a: f32,
+        ui: &UiPalette,
+    ) -> Option<panel::Rect> {
+        let (tex, img_w, img_h) = match (&self.system_ui_preview, &overlay.side_preview) {
+            (Some((path, tex, w, h)), Some(want)) if path == want => (*tex, *w, *h),
+            _ => return None,
+        };
+        let frame = panel::side_preview_frame(card, viewport)?;
+        let [ix, iy, iw, ih] = panel::letterbox(frame, img_w as f32, img_h as f32)?;
+        unsafe {
+            // The backing is a small panel-surface card; under a glass theme
+            // it frosts from the same backdrop the list card samples.
+            self.ui_fill_island(
+                proj,
+                ui,
+                frame[0],
+                frame[1],
+                frame[2],
+                frame[3],
+                panel::PREVIEW_RADIUS,
+                panel::PREVIEW_RADIUS,
+                ui.panel,
+                content_a,
+            );
+            // The image through the ordinary window program, whose radius
+            // uniform rounds it like any other drawn texture. Its uniforms
+            // are sticky, so every one the pass cares about is written here.
+            self.gl.use_program(Some(self.program));
+            self.gl
+                .uniform_matrix_4_f32_slice(self.win_uniforms.projection.as_ref(), false, proj);
+            self.gl.uniform_1_i32(self.win_uniforms.texture.as_ref(), 0);
+            self.gl
+                .uniform_4_f32(self.win_uniforms.uv_rect.as_ref(), 0.0, 0.0, 1.0, 1.0);
+            self.gl.uniform_1_f32(self.win_uniforms.desat.as_ref(), 0.0);
+            self.gl
+                .uniform_1_f32(self.win_uniforms.ripple_progress.as_ref(), -1.0);
+            self.gl
+                .uniform_1_f32(self.win_uniforms.ripple_amplitude.as_ref(), 0.0);
+            self.gl.uniform_1_f32(self.win_uniforms.dim.as_ref(), 1.0);
+            self.gl
+                .uniform_1_f32(self.win_uniforms.opacity.as_ref(), content_a);
+            self.gl
+                .uniform_1_f32(self.win_uniforms.radius.as_ref(), panel::PREVIEW_RADIUS);
+            self.gl
+                .uniform_2_f32(self.win_uniforms.size.as_ref(), iw, ih);
+            self.gl
+                .uniform_4_f32(self.win_uniforms.rect.as_ref(), ix, iy, iw, ih);
+            self.gl.active_texture(glow::TEXTURE0);
+            self.gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+            self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            // Back to the border program the card's fills draw with.
+            self.gl.use_program(Some(self.border_program));
+            self.gl.uniform_matrix_4_f32_slice(
+                self.border_uniforms.projection.as_ref(),
+                false,
+                proj,
+            );
+        }
+        Some(frame)
+    }
+
     /// The on-screen tag's live cell content: every window's texture scaled
     /// into the rectangle its wireframe would occupy — the identical
     /// [`crate::backend::compositor_common::layout_strip::window_rect`]
@@ -2772,11 +2857,22 @@ impl<C: CompositorConnection> Compositor<C> {
                     )
                     .selection
                 });
-            self.system_ui_hit_geometry = Some(panel::HitGeometry::new(
+            // The wallpaper picker's side preview: purely additive, off the
+            // card's right edge. Its painted frame registers as a dead zone
+            // so a press there is swallowed like one on the card's body
+            // rather than dismissing the panel like a scrim click.
+            let preview_frame = self.render_system_ui_side_preview(
+                proj,
+                &overlay,
+                viewport,
                 [x, y, panel_w, panel_h],
-                &layout,
-                overlay.items.len(),
-            ));
+                content_a,
+                ui,
+            );
+            self.system_ui_hit_geometry = Some(
+                panel::HitGeometry::new([x, y, panel_w, panel_h], &layout, overlay.items.len())
+                    .with_side_preview(preview_frame),
+            );
 
             if let Some([fx, fy, fw, fh]) = layout.query_field {
                 self.sysui_fill_rounded(
@@ -4482,6 +4578,11 @@ impl<C: CompositorConnection> Compositor<C> {
         if wallpaper_just_loaded {
             self.needs_render = true;
         }
+
+        // Poll the wallpaper picker's side-preview decode alongside; the
+        // superseded requests' receivers are gone, so only the latest
+        // highlight's decode can land.
+        self.poll_system_ui_preview();
 
         // Skip-unchanged-frame: if scene hasn't changed and no textures are
         // dirty, we can skip the entire GL render (unless screenshot pending or HUD active).

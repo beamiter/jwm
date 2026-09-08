@@ -548,6 +548,18 @@ where
     system_ui_hit_geometry: Option<crate::backend::compositor_common::system_ui_panel::HitGeometry>,
     /// Visible row under the pointer; it only affects the quiet hover cue.
     system_ui_hovered: Option<usize>,
+    /// The wallpaper picker's side preview: `(path, texture, w, h)`. The path
+    /// is the payload's, so a texture never draws for a highlight it was not
+    /// decoded from.
+    system_ui_preview: Option<(String, glow::Texture, u32, u32)>,
+    /// The path last requested through the overlay payload. `set_system_ui`
+    /// compares on every sync: a new highlight kicks a new decode, a payload
+    /// without the field retires the texture.
+    system_ui_preview_path: String,
+    /// In-flight decode for the side preview. Replaced on every new request;
+    /// the dropped receiver makes the superseded worker's send a no-op, so
+    /// held-down arrow keys never queue a backlog.
+    pending_system_ui_preview: Option<mpsc::Receiver<WallpaperImageData>>,
     /// Open/morph spring for the docked debug HUD card.
     hud_island: crate::backend::compositor_common::dynamic_island::IslandMotion,
     debug_hud: bool,
@@ -736,6 +748,11 @@ where
     expose_entries: Vec<ExposeEntry>,
     expose_opacity: f32,
     expose_start: Option<std::time::Instant>,
+    /// One title texture per expose entry, in entry order; `None` is the
+    /// "no label" slot. Rebuilt with the entry set in
+    /// `Compositor::refresh_expose_title_textures`, the same bargain
+    /// `tab_title_textures` strikes.
+    expose_title_textures: Vec<Option<(glow::Texture, u32, u32)>>,
 
     // --- Phase 5: Smart Snap Preview ---
     snap_preview_enabled: bool,
@@ -1119,6 +1136,9 @@ impl<C: CompositorConnection> Drop for Compositor<C> {
                     self.gl.delete_texture(tex);
                 }
             }
+            if let Some((_, tex, _, _)) = self.system_ui_preview.take() {
+                self.gl.delete_texture(tex);
+            }
             for (_, set) in self.toast_textures.drain() {
                 for slot in set.text.into_iter().chain(set.buttons).flatten() {
                     self.gl.delete_texture(slot.0);
@@ -1133,6 +1153,9 @@ impl<C: CompositorConnection> Drop for Compositor<C> {
                 }
             }
             for (tex, _, _) in self.tab_title_textures.drain(..).flatten().flatten() {
+                self.gl.delete_texture(tex);
+            }
+            for (tex, _, _) in self.expose_title_textures.drain(..).flatten() {
                 self.gl.delete_texture(tex);
             }
             for (_, tex, _, _) in self.tags_grid_label_textures.drain(..) {

@@ -342,6 +342,15 @@ impl Jwm {
                         // window whose texture it cannot find.
                         live: live_cell(overview),
                     }),
+                // The wallpaper picker's side preview tracks the highlight:
+                // the row key is the path the picker would apply, so the
+                // compositor decodes exactly what an Enter would load. Any
+                // other panel — or none — carries no path and retires it.
+                side_preview: self
+                    .features
+                    .system_ui
+                    .selected_wallpaper()
+                    .map(str::to_string),
             }
         }));
         backend.compositor_force_full_redraw();
@@ -362,6 +371,13 @@ impl Jwm {
             selected_monitor,
             (self.s_w, self.s_h),
         )
+    }
+
+    /// The live caps-lock state, read back from the backend's current
+    /// modifier mask; `None` when the backend cannot report it right now.
+    fn current_caps_lock(backend: &dyn Backend) -> Option<bool> {
+        let (_, _, mask, _) = backend.input_ops().query_pointer_root().ok()?;
+        Some(backend.key_ops().clean_mods(mask).contains(Mods::CAPS))
     }
 
     fn system_ui_char(keysym: u32, mods: Mods) -> Option<char> {
@@ -1684,6 +1700,22 @@ impl Jwm {
             // pill pinned to its old row.
             backend.compositor_set_system_ui_hover(None);
             let locked = self.features.system_ui.is_locked();
+            if locked {
+                // The lock holds the keyboard grab, so every key event doubles
+                // as a modifier-state reading for the caps-lock row. Read the
+                // mask back from the backend instead of trusting this event's
+                // state field: on X11 that field is the mask *before* the
+                // event, so the very press that turns caps on would show the
+                // row one keystroke late (the window switcher reads the live
+                // mask back on modifier release for the same reason). The
+                // Wayland backends answer with the state this key just left
+                // behind. A failed query keeps the previous reading. The flag
+                // rides the per-keystroke re-sync the password row already
+                // triggers below; no extra sync is added for it.
+                if let Some(caps_lock) = Self::current_caps_lock(backend) {
+                    self.features.system_ui.set_lock_caps_lock(caps_lock);
+                }
+            }
             // Escape backs out of the passphrase prompt before it closes the
             // picker, so a typo does not cost the whole scan.
             if keysym == keys::KEY_Escape && self.features.system_ui.cancel_wifi_passphrase() {

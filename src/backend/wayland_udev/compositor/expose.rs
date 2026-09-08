@@ -1,7 +1,9 @@
 use super::render::transform_for_encoded_srgb;
 use super::*;
 use crate::backend::api::ExposeNavDirection;
-use crate::backend::compositor_common::expose::{expose_grid_cols, move_expose_selection};
+use crate::backend::compositor_common::expose::{
+    expose_grid_cols, expose_label_origin, move_expose_selection,
+};
 use crate::backend::compositor_common::ui_theme;
 use crate::backend::compositor_common::window_tabs;
 use crate::backend::compositor_font;
@@ -11,6 +13,27 @@ fn snap_preview_colors(color: [f32; 4], opacity: f32) -> ([f32; 4], [f32; 4]) {
     let [r, g, b, a] = color;
     let alpha = a * opacity.clamp(0.0, 1.0);
     ([r, g, b, alpha], [r * 1.5, g * 1.5, b * 1.5, alpha * 2.0])
+}
+
+/// The rect an expose cell's thumbnail is drawn with this frame: hovered
+/// cells read 5% larger, centred on the cell. The hover ring and the title
+/// label must agree with the thumbnail on it, so all three ask here.
+fn expose_thumb_rect(entry: &ExposeEntry) -> (f32, f32, f32, f32) {
+    if entry.is_hovered {
+        let scale = 1.05f32;
+        let sw = entry.current_w * scale;
+        let sh = entry.current_h * scale;
+        let sx = entry.current_x - (sw - entry.current_w) * 0.5;
+        let sy = entry.current_y - (sh - entry.current_h) * 0.5;
+        (sx, sy, sw, sh)
+    } else {
+        (
+            entry.current_x,
+            entry.current_y,
+            entry.current_w,
+            entry.current_h,
+        )
+    }
 }
 
 impl WaylandCompositor {
@@ -23,7 +46,7 @@ impl WaylandCompositor {
     /// (deferred routes), false when it draws into the encoded output target
     /// (legacy and early-fallback routes — the historical SDR draw).
     pub(crate) fn render_expose(
-        &self,
+        &mut self,
         gl: &ffi::Gles2,
         projection: &[f32; 16],
         tail_scene_linear: bool,
@@ -39,6 +62,11 @@ impl WaylandCompositor {
         if self.expose_entries.is_empty() || self.expose_opacity <= 0.0 {
             return;
         }
+        // Entry changes arrive without GL access (`set_expose_mode` only
+        // records them and marks the labels dirty), so the first frame that
+        // actually draws the grid rebuilds the title textures while the
+        // context is current — the same bargain the tab titles strike.
+        self.refresh_expose_title_textures(gl);
 
         unsafe {
             // Dark backdrop
@@ -89,6 +117,15 @@ impl WaylandCompositor {
                 projection.as_ptr(),
             );
 
+            // When exiting (expose_active=false), keep windows fully opaque
+            // so only the dark overlay fades — avoids a dim flash at the end.
+            // The title labels take the same scalar.
+            let opacity = if self.expose_active {
+                self.expose_opacity
+            } else {
+                1.0
+            };
+
             for entry in &self.expose_entries {
                 let win = match self.windows.get(&entry.id) {
                     Some(w) => w,
@@ -100,21 +137,7 @@ impl WaylandCompositor {
                 };
 
                 // Apply hover scale: hovered windows get 1.05x centered scale
-                let (x, y, w, h) = if entry.is_hovered {
-                    let scale = 1.05f32;
-                    let sw = entry.current_w * scale;
-                    let sh = entry.current_h * scale;
-                    let sx = entry.current_x - (sw - entry.current_w) * 0.5;
-                    let sy = entry.current_y - (sh - entry.current_h) * 0.5;
-                    (sx, sy, sw, sh)
-                } else {
-                    (
-                        entry.current_x,
-                        entry.current_y,
-                        entry.current_w,
-                        entry.current_h,
-                    )
-                };
+                let (x, y, w, h) = expose_thumb_rect(entry);
 
                 // Draw shadow behind each window. The shadow color is fixed
                 // black, whose RGB is identical in the encoded and linear
@@ -157,11 +180,6 @@ impl WaylandCompositor {
                 );
                 gl.Uniform4f(self.win_uniforms.rect, x, y, w, h);
 
-                let opacity = if self.expose_active {
-                    self.expose_opacity
-                } else {
-                    1.0
-                };
                 gl.Uniform1f(self.win_uniforms.opacity, opacity);
                 gl.Uniform1f(self.win_uniforms.radius, 6.0);
                 gl.Uniform2f(self.win_uniforms.size, w, h);
@@ -225,7 +243,149 @@ impl WaylandCompositor {
                     );
                 }
             }
+
+            // Title labels come last, under one text-program bind for the
+            // whole grid: a label must never end up under a neighbour's
+            // thumbnail or hover ring while cells are still flying in.
+            self.render_expose_titles(gl, projection, opacity);
         }
+    }
+
+    /// Draw every expose cell's title label from the cached textures.
+    ///
+    /// A label is pure overlay: it rides the thumbnail's drawn rect (hover
+    /// scale included, via [`expose_thumb_rect`]) and the expose fade, and
+    /// hit-testing is untouched — the click path still sees only the entry
+    /// geometry. Cells whose in-flight thumbnail is still narrower than the
+    /// rasterised label draw nothing until they settle
+    /// ([`expose_label_origin`]).
+    fn render_expose_titles(&self, gl: &ffi::Gles2, projection: &[f32; 16], opacity: f32) {
+        if self.expose_title_textures.is_empty() {
+            return;
+        }
+        let (text_rect, text_proj, text_tex, text_opacity) = unsafe {
+            (
+                super::get_uniform_loc(gl, self.sysui_text_program, "u_rect"),
+                super::get_uniform_loc(gl, self.sysui_text_program, "u_projection"),
+                super::get_uniform_loc(gl, self.sysui_text_program, "u_texture"),
+                super::get_uniform_loc(gl, self.sysui_text_program, "u_opacity"),
+            )
+        };
+
+        unsafe {
+            gl.UseProgram(self.sysui_text_program);
+            self.set_projection_uniform(gl, text_proj, projection);
+            gl.Uniform1i(text_tex, 0);
+            gl.Uniform1f(text_opacity, opacity);
+            gl.ActiveTexture(ffi::TEXTURE0);
+            for (entry, &(texture, tw, th)) in self
+                .expose_entries
+                .iter()
+                .zip(self.expose_title_textures.iter())
+            {
+                if texture == 0 {
+                    continue;
+                }
+                let (x, y, w, _) = expose_thumb_rect(entry);
+                let Some((lx, ly)) = expose_label_origin(x, y, w, tw as f32) else {
+                    continue;
+                };
+                self.set_rect_uniform(gl, text_rect, lx.round(), ly.round(), tw as f32, th as f32);
+                gl.BindTexture(ffi::TEXTURE_2D, texture);
+                gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+            }
+        }
+    }
+
+    /// Rasterise and upload every expose entry's title, once per entry-set
+    /// change rather than once per frame — the same bargain
+    /// [`Self::refresh_tab_titles`] strikes.
+    ///
+    /// The raster is fitted against the cell the fly-in animation settles
+    /// into (`target_w`), never the in-flight rect, so pure geometry motion
+    /// cannot invalidate the cache; only a new entry set sets the dirty
+    /// flag. Labels use the configured system-UI font at the cube overview's
+    /// window-title size and the theme's `title_ink`, so an expose label
+    /// reads as the same text the other overviews draw.
+    pub(crate) fn refresh_expose_title_textures(&mut self, gl: &ffi::Gles2) {
+        if !self.expose_titles_dirty {
+            return;
+        }
+        self.expose_titles_dirty = false;
+
+        let stale = std::mem::take(&mut self.expose_title_textures);
+        unsafe {
+            for (texture, _, _) in stale {
+                if texture != 0 {
+                    gl.DeleteTextures(1, &texture);
+                }
+            }
+        }
+
+        let ui = ui_theme::palette();
+        let config = crate::config::CONFIG.load();
+        let font = config.system_ui_font();
+        let size = compositor_font::ui_font_pixel_size(font);
+
+        let mut cache = Vec::with_capacity(self.expose_entries.len());
+        for entry in &self.expose_entries {
+            // A 0 texture is the "no label" slot: empty title, a title too
+            // long for even the ellipsis, or a failed upload all draw
+            // nothing rather than an empty box.
+            let mut slot = (0u32, 0u32, 0u32);
+            let budget = window_tabs::title_budget(entry.target_w);
+            let text = compositor_font::fit_ui_text(&entry.title, font, size, budget);
+            if !text.is_empty() {
+                let (pixels, w, h) =
+                    compositor_font::render_ui_text_to_rgba(&text, font, size, ui.title_ink);
+                if w != 0 && h != 0 {
+                    let mut texture = 0u32;
+                    unsafe {
+                        gl.GenTextures(1, &mut texture);
+                        if texture != 0 {
+                            gl.BindTexture(ffi::TEXTURE_2D, texture);
+                            gl.TexParameteri(
+                                ffi::TEXTURE_2D,
+                                ffi::TEXTURE_MIN_FILTER,
+                                ffi::LINEAR as i32,
+                            );
+                            gl.TexParameteri(
+                                ffi::TEXTURE_2D,
+                                ffi::TEXTURE_MAG_FILTER,
+                                ffi::LINEAR as i32,
+                            );
+                            gl.TexParameteri(
+                                ffi::TEXTURE_2D,
+                                ffi::TEXTURE_WRAP_S,
+                                ffi::CLAMP_TO_EDGE as i32,
+                            );
+                            gl.TexParameteri(
+                                ffi::TEXTURE_2D,
+                                ffi::TEXTURE_WRAP_T,
+                                ffi::CLAMP_TO_EDGE as i32,
+                            );
+                            gl.TexImage2D(
+                                ffi::TEXTURE_2D,
+                                0,
+                                ffi::RGBA as i32,
+                                w as i32,
+                                h as i32,
+                                0,
+                                ffi::RGBA,
+                                ffi::UNSIGNED_BYTE,
+                                pixels.as_ptr() as *const _,
+                            );
+                            gl.BindTexture(ffi::TEXTURE_2D, 0);
+                        }
+                    }
+                    if texture != 0 {
+                        slot = (texture, w, h);
+                    }
+                }
+            }
+            cache.push(slot);
+        }
+        self.expose_title_textures = cache;
     }
 
     /// Render the snap preview highlight rectangle.

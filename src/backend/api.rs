@@ -1116,6 +1116,12 @@ pub struct SystemUiOverlay {
     /// Set by the tags overview, which is drawn as a grid of per-tag
     /// wireframe cells instead of the list card.
     pub tags_grid: Option<TagsGrid>,
+    /// Set by the wallpaper picker: the highlighted candidate's file path,
+    /// re-sent on every selection move. The compositor decodes it
+    /// asynchronously into a thumbnail drawn beside the list card. Strings
+    /// stay strings across this boundary — pixels never cross it. A payload
+    /// without the field (any other panel, or none) retires the preview.
+    pub side_preview: Option<String>,
 }
 
 /// What is under the pointer on the compositor-drawn system-UI card.
@@ -2808,10 +2814,13 @@ pub trait CompositorWorkspaceEffects: Send {
     fn compositor_set_monitors(&mut self, _monitors: &[(u32, i32, i32, u32, u32, u32)]) {}
     fn compositor_set_overview_selection(&mut self, _window: WindowId) {}
 
+    /// Enable or disable expose mode. Each window carries its sanitized
+    /// title so the compositor can label the thumbnail; an empty title
+    /// draws no label.
     fn compositor_set_expose_mode(
         &mut self,
         _active: bool,
-        _windows: Vec<(WindowId, i32, i32, u32, u32)>,
+        _windows: Vec<(WindowId, i32, i32, u32, u32, String)>,
     ) {
     }
 

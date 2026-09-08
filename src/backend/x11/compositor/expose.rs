@@ -1,5 +1,6 @@
 use super::{Compositor, SnapPreview, class_matches_exclude};
 use crate::backend::api::ExposeNavDirection;
+use crate::backend::compositor_common::expose::expose_label_origin;
 use crate::backend::compositor_common::ui_theme;
 use crate::backend::compositor_common::window_tabs::{self, TabGroup};
 use crate::backend::compositor_font;
@@ -16,11 +17,13 @@ impl<C: CompositorConnection> Compositor<C> {
     // =========================================================================
 
     /// Activate or deactivate expose mode.
-    /// `windows` contains (x11_win, x, y, w, h) for each window to arrange.
+    /// `windows` contains (x11_win, x, y, w, h, title) for each window to
+    /// arrange; the sanitized title labels the thumbnail, an empty one
+    /// draws no label.
     pub(crate) fn set_expose_mode(
         &mut self,
         active: bool,
-        windows: Vec<(u32, i32, i32, u32, u32)>,
+        windows: Vec<(u32, i32, i32, u32, u32, String)>,
     ) {
         if !self.expose_enabled {
             return;
@@ -39,8 +42,12 @@ impl<C: CompositorConnection> Compositor<C> {
                 self.screen_w as f32,
                 self.screen_h as f32,
                 self.expose_gap,
-                &windows,
+                windows,
             );
+            // The label textures derive from the entry set, so they rebuild
+            // with it; the fly-in animation itself never invalidates them
+            // (the raster is fitted to the settled cell width).
+            self.refresh_expose_title_textures();
 
             self.expose_active = true;
             self.expose_opacity = 0.0;
@@ -117,19 +124,21 @@ impl<C: CompositorConnection> Compositor<C> {
             self.gl
                 .uniform_1_f32(self.win_uniforms.ripple_amplitude.as_ref(), 0.0);
 
+            // When exiting (expose_active=false), keep windows fully opaque
+            // so only the dark overlay fades — avoids a dim flash at the end.
+            // The title labels take the same scalar.
+            let opacity = if self.expose_active {
+                self.expose_opacity
+            } else {
+                1.0
+            };
+
             for entry in &self.expose_entries {
                 let wt = match self.windows.get(&entry.id) {
                     Some(wt) => wt,
                     None => continue,
                 };
 
-                // When exiting (expose_active=false), keep windows fully opaque
-                // so only the dark overlay fades — avoids a dim flash at the end.
-                let opacity = if self.expose_active {
-                    self.expose_opacity
-                } else {
-                    1.0
-                };
                 self.gl
                     .uniform_1_f32(self.win_uniforms.opacity.as_ref(), opacity);
                 self.gl
@@ -195,9 +204,100 @@ impl<C: CompositorConnection> Compositor<C> {
                 }
             }
 
+            // Title labels come last, under one text-program bind for the
+            // whole grid: a label must never end up under a neighbour's
+            // thumbnail or hover ring while cells are still flying in. A
+            // label is pure overlay — hit-testing still sees only the entry
+            // geometry — riding the expose fade exactly like the thumbnails.
+            if !self.expose_title_textures.is_empty() {
+                self.gl.use_program(Some(self.hud_text_program));
+                self.gl.uniform_matrix_4_f32_slice(
+                    self.hud_text_uniforms.projection.as_ref(),
+                    false,
+                    proj,
+                );
+                self.gl
+                    .uniform_1_i32(self.hud_text_uniforms.texture.as_ref(), 0);
+                self.gl
+                    .uniform_1_f32(self.hud_text_uniforms.opacity.as_ref(), opacity);
+                self.gl.active_texture(glow::TEXTURE0);
+                for (entry, slot) in self
+                    .expose_entries
+                    .iter()
+                    .zip(self.expose_title_textures.iter())
+                {
+                    let Some((texture, tw, th)) = slot else {
+                        continue;
+                    };
+                    let (tw, th) = (*tw as f32, *th as f32);
+                    // Cells whose in-flight thumbnail is still narrower than
+                    // the rasterised label draw nothing until they settle.
+                    let Some((lx, ly)) =
+                        expose_label_origin(entry.current_x, entry.current_y, entry.current_w, tw)
+                    else {
+                        continue;
+                    };
+                    self.gl.uniform_4_f32(
+                        self.hud_text_uniforms.rect.as_ref(),
+                        lx.round(),
+                        ly.round(),
+                        tw,
+                        th,
+                    );
+                    self.gl.bind_texture(glow::TEXTURE_2D, Some(*texture));
+                    self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                }
+            }
+
             self.gl.bind_vertex_array(None);
             self.gl.use_program(None);
         }
+    }
+
+    /// Rasterise and upload every expose entry's title, once per entry-set
+    /// change rather than once per frame — the same bargain
+    /// [`Self::refresh_tab_titles`] strikes.
+    ///
+    /// The raster is fitted against the cell the fly-in animation settles
+    /// into (`target_w`), never the in-flight rect, so pure geometry motion
+    /// cannot invalidate the cache. Labels use the configured system-UI font
+    /// at the cube overview's window-title size and the theme's `title_ink`,
+    /// so an expose label reads as the same text the other overviews draw.
+    pub(super) fn refresh_expose_title_textures(&mut self) {
+        let stale = std::mem::take(&mut self.expose_title_textures);
+        unsafe {
+            for (texture, _, _) in stale.into_iter().flatten() {
+                self.gl.delete_texture(texture);
+            }
+        }
+
+        let ui = ui_theme::palette();
+        let config = crate::config::CONFIG.load();
+        let font = config.system_ui_font();
+        let size = compositor_font::ui_font_pixel_size(font);
+
+        let mut cache = Vec::with_capacity(self.expose_entries.len());
+        for entry in &self.expose_entries {
+            // A `None` slot is "no label": an empty title, a title too long
+            // for even the ellipsis, or a failed upload all draw nothing
+            // rather than an empty box.
+            let budget = window_tabs::title_budget(entry.target_w);
+            let text = compositor_font::fit_ui_text(&entry.title, font, size, budget);
+            let slot = if text.is_empty() {
+                None
+            } else {
+                let (pixels, w, h) =
+                    compositor_font::render_ui_text_to_rgba(&text, font, size, ui.title_ink);
+                if w == 0 || h == 0 {
+                    None
+                } else {
+                    unsafe { self.upload_text_texture(&pixels, w, h) }
+                        .map(|texture| (texture, w, h))
+                }
+            };
+            cache.push(slot);
+        }
+        self.expose_title_textures = cache;
     }
 
     /// Handle mouse hover in expose mode.
@@ -594,7 +694,7 @@ impl<C: CompositorConnection> Compositor<C> {
                         if w == 0 || h == 0 {
                             return None;
                         }
-                        let texture = unsafe { self.upload_tab_title(&pixels, w, h) }?;
+                        let texture = unsafe { self.upload_text_texture(&pixels, w, h) }?;
                         Some((texture, w, h))
                     },
                 ));
@@ -604,7 +704,8 @@ impl<C: CompositorConnection> Compositor<C> {
         self.tab_title_textures = cache;
     }
 
-    unsafe fn upload_tab_title(&self, pixels: &[u8], w: u32, h: u32) -> Option<glow::Texture> {
+    /// Upload rasterised UI text (tab titles, expose labels) as a texture.
+    unsafe fn upload_text_texture(&self, pixels: &[u8], w: u32, h: u32) -> Option<glow::Texture> {
         unsafe {
             let texture = self.gl.create_texture().ok()?;
             self.gl.bind_texture(glow::TEXTURE_2D, Some(texture));

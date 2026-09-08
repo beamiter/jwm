@@ -19,6 +19,10 @@
 //! * the selection pill's height is the *rasterizer's* line height, recovered
 //!   as `(items_h - 2 * TEXT_PAD) / rows`. The list is one texture, so this is
 //!   the only handle the renderer has on a row.
+//!
+//! The wallpaper picker's side preview lives here too — frame, letterbox and
+//! hit-test dead zone — because both renderers must place it identically and
+//! its arithmetic is exactly as pure as the card's.
 
 /// A rectangle in screen pixels: `[x, y, w, h]`.
 pub(crate) type Rect = [f32; 4];
@@ -65,6 +69,24 @@ const SCROLLBAR_W: f32 = 3.0;
 const SCROLLBAR_MIN_THUMB: f32 = 20.0;
 /// Corner radius of the scroll track and thumb: a capsule.
 pub(crate) const SCROLLBAR_RADIUS: f32 = SCROLLBAR_W * 0.5;
+
+/// Gap between the list card's right edge and the wallpaper picker's side
+/// preview.
+pub(crate) const PREVIEW_GAP: f32 = 24.0;
+/// Largest letterbox frame the side preview may occupy. The decode bound
+/// ([`super::wallpaper::PREVIEW_THUMB_EDGE`]) matches the long edge, so a
+/// thumbnail lands at very nearly its drawn size.
+pub(crate) const PREVIEW_MAX_W: f32 = 480.0;
+pub(crate) const PREVIEW_MAX_H: f32 = 360.0;
+/// A gap narrower than this draws no preview rather than a sliver.
+pub(crate) const PREVIEW_MIN_W: f32 = 96.0;
+/// Same rule for the height of a very short viewport.
+pub(crate) const PREVIEW_MIN_H: f32 = 96.0;
+/// Margin the preview keeps to the viewport's right and vertical edges.
+const PREVIEW_EDGE: f32 = 32.0;
+/// Corner radius of the preview's backing and of the image drawn over it.
+/// Smaller than the panel's own radius, the way the query field's is.
+pub(crate) const PREVIEW_RADIUS: f32 = 12.0;
 
 /// Widest a card may be on this screen.
 ///
@@ -169,6 +191,10 @@ pub(crate) struct HitGeometry {
     items: Option<Rect>,
     row_height: f32,
     rows: usize,
+    /// The side preview's painted frame, when one is on screen. It is a dead
+    /// zone: a press there must do nothing — neither pick a row nor dismiss
+    /// the panel the way a scrim click would.
+    side_preview: Option<Rect>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -198,7 +224,17 @@ impl HitGeometry {
             items,
             row_height: contents.row_height,
             rows,
+            side_preview: None,
         }
+    }
+
+    /// Attach the side preview's painted frame as a dead zone. Called with
+    /// `None` on every frame the preview is not drawn, so the zone never
+    /// outlives the pixels it protects.
+    #[must_use]
+    pub(crate) fn with_side_preview(mut self, frame: Option<Rect>) -> Self {
+        self.side_preview = frame;
+        self
     }
 
     #[must_use]
@@ -206,7 +242,10 @@ impl HitGeometry {
         let x = x as f32;
         let y = y as f32;
         if !contains(self.panel, x, y) {
-            return Hit::Outside;
+            return match self.side_preview {
+                Some(frame) if contains(frame, x, y) => Hit::Panel,
+                _ => Hit::Outside,
+            };
         }
         let Some(items) = self.items else {
             return Hit::Panel;
@@ -347,6 +386,56 @@ pub(crate) fn contents(
     }
 
     out
+}
+
+/// The frame the wallpaper picker's side preview occupies, if it fits.
+///
+/// The card is content-sized and docked under the bar, so the open desktop
+/// beside it — never below it, where the footer's height depends on the list
+/// — is where the preview goes: right of the card by [`PREVIEW_GAP`],
+/// vertically centered on the card, capped at [`PREVIEW_MAX_W`] ×
+/// [`PREVIEW_MAX_H`] and clamped inside the viewport. The frame does not
+/// depend on the highlighted image's aspect, so browsing a mixed directory
+/// never resizes the surface under the user — only the letterboxed image
+/// inside it moves. `None` when the remaining gap would be a sliver, which
+/// is how a narrow output simply keeps the text-only picker.
+///
+/// Everything the preview needs follows from the card rect actually being
+/// painted this frame, so mid-spring the preview tracks the card exactly the
+/// way its contents do — and the same rect is the hit-test dead zone.
+#[must_use]
+pub(crate) fn side_preview_frame(panel: Rect, viewport: [f32; 4]) -> Option<Rect> {
+    let [vx, vy, vw, vh] = viewport;
+    let x = panel[0] + panel[2] + PREVIEW_GAP;
+    let w = (vx + vw - PREVIEW_EDGE - x).min(PREVIEW_MAX_W);
+    let h = (vh - 2.0 * PREVIEW_EDGE).min(PREVIEW_MAX_H);
+    if w < PREVIEW_MIN_W || h < PREVIEW_MIN_H {
+        return None;
+    }
+    let centered_y = panel[1] + (panel[3] - h) * 0.5;
+    // The clamp bounds are ordered by construction: h ≤ vh - 2·edge.
+    let y = centered_y.clamp(vy + PREVIEW_EDGE, vy + vh - PREVIEW_EDGE - h);
+    Some([x, y, w, h])
+}
+
+/// The image inside `frame`: aspect-preserved, centered, never upscaled past
+/// the decoded size (a tiny source stays tiny rather than blurring up).
+/// `None` for a degenerate frame or image, which is how a zero-sized decode
+/// draws nothing.
+#[must_use]
+pub(crate) fn letterbox(frame: Rect, img_w: f32, img_h: f32) -> Option<Rect> {
+    if frame[2] <= 0.0 || frame[3] <= 0.0 || img_w <= 0.0 || img_h <= 0.0 {
+        return None;
+    }
+    let scale = (frame[2] / img_w).min(frame[3] / img_h).min(1.0);
+    let w = (img_w * scale).max(1.0);
+    let h = (img_h * scale).max(1.0);
+    Some([
+        frame[0] + (frame[2] - w) * 0.5,
+        frame[1] + (frame[3] - h) * 0.5,
+        w,
+        h,
+    ])
 }
 
 #[cfg(test)]
@@ -714,5 +803,100 @@ mod tests {
             hit.hit_test(122.0, items_y as f64 + 1.0),
             Hit::Item(0, -8.0)
         );
+    }
+
+    #[test]
+    fn the_side_preview_sits_right_of_the_card_centered_on_it() {
+        let viewport = [0.0, 0.0, 1920.0, 1080.0];
+        let panel = [660.0, 100.0, 600.0, 520.0];
+        let frame = side_preview_frame(panel, viewport).expect("room beside the card");
+
+        assert_eq!(frame[0], 660.0 + 600.0 + PREVIEW_GAP);
+        assert_eq!(frame[2], PREVIEW_MAX_W, "capped, not gap-filling");
+        assert_eq!(frame[3], PREVIEW_MAX_H);
+        // Vertically centered on the card.
+        assert_eq!(frame[1], 100.0 + (520.0 - PREVIEW_MAX_H) * 0.5);
+        // Fully inside the viewport.
+        assert!(frame[0] + frame[2] <= 1920.0 - PREVIEW_EDGE + 0.001);
+    }
+
+    #[test]
+    fn the_side_preview_frame_is_clamped_into_the_viewport() {
+        let viewport = [0.0, 0.0, 1920.0, 1080.0];
+        // A card hugging the bottom: centering would push the preview off the
+        // bottom edge, so the clamp wins.
+        let low = side_preview_frame([660.0, 900.0, 600.0, 160.0], viewport).unwrap();
+        assert_eq!(low[1] + low[3], 1080.0 - PREVIEW_EDGE);
+
+        // A narrow remaining gap shrinks the frame until the minimum vetoes it.
+        let tight = side_preview_frame([0.0, 100.0, 1472.0, 400.0], viewport).unwrap();
+        assert_eq!(tight[2], 1920.0 - PREVIEW_EDGE - 1472.0 - PREVIEW_GAP);
+        assert!(side_preview_frame([0.0, 100.0, 1800.0, 400.0], viewport).is_none());
+        // A very short viewport vetoes the frame on height instead.
+        assert!(side_preview_frame([0.0, 10.0, 400.0, 100.0], [0.0, 0.0, 1920.0, 150.0]).is_none());
+    }
+
+    #[test]
+    fn a_monitor_local_viewport_offsets_the_side_preview() {
+        let viewport = [-1920.0, 0.0, 1920.0, 1080.0];
+        let panel = [-1260.0, 100.0, 600.0, 520.0];
+        let frame = side_preview_frame(panel, viewport).unwrap();
+        assert_eq!(frame[0], -1260.0 + 600.0 + PREVIEW_GAP);
+        assert!(frame[0] + frame[2] <= viewport[0] + viewport[2] - PREVIEW_EDGE + 0.001);
+    }
+
+    #[test]
+    fn the_letterbox_preserves_aspect_and_never_upscales() {
+        let frame = [100.0, 50.0, 480.0, 360.0];
+        // Landscape fits the width; portrait fits the height; both centered.
+        assert_eq!(
+            letterbox(frame, 480.0, 270.0),
+            Some([100.0, 50.0 + (360.0 - 270.0) * 0.5, 480.0, 270.0])
+        );
+        assert_eq!(
+            letterbox(frame, 360.0, 480.0),
+            Some([100.0 + (480.0 - 270.0) * 0.5, 50.0, 270.0, 360.0])
+        );
+        // A source smaller than the frame draws at native size, not blurred up.
+        assert_eq!(
+            letterbox(frame, 100.0, 80.0),
+            Some([290.0, 190.0, 100.0, 80.0])
+        );
+        // Degenerate inputs draw nothing.
+        assert_eq!(letterbox(frame, 0.0, 80.0), None);
+        assert_eq!(letterbox([100.0, 50.0, 0.0, 360.0], 100.0, 80.0), None);
+    }
+
+    #[test]
+    fn the_side_preview_is_a_dead_zone_that_never_moves_a_row() {
+        let s = sizes((40.0, 24.0), (0.0, 0.0), (300.0, 204.0), (0.0, 0.0));
+        let panel = [100.0, 50.0, 600.0, 400.0];
+        let contents = contents(panel, &s, 10, Some(3), None);
+        let items_y = contents.items.unwrap()[1];
+        let viewport = [0.0, 0.0, 1920.0, 1080.0];
+        let frame = side_preview_frame(panel, viewport).unwrap();
+
+        let bare = HitGeometry::new(panel, &contents, 10);
+        let guarded = bare.with_side_preview(Some(frame));
+
+        // Inside the frame a press reads as panel body — inert — instead of
+        // the scrim's dismiss.
+        let cx = f64::from(frame[0] + frame[2] * 0.5);
+        let cy = f64::from(frame[1] + frame[3] * 0.5);
+        assert_eq!(bare.hit_test(cx, cy), Hit::Outside);
+        assert_eq!(guarded.hit_test(cx, cy), Hit::Panel);
+
+        // Every existing region is byte-identical with the zone attached.
+        for (x, y) in [
+            (130.0, items_y as f64 + 1.0),
+            (101.0, items_y as f64),
+            (99.0, 100.0),
+            (10.0, 10.0),
+        ] {
+            assert_eq!(bare.hit_test(x, y), guarded.hit_test(x, y), "at ({x}, {y})");
+        }
+
+        // And a frame that was not painted protects nothing.
+        assert_eq!(bare.with_side_preview(None).hit_test(cx, cy), Hit::Outside);
     }
 }

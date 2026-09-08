@@ -1054,6 +1054,9 @@ impl<C: CompositorConnection> Compositor<C> {
             system_ui_identity: String::new(),
             system_ui_hit_geometry: None,
             system_ui_hovered: None,
+            system_ui_preview: None,
+            system_ui_preview_path: String::new(),
+            pending_system_ui_preview: None,
             hud_island: Default::default(),
             debug_hud: behavior.debug_hud,
             sys_stats: crate::backend::sys_stats::SysStatsSampler::new(),
@@ -1206,6 +1209,7 @@ impl<C: CompositorConnection> Compositor<C> {
             expose_entries: Vec::new(),
             expose_opacity: 0.0,
             expose_start: None,
+            expose_title_textures: Vec::new(),
             // Phase 5: Smart Snap Preview
             snap_preview_enabled: behavior.snap_preview,
             snap_preview_color: behavior.snap_preview_color,

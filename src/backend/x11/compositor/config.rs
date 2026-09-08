@@ -239,7 +239,10 @@ impl<C: CompositorConnection> Compositor<C> {
             return true;
         }
         // Need render to poll async wallpaper loading
-        if self.pending_wallpaper.is_some() || !self.pending_monitor_wallpapers.is_empty() {
+        if self.pending_wallpaper.is_some()
+            || !self.pending_monitor_wallpapers.is_empty()
+            || self.pending_system_ui_preview.is_some()
+        {
             return true;
         }
         false

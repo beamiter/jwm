@@ -236,6 +236,30 @@ impl<C: CompositorConnection> Compositor<C> {
         if !overlay.as_ref().is_some_and(|ui| ui.tags_grid.is_some()) {
             self.free_tags_grid_labels();
         }
+        // The wallpaper picker's side preview follows the payload's path.
+        // Latest wins: a new highlight retires the in-flight decode with the
+        // texture and starts over, so held-down arrow keys never queue a
+        // backlog; a payload without the field just retires both.
+        let preview_path = overlay.as_ref().and_then(|ui| ui.side_preview.as_deref());
+        match crate::backend::compositor_common::wallpaper::preview_request(
+            &self.system_ui_preview_path,
+            preview_path,
+        ) {
+            crate::backend::compositor_common::wallpaper::PreviewRequest::Keep => {}
+            crate::backend::compositor_common::wallpaper::PreviewRequest::Clear => {
+                self.system_ui_preview_path.clear();
+                self.pending_system_ui_preview = None;
+                self.free_system_ui_preview();
+            }
+            crate::backend::compositor_common::wallpaper::PreviewRequest::Reload => {
+                self.system_ui_preview_path = preview_path.unwrap_or_default().to_string();
+                self.pending_system_ui_preview = None;
+                self.free_system_ui_preview();
+                self.pending_system_ui_preview = Some(Self::load_system_ui_preview_async(
+                    &self.system_ui_preview_path,
+                ));
+            }
+        }
         self.system_ui = overlay.map(Arc::new);
         self.needs_render = true;
     }

@@ -3070,7 +3070,10 @@ impl Jwm {
             return Err("expose requires an active compositor".into());
         }
         // Collect windows visible on their monitor; eligibility filtering and
-        // the enter/exit decision live in the pure plan.
+        // the enter/exit decision live in the pure plan. The title rides
+        // along so the compositor can label each thumbnail; the plan
+        // sanitizes it (control characters collapse to spaces, like the
+        // launcher and notification surfaces do).
         let mut candidates: Vec<expose_plan::ExposeCandidate> = Vec::new();
         if !self.features.expose_active {
             for &mon_key in &self.state.monitor_order.clone() {
@@ -3081,7 +3084,7 @@ impl Jwm {
                         }
                         if let Some(client) = self.state.clients.get(ck) {
                             let g = &client.geometry;
-                            candidates.push((client.win, g.x, g.y, g.w, g.h));
+                            candidates.push((client.win, g.x, g.y, g.w, g.h, client.name.clone()));
                         }
                     }
                 }

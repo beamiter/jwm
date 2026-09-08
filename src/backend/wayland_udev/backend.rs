@@ -4358,12 +4358,14 @@ impl CompositorWorkspaceEffects for UdevBackend {
     fn compositor_set_expose_mode(
         &mut self,
         active: bool,
-        windows: Vec<(WindowId, i32, i32, u32, u32)>,
+        windows: Vec<(WindowId, i32, i32, u32, u32, String)>,
     ) {
         if let Some(compositor) = self.compositor.as_mut() {
             let entries = windows
-                .iter()
-                .map(|(window, x, y, width, height)| (window.raw(), *x, *y, *width, *height))
+                .into_iter()
+                .map(|(window, x, y, width, height, title)| {
+                    (window.raw(), x, y, width, height, title)
+                })
                 .collect();
             compositor.set_expose_mode(active, entries);
         }

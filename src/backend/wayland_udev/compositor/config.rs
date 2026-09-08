@@ -347,6 +347,30 @@ impl WaylandCompositor {
             self.system_ui_highlight.reset();
             self.system_ui_hovered = None;
         }
+        // The wallpaper picker's side preview follows the payload's path.
+        // Latest wins: a new highlight drops the in-flight decode (the
+        // superseded worker's send then lands nowhere) and starts over, so
+        // held-down arrow keys never queue a backlog. There is no GL context
+        // here, so the texture itself — tagged with the path it decodes — is
+        // deleted on the next rendered frame once it no longer matches.
+        let preview_path = overlay.as_ref().and_then(|ui| ui.side_preview.as_deref());
+        match crate::backend::compositor_common::wallpaper::preview_request(
+            &self.system_ui_preview_path,
+            preview_path,
+        ) {
+            crate::backend::compositor_common::wallpaper::PreviewRequest::Keep => {}
+            crate::backend::compositor_common::wallpaper::PreviewRequest::Clear => {
+                self.system_ui_preview_path.clear();
+                self.pending_system_ui_preview = None;
+            }
+            crate::backend::compositor_common::wallpaper::PreviewRequest::Reload => {
+                self.system_ui_preview_path = preview_path.unwrap_or_default().to_string();
+                self.pending_system_ui_preview = None;
+                self.pending_system_ui_preview = Some(Self::load_system_ui_preview_async(
+                    &self.system_ui_preview_path,
+                ));
+            }
+        }
         self.system_ui = overlay.map(Arc::new);
         self.needs_render = true;
     }
@@ -1125,7 +1149,7 @@ impl WaylandCompositor {
     pub(crate) fn set_expose_mode(
         &mut self,
         active: bool,
-        windows: Vec<(u64, i32, i32, u32, u32)>,
+        windows: Vec<(u64, i32, i32, u32, u32, String)>,
     ) {
         if !self.expose_enabled {
             self.clear_expose_state_immediate();
@@ -1144,8 +1168,14 @@ impl WaylandCompositor {
                 self.screen_w as f32,
                 self.screen_h as f32,
                 self.expose_gap,
-                &windows,
+                windows,
             );
+            // A new entry set is the only thing that can invalidate a label:
+            // the text lives in the entry and the raster is fitted to the
+            // settled cell width, so the fly-in animation never sets this.
+            // The rebuild itself happens on the first drawn frame, when the
+            // GL context is current (`render_expose`).
+            self.expose_titles_dirty = true;
 
             self.expose_active = true;
             self.expose_opacity = 0.0;
@@ -2853,6 +2883,7 @@ mod tests {
     fn expose_terminal_cleanup_requests_one_full_repair() {
         let mut entries = vec![crate::backend::compositor_common::expose::ExposeEntry {
             id: 1_u64,
+            title: String::new(),
             orig_x: 0.0,
             orig_y: 0.0,
             orig_w: 100.0,

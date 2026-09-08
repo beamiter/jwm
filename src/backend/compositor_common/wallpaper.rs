@@ -17,6 +17,43 @@ pub(crate) struct WallpaperImageData {
     pub(crate) mode: WallpaperMode,
 }
 
+/// Long-edge bound of the wallpaper picker's side-preview thumbnail, matched
+/// to [`super::system_ui_panel::PREVIEW_MAX_W`] so the decode lands at very
+/// nearly its drawn size. Both compositors decode through this one bound.
+pub(crate) const PREVIEW_THUMB_EDGE: u32 = 480;
+
+/// What a fresh overlay payload asks of the side preview, given the path that
+/// is currently requested or decoded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PreviewRequest {
+    /// The payload repeats the current path: keep any in-flight decode and
+    /// any uploaded texture. This is what makes a re-sync cheap.
+    Keep,
+    /// No path in the payload (another panel, or none): drop the in-flight
+    /// decode and retire the texture.
+    Clear,
+    /// A different path: drop the in-flight decode and texture, start over.
+    Reload,
+}
+
+/// Latest-wins bookkeeping for the side preview, shared so the two
+/// compositors cannot drift: a new path supersedes whatever is in flight
+/// (the dropped receiver turns the superseded worker's send into a no-op),
+/// and only a repeated path leaves the pipeline alone — so re-syncs of the
+/// same highlight never restart a decode, and a path whose decode failed is
+/// not retried until the highlight leaves and returns to it.
+#[must_use]
+pub(crate) fn preview_request(current_path: &str, payload: Option<&str>) -> PreviewRequest {
+    let wanted = payload.unwrap_or("");
+    if wanted == current_path {
+        PreviewRequest::Keep
+    } else if wanted.is_empty() {
+        PreviewRequest::Clear
+    } else {
+        PreviewRequest::Reload
+    }
+}
+
 pub(crate) fn parse_wallpaper_mode(s: &str) -> WallpaperMode {
     match s.to_ascii_lowercase().as_str() {
         "fit" => WallpaperMode::Fit,
@@ -107,4 +144,41 @@ pub(crate) fn resolve_wallpaper_for_tag(
         return (path, mode);
     }
     (&behavior.wallpaper, &behavior.wallpaper_mode)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PreviewRequest, preview_request};
+
+    #[test]
+    fn a_repeated_path_keeps_the_in_flight_preview_decode() {
+        assert_eq!(
+            preview_request("/walls/a.png", Some("/walls/a.png")),
+            PreviewRequest::Keep
+        );
+        // An empty request and an absent payload are the same nothing.
+        assert_eq!(preview_request("", None), PreviewRequest::Keep);
+        assert_eq!(preview_request("", Some("")), PreviewRequest::Keep);
+    }
+
+    #[test]
+    fn a_payload_without_a_path_retires_the_preview() {
+        assert_eq!(preview_request("/walls/a.png", None), PreviewRequest::Clear);
+        assert_eq!(
+            preview_request("/walls/a.png", Some("")),
+            PreviewRequest::Clear
+        );
+    }
+
+    #[test]
+    fn a_new_path_supersedes_the_in_flight_preview_decode() {
+        assert_eq!(
+            preview_request("/walls/a.png", Some("/walls/b.png")),
+            PreviewRequest::Reload
+        );
+        assert_eq!(
+            preview_request("", Some("/walls/b.png")),
+            PreviewRequest::Reload
+        );
+    }
 }

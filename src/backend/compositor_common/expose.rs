@@ -11,6 +11,10 @@ use crate::backend::api::ExposeNavDirection;
 /// Entry for Expose/Mission Control mode.
 pub struct ExposeEntry<Id> {
     pub id: Id,
+    /// The window's sanitized title (empty when the window has no usable
+    /// name): the compositors draw it as the thumbnail's label and skip
+    /// empty ones. Pure overlay — geometry and hit-testing ignore it.
+    pub title: String,
     pub orig_x: f32,
     pub orig_y: f32,
     pub orig_w: f32,
@@ -84,12 +88,48 @@ pub(crate) fn move_expose_selection(
     Some(next)
 }
 
+/// Pixels between a thumbnail's top edge and its title label.
+pub(crate) const EXPOSE_LABEL_TOP_INSET: f32 = 6.0;
+
+/// Where a cell's title label is drawn: centred horizontally on the
+/// thumbnail, just inside its top edge (the GNOME/KDE overview placement).
+///
+/// `thumb_*` is the rect the thumbnail is drawn with this frame — hover
+/// scaling included, so the label rides the exact pixels it names. Returns
+/// `None` when the rasterised label is wider than the thumbnail: the label
+/// texture is fitted to the *settled* cell width, so this only triggers for
+/// cells still flying in (or thumbnails too narrow to carry text at all),
+/// and the label simply waits instead of overflowing the cell. Both
+/// compositors call this so their labels cannot drift apart.
+pub(crate) fn expose_label_origin(
+    thumb_x: f32,
+    thumb_y: f32,
+    thumb_w: f32,
+    text_w: f32,
+) -> Option<(f32, f32)> {
+    let finite =
+        thumb_x.is_finite() && thumb_y.is_finite() && thumb_w.is_finite() && text_w.is_finite();
+    if !finite {
+        return None;
+    }
+    if text_w > thumb_w {
+        return None;
+    }
+    Some((
+        thumb_x + (thumb_w - text_w) * 0.5,
+        thumb_y + EXPOSE_LABEL_TOP_INSET,
+    ))
+}
+
 /// Compute Expose/Mission Control targets for a set of window rectangles.
+///
+/// Takes the windows by value so each entry can own its title without a
+/// second allocation per window.
 pub fn build_expose_entries<Id: Copy>(
     screen_w: f32,
     screen_h: f32,
     gap: f32,
-    windows: &[(Id, i32, i32, u32, u32)],
+    windows: Vec<(Id, i32, i32, u32, u32, String)>,
 ) -> Vec<ExposeEntry<Id>> {
     let n = windows.len();
     if n == 0 {
@@ -121,9 +161,9 @@ pub fn build_expose_entries<Id: Copy>(
     let cell_h = ((screen_h - gap * (rows as f32 + 1.0)) / rows as f32).max(1.0);
 
     windows
-        .iter()
+        .into_iter()
         .enumerate()
-        .map(|(i, &(id, x, y, w, h))| {
+        .map(|(i, (id, x, y, w, h, title))| {
             let col = i as u32 % cols;
             let row = i as u32 / cols;
 
@@ -142,6 +182,7 @@ pub fn build_expose_entries<Id: Copy>(
 
             ExposeEntry {
                 id,
+                title,
                 orig_x: x as f32,
                 orig_y: y as f32,
                 orig_w: w as f32,
@@ -259,11 +300,15 @@ mod tests {
 
     #[test]
     fn expose_layout_preserves_aspect_and_count() {
-        let windows = vec![(1u32, 10, 20, 800, 400), (2, 50, 60, 300, 600)];
-        let entries = build_expose_entries(1920.0, 1080.0, 20.0, &windows);
+        let windows = vec![
+            (1u32, 10, 20, 800, 400, "one".to_string()),
+            (2, 50, 60, 300, 600, "two".to_string()),
+        ];
+        let entries = build_expose_entries(1920.0, 1080.0, 20.0, windows);
 
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].id, 1);
+        assert_eq!(entries[0].title, "one");
         assert_eq!(entries[0].orig_x, 10.0);
         assert_eq!(entries[0].orig_y, 20.0);
         assert!(entries[0].target_w > entries[0].target_h);
@@ -272,16 +317,17 @@ mod tests {
 
     #[test]
     fn expose_layout_is_id_type_agnostic() {
-        let windows = vec![(u64::MAX, 0, 0, 640, 480)];
-        let entries = build_expose_entries(1920.0, 1080.0, 20.0, &windows);
+        let windows = vec![(u64::MAX, 0, 0, 640, 480, String::new())];
+        let entries = build_expose_entries(1920.0, 1080.0, 20.0, windows);
         assert_eq!(entries[0].id, u64::MAX);
+        assert_eq!(entries[0].title, "");
     }
 
     #[test]
     fn expose_layout_clamps_extreme_gap_before_cells_can_invert() {
-        let windows = vec![(1u32, 0, 0, 640, 480)];
+        let windows = vec![(1u32, 0, 0, 640, 480, "t".to_string())];
         for gap in [512.0, f32::INFINITY, f32::NAN, -20.0] {
-            let entries = build_expose_entries(1280.0, 720.0, gap, &windows);
+            let entries = build_expose_entries(1280.0, 720.0, gap, windows.clone());
             let entry = &entries[0];
             assert!(entry.target_x.is_finite() && entry.target_y.is_finite());
             assert!(entry.target_w.is_finite() && entry.target_w >= 1.0);
@@ -290,6 +336,29 @@ mod tests {
             assert!(entry.target_x + entry.target_w <= 1280.0);
             assert!(entry.target_y + entry.target_h <= 720.0);
         }
+    }
+
+    #[test]
+    fn expose_label_origin_centres_and_insets_inside_the_top_edge() {
+        let (x, y) = expose_label_origin(100.0, 40.0, 300.0, 120.0).expect("label fits");
+        assert_eq!(x, 100.0 + (300.0 - 120.0) * 0.5);
+        assert_eq!(y, 40.0 + EXPOSE_LABEL_TOP_INSET);
+    }
+
+    #[test]
+    fn expose_label_origin_waits_for_cells_still_narrower_than_the_label() {
+        // The texture is fitted to the settled cell width, so a cell that is
+        // still flying in (or a thumbnail too narrow to carry text) draws no
+        // label rather than letting it spill over the neighbours.
+        assert_eq!(expose_label_origin(0.0, 0.0, 60.0, 61.0), None);
+        assert!(expose_label_origin(0.0, 0.0, 61.0, 60.0).is_some());
+    }
+
+    #[test]
+    fn expose_label_origin_rejects_non_finite_geometry() {
+        assert_eq!(expose_label_origin(f32::NAN, 0.0, 100.0, 50.0), None);
+        assert_eq!(expose_label_origin(0.0, 0.0, f32::INFINITY, 50.0), None);
+        assert_eq!(expose_label_origin(0.0, 0.0, 100.0, f32::NAN), None);
     }
 
     #[test]
@@ -405,9 +474,10 @@ mod tests {
         ] {
             // Identical windows keep every cell of a row/column at the same
             // target coordinate, so the grid shape is readable off the targets.
-            let windows: Vec<(u32, i32, i32, u32, u32)> =
-                (0..n).map(|i| (i as u32, 0, 0, 100, 100)).collect();
-            let entries = build_expose_entries(screen_w, screen_h, 20.0, &windows);
+            let windows: Vec<(u32, i32, i32, u32, u32, String)> = (0..n)
+                .map(|i| (i as u32, 0, 0, 100, 100, String::new()))
+                .collect();
+            let entries = build_expose_entries(screen_w, screen_h, 20.0, windows);
             let cols = expose_grid_cols(n, screen_w, screen_h);
 
             let first_row = entries
@@ -432,8 +502,8 @@ mod tests {
 
     #[test]
     fn expose_tick_moves_towards_target_and_fades_in() {
-        let windows = vec![(1u32, 0, 0, 800, 400)];
-        let mut entries = build_expose_entries(1920.0, 1080.0, 20.0, &windows);
+        let windows = vec![(1u32, 0, 0, 800, 400, "t".to_string())];
+        let mut entries = build_expose_entries(1920.0, 1080.0, 20.0, windows);
         let mut opacity = 0.0;
 
         let result = tick_expose_entries(&mut entries, true, &mut opacity, 1.0 / 60.0);
@@ -448,6 +518,7 @@ mod tests {
     fn expose_tick_requests_clear_after_fade_out_finishes() {
         let mut entries = vec![ExposeEntry {
             id: 1u32,
+            title: String::new(),
             orig_x: 0.0,
             orig_y: 0.0,
             orig_w: 100.0,
@@ -475,6 +546,7 @@ mod tests {
         // Entry still far from its origin: slow fade while windows fly back.
         let mut moving = vec![ExposeEntry {
             id: 7u32,
+            title: "seven".to_string(),
             orig_x: 0.0,
             orig_y: 0.0,
             orig_w: 100.0,
@@ -494,6 +566,7 @@ mod tests {
 
         let mut settled = vec![ExposeEntry {
             id: 7u32,
+            title: "seven".to_string(),
             orig_x: 0.0,
             orig_y: 0.0,
             orig_w: 100.0,

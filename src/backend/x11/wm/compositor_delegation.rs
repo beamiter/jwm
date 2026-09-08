@@ -731,16 +731,16 @@ macro_rules! delegate_compositor_capabilities {
             fn compositor_set_expose_mode(
                 &mut self,
                 active: bool,
-                windows: Vec<(crate::backend::common_define::WindowId, i32, i32, u32, u32)>,
+                windows: Vec<(crate::backend::common_define::WindowId, i32, i32, u32, u32, String)>,
             ) {
                 if let Some(compositor) = self.compositor.as_mut() {
                     let windows = windows
-                        .iter()
-                        .filter_map(|(window, x, y, width, height)| {
+                        .into_iter()
+                        .filter_map(|(window, x, y, width, height, title)| {
                             self.ids
-                                .x11(*window)
+                                .x11(window)
                                 .ok()
-                                .map(|x11_window| (x11_window, *x, *y, *width, *height))
+                                .map(|x11_window| (x11_window, x, y, width, height, title))
                         })
                         .collect();
                     compositor.set_expose_mode(active, windows);

@@ -3979,8 +3979,10 @@ impl WaylandCompositor {
         } else {
             // The overlay is gone: `set_system_ui(None)` runs without a GL
             // context, so the labels it baked are freed on the first frame
-            // that has one.
+            // that has one. The wallpaper picker's side-preview texture
+            // follows the same rule.
             unsafe { self.clear_tags_grid_labels(gl) };
+            unsafe { self.clear_system_ui_preview(gl) };
         }
 
         // =================================================================
@@ -5454,6 +5456,18 @@ impl WaylandCompositor {
         self.tags_grid_labels_key.forget();
     }
 
+    /// Delete the wallpaper picker's side-preview texture, if one is
+    /// uploaded. Requires a current GL context; every caller runs inside the
+    /// render pass, which is where the texture's lifetime is tied to the
+    /// payload that requested it.
+    pub(crate) unsafe fn clear_system_ui_preview(&mut self, gl: &ffi::Gles2) {
+        if let Some((_, texture, _, _)) = self.system_ui_preview.take()
+            && texture != 0
+        {
+            unsafe { gl.DeleteTextures(1, &texture) };
+        }
+    }
+
     /// The on-screen tag's live cell content: every window's texture scaled
     /// into the rectangle its wireframe would occupy — the identical
     /// [`crate::backend::compositor_common::layout_strip::window_rect`]
@@ -5547,6 +5561,77 @@ impl WaylandCompositor {
         }
     }
 
+    /// The wallpaper picker's side preview: the highlighted candidate's
+    /// thumbnail on a panel-tinted card to the right of the list, vertically
+    /// centered on it. Purely additive — the list card's geometry and hit
+    /// regions are computed before and independent of this — so the picker
+    /// looks and clicks exactly as without it until a texture lands (and
+    /// forever, for a candidate that does not decode). Returns the painted
+    /// frame so the caller can register it as a hit-test dead zone; `None`
+    /// means nothing was drawn and nothing is protected.
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn render_system_ui_side_preview(
+        &self,
+        gl: &ffi::Gles2,
+        projection: &[f32; 16],
+        overlay: &crate::backend::api::SystemUiOverlay,
+        viewport: [f32; 4],
+        card: [f32; 4],
+        content_a: f32,
+        ui: &UiPalette,
+    ) -> Option<panel::Rect> {
+        let (tex, img_w, img_h) = match (&self.system_ui_preview, &overlay.side_preview) {
+            (Some((path, tex, w, h)), Some(want)) if path == want => (*tex, *w, *h),
+            _ => return None,
+        };
+        let frame = panel::side_preview_frame(card, viewport)?;
+        let [ix, iy, iw, ih] = panel::letterbox(frame, img_w as f32, img_h as f32)?;
+        unsafe {
+            // The backing is a small panel-surface card; under a glass theme
+            // it frosts from the same backdrop the list card samples.
+            self.ui_fill_island(
+                gl,
+                projection,
+                ui,
+                frame[0],
+                frame[1],
+                frame[2],
+                frame[3],
+                panel::PREVIEW_RADIUS,
+                panel::PREVIEW_RADIUS,
+                ui.panel,
+                content_a,
+            );
+            // The image through the ordinary window program, whose radius
+            // uniform rounds it like any other drawn texture. Its uniforms
+            // are sticky, so every one the pass cares about is written here.
+            gl.UseProgram(self.program);
+            self.set_projection_uniform(gl, self.win_uniforms.projection, projection);
+            gl.Uniform1i(self.win_uniforms.texture, 0);
+            gl.Uniform4f(self.win_uniforms.uv_rect, 0.0, 0.0, 1.0, 1.0);
+            gl.Uniform1f(self.win_uniforms.desat, 0.0);
+            gl.Uniform1f(self.win_uniforms.ripple_progress, -1.0);
+            gl.Uniform1f(self.win_uniforms.ripple_amplitude, 0.0);
+            gl.Uniform1f(self.win_uniforms.dim, 1.0);
+            gl.Uniform1f(self.win_uniforms.opacity, content_a);
+            gl.Uniform1f(self.win_uniforms.radius, panel::PREVIEW_RADIUS);
+            gl.Uniform2f(self.win_uniforms.size, iw, ih);
+            self.set_rect_uniform(gl, self.win_uniforms.rect, ix, iy, iw, ih);
+            // A decoded sRGB image on the display-encoded overlay target: no
+            // color transform, no scene-linear decode — the state the card's
+            // own overlay passes use.
+            self.upload_window_color_transform(gl, None, false);
+            gl.ActiveTexture(ffi::TEXTURE0);
+            self.bind_window_texture(gl, tex);
+            gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+            self.reset_window_color_transform(gl);
+            // Back to the border program the card's fills draw with.
+            gl.UseProgram(self.border_program);
+            self.set_projection_uniform(gl, self.border_uniforms.projection, projection);
+        }
+        Some(frame)
+    }
+
     /// Modal system UI drawn as a material-style card: dimmed scrim, drop
     /// shadow, rounded panel with a gradient accent ring, a search-field bar,
     /// and a selection pill under the highlighted list row.
@@ -5555,6 +5640,17 @@ impl WaylandCompositor {
             return;
         };
         self.system_ui_hit_geometry = None;
+        // The preview texture outlives its request by at most a frame:
+        // `set_system_ui` tracks the payload's path without a GL context, so
+        // the first frame that has one deletes whatever no longer matches —
+        // a moved highlight, a panel without the field, any of them.
+        if self
+            .system_ui_preview
+            .as_ref()
+            .is_some_and(|(path, ..)| Some(path.as_str()) != overlay.side_preview.as_deref())
+        {
+            unsafe { self.clear_system_ui_preview(gl) };
+        }
         unsafe { self.update_system_ui_textures(gl, &overlay) };
         let viewport = overlay.effective_viewport(self.screen_w as i32, self.screen_h as i32);
         if let Some(strip) = &overlay.filmstrip {
@@ -5747,11 +5843,23 @@ impl WaylandCompositor {
                     )
                     .selection
                 });
-            self.system_ui_hit_geometry = Some(panel::HitGeometry::new(
+            // The wallpaper picker's side preview: purely additive, off the
+            // card's right edge. Its painted frame registers as a dead zone
+            // so a press there is swallowed like one on the card's body
+            // rather than dismissing the panel like a scrim click.
+            let preview_frame = self.render_system_ui_side_preview(
+                gl,
+                projection,
+                &overlay,
+                viewport,
                 [x, y, panel_w, panel_h],
-                &layout,
-                overlay.items.len(),
-            ));
+                content_a,
+                ui,
+            );
+            self.system_ui_hit_geometry = Some(
+                panel::HitGeometry::new([x, y, panel_w, panel_h], &layout, overlay.items.len())
+                    .with_side_preview(preview_frame),
+            );
 
             if let Some([fx, fy, fw, fh]) = layout.query_field {
                 self.sysui_fill_rounded(

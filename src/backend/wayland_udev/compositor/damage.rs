@@ -366,6 +366,10 @@ impl WaylandCompositor {
         if !self.pending_monitor_wallpapers.is_empty() {
             return true;
         }
+        // A pending side-preview decode (wallpaper picker) polls the same way.
+        if self.pending_system_ui_preview.is_some() {
+            return true;
+        }
         false
     }
 

@@ -3,7 +3,9 @@
 
 #[allow(unused_imports)]
 use super::*;
-use crate::backend::compositor_common::wallpaper::{compute_wallpaper_rect, parse_wallpaper_mode};
+use crate::backend::compositor_common::wallpaper::{
+    PREVIEW_THUMB_EDGE, compute_wallpaper_rect, parse_wallpaper_mode,
+};
 use smithay::backend::renderer::gles::ffi;
 use std::sync::mpsc;
 use std::sync::{Condvar, Mutex, OnceLock};
@@ -177,6 +179,45 @@ impl WaylandCompositor {
         rx
     }
 
+    /// Decode a wallpaper picker's side-preview thumbnail on a background
+    /// thread. Same worker pattern as [`Self::load_wallpaper_async`] — decode
+    /// gate, Lanczos3 downscale, channel back — but bounded to a thumbnail
+    /// and quiet about it: an unreadable candidate is a no-preview, not a
+    /// warning the user cannot act on.
+    pub(crate) fn load_system_ui_preview_async(path: &str) -> mpsc::Receiver<WallpaperImageData> {
+        let (tx, rx) = mpsc::channel();
+        let path = path.to_string();
+        std::thread::spawn(move || {
+            // Bound concurrent decodes; released when this thread exits.
+            let _permit = DecodePermit::acquire();
+            let img = match image::open(&path) {
+                Ok(img) => img,
+                Err(e) => {
+                    log::debug!("[wallpaper] no side preview for '{}': {}", path, e);
+                    return;
+                }
+            };
+            let img = if img.width() > PREVIEW_THUMB_EDGE || img.height() > PREVIEW_THUMB_EDGE {
+                img.resize(
+                    PREVIEW_THUMB_EDGE,
+                    PREVIEW_THUMB_EDGE,
+                    image::imageops::FilterType::Lanczos3,
+                )
+            } else {
+                img
+            };
+            let rgba = img.to_rgba8();
+            let (w, h) = (rgba.width(), rgba.height());
+            let _ = tx.send(WallpaperImageData {
+                rgba: rgba.into_raw(),
+                width: w,
+                height: h,
+                mode: WallpaperMode::Fit,
+            });
+        });
+        rx
+    }
+
     // =========================================================================
     // 2. Upload wallpaper texture via GLES2 FFI
     // =========================================================================
@@ -303,6 +344,41 @@ impl WaylandCompositor {
                 Err(mpsc::TryRecvError::Disconnected) => {
                     // Thread finished without sending (error logged in thread).
                     self.pending_wallpaper = None;
+                }
+            }
+        }
+
+        // --- System-UI side preview (wallpaper picker) ---
+        // A superseded request's receiver was dropped, so only the latest
+        // highlight's decode can land here.
+        if let Some(ref rx) = self.pending_system_ui_preview {
+            match rx.try_recv() {
+                Ok(data) => {
+                    if let Some((tex, w, h)) =
+                        unsafe { Self::upload_wallpaper_texture_gles(gl, &data) }
+                    {
+                        if let Some((_, old, _, _)) = self.system_ui_preview.replace((
+                            self.system_ui_preview_path.clone(),
+                            tex,
+                            w,
+                            h,
+                        )) && old != 0
+                        {
+                            unsafe {
+                                gl.DeleteTextures(1, &old);
+                            }
+                        }
+                    }
+                    self.pending_system_ui_preview = None;
+                    self.needs_render = true;
+                }
+                Err(mpsc::TryRecvError::Empty) => {
+                    // Still loading, keep waiting.
+                }
+                // The worker finished without sending (decode failed, logged
+                // there): no preview, no retry until the highlight moves.
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.pending_system_ui_preview = None;
                 }
             }
         }

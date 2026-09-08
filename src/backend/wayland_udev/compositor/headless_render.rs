@@ -4311,6 +4311,7 @@ fn wayland_tail_overlay_expose_matches_legacy_srgb_scanout() {
         compositor.expose_opacity = 1.0;
         compositor.expose_entries = vec![crate::backend::compositor_common::expose::ExposeEntry {
             id: 7_u64,
+            title: String::new(),
             orig_x: 10.0,
             orig_y: 20.0,
             orig_w: 8.0,
