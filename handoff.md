@@ -4,6 +4,25 @@
 
 ---
 
+## 2026-09-09：UI/UX 十七轮（指示器闭环、锁屏再续、picker 家务、测试隔离修复）
+
+选题 = 十六轮候选清单。两波（wave 1 三路：MIC chip / 锁屏 now-playing / expose 中键关窗；wave 2 三路：OSD settled 收窄 / BT·Wi-Fi forget / 测试隔离），集成补 4 个波边界缺口。
+
+1. **MIC chip（新 backend trait API 全栈）**。`compositor_set_mic_indicator(bool)` 落在 **`CompositorMedia`**（录制家族，非 WorkspaceEffects），**no-op 默认实现**（compositor_push_toast 先例）→ 两嵌套后端空 impl 零改动、测试 mock 零涟漪（「嵌套无面板」成文一致）。chip 设计：红点 + **静态** `MIC` 标签（无 m:ss → 一次光栅 per 状态变化，**零帧泵**——刻意不抄 REC 的秒表）；flat ui.osd 无玻璃。**槽位**：角落空时占 REC 槽（几何逐字节相同），REC 在场时叠其正上方（`CHIP_STACK_GAP`，REC 永不动；render_recording_indicator 返回实际绘制高度供堆叠）；退化矮屏钉顶边。**纪律与 REC 完全同款**：X11 画在 capture_recording_frame 之后；Wayland 画在合并 post-delivery chrome 块（块条件加 texture 臂多撑一帧——toast_retired 问题的 X11 式解法）；`tail_domain` blocker 谓词加 `mic_indicator_active`（副作用记录在案：音频录制期间持有 exact-SRGB 回退路由）；**挡 direct scanout**（全屏独占会埋掉提示）。驱动点唯一：start/stop_audio_recording（实际起来才亮、stop 成败都灭——失败的 join = 捕获线程已终结，顺手扫掉一条「失败会留 mic 开着」的陈旧错误注释）；toggle/IPC/录屏 mic 交接全走这两个函数；**录屏即使采 mic 也只亮 REC**（钉住）。RAW_GPU_OWNER_FIELDS 已登记。生命周期 cleanup 补 clear（集成）。
+2. **锁屏 now-playing 行**。`Locked.now_playing: Option<String>`（与十五轮 auth 槽同手法：内嵌进锁状态，解锁零额外清理）；行语法 = 控制中心媒体行**减去 transport 簇**（`row_text` 共享提取 → 两处永不分叉； paused 形状与控制中心逐字节一致）；行尾追加（clock/date/status/password/caps 全部钉住索引不动，无播放器 = 逐字节等于今天）。新鲜感：`set_media_status` 钩子走 `set_lock_now_playing -> bool`（与 tick_lock_screen_clock 同一纪律——**可见行真变才 sync**：暂停播放器 3s sweep 只花一次比较，播放中 position_label 每秒真变 = 诚实重绘）；**开锁即播种**（集成在 3 个生产 lock() 点补一行，B 的文件集外——否则等下一个 ≤3s sweep）。安全属性零改动；无封面无控制（十五轮按键放行已够）。
+3. **expose 中键关窗**。`plan_close_at` + `grid_index`（被点 cell 解析到**过滤后**网格索引——与 plan_toggle/plan_close 共享同一 `eligible`/`close_grid_entry` 核，双份约定同步实现并为一处）；**浏览器标签语义：点谁关谁**（与高亮可不同）；中键 miss（空白/已死窗）= no-op **不退手势**（新语义，钉住）；其余按钮逐字节不动（十六轮「无指针关窗」的 docs 句子按 intended change 改写）。X11 的 expose_click 命中即拆合成器态——中键命中后同次 dispatch 内立刻重建/退出，中间态零帧渲染（记录在案）。
+4. **OSD settled 臂收窄**（十六轮 toast 机制逐点移植）。OSD 无悬停交互（核实：没有任何 hit-test/click/hover 路径）→ 无 hover 项；`spring_animating` 的目标**从卡片推导**而非存储（toast 的 spring_target 依赖纹理度量，OSD 不需要）；替换 morph 无需排队态项——`show_labeled` 原地换 kind/label，推导目标一变，弹簧自己报 animating。三处臂收窄 + Wayland `next_wakeup` join `osd_boundary`；X11 仍骑 20ms idle cadence（两 envelope 共用政策 pin 改名扩义）；按住音量键 = 输入事件自带帧（钉住）。direct-scanout 阻挡不动。
+5. **BT/Wi-Fi forget**。`d` 键 + 二段确认（BT 关机先例：首按 arm、行变 `← d again to forget`、选移即撤）；BT 仅已配对行可 arm（未配对得状态行拒绝）；执行全走既有异步（`start_device_action(&addr, "remove")` 骑 bluetooth_action 槽；`nmcli connection delete uuid <uuid>`——**按 UUID 删，重名 profile 不会误删**）。**Wi-Fi 列表实载**：无 saved-profile 概念（行只是扫描结果）→ saved-only 约束放进 worker 里查（诚实报错 `no saved profile for <ssid>`）；forget 槽**不能**骑 wifi_connect（它的完成会关 picker 还谎报 joined）→ 进程级 `WIFI_FORGET` 静态槽 + poll_connectivity_job 收养（**记录在案的临时替身**：features 加字段才是正形——follow-up，跨 Jwm 实例共享只在测试里可感，FORGET_SLOT_TESTS mutex 串行）。在飞合并（job_in_flight 守卫）。
+6. **测试隔离修复（十五轮记录在案的坑，本轮关闭）**。机制：**CONFIG 静态初始化器内 `#[cfg(test)] Config::default()`**（非 test 编译原样保留模板生成 + 日志行 + stderr 回退）——漏config的不止 empty_jwm，全 crate ~264 个 `CONFIG.load()` 调用点（`createmon → seed_pertag_from_config` 把宿主 `[[layout.tags]]` 变成测试可见 pertag），闸在静态处一次全覆盖；loader 测试从不走静态（fixture 路径调 load_from_file 等，原样工作）。验证三向：无 XDG 覆盖 / 空 XDG / **敌意 monocle 配置** 全绿同数（3164/0）；doctest + strace 证明生产路径仍真读用户文件。两处 empty_jwm 加指路注释（第三处由集成补）。**从此验证不再需要 XDG_CONFIG_HOME 隔离**。
+
+**集成阶段修掉的本轮缺口（4 个，都是波边界）**：x11 compositor_delegation.rs 与 wayland_udev/backend.rs 的 `CompositorMedia` 各补 `compositor_set_mic_indicator` 转发臂（A 集外；补完顺手删了两个 setter 上已过期的 `#[allow(dead_code)]`）；lifecycle.rs 关停路径补 `compositor_set_mic_indicator(false)`；3 个生产 `SystemUiState::lock()` 点补 `set_lock_now_playing` 播种行（B 集外）；window_tabs.rs 第三处 empty_jwm 补指路注释（F 集外）。
+
+**验证**：fmt / clippy -D warnings（0）/ check --all-targets / no-default + 7 组 profile 全绿；lib **3164 passed / 0 failed**（3108 → +56：A +13、B +7、E +9、C +12、D +15，含集成）；bridge **72/0**（未碰）。**无真机显示会话**。真机优先验证：音频录制 MIC chip 起/灭 + 与 REC 同录堆叠 + **录屏回放确认 MIC 不在画面里**；锁屏 now-playing 首帧即在（开锁即有播放器）、暂停/切歌形状、解锁后无残留；expose 中键点关（含点空白不退）；按住音量键后盯 settled OSD 期间 CPU/GPU 回落、fade-out 准点；BT `d` 二段删配对、Wi-Fi `d` 删/误删保护；全屏独占应用时 MIC chip 是否被正确挡出。
+
+**仍然开着的**（十八轮候选，均有记录在案）：`WIFI_FORGET` 静态槽 → features 字段（正形）；IPC `set_audio_device` 仍同步（刻意留：reply 语义 confirmed）；MicMuteSet 的消费者（Input 行指示器或 IPC 命令）；工具条 appear ease（需合成器侧字段，重发布重启问题）；Wi-Fi Enter(join) 不查 forget 在飞（toggles.rs，记录在案的不对称）；多播放器 MPRIS 抢占切换 UI；剪贴板图片历史（medium-large）；日历点击翻月；X11 `compositor_frame_deadline` 不接 overlay 边界（20ms idle cadence 已覆盖）；README 绑定表残段无表头（pre-existing，docs agent 发现）。**成文勿再提**：sync_window_groups dirty 门控、嵌套后端无面板、toast NotificationClosed(1)、clear-all 指针路径、toast/OSD 进录制画面（改捕获顺序风险高）、X11 视觉特征不扩只做 easing、锁屏 backdrop 瞬间不透明（安全属性）、show_keybindings 原始函数名（cosmetic）。
+
+---
+
 ## 2026-09-09：UI/UX 十六轮（窗口家务、toast 表面、音频补全、面板识别续）
 
 选题 = 十五轮候选清单。两波（wave 1 三路：expose 关窗+工具条 ease / toast 表面 / tab 条 ease；wave 2 两路：音频（mic mute + 录制 toast）/ BT 电量 + 通知中心图标），集成补掉 3 个波边界缺口。
