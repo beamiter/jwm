@@ -75,6 +75,29 @@ division by zero shows nothing rather than `inf`.
 While an answer is showing it replaces the application list, so `Enter` has
 exactly one meaning. Backspacing past the operator brings the list back.
 
+## Command mode
+
+Prefixing the query with `>` runs a command line directly. The list collapses
+to a single COMMAND row naming what will run, and `Enter` — or a click on the
+row — spawns it as argv, never through a shell:
+
+```
+> xterm -e htop
+```
+
+The query is split the way a shell would read it — quotes group, backslash
+escapes — and the program must resolve: a desktop-entry or `PATH` name from
+the catalog, or an executable file path. The launch is recorded in the
+frecency history like any other.
+
+Without the prefix the same recognition applies, but conservatively: typed
+text becomes a command only when its first word is a known executable *and*
+at least one argument follows (`feh --scale-down x.png`), so a multi-word
+application search stays a search. The explicit prefix lifts the two-word
+rule — `> xterm` runs — and is also the only way to start one with an
+absolute path, because a leading `/` means window search: `> /opt/tool/bin/run
+--flag`.
+
 ## Open windows
 
 Once you type something, the list also matches the windows that are already

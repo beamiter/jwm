@@ -139,6 +139,52 @@ monorepo use independent Semantic Versions.
   that X11's existing visual features are eased, not expanded. See
   [docs/expose.md](docs/expose.md).
 
+- The exposé grid closes windows mid-gesture, like the switcher: with the
+  grid up, `Delete` / `BackSpace` closes the *highlighted* cell through the
+  same `close_window` path `killclient` uses, the survivors keep their
+  order with the entry after the closed one sliding under the highlight
+  (the tail clamps), and closing the last cell ends the gesture. A
+  highlight naming a window that already died is a no-op — the WM only
+  knows the live candidate list, where the switcher owns its snapshot and
+  can prune dead rows. Pointer semantics are unchanged. See
+  [docs/expose.md](docs/expose.md).
+
+- Toast cards now attribute their sender: when the sending application is
+  known, a dim line above the title names it — the label ink at 0.72
+  alpha, riding the title's one-line, 80-character sanitation. A card
+  whose sender is unknown keeps its previous geometry pixel for pixel. See
+  [docs/notifications.md](docs/notifications.md).
+
+- `XF86AudioMicMute` toggles the default microphone's mute
+  (`toggle_mic_mute`), riding the same controls worker as the volume keys
+  — an optimistic flip on the event, the worker's read-back correcting —
+  and raises a labeled `Microphone Muted` / `Microphone Unmuted` OSD card
+  with its own icons. The key is deliberately absent from the lock-screen
+  media passthrough: unmuting a microphone while locked is a privacy risk,
+  so the passthrough stays at its ten keysyms. See
+  [docs/media-controls.md](docs/media-controls.md).
+
+- Standalone audio recording (`Alt+Ctrl+M`, or the `start_audio_recording`
+  / `stop_audio_recording` IPC) now mirrors the screen recorder's
+  feedback: a start toast carrying the output path once the recorder is
+  actually running, a stop toast with the path, and failure toasts at
+  critical urgency that break through Do Not Disturb. A persistent
+  on-screen microphone indicator is deliberately out of scope. See
+  [docs/audio-recording.md](docs/audio-recording.md).
+
+- The Bluetooth picker's connected rows now carry the device's charge —
+  `connected · 85%` — read from `org.bluez.Battery1` in the same
+  `GetManagedObjects` sweep as everything else (an append-only payload
+  field, so mixed old/new bridge↔jwm pairs keep working, and out-of-range
+  readings are dropped). Disconnected rows show nothing: a stale charge is
+  noise. See [docs/control-center.md](docs/control-center.md).
+
+- Notification-center rows now resolve the record's app name through the
+  same cached icon resolver the switcher's window rows use. App names are
+  free-form sender strings rather than desktop ids, so a miss is the
+  common case — and a safe one: unresolved rows render text-only exactly
+  as before. See [docs/notifications.md](docs/notifications.md).
+
 ### Changed
 
 - Volume and brightness input no longer blocks the WM on subprocesses.
@@ -204,6 +250,27 @@ monorepo use independent Semantic Versions.
   disappearing mid-dwell drops the chip the same frame. On outputs narrower
   than the chip's 500 px maximum its text budget shrinks, so the chip never
   overflows the right edge. See [docs/window-tabs.md](docs/window-tabs.md).
+
+- The screenshot toolbar's buttons now ease their hover wash in over 120 ms
+  (ease-out quad, gone the frame the hover leaves, full strength on the
+  first frame with animations disabled) instead of flipping on in one
+  frame. Settled states are pixel-identical to before, and the hit geometry
+  is untouched. See [README.md](README.md#the-screenshot-editor).
+
+- A fully settled toast no longer holds the compositor rendering
+  display-rate frames for its whole hold (up to 30 s a card): frames flow
+  only while a card's envelope is actually changing — fade-in, fade-out,
+  dismiss, open spring — with wake-ups scheduled at the envelope
+  boundaries. Hover pause, the fade timings and dismiss behavior are
+  user-visible identical, and the volume/brightness OSD arm is deliberately
+  unchanged this round. See [docs/notifications.md](docs/notifications.md).
+
+- The tab strip now eases in over 120 ms when a group gains its second
+  window — alpha only, a clamped ease-out quad with no overshoot — and a
+  window joining an already-shown strip eases its cell the same way.
+  Disappearing stays instant (nothing in the shell fades out), the first
+  frame is full strength with animations disabled, and hit-testing is
+  untouched. See [docs/window-tabs.md](docs/window-tabs.md).
 
 ### Changed
 

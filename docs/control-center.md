@@ -261,6 +261,15 @@ which matters when a scan returns thirty devices whose "name" is their own MAC
 address. The `bluetoothctl` fallback reports no RSSI at all; those rows sort
 after the ones that were heard and keep the old alphabetical order.
 
+A connected row's trailing column carries the device's charge when BlueZ
+publishes one — `connected · 85%` — read from the `org.bluez.Battery1`
+interface in the same `GetManagedObjects` reply, so it costs no extra round
+trip. The payload field is append-only: an old jwm ignores it, an old bridge
+simply lacks it, and an out-of-range reading is dropped rather than shown.
+Only connected rows carry it — a percentage read while the device was last
+connected is stale noise on a row that says nothing else about now — and the
+`bluetoothctl` fallback never had it.
+
 After a connect or disconnect the list is re-read, so the row shows what
 actually took rather than what was asked — `bluetoothctl` exits 0 even when
 the attempt failed, so the outcome is read out of what it printed.

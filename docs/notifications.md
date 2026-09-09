@@ -26,9 +26,21 @@ Styling matches the modal system UI: an urgency accent stripe, a bright title
 over a dimmer body, and a fade in/out envelope. At most four cards are
 visible; older cards are evicted first.
 
+When the sending application is known the card leads with a dim sender line
+above the title — the label ink at 0.72 alpha, so the attribution reads
+quieter than the message in every theme. The sender rides the title's
+sanitation: one line, control characters stripped, ellipsized at 80
+characters. A card whose sender is unknown draws no line and keeps its
+pre-attribution geometry pixel for pixel.
+
 While any toast is visible the scene keeps compositing (direct scanout and
-KMS color offload resume once the last card fades out). The modal system UI
-draws above toasts, and the lock screen hides them entirely.
+KMS color offload resume once the last card fades out). The frames
+themselves flow only while a card's envelope is actually changing — the
+fade-in, the fade-out, a dismiss, the open spring: a fully settled card
+arms nothing, and the loop wakes at the scheduled envelope boundary to
+start the fade-out on time. Hover pause, the fade timings and dismissal
+are unaffected. The modal system UI draws above toasts, and the lock
+screen hides them entirely.
 
 Cards answer the pointer. Hovering one freezes its countdown — the timer
 resumes from the frozen point when the pointer leaves, so reading a long
@@ -54,7 +66,11 @@ card. A hovered card being replaced stays frozen under the pointer.
 `Alt+F11` (`notification_center`) opens the history as a material card, newest
 first: urgency icon, sending application, summary, body preview, and a compact
 age. Rows Do-Not-Disturb suppressed carry a DND marker, so nothing is lost
-while notifications are muted.
+while notifications are muted. A row may also lead with the sender's icon —
+the record's app name run through the same cached icon resolver the
+switcher's window rows use. App names are free-form sender strings rather
+than desktop ids, so misses are common; they are also safe, leaving the row
+text-only exactly as before.
 
 | Key | Action |
 | --- | --- |
@@ -262,4 +278,8 @@ JWM posts its own toasts for a few state changes:
 
 - configuration reload succeeded (short, normal) or failed (critical, with
   the parse error in the body),
-- screen recording stopped (with the output path).
+- screen recording stopped (with the output path),
+- audio recording started or stopped (both with the output path, once the
+  recorder is actually running), and its failures (critical, so they break
+  through Do Not Disturb) — see
+  [audio recording](audio-recording.md).

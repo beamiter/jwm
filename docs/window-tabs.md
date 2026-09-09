@@ -9,7 +9,12 @@ The strip is drawn only when there is something to choose between — two or
 more visible tiled windows. Floating windows get no cell, a fullscreen
 window (or the fullscreen layout) takes the strip down with the status bar
 while it owns the output, and the strip's pixels are reserved out of the
-work area, so no window ever slides underneath it.
+work area, so no window ever slides underneath it. Appearing eases in over
+120 ms — alpha only, a clamped ease-out quad, so no overshoot — and a
+window joining an already-shown strip eases its cell the same way;
+disappearing stays instant, as everywhere in the shell, and with
+animations disabled the first frame is full strength. The ease is a draw
+multiplier only: geometry and hit-testing never see it.
 
 ## Configuration
 
@@ -73,6 +78,9 @@ clamped.
   that window's cell sits at draw time, and `tooltip_rect` with
   `tooltip_text_budget` keep the chip on the screen — all pure for the
   same reason; the chip's raster is cached per title and freed with the
-  title textures.
+  title textures. The appear ease is shared here too: `TabAppears` holds
+  the fade-in envelopes for a strip that appears and for a cell joining
+  one already shown, consumed as alpha multipliers only, so geometry,
+  hit-testing and both backends stay in agreement.
   Hover state lives in the compositor rather than the window manager, so
   pointer motion never triggers a title-texture rebuild.

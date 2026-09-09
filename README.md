@@ -182,6 +182,7 @@ The default modifier is Alt (`Mod1`). Useful built-in bindings include:
 | Alt+S / Alt+Shift+S | Interactive / immediate desktop screenshot |
 | Alt+Control+R | Interactively choose a source and start/stop screen recording |
 | Alt+Control+Shift+R | Move, resize, or replace the active recording source |
+| XF86AudioMicMute | Toggle the default microphone's mute (labeled OSD confirms) |
 | Alt+Shift+C | Close focused client |
 | Alt+Shift+Left / Alt+Shift+Right | Snap the focused floating window to that half of its monitor |
 | Alt+Shift+Up | Maximize the focused floating window |
@@ -242,7 +243,10 @@ ink swatch, and the four ways out:
 While a text label is open every key is text; `Enter` commits it, `Escape`
 drops it, and switching tools commits it. A control with nothing to do — undo
 with an empty history, thinner at the minimum width — is dimmed rather than
-removed, so the row never reflows under the pointer.
+removed, so the row never reflows under the pointer. Hovering a button eases
+its wash in over 120 ms instead of flipping it on; the leave is still
+instant, settled states are exactly what they were, and the hit geometry is
+unchanged.
 
 The status bars' screenshot pill drives exactly this editor over the control
 socket (the `take_screenshot` IPC command) rather than launching an external

@@ -47,6 +47,22 @@ cards and carries no progress bar.
 Media keys also echo the current track on the OSD immediately, so a keypress
 gives feedback before the player has answered.
 
+## Microphone mute
+
+`XF86AudioMicMute` (`toggle_mic_mute`, bound by default) toggles the default
+microphone's mute against `@DEFAULT_AUDIO_SOURCE@`, through the same
+`wpctl` / `pactl` / `amixer` fallback chain the volume control settles on,
+and rides the same controls worker the volume and brightness keys use: the
+press is an event, the shown state flips optimistically, and the worker's
+read-back corrects it if the toggle did not take. The feedback is a labeled OSD card — `Microphone
+Muted` / `Microphone Unmuted` with fa-microphone(-slash) icons — which,
+unlike the volume card, carries no bar: the flag is the whole story.
+
+Three deliberate absences: the key is *not* in the lock-screen media
+passthrough (unmuting a microphone while locked is a privacy risk, so the
+passthrough stays at its ten keysyms), there is no control-center row
+indicator for it, and there is no IPC command.
+
 ## Which player wins
 
 The bridge ranks every `org.mpris.MediaPlayer2.*` name on the bus: playing

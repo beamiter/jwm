@@ -43,12 +43,24 @@ is a no-op round trip — a safe way to peek at the grid.
 | --- | --- |
 | `Left` / `Right` / `Up` / `Down` | move the highlight through the grid |
 | `Return` / keypad `Enter` | focus the highlighted window and exit |
+| `Delete` / `BackSpace` | close the highlighted window; the grid stays up |
 | `Esc` | exit without changing focus |
 | `Alt+E` | exit without changing focus (the key is a toggle) |
 
 Movement clamps at the grid's edges instead of wrapping, and `Down` from a
 full row into an incomplete bottom row stays put — the highlight only ever
 sits on a real thumbnail, so `Return` never surprises you.
+
+The close goes through the same `close_window` call `killclient` sends —
+the graceful request with its forced fallback — and the grid rebuilds in
+place from the survivors: their order is unchanged, the entry after the
+closed one slides under the highlight, and closing the tail clamps the
+highlight to the new tail. Closing the last cell ends the gesture through
+the same exit `Esc` uses, focusing nothing. A highlight naming a window
+that already died mid-expose is a no-op: the compositor owns the grid, so
+the WM's only knowledge of it is the live candidate list — an honest
+asymmetry with the switcher, which owns its snapshot and can prune dead
+rows. Pointer semantics are unchanged; there is no pointer close.
 
 ## Pointer interaction
 
@@ -71,7 +83,7 @@ a stray keystroke does not leak to a window behind the grid.
 
 ## Where it lives
 
-- `src/jwm/features/expose_plan.rs` — the enter/exit/click/escape
+- `src/jwm/features/expose_plan.rs` — the enter/exit/click/escape/close
   decisions as pure functions, unit-tested without a display.
 - `src/backend/compositor_common/expose.rs` — the grid layout and the
   highlight movement (edge clamping included), shared by both compositors,
