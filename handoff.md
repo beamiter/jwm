@@ -4,6 +4,28 @@
 
 ---
 
+## 2026-09-09：UI/UX 十六轮（窗口家务、toast 表面、音频补全、面板识别续）
+
+选题 = 十五轮候选清单。两波（wave 1 三路：expose 关窗+工具条 ease / toast 表面 / tab 条 ease；wave 2 两路：音频（mic mute + 录制 toast）/ BT 电量 + 通知中心图标），集成补掉 3 个波边界缺口。
+
+1. **expose Delete/BackSpace 关窗**（十三轮 switcher 先例镜像）。`plan_close` 纯函数（与 `plan_toggle` 同一过滤 + sanitize——rebuild 与重进字节一致）；Close/CloseLast/Keep；高亮**条目**而非焦点窗；与 killclient 同一个 `close_window`；`compositor_set_expose_mode(true, survivors)` 原地重建网格（纹理安全路径）；幸存者保序、次旧滑到光标下、尾钳位；关到空 = `apply_expose_action(plan_escape())`；指针语义逐字节不动（无指针关窗：expose 指针路径不区分按钮，记录在案）。**已知不对称（诚实，钉在 ExposeCloseAction::Keep 文档）**：高亮命名已死窗口 = Keep 无操作——WM 只知活候选列表，switcher 拥有自己的快照所以能索引陈旧行。expose 无 modifier-release commit 需守（`on_key_release` 只提 switcher）。
+2. **截图工具条 hover ease**。`hover_ease` 放 **ScreenshotToolbar 模型里**而非合成器字段（两合成器结构体在 mod.rs/init.rs 文件集外——WM 每次发布新模型，重发布 = 重启 cue，与 set_expose_mode 对 expose_hover_ease 的语义同）；派生 PartialEq 改手工（只比 bar/button_size/buttons——在飞的 ease 不能压掉 set_screenshot_toolbar 早退也不能触发重光栅）；wash 消费 settled 态 IEEE 逐字节等同旧值（×1.0 精确）；命中几何不吃 envelope（钉住）；两后端泵臂 + 源契约 pin。**follow-up**：工具条 appear ease 需合成器侧字段（每次 hover 移动都重发布模型会反复重启 appear envelope 做成 stutter——本轮拒做）。
+3. **toast 来源行**（full 版）。`ToastNotification.app`（空 = 未知；未知发送者卡片几何/像素逐字节不变）；发送者行**烘进标题纹理**（`merge_text_bands` 竖拼 + `sender_ink` = label_ink ×0.72）——**设计被文件集逼出来且更优**：X11 ToastTextureSet 在 mod.rs（集外）加不了第三槽 → 无新 GPU 字段、无 RAW_GPU_OWNER_FIELDS 变动、无脏标记变动、两后端不可能分叉。
+4. **settled toast 不再整帧泵**（原：30s hold × 显示帧率，注释标 deliberate——本轮显式决定修）。`needs_frames` = envelope_active ∨ spring ∨ expired-unpruned；`next_envelope_change_at`（hover 暂停 = None 但到达永不停）；三处泵臂收窄（X11 force_render + config needs_render、Wayland has_active_animations）；**X11 无新 deadline 源**——合成会话本就保 20ms idle cadence，边界帧一个 tick 内到达（钉住）；Wayland 走 needs_render + `next_wakeup` join toast_boundary；hover/unhover/dismiss 是指针事件自带帧（钉住）。**OSD 臂刻意不收窄**（hold 2-3s，注释在案）；direct_scanout_block_reason 的 toast 项不动（settled 卡像素仍只在合成 overlay）。用户可见行为零变化。
+5. **tab 条 appear ease**。`TabAppears { bars: Vec<Appear<Rect>>, cells: Vec<Appear<u64>> }`；**strip 键 = bar 的 Rect**（per-monitor 诚实身份：第三窗加入/retitle/焦点翻不重启——钉住；strip 移动则重启——诚实；组索引会被别屏组消失移位、窗口 id 集会被第三窗加入误重启，均否）；cell 键 = 十五轮窗口 id；消失即清（无 fade-out）；`clamp_effect_dt` 50ms 帽防帧隙跳变；alpha-only 三路消费（track/pill/title，几何钉住不动）；**X11 在 set_window_groups 也 advance 一次**（藏在 render 空集门后的 settled envelope 会传给下一个同 Rect strip）——Wayland parity 由集成补（config.rs 一行）。
+6. **mic mute 端到端**。源侧原语共享 sink 工具链（同一 VOLUME_TOOL OnceLock——无工具稳态逐字节一致，peek 无需孪生）；`mic_mute_state`/`mic_set_mute`/`mic_toggle_mute` 各带回读（wpctl/pactl/amixer 三工具 parity）；`ControlDomain::MicMute` + `MicMuteSet/MicMuteToggle`；**`CancelledToggles { volume, mic }`**——`cancelled_seq: Option<u64>` 改按域记账，一个 drain 里两域各消一对不互相强拉 spawn（四个既有 fold pin 按此更新，volume 语义不变）；optimistic flip + decide_feedback 回读纠正；`OsdKind::MicMute(bool)`（f130/f131 < 0xf600）；默认绑定 XF86AudioMicMute（全表无 chord 冲突 + 钉住测试）；func_name 臂补齐（十三轮同缺口不二犯）；`MicMuteSet` 带 `#[allow(dead_code)]`（无人构造——无行指示器无 IPC，刻意）。**刻意不做**：锁屏放行保持 10 keysym（锁屏后 mic UNMUTE 是隐私风险——source-scan pin 扫 input_handler.rs 钉住）；无 Input 行指示器；无 IPC 命令。
+7. **音频录制 toast**（镜像十三轮录屏反馈）。start（实际起来才发、路径正文）/ stop（有活动才发、路径）/ failure（urgency 2 穿 DND）全对齐 urgency 与超时约定；录屏的 mic 交接路径顺带补上传参；IPC start/stop 经集成补丁同享 toast。**无 MIC chip**（REC chip 派生自合成器自己的录制态；音频录制在 WM 侧，chip 需新 backend trait API——十七轮候选）。
+8. **BT 电量**。bridge 同一 GetManagedObjects sweep 解析 `org.bluez.Battery1.Percentage`（零额外出栈）；append-only `battery: Option<u8>`（十四轮 mpris 先例，双向容忍有测试）；>100 丢（RSSI 先例）；**仅 connected 行**带 `· 85%`（断开行的读数是上次连接时的陈旧值 = 噪音）；排序谓词不动；无读数行逐字节不变；wire-schema pin 更新。
+9. **通知中心行图标**。复用十四轮 `launcher::resolve_window_icon`（app 名原样当 class 键，空 instance 腿是记录在案的 no-op）——**xbar_core 零改动**；dismiss 掉行同步掉图标、clear-all 清带（switcher remove_selected 先例）；**已知形状**：app 名是自由文本不是 desktop id，miss 是常态且安全（纯文本行 = 今天的样子），miss 与 hit 同缓存，重建零成本。
+
+**集成阶段修掉的本轮缺口（3 个，都是波边界）**：x11 init.rs 构造字面量补 `tab_appears` 字段（ε 集外）；wayland config.rs 的 `set_window_groups` 补 `tab_appears.advance` parity 行（同 ε）；input_handler.rs `flush_system_ui` 补 `ControlDomain::MicMute` 臂 + ipc_handler.rs 音频录制 IPC 两处补 `backend` 传参（β 集外，E0004/E0061）。
+
+**验证**：fmt / clippy -D warnings（0 警告）/ check --all-targets / no-default + 7 组 profile 全绿；lib **3108 passed / 0 failed**（3045 → +63：α +10、γ +23、ε +10、β +12、ζ +5，含集成）；bridge **72/0**（+2：battery sweep 双向容忍；dbus-daemon 在场，bluez live 测试实跑）。测试数字均以 `XDG_CONFIG_HOME=/tmp/jwm-empty-cfg` 取得（十五轮记录的 empty_jwm 测试隔离缺口仍在）。**中断处置（值得复用）**：wave-1 γ 被 provider 配额打断在工作区半路——先落 ε 的两个集成一行补丁（与 γ 文件集不相交），再 resume 同一 agent（保留其上下文与半路改动），比重新派活省一次考古。**无真机显示会话**。真机优先验证：expose 连 Delete 清网格（含关到空退手势）；工具条 hover 渐入；toast 发送者行（未知发送者逐字节不变）；**idle 桌面放一张 settled toast 盯 CPU/GPU 是否回落**；tab 组成立瞬间的 ease（motion 关 = 首帧即满）；mic mute 键 + OSD + **锁屏后不生效**；音频录制 start/stop/failure toast；BT 耳机 `connected · 85%`；通知中心图标 miss 回退。
+
+**仍然开着的**（十七轮候选，均有探索 sketch 在案）：MIC chip（需新 backend trait API：compositor 看不到 WM 侧音频录制态）；锁屏 now-playing 行（需 locked 时 media-change rebuild hook）；工具条 appear ease（需合成器侧字段，重发布重启问题见上）；OSD settled 臂收窄（toast 机制可搬）；IPC `set_audio_device` 仍同步（刻意留：reply 语义 confirmed 非 queued）；MicMuteSet 的消费者（Input 行指示器或 IPC 命令）；多播放器 MPRIS 抢占切换 UI；剪贴板图片历史（medium-large）；BT/Wi-Fi forget（armed-confirm 先例）；日历点击翻月；expose 指针关窗（按钮无区分）；测试隔离（empty_jwm 读真实用户配置——十五轮记录在案，应 XDG 隔离或配置注入）；X11 `compositor_frame_deadline` 不接 toast 边界（x11rb/xcb backend.rs——20ms idle cadence 已覆盖，改需两后端新源）。**成文勿再提**：sync_window_groups dirty 门控、嵌套后端无面板、toast NotificationClosed(1)、clear-all 指针路径、toast/OSD 进录制画面（改捕获顺序风险高）、X11 视觉特征不扩只做 easing、锁屏 backdrop 瞬间不透明（安全属性）、show_keybindings 原始函数名（cosmetic）。
+
+---
+
 ## 2026-09-09：UI/UX 十五轮（锁屏不失能、会话不冻结、十四轮形状收口）
 
 选题 = 十四轮候选清单收口 + 新一轮三 explore 全景盘点（backlog 落点测绘 / 日常流缺口 / 动效与感知性能）。两波（wave 1 三路并行：锁屏包 / 图标替换字形 / expose 标题增亮；wave 2 两路并行：tooltip dwell+chip 钳 / 控制路径不冻结+开关 OSD），集成阶段补掉 1 个波边界缺口。
