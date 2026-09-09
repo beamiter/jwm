@@ -604,8 +604,9 @@ impl AudioDefaults {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ControlCenterSnapshot {
     pub volume: Option<AudioState>,
-    /// The default microphone's mute flag. No control-center row reads it
-    /// yet: it is the confirmed base the mic-mute key's optimistic flip
+    /// The default microphone's mute flag. The control-center Input row
+    /// swaps its icon for the muted microphone while this is `Some(true)`,
+    /// and it is the confirmed base the mic-mute key's optimistic flip
     /// estimates from, adopted from the controls worker's read-backs.
     pub mic_muted: Option<bool>,
     pub brightness: Option<u8>,
@@ -885,11 +886,9 @@ pub(crate) enum ControlRequest {
     /// adjacent twin cancels it (two flips with nothing between are no flip).
     VolumeToggleMute,
     /// Microphone mute as an absolute target. A value like the level sets:
-    /// two queued sets fold to the newest. Nothing constructs it this round
-    /// — the toggle key is the only mic interaction; the control-center
-    /// Input row / IPC follow-up will — but its fold, estimate, and worker
-    /// arms are live code and test-covered.
-    #[allow(dead_code)]
+    /// two queued sets fold to the newest. The IPC `set_mic_mute` command
+    /// constructs it; the toggle key remains the only mic interaction that
+    /// is an event rather than a value.
     MicMuteSet(bool),
     /// The microphone half of [`Self::VolumeToggleMute`]: an event, never
     /// folded into a set, cancelled only by an adjacent twin.

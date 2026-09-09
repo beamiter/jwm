@@ -911,6 +911,15 @@ impl Jwm {
                     {
                         log::debug!("control center media: {error}");
                     }
+                    // `p` hands the row — and the transport keys with it — to
+                    // the next player the bridge reported; the re-published
+                    // state rebuilds this row and raises the media OSD. With
+                    // one player (or none) there is nothing to switch to.
+                    if keysym == keys::KEY_p
+                        && let Err(error) = self.cycle_media_player()
+                    {
+                        log::debug!("control center media: {error}");
+                    }
                 }
                 ControlKind::Volume => {
                     if let Some(delta) = slider_delta {
@@ -1437,7 +1446,7 @@ impl Jwm {
         // Coalesce the way leaning on `r` does: while a delete — or a join —
         // is still being applied, another press is a no-op rather than a
         // second racing nmcli write.
-        if connectivity::wifi_forget_in_flight()
+        if connectivity::job_in_flight(self.features.wifi_forget.as_ref())
             || connectivity::job_in_flight(self.features.wifi_connect.as_ref())
         {
             return;
@@ -1454,7 +1463,7 @@ impl Jwm {
                     connectivity::display_ssid(&ssid)
                 ));
                 let job = connectivity::start_forget_profile(&ssid);
-                connectivity::track_wifi_forget(self.track_background_job(job));
+                self.features.wifi_forget = Some(self.track_background_job(job));
             }
         }
     }
@@ -1665,6 +1674,40 @@ impl Jwm {
                 self.invoke_notification_action(id, &action);
                 self.sync_system_ui(backend);
             }
+            return Ok(());
+        }
+        // The calendar card's rows have no selection to activate; a click
+        // maps onto the grid instead — the pointer counterpart of the
+        // ←/→/t keys. The edge cells the neighboring months would occupy
+        // flip the view to them, today's cell returns to it, and any other
+        // cell keeps being the no-op a click on the card always was.
+        if let Some(view) = self.features.system_ui.calendar_view() {
+            use crate::jwm::features::calendar::CalendarClick;
+            let config = CONFIG.load();
+            let description = config.system_ui_font();
+            let pixel_size = crate::backend::compositor_font::ui_font_pixel_size(description);
+            // One glyph's advance: the texture margins cancel between the
+            // two probes, on the real font and the bitmap fallback alike.
+            let measure = |text: &str| {
+                crate::backend::compositor_font::measure_ui_text_width(
+                    text,
+                    description,
+                    pixel_size,
+                )
+            };
+            let char_width = measure("0000000000000000000000000000")
+                .saturating_sub(measure("000000000000000000000000000"))
+                as f32;
+            let (months, today) = match crate::jwm::features::calendar::click_action(
+                row, text_x, char_width, &view,
+            ) {
+                CalendarClick::PrevMonth => (-1, false),
+                CalendarClick::NextMonth => (1, false),
+                CalendarClick::Today => (0, true),
+                CalendarClick::None => return Ok(()),
+            };
+            self.features.system_ui.shift_calendar(months, 0, today);
+            self.sync_system_ui(backend);
             return Ok(());
         }
         let direct_command_row =
@@ -4472,6 +4515,46 @@ mod tests {
     }
 
     #[test]
+    fn a_click_on_a_leading_edge_cell_flips_the_calendar_a_month_back() {
+        let mut backend = ConfigureReplyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        jwm.features.system_ui = crate::jwm::features::SystemUiState::calendar(
+            chrono::NaiveDate::from_ymd_opt(2026, 7, 27)
+                .and_then(|date| date.and_hms_opt(15, 42, 0))
+                .expect("valid test time"),
+        );
+
+        // July 2026 opens on a Wednesday: the first week row (overlay row 3)
+        // leads with two blank cells where June's tail days would sit. A
+        // press 20 px into the row lands on one of them for any glyph
+        // advance the font can plausibly have (both cells flip back, so the
+        // exact one does not matter).
+        jwm.activate_system_ui_pointer_row(&mut backend, 3, 20.0)
+            .unwrap();
+        let view = jwm
+            .features
+            .system_ui
+            .calendar_view()
+            .expect("still the calendar");
+        assert_eq!((view.year, view.month), (2026, 6));
+        assert_eq!(
+            jwm.features.system_ui.overlay_parts().title,
+            "\u{f073}  June 2026"
+        );
+
+        // June 2026 opens on a Monday: the same press now lands on the 1st,
+        // a real day — the click goes back to being the card's no-op.
+        jwm.activate_system_ui_pointer_row(&mut backend, 3, 20.0)
+            .unwrap();
+        let view = jwm
+            .features
+            .system_ui
+            .calendar_view()
+            .expect("still the calendar");
+        assert_eq!((view.year, view.month), (2026, 6));
+    }
+
+    #[test]
     fn closing_the_last_switcher_row_ends_the_gesture() {
         use crate::backend::common_define::{Mods, keys};
 
@@ -5004,8 +5087,13 @@ mod tests {
             .split_once("fn handle_bluetooth_picker_key")
             .expect("forget_selected_wifi is no longer followed by handle_bluetooth_picker_key")
             .0;
-        for helper in ["start_forget_profile", "track_wifi_forget"] {
-            let needle = format!("connectivity::{}(", helper);
+        for needle in [
+            format!("connectivity::{}(", "start_forget_profile"),
+            format!(
+                "self.features.{} = Some(self.track_background_job(job))",
+                "wifi_forget"
+            ),
+        ] {
             assert!(
                 wifi_forget.contains(&needle),
                 "the Wi-Fi forget no longer queues the worker ({needle})"
@@ -5036,63 +5124,46 @@ mod tests {
     /// picker's status line says so, success and failure alike. The fake
     /// jobs' closures are pure — no nmcli — so only the adoption path is
     /// under test; the delete itself is pinned by source scan above.
-    ///
-    /// The slot is process-wide (see `WIFI_FORGET` in connectivity.rs) and
-    /// every test handler's tick polls it, so a concurrent test can take a
-    /// job this test parked — the thief's adoption is inert (no Wi-Fi panel
-    /// open, nothing marked dirty). Rather than serialize half the suite
-    /// against the slot, this test parks afresh and polls again until one
-    /// adoption lands on *this* handler.
     #[test]
     fn a_finished_wifi_forget_lands_on_the_picker_status_line() {
         use crate::jwm::features::connectivity;
 
-        fn adopt_until(
-            jwm: &mut Jwm,
-            park: impl Fn() -> connectivity::BackgroundJob<Result<String, String>>,
-            wanted: &str,
-        ) -> bool {
-            for _ in 0..400 {
-                // An empty slot means the last park was adopted — by this
-                // handler, or stolen by a concurrent test's tick.
-                if !connectivity::wifi_forget_in_flight() {
-                    connectivity::track_wifi_forget(park());
-                }
-                jwm.poll_connectivity_job();
-                let parts = jwm.features.system_ui.overlay_parts();
-                if parts.items.iter().any(|row| row.contains(wanted)) {
-                    return true;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(5));
-            }
-            false
-        }
-
-        let _serial = connectivity::FORGET_SLOT_TESTS
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut backend = ConfigureReplyBackend::new();
         let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
         jwm.features.system_ui = crate::jwm::features::SystemUiState::wifi_picker("");
 
+        // Park the fake delete in this handler's own slot and adopt it with
+        // one poll. The notifier's wake never precedes publication, so once
+        // it fires the outcome is there for the poll to take.
+        let adopt = |jwm: &mut Jwm, outcome: Result<String, String>| {
+            let notifier = crate::backend::update_notifier::AsyncUpdateNotifier::new().unwrap();
+            let job = connectivity::BackgroundJob::spawn(move || outcome)
+                .with_notifier(Some(notifier.clone()));
+            jwm.features.wifi_forget = Some(job);
+            for _ in 0..200 {
+                if notifier.drain().expect("notifier drain") > 0 {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            jwm.poll_connectivity_job();
+        };
+
+        adopt(&mut jwm, Ok("TestNet".to_string()));
+        let parts = jwm.features.system_ui.overlay_parts();
         assert!(
-            adopt_until(
-                &mut jwm,
-                || connectivity::BackgroundJob::spawn(|| Ok::<String, String>("TestNet".into())),
-                "Forgot TestNet"
-            ),
+            parts.items.iter().any(|row| row.contains("Forgot TestNet")),
             "the finished forget never reached the picker's status line"
         );
         // The honest error surface is the same line: a delete that found no
         // profile says so rather than vanishing.
+        adopt(&mut jwm, Err("no saved profile for Ghost".to_string()));
+        let parts = jwm.features.system_ui.overlay_parts();
         assert!(
-            adopt_until(
-                &mut jwm,
-                || connectivity::BackgroundJob::spawn(|| Err::<String, String>(
-                    "no saved profile for Ghost".into()
-                )),
-                "no saved profile for Ghost"
-            ),
+            parts
+                .items
+                .iter()
+                .any(|row| row.contains("no saved profile for Ghost")),
             "the failed forget never reached the status line"
         );
     }

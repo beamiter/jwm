@@ -163,6 +163,12 @@ pub struct FeatureStates {
     pub wifi_scan: Option<connectivity::BackgroundJob<Vec<WifiNetwork>>>,
     /// Connection attempt running for an open Wi-Fi picker, if any.
     pub wifi_connect: Option<connectivity::BackgroundJob<Result<String, String>>>,
+    /// Profile delete running from the Wi-Fi picker, if any. A delete is not
+    /// a join — no picker close, no join log — so it cannot ride
+    /// `wifi_connect`; the frame tick's connectivity poll adopts the outcome
+    /// instead. The slot deliberately survives closing the picker: the
+    /// completion re-read still lands the truth on the control-center row.
+    pub wifi_forget: Option<connectivity::BackgroundJob<Result<String, String>>>,
     /// Device list being read for an open Bluetooth picker, if any.
     pub bluetooth_scan: Option<connectivity::BackgroundJob<Vec<BluetoothDevice>>>,
     /// Connect/disconnect running for an open Bluetooth picker, if any.

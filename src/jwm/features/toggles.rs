@@ -464,8 +464,9 @@ impl Jwm {
                         .and_then(|snapshot| snapshot.mic_muted);
                     if current != Some(muted) {
                         self.cache_control_mic_mute(muted);
-                        // No control-center row reads the microphone flag
-                        // yet, so the adopt does not flag the panel.
+                        // The control-center Input row reads the flag, so a
+                        // move repaints an open panel like any other row's.
+                        panel_changed = true;
                     }
                 }
                 FeedbackAction::Revert(previous) => {
@@ -476,6 +477,7 @@ impl Jwm {
                         .and_then(|snapshot| snapshot.mic_muted);
                     if current != previous {
                         self.mutate_control_snapshot(|snapshot| snapshot.mic_muted = previous);
+                        panel_changed = true;
                     }
                     log::debug!("[controls] mic mute change did not take; estimate reverted");
                 }
@@ -565,7 +567,7 @@ impl Jwm {
     /// The mic counterpart of [`Self::show_volume_osd`]: the card is the
     /// labeled toggle kind — a microphone has no bar, so the percent slot
     /// carries 0 and only the flag matters.
-    fn show_mic_osd(&mut self, backend: &mut dyn Backend, muted: bool) {
+    pub(crate) fn show_mic_osd(&mut self, backend: &mut dyn Backend, muted: bool) {
         self.features.control_feedback.note_osd_shown(
             crate::jwm::features::system_controls::ControlDomain::MicMute,
             0,
@@ -632,6 +634,7 @@ impl Jwm {
             .and_then(|snapshot| snapshot.volume)
             .map(|state| (state.percent, state.muted));
         let brightness = controls.and_then(|snapshot| snapshot.brightness);
+        let mic_muted = controls.and_then(|snapshot| snapshot.mic_muted);
         let audio_defaults = controls.map(|snapshot| &snapshot.audio_defaults);
         let profiles = controls.and_then(|snapshot| snapshot.power_profiles.as_ref());
         let cfg = CONFIG.load();
@@ -654,6 +657,7 @@ impl Jwm {
                 audio_input: audio_defaults.and_then(|defaults| {
                     defaults.name(crate::jwm::features::system_controls::AudioDirection::Input)
                 }),
+                mic_muted,
                 battery: self.features.battery.as_ref(),
                 resources: behavior.resource_rows.then_some(&self.features.resources),
                 network: self.features.connectivity.network.as_ref(),
@@ -1771,6 +1775,12 @@ impl Jwm {
         let Some((ssid, secured)) = self.features.system_ui.selected_wifi() else {
             return;
         };
+        // A forget in flight owns the air: joining now would race the delete
+        // and its completion re-read. `forget_selected_wifi` guards both
+        // directions; this arm is the recorded asymmetry's other half.
+        if connectivity::job_in_flight(self.features.wifi_forget.as_ref()) {
+            return;
+        }
         let mut passphrase = self.features.system_ui.take_wifi_passphrase();
 
         // `plan_connect` only needs to know whether the network is secured.
@@ -4083,6 +4093,40 @@ mod shell_entry_tests {
         );
     }
 
+    /// Enter(join) must not race a forget that is still deleting the profile:
+    /// the join would spawn against a half-deleted connection and the forget's
+    /// completion re-read would then report a world the join already changed.
+    /// `forget_selected_wifi` guards both slots; this arm is the other
+    /// direction of that recorded asymmetry. Runtime-assembled needles over a
+    /// single function body, so this cannot match its own source.
+    #[test]
+    fn the_join_path_yields_to_a_forget_in_flight() {
+        const SOURCE: &str = include_str!("toggles.rs");
+        let join = SOURCE
+            .split_once(&format!("fn {}(", "join_selected_wifi"))
+            .expect("join_selected_wifi")
+            .1
+            .split_once(&format!("fn {}(", "toggle_wifi"))
+            .expect("the function that follows join_selected_wifi")
+            .0;
+        let guard = join
+            .find(&format!(
+                "{}(self.features.{}",
+                "job_in_flight", "wifi_forget"
+            ))
+            .expect("the forget-in-flight guard is still there");
+        let passphrase = join
+            .find(&format!("{}(", "take_wifi_passphrase"))
+            .expect("the passphrase take is still there");
+        let connect = join
+            .find(&format!("{}(", "start_connect"))
+            .expect("the worker spawn is still there");
+        assert!(
+            guard < passphrase && passphrase < connect,
+            "the forget guard must precede the passphrase take and the worker spawn"
+        );
+    }
+
     #[test]
     fn control_snapshot_refreshes_are_coalesced_and_epoch_guarded() {
         let now = std::time::Instant::now();
@@ -4198,6 +4242,55 @@ mod shell_entry_tests {
                 "the feedback poll regained a blocking tool call: {needle}"
             );
         }
+    }
+
+    /// The control-center Input row reads the mic flag now, so a read-back
+    /// that actually moves it — a confirm that corrects the estimate or a
+    /// revert of a failed change — must flag the panel for repaint, exactly
+    /// like the volume and brightness arms. A read-back that lands on the
+    /// value already shown still flags nothing. The haystack is the mic arm
+    /// of the poll alone, and the needle is assembled at runtime so this
+    /// test cannot match its own source.
+    #[test]
+    fn the_mic_feedback_arms_flag_the_panel_on_a_real_move() {
+        const SOURCE: &str = include_str!("toggles.rs");
+        let poll = SOURCE
+            .split_once("pub(crate) fn poll_control_feedback")
+            .expect("poll_control_feedback")
+            .1
+            .split_once("fn show_volume_osd")
+            .expect("the end of poll_control_feedback")
+            .0;
+        let mic = poll
+            .split_once("if let Some(mic) = report.mic")
+            .expect("the mic arm")
+            .1
+            .split_once("if let Some(audio) = report.audio")
+            .expect("the end of the mic arm")
+            .0;
+        let flag = format!("{} = true", "panel_changed");
+        let adopt = mic
+            .split_once("FeedbackAction::Adopt")
+            .expect("the mic adopt arm")
+            .1
+            .split_once("FeedbackAction::Revert")
+            .expect("the mic revert arm")
+            .0;
+        assert!(
+            adopt.contains(&flag),
+            "a mic adopt that moves the flag no longer repaints an open control center ({flag})"
+        );
+        let revert = mic
+            .split_once("FeedbackAction::Revert")
+            .expect("the mic revert arm")
+            .1
+            .split_once("FeedbackAction::KeepEstimate")
+            .expect("the mic keep arm")
+            .0;
+        assert!(
+            revert.contains(&flag),
+            "a mic revert that restores the flag no longer repaints an open control center ({flag})"
+        );
     }
 
     /// The audio picker's Enter used to run `wpctl set-default` plus a

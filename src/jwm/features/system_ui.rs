@@ -609,6 +609,10 @@ pub struct ControlCenterInputs<'a> {
     /// devices at all. `amixer`-only sessions get no rows.
     pub audio_output: Option<&'a str>,
     pub audio_input: Option<&'a str>,
+    /// The default microphone's mute flag, when it was ever read. The Input
+    /// row swaps its microphone icon for the muted one while `Some(true)`;
+    /// `Some(false)` and `None` draw the row the panel has always drawn.
+    pub mic_muted: Option<bool>,
     pub battery: Option<&'a crate::jwm::features::BatteryState>,
     /// CPU, memory and throughput. Each row appears only when `/proc`
     /// answered for that one.
@@ -1280,6 +1284,7 @@ impl SystemUiState {
             brightness,
             audio_output,
             audio_input,
+            mic_muted,
             battery,
             resources,
             network,
@@ -1355,6 +1360,10 @@ impl SystemUiState {
                         "{}  {name}",
                         match kind {
                             ControlKind::AudioOutput => "\u{f028}  Output      ",
+                            // A muted microphone wears the slashed icon the
+                            // OSD uses; unmuted — and never-read — keep the
+                            // row byte-for-byte what it has always been.
+                            _ if mic_muted == Some(true) => "\u{f131}  Input       ",
                             _ => "\u{f130}  Input       ",
                         }
                     ),
@@ -1462,6 +1471,17 @@ impl SystemUiState {
 
     pub fn is_calendar(&self) -> bool {
         matches!(self, Self::Calendar { .. })
+    }
+
+    /// The calendar card's view while the card is the panel on screen. The
+    /// pointer's click mapper reads it; the keys mutate it through
+    /// [`Self::shift_calendar`].
+    #[must_use]
+    pub fn calendar_view(&self) -> Option<crate::jwm::features::CalendarView> {
+        match self {
+            Self::Calendar { view, .. } => Some(*view),
+            _ => None,
+        }
     }
 
     /// Step the shown month, year, or jump back to today.
@@ -3943,7 +3963,7 @@ impl SystemUiState {
                     items,
                     icons: None,
                     selected: None,
-                    hint: "\u{f060}/\u{f061}  month    \u{f062}/\u{f063}  year    t  today    Esc  close"
+                    hint: "\u{f060}/\u{f061}  month    \u{f062}/\u{f063}  year    t  today    click edge days  month    Esc  close"
                         .into(),
                     scroll: None,
                 }
@@ -4818,6 +4838,38 @@ mod tests {
         let state = SystemUiState::control_center(&ControlCenterInputs::default());
         assert_eq!(state.selected_control(), Some(ControlKind::NightLight));
         assert_eq!(state.overlay_parts().items.len(), 5);
+    }
+
+    /// The Input row is the panel's mic-mute indicator: a muted source swaps
+    /// the microphone icon for the slashed one the OSD shows, while an
+    /// unmuted — or never-read — flag keeps the row byte-for-byte what it
+    /// was before the row learned the flag.
+    #[test]
+    fn the_input_row_wears_the_muted_microphone_icon() {
+        let input_label = |mic_muted: Option<bool>| {
+            let state = SystemUiState::control_center(&ControlCenterInputs {
+                audio_input: Some("Headset Microphone"),
+                mic_muted,
+                ..Default::default()
+            });
+            let SystemUiState::ControlCenter { entries, .. } = state else {
+                panic!("control_center must build the panel");
+            };
+            entries
+                .into_iter()
+                .find(|entry| entry.kind == ControlKind::AudioInput)
+                .expect("a named input device is an Input row")
+                .label
+        };
+
+        let unmuted = input_label(Some(false));
+        assert_eq!(unmuted, "\u{f130}  Input         Headset Microphone");
+        // Never read is byte-identical to unmuted: no flag, no icon change.
+        assert_eq!(input_label(None), unmuted);
+        assert_eq!(
+            input_label(Some(true)),
+            "\u{f131}  Input         Headset Microphone"
+        );
     }
 
     #[test]
@@ -6261,6 +6313,7 @@ mod tests {
             can_go_previous: true,
             position_us: Some(161_000_000),
             length_us: Some(245_000_000),
+            players: Vec::new(),
         };
         let state = SystemUiState::control_center(&ControlCenterInputs {
             media: Some(&media),
@@ -7503,6 +7556,31 @@ mod tests {
     }
 
     #[test]
+    fn the_calendar_hint_advertises_clicking_the_edge_days() {
+        let state = SystemUiState::calendar(lock_test_time());
+        let parts = state.overlay_parts();
+        // The pointer's month-flip sits next to the keyboard's, in the same
+        // "gesture  action" grammar the hint line always used.
+        assert!(
+            parts.hint.contains("click edge days  month"),
+            "{}",
+            parts.hint
+        );
+        assert!(parts.hint.contains("\u{f060}/\u{f061}  month"));
+        assert!(parts.hint.contains("t  today"));
+        assert!(parts.hint.contains("Esc  close"));
+    }
+
+    #[test]
+    fn the_calendar_view_is_exposed_only_while_the_card_is_up() {
+        let state = SystemUiState::calendar(lock_test_time());
+        let view = state.calendar_view().expect("the calendar has a view");
+        assert_eq!((view.year, view.month), (2026, 7));
+        assert!(SystemUiState::Inactive.calendar_view().is_none());
+        assert!(SystemUiState::lock().calendar_view().is_none());
+    }
+
+    #[test]
     fn the_lock_overlay_leads_with_the_clock_and_date() {
         let state = SystemUiState::locked_at(lock_test_time());
         let parts = state.overlay_parts();
@@ -7575,6 +7653,7 @@ mod tests {
             can_go_previous: true,
             position_us: Some(161_000_000),
             length_us: Some(245_000_000),
+            players: Vec::new(),
         }
     }
 

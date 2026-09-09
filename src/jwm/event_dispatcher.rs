@@ -4160,6 +4160,34 @@ mod tests {
         assert!(jwm.secondary_bars[&5].command_notifier.is_none());
     }
 
+    /// The Wi-Fi forget slot is registered with the readiness hub like every
+    /// other background-job slot: until its completion can wake the loop,
+    /// the idle poll fallback must stay.
+    #[test]
+    fn a_parked_wifi_forget_is_registered_with_the_readiness_hub() {
+        let mut jwm = empty_jwm();
+        assert!(jwm.background_job_readiness_is_complete());
+
+        jwm.features.wifi_forget = Some(crate::jwm::features::connectivity::BackgroundJob::spawn(
+            || Ok::<String, String>("done".into()),
+        ));
+        assert!(
+            !jwm.background_job_readiness_is_complete(),
+            "an untracked forget must keep the idle poll fallback"
+        );
+
+        jwm.async_update_notifier =
+            Some(crate::backend::update_notifier::AsyncUpdateNotifier::new().unwrap());
+        let job = crate::jwm::features::connectivity::BackgroundJob::spawn(|| {
+            Ok::<String, String>("done".into())
+        });
+        jwm.features.wifi_forget = Some(jwm.track_background_job(job));
+        assert!(
+            jwm.background_job_readiness_is_complete(),
+            "a tracked forget rides the readiness hub like every other slot"
+        );
+    }
+
     #[test]
     fn orphan_bar_is_retired_before_a_mapping_bar_blocks_creation() {
         let mut jwm = empty_jwm();
@@ -5493,6 +5521,11 @@ impl Jwm {
             && self
                 .features
                 .wifi_connect
+                .as_ref()
+                .is_none_or(BackgroundJob::readiness_is_covered)
+            && self
+                .features
+                .wifi_forget
                 .as_ref()
                 .is_none_or(BackgroundJob::readiness_is_covered)
             && self

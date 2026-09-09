@@ -1287,6 +1287,7 @@ impl<C: CompositorConnection> Compositor<C> {
             screenshot_toolbar: None,
             screenshot_toolbar_icons: Vec::new(),
             screenshot_toolbar_dirty: false,
+            screenshot_toolbar_appear: Default::default(),
             // Phase 6.3: Zoom to fit
             zoom_to_fit_window: None,
             zoom_to_fit_scale: 1.0,

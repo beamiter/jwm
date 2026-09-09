@@ -275,6 +275,7 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "set_hdr_metadata",
         "set_audio_device",
         "set_media_status",
+        "set_mic_mute",
         "set_power_profile",
         "set_recording_region",
         "start_audio_recording",
@@ -1318,6 +1319,12 @@ mod tests {
                 .commands
                 .iter()
                 .any(|name| name == "start_recording")
+        );
+        assert!(
+            capabilities
+                .commands
+                .iter()
+                .any(|name| name == "set_mic_mute")
         );
         assert!(
             capabilities

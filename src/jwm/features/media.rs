@@ -3,8 +3,9 @@
 //! JWM does not speak MPRIS itself — `jwm-bridge` watches the session bus and
 //! pushes the active player's state in over IPC, and JWM broadcasts control
 //! requests back out the same way. This module owns what the shell needs from
-//! that: the last known track, whether it is playing, and the pure formatting
-//! the control-center row and the media OSD render.
+//! that: the last known track, whether it is playing, which players shared
+//! the bus on the last sweep, and the pure formatting the control-center row
+//! and the media OSD render.
 //!
 //! Keeping it pure means the row text, the OSD label, and the
 //! "is this control even available" decisions are unit tested without a bus.
@@ -17,6 +18,9 @@ const MAX_PLAYER_BYTES: usize = 255;
 /// Keep metadata generous for long podcast titles while bounding the state,
 /// OSD label, and status event derived from one bridge message.
 const MAX_METADATA_BYTES: usize = 4 * 1024;
+/// Real sessions see a handful of MPRIS players at once; the cap keeps a
+/// garbage list from an untrusted bridge from lingering in the state.
+const MAX_PLAYERS: usize = 32;
 
 fn bounded_text(value: &str, max_bytes: usize) -> String {
     if value.len() <= max_bytes {
@@ -121,6 +125,11 @@ pub struct MediaState {
     /// `mpris:length` in microseconds. `None` when the track does not say —
     /// streams routinely do not.
     pub length_us: Option<i64>,
+    /// Every MPRIS bus suffix the bridge's last sweep saw, in sweep order,
+    /// this player included — the list the `p` key cycles through. Empty
+    /// when the bridge is too old to send one, which reads exactly like a
+    /// one-player session: no switch hint on the row, nothing for `p` to do.
+    pub players: Vec<String>,
 }
 
 impl MediaState {
@@ -274,9 +283,29 @@ fn row_text(state: &MediaState) -> (String, String) {
     (label, position)
 }
 
+/// The player `p` would hand the row to: the one after `active` in the
+/// bridge's reported list, wrapping back to the first — and the first when
+/// `active` is not in the list at all, a stale read the bridge's next push
+/// repairs. `None` with fewer than two players: there is nothing to switch
+/// to, and the row shows no switch hint then either.
+#[must_use]
+pub fn next_player<'a>(players: &'a [String], active: &str) -> Option<&'a str> {
+    if players.len() < 2 {
+        return None;
+    }
+    let index = players
+        .iter()
+        .position(|player| player == active)
+        .map_or(0, |index| index + 1);
+    Some(players[index % players.len()].as_str())
+}
+
 /// The control-center row: status icon, track, and which transport controls
 /// the player says it supports. When the player reports both a position and
 /// a length, the row carries them as `2:41 / 4:05` after the track label.
+/// With more than one player on the bus the row ends with a `· p ‹next›`
+/// hint naming the player the `p` key would switch to; a one-player row —
+/// or one fed by an old bridge — stays byte-identical to before.
 #[must_use]
 pub fn control_row(state: &MediaState) -> String {
     let previous = if state.can_go_previous {
@@ -290,8 +319,11 @@ pub fn control_row(state: &MediaState) -> String {
         " "
     };
     let (label, position) = row_text(state);
+    let switch = next_player(&state.players, &state.player)
+        .map(|player| format!(" \u{b7} p {player}"))
+        .unwrap_or_default();
     format!(
-        "{}  {label}{position}   {previous} {} {next}",
+        "{}  {label}{position}   {previous} {} {next}{switch}",
         "\u{f001}", // fa-music
         state.status.icon(),
     )
@@ -302,7 +334,9 @@ pub fn control_row(state: &MediaState) -> String {
 /// center already shows — title, artist, position — and never controls (the
 /// transport keys already work while locked; they need no on-screen cluster).
 /// The status icon keeps its trailing place, so a paused player reads paused
-/// exactly as it does in the control center.
+/// exactly as it does in the control center. The control row's `p` switch
+/// hint is a control too: it never appears here, so multi-player state
+/// formats byte-identically to single-player.
 #[must_use]
 pub fn lock_row(state: &MediaState) -> String {
     let (label, position) = row_text(state);
@@ -382,6 +416,29 @@ impl crate::jwm::Jwm {
         Ok(())
     }
 
+    /// Ask the bridge to hand the row — and the transport keys with it — to
+    /// the next player in its reported list. The bridge re-publishes the
+    /// pinned player's state, which rebuilds this row and raises the media
+    /// OSD like any track change. The error is for the caller's log when
+    /// there is nothing to switch to: no player, or only one.
+    pub(crate) fn cycle_media_player(&mut self) -> Result<(), String> {
+        let next = {
+            let state = self
+                .features
+                .media
+                .get()
+                .ok_or("no media player is running")?;
+            next_player(&state.players, &state.player)
+                .ok_or("no other media player is running")?
+                .to_string()
+        };
+        self.broadcast_ipc_event(
+            "media/command",
+            serde_json::json!({ "action": "select_player", "player": next }),
+        );
+        Ok(())
+    }
+
     /// JSON snapshot for the `get_media_status` query.
     pub(crate) fn media_status_json(&self) -> serde_json::Value {
         match self.features.media.get() {
@@ -428,6 +485,22 @@ pub fn parse_state_args(args: &serde_json::Value) -> Option<MediaState> {
     // sends them, and a player that did not report one sends null. Anything
     // that is not an integer — or does not fit one — reads as unreported.
     let micros = |key: &str| args.get(key).and_then(serde_json::Value::as_i64);
+    // The sweep's full player list rides the same push, append-only: an old
+    // bridge never sends it, and anything but a list of names reads as a
+    // one-player session.
+    let players = args
+        .get("players")
+        .and_then(serde_json::Value::as_array)
+        .map(|list| {
+            list.iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|player| !player.is_empty())
+                .take(MAX_PLAYERS)
+                .map(|player| bounded_text(player, MAX_PLAYER_BYTES))
+                .collect()
+        })
+        .unwrap_or_default();
     Some(MediaState {
         player: bounded_text(player, MAX_PLAYER_BYTES),
         identity: text("identity"),
@@ -442,6 +515,7 @@ pub fn parse_state_args(args: &serde_json::Value) -> Option<MediaState> {
         can_go_previous: flag("can_go_previous"),
         position_us: micros("position_us"),
         length_us: micros("length_us"),
+        players,
     })
 }
 
@@ -460,6 +534,7 @@ mod tests {
             can_go_previous: true,
             position_us: None,
             length_us: None,
+            players: Vec::new(),
         }
     }
 
@@ -641,6 +716,97 @@ mod tests {
         assert!(!parsed.can_go_next);
         assert_eq!(parsed.position_us, None, "old bridges send no counters");
         assert_eq!(parsed.length_us, None);
+        assert!(parsed.players.is_empty(), "old bridges send no player list");
+    }
+
+    #[test]
+    fn state_args_parse_the_sweeps_player_list_append_only() {
+        let parsed = parse_state_args(&serde_json::json!({
+            "player": "mpv",
+            "players": ["mpv", "spotify"],
+        }))
+        .expect("player parses");
+        assert_eq!(
+            parsed.players,
+            vec!["mpv".to_string(), "spotify".to_string()]
+        );
+
+        // An empty list reads like a missing key: one-player behavior.
+        let parsed = parse_state_args(&serde_json::json!({
+            "player": "mpv",
+            "players": [],
+        }))
+        .expect("player parses");
+        assert!(parsed.players.is_empty());
+
+        // Entries that are not names are dropped, not trusted, and the
+        // active player is not forced into the list.
+        let parsed = parse_state_args(&serde_json::json!({
+            "player": "mpv",
+            "players": ["mpv", 7, null, "  ", "spotify"],
+        }))
+        .expect("player parses");
+        assert_eq!(
+            parsed.players,
+            vec!["mpv".to_string(), "spotify".to_string()]
+        );
+    }
+
+    #[test]
+    fn the_p_key_cycles_the_reported_players_in_sweep_order() {
+        let players = || {
+            vec![
+                "mpv".to_string(),
+                "spotify".to_string(),
+                "firefox".to_string(),
+            ]
+        };
+        assert_eq!(next_player(&players(), "mpv"), Some("spotify"));
+        assert_eq!(next_player(&players(), "spotify"), Some("firefox"));
+        assert_eq!(
+            next_player(&players(), "firefox"),
+            Some("mpv"),
+            "wraps around"
+        );
+        // A stale active player — the sweep moved on — starts from the first.
+        assert_eq!(next_player(&players(), "gone"), Some("mpv"));
+    }
+
+    #[test]
+    fn the_p_key_has_nothing_to_cycle_with_fewer_than_two_players() {
+        assert_eq!(next_player(&[], "mpv"), None);
+        assert_eq!(next_player(&["mpv".to_string()], "mpv"), None);
+    }
+
+    #[test]
+    fn the_row_advertises_the_p_key_only_with_another_player_to_switch_to() {
+        let mut multi = state("Track", "Artist");
+        multi.players = vec!["spotify".to_string(), "mpv".to_string()];
+        let row = control_row(&multi);
+        assert!(row.contains("\u{b7} p mpv"), "{row}");
+
+        // One player — or an old bridge that sends no list — keeps the row
+        // byte-identical to before switching existed.
+        let mut single = state("Track", "Artist");
+        single.players = vec!["spotify".to_string()];
+        assert_eq!(control_row(&single), control_row(&state("Track", "Artist")));
+        assert!(!control_row(&single).contains('\u{b7}'));
+    }
+
+    #[test]
+    fn the_lock_row_never_grows_the_player_switch_hint() {
+        let mut multi = state("Blue in Green", "Miles Davis");
+        multi.players = vec!["spotify".to_string(), "mpv".to_string()];
+        // Multi-player state formats byte-identically to single-player on
+        // the lock screen: the hint is a control, and the lock shows none.
+        assert_eq!(
+            lock_row(&multi),
+            lock_row(&state("Blue in Green", "Miles Davis"))
+        );
+        assert_eq!(
+            lock_row(&multi),
+            "\u{f001}  Blue in Green \u{2014} Miles Davis   \u{f04b}"
+        );
     }
 
     #[test]
@@ -840,6 +1006,8 @@ mod tests {
         color_allocator: crate::backend::wayland_dummy_ops::DummyColorAllocator,
         overlay_pushes: usize,
         last_overlay: Option<crate::backend::api::SystemUiOverlay>,
+        /// Every media OSD card the WM asked for, in order.
+        media_osd_labels: Vec<String>,
     }
 
     impl SystemUiSpyBackend {
@@ -854,6 +1022,7 @@ mod tests {
                 color_allocator: crate::backend::wayland_dummy_ops::DummyColorAllocator,
                 overlay_pushes: 0,
                 last_overlay: None,
+                media_osd_labels: Vec::new(),
             }
         }
     }
@@ -869,6 +1038,10 @@ mod tests {
         ) {
             self.overlay_pushes += 1;
             self.last_overlay = overlay;
+        }
+
+        fn compositor_show_media_osd(&mut self, label: &str) {
+            self.media_osd_labels.push(label.to_string());
         }
     }
     impl crate::backend::api::CompositorWindowEffects for SystemUiSpyBackend {}
@@ -999,5 +1172,48 @@ mod tests {
         jwm.features.system_ui = crate::jwm::features::SystemUiState::Inactive;
         jwm.set_media_status(&mut backend, Some(playing_at(167)));
         assert_eq!(backend.overlay_pushes, 4);
+    }
+
+    #[test]
+    fn a_player_switch_raises_the_media_osd_like_a_track_change() {
+        let mut backend = SystemUiSpyBackend::new();
+        let mut jwm = crate::Jwm::new_with_runtime_backend(&mut backend, "test").expect("test jwm");
+
+        // The bridge's answer to `select_player` is a re-publish naming the
+        // pinned player: a different player on the push counts as a track
+        // change, so a switch raises the OSD through the existing path.
+        let mut mpv = state("Track", "Artist");
+        mpv.player = "mpv".into();
+        jwm.set_media_status(&mut backend, Some(mpv));
+        jwm.set_media_status(&mut backend, Some(state("Track", "Artist")));
+        assert_eq!(backend.media_osd_labels.len(), 2, "one card per switch");
+        assert!(
+            backend
+                .media_osd_labels
+                .iter()
+                .all(|label| label.contains("Track"))
+        );
+        // Re-pushing the switched-to player is churn, not a switch.
+        jwm.set_media_status(&mut backend, Some(state("Track", "Artist")));
+        assert_eq!(backend.media_osd_labels.len(), 2);
+    }
+
+    #[test]
+    fn cycling_the_player_is_a_no_op_without_another_player() {
+        let mut backend = SystemUiSpyBackend::new();
+        let mut jwm = crate::Jwm::new_with_runtime_backend(&mut backend, "test").expect("test jwm");
+
+        // No player yet, then one player: `p` reports there is nothing to
+        // switch to and nothing is broadcast.
+        assert!(jwm.cycle_media_player().is_err());
+        jwm.set_media_status(&mut backend, Some(state("Track", "Artist")));
+        assert!(jwm.cycle_media_player().is_err());
+
+        // Two players on the bus: the broadcast goes out (to no IPC client
+        // in this test), and the bridge's re-publish is what moves the row.
+        let mut multi = state("Track", "Artist");
+        multi.players = vec!["spotify".to_string(), "mpv".to_string()];
+        jwm.set_media_status(&mut backend, Some(multi));
+        assert!(jwm.cycle_media_player().is_ok());
     }
 }

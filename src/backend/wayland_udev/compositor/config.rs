@@ -1904,12 +1904,23 @@ impl WaylandCompositor {
     }
 
     /// Take the screenshot editor's toolbar, or withdraw it.
+    ///
+    /// The appear ease keys on presence alone: publishing the strip starts
+    /// it fresh and withdrawing clears it, while a republished strip —
+    /// every hover move is one — keeps the ease it has, which is exactly
+    /// why the envelope lives here and not on the model it would restart
+    /// with.
     pub(crate) fn set_screenshot_toolbar(
         &mut self,
         toolbar: Option<crate::backend::compositor_common::screenshot_toolbar::ScreenshotToolbar>,
     ) {
         if self.screenshot_toolbar == toolbar {
             return;
+        }
+        // A presence change is the only thing that resets the ease; the
+        // first drawn frame after this starts the fresh envelope.
+        if self.screenshot_toolbar.is_some() != toolbar.is_some() {
+            self.screenshot_toolbar_appear.clear();
         }
         self.screenshot_toolbar = toolbar;
         self.screenshot_toolbar_dirty = true;

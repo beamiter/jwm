@@ -900,6 +900,13 @@ where
         Option<crate::backend::compositor_common::screenshot_toolbar::ScreenshotToolbar>,
     screenshot_toolbar_icons: Vec<Option<(glow::Texture, u32, u32)>>,
     screenshot_toolbar_dirty: bool,
+    /// The strip's appear envelope, keyed on its presence: publishing the
+    /// toolbar eases it in over the tab strips' 120 ms instead of popping
+    /// at full alpha, withdrawing clears it, and a republished strip —
+    /// every hover move is one — keeps the ease it has, which is exactly
+    /// why it lives here and not on the model. Plain animation state,
+    /// consumed as alpha only: geometry and hit-testing never see it.
+    screenshot_toolbar_appear: crate::backend::compositor_common::screenshot_toolbar::AppearEase,
 
     // --- Phase 6.3: Zoom to fit ---
     zoom_to_fit_window: Option<u32>,

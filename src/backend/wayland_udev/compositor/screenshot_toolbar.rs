@@ -160,6 +160,12 @@ impl WaylandCompositor {
     }
 
     /// Paint the track, the chips, and the glyphs on top.
+    ///
+    /// The whole strip eases in when the editor appears — one blank frame
+    /// after publish, then the tab strips' 120 ms ease-out quad to full —
+    /// through `screenshot_toolbar_appear`, multiplied into every layer as
+    /// alpha. With motion off the first frame is already full and no extra
+    /// frames tick.
     pub(crate) fn render_screenshot_toolbar(&mut self, gl: &ffi::Gles2, projection: &[f32; 16]) {
         // The hover wash eases in on the button under the pointer instead of
         // flipping on in a single frame, and is gone the same frame the hover
@@ -184,6 +190,22 @@ impl WaylandCompositor {
         if bar.buttons.is_empty() {
             return;
         }
+        // The strip as a whole eases in over the tab strips' 120 ms when the
+        // editor appears, presence-keyed so the hover republishes cannot
+        // restart it. It runs on a clock like the wash, so the pump mirrors
+        // it: frames must keep coming while the ease is mid-flight.
+        let appear = self.screenshot_toolbar_appear.advance(
+            std::time::Instant::now(),
+            true,
+            crate::config::CONFIG.load().motion_enabled(),
+        );
+        if self.screenshot_toolbar_appear.animating() {
+            self.needs_render = true;
+        }
+        // The ease opens with one blank frame — the tab strips' shape.
+        if appear <= 0.0 {
+            return;
+        }
         let ui = ui_theme::palette();
         self.ensure_glass_backdrop(gl, ui, projection);
         let accent = self.border_gradient_color_a;
@@ -205,7 +227,7 @@ impl WaylandCompositor {
                 track_radius,
                 track_radius,
                 ui.card,
-                1.0,
+                appear,
             );
 
             for (index, button) in bar.buttons.iter().enumerate() {
@@ -236,7 +258,12 @@ impl WaylandCompositor {
                     w,
                     h,
                     radius,
-                    [ui.chip[0], ui.chip[1], ui.chip[2], ui.chip[3] * wash],
+                    [
+                        ui.chip[0],
+                        ui.chip[1],
+                        ui.chip[2],
+                        ui.chip[3] * wash * appear,
+                    ],
                 );
                 // Both states need the accent, not just the selected one: the
                 // chip tone is a near-white, and the frosted track over a
@@ -253,7 +280,10 @@ impl WaylandCompositor {
                         accent[0],
                         accent[1],
                         accent[2],
-                        ui.selection_alpha * wash * if button.active { 1.0 } else { HOVER_WASH },
+                        ui.selection_alpha
+                            * wash
+                            * appear
+                            * if button.active { 1.0 } else { HOVER_WASH },
                     ],
                 );
             }
@@ -278,7 +308,7 @@ impl WaylandCompositor {
                 } else {
                     0.38
                 };
-                gl.Uniform1f(text_opacity, opacity);
+                gl.Uniform1f(text_opacity, opacity * appear);
                 let (gw, gh) = (*gw as f32, *gh as f32);
                 self.set_rect_uniform(
                     gl,
@@ -367,12 +397,18 @@ unsafe fn upload_overlay_texture(
 mod tests {
     /// The hover wash eases in on a clock, not on an event, so the strip's
     /// render path must keep the frame loop alive while the envelope is in
-    /// flight — an idle screen would otherwise freeze the cue mid-fade. Pin
-    /// the wiring: the ease keys on the model's hovered button (the same
-    /// index the hit test resolves), advances on the frame clock under the
-    /// motion setting, arms `needs_render` exactly while it is animating,
-    /// and scales only the chip's draw strength. The haystack is the shipped
-    /// source; the needles are built at runtime so this test cannot match
+    /// flight — an idle screen would otherwise freeze the cue mid-fade. The
+    /// strip's own appear ease keeps the same discipline, keyed on the
+    /// strip's *presence* rather than its content: the window manager
+    /// republishes the strip on every hover move, and the ease must ride
+    /// through every one of them (the round-16 rejection). Pin the wiring:
+    /// the hover ease keys on the model's hovered button (the same index
+    /// the hit test resolves), the appear ease clears only on a presence
+    /// transition, both advance on the frame clock under the motion setting
+    /// and arm `needs_render` exactly while animating, and the appear ease
+    /// scales every layer's alpha after one blank first frame. The haystack
+    /// is the shipped source (the setter lives in `config.rs` on this
+    /// backend); the needles are built at runtime so this test cannot match
     /// its own. This mirrors the X11 pin of the same name.
     #[test]
     fn the_toolbar_pumps_frames_while_a_hover_wash_is_easing_in() {
@@ -380,8 +416,12 @@ mod tests {
             .chars()
             .filter(|character| !character.is_whitespace())
             .collect();
+        let setter: String = include_str!("config.rs")
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect();
 
-        // The envelope keys on the model's hovered button…
+        // The hover envelope keys on the model's hovered button…
         assert!(compact.contains(concat!("toolbar::hovered", "_key(&stored.buttons)")));
         // …advances on the frame clock under the motion setting…
         assert!(compact.contains(concat!("hover_ease.advance", "_with_motion(")));
@@ -396,14 +436,39 @@ mod tests {
         // decides, and a hover that left skips the chip on the spot.
         assert!(!compact.contains(concat!("button.", "hovered")));
         assert!(compact.contains(concat!("ifwash<=0.0{", "continue;}")));
-        // Both chip fills ride the envelope…
-        assert!(compact.contains(concat!("ui.chip[3]*", "wash")));
+
+        // The appear ease clears only when the strip's presence changes —
+        // never on a republish, or the fade would restart on every hover
+        // move…
+        assert!(setter.contains(concat!(
+            "self.screenshot_toolbar.is_some()!=toolbar.is_some(){",
+            "self.screenshot_toolbar",
+            "_appear.clear();}"
+        )));
+        // …advances on the same frame clock and motion setting…
         assert!(compact.contains(concat!(
-            "ui.selection_alpha*wash*ifbutton.active{1.0}else{HOVER",
+            "self.screenshot_toolbar",
+            "_appear.advance(std::time::Instant::now(),true,"
+        )));
+        // …arms the pump exactly while it is in flight…
+        assert!(compact.contains(concat!(
+            "ifself.screenshot_toolbar",
+            "_appear.animating(){self.needs_render=true;}"
+        )));
+        // …and opens with one blank frame, the tab strips' shape.
+        assert!(compact.contains(concat!("ifappear<=0.0{", "return;}")));
+
+        // Every layer rides the appear envelope as alpha — the track…
+        assert!(compact.contains(concat!("ui.card,", "appear,")));
+        assert!(!compact.contains(concat!("ui.card,", "1.0,")));
+        // …both chip fills, which keep the hover wash beside it…
+        assert!(compact.contains(concat!("ui.chip[3]*wash*", "appear")));
+        assert!(compact.contains(concat!(
+            "ui.selection_alpha*wash*",
+            "appear*ifbutton.active{1.0}else{HOVER",
             "_WASH},"
         )));
-        // …while the track still paints at full alpha: the envelope scales
-        // the cue, never the strip.
-        assert!(compact.contains(concat!("ui.card,", "1.0,")));
+        // …and the glyph opacity uniform.
+        assert!(compact.contains(concat!("opacity*", "appear")));
     }
 }

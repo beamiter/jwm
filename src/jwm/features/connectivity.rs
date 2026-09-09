@@ -1558,62 +1558,6 @@ pub fn start_forget_profile(ssid: &str) -> BackgroundJob<Result<String, String>>
     })
 }
 
-/// The profile delete currently being applied, process-wide.
-///
-/// This handle cannot ride `features.wifi_connect`: that slot's completion
-/// closes the picker and logs a join, and a profile delete is neither. It
-/// cannot live in the picker state either — the panel's exhaustive literals
-/// exist in code this module does not own — so until the features table
-/// grows a slot of its own the handle lives here. One delete at a time is
-/// the coalescing rule either way; [`Jwm::poll_connectivity_job`] adopts the
-/// finished job beside the state reads it already polls.
-static WIFI_FORGET: std::sync::Mutex<Option<BackgroundJob<Result<String, String>>>> =
-    std::sync::Mutex::new(None);
-
-/// Tests in more than one module drive the process-wide slot; this lock
-/// serializes them so one test's parked job cannot be adopted by another's
-/// poll (the `BAND_TESTS` precedent for a shared static).
-#[cfg(test)]
-pub(crate) static FORGET_SLOT_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-/// Whether a profile delete is still being applied. The picker's `d` key
-/// coalesces on it the way the `s`/`r` keys coalesce on their scan slot: two
-/// concurrent nmcli writes race, and the profile ends wherever the slower
-/// one left it.
-#[must_use]
-pub fn wifi_forget_in_flight() -> bool {
-    let guard = WIFI_FORGET
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    job_in_flight(guard.as_ref())
-}
-
-/// Park a just-started delete where [`Jwm::poll_connectivity_job`] adopts it.
-/// The job arrives already carrying its event-loop notifier.
-pub(crate) fn track_wifi_forget(job: BackgroundJob<Result<String, String>>) {
-    *WIFI_FORGET
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(job);
-}
-
-/// The finished delete, once. A handle whose thread the OS refused never
-/// publishes; it is dropped here rather than holding
-/// [`wifi_forget_in_flight`] shut — the same recovery `poll_connectivity_job`
-/// gives the state-read slot.
-fn take_finished_wifi_forget() -> Option<Result<String, String>> {
-    let mut guard = WIFI_FORGET
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let job = guard.as_ref()?;
-    if !job.started() {
-        *guard = None;
-        return None;
-    }
-    let result = job.take()?;
-    *guard = None;
-    Some(result)
-}
-
 /// Start a scan on a worker thread. `None` when there is no nmcli to scan
 /// with — the picker then reports that instead of showing an empty list.
 #[must_use]
@@ -1726,6 +1670,23 @@ pub fn start_state_read() -> BackgroundJob<ConnectivityState> {
     BackgroundJob::spawn(read_state)
 }
 
+/// The finished delete parked in `FeatureStates::wifi_forget`, once. A
+/// handle whose thread the OS refused never publishes; it is dropped here
+/// rather than holding the picker's `d`-key coalescing guard shut — the
+/// same recovery `poll_connectivity_job` gives the state-read slot.
+fn take_finished_wifi_forget(
+    slot: &mut Option<BackgroundJob<Result<String, String>>>,
+) -> Option<Result<String, String>> {
+    let job = slot.as_ref()?;
+    if !job.started() {
+        *slot = None;
+        return None;
+    }
+    let result = job.take()?;
+    *slot = None;
+    Some(result)
+}
+
 impl crate::jwm::Jwm {
     /// Bind a worker's completion to this handler's readiness fd. When the fd
     /// could not be created or aggregated, `None` leaves the job on the
@@ -1817,7 +1778,7 @@ impl crate::jwm::Jwm {
         // the connection the cache still claims. Either outcome reaches an
         // open picker's status line; a picker closed mid-delete simply never
         // gets the message, and the periodic read covers the row instead.
-        if let Some(result) = take_finished_wifi_forget() {
+        if let Some(result) = take_finished_wifi_forget(&mut self.features.wifi_forget) {
             let picker_open = self.features.system_ui.is_wifi_picker();
             match result {
                 Ok(ssid) => {
@@ -2312,8 +2273,8 @@ mod tests {
             .split_once("fn start_forget_profile")
             .expect("start_forget_profile not found")
             .1
-            .split_once("static WIFI_FORGET")
-            .expect("start_forget_profile is no longer followed by the WIFI_FORGET slot")
+            .split_once("fn start_scan")
+            .expect("start_forget_profile is no longer followed by the scan starter")
             .0;
         let (gate, worker) = body
             .split_once("BackgroundJob::spawn")
@@ -2348,7 +2309,10 @@ mod tests {
             .split_once(&format!("fn {}(", "connectivity_json"))
             .expect("poll_connectivity_job is no longer followed by connectivity_json")
             .0;
-        let adopt = format!("{}()", "take_finished_wifi_forget");
+        let adopt = format!(
+            "{}(&mut self.features.wifi_forget)",
+            "take_finished_wifi_forget"
+        );
         let reread = format!("self.{}()", "refresh_connectivity");
         let adopt_at = body.find(&adopt).expect("the poll adopts the forget");
         let reread_at = body
@@ -2366,18 +2330,15 @@ mod tests {
 
     #[test]
     fn a_refused_forget_thread_never_holds_the_slot_shut() {
-        // The `d` key coalesces on `wifi_forget_in_flight`; a handle the OS
-        // refused a thread for publishes nothing, ever, so it must read as
-        // "no work in flight" and be dropped on the next poll — the same
-        // recovery the state-read slot gets.
-        let _serial = FORGET_SLOT_TESTS
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        track_wifi_forget(BackgroundJob::<Result<String, String>>::refused());
-        assert!(!wifi_forget_in_flight());
-        assert_eq!(take_finished_wifi_forget(), None);
+        // The `d` key coalesces on the forget slot; a handle the OS refused
+        // a thread for publishes nothing, ever, so it must read as "no work
+        // in flight" and be dropped on the next poll — the same recovery the
+        // state-read slot gets.
+        let mut slot = Some(BackgroundJob::<Result<String, String>>::refused());
+        assert!(!job_in_flight(slot.as_ref()));
+        assert_eq!(take_finished_wifi_forget(&mut slot), None);
         assert!(
-            !wifi_forget_in_flight(),
+            !job_in_flight(slot.as_ref()),
             "the dead handle was dropped, so the guard recovers"
         );
     }

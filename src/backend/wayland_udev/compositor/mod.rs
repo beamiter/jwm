@@ -1419,6 +1419,13 @@ pub(crate) struct WaylandCompositor {
         Option<crate::backend::compositor_common::screenshot_toolbar::ScreenshotToolbar>,
     screenshot_toolbar_icons: Vec<Option<(u32, u32, u32)>>,
     screenshot_toolbar_dirty: bool,
+    /// The strip's appear envelope, keyed on its presence: publishing the
+    /// toolbar eases it in over the tab strips' 120 ms instead of popping
+    /// at full alpha, withdrawing clears it, and a republished strip —
+    /// every hover move is one — keeps the ease it has, which is exactly
+    /// why it lives here and not on the model. Plain animation state,
+    /// consumed as alpha only: geometry and hit-testing never see it.
+    screenshot_toolbar_appear: crate::backend::compositor_common::screenshot_toolbar::AppearEase,
     line_program: u32,
     line_uniform_projection: i32,
     line_uniform_color: i32,
@@ -2854,6 +2861,7 @@ impl WaylandCompositor {
                 screenshot_toolbar: None,
                 screenshot_toolbar_icons: Vec::new(),
                 screenshot_toolbar_dirty: false,
+                screenshot_toolbar_appear: Default::default(),
                 line_program,
                 line_uniform_projection,
                 line_uniform_color,

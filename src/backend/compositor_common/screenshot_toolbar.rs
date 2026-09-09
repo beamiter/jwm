@@ -24,6 +24,9 @@
 //! anti-aliased for free, and is the same handful of shapes on both backends.
 
 use super::dynamic_island::HoverEase;
+use super::effects::{clamp_effect_dt, finite_clamp};
+use super::window_tabs::APPEAR_DURATION;
+use std::time::Instant;
 
 /// A rectangle in screen pixels: `[x, y, w, h]`.
 pub type Rect = [f32; 4];
@@ -191,6 +194,102 @@ impl PartialEq for ScreenshotToolbar {
 #[must_use]
 pub(crate) fn hovered_key(buttons: &[ToolbarButton]) -> Option<usize> {
     buttons.iter().position(|button| button.hovered)
+}
+
+// ---------------------------------------------------------------------------
+// Appear ease
+// ---------------------------------------------------------------------------
+
+/// Fade-in envelope for the strip as a whole, keyed on its *presence*.
+///
+/// The toolbar used to pop in at full alpha the frame the capture became an
+/// editor. This is the alpha half of that fix, shared by both compositors so
+/// the backends cannot drift: a published strip eases in over
+/// [`APPEAR_DURATION`] — the tab strips' own 120 ms ease-out quad — drawing
+/// one blank frame after publish and then carrying every layer's alpha to
+/// full. Withdrawing is not eased — JWM draws no fade-outs — it clears the
+/// envelope on the spot.
+///
+/// The envelope lives on the compositor side, never on the model — this is
+/// the round-16 rejection, and it is worth spelling out: the window manager
+/// republishes the strip on every hover move, so an envelope riding the
+/// model would restart on every republish and the fade would stutter under
+/// the pointer. Presence is the only key that survives a republish:
+/// `None → Some` starts the ease, `Some → None` clears it, and
+/// `Some → Some` keeps whatever it has. The setter sides detect the
+/// transitions; this type only keeps the clock.
+///
+/// The frame an ease starts on consumes no time — the discipline the hover
+/// cues keep — so a long idle gap before it cannot finish the fade before
+/// it is drawn, and a stalled frame catches up only a capped step. With
+/// motion off a present strip reports full strength on its first frame and
+/// [`Self::animating`] stays false: one frame and no more. Pure alpha:
+/// geometry and hit-testing never see it.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct AppearEase {
+    progress: f32,
+    last_tick: Option<Instant>,
+}
+
+impl AppearEase {
+    /// Advance to `now` against whether the strip is currently published and
+    /// return the eased `0.0..=1.0` alpha it should draw with.
+    ///
+    /// `present: false` — the strip was withdrawn — clears the envelope
+    /// outright: the strip disappears on the very frame that reports it,
+    /// and a later re-publish eases in from nothing.
+    pub fn advance(&mut self, now: Instant, present: bool, motion_enabled: bool) -> f32 {
+        if !present {
+            self.clear();
+            return 0.0;
+        }
+        let Some(last) = self.last_tick.replace(now) else {
+            // A fresh ease starts here, on the first frame that asks. That
+            // frame consumes no time, so a long idle gap before it cannot
+            // finish the fade before it is drawn.
+            self.progress = if motion_enabled { 0.0 } else { 1.0 };
+            return appear_ease_out(self.progress);
+        };
+        if !motion_enabled {
+            // Snap the stored envelope as well as the returned value, so
+            // `animating` is false and no invisible follow-up frames tick.
+            self.progress = 1.0;
+            return 1.0;
+        }
+        let dt = clamp_effect_dt(now.saturating_duration_since(last).as_secs_f32());
+        self.progress = finite_clamp(
+            self.progress + dt / APPEAR_DURATION.as_secs_f32(),
+            0.0,
+            1.0,
+            1.0,
+        );
+        appear_ease_out(self.progress)
+    }
+
+    /// Whether the envelope is still easing toward full strength. While this
+    /// holds the compositor keeps `needs_render` armed: the ease runs on a
+    /// clock, not on events, so an otherwise idle screen must keep drawing
+    /// frames or the strip would hang half-faded until something else woke
+    /// the renderer.
+    #[must_use]
+    pub fn animating(&self) -> bool {
+        self.last_tick.is_some() && self.progress < 1.0
+    }
+
+    /// Forget the envelope, so a strip that appears again eases in from
+    /// nothing instead of resuming where a withdrawn one left off.
+    pub fn clear(&mut self) {
+        self.progress = 0.0;
+        self.last_tick = None;
+    }
+}
+
+/// Ease-out quad for the appear envelope, the hover cues' curve: the strip
+/// reads almost immediately and then settles. The timeline is clamped, not
+/// sprung — an alpha multiplier must never overshoot.
+fn appear_ease_out(t: f32) -> f32 {
+    let t = finite_clamp(t, 0.0, 1.0, 0.0);
+    1.0 - (1.0 - t) * (1.0 - t)
 }
 
 // ---------------------------------------------------------------------------
@@ -843,6 +942,7 @@ pub fn icon_rgba(icon: ToolbarIcon, px: u32, ink: [u8; 4]) -> (Vec<u8>, u32, u32
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     fn row(count: usize) -> Vec<ToolbarButton> {
         (0..count)
@@ -996,6 +1096,157 @@ mod tests {
             button_at(bar, &hovered, BUTTON_SIZE, x + w * 0.5, y + h * 0.5),
             None
         );
+
+        // The appear ease keeps the identical discipline, and by
+        // construction: the envelope lives on the compositors, never on this
+        // model — a model-side envelope would restart on every hover
+        // republish (the round-16 rejection) — so no alpha it computes can
+        // reach a rectangle the hit test resolves. Pin the absence; the
+        // needles are runtime-assembled so this test cannot match its own
+        // source.
+        let model = include_str!("screenshot_toolbar.rs")
+            .split(concat!("pub struct Screenshot", "Toolbar {"))
+            .nth(1)
+            .expect("the toolbar model")
+            .split('}')
+            .next()
+            .expect("the toolbar model's body");
+        assert!(
+            model.contains(concat!("hover", "_ease")),
+            "the slice must be the model's body"
+        );
+        assert!(
+            !model.contains(concat!("Appear", "Ease")),
+            "the appear ease is compositor draw state; the model must not carry it"
+        );
+    }
+
+    #[test]
+    fn an_appearing_strip_eases_in_over_the_appear_duration() {
+        let mut ease = AppearEase::default();
+        let t0 = Instant::now();
+
+        // The frame the strip appears on consumes no time: it draws fully
+        // transparent, and the pump must stay armed or an idle screen would
+        // sleep through the whole ease.
+        assert_eq!(ease.advance(t0, true, true), 0.0);
+        assert!(ease.animating());
+
+        // Mid-travel: half the duration in, ease-out quad reads 0.75.
+        ease.advance(t0 + Duration::from_millis(30), true, true);
+        let mid = ease.advance(t0 + Duration::from_millis(60), true, true);
+        assert!((mid - 0.75).abs() < 1e-3, "half-way alpha {mid}");
+        assert!(ease.animating());
+
+        // Completion: full strength, and nothing left to pump.
+        ease.advance(t0 + Duration::from_millis(90), true, true);
+        assert_eq!(
+            ease.advance(t0 + Duration::from_millis(120), true, true),
+            1.0
+        );
+        assert!(!ease.animating());
+
+        // The multiplier is clamped, not sprung: however much time passes,
+        // it settles at exactly full strength and never overshoots.
+        assert_eq!(ease.advance(t0 + Duration::from_secs(5), true, true), 1.0);
+        assert!(!ease.animating());
+    }
+
+    #[test]
+    fn motion_off_draws_the_strip_full_on_its_first_frame() {
+        let mut ease = AppearEase::default();
+        let t0 = Instant::now();
+
+        assert_eq!(ease.advance(t0, true, false), 1.0);
+        // One frame and no more: reduced motion must not keep the pump
+        // armed for an ease nothing performs.
+        assert!(!ease.animating());
+
+        // Toggling motion on afterwards does not replay the ease.
+        assert_eq!(
+            ease.advance(t0 + Duration::from_millis(16), true, true),
+            1.0
+        );
+        assert!(!ease.animating());
+    }
+
+    #[test]
+    fn a_withdrawn_strip_eases_in_fresh_when_it_returns() {
+        let t0 = Instant::now();
+
+        // Mid-flight: the strip is withdrawn, and it is gone on the spot,
+        // envelope and all — disappearing is not eased.
+        let mut ease = AppearEase::default();
+        ease.advance(t0, true, true);
+        ease.advance(t0 + Duration::from_millis(30), true, true);
+        assert_eq!(
+            ease.advance(t0 + Duration::from_millis(46), false, true),
+            0.0
+        );
+        assert!(!ease.animating());
+
+        // Coming back it starts over from transparent rather than resuming
+        // where the withdrawn strip left off.
+        assert_eq!(
+            ease.advance(t0 + Duration::from_millis(62), true, true),
+            0.0
+        );
+        assert!(ease.animating());
+
+        // The same holds for a strip that had fully settled: the withdraw
+        // clears the settled envelope, so the returning strip eases in
+        // instead of popping back at full alpha.
+        let mut ease = AppearEase::default();
+        ease.advance(t0, true, true);
+        for step in 1..=4 {
+            ease.advance(t0 + Duration::from_millis(30 * step), true, true);
+        }
+        assert_eq!(
+            ease.advance(t0 + Duration::from_millis(150), true, true),
+            1.0
+        );
+        ease.advance(t0 + Duration::from_millis(166), false, true);
+        assert_eq!(
+            ease.advance(t0 + Duration::from_millis(182), true, true),
+            0.0
+        );
+        assert!(ease.animating());
+    }
+
+    #[test]
+    fn a_republished_strip_keeps_its_envelope() {
+        // Presence is the only key: the window manager republishes the strip
+        // on every hover move, and as long as it stays published the ease
+        // must ride through every one of them — a restart per republish is
+        // the stutter the compositor-side keying exists to prevent.
+        let mut ease = AppearEase::default();
+        let t0 = Instant::now();
+        assert_eq!(ease.advance(t0, true, true), 0.0);
+        let mut previous = 0.0;
+        for step in 1..=4u64 {
+            // Each advance stands in for a frame drawn against a republished
+            // strip: same presence, new content.
+            let alpha = ease.advance(t0 + Duration::from_millis(30 * step), true, true);
+            assert!(alpha > previous, "frame {step} must not restart the ease");
+            previous = alpha;
+        }
+        assert_eq!(previous, 1.0);
+        assert!(!ease.animating());
+    }
+
+    #[test]
+    fn a_stalled_frame_catches_up_only_a_capped_step() {
+        let mut ease = AppearEase::default();
+        let t0 = Instant::now();
+        assert_eq!(ease.advance(t0, true, true), 0.0);
+
+        // Five idle seconds — a screen asleep behind the render gate — must
+        // not finish the ease in one jump: the capped step fast-forwards
+        // one 50ms frame's worth.
+        let alpha = ease.advance(t0 + Duration::from_secs(5), true, true);
+        let expected = appear_ease_out(0.05 / APPEAR_DURATION.as_secs_f32());
+        assert!((alpha - expected).abs() < 1e-3, "capped alpha {alpha}");
+        assert!(ease.animating());
     }
 
     #[test]

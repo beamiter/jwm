@@ -1885,7 +1885,7 @@ impl Jwm {
             return IpcResponse::ok(Some(serde_json::json!({ "cleared": cleared })));
         }
 
-        // Special command: set_power_profile — switch the platform profile.
+        // Special command: set_audio_device — switch the default sink/source.
         if name == "set_audio_device" {
             use crate::jwm::features::system_controls::{self, AudioDirection};
 
@@ -1941,6 +1941,43 @@ impl Jwm {
             return IpcResponse::ok(None);
         }
 
+        // Special command: set_mic_mute — set the default microphone's mute
+        // flag.
+        //
+        // Reply semantics: queued, like the volume keys. The reply
+        // acknowledges the submission and the optimistic card is drawn at
+        // once; the controls worker's read-back then confirms or corrects it
+        // (the OSD refreshes in place, the control-center Input row follows
+        // the adopted value). This is deliberately unlike `set_audio_device`'s
+        // synchronous confirmed reply: the controls worker exists precisely
+        // to keep the helper's blocking read-back off the event thread an
+        // IPC call runs on. No `audio/mic` broadcast or `get_mic_mute` query
+        // rides along — those are a possible follow-up, and the 2s snapshot
+        // already keeps an open control center current.
+        if name == "set_mic_mute" {
+            let Some(muted) = args.get("muted").and_then(|value| value.as_bool()) else {
+                return IpcResponse::err("set_mic_mute: expected boolean field 'muted'");
+            };
+            let Some((seq, estimate)) = self.queue_mic_request(
+                crate::jwm::features::system_controls::ControlRequest::MicMuteSet(muted),
+            ) else {
+                // The key path's own answer when no audio tool works.
+                return IpcResponse::err("no working audio control (wpctl/pactl/amixer)");
+            };
+            match estimate {
+                // A set knows its target with no confirmed base, so this is
+                // always the taken arm today; the `None` shape mirrors the
+                // key path — the covering read-back draws the first card.
+                Some(muted) => self.show_mic_osd(backend, muted),
+                None => self.features.control_feedback.owe_osd(
+                    crate::jwm::features::system_controls::ControlDomain::MicMute,
+                    seq,
+                ),
+            }
+            return IpcResponse::ok(None);
+        }
+
+        // Special command: set_power_profile — switch the platform profile.
         if name == "set_power_profile" {
             let Some(profile) = args.get("profile").and_then(|value| value.as_str()) else {
                 return IpcResponse::err("set_power_profile: expected string field 'profile'");
@@ -3609,7 +3646,7 @@ mod tests {
     use crate::backend::api::{
         Backend, BackendDiagnostics, Capabilities, ColorAllocator, ColorManagedSurfaceInfo,
         CompositorAnnotation, CompositorBenchmark, CompositorControl, CompositorMedia,
-        CompositorWindowEffects, CompositorWorkspaceEffects, DisplayControl, EventHandler,
+        CompositorWindowEffects, CompositorWorkspaceEffects, DisplayControl, EventHandler, OsdKind,
         OutputIdentity, OutputInfo, RenderScheduler,
     };
     use crate::backend::common_define::{OutputId, WindowId};
@@ -5252,6 +5289,8 @@ mod tests {
         key_ops: DummyKeyOps,
         cursor_provider: DummyCursorProvider,
         color_allocator: DummyColorAllocator,
+        /// Every OSD card the WM asked for, in order.
+        osd: Vec<(OsdKind, u8)>,
     }
 
     impl PairingIpcBackend {
@@ -5264,6 +5303,7 @@ mod tests {
                 key_ops: DummyKeyOps,
                 cursor_provider: DummyCursorProvider,
                 color_allocator: DummyColorAllocator,
+                osd: Vec::new(),
             }
         }
     }
@@ -5272,7 +5312,11 @@ mod tests {
     impl BackendDiagnostics for PairingIpcBackend {}
     impl CompositorControl for PairingIpcBackend {}
     impl CompositorMedia for PairingIpcBackend {}
-    impl CompositorWorkspaceEffects for PairingIpcBackend {}
+    impl CompositorWorkspaceEffects for PairingIpcBackend {
+        fn compositor_show_osd(&mut self, kind: OsdKind, percent: u8) {
+            self.osd.push((kind, percent));
+        }
+    }
     impl CompositorWindowEffects for PairingIpcBackend {}
     impl CompositorAnnotation for PairingIpcBackend {}
     impl DisplayControl for PairingIpcBackend {}
@@ -5437,5 +5481,132 @@ mod tests {
                 "a malformed frame ended the window: {args}"
             );
         }
+    }
+
+    /// The reply is the queued contract: an immediate ack carrying the
+    /// estimate, never the worker's read-back. A set needs no confirmed base
+    /// — the estimate is the asked target itself — so the snapshot cache and
+    /// the mic card move synchronously and deterministically.
+    #[test]
+    fn set_mic_mute_queues_the_set_and_draws_the_estimate() {
+        let mut backend = PairingIpcBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+
+        let response = jwm.handle_ipc_command(
+            &mut backend,
+            "set_mic_mute",
+            &serde_json::json!({"muted": true}),
+        );
+
+        assert!(response.success, "{response:?}");
+        assert_eq!(
+            jwm.features
+                .control_snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.mic_muted),
+            Some(true),
+            "the estimate is cached for the control-center Input row"
+        );
+        assert_eq!(
+            backend.osd.as_slice(),
+            &[(OsdKind::MicMute(true), 0)],
+            "the ack draws the mic card; the percent slot is unused"
+        );
+
+        // An absolute target, not a flip: asking again re-queues and redraws
+        // with the new target, whatever the current estimate says.
+        let response = jwm.handle_ipc_command(
+            &mut backend,
+            "set_mic_mute",
+            &serde_json::json!({"muted": false}),
+        );
+
+        assert!(response.success, "{response:?}");
+        assert_eq!(
+            jwm.features
+                .control_snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.mic_muted),
+            Some(false)
+        );
+        assert_eq!(
+            backend.osd.as_slice(),
+            &[(OsdKind::MicMute(true), 0), (OsdKind::MicMute(false), 0)]
+        );
+    }
+
+    #[test]
+    fn set_mic_mute_rejects_malformed_frames() {
+        let mut backend = PairingIpcBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+
+        for args in [
+            serde_json::json!({}),
+            serde_json::json!({"muted": "yes"}),
+            serde_json::json!({"muted": 1}),
+            serde_json::json!({"muted": null}),
+        ] {
+            let response = jwm.handle_ipc_command(&mut backend, "set_mic_mute", &args);
+            assert!(!response.success, "accepted {args}");
+            assert_eq!(
+                response.error.as_deref(),
+                Some("set_mic_mute: expected boolean field 'muted'"),
+                "{args}"
+            );
+        }
+        assert!(backend.osd.is_empty(), "a malformed frame drew a card");
+        assert_eq!(
+            jwm.features
+                .control_snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.mic_muted),
+            None,
+            "a malformed frame moved the cached flag"
+        );
+    }
+
+    /// The arm must queue on the controls worker — never run the audio
+    /// helper on the event thread an IPC call runs on — and its no-tool
+    /// answer is the mic-mute key's own error string, so a caller cannot
+    /// tell which path found no tool. The haystacks are the arm and the key
+    /// handler alone, and the needles are assembled at runtime so this test
+    /// cannot match its own source.
+    #[test]
+    fn set_mic_mute_queues_and_mirrors_the_key_paths_no_tool_answer() {
+        const SOURCE: &str = include_str!("ipc_handler.rs");
+        let arm = SOURCE
+            .split_once(&format!("if name == \"{}\"", "set_mic_mute"))
+            .expect("set_mic_mute handler")
+            .1
+            .split_once(&format!("if name == \"{}\"", "set_power_profile"))
+            .expect("the command handled after set_mic_mute")
+            .0;
+        let queue = format!("self.{}(", "queue_mic_request");
+        assert!(
+            arm.contains(&queue),
+            "set_mic_mute no longer queues on the controls worker ({queue})"
+        );
+        for primitive in ["mic_set_mute", "mic_toggle_mute", "mic_mute_state"] {
+            let needle = format!("system_controls::{primitive}(");
+            assert!(
+                !arm.contains(&needle),
+                "set_mic_mute regained a blocking tool call: {needle}"
+            );
+        }
+
+        const TOGGLES: &str = include_str!("features/toggles.rs");
+        let key = TOGGLES
+            .split_once("pub(crate) fn toggle_mic_mute")
+            .expect("toggle_mic_mute")
+            .1
+            .split_once("pub(crate) fn brightness_adjust")
+            .expect("the end of toggle_mic_mute")
+            .0;
+        let error = format!("no working {} (wpctl/pactl/amixer)", "audio control");
+        assert!(key.contains(&error), "the key path's no-tool answer moved");
+        assert!(
+            arm.contains(&error),
+            "set_mic_mute must answer the key path's no-tool error ({error})"
+        );
     }
 }

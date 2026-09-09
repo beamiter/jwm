@@ -3,7 +3,10 @@
 //! The compositor has no bus connection, so this module is the eyes and hands
 //! of its media row: it watches every `org.mpris.MediaPlayer2.*` name on the
 //! session bus, pushes the *active* player's state in over IPC, and turns
-//! jwm's `media/command` broadcasts back into method calls.
+//! jwm's `media/command` broadcasts back into method calls. When several
+//! players are on the bus the push also names them all, and jwm can pin the
+//! row to one of them with a `select_player` command; the pin holds while
+//! its bus name is alive and clears itself when the player goes away.
 //!
 //! Player selection and metadata extraction are pure functions so the rules
 //! (a playing player outranks a paused one; `xesam:artist` is a list) are unit
@@ -86,6 +89,43 @@ pub fn pick_active(players: &[PlayerSnapshot]) -> Option<&PlayerSnapshot> {
         }
     }
     best
+}
+
+/// Which player one sweep publishes and transport commands target: the
+/// pinned one while its bus name is still alive, else the ordinary active
+/// pick. The second return is the pin to keep — a pin that named nobody
+/// alive comes back cleared, so a player that quit cannot hold the row.
+fn resolve_active<'a>(
+    players: &'a [PlayerSnapshot],
+    pinned: Option<&str>,
+) -> (Option<&'a PlayerSnapshot>, Option<String>) {
+    if let Some(pin) = pinned
+        && let Some(player) = players.iter().find(|player| player.player == pin)
+    {
+        return (Some(player), Some(pin.to_string()));
+    }
+    (pick_active(players), None)
+}
+
+/// The `set_media_status` payload for one sweep: the resolved player's
+/// state, plus every bus suffix the sweep saw in sweep order, so jwm can
+/// offer player switching without a second channel. The list is an
+/// append-only key — an old jwm ignores it, and a new jwm reading a missing
+/// one (an old bridge) treats the session as single-player.
+fn publish_args(players: &[PlayerSnapshot], pinned: Option<&str>) -> (Value, Option<String>) {
+    let (active, pin) = resolve_active(players, pinned);
+    let args = match active {
+        Some(active) => {
+            let mut args = active.to_args();
+            args["players"] = players
+                .iter()
+                .map(|player| Value::String(player.player.clone()))
+                .collect();
+            args
+        }
+        None => serde_json::json!({ "player": Value::Null }),
+    };
+    (args, pin)
 }
 
 /// `xesam:title` from an MPRIS metadata dict.
@@ -185,14 +225,19 @@ async fn snapshot(connection: &Connection, name: &OwnedBusName) -> Option<Player
     })
 }
 
-/// Sweep every MPRIS player currently on the bus and push the active one to
-/// jwm. Pushing `player: null` is how "every player went away" is reported.
-async fn publish(connection: &Connection, ipc: &JwmIpc) {
+/// Sweep every MPRIS player currently on the bus and push the resolved one
+/// to jwm, with the sweep's full suffix list alongside. Pushing
+/// `player: null` is how "every player went away" is reported. Returns the
+/// pin to keep: the pinned player while its bus name is alive, otherwise
+/// the pin clears itself rather than sticking to a player that is gone. A
+/// sweep that could not run at all (the bus daemon unreachable) validates
+/// nothing, so the pin passes through untouched.
+async fn publish(connection: &Connection, ipc: &JwmIpc, pinned: Option<&str>) -> Option<String> {
     let Ok(dbus) = DBusProxy::new(connection).await else {
-        return;
+        return pinned.map(str::to_string);
     };
     let Ok(names) = dbus.list_names().await else {
-        return;
+        return pinned.map(str::to_string);
     };
 
     let mut players = Vec::new();
@@ -205,12 +250,10 @@ async fn publish(connection: &Connection, ipc: &JwmIpc) {
         }
     }
 
-    let args = match pick_active(&players) {
-        Some(active) => active.to_args(),
-        None => serde_json::json!({ "player": Value::Null }),
-    };
+    let (args, pin) = publish_args(&players, pinned);
     let ipc = ipc.clone();
     let _ = tokio::task::spawn_blocking(move || ipc.command("set_media_status", args)).await;
+    pin
 }
 
 /// Method name on `org.mpris.MediaPlayer2.Player` for a jwm media action.
@@ -223,6 +266,35 @@ pub fn method_for(action: &str) -> Option<&'static str> {
         "stop" => Some("Stop"),
         _ => None,
     }
+}
+
+/// What one `media/command` broadcast asks for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MediaRequest {
+    /// Call the MPRIS method on the resolved player.
+    Transport(&'static str),
+    /// Pin resolution to this bus suffix; an empty name clears the pin back
+    /// to the active pick.
+    Select(String),
+}
+
+/// Parse a command's payload. Unknown actions are `None`, which the caller
+/// logs and drops: an old jwm and a new bridge — or the reverse — degrade
+/// to ignoring each other's news rather than failing.
+fn parse_request(payload: &Value) -> Option<MediaRequest> {
+    let action = payload
+        .get("action")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if action == "select_player" {
+        let player = payload
+            .get("player")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim();
+        return Some(MediaRequest::Select(player.to_string()));
+    }
+    method_for(action).map(MediaRequest::Transport)
 }
 
 async fn call_active(connection: &Connection, player: &str, method: &'static str) {
@@ -256,7 +328,9 @@ pub async fn run(
     ipc: JwmIpc,
     mut events: tokio::sync::mpsc::Receiver<Value>,
 ) {
-    publish(&connection, &ipc).await;
+    // The player jwm pinned the row to, while its bus name stays alive.
+    let mut pinned: Option<String> = None;
+    pinned = publish(&connection, &ipc, pinned.as_deref()).await;
 
     let mut owner_changes = match DBusProxy::new(&connection).await {
         Ok(dbus) => match dbus.receive_name_owner_changed().await {
@@ -281,40 +355,54 @@ pub async fn run(
                 if event.get("event").and_then(Value::as_str) != Some("media/command") {
                     continue;
                 }
-                let action = event
-                    .get("payload")
-                    .and_then(|payload| payload.get("action"))
-                    .and_then(Value::as_str)
-                    .unwrap_or_default();
-                let Some(method) = method_for(action) else {
+                let payload = event.get("payload").cloned().unwrap_or(Value::Null);
+                let Some(request) = parse_request(&payload) else {
+                    let action = payload
+                        .get("action")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
                     log::warn!("ignoring unknown media action {action:?}");
                     continue;
                 };
-                // Re-resolve the active player instead of trusting a cached
-                // one: the user may have switched players since the last push.
-                if let Ok(dbus) = DBusProxy::new(&connection).await
-                    && let Ok(names) = dbus.list_names().await
-                {
-                    let mut players = Vec::new();
-                    for name in names
-                        .into_iter()
-                        .filter(|name| name.as_str().starts_with(MPRIS_PREFIX))
-                    {
-                        if let Some(snapshot) = snapshot(&connection, &name).await {
-                            players.push(snapshot);
-                        }
+                match request {
+                    MediaRequest::Select(player) => {
+                        // The publish right after validates the name against
+                        // the live sweep: a player nobody owns clears the
+                        // pin again on the spot.
+                        pinned = (!player.is_empty()).then_some(player);
+                        pinned = publish(&connection, &ipc, pinned.as_deref()).await;
                     }
-                    if let Some(active) = pick_active(&players) {
-                        call_active(&connection, &active.player, method).await;
+                    MediaRequest::Transport(method) => {
+                        // Re-resolve the active player instead of trusting a
+                        // cached one: the user may have switched players since
+                        // the last push.
+                        if let Ok(dbus) = DBusProxy::new(&connection).await
+                            && let Ok(names) = dbus.list_names().await
+                        {
+                            let mut players = Vec::new();
+                            for name in names
+                                .into_iter()
+                                .filter(|name| name.as_str().starts_with(MPRIS_PREFIX))
+                            {
+                                if let Some(snapshot) = snapshot(&connection, &name).await {
+                                    players.push(snapshot);
+                                }
+                            }
+                            let (active, keep) = resolve_active(&players, pinned.as_deref());
+                            pinned = keep;
+                            if let Some(active) = active {
+                                call_active(&connection, &active.player, method).await;
+                            }
+                        }
+                        pinned = publish(&connection, &ipc, pinned.as_deref()).await;
                     }
                 }
-                publish(&connection, &ipc).await;
             }
             Some(_) = next_owner_change(&mut owner_changes) => {
-                publish(&connection, &ipc).await;
+                pinned = publish(&connection, &ipc, pinned.as_deref()).await;
             }
             _ = poll.tick() => {
-                publish(&connection, &ipc).await;
+                pinned = publish(&connection, &ipc, pinned.as_deref()).await;
             }
         }
     }
@@ -480,5 +568,70 @@ mod tests {
         let args = player("spotify", "Playing").to_args();
         assert_eq!(args["position_us"], Value::Null);
         assert_eq!(args["length_us"], Value::Null);
+    }
+
+    #[test]
+    fn the_publish_payload_lists_every_player_in_sweep_order() {
+        let players = vec![player("mpv", "Paused"), player("spotify", "Playing")];
+        let (args, pin) = publish_args(&players, None);
+        assert_eq!(args["player"], "spotify", "the active pick still leads");
+        assert_eq!(args["players"], serde_json::json!(["mpv", "spotify"]));
+        assert_eq!(pin, None, "no pin was given, none comes back");
+
+        // The list is the sweep's, not the resolved player's: a pin does not
+        // reorder or trim it.
+        let (args, _) = publish_args(&players, Some("mpv"));
+        assert_eq!(args["players"], serde_json::json!(["mpv", "spotify"]));
+        // A player-less sweep keeps the null signal, with no list key at all.
+        let (args, pin) = publish_args(&[], Some("mpv"));
+        assert_eq!(args["player"], Value::Null);
+        assert!(args.get("players").is_none());
+        assert_eq!(pin, None);
+    }
+
+    #[test]
+    fn the_pin_outranks_the_active_pick_while_its_player_is_alive() {
+        let players = vec![player("mpv", "Paused"), player("spotify", "Playing")];
+        let (args, pin) = publish_args(&players, Some("mpv"));
+        assert_eq!(args["player"], "mpv", "the pinned player leads the push");
+        assert_eq!(args["status"], "Paused");
+        assert_eq!(pin.as_deref(), Some("mpv"), "the pin holds");
+    }
+
+    #[test]
+    fn a_dead_pin_falls_back_to_the_active_pick_and_clears_itself() {
+        let players = vec![player("spotify", "Playing")];
+        let (args, pin) = publish_args(&players, Some("gone"));
+        assert_eq!(args["player"], "spotify");
+        assert_eq!(pin, None, "a pin naming nobody alive cannot stick");
+    }
+
+    #[test]
+    fn select_player_parses_into_a_pin_and_transports_keep_their_methods() {
+        assert_eq!(
+            parse_request(&serde_json::json!({"action": "select_player", "player": "mpv"})),
+            Some(MediaRequest::Select("mpv".to_string()))
+        );
+        // A missing or empty player name clears the pin rather than naming
+        // an empty bus suffix.
+        assert_eq!(
+            parse_request(&serde_json::json!({"action": "select_player"})),
+            Some(MediaRequest::Select(String::new()))
+        );
+        assert_eq!(
+            parse_request(&serde_json::json!({"action": "select_player", "player": "  "})),
+            Some(MediaRequest::Select(String::new()))
+        );
+        assert_eq!(
+            parse_request(&serde_json::json!({"action": "play_pause"})),
+            Some(MediaRequest::Transport("PlayPause"))
+        );
+        // Unknown actions stay ignorable, so old and new ends tolerate each
+        // other in either direction.
+        assert_eq!(
+            parse_request(&serde_json::json!({"action": "rewind"})),
+            None
+        );
+        assert_eq!(parse_request(&serde_json::json!({})), None);
     }
 }

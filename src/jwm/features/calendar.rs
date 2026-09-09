@@ -100,8 +100,11 @@ pub fn leading_blanks(year: i32, month: u32) -> usize {
 
 /// The month laid out as one string per week, with today marked by brackets.
 ///
-/// Cells are three columns wide so the grid lines up in the monospace font
-/// the panel renders with.
+/// Day cells are four columns wide — ` dd `, or `[dd]` around today — and
+/// the header's three-column weekday names plus their one-column separators
+/// ride the same four-column stride, so the grid lines up in the monospace
+/// font the panel renders with. Leading cells before the 1st are blank;
+/// trailing cells past the month's end are not drawn at all.
 #[must_use]
 pub fn month_grid(view: &CalendarView) -> Vec<String> {
     let days = days_in_month(view.year, view.month);
@@ -132,6 +135,86 @@ pub fn month_grid(view: &CalendarView) -> Vec<String> {
         rows.push(week);
     }
     rows
+}
+
+/// Transparent margin the text rasterizer leaves around every overlay
+/// texture (`compositor_font::TEXT_PAD`, private to the backend — the same
+/// tiny copy `system_ui` keeps). Glyph columns start this far into the
+/// texture, so it comes out of a pointer offset before the column math.
+const TEXT_PAD: f32 = 2.0;
+
+/// What a click on the calendar card asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CalendarClick {
+    /// Step one month back.
+    PrevMonth,
+    /// Step one month forward.
+    NextMonth,
+    /// Return to the month containing today.
+    Today,
+    /// Nothing the calendar answers to; the click stays a no-op.
+    None,
+}
+
+/// Map a pointer press on the calendar card onto what it means, from the
+/// row's index in the overlay and the press's offset into the row's text
+/// texture. The rule, pinned:
+///
+/// * The overlay's rows are fixed: 0 is the clock line, 1 is blank, 2 the
+///   weekday header, and 3 on are the week rows — only week rows answer.
+/// * On a week row the grid is seven 4-column cells (see [`month_grid`]). A
+///   click on a LEADING cell before the 1st — where the previous month's
+///   tail days would sit — steps a month back; a click on a TRAILING cell
+///   past the month's end — drawn or not — steps a month forward; a click
+///   on today's own cell returns the view to the current month, mirroring
+///   the `t` key.
+/// * Everything else — real day cells, the clock, the blank row, the
+///   header, the texture's margins, anywhere past the grid — is
+///   [`CalendarClick::None`], and the press keeps being the no-op a click
+///   on the card always was.
+///
+/// `char_width_px` is the measured advance of one glyph in the panel's
+/// monospace font (the caller measures; this stays backend-free), and the
+/// cell boundaries follow from it — never from a hardcoded pixel geometry.
+#[must_use]
+pub fn click_action(
+    visual_row: usize,
+    text_x_px: f32,
+    char_width_px: f32,
+    view: &CalendarView,
+) -> CalendarClick {
+    // The clock, the blank row and the weekday header name nothing.
+    let Some(week) = visual_row.checked_sub(3) else {
+        return CalendarClick::None;
+    };
+    // The grid never draws more than six week rows; a row past them (or a
+    // width that cannot measure) is nobody's cell.
+    if week >= 6 || !char_width_px.is_finite() || char_width_px <= 0.0 {
+        return CalendarClick::None;
+    }
+    let column = ((text_x_px - TEXT_PAD) / char_width_px).floor();
+    if !column.is_finite() || column < 0.0 {
+        return CalendarClick::None;
+    }
+    let cell = (column as usize) / 4;
+    if cell > 6 {
+        return CalendarClick::None;
+    }
+    let position = week * 7 + cell;
+    let leading = leading_blanks(view.year, view.month);
+    let days = days_in_month(view.year, view.month);
+    if position < leading {
+        return CalendarClick::PrevMonth;
+    }
+    let day = (position - leading + 1) as u32;
+    if day > days {
+        return CalendarClick::NextMonth;
+    }
+    let today_here = view.today.year() == view.year && view.today.month() == view.month;
+    if today_here && day == view.today.day() {
+        return CalendarClick::Today;
+    }
+    CalendarClick::None
 }
 
 /// `Monday, 27 July 2026 · 15:42` — the line above the grid.
@@ -268,5 +351,172 @@ mod tests {
             .and_hms_opt(15, 42, 0)
             .expect("valid time");
         assert_eq!(clock_line(&when), "Monday, 27 July 2026 \u{2022} 15:42");
+    }
+
+    /// Clicks in these tests use the bitmap fallback's metrics: 12 px a
+    /// glyph, so cell `c` of a week row spans the 48 px after `48 * c + 2`
+    /// (the texture's margin), and the +26 lands mid-cell.
+    fn cell_x(cell: usize) -> f32 {
+        (48 * cell + 26) as f32
+    }
+
+    #[test]
+    fn leading_blank_cells_step_a_month_back() {
+        // July 2026 opens on a Wednesday: two leading blanks under Mo/Tu.
+        let view = CalendarView::new(date(2026, 7, 27));
+        assert_eq!(
+            click_action(3, cell_x(0), 12.0, &view),
+            CalendarClick::PrevMonth
+        );
+        assert_eq!(
+            click_action(3, cell_x(1), 12.0, &view),
+            CalendarClick::PrevMonth
+        );
+    }
+
+    #[test]
+    fn trailing_blank_cells_step_a_month_forward() {
+        // 31 days from a Wednesday end on a Friday: the last week row's
+        // Saturday and Sunday cells are the trailing edge, drawn or not.
+        let view = CalendarView::new(date(2026, 7, 27));
+        assert_eq!(
+            click_action(7, cell_x(5), 12.0, &view),
+            CalendarClick::NextMonth
+        );
+        assert_eq!(
+            click_action(7, cell_x(6), 12.0, &view),
+            CalendarClick::NextMonth
+        );
+
+        // February 2026 starts on a Sunday and fills 28 days: only the very
+        // last cell of the grid is a trailing blank.
+        let february = CalendarView {
+            year: 2026,
+            month: 2,
+            today: date(2026, 7, 27),
+        };
+        assert_eq!(
+            click_action(7, cell_x(6), 12.0, &february),
+            CalendarClick::NextMonth
+        );
+        assert_eq!(
+            click_action(7, cell_x(5), 12.0, &february),
+            CalendarClick::None,
+            "the 28th is a real day"
+        );
+    }
+
+    #[test]
+    fn clicking_todays_cell_returns_to_today() {
+        let view = CalendarView::new(date(2026, 7, 27));
+        // The 27th sits at position 2 + 26 = 28: first cell of week row 4.
+        assert_eq!(
+            click_action(7, cell_x(0), 12.0, &view),
+            CalendarClick::Today
+        );
+
+        // A leap day is just another today: 29 February 2024, a Thursday,
+        // lands at position 3 + 28 = 31 — cell 3 of week row 4.
+        let leap = CalendarView {
+            year: 2024,
+            month: 2,
+            today: date(2024, 2, 29),
+        };
+        assert_eq!(
+            click_action(7, cell_x(3), 12.0, &leap),
+            CalendarClick::Today
+        );
+
+        // The same cell in a month that is not today's names nothing.
+        let mut august = view;
+        august.shift_month(1);
+        assert_eq!(
+            click_action(7, cell_x(3), 12.0, &august),
+            CalendarClick::None
+        );
+        assert_eq!(
+            click_action(7, cell_x(3), 12.0, &view),
+            CalendarClick::None,
+            "the 30th is not today"
+        );
+    }
+
+    #[test]
+    fn ordinary_days_and_fixed_rows_keep_the_click_a_no_op() {
+        let view = CalendarView::new(date(2026, 7, 27));
+        // A real day cell: the 1st under We on the first week row, the 13th
+        // leading the third.
+        assert_eq!(click_action(3, cell_x(2), 12.0, &view), CalendarClick::None);
+        assert_eq!(click_action(5, cell_x(0), 12.0, &view), CalendarClick::None);
+        // The clock, the blank row and the weekday header never answer,
+        // wherever on them the press lands.
+        for row in 0..=2 {
+            assert_eq!(
+                click_action(row, cell_x(0), 12.0, &view),
+                CalendarClick::None
+            );
+            assert_eq!(
+                click_action(row, cell_x(3), 12.0, &view),
+                CalendarClick::None
+            );
+        }
+    }
+
+    #[test]
+    fn clicks_off_the_grid_or_unmeasurable_name_nothing() {
+        let view = CalendarView::new(date(2026, 7, 27));
+        // Past the seventh cell the grid ends, even on a week row.
+        assert_eq!(click_action(7, cell_x(7), 12.0, &view), CalendarClick::None);
+        assert_eq!(click_action(7, 9000.0, 12.0, &view), CalendarClick::None);
+        // The texture's left margin belongs to no cell.
+        assert_eq!(click_action(3, 1.9, 12.0, &view), CalendarClick::None);
+        assert_eq!(click_action(3, -8.0, 12.0, &view), CalendarClick::None);
+        // The first cell starts where its glyphs do.
+        assert_eq!(click_action(3, 2.0, 12.0, &view), CalendarClick::PrevMonth);
+        // The card never draws a seventh week row.
+        assert_eq!(click_action(9, cell_x(0), 12.0, &view), CalendarClick::None);
+        // A width that cannot measure maps nothing.
+        assert_eq!(click_action(3, cell_x(0), 0.0, &view), CalendarClick::None);
+        assert_eq!(
+            click_action(3, cell_x(0), -12.0, &view),
+            CalendarClick::None
+        );
+        assert_eq!(click_action(3, f32::NAN, 12.0, &view), CalendarClick::None);
+    }
+
+    #[test]
+    fn edge_cells_span_month_and_year_boundaries() {
+        // December's trailing edge steps into January of the next year;
+        // January's leading edge back into December of the last. The mapper
+        // only names the direction; the shift itself is pinned above.
+        let december = CalendarView {
+            year: 2026,
+            month: 12,
+            today: date(2026, 7, 27),
+        };
+        assert_eq!(
+            click_action(7, cell_x(4), 12.0, &december),
+            CalendarClick::NextMonth
+        );
+        let january = CalendarView {
+            year: 2026,
+            month: 1,
+            today: date(2026, 7, 27),
+        };
+        assert_eq!(
+            click_action(3, cell_x(0), 12.0, &january),
+            CalendarClick::PrevMonth
+        );
+        // A leap February's tail: 29 days from a Thursday end on a Thursday,
+        // leaving Friday through Sunday of the last week row to step forward.
+        let leap = CalendarView {
+            year: 2024,
+            month: 2,
+            today: date(2024, 7, 27),
+        };
+        assert_eq!(
+            click_action(7, cell_x(4), 12.0, &leap),
+            CalendarClick::NextMonth
+        );
     }
 }
