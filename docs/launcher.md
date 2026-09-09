@@ -16,6 +16,12 @@ Applications come from the desktop entries in `$XDG_DATA_HOME/applications` and
 named. Entries marked `Hidden=true` or `NoDisplay=true` are left out, because
 their author asked for that.
 
+Rows show the application's icon beside its name: icons come from the
+entry's `Icon=` key, resolved through the icon theme by the same cached
+resolver the status bars use, and decode on a worker thread — a missing icon
+leaves the plain text row, and an in-flight decode pops in without moving
+the text.
+
 Directory and `PATH` discovery runs on a worker rather than the compositor
 event loop. The first opening appears immediately with an indexing row; later
 openings reuse an immutable catalog. A five-minute stale catalog stays usable

@@ -6,10 +6,16 @@ puts the entry you choose back on the clipboard.
 | Key | Action |
 | --- | --- |
 | `Up` / `Down` | move the selection |
+| type | filter the list — case-insensitive substring on the entry text |
+| `BackSpace` | edit the filter |
 | `Enter` | copy the entry back |
 | `d` / `Delete` | forget the selected entry |
 | `c` | clear the whole history |
 | `Esc` or `Alt+Ctrl+V` | close — the key that opened the list also dismisses it |
+
+The filter bar mirrors the launcher's, caret included, and starts empty on
+every open. Row numbers keep their history positions, so a filtered list
+shows gaps; with nothing matching, the panel says so instead of going blank.
 
 Each row shows its position, how much was copied (`31c` for a single line of
 31 characters, `3L` for three lines), and a one-line preview with whitespace

@@ -31,7 +31,11 @@ the panel is up commits it immediately.
 
 Rows are the most-recently-used windows, the monitor in front of you
 first — the same order the [launcher's window list](launcher.md) uses. A
-row shows the title, the class when it adds information, and a `screen N`
+row leads with the window's application icon, resolved from its class (via
+`StartupWMClass`) through the same cached resolver the launcher uses; a
+window whose class resolves to nothing keeps the generic window glyph —
+there is never an empty hole. Then
+the title, the class when it adds information, and a `screen N`
 marker on the other heads.
 
 A window earns a row only when the gesture could actually land on it:

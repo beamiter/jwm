@@ -59,14 +59,47 @@ monorepo use independent Semantic Versions.
   list exactly as it was. No placeholder or spinner — until the thumbnail
   lands the picker looks unchanged. See [docs/wallpaper.md](docs/wallpaper.md).
 
-- `snap_window <left|right|maximize>` is a new bindable and IPC command —
+- `snap_window <direction>` is a new bindable and IPC command —
   the keyboard/scripting equivalent of dragging a floating window to a
   screen edge, using the exact mouse-drop geometry (full monitor rect, size
   hints respected, and the snapped rect becomes what a later
-  `togglefloating` restores). Tiled and fullscreen windows are deliberate
-  no-ops; an invalid direction is an error. Default bindings:
-  `Alt+Shift+Left` / `Alt+Shift+Right` / `Alt+Shift+Up`; over IPC:
-  `jwm-tool msg snap_window --args '"left"'`.
+  `togglefloating` restores). Directions: `left` / `right` /
+  `top-left` / `top-right` / `bottom-left` / `bottom-right` / `maximize`
+  (case-insensitive); tiled and fullscreen windows are deliberate
+  no-ops; an invalid direction is an error. Dropping a dragged window into
+  a screen corner (within `snap_dist` of both edges) now snaps it to that
+  corner's quarter instead of resolving to a half. Default bindings:
+  `Alt+Shift+Left` / `Alt+Shift+Right` / `Alt+Shift+Up` — the quarters have
+  none (corners don't map honestly onto arrows); over IPC:
+  `jwm-tool msg snap_window --args '"top-left"'`.
+
+- The launcher and the window switcher show application icons beside their
+  rows: resolved from each desktop entry's `Icon=` key (and each window's
+  class via `StartupWMClass`) through the same cached icon-theme resolver
+  the status bars use, decoded on worker threads, and popped in without
+  moving the text. A missing icon keeps the plain text row — there is never
+  an empty hole. See [docs/launcher.md](docs/launcher.md).
+
+- The control-center media row shows `m:ss / m:ss` when the player reports
+  both position and length — clamped for display, refreshed on the bridge's
+  sweep, holding while paused, reset on a track change, and never a
+  placeholder for streams. The `media/status` broadcast and
+  `get_media_status` reply carry the new `position_us` / `length_us` /
+  `position_label` fields (append-only, tolerated both directions).
+  Display-only — no seeking. See
+  [docs/media-controls.md](docs/media-controls.md).
+
+- The clipboard picker is type-to-filter: typing narrows the history by
+  case-insensitive substring, `BackSpace` edits, and `Enter` / `d` / `c`
+  act on the filtered selection; the filter starts empty on every open. See
+  [docs/clipboard.md](docs/clipboard.md).
+
+- Resting the pointer ~500 ms on a tab-strip cell whose title is
+  ellipsized floats the full title in a chip off the strip — above it, or
+  below when the strip hugs the screen's top edge. Truncated titles only,
+  never covering the hovered cell, fade following the animation switch with
+  the dwell applying either way. See
+  [docs/window-tabs.md](docs/window-tabs.md).
 
 - Screenshots and screen recordings announce themselves now. A finished
   capture raises a toast with the saved path (or confirms the clipboard

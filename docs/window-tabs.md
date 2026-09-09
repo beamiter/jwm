@@ -30,6 +30,7 @@ of question marks.
 | Gesture | Action |
 | --- | --- |
 | hover | highlights the inactive cell under the pointer at half strength |
+| rest ~500 ms on a cell whose title is ellipsized | floats the full title in a chip above the strip — below it when the strip hugs the screen's top edge |
 | left-click | focuses the window (and raises it) |
 | middle-click | closes the window, through the same path as `killclient` |
 | left-drag past `behavior.drag_threshold_px` (default 12 px), then release | moves the window to the dropped slot in that monitor's tiling order |
@@ -43,6 +44,11 @@ A left press focuses its window immediately, so a reorder drag always
 starts from the window you just made current — matching what the layout
 does with the slot it lands in.
 
+The tooltip chip appears only for titles actually ellipsized in their cell,
+never covers the cell under the pointer, and takes no clicks off the strip;
+its fade follows the global animation switch, but the 500 ms rest applies
+either way — the dwell is information policy, not animation.
+
 ## Where it lives
 
 - `src/jwm/window_tabs.rs` — which windows are in the bar, the pixels the
@@ -52,6 +58,9 @@ does with the slot it lands in.
   would sit on top of the status bar.
 - `src/backend/compositor_common/window_tabs.rs` — the strip's geometry
   and hit math, shared by the window manager and both compositors so the
-  reserved band and the painted cells cannot drift apart. Hover state
-  lives in the compositor rather than the window manager, so pointer
-  motion never triggers a title-texture rebuild.
+  reserved band and the painted cells cannot drift apart — plus the
+  tooltip's shared half: `TooltipDwell` keeps the rest-then-show policy and
+  `tooltip_rect` the chip placement, both pure for the same reason; the
+  chip's raster is cached per title and freed with the title textures.
+  Hover state lives in the compositor rather than the window manager, so
+  pointer motion never triggers a title-texture rebuild.

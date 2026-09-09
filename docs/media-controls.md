@@ -26,7 +26,12 @@ player --MPRIS--> jwm-bridge --set_media_status--> jwm --> control center row
 In the control center the media row is first when a player is running:
 `Left`/`Right` skip tracks, `Return` toggles playback. The row hides the
 skip glyphs a player says it cannot honor (`CanGoNext` / `CanGoPrevious`),
-and disappears entirely when no player is running.
+and disappears entirely when no player is running. When the player reports
+both a position and a length, the row shows `m:ss / m:ss` (`h:mm:ss` past
+an hour) — clamped to the track's length for display, refreshed on the
+bridge's sweep, holding the last polled position while paused, and reset on
+a track change; streams and players that don't report both show no suffix,
+never a placeholder. It is display-only — no seeking.
 
 A media key on a session with no player reports `no media player is running`
 rather than failing silently.
@@ -56,11 +61,15 @@ picked up by a 3-second sweep.
 
 - `set_media_status` — what the bridge pushes: `player`, `identity`, `status`
   (`Playing`/`Paused`/`Stopped`), `title`, `artist`, `can_go_next`,
-  `can_go_previous`. A missing or null `player` clears the state, which is how
+  `can_go_previous`, and append-only `position_us` / `length_us` microsecond
+  fields (nullable; mixed old/new bridge↔jwm pairs are tolerated). A missing
+  or null `player` clears the state, which is how
   the bridge reports that every player went away.
 - `media_control` — `{"action": "play_pause" | "next" | "previous" | "stop"}`.
   `toggle`, `playpause`, and `prev` are accepted aliases.
-- `get_media_status` — the current state plus the rendered `label`.
+- `get_media_status` — the current state plus the rendered `label` and a
+  pre-formatted nullable `position_label`, so bars don't reimplement the
+  clamping.
 - the `media` subscription topic carries `media/status` and `media/command`.
 
 Bars can subscribe to `media/status` for a now-playing widget without talking

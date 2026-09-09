@@ -185,6 +185,12 @@ The default modifier is Alt (`Mod1`). Useful built-in bindings include:
 | Alt+Shift+C | Close focused client |
 | Alt+Shift+Left / Alt+Shift+Right | Snap the focused floating window to that half of its monitor |
 | Alt+Shift+Up | Maximize the focused floating window |
+
+Mouse users get the same geometry: dragging a floating window to a screen
+edge snaps it to that half (or maximizes at the top), and dropping it into a
+corner quarters it there. The quarters have no default bindings, but
+`snap_window top-left` / `top-right` / `bottom-left` / `bottom-right` are
+bindable and scriptable over IPC like the three defaults.
 | Alt+Control+C | Calculator scratchpad |
 | Alt+Control+S | Toggle sticky window |
 | Alt+Shift+F11 | Toggle the WaterLily simulation |
