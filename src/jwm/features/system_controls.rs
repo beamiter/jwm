@@ -4,7 +4,8 @@
 //! queues a [`ControlRequest`] on one session-wide worker and draws an
 //! optimistic estimate at once, while the worker shells out to the session's
 //! native tools with a fallback chain — volume: `wpctl` (PipeWire) → `pactl`
-//! (PulseAudio) → `amixer` (ALSA); brightness: `brightnessctl` → direct
+//! (PulseAudio) → `amixer` (ALSA); the microphone's mute rides the same
+//! chain against the default source; brightness: `brightnessctl` → direct
 //! sysfs. The worker folds everything still queued into the newest level
 //! before running, so a key-repeat storm or slider drag costs one write, not
 //! one spawn per repeat, and its read-back confirms or corrects the estimate
@@ -237,6 +238,62 @@ fn volume_set(percent: u8) -> Option<AudioState> {
         return None;
     }
     volume_state()
+}
+
+// ---------------------------------------------------------------------------
+// Microphone mute
+// ---------------------------------------------------------------------------
+//
+// The source half of the sink's tool chain: the one detected audio tool
+// answers for the microphone too, so a session whose chain fell through to
+// ALSA — or to no tool at all — behaves identically at both ends, and the
+// known-absent peek the key path reads needs no microphone twin.
+
+/// Current default-source mute state, or `None` when no tool works.
+pub fn mic_mute_state() -> Option<bool> {
+    match detect_volume_tool()? {
+        // `get-volume` reports the source's level and its [MUTED] flag in
+        // one read; only the flag is asked for here.
+        VolumeTool::Wpctl => {
+            Some(parse_wpctl(&run("wpctl", &["get-volume", "@DEFAULT_AUDIO_SOURCE@"])?)?.muted)
+        }
+        VolumeTool::Pactl => {
+            parse_pactl_mute(&run("pactl", &["get-source-mute", "@DEFAULT_SOURCE@"])?)
+        }
+        VolumeTool::Amixer => Some(parse_amixer(&run("amixer", &["get", "Capture"])?)?.muted),
+    }
+}
+
+/// Set the default source's mute flag, returning the read-back. Runs on the
+/// controls worker.
+fn mic_set_mute(muted: bool) -> Option<bool> {
+    let flag = if muted { "1" } else { "0" };
+    let ok = match detect_volume_tool()? {
+        VolumeTool::Wpctl => run_ok("wpctl", &["set-mute", "@DEFAULT_AUDIO_SOURCE@", flag]),
+        VolumeTool::Pactl => run_ok("pactl", &["set-source-mute", "@DEFAULT_SOURCE@", flag]),
+        VolumeTool::Amixer => run_ok(
+            "amixer",
+            &["set", "Capture", if muted { "mute" } else { "unmute" }],
+        ),
+    };
+    if !ok {
+        return None;
+    }
+    mic_mute_state()
+}
+
+/// Toggle the default source's mute flag, returning the read-back. Runs on
+/// the controls worker.
+fn mic_toggle_mute() -> Option<bool> {
+    let ok = match detect_volume_tool()? {
+        VolumeTool::Wpctl => run_ok("wpctl", &["set-mute", "@DEFAULT_AUDIO_SOURCE@", "toggle"]),
+        VolumeTool::Pactl => run_ok("pactl", &["set-source-mute", "@DEFAULT_SOURCE@", "toggle"]),
+        VolumeTool::Amixer => run_ok("amixer", &["set", "Capture", "toggle"]),
+    };
+    if !ok {
+        return None;
+    }
+    mic_mute_state()
 }
 
 // ---------------------------------------------------------------------------
@@ -547,6 +604,10 @@ impl AudioDefaults {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ControlCenterSnapshot {
     pub volume: Option<AudioState>,
+    /// The default microphone's mute flag. No control-center row reads it
+    /// yet: it is the confirmed base the mic-mute key's optimistic flip
+    /// estimates from, adopted from the controls worker's read-backs.
+    pub mic_muted: Option<bool>,
     pub brightness: Option<u8>,
     pub audio_defaults: AudioDefaults,
     /// Both full device lists, not just the two in use: `get_audio_devices`
@@ -571,6 +632,7 @@ impl ControlCenterSnapshot {
         let audio_inventory = audio_inventory();
         Self {
             volume: volume_state(),
+            mic_muted: mic_mute_state(),
             brightness: brightness_percent(),
             audio_defaults: audio_inventory.defaults(),
             audio_inventory,
@@ -822,6 +884,16 @@ pub(crate) enum ControlRequest {
     /// An event, not a value: it is never folded into a level, and only an
     /// adjacent twin cancels it (two flips with nothing between are no flip).
     VolumeToggleMute,
+    /// Microphone mute as an absolute target. A value like the level sets:
+    /// two queued sets fold to the newest. Nothing constructs it this round
+    /// — the toggle key is the only mic interaction; the control-center
+    /// Input row / IPC follow-up will — but its fold, estimate, and worker
+    /// arms are live code and test-covered.
+    #[allow(dead_code)]
+    MicMuteSet(bool),
+    /// The microphone half of [`Self::VolumeToggleMute`]: an event, never
+    /// folded into a set, cancelled only by an adjacent twin.
+    MicMuteToggle,
     BrightnessAdjust(i32),
     BrightnessSet(u8),
     /// Make a device the default sink/source (the audio picker's Enter). A
@@ -841,6 +913,8 @@ pub(crate) enum ControlRequest {
 pub(crate) enum ControlDomain {
     Volume,
     Brightness,
+    /// The default microphone's mute flag.
+    MicMute,
     /// The default audio device. It never carries an OSD estimate or debt —
     /// its feedback is the picker's re-read rows — so the OSD-side matches
     /// turn it away empty-handed.
@@ -854,6 +928,7 @@ impl ControlRequest {
                 ControlDomain::Volume
             }
             Self::BrightnessAdjust(_) | Self::BrightnessSet(_) => ControlDomain::Brightness,
+            Self::MicMuteSet(_) | Self::MicMuteToggle => ControlDomain::MicMute,
             Self::AudioSetDefault { .. } => ControlDomain::AudioDevice,
         }
     }
@@ -898,11 +973,23 @@ fn merge_value_requests(pending: &ControlRequest, next: &ControlRequest) -> Cont
         // before it moot.
         (_, ControlRequest::VolumeSet(_))
         | (_, ControlRequest::BrightnessSet(_))
+        | (_, ControlRequest::MicMuteSet(_))
         | (_, ControlRequest::AudioSetDefault { .. }) => next.clone(),
         // Toggles never reach here and cross-domain pairs are never merged;
         // the folder below guarantees both.
         _ => pending.clone(),
     }
+}
+
+/// The newest submission sequence folded away per toggle domain in one
+/// drain. A cancelled toggle pair changed no state, but the estimate on
+/// screen is still owed a read-back whose sequence covers the cancelled
+/// submissions — tracked per domain so a cancelled sink pair never forces a
+/// microphone read-back (an extra spawn for nothing) nor vice versa.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct CancelledToggles {
+    volume: Option<u64>,
+    mic: Option<u64>,
 }
 
 /// Fold a queued request into the batch the worker is about to run.
@@ -913,12 +1000,14 @@ fn merge_value_requests(pending: &ControlRequest, next: &ControlRequest) -> Cont
 /// merging across it, because the set-on-muted unmute chain depends on the
 /// order. The one fold a toggle allows is against its own adjacent twin:
 /// two flips with nothing between are no flip, and cancelling the pair keeps
-/// a toggle flood from piling up behind a hung helper. `cancelled_seq`
-/// records the newest sequence folded away this drain so the worker can
-/// still publish a read-back covering it.
+/// a toggle flood from piling up behind a hung helper. Sink and microphone
+/// toggles are different events in different domains: they never cancel
+/// each other. `cancelled` records the newest sequence folded away per
+/// toggle domain this drain so the worker can still publish a read-back
+/// covering it.
 fn fold_request(
     batch: &mut Vec<QueuedRequest>,
-    cancelled_seq: &mut Option<u64>,
+    cancelled: &mut CancelledToggles,
     next: QueuedRequest,
 ) {
     let domain = next.request.domain();
@@ -929,11 +1018,23 @@ fn fold_request(
         (ControlRequest::VolumeToggleMute, Some(index))
             if batch[index].request == ControlRequest::VolumeToggleMute =>
         {
-            let cancelled = batch.remove(index);
-            *cancelled_seq = Some(cancelled.seq.max(next.seq));
+            let removed = batch.remove(index);
+            cancelled.volume = Some(removed.seq.max(next.seq));
         }
         (ControlRequest::VolumeToggleMute, _) => batch.push(next),
-        (_, Some(index)) if batch[index].request != ControlRequest::VolumeToggleMute => {
+        (ControlRequest::MicMuteToggle, Some(index))
+            if batch[index].request == ControlRequest::MicMuteToggle =>
+        {
+            let removed = batch.remove(index);
+            cancelled.mic = Some(removed.seq.max(next.seq));
+        }
+        (ControlRequest::MicMuteToggle, _) => batch.push(next),
+        (_, Some(index))
+            if !matches!(
+                batch[index].request,
+                ControlRequest::VolumeToggleMute | ControlRequest::MicMuteToggle
+            ) =>
+        {
             let merged = merge_value_requests(&batch[index].request, &next.request);
             batch[index] = QueuedRequest {
                 seq: batch[index].seq.max(next.seq),
@@ -953,6 +1054,7 @@ pub(crate) struct ControlReport {
     pub volume: Option<VolumeReport>,
     pub brightness: Option<BrightnessReport>,
     pub audio: Option<AudioReport>,
+    pub mic: Option<MicReport>,
 }
 
 /// What the worker confirmed after a device switch: the set's own answer and,
@@ -1051,6 +1153,27 @@ impl BrightnessReport {
     }
 }
 
+/// The microphone counterpart of [`VolumeReport`]: the read-back carries
+/// only the mute flag — the mic card has no level to confirm.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MicReport {
+    /// Read-back after the newest applied mic request; the sequence says
+    /// which submissions this answer covers.
+    Applied(u64, bool),
+    /// The change or its read-back did not take — the same `None` the
+    /// synchronous path returned.
+    Failed(u64),
+}
+
+impl MicReport {
+    fn split(self) -> (u64, Option<bool>) {
+        match self {
+            Self::Applied(seq, muted) => (seq, Some(muted)),
+            Self::Failed(seq) => (seq, None),
+        }
+    }
+}
+
 /// The one session-wide control queue. An unbounded channel is still bounded
 /// in practice — the worker folds everything pending each time it finishes a
 /// step — but the fold, not the channel, is what guarantees a drag never
@@ -1121,11 +1244,11 @@ fn run_control_queue(
 ) {
     while let Ok(first) = receiver.recv() {
         let mut batch = vec![first];
-        let mut cancelled_seq = None;
+        let mut cancelled = CancelledToggles::default();
         // Everything submitted while the previous step ran — a slider drag's
         // worth of levels — folds into the newest one before any of it runs.
         while let Ok(next) = receiver.try_recv() {
-            fold_request(&mut batch, &mut cancelled_seq, next);
+            fold_request(&mut batch, &mut cancelled, next);
         }
 
         let mut outcome = ControlReport::default();
@@ -1150,6 +1273,20 @@ fn run_control_queue(
                     outcome.volume = Some(
                         volume_toggle_mute().map_or(VolumeReport::Failed(queued.seq), |state| {
                             VolumeReport::Applied(queued.seq, state)
+                        }),
+                    );
+                }
+                ControlRequest::MicMuteSet(muted) => {
+                    outcome.mic = Some(
+                        mic_set_mute(muted).map_or(MicReport::Failed(queued.seq), |state| {
+                            MicReport::Applied(queued.seq, state)
+                        }),
+                    );
+                }
+                ControlRequest::MicMuteToggle => {
+                    outcome.mic = Some(
+                        mic_toggle_mute().map_or(MicReport::Failed(queued.seq), |muted| {
+                            MicReport::Applied(queued.seq, muted)
                         }),
                     );
                 }
@@ -1189,27 +1326,48 @@ fn run_control_queue(
         // A batch reduced to nothing by a cancelled toggle pair changed no
         // state, but the estimate on screen still needs a read-back whose
         // sequence covers the cancelled submissions. When the batch did run
-        // a volume command, its answer — success or failure — already ran
-        // after everything the cancelled pair could have toggled, so it
-        // covers those submissions too.
-        if let Some(cancelled) = cancelled_seq {
+        // a command for that domain, its answer — success or failure —
+        // already ran after everything the cancelled pair could have
+        // toggled, so it covers those submissions too.
+        if let Some(cancelled_seq) = cancelled.volume {
             match &mut outcome.volume {
                 Some(report) => {
                     let seq = match report {
                         VolumeReport::Applied(seq, _) | VolumeReport::Failed(seq) => seq,
                     };
-                    *seq = (*seq).max(cancelled);
+                    *seq = (*seq).max(cancelled_seq);
                 }
                 None => {
                     outcome.volume = Some(
-                        volume_state().map_or(VolumeReport::Failed(cancelled), |state| {
-                            VolumeReport::Applied(cancelled, state)
+                        volume_state().map_or(VolumeReport::Failed(cancelled_seq), |state| {
+                            VolumeReport::Applied(cancelled_seq, state)
                         }),
                     );
                 }
             }
         }
-        if outcome.volume.is_none() && outcome.brightness.is_none() && outcome.audio.is_none() {
+        if let Some(cancelled_seq) = cancelled.mic {
+            match &mut outcome.mic {
+                Some(report) => {
+                    let seq = match report {
+                        MicReport::Applied(seq, _) | MicReport::Failed(seq) => seq,
+                    };
+                    *seq = (*seq).max(cancelled_seq);
+                }
+                None => {
+                    outcome.mic = Some(
+                        mic_mute_state().map_or(MicReport::Failed(cancelled_seq), |muted| {
+                            MicReport::Applied(cancelled_seq, muted)
+                        }),
+                    );
+                }
+            }
+        }
+        if outcome.volume.is_none()
+            && outcome.brightness.is_none()
+            && outcome.audio.is_none()
+            && outcome.mic.is_none()
+        {
             continue;
         }
 
@@ -1225,6 +1383,9 @@ fn run_control_queue(
             }
             if outcome.audio.is_some() {
                 guard.audio = outcome.audio;
+            }
+            if outcome.mic.is_some() {
+                guard.mic = outcome.mic;
             }
             // Publish before signalling, mirroring `BackgroundJob`: a handler
             // woken by the eventfd must find the value already visible.
@@ -1272,7 +1433,11 @@ pub(crate) fn take_control_report() -> Option<ControlReport> {
     let worker = CONTROLS_WORKER.get()?;
     let mut guard = worker.report.lock().unwrap_or_else(PoisonError::into_inner);
     let taken = std::mem::take(&mut *guard);
-    (taken.volume.is_some() || taken.brightness.is_some() || taken.audio.is_some()).then_some(taken)
+    (taken.volume.is_some()
+        || taken.brightness.is_some()
+        || taken.audio.is_some()
+        || taken.mic.is_some())
+    .then_some(taken)
 }
 
 /// Whether detection already concluded that no volume tool works — the one
@@ -1318,6 +1483,8 @@ pub(crate) fn optimistic_volume(
         }),
         ControlRequest::BrightnessAdjust(_)
         | ControlRequest::BrightnessSet(_)
+        | ControlRequest::MicMuteSet(_)
+        | ControlRequest::MicMuteToggle
         | ControlRequest::AudioSetDefault { .. } => None,
     }
 }
@@ -1331,6 +1498,25 @@ pub(crate) fn optimistic_brightness(base: Option<u8>, request: &ControlRequest) 
         ControlRequest::VolumeAdjust(_)
         | ControlRequest::VolumeSet(_)
         | ControlRequest::VolumeToggleMute
+        | ControlRequest::MicMuteSet(_)
+        | ControlRequest::MicMuteToggle
+        | ControlRequest::AudioSetDefault { .. } => None,
+    }
+}
+
+/// The microphone mute flag to show before the worker confirms; same rules
+/// as [`optimistic_volume`]: a set needs no base (it knows its target), a
+/// toggle flips the base, and a `None` base shows nothing — the read-back
+/// owns the first card.
+pub(crate) fn optimistic_mic_mute(base: Option<bool>, request: &ControlRequest) -> Option<bool> {
+    match request {
+        ControlRequest::MicMuteSet(muted) => Some(*muted),
+        ControlRequest::MicMuteToggle => base.map(|muted| !muted),
+        ControlRequest::VolumeAdjust(_)
+        | ControlRequest::VolumeSet(_)
+        | ControlRequest::VolumeToggleMute
+        | ControlRequest::BrightnessAdjust(_)
+        | ControlRequest::BrightnessSet(_)
         | ControlRequest::AudioSetDefault { .. } => None,
     }
 }
@@ -1412,10 +1598,12 @@ struct LastOsd {
 pub struct ControlFeedback {
     volume: Option<OptimisticValue<AudioState>>,
     brightness: Option<OptimisticValue<u8>>,
+    mic: Option<OptimisticValue<bool>>,
     /// A press that had nothing to estimate from is owed its first card from
     /// the read-back; the sequence keeps a stale report from paying the debt.
     volume_osd_owed: Option<u64>,
     brightness_osd_owed: Option<u64>,
+    mic_osd_owed: Option<u64>,
     last_osd: Option<LastOsd>,
     /// A read-back that contradicts the visible card queues a re-show here.
     pending_osd: Option<OsdCorrection>,
@@ -1431,6 +1619,11 @@ impl ControlFeedback {
     /// The brightness counterpart of [`Self::volume_shown`].
     pub(crate) fn brightness_shown(&self) -> Option<u8> {
         self.brightness.map(|estimate| estimate.shown)
+    }
+
+    /// The microphone counterpart of [`Self::volume_shown`].
+    pub(crate) fn mic_shown(&self) -> Option<bool> {
+        self.mic.map(|estimate| estimate.shown)
     }
 
     /// Record an estimate just drawn. A chained estimate keeps the original
@@ -1474,6 +1667,23 @@ impl ControlFeedback {
         }
     }
 
+    /// The microphone counterpart of [`Self::note_volume_estimate`].
+    pub(crate) fn note_mic_estimate(&mut self, seq: u64, shown: bool, confirmed: Option<bool>) {
+        match &mut self.mic {
+            Some(estimate) => {
+                estimate.seq = seq;
+                estimate.shown = shown;
+            }
+            None => {
+                self.mic = Some(OptimisticValue {
+                    seq,
+                    shown,
+                    previous: confirmed,
+                });
+            }
+        }
+    }
+
     /// The card a key press just drew, so a contradicting read-back can
     /// refresh it in place.
     pub(crate) fn note_osd_shown(
@@ -1497,6 +1707,7 @@ impl ControlFeedback {
         match domain {
             ControlDomain::Volume => self.volume_osd_owed = Some(seq),
             ControlDomain::Brightness => self.brightness_osd_owed = Some(seq),
+            ControlDomain::MicMute => self.mic_osd_owed = Some(seq),
             // A device switch owes no card: its feedback is the picker's
             // re-read rows, not the OSD.
             ControlDomain::AudioDevice => {}
@@ -1551,6 +1762,25 @@ impl ControlFeedback {
         action
     }
 
+    /// The microphone counterpart of [`Self::resolve_volume`]. The card
+    /// value pair carries a 0 percent: the mic card draws no bar, only the
+    /// mute flag.
+    pub(crate) fn resolve_mic(&mut self, report: MicReport, now: Instant) -> FeedbackAction<bool> {
+        let (seq, result) = report.split();
+        let action = decide_feedback(self.mic, seq, result);
+        if matches!(action, FeedbackAction::KeepEstimate) {
+            return action;
+        }
+        self.mic = None;
+        let value = match action {
+            FeedbackAction::Adopt(muted) => Some((0, muted)),
+            FeedbackAction::Revert(previous) => previous.map(|muted| (0, muted)),
+            FeedbackAction::KeepEstimate => None,
+        };
+        self.resolve_osd(ControlDomain::MicMute, seq, value, now);
+        action
+    }
+
     /// Queue an OSD refresh when the report calls for one: an owed first
     /// card, or a live card whose value the read-back just contradicted.
     fn resolve_osd(
@@ -1566,6 +1796,7 @@ impl ControlFeedback {
         let owed = match domain {
             ControlDomain::Volume => &mut self.volume_osd_owed,
             ControlDomain::Brightness => &mut self.brightness_osd_owed,
+            ControlDomain::MicMute => &mut self.mic_osd_owed,
             // Never owed: a device switch's feedback is the picker's re-read
             // rows, and this helper is only ever called for the OSD domains.
             ControlDomain::AudioDevice => return,
@@ -2073,26 +2304,26 @@ Source #51
 
     fn fold_all(
         requests: impl IntoIterator<Item = QueuedRequest>,
-    ) -> (Vec<QueuedRequest>, Option<u64>) {
+    ) -> (Vec<QueuedRequest>, CancelledToggles) {
         let mut batch = Vec::new();
-        let mut cancelled_seq = None;
+        let mut cancelled = CancelledToggles::default();
         for request in requests {
-            fold_request(&mut batch, &mut cancelled_seq, request);
+            fold_request(&mut batch, &mut cancelled, request);
         }
-        (batch, cancelled_seq)
+        (batch, cancelled)
     }
 
     #[test]
     fn queued_adjusts_sum_into_one_write() {
         // A key-repeat storm applies the same total as pressing each key
         // after the worker caught up — but as one write, not a backlog.
-        let (batch, cancelled_seq) = fold_all([
+        let (batch, cancelled) = fold_all([
             queued(1, ControlRequest::VolumeAdjust(5)),
             queued(2, ControlRequest::VolumeAdjust(5)),
             queued(3, ControlRequest::VolumeAdjust(-12)),
         ]);
         assert_eq!(batch, [queued(3, ControlRequest::VolumeAdjust(-2))]);
-        assert_eq!(cancelled_seq, None);
+        assert_eq!(cancelled, CancelledToggles::default());
 
         // The sum cannot overflow no matter how long the worker is busy.
         let (batch, _) = fold_all([
@@ -2146,7 +2377,7 @@ Source #51
         // The toggle is an event: the set-on-muted unmute chain depends on
         // whether it ran, so the levels on either side must not merge across
         // it.
-        let (batch, cancelled_seq) = fold_all([
+        let (batch, cancelled) = fold_all([
             queued(1, ControlRequest::VolumeSet(30)),
             queued(2, ControlRequest::VolumeToggleMute),
             queued(3, ControlRequest::VolumeSet(60)),
@@ -2159,7 +2390,7 @@ Source #51
                 queued(3, ControlRequest::VolumeSet(60)),
             ]
         );
-        assert_eq!(cancelled_seq, None);
+        assert_eq!(cancelled, CancelledToggles::default());
 
         let (batch, _) = fold_all([
             queued(1, ControlRequest::VolumeAdjust(5)),
@@ -2180,32 +2411,127 @@ Source #51
     fn adjacent_mute_toggles_cancel_in_pairs() {
         // Two flips with nothing between are no flip; the newest cancelled
         // sequence still earns a read-back so the estimate can resolve.
-        let (batch, cancelled_seq) = fold_all([
+        let (batch, cancelled) = fold_all([
             queued(1, ControlRequest::VolumeToggleMute),
             queued(2, ControlRequest::VolumeToggleMute),
         ]);
         assert!(batch.is_empty());
-        assert_eq!(cancelled_seq, Some(2));
+        assert_eq!(cancelled.volume, Some(2));
 
         // …and once the pair is gone, the levels around it merge — the end
         // state of set-flip-flip-set is the one set.
-        let (batch, cancelled_seq) = fold_all([
+        let (batch, cancelled) = fold_all([
             queued(1, ControlRequest::VolumeSet(30)),
             queued(2, ControlRequest::VolumeToggleMute),
             queued(3, ControlRequest::VolumeToggleMute),
             queued(4, ControlRequest::VolumeSet(60)),
         ]);
         assert_eq!(batch, [queued(4, ControlRequest::VolumeSet(60))]);
-        assert_eq!(cancelled_seq, Some(3));
+        assert_eq!(cancelled.volume, Some(3));
 
         // An odd run of toggles keeps exactly one — the parity is the event.
-        let (batch, cancelled_seq) = fold_all([
+        let (batch, cancelled) = fold_all([
             queued(1, ControlRequest::VolumeToggleMute),
             queued(2, ControlRequest::VolumeToggleMute),
             queued(3, ControlRequest::VolumeToggleMute),
         ]);
         assert_eq!(batch, [queued(3, ControlRequest::VolumeToggleMute)]);
-        assert_eq!(cancelled_seq, Some(2));
+        assert_eq!(cancelled.volume, Some(2));
+    }
+
+    #[test]
+    fn queued_mic_sets_fold_to_the_newest() {
+        // Like the level sets: two queued mic targets are one write, the
+        // newest.
+        let (batch, cancelled) = fold_all([
+            queued(1, ControlRequest::MicMuteSet(true)),
+            queued(2, ControlRequest::MicMuteSet(false)),
+        ]);
+        assert_eq!(batch, [queued(2, ControlRequest::MicMuteSet(false))]);
+        assert_eq!(cancelled, CancelledToggles::default());
+    }
+
+    #[test]
+    fn a_mic_toggle_between_sets_is_never_folded_away() {
+        // The microphone half of the volume rule: the toggle is an event,
+        // and the sets on either side must not merge across it.
+        let (batch, cancelled) = fold_all([
+            queued(1, ControlRequest::MicMuteSet(true)),
+            queued(2, ControlRequest::MicMuteToggle),
+            queued(3, ControlRequest::MicMuteSet(false)),
+        ]);
+        assert_eq!(
+            batch,
+            [
+                queued(1, ControlRequest::MicMuteSet(true)),
+                queued(2, ControlRequest::MicMuteToggle),
+                queued(3, ControlRequest::MicMuteSet(false)),
+            ]
+        );
+        assert_eq!(cancelled, CancelledToggles::default());
+    }
+
+    #[test]
+    fn adjacent_mic_toggles_cancel_in_pairs() {
+        // Two mic flips with nothing between are no flip; the newest
+        // cancelled sequence still earns a read-back so the estimate can
+        // resolve.
+        let (batch, cancelled) = fold_all([
+            queued(1, ControlRequest::MicMuteToggle),
+            queued(2, ControlRequest::MicMuteToggle),
+        ]);
+        assert!(batch.is_empty());
+        assert_eq!(cancelled.mic, Some(2));
+
+        // Once the pair is gone the sets around it merge, exactly like the
+        // volume fold.
+        let (batch, cancelled) = fold_all([
+            queued(1, ControlRequest::MicMuteSet(true)),
+            queued(2, ControlRequest::MicMuteToggle),
+            queued(3, ControlRequest::MicMuteToggle),
+            queued(4, ControlRequest::MicMuteSet(false)),
+        ]);
+        assert_eq!(batch, [queued(4, ControlRequest::MicMuteSet(false))]);
+        assert_eq!(cancelled.mic, Some(3));
+
+        // An odd run keeps exactly one — the parity is the event.
+        let (batch, cancelled) = fold_all([
+            queued(1, ControlRequest::MicMuteToggle),
+            queued(2, ControlRequest::MicMuteToggle),
+            queued(3, ControlRequest::MicMuteToggle),
+        ]);
+        assert_eq!(batch, [queued(3, ControlRequest::MicMuteToggle)]);
+        assert_eq!(cancelled.mic, Some(2));
+    }
+
+    #[test]
+    fn mic_and_volume_toggles_cancel_only_within_their_own_domain() {
+        // A sink flip and a mic flip are different events: adjacent across
+        // domains they must both run, in the order asked.
+        let (batch, cancelled) = fold_all([
+            queued(1, ControlRequest::VolumeToggleMute),
+            queued(2, ControlRequest::MicMuteToggle),
+        ]);
+        assert_eq!(
+            batch,
+            [
+                queued(1, ControlRequest::VolumeToggleMute),
+                queued(2, ControlRequest::MicMuteToggle),
+            ]
+        );
+        assert_eq!(cancelled, CancelledToggles::default());
+
+        // …and each domain's pair still cancels independently in one drain,
+        // so each earns its own covering read-back.
+        let (batch, cancelled) = fold_all([
+            queued(1, ControlRequest::VolumeToggleMute),
+            queued(2, ControlRequest::MicMuteToggle),
+            queued(3, ControlRequest::VolumeToggleMute),
+            queued(4, ControlRequest::MicMuteToggle),
+        ]);
+        assert!(batch.is_empty());
+        assert_eq!(cancelled.volume, Some(3));
+        assert_eq!(cancelled.mic, Some(4));
     }
 
     #[test]
@@ -2239,12 +2565,12 @@ Source #51
     fn queued_audio_switches_fold_to_the_newest() {
         // Two quick Enter presses are one switch: the device asked for last,
         // never both in order.
-        let (batch, cancelled_seq) = fold_all([
+        let (batch, cancelled) = fold_all([
             audio_switch(1, AudioDirection::Output, "42"),
             audio_switch(2, AudioDirection::Output, "57"),
         ]);
         assert_eq!(batch, [audio_switch(2, AudioDirection::Output, "57")]);
-        assert_eq!(cancelled_seq, None);
+        assert_eq!(cancelled, CancelledToggles::default());
     }
 
     #[test]
@@ -2434,6 +2760,110 @@ Source #51
                 muted: false
             })
         );
+    }
+
+    #[test]
+    fn optimistic_mic_mute_flips_the_base_and_a_set_needs_none() {
+        assert_eq!(
+            optimistic_mic_mute(Some(false), &ControlRequest::MicMuteToggle),
+            Some(true)
+        );
+        assert_eq!(
+            optimistic_mic_mute(Some(true), &ControlRequest::MicMuteToggle),
+            Some(false)
+        );
+        // Nothing ever read: no invented state for a flip — the read-back
+        // owns the first card — but a set knows its target either way.
+        assert_eq!(
+            optimistic_mic_mute(None, &ControlRequest::MicMuteToggle),
+            None
+        );
+        assert_eq!(
+            optimistic_mic_mute(None, &ControlRequest::MicMuteSet(true)),
+            Some(true)
+        );
+        assert_eq!(
+            optimistic_mic_mute(Some(true), &ControlRequest::MicMuteSet(false)),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn a_mic_readback_covering_the_estimate_is_adopted_and_a_failure_reverts() {
+        let mut feedback = ControlFeedback::default();
+        let now = Instant::now();
+        feedback.note_mic_estimate(5, true, Some(false));
+
+        // A read-back predating the flip changes nothing on screen — not an
+        // adopt, and not a revert either.
+        let action = feedback.resolve_mic(MicReport::Applied(4, false), now);
+        assert_eq!(action, FeedbackAction::KeepEstimate);
+        let action = feedback.resolve_mic(MicReport::Failed(4), now);
+        assert_eq!(action, FeedbackAction::KeepEstimate);
+
+        // The covering read-back is adopted…
+        let action = feedback.resolve_mic(MicReport::Applied(5, true), now);
+        assert_eq!(action, FeedbackAction::Adopt(true));
+
+        // …while a covered failure restores the last confirmed state, not
+        // the flip that never landed.
+        feedback.note_mic_estimate(6, false, Some(true));
+        let action = feedback.resolve_mic(MicReport::Failed(6), now);
+        assert_eq!(action, FeedbackAction::Revert(Some(true)));
+    }
+
+    #[test]
+    fn a_mic_press_with_no_base_is_owed_its_first_card() {
+        let mut feedback = ControlFeedback::default();
+        let now = Instant::now();
+        feedback.owe_osd(ControlDomain::MicMute, 3);
+
+        // A report predating the owed submission pays nothing.
+        feedback.resolve_mic(MicReport::Applied(2, true), now);
+        assert_eq!(feedback.take_pending_osd(), None);
+
+        // The covering read-back draws the mic card: no bar, just the flag.
+        feedback.resolve_mic(MicReport::Applied(3, true), now);
+        assert_eq!(
+            feedback.take_pending_osd(),
+            Some(OsdCorrection {
+                domain: ControlDomain::MicMute,
+                percent: 0,
+                muted: true,
+            })
+        );
+
+        // …while a failed change pays nothing, matching the binding's old
+        // no-card error path.
+        feedback.owe_osd(ControlDomain::MicMute, 5);
+        let action = feedback.resolve_mic(MicReport::Failed(5), now);
+        assert_eq!(action, FeedbackAction::Revert(None));
+        assert_eq!(feedback.take_pending_osd(), None);
+    }
+
+    #[test]
+    fn a_contradicted_live_mic_card_is_refreshed_in_place() {
+        let mut feedback = ControlFeedback::default();
+        let now = Instant::now();
+        feedback.note_osd_shown(ControlDomain::MicMute, 0, true, now);
+
+        // The read-back says the flip never landed: re-show the live card
+        // with the true flag.
+        feedback.resolve_mic(MicReport::Applied(1, false), now);
+        assert_eq!(
+            feedback.take_pending_osd(),
+            Some(OsdCorrection {
+                domain: ControlDomain::MicMute,
+                percent: 0,
+                muted: false,
+            })
+        );
+
+        // Another domain's card owns the slot now; a mic read-back must not
+        // yank the volume card off the screen.
+        feedback.note_osd_shown(ControlDomain::Volume, 60, false, now);
+        feedback.resolve_mic(MicReport::Applied(2, true), now);
+        assert_eq!(feedback.take_pending_osd(), None);
     }
 
     #[test]
@@ -2723,6 +3153,8 @@ Source #51
             "volume_toggle_mute",
             "brightness_adjust",
             "brightness_set",
+            "mic_set_mute",
+            "mic_toggle_mute",
         ] {
             let needle = format!("{primitive}(");
             // The only allowed call shape inside the queue is on

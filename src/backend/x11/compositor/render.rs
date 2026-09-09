@@ -3229,33 +3229,66 @@ impl<C: CompositorConnection> Compositor<C> {
         let description = config.system_ui_font();
         let size = crate::backend::compositor_font::ui_font_pixel_size(description);
         let ui = ui_theme::palette();
-        // Title in the brightest ink, body one step down.
-        let colors: [[u8; 4]; 2] = [ui.value_ink, ui.label_ink];
+        use crate::backend::compositor_common::toast as toast_layout;
+        let fit = |text: &str, max_width: u32| {
+            crate::backend::compositor_font::fit_ui_text_lines(text, description, size, max_width)
+        };
         let mut set = ToastTextureSet {
             text: [None, None],
             buttons: Vec::with_capacity(toast.actions.len()),
         };
-        let texts = [&toast.title, &toast.body];
-        for (slot, (text, color)) in texts.into_iter().zip(colors).enumerate() {
-            let text = crate::backend::compositor_font::fit_ui_text_lines(
-                text,
-                description,
-                size,
-                crate::backend::compositor_common::toast::MAX_TEXT_WIDTH_PX,
-            );
-            set.text[slot] = self.rasterize_toast_text(&text, description, size, color);
-        }
+        // Title in the brightest ink, body one step down. A known sender is
+        // baked into the title texture as a dimmer line above it, so the draw
+        // pass — and every card without a sender — needs no sender case.
+        let title = fit(&toast.title, toast_layout::MAX_TEXT_WIDTH_PX);
+        set.text[0] = if toast.app.is_empty() {
+            self.rasterize_toast_text(&title, description, size, ui.value_ink)
+        } else {
+            let sender = fit(&toast.app, toast_layout::MAX_TEXT_WIDTH_PX);
+            self.rasterize_toast_title_with_sender(&sender, &title, description, size, ui)
+        };
+        let body = fit(&toast.body, toast_layout::MAX_TEXT_WIDTH_PX);
+        set.text[1] = self.rasterize_toast_text(&body, description, size, ui.label_ink);
         for action in &toast.actions {
-            let text = crate::backend::compositor_font::fit_ui_text_lines(
-                &action.label,
-                description,
-                size,
-                crate::backend::compositor_common::toast::MAX_ACTION_LABEL_WIDTH_PX,
-            );
+            let text = fit(&action.label, toast_layout::MAX_ACTION_LABEL_WIDTH_PX);
             set.buttons
                 .push(self.rasterize_toast_text(&text, description, size, ui.chip_ink));
         }
         self.toast_textures.insert(id, set);
+    }
+
+    /// The title texture of a card with a known sender: the dim attribution
+    /// line baked directly above the bright title, so both lines share one
+    /// upload and the card layout reads their combined height from it.
+    fn rasterize_toast_title_with_sender(
+        &self,
+        sender: &str,
+        title: &str,
+        description: &str,
+        size: f32,
+        ui: &UiPalette,
+    ) -> Option<(glow::Texture, u32, u32)> {
+        use crate::backend::compositor_common::toast;
+        let sender_px = crate::backend::compositor_font::render_ui_text_to_rgba(
+            sender,
+            description,
+            size,
+            toast::sender_ink(ui.label_ink),
+        );
+        let title_px = crate::backend::compositor_font::render_ui_text_to_rgba(
+            title,
+            description,
+            size,
+            ui.value_ink,
+        );
+        let mut bands: Vec<(&[u8], u32, u32)> = Vec::with_capacity(2);
+        for (pixels, w, h) in [&sender_px, &title_px] {
+            if *w > 0 && *h > 0 {
+                bands.push((pixels.as_slice(), *w, *h));
+            }
+        }
+        let (pixels, w, h) = toast::merge_text_bands(&bands, toast::SENDER_TITLE_GAP_PX);
+        self.upload_toast_texture(&pixels, w, h)
     }
 
     /// Upload one line of toast text as a texture; `None` for empty text.
@@ -3271,6 +3304,17 @@ impl<C: CompositorConnection> Compositor<C> {
         }
         let (pixels, w, h) =
             crate::backend::compositor_font::render_ui_text_to_rgba(text, description, size, color);
+        self.upload_toast_texture(&pixels, w, h)
+    }
+
+    /// Upload an already-rasterized toast text buffer; `None` for a
+    /// degenerate one.
+    fn upload_toast_texture(
+        &self,
+        pixels: &[u8],
+        w: u32,
+        h: u32,
+    ) -> Option<(glow::Texture, u32, u32)> {
         if w == 0 || h == 0 {
             return None;
         }
@@ -3286,7 +3330,7 @@ impl<C: CompositorConnection> Compositor<C> {
                 0,
                 glow::RGBA,
                 glow::UNSIGNED_BYTE,
-                glow::PixelUnpackData::Slice(Some(&pixels)),
+                glow::PixelUnpackData::Slice(Some(pixels)),
             );
             for filter in [glow::TEXTURE_MIN_FILTER, glow::TEXTURE_MAG_FILTER] {
                 self.gl
@@ -3386,12 +3430,9 @@ impl<C: CompositorConnection> Compositor<C> {
                     target_h += toast::ACTIONS_ROW_EXTRA_H;
                 }
 
-                let (card_w, card_h) = self
-                    .toast_stack
-                    .motion_for(id)
-                    .map_or((target_w, target_h), |motion| {
-                        motion.advance_with_motion(now, target_w, target_h, motion_enabled)
-                    });
+                let (card_w, card_h) =
+                    self.toast_stack
+                        .advance_motion(id, now, target_w, target_h, motion_enabled);
                 let [x, y, ..] = dock.rect(card_w, card_h, top);
                 // The chip row hangs under the text block, aligned with it.
                 let text_bottom = pad + title_h + if body_h > 0.0 { 6.0 + body_h } else { 0.0 };
@@ -4747,8 +4788,10 @@ impl<C: CompositorConnection> Compositor<C> {
             && self.border_width > 0.0
             && self.windows.len() > 1;
         let overview_animating = self.overview_animation_pending();
-        // Toasts and the OSD fade on a wall-clock envelope; keep frames coming
-        // while any card is visible (bounded by the toast/OSD timeout).
+        // Toasts and the OSD still count as animation for the damage
+        // tracker's thresholds while any card is visible. The frame pump
+        // itself is narrower: `force_render` below arms only while a toast's
+        // envelope or spring actually moves.
         let toasts_active = !self.toast_stack.is_empty() || !self.osd_slot.is_empty();
 
         // Tick Phase 5 animations
@@ -4959,7 +5002,16 @@ impl<C: CompositorConnection> Compositor<C> {
             // dirty. Without them here the push frame draws the card at the
             // very start of its fade and the gate below throws every later
             // frame away, leaving it frozen at ~0 alpha and invisible.
-            || !self.toast_stack.is_empty()
+            // A toast claims this only while its envelope or open spring is
+            // actually moving — or it is owed the frame that prunes it: a
+            // settled hold composites nothing. The fade-out's first frame
+            // still lands on time, because a composited session keeps the
+            // 20 ms idle cadence (`scheduling::idle_poll_required`) and every
+            // wake re-evaluates this gate; hover, unhover and dismiss are
+            // pointer events that set `needs_render` themselves. The OSD arm
+            // stays unconditional this round: its holds are ~2-3 s, and
+            // sharing the toast mechanism was considered and descoped.
+            || self.toast_stack.needs_frames(std::time::Instant::now())
             || !self.osd_slot.is_empty()
             || self.system_ui.is_some()
             || explicit_render;
@@ -8268,5 +8320,55 @@ mod tests {
             3,
             |win| win == 20,
         ));
+    }
+
+    /// The body of the first item whose header matches `needle`, by brace
+    /// walk, so a needle can never match a mention in another function.
+    fn body_of<'a>(source: &'a str, needle: &str) -> &'a str {
+        let start = source
+            .find(needle)
+            .unwrap_or_else(|| panic!("missing `{needle}`"));
+        let body_start = source[start..]
+            .find('{')
+            .map(|offset| start + offset + 1)
+            .unwrap_or_else(|| panic!("missing body for `{needle}`"));
+        let mut depth = 1usize;
+        for (offset, ch) in source[body_start..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return &source[body_start..body_start + offset];
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("unterminated body for `{needle}`");
+    }
+
+    #[test]
+    fn the_sender_line_is_baked_into_the_title_texture() {
+        // The attribution rides the title texture: one upload holds the dim
+        // sender band over the bright title band, so the draw pass and the
+        // card layout read everything from the texture's dimensions and need
+        // no sender case — and a card without a sender keeps the exact
+        // pixels, and geometry, it has always had.
+        const RENDER_SRC: &str = include_str!("render.rs");
+        let raster = body_of(RENDER_SRC, &format!("fn update_toast_{}(", "textures"));
+        assert!(
+            raster.contains(&format!("toast.{}", "app")),
+            "the raster pass must read the sender"
+        );
+        assert!(
+            raster.contains(&format!("{}(", "rasterize_toast_title_with_sender")),
+            "a known sender takes the merged-texture path"
+        );
+        let draw = body_of(RENDER_SRC, &format!("fn render_{}(", "toasts"));
+        assert!(
+            !draw.contains(&format!("notification.{}", "app")),
+            "the draw pass must not grow a sender case: it reads the merged texture"
+        );
     }
 }

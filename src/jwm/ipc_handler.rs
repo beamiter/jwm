@@ -2154,7 +2154,7 @@ impl Jwm {
                     "start_audio_recording: expected absolute .wav/.flac/.opus/.mp3 path in string field 'path'",
                 );
             };
-            return match self.start_audio_recording(std::path::Path::new(path)) {
+            return match self.start_audio_recording(backend, std::path::Path::new(path)) {
                 Ok(()) => IpcResponse::ok(Some(serde_json::json!({
                     "active": true,
                     "output_path": path,
@@ -2172,7 +2172,7 @@ impl Jwm {
         if name == "stop_audio_recording" {
             let was_active = self.features.audio_recording.active;
             let output_path = self.features.audio_recording.output_path.clone();
-            return match self.stop_audio_recording() {
+            return match self.stop_audio_recording(backend) {
                 Ok(()) => IpcResponse::ok(Some(serde_json::json!({
                     "active": false,
                     "was_active": was_active,

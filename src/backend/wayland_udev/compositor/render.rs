@@ -45,6 +45,51 @@ unsafe fn rasterize_toast_text(
     }
     let (pixels, w, h) =
         crate::backend::compositor_font::render_ui_text_to_rgba(text, description, size, color);
+    unsafe { upload_toast_texture(gl, &pixels, w, h) }
+}
+
+/// The title texture of a card with a known sender: the dim attribution
+/// line baked directly above the bright title, so both lines share one
+/// upload and the card layout reads their combined height from it.
+unsafe fn rasterize_toast_title_with_sender(
+    gl: &ffi::Gles2,
+    sender: &str,
+    title: &str,
+    description: &str,
+    size: f32,
+    ui: &UiPalette,
+) -> Option<(u32, u32, u32)> {
+    use crate::backend::compositor_common::toast;
+    let sender_px = crate::backend::compositor_font::render_ui_text_to_rgba(
+        sender,
+        description,
+        size,
+        toast::sender_ink(ui.label_ink),
+    );
+    let title_px = crate::backend::compositor_font::render_ui_text_to_rgba(
+        title,
+        description,
+        size,
+        ui.value_ink,
+    );
+    let mut bands: Vec<(&[u8], u32, u32)> = Vec::with_capacity(2);
+    for (pixels, w, h) in [&sender_px, &title_px] {
+        if *w > 0 && *h > 0 {
+            bands.push((pixels.as_slice(), *w, *h));
+        }
+    }
+    let (pixels, w, h) = toast::merge_text_bands(&bands, toast::SENDER_TITLE_GAP_PX);
+    unsafe { upload_toast_texture(gl, &pixels, w, h) }
+}
+
+/// Upload an already-rasterized toast text buffer; `None` for a degenerate
+/// one.
+unsafe fn upload_toast_texture(
+    gl: &ffi::Gles2,
+    pixels: &[u8],
+    w: u32,
+    h: u32,
+) -> Option<(u32, u32, u32)> {
     if w == 0 || h == 0 {
         return None;
     }
@@ -630,6 +675,30 @@ mod tests {
         assert!(
             body[recorded..].contains(&refresh),
             "the drawn stack must re-derive hover from the geometry it just recorded"
+        );
+    }
+
+    #[test]
+    fn the_sender_line_is_baked_into_the_title_texture() {
+        // The attribution rides the title texture: one upload holds the dim
+        // sender band over the bright title band, so the draw pass and the
+        // card layout read everything from the texture's dimensions and need
+        // no sender case — and a card without a sender keeps the exact
+        // pixels, and geometry, it has always had.
+        let source = include_str!("render.rs");
+        let raster = body_of(source, &format!("unsafe fn update_toast_{}(", "textures"));
+        assert!(
+            raster.contains(&format!("toast.{}", "app")),
+            "the raster pass must read the sender"
+        );
+        assert!(
+            raster.contains(&format!("{}(", "rasterize_toast_title_with_sender")),
+            "a known sender takes the merged-texture path"
+        );
+        let draw = body_of(source, &format!("unsafe fn render_{}(", "toasts"));
+        assert!(
+            !draw.contains(&format!("notification.{}", "app")),
+            "the draw pass must not grow a sender case: it reads the merged texture"
         );
     }
 
@@ -6230,29 +6299,28 @@ impl WaylandCompositor {
         let description = config.system_ui_font();
         let size = crate::backend::compositor_font::ui_font_pixel_size(description);
         let ui = ui_theme::palette();
-        // Title in the brightest ink, body one step down.
-        let colors: [[u8; 4]; 2] = [ui.value_ink, ui.label_ink];
+        use crate::backend::compositor_common::toast as toast_layout;
+        let fit = |text: &str, max_width: u32| {
+            crate::backend::compositor_font::fit_ui_text_lines(text, description, size, max_width)
+        };
         let mut set = ToastTextureSet {
             text: [None, None],
             buttons: Vec::with_capacity(toast.actions.len()),
         };
-        let texts = [&toast.title, &toast.body];
-        for (slot, (text, color)) in texts.into_iter().zip(colors).enumerate() {
-            let text = crate::backend::compositor_font::fit_ui_text_lines(
-                text,
-                description,
-                size,
-                crate::backend::compositor_common::toast::MAX_TEXT_WIDTH_PX,
-            );
-            set.text[slot] = unsafe { rasterize_toast_text(gl, &text, description, size, color) };
-        }
+        // Title in the brightest ink, body one step down. A known sender is
+        // baked into the title texture as a dimmer line above it, so the draw
+        // pass — and every card without a sender — needs no sender case.
+        let title = fit(&toast.title, toast_layout::MAX_TEXT_WIDTH_PX);
+        set.text[0] = if toast.app.is_empty() {
+            unsafe { rasterize_toast_text(gl, &title, description, size, ui.value_ink) }
+        } else {
+            let sender = fit(&toast.app, toast_layout::MAX_TEXT_WIDTH_PX);
+            unsafe { rasterize_toast_title_with_sender(gl, &sender, &title, description, size, ui) }
+        };
+        let body = fit(&toast.body, toast_layout::MAX_TEXT_WIDTH_PX);
+        set.text[1] = unsafe { rasterize_toast_text(gl, &body, description, size, ui.label_ink) };
         for action in &toast.actions {
-            let text = crate::backend::compositor_font::fit_ui_text_lines(
-                &action.label,
-                description,
-                size,
-                crate::backend::compositor_common::toast::MAX_ACTION_LABEL_WIDTH_PX,
-            );
+            let text = fit(&action.label, toast_layout::MAX_ACTION_LABEL_WIDTH_PX);
             set.buttons
                 .push(unsafe { rasterize_toast_text(gl, &text, description, size, ui.chip_ink) });
         }
@@ -6290,8 +6358,8 @@ impl WaylandCompositor {
 
         use crate::backend::compositor_common::toast;
 
-        // The stack keeps the render loop at display rate for every card's
-        // whole lifetime, so the per-frame working set is the Copy triple
+        // The pump runs at display rate only while a card's envelope or open
+        // spring moves, so the per-frame working set is the Copy triple
         // only. A notification's strings are cloned once, on the frame that
         // rasterizes its textures, never per frame.
         let toasts: Vec<(u64, u8, f32)> = self
@@ -6378,12 +6446,9 @@ impl WaylandCompositor {
                     target_h += toast::ACTIONS_ROW_EXTRA_H;
                 }
 
-                let (card_w, card_h) = self
-                    .toast_stack
-                    .motion_for(id)
-                    .map_or((target_w, target_h), |motion| {
-                        motion.advance_with_motion(now, target_w, target_h, motion_enabled)
-                    });
+                let (card_w, card_h) =
+                    self.toast_stack
+                        .advance_motion(id, now, target_w, target_h, motion_enabled);
                 let [x, y, ..] = dock.rect(card_w, card_h, top);
                 // The chip row hangs under the text block, aligned with it.
                 let text_bottom = pad + title_h + if body_h > 0.0 { 6.0 + body_h } else { 0.0 };

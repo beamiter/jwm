@@ -270,6 +270,9 @@ impl Jwm {
                 }
                 ControlDomain::Volume => Some(crate::backend::api::OsdKind::Volume),
                 ControlDomain::Brightness => Some(crate::backend::api::OsdKind::Brightness),
+                ControlDomain::MicMute => {
+                    Some(crate::backend::api::OsdKind::MicMute(correction.muted))
+                }
                 // A device switch never queues an OSD correction: its
                 // feedback is the picker's re-read rows, not a value card.
                 ControlDomain::AudioDevice => None,
@@ -773,6 +776,9 @@ impl Jwm {
             bar,
             button_size,
             buttons,
+            // The compositor owns the hover envelope: every published strip
+            // starts it fresh.
+            hover_ease: Default::default(),
         };
         if self.features.screenshot.toolbar.as_ref() == Some(&toolbar) {
             return;
@@ -1185,6 +1191,84 @@ impl Jwm {
             self.cancel_window_switcher(backend);
         } else {
             self.sync_system_ui(backend);
+        }
+        Ok(())
+    }
+
+    /// The expose grid's windows in entry order — the same collection
+    /// `toggle_expose` entered with, recomputed live. A close only ever
+    /// removes entries, so the rebuilt grid keeps every survivor exactly
+    /// where the list had it.
+    fn expose_candidates(&self) -> Vec<expose_plan::ExposeCandidate> {
+        let mut candidates: Vec<expose_plan::ExposeCandidate> = Vec::new();
+        for &mon_key in &self.state.monitor_order {
+            if let Some(clients) = self.state.monitor_clients.get(mon_key) {
+                for &ck in clients {
+                    if !self.is_client_visible_on_monitor(ck, mon_key) {
+                        continue;
+                    }
+                    if let Some(client) = self.state.clients.get(ck) {
+                        let g = &client.geometry;
+                        candidates.push((client.win, g.x, g.y, g.w, g.h, client.name.clone()));
+                    }
+                }
+            }
+        }
+        candidates
+    }
+
+    /// Delete or BackSpace with expose up: close the highlighted thumbnail's
+    /// window without leaving the gesture. The close is the one `killclient`
+    /// sends — `window_ops().close_window`, the graceful WM_DELETE request
+    /// with its forced fallback — then the grid rebuilds in place from the
+    /// survivors: the entry after the closed one slides under the highlight,
+    /// the tail clamps, and no survivor changes its order. Closing the last
+    /// entry ends the gesture through the same exit sequence Escape uses,
+    /// focusing nothing: the opener refuses an empty grid, so the overlay
+    /// never sits open over one either — and with the gesture over, no later
+    /// key or release can commit the window just closed (expose has no
+    /// modifier-release commit to guard; the switcher needs one because its
+    /// commit *is* the release). The grabs stay until then — the close is a
+    /// request to the client, not an expose hand-over.
+    fn close_expose_highlighted(
+        &mut self,
+        backend: &mut dyn Backend,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        // The highlighted cell, not the focused window — the two usually
+        // differ mid-gesture (the switcher resolves its row the same way).
+        let highlighted = backend.compositor_expose_selected();
+        match expose_plan::plan_close(self.expose_candidates(), highlighted) {
+            expose_plan::ExposeCloseAction::Keep => {}
+            expose_plan::ExposeCloseAction::Close {
+                window,
+                survivors,
+                select,
+            } => {
+                // The grid can name a window that already died mid-expose;
+                // only a live client can take the close, but its cell
+                // leaves either way.
+                if let Some(client_key) = self.wintoclient(window)
+                    && let Some(client) = self.state.clients.get(client_key)
+                {
+                    backend.window_ops().close_window(client.win)?;
+                }
+                // Rebuild in place through the same call that entered
+                // expose: the compositors rebuild each thumbnail's label
+                // texture with the entry set it names, so grid and labels
+                // can never disagree. The highlight is re-pointed at the
+                // survivor the plan kept under it.
+                let select_id = survivors.get(select).map(|&(win, ..)| win);
+                backend.compositor_set_expose_mode(true, survivors);
+                backend.compositor_expose_select(select_id);
+            }
+            expose_plan::ExposeCloseAction::CloseLast { window } => {
+                if let Some(client_key) = self.wintoclient(window)
+                    && let Some(client) = self.state.clients.get(client_key)
+                {
+                    backend.window_ops().close_window(client.win)?;
+                }
+                return self.apply_expose_action(backend, expose_plan::plan_escape());
+            }
         }
         Ok(())
     }
@@ -2428,6 +2512,9 @@ impl Jwm {
             if keysym == keys::KEY_Return || keysym == keys::KEY_KP_Enter {
                 let hit = backend.compositor_expose_selected();
                 return self.apply_expose_action(backend, expose_plan::plan_click(hit));
+            }
+            if keysym == keys::KEY_Delete || keysym == keys::KEY_BackSpace {
+                return self.close_expose_highlighted(backend);
             }
             // Fall through to normal keybinding dispatch so Alt+E can toggle off
         }
@@ -3675,6 +3762,10 @@ mod tests {
         osd_log: std::sync::Arc<Mutex<Vec<(crate::backend::api::OsdKind, u8)>>>,
         /// Every toast pushed past the DND gate, in order (titles only).
         toast_log: std::sync::Arc<Mutex<Vec<String>>>,
+        /// The expose grid the session last published, entry ids in order
+        /// (empty while expose is off), and the highlighted entry.
+        expose_windows: Vec<WindowId>,
+        expose_selected: Option<WindowId>,
     }
 
     impl ConfigureReplyBackend {
@@ -3689,6 +3780,8 @@ mod tests {
                 color_allocator: DummyColorAllocator,
                 osd_log: std::sync::Arc::new(Mutex::new(Vec::new())),
                 toast_log: std::sync::Arc::new(Mutex::new(Vec::new())),
+                expose_windows: Vec::new(),
+                expose_selected: None,
             }
         }
     }
@@ -3710,6 +3803,30 @@ mod tests {
                 .lock()
                 .expect("toast log lock")
                 .push(toast.title);
+        }
+
+        fn compositor_set_expose_mode(
+            &mut self,
+            active: bool,
+            windows: Vec<(WindowId, i32, i32, u32, u32, String)>,
+        ) {
+            self.expose_windows = if active {
+                windows.iter().map(|&(win, ..)| win).collect()
+            } else {
+                Vec::new()
+            };
+            if !active {
+                self.expose_selected = None;
+            }
+        }
+
+        fn compositor_expose_selected(&mut self) -> Option<WindowId> {
+            self.expose_selected
+                .filter(|win| self.expose_windows.contains(win))
+        }
+
+        fn compositor_expose_select(&mut self, win: Option<WindowId>) {
+            self.expose_selected = win;
         }
     }
     impl CompositorWindowEffects for ConfigureReplyBackend {}
@@ -4242,6 +4359,198 @@ mod tests {
         // switcher to commit.
         assert!(!jwm.features.system_ui.is_window_switcher());
         assert!(!jwm.features.system_ui.is_active());
+    }
+
+    /// An expose grid over `windows` (ids in entry order), highlighting
+    /// `selected`, published to the recording backend.
+    fn open_expose(
+        jwm: &mut Jwm,
+        backend: &mut ConfigureReplyBackend,
+        windows: &[WindowId],
+        selected: WindowId,
+    ) {
+        jwm.features.expose_active = true;
+        backend.compositor_set_expose_mode(
+            true,
+            windows
+                .iter()
+                .map(|&win| (win, 0, 0, 640, 480, format!("{win:?}")))
+                .collect(),
+        );
+        backend.compositor_expose_select(Some(selected));
+    }
+
+    #[test]
+    fn delete_with_expose_up_closes_the_highlighted_cell_and_rebuilds_the_grid() {
+        let mut backend = ConfigureReplyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let monitor = jwm.state.monitor_order[0];
+        let closing = WindowId::from_raw(0x7f20);
+        let survivor = WindowId::from_raw(0x7f21);
+        add_floating_configure_client(&mut jwm, closing, monitor, 0, false);
+        add_floating_configure_client(&mut jwm, survivor, monitor, 0, false);
+        open_expose(&mut jwm, &mut backend, &[closing, survivor], closing);
+
+        jwm.close_expose_highlighted(&mut backend).unwrap();
+
+        // The close is the one killclient sends: window_ops().close_window
+        // on the highlighted cell's live window.
+        assert_eq!(
+            backend
+                .window_ops
+                .closed
+                .lock()
+                .expect("closed windows lock")
+                .as_slice(),
+            &[closing]
+        );
+        // The grid rebuilt in place from the survivors in their old order,
+        // the next entry slid under the highlight, and the gesture, grabs
+        // and all, is still up.
+        assert!(jwm.features.expose_active);
+        assert_eq!(backend.expose_windows, &[survivor]);
+        assert_eq!(backend.expose_selected, Some(survivor));
+    }
+
+    #[test]
+    fn closing_the_expose_tail_clamps_the_highlight_onto_the_new_tail() {
+        let mut backend = ConfigureReplyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let monitor = jwm.state.monitor_order[0];
+        let survivor = WindowId::from_raw(0x7f22);
+        let closing = WindowId::from_raw(0x7f23);
+        add_floating_configure_client(&mut jwm, survivor, monitor, 0, false);
+        add_floating_configure_client(&mut jwm, closing, monitor, 0, false);
+        open_expose(&mut jwm, &mut backend, &[survivor, closing], closing);
+
+        jwm.close_expose_highlighted(&mut backend).unwrap();
+
+        assert_eq!(
+            backend
+                .window_ops
+                .closed
+                .lock()
+                .expect("closed windows lock")
+                .as_slice(),
+            &[closing]
+        );
+        assert!(jwm.features.expose_active);
+        assert_eq!(backend.expose_windows, &[survivor]);
+        assert_eq!(backend.expose_selected, Some(survivor));
+    }
+
+    #[test]
+    fn closing_the_last_expose_cell_ends_the_gesture() {
+        let mut backend = ConfigureReplyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let monitor = jwm.state.monitor_order[0];
+        let window = WindowId::from_raw(0x7f24);
+        add_floating_configure_client(&mut jwm, window, monitor, 0, false);
+        open_expose(&mut jwm, &mut backend, &[window], window);
+
+        jwm.close_expose_highlighted(&mut backend).unwrap();
+
+        assert_eq!(
+            backend
+                .window_ops
+                .closed
+                .lock()
+                .expect("closed windows lock")
+                .as_slice(),
+            &[window]
+        );
+        // The enter path refuses an empty grid, so the overlay never sits
+        // open over one either: the gesture is over, and with
+        // `expose_active` cleared no later key can commit the window just
+        // closed (expose has no modifier-release commit to guard — its
+        // commit is Return, and the branch is gated on the flag).
+        assert!(!jwm.features.expose_active);
+        assert!(backend.expose_windows.is_empty());
+        assert_eq!(backend.expose_selected, None);
+    }
+
+    #[test]
+    fn a_highlight_that_names_no_live_window_closes_nothing_in_expose() {
+        let mut backend = ConfigureReplyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let monitor = jwm.state.monitor_order[0];
+        let live = WindowId::from_raw(0x7f25);
+        add_floating_configure_client(&mut jwm, live, monitor, 0, false);
+        // The compositor's grid can still show a cell for a window that died
+        // mid-expose; a Delete on it has nothing honest to close or re-clamp,
+        // so the gesture and the grid stay exactly as they were.
+        let dead = WindowId::from_raw(0x7f26);
+        open_expose(&mut jwm, &mut backend, &[live, dead], dead);
+
+        jwm.close_expose_highlighted(&mut backend).unwrap();
+
+        assert!(
+            backend
+                .window_ops
+                .closed
+                .lock()
+                .expect("closed windows lock")
+                .is_empty(),
+            "no live client, no close request"
+        );
+        assert!(jwm.features.expose_active);
+        assert_eq!(backend.expose_windows, &[live, dead]);
+    }
+
+    /// The expose Delete/BackSpace branch must close through the same call
+    /// killclient uses — `window_ops().close_window`, graceful with its
+    /// forced fallback — never a window-killing call of its own; the grid
+    /// rebuild must ride the same entry-set rebuild that entering expose
+    /// uses (the compositors rebuild the thumbnails' label textures with
+    /// it); and closing down to an empty grid must end the gesture through
+    /// the shared exit sequence. The haystack is the shipped source, and the
+    /// needles are built at runtime so this test cannot match its own.
+    #[test]
+    fn expose_delete_routes_through_the_same_close_path_as_killclient() {
+        const SOURCE: &str = include_str!("input_handler.rs");
+        let compact: String = SOURCE.chars().filter(|c| !c.is_whitespace()).collect();
+
+        let branch = compact
+            .split_once(concat!("ifself.features.expose", "_active{"))
+            .expect("the expose key branch")
+            .1
+            .split_once(concat!("ifself.features.annotation", "_active{"))
+            .expect("the end of the expose key branch")
+            .0;
+        let routing = concat!(
+            "keysym==keys::KEY_Delete||keysym==keys::KEY_BackSpace{returnself.close_expose",
+            "_highlighted(backend);}"
+        );
+        assert!(
+            branch.contains(routing),
+            "the expose key branch must route Delete/BackSpace to the close helper"
+        );
+
+        let helper = compact
+            .split_once(concat!("fnclose_expose", "_highlighted("))
+            .expect("the expose close helper")
+            .1
+            .split_once("fnhandle_notification_center_key")
+            .expect("the end of the expose close helper")
+            .0;
+        // The highlighted cell — not the focused window — decides what closes.
+        assert!(helper.contains(concat!("compositor_expose", "_selected()")));
+        // The close is the one killclient sends…
+        assert!(helper.contains(concat!("window_ops().close", "_window(client.win)")));
+        // …and no new window-killing call appeared for it.
+        assert!(
+            !helper.contains("kill_client("),
+            "expose grew its own window-killing call"
+        );
+        // The grid rebuilds in place through the same entry-set rebuild that
+        // entered expose, and the highlight slides onto the planned survivor.
+        assert!(helper.contains(concat!("compositor_set_expose_mode(true,", "survivors)")));
+        assert!(helper.contains(concat!("compositor_expose_select(select", "_id)")));
+        // Close-to-empty ends the gesture through the shared exit sequence.
+        assert!(helper.contains(concat!(
+            "apply_expose_action(backend,expose_plan::plan",
+            "_escape())"
+        )));
     }
 
     /// The slider paths used to shell out to the session's tools — plus a

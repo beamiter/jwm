@@ -213,6 +213,32 @@ impl Jwm {
         Ok(())
     }
 
+    /// Toggle the default microphone's mute state (XF86AudioMicMute) and show
+    /// the mic OSD with the estimate; the worker performs the toggle off the
+    /// event thread. Same event semantics as [`Self::volume_mute`]: never
+    /// folded into another request, cancelled only by an adjacent twin. The
+    /// mic card carries no bar, so unlike the volume OSD it shows the flag
+    /// alone.
+    pub(crate) fn toggle_mic_mute(
+        &mut self,
+        backend: &mut dyn Backend,
+        _arg: &WMArgEnum,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let Some((seq, estimate)) = self.queue_mic_request(
+            crate::jwm::features::system_controls::ControlRequest::MicMuteToggle,
+        ) else {
+            return Err("no working audio control (wpctl/pactl/amixer)".into());
+        };
+        match estimate {
+            Some(muted) => self.show_mic_osd(backend, muted),
+            None => self.features.control_feedback.owe_osd(
+                crate::jwm::features::system_controls::ControlDomain::MicMute,
+                seq,
+            ),
+        }
+        Ok(())
+    }
+
     /// Adjust the backlight by the binding's Int argument (percentage
     /// points) and show the OSD with the estimate; the worker applies the
     /// real change off the event thread.
@@ -319,6 +345,37 @@ impl Jwm {
         Some((seq, estimate))
     }
 
+    /// The microphone counterpart of [`Self::queue_volume_request`]. The
+    /// confirmed base is the snapshot's mic flag — there is no estimate
+    /// without one, since a flip needs something to flip — and the
+    /// known-absent peek is the volume tool's own: sink and source share
+    /// the one detected tool chain.
+    pub(crate) fn queue_mic_request(
+        &mut self,
+        request: crate::jwm::features::system_controls::ControlRequest,
+    ) -> Option<(u64, Option<bool>)> {
+        use crate::jwm::features::system_controls;
+        if system_controls::volume_tool_known_absent() {
+            return None;
+        }
+        let confirmed = self
+            .features
+            .control_snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.mic_muted);
+        let base = self.features.control_feedback.mic_shown().or(confirmed);
+        let estimate = system_controls::optimistic_mic_mute(base, &request);
+        let seq =
+            system_controls::queue_control_request(request, self.async_update_notifier.clone())?;
+        if let Some(estimate) = estimate {
+            self.features
+                .control_feedback
+                .note_mic_estimate(seq, estimate, confirmed);
+            self.cache_control_mic_mute(estimate);
+        }
+        Some((seq, estimate))
+    }
+
     /// Adopt the controls worker's newest read-backs: confirm the estimate
     /// on screen, correct it when the true value drifted, or revert it when
     /// the change failed outright. Runs from the frame tick; never blocks,
@@ -392,6 +449,35 @@ impl Jwm {
                         panel_changed = true;
                     }
                     log::debug!("[controls] brightness change did not take; estimate reverted");
+                }
+                FeedbackAction::KeepEstimate => {}
+            }
+        }
+
+        if let Some(mic) = report.mic {
+            match self.features.control_feedback.resolve_mic(mic, now) {
+                FeedbackAction::Adopt(muted) => {
+                    let current = self
+                        .features
+                        .control_snapshot
+                        .as_ref()
+                        .and_then(|snapshot| snapshot.mic_muted);
+                    if current != Some(muted) {
+                        self.cache_control_mic_mute(muted);
+                        // No control-center row reads the microphone flag
+                        // yet, so the adopt does not flag the panel.
+                    }
+                }
+                FeedbackAction::Revert(previous) => {
+                    let current = self
+                        .features
+                        .control_snapshot
+                        .as_ref()
+                        .and_then(|snapshot| snapshot.mic_muted);
+                    if current != previous {
+                        self.mutate_control_snapshot(|snapshot| snapshot.mic_muted = previous);
+                    }
+                    log::debug!("[controls] mic mute change did not take; estimate reverted");
                 }
                 FeedbackAction::KeepEstimate => {}
             }
@@ -474,6 +560,19 @@ impl Jwm {
             std::time::Instant::now(),
         );
         backend.compositor_show_osd(kind, state.percent);
+    }
+
+    /// The mic counterpart of [`Self::show_volume_osd`]: the card is the
+    /// labeled toggle kind — a microphone has no bar, so the percent slot
+    /// carries 0 and only the flag matters.
+    fn show_mic_osd(&mut self, backend: &mut dyn Backend, muted: bool) {
+        self.features.control_feedback.note_osd_shown(
+            crate::jwm::features::system_controls::ControlDomain::MicMute,
+            0,
+            muted,
+            std::time::Instant::now(),
+        );
+        backend.compositor_show_osd(crate::backend::api::OsdKind::MicMute(muted), 0);
     }
 
     /// Toggle playback on the active MPRIS player.
@@ -637,6 +736,10 @@ impl Jwm {
 
     pub(crate) fn cache_control_brightness(&mut self, percent: u8) {
         self.mutate_control_snapshot(|snapshot| snapshot.brightness = Some(percent));
+    }
+
+    pub(crate) fn cache_control_mic_mute(&mut self, muted: bool) {
+        self.mutate_control_snapshot(|snapshot| snapshot.mic_muted = Some(muted));
     }
 
     pub(crate) fn cache_control_power_profiles(&mut self, available: Vec<String>, active: String) {
@@ -2994,12 +3097,12 @@ impl Jwm {
     /// Toggle the built-in microphone recorder (Alt+Ctrl+M by default).
     pub fn toggle_audio_recording(
         &mut self,
-        _backend: &mut dyn Backend,
+        backend: &mut dyn Backend,
         _arg: &WMArgEnum,
     ) -> Result<(), Box<dyn std::error::Error>> {
         self.features.audio_recording.refresh();
         if self.features.audio_recording.active {
-            self.stop_audio_recording()?;
+            self.stop_audio_recording(backend)?;
         } else {
             let behavior = CONFIG.load().behavior().clone();
             let output_dir = if !behavior.audio_recording_output_dir.is_empty() {
@@ -3016,32 +3119,65 @@ impl Jwm {
             let timestamp = chrono::Local::now().format("%Y%m%d-%H%M%S-%6f");
             let format = behavior.audio_recording_format.as_str();
             if !matches!(format, "wav" | "flac" | "opus" | "mp3") {
-                return Err(format!("unsupported audio recording format: {format}").into());
+                let error = format!("unsupported audio recording format: {format}");
+                // Same shape as the screen recorder's unavailable toast: a
+                // mic the user believes is recording when it is not is the
+                // privacy-relevant case, so the failure breaks through
+                // do-not-disturb.
+                self.push_system_toast(
+                    backend,
+                    crate::backend::api::ToastNotification {
+                        title: "\u{f130}  Audio recording unavailable".into(),
+                        body: error.clone(),
+                        urgency: 2,
+                        timeout_ms: 8000,
+                        ..Default::default()
+                    },
+                );
+                return Err(error.into());
             }
             let path = output_dir.join(format!("jwm-recording-{timestamp}.{format}"));
-            self.start_audio_recording(&path)?;
+            self.start_audio_recording(backend, &path)?;
         }
         Ok(())
     }
 
     pub(crate) fn start_audio_recording(
         &mut self,
+        backend: &mut dyn Backend,
         output_path: &std::path::Path,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let behavior = CONFIG.load().behavior().clone();
-        if self.features.recording.active && behavior.recording_audio_enabled {
-            return Err(
-                "screen recording is already using the configured microphone; stop it first".into(),
+        let started = if self.features.recording.active && behavior.recording_audio_enabled {
+            Err(
+                "screen recording is already using the configured microphone; stop it first"
+                    .to_string(),
+            )
+        } else {
+            self.features.audio_recording.start(
+                output_path,
+                &behavior.audio_recording_device,
+                behavior.audio_recording_sample_rate,
+                behavior.audio_recording_channels,
+                &behavior.audio_recording_backend,
+                &behavior.audio_recording_bitrate,
+            )
+        };
+        if let Err(error) = started {
+            // Mirror the screen recorder's unavailable toast, urgency and
+            // all: a start that did not happen must not fail silently.
+            self.push_system_toast(
+                backend,
+                crate::backend::api::ToastNotification {
+                    title: "\u{f130}  Audio recording unavailable".into(),
+                    body: error.clone(),
+                    urgency: 2,
+                    timeout_ms: 8000,
+                    ..Default::default()
+                },
             );
+            return Err(error.into());
         }
-        self.features.audio_recording.start(
-            output_path,
-            &behavior.audio_recording_device,
-            behavior.audio_recording_sample_rate,
-            behavior.audio_recording_channels,
-            &behavior.audio_recording_backend,
-            &behavior.audio_recording_bitrate,
-        )?;
         info!(
             "[audio-recording] start → {} (backend={}, format={}, device={}, {} Hz, {} channel(s))",
             output_path.display(),
@@ -3055,13 +3191,44 @@ impl Jwm {
             "audio_recording/started",
             serde_json::json!({"output_path": output_path}),
         );
+        // Mirror the screen recorder's start toast: the request was
+        // accepted. (No persistent MIC chip this round — the screen REC
+        // chip is derived from the compositor's own recording state, while
+        // audio recording lives WM-side.)
+        self.push_system_toast(
+            backend,
+            crate::backend::api::ToastNotification {
+                title: "\u{f130}  Audio recording started".into(),
+                body: output_path.to_string_lossy().into_owned(),
+                urgency: 1,
+                timeout_ms: 5000,
+                ..Default::default()
+            },
+        );
         Ok(())
     }
 
-    pub(crate) fn stop_audio_recording(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    pub(crate) fn stop_audio_recording(
+        &mut self,
+        backend: &mut dyn Backend,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let was_active = self.features.audio_recording.active;
         let path = self.features.audio_recording.output_path.clone();
-        self.features.audio_recording.stop()?;
+        if let Err(error) = self.features.audio_recording.stop() {
+            // A stop that failed leaves the mic open and the file unfinalized
+            // — say so, through do-not-disturb like any recording failure.
+            self.push_system_toast(
+                backend,
+                crate::backend::api::ToastNotification {
+                    title: "\u{f130}  Audio recording failed".into(),
+                    body: error.clone(),
+                    urgency: 2,
+                    timeout_ms: 8000,
+                    ..Default::default()
+                },
+            );
+            return Err(error.into());
+        }
         if was_active {
             info!(
                 "[audio-recording] stop → {}",
@@ -3070,6 +3237,17 @@ impl Jwm {
             self.broadcast_ipc_event(
                 "audio_recording/stopped",
                 serde_json::json!({"output_path": path}),
+            );
+            // Mirror the screen recorder's stop toast, output path included.
+            self.push_system_toast(
+                backend,
+                crate::backend::api::ToastNotification {
+                    title: "\u{f130}  Audio recording stopped".into(),
+                    body: path.clone().unwrap_or_default(),
+                    urgency: 1,
+                    timeout_ms: 5000,
+                    ..Default::default()
+                },
             );
         }
         Ok(())
@@ -3111,7 +3289,7 @@ impl Jwm {
         if CONFIG.load().behavior().recording_audio_enabled && self.features.audio_recording.active
         {
             info!("[recording] stopping standalone audio before synchronized capture");
-            self.stop_audio_recording()?;
+            self.stop_audio_recording(backend)?;
         }
 
         self.features.recording.start(output_path.to_string());
@@ -4081,5 +4259,166 @@ mod shell_entry_tests {
                 "{toggle} no longer queues the flip on the connectivity worker ({queue})"
             );
         }
+    }
+
+    /// The mic-mute key follows the round-13 rule the volume keys follow:
+    /// queue the change on the controls worker and draw the estimate, never
+    /// shell out on the event thread. Same construction as
+    /// `control_keys_queue_instead_of_shelling_out`, with the haystack
+    /// bounded by the handler that follows in the source.
+    #[test]
+    fn the_mic_mute_key_queues_and_acknowledges_with_the_mic_osd() {
+        const SOURCE: &str = include_str!("toggles.rs");
+        let handler = SOURCE
+            .split_once("pub(crate) fn toggle_mic_mute")
+            .expect("toggle_mic_mute")
+            .1
+            .split_once("pub(crate) fn brightness_adjust")
+            .expect("the end of toggle_mic_mute")
+            .0;
+        for primitive in ["mic_toggle_mute", "mic_set_mute", "mic_mute_state"] {
+            let needle = format!("system_controls::{primitive}(");
+            assert!(
+                !handler.contains(&needle),
+                "the mic-mute key regained a blocking tool call: {needle}"
+            );
+        }
+        let queue = format!("self.{}(", "queue_mic_request");
+        assert!(
+            handler.contains(&queue),
+            "the mic-mute key no longer queues on the controls worker ({queue})"
+        );
+        let osd = format!("self.{}(backend, muted)", "show_mic_osd");
+        assert!(
+            handler.contains(&osd),
+            "the mic-mute key no longer acknowledges the press with the mic OSD ({osd})"
+        );
+    }
+
+    /// The lock-screen media passthrough deliberately stays at its ten
+    /// keysyms: unmuting a microphone behind a locked screen is a privacy
+    /// risk, so the new XF86AudioMicMute binding must never join the
+    /// passthrough — neither the keysym set nor the function set. The
+    /// passthrough lives in input_handler.rs, outside this change's file
+    /// set, so the pin reads its source the way the round-15 pins do.
+    #[test]
+    fn the_lock_screen_passthrough_never_covers_the_microphone_mute_key() {
+        const SOURCE: &str = include_str!("../input_handler.rs");
+        let keysyms = SOURCE
+            .split_once("fn lock_media_keysym")
+            .expect("lock_media_keysym")
+            .1
+            .split_once("fn lock_media_func")
+            .expect("lock_media_func follows lock_media_keysym")
+            .0;
+        assert!(
+            !keysyms.contains("MicMute"),
+            "the lock-screen media passthrough must never include the microphone mute keysym"
+        );
+        let funcs = SOURCE
+            .split_once("fn lock_media_func")
+            .expect("lock_media_func")
+            .1
+            .split_once("pub(crate) fn on_button_press_internal")
+            .expect("the end of lock_media_func")
+            .0;
+        assert!(
+            !funcs.contains("mic_mute"),
+            "the lock-screen media actions must never include the mic-mute toggle"
+        );
+    }
+
+    /// The audio recorder mirrors the screen recorder's toast contract: a
+    /// start toast at normal urgency, a stop toast carrying the output
+    /// path, and urgency-2 failure toasts that break through
+    /// do-not-disturb — a mic believed recording (or believed stopped) when
+    /// the opposite is true is the privacy-relevant case. Needles are
+    /// assembled at runtime so this cannot match its own source.
+    #[test]
+    fn audio_recording_mirrors_the_screen_recorders_toasts() {
+        const SOURCE: &str = include_str!("toggles.rs");
+        let shipped = SOURCE
+            .split_once("#[cfg(test)]")
+            .expect("the first test module")
+            .0;
+        let toast = format!("self.{}(", "push_system_toast");
+        for (name, body) in [
+            (
+                "start",
+                shipped
+                    .split_once("pub(crate) fn start_audio_recording")
+                    .expect("start_audio_recording")
+                    .1
+                    .split_once("pub(crate) fn stop_audio_recording")
+                    .expect("stop_audio_recording")
+                    .0,
+            ),
+            (
+                "stop",
+                shipped
+                    .split_once("pub(crate) fn stop_audio_recording")
+                    .expect("stop_audio_recording")
+                    .1
+                    .split_once("pub(crate) fn start_recording_region")
+                    .expect("the end of stop_audio_recording")
+                    .0,
+            ),
+        ] {
+            assert!(
+                body.contains(&toast),
+                "audio recording {name} no longer toasts through the DND gate"
+            );
+            assert!(
+                body.contains("urgency: 1"),
+                "audio recording {name} lost its normal-urgency state toast"
+            );
+            assert!(
+                body.contains("urgency: 2"),
+                "audio recording {name} lost its through-DND failure toast"
+            );
+        }
+        let stop = shipped
+            .split_once("pub(crate) fn stop_audio_recording")
+            .expect("stop_audio_recording")
+            .1
+            .split_once("pub(crate) fn start_recording_region")
+            .expect("the end of stop_audio_recording")
+            .0;
+        assert!(
+            stop.contains("body: path"),
+            "the audio stop toast no longer carries the output path"
+        );
+
+        // Every route into a start or stop hands over the backend the toast
+        // needs: the key toggle, and the screen recorder's microphone
+        // handoff.
+        let toggle = shipped
+            .split_once("pub fn toggle_audio_recording")
+            .expect("toggle_audio_recording")
+            .1
+            .split_once("pub(crate) fn start_audio_recording")
+            .expect("start_audio_recording")
+            .0;
+        let start_call = format!("self.{}(backend, &path)?", "start_audio_recording");
+        assert!(
+            toggle.contains(&start_call),
+            "the toggle no longer starts through the toasting path ({start_call})"
+        );
+        let stop_call = format!("self.{}(backend)?", "stop_audio_recording");
+        assert!(
+            toggle.contains(&stop_call),
+            "the toggle no longer stops through the toasting path ({stop_call})"
+        );
+        let handoff = shipped
+            .split_once("stopping standalone audio before synchronized capture")
+            .expect("the screen recorder's microphone handoff")
+            .1
+            .split_once("self.features.recording.start(")
+            .expect("the end of the handoff")
+            .0;
+        assert!(
+            handoff.contains(&stop_call),
+            "the synchronized-capture handoff no longer stops through the toasting path ({stop_call})"
+        );
     }
 }

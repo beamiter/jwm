@@ -53,6 +53,7 @@ const BLUEZ: &str = "org.bluez";
 const AGENT_MANAGER_IFACE: &str = "org.bluez.AgentManager1";
 const DEVICE_IFACE: &str = "org.bluez.Device1";
 const ADAPTER_IFACE: &str = "org.bluez.Adapter1";
+const BATTERY_IFACE: &str = "org.bluez.Battery1";
 const PROPERTIES_IFACE: &str = "org.freedesktop.DBus.Properties";
 
 /// Where this process serves its agent. The path dies with the process, so
@@ -1197,13 +1198,20 @@ struct ScannedDevice {
     /// Signal strength in dBm when bluez has heard the device this session.
     /// Absent for a remembered device that is merely out of range.
     rssi: Option<i16>,
+    /// Charge percentage from the `org.bluez.Battery1` interface riding the
+    /// same `GetManagedObjects` reply — no extra round trip. Absent when the
+    /// device does not publish one (most do not until connected, many never
+    /// do) and when bluez reported a value outside 0..=100: a battery
+    /// percentage has a defined range, so an out-of-range one is dropped
+    /// rather than shown, the way an out-of-range RSSI is.
+    battery: Option<u8>,
 }
 
 impl ScannedDevice {
     /// The wire shape jwm's `parse_bridge_devices` reads. Hand-built rather
     /// than derived so the bridge keeps its dependency list at `serde_json`
-    /// alone — the schema is five fields and is pinned by a test on both
-    /// sides.
+    /// alone — the schema is pinned by a test on both sides, and grows
+    /// append-only so either side can be the older one.
     fn to_json(&self) -> Value {
         serde_json::json!({
             "address": self.address,
@@ -1211,6 +1219,9 @@ impl ScannedDevice {
             "paired": self.paired,
             "connected": self.connected,
             "rssi": self.rssi,
+            // Append-only wire field: an old jwm ignores it, and a new jwm
+            // reads a missing key (old bridge) as `None`.
+            "battery": self.battery,
         })
     }
 }
@@ -1243,6 +1254,15 @@ fn managed_u32(
     properties
         .get(key)
         .and_then(|value| u32::try_from(value.clone()).ok())
+}
+
+fn managed_u8(
+    properties: &std::collections::HashMap<String, zbus::zvariant::OwnedValue>,
+    key: &str,
+) -> Option<u8> {
+    properties
+        .get(key)
+        .and_then(|value| u8::try_from(value.clone()).ok())
 }
 
 /// The controller's current `PairableTimeout` / `DiscoverableTimeout`, read
@@ -1297,6 +1317,9 @@ fn devices_from_managed_objects(objects: &zbus::fdo::ManagedObjects) -> Vec<Scan
     let Ok(iface) = zbus::names::InterfaceName::try_from(DEVICE_IFACE) else {
         return Vec::new();
     };
+    let Ok(battery_iface) = zbus::names::InterfaceName::try_from(BATTERY_IFACE) else {
+        return Vec::new();
+    };
     let mut devices: Vec<ScannedDevice> = Vec::new();
     let mut paths: Vec<_> = objects.iter().collect();
     paths.sort_by_key(|(path, _)| path.as_str().to_string());
@@ -1335,12 +1358,20 @@ fn devices_from_managed_objects(objects: &zbus::fdo::ManagedObjects) -> Vec<Scan
         let rssi = properties
             .get("RSSI")
             .and_then(|value| i16::try_from(value.clone()).ok());
+        // Battery1 rides the same object as Device1, so the percentage comes
+        // out of the interface map already in hand. A percentage has a
+        // defined range; anything outside it is dropped, not saturated.
+        let battery = interfaces
+            .get(&battery_iface)
+            .and_then(|battery| managed_u8(battery, "Percentage"))
+            .filter(|percentage| *percentage <= 100);
         devices.push(ScannedDevice {
             address,
             name,
             paired: managed_bool(properties, "Paired"),
             connected: managed_bool(properties, "Connected"),
             rssi,
+            battery,
         });
     }
     // Sort before the cap. Object-path order is MAC order, so truncating
@@ -2412,6 +2443,7 @@ mod tests {
             paired: true,
             connected: false,
             rssi: Some(-40),
+            battery: Some(85),
         }
         .to_json();
         assert_eq!(json["address"], ADDR);
@@ -2419,6 +2451,7 @@ mod tests {
         assert_eq!(json["paired"], true);
         assert_eq!(json["connected"], false);
         assert_eq!(json["rssi"], -40);
+        assert_eq!(json["battery"], 85);
         // An unheard device reports a null rather than a fabricated floor.
         let quiet = ScannedDevice {
             address: ADDR.to_string(),
@@ -2426,9 +2459,78 @@ mod tests {
             paired: true,
             connected: false,
             rssi: None,
+            battery: None,
         }
         .to_json();
         assert!(quiet["rssi"].is_null());
+        // So does one that never published its charge: the key is present —
+        // append-only means an old jwm ignores it either way — and null.
+        assert!(quiet["battery"].is_null());
+    }
+
+    #[test]
+    fn a_battery_percentage_rides_the_same_sweep() {
+        let objects = managed_tree(&[
+            (
+                DEVICE_PATH,
+                DEVICE_IFACE,
+                &[
+                    ("Address", text(ADDR)),
+                    ("Alias", text("Studio Headphones")),
+                    ("Connected", OwnedValue::from(true)),
+                ],
+            ),
+            (
+                DEVICE_PATH,
+                BATTERY_IFACE,
+                &[("Percentage", OwnedValue::from(85u8))],
+            ),
+        ]);
+        let devices = devices_from_managed_objects(&objects);
+        assert_eq!(devices.len(), 1, "the battery interface is not a device");
+        assert_eq!(devices[0].battery, Some(85));
+
+        // Full and empty are both honest readings, not edge cases.
+        for percentage in [0u8, 100] {
+            let objects = managed_tree(&[
+                (DEVICE_PATH, DEVICE_IFACE, &[("Address", text(ADDR))]),
+                (
+                    DEVICE_PATH,
+                    BATTERY_IFACE,
+                    &[("Percentage", OwnedValue::from(percentage))],
+                ),
+            ]);
+            assert_eq!(
+                devices_from_managed_objects(&objects)[0].battery,
+                Some(percentage)
+            );
+        }
+    }
+
+    #[test]
+    fn a_missing_or_unbelievable_battery_reports_nothing() {
+        // No Battery1 interface at all: most devices, most of the time.
+        let objects = managed_tree(&[(DEVICE_PATH, DEVICE_IFACE, &[("Address", text(ADDR))])]);
+        assert_eq!(devices_from_managed_objects(&objects)[0].battery, None);
+
+        // A percentage has a defined range; outside it the value is dropped
+        // rather than shown, the way an out-of-range RSSI is.
+        let objects = managed_tree(&[
+            (DEVICE_PATH, DEVICE_IFACE, &[("Address", text(ADDR))]),
+            (
+                DEVICE_PATH,
+                BATTERY_IFACE,
+                &[("Percentage", OwnedValue::from(101u8))],
+            ),
+        ]);
+        assert_eq!(devices_from_managed_objects(&objects)[0].battery, None);
+
+        // A property of the wrong type is not a reading either.
+        let objects = managed_tree(&[
+            (DEVICE_PATH, DEVICE_IFACE, &[("Address", text(ADDR))]),
+            (DEVICE_PATH, BATTERY_IFACE, &[("Percentage", text("85"))]),
+        ]);
+        assert_eq!(devices_from_managed_objects(&objects)[0].battery, None);
     }
 
     #[test]

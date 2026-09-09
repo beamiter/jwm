@@ -1338,6 +1338,10 @@ pub enum OsdKind {
     /// Bluetooth controller flip requested; the payload is the requested
     /// target, on the same immediate-acknowledgement terms as [`Self::Wifi`].
     Bluetooth(bool),
+    /// Microphone mute flipped; the payload is the new muted state. A
+    /// labeled card like the other toggle kinds: the mic shows only its
+    /// live/cut state, never a level bar.
+    MicMute(bool),
 }
 
 /// One keyboard navigation step in Expose / Mission Control, in the grid the
@@ -1366,6 +1370,10 @@ pub struct NotificationAction {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ToastNotification {
     pub title: String,
+    /// Sending application, drawn as a dim attribution line above the title.
+    /// Empty means the sender is unknown: the card draws no line then and
+    /// keeps its pre-attribution geometry.
+    pub app: String,
     /// Optional multi-line body under the title.
     pub body: String,
     /// 0 = low (dim accent), 1 = normal, 2 = critical (danger accent).

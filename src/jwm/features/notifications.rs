@@ -1015,16 +1015,18 @@ impl crate::jwm::Jwm {
             } else {
                 request.summary.clone()
             };
-            // The toast carries the record's sanitized actions, so its
-            // buttons invoke the exact keys the history offers.
-            let actions = self
+            // The toast carries the record's sanitized sender and actions, so
+            // the card can attribute the banner and its buttons invoke the
+            // exact keys the history offers.
+            let (app, actions) = self
                 .features
                 .notifications
                 .get(id)
-                .map(|record| record.actions.clone())
+                .map(|record| (record.app.clone(), record.actions.clone()))
                 .unwrap_or_default();
             backend.compositor_push_toast(crate::backend::api::ToastNotification {
                 title,
+                app,
                 body: request.body.clone(),
                 urgency: request.urgency.min(2),
                 timeout_ms,
@@ -2083,5 +2085,177 @@ mod tests {
             bullet.contains(&format!("longer than {MAX_ACTION_KEY_CHARS} characters")),
             "the action bullet must name the live key cap"
         );
+    }
+
+    /// A backend built from the shared dummy ops, recording the full toast
+    /// each push delivers so the attribution can be asserted.
+    struct ToastCaptureBackend {
+        window_ops: crate::backend::wayland_dummy_ops::DummyWindowOps,
+        input_ops: crate::backend::wayland_dummy_ops::DummyInputOps,
+        property_ops: crate::backend::wayland_dummy_ops::DummyPropertyOps,
+        output_ops: crate::backend::wayland_dummy_ops::DummyOutputOps,
+        key_ops: crate::backend::wayland_dummy_ops::DummyKeyOps,
+        cursor_provider: crate::backend::wayland_dummy_ops::DummyCursorProvider,
+        color_allocator: crate::backend::wayland_dummy_ops::DummyColorAllocator,
+        toasts: Vec<crate::backend::api::ToastNotification>,
+    }
+
+    impl ToastCaptureBackend {
+        fn new() -> Self {
+            Self {
+                window_ops: crate::backend::wayland_dummy_ops::DummyWindowOps,
+                input_ops: crate::backend::wayland_dummy_ops::DummyInputOps,
+                property_ops: crate::backend::wayland_dummy_ops::DummyPropertyOps,
+                output_ops: crate::backend::wayland_dummy_ops::DummyOutputOps,
+                key_ops: crate::backend::wayland_dummy_ops::DummyKeyOps,
+                cursor_provider: crate::backend::wayland_dummy_ops::DummyCursorProvider,
+                color_allocator: crate::backend::wayland_dummy_ops::DummyColorAllocator,
+                toasts: Vec::new(),
+            }
+        }
+    }
+
+    impl crate::backend::api::CompositorBenchmark for ToastCaptureBackend {}
+    impl crate::backend::api::BackendDiagnostics for ToastCaptureBackend {}
+    impl crate::backend::api::CompositorControl for ToastCaptureBackend {}
+    impl crate::backend::api::CompositorMedia for ToastCaptureBackend {}
+    impl crate::backend::api::CompositorWorkspaceEffects for ToastCaptureBackend {
+        fn compositor_push_toast(&mut self, toast: crate::backend::api::ToastNotification) {
+            self.toasts.push(toast);
+        }
+    }
+    impl crate::backend::api::CompositorWindowEffects for ToastCaptureBackend {}
+    impl crate::backend::api::CompositorAnnotation for ToastCaptureBackend {}
+    impl crate::backend::api::DisplayControl for ToastCaptureBackend {}
+    impl crate::backend::api::RenderScheduler for ToastCaptureBackend {}
+
+    impl crate::backend::api::Backend for ToastCaptureBackend {
+        fn capabilities(&self) -> crate::backend::api::Capabilities {
+            crate::backend::api::Capabilities::default()
+        }
+
+        fn root_window(&self) -> Option<crate::backend::common_define::WindowId> {
+            Some(crate::backend::common_define::WindowId::from_raw(0))
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+
+        fn check_existing_wm(&self) -> Result<(), crate::backend::error::BackendError> {
+            Ok(())
+        }
+
+        fn window_ops(&self) -> &dyn crate::backend::api::WindowOps {
+            &self.window_ops
+        }
+
+        fn input_ops(&self) -> &dyn crate::backend::api::InputOps {
+            &self.input_ops
+        }
+
+        fn property_ops(&self) -> &dyn crate::backend::api::PropertyOps {
+            &self.property_ops
+        }
+
+        fn output_ops(&self) -> &dyn crate::backend::api::OutputOps {
+            &self.output_ops
+        }
+
+        fn key_ops(&self) -> &dyn crate::backend::api::KeyOps {
+            &self.key_ops
+        }
+
+        fn key_ops_mut(&mut self) -> &mut dyn crate::backend::api::KeyOps {
+            &mut self.key_ops
+        }
+
+        fn cursor_provider(&mut self) -> &mut dyn crate::backend::api::CursorProvider {
+            &mut self.cursor_provider
+        }
+
+        fn color_allocator(&mut self) -> &mut dyn crate::backend::api::ColorAllocator {
+            &mut self.color_allocator
+        }
+
+        fn run(
+            &mut self,
+            _handler: &mut dyn crate::backend::api::EventHandler,
+        ) -> Result<(), crate::backend::error::BackendError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn the_toast_attributes_the_notification_to_its_sender() {
+        let mut backend = ToastCaptureBackend::new();
+        let mut jwm = crate::Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        // An in-memory history: the test must not touch the user's file.
+        jwm.features.notifications = NotificationCenter::new();
+
+        let id = jwm.post_notification(
+            &mut backend,
+            &NotificationRequest {
+                app: "dusk builder".into(),
+                summary: "Build finished".into(),
+                body: "3 warnings".into(),
+                urgency: 1,
+                ..Default::default()
+            },
+            0,
+        );
+        assert_eq!(backend.toasts.len(), 1);
+        let toast = &backend.toasts[0];
+        assert_eq!(toast.title, "Build finished");
+        assert_eq!(toast.app, "dusk builder");
+        assert_eq!(toast.notification_id, id);
+
+        // An empty summary still falls back to the app name for the title,
+        // exactly as it always has — and the card is attributed too.
+        jwm.post_notification(
+            &mut backend,
+            &NotificationRequest {
+                app: "dusk builder".into(),
+                summary: "  ".into(),
+                ..Default::default()
+            },
+            0,
+        );
+        let toast = &backend.toasts[1];
+        assert_eq!(toast.title, "dusk builder");
+        assert_eq!(toast.app, "dusk builder");
+
+        // A sender that never identified itself leaves the attribution
+        // empty: the card draws no sender line for it.
+        jwm.post_notification(
+            &mut backend,
+            &NotificationRequest {
+                summary: "Update ready".into(),
+                ..Default::default()
+            },
+            0,
+        );
+        let toast = &backend.toasts[2];
+        assert_eq!(toast.title, "Update ready");
+        assert!(toast.app.is_empty());
+    }
+
+    #[test]
+    fn do_not_disturb_still_holds_back_the_toast_and_its_sender() {
+        let mut backend = ToastCaptureBackend::new();
+        let mut jwm = crate::Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        jwm.features.notifications = NotificationCenter::new();
+        jwm.do_not_disturb = true;
+
+        jwm.post_notification(
+            &mut backend,
+            &NotificationRequest {
+                app: "dusk builder".into(),
+                summary: "Build finished".into(),
+                ..Default::default()
+            },
+            0,
+        );
+        assert!(backend.toasts.is_empty());
     }
 }

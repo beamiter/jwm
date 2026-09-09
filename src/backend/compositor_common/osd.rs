@@ -98,6 +98,10 @@ impl ActiveOsd {
             OsdKind::Wifi(false) => ("\u{f05e}", "Wi-Fi Off".into()),           // fa-ban
             OsdKind::Bluetooth(true) => ("\u{f293}", "Bluetooth On".into()),    // fa-bluetooth
             OsdKind::Bluetooth(false) => ("\u{f293}", "Bluetooth Off".into()),
+            // fa-microphone-slash / fa-microphone: both sit in the FA-4
+            // range for the same reason as `VolumeMuted` above.
+            OsdKind::MicMute(true) => ("\u{f131}", "Microphone Muted".into()),
+            OsdKind::MicMute(false) => ("\u{f130}", "Microphone Unmuted".into()),
         }
     }
 
@@ -110,7 +114,8 @@ impl ActiveOsd {
             | OsdKind::Caffeine(_)
             | OsdKind::NightLight(_)
             | OsdKind::Wifi(_)
-            | OsdKind::Bluetooth(_) => None,
+            | OsdKind::Bluetooth(_)
+            | OsdKind::MicMute(_) => None,
             OsdKind::VolumeMuted => Some(0.0),
             _ => Some(f32::from(self.percent.min(100)) / 100.0),
         }
@@ -313,6 +318,8 @@ mod tests {
             (OsdKind::Wifi(false), "\u{f05e}", "Wi-Fi Off"),
             (OsdKind::Bluetooth(true), "\u{f293}", "Bluetooth On"),
             (OsdKind::Bluetooth(false), "\u{f293}", "Bluetooth Off"),
+            (OsdKind::MicMute(true), "\u{f131}", "Microphone Muted"),
+            (OsdKind::MicMute(false), "\u{f130}", "Microphone Unmuted"),
         ] {
             let mut slot = OsdSlot::default();
             slot.show(kind, 0, now);

@@ -116,6 +116,17 @@ fn row_icon_payload(icons: Vec<Option<String>>, items_len: usize) -> Option<Vec<
     (icons.len() == items_len && icons.iter().any(Option::is_some)).then_some(icons)
 }
 
+/// A notification-center row's icon: the record's app name as the resolution
+/// key, as-is, through the same cached resolver the switcher's window rows
+/// use (an empty instance leg simply adds nothing). App names are free-form
+/// sender strings rather than desktop ids — anything with whitespace or a
+/// separator is not even a lookup key — so a miss is the common case, and a
+/// cheap one: the resolver caches misses as eagerly as hits. `None` leaves
+/// the row text-only, exactly as it was.
+fn notification_row_icon(app: &str) -> Option<String> {
+    crate::jwm::features::launcher::resolve_window_icon(app, "")
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MonitorLayoutEntry {
     pub name: String,
@@ -223,10 +234,11 @@ pub enum SystemUiState {
         kind: ListKind,
         rows: Vec<ListRow>,
         /// Raster icon paths aligned with `rows`, resolved when the list was
-        /// built; empty for every kind but the window switcher, the one list
-        /// whose rows stand for applications. Kept beside the rows rather than
-        /// inside them: `ListRow` literals exist in code this crate does not
-        /// own, so the row type cannot grow a field.
+        /// built; empty for every kind but the window switcher and the
+        /// notification center, the two lists whose rows stand for
+        /// applications. Kept beside the rows rather than inside them:
+        /// `ListRow` literals exist in code this crate does not own, so the
+        /// row type cannot grow a field.
         row_icons: Vec<Option<String>>,
         selected: usize,
         /// Status line: scanning, connecting, or why something failed.
@@ -1495,28 +1507,36 @@ impl SystemUiState {
     // --- Notification center ---
 
     /// Build the notification center from the live history, newest first.
+    /// Each row's icon is the sender's app name resolved through the same
+    /// cached lookup the switcher's window rows use; a miss — the common
+    /// case, see [`notification_row_icon`] — leaves the row text-only,
+    /// exactly as it was.
     pub fn notification_center(
         center: &crate::jwm::features::NotificationCenter,
         now_unix_ms: u64,
     ) -> Self {
+        let mut row_icons: Vec<Option<String>> = Vec::new();
         let rows = center
             .recent()
-            .map(|record| ListRow {
-                key: record.id.to_string(),
-                text: crate::jwm::features::notifications::panel_row(record, now_unix_ms),
-                data: RowData::Notification {
-                    id: record.id,
-                    cursor: crate::jwm::features::notifications::default_action_index(
-                        &record.actions,
-                    ),
-                    actions: record.actions.clone(),
-                },
+            .map(|record| {
+                row_icons.push(notification_row_icon(&record.app));
+                ListRow {
+                    key: record.id.to_string(),
+                    text: crate::jwm::features::notifications::panel_row(record, now_unix_ms),
+                    data: RowData::Notification {
+                        id: record.id,
+                        cursor: crate::jwm::features::notifications::default_action_index(
+                            &record.actions,
+                        ),
+                        actions: record.actions.clone(),
+                    },
+                }
             })
             .collect();
         Self::ListPanel {
             kind: ListKind::Notifications,
             rows,
-            row_icons: Vec::new(),
+            row_icons,
             selected: 0,
             message: String::new(),
             prompt: None,
@@ -1654,6 +1674,7 @@ impl SystemUiState {
         let Self::ListPanel {
             kind,
             rows,
+            row_icons,
             selected,
             ..
         } = self
@@ -1669,6 +1690,11 @@ impl SystemUiState {
             return;
         };
         rows.remove(index);
+        // The icons ride beside the rows; dropping one without the other
+        // would misalign every row below it.
+        if index < row_icons.len() {
+            row_icons.remove(index);
+        }
         *selected = (*selected).min(rows.len().saturating_sub(1));
     }
 
@@ -1677,12 +1703,14 @@ impl SystemUiState {
         if let Self::ListPanel {
             kind,
             rows,
+            row_icons,
             selected,
             ..
         } = self
             && *kind == ListKind::Notifications
         {
             rows.clear();
+            row_icons.clear();
             *selected = 0;
         }
     }
@@ -3613,10 +3641,11 @@ impl SystemUiState {
                         .map(|row| row.text.clone())
                         .collect()
                 };
-                // The switcher's icons align with the visible slice of `rows`;
+                // The row icons align with the visible slice of `rows`;
                 // every line appended or inserted below gets a `None` so the
-                // payload keeps `icons.len() == items.len()`. Other lists carry
-                // no icons at all, and their payload stays `None` throughout.
+                // payload keeps `icons.len() == items.len()`. Lists without
+                // icons carry an empty vec, and their payload stays `None`
+                // throughout.
                 let mut icons: Option<Vec<Option<String>>> =
                     if row_icons.is_empty() || row_icons.len() != rows.len() {
                         None
@@ -4846,6 +4875,7 @@ mod tests {
             connected: false,
             paired: false,
             rssi: None,
+            battery: None,
         }]);
         panel
     }
@@ -6744,7 +6774,11 @@ mod tests {
         let mut center = crate::jwm::features::NotificationCenter::new();
         center.push(
             &crate::jwm::features::notifications::NotificationRequest {
-                app: "mail".into(),
+                // A sender name with whitespace is not even a lookup key for
+                // the icon resolver, so this row deterministically resolves
+                // to nothing on any host — and a list where nothing resolved
+                // keeps the text-only payload it has always had.
+                app: "not an application".into(),
                 summary: "New mail".into(),
                 ..Default::default()
             },
@@ -6755,6 +6789,145 @@ mod tests {
         let parts = panel.overlay_parts();
         assert!(!parts.items.is_empty());
         assert_eq!(parts.icons, None);
+    }
+
+    #[test]
+    fn a_sender_name_that_cannot_be_a_desktop_id_is_not_even_looked_up() {
+        // App names are free-form sender strings; the resolver rejects
+        // anything that is not a single bounded path component before it
+        // would walk a directory, so these answers hold on any host.
+        assert_eq!(notification_row_icon(""), None);
+        assert_eq!(notification_row_icon("   "), None);
+        assert_eq!(notification_row_icon("not an application"), None);
+        assert_eq!(notification_row_icon("path/like"), None);
+        assert_eq!(notification_row_icon(&"x".repeat(128)), None);
+    }
+
+    #[test]
+    fn the_notification_centers_icons_align_with_its_rows() {
+        let mut center = crate::jwm::features::NotificationCenter::new();
+        for (index, app) in ["not an application", "path/like", ""].iter().enumerate() {
+            center.push(
+                &crate::jwm::features::notifications::NotificationRequest {
+                    app: (*app).into(),
+                    summary: format!("n{index}"),
+                    ..Default::default()
+                },
+                1_000 + index as u64,
+                false,
+            );
+        }
+        let panel = SystemUiState::notification_center(&center, 2_000);
+        let SystemUiState::ListPanel {
+            rows, row_icons, ..
+        } = &panel
+        else {
+            panic!("the notification center is a list panel");
+        };
+        // The band contract is index alignment: one icon slot per row, newest
+        // first, a `None` for every sender the resolver cannot name — which,
+        // for free-form app names, is the common case.
+        assert_eq!(row_icons.len(), rows.len());
+        assert!(row_icons.iter().all(Option::is_none), "{row_icons:?}");
+        assert_eq!(panel.overlay_parts().icons, None);
+    }
+
+    #[test]
+    fn the_notification_centers_icons_follow_the_strip_and_a_dismissed_row() {
+        use crate::jwm::features::notifications::NotificationAction;
+
+        let row = |id: u32, actions: Vec<NotificationAction>| ListRow {
+            key: id.to_string(),
+            text: format!("notification {id}"),
+            data: RowData::Notification {
+                id,
+                actions,
+                cursor: 0,
+            },
+        };
+        let rows: Vec<ListRow> = (0..20u32)
+            .map(|id| {
+                // The selected row offers actions, so its strip line is drawn.
+                let actions = if id == 15 {
+                    vec![NotificationAction {
+                        key: "open".into(),
+                        label: "Open".into(),
+                    }]
+                } else {
+                    Vec::new()
+                };
+                row(id, actions)
+            })
+            .collect();
+        let icons: Vec<Option<String>> = (0..20u32)
+            .map(|id| (id % 2 == 0).then(|| format!("/icons/app{id}.png")))
+            .collect();
+        let mut panel = SystemUiState::ListPanel {
+            kind: ListKind::Notifications,
+            rows,
+            row_icons: icons,
+            selected: 15,
+            message: String::new(),
+            prompt: None,
+            query: String::new(),
+            empty: String::new(),
+        };
+
+        // The window shows 14 rows ending at the selection: rows 2..=15,
+        // then the action strip as the last line — one icon slot per line,
+        // the strip's a `None`.
+        let parts = panel.overlay_parts();
+        assert_eq!(parts.items.len(), 15);
+        let payload = parts.icons.expect("resolved icons ride the payload");
+        assert_eq!(payload.len(), parts.items.len());
+        for (index, item) in parts.items.iter().take(14).enumerate() {
+            let row_number: u32 = item.strip_prefix("notification ").unwrap().parse().unwrap();
+            assert_eq!(
+                payload[index],
+                (row_number % 2 == 0).then(|| format!("/icons/app{row_number}.png")),
+                "row {item} carries its own icon"
+            );
+        }
+        assert_eq!(payload[14], None, "the action strip is not a row");
+
+        // Dismissing the selected notification drops its icon with it.
+        panel.remove_notification(15);
+        let parts = panel.overlay_parts();
+        let payload = parts.icons.expect("icons survive a dismissal");
+        assert!(
+            !parts.items.iter().any(|item| item == "notification 15"),
+            "the row is gone"
+        );
+        assert!(
+            !payload
+                .iter()
+                .flatten()
+                .any(|path| path == "/icons/app15.png"),
+            "its icon went with it"
+        );
+        // Every surviving row still carries its own icon: alignment held.
+        for (index, item) in parts.items.iter().enumerate() {
+            let Some(number) = item
+                .strip_prefix("notification ")
+                .and_then(|number| number.parse::<u32>().ok())
+            else {
+                continue;
+            };
+            assert_eq!(
+                payload[index],
+                (number % 2 == 0).then(|| format!("/icons/app{number}.png")),
+                "row {item} carries its own icon"
+            );
+        }
+
+        // Clear-all empties the icons with the rows: a rebuilt panel starts
+        // from nothing, never from a stale band.
+        panel.clear_notifications();
+        let SystemUiState::ListPanel { row_icons, .. } = &panel else {
+            panic!("still the notification center");
+        };
+        assert!(row_icons.is_empty());
+        assert_eq!(panel.overlay_parts().icons, None);
     }
 
     #[test]

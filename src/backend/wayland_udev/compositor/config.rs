@@ -1697,6 +1697,14 @@ impl WaylandCompositor {
             return;
         }
         self.window_groups = groups;
+        // Keep the appear-envelope membership in sync even while every bar is
+        // hidden behind the render loop's empty-set gate, so a returning strip
+        // eases in fresh instead of inheriting a settled envelope.
+        self.tab_appears.advance(
+            std::time::Instant::now(),
+            &self.window_groups,
+            crate::config::CONFIG.load().motion_enabled(),
+        );
         // Re-derive the hovered cell against the new layout: the tab under
         // the pointer may sit at another index now, or be gone entirely.
         self.tab_hover = tab_hover_for_pointer(

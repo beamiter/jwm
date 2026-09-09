@@ -1243,6 +1243,7 @@ impl<C: CompositorConnection> Compositor<C> {
             tab_tooltip_dwell: Default::default(),
             tab_tooltip_ease: Default::default(),
             tab_tooltip_texture: None,
+            tab_appears: Default::default(),
             // Particle effects
             particle_program,
             particle_uniforms,

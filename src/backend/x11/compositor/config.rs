@@ -183,8 +183,13 @@ impl<C: CompositorConnection> Compositor<C> {
                 }
             }
         }
-        // Need render while toast cards are on screen (fade envelope + expiry)
-        if !self.toast_stack.is_empty() {
+        // Need render while a toast card's fade envelope or open spring is
+        // moving, or a card reached its end and is owed the frame that prunes
+        // it. A settled hold arms nothing: the 20 ms idle cadence every
+        // composited session keeps (`scheduling::idle_poll_required`) wakes
+        // the loop for the fade-out's first frame, and hover/dismiss arrive
+        // as pointer events that set `needs_render` themselves.
+        if self.toast_stack.needs_frames(std::time::Instant::now()) {
             return true;
         }
         // Same for the volume/brightness OSD card.
@@ -1310,5 +1315,97 @@ mod tests {
             (10.0, 20.0, 300.0, 200.0),
             (10.6, 20.0, 300.0, 200.0),
         ));
+    }
+
+    #[test]
+    fn a_settled_toast_hold_arms_neither_x11_render_gate() {
+        // The toast envelope only moves during the fades, a dismiss and the
+        // open spring, so both frame gates must ask the stack whether frames
+        // are owed rather than whether any card exists: a visible but
+        // settled hold used to composite full frames at display cadence for
+        // the whole timeout. `needs_render` paces the loop; `render_frame`'s
+        // `force_render` is the gate that throws idle frames away. The
+        // `toasts_active` input to the damage tracker keeps its broader form
+        // deliberately — it only tunes damage thresholds.
+        const CONFIG_SRC: &str = include_str!("config.rs");
+        const RENDER_SRC: &str = include_str!("render.rs");
+        let frames = format!("self.{}.needs_frames(", "toast_stack");
+        let arm = format!("|| !self.{}.is_empty()", "toast_stack");
+
+        let needs = body_of(CONFIG_SRC, "pub(crate) fn needs_render");
+        assert!(
+            needs.contains(&frames),
+            "needs_render must ask the stack whether a toast owes frames"
+        );
+        assert!(
+            !needs.contains(&format!("!self.{}.is_empty()", "toast_stack")),
+            "a visible-but-settled hold must not keep the loop at frame cadence"
+        );
+
+        let frame = body_of(RENDER_SRC, "pub(crate) fn render_frame");
+        assert!(
+            frame.contains(&frames),
+            "render_frame must composite while a toast envelope moves"
+        );
+        assert!(
+            !frame.contains(&arm),
+            "force_render must not arm on a settled hold"
+        );
+    }
+
+    #[test]
+    fn the_composited_idle_cadence_delivers_the_toast_envelope_boundaries() {
+        // X11 needs no toast term in `compositor_frame_deadline`: a
+        // composited session intentionally keeps the idle safety poll, so
+        // the loop wakes at least every 20 ms and every wake re-evaluates
+        // the render gate — the fade-out's first frame lands within one idle
+        // tick of its boundary. Pin the policy that guarantees it.
+        use crate::backend::x11::scheduling::{
+            IDLE_UPDATE_INTERVAL, idle_poll_required, update_interval,
+        };
+        assert_eq!(IDLE_UPDATE_INTERVAL, std::time::Duration::from_millis(20));
+        for readiness in [(true, true), (true, false), (false, true), (false, false)] {
+            assert!(
+                idle_poll_required(true, readiness.0, readiness.1),
+                "a composited session must keep the idle cadence: {readiness:?}"
+            );
+        }
+        assert_eq!(
+            update_interval(false, true),
+            Some(IDLE_UPDATE_INTERVAL),
+            "an idle composited loop still wakes on the idle cadence"
+        );
+    }
+
+    #[test]
+    fn toast_pointer_transitions_make_their_own_frames() {
+        // This is why the pump needs no hover/dismiss term: pushing a card,
+        // clicking one, and a hover change each arm a frame from the event
+        // itself, so the envelope boundaries are the only clock-driven
+        // transitions the idle cadence has to catch.
+        const FEATURES_SRC: &str = include_str!("features.rs");
+        for (needle, what) in [
+            (format!("pub(crate) fn {}(", "push_toast"), "a pushed card"),
+            (
+                format!("pub(crate) fn {}(", "click_toast"),
+                "a clicked card",
+            ),
+        ] {
+            let body = body_of(FEATURES_SRC, &needle);
+            assert!(
+                body.contains(&format!("self.{} = true", "needs_render")),
+                "{what} must arm its own frame"
+            );
+        }
+        let hover = body_of(
+            FEATURES_SRC,
+            &format!("pub(super) fn {}(", "refresh_toast_hover"),
+        );
+        let pause = format!("self.{}.set_hovered(toast_hover, now)", "toast_stack");
+        let paused_at = hover.find(&pause).expect("the hover pause is applied");
+        assert!(
+            hover[paused_at..].contains(&format!("self.{} = true", "needs_render")),
+            "a hover change must arm a frame for the paused card"
+        );
     }
 }

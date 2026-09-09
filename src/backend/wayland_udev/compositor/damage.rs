@@ -283,9 +283,12 @@ impl WaylandCompositor {
         if self.transition_active {
             return true;
         }
-        // Toast cards fade on a wall-clock envelope; keep frames coming
-        // while any card is visible (bounded by the toast timeout).
-        if !self.toast_stack.is_empty() {
+        // Toast cards fade on a wall-clock envelope. Only the envelope's
+        // moving parts — the fade-in, the fade-out, a dismiss, the open
+        // spring — and a card owed its pruning frame ask for frames here; a
+        // settled hold is silent and gets its fade-out's first frame from
+        // `next_wakeup`, which carries the envelope boundary to the loop.
+        if self.toast_stack.needs_frames(std::time::Instant::now()) {
             return true;
         }
         // Same for the volume/brightness OSD card.
@@ -555,5 +558,103 @@ mod tests {
         assert!(peek_animation_pending(true, 0.0));
         assert!(peek_animation_pending(false, 1.0));
         assert!(peek_animation_pending(false, f32::NAN));
+    }
+
+    /// The body of the first item whose header matches `needle`, by brace
+    /// walk, so a needle can never match a mention in another function.
+    fn body_of<'a>(source: &'a str, needle: &str) -> &'a str {
+        let start = source
+            .find(needle)
+            .unwrap_or_else(|| panic!("missing `{needle}`"));
+        let body_start = source[start..]
+            .find('{')
+            .map(|offset| start + offset + 1)
+            .unwrap_or_else(|| panic!("missing body for `{needle}`"));
+        let mut depth = 1usize;
+        for (offset, ch) in source[body_start..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return &source[body_start..body_start + offset];
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("unterminated body for `{needle}`");
+    }
+
+    #[test]
+    fn a_settled_toast_hold_does_not_arm_the_animation_pump() {
+        // The envelope only moves during the fades, a dismiss and the open
+        // spring, so `has_active_animations` must ask the stack whether
+        // frames are owed rather than whether any card exists: a visible but
+        // settled hold used to composite full frames at display cadence for
+        // the whole timeout. The fade-out's first frame is scheduled through
+        // `next_wakeup`, not through this pump.
+        let source = include_str!("damage.rs");
+        let body = body_of(
+            source,
+            &format!("pub(crate) fn {}(", "has_active_animations"),
+        );
+        let frames = format!("self.{}.needs_frames(", "toast_stack");
+        let any_card = format!("!self.{}.is_empty()", "toast_stack");
+        assert!(
+            body.contains(&frames),
+            "the toast term must ask the stack whether frames are owed"
+        );
+        assert!(
+            !body.contains(&any_card),
+            "a visible-but-settled hold must not arm the pump"
+        );
+    }
+
+    #[test]
+    fn a_settled_toast_still_blocks_direct_scanout() {
+        // Narrowing the pump must not narrow the scanout exclusion: a
+        // settled card is not animating, but its pixels still live only in
+        // the composited overlay, so a fullscreen client below it can never
+        // take over the CRTC while it shows.
+        let source = include_str!("damage.rs");
+        let body = body_of(
+            source,
+            &format!("pub(crate) fn {}(", "direct_scanout_block_reason"),
+        );
+        let any_card = format!("!self.{}.is_empty()", "toast_stack");
+        assert!(
+            body.contains(&any_card),
+            "any visible card — settled or not — must keep blocking scanout"
+        );
+    }
+
+    #[test]
+    fn toast_pointer_transitions_make_their_own_frames() {
+        // This is why the pump needs no hover/dismiss term: pushing a card,
+        // clicking one, and a hover change each arm a frame from the event
+        // itself, so the envelope boundaries are the only clock-driven
+        // transitions the loop has to schedule.
+        let source = include_str!("config.rs");
+        for (needle, what) in [
+            (format!("pub(crate) fn {}(", "push_toast"), "a pushed card"),
+            (
+                format!("pub(crate) fn {}(", "click_toast"),
+                "a clicked card",
+            ),
+        ] {
+            let body = body_of(source, &needle);
+            assert!(
+                body.contains(&format!("self.{} = true", "needs_render")),
+                "{what} must arm its own frame"
+            );
+        }
+        let hover = body_of(source, &format!("pub(crate) fn {}(", "refresh_toast_hover"));
+        let pause = format!("self.{}.set_hovered(toast_hover, now)", "toast_stack");
+        let paused_at = hover.find(&pause).expect("the hover pause is applied");
+        assert!(
+            hover[paused_at..].contains(&format!("self.{} = true", "needs_render")),
+            "a hover change must arm a frame for the paused card"
+        );
     }
 }

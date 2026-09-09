@@ -649,6 +649,17 @@ impl<C: CompositorConnection> Compositor<C> {
             return;
         }
         self.window_groups = groups;
+        // Sync the appear envelopes against the new set the moment it
+        // changes: when the last strip goes away the render loop gates the
+        // per-frame advance off entirely, and without this a strip that
+        // vanished behind that gate would hand its settled envelope to the
+        // next strip reserving the same rectangle — the pop this mechanism
+        // exists to prevent.
+        self.tab_appears.advance(
+            std::time::Instant::now(),
+            &self.window_groups,
+            crate::config::CONFIG.load().motion_enabled(),
+        );
         // Re-derive the hovered cell against the new layout: the tab under
         // the pointer may sit at another index now, or be gone entirely.
         self.tab_hover = tab_hover_for_pointer(
@@ -834,6 +845,19 @@ impl<C: CompositorConnection> Compositor<C> {
         if self.tab_tooltip_ease.animating() {
             self.needs_render = true;
         }
+        // A strip that just gained its second window eases in over
+        // `window_tabs::APPEAR_DURATION` instead of popping at full alpha,
+        // and a cell joining an already-shown strip does the same. The
+        // envelopes run on a clock like the dwell's, so the pump mirrors it:
+        // frames must keep coming while any of them is mid-flight.
+        self.tab_appears.advance(
+            std::time::Instant::now(),
+            &self.window_groups,
+            crate::config::CONFIG.load().motion_enabled(),
+        );
+        if self.tab_appears.animating() {
+            self.needs_render = true;
+        }
         let ui = ui_theme::palette();
         self.ensure_glass_backdrop(ui);
         let accent = self.border_gradient_color_a;
@@ -851,6 +875,14 @@ impl<C: CompositorConnection> Compositor<C> {
                 let Some([tx, ty, tw, th]) = window_tabs::track_rect(group.bar) else {
                     continue;
                 };
+                // The strip's appear envelope multiplies everything this bar
+                // draws — track, raised cells and titles — as alpha only:
+                // geometry and hit-testing keep the exact rectangles. Its
+                // first frame draws nothing at all.
+                let appear = self.tab_appears.bar_alpha(group.bar);
+                if appear <= 0.0 {
+                    continue;
+                }
 
                 // Track first, then every cell: a title must never end up
                 // under the neighbouring cell's fill. `ui_fill_island` leaves
@@ -866,7 +898,7 @@ impl<C: CompositorConnection> Compositor<C> {
                     track_radius,
                     track_radius,
                     ui.card,
-                    1.0,
+                    appear,
                 );
 
                 for (index, tab) in group.tabs.iter().enumerate() {
@@ -884,16 +916,26 @@ impl<C: CompositorConnection> Compositor<C> {
                     let Some([x, y, w, h]) = window_tabs::cell_rect(group.bar, count, index) else {
                         continue;
                     };
+                    // The cell's own appear envelope (a window joining an
+                    // already-shown strip) multiplies its pill as alpha only.
+                    let cell_p = self.tab_appears.cell_alpha(group.bar, tab.window);
                     let radius = window_tabs::pill_radius(h);
                     if tab.active {
-                        self.sysui_fill_rounded(x, y, w, h, radius, ui.chip);
                         self.sysui_fill_rounded(
                             x,
                             y,
                             w,
                             h,
                             radius,
-                            [accent[0], accent[1], accent[2], ui.selection_alpha],
+                            [ui.chip[0], ui.chip[1], ui.chip[2], ui.chip[3] * cell_p],
+                        );
+                        self.sysui_fill_rounded(
+                            x,
+                            y,
+                            w,
+                            h,
+                            radius,
+                            [accent[0], accent[1], accent[2], ui.selection_alpha * cell_p],
                         );
                     } else {
                         self.sysui_fill_rounded(
@@ -902,7 +944,12 @@ impl<C: CompositorConnection> Compositor<C> {
                             w,
                             h,
                             radius,
-                            [ui.chip[0], ui.chip[1], ui.chip[2], ui.chip[3] * hover_scale],
+                            [
+                                ui.chip[0],
+                                ui.chip[1],
+                                ui.chip[2],
+                                ui.chip[3] * hover_scale * cell_p,
+                            ],
                         );
                         self.sysui_fill_rounded(
                             x,
@@ -914,7 +961,7 @@ impl<C: CompositorConnection> Compositor<C> {
                                 accent[0],
                                 accent[1],
                                 accent[2],
-                                ui.selection_alpha * hover_scale,
+                                ui.selection_alpha * hover_scale * cell_p,
                             ],
                         );
                     }
@@ -931,8 +978,6 @@ impl<C: CompositorConnection> Compositor<C> {
                 );
                 self.gl
                     .uniform_1_i32(self.hud_text_uniforms.texture.as_ref(), 0);
-                self.gl
-                    .uniform_1_f32(self.hud_text_uniforms.opacity.as_ref(), 1.0);
                 self.gl.active_texture(glow::TEXTURE0);
                 for (index, slot) in titles.iter().enumerate() {
                     let Some((texture, tw, th)) = slot else {
@@ -941,6 +986,14 @@ impl<C: CompositorConnection> Compositor<C> {
                     let Some([x, y, w, h]) = window_tabs::cell_rect(group.bar, count, index) else {
                         continue;
                     };
+                    // The title fades with its cell's appear envelope, so a
+                    // window joining an already-shown strip eases in whole
+                    // rather than pill-first, text-first.
+                    let cell_p = group.tabs.get(index).map_or(1.0, |tab| {
+                        self.tab_appears.cell_alpha(group.bar, tab.window)
+                    });
+                    self.gl
+                        .uniform_1_f32(self.hud_text_uniforms.opacity.as_ref(), cell_p);
                     let (tw, th) = (*tw as f32, *th as f32);
                     self.gl.uniform_4_f32(
                         self.hud_text_uniforms.rect.as_ref(),
@@ -1247,5 +1300,63 @@ mod tests {
         assert!(compact.contains(
             "ifletSome(window)=tooltip_key&&tooltip_p>0.0&&letSome((group_index,index))=window_tabs::find_tab(&self.window_groups,window){self.render_tab_tooltip("
         ));
+    }
+
+    /// A strip that gains its second window eases in on a clock, not on an
+    /// event, so the strip's render path must keep the frame loop alive
+    /// while an appear envelope is mid-flight — an idle screen would
+    /// otherwise hang the strip half-faded. Pin the wiring: the live groups
+    /// feed the envelopes every drawn frame, a flying envelope arms
+    /// `needs_render`, the motion setting rides the same advance, and the
+    /// strip's draws consume the envelopes as alpha multipliers only — the
+    /// geometry calls keep their exact no-envelope shape. The membership
+    /// sync inside `set_window_groups` is what keeps a strip that vanished
+    /// behind the renderer's empty-set gate from handing its settled
+    /// envelope to the next strip reserving the same rectangle.
+    #[test]
+    fn the_tab_bar_pumps_frames_while_an_appear_envelope_is_flying() {
+        let compact: String = include_str!("expose.rs")
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect();
+
+        // One advance per drawn frame, fed the live groups and the motion
+        // setting (the trailing comma is the multi-line call's own)...
+        let frame_advance = "self.tab_appears.advance(std::time::Instant::now(),&self.window_groups,crate::config::CONFIG.load().motion_enabled(),);";
+        assert!(compact.contains(frame_advance));
+        // ...plus the membership sync the moment the set changes, so an
+        // empty-set render gap cannot strand a settled envelope.
+        let setter = compact
+            .find("fnset_window_groups(")
+            .expect("set_window_groups exists");
+        let sync = compact[setter..]
+            .find(frame_advance)
+            .expect("set_window_groups syncs the appear envelopes");
+        assert!(sync < 700, "the membership sync belongs to the set change");
+
+        // While any envelope is mid-flight the pump stays armed: the
+        // `needs_render = true` lands inside the `animating` guard, behind
+        // only its explaining comment.
+        let guard = compact
+            .find("ifself.tab_appears.animating(){")
+            .expect("the appear pump guards on animating");
+        let armed = compact[guard..]
+            .find("self.needs_render=true;")
+            .expect("the appear pump arms needs_render");
+        assert!(
+            armed < 400,
+            "needs_render must be armed by the animating guard"
+        );
+
+        // Consumed as alpha multipliers on the strip's own draws — the
+        // track, the raised cells and their titles...
+        assert!(compact.contains("self.tab_appears.bar_alpha(group.bar)"));
+        assert!(compact.contains("self.tab_appears.cell_alpha(group.bar,tab.window)"));
+        // ...while the geometry the hit test reproduces keeps its exact
+        // envelope-free shape: appear is alpha-only. (The needle is joined
+        // at runtime so this test's own source cannot match it.)
+        assert!(compact.contains("window_tabs::cell_rect(group.bar,count,index)"));
+        let scaled = ["window_tabs::cell_rect(group.bar,count,index)", "*appear"].concat();
+        assert!(!compact.contains(&scaled));
     }
 }

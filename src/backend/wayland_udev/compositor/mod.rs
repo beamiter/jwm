@@ -1385,6 +1385,12 @@ pub(crate) struct WaylandCompositor {
     /// The chip's rasterised line, keyed by its text; freed on every title
     /// refresh and at teardown, the same bargain `tab_title_textures` strikes.
     tab_tooltip_texture: Option<(String, u32, u32, u32)>,
+    /// Appear envelopes for the strips and their cells, keyed per strip by
+    /// its reserved rectangle and per cell by window id: a bar that gains
+    /// its second window eases in instead of popping at full alpha, and a
+    /// cell joining an already-shown bar does the same. Plain animation
+    /// state — nothing here touches the GPU.
+    tab_appears: crate::backend::compositor_common::window_tabs::TabAppears,
 
     // Monitors info
     monitors: Vec<(u32, i32, i32, u32, u32, u32)>,
@@ -2821,6 +2827,7 @@ impl WaylandCompositor {
                 tab_tooltip_dwell: Default::default(),
                 tab_tooltip_ease: Default::default(),
                 tab_tooltip_texture: None,
+                tab_appears: Default::default(),
 
                 // Monitors
                 monitors: Vec::new(),
@@ -3449,6 +3456,71 @@ mod vrr_report_contract_tests {
 }
 
 #[cfg(test)]
+mod toast_frame_scheduling_tests {
+    /// The compact source of one `fn` item, without whitespace — the same
+    /// narrowing `vrr_report_contract_tests` uses, so a needle cannot match a
+    /// mention in another function.
+    fn compact_item(source: &str, needle: &str) -> String {
+        let start = source.find(needle).expect("source item missing");
+        let open = start
+            + source[start..]
+                .find('{')
+                .expect("source item has no opening brace");
+        let mut depth = 0usize;
+        for (offset, byte) in source[open..].bytes().enumerate() {
+            match byte {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return source[start..open + offset + 1]
+                            .chars()
+                            .filter(|character| !character.is_whitespace())
+                            .collect();
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("source item has no closing brace");
+    }
+
+    #[test]
+    fn a_due_toast_boundary_runs_an_update_on_a_static_desktop() {
+        // The udev loop only runs `handler.update` — and therefore any
+        // render — when `needs_render()` answers true, so the envelope
+        // boundary `next_wakeup` sleeps until must also be reported here, on
+        // exactly the terms the recording deadline has.
+        let source = include_str!("mod.rs");
+        let body = compact_item(source, &format!("pub(crate) fn {}(", "needs_render"));
+        assert!(
+            body.contains(&format!("self.{}.needs_frames(", "toast_stack")),
+            "a toast owed a frame must gate handler.update like a due capture"
+        );
+    }
+
+    #[test]
+    fn the_loop_sleeps_until_the_toast_envelope_boundary() {
+        // Without this term a settled hold would produce no wake at all: the
+        // fade-out would start whenever some unrelated event happened to
+        // render, not when the envelope says it must.
+        let source = include_str!("mod.rs");
+        let body = compact_item(source, &format!("pub(crate) fn {}(", "next_wakeup"));
+        assert!(
+            body.contains(&format!(
+                "self.{}.{}(",
+                "toast_stack", "next_envelope_change_at"
+            )),
+            "the toast envelope boundary must join the wakeup set"
+        );
+        assert!(
+            body.contains("toast_boundary"),
+            "the deadline must be named and joined with the others"
+        );
+    }
+}
+
+#[cfg(test)]
 mod gpu_release_contract_tests {
     use std::collections::BTreeSet;
 
@@ -4039,6 +4111,14 @@ impl WaylandCompositor {
             // for the encoder to read. `next_wakeup` carries the interval in
             // between, so this is true only on the frames that get captured.
             || self.recording.frame_due()
+            // A toast whose envelope reached a boundary — the fade-out's
+            // start, the expiry — owes the frame that starts the fade or
+            // prunes the card, on the same terms as the recording above:
+            // `next_wakeup` schedules the wake, and this lets it run an
+            // update on an otherwise static desktop. Hover, dismiss and
+            // replacement arrive as pointer/push events that set the flag
+            // itself, so they never depend on this term.
+            || self.toast_stack.needs_frames(Instant::now())
             // Start and stop both run inside render_frame, where the GL context
             // is current. Without this a stop requested after the encoder pipe
             // broke — which clears the active flag, and with it `frame_due` —
@@ -4073,7 +4153,19 @@ impl WaylandCompositor {
                     preview.lease_deadline,
                 )
             });
-        [recording, preview_lease].into_iter().flatten().min()
+        // A settled toast hold owes exactly one frame when it ends: the
+        // envelope boundary (fade-out start, then expiry) is the wakeup, so
+        // the fade begins on time on a static desktop without compositing
+        // through the hold. While any card is fading or dismissed the
+        // animation pump is armed instead and this deadline goes unread.
+        let toast_boundary = self
+            .toast_stack
+            .next_envelope_change_at(Instant::now())
+            .map(|at| at.saturating_duration_since(Instant::now()));
+        [recording, preview_lease, toast_boundary]
+            .into_iter()
+            .flatten()
+            .min()
     }
 
     /// Clear the needs_render flag after a frame has been rendered.

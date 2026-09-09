@@ -93,6 +93,10 @@ pub(crate) struct ActiveToast {
     /// Open spring for the docked card, so each notification drops out of the
     /// bar on its own rather than the whole stack sliding as one.
     motion: IslandMotion,
+    /// The size the renderer last asked the spring to travel to, remembered
+    /// so [`Self::spring_animating`] can answer without the texture set that
+    /// produced the measurement.
+    spring_target: (f32, f32),
 }
 
 impl ActiveToast {
@@ -115,6 +119,66 @@ impl ActiveToast {
         let timeout = self.timeout.as_secs_f32();
         let fade_out = ((timeout - age) / TOAST_FADE_OUT).clamp(0.0, 1.0);
         fade_in.min(fade_out)
+    }
+
+    /// Whether the card's on-screen state is moving at `now`: inside the
+    /// fade-in, the fade-out, or a dismiss fade. A settled hold and a frozen
+    /// hover both read false — their next change is a scheduled boundary
+    /// ([`Self::next_envelope_change_at`]), not a running curve.
+    pub(crate) fn envelope_active(&self, now: Instant) -> bool {
+        if let Some((dismissed_at, _)) = self.dismissed {
+            return now.saturating_duration_since(dismissed_at).as_secs_f32() < TOAST_DISMISS_FADE;
+        }
+        // The arrival is never frozen: a card the pointer reached while it
+        // was still appearing keeps finishing its fade-in.
+        if now.saturating_duration_since(self.born).as_secs_f32() < TOAST_FADE_IN {
+            return true;
+        }
+        if self.paused_at.is_some() {
+            return false;
+        }
+        let age = now.saturating_duration_since(self.created).as_secs_f32();
+        let timeout = self.timeout.as_secs_f32();
+        age >= timeout - TOAST_FADE_OUT && age < timeout
+    }
+
+    /// Whether the open spring is still travelling toward the size the
+    /// renderer last measured for this card.
+    pub(crate) fn spring_animating(&self) -> bool {
+        self.motion
+            .animating(self.spring_target.0, self.spring_target.1)
+    }
+
+    /// Whether the compositor owes this card frames right now: the envelope
+    /// or the open spring is moving, or the card reached its end and is owed
+    /// the frame that prunes it and erases its pixels.
+    pub(crate) fn needs_frames(&self, now: Instant) -> bool {
+        self.envelope_active(now) || self.spring_animating() || self.expired(now)
+    }
+
+    /// The next instant the card's on-screen state changes without further
+    /// input: the fade-in completing, the hold ending and the fade-out
+    /// beginning, the card expiring, or a dismiss fade finishing. `None`
+    /// while the countdown is frozen by a hover — the pointer leaving is
+    /// what re-arms the clock, and that event makes its own frame.
+    pub(crate) fn next_envelope_change_at(&self, now: Instant) -> Option<Instant> {
+        if let Some((dismissed_at, _)) = self.dismissed {
+            let end = dismissed_at + Duration::from_secs_f32(TOAST_DISMISS_FADE);
+            return (end > now).then_some(end);
+        }
+        let fade_in_end = self.born + Duration::from_secs_f32(TOAST_FADE_IN);
+        if self.paused_at.is_some() {
+            return (fade_in_end > now).then_some(fade_in_end);
+        }
+        let expiry = self.created + self.timeout;
+        let fade_out_start = self.created
+            + self
+                .timeout
+                .saturating_sub(Duration::from_secs_f32(TOAST_FADE_OUT));
+        [fade_in_end, fade_out_start, expiry]
+            .into_iter()
+            .filter(|&at| at > now)
+            .min()
     }
 
     /// Swap in a newer notification for the same record. The countdown
@@ -216,6 +280,14 @@ fn sanitize_notification(notification: &mut ToastNotification) {
         .map(sanitize_line)
         .find(|line| !line.is_empty())
         .unwrap_or_default();
+    // The sender gets the title's one-line shape and length cap: an empty
+    // result means the card draws no attribution line at all.
+    notification.app = notification
+        .app
+        .lines()
+        .map(sanitize_line)
+        .find(|line| !line.is_empty())
+        .unwrap_or_default();
     notification.body = notification
         .body
         .lines()
@@ -226,6 +298,71 @@ fn sanitize_notification(notification: &mut ToastNotification) {
         .join("\n");
     notification.urgency = notification.urgency.min(2);
     notification.actions = sanitize_actions(&notification.actions);
+}
+
+/// Transparent rows between the sender band and the title band of a merged
+/// title texture. With the rasterizer's own 2 px margins on both bands this
+/// lands the sender the same 6 px above the title that the body sits below
+/// it.
+pub(crate) const SENDER_TITLE_GAP_PX: u32 = 2;
+
+/// The sender line's ink: the body's label ink at a reduced alpha, so the
+/// attribution reads quieter than the message in every theme without a new
+/// palette tone. The card's type scale is one size with brightness as the
+/// hierarchy — the title is the brightest ink, the body one step down, and
+/// the sender sits at the dim end.
+pub(crate) fn sender_ink(label_ink: [u8; 4]) -> [u8; 4] {
+    [
+        label_ink[0],
+        label_ink[1],
+        label_ink[2],
+        (f32::from(label_ink[3]) * 0.72).round() as u8,
+    ]
+}
+
+/// Stack rasterized RGBA text bands into one texture buffer, top band first,
+/// with `gap_px` fully transparent rows between bands. The card bakes its
+/// dim sender line and bright title into the single title texture this way,
+/// so the draw and layout code needs no sender case — it reads everything
+/// from the merged texture's dimensions, and a card without a sender keeps
+/// the exact pixels, and therefore geometry, it has always had. Returns
+/// `(pixels, width, height)`; `(vec![], 0, 0)` for no bands.
+pub(crate) fn merge_text_bands(bands: &[(&[u8], u32, u32)], gap_px: u32) -> (Vec<u8>, u32, u32) {
+    if bands.is_empty() {
+        return (Vec::new(), 0, 0);
+    }
+    let width = bands.iter().map(|&(_, w, _)| w).max().unwrap_or(0);
+    let height = bands
+        .iter()
+        .map(|&(_, _, h)| h)
+        .sum::<u32>()
+        .saturating_add(gap_px.saturating_mul(bands.len().saturating_sub(1) as u32));
+    let Some(len) = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|px| px.checked_mul(4))
+    else {
+        return (Vec::new(), 0, 0);
+    };
+    if len == 0 {
+        return (Vec::new(), 0, 0);
+    }
+    let mut pixels = vec![0u8; len];
+    let mut top = 0usize;
+    for (index, &(band, band_w, band_h)) in bands.iter().enumerate() {
+        if index > 0 {
+            top += gap_px as usize;
+        }
+        for row in 0..band_h as usize {
+            let dst = ((top + row) * width as usize) * 4;
+            let src = row * band_w as usize * 4;
+            let span = band_w as usize * 4;
+            if src + span <= band.len() && dst + span <= pixels.len() {
+                pixels[dst..dst + span].copy_from_slice(&band[src..src + span]);
+            }
+        }
+        top += band_h as usize;
+    }
+    (pixels, width, height)
 }
 
 /// One toast card's hit geometry from the last drawn frame.
@@ -337,6 +474,7 @@ impl ToastStack {
                     paused_at: None,
                     dismissed: None,
                     motion: IslandMotion::default(),
+                    spring_target: (0.0, 0.0),
                 });
             }
         }
@@ -476,13 +614,45 @@ impl ToastStack {
         self.toasts.iter()
     }
 
-    /// One card's open spring, for the renderer to advance once its measured
-    /// size is known.
-    pub(crate) fn motion_for(&mut self, id: u64) -> Option<&mut IslandMotion> {
+    /// Whether any card needs compositor frames right now: an envelope or
+    /// open spring still moving, or a card owed the frame that prunes it. A
+    /// fully settled hold answers false — its next change is a scheduled
+    /// boundary ([`Self::next_envelope_change_at`]), not a running curve.
+    pub(crate) fn needs_frames(&self, now: Instant) -> bool {
+        self.toasts.iter().any(|toast| toast.needs_frames(now))
+    }
+
+    /// The nearest instant some card's on-screen state next changes without
+    /// input, so the event loop can sleep until then and still start the
+    /// fade-out on time. `None` when every card is settled or hover-frozen —
+    /// pointer and click events make their own frames.
+    pub(crate) fn next_envelope_change_at(&self, now: Instant) -> Option<Instant> {
+        self.toasts
+            .iter()
+            .filter_map(|toast| toast.next_envelope_change_at(now))
+            .min()
+    }
+
+    /// Advance one card's open spring to `now` toward the renderer's measured
+    /// target, remembering that target so [`ActiveToast::spring_animating`]
+    /// can later answer without the texture set that produced it.
+    pub(crate) fn advance_motion(
+        &mut self,
+        id: u64,
+        now: Instant,
+        target_w: f32,
+        target_h: f32,
+        motion_enabled: bool,
+    ) -> (f32, f32) {
         self.toasts
             .iter_mut()
             .find(|toast| toast.id == id)
-            .map(|toast| &mut toast.motion)
+            .map_or((target_w, target_h), |toast| {
+                toast.spring_target = (target_w, target_h);
+                toast
+                    .motion
+                    .advance_with_motion(now, target_w, target_h, motion_enabled)
+            })
     }
 }
 
@@ -525,6 +695,295 @@ mod tests {
         assert!(stack.prune(now + Duration::from_millis(999)).is_empty());
         assert_eq!(stack.prune(now + Duration::from_millis(1000)), vec![0]);
         assert!(stack.is_empty());
+    }
+
+    #[test]
+    fn a_settled_hold_needs_no_frames_but_its_boundaries_do() {
+        let now = Instant::now();
+        let mut stack = ToastStack::default();
+        stack.push(toast("hold", 4000), now);
+        {
+            let active = stack.iter().next().unwrap();
+            // Fade-in: the envelope is moving and owes frames.
+            assert!(active.envelope_active(now));
+            assert!(active.needs_frames(now));
+            assert!(active.envelope_active(now + Duration::from_millis(179)));
+            // Settled hold: nothing moves, nothing is owed.
+            let hold = now + Duration::from_millis(1000);
+            assert!(!active.envelope_active(hold));
+            assert!(!active.needs_frames(hold));
+            // The fade-out begins 300 ms before the timeout ...
+            assert!(!active.envelope_active(now + Duration::from_millis(3699)));
+            let fade_out = now + Duration::from_millis(3701);
+            assert!(active.envelope_active(fade_out));
+            assert!(active.needs_frames(fade_out));
+            // ... and at the timeout the card is owed its pruning frame.
+            let expiry = now + Duration::from_millis(4001);
+            assert!(!active.envelope_active(expiry));
+            assert!(active.needs_frames(expiry));
+        }
+        // Pruned, the stack goes quiet.
+        assert_eq!(stack.prune(now + Duration::from_millis(4001)), vec![0]);
+        assert!(!stack.needs_frames(now + Duration::from_millis(4001)));
+    }
+
+    #[test]
+    fn next_envelope_change_walks_the_boundaries() {
+        let now = Instant::now();
+        let mut stack = ToastStack::default();
+        stack.push(toast("walk", 4000), now);
+        let active = stack.iter().next().unwrap();
+        // While fading in, the next change is the fade-in completing.
+        assert_eq!(
+            active.next_envelope_change_at(now),
+            Some(now + Duration::from_secs_f32(TOAST_FADE_IN))
+        );
+        // In the hold it is the fade-out's start, 300 ms before the timeout.
+        let fade_out_start = now
+            + Duration::from_millis(4000).saturating_sub(Duration::from_secs_f32(TOAST_FADE_OUT));
+        assert_eq!(
+            active.next_envelope_change_at(now + Duration::from_millis(1000)),
+            Some(fade_out_start)
+        );
+        // Once the fade-out runs, only the expiry is left.
+        assert_eq!(
+            active.next_envelope_change_at(fade_out_start),
+            Some(now + Duration::from_millis(4000))
+        );
+        // Past the timeout nothing is scheduled: the card is owed a prune,
+        // which `needs_frames` already reports.
+        assert_eq!(
+            active.next_envelope_change_at(now + Duration::from_millis(4001)),
+            None
+        );
+    }
+
+    #[test]
+    fn a_hover_pause_reports_no_boundary_but_keeps_the_arrival() {
+        let now = Instant::now();
+        let mut stack = ToastStack::default();
+        stack.push(toast("frozen", 4000), now);
+        // Hovered mid-hold: the countdown is frozen, so there is no boundary
+        // to schedule — the pointer leaving makes its own frame.
+        stack.set_hovered(Some(0), now + Duration::from_millis(1000));
+        let active = stack.iter().next().unwrap();
+        assert_eq!(
+            active.next_envelope_change_at(now + Duration::from_millis(1000)),
+            None
+        );
+        assert!(!active.envelope_active(now + Duration::from_millis(1000)));
+        assert!(!active.needs_frames(now + Duration::from_millis(5000)));
+
+        // Leaving credits the hover back: the fade-out boundary rides the
+        // shifted countdown (created moved 4 s forward).
+        stack.set_hovered(None, now + Duration::from_millis(5000));
+        let active = stack.iter().next().unwrap();
+        let shifted_fade_out = now
+            + Duration::from_millis(4000)
+            + Duration::from_millis(4000).saturating_sub(Duration::from_secs_f32(TOAST_FADE_OUT));
+        assert_eq!(
+            active.next_envelope_change_at(now + Duration::from_millis(5000)),
+            Some(shifted_fade_out)
+        );
+
+        // A hover during the fade-in freezes the countdown but not the
+        // arrival: the only scheduled change is the fade-in completing.
+        let mut stack = ToastStack::default();
+        stack.push(toast("early", 4000), now);
+        stack.set_hovered(Some(0), now + Duration::from_millis(50));
+        let active = stack.iter().next().unwrap();
+        assert!(active.envelope_active(now + Duration::from_millis(100)));
+        assert_eq!(
+            active.next_envelope_change_at(now + Duration::from_millis(50)),
+            Some(now + Duration::from_secs_f32(TOAST_FADE_IN))
+        );
+    }
+
+    #[test]
+    fn a_dismiss_rides_its_own_clock_to_the_pruning_frame() {
+        let now = Instant::now();
+        let mut stack = ToastStack::default();
+        stack.push(toast("bye", 4000), now);
+        let click = now + Duration::from_millis(500);
+        assert!(stack.dismiss(0, click));
+        let active = stack.iter().next().unwrap();
+        assert_eq!(
+            active.next_envelope_change_at(click),
+            Some(click + Duration::from_secs_f32(TOAST_DISMISS_FADE))
+        );
+        assert!(active.envelope_active(click + Duration::from_millis(60)));
+        // The fade over, the envelope is quiet but the card is still owed
+        // the frame that prunes it; nothing further is ever scheduled.
+        let end = click + Duration::from_millis(121);
+        assert!(!active.envelope_active(end));
+        assert!(active.needs_frames(end));
+        assert_eq!(active.next_envelope_change_at(end), None);
+    }
+
+    #[test]
+    fn the_open_spring_keeps_frames_coming_until_it_settles() {
+        let now = Instant::now();
+        let mut stack = ToastStack::default();
+        stack.push(toast("spring", 4000), now);
+        // Mid-hold, so the envelope itself is quiet and only the spring can
+        // ask for frames.
+        let hold = now + Duration::from_millis(1000);
+        // Before the renderer's first advance the spring has never opened;
+        // the size it reports is the seed, nowhere near the measured target.
+        let (w, h) = stack.advance_motion(0, hold, 300.0, 80.0, true);
+        assert!((w, h) != (300.0, 80.0));
+        assert!(stack.needs_frames(hold), "a travelling spring owes frames");
+        // Motion disabled snaps straight to the target: nothing left to draw.
+        let (w, h) = stack.advance_motion(0, hold, 300.0, 80.0, false);
+        assert_eq!((w, h), (300.0, 80.0));
+        assert!(
+            !stack.needs_frames(hold),
+            "a snapped spring settles on the spot"
+        );
+    }
+
+    #[test]
+    fn the_stack_schedules_the_nearest_boundary_of_any_card() {
+        let now = Instant::now();
+        let mut stack = ToastStack::default();
+        stack.push(toast("first", 4000), now);
+        stack.push(toast("second", 4000), now + Duration::from_millis(1000));
+        assert_eq!(
+            stack.next_envelope_change_at(now),
+            Some(now + Duration::from_secs_f32(TOAST_FADE_IN))
+        );
+        // Past the first card's fade-in, the second card's is the nearest.
+        assert_eq!(
+            stack.next_envelope_change_at(now + Duration::from_millis(200)),
+            Some(now + Duration::from_millis(1000) + Duration::from_secs_f32(TOAST_FADE_IN))
+        );
+        // In the double hold, the first card's fade-out start wins.
+        assert_eq!(
+            stack.next_envelope_change_at(now + Duration::from_millis(2000)),
+            Some(
+                now + Duration::from_millis(4000)
+                    .saturating_sub(Duration::from_secs_f32(TOAST_FADE_OUT))
+            )
+        );
+    }
+
+    #[test]
+    fn sanitation_gives_the_sender_the_titles_one_line_shape() {
+        let now = Instant::now();
+        let mut stack = ToastStack::default();
+        stack.push(
+            ToastNotification {
+                title: "Build finished".into(),
+                app: "dusk\tbuilder\nextra line ignored".into(),
+                timeout_ms: 100,
+                ..Default::default()
+            },
+            now,
+        );
+        assert_eq!(
+            stack.iter().next().unwrap().notification.app,
+            "dusk builder"
+        );
+
+        // The length cap matches the title's: 80 characters, ellipsis ended.
+        let mut stack = ToastStack::default();
+        stack.push(
+            ToastNotification {
+                title: "t".into(),
+                app: "x".repeat(120),
+                timeout_ms: 100,
+                ..Default::default()
+            },
+            now,
+        );
+        let app = &stack.iter().next().unwrap().notification.app;
+        assert_eq!(app.chars().count(), 80);
+        assert!(app.ends_with('\u{2026}'));
+
+        // A sender that is blank once cleaned is no sender: the card draws
+        // no attribution line for it.
+        let mut stack = ToastStack::default();
+        stack.push(
+            ToastNotification {
+                title: "t".into(),
+                app: " \t ".into(),
+                timeout_ms: 100,
+                ..Default::default()
+            },
+            now,
+        );
+        assert!(stack.iter().next().unwrap().notification.app.is_empty());
+    }
+
+    #[test]
+    fn a_card_without_a_sender_sanitizes_exactly_as_before() {
+        // Unknown sender: the notification — and therefore the card, which
+        // draws a sender line only for a non-empty app — is byte-identical
+        // to what it has always been.
+        let now = Instant::now();
+        let mut stack = ToastStack::default();
+        stack.push(
+            ToastNotification {
+                title: "a\tb\n second line ignored".into(),
+                body: (0..4)
+                    .map(|i| "x".repeat(90 + i))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                urgency: 9,
+                timeout_ms: 100,
+                ..Default::default()
+            },
+            now,
+        );
+        let card = &stack.iter().next().unwrap().notification;
+        assert_eq!(card.title, "a b");
+        assert!(card.app.is_empty());
+        let body_lines: Vec<&str> = card.body.lines().collect();
+        assert_eq!(body_lines.len(), 3);
+        assert!(body_lines.iter().all(|l| l.chars().count() == 80));
+        assert_eq!(card.urgency, 2);
+    }
+
+    #[test]
+    fn the_sender_ink_only_dims_the_alpha() {
+        let label = [136, 148, 172, 255];
+        assert_eq!(sender_ink(label), [136, 148, 172, 184]);
+        // Zero alpha is a fixed point; the hue never moves.
+        assert_eq!(sender_ink([10, 20, 30, 0]), [10, 20, 30, 0]);
+        assert_eq!(sender_ink([0, 0, 0, 128]), [0, 0, 0, 92]);
+    }
+
+    #[test]
+    fn merge_text_bands_stacks_bands_over_a_transparent_gap() {
+        // One 2x1 band over one 1x1 band, gap 2: width follows the widest,
+        // the gap rows and the narrow band's padding stay zeroed.
+        let top: &[u8] = &[255, 0, 0, 255, 0, 255, 0, 255];
+        let bottom: &[u8] = &[1, 2, 3, 4];
+        let (pixels, w, h) = merge_text_bands(&[(top, 2, 1), (bottom, 1, 1)], 2);
+        assert_eq!((w, h), (2, 4));
+        assert_eq!(
+            pixels,
+            vec![
+                255, 0, 0, 255, 0, 255, 0, 255, // top band
+                0, 0, 0, 0, 0, 0, 0, 0, // gap
+                0, 0, 0, 0, 0, 0, 0, 0, // gap
+                1, 2, 3, 4, 0, 0, 0, 0, // bottom band, right-padded
+            ]
+        );
+
+        // A single band is copied through with no gap rows — this is the
+        // shape a sender-only title texture takes.
+        let (pixels, w, h) = merge_text_bands(&[(top, 2, 1)], 2);
+        assert_eq!((w, h), (2, 1));
+        assert_eq!(pixels.as_slice(), top);
+    }
+
+    #[test]
+    fn merge_text_bands_refuses_empty_and_degenerate_input() {
+        assert_eq!(merge_text_bands(&[], 2), (Vec::new(), 0, 0));
+        let band: &[u8] = &[1, 2, 3, 4];
+        assert_eq!(merge_text_bands(&[(band, 0, 1)], 2), (Vec::new(), 0, 0));
+        assert_eq!(merge_text_bands(&[(band, 1, 0)], 2), (Vec::new(), 0, 0));
     }
 
     #[test]

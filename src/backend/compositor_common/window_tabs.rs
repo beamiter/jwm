@@ -29,7 +29,14 @@
 //! the full title in a chip off the strip. [`TooltipDwell`] keeps the
 //! rest-then-show state and [`tooltip_rect`] the chip placement, both pure,
 //! so the two compositors cannot drift apart on either.
+//!
+//! The strip's motion lives here too: [`TabAppears`] holds the fade-in
+//! envelopes for a strip that appears and for a cell joining one that is
+//! already shown — pure time and keys like the dwell, consumed as alpha
+//! multipliers only, so geometry, hit-testing and both backends all stay in
+//! agreement.
 
+use crate::backend::compositor_common::effects::{clamp_effect_dt, finite_clamp};
 use std::time::{Duration, Instant};
 
 /// A rectangle in screen pixels: `[x, y, w, h]`.
@@ -367,6 +374,166 @@ impl TooltipDwell {
     pub fn needs_frame(&self) -> bool {
         self.eligible && self.key.is_some() && !self.visible
     }
+}
+
+/// How long a freshly appeared strip — and a cell joining an already-shown
+/// strip — eases in for. The same 120ms the hover cues take: long enough to
+/// read as arriving, short enough to never feel like lag.
+pub const APPEAR_DURATION: Duration = Duration::from_millis(120);
+
+/// Ease-out quad for the appear envelopes, the hover cues' curve: the strip
+/// reads almost immediately and then settles. The timeline is clamped, not
+/// sprung — an alpha multiplier must never overshoot.
+fn appear_ease_out(t: f32) -> f32 {
+    let t = finite_clamp(t, 0.0, 1.0, 0.0);
+    1.0 - (1.0 - t) * (1.0 - t)
+}
+
+/// One keyed envelope: how far `key`'s target has eased in, and the clock it
+/// advances on.
+#[derive(Clone, Copy, Debug)]
+struct Appear<K> {
+    key: K,
+    progress: f32,
+    last_tick: Instant,
+}
+
+/// Fade-in envelopes for the tab strip and its cells.
+///
+/// A strip used to pop in at full alpha the frame its group gained a second
+/// window, and a cell joining an already-shown strip resized into place the
+/// same instant. This is the alpha half of that fix, shared by both
+/// compositors so the backends cannot drift: a bar that appears eases in
+/// over [`APPEAR_DURATION`], and so does a cell that joins a bar whose own
+/// appear has already settled. Disappearing is not eased — JWM draws no
+/// fade-outs — a gone bar or cell simply stops being drawn.
+///
+/// The strip key is its reserved [`Rect`]: it pins the envelope to one
+/// monitor's strip, so a relayout that only changes the strip's contents — a
+/// third window joining, a retitle, a focus change — keeps the envelope,
+/// while the strip genuinely moving to another rectangle honestly starts
+/// over. The cell key is the window id, the same session-stable key the
+/// dwell tooltip uses. Both envelopes are pure alpha multipliers consumed at
+/// draw time: geometry and hit-testing never see them.
+///
+/// Membership is re-synced against the drawn group set on every
+/// [`Self::advance`], which the compositors call once per frame; backends
+/// that see the group-set change itself also advance from there, so a strip
+/// that vanished while its renderer was gated off cannot hand its settled
+/// envelope to the next strip reserving the same rectangle.
+#[derive(Clone, Debug, Default)]
+pub struct TabAppears {
+    bars: Vec<Appear<Rect>>,
+    cells: Vec<Appear<u64>>,
+}
+
+impl TabAppears {
+    /// Advance every envelope to `now` against the strips `groups` currently
+    /// draws. Keys that left the set drop out on the spot — disappearing is
+    /// instant, and a bar or cell that later returns eases in fresh. New keys
+    /// start at zero, or at full strength with motion off; the frame a key
+    /// starts on consumes no time, so a long idle gap before it cannot finish
+    /// the ease before it is drawn.
+    pub fn advance(&mut self, now: Instant, groups: &[TabGroup], motion_enabled: bool) {
+        self.bars.retain(|entry| {
+            groups
+                .iter()
+                .any(|group| group.bar == entry.key && group_draws_bar(group))
+        });
+        self.cells.retain(|entry| {
+            groups.iter().any(|group| {
+                group_draws_bar(group) && group.tabs.iter().any(|tab| tab.window == entry.key)
+            })
+        });
+        for group in groups {
+            if !group_draws_bar(group) {
+                continue;
+            }
+            sync_appear(&mut self.bars, group.bar, now, motion_enabled);
+            for tab in &group.tabs {
+                sync_appear(&mut self.cells, tab.window, now, motion_enabled);
+            }
+        }
+    }
+
+    /// The strip-wide alpha multiplier for `bar`: zero on its first frame,
+    /// easing up to one, and one once settled — or for a bar nobody tracks,
+    /// which can only be one that was never drawn.
+    #[must_use]
+    pub fn bar_alpha(&self, bar: Rect) -> f32 {
+        self.bars
+            .iter()
+            .find(|entry| entry.key == bar)
+            .map_or(1.0, |entry| appear_ease_out(entry.progress))
+    }
+
+    /// The full alpha multiplier for one cell of `bar`: the strip's own
+    /// envelope times the cell's. A cell whose strip is still easing in
+    /// rides the strip's envelope rather than easing twice.
+    #[must_use]
+    pub fn cell_alpha(&self, bar: Rect, window: u64) -> f32 {
+        let bar_p = self.bar_alpha(bar);
+        if bar_p < 1.0 {
+            return bar_p;
+        }
+        self.cells
+            .iter()
+            .find(|entry| entry.key == window)
+            .map_or(1.0, |entry| appear_ease_out(entry.progress))
+    }
+
+    /// Whether any envelope is still easing. While this holds the compositor
+    /// keeps `needs_render` armed: the ease runs on a clock, not on events,
+    /// so an otherwise idle screen must keep drawing frames or the strip
+    /// would hang half-faded until something else woke the renderer.
+    #[must_use]
+    pub fn animating(&self) -> bool {
+        self.bars.iter().any(|entry| entry.progress < 1.0)
+            || self.cells.iter().any(|entry| entry.progress < 1.0)
+    }
+}
+
+/// Whether `group`'s strip is one the compositors paint: enough windows to
+/// want a bar and a band drawable enough to hold a track — the same
+/// predicates the draw loops skip on, so the envelopes track exactly the
+/// strips that show.
+fn group_draws_bar(group: &TabGroup) -> bool {
+    wants_bar(group.tabs.len()) && track_rect(group.bar).is_some()
+}
+
+/// Insert `key` fresh, or tick its envelope one frame. The frame an envelope
+/// is inserted on consumes no time — the discipline the hover cues keep —
+/// and a stalled frame catches up only a capped step, so an envelope that
+/// outlived a render gap fast-forwards over a few frames instead of jumping.
+fn sync_appear<K: Copy + PartialEq>(
+    entries: &mut Vec<Appear<K>>,
+    key: K,
+    now: Instant,
+    motion_enabled: bool,
+) {
+    let Some(entry) = entries.iter_mut().find(|entry| entry.key == key) else {
+        entries.push(Appear {
+            key,
+            progress: if motion_enabled { 0.0 } else { 1.0 },
+            last_tick: now,
+        });
+        return;
+    };
+    if !motion_enabled {
+        // Snap the stored envelope, not just the reported value, so
+        // `animating` stays false and no invisible follow-up frames tick.
+        entry.progress = 1.0;
+        entry.last_tick = now;
+        return;
+    }
+    let dt = clamp_effect_dt(now.saturating_duration_since(entry.last_tick).as_secs_f32());
+    entry.last_tick = now;
+    entry.progress = finite_clamp(
+        entry.progress + dt / APPEAR_DURATION.as_secs_f32(),
+        0.0,
+        1.0,
+        1.0,
+    );
 }
 
 /// Pixel budget for the chip's line on a screen this wide. The chip is the
@@ -931,6 +1098,221 @@ mod tests {
                 1080.0
             ),
             None
+        );
+    }
+
+    fn strip(bar: Rect, windows: &[u64]) -> TabGroup {
+        TabGroup {
+            bar,
+            tabs: windows
+                .iter()
+                .enumerate()
+                .map(|(index, &window)| Tab {
+                    title: format!("tab {index}"),
+                    active: index == 0,
+                    window,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn an_appearing_strip_eases_in_over_the_appear_duration() {
+        let mut appears = TabAppears::default();
+        let t0 = Instant::now();
+        let groups = vec![strip(BAR, &[1, 2])];
+
+        // The frame the strip appears on consumes no time: it draws fully
+        // transparent, and the pump must stay armed or an idle screen would
+        // sleep through the whole ease.
+        appears.advance(t0, &groups, true);
+        assert_eq!(appears.bar_alpha(BAR), 0.0);
+        assert!(appears.animating());
+
+        // Mid-travel: half the duration in, ease-out quad reads 0.75.
+        appears.advance(t0 + Duration::from_millis(30), &groups, true);
+        appears.advance(t0 + Duration::from_millis(60), &groups, true);
+        assert!(
+            (appears.bar_alpha(BAR) - 0.75).abs() < 1e-3,
+            "half-way alpha {}",
+            appears.bar_alpha(BAR)
+        );
+        assert!(appears.animating());
+
+        // Completion: full strength, and nothing left to pump.
+        appears.advance(t0 + Duration::from_millis(90), &groups, true);
+        appears.advance(t0 + Duration::from_millis(120), &groups, true);
+        assert_eq!(appears.bar_alpha(BAR), 1.0);
+        assert!(!appears.animating());
+
+        // The multiplier is clamped, not sprung: however much time passes,
+        // it settles at exactly full strength and never overshoots.
+        appears.advance(t0 + Duration::from_secs(5), &groups, true);
+        assert_eq!(appears.bar_alpha(BAR), 1.0);
+        assert!(!appears.animating());
+    }
+
+    #[test]
+    fn motion_off_draws_the_strip_full_on_its_first_frame() {
+        let mut appears = TabAppears::default();
+        let t0 = Instant::now();
+        let groups = vec![strip(BAR, &[1, 2])];
+
+        appears.advance(t0, &groups, false);
+        assert_eq!(appears.bar_alpha(BAR), 1.0);
+        // One frame and no more: reduced motion must not keep the pump
+        // armed for an ease nothing performs.
+        assert!(!appears.animating());
+
+        // Toggling motion back on afterwards does not replay the ease.
+        appears.advance(t0 + Duration::from_millis(16), &groups, true);
+        assert_eq!(appears.bar_alpha(BAR), 1.0);
+        assert!(!appears.animating());
+    }
+
+    #[test]
+    fn a_strip_that_vanishes_eases_in_fresh_when_it_returns() {
+        let t0 = Instant::now();
+        let groups = vec![strip(BAR, &[1, 2])];
+
+        // Mid-flight: the group drops below two windows, and the strip is
+        // gone on the spot, envelope and all — disappearing is not eased.
+        let mut appears = TabAppears::default();
+        appears.advance(t0, &groups, true);
+        appears.advance(t0 + Duration::from_millis(30), &groups, true);
+        appears.advance(t0 + Duration::from_millis(60), &[], true);
+        assert!(!appears.animating());
+
+        // Coming back it starts over from transparent rather than resuming
+        // where the vanished strip left off.
+        appears.advance(t0 + Duration::from_millis(76), &groups, true);
+        assert_eq!(appears.bar_alpha(BAR), 0.0);
+        assert!(appears.animating());
+
+        // The same holds for a strip that had fully settled: the membership
+        // sync drops the settled envelope with the group, so the returning
+        // strip eases in instead of popping back at full alpha.
+        let mut appears = TabAppears::default();
+        appears.advance(t0, &groups, true);
+        for step in 1..=4 {
+            appears.advance(t0 + Duration::from_millis(30 * step), &groups, true);
+        }
+        assert_eq!(appears.bar_alpha(BAR), 1.0);
+        appears.advance(t0 + Duration::from_millis(150), &[], true);
+        appears.advance(t0 + Duration::from_millis(166), &groups, true);
+        assert_eq!(appears.bar_alpha(BAR), 0.0);
+        assert!(appears.animating());
+    }
+
+    #[test]
+    fn a_moved_strip_restarts_its_envelope() {
+        let mut appears = TabAppears::default();
+        let t0 = Instant::now();
+        let groups = vec![strip(BAR, &[1, 2])];
+        appears.advance(t0, &groups, true);
+        appears.advance(t0 + Duration::from_millis(30), &groups, true);
+        let mid = appears.bar_alpha(BAR);
+        assert!(mid > 0.0 && mid < 1.0);
+
+        // The monitor relayouts and the strip lands on a new rectangle: a
+        // new key, a fresh envelope — the old rectangle's ease does not
+        // travel to it.
+        let moved: Rect = [BAR[0], BAR[1] + 400.0, BAR[2], BAR[3]];
+        let groups = vec![strip(moved, &[1, 2])];
+        appears.advance(t0 + Duration::from_millis(46), &groups, true);
+        assert_eq!(appears.bar_alpha(moved), 0.0);
+        // The old rectangle is nobody's now: untracked reads as settled.
+        assert_eq!(appears.bar_alpha(BAR), 1.0);
+    }
+
+    #[test]
+    fn a_cell_joining_a_shown_strip_eases_in_on_its_own() {
+        let mut appears = TabAppears::default();
+        let t0 = Instant::now();
+        let groups = vec![strip(BAR, &[1, 2])];
+        appears.advance(t0, &groups, true);
+        for step in 1..=4 {
+            appears.advance(t0 + Duration::from_millis(30 * step), &groups, true);
+        }
+        assert!(!appears.animating());
+
+        // A third window joins: the strip itself does not restart...
+        let joined = vec![strip(BAR, &[1, 2, 3])];
+        appears.advance(t0 + Duration::from_millis(136), &joined, true);
+        assert_eq!(appears.bar_alpha(BAR), 1.0);
+        // ...but the new cell eases in, and only it: the cells that were
+        // there stay at full strength.
+        assert_eq!(appears.cell_alpha(BAR, 3), 0.0);
+        assert_eq!(appears.cell_alpha(BAR, 1), 1.0);
+        assert_eq!(appears.cell_alpha(BAR, 2), 1.0);
+        assert!(appears.animating());
+
+        // The newcomer's ease runs the same duration and curve.
+        appears.advance(t0 + Duration::from_millis(166), &joined, true);
+        appears.advance(t0 + Duration::from_millis(196), &joined, true);
+        assert!(
+            (appears.cell_alpha(BAR, 3) - 0.75).abs() < 1e-3,
+            "half-way cell alpha {}",
+            appears.cell_alpha(BAR, 3)
+        );
+        appears.advance(t0 + Duration::from_millis(226), &joined, true);
+        appears.advance(t0 + Duration::from_millis(256), &joined, true);
+        assert_eq!(appears.cell_alpha(BAR, 3), 1.0);
+        assert!(!appears.animating());
+    }
+
+    #[test]
+    fn a_cell_joining_while_its_strip_eases_in_rides_the_strip() {
+        let mut appears = TabAppears::default();
+        let t0 = Instant::now();
+        let groups = vec![strip(BAR, &[1, 2])];
+        appears.advance(t0, &groups, true);
+
+        // A third window joins one frame into the strip's own appear: no
+        // double ease — its multiplier is the strip's, not the product of
+        // two half-run envelopes.
+        let joined = vec![strip(BAR, &[1, 2, 3])];
+        appears.advance(t0 + Duration::from_millis(16), &joined, true);
+        assert_eq!(appears.cell_alpha(BAR, 3), appears.bar_alpha(BAR));
+        assert_eq!(appears.cell_alpha(BAR, 1), appears.bar_alpha(BAR));
+        assert!(appears.bar_alpha(BAR) > 0.0);
+    }
+
+    #[test]
+    fn a_stalled_frame_catches_up_one_capped_step_at_a_time() {
+        let mut appears = TabAppears::default();
+        let t0 = Instant::now();
+        let groups = vec![strip(BAR, &[1, 2])];
+        appears.advance(t0, &groups, true);
+
+        // A ten-second stall does not finish the ease in one jump: the step
+        // is capped, so the catch-up reads as a few quick frames rather than
+        // a pop.
+        appears.advance(t0 + Duration::from_secs(10), &groups, true);
+        assert!(appears.bar_alpha(BAR) < 1.0);
+        assert!(appears.animating());
+    }
+
+    /// The envelopes are draw-side alpha only: hit-testing never sees them,
+    /// so a click lands on the same cell whether the strip is mid-ease or
+    /// settled.
+    #[test]
+    fn hit_testing_ignores_the_appear_envelopes() {
+        let groups = vec![strip(BAR, &[1, 2])];
+        let points = [
+            (BAR[0] + 1.0, BAR[1] + 1.0),
+            (BAR[0] + BAR[2] - 1.0, BAR[1] + BAR[3] - 1.0),
+        ];
+        let baseline = points.map(|(px, py)| tab_hover_at(&groups, px, py));
+
+        let mut appears = TabAppears::default();
+        let t0 = Instant::now();
+        appears.advance(t0, &groups, true);
+        appears.advance(t0 + Duration::from_millis(30), &groups, true);
+        assert!(appears.animating());
+        assert_eq!(
+            points.map(|(px, py)| tab_hover_at(&groups, px, py)),
+            baseline
         );
     }
 }

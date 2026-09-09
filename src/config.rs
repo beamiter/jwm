@@ -2123,6 +2123,12 @@ impl Config {
             },
             KeyConfig {
                 modifier: vec![],
+                key: "XF86AudioMicMute".to_string(),
+                function: "toggle_mic_mute".to_string(),
+                argument: ArgumentConfig::Int(0),
+            },
+            KeyConfig {
+                modifier: vec![],
                 key: "XF86MonBrightnessUp".to_string(),
                 function: "brightness_adjust".to_string(),
                 argument: ArgumentConfig::Int(5),
@@ -3259,6 +3265,7 @@ impl Config {
             "toggle_recording" => Some(Jwm::toggle_recording),
             "volume_adjust" => Some(Jwm::volume_adjust),
             "volume_mute" => Some(Jwm::volume_mute),
+            "toggle_mic_mute" => Some(Jwm::toggle_mic_mute),
             "brightness_adjust" => Some(Jwm::brightness_adjust),
             "control_center" => Some(Jwm::control_center),
             "notification_center" => Some(Jwm::notification_center),
@@ -3372,6 +3379,7 @@ impl Config {
             "XF86AudioRaiseVolume" => k::KEY_XF86AudioRaiseVolume,
             "XF86AudioLowerVolume" => k::KEY_XF86AudioLowerVolume,
             "XF86AudioMute" => k::KEY_XF86AudioMute,
+            "XF86AudioMicMute" => k::KEY_XF86AudioMicMute,
             "XF86AudioPlay" => k::KEY_XF86AudioPlay,
             "XF86AudioPause" => k::KEY_XF86AudioPause,
             "XF86AudioNext" => k::KEY_XF86AudioNext,
@@ -4579,6 +4587,51 @@ mod tests {
                     r#"String("maximize")"#.to_string()
                 ),
             ]
+        );
+    }
+
+    #[test]
+    fn default_keybindings_bind_mic_mute_to_the_dedicated_keysym() {
+        // The full default table was checked for XF86AudioMicMute before
+        // taking it (same full-table check round 13 did for snap_window):
+        // no existing chord uses that keysym. Pin the wiring so a future
+        // default cannot silently take it over or double-bind it — the
+        // duplicate-shortcut diagnostic only fires when two bindings
+        // collide, not when one disappears.
+        let config = Config::default();
+        let mic: Vec<(Vec<String>, String)> = config
+            .inner
+            .keybindings
+            .keys
+            .iter()
+            .filter(|key| key.key == "XF86AudioMicMute")
+            .map(|key| (key.modifier.clone(), key.function.clone()))
+            .collect();
+        assert_eq!(
+            mic,
+            vec![(Vec::<String>::new(), "toggle_mic_mute".to_string())],
+            "XF86AudioMicMute must be bound exactly once, unmodified, to toggle_mic_mute"
+        );
+
+        // …and the binding must resolve to the mic-mute action through the
+        // same keysym table and function map every other binding uses.
+        let key_sym = config.parse_keysym("XF86AudioMicMute").unwrap();
+        let matches: Vec<_> = config
+            .get_keys()
+            .into_iter()
+            .filter(|key| key.key_sym == key_sym && key.mask == Mods::NONE)
+            .collect();
+        assert_eq!(
+            matches.len(),
+            1,
+            "the mic-mute keysym compiled {matches:?} times"
+        );
+        assert!(
+            matches[0].func_opt.is_some_and(|func| std::ptr::fn_addr_eq(
+                func,
+                super::Jwm::toggle_mic_mute as super::WMFuncType
+            )),
+            "XF86AudioMicMute no longer resolves to toggle_mic_mute"
         );
     }
 

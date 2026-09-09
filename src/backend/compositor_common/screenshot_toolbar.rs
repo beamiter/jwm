@@ -23,6 +23,8 @@
 //! user happens to have installed; a distance field is exact at any size, is
 //! anti-aliased for free, and is the same handful of shapes on both backends.
 
+use super::dynamic_island::HoverEase;
+
 /// A rectangle in screen pixels: `[x, y, w, h]`.
 pub type Rect = [f32; 4];
 
@@ -87,7 +89,9 @@ pub struct ToolbarButton {
     pub face: ButtonFace,
     /// This button's tool is the current one; painted as a filled chip.
     pub active: bool,
-    /// The pointer is over this button.
+    /// The pointer is over this button. The compositors ease its wash in
+    /// from this flag ([`hovered_key`]) rather than flipping it on, so the
+    /// flag is the envelope's key, not its strength.
     pub hovered: bool,
     /// A disabled button is dimmed and hit-tests as a miss, so an undo with
     /// nothing to undo cannot swallow a click that was meant for the canvas.
@@ -147,13 +151,46 @@ impl ToolbarButton {
 /// `button_size` travels with the model because it is the output of a fit that
 /// only the window manager can perform — it is the one side that knows the
 /// monitor. Every geometry function here takes it rather than re-deriving it.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct ScreenshotToolbar {
     /// The painted track, in screen pixels.
     pub bar: Rect,
     /// Diameter of a round button, already fitted to the monitor.
     pub button_size: f32,
     pub buttons: Vec<ToolbarButton>,
+    /// The hover cue's fade-in envelope, keyed on the hovered button's index
+    /// ([`hovered_key`]): the wash eases in over the shared 120 ms ease-out,
+    /// is gone the frame the hover leaves, and draws at full strength on the
+    /// first frame when motion is disabled. This is compositor draw state
+    /// riding the published strip — the compositor structs have no slot for
+    /// it — advanced on the frame clock while the strip is drawn. The window
+    /// manager always publishes a fresh envelope, so a republished strip
+    /// restarts the cue the way a new exposé grid does; the settled strength
+    /// is byte-identical to the flag-driven wash it replaced.
+    pub(crate) hover_ease: HoverEase<usize>,
+}
+
+/// Two strips are the same model when everything *drawn or hit-tested*
+/// matches. The hover envelope is deliberately excluded: an ease in flight
+/// is not a model change, so it must neither suppress the early-out in
+/// `set_screenshot_toolbar` nor re-rasterise the button glyphs.
+impl PartialEq for ScreenshotToolbar {
+    fn eq(&self, other: &Self) -> bool {
+        self.bar == other.bar
+            && self.button_size == other.button_size
+            && self.buttons == other.buttons
+    }
+}
+
+/// The button the hover cue eases on: the one the window manager marked
+/// [`ToolbarButton::hovered`], by index. The window manager sets that flag
+/// from [`button_at`], so the index the wash eases in on is the very index a
+/// click resolves against — both compositors key their envelope on this, and
+/// the hit geometry, which never sees the envelope, cannot drift from the
+/// drawn cue.
+#[must_use]
+pub(crate) fn hovered_key(buttons: &[ToolbarButton]) -> Option<usize> {
+    buttons.iter().position(|button| button.hovered)
 }
 
 // ---------------------------------------------------------------------------
@@ -899,6 +936,66 @@ mod tests {
             previous_right = x + w;
         }
         assert!((previous_right - (bar[0] + bar[2])).abs() < 1e-3);
+    }
+
+    /// The hover cue eases in on a button index, and that index must be the
+    /// one the hit test names for the same pixels — the envelope is draw
+    /// strength only, so no rectangle the pointer resolves against may move
+    /// when a button is marked hovered.
+    #[test]
+    fn the_hover_key_is_the_hit_tested_button_and_hover_never_moves_geometry() {
+        let mut buttons = row(6);
+        buttons[2] = ToolbarButton::label("640x480");
+        buttons[4].enabled = false;
+        let bar = place(
+            [0.0, 0.0, 600.0, 400.0],
+            SCREEN,
+            track_extent(&buttons, BUTTON_SIZE),
+        );
+        assert_eq!(hovered_key(&buttons), None, "no flag, no key");
+
+        for index in [0, 1, 3, 5] {
+            let mut hovered = buttons.clone();
+            hovered[index].hovered = true;
+            assert_eq!(hovered_key(&hovered), Some(index));
+
+            // The key the wash eases in on is the button `button_at` names
+            // for a point over the painted rect.
+            let [x, y, w, h] = button_rect(bar, &hovered, BUTTON_SIZE, index).unwrap();
+            assert_eq!(
+                button_at(bar, &hovered, BUTTON_SIZE, x + w * 0.5, y + h * 0.5),
+                Some(index)
+            );
+
+            // Hover state is invisible to geometry: every rectangle the hit
+            // test resolves is byte-identical with the flag on or off, so
+            // eased alpha can never move the click target.
+            for other in 0..buttons.len() {
+                assert_eq!(
+                    slot_rect(bar, &hovered, BUTTON_SIZE, other),
+                    slot_rect(bar, &buttons, BUTTON_SIZE, other)
+                );
+                assert_eq!(
+                    button_rect(bar, &hovered, BUTTON_SIZE, other),
+                    button_rect(bar, &buttons, BUTTON_SIZE, other)
+                );
+            }
+            assert_eq!(
+                track_extent(&hovered, BUTTON_SIZE),
+                track_extent(&buttons, BUTTON_SIZE)
+            );
+        }
+
+        // Even a (never published) hovered flag on a disabled cell cannot
+        // make the hit test swallow the click that belongs behind it.
+        let mut hovered = buttons.clone();
+        hovered[4].hovered = true;
+        assert_eq!(hovered_key(&hovered), Some(4));
+        let [x, y, w, h] = button_rect(bar, &hovered, BUTTON_SIZE, 4).unwrap();
+        assert_eq!(
+            button_at(bar, &hovered, BUTTON_SIZE, x + w * 0.5, y + h * 0.5),
+            None
+        );
     }
 
     #[test]

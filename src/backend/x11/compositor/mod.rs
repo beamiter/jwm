@@ -830,6 +830,12 @@ where
     /// The chip's rasterised line, keyed by its text; freed on every title
     /// refresh and in `Drop`, the same bargain `tab_title_textures` strikes.
     tab_tooltip_texture: Option<(String, glow::Texture, u32, u32)>,
+    /// Appear envelopes for the strips and their cells, keyed per strip by
+    /// its reserved rectangle and per cell by window id: a bar that gains
+    /// its second window eases in instead of popping at full alpha, and a
+    /// cell joining an already-shown bar does the same. Plain animation
+    /// state — nothing here touches the GPU.
+    tab_appears: crate::backend::compositor_common::window_tabs::TabAppears,
 
     // --- Particle effects ---
     particle_program: glow::Program,

@@ -881,6 +881,8 @@ impl Jwm {
             "adjust_recording_region"
         } else if eq!(Jwm::toggle_audio_recording) {
             "toggle_audio_recording"
+        } else if eq!(Jwm::toggle_mic_mute) {
+            "toggle_mic_mute"
         } else {
             "<unknown>"
         }

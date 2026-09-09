@@ -1023,6 +1023,20 @@ impl WaylandCompositor {
         if self.tab_tooltip_ease.animating() {
             self.needs_render = true;
         }
+        // A strip that just gained its second window eases in over
+        // `window_tabs::APPEAR_DURATION` instead of popping at full alpha,
+        // and a cell joining an already-shown strip does the same. The
+        // envelopes run on a clock like the dwell's, so the pump mirrors it:
+        // frames must keep coming while any of them is mid-flight. Advanced
+        // ahead of the empty early-return like the envelopes above.
+        self.tab_appears.advance(
+            std::time::Instant::now(),
+            &self.window_groups,
+            crate::config::CONFIG.load().motion_enabled(),
+        );
+        if self.tab_appears.animating() {
+            self.needs_render = true;
+        }
         if self.window_groups.is_empty() {
             return;
         }
@@ -1052,6 +1066,14 @@ impl WaylandCompositor {
                 let Some([tx, ty, tw, th]) = window_tabs::track_rect(group.bar) else {
                     continue;
                 };
+                // The strip's appear envelope multiplies everything this bar
+                // draws — track, raised cells and titles — as alpha only:
+                // geometry and hit-testing keep the exact rectangles. Its
+                // first frame draws nothing at all.
+                let appear = self.tab_appears.bar_alpha(group.bar);
+                if appear <= 0.0 {
+                    continue;
+                }
 
                 // Track first, then every cell: a title must never end up
                 // under the neighbouring cell's fill. `ui_fill_island` leaves
@@ -1068,7 +1090,7 @@ impl WaylandCompositor {
                     track_radius,
                     track_radius,
                     ui.card,
-                    1.0,
+                    appear,
                 );
 
                 for (index, tab) in group.tabs.iter().enumerate() {
@@ -1086,9 +1108,11 @@ impl WaylandCompositor {
                     let Some([x, y, w, h]) = window_tabs::cell_rect(group.bar, count, index) else {
                         continue;
                     };
+                    // The cell's own appear envelope (a window joining an
+                    // already-shown strip) multiplies its pill as alpha only.
+                    let cell_p = self.tab_appears.cell_alpha(group.bar, tab.window);
                     let radius = window_tabs::pill_radius(h);
                     if tab.active {
-                        self.sysui_fill_rounded(gl, x, y, w, h, radius, ui.chip);
                         self.sysui_fill_rounded(
                             gl,
                             x,
@@ -1096,7 +1120,16 @@ impl WaylandCompositor {
                             w,
                             h,
                             radius,
-                            [accent[0], accent[1], accent[2], ui.selection_alpha],
+                            [ui.chip[0], ui.chip[1], ui.chip[2], ui.chip[3] * cell_p],
+                        );
+                        self.sysui_fill_rounded(
+                            gl,
+                            x,
+                            y,
+                            w,
+                            h,
+                            radius,
+                            [accent[0], accent[1], accent[2], ui.selection_alpha * cell_p],
                         );
                     } else {
                         self.sysui_fill_rounded(
@@ -1106,7 +1139,12 @@ impl WaylandCompositor {
                             w,
                             h,
                             radius,
-                            [ui.chip[0], ui.chip[1], ui.chip[2], ui.chip[3] * hover_scale],
+                            [
+                                ui.chip[0],
+                                ui.chip[1],
+                                ui.chip[2],
+                                ui.chip[3] * hover_scale * cell_p,
+                            ],
                         );
                         self.sysui_fill_rounded(
                             gl,
@@ -1119,7 +1157,7 @@ impl WaylandCompositor {
                                 accent[0],
                                 accent[1],
                                 accent[2],
-                                ui.selection_alpha * hover_scale,
+                                ui.selection_alpha * hover_scale * cell_p,
                             ],
                         );
                     }
@@ -1131,7 +1169,6 @@ impl WaylandCompositor {
                 gl.UseProgram(self.sysui_text_program);
                 self.set_projection_uniform(gl, text_proj, projection);
                 gl.Uniform1i(text_tex, 0);
-                gl.Uniform1f(text_opacity, 1.0);
                 gl.ActiveTexture(ffi::TEXTURE0);
                 for (index, slot) in titles.iter().enumerate() {
                     let Some((texture, tw, th)) = slot else {
@@ -1140,6 +1177,13 @@ impl WaylandCompositor {
                     let Some([x, y, w, h]) = window_tabs::cell_rect(group.bar, count, index) else {
                         continue;
                     };
+                    // The title fades with its cell's appear envelope, so a
+                    // window joining an already-shown strip eases in whole
+                    // rather than pill-first, text-first.
+                    let cell_p = group.tabs.get(index).map_or(1.0, |tab| {
+                        self.tab_appears.cell_alpha(group.bar, tab.window)
+                    });
+                    gl.Uniform1f(text_opacity, cell_p);
                     let (tw, th) = (*tw as f32, *th as f32);
                     self.set_rect_uniform(
                         gl,
@@ -1493,5 +1537,53 @@ mod tests {
         // The frame pump is the hover ease's existing one — the brighten
         // adds no new frame source.
         assert!(compact.contains("ifself.expose_hover_ease.animating(){self.needs_render=true;}"));
+    }
+
+    /// A strip that gains its second window eases in on a clock, not on an
+    /// event, so the strip's render path must keep the frame loop alive
+    /// while an appear envelope is mid-flight — an idle screen would
+    /// otherwise hang the strip half-faded. Pin the wiring: the live groups
+    /// feed the envelopes every drawn frame, ahead of the empty early-return
+    /// like the dwell's, a flying envelope arms `needs_render`, the motion
+    /// setting rides the same advance, and the strip's draws consume the
+    /// envelopes as alpha multipliers only — the geometry calls keep their
+    /// exact no-envelope shape.
+    #[test]
+    fn the_tab_bar_pumps_frames_while_an_appear_envelope_is_flying() {
+        let compact: String = include_str!("expose.rs")
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect();
+
+        // One advance per drawn frame, fed the live groups and the motion
+        // setting (the trailing comma is the multi-line call's own).
+        assert!(compact.contains(
+            "self.tab_appears.advance(std::time::Instant::now(),&self.window_groups,crate::config::CONFIG.load().motion_enabled(),);"
+        ));
+
+        // While any envelope is mid-flight the pump stays armed: the
+        // `needs_render = true` lands inside the `animating` guard, behind
+        // only its explaining comment.
+        let guard = compact
+            .find("ifself.tab_appears.animating(){")
+            .expect("the appear pump guards on animating");
+        let armed = compact[guard..]
+            .find("self.needs_render=true;")
+            .expect("the appear pump arms needs_render");
+        assert!(
+            armed < 400,
+            "needs_render must be armed by the animating guard"
+        );
+
+        // Consumed as alpha multipliers on the strip's own draws — the
+        // track, the raised cells and their titles...
+        assert!(compact.contains("self.tab_appears.bar_alpha(group.bar)"));
+        assert!(compact.contains("self.tab_appears.cell_alpha(group.bar,tab.window)"));
+        // ...while the geometry the hit test reproduces keeps its exact
+        // envelope-free shape: appear is alpha-only. (The needle is joined
+        // at runtime so this test's own source cannot match it.)
+        assert!(compact.contains("window_tabs::cell_rect(group.bar,count,index)"));
+        let scaled = ["window_tabs::cell_rect(group.bar,count,index)", "*appear"].concat();
+        assert!(!compact.contains(&scaled));
     }
 }

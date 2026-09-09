@@ -812,6 +812,13 @@ pub struct BluetoothDevice {
     /// beacons; sorting those by name is sorting by MAC address. Proximity is
     /// the only ordering that helps someone find the headset in their hand.
     pub rssi: Option<i16>,
+    /// Charge percentage when the device publishes one. Only the D-Bus helper
+    /// reports it (`org.bluez.Battery1` rides the same `GetManagedObjects`
+    /// reply); the `bluetoothctl` path never had it, and an old bridge has
+    /// no `battery` key — both read as `None`, as does a value outside
+    /// 0..=100, which is dropped rather than saturated like an out-of-range
+    /// RSSI.
+    pub battery: Option<u8>,
 }
 
 /// A remembered-device list should be tiny. These bounds keep malformed or
@@ -888,8 +895,9 @@ pub fn parse_devices(output: &str) -> Vec<BluetoothDevice> {
             },
             connected: false,
             paired: false,
-            // The text path never reported it; only the D-Bus helper does.
+            // The text path never reported either; only the D-Bus helper does.
             rssi: None,
+            battery: None,
         });
     }
     devices
@@ -953,8 +961,9 @@ pub fn parse_scan_output(output: &str) -> Vec<BluetoothDevice> {
             },
             connected: false,
             paired: false,
-            // The text path never reported it; only the D-Bus helper does.
+            // The text path never reported either; only the D-Bus helper does.
             rssi: None,
+            battery: None,
         });
     }
     devices
@@ -976,14 +985,15 @@ pub fn parse_device_info(output: &str) -> (bool, bool) {
 }
 
 /// Parse `jwm-bridge discover`: a JSON array of
-/// `{address, name, paired, connected, rssi}`.
+/// `{address, name, paired, connected, rssi, battery}`.
 ///
 /// One `GetManagedObjects` round trip answers what the text path needed one
 /// `bluetoothctl info` child per device to learn, so a list parsed here needs
 /// no follow-up sweep. The payload comes from a helper reading remote-peer
 /// advertisements, so it is bounded exactly like the text path: the same
 /// device cap, the same name cap, addresses validated before they can become
-/// a command argument.
+/// a command argument. New fields are append-only on the wire: a missing key
+/// — an older bridge — reads as `None`, never as a parse failure.
 #[must_use]
 pub fn parse_bridge_devices(output: &str) -> Vec<BluetoothDevice> {
     let Ok(serde_json::Value::Array(entries)) = serde_json::from_str(output.trim()) else {
@@ -1025,6 +1035,14 @@ pub fn parse_bridge_devices(output: &str) -> Vec<BluetoothDevice> {
                 .get("rssi")
                 .and_then(serde_json::Value::as_i64)
                 .and_then(|rssi| i16::try_from(rssi).ok()),
+            // A percentage has a defined range; outside it the value is
+            // dropped, not saturated — a wrong number would mislead where an
+            // absent one only omits. Absent (old bridge) reads the same way.
+            battery: entry
+                .get("battery")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|battery| u8::try_from(battery).ok())
+                .filter(|battery| *battery <= 100),
         });
     }
     // Sort *before* the cap, so what survives it is what the user most likely
@@ -1074,7 +1092,13 @@ pub fn device_row(device: &BluetoothDevice) -> String {
     // where closer to zero is nearer; it is printed raw because there is no
     // honest way to turn one advertisement's RSSI into a percentage.
     let state = if device.connected {
-        "connected".to_string()
+        // The charge joins the live state, and only the live state: a
+        // percentage read while the device was last connected is stale noise
+        // on a row that says nothing else about now.
+        match device.battery {
+            Some(battery) => format!("connected · {battery}%"),
+            None => "connected".to_string(),
+        }
     } else if device.paired {
         "paired".to_string()
     } else {
@@ -2222,6 +2246,7 @@ mod tests {
             connected,
             paired,
             rssi: None,
+            battery: None,
         }
     }
 
@@ -2385,6 +2410,50 @@ mod tests {
         // address, which is at least the handle they have.
         assert_eq!(devices[1].name, "7C:10:C9:AA:BB:CC");
         assert_eq!(devices[1].rssi, None);
+    }
+
+    #[test]
+    fn the_battery_reading_is_tolerated_in_both_wire_directions() {
+        // The field is append-only: a new bridge feeding an old jwm is read
+        // by this same unknown-field-ignoring parse, and an old bridge — no
+        // `battery` key at all — yields `None`, never a parse failure.
+        let devices = parse_bridge_devices(
+            r#"[
+              {"address":"5C:FB:7C:1A:2B:3C","name":"Headphones",
+               "connected":true,"battery":85},
+              {"address":"7C:10:C9:AA:BB:CC","name":"Keyboard","battery":0},
+              {"address":"11:22:33:44:55:66","name":"Old bridge"},
+              {"address":"AA:BB:CC:DD:EE:FF","name":"Null","battery":null}
+            ]"#,
+        );
+        assert_eq!(devices.len(), 4);
+        // The parse sorts the list (connected first), so read by name.
+        let battery_of = |name: &str| {
+            devices
+                .iter()
+                .find(|device| device.name == name)
+                .and_then(|device| device.battery)
+        };
+        assert_eq!(battery_of("Headphones"), Some(85));
+        // Empty is an honest reading, not a missing one.
+        assert_eq!(battery_of("Keyboard"), Some(0));
+        assert_eq!(battery_of("Old bridge"), None);
+        assert_eq!(battery_of("Null"), None);
+
+        // Out-of-range is dropped, not saturated — a wrong number would
+        // mislead where an absent one only omits (the RSSI precedent).
+        for junk in [r#""battery":101"#, r#""battery":255"#, r#""battery":-1"#] {
+            let devices = parse_bridge_devices(&format!(
+                r#"[{{"address":"5C:FB:7C:1A:2B:3C","connected":true,{junk}}}]"#
+            ));
+            assert_eq!(devices[0].battery, None, "{junk}");
+        }
+        // So is a percentage that arrived as the wrong JSON type.
+        let devices = parse_bridge_devices(r#"[{"address":"5C:FB:7C:1A:2B:3C","battery":"85"}]"#);
+        assert_eq!(devices[0].battery, None);
+        // And the boundary readings survive.
+        let devices = parse_bridge_devices(r#"[{"address":"5C:FB:7C:1A:2B:3C","battery":100}]"#);
+        assert_eq!(devices[0].battery, Some(100));
     }
 
     #[test]
@@ -2553,6 +2622,7 @@ mod tests {
             connected: false,
             paired: true,
             rssi: None,
+            battery: None,
         }];
         let discovered = parse_scan_output(
             "[NEW] Device 5c:fb:7c:1a:2b:3c Speaker\n[NEW] Device 7C:10:C9:AA:BB:CC Keyboard\n",
@@ -2574,6 +2644,55 @@ mod tests {
         assert!(row.contains('\u{f00c}'));
         assert!(!device_row(&device("Speaker", false, true)).contains('\u{f00c}'));
         assert!(device_row(&device("Speaker", false, true)).contains("paired"));
+    }
+
+    #[test]
+    fn only_a_connected_row_carries_the_charge_reading() {
+        let charged = BluetoothDevice {
+            battery: Some(85),
+            ..device("Speaker", true, true)
+        };
+        assert_eq!(
+            device_row(&charged),
+            format!("\u{f293} \u{f00c} {:<34} connected · 85%", "Speaker")
+        );
+        // Full and empty are printed like any other reading.
+        let full = BluetoothDevice {
+            battery: Some(100),
+            ..device("Speaker", true, true)
+        };
+        assert!(device_row(&full).ends_with("connected · 100%"));
+        let empty = BluetoothDevice {
+            battery: Some(0),
+            ..device("Speaker", true, true)
+        };
+        assert!(device_row(&empty).ends_with("connected · 0%"));
+
+        // No reading, no fragment: a connected row without one is exactly the
+        // row it was before the field existed.
+        assert_eq!(
+            device_row(&device("Speaker", true, true)),
+            format!("\u{f293} \u{f00c} {:<34} connected", "Speaker")
+        );
+
+        // A percentage remembered from the last connection is stale noise on
+        // any other row, so the fragment is connected-only — the paired and
+        // the heard-just-now rows print their own trailing column as before.
+        let idle = BluetoothDevice {
+            battery: Some(85),
+            ..device("Speaker", false, true)
+        };
+        let row = device_row(&idle);
+        assert!(row.ends_with("paired"), "{row}");
+        assert!(!row.contains('%'), "{row}");
+        let beacon = BluetoothDevice {
+            battery: Some(85),
+            rssi: Some(-41),
+            ..device("Beacon", false, false)
+        };
+        let row = device_row(&beacon);
+        assert!(row.ends_with("-41 dBm"), "{row}");
+        assert!(!row.contains('%'), "{row}");
     }
 
     #[test]

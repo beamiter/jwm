@@ -161,9 +161,26 @@ impl WaylandCompositor {
 
     /// Paint the track, the chips, and the glyphs on top.
     pub(crate) fn render_screenshot_toolbar(&mut self, gl: &ffi::Gles2, projection: &[f32; 16]) {
-        let Some(bar) = self.screenshot_toolbar.clone() else {
+        // The hover wash eases in on the button under the pointer instead of
+        // flipping on in a single frame, and is gone the same frame the hover
+        // leaves — JWM draws no fade-outs. The envelope is draw strength
+        // only: the hit test resolves the model's rectangles, which never
+        // see it.
+        let Some(stored) = self.screenshot_toolbar.as_mut() else {
             return;
         };
+        let hovered = toolbar::hovered_key(&stored.buttons);
+        let hover_p = stored.hover_ease.advance_with_motion(
+            std::time::Instant::now(),
+            hovered,
+            crate::config::CONFIG.load().motion_enabled(),
+        );
+        // The wash follows a clock, not an event: keep the frame loop alive
+        // while it is easing in, or an idle screen would freeze it mid-fade.
+        if stored.hover_ease.animating() {
+            self.needs_render = true;
+        }
+        let bar = stored.clone();
         if bar.buttons.is_empty() {
             return;
         }
@@ -192,7 +209,18 @@ impl WaylandCompositor {
             );
 
             for (index, button) in bar.buttons.iter().enumerate() {
-                if !button.active && !button.hovered {
+                // The selected tool sits at full strength; the hovered button
+                // rides the envelope. Anything else draws no chip at all —
+                // which is also how a hover that just left disappears on the
+                // spot.
+                let wash = if button.active {
+                    1.0
+                } else if Some(index) == hovered {
+                    hover_p
+                } else {
+                    0.0
+                };
+                if wash <= 0.0 {
                     continue;
                 }
                 let Some([x, y, w, h]) =
@@ -201,7 +229,15 @@ impl WaylandCompositor {
                     continue;
                 };
                 let radius = toolbar::pill_radius(h.min(w));
-                self.sysui_fill_rounded(gl, x, y, w, h, radius, ui.chip);
+                self.sysui_fill_rounded(
+                    gl,
+                    x,
+                    y,
+                    w,
+                    h,
+                    radius,
+                    [ui.chip[0], ui.chip[1], ui.chip[2], ui.chip[3] * wash],
+                );
                 // Both states need the accent, not just the selected one: the
                 // chip tone is a near-white, and the frosted track over a
                 // bright desktop is near-white too, so a chip on its own is
@@ -217,7 +253,7 @@ impl WaylandCompositor {
                         accent[0],
                         accent[1],
                         accent[2],
-                        ui.selection_alpha * if button.active { 1.0 } else { HOVER_WASH },
+                        ui.selection_alpha * wash * if button.active { 1.0 } else { HOVER_WASH },
                     ],
                 );
             }
@@ -324,5 +360,50 @@ unsafe fn upload_overlay_texture(
         );
         gl.BindTexture(ffi::TEXTURE_2D, 0);
         Some((texture, w, h))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// The hover wash eases in on a clock, not on an event, so the strip's
+    /// render path must keep the frame loop alive while the envelope is in
+    /// flight — an idle screen would otherwise freeze the cue mid-fade. Pin
+    /// the wiring: the ease keys on the model's hovered button (the same
+    /// index the hit test resolves), advances on the frame clock under the
+    /// motion setting, arms `needs_render` exactly while it is animating,
+    /// and scales only the chip's draw strength. The haystack is the shipped
+    /// source; the needles are built at runtime so this test cannot match
+    /// its own. This mirrors the X11 pin of the same name.
+    #[test]
+    fn the_toolbar_pumps_frames_while_a_hover_wash_is_easing_in() {
+        let compact: String = include_str!("screenshot_toolbar.rs")
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect();
+
+        // The envelope keys on the model's hovered button…
+        assert!(compact.contains(concat!("toolbar::hovered", "_key(&stored.buttons)")));
+        // …advances on the frame clock under the motion setting…
+        assert!(compact.contains(concat!("hover_ease.advance", "_with_motion(")));
+        assert!(compact.contains(concat!("crate::config::CONFIG.load().motion", "_enabled()")));
+        // …and arms the pump exactly while the ease is in flight.
+        assert!(compact.contains(concat!(
+            "ifstored.hover_ease.animating(){",
+            "self.needs_render=true;}"
+        )));
+
+        // The hover flag no longer gates drawing directly: the eased wash
+        // decides, and a hover that left skips the chip on the spot.
+        assert!(!compact.contains(concat!("button.", "hovered")));
+        assert!(compact.contains(concat!("ifwash<=0.0{", "continue;}")));
+        // Both chip fills ride the envelope…
+        assert!(compact.contains(concat!("ui.chip[3]*", "wash")));
+        assert!(compact.contains(concat!(
+            "ui.selection_alpha*wash*ifbutton.active{1.0}else{HOVER",
+            "_WASH},"
+        )));
+        // …while the track still paints at full alpha: the envelope scales
+        // the cue, never the strip.
+        assert!(compact.contains(concat!("ui.card,", "1.0,")));
     }
 }
