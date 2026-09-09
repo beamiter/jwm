@@ -7,6 +7,58 @@ monorepo use independent Semantic Versions.
 
 ### Added
 
+- The microphone's mute flag is settable over IPC and visible in the shell.
+  `set_mic_mute {"muted": bool}` sets the default source's mute with the
+  volume keys' queued semantics — an immediate `ok` ack and the mic OSD
+  drawn from the optimistic estimate, then the controls worker's read-back
+  confirming or correcting it (the OSD refreshes in place) — deliberately
+  unlike `set_audio_device`'s synchronous confirmed reply. A non-boolean
+  `muted` is rejected (`set_mic_mute: expected boolean field 'muted'`), a
+  session with no audio tool gets the key path's own
+  `no working audio control (wpctl/pactl/amixer)` answer, and the command is
+  advertised through `get_capabilities`. The control-center Input row is the
+  indicator: the slashed microphone icon while the default source is muted,
+  the unchanged row when unmuted or never read, and an open panel repaints
+  when a read-back corrects the shown flag. See
+  [docs/media-controls.md](docs/media-controls.md).
+
+- With more than one MPRIS player running, `p` on the control-center media
+  row pins the row — and the transport keys with it — to the next player in
+  the bridge's list, wrapping around; the row names the target ahead of time
+  with a trailing `· p ‹next player›` hint. The bridge holds the pin while
+  that player's bus name is alive, clearing it when the pinned player exits,
+  and re-publishes its state, so the switch raises the media OSD like any
+  track change. Single-player sessions are unchanged (`p` is a no-op, no
+  hint), and the lock screen's now-playing row never grows the hint. The
+  bridge's push carries the player list as an append-only `players` field.
+  See [docs/media-controls.md](docs/media-controls.md).
+
+- The calendar card answers the pointer: a click on a blank leading cell of
+  the month grid flips to the previous month, a blank trailing cell flips to
+  the next, and a click on today's bracketed cell returns to the current
+  month — the pointer counterparts of `Left`/`Right` and `t`, and now what
+  the footer hint advertises. Clicks on ordinary days, the clock line and
+  the header remain no-ops. See [docs/calendar.md](docs/calendar.md).
+
+### Changed
+
+- The screenshot editor's toolbar eases in when it appears instead of
+  popping in at full alpha: one blank frame after publish, then a 120 ms
+  ease-out fade to full opacity carrying the track, the button chips and the
+  icons together. Moving the pointer across the buttons does not restart the
+  fade, withdrawing is instant, and with animations disabled the strip is at
+  full opacity from its first frame and renders no extra frames. Hit
+  geometry is untouched. See [README.md](README.md#the-screenshot-editor).
+
+### Fixed
+
+- `Enter` (join) in the Wi-Fi picker while a forget is still deleting its
+  profile is now a no-op instead of racing the delete and the re-read its
+  completion kicks off — the mirror of the forget key's own in-flight
+  coalescing. See [docs/control-center.md](docs/control-center.md).
+
+### Added
+
 - The control centre's Volume and Brightness rows now answer the wheel:
   scrolling over a slider row adjusts that value by 5% per click — the
   pointer counterpart of `Left`/`Right` — and the selection pill follows the

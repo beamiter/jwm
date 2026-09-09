@@ -81,7 +81,7 @@ PipeWire output and input defaults come from one shared `wpctl status` read.
 
 | Row | Appears when | Keys |
 | --- | --- | --- |
-| Media | An MPRIS player is running | `Left`/`Right` skip, `Enter` play/pause |
+| Media | An MPRIS player is running | `Left`/`Right` skip, `Enter` play/pause, `p` pins the next player |
 | Network | A wireless radio exists (`nmcli` or `rfkill`) | `Enter` opens the picker, `Left`/`Right` toggles the radio |
 | Bluetooth | A controller exists (`bluetoothctl` or `rfkill`) | `Enter` opens the picker, `Left`/`Right` toggles power |
 | Volume | `wpctl`, `pactl`, or `amixer` works | `Left`/`Right` adjust, `Enter`/`m` mute |
@@ -109,6 +109,13 @@ change, a battery poll — so an open card never shows a stale value, and the
 selection stays put (falling back to the nearest row only if the selected
 control itself disappeared). Slow external controls refresh in the background;
 media, notification and clipboard updates rebuild from memory only.
+
+The Input row doubles as the microphone's mute indicator: it wears the
+slashed microphone icon while the default source is muted, and renders
+exactly as it always has when the flag is unmuted or was never read. A mic
+read-back that corrects or reverts the shown flag repaints an open panel
+through the same rebuild. See
+[media controls](media-controls.md#microphone-mute).
 
 ## Opening the shell from a status bar
 
@@ -221,7 +228,10 @@ profile for <ssid>` on the status line rather than a key that silently did
 nothing. Deleting the profile the link is running on is allowed — the link
 drops with it, and the re-read the completion kicks off lands that truth
 on the control-center row. A press while a delete — or a join — is still
-being applied coalesces to a no-op, the way leaning on `r` does.
+being applied coalesces to a no-op, the way leaning on `r` does, and the
+gate runs both directions: `Enter` while a forget is still deleting its
+profile is a no-op too, rather than racing the delete and the re-read its
+completion kicks off.
 
 ### Scanning does not block the compositor
 
@@ -500,6 +510,7 @@ jwm-msg '{"query": "get_connectivity"}'
 jwm-msg '{"command": "toggle_wifi"}'
 jwm-msg '{"query": "get_audio_devices"}'
 jwm-msg '{"command": "set_audio_device", "args": {"direction": "output", "id": "49"}}'
+jwm-msg '{"command": "set_mic_mute", "args": {"muted": true}}'
 ```
 
 `get_power_status` reports the battery and the available/active profiles.
@@ -512,6 +523,12 @@ reading actually changed) and `power/profile`; the `network` topic carries
 reports is what `set_audio_device` takes — a wpctl node id or a PulseAudio
 node name, depending on which tool the session uses. The `audio` subscription
 topic carries `audio/devices` after a switch.
+
+`set_mic_mute` sets the default microphone's mute flag with the queued
+semantics of the volume keys, not `set_audio_device`'s confirmed-after-re-read
+reply: the ack is immediate, the mic OSD draws the optimistic estimate, and
+the controls worker's read-back confirms or corrects it. See
+[media controls](media-controls.md#microphone-mute).
 
 ### Reading them is free, and says when it has nothing yet
 

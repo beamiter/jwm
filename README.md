@@ -192,6 +192,9 @@ edge snaps it to that half (or maximizes at the top), and dropping it into a
 corner quarters it there. The quarters have no default bindings, but
 `snap_window top-left` / `top-right` / `bottom-left` / `bottom-right` are
 bindable and scriptable over IPC like the three defaults.
+
+| Binding | Action |
+| --- | --- |
 | Alt+Control+C | Calculator scratchpad |
 | Alt+Control+S | Toggle sticky window |
 | Alt+Shift+F11 | Toggle the WaterLily simulation |
@@ -243,10 +246,15 @@ ink swatch, and the four ways out:
 While a text label is open every key is text; `Enter` commits it, `Escape`
 drops it, and switching tools commits it. A control with nothing to do — undo
 with an empty history, thinner at the minimum width — is dimmed rather than
-removed, so the row never reflows under the pointer. Hovering a button eases
-its wash in over 120 ms instead of flipping it on; the leave is still
-instant, settled states are exactly what they were, and the hit geometry is
-unchanged.
+removed, so the row never reflows under the pointer. The strip itself eases
+in when the editor appears: one blank frame after it is published, then a
+120 ms ease-out fade to full opacity carrying the track, the button chips
+and the icons together — a pointer moving across the buttons does not
+restart it, withdrawing the strip is instant, and with animations disabled
+it is at full opacity from its first frame, rendering no extra frames.
+Hovering a button eases its wash in over 120 ms instead of flipping it on;
+the leave is still instant, settled states are exactly what they were, and
+the hit geometry is unchanged.
 
 The status bars' screenshot pill drives exactly this editor over the control
 socket (the `take_screenshot` IPC command) rather than launching an external

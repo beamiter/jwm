@@ -24,7 +24,9 @@ player --MPRIS--> jwm-bridge --set_media_status--> jwm --> control center row
 | — | `media_stop` is bindable but unbound by default |
 
 In the control center the media row is first when a player is running:
-`Left`/`Right` skip tracks, `Return` toggles playback. The row hides the
+`Left`/`Right` skip tracks, `Return` toggles playback, and — with more than
+one player on the bus — `p` hands the row to the next player (see
+[Which player wins](#which-player-wins)). The row hides the
 skip glyphs a player says it cannot honor (`CanGoNext` / `CanGoPrevious`),
 and disappears entirely when no player is running. When the player reports
 both a position and a length, the row shows `m:ss / m:ss` (`h:mm:ss` past
@@ -58,10 +60,24 @@ read-back corrects it if the toggle did not take. The feedback is a labeled OSD 
 Muted` / `Microphone Unmuted` with fa-microphone(-slash) icons — which,
 unlike the volume card, carries no bar: the flag is the whole story.
 
-Three deliberate absences: the key is *not* in the lock-screen media
+The flag has two more consumers. The control center's Input row is the
+indicator: while the default source is muted it wears the slashed
+microphone icon the OSD uses, and an unmuted or never-read flag draws the
+row exactly as before; an open control center repaints when a read-back
+corrects or reverts the shown state. And `set_mic_mute {"muted": bool}`
+sets the flag over IPC — queued, like the volume keys, and deliberately
+unlike `set_audio_device`'s synchronous confirmed reply: the `ok` ack is
+immediate and the OSD draws the optimistic estimate, then the worker's
+read-back confirms or corrects it (the OSD refreshes in place and the
+Input row follows). A non-boolean `muted` is rejected with
+`set_mic_mute: expected boolean field 'muted'`, and a session with no
+working audio tool gets the key path's own answer,
+`no working audio control (wpctl/pactl/amixer)`. The command is advertised
+through `get_capabilities`.
+
+One deliberate absence stands: the key is *not* in the lock-screen media
 passthrough (unmuting a microphone while locked is a privacy risk, so the
-passthrough stays at its ten keysyms), there is no control-center row
-indicator for it, and there is no IPC command.
+passthrough stays at its ten keysyms).
 
 ## Which player wins
 
@@ -70,6 +86,17 @@ beats paused beats stopped, and ties keep the earlier name so the choice does
 not flap between two idle players. It re-reads the ranking on every control
 request, so pressing play after switching players drives the one now in front.
 
+The ranking loses to a pin. With more than one player running, the media row
+ends with a `· p ‹next player›` hint naming what the key would switch to
+(`· p spotify`), and pressing `p` pins the row — and the transport keys with
+it — to that next player, wrapping around the list. The bridge holds the pin
+while the pinned player's bus name is alive and re-publishes its state, so
+the switch raises the media OSD like any track change; when the pinned
+player exits, the pin clears itself and the ranking takes the row back. A
+single-player session is untouched: `p` is a no-op and the row carries no
+hint. The lock screen's now-playing row never grows the hint either — it is
+a control, and the lock shows none.
+
 Player start/stop is picked up from bus name-owner changes; track changes are
 picked up by a 3-second sweep.
 
@@ -77,12 +104,19 @@ picked up by a 3-second sweep.
 
 - `set_media_status` — what the bridge pushes: `player`, `identity`, `status`
   (`Playing`/`Paused`/`Stopped`), `title`, `artist`, `can_go_next`,
-  `can_go_previous`, and append-only `position_us` / `length_us` microsecond
-  fields (nullable; mixed old/new bridge↔jwm pairs are tolerated). A missing
+  `can_go_previous`, the append-only `position_us` / `length_us` microsecond
+  fields (nullable), and the append-only `players` list naming every player
+  the sweep saw, in sweep order. Mixed old/new bridge↔jwm pairs are
+  tolerated; a missing list reads as a single-player session. A missing
   or null `player` clears the state, which is how
   the bridge reports that every player went away.
 - `media_control` — `{"action": "play_pause" | "next" | "previous" | "stop"}`.
   `toggle`, `playpause`, and `prev` are accepted aliases.
+- `set_mic_mute` — `{"muted": bool}` sets the default microphone's mute flag.
+  Queued, not confirmed: the `ok` ack is immediate and the OSD draws the
+  optimistic estimate, with the controls worker's read-back confirming or
+  correcting it after — deliberately unlike `set_audio_device`'s synchronous
+  re-read reply. See [Microphone mute](#microphone-mute).
 - `get_media_status` — the current state plus the rendered `label` and a
   pre-formatted nullable `position_label`, so bars don't reimplement the
   clamping.
