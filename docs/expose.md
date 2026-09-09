@@ -60,7 +60,8 @@ the same exit `Esc` uses, focusing nothing. A highlight naming a window
 that already died mid-expose is a no-op: the compositor owns the grid, so
 the WM's only knowledge of it is the live candidate list — an honest
 asymmetry with the switcher, which owns its snapshot and can prune dead
-rows. Pointer semantics are unchanged; there is no pointer close.
+rows. Middle-click is the pointer half of the same close (below); every
+other button keeps its old meaning.
 
 ## Pointer interaction
 
@@ -68,6 +69,14 @@ Hover and the keyboard selection are one highlight: moving the pointer
 across the grid takes it over, and the arrow keys pick up from wherever it
 is. Clicking a thumbnail focuses that window and exits; clicking empty
 space exits without changing focus.
+
+Middle-clicking a thumbnail closes that window instead — browser-tab
+semantics: the clicked cell, not the highlighted one (the two may
+differ) — through the same `close_window` and in-place rebuild the
+keyboard close uses, and the gesture stays up. A middle-click on empty
+space, or on a cell whose window already died mid-expose, is a no-op that
+neither closes nor exits: the click never commits, so the grid simply
+ignores it.
 
 While expose is up, the keyboard and the pointer's buttons are grabbed, so
 a stray keystroke does not leak to a window behind the grid.
@@ -84,7 +93,8 @@ a stray keystroke does not leak to a window behind the grid.
 ## Where it lives
 
 - `src/jwm/features/expose_plan.rs` — the enter/exit/click/escape/close
-  decisions as pure functions, unit-tested without a display.
+  decisions as pure functions (keyboard and middle-click close included),
+  unit-tested without a display.
 - `src/backend/compositor_common/expose.rs` — the grid layout and the
   highlight movement (edge clamping included), shared by both compositors,
   so a cell is exactly where the click test thinks it is.

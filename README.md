@@ -260,7 +260,11 @@ Disturb is on. While a recording runs, a small `REC` chip with the running
 time sits in the bottom-right corner of the recorded output — drawn after
 the frame's pixels are read, so it never lands in the video or in
 screenshots — and starting and stopping both raise a toast with the output
-path.
+path. Standalone audio recording (`Alt+Ctrl+M`) gets the same cue: a red
+dot and a static `MIC` label take the corner while the recorder runs —
+stacking directly above the `REC` chip when both run together — appearing
+only once the recorder actually started and clearing on stop, success or
+failure.
 
 The X11 compositor freezes the desktop behind the interactive selector/editor
 by default. To keep clients and animations live instead, set this in the

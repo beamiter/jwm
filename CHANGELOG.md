@@ -185,6 +185,51 @@ monorepo use independent Semantic Versions.
   common case — and a safe one: unresolved rows render text-only exactly
   as before. See [docs/notifications.md](docs/notifications.md).
 
+- Standalone audio recording now parks a persistent `MIC` chip for as long
+  as the recorder runs — a red dot and a static label on the same flat
+  pill as the screen recorder's `REC` chip. It takes the REC chip's
+  bottom-right slot when the corner is free and stacks directly above it
+  when screen and audio record together, never overlapping and never
+  leaving the screen on degenerate displays. The chip shares the REC
+  chip's draw discipline (drawn after the frame's pixels are read, so it
+  never lands in a video or a screenshot, and direct scanout is blocked
+  while it is up), appears only once the recorder has actually started,
+  and clears on stop — success or failure — and at session teardown. A
+  screen recording that captures the microphone keeps only the REC chip.
+  See [docs/audio-recording.md](docs/audio-recording.md).
+
+- The lock screen shows a now-playing row while a player is active: the
+  control-center media row minus its transport cluster — `Title — Artist`,
+  the `m:ss / m:ss` position, and the trailing status icon, so a paused
+  player reads exactly as paused as it does in the control center. No
+  album art, no controls; with no player active the row is absent and the
+  lock is byte-identical to before. The row rides the bridge's 3-second
+  push, re-syncing only when the visible text actually changes, and is
+  seeded at lock-open so it is there from the first frame. See
+  [docs/idle.md](docs/idle.md).
+
+- Middle-clicking an exposé cell closes that cell's window — browser-tab
+  semantics: the clicked cell, not the highlighted one — through the same
+  close path the grid's `Delete` / `BackSpace` uses (the `killclient`
+  `close_window`, the in-place rebuild with the tail clamp, and
+  close-to-empty ending the gesture). A middle-click on empty space, or
+  one naming a window that already died, is a no-op that leaves the grid
+  up; the left-click commit and every other button are unchanged. See
+  [docs/expose.md](docs/expose.md).
+
+- Both connectivity pickers can forget what they list. In the Bluetooth
+  picker `d` removes the highlighted *paired* device — a two-press armed
+  confirm like switching the controller off (moving the selection disarms,
+  and an unpaired row gets a status-line refusal) — through an async
+  `bluetoothctl remove` worker, with the list re-reading on completion;
+  forgetting the connected device drops the connection with the bond. In
+  the Wi-Fi picker `d` deletes the highlighted network's saved profile by
+  UUID (`nmcli connection delete uuid …`, so duplicate profile names
+  cannot remove the wrong one); a network with no saved profile gets the
+  honest `no saved profile for <ssid>` answer, and deleting the profile
+  the link runs on is allowed — the post-delete re-read lands the truth
+  on the row. See [docs/control-center.md](docs/control-center.md).
+
 ### Changed
 
 - Volume and brightness input no longer blocks the WM on subprocesses.
@@ -271,6 +316,17 @@ monorepo use independent Semantic Versions.
   Disappearing stays instant (nothing in the shell fades out), the first
   frame is full strength with animations disabled, and hit-testing is
   untouched. See [docs/window-tabs.md](docs/window-tabs.md).
+
+- A fully settled OSD card no longer holds the compositor rendering
+  display-rate frames for its whole 1400 ms hold: the settled-toast
+  mechanism now covers the volume/brightness/media OSD too. Frames flow
+  only while the card's envelope is actually changing — the fade-in and
+  fade-out, the open spring, a replacement's width morph, and the frame
+  that prunes the expired card — with wake-ups at the envelope boundaries
+  (an explicit deadline on Wayland; X11 rides its standing 20 ms idle
+  cadence). Every show or refresh, a held volume key's repeats included,
+  is an input event that arms its own frame. Timings, appearance and
+  direct-scanout exclusion are user-visible identical.
 
 ### Changed
 

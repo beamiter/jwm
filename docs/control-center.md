@@ -206,7 +206,22 @@ dropped — there is nothing to select.
 | `Up` / `Down` | move the selection |
 | `Enter` | join, prompting for a passphrase when one is needed |
 | `r` | rescan |
+| `d` | forget the highlighted network's saved profile — arms on the first press, deletes on the second |
 | `Esc` or `Alt+F12` | close — or, while prompting, `Esc` cancels the prompt and keeps the list |
+
+The forget is the two-press confirm the shell uses for destructive rows:
+the first `d` arms the highlighted row (the row names its confirm key and
+the hint swaps to it), moving the selection disarms, and the second `d` on
+the same row deletes. The delete runs on a worker like every other nmcli
+call, and it goes by UUID — `nmcli connection delete uuid …` — never by
+name, so two profiles sharing a name cannot remove the wrong one. Whether
+a profile backs the highlighted row at all is knowable only by asking
+NetworkManager, so the worker checks and answers honestly: `no saved
+profile for <ssid>` on the status line rather than a key that silently did
+nothing. Deleting the profile the link is running on is allowed — the link
+drops with it, and the re-read the completion kicks off lands that truth
+on the control-center row. A press while a delete — or a join — is still
+being applied coalesces to a no-op, the way leaning on `r` does.
 
 ### Scanning does not block the compositor
 
@@ -235,7 +250,8 @@ devices in the same state — strongest signal first, then by name. `Enter`
 connects the selected device, or disconnects it if it is already connected;
 on a device that was never bonded, `Enter` starts pairing (below). `s` runs a
 bounded discovery scan and merges what it hears into the list; `r` re-reads
-the list; `Esc` — or `Alt+Ctrl+F12` again — closes. Leaning on `s` does not
+the list; `d` removes a bonded device (below); `Esc` — or `Alt+Ctrl+F12`
+again — closes. Leaning on `s` does not
 stack scans: while one is running the key just says `Scanning…` again.
 
 ### Where the list comes from
@@ -273,6 +289,18 @@ connected is stale noise on a row that says nothing else about now — and the
 After a connect or disconnect the list is re-read, so the row shows what
 actually took rather than what was asked — `bluetoothctl` exits 0 even when
 the attempt failed, so the outcome is read out of what it printed.
+
+`d` forgets the highlighted device: the same two-press armed confirm as
+switching the controller off — the first press arms the row (the row and
+the hint say so), moving the selection disarms, and the second removes the
+bond through an async `bluetoothctl remove` worker. The removal rides the
+same worker slot connect and disconnect use, so a press while one of them
+is still being applied is a no-op, and the list re-read its completion
+kicks off is what makes the row disappear. Only a bonded device arms: on a
+device the controller never bonded the key refuses on the status line —
+removing it would only make its beacon reappear on the next scan.
+Forgetting the connected device is allowed and drops the connection with
+the bond; the re-read shows both gone.
 
 ### Pairing
 

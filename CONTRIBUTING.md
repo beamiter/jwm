@@ -122,6 +122,9 @@ jwm-support --backend <backend> --output jwm-support.json
 
 - Add deterministic unit tests for policy, parsing, geometry, state transitions,
   resource limits, and serialization.
+- Unit tests are host-config-independent: the global `CONFIG` starts from the
+  built-in defaults under `cfg(test)`, so your own `~/.config/jwm` file must
+  never change a test's outcome — set non-default values up in the test itself.
 - Bound externally influenced buffers, queues, message counts, and timeouts.
 - Version persisted or externally consumed JSON schemas.
 - Use atomic writes and private permissions for state that may contain session
