@@ -53,7 +53,9 @@ JWM already warms the screen on a schedule (`behavior.night_light`,
 override on top of that schedule. The override wins until it is toggled back,
 so warmth at noon stays on and a bright screen at midnight stays bright. It
 applies immediately rather than waiting for the next schedule tick, and is
-broadcast as `night_light/toggle` on the `night_light` topic.
+broadcast as `night_light/toggle` on the `night_light` topic. The toggle
+raises a labeled OSD card with the target state — `Night Light On` /
+`Night Light Off` — so a key press confirms the flip with the panel closed.
 
 The override is in-memory: a restart returns to the configured schedule.
 

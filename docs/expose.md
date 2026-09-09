@@ -16,6 +16,15 @@ Labels fade with the grid, are pure overlay (hit-testing ignores them), and
 their textures rebuild per activation and are freed on rebuild and at
 compositor teardown.
 
+On the Wayland compositor the highlighted cell's label also brightens with
+the hover ease: a pre-brightened copy of the title texture — the ink mixed
+a pinned 0.35 toward white, alpha untouched — draws over the normal label
+at the grid's opacity scaled by the hover progress, so the title eases
+brighter on the same envelope the cell lift and ring ride. Hover and the
+keyboard selection are one highlight, so both get it. The X11 compositor
+keeps its ring-only hover, per the standing rule that X11's existing visual
+features are eased, not expanded.
+
 Expose needs the compositor; in a deliberately non-composited session the
 key reports an error rather than faking the grid.
 

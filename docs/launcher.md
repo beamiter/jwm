@@ -20,7 +20,10 @@ Rows show the application's icon beside its name: icons come from the
 entry's `Icon=` key, resolved through the icon theme by the same cached
 resolver the status bars use, and decode on a worker thread — a missing icon
 leaves the plain text row, and an in-flight decode pops in without moving
-the text.
+the text. A window row leads with the generic window glyph until its icon
+is on screen; the glyph disappears in the same frame the real icon draws —
+the two never sit side by side — and a row whose icon is still decoding or
+resolves to nothing keeps the glyph, so there is never an empty hole.
 
 Directory and `PATH` discovery runs on a worker rather than the compositor
 event loop. The first opening appears immediately with an indexing row; later

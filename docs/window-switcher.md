@@ -32,9 +32,11 @@ the panel is up commits it immediately.
 Rows are the most-recently-used windows, the monitor in front of you
 first — the same order the [launcher's window list](launcher.md) uses. A
 row leads with the window's application icon, resolved from its class (via
-`StartupWMClass`) through the same cached resolver the launcher uses; a
-window whose class resolves to nothing keeps the generic window glyph —
-there is never an empty hole. Then
+`StartupWMClass`) through the same cached resolver the launcher uses. The
+generic window glyph holds the spot until the icon is on screen, then
+disappears in the same frame the icon draws — the two never sit side by
+side; a row still decoding, or a class that resolves to nothing, keeps the
+glyph. There is never an empty hole. Then
 the title, the class when it adds information, and a `screen N`
 marker on the other heads.
 

@@ -47,7 +47,15 @@ does with the slot it lands in.
 The tooltip chip appears only for titles actually ellipsized in their cell,
 never covers the cell under the pointer, and takes no clicks off the strip;
 its fade follows the global animation switch, but the 500 ms rest applies
-either way — the dwell is information policy, not animation.
+either way — the dwell is information policy, not animation. The rest keys
+on the window, not on the cell's position: a relayout — a tab inserted,
+removed, or reordered — moves a showing chip with its window and never
+hands an accumulated rest to a different window that slid under the pointer
+(that one honestly restarts its own), and if the hovered window disappears
+mid-dwell the chip drops the same frame. On an output narrower than the
+chip's 500 px maximum the chip's text budget shrinks to fit, so the chip
+itself never overflows the right edge — previously only its origin was
+clamped.
 
 ## Where it lives
 
@@ -59,8 +67,12 @@ either way — the dwell is information policy, not animation.
 - `src/backend/compositor_common/window_tabs.rs` — the strip's geometry
   and hit math, shared by the window manager and both compositors so the
   reserved band and the painted cells cannot drift apart — plus the
-  tooltip's shared half: `TooltipDwell` keeps the rest-then-show policy and
-  `tooltip_rect` the chip placement, both pure for the same reason; the
-  chip's raster is cached per title and freed with the title textures.
+  tooltip's shared half: `TooltipDwell` keeps the rest-then-show policy,
+  keyed on the window's session-stable id so a relayout moves the chip
+  with its window instead of dropping it, `find_tab` re-resolves where
+  that window's cell sits at draw time, and `tooltip_rect` with
+  `tooltip_text_budget` keep the chip on the screen — all pure for the
+  same reason; the chip's raster is cached per title and freed with the
+  title textures.
   Hover state lives in the compositor rather than the window manager, so
   pointer motion never triggers a title-texture rebuild.

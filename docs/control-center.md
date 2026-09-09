@@ -99,6 +99,11 @@ PipeWire output and input defaults come from one shared `wpctl status` read.
 | Lock Screen | always | `Enter` locks |
 | Session… | always | `Enter` opens the [session menu](session-menu.md) |
 
+The Do Not Disturb and Caffeine rows flip through the same toggles their
+key bindings use, so `Enter` there raises the labeled OSD card too — DND's
+confirmation is an OSD rather than a toast precisely because toasts are
+DND-gated.
+
 The panel rebuilds itself when the state behind a row changes — a track
 change, a battery poll — so an open card never shows a stale value, and the
 selection stays put (falling back to the nearest row only if the selected
@@ -171,12 +176,22 @@ is always explicit: `Left`/`Right` on the row, or the `toggle_wifi` action.
 When the radio is already off, `Enter` switches it on, since there is nothing
 to pick until it is.
 
-Both toggles re-read the hardware afterwards instead of assuming success: a
+A radio flip never runs its `nmcli`/`bluetoothctl` write on the WM thread —
+a wedged bus can hold one of those for seconds. The set rides a background
+worker; the row and the `network/status` broadcast show the requested state
+at once, and the worker's post-set re-read confirms it or takes it back: a
 hard-blocked radio (a physical switch) refuses to come back on, and the row
-must show that.
+must show that. A press while a flip is still being applied is a no-op —
+the requested state is already what the row shows.
 
 `toggle_wifi` and `toggle_bluetooth` are also bindable and dispatchable over
 IPC; they report which tools were missing rather than failing silently.
+Bound to a key, the press is acknowledged on the OSD at once with the
+requested target — `Wi-Fi On` / `Wi-Fi Off`, likewise Bluetooth — while the
+worker applies it. One known shape on a machine with neither tool: the
+*first* press still shows the optimistic card once, because tool detection
+has not concluded yet; the worker's re-read then takes the state back, and
+later presses keep the old error path.
 
 ## Wi-Fi picker
 
@@ -394,13 +409,18 @@ Plugging in headphones and having the music stay in the speakers is the
 failure this avoids; WirePlumber does it on its own, PulseAudio has to be told
 one stream at a time.
 
+`Enter` queues the switch onto the same controls worker the sliders use —
+the set and the verifying re-read are two bounded-but-blocking tool runs,
+so they no longer stall the panel — and the status line reads `Switching…`
+until the re-read lands.
+
 ### The exit code is not the answer
 
 A sound server will accept a switch to a device that is not really there — an
 HDMI output with no monitor, a headset microphone with no headset — and then
-quietly put the default back. `pactl` exits 0 either way. So the picker
-re-reads the device list afterwards and reports what it finds: the marker
-moves only if the switch actually took, and the panel says
+quietly put the default back. `pactl` exits 0 either way. So the worker
+re-reads the device list after the set and the panel reports what it finds:
+the marker moves only if the switch actually took, and the panel says
 `Unavailable — still using …` when it did not. `set_audio_device` over IPC
 fails with the same reasoning rather than reporting a success that did not
 happen.

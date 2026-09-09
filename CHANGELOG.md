@@ -115,6 +115,30 @@ monorepo use independent Semantic Versions.
   and closing the last row ends the gesture. Pointer semantics are
   unchanged. See [docs/window-switcher.md](docs/window-switcher.md).
 
+- Volume, brightness and media transport keys now work behind the lock
+  screen: exactly the ten dedicated XF86 keysyms (volume raise/lower/mute,
+  play/pause/next/previous/stop, brightness up/down), and only where the
+  key is bound to the matching media action, so the press runs the same
+  dispatch — controls worker included — as the unlocked session. The
+  feedback stays invisible (the opaque backdrop hides the OSD) and every
+  other key is still swallowed. See [docs/idle.md](docs/idle.md).
+
+- The toggle family confirms on the OSD: Do Not Disturb, caffeine, night
+  light, Wi-Fi and Bluetooth flips each raise a labeled card with its own
+  icon carrying the target state (`Wi-Fi Off`, `Caffeine On`, …). DND uses
+  the OSD precisely because toasts are DND-gated — a "Do Not Disturb On"
+  toast would be swallowed by the state it announces — and the missing-tool
+  error paths are unchanged. See
+  [docs/control-center.md](docs/control-center.md).
+
+- On the exposé grid the highlighted cell's window title now brightens with
+  the hover ease — a pre-brightened texture composited over the normal
+  label at the grid's opacity scaled by the hover progress (the ink mixed a
+  pinned 0.35 toward white), with the keyboard selection riding the same
+  channel. Wayland only: X11 keeps ring-only hover, per the standing rule
+  that X11's existing visual features are eased, not expanded. See
+  [docs/expose.md](docs/expose.md).
+
 ### Changed
 
 - Volume and brightness input no longer blocks the WM on subprocesses.
@@ -133,6 +157,53 @@ monorepo use independent Semantic Versions.
   snapping. Hover-leave still clears in the same frame (nothing in the
   shell fades out), exposé hit-testing keeps using the base geometry, and
   with animations disabled everything snaps as before.
+
+- Caps Lock now genuinely affects the lock screen's password field: ASCII
+  letters shift (shift with caps types lowercase again), while digits and
+  punctuation follow shift alone. Previously the modifier was stripped from
+  the character path and only the indicator row noticed it. See
+  [docs/idle.md](docs/idle.md).
+
+- Lock-screen authentication no longer blocks the compositor: `Enter` hands
+  the password to a one-shot PAM worker thread and the status row reads
+  "Verifying…", so the ~2 s pam_unix wrong-password delay — or an
+  arbitrarily slow pam_sss/fingerprint module — no longer freezes the
+  session. While one attempt runs `Enter` is dead, typing collects the next
+  attempt (and clears the row), `Esc` clears the field but cannot cancel
+  the worker, and the password is wiped on every exit path; unlock still
+  happens only on success, through the same code path. See
+  [docs/idle.md](docs/idle.md).
+
+- Wi-Fi and Bluetooth radio flips — the control-center rows and the
+  key-bound toggles alike — no longer run blocking subprocesses on the WM
+  thread. The set rides a background worker, the row and the
+  `network/status` broadcast show the requested state optimistically, and
+  the post-toggle re-read confirms or reverts it; a repeat press while a
+  flip is in flight is a no-op, and the Bluetooth power-down two-press
+  confirm is preserved. Known shape: on a machine with no nmcli or
+  bluetoothctl the first press shows the optimistic OSD once before tool
+  detection concludes; later presses keep the old error path. See
+  [docs/control-center.md](docs/control-center.md).
+
+- The audio device picker's `Enter` no longer runs two serial blocking
+  `wpctl` spawns: the switch queues onto the controls worker (set-default,
+  then the inventory re-read), the status line reads `Switching…`, and the
+  marker moves only if the re-read says the switch actually took. See
+  [docs/control-center.md](docs/control-center.md).
+
+- In the launcher and the window switcher a window row's generic
+  placeholder glyph now disappears in the same frame its real icon draws —
+  the two never sit side by side; rows still decoding, or whose class
+  resolves to nothing, keep the glyph. See
+  [docs/window-switcher.md](docs/window-switcher.md).
+
+- The tab-strip dwell tooltip keys on the window's session-stable id rather
+  than its cell position: a relayout — a tab inserted, removed, or
+  reordered — moves a showing chip with its window instead of dropping it
+  or handing the accumulated rest to a neighbour, and a hovered window
+  disappearing mid-dwell drops the chip the same frame. On outputs narrower
+  than the chip's 500 px maximum its text budget shrinks, so the chip never
+  overflows the right edge. See [docs/window-tabs.md](docs/window-tabs.md).
 
 ### Changed
 

@@ -241,6 +241,11 @@ X11 notification windows from external daemons. Suppressed notifications are
 still recorded, marked in the notification center, and still emit their
 `notification/posted` event.
 
+Flipping it — from the key or the row — raises a labeled OSD card carrying
+the new state. The OSD rather than a toast, precisely: toasts are DND-gated,
+so a "Do Not Disturb On" toast would be swallowed by the very state it
+announces.
+
 The runtime toggle is your most recent word: a configuration reload that left
 `behavior.do_not_disturb` where it was keeps the toggle, while a reload whose
 value moved adopts the file and tells the bars with a `dnd/toggle` event.

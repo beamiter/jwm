@@ -13,8 +13,30 @@ calendar card) and the spelled-out date above the password row; the clock
 repaints on each wall-clock minute through a wakeup that is scheduled only
 while the lock is up. A quiet "Caps Lock is on" row appears under the
 password row while caps lock is active — informational, not an error, and it
-coexists with the wrong-password message. Both rows are information-only:
-the backdrop, the grabs, and the PAM exchange are unchanged.
+coexists with the wrong-password message. The indicator is honest about the
+field too: caps lock genuinely shifts the ASCII letters typed into the
+password (shift with caps types lowercase again), while digits and
+punctuation follow the shift key alone, exactly as an unlocked prompt
+behaves.
+
+Volume, brightness and media transport keys stay live behind the lock, as
+they do on GNOME, KDE, macOS and Windows — exactly the ten dedicated XF86
+keysyms (volume raise/lower/mute, play/pause/next/previous/stop, brightness
+up/down), and only where the key is bound to the matching media action, so
+it runs the same dispatch it would unlocked, controls worker included.
+Every other key is still swallowed, and the feedback is deliberately
+invisible: the opaque backdrop hides the OSD, and the card grows no rows
+for it.
+
+`Enter` no longer runs PAM on the compositor. A wrong password costs ~2 s
+inside pam_unix, and pam_sss, fingerprint or faillock modules can wait
+arbitrarily long, so the attempt runs on a one-shot worker thread while the
+compositor keeps rendering, and the status row reads "Verifying…" through
+the same channel a failure uses. While one attempt is in flight `Enter` is
+dead, typing collects the next attempt (and clears the row, exactly as it
+clears an error), and `Esc` still only clears the field — it cannot cancel
+the worker. The password is wiped on every path out of the attempt, and
+only a success unlocks, through the same code path as before.
 
 ```toml
 [behavior]
@@ -108,7 +130,9 @@ themselves — `xset dpms force off` wakes on its own, `wlopm` does not.
 `toggle_idle_inhibit` holds the session awake until it is toggled back, and the
 control center has a **Caffeine** row for the same thing. Switching it on while
 the screen is already dim brightens it immediately rather than waiting for the
-next input.
+next input. Either way the flip raises a labeled OSD card (`Caffeine On` /
+`Caffeine Off`) — bound to a key with the control center closed, the card is
+the only confirmation the flip happened.
 
 Three other things hold the session awake without being asked:
 
