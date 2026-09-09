@@ -4,6 +4,74 @@
 
 ---
 
+## 2026-09-08：UI/UX 十四轮（识别与可达性续：launcher/switcher 图标 / quarter-tiling / 媒体进度 / 剪贴板过滤 / tab tooltip）
+
+候选清单五项全收。两波（wave 1：图标 + quarter；wave 2：媒体+剪贴板 + tooltip）。
+**本轮发生了一次中断事故，处置方式值得记录**（见文末）。
+
+1. **launcher/switcher 行图标**（最大剩余识别性缺口）。硬约束（实现者发现）：
+   `SystemUiOverlay` 不能加字段——唯一构造点是 input_handler.rs 的穷尽字面量（在
+   别的 agent 文件集内）。落地方案：`OverlayParts.icons` + 新模块
+   `compositor_common/row_icons.rs` 的侧带（band）：`overlay_parts()` 发布
+   `(items, icons)`，两后端 `set_system_ui` 经 `icons_for(&overlay.items)` 内容匹
+   配才消费，不匹配回退纯文本——delegation/api.rs 零改动。`xbar_core::app_icon`
+   返回**路径**非像素（resolve 缓存含 miss、LRU 256；绝对路径走
+   `AppIcon::new(p).normalized()`）；窗口行按 class→StartupWMClass 解析。几何：
+   `SectionSizes.row_icons` 32px 槽（0.0 时全字节一致，有钉住测试）；只解可见行
+   （payload 即窗口切片）；`RowIconCache` ≤64 纹理 LRU + ≤32 pending + ≤256
+   miss。Wayland 释放走 retired_* 下一帧模式 + `RAW_GPU_OWNER_FIELDS` 双登记。
+   ripple：navigation.rs +4（switcher 行图标收集）、damage.rs +4（帧泵）。**已知
+   形状**：窗口行文本里的 `\u{f2d0}` 通用字形在真图标到达后仍保留（图标叠加画
+   在槽位）；「图标替换字形」是 follow-up。
+2. **quarter-tiling**（十三轮 snap_window 的自然延伸）。`SnapDirection` 加四角
+   （kebab 名 `top-left` 等，仅 kebab 接受，大小写不敏感）；`snap_rect` 四分之
+   一 = 半宽半高锚角，rounding 与 halves 同为 floor（1921 宽 / 1081 高钉住）；角
+   落命中盒 = 两条既有 near-edge 带的交叠，**不新增阈值配置**；退化小屏优先级
+   TopLeft→TopRight→BottomLeft→BottomRight（保持左先于右）。单边行为字节级不
+   变，snap preview 透传无需改。quarter 无默认绑定（角落无法诚实映射到方向
+   键）；ipc.rs 与 `from_name` 双名单同步、互钉测试更新。
+3. **媒体进度（display-only，不做 seek）**。bridge 在既有 3s sweep 上读
+   `Position` + metadata 的 `mpris:length`，append-only `position_us`/`length_us`
+   可空字段（新旧 bridge↔jwm 双向容忍，有测试）。显示规则（`position_label` 纯
+   函数）：两半齐备才显示、length>0、显示钳到 [0,length] 但状态保留原始值、切
+   歌重置、暂停保持最后读数、流媒体无占位符。`media/status` 广播与
+   `get_media_status` 快照都带预格式化 `position_label`（bar 不重实现钳制）。
+   「暂停不算换歌」的 OSD 规则有测试钉住未回归。
+4. **剪贴板 type-to-filter**。query 走 launcher 同款 `system_ui_char`；
+   `matches_query` 纯函数（大小写不敏感子串，Unicode 钉住）；行号保留历史索引
+   （过滤列表显示跳号）；Enter/d/c 作用在过滤后选择；重开空 query；hint 行加
+   「type  filter」。**已知形状**：保留键（d/c/space/Return/Delete/BackSpace/方
+   向键）不进 query——query 不能含空格或 d/c，launcher 同款既有行为。
+5. **tab 条 dwell tooltip**。`TOOLTIP_DWELL = 500ms`（**信息策略不是动画**：
+   motion 关也要 dwell 才出现，只是不渐入）；只给真正被截断的 cell
+   （`refresh_tab_titles` 时用 uncut-reference 对比记录 `tab_titles_truncated`）；
+   chip 在条上方、顶边条翻转下方、永不盖住悬停 cell、不挡点击；纹理
+   text-keyed 缓存 + teardown 释放（wayland `RAW_GPU_OWNER_FIELDS` 加
+   `"tab_tooltip_texture"`）；needs_render 泵两后端都接（dwell 是时钟不是事件，
+   没泵 chip 不会出现——两个新源钉测试防回归）。
+
+**中断事故与处置**：wave 2 两个 coder 的工具调用被打断、报告未记录，工作区留
+有未报告的改动。处置流程（值得复用）：**先量化工作区状态**（cargo check/test
+全绿 → 改动停在干净点），**再派审计+补全 agent 按原简报逐条核对**（不假设完
+成、也不推倒重来）——媒体/剪贴板 12/12 确认、零改动；tooltip 6/6 确认 + 修 7
+处 rustfmt 偏差 + 补 2 个帧泵钉住测试。
+
+**验证**：fmt / clippy -D warnings / check --all-targets / no-default + 7 组
+profile 全绿（警告与基线逐行一致）；lib **3011 passed / 0 failed**（2963 → 2985
+wave1 +22 → 3011 wave2 +26）；bridge **70/0**（+4：mpris position 解析/推送）。
+**无真机显示会话**。真机优先验证：图标到达无跳动与 miss 回退、长列表滚动时的
+LRU；角落拖放四分之一与 snap preview；媒体行 `m:ss / m:ss`（含流媒体空无占位）；
+剪贴板过滤与重开；tooltip 的 dwell、顶边翻转、截断才出。
+
+**仍然开着的**（十五轮候选）：图标替换通用字形（follow-up）；expose 标题 hover
+增亮；caps 不影响密码字符（pre-existing）；toast/OSD 进录制画面（pre-existing，
+改捕获顺序风险高）；tab tooltip 的 (group,index) 位置键在 relayout 下继承
+dwell（与 tab_hover_ease 同先例）；sub-500px 输出 chip 宽度不钳（origin 钳了）。
+**成文勿再提**：sync_window_groups dirty 门控、嵌套后端无面板、toast
+NotificationClosed(1)、clear-all 指针路径。
+
+---
+
 ## 2026-09-08：UI/UX 十三轮（流畅与反馈闭环：热路径去阻塞 / hover 弹簧 / snap_window / 截图录制反馈 / 切换器 Delete）
 
 主题来自新一轮全景盘点（三个 explore：窗口操作导航 / 系统反馈工具 / 动效与感知
