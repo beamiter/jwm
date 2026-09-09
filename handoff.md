@@ -4,6 +4,31 @@
 
 ---
 
+## 2026-09-09：UI/UX 十八轮（forget 正形、mic 消费者、日历点击、工具条 appear、多播放器）
+
+选题 = 十七轮候选清单。三 explore 先出 sketch，两波实施：wave 1 三路（A forget 正形 / B mic 消费者双半 / D 工具条 appear ease），wave 2 一路（C+E 合一：日历点击 + 多播放器——两者同需 input_handler.rs，十五轮锁屏包先例）。**波划分关键**：A 的 toggles.rs join 守卫依赖 B 完工后的独占 → 启动即定为计划集成项（非缺口）。docs 与全量验证并行（docs agent 只读代码，验证不碰 docs/）。
+
+1. **Wi-Fi forget 正形（静态槽 → FeatureStates 字段，关两条记录在案）**。`FeatureStates.wifi_forget: Option<BackgroundJob<Result<String,String>>>`（mod.rs:167，derive-Default + `..Self::default()` 形状不动，无穷尽字面量——各 empty_jwm 全走 `FeatureStates::new()`）；删 `static WIFI_FORGET` / `FORGET_SLOT_TESTS` / `wifi_forget_in_flight()` / `track_wifi_forget()`；`take_finished_wifi_forget` 保名改自由函数带 slot 参数（pin 针加强为收养**自 features 槽**，调用点仍在 `refresh_connectivity()` 前；refused-thread drop 语义不动）。**picker 关闭/换手不清槽**（静态原语义钉住：删除在飞 survives picker close，`poll_connectivity_job` 每 tick 收养，完成重读必须仍发生）。**readiness hub 登记**（十七轮静态无法登记——十五轮 auth 先例补 chain 行 + 测试：未 track 的 park 使 hub incomplete，带 notifier 的 park complete）。测试 5 改写（静态针→字段针；`a_finished_wifi_forget_lands_on_the_picker_status_line` 的 400× 防盗循环删除——跨测试偷槽理由随静态消亡）+1 新增。
+2. **MicMuteSet 消费者双半**（十六轮 `#[allow(dead_code)]` 关闭）。
+   a. **IPC `set_mic_mute {"muted": bool}`**（special command，臂在 set_audio_device 与 set_power_profile 之间）：**queued 语义钉住**——立即 ok + 乐观 OSD（set 的 estimate 无需 base：`Some(*muted)`，确定性可测），controls worker 回读确认/纠正；刻意不像 `set_audio_device` 的同步 confirmed reply（worker 存在正是为让 helper 的阻塞回读离开事件线程——注释成文）；无工具答 key path 同文案（跨文件源 pin）；`get_capabilities` 自动广告（pin 扩）。**刻意不做**：`audio/mic` 广播、`get_mic_mute` 查询（follow-up）。
+   b. **Input 行指示器**：`ControlCenterInputs.mic_muted: Option<bool>`（Copy；~30 测试字面量靠 `..Default::default()` 零改动）；muted → f130→f131（<0xf600 Nerd Font 告诫遵守），Some(false)/None → 行逐字节等于今天（字面量 pin）；`poll_control_feedback` mic adopt/revert 臂设 `panel_changed = true`（「无行读它」注释删除——开着的控制中心现在随 mic 回读纠正重绘，**新重绘流量记录在案**：2s TTL 面板上每对 adopt/revert 一次 rebuild）。
+3. **截图工具条 appear ease（合成器侧字段，两后端——十六轮拒做项的正面解法）**。`AppearEase`（compositor_common/screenshot_toolbar.rs）：**presence 键控**——setter 检测 `is_some() != toolbar.is_some()` → clear；**Some→Some 重发布保 envelope**（hover 每次移动都重发布模型，模型内 envelope 必 stutter——十六轮推理的锁）；120ms（复用 `window_tabs::APPEAR_DURATION`）ease-out quad；首帧零 alpha 不消耗时间（tab 条同款空白首帧钉住：不许 publish 时 seed alpha）；50ms dt 帽；motion off 首帧满 alpha 零额外帧；撤下即清无 fade-out。**alpha-only**（几何/命中从不见 envelope；几何 pin 加姊妹断言 + 「WM 模型无 AppearEase 字段」源 pin）。字段非 GPU：`RAW_GPU_OWNER_FIELDS` / `release_gpu_resources` / X11 `Drop` 全不动（tab_appears 先例）。**偏差记录在案**：setter 不 advance——render 侧 advance 才是空白首帧的来源。两后端 `the_toolbar_pumps_frames_while_a_hover_wash_is_easing_in` 源契约 pin 更新（旧 `ui.card,1.0,` 针现在断言**不存在**）。
+4. **日历点击翻月**。`CalendarClick` + 纯 `click_action(visual_row, text_x_px, char_width_px, &view)`（calendar.rs）：行 0/1/2（clock/空行/星期头）→ None；周行 7 cell × 4 等宽列：**前导空白 cell（上月尾日位置）→ 上一月；末尾空白 cell（下月头日位置，含短末行未画出的）→ 下一月；今天 cell → 回当前月**（`t` 键指针对应）；其余 → None（历史 no-op 不动）。字宽 = `measure("0"×28) − measure("0"×27)`（纹理边距在真字体与位图回退上都对消）；TEXT_PAD 先减后除（slider/chip 先例）。臂在 `activate_system_ui_pointer_row` 的 `select_visible_row` 早退前，Calendar 面板 map+`shift_calendar`+`sync_system_ui` 即返回，其余面板逐字节。hint 行加 `click edge days  month`。docs 纯度声明保持真（映射是纯函数）。
+5. **多播放器 MPRIS 切换（最小诚实切片）**。
+   - bridge：`publish` 增 `"players"` 总线后缀列表（sweep 顺序，旧 jwm 忽略——append-only 先例）；`resolve_active()` pin 活则优先、死则回落 `pick_active` 并自清；`media/command` 新 action `select_player` 设 pin（空/缺 `player` 清 pin）；transport 命令时同偏好重解析；pin 不持久化。
+   - WM：`MediaState.players: Vec<String>`（append-only 解析，缺失=空=单播放器逐字节；`MAX_PLAYERS=32` 帽，不可信输入 bounding 家族）；`next_player()` 环绕（active 不在列表=陈旧→第一个；<2 → None 不广播）；`p` 键于 media 行（`m` 于 volume 行先例）→ `cycle_media_player()` 广播 select_player；**行尾 `· p ‹next›` 只在 `control_row`**（players>1 才出现），`row_text`/`lock_row` 逐字节不变（相等 pin——锁屏无切换提示，players 列表抖动不花锁屏重绘）；切播放器 = 换歌 → 既有媒体 OSD 自动起（pin 测试 `a_player_switch_raises_the_media_osd_like_a_track_change`）。新旧 bridge↔jwm 双向容忍。
+   - **follow-up 排除在案**：播放器 picker 面板、per-player position、行上点击循环、bars 暴露列表（jwm→bars payload 刻意不变）、pin 跨 bridge 重启持久化。
+
+**集成阶段（1 个启动即定的计划项）**：toggles.rs `join_selected_wifi` 补 forget 在飞守卫（`job_in_flight(self.features.wifi_forget.as_ref())` 在 `take_wifi_passphrase()` 前——十七轮「Enter(join) 不查 forget 在飞」不对称的另一向；`forget_selected_wifi` 双向都查，join 这向缺）+ `the_join_path_yields_to_a_forget_in_flight` 源 pin（守卫先于 passphrase take 与 `start_connect`）。无其他波边界缺口（三路报告交叉核实：A 见的 MicMuteSet dead-code 警告 = B 的在飞编辑，B 见的工具条测试红 = D 的在飞编辑，均随 wave 1 收尾自闭合）。
+
+**验证**：fmt / clippy -D warnings（0）/ check --all-targets / no-default + 8 组 profile（CI 矩阵原样）全绿；lib **3192 passed / 0 failed**（3164 → +28：A +1 新增 5 改写、B +5、D +5、C+E +16、集成 +1）；bridge **76/0**（72 → +4）；根 tests/ 13/0。**无真机显示会话**。真机优先验证：mic mute 后控制中心 Input 行 f131 + `jwm-msg set_mic_mute`（含回读纠正时开着的面板重绘）；截图工具条出现渐入（motion 关 = 首帧即满）+ hover 移动不重启渐入；日历点前导/末尾空白翻月 + 点今天回当月；双播放器 media 行 `· p ‹next›` + p 循环 + 切换起 OSD + 被 pin 播放器退出后回落；Wi-Fi forget 在飞时按 Enter 无操作。
+
+**过程笔记（值得复用）**：① 三路同抢 input_handler.rs/system_ui.rs/toggles.rs 时的划分法——把跨依赖的一行守卫启动即定为集成项，比硬切文件干净；② docs agent 与全量验证并行无冲突（docs 只读 src，验证不写 docs/）；③ `cargo fmt -- <files>` 会把 edition-2024 let-chain 解析坏——单文件格式化用 `rustfmt --edition 2024`（wave agent 全员踩过同一坑）。
+
+**仍然开着的**（十九轮候选，均有记录在案）：IPC `set_audio_device` 仍同步（刻意留：reply 语义 confirmed 非 queued）；`audio/mic` 广播 + `get_mic_mute` 查询（本轮 IPC 的 follow-up）；多播放器 follow-up 包（picker 面板 / per-player position / 行上点击循环 / bars 暴露列表 / pin 持久化）；剪贴板图片历史（medium-large）；X11 `compositor_frame_deadline` 不接 overlay 边界（20ms idle cadence 已覆盖）；docs/idle.md:22-26 锁屏行描述可锐化为「minus transport cluster and player-switch hint」（docs agent 发现，现状 defensible 未动）。**成文勿再提**：sync_window_groups dirty 门控、嵌套后端无面板、toast NotificationClosed(1)、clear-all 指针路径、toast/OSD 进录制画面（改捕获顺序风险高）、X11 视觉特征不扩只做 easing、锁屏 backdrop 瞬间不透明（安全属性）、show_keybindings 原始函数名（cosmetic）。
+
+---
+
 ## 2026-09-09：UI/UX 十七轮（指示器闭环、锁屏再续、picker 家务、测试隔离修复）
 
 选题 = 十六轮候选清单。两波（wave 1 三路：MIC chip / 锁屏 now-playing / expose 中键关窗；wave 2 三路：OSD settled 收窄 / BT·Wi-Fi forget / 测试隔离），集成补 4 个波边界缺口。
