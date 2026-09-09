@@ -3271,10 +3271,12 @@ mod tests {
                 Tab {
                     title: "left".to_string(),
                     active: true,
+                    window: 1,
                 },
                 Tab {
                     title: "right".to_string(),
                     active: false,
+                    window: 2,
                 },
             ],
         }]

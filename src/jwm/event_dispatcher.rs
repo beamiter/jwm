@@ -5510,6 +5510,7 @@ impl Jwm {
                 .launcher_catalog_job
                 .as_ref()
                 .is_none_or(BackgroundJob::readiness_is_covered)
+            && self.features.system_ui.auth_readiness_is_covered()
     }
 
     fn maintenance_next_wakeup_at(&self, now: std::time::Instant) -> std::time::Duration {

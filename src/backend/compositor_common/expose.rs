@@ -121,6 +121,27 @@ pub(crate) fn expose_label_origin(
     ))
 }
 
+/// How far the exposé hover-brightened title ink mixes toward white.
+///
+/// The label texture bakes the theme's `title_ink` in at raster time and the
+/// text shader clamps its opacity to `1.0`, so once the exposé fade has
+/// arrived no uniform can push the drawn label brighter — the hover cue's
+/// brighter copy is a second texture rasterised with this ink instead.
+pub(crate) const EXPOSE_TITLE_HOVER_BRIGHTEN: f32 = 0.35;
+
+/// The ink an exposé title's hover-brightened copy is rasterised with: the
+/// theme ink's RGB mixed toward white by [`EXPOSE_TITLE_HOVER_BRIGHTEN`],
+/// alpha untouched (the overlay's fade owns opacity). Mixing toward white —
+/// rather than scaling the channels — lifts a dark light-theme ink as surely
+/// as a pale dark-theme one, and white is a fixed point so re-applying can
+/// never overshoot.
+pub(crate) fn brightened_title_ink(ink: [u8; 4]) -> [u8; 4] {
+    let brighten = |channel: u8| {
+        channel + ((255 - channel) as f32 * EXPOSE_TITLE_HOVER_BRIGHTEN).round() as u8
+    };
+    [brighten(ink[0]), brighten(ink[1]), brighten(ink[2]), ink[3]]
+}
+
 /// Compute Expose/Mission Control targets for a set of window rectangles.
 ///
 /// Takes the windows by value so each entry can own its title without a
@@ -359,6 +380,45 @@ mod tests {
         assert_eq!(expose_label_origin(f32::NAN, 0.0, 100.0, 50.0), None);
         assert_eq!(expose_label_origin(0.0, 0.0, f32::INFINITY, 50.0), None);
         assert_eq!(expose_label_origin(0.0, 0.0, 100.0, f32::NAN), None);
+    }
+
+    #[test]
+    fn brightened_title_ink_mixes_rgb_toward_white_by_the_pinned_factor() {
+        // 0.35 of each channel's distance to white, rounded.
+        assert_eq!(
+            brightened_title_ink([100, 150, 200, 77]),
+            [154, 187, 219, 77]
+        );
+        // A dark light-theme ink (GLASS's `title_ink`) lifts by the same
+        // rule...
+        assert_eq!(
+            brightened_title_ink([22, 26, 34, 255]),
+            [104, 106, 111, 255]
+        );
+        // ...and a pale dark-theme ink (the default `title_ink`) still has
+        // headroom left to lift into.
+        assert_eq!(
+            brightened_title_ink([214, 228, 255, 255]),
+            [228, 237, 255, 255]
+        );
+    }
+
+    #[test]
+    fn brightened_title_ink_preserves_alpha_and_is_idempotent_at_white() {
+        // Alpha passes through untouched — the overlay fade owns opacity.
+        assert_eq!(brightened_title_ink([0, 0, 0, 200]), [89, 89, 89, 200]);
+        // White is the fixed point: re-applying never overshoots.
+        assert_eq!(
+            brightened_title_ink([255, 255, 255, 128]),
+            [255, 255, 255, 128]
+        );
+        // The mix is a lift or a no-op on every channel, never a dim.
+        for ink in [[9, 240, 128, 255], [255, 0, 64, 3]] {
+            let bright = brightened_title_ink(ink);
+            for channel in 0..3 {
+                assert!(bright[channel] >= ink[channel]);
+            }
+        }
     }
 
     #[test]

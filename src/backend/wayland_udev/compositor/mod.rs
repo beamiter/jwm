@@ -1233,6 +1233,12 @@ pub(crate) struct WaylandCompositor {
     /// texture is the "no label" slot. Rebuilt only when a new entry set
     /// arrives, the same bargain `tab_title_textures` strikes.
     expose_title_textures: Vec<(u32, u32, u32)>,
+    /// The hovered entry's brighter title copy, one slot per expose entry in
+    /// `expose_entries` order: `None` until the first hovered frame
+    /// rasterises it lazily on the draw path, `Some((0, 0, 0))` for the
+    /// normal cache's "no label" convention so a failed attempt is not
+    /// retried every frame. Reset whenever the normal cache rebuilds.
+    expose_title_bright_textures: Vec<Option<(u32, u32, u32)>>,
     /// Entry changes are recorded without touching GL; the first drawn frame
     /// rebuilds the label textures while the compositor context is current.
     expose_titles_dirty: bool,
@@ -1368,11 +1374,14 @@ pub(crate) struct WaylandCompositor {
     /// order: only those earn a dwell tooltip, so a cell whose title fits
     /// whole never floats one. Rebuilt with the textures.
     tab_titles_truncated: Vec<Vec<bool>>,
-    /// Rest-then-show state for the tooltip chip. The dwell is information
-    /// policy, not animation, so it is tracked apart from the fade.
+    /// Rest-then-show state for the tooltip chip, keyed by the window under
+    /// the pointer so a relayout that slides its cell keeps the rest. The
+    /// dwell is information policy, not animation, so it is tracked apart
+    /// from the fade.
     tab_tooltip_dwell: crate::backend::compositor_common::window_tabs::TooltipDwell,
-    /// Fade-in of the tooltip chip, keyed by the same (group, tab).
-    tab_tooltip_ease: crate::backend::compositor_common::dynamic_island::HoverEase<(usize, usize)>,
+    /// Fade-in of the tooltip chip, keyed by the same window id as the
+    /// dwell, so the fade survives the relayout with it.
+    tab_tooltip_ease: crate::backend::compositor_common::dynamic_island::HoverEase<u64>,
     /// The chip's rasterised line, keyed by its text; freed on every title
     /// refresh and at teardown, the same bargain `tab_title_textures` strikes.
     tab_tooltip_texture: Option<(String, u32, u32, u32)>,
@@ -2715,6 +2724,7 @@ impl WaylandCompositor {
                 expose_opacity: 0.0,
                 expose_entries: Vec::new(),
                 expose_title_textures: Vec::new(),
+                expose_title_bright_textures: Vec::new(),
                 expose_titles_dirty: false,
                 expose_hover_ease: Default::default(),
 
@@ -3130,6 +3140,11 @@ impl WaylandCompositor {
                     gl.DeleteTextures(1, &texture);
                 }
             }
+            for (texture, _, _) in self.expose_title_bright_textures.drain(..).flatten() {
+                if texture != 0 {
+                    gl.DeleteTextures(1, &texture);
+                }
+            }
             for row in self.tab_title_textures.drain(..) {
                 for (texture, _, _) in row.into_iter().flatten() {
                     if texture != 0 {
@@ -3489,6 +3504,7 @@ mod gpu_release_contract_tests {
         "glass_backdrop",
         "overview_title_textures",
         "expose_title_textures",
+        "expose_title_bright_textures",
         "tab_title_textures",
         "tab_tooltip_texture",
         "annotation_label_textures",

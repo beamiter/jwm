@@ -606,6 +606,12 @@ impl crate::jwm::Jwm {
         self.last_idle_poll = None;
         self.poll_idle(backend);
         self.broadcast_idle_state();
+        // Bound to a key with the control center closed, the card is the only
+        // confirmation the flip happened.
+        backend.compositor_show_osd(
+            crate::backend::api::OsdKind::Caffeine(self.idle_inhibited),
+            0,
+        );
         Ok(())
     }
 

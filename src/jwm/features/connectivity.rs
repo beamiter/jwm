@@ -7,6 +7,7 @@
 //! the output formats are pinned by tests on machines that have neither.
 
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 const CONNECTIVITY_QUERY_TIMEOUT: Duration = Duration::from_secs(10);
@@ -211,6 +212,25 @@ pub fn bluetooth_row(state: &BluetoothState) -> String {
     )
 }
 
+/// The reading a Wi-Fi radio flip asks for, rendered ahead of the worker's
+/// re-read so the row acknowledges the press at once. Only the fields the
+/// flip itself decides are written; the re-read lands the rest within a tick
+/// or two. A wired link is untouched: Ethernet does not go down with the
+/// wireless radio, so its row keeps the connection it still has.
+#[must_use]
+pub fn optimistic_network_state(state: &NetworkState, enabled: bool) -> NetworkState {
+    let mut optimistic = state.clone();
+    optimistic.wifi_enabled = enabled;
+    if !enabled && optimistic.kind != LinkKind::Wired {
+        // A radio that is going off drops its link: drawing the old SSID
+        // beside "[ off ]" would claim a connection that is already gone.
+        optimistic.connection = None;
+        optimistic.signal = None;
+        optimistic.kind = LinkKind::None;
+    }
+    optimistic
+}
+
 // ---------------------------------------------------------------------------
 // Tool detection and queries
 // ---------------------------------------------------------------------------
@@ -293,6 +313,24 @@ fn peek_bluetoothctl() -> Option<bool> {
 /// The Wi-Fi counterpart of [`peek_bluetoothctl`].
 fn peek_nmcli() -> Option<bool> {
     WIFI_TOOL.get().map(|tool| *tool == Some(WifiTool::Nmcli))
+}
+
+/// Peek, without initialising, whether detection already concluded that no
+/// Wi-Fi tool works at all (neither nmcli nor rfkill): `Some(true)`/`Some(false)`
+/// once detection has run, `None` before it has. The radio toggle's gate reads
+/// this on the frame thread for the same reason [`peek_nmcli`] exists —
+/// initialising the lock execs nmcli/rfkill, the fork a worker exists to keep
+/// off the compositor.
+fn peek_wifi_tool_absent() -> Option<bool> {
+    WIFI_TOOL.get().map(|tool| tool.is_none())
+}
+
+/// The Bluetooth counterpart of [`peek_wifi_tool_absent`]. Unlike
+/// [`peek_bluetoothctl`] this does not distinguish bluetoothctl from rfkill:
+/// either one can switch the radio, so "no tool" is the only answer the
+/// toggle's gate needs.
+fn peek_bluetooth_tool_absent() -> Option<bool> {
+    BLUETOOTH_TOOL.get().map(|tool| tool.is_none())
 }
 
 /// Read the current network state, or `None` when this machine has no
@@ -1260,6 +1298,91 @@ pub fn start_device_action(
     })
 }
 
+/// Which radio a [`start_radio_set`] job switches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RadioKind {
+    Wifi,
+    Bluetooth,
+}
+
+impl RadioKind {
+    /// The blocking switch, run on the worker. Returns false when no tool
+    /// would do it; the re-read after it is what the row believes anyway.
+    fn set(self, enabled: bool) -> bool {
+        match self {
+            Self::Wifi => set_wifi(enabled),
+            Self::Bluetooth => set_bluetooth(enabled),
+        }
+    }
+}
+
+/// Whether a radio flip is still being applied off-thread. The control-center
+/// rows and the key-bound toggles coalesce on it the way the pickers' `s`/`r`
+/// keys coalesce on their scan slot: two concurrent nmcli/bluetoothctl writes
+/// race, and the radio would end wherever the slower one left it rather than
+/// where the user last asked.
+static RADIO_SET_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+
+/// Whether a requested radio flip has not finished applying yet.
+#[must_use]
+pub fn radio_set_in_flight() -> bool {
+    RADIO_SET_IN_FLIGHT.load(Ordering::Acquire)
+}
+
+/// Whether detection already concluded that no tool can switch this radio —
+/// the one answer the event thread may read without spawning, so the key
+/// binding keeps its old error path instead of queueing work that only
+/// reports the same thing a tick later. The counterpart of
+/// [`super::system_controls::volume_tool_known_absent`].
+#[must_use]
+pub fn radio_tool_known_absent(kind: RadioKind) -> bool {
+    match kind {
+        RadioKind::Wifi => peek_wifi_tool_absent() == Some(true),
+        RadioKind::Bluetooth => peek_bluetooth_tool_absent() == Some(true),
+    }
+}
+
+/// Switch a radio on a worker thread, then re-read both radios so the result
+/// the frame tick adopts is the state that actually took — a hard-blocked
+/// radio refuses to come back on, and the row must land on the truth.
+///
+/// The job rides the same slot and poll as a plain [`start_state_read`]:
+/// `refresh_connectivity` after a toggle used to spawn exactly this re-read,
+/// just after blocking the event thread on the set itself. `None` when
+/// detection already concluded there is no tool to switch with, matching the
+/// synchronous path's refusal.
+#[must_use]
+pub fn start_radio_set(kind: RadioKind, enabled: bool) -> Option<BackgroundJob<ConnectivityState>> {
+    // Peek, never initialise, on the frame thread: initialising the tool lock
+    // execs nmcli/bluetoothctl/rfkill, which must not stall a frame. A
+    // not-yet-detected tool errs toward spawning so the worker decides
+    // off-thread.
+    if radio_tool_known_absent(kind) {
+        return None;
+    }
+    // Only the event thread submits, so this load/store pair cannot race a
+    // second claim; callers still test `radio_set_in_flight` first so a press
+    // while a flip runs is a coalesced no-op rather than a replaced handle.
+    RADIO_SET_IN_FLIGHT.store(true, Ordering::Release);
+    let job = BackgroundJob::spawn(move || {
+        // The set's own answer is not evidence: bluetoothctl exits 0 on
+        // failure and rfkill cannot override a hard block. The re-read the
+        // job returns is what the panel adopts. Either way the lock is
+        // initialised here, off-thread, where the gate could not look.
+        let _ = kind.set(enabled);
+        let state = read_state();
+        RADIO_SET_IN_FLIGHT.store(false, Ordering::Release);
+        state
+    });
+    if !job.started() {
+        // A thread the OS refused never runs the closure, so it never clears
+        // the flag either; reset it here or every later flip coalesces into a
+        // job that does not exist for the rest of the session.
+        RADIO_SET_IN_FLIGHT.store(false, Ordering::Release);
+    }
+    Some(job)
+}
+
 /// Condense bluetoothctl's chatter into the one line that matters.
 #[must_use]
 pub fn summarize_bluetoothctl_error(output: &str) -> String {
@@ -1491,13 +1614,58 @@ impl crate::jwm::Jwm {
 
     /// Kick off a background re-read of Wi-Fi and Bluetooth. The result is
     /// adopted from the frame tick by [`Self::poll_connectivity_job`].
-    /// Called after a toggle and on the hardware poll.
+    /// Called after a state-changing action whose effects the cache has not
+    /// seen — a joined network, a connected device, a finished pairing.
+    /// (Radio flips use [`Self::request_radio_set`] instead: its job already
+    /// returns the post-set re-read.)
     ///
-    /// A toggle wants the post-toggle state, so a still-running read is
+    /// The caller wants the post-action state, so a still-running read is
     /// replaced; its thread finishes on its own and the stale result is
     /// dropped with the handle.
     pub(crate) fn refresh_connectivity(&mut self) {
         self.features.connectivity_poll = Some(self.track_background_job(start_state_read()));
+    }
+
+    /// Ask the worker to flip a radio, drawing the requested state at once.
+    /// The job's post-set re-read is adopted by [`Self::poll_connectivity_job`]
+    /// like any other read, so the row lands on the truth — including "the
+    /// radio refused", which no estimate may survive.
+    ///
+    /// The estimate follows the round-13 convention: it is written into the
+    /// cached reading, so the rebuilt row and the `network/status` broadcast
+    /// all carry it immediately, and the re-read then confirms it (the poll
+    /// finds nothing new and stays quiet) or takes it back (the read differs,
+    /// so the row reverts and a second broadcast corrects subscribers).
+    ///
+    /// Coalesces the way the pickers' `s`/`r` keys do: while a flip is still
+    /// being applied another press is a no-op, because the requested state is
+    /// already what the row shows — the cached reading cannot have moved yet,
+    /// so a repeated press can only be asking for the same target.
+    pub(crate) fn request_radio_set(&mut self, kind: RadioKind, enabled: bool) {
+        if radio_set_in_flight() {
+            return;
+        }
+        let Some(job) = start_radio_set(kind, enabled) else {
+            log::debug!("connectivity: no tool to switch {kind:?}");
+            return;
+        };
+        match kind {
+            RadioKind::Wifi => {
+                if let Some(state) = self.features.connectivity.network.as_mut() {
+                    *state = optimistic_network_state(state, enabled);
+                }
+            }
+            RadioKind::Bluetooth => {
+                self.features.connectivity.bluetooth.powered = enabled;
+            }
+        }
+        // No-op when the control center is not on screen; the estimate still
+        // stands in the cache for the next opening, and the OSD (key-bound
+        // path) already acknowledged the press.
+        self.refresh_open_control_center();
+        let payload = self.connectivity_json();
+        self.broadcast_ipc_event("network/status", payload);
+        self.features.connectivity_poll = Some(self.track_background_job(job));
     }
 
     /// Adopt a finished background connectivity read and refresh an open
@@ -1871,6 +2039,125 @@ mod tests {
                 "{starter}'s worker never initialises the tool lock ({needle})"
             );
         }
+    }
+
+    /// The radio toggle's starter follows the same rule as the scan starters
+    /// above: the frame-thread gate only peeks the tool lock, and the worker
+    /// is what runs the set and the re-read behind it. Same construction as
+    /// the scan-starter pin.
+    #[test]
+    fn the_radio_set_starter_peeks_and_lets_the_worker_set() {
+        const SOURCE: &str = include_str!("connectivity.rs");
+        let body = SOURCE
+            .split_once("fn start_radio_set")
+            .expect("start_radio_set not found")
+            .1
+            .split_once("fn summarize_bluetoothctl_error")
+            .expect("start_radio_set is no longer followed by summarize_bluetoothctl_error")
+            .0;
+        let (gate, worker) = body
+            .split_once("BackgroundJob::spawn")
+            .expect("start_radio_set has no worker spawn");
+        for needle in [
+            format!("{}{}", "wifi_tool", "()"),
+            format!("{}{}", "bluetooth_tool", "()"),
+            format!("{}(", "set_wifi"),
+            format!("{}(", "set_bluetooth"),
+        ] {
+            assert!(
+                !gate.contains(&needle),
+                "start_radio_set's gate runs {needle} on the frame thread"
+            );
+        }
+        let set = format!("kind.{}(", "set");
+        let reread = format!("{}()", "read_state");
+        assert!(
+            worker.contains(&set),
+            "start_radio_set's worker never switches the radio ({set})"
+        );
+        let set_at = worker.find(&set).expect("the set");
+        let reread_at = worker.find(&reread).expect("the re-read");
+        assert!(
+            set_at < reread_at,
+            "the worker must re-read after the set so the row lands on the truth"
+        );
+    }
+
+    /// A flip already being applied owns the radio: `request_radio_set` must
+    /// test the in-flight flag before submitting, the way the pickers' `s`/`r`
+    /// keys coalesce on a running scan. The needles are assembled at runtime
+    /// and the haystack is one function's body, so this cannot match its own
+    /// source.
+    #[test]
+    fn the_radio_set_request_coalesces_before_submitting() {
+        const SOURCE: &str = include_str!("connectivity.rs");
+        let body = SOURCE
+            .split_once(&format!("fn {}(", "request_radio_set"))
+            .expect("request_radio_set not found")
+            .1
+            .split_once(&format!("fn {}(", "poll_connectivity_job"))
+            .expect("request_radio_set is no longer followed by poll_connectivity_job")
+            .0;
+        let guard = format!("{}()", "radio_set_in_flight");
+        let submit = format!("{}(", "start_radio_set");
+        let guard_at = body.find(&guard).expect("the request is guarded");
+        let submit_at = body.find(&submit).expect("the job is still started");
+        assert!(
+            guard_at < submit_at,
+            "request_radio_set must test for a running flip before starting another"
+        );
+    }
+
+    #[test]
+    fn the_optimistic_network_state_writes_only_what_the_flip_decides() {
+        let wireless = NetworkState {
+            wifi_enabled: true,
+            connection: Some("ENGINEAI 1".to_string()),
+            kind: LinkKind::Wireless,
+            signal: Some(72),
+        };
+        // Going off drops the link fields: the old SSID beside "[ off ]"
+        // would claim a connection that is already gone.
+        let off = optimistic_network_state(&wireless, false);
+        assert_eq!(
+            off,
+            NetworkState {
+                wifi_enabled: false,
+                connection: None,
+                kind: LinkKind::None,
+                signal: None,
+            }
+        );
+        // Going on changes the switch and nothing else; the re-read owns the
+        // rest.
+        let on = optimistic_network_state(&off, true);
+        assert_eq!(
+            on,
+            NetworkState {
+                wifi_enabled: true,
+                ..off
+            }
+        );
+
+        // A wired link does not go down with the wireless radio, so its row
+        // keeps the connection it still has.
+        let wired = NetworkState {
+            wifi_enabled: true,
+            connection: Some("Wired connection 1".to_string()),
+            kind: LinkKind::Wired,
+            signal: None,
+        };
+        let off = optimistic_network_state(&wired, false);
+        assert_eq!(
+            off,
+            NetworkState {
+                wifi_enabled: false,
+                ..wired.clone()
+            }
+        );
+        // ...so the drawn row does not change at all: a cable does not care
+        // about the wireless switch.
+        assert_eq!(network_row(&off), network_row(&wired));
     }
 
     #[test]

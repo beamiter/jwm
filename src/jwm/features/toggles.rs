@@ -276,7 +276,7 @@ impl Jwm {
         // A chain of quick presses estimates from the estimate already on
         // screen, so a repeat storm follows its own display.
         let base = self.features.control_feedback.volume_shown().or(confirmed);
-        let estimate = system_controls::optimistic_volume(base, request);
+        let estimate = system_controls::optimistic_volume(base, &request);
         let seq =
             system_controls::queue_control_request(request, self.async_update_notifier.clone())?;
         if let Some(estimate) = estimate {
@@ -307,7 +307,7 @@ impl Jwm {
             .control_feedback
             .brightness_shown()
             .or(confirmed);
-        let estimate = system_controls::optimistic_brightness(base, request);
+        let estimate = system_controls::optimistic_brightness(base, &request);
         let seq =
             system_controls::queue_control_request(request, self.async_update_notifier.clone())?;
         if let Some(estimate) = estimate {
@@ -397,7 +397,62 @@ impl Jwm {
             }
         }
 
+        if let Some(audio) = report.audio {
+            self.adopt_audio_switch(audio);
+        }
+
         if panel_changed {
+            self.refresh_open_control_center();
+        }
+    }
+
+    /// Adopt the worker's answer to a device switch: the picker's marker and
+    /// status line follow the re-read, never the request, and the cached
+    /// topology moves with them so the control-center rows and
+    /// `get_audio_devices` agree. Runs from the frame tick via
+    /// [`Self::poll_control_feedback`]; never blocks.
+    fn adopt_audio_switch(&mut self, report: crate::jwm::features::system_controls::AudioReport) {
+        use crate::jwm::features::system_controls;
+
+        let verdict = system_controls::audio_switch_verdict(&report);
+        match (verdict.took, verdict.in_use.as_deref()) {
+            (true, Some(name)) => {
+                log::info!("audio: {} is now {name}", report.direction.label());
+            }
+            (false, Some(name)) => {
+                log::warn!(
+                    "audio: {} stayed on {name} after asking for {}",
+                    report.direction.label(),
+                    report.asked_id
+                );
+            }
+            _ => {
+                log::debug!(
+                    "audio: switch #{} of {} resolved with no default reporting",
+                    report.seq,
+                    report.direction.label()
+                );
+            }
+        }
+        if self.features.system_ui.audio_picker_direction() == Some(report.direction) {
+            self.features
+                .system_ui
+                .set_audio_devices(report.direction, report.inventory.devices(report.direction));
+            self.features
+                .system_ui
+                .set_audio_message(report.direction, verdict.message);
+            self.mark_system_ui_dirty();
+        }
+        // The epoch bump discards a worker read that was already in flight,
+        // so the pre-switch default marker cannot roll the row back.
+        let old_defaults = self
+            .features
+            .control_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.audio_defaults.clone());
+        let new_defaults = report.inventory.defaults();
+        self.cache_control_audio_inventory(report.inventory);
+        if old_defaults.as_ref() != Some(&new_defaults) {
             self.refresh_open_control_center();
         }
     }
@@ -582,13 +637,6 @@ impl Jwm {
 
     pub(crate) fn cache_control_brightness(&mut self, percent: u8) {
         self.mutate_control_snapshot(|snapshot| snapshot.brightness = Some(percent));
-    }
-
-    pub(crate) fn cache_control_audio_defaults(
-        &mut self,
-        defaults: crate::jwm::features::system_controls::AudioDefaults,
-    ) {
-        self.mutate_control_snapshot(|snapshot| snapshot.audio_defaults = defaults);
     }
 
     pub(crate) fn cache_control_power_profiles(&mut self, available: Vec<String>, active: String) {
@@ -964,8 +1012,11 @@ impl Jwm {
         Ok(())
     }
 
-    /// Make the selected device the default, then re-read so the marker
-    /// shows what actually took effect rather than what was asked for.
+    /// Queue the selected device as the default on the controls worker. The
+    /// set plus the verifying re-read are two bounded-but-blocking spawns —
+    /// the round-13 bug shape — so they run off the event thread; the picker's
+    /// message acknowledges the press now, and the worker's report lands the
+    /// marker on what actually took effect from the frame tick.
     pub(crate) fn use_selected_audio_device(&mut self, backend: &mut dyn Backend) {
         use crate::jwm::features::system_controls;
 
@@ -975,36 +1026,17 @@ impl Jwm {
         let Some(id) = self.features.system_ui.selected_audio_device() else {
             return;
         };
-        let asked = system_controls::set_audio_device(direction, &id);
-        // The tool's exit code is not evidence: a sound server routinely
-        // accepts the request and then puts the default back, because the
-        // device is not actually available — an HDMI output with no monitor,
-        // a headset microphone with no headset. Believe the re-read.
-        let inventory = system_controls::audio_inventory();
-        let devices = inventory.devices(direction);
-        let took = devices
-            .iter()
-            .any(|device| device.id == id && device.is_default);
-        self.features
-            .system_ui
-            .set_audio_devices(direction, devices);
-        let defaults = inventory.defaults();
-        let in_use = defaults.name(direction).map(str::to_string);
-        self.cache_control_audio_defaults(defaults);
-        let message = match (took, in_use) {
-            (true, Some(name)) => {
-                log::info!("audio: {} is now {name}", direction.label());
-                format!("Using {name}")
-            }
-            (false, Some(name)) => {
-                log::warn!(
-                    "audio: {} stayed on {name} after asking for {id}",
-                    direction.label()
-                );
-                format!("Unavailable \u{2014} still using {name}")
-            }
-            (_, None) if asked => "Switched, but nothing reports as default".to_string(),
-            (_, None) => "Could not switch device".to_string(),
+        let queued = system_controls::queue_control_request(
+            system_controls::ControlRequest::AudioSetDefault { direction, id },
+            self.async_update_notifier.clone(),
+        );
+        // The picker's rows carry no half-switched state worth inventing, so
+        // the honest optimistic surface is the status line; the re-read lands
+        // within a tick or two and moves the marker itself.
+        let message = if queued.is_some() {
+            "Switching\u{2026}"
+        } else {
+            "Could not switch device"
         };
         self.features
             .system_ui
@@ -1670,36 +1702,47 @@ impl Jwm {
         self.sync_system_ui(backend);
     }
 
-    /// Toggle the Wi-Fi radio.
+    /// Toggle the Wi-Fi radio. The flip runs on a worker (nmcli/rfkill can
+    /// block for seconds behind a wedged bus); the OSD acknowledges the press
+    /// at once with the requested target, and the row confirms from the
+    /// worker's post-set re-read — GNOME's immediate-acknowledgement shape.
     pub(crate) fn toggle_wifi(
         &mut self,
-        _backend: &mut dyn Backend,
+        backend: &mut dyn Backend,
         _arg: &WMArgEnum,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        use crate::jwm::features::connectivity::{self, RadioKind};
+
         let enabled = !self
             .features
             .connectivity
             .network
             .as_ref()
             .is_some_and(|state| state.wifi_enabled);
-        if !crate::jwm::features::connectivity::set_wifi(enabled) {
+        if connectivity::radio_tool_known_absent(RadioKind::Wifi) {
             return Err("no working Wi-Fi control (nmcli or rfkill)".into());
         }
-        self.refresh_connectivity();
+        backend.compositor_show_osd(crate::backend::api::OsdKind::Wifi(enabled), 0);
+        self.request_radio_set(RadioKind::Wifi, enabled);
         Ok(())
     }
 
-    /// Toggle the Bluetooth controller.
+    /// Toggle the Bluetooth controller. Same shape as [`Self::toggle_wifi`]:
+    /// queued off the event thread, acknowledged by the OSD with the
+    /// requested target, confirmed by the re-read.
     pub(crate) fn toggle_bluetooth(
         &mut self,
-        _backend: &mut dyn Backend,
+        backend: &mut dyn Backend,
         _arg: &WMArgEnum,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        use crate::jwm::features::connectivity::{self, RadioKind};
+
         let enabled = !self.features.connectivity.bluetooth.powered;
-        if !crate::jwm::features::connectivity::set_bluetooth(enabled) {
+        if connectivity::radio_tool_known_absent(RadioKind::Bluetooth) {
             return Err("no working Bluetooth control (bluetoothctl or rfkill)".into());
         }
-        self.refresh_connectivity();
+        backend.compositor_show_osd(crate::backend::api::OsdKind::Bluetooth(enabled), 0);
+        self.request_radio_set(RadioKind::Bluetooth, enabled);
         Ok(())
     }
 
@@ -1712,6 +1755,7 @@ impl Jwm {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let enabled = !self.night_light_active();
         self.set_night_light_override(backend, enabled);
+        backend.compositor_show_osd(crate::backend::api::OsdKind::NightLight(enabled), 0);
         Ok(())
     }
 
@@ -2359,7 +2403,7 @@ impl Jwm {
     /// Toggle do-not-disturb. Broadcasts `dnd/toggle` so bars can update.
     pub fn toggle_dnd(
         &mut self,
-        _backend: &mut dyn Backend,
+        backend: &mut dyn Backend,
         _arg: &WMArgEnum,
     ) -> Result<(), Box<dyn std::error::Error>> {
         self.do_not_disturb = !self.do_not_disturb;
@@ -2367,6 +2411,13 @@ impl Jwm {
         self.broadcast_ipc_event(
             "dnd/toggle",
             serde_json::json!({ "enabled": self.do_not_disturb }),
+        );
+        // The OSD is the honest surface for DND itself: toasts are DND-gated
+        // (a "Do Not Disturb On" toast would be swallowed by the state it
+        // announces), the OSD is not.
+        backend.compositor_show_osd(
+            crate::backend::api::OsdKind::DoNotDisturb(self.do_not_disturb),
+            0,
         );
         Ok(())
     }
@@ -3940,11 +3991,94 @@ mod shell_entry_tests {
             "brightness_adjust",
             "brightness_set",
             "brightness_percent",
+            // The audio-device switch report is adopted here too, and rides
+            // the same rule: the worker read the tools, the poll only
+            // believes the re-read it was handed.
+            "set_audio_device",
+            "audio_inventory",
         ] {
             let needle = format!("system_controls::{primitive}(");
             assert!(
                 !poll.contains(&needle),
                 "the feedback poll regained a blocking tool call: {needle}"
+            );
+        }
+    }
+
+    /// The audio picker's Enter used to run `wpctl set-default` plus a
+    /// `wpctl status` re-read as two serial blocking spawns on the event
+    /// thread — the round-13 freeze shape. It queues a
+    /// `ControlRequest::AudioSetDefault` on the controls worker now and lets
+    /// the frame tick adopt the re-read. The haystack is the handler alone,
+    /// and the needles are built at runtime so this test cannot match its
+    /// own source.
+    #[test]
+    fn the_audio_picker_enter_queues_instead_of_shelling_out() {
+        const SOURCE: &str = include_str!("toggles.rs");
+        let handler = SOURCE
+            .split_once("pub(crate) fn use_selected_audio_device")
+            .expect("use_selected_audio_device")
+            .1
+            .split_once("pub(crate) fn wifi_picker")
+            .expect("the end of the audio-picker Enter handler")
+            .0;
+        for forbidden in ["set_audio_device", "audio_inventory", "Command"] {
+            let needle = format!("{}(", forbidden);
+            assert!(
+                !handler.contains(&needle),
+                "the audio-picker Enter regained a blocking call: {needle}"
+            );
+        }
+        let queue = format!("{}(", "queue_control_request");
+        assert!(
+            handler.contains(&queue),
+            "the audio-picker Enter no longer queues on the controls worker ({queue})"
+        );
+    }
+
+    /// The key-bound radio toggles used to run `nmcli`/`bluetoothctl`
+    /// synchronously — up to the 10 s query timeout — on the event thread.
+    /// They queue the flip on the connectivity worker and acknowledge the
+    /// press with an OSD showing the requested target; the row confirms from
+    /// the worker's re-read. Same construction as the pins above.
+    #[test]
+    fn the_radio_toggles_queue_and_acknowledge_with_the_osd() {
+        const SOURCE: &str = include_str!("toggles.rs");
+        for (toggle, next, kind) in [
+            (
+                "pub(crate) fn toggle_wifi",
+                "pub(crate) fn toggle_bluetooth",
+                "Wifi",
+            ),
+            (
+                "pub(crate) fn toggle_bluetooth",
+                "pub(crate) fn toggle_night_light",
+                "Bluetooth",
+            ),
+        ] {
+            let body = SOURCE
+                .split_once(toggle)
+                .unwrap_or_else(|| panic!("{toggle} not found"))
+                .1
+                .split_once(next)
+                .unwrap_or_else(|| panic!("{toggle} is no longer followed by {next}"))
+                .0;
+            for primitive in ["set_wifi", "set_bluetooth"] {
+                let needle = format!("connectivity::{primitive}(");
+                assert!(
+                    !body.contains(&needle),
+                    "{toggle} regained a synchronous radio set: {needle}"
+                );
+            }
+            let osd = format!("{}::{}{}", "OsdKind", kind, "(");
+            assert!(
+                body.contains(&osd),
+                "{toggle} no longer acknowledges the press with the {kind} OSD ({osd})"
+            );
+            let queue = format!("self.{}(", "request_radio_set");
+            assert!(
+                body.contains(&queue),
+                "{toggle} no longer queues the flip on the connectivity worker ({queue})"
             );
         }
     }

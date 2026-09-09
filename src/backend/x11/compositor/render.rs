@@ -1502,8 +1502,16 @@ impl<C: CompositorConnection> Compositor<C> {
                 query_width,
             )
         });
+        // A row whose real icon is uploaded loses its generic glyph from the
+        // rasterized text — the icon draws in the slot where the glyph stood;
+        // rows still decoding or without an answer keep the placeholder.
+        let items_joined = crate::backend::compositor_common::row_icons::items_text(
+            &overlay.items,
+            self.system_ui_row_icons.as_deref(),
+            |path| self.system_ui_row_icon_cache.get(path).is_some(),
+        );
         let items_text = crate::backend::compositor_font::fit_ui_text_lines(
-            &overlay.items.join("\n"),
+            &items_joined,
             description,
             size,
             items_width,
@@ -2537,6 +2545,15 @@ impl<C: CompositorConnection> Compositor<C> {
                 };
             match uploaded {
                 Some(texture) => {
+                    // An insert past the cache cap evicts the coldest
+                    // texture. When that was a visible row's icon, the row's
+                    // generic glyph belongs in its text again — re-rasterize.
+                    if let Some(evicted) = self.system_ui_row_icon_cache.eviction_candidate(&path)
+                        && let Some(icons) = self.system_ui_row_icons.as_deref()
+                        && icons.iter().flatten().any(|band| band.as_str() == evicted)
+                    {
+                        self.sysui_text_dirty = true;
+                    }
                     if let Some((evicted, _, _)) = self
                         .system_ui_row_icon_cache
                         .insert_texture(path, (texture, data.width, data.height))
@@ -2548,10 +2565,12 @@ impl<C: CompositorConnection> Compositor<C> {
                 None => self.system_ui_row_icon_cache.mark_missed(&path),
             }
         }
-        // A landed icon is the one change a frame must show; the rows' text
-        // was drawn with its glyph placeholders all along.
+        // A landed icon changes the frame twice over: the icon itself, and
+        // its row's text, which now drops the generic glyph the slot no
+        // longer needs — hence the re-rasterization alongside the redraw.
         if landed {
             self.needs_render = true;
+            self.sysui_text_dirty = true;
         }
     }
 
@@ -2724,7 +2743,11 @@ impl<C: CompositorConnection> Compositor<C> {
     /// shadow, rounded panel with a gradient accent ring, a search-field bar,
     /// and a selection pill under the highlighted list row.
     fn render_system_ui(&mut self, proj: &[f32; 16]) {
-        let Some(overlay) = self.system_ui.clone() else {
+        // The frame below mutates renderer state all over, so the overlay
+        // cannot be borrowed out of `self` — and deep-cloning its strings on
+        // every rendered frame is the one cost worth avoiding. Take it out,
+        // and put it back on the way out, every path.
+        let Some(overlay) = self.system_ui.take() else {
             return;
         };
         self.system_ui_hit_geometry = None;
@@ -2732,12 +2755,24 @@ impl<C: CompositorConnection> Compositor<C> {
         let viewport = overlay.effective_viewport(self.screen_w as i32, self.screen_h as i32);
         if let Some(strip) = &overlay.filmstrip {
             self.render_layout_filmstrip(proj, strip, viewport);
-            return;
-        }
-        if let Some(grid) = &overlay.tags_grid {
+        } else if let Some(grid) = &overlay.tags_grid {
             self.render_tags_grid(proj, grid, viewport);
-            return;
+        } else {
+            self.render_system_ui_panel(proj, &overlay, viewport);
         }
+        self.system_ui = Some(overlay);
+    }
+
+    /// The list-card panel of the system UI: sections, the selection pill and
+    /// hover cue, the scrollbar, and the launcher/switcher row icons. The
+    /// filmstrip and the tags grid branch off in
+    /// [`render_system_ui`](Self::render_system_ui) before this runs.
+    fn render_system_ui_panel(
+        &mut self,
+        proj: &[f32; 16],
+        overlay: &crate::backend::api::SystemUiOverlay,
+        viewport: [f32; 4],
+    ) {
         let dims = |slot: usize| -> (f32, f32) {
             self.sysui_textures[slot]
                 .map(|(_, w, h)| (w as f32, h as f32))
@@ -2947,7 +2982,7 @@ impl<C: CompositorConnection> Compositor<C> {
             // rather than dismissing the panel like a scrim click.
             let preview_frame = self.render_system_ui_side_preview(
                 proj,
-                &overlay,
+                overlay,
                 viewport,
                 [x, y, panel_w, panel_h],
                 content_a,
@@ -3152,9 +3187,11 @@ impl<C: CompositorConnection> Compositor<C> {
                 self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
             }
             // Row icons of the launcher and the switcher, in the same pass:
-            // same program, same content alpha as the text. A row whose icon
-            // is still decoding — or will never resolve — keeps its text as
-            // it is; the icon pops in on a later frame without moving it.
+            // same program, same content alpha as the text. A row drawn here
+            // has already lost its generic glyph from the rasterized text
+            // (the poll re-rasterized it when the texture landed), so glyph
+            // and icon never show side by side; a row still decoding — or
+            // one that will never resolve — keeps the glyph placeholder.
             if let (Some(icons), Some(items_pos)) =
                 (self.system_ui_row_icons.as_deref(), layout.items)
                 && layout.row_height > 0.0

@@ -266,12 +266,17 @@ impl Jwm {
             use crate::jwm::features::system_controls::ControlDomain;
             let kind = match correction.domain {
                 ControlDomain::Volume if correction.muted => {
-                    crate::backend::api::OsdKind::VolumeMuted
+                    Some(crate::backend::api::OsdKind::VolumeMuted)
                 }
-                ControlDomain::Volume => crate::backend::api::OsdKind::Volume,
-                ControlDomain::Brightness => crate::backend::api::OsdKind::Brightness,
+                ControlDomain::Volume => Some(crate::backend::api::OsdKind::Volume),
+                ControlDomain::Brightness => Some(crate::backend::api::OsdKind::Brightness),
+                // A device switch never queues an OSD correction: its
+                // feedback is the picker's re-read rows, not a value card.
+                ControlDomain::AudioDevice => None,
             };
-            backend.compositor_show_osd(kind, correction.percent);
+            if let Some(kind) = kind {
+                backend.compositor_show_osd(kind, correction.percent);
+            }
         }
         // The tags grid describes one monitor. When the selection moved to
         // another one underneath it — IPC `focus_monitor`, an activation on
@@ -442,6 +447,48 @@ impl Jwm {
         // searches and Wi-Fi passphrases reject accented and CJK input even
         // though the font/raster path is UTF-8 throughout.
         (!ch.is_control()).then_some(ch)
+    }
+
+    /// Enter on the lock screen: hand the password field to the PAM worker.
+    /// A wrong password costs ~2s inside `pam_authenticate` on stock
+    /// pam_unix — and pam_sss, fingerprint or faillock modules wait
+    /// arbitrarily long — so running it here would freeze the whole
+    /// compositor; the frame tick's [`Self::poll_lock_auth_job`] adopts the
+    /// outcome instead. One attempt at a time: while the worker holds a
+    /// password, Enter is dead and the field keeps collecting the next try.
+    /// Esc is untouched — it still only clears the field, never the worker.
+    fn submit_lock_password(&mut self) {
+        let Some(password) = self.features.system_ui.begin_authentication() else {
+            return;
+        };
+        let job = crate::jwm::features::system_ui::start_authentication(password);
+        let job = self.track_background_job(job);
+        self.features.system_ui.track_authentication(job);
+    }
+
+    /// Adopt the lock screen's finished PAM authentication. Called from the
+    /// frame tick beside the other worker polls; does nothing while the
+    /// worker is still running, and nothing at all once the lock is gone —
+    /// the attempt lives in the lock state, so a dismissed lock took its
+    /// worker handle with it. Success runs exactly the path the inline
+    /// authentication took (`close_system_ui`), failure shows the same row
+    /// it did; the worker has already wiped the password on either outcome.
+    pub(crate) fn poll_lock_auth_job(&mut self, backend: &mut dyn Backend) {
+        use crate::jwm::features::system_ui::AuthPoll;
+        match self.features.system_ui.poll_authentication() {
+            AuthPoll::Pending => {}
+            AuthPoll::Completed(true) => self.close_system_ui(backend),
+            AuthPoll::Completed(false) => {
+                self.features.system_ui.authentication_failed();
+                self.sync_system_ui(backend);
+            }
+            AuthPoll::Refused => {
+                // The OS refused the worker a thread: no authentication
+                // ran, so the progress row comes down and Enter may retry.
+                self.features.system_ui.authentication_aborted();
+                self.sync_system_ui(backend);
+            }
+        }
     }
 
     pub(crate) fn sync_screenshot_annotation_style(&self, backend: &mut dyn Backend) {
@@ -902,16 +949,14 @@ impl Jwm {
                             }
                         }
                         NetworkRowAction::EnableRadio => {
-                            // Re-read rather than assume: the radio may be
-                            // hard-blocked and refuse to come back on.
-                            if connectivity::set_wifi(true) {
-                                self.refresh_connectivity();
-                            }
+                            // Off the event thread: the worker flips the
+                            // radio and re-reads, and the row lands on the
+                            // truth — the radio may be hard-blocked and
+                            // refuse to come back on.
+                            self.request_radio_set(connectivity::RadioKind::Wifi, true);
                         }
                         NetworkRowAction::SetRadio(enabled) => {
-                            if connectivity::set_wifi(enabled) {
-                                self.refresh_connectivity();
-                            }
+                            self.request_radio_set(connectivity::RadioKind::Wifi, enabled);
                         }
                         NetworkRowAction::Nothing => {}
                     }
@@ -939,24 +984,18 @@ impl Jwm {
                             }
                         }
                         BluetoothRowAction::PowerOn => {
-                            if connectivity::set_bluetooth(true) {
-                                self.refresh_connectivity();
-                            }
+                            self.request_radio_set(connectivity::RadioKind::Bluetooth, true);
                         }
                         // Powering down can take a Bluetooth keyboard with it,
                         // so `activate_control` withholds it until a second
                         // press confirms.
                         BluetoothRowAction::SetPower(false) => {
-                            if self.features.system_ui.activate_control().is_some()
-                                && connectivity::set_bluetooth(false)
-                            {
-                                self.refresh_connectivity();
+                            if self.features.system_ui.activate_control().is_some() {
+                                self.request_radio_set(connectivity::RadioKind::Bluetooth, false);
                             }
                         }
                         BluetoothRowAction::SetPower(true) => {
-                            if connectivity::set_bluetooth(true) {
-                                self.refresh_connectivity();
-                            }
+                            self.request_radio_set(connectivity::RadioKind::Bluetooth, true);
                         }
                         BluetoothRowAction::Nothing => {}
                     }
@@ -1754,6 +1793,15 @@ impl Jwm {
             // pill pinned to its old row.
             backend.compositor_set_system_ui_hover(None);
             let locked = self.features.system_ui.is_locked();
+            // `clean_mask` strips Mods::CAPS from `clean_state`, which keeps
+            // caps lock out of every binding and type-to-filter — but the
+            // lock screen's password field is the one place the modifier
+            // must change the character a key produces. `char_mods` restores
+            // the live reading for that single consumer (the `system_ui_char`
+            // call that feeds the field at the bottom of this branch); every
+            // other caller keeps `clean_state`, and `clean_mask` is
+            // untouched.
+            let mut char_mods = clean_state;
             if locked {
                 // The lock holds the keyboard grab, so every key event doubles
                 // as a modifier-state reading for the caps-lock row. Read the
@@ -1768,6 +1816,37 @@ impl Jwm {
                 // triggers below; no extra sync is added for it.
                 if let Some(caps_lock) = Self::current_caps_lock(backend) {
                     self.features.system_ui.set_lock_caps_lock(caps_lock);
+                    if caps_lock {
+                        char_mods |= Mods::CAPS;
+                    }
+                }
+                // Volume, brightness and media transport keys stay live
+                // behind the lock screen, as they do on GNOME, KDE, macOS
+                // and Windows. The match runs through the ordinary binding
+                // table — same modifier rule, same function pointer, same
+                // argument — so the action is byte-for-byte the one the
+                // unlocked session would run, controls worker and optimistic
+                // OSD state included; the opaque backdrop simply hides the
+                // OSD, and the lock card grows no rows for it. The key must
+                // be one of the dedicated XF86 keysyms *and* bound to one of
+                // the media actions, or it falls through to the swallow like
+                // every other key.
+                if Self::lock_media_keysym(keysym) {
+                    let passthrough = self
+                        .key_bindings
+                        .iter()
+                        .find(|kc| {
+                            keysym == kc.key_sym
+                                && (kc.mask & key_mods) == clean_state
+                                && kc.func_opt.is_some_and(Self::lock_media_func)
+                        })
+                        .and_then(|kc| kc.func_opt.map(|func| (func, kc.arg.clone())));
+                    if let Some((func, arg)) = passthrough {
+                        if let Err(error) = func(self, backend, &arg) {
+                            error!("Error executing lock-screen media key: {error}");
+                        }
+                        return Ok(());
+                    }
                 }
             }
             // Escape backs out of the passphrase prompt before it closes the
@@ -2102,20 +2181,11 @@ impl Jwm {
                 self.features.system_ui.move_selection(1);
             } else if keysym == keys::KEY_Return {
                 if locked {
-                    if let Some(mut password) = self.features.system_ui.take_password() {
-                        let authenticated =
-                            crate::jwm::features::system_ui::authenticate_current_user(&password);
-                        unsafe { password.as_bytes_mut().fill(0) };
-                        if authenticated {
-                            self.close_system_ui(backend);
-                            return Ok(());
-                        }
-                        self.features.system_ui.authentication_failed();
-                    }
+                    self.submit_lock_password();
                 } else if self.activate_launcher_selection(backend)? {
                     return Ok(());
                 }
-            } else if let Some(ch) = Self::system_ui_char(keysym, clean_state) {
+            } else if let Some(ch) = Self::system_ui_char(keysym, char_mods) {
                 self.features.system_ui.push_char(ch);
             }
             self.sync_system_ui(backend);
@@ -2522,6 +2592,38 @@ impl Jwm {
     pub(crate) fn is_native_screenshot(func: WMFuncType) -> bool {
         std::ptr::fn_addr_eq(func, Jwm::take_screenshot as WMFuncType)
             || std::ptr::fn_addr_eq(func, Jwm::take_screenshot_fullscreen as WMFuncType)
+    }
+
+    /// The dedicated volume/brightness/media keysyms that stay live on the
+    /// lock screen. Exactly the set the default keybinding table maps to the
+    /// media actions; every other key remains swallowed by the modal lock.
+    pub(crate) fn lock_media_keysym(keysym: u32) -> bool {
+        matches!(
+            keysym,
+            keys::KEY_XF86AudioRaiseVolume
+                | keys::KEY_XF86AudioLowerVolume
+                | keys::KEY_XF86AudioMute
+                | keys::KEY_XF86AudioPlay
+                | keys::KEY_XF86AudioPause
+                | keys::KEY_XF86AudioNext
+                | keys::KEY_XF86AudioPrev
+                | keys::KEY_XF86AudioStop
+                | keys::KEY_XF86MonBrightnessUp
+                | keys::KEY_XF86MonBrightnessDown
+        )
+    }
+
+    /// The actions a lock-screen media key may invoke: exactly the volume,
+    /// brightness and media transport functions — never a spawn, a panel
+    /// opener, or anything else a user happened to bind to those keysyms.
+    pub(crate) fn lock_media_func(func: WMFuncType) -> bool {
+        std::ptr::fn_addr_eq(func, Jwm::volume_adjust as WMFuncType)
+            || std::ptr::fn_addr_eq(func, Jwm::volume_mute as WMFuncType)
+            || std::ptr::fn_addr_eq(func, Jwm::brightness_adjust as WMFuncType)
+            || std::ptr::fn_addr_eq(func, Jwm::media_play_pause as WMFuncType)
+            || std::ptr::fn_addr_eq(func, Jwm::media_next as WMFuncType)
+            || std::ptr::fn_addr_eq(func, Jwm::media_previous as WMFuncType)
+            || std::ptr::fn_addr_eq(func, Jwm::media_stop as WMFuncType)
     }
 
     pub(crate) fn on_button_press_internal(
@@ -3297,6 +3399,155 @@ mod tests {
         );
     }
 
+    #[test]
+    fn system_ui_char_applies_caps_lock_to_letters_only() {
+        use crate::backend::common_define::{Mods, keys};
+
+        // Caps XORs with shift on ASCII letters: alone it capitalizes, with
+        // shift it lowers — the lock screen's password field behaves like
+        // every real lock screen once `char_mods` carries the live reading.
+        assert_eq!(Jwm::system_ui_char(keys::KEY_a, Mods::CAPS), Some('A'));
+        assert_eq!(
+            Jwm::system_ui_char(keys::KEY_a, Mods::CAPS | Mods::SHIFT),
+            Some('a')
+        );
+        // Digits and punctuation follow the shift table only; caps alone is
+        // not shift.
+        assert_eq!(Jwm::system_ui_char(keys::KEY_1, Mods::CAPS), Some('1'));
+        // The Caps Lock press itself is not a printable character: no
+        // password character appears for the keystroke that toggles it.
+        assert_eq!(Jwm::system_ui_char(keys::KEY_Caps_Lock, Mods::CAPS), None);
+        // A non-ASCII keysym already names the layout's character; caps does
+        // not reach it.
+        assert_eq!(Jwm::system_ui_char(0x00e9, Mods::CAPS), Some('é'));
+    }
+
+    #[test]
+    fn the_lock_screen_media_passthrough_covers_exactly_the_xf86_set() {
+        use crate::backend::common_define::keys;
+
+        for keysym in [
+            keys::KEY_XF86AudioRaiseVolume,
+            keys::KEY_XF86AudioLowerVolume,
+            keys::KEY_XF86AudioMute,
+            keys::KEY_XF86AudioPlay,
+            keys::KEY_XF86AudioPause,
+            keys::KEY_XF86AudioNext,
+            keys::KEY_XF86AudioPrev,
+            keys::KEY_XF86AudioStop,
+            keys::KEY_XF86MonBrightnessUp,
+            keys::KEY_XF86MonBrightnessDown,
+        ] {
+            assert!(
+                Jwm::lock_media_keysym(keysym),
+                "keysym 0x{keysym:x} fell out of the lock-screen set"
+            );
+        }
+        // Password keys, navigation and ordinary function keys stay
+        // swallowed.
+        assert!(!Jwm::lock_media_keysym(keys::KEY_a));
+        assert!(!Jwm::lock_media_keysym(keys::KEY_1));
+        assert!(!Jwm::lock_media_keysym(keys::KEY_Return));
+        assert!(!Jwm::lock_media_keysym(keys::KEY_Escape));
+        assert!(!Jwm::lock_media_keysym(keys::KEY_F5));
+    }
+
+    #[test]
+    fn the_lock_screen_media_passthrough_only_runs_media_actions() {
+        use crate::jwm::types::WMFuncType;
+
+        for func in [
+            Jwm::volume_adjust as WMFuncType,
+            Jwm::volume_mute as WMFuncType,
+            Jwm::brightness_adjust as WMFuncType,
+            Jwm::media_play_pause as WMFuncType,
+            Jwm::media_next as WMFuncType,
+            Jwm::media_previous as WMFuncType,
+            Jwm::media_stop as WMFuncType,
+        ] {
+            assert!(Jwm::lock_media_func(func));
+        }
+        // A user binding one of those keysyms to anything else — a panel
+        // opener, a lock action, a spawn — stays swallowed behind the lock.
+        assert!(!Jwm::lock_media_func(Jwm::app_launcher as WMFuncType));
+        assert!(!Jwm::lock_media_func(Jwm::lock_screen as WMFuncType));
+        assert!(!Jwm::lock_media_func(Jwm::spawn as WMFuncType));
+    }
+
+    /// GNOME, KDE, macOS and Windows all answer volume and transport keys on
+    /// their lock screens; jwm's locked arm swallowed them with every other
+    /// key. The pin is textual because driving the modal branch needs a
+    /// grabbing backend: the passthrough must be consulted inside the locked
+    /// arm, before the fall-through that feeds the password field. Needles
+    /// are assembled at runtime so this test's own source cannot match them.
+    #[test]
+    fn the_locked_arm_passes_media_keys_through_before_swallowing() {
+        const SOURCE: &str = include_str!("input_handler.rs");
+        let body = SOURCE
+            .split_once(&format!("fn {}(", "on_key_press_internal"))
+            .expect("the key handler")
+            .1
+            .split_once(&format!("fn {}(", "is_native_screenshot"))
+            .expect("the function after the key handler")
+            .0;
+        let passthrough = body
+            .find(&format!("Self::{}(", "lock_media_keysym"))
+            .expect("the locked arm never consults the media passthrough");
+        let guard = body
+            .find(&format!("Self::{}", "lock_media_func"))
+            .expect("the passthrough lost its action guard");
+        let swallow = body
+            .find("system_ui.push_char")
+            .expect("the password field feed");
+        assert!(
+            passthrough < swallow && guard < swallow,
+            "media keys are swallowed with every other key again"
+        );
+    }
+
+    /// The round-13 freeze shape on the auth path: a wrong password blocks
+    /// `pam_authenticate` for ~2s on stock pam_unix, and pam_sss,
+    /// fingerprint or faillock wait arbitrarily long. The pin is textual,
+    /// needles assembled at runtime: this file must not name the blocking
+    /// call at all — its only caller is the worker in system_ui.rs — and
+    /// the locked Enter path must go through the worker submit.
+    #[test]
+    fn pam_never_runs_on_the_compositor_thread_from_the_key_handler() {
+        const SOURCE: &str = include_str!("input_handler.rs");
+        let inline_call = format!("{}(", "authenticate_current_user");
+        assert!(
+            !SOURCE.contains(&inline_call),
+            "Enter called PAM inline again; only the worker may"
+        );
+        let body = SOURCE
+            .split_once(&format!("fn {}(", "on_key_press_internal"))
+            .expect("the key handler")
+            .1
+            .split_once(&format!("fn {}(", "is_native_screenshot"))
+            .expect("the function after the key handler")
+            .0;
+        assert!(
+            body.contains(&format!("self.{}()", "submit_lock_password")),
+            "the locked Enter path no longer submits the authentication worker"
+        );
+        const SYSTEM_UI: &str = include_str!("features/system_ui.rs");
+        let worker = SYSTEM_UI
+            .split_once(&format!("struct {}", "ZeroizingPassword"))
+            .expect("the wiping password buffer")
+            .1
+            .split_once(&format!("fn {}(", "authenticate_pam"))
+            .expect("the PAM client after it")
+            .0;
+        assert!(
+            worker.contains(&inline_call),
+            "the worker no longer performs the authentication"
+        );
+        assert!(
+            worker.contains("BackgroundJob::spawn"),
+            "the authentication is back on the calling thread"
+        );
+    }
+
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     struct ConfigureReply {
         window: WindowId,
@@ -3420,6 +3671,10 @@ mod tests {
         key_ops: DummyKeyOps,
         cursor_provider: DummyCursorProvider,
         color_allocator: DummyColorAllocator,
+        /// Every OSD card the session asked for, in order.
+        osd_log: std::sync::Arc<Mutex<Vec<(crate::backend::api::OsdKind, u8)>>>,
+        /// Every toast pushed past the DND gate, in order (titles only).
+        toast_log: std::sync::Arc<Mutex<Vec<String>>>,
     }
 
     impl ConfigureReplyBackend {
@@ -3432,6 +3687,8 @@ mod tests {
                 key_ops: DummyKeyOps,
                 cursor_provider: DummyCursorProvider,
                 color_allocator: DummyColorAllocator,
+                osd_log: std::sync::Arc::new(Mutex::new(Vec::new())),
+                toast_log: std::sync::Arc::new(Mutex::new(Vec::new())),
             }
         }
     }
@@ -3440,7 +3697,21 @@ mod tests {
     impl BackendDiagnostics for ConfigureReplyBackend {}
     impl CompositorControl for ConfigureReplyBackend {}
     impl CompositorMedia for ConfigureReplyBackend {}
-    impl CompositorWorkspaceEffects for ConfigureReplyBackend {}
+    impl CompositorWorkspaceEffects for ConfigureReplyBackend {
+        fn compositor_show_osd(&mut self, kind: crate::backend::api::OsdKind, percent: u8) {
+            self.osd_log
+                .lock()
+                .expect("osd log lock")
+                .push((kind, percent));
+        }
+
+        fn compositor_push_toast(&mut self, toast: crate::backend::api::ToastNotification) {
+            self.toast_log
+                .lock()
+                .expect("toast log lock")
+                .push(toast.title);
+        }
+    }
     impl CompositorWindowEffects for ConfigureReplyBackend {}
     impl CompositorAnnotation for ConfigureReplyBackend {}
     impl DisplayControl for ConfigureReplyBackend {}
@@ -4010,5 +4281,78 @@ mod tests {
                 "a slider path no longer queues on the controls worker ({needle})"
             );
         }
+    }
+
+    /// The radio rows used to run `nmcli`/`bluetoothctl` — up to the 10 s
+    /// query timeout behind a wedged bus — on the event thread, freezing the
+    /// whole session. They queue a `start_radio_set` worker now, like every
+    /// other connectivity action. The haystack is the shipped source alone
+    /// (the test modules are cut away), and the needles are built at runtime
+    /// so this test cannot match its own source.
+    #[test]
+    fn radio_rows_never_set_the_radio_on_the_event_thread() {
+        const SOURCE: &str = include_str!("input_handler.rs");
+        let shipped = SOURCE
+            .split_once("#[cfg(test)]")
+            .expect("the first test module")
+            .0;
+        for primitive in ["set_wifi", "set_bluetooth"] {
+            let needle = format!("{primitive}(");
+            assert!(
+                !shipped.contains(&needle),
+                "input handling regained a synchronous radio set: {needle}"
+            );
+        }
+        let region = SOURCE
+            .split_once("fn handle_control_center_key")
+            .expect("handle_control_center_key")
+            .1
+            .split_once("fn dismiss_system_ui_from_pointer")
+            .expect("the end of the control-center input region")
+            .0;
+        let helper = format!("self.{}(", "request_radio_set");
+        assert!(
+            region.contains(&helper),
+            "the radio rows no longer queue the flip on the connectivity worker ({helper})"
+        );
+    }
+
+    /// Every key-bound toggle confirms the flip on screen. The OSD is the
+    /// right surface — never a toast: toasts are DND-gated, so a "Do Not
+    /// Disturb On" toast would be swallowed by the very state it announces.
+    #[test]
+    fn toggle_confirmations_raise_the_osd_and_never_a_toast() {
+        use crate::backend::api::OsdKind;
+        use crate::jwm::types::WMArgEnum;
+
+        let mut backend = ConfigureReplyBackend::new();
+        let osd_log = std::sync::Arc::clone(&backend.osd_log);
+        let toast_log = std::sync::Arc::clone(&backend.toast_log);
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+
+        jwm.toggle_dnd(&mut backend, &WMArgEnum::Int(0)).unwrap();
+        assert!(jwm.do_not_disturb);
+        jwm.toggle_dnd(&mut backend, &WMArgEnum::Int(0)).unwrap();
+        assert!(!jwm.do_not_disturb);
+        jwm.toggle_night_light(&mut backend, &WMArgEnum::Int(0))
+            .unwrap();
+        let night_light = jwm.night_light_active();
+        jwm.toggle_idle_inhibit(&mut backend, &WMArgEnum::Int(0))
+            .unwrap();
+        assert!(jwm.idle_inhibited);
+
+        assert_eq!(
+            osd_log.lock().expect("osd log lock").as_slice(),
+            &[
+                (OsdKind::DoNotDisturb(true), 0),
+                (OsdKind::DoNotDisturb(false), 0),
+                (OsdKind::NightLight(night_light), 0),
+                (OsdKind::Caffeine(true), 0),
+            ]
+        );
+        assert!(
+            toast_log.lock().expect("toast log lock").is_empty(),
+            "a toggle confirmation must not be a DND-gated toast"
+        );
     }
 }

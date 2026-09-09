@@ -14,6 +14,8 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::backend::compositor_common::row_icons::WINDOW_ROW_GLYPH;
+
 /// Where the usage counts live, under the user's data directory.
 pub const USAGE_FILE: &str = "launcher-usage";
 
@@ -538,8 +540,10 @@ pub fn window_row(entry: &WindowEntry) -> String {
     } else {
         format!("  [{}]", where_it_is.join(", "))
     };
-    // fa-window-maximize, inside FontAwesome 4.7.
-    format!("\u{f2d0}  {name}{class}{elsewhere}")
+    // fa-window-maximize, inside FontAwesome 4.7. The compositor strips this
+    // prefix from the rasterized text of a row whose real icon is being
+    // drawn; the bytes here never change (the row-icon band keys on them).
+    format!("{WINDOW_ROW_GLYPH}{name}{class}{elsewhere}")
 }
 
 /// Collapse a client-controlled string onto one line.
@@ -1289,6 +1293,15 @@ mod tests {
                 assert!((ch as u32) < 0xf600, "{ch:?} is outside FontAwesome 4");
             }
         }
+    }
+
+    #[test]
+    fn a_window_row_starts_with_the_shared_glyph_placeholder() {
+        // The compositor strips exactly this prefix from the text of a row
+        // whose real icon is on the GPU; both ends of that contract share the
+        // one constant, and this pins them together.
+        let row = window_row(&window(1, "GitHub", "firefox"));
+        assert!(row.starts_with(WINDOW_ROW_GLYPH), "{row:?}");
     }
 
     #[test]

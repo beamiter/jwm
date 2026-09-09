@@ -18,6 +18,7 @@ use crate::config::CONFIG;
 use crate::core::models::{ClientKey, MonitorKey};
 use crate::core::types::Rect;
 use log::info;
+use slotmap::Key;
 
 /// A left-button press on a tab cell being watched as a reorder drag.
 ///
@@ -145,6 +146,11 @@ impl Jwm {
                     Some(tabs::Tab {
                         title: client.name.clone(),
                         active: focused == Some(client_key),
+                        // The client key's FFI value is stable for the whole
+                        // session and means the same thing to both backends,
+                        // so the compositors' dwell tooltip can key on it and
+                        // survive the cell sliding to another index.
+                        window: client_key.data().as_ffi(),
                     })
                 })
                 .collect::<Vec<_>>();
@@ -353,14 +359,162 @@ pub(crate) fn plan_tab_reorder(
 
 #[cfg(test)]
 mod tests {
-    use super::{plan_tab_reorder, without_tab_bar};
-    use crate::core::models::ClientKey;
+    use super::{Jwm, plan_tab_reorder, without_tab_bar};
+    use crate::backend::common_define::WindowId;
+    use crate::core::animation::AnimationManager;
+    use crate::core::models::{ClientKey, MonitorKey, WMClient};
+    use crate::core::state::WMState;
     use crate::core::types::Rect;
-    use slotmap::SlotMap;
+    use crate::jwm::features::FeatureStates;
+    use slotmap::{Key, SecondaryMap, SlotMap};
+    use std::collections::{HashMap, HashSet};
+    use std::sync::atomic::AtomicBool;
+    use xbar_core::shared_structures::SharedMessage;
 
     fn keys(n: usize) -> Vec<ClientKey> {
         let mut sm: SlotMap<ClientKey, ()> = SlotMap::new();
         (0..n).map(|_| sm.insert(())).collect()
+    }
+
+    fn empty_jwm() -> Jwm {
+        Jwm {
+            state: WMState::new(),
+            runtime_backend: "test".into(),
+            started_at: std::time::Instant::now(),
+            s_w: 0,
+            s_h: 0,
+            running: AtomicBool::new(true),
+            is_restarting: AtomicBool::new(false),
+            last_mouse_root: (0.0, 0.0),
+            drag_ctl: None,
+            tab_drag: None,
+            control_slider_drag: None,
+            message: SharedMessage::default(),
+            secondary_bars: HashMap::new(),
+            secondary_bar_failures: HashMap::new(),
+            secondary_bar_retry_after: HashMap::new(),
+            transient_children: crate::jwm::process::TransientChildSupervisor::default(),
+            last_key_grab_refresh_at: None,
+            pending_bar_updates: HashSet::new(),
+            minimized_projection_epochs: HashMap::new(),
+            reconciled_minimized_target_generations: HashMap::new(),
+            minimized_dock_shelves: HashMap::new(),
+            active_minimized_preview: None,
+            active_minimized_preview_generation: None,
+            suppress_mouse_focus_until: None,
+            suppress_layout_animation: false,
+            last_stacking: SecondaryMap::new(),
+            scratchpads: HashMap::new(),
+            scratchpad_pending: crate::jwm::scratchpad_pending::ScratchpadPendingRegistry::default(
+            ),
+            animations: AnimationManager::new(),
+            hidden_client_park_retries: crate::jwm::monitor::HiddenClientParkRetries::default(),
+            key_bindings: Vec::new(),
+            chord_compiled: None,
+            chord_armed_until: None,
+            do_not_disturb: false,
+            debug_hud_on: false,
+            external_struts: HashMap::new(),
+            ipc_server: None,
+            update_readiness: None,
+            async_update_notifier: None,
+            config_reload_tracker: crate::jwm::lifecycle::ConfigReloadTracker::new(None),
+            config_last_modified: None,
+            config_reload_debounce: None,
+            config_reload_count: 0,
+            config_reload_last_unix_ms: None,
+            config_reload_last_success: None,
+            config_reload_last_error: None,
+            layout_persist_dirty: None,
+            override_redirect_windows: HashSet::new(),
+            or_window_geometries: HashMap::new(),
+            scrolling_states: HashMap::new(),
+            pushed_window_groups: Vec::new(),
+            last_night_light_update: None,
+            night_light_override: None,
+            last_battery_poll: None,
+            last_idle_poll: None,
+            idle: crate::jwm::features::idle::IdleTracker::default(),
+            idle_inhibited: false,
+            system_ui_dirty: false,
+            server_saver_suppressed: false,
+            features: FeatureStates::new(),
+            event_coalescer:
+                crate::backend::compositor_common::event_coalescer::EventCoalescer::new(),
+            pending_pings: HashMap::new(),
+            unresponsive_windows: HashSet::new(),
+            last_ping_time: None,
+            last_user_activity_time: 0,
+        }
+    }
+
+    /// A window manager with one monitor and two tiled clients sharing its
+    /// tab bar — the least `build_window_groups` needs to produce a group.
+    fn jwm_with_tab_group() -> (Jwm, MonitorKey, ClientKey, ClientKey) {
+        let mut jwm = empty_jwm();
+        let mut monitor = jwm.createmon(true);
+        monitor.geometry.m_w = 1920;
+        monitor.geometry.m_h = 1080;
+        monitor.geometry.w_w = 1920;
+        monitor.geometry.w_h = 1080;
+        let monitor_key = jwm.insert_monitor(monitor);
+        jwm.state.sel_mon = Some(monitor_key);
+        jwm.s_w = 1920;
+        jwm.s_h = 1080;
+
+        let mut keys = Vec::new();
+        for raw in [0x301, 0x302] {
+            let mut client = WMClient::new(WindowId::from_raw(raw));
+            client.mon = Some(monitor_key);
+            client.state.tags = 0b01;
+            client.geometry.w = 800;
+            client.geometry.h = 600;
+            let client_key = jwm.insert_client(client);
+            jwm.attach_to_monitor(client_key, monitor_key);
+            keys.push(client_key);
+        }
+        (jwm, monitor_key, keys[0], keys[1])
+    }
+
+    /// The dwell tooltip keys on `Tab::window`, so the id must be stable
+    /// across rebuilds and travel with its window when the cells slide.
+    #[test]
+    fn build_window_groups_emits_session_stable_window_ids() {
+        let (mut jwm, monitor_key, first, second) = jwm_with_tab_group();
+
+        let groups = jwm.build_window_groups();
+        assert_eq!(groups.len(), 1);
+        let ids: Vec<u64> = groups[0].tabs.iter().map(|tab| tab.window).collect();
+        // The id is the client key's FFI value: session-stable,
+        // backend-agnostic and unique per window.
+        assert_eq!(ids, vec![first.data().as_ffi(), second.data().as_ffi()]);
+
+        // An unchanged desktop rebuilds to the same ids — stability across
+        // frames is the whole point of keying the dwell on them.
+        let rebuilt = jwm.build_window_groups();
+        assert_eq!(
+            rebuilt[0]
+                .tabs
+                .iter()
+                .map(|tab| tab.window)
+                .collect::<Vec<_>>(),
+            ids
+        );
+
+        // A reorder slides the cells and the ids travel with their windows,
+        // so a rest on one of them survives the relayout.
+        if let Some(list) = jwm.state.monitor_clients.get_mut(monitor_key) {
+            list.swap(0, 1);
+        }
+        let slid = jwm.build_window_groups();
+        assert_eq!(
+            slid[0]
+                .tabs
+                .iter()
+                .map(|tab| tab.window)
+                .collect::<Vec<_>>(),
+            vec![second.data().as_ffi(), first.data().as_ffi()]
+        );
     }
 
     #[test]

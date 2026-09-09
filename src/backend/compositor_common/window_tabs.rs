@@ -42,6 +42,13 @@ pub struct Tab {
     pub title: String,
     /// Whether this is the focused window.
     pub active: bool,
+    /// The window this cell stands for, as a session-stable, backend-agnostic
+    /// id the window manager fills in from its client key. The dwell tooltip
+    /// keys on it rather than on the cell's position, so a relayout that
+    /// slides the cell to another index keeps the rest instead of restarting
+    /// it — and an insert-before cannot hand the window now under the
+    /// pointer the previous occupant's rest.
+    pub window: u64,
 }
 
 /// One monitor's tab bar: the strip and what is in it.
@@ -254,6 +261,22 @@ pub fn tab_hover_at(groups: &[TabGroup], px: f32, py: f32) -> Option<(usize, usi
     })
 }
 
+/// The `(group_index, tab_index)` of `window`'s cell, if it is in any group.
+/// The dwell tooltip and its fade key on the window rather than on the
+/// position, so this is the lookup that re-resolves where the chip goes at
+/// draw time: a relayout that slid the cell moves the chip with it instead
+/// of restarting the rest.
+#[must_use]
+pub fn find_tab(groups: &[TabGroup], window: u64) -> Option<(usize, usize)> {
+    groups.iter().enumerate().find_map(|(group_index, group)| {
+        group
+            .tabs
+            .iter()
+            .position(|tab| tab.window == window)
+            .map(|tab_index| (group_index, tab_index))
+    })
+}
+
 /// Which cell contains `(px, py)`, if any. Walks the same partition
 /// [`tab_rect`] produces rather than recomputing an index from the fraction,
 /// so the hit test cannot round to a different cell than the one drawn.
@@ -280,33 +303,38 @@ pub fn tab_at(bar: Rect, count: usize, px: f32, py: f32) -> Option<usize> {
     Some(count - 1)
 }
 
-/// Dwell state for the tab-strip tooltip: which cell the pointer is resting
-/// on, since when, and whether the chip is up.
+/// Dwell state for the tab-strip tooltip: which window the pointer is
+/// resting on, since when, and whether the chip is up.
 ///
 /// The tracker is pure time and keys: each frame the compositor feeds it the
-/// hovered cell and whether that cell's title was ellipsized at the last
-/// title refresh, and it answers whether the chip is up and whether frames
-/// must keep coming. Like the hover state, it lives outside [`TabGroup`] so
+/// hovered cell's window id and whether that cell's title was ellipsized at
+/// the last title refresh, and it answers whether the chip is up and whether
+/// frames must keep coming. Keying on the window rather than on the
+/// `(group, index)` position is what makes the rest survive a relayout: the
+/// same window sliding to a new index feeds the same id, while a different
+/// window landing under the resting pointer feeds a new one and honestly
+/// restarts. Like the hover state, the tracker lives outside [`TabGroup`] so
 /// following the pointer never rebuilds the baked title textures.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct TooltipDwell {
-    key: Option<(usize, usize)>,
+    key: Option<u64>,
     eligible: bool,
     since: Option<Instant>,
     visible: bool,
 }
 
 impl TooltipDwell {
-    /// Advance to `now`: `hover` is the cell under the pointer, `eligible`
-    /// whether its title was ellipsized at the last title refresh. Returns
-    /// whether the chip is up this frame.
+    /// Advance to `now`: `hover` is the window whose cell is under the
+    /// pointer, `eligible` whether that cell's title was ellipsized at the
+    /// last title refresh. Returns whether the chip is up this frame.
     ///
-    /// Moving to another cell — or off the strip — restarts the rest and
-    /// drops the chip on the spot: the dwell is information policy, not an
-    /// animation, so nothing eases out. A cell whose title fits whole never
-    /// raises a chip at all; one that stops being truncated under a resting
-    /// pointer (a retitle, a relayout) drops it the same frame.
-    pub fn advance(&mut self, now: Instant, hover: Option<(usize, usize)>, eligible: bool) -> bool {
+    /// A different window arriving under the pointer — or the pointer
+    /// leaving the strip — restarts the rest and drops the chip on the spot:
+    /// the dwell is information policy, not an animation, so nothing eases
+    /// out. A cell whose title fits whole never raises a chip at all; one
+    /// that stops being truncated under a resting pointer (a retitle, a
+    /// relayout) drops it the same frame.
+    pub fn advance(&mut self, now: Instant, hover: Option<u64>, eligible: bool) -> bool {
         if self.key != hover {
             self.key = hover;
             self.since = hover.map(|_| now);
@@ -321,9 +349,12 @@ impl TooltipDwell {
         self.visible
     }
 
-    /// The cell the chip is up for, if it is up.
+    /// The window the chip is up for, if it is up. The position is
+    /// re-resolved at draw time with [`find_tab`], so the chip follows the
+    /// window's cell across relayouts instead of pointing where the cell
+    /// used to be.
     #[must_use]
-    pub fn visible_key(&self) -> Option<(usize, usize)> {
+    pub fn visible_key(&self) -> Option<u64> {
         if self.visible { self.key } else { None }
     }
 
@@ -338,13 +369,36 @@ impl TooltipDwell {
     }
 }
 
+/// Pixel budget for the chip's line on a screen this wide. The chip is the
+/// text plus [`TOOLTIP_PAD_X`] on both sides, and the whole chip must fit the
+/// screen, so an output narrower than [`TOOLTIP_MAX_TEXT_WIDTH`] plus the
+/// pads shrinks the line's share: the text ellipsizes harder and the texture
+/// and chip genuinely fit. Widths too small for even a couple of characters
+/// floor at [`TITLE_MIN_WIDTH`]; a non-finite width keeps the full budget —
+/// [`tooltip_rect`] already refuses to place a chip on a screen it cannot
+/// measure.
+#[must_use]
+pub fn tooltip_text_budget(screen_w: f32) -> u32 {
+    if !screen_w.is_finite() {
+        return TOOLTIP_MAX_TEXT_WIDTH;
+    }
+    TOOLTIP_MAX_TEXT_WIDTH.min(
+        (screen_w - 2.0 * TOOLTIP_PAD_X)
+            .floor()
+            .max(TITLE_MIN_WIDTH) as u32,
+    )
+}
+
 /// Where the tooltip chip for `cell` goes: centred on it, clamped onto the
 /// screen sideways, floating [`TOOLTIP_GAP`] above the strip — or the same
 /// gap below it when the strip touches the screen's top edge and the chip
-/// would clip. Either way the gap keeps the chip off the band, so it can
-/// never cover the cell whose clicks must still land. `None` for degenerate
-/// input, matching [`track_rect`]'s rule that a rectangle nobody can draw is
-/// nobody's to paint.
+/// would clip. A chip wider than the screen (its line was fitted against a
+/// larger width) narrows to the screen rather than overflowing the right
+/// edge; the height is never clamped, a short screen slides the chip instead.
+/// Either way the gap keeps the chip off the band, so it can never cover the
+/// cell whose clicks must still land. `None` for degenerate input, matching
+/// [`track_rect`]'s rule that a rectangle nobody can draw is nobody's to
+/// paint.
 #[must_use]
 pub fn tooltip_rect(
     bar: Rect,
@@ -364,6 +418,11 @@ pub fn tooltip_rect(
     }
     let [cx, _, cw, _] = cell;
     let [_, by, _, bh] = bar;
+    // The origin clamp alone cannot keep an oversized chip on the screen:
+    // with `chip_w > screen_w` its upper bound is zero and the right edge
+    // would hang off. Narrow first, then the same clamp pins the chip to
+    // the left edge.
+    let chip_w = chip_w.min(screen_w);
     let x = (cx + cw * 0.5 - chip_w * 0.5).clamp(0.0, (screen_w - chip_w).max(0.0));
     let above = by - TOOLTIP_GAP - chip_h;
     let y = if above >= 0.0 {
@@ -457,6 +516,7 @@ mod tests {
             tabs: vec![Tab {
                 title: "only".to_string(),
                 active: true,
+                window: 1,
             }],
         }];
         assert_eq!(tab_hover_at(&groups, f32::NAN, f32::NAN), None);
@@ -470,6 +530,7 @@ mod tests {
                 .map(|index| Tab {
                     title: format!("tab {index}"),
                     active: index == 0,
+                    window: index as u64,
                 })
                 .collect(),
         };
@@ -615,66 +676,84 @@ mod tests {
         // The frame the pointer lands consumes no rest: the chip is not up,
         // but frames must keep coming or an idle screen sleeps through the
         // moment it is due.
-        assert!(!dwell.advance(t0, Some((0, 1)), true));
+        assert!(!dwell.advance(t0, Some(7), true));
         assert!(dwell.needs_frame());
         assert_eq!(dwell.visible_key(), None);
 
-        assert!(!dwell.advance(
-            t0 + TOOLTIP_DWELL - Duration::from_millis(1),
-            Some((0, 1)),
-            true
-        ));
+        assert!(!dwell.advance(t0 + TOOLTIP_DWELL - Duration::from_millis(1), Some(7), true));
         assert!(dwell.needs_frame());
 
-        assert!(dwell.advance(t0 + TOOLTIP_DWELL, Some((0, 1)), true));
-        assert_eq!(dwell.visible_key(), Some((0, 1)));
+        assert!(dwell.advance(t0 + TOOLTIP_DWELL, Some(7), true));
+        assert_eq!(dwell.visible_key(), Some(7));
         // Up is up: nothing about the dwell still needs the renderer.
         assert!(!dwell.needs_frame());
 
         // Staying put keeps the chip; a clock tick that runs backwards
         // saturates instead of panicking — at that instant the rest simply
         // has not lapsed yet.
-        assert!(dwell.advance(t0 + TOOLTIP_DWELL * 4, Some((0, 1)), true));
-        assert!(!dwell.advance(t0 - Duration::from_millis(1), Some((0, 1)), true));
+        assert!(dwell.advance(t0 + TOOLTIP_DWELL * 4, Some(7), true));
+        assert!(!dwell.advance(t0 - Duration::from_millis(1), Some(7), true));
     }
 
     #[test]
     fn moving_to_another_cell_restarts_the_rest_there() {
         let mut dwell = TooltipDwell::default();
         let t0 = Instant::now();
-        dwell.advance(t0, Some((0, 0)), true);
+        dwell.advance(t0, Some(7), true);
         let t1 = t0 + TOOLTIP_DWELL - Duration::from_millis(1);
-        assert!(!dwell.advance(t1, Some((0, 0)), true));
+        assert!(!dwell.advance(t1, Some(7), true));
 
-        // A moment before the first cell's dwell would have lapsed, the
-        // pointer moves: the new cell's clock starts from the move, so the
-        // old cell's almost-mature rest buys nothing.
-        assert!(!dwell.advance(t1, Some((0, 1)), true));
+        // A moment before the first window's dwell would have lapsed, the
+        // pointer moves onto another: its clock starts from the move, so the
+        // old window's almost-mature rest buys nothing.
+        assert!(!dwell.advance(t1, Some(9), true));
         assert!(dwell.needs_frame());
-        assert!(!dwell.advance(
-            t1 + TOOLTIP_DWELL - Duration::from_millis(1),
-            Some((0, 1)),
-            true
-        ));
-        assert!(dwell.advance(t1 + TOOLTIP_DWELL, Some((0, 1)), true));
-        assert_eq!(dwell.visible_key(), Some((0, 1)));
+        assert!(!dwell.advance(t1 + TOOLTIP_DWELL - Duration::from_millis(1), Some(9), true));
+        assert!(dwell.advance(t1 + TOOLTIP_DWELL, Some(9), true));
+        assert_eq!(dwell.visible_key(), Some(9));
+    }
+
+    /// The key is the window, not the position: a relayout that slides the
+    /// hovered cell feeds the same id (the compositor re-resolves it from
+    /// its positional hover each frame), so the rest survives — while an
+    /// insert-before that lands a *different* window under the resting
+    /// pointer feeds a different id and honestly restarts.
+    #[test]
+    fn the_dwell_follows_the_window_across_a_relayout() {
+        let mut dwell = TooltipDwell::default();
+        let t0 = Instant::now();
+        dwell.advance(t0, Some(7), true);
+
+        // The window's cell slides to another index mid-rest: same id, the
+        // rest matures on the original clock.
+        assert!(dwell.advance(t0 + TOOLTIP_DWELL, Some(7), true));
+        assert_eq!(dwell.visible_key(), Some(7));
+
+        // A relayout seats a different window where the pointer rests: the
+        // new id drops the old chip and starts its own rest from that frame.
+        assert!(!dwell.advance(t0 + TOOLTIP_DWELL * 2, Some(9), true));
+        assert!(dwell.needs_frame());
+        assert!(dwell.advance(t0 + TOOLTIP_DWELL * 3, Some(9), true));
+        assert_eq!(dwell.visible_key(), Some(9));
     }
 
     #[test]
     fn leaving_the_strip_drops_the_chip_the_same_frame() {
         let mut dwell = TooltipDwell::default();
         let t0 = Instant::now();
-        dwell.advance(t0, Some((0, 1)), true);
-        assert!(dwell.advance(t0 + TOOLTIP_DWELL, Some((0, 1)), true));
+        dwell.advance(t0, Some(7), true);
+        assert!(dwell.advance(t0 + TOOLTIP_DWELL, Some(7), true));
 
+        // The hovered window closing or ungrouping mid-chip feeds `None`
+        // just like the pointer leaving: the chip drops the same frame.
         assert!(!dwell.advance(t0 + TOOLTIP_DWELL * 2, None, false));
         assert_eq!(dwell.visible_key(), None);
         // Nothing is pending either: hovering nothing must never spin the
         // renderer.
         assert!(!dwell.needs_frame());
 
-        // Coming back to the same cell is a new rest, not a resumption.
-        assert!(!dwell.advance(t0 + TOOLTIP_DWELL * 3, Some((0, 1)), true));
+        // Coming back to the same window is a new rest, not a resumption.
+        assert!(!dwell.advance(t0 + TOOLTIP_DWELL * 3, Some(7), true));
         assert!(dwell.needs_frame());
     }
 
@@ -685,19 +764,66 @@ mod tests {
 
         // However long the pointer rests on an untruncated cell, no chip —
         // and no frame pumping, since none is ever due.
-        assert!(!dwell.advance(t0, Some((0, 0)), false));
+        assert!(!dwell.advance(t0, Some(7), false));
         assert!(!dwell.needs_frame());
-        assert!(!dwell.advance(t0 + TOOLTIP_DWELL * 10, Some((0, 0)), false));
+        assert!(!dwell.advance(t0 + TOOLTIP_DWELL * 10, Some(7), false));
         assert_eq!(dwell.visible_key(), None);
         assert!(!dwell.needs_frame());
 
         // A title refresh can make a resting cell stop being truncated; the
         // chip drops the same frame rather than outliving its reason.
         let mut dwell = TooltipDwell::default();
-        assert!(!dwell.advance(t0, Some((0, 0)), true));
-        assert!(dwell.advance(t0 + TOOLTIP_DWELL, Some((0, 0)), true));
-        assert!(!dwell.advance(t0 + TOOLTIP_DWELL * 2, Some((0, 0)), false));
+        assert!(!dwell.advance(t0, Some(7), true));
+        assert!(dwell.advance(t0 + TOOLTIP_DWELL, Some(7), true));
+        assert!(!dwell.advance(t0 + TOOLTIP_DWELL * 2, Some(7), false));
         assert_eq!(dwell.visible_key(), None);
+    }
+
+    #[test]
+    fn find_tab_resolves_a_window_to_its_cell() {
+        let group = |bar: Rect, windows: &[u64]| TabGroup {
+            bar,
+            tabs: windows
+                .iter()
+                .enumerate()
+                .map(|(index, &window)| Tab {
+                    title: format!("tab {index}"),
+                    active: index == 0,
+                    window,
+                })
+                .collect(),
+        };
+        let groups = vec![
+            group([0.0, 0.0, 600.0, 28.0], &[10, 11, 12]),
+            group([0.0, 100.0, 400.0, 28.0], &[20, 21]),
+        ];
+        assert_eq!(find_tab(&groups, 10), Some((0, 0)));
+        assert_eq!(find_tab(&groups, 12), Some((0, 2)));
+        assert_eq!(find_tab(&groups, 21), Some((1, 1)));
+        // A window that left the groups resolves to nothing — a chip keyed
+        // on it simply is not drawn.
+        assert_eq!(find_tab(&groups, 99), None);
+        assert_eq!(find_tab(&[], 10), None);
+    }
+
+    /// The chip is the text plus two pads, so on an output narrower than
+    /// `TOOLTIP_MAX_TEXT_WIDTH + 2 * TOOLTIP_PAD_X` the line's budget shrinks
+    /// to keep the whole chip on the screen.
+    #[test]
+    fn the_chip_text_budget_shrinks_on_a_narrow_screen() {
+        // Room to spare: the full budget, down to the exact break point.
+        assert_eq!(tooltip_text_budget(1920.0), TOOLTIP_MAX_TEXT_WIDTH);
+        assert_eq!(tooltip_text_budget(500.0), TOOLTIP_MAX_TEXT_WIDTH);
+        // Narrower: the pads come out of the screen first.
+        assert_eq!(tooltip_text_budget(400.0), 380);
+        assert_eq!(tooltip_text_budget(100.0), 80);
+        // Degenerate widths still fit a couple of characters.
+        assert_eq!(tooltip_text_budget(10.0), TITLE_MIN_WIDTH as u32);
+        assert_eq!(tooltip_text_budget(-50.0), TITLE_MIN_WIDTH as u32);
+        // An unmeasurable screen keeps the full budget: `tooltip_rect`
+        // refuses to place a chip on it anyway.
+        assert_eq!(tooltip_text_budget(f32::NAN), TOOLTIP_MAX_TEXT_WIDTH);
+        assert_eq!(tooltip_text_budget(f32::INFINITY), TOOLTIP_MAX_TEXT_WIDTH);
     }
 
     /// The chip centres on its cell but never leaves the screen sideways.
@@ -758,6 +884,23 @@ mod tests {
         // resort instead of returning an unpaintable rectangle.
         let [_, y, _, h] = tooltip_rect(bar, cell, chip_w, chip_h, 1920.0, 20.0).expect("chip");
         assert_eq!([y, h], [0.0, chip_h]);
+    }
+
+    /// A chip whose line was fitted against a wider screen than the one it
+    /// lands on narrows to the screen instead of overflowing the right edge.
+    /// (The height is never narrowed: a short screen slides the chip, as the
+    /// 20px-tall case above pins.)
+    #[test]
+    fn a_chip_wider_than_the_screen_is_narrowed_to_it() {
+        let bar: Rect = [0.0, 100.0, 400.0, 28.0];
+        let cell = cell_rect(bar, 2, 0).expect("cell in range");
+        let [x, _, w, h] = tooltip_rect(bar, cell, 500.0, 30.0, 400.0, 1080.0).expect("chip");
+        assert_eq!([x, w], [0.0, 400.0]);
+        assert_eq!(h, 30.0);
+
+        // Already-fitting chips are untouched, even exactly screen-wide.
+        let [x, _, w, _] = tooltip_rect(bar, cell, 400.0, 30.0, 400.0, 1080.0).expect("chip");
+        assert_eq!([x, w], [0.0, 400.0]);
     }
 
     #[test]

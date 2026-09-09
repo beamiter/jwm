@@ -2,7 +2,7 @@ use super::render::transform_for_encoded_srgb;
 use super::*;
 use crate::backend::api::ExposeNavDirection;
 use crate::backend::compositor_common::expose::{
-    expose_grid_cols, expose_label_origin, move_expose_selection,
+    brightened_title_ink, expose_grid_cols, expose_label_origin, move_expose_selection,
 };
 use crate::backend::compositor_common::ui_theme;
 use crate::backend::compositor_common::window_tabs;
@@ -86,6 +86,11 @@ impl WaylandCompositor {
             self.needs_render = true;
         }
         let hover_scale = 1.0 + (EXPOSE_HOVER_SCALE - 1.0) * hover_p;
+
+        // The title brighten rides the same envelope: the hovered cell's
+        // brighter copy is rasterised on first use, here on the draw path
+        // where the GL context is current.
+        self.ensure_expose_bright_title(gl, hovered_id, hover_p);
 
         unsafe {
             // Dark backdrop
@@ -274,7 +279,7 @@ impl WaylandCompositor {
             // Title labels come last, under one text-program bind for the
             // whole grid: a label must never end up under a neighbour's
             // thumbnail or hover ring while cells are still flying in.
-            self.render_expose_titles(gl, projection, opacity, hover_scale);
+            self.render_expose_titles(gl, projection, opacity, hover_scale, hover_p);
         }
     }
 
@@ -286,12 +291,21 @@ impl WaylandCompositor {
     /// geometry. Cells whose in-flight thumbnail is still narrower than the
     /// rasterised label draw nothing until they settle
     /// ([`expose_label_origin`]).
+    ///
+    /// The hovered cell's label draws twice: the normal ink first, then its
+    /// brighter copy (rasterised lazily by [`Self::ensure_expose_bright_title`]
+    /// with [`brightened_title_ink`]) over the same rect at
+    /// `opacity * hover_p`, so the cue eases in on the exact envelope the
+    /// scale and the ring already ride. The text shader clamps `u_opacity`
+    /// to 1.0, so no boost uniform could ever brighten — the second texture
+    /// is the brighten.
     fn render_expose_titles(
         &self,
         gl: &ffi::Gles2,
         projection: &[f32; 16],
         opacity: f32,
         hover_scale: f32,
+        hover_p: f32,
     ) {
         if self.expose_title_textures.is_empty() {
             return;
@@ -311,10 +325,11 @@ impl WaylandCompositor {
             gl.Uniform1i(text_tex, 0);
             gl.Uniform1f(text_opacity, opacity);
             gl.ActiveTexture(ffi::TEXTURE0);
-            for (entry, &(texture, tw, th)) in self
+            for (index, (entry, &(texture, tw, th))) in self
                 .expose_entries
                 .iter()
                 .zip(self.expose_title_textures.iter())
+                .enumerate()
             {
                 if texture == 0 {
                     continue;
@@ -326,8 +341,145 @@ impl WaylandCompositor {
                 self.set_rect_uniform(gl, text_rect, lx.round(), ly.round(), tw as f32, th as f32);
                 gl.BindTexture(ffi::TEXTURE_2D, texture);
                 gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+
+                // The hovered cell re-draws its label from the brightened
+                // copy, faded in with the hover envelope over the normal
+                // ink — the same rect, so the two pixel-aligned rasters read
+                // as one label brightening rather than two texts.
+                if entry.is_hovered
+                    && hover_p > 0.0
+                    && let Some(&Some((bright, bw, bh))) =
+                        self.expose_title_bright_textures.get(index)
+                    && bright != 0
+                {
+                    gl.Uniform1f(text_opacity, opacity * hover_p);
+                    self.set_rect_uniform(
+                        gl,
+                        text_rect,
+                        lx.round(),
+                        ly.round(),
+                        bw as f32,
+                        bh as f32,
+                    );
+                    gl.BindTexture(ffi::TEXTURE_2D, bright);
+                    gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+                    gl.Uniform1f(text_opacity, opacity);
+                }
             }
         }
+    }
+
+    /// Rasterise the hovered entry's brighter title copy on first use.
+    ///
+    /// Only the hovered entry ever draws one, so the copy is built lazily
+    /// here — on the draw path, where the GL context is current, the same
+    /// bargain [`Self::refresh_expose_title_textures`] strikes — rather than
+    /// doubling the eager rebuild for a texture most frames never draw. The
+    /// raster reuses the normal label's exact fit inputs (the settled cell
+    /// width's budget, the configured font and size, the fitted text), so
+    /// the two textures are pixel-aligned and the copy can draw over the
+    /// same rect. A `None` slot is un-attempted; an attempt that yields no
+    /// texture records the normal cache's 0-slot "no label" convention so a
+    /// GL hiccup does not retry every frame.
+    fn ensure_expose_bright_title(
+        &mut self,
+        gl: &ffi::Gles2,
+        hovered_id: Option<u64>,
+        hover_p: f32,
+    ) {
+        let Some(hovered_id) = hovered_id else {
+            return;
+        };
+        if hover_p <= 0.0 {
+            return;
+        }
+        let Some(index) = self
+            .expose_entries
+            .iter()
+            .position(|entry| entry.id == hovered_id)
+        else {
+            return;
+        };
+        // The bright cache is reset alongside the normal one
+        // (`refresh_expose_title_textures`), so a length mismatch can only
+        // come from a probe poking entries directly; drawing no brighten
+        // beats guessing at an alignment.
+        let Some(slot) = self.expose_title_bright_textures.get_mut(index) else {
+            return;
+        };
+        if slot.is_some() {
+            return;
+        }
+        // Only mirror a label the normal cache actually produced.
+        let normal_texture = self
+            .expose_title_textures
+            .get(index)
+            .map_or(0, |&(texture, _, _)| texture);
+        if normal_texture == 0 {
+            *slot = Some((0, 0, 0));
+            return;
+        }
+        let entry = &self.expose_entries[index];
+        let budget = window_tabs::title_budget(entry.target_w);
+        let ui = ui_theme::palette();
+        let config = crate::config::CONFIG.load();
+        let font = config.system_ui_font();
+        let size = compositor_font::ui_font_pixel_size(font);
+        let text = compositor_font::fit_ui_text(&entry.title, font, size, budget);
+        let mut bright_slot = (0u32, 0u32, 0u32);
+        if !text.is_empty() {
+            let (pixels, w, h) = compositor_font::render_ui_text_to_rgba(
+                &text,
+                font,
+                size,
+                brightened_title_ink(ui.title_ink),
+            );
+            if w != 0 && h != 0 {
+                let mut texture = 0u32;
+                unsafe {
+                    gl.GenTextures(1, &mut texture);
+                    if texture != 0 {
+                        gl.BindTexture(ffi::TEXTURE_2D, texture);
+                        gl.TexParameteri(
+                            ffi::TEXTURE_2D,
+                            ffi::TEXTURE_MIN_FILTER,
+                            ffi::LINEAR as i32,
+                        );
+                        gl.TexParameteri(
+                            ffi::TEXTURE_2D,
+                            ffi::TEXTURE_MAG_FILTER,
+                            ffi::LINEAR as i32,
+                        );
+                        gl.TexParameteri(
+                            ffi::TEXTURE_2D,
+                            ffi::TEXTURE_WRAP_S,
+                            ffi::CLAMP_TO_EDGE as i32,
+                        );
+                        gl.TexParameteri(
+                            ffi::TEXTURE_2D,
+                            ffi::TEXTURE_WRAP_T,
+                            ffi::CLAMP_TO_EDGE as i32,
+                        );
+                        gl.TexImage2D(
+                            ffi::TEXTURE_2D,
+                            0,
+                            ffi::RGBA as i32,
+                            w as i32,
+                            h as i32,
+                            0,
+                            ffi::RGBA,
+                            ffi::UNSIGNED_BYTE,
+                            pixels.as_ptr() as *const _,
+                        );
+                        gl.BindTexture(ffi::TEXTURE_2D, 0);
+                    }
+                }
+                if texture != 0 {
+                    bright_slot = (texture, w, h);
+                }
+            }
+        }
+        *slot = Some(bright_slot);
     }
 
     /// Rasterise and upload every expose entry's title, once per entry-set
@@ -339,7 +491,9 @@ impl WaylandCompositor {
     /// cannot invalidate the cache; only a new entry set sets the dirty
     /// flag. Labels use the configured system-UI font at the cube overview's
     /// window-title size and the theme's `title_ink`, so an expose label
-    /// reads as the same text the other overviews draw.
+    /// reads as the same text the other overviews draw. The rebuild also
+    /// drops the brighten copies (`expose_title_bright_textures`), which
+    /// re-derive from these rasters lazily on the next hovered frame.
     pub(crate) fn refresh_expose_title_textures(&mut self, gl: &ffi::Gles2) {
         if !self.expose_titles_dirty {
             return;
@@ -354,6 +508,16 @@ impl WaylandCompositor {
         let stale = std::mem::take(&mut self.expose_title_textures);
         unsafe {
             for (texture, _, _) in stale {
+                if texture != 0 {
+                    gl.DeleteTextures(1, &texture);
+                }
+            }
+        }
+        // The brighten copies derive from the same rasters, so they go with
+        // them and rebuild lazily on the next hovered frame.
+        let stale_bright = std::mem::take(&mut self.expose_title_bright_textures);
+        unsafe {
+            for (texture, _, _) in stale_bright.into_iter().flatten() {
                 if texture != 0 {
                     gl.DeleteTextures(1, &texture);
                 }
@@ -423,6 +587,7 @@ impl WaylandCompositor {
             }
             cache.push(slot);
         }
+        self.expose_title_bright_textures = vec![None; cache.len()];
         self.expose_title_textures = cache;
     }
 
@@ -829,8 +994,21 @@ impl WaylandCompositor {
                 .copied()
                 == Some(true)
         });
+        // The dwell keys on the window, not the cell: the hover stays
+        // positional (it is re-derived from the pointer on every relayout),
+        // and the id is resolved from it here each frame. The same window
+        // sliding to another index then keeps its rest, while a different
+        // window landing under the resting pointer honestly restarts.
+        let tooltip_window = self
+            .tab_hover
+            .and_then(|(group_index, index)| {
+                self.window_groups
+                    .get(group_index)
+                    .and_then(|group| group.tabs.get(index))
+            })
+            .map(|tab| tab.window);
         self.tab_tooltip_dwell
-            .advance(std::time::Instant::now(), self.tab_hover, tooltip_eligible);
+            .advance(std::time::Instant::now(), tooltip_window, tooltip_eligible);
         if self.tab_tooltip_dwell.needs_frame() {
             // The dwell lapses on a clock, not on an event: frames must keep
             // coming or an idle screen sleeps through the chip's due moment.
@@ -979,8 +1157,12 @@ impl WaylandCompositor {
 
         // The chip draws over every strip and under nothing: placed off the
         // band, it can never cover the cell whose clicks must still land.
-        if let Some((group_index, index)) = tooltip_key
+        // The dwell and the fade key on the window, so the cell is
+        // re-resolved here: a relayout that slid it moves the chip along,
+        // and a window that left the groups simply draws nothing.
+        if let Some(window) = tooltip_key
             && tooltip_p > 0.0
+            && let Some((group_index, index)) = window_tabs::find_tab(&self.window_groups, window)
         {
             self.render_tab_tooltip(gl, projection, group_index, index, tooltip_p);
         }
@@ -1010,9 +1192,15 @@ impl WaylandCompositor {
         let size = compositor_font::ui_font_pixel_size(font);
         // The chip re-ellipsizes against its own budget: a title that would
         // run off the screen is still cut, just against the screen instead
-        // of the cell.
-        let text =
-            compositor_font::fit_ui_text(&title, font, size, window_tabs::TOOLTIP_MAX_TEXT_WIDTH);
+        // of the cell. On an output narrower than the full budget the line
+        // ellipsizes harder, so the texture and the chip around it genuinely
+        // fit.
+        let text = compositor_font::fit_ui_text(
+            &title,
+            font,
+            size,
+            window_tabs::tooltip_text_budget(self.screen_w as f32),
+        );
         if text.is_empty() {
             return;
         }
@@ -1207,9 +1395,11 @@ mod tests {
     /// render path must keep the frame loop alive while a rest is pending —
     /// an idle screen would otherwise sleep through the moment the chip is
     /// due. Pin the wiring: the truncation set is recorded at title refresh,
-    /// the live hover feeds the dwell every drawn frame, a pending dwell
-    /// arms `needs_render`, the fade follows the motion setting, and only
-    /// the dwell's visible cell is ever chipped.
+    /// the live hover's window id feeds the dwell every drawn frame, a
+    /// pending dwell arms `needs_render`, the fade follows the motion
+    /// setting, and only the dwell's visible window is ever chipped — with
+    /// its cell re-resolved at draw time so a relayout moves the chip with
+    /// the window instead of restarting the rest.
     #[test]
     fn the_tab_bar_pumps_frames_while_a_tooltip_dwell_is_pending() {
         let compact: String = include_str!("expose.rs")
@@ -1241,14 +1431,67 @@ mod tests {
             "needs_render must be armed by the needs_frame guard"
         );
 
-        // The fade takes the dwell's visible cell and the motion setting, so
-        // reduced motion snaps the chip but never skips the dwell.
+        // The fade takes the dwell's visible window and the motion setting,
+        // so reduced motion snaps the chip but never skips the dwell.
         assert!(compact.contains("self.tab_tooltip_ease.advance_with_motion("));
         assert!(compact.contains("tooltip_key,crate::config::CONFIG.load().motion_enabled()"));
-        // The chip draws for that visible cell only, and only at a strength
-        // above zero.
+        // The chip draws for that visible window only, and only at a
+        // strength above zero; the cell is re-resolved from the id so a
+        // relayout cannot strand the chip where the window used to sit.
         assert!(compact.contains(
-            "ifletSome((group_index,index))=tooltip_key&&tooltip_p>0.0{self.render_tab_tooltip("
+            "ifletSome(window)=tooltip_key&&tooltip_p>0.0&&letSome((group_index,index))=window_tabs::find_tab(&self.window_groups,window){self.render_tab_tooltip("
         ));
+    }
+
+    /// The exposé title hover-brighten rides the exact channel the scale and
+    /// the ring already ride: the same hover id, the same eased envelope, the
+    /// same existing frame pump — only the texture is a second, brighter
+    /// copy, because the text shader clamps `u_opacity` to 1.0 and the theme
+    /// ink is baked into the raster. Pin the wiring so a future refactor
+    /// cannot silently drop the cue or grow a second frame source: the
+    /// hovered cell re-draws its label from the bright cache at
+    /// `opacity * hover_p` over the same rect, the copy is rasterised lazily
+    /// on the draw path (GL is current there), and the brighten cache dies
+    /// with the normal one.
+    #[test]
+    fn the_hovered_expose_cell_overlays_its_brightened_title_at_opacity_times_hover_p() {
+        let compact: String = include_str!("expose.rs")
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect();
+
+        // The copy is built on the draw path from the same hover id and
+        // envelope the scale and ring consume, rasterised from the theme's
+        // title ink mixed toward white.
+        assert!(compact.contains("self.ensure_expose_bright_title(gl,hovered_id,hover_p);"));
+        assert!(compact.contains("brightened_title_ink(ui.title_ink)"));
+
+        // The hovered cell — and only it — draws the bright texture over the
+        // normal label at `opacity * hover_p`...
+        assert!(compact.contains("ifentry.is_hovered&&hover_p>0.0"));
+        assert!(compact.contains("gl.Uniform1f(text_opacity,opacity*hover_p);"));
+        assert!(compact.contains("gl.BindTexture(ffi::TEXTURE_2D,bright);"));
+        // ...and the grid-wide scalar is restored for the cells after it:
+        // the plain fade is set again right after the overlay draw. (A bare
+        // count would trip on this test's own string literals — the
+        // positional window mirrors the dwell pump pin above.)
+        let overlay = compact
+            .find("gl.Uniform1f(text_opacity,opacity*hover_p);")
+            .expect("the hovered cell draws its brighten at opacity * hover_p");
+        let restore = compact[overlay..]
+            .find("gl.Uniform1f(text_opacity,opacity);")
+            .expect("the plain fade scalar is restored after the overlay");
+        assert!(
+            restore < 200,
+            "the fade scalar must be restored right after the overlay draw"
+        );
+
+        // The brighten cache shares the normal cache's lifecycle: rebuilt
+        // entry sets drop the copies so they re-derive lazily.
+        assert!(compact.contains("self.expose_title_bright_textures=vec![None;cache.len()];"));
+
+        // The frame pump is the hover ease's existing one — the brighten
+        // adds no new frame source.
+        assert!(compact.contains("ifself.expose_hover_ease.animating(){self.needs_render=true;}"));
     }
 }

@@ -420,6 +420,10 @@ impl Jwm {
         // the periodic one above or one kicked off by a toggle.
         self.poll_connectivity_job();
 
+        // The lock screen's PAM authentication runs on a worker so a slow
+        // module cannot freeze the compositor; adopt its outcome here.
+        self.poll_lock_auth_job(backend);
+
         // --- CPU / memory / network: a much faster interval, gated inside
         // the sampler because a rate divides by the gap actually observed.
         self.poll_resources();

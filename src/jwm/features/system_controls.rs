@@ -810,7 +810,7 @@ fn brightness_set(percent: u8) -> Option<u8> {
 // correct the estimate.
 
 /// One requested change, in the order the user asked for it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ControlRequest {
     /// Relative nudge in percentage points (volume keys, arrows,
     /// scroll-on-slider).
@@ -824,6 +824,16 @@ pub(crate) enum ControlRequest {
     VolumeToggleMute,
     BrightnessAdjust(i32),
     BrightnessSet(u8),
+    /// Make a device the default sink/source (the audio picker's Enter). A
+    /// value like the sets: two queued switches fold to the newest. The
+    /// worker answers with the set's own result *and* a full re-read of the
+    /// topology, because a sound server routinely accepts the request and
+    /// then puts the default back.
+    AudioSetDefault {
+        direction: AudioDirection,
+        /// wpctl node id or PulseAudio node name, as the picker listed it.
+        id: String,
+    },
 }
 
 /// Which control a request, an estimate, or a report concerns.
@@ -831,15 +841,20 @@ pub(crate) enum ControlRequest {
 pub(crate) enum ControlDomain {
     Volume,
     Brightness,
+    /// The default audio device. It never carries an OSD estimate or debt —
+    /// its feedback is the picker's re-read rows — so the OSD-side matches
+    /// turn it away empty-handed.
+    AudioDevice,
 }
 
 impl ControlRequest {
-    fn domain(self) -> ControlDomain {
+    fn domain(&self) -> ControlDomain {
         match self {
             Self::VolumeAdjust(_) | Self::VolumeSet(_) | Self::VolumeToggleMute => {
                 ControlDomain::Volume
             }
             Self::BrightnessAdjust(_) | Self::BrightnessSet(_) => ControlDomain::Brightness,
+            Self::AudioSetDefault { .. } => ControlDomain::AudioDevice,
         }
     }
 }
@@ -847,7 +862,7 @@ impl ControlRequest {
 /// A request plus its submission sequence. Reports carry the sequence of the
 /// newest request they cover, so the event thread can tell a read-back that
 /// confirms the estimate on screen from one that predates it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct QueuedRequest {
     seq: u64,
     request: ControlRequest,
@@ -863,28 +878,30 @@ fn adjusted_level(percent: u8, delta: i32, floor: u8) -> u8 {
 /// Fold two queued value requests for one domain into the single write that
 /// reaches the same end state. Only ever applied to requests still queued —
 /// nothing has run yet, so the fold itself is unobservable.
-fn merge_value_requests(pending: ControlRequest, next: ControlRequest) -> ControlRequest {
+fn merge_value_requests(pending: &ControlRequest, next: &ControlRequest) -> ControlRequest {
     match (pending, next) {
         // Relative nudges add up: ten queued repeats of +5 are one +50.
         (ControlRequest::VolumeAdjust(a), ControlRequest::VolumeAdjust(b)) => {
-            ControlRequest::VolumeAdjust(a.saturating_add(b))
+            ControlRequest::VolumeAdjust(a.saturating_add(*b))
         }
         (ControlRequest::BrightnessAdjust(a), ControlRequest::BrightnessAdjust(b)) => {
-            ControlRequest::BrightnessAdjust(a.saturating_add(b))
+            ControlRequest::BrightnessAdjust(a.saturating_add(*b))
         }
         // A nudge after a queued set retargets the set itself.
         (ControlRequest::VolumeSet(percent), ControlRequest::VolumeAdjust(delta)) => {
-            ControlRequest::VolumeSet(adjusted_level(percent, delta, 0))
+            ControlRequest::VolumeSet(adjusted_level(*percent, *delta, 0))
         }
         (ControlRequest::BrightnessSet(percent), ControlRequest::BrightnessAdjust(delta)) => {
-            ControlRequest::BrightnessSet(adjusted_level(percent, delta, 1))
+            ControlRequest::BrightnessSet(adjusted_level(*percent, *delta, 1))
         }
-        // An absolute set makes whatever level was queued before it moot.
-        (_, ControlRequest::VolumeSet(_)) => next,
-        (_, ControlRequest::BrightnessSet(_)) => next,
+        // An absolute set — or a device switch — makes whatever was queued
+        // before it moot.
+        (_, ControlRequest::VolumeSet(_))
+        | (_, ControlRequest::BrightnessSet(_))
+        | (_, ControlRequest::AudioSetDefault { .. }) => next.clone(),
         // Toggles never reach here and cross-domain pairs are never merged;
         // the folder below guarantees both.
-        _ => pending,
+        _ => pending.clone(),
     }
 }
 
@@ -908,7 +925,7 @@ fn fold_request(
     let last = batch
         .iter()
         .rposition(|queued| queued.request.domain() == domain);
-    match (next.request, last) {
+    match (&next.request, last) {
         (ControlRequest::VolumeToggleMute, Some(index))
             if batch[index].request == ControlRequest::VolumeToggleMute =>
         {
@@ -917,7 +934,7 @@ fn fold_request(
         }
         (ControlRequest::VolumeToggleMute, _) => batch.push(next),
         (_, Some(index)) if batch[index].request != ControlRequest::VolumeToggleMute => {
-            let merged = merge_value_requests(batch[index].request, next.request);
+            let merged = merge_value_requests(&batch[index].request, &next.request);
             batch[index] = QueuedRequest {
                 seq: batch[index].seq.max(next.seq),
                 request: merged,
@@ -931,10 +948,73 @@ fn fold_request(
 /// What the worker confirmed after applying a batch: per domain, the
 /// read-back after its newest executed request — or that request's failure.
 /// A domain left `None` was untouched by the batch.
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone)]
 pub(crate) struct ControlReport {
     pub volume: Option<VolumeReport>,
     pub brightness: Option<BrightnessReport>,
+    pub audio: Option<AudioReport>,
+}
+
+/// What the worker confirmed after a device switch: the set's own answer and,
+/// decisively, the topology re-read that follows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AudioReport {
+    /// Submission this answer covers; the newest switch's report is the only
+    /// one worth keeping, and the publish slot overwrites accordingly.
+    pub seq: u64,
+    pub direction: AudioDirection,
+    /// The device the user asked for.
+    pub asked_id: String,
+    /// `set_audio_device`'s own answer. Not evidence on its own — a sound
+    /// server routinely accepts the request and then puts the default back —
+    /// but it still tells "the tool refused outright" apart from "the tool
+    /// said yes and the server disagreed".
+    pub asked_ok: bool,
+    /// Both directions re-read after the set; the picker and the
+    /// control-center rows adopt this, never the request.
+    pub inventory: AudioInventory,
+}
+
+/// What the picker's re-read says about a requested switch. Pure so the
+/// adopt/revert decision is testable without a sound server: `took` is the
+/// adopt case (the marker moves to the asked device), a kept old default is
+/// the revert case, and the message says which happened — the same four
+/// outcomes the synchronous path reported.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AudioSwitchVerdict {
+    /// Whether the asked device actually became the default.
+    pub took: bool,
+    /// What reports as default after the re-read, when anything does.
+    pub in_use: Option<String>,
+    /// The picker status line for the outcome.
+    pub message: String,
+}
+
+/// Decide what a device switch resolved to, believing the re-read over the
+/// request — an HDMI output with no monitor or a headset microphone with no
+/// headset accepts the set and still never becomes the default.
+#[must_use]
+pub(crate) fn audio_switch_verdict(report: &AudioReport) -> AudioSwitchVerdict {
+    let devices = report.inventory.devices(report.direction);
+    let took = devices
+        .iter()
+        .any(|device| device.id == report.asked_id && device.is_default);
+    let in_use = report
+        .inventory
+        .defaults()
+        .name(report.direction)
+        .map(str::to_string);
+    let message = match (took, in_use.as_deref()) {
+        (true, Some(name)) => format!("Using {name}"),
+        (false, Some(name)) => format!("Unavailable \u{2014} still using {name}"),
+        (_, None) if report.asked_ok => "Switched, but nothing reports as default".to_string(),
+        (_, None) => "Could not switch device".to_string(),
+    };
+    AudioSwitchVerdict {
+        took,
+        in_use,
+        message,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1089,6 +1169,21 @@ fn run_control_queue(
                             }),
                     );
                 }
+                ControlRequest::AudioSetDefault { direction, id } => {
+                    // The set's exit code is not the answer; the re-read is.
+                    // Both run here, never on the event thread — two bounded-
+                    // but-blocking spawns, seconds of stall behind a hung
+                    // wpctl, is the round-13 bug shape.
+                    let asked_ok = set_audio_device(direction, &id);
+                    let inventory = audio_inventory();
+                    outcome.audio = Some(AudioReport {
+                        seq: queued.seq,
+                        direction,
+                        asked_id: id,
+                        asked_ok,
+                        inventory,
+                    });
+                }
             }
         }
         // A batch reduced to nothing by a cancelled toggle pair changed no
@@ -1114,7 +1209,7 @@ fn run_control_queue(
                 }
             }
         }
-        if outcome.volume.is_none() && outcome.brightness.is_none() {
+        if outcome.volume.is_none() && outcome.brightness.is_none() && outcome.audio.is_none() {
             continue;
         }
 
@@ -1127,6 +1222,9 @@ fn run_control_queue(
             }
             if outcome.brightness.is_some() {
                 guard.brightness = outcome.brightness;
+            }
+            if outcome.audio.is_some() {
+                guard.audio = outcome.audio;
             }
             // Publish before signalling, mirroring `BackgroundJob`: a handler
             // woken by the eventfd must find the value already visible.
@@ -1174,7 +1272,7 @@ pub(crate) fn take_control_report() -> Option<ControlReport> {
     let worker = CONTROLS_WORKER.get()?;
     let mut guard = worker.report.lock().unwrap_or_else(PoisonError::into_inner);
     let taken = std::mem::take(&mut *guard);
-    (taken.volume.is_some() || taken.brightness.is_some()).then_some(taken)
+    (taken.volume.is_some() || taken.brightness.is_some() || taken.audio.is_some()).then_some(taken)
 }
 
 /// Whether detection already concluded that no volume tool works — the one
@@ -1199,38 +1297,41 @@ pub(crate) fn brightness_tool_known_absent() -> bool {
 /// read-back then owns the first card.
 pub(crate) fn optimistic_volume(
     base: Option<AudioState>,
-    request: ControlRequest,
+    request: &ControlRequest,
 ) -> Option<AudioState> {
     match request {
         // A set needs no base, and the worker's unmute chain makes the
         // estimate unmuted: pointing at a level is an ask for that much sound.
         ControlRequest::VolumeSet(percent) => Some(AudioState {
-            percent: percent.min(100),
+            percent: (*percent).min(100),
             muted: false,
         }),
         // A plain adjust never unmutes, and every backend caps the result of
         // an adjust at 100 — including one that started above it.
         ControlRequest::VolumeAdjust(delta) => base.map(|base| AudioState {
-            percent: adjusted_level(base.percent, delta, 0),
+            percent: adjusted_level(base.percent, *delta, 0),
             muted: base.muted,
         }),
         ControlRequest::VolumeToggleMute => base.map(|base| AudioState {
             muted: !base.muted,
             ..base
         }),
-        ControlRequest::BrightnessAdjust(_) | ControlRequest::BrightnessSet(_) => None,
+        ControlRequest::BrightnessAdjust(_)
+        | ControlRequest::BrightnessSet(_)
+        | ControlRequest::AudioSetDefault { .. } => None,
     }
 }
 
 /// The brightness to show before the worker confirms; same rules as
 /// [`optimistic_volume`], with the brightness floor of 1.
-pub(crate) fn optimistic_brightness(base: Option<u8>, request: ControlRequest) -> Option<u8> {
+pub(crate) fn optimistic_brightness(base: Option<u8>, request: &ControlRequest) -> Option<u8> {
     match request {
-        ControlRequest::BrightnessSet(percent) => Some(percent.clamp(1, 100)),
-        ControlRequest::BrightnessAdjust(delta) => base.map(|base| adjusted_level(base, delta, 1)),
+        ControlRequest::BrightnessSet(percent) => Some((*percent).clamp(1, 100)),
+        ControlRequest::BrightnessAdjust(delta) => base.map(|base| adjusted_level(base, *delta, 1)),
         ControlRequest::VolumeAdjust(_)
         | ControlRequest::VolumeSet(_)
-        | ControlRequest::VolumeToggleMute => None,
+        | ControlRequest::VolumeToggleMute
+        | ControlRequest::AudioSetDefault { .. } => None,
     }
 }
 
@@ -1396,6 +1497,9 @@ impl ControlFeedback {
         match domain {
             ControlDomain::Volume => self.volume_osd_owed = Some(seq),
             ControlDomain::Brightness => self.brightness_osd_owed = Some(seq),
+            // A device switch owes no card: its feedback is the picker's
+            // re-read rows, not the OSD.
+            ControlDomain::AudioDevice => {}
         }
     }
 
@@ -1462,6 +1566,9 @@ impl ControlFeedback {
         let owed = match domain {
             ControlDomain::Volume => &mut self.volume_osd_owed,
             ControlDomain::Brightness => &mut self.brightness_osd_owed,
+            // Never owed: a device switch's feedback is the picker's re-read
+            // rows, and this helper is only ever called for the OSD domains.
+            ControlDomain::AudioDevice => return,
         };
         if owed.is_some_and(|owed_seq| owed_seq <= seq) {
             *owed = None;
@@ -2118,6 +2225,128 @@ Source #51
         );
     }
 
+    fn audio_switch(seq: u64, direction: AudioDirection, id: &str) -> QueuedRequest {
+        queued(
+            seq,
+            ControlRequest::AudioSetDefault {
+                direction,
+                id: id.to_string(),
+            },
+        )
+    }
+
+    #[test]
+    fn queued_audio_switches_fold_to_the_newest() {
+        // Two quick Enter presses are one switch: the device asked for last,
+        // never both in order.
+        let (batch, cancelled_seq) = fold_all([
+            audio_switch(1, AudioDirection::Output, "42"),
+            audio_switch(2, AudioDirection::Output, "57"),
+        ]);
+        assert_eq!(batch, [audio_switch(2, AudioDirection::Output, "57")]);
+        assert_eq!(cancelled_seq, None);
+    }
+
+    #[test]
+    fn audio_switches_do_not_merge_across_domains() {
+        // A device switch and a volume change are different domains: both
+        // run, in the order asked.
+        let (batch, _) = fold_all([
+            audio_switch(1, AudioDirection::Input, "9"),
+            queued(2, ControlRequest::VolumeSet(60)),
+        ]);
+        assert_eq!(
+            batch,
+            [
+                audio_switch(1, AudioDirection::Input, "9"),
+                queued(2, ControlRequest::VolumeSet(60)),
+            ]
+        );
+        let (batch, _) = fold_all([
+            queued(1, ControlRequest::VolumeSet(60)),
+            audio_switch(2, AudioDirection::Input, "9"),
+        ]);
+        assert_eq!(
+            batch,
+            [
+                queued(1, ControlRequest::VolumeSet(60)),
+                audio_switch(2, AudioDirection::Input, "9"),
+            ]
+        );
+    }
+
+    fn audio_report(asked_id: &str, asked_ok: bool, inventory: AudioInventory) -> AudioReport {
+        AudioReport {
+            seq: 1,
+            direction: AudioDirection::Output,
+            asked_id: asked_id.to_string(),
+            asked_ok,
+            inventory,
+        }
+    }
+
+    fn audio_device(id: &str, description: &str, is_default: bool) -> AudioDevice {
+        AudioDevice {
+            id: id.to_string(),
+            description: description.to_string(),
+            is_default,
+        }
+    }
+
+    #[test]
+    fn the_audio_switch_verdict_believes_the_re_read() {
+        // Adopt: the asked device reports as default — the marker moves to
+        // it and the picker says so.
+        let inventory = AudioInventory {
+            output: vec![
+                audio_device("42", "HDMI Output", true),
+                audio_device("57", "Speakers", false),
+            ],
+            input: Vec::new(),
+        };
+        let verdict = audio_switch_verdict(&audio_report("42", true, inventory));
+        assert!(verdict.took);
+        assert_eq!(verdict.in_use.as_deref(), Some("HDMI Output"));
+        assert_eq!(verdict.message, "Using HDMI Output");
+
+        // Revert: the server accepted the set and still put the default back
+        // — the exit code said yes, the re-read is what counts.
+        let inventory = AudioInventory {
+            output: vec![
+                audio_device("42", "HDMI Output", false),
+                audio_device("57", "Speakers", true),
+            ],
+            input: Vec::new(),
+        };
+        let verdict = audio_switch_verdict(&audio_report("42", true, inventory));
+        assert!(!verdict.took);
+        assert_eq!(verdict.in_use.as_deref(), Some("Speakers"));
+        assert_eq!(verdict.message, "Unavailable \u{2014} still using Speakers");
+
+        // Nothing reports as default at all: the tool's own answer is all
+        // that tells "said yes" from "refused".
+        let empty = AudioInventory::default();
+        let verdict = audio_switch_verdict(&audio_report("42", true, empty.clone()));
+        assert!(!verdict.took);
+        assert_eq!(verdict.in_use, None);
+        assert_eq!(verdict.message, "Switched, but nothing reports as default");
+        let verdict = audio_switch_verdict(&audio_report("42", false, empty));
+        assert_eq!(verdict.message, "Could not switch device");
+
+        // The verdict reads the asked direction's list, not the other end's.
+        let inventory = AudioInventory {
+            output: Vec::new(),
+            input: vec![audio_device("9", "Headset Microphone", true)],
+        };
+        let report = AudioReport {
+            direction: AudioDirection::Input,
+            ..audio_report("9", true, inventory)
+        };
+        let verdict = audio_switch_verdict(&report);
+        assert!(verdict.took);
+        assert_eq!(verdict.message, "Using Headset Microphone");
+    }
+
     #[test]
     fn optimistic_volume_estimates_follow_the_tools_bounds() {
         let base = Some(AudioState {
@@ -2127,14 +2356,14 @@ Source #51
         // An adjust keeps the mute flag and clamps at the 100 every backend
         // caps an adjust's result at.
         assert_eq!(
-            optimistic_volume(base, ControlRequest::VolumeAdjust(10)),
+            optimistic_volume(base, &ControlRequest::VolumeAdjust(10)),
             Some(AudioState {
                 percent: 55,
                 muted: false
             })
         );
         assert_eq!(
-            optimistic_volume(base, ControlRequest::VolumeAdjust(900)),
+            optimistic_volume(base, &ControlRequest::VolumeAdjust(900)),
             Some(AudioState {
                 percent: 100,
                 muted: false
@@ -2145,7 +2374,7 @@ Source #51
             muted: false,
         });
         assert_eq!(
-            optimistic_volume(quiet, ControlRequest::VolumeAdjust(-30)),
+            optimistic_volume(quiet, &ControlRequest::VolumeAdjust(-30)),
             Some(AudioState {
                 percent: 0,
                 muted: false
@@ -2159,7 +2388,7 @@ Source #51
             muted: false,
         });
         assert_eq!(
-            optimistic_volume(loud, ControlRequest::VolumeAdjust(-5)),
+            optimistic_volume(loud, &ControlRequest::VolumeAdjust(-5)),
             Some(AudioState {
                 percent: 100,
                 muted: false
@@ -2173,7 +2402,7 @@ Source #51
             muted: true,
         });
         assert_eq!(
-            optimistic_volume(muted, ControlRequest::VolumeSet(60)),
+            optimistic_volume(muted, &ControlRequest::VolumeSet(60)),
             Some(AudioState {
                 percent: 60,
                 muted: false
@@ -2181,7 +2410,7 @@ Source #51
         );
         // A toggle flips the flag and keeps the level.
         assert_eq!(
-            optimistic_volume(muted, ControlRequest::VolumeToggleMute),
+            optimistic_volume(muted, &ControlRequest::VolumeToggleMute),
             Some(AudioState {
                 percent: 45,
                 muted: false
@@ -2191,15 +2420,15 @@ Source #51
         // Nothing ever read: no invented level for relative changes — but an
         // absolute set still knows exactly what to show.
         assert_eq!(
-            optimistic_volume(None, ControlRequest::VolumeAdjust(5)),
+            optimistic_volume(None, &ControlRequest::VolumeAdjust(5)),
             None
         );
         assert_eq!(
-            optimistic_volume(None, ControlRequest::VolumeToggleMute),
+            optimistic_volume(None, &ControlRequest::VolumeToggleMute),
             None
         );
         assert_eq!(
-            optimistic_volume(None, ControlRequest::VolumeSet(160)),
+            optimistic_volume(None, &ControlRequest::VolumeSet(160)),
             Some(AudioState {
                 percent: 100,
                 muted: false
@@ -2210,25 +2439,25 @@ Source #51
     #[test]
     fn optimistic_brightness_never_leaves_the_visible_range() {
         assert_eq!(
-            optimistic_brightness(Some(45), ControlRequest::BrightnessAdjust(10)),
+            optimistic_brightness(Some(45), &ControlRequest::BrightnessAdjust(10)),
             Some(55)
         );
         assert_eq!(
-            optimistic_brightness(Some(95), ControlRequest::BrightnessAdjust(10)),
+            optimistic_brightness(Some(95), &ControlRequest::BrightnessAdjust(10)),
             Some(100)
         );
         // Both backends floor a decrease at a nonzero level, so the estimate
         // does too.
         assert_eq!(
-            optimistic_brightness(Some(5), ControlRequest::BrightnessAdjust(-30)),
+            optimistic_brightness(Some(5), &ControlRequest::BrightnessAdjust(-30)),
             Some(1)
         );
         assert_eq!(
-            optimistic_brightness(None, ControlRequest::BrightnessAdjust(5)),
+            optimistic_brightness(None, &ControlRequest::BrightnessAdjust(5)),
             None
         );
         assert_eq!(
-            optimistic_brightness(None, ControlRequest::BrightnessSet(0)),
+            optimistic_brightness(None, &ControlRequest::BrightnessSet(0)),
             Some(1)
         );
     }

@@ -1323,6 +1323,21 @@ pub enum OsdKind {
     /// Track label on media-key presses and track changes; drawn without a
     /// progress bar, on a wider card.
     Media,
+    /// Do-not-disturb flipped; the payload is the new state. A labeled card
+    /// like `Media`, and deliberately NOT a toast: toasts are DND-gated, the
+    /// OSD is not, so it is the only surface that can confirm DND itself.
+    DoNotDisturb(bool),
+    /// Caffeine (idle inhibit) flipped; the payload is the new state.
+    Caffeine(bool),
+    /// Night light flipped; the payload is the new state.
+    NightLight(bool),
+    /// Wi-Fi radio flip requested; the payload is the requested target. The
+    /// flip itself runs on a worker and the control-center row confirms from
+    /// the re-read — the card is the immediate acknowledgement.
+    Wifi(bool),
+    /// Bluetooth controller flip requested; the payload is the requested
+    /// target, on the same immediate-acknowledgement terms as [`Self::Wifi`].
+    Bluetooth(bool),
 }
 
 /// One keyboard navigation step in Expose / Mission Control, in the grid the

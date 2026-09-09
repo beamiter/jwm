@@ -819,11 +819,14 @@ where
     /// order: only those earn a dwell tooltip, so a cell whose title fits
     /// whole never floats one. Rebuilt with the textures.
     tab_titles_truncated: Vec<Vec<bool>>,
-    /// Rest-then-show state for the tooltip chip. The dwell is information
-    /// policy, not animation, so it is tracked apart from the fade.
+    /// Rest-then-show state for the tooltip chip, keyed by the window under
+    /// the pointer so a relayout that slides its cell keeps the rest. The
+    /// dwell is information policy, not animation, so it is tracked apart
+    /// from the fade.
     tab_tooltip_dwell: crate::backend::compositor_common::window_tabs::TooltipDwell,
-    /// Fade-in of the tooltip chip, keyed by the same (group, tab).
-    tab_tooltip_ease: crate::backend::compositor_common::dynamic_island::HoverEase<(usize, usize)>,
+    /// Fade-in of the tooltip chip, keyed by the same window id as the
+    /// dwell, so the fade survives the relayout with it.
+    tab_tooltip_ease: crate::backend::compositor_common::dynamic_island::HoverEase<u64>,
     /// The chip's rasterised line, keyed by its text; freed on every title
     /// refresh and in `Drop`, the same bargain `tab_title_textures` strikes.
     tab_tooltip_texture: Option<(String, glow::Texture, u32, u32)>,

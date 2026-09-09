@@ -176,6 +176,42 @@ pub(crate) fn icons_for(items: &[String]) -> Option<Arc<[Option<String>]>> {
     (band.items == items && band.icons.len() == items.len()).then(|| band.icons.clone())
 }
 
+/// The placeholder every launcher/switcher window row starts with:
+/// FontAwesome 4.7's fa-window-maximize and the two-space gap after it. The
+/// window manager always emits it — the band's content match keys on the
+/// rows' exact bytes, so they never change — and the compositor strips it
+/// from the rasterized text of a row whose real icon is being drawn
+/// ([`items_text`]), so the glyph and the icon never show side by side.
+pub(crate) const WINDOW_ROW_GLYPH: &str = "\u{f2d0}  ";
+
+/// The items block as it should be rasterized: the plain newline join, except
+/// that a row whose real icon is on the GPU this frame — its resolved path
+/// has an uploaded texture, per `uploaded` — loses its [`WINDOW_ROW_GLYPH`]
+/// prefix, which the drawn icon replaces. A row whose icon is still decoding,
+/// remembered as a miss, or never resolved keeps the glyph: the fail-safe
+/// placeholder. Without a band this is the plain join, byte for byte, and a
+/// row that never carried the prefix always passes through untouched.
+pub(crate) fn items_text(
+    items: &[String],
+    icons: Option<&[Option<String>]>,
+    uploaded: impl Fn(&str) -> bool,
+) -> String {
+    let Some(icons) = icons else {
+        return items.join("\n");
+    };
+    items
+        .iter()
+        .enumerate()
+        .map(
+            |(row, text)| match icons.get(row).and_then(Option::as_deref) {
+                Some(path) if uploaded(path) => text.strip_prefix(WINDOW_ROW_GLYPH).unwrap_or(text),
+                _ => text.as_str(),
+            },
+        )
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Decoded row-icon textures plus the in-flight decodes and the remembered
 /// misses, keyed by resolved path. `T` is the renderer's texture handle; the
 /// policy here never touches GL — uploads and deletes are the compositor's,
@@ -276,6 +312,19 @@ impl<T> RowIconCache<T> {
         }
     }
 
+    /// The path an insert of `new_path` would evict right now, mirroring
+    /// [`insert_texture`](Self::insert_texture)'s policy: a path already
+    /// cached is replaced in place (nothing is evicted), and past
+    /// [`MAX_TEXTURES`] the least-recently-used entry goes. The compositor
+    /// asks before inserting so that a visible row losing its icon can have
+    /// its text re-rasterized with the generic glyph back.
+    pub(crate) fn eviction_candidate(&self, new_path: &str) -> Option<&str> {
+        if self.textures.contains_key(new_path) || self.textures.len() < MAX_TEXTURES {
+            return None;
+        }
+        self.recency.front().map(String::as_str)
+    }
+
     /// Install an uploaded texture, evicting the least-recently-used one past
     /// [`MAX_TEXTURES`]. The evicted (or defensively replaced) handle goes back
     /// to the caller, whose GL context deletes it.
@@ -337,8 +386,14 @@ mod tests {
         rows.iter().map(|row| row.to_string()).collect()
     }
 
+    /// The band is one process-wide slot, so the tests that publish one must
+    /// not run concurrently — a parallel clear would pull another test's
+    /// fixture from under its assertion.
+    static BAND_TESTS: Mutex<()> = Mutex::new(());
+
     #[test]
     fn a_published_band_is_handed_out_only_for_its_own_rows() {
+        let _serial = BAND_TESTS.lock_safe();
         let items = strings(&["Firefox", "Terminal"]);
         let icons = vec![Some("/icons/firefox.png".to_string()), None];
         publish(&items, Some(&icons));
@@ -353,6 +408,7 @@ mod tests {
 
     #[test]
     fn panels_without_icons_clear_the_band() {
+        let _serial = BAND_TESTS.lock_safe();
         let items = strings(&["Firefox"]);
         publish(&items, Some(&[Some("/icons/firefox.png".to_string())]));
         publish(&items, None);
@@ -361,6 +417,7 @@ mod tests {
 
     #[test]
     fn malformed_bands_publish_nothing() {
+        let _serial = BAND_TESTS.lock_safe();
         let items = strings(&["Firefox", "Terminal"]);
         // An icon vec that does not align with the rows.
         publish(&items, Some(&[Some("/icons/firefox.png".to_string())]));
@@ -482,5 +539,78 @@ mod tests {
         assert!(cache.insert_texture("/icons/a.png".into(), 1).is_none());
         assert_eq!(cache.insert_texture("/icons/a.png".into(), 2), Some(1));
         assert_eq!(cache.get("/icons/a.png"), Some(&2));
+    }
+
+    #[test]
+    fn the_eviction_candidate_is_the_path_an_insert_would_evict() {
+        let mut cache = RowIconCache::<u32>::new();
+        for index in 0..MAX_TEXTURES {
+            // Room left: an insert evicts nothing, and the candidate says so.
+            assert!(cache.eviction_candidate("/icons/q.png").is_none());
+            assert!(
+                cache
+                    .insert_texture(format!("/icons/{index}.png"), index as u32)
+                    .is_none()
+            );
+        }
+        // Full: the next new path evicts the coldest entry, named in advance.
+        assert_eq!(
+            cache.eviction_candidate("/icons/new.png"),
+            Some("/icons/0.png")
+        );
+        assert_eq!(
+            cache.insert_texture("/icons/new.png".into(), 10_000),
+            Some(0)
+        );
+        // Replacing a cached path evicts nothing, and the candidate agrees.
+        assert!(cache.eviction_candidate("/icons/new.png").is_none());
+        assert_eq!(
+            cache.insert_texture("/icons/new.png".into(), 10_001),
+            Some(10_000)
+        );
+    }
+
+    #[test]
+    fn a_row_with_an_uploaded_icon_loses_the_generic_glyph() {
+        let items = strings(&[
+            &format!("{WINDOW_ROW_GLYPH}Firefox"),
+            &format!("{WINDOW_ROW_GLYPH}Terminal"),
+        ]);
+        let icons = vec![
+            Some("/icons/firefox.png".to_string()),
+            Some("/icons/terminal.png".to_string()),
+        ];
+        // Only the first row's texture is uploaded: only its glyph is stripped.
+        let text = items_text(&items, Some(&icons), |path| path == "/icons/firefox.png");
+        assert_eq!(text, format!("Firefox\n{WINDOW_ROW_GLYPH}Terminal"));
+    }
+
+    #[test]
+    fn rows_without_an_uploaded_icon_keep_the_glyph() {
+        let items = strings(&[&format!("{WINDOW_ROW_GLYPH}Firefox")]);
+        // Still decoding (a path, no texture yet) and never resolved (no path
+        // at all) both keep the placeholder.
+        for icons in [vec![Some("/icons/firefox.png".to_string())], vec![None]] {
+            let text = items_text(&items, Some(&icons), |_| false);
+            assert_eq!(text, items[0]);
+        }
+    }
+
+    #[test]
+    fn a_panel_without_an_icon_band_joins_byte_for_byte() {
+        let items = strings(&[&format!("{WINDOW_ROW_GLYPH}Firefox"), "Plain row"]);
+        // Even an always-true `uploaded` is never consulted without a band.
+        assert_eq!(items_text(&items, None, |_| true), items.join("\n"));
+    }
+
+    #[test]
+    fn rows_that_never_carried_the_glyph_pass_through_untouched() {
+        // Application rows have no prefix to strip, uploaded icon or not.
+        let items = strings(&["Firefox", "Terminal  \u{f120}"]);
+        let icons = vec![
+            Some("/icons/firefox.png".to_string()),
+            Some("/icons/terminal.png".to_string()),
+        ];
+        assert_eq!(items_text(&items, Some(&icons), |_| true), items.join("\n"));
     }
 }

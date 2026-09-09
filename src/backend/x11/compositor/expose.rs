@@ -805,8 +805,21 @@ impl<C: CompositorConnection> Compositor<C> {
                 .copied()
                 == Some(true)
         });
+        // The dwell keys on the window, not the cell: the hover stays
+        // positional (it is re-derived from the pointer on every relayout),
+        // and the id is resolved from it here each frame. The same window
+        // sliding to another index then keeps its rest, while a different
+        // window landing under the resting pointer honestly restarts.
+        let tooltip_window = self
+            .tab_hover
+            .and_then(|(group_index, index)| {
+                self.window_groups
+                    .get(group_index)
+                    .and_then(|group| group.tabs.get(index))
+            })
+            .map(|tab| tab.window);
         self.tab_tooltip_dwell
-            .advance(std::time::Instant::now(), self.tab_hover, tooltip_eligible);
+            .advance(std::time::Instant::now(), tooltip_window, tooltip_eligible);
         if self.tab_tooltip_dwell.needs_frame() {
             // The dwell lapses on a clock, not on an event: frames must keep
             // coming or an idle screen sleeps through the chip's due moment.
@@ -947,8 +960,12 @@ impl<C: CompositorConnection> Compositor<C> {
 
         // The chip draws over every strip and under nothing: placed off the
         // band, it can never cover the cell whose clicks must still land.
-        if let Some((group_index, index)) = tooltip_key
+        // The dwell and the fade key on the window, so the cell is
+        // re-resolved here: a relayout that slid it moves the chip along,
+        // and a window that left the groups simply draws nothing.
+        if let Some(window) = tooltip_key
             && tooltip_p > 0.0
+            && let Some((group_index, index)) = window_tabs::find_tab(&self.window_groups, window)
         {
             self.render_tab_tooltip(proj, group_index, index, tooltip_p);
         }
@@ -971,9 +988,15 @@ impl<C: CompositorConnection> Compositor<C> {
         let size = compositor_font::ui_font_pixel_size(font);
         // The chip re-ellipsizes against its own budget: a title that would
         // run off the screen is still cut, just against the screen instead
-        // of the cell.
-        let text =
-            compositor_font::fit_ui_text(&title, font, size, window_tabs::TOOLTIP_MAX_TEXT_WIDTH);
+        // of the cell. On an output narrower than the full budget the line
+        // ellipsizes harder, so the texture and the chip around it genuinely
+        // fit.
+        let text = compositor_font::fit_ui_text(
+            &title,
+            font,
+            size,
+            window_tabs::tooltip_text_budget(self.screen_w as f32),
+        );
         if text.is_empty() {
             return;
         }
@@ -1112,10 +1135,12 @@ mod tests {
                 Tab {
                     title: "left".to_string(),
                     active: true,
+                    window: 1,
                 },
                 Tab {
                     title: "right".to_string(),
                     active: false,
+                    window: 2,
                 },
             ],
         }]
@@ -1176,9 +1201,11 @@ mod tests {
     /// render path must keep the frame loop alive while a rest is pending —
     /// an idle screen would otherwise sleep through the moment the chip is
     /// due. Pin the wiring: the truncation set is recorded at title refresh,
-    /// the live hover feeds the dwell every drawn frame, a pending dwell
-    /// arms `needs_render`, the fade follows the motion setting, and only
-    /// the dwell's visible cell is ever chipped.
+    /// the live hover's window id feeds the dwell every drawn frame, a
+    /// pending dwell arms `needs_render`, the fade follows the motion
+    /// setting, and only the dwell's visible window is ever chipped — with
+    /// its cell re-resolved at draw time so a relayout moves the chip with
+    /// the window instead of restarting the rest.
     #[test]
     fn the_tab_bar_pumps_frames_while_a_tooltip_dwell_is_pending() {
         let compact: String = include_str!("expose.rs")
@@ -1210,14 +1237,15 @@ mod tests {
             "needs_render must be armed by the needs_frame guard"
         );
 
-        // The fade takes the dwell's visible cell and the motion setting, so
-        // reduced motion snaps the chip but never skips the dwell.
+        // The fade takes the dwell's visible window and the motion setting,
+        // so reduced motion snaps the chip but never skips the dwell.
         assert!(compact.contains("self.tab_tooltip_ease.advance_with_motion("));
         assert!(compact.contains("tooltip_key,crate::config::CONFIG.load().motion_enabled()"));
-        // The chip draws for that visible cell only, and only at a strength
-        // above zero.
+        // The chip draws for that visible window only, and only at a
+        // strength above zero; the cell is re-resolved from the id so a
+        // relayout cannot strand the chip where the window used to sit.
         assert!(compact.contains(
-            "ifletSome((group_index,index))=tooltip_key&&tooltip_p>0.0{self.render_tab_tooltip("
+            "ifletSome(window)=tooltip_key&&tooltip_p>0.0&&letSome((group_index,index))=window_tabs::find_tab(&self.window_groups,window){self.render_tab_tooltip("
         ));
     }
 }

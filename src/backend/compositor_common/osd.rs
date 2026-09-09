@@ -83,6 +83,21 @@ impl ActiveOsd {
                 "\u{f001}", // fa-music
                 self.label.clone().unwrap_or_default(),
             ),
+            // Every glyph below is a FontAwesome-4 codepoint for the same
+            // reason as `VolumeMuted`: FA-5-era f6xx glyphs render as hollow
+            // boxes on common Nerd Font builds. The off states reuse the
+            // panel's own vocabulary — fa-ban is what the network row draws
+            // for a switched-off radio.
+            OsdKind::DoNotDisturb(true) => ("\u{f1f7}", "Do Not Disturb On".into()), // fa-bell-slash
+            OsdKind::DoNotDisturb(false) => ("\u{f0f3}", "Do Not Disturb Off".into()), // fa-bell
+            OsdKind::Caffeine(true) => ("\u{f0f4}", "Caffeine On".into()),           // fa-coffee
+            OsdKind::Caffeine(false) => ("\u{f0f4}", "Caffeine Off".into()),
+            OsdKind::NightLight(true) => ("\u{f186}", "Night Light On".into()), // fa-moon-o
+            OsdKind::NightLight(false) => ("\u{f185}", "Night Light Off".into()), // fa-sun
+            OsdKind::Wifi(true) => ("\u{f1eb}", "Wi-Fi On".into()),             // fa-wifi
+            OsdKind::Wifi(false) => ("\u{f05e}", "Wi-Fi Off".into()),           // fa-ban
+            OsdKind::Bluetooth(true) => ("\u{f293}", "Bluetooth On".into()),    // fa-bluetooth
+            OsdKind::Bluetooth(false) => ("\u{f293}", "Bluetooth Off".into()),
         }
     }
 
@@ -90,7 +105,12 @@ impl ActiveOsd {
     /// an empty bar rather than no bar, so the card keeps its shape.
     pub(crate) fn fill(&self) -> Option<f32> {
         match self.kind {
-            OsdKind::Media => None,
+            OsdKind::Media
+            | OsdKind::DoNotDisturb(_)
+            | OsdKind::Caffeine(_)
+            | OsdKind::NightLight(_)
+            | OsdKind::Wifi(_)
+            | OsdKind::Bluetooth(_) => None,
             OsdKind::VolumeMuted => Some(0.0),
             _ => Some(f32::from(self.percent.min(100)) / 100.0),
         }
@@ -269,5 +289,47 @@ mod tests {
         // The stale label must not survive onto the volume card.
         assert_eq!(osd.icon_and_label().1, "30%");
         assert_eq!(osd.card_width(), SLIDER_CARD_WIDTH);
+    }
+
+    #[test]
+    fn toggle_kinds_draw_labeled_cards_without_bars() {
+        let now = Instant::now();
+        // Each kind carries its new state in the label, an icon in the
+        // FontAwesome-4 range common Nerd Font builds actually carry (an
+        // f6xx glyph renders as a hollow box), no bar, and the slider
+        // card's width.
+        for (kind, icon, label) in [
+            (OsdKind::DoNotDisturb(true), "\u{f1f7}", "Do Not Disturb On"),
+            (
+                OsdKind::DoNotDisturb(false),
+                "\u{f0f3}",
+                "Do Not Disturb Off",
+            ),
+            (OsdKind::Caffeine(true), "\u{f0f4}", "Caffeine On"),
+            (OsdKind::Caffeine(false), "\u{f0f4}", "Caffeine Off"),
+            (OsdKind::NightLight(true), "\u{f186}", "Night Light On"),
+            (OsdKind::NightLight(false), "\u{f185}", "Night Light Off"),
+            (OsdKind::Wifi(true), "\u{f1eb}", "Wi-Fi On"),
+            (OsdKind::Wifi(false), "\u{f05e}", "Wi-Fi Off"),
+            (OsdKind::Bluetooth(true), "\u{f293}", "Bluetooth On"),
+            (OsdKind::Bluetooth(false), "\u{f293}", "Bluetooth Off"),
+        ] {
+            let mut slot = OsdSlot::default();
+            slot.show(kind, 0, now);
+            let osd = slot.get().unwrap();
+            assert_eq!(osd.icon_and_label(), (icon, label.to_string()), "{kind:?}");
+            assert_eq!(osd.fill(), None, "{kind:?} draws no bar");
+            assert_eq!(osd.card_width(), SLIDER_CARD_WIDTH, "{kind:?}");
+            for ch in icon
+                .chars()
+                .filter(|ch| ('\u{f000}'..'\u{f900}').contains(ch))
+            {
+                assert!(
+                    (ch as u32) < 0xf600,
+                    "{kind:?}'s icon {ch:?} (U+{:04X}) is outside the FontAwesome-4 range",
+                    ch as u32
+                );
+            }
+        }
     }
 }

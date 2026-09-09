@@ -194,6 +194,14 @@ pub enum SystemUiState {
         /// Whether the "Caps Lock is on" row is showing. Read back from the
         /// live modifier mask on every key event the lock receives.
         caps_lock: bool,
+        /// The one-shot PAM authentication behind Enter. It lives in the
+        /// lock state itself — not beside it on the WM — so a lock that
+        /// goes away takes its worker handle with it (the worker still
+        /// wipes the password; only the answer is discarded). PAM blocks
+        /// for seconds on a wrong password, and arbitrarily long on
+        /// pam_sss/fingerprint/faillock, which is why it runs on a worker
+        /// thread at all; see [`AuthAttempt`].
+        auth: AuthAttempt,
     },
     ControlCenter {
         entries: Vec<ControlEntry>,
@@ -943,6 +951,9 @@ impl Clone for SystemUiState {
                 clock: clock.clone(),
                 date: date.clone(),
                 caps_lock: *caps_lock,
+                // Nor inherit an in-flight authentication: the worker's
+                // answer belongs to the state that asked for it.
+                auth: AuthAttempt::Idle,
             },
             Self::ControlCenter {
                 entries,
@@ -1173,6 +1184,7 @@ impl SystemUiState {
             clock: lock_clock_line(&now),
             date: lock_date_line(&now),
             caps_lock: false,
+            auth: AuthAttempt::Idle,
         }
     }
 
@@ -3197,6 +3209,70 @@ impl SystemUiState {
         }
     }
 
+    /// The PAM worker has the field's contents now: say so on the status
+    /// row. Typing from here collects the *next* attempt and clears this
+    /// row exactly like it clears an error.
+    pub fn authentication_started(&mut self) {
+        if let Self::Locked { message, .. } = self {
+            *message = "Verifying\u{2026}".into();
+        }
+    }
+
+    /// The worker never ran — the OS refused it a thread — so the progress
+    /// row would be a lie. Clear it without touching whatever the user has
+    /// typed since; Enter may be tried again.
+    pub fn authentication_aborted(&mut self) {
+        if let Self::Locked { message, .. } = self {
+            message.clear();
+        }
+    }
+
+    /// Enter on the lock screen: take the field for the PAM worker and
+    /// announce the wait on the status row. `None` — Enter is dead — while
+    /// an attempt is already in flight: the lock screen authenticates one
+    /// password at a time. Also `None` outside the lock screen.
+    pub fn begin_authentication(&mut self) -> Option<String> {
+        let Self::Locked { auth, .. } = self else {
+            return None;
+        };
+        if auth.is_verifying() {
+            return None;
+        }
+        let password = self.take_password()?;
+        self.authentication_started();
+        Some(password)
+    }
+
+    /// Install the worker started with the password from
+    /// [`Self::begin_authentication`]. The two are split because attaching
+    /// the event loop's completion notifier happens on the `Jwm` between
+    /// them; a second Enter cannot interleave on the one input thread.
+    pub fn track_authentication(&mut self, job: BackgroundJob<bool>) {
+        if let Self::Locked { auth, .. } = self {
+            auth.submit(job);
+        }
+    }
+
+    /// One frame-tick look at the PAM worker; see [`AuthAttempt::poll`].
+    /// Always [`AuthPoll::Pending`] outside the lock screen — a dismissed
+    /// lock dropped its attempt with the rest of the state.
+    pub fn poll_authentication(&mut self) -> AuthPoll {
+        let Self::Locked { auth, .. } = self else {
+            return AuthPoll::Pending;
+        };
+        auth.poll()
+    }
+
+    /// Whether the in-flight authentication's completion signal can still
+    /// reach the event loop, for the notifier-hub health check; always
+    /// covered outside the lock screen.
+    pub fn auth_readiness_is_covered(&self) -> bool {
+        let Self::Locked { auth, .. } = self else {
+            return true;
+        };
+        auth.readiness_is_covered()
+    }
+
     /// Refresh the lock screen's clock and date rows from `now`. Returns true
     /// when either row's text changed, meaning the overlay needs a re-sync;
     /// always false outside the lock screen, so the caller's per-minute tick
@@ -3287,6 +3363,10 @@ impl SystemUiState {
                 clock,
                 date,
                 caps_lock,
+                // The auth worker is not a row: "Verifying…" travels through
+                // the status message, the outcome through the same paths a
+                // keystroke would take.
+                ..
             } => {
                 let status = if message.is_empty() {
                     "Enter password to unlock"
@@ -4270,6 +4350,109 @@ fn parse_exec(exec: &str) -> Vec<String> {
     args.into_iter()
         .filter(|arg| !arg.starts_with('%'))
         .collect()
+}
+
+/// The lock screen's one in-flight PAM authentication. `pam_authenticate`
+/// blocks for seconds on a wrong password — arbitrarily long behind
+/// pam_sss, fingerprint or faillock modules — so Enter hands the password
+/// to a worker thread and the frame tick adopts the outcome here. The
+/// password never crosses back: only the boolean does.
+#[derive(Debug, Default)]
+pub enum AuthAttempt {
+    /// No authentication in flight; Enter submits the field.
+    #[default]
+    Idle,
+    /// PAM is running on the worker. Enter is ignored; Esc still only
+    /// clears the field — it cannot cancel the worker.
+    Verifying(BackgroundJob<bool>),
+}
+
+/// What one frame-tick look at the PAM worker found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthPoll {
+    /// Still running, or no attempt exists: nothing to do.
+    Pending,
+    /// The worker finished; the password left with it, already wiped.
+    Completed(bool),
+    /// The OS refused the worker a thread, so no authentication ran. The
+    /// progress row would be a lie; the caller clears it so Enter retries.
+    Refused,
+}
+
+impl AuthAttempt {
+    /// Whether a worker holds a password right now. A thread the OS
+    /// refused never publishes, so it does not count: the frame tick
+    /// retires its handle and Enter may submit again.
+    fn is_verifying(&self) -> bool {
+        matches!(self, Self::Verifying(job) if job.started())
+    }
+
+    /// Whether the worker's completion signal can still reach the event
+    /// loop; an idle slot has nothing to cover.
+    fn readiness_is_covered(&self) -> bool {
+        match self {
+            Self::Idle => true,
+            Self::Verifying(job) => job.readiness_is_covered(),
+        }
+    }
+
+    /// Install the worker started for the just-taken password. Returns
+    /// false — dropping the offered job, whose worker still wipes its
+    /// copy — when an attempt is already in flight: the lock screen runs
+    /// exactly one.
+    fn submit(&mut self, job: BackgroundJob<bool>) -> bool {
+        if self.is_verifying() {
+            return false;
+        }
+        *self = Self::Verifying(job);
+        true
+    }
+
+    /// One frame-tick look. Completion and refusal both retire the slot to
+    /// [`Self::Idle`]; a still-running worker changes nothing.
+    fn poll(&mut self) -> AuthPoll {
+        let Self::Verifying(job) = self else {
+            return AuthPoll::Pending;
+        };
+        if !job.started() {
+            *self = Self::Idle;
+            return AuthPoll::Refused;
+        }
+        match job.take() {
+            Some(authenticated) => {
+                *self = Self::Idle;
+                AuthPoll::Completed(authenticated)
+            }
+            None => AuthPoll::Pending,
+        }
+    }
+}
+
+/// A password on its way to and through the PAM worker. Overwriting on
+/// drop keeps every exit — success, failure, a panicking worker, or a
+/// spawn the OS refused dropping the unrun closure — on the zeroization
+/// discipline the old inline path and [`SystemUiState::cancel`] keep.
+struct ZeroizingPassword(String);
+
+impl ZeroizingPassword {
+    fn authenticate(&self) -> bool {
+        authenticate_current_user(&self.0)
+    }
+}
+
+impl Drop for ZeroizingPassword {
+    fn drop(&mut self) {
+        unsafe { self.0.as_bytes_mut().fill(0) };
+    }
+}
+
+/// Run PAM off the compositor thread: the password moves into the worker
+/// and is wiped there on every outcome. The boolean result is adopted from
+/// the frame tick, which runs the unlock or the failure row.
+#[must_use]
+pub fn start_authentication(password: String) -> BackgroundJob<bool> {
+    let password = ZeroizingPassword(password);
+    BackgroundJob::spawn(move || password.authenticate())
 }
 
 // Minimal dynamically-loaded PAM client. dlopen keeps builds working on
@@ -6741,6 +6924,7 @@ mod tests {
             clock: "15:42".into(),
             date: "Monday, 27 July 2026".into(),
             caps_lock: false,
+            auth: AuthAttempt::Idle,
         };
 
         assert!(state.clear_lock_password());
@@ -6818,6 +7002,120 @@ mod tests {
         assert_eq!(parts.items[0], "\u{f017}  15:42");
         assert_eq!(parts.items[2], "Authentication failed");
         assert!(!SystemUiState::Inactive.set_lock_caps_lock(true));
+    }
+
+    fn poll_until_settled(state: &mut SystemUiState) -> AuthPoll {
+        for _ in 0..200 {
+            let outcome = state.poll_authentication();
+            if outcome != AuthPoll::Pending {
+                return outcome;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        AuthPoll::Pending
+    }
+
+    #[test]
+    fn the_lock_screen_runs_one_authentication_at_a_time() {
+        let mut state = SystemUiState::locked_at(lock_test_time());
+        // Nothing exists outside the lock screen.
+        assert_eq!(
+            SystemUiState::Inactive.poll_authentication(),
+            AuthPoll::Pending
+        );
+        assert_eq!(SystemUiState::Inactive.begin_authentication(), None);
+        assert_eq!(state.poll_authentication(), AuthPoll::Pending);
+
+        // Enter takes the field and announces the wait on the status row.
+        for ch in "hunter2".chars() {
+            state.push_char(ch);
+        }
+        let (release, wait) = std::sync::mpsc::channel();
+        let password = state.begin_authentication().expect("the field to submit");
+        assert_eq!(password, "hunter2");
+        state.track_authentication(BackgroundJob::spawn(move || {
+            wait.recv().unwrap();
+            true
+        }));
+        assert_eq!(state.overlay_parts().items[2], "Verifying\u{2026}");
+
+        // Enter is dead while the worker holds a password — the field keeps
+        // collecting the next attempt instead, and typing clears the
+        // progress row exactly like it clears an error.
+        assert_eq!(state.begin_authentication(), None);
+        state.push_char('x');
+        let parts = state.overlay_parts();
+        assert_eq!(parts.items[2], "Enter password to unlock");
+        assert_eq!(parts.items[3], "\u{f084}  Password  *");
+        assert_eq!(state.poll_authentication(), AuthPoll::Pending);
+
+        // Esc keeps its clear-the-field behavior and does not cancel or
+        // otherwise touch the in-flight worker.
+        assert!(state.clear_lock_password());
+        assert_eq!(state.poll_authentication(), AuthPoll::Pending);
+
+        release.send(()).unwrap();
+        assert_eq!(poll_until_settled(&mut state), AuthPoll::Completed(true));
+        // The slot retired: a second Enter submits again, and an idle poll
+        // stays quiet.
+        assert_eq!(state.poll_authentication(), AuthPoll::Pending);
+        for ch in "again".chars() {
+            state.push_char(ch);
+        }
+        assert!(state.begin_authentication().is_some());
+    }
+
+    #[test]
+    fn a_failed_authentication_retires_the_slot_and_keeps_the_error_row() {
+        let mut state = SystemUiState::locked_at(lock_test_time());
+        state.push_char('x');
+        assert!(state.begin_authentication().is_some());
+        state.track_authentication(BackgroundJob::spawn(|| false));
+        assert_eq!(poll_until_settled(&mut state), AuthPoll::Completed(false));
+        // The tick's failure path: today's row, today's wiped field.
+        state.authentication_failed();
+        let parts = state.overlay_parts();
+        assert_eq!(parts.items[2], "Authentication failed");
+        assert_eq!(parts.items[3], "\u{f084}  Password  ");
+        assert_eq!(state.poll_authentication(), AuthPoll::Pending);
+    }
+
+    #[test]
+    fn an_aborted_authentication_clears_only_the_progress_row() {
+        let mut state = SystemUiState::locked_at(lock_test_time());
+        state.authentication_started();
+        assert_eq!(state.overlay_parts().items[2], "Verifying\u{2026}");
+        // The user kept typing the next attempt after Enter; a refused
+        // worker clears the lie but not their typing.
+        state.push_char('y');
+        state.authentication_started();
+        state.authentication_aborted();
+        let parts = state.overlay_parts();
+        assert_eq!(parts.items[2], "Enter password to unlock");
+        assert_eq!(parts.items[3], "\u{f084}  Password  *");
+        // Non-lock states ignore all three setters.
+        let mut inactive = SystemUiState::Inactive;
+        inactive.authentication_started();
+        inactive.authentication_aborted();
+        inactive.authentication_failed();
+        assert!(!inactive.is_locked());
+    }
+
+    #[test]
+    fn a_cloned_lock_never_inherits_an_in_flight_authentication() {
+        let mut state = SystemUiState::locked_at(lock_test_time());
+        let (release, wait) = std::sync::mpsc::channel();
+        assert!(state.begin_authentication().is_some());
+        state.track_authentication(BackgroundJob::spawn(move || {
+            wait.recv().unwrap();
+            true
+        }));
+        let mut cloned = state.clone();
+        // The clone is a render-time snapshot: no worker, no pending answer.
+        assert_eq!(cloned.poll_authentication(), AuthPoll::Pending);
+        assert!(cloned.begin_authentication().is_some());
+        release.send(()).unwrap();
+        assert_eq!(poll_until_settled(&mut state), AuthPoll::Completed(true));
     }
 
     #[test]
