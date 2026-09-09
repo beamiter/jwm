@@ -88,6 +88,20 @@ const PREVIEW_EDGE: f32 = 32.0;
 /// Smaller than the panel's own radius, the way the query field's is.
 pub(crate) const PREVIEW_RADIUS: f32 = 12.0;
 
+/// Edge of the square a row icon draws in. The bar's app icons are 24 px and
+/// the resolver is asked for that size, so the launcher and the switcher agree
+/// with what the user already reads on the bar.
+pub(crate) const ROW_ICON_PX: f32 = 24.0;
+/// Breathing room between a row's icon and its text.
+pub(crate) const ROW_ICON_GAP: f32 = 8.0;
+/// Width a list reserves for the icon column when — and only when — the
+/// payload carries row icons. Text-only panels pass 0.0 and keep exactly the
+/// geometry they had.
+pub(crate) const ROW_ICON_SLOT: f32 = ROW_ICON_PX + ROW_ICON_GAP;
+/// Vertical margin inside a row before the icon is clamped smaller than
+/// [`ROW_ICON_PX`]; a very small font keeps the icon inside its own row.
+const ROW_ICON_PAD_Y: f32 = 2.0;
+
 /// Widest a card may be on this screen.
 ///
 /// The ordinary margin is a total inset (half on either side). On a very
@@ -146,6 +160,11 @@ pub(crate) struct SectionSizes {
     pub(crate) query: Size,
     pub(crate) items: Size,
     pub(crate) hint: Size,
+    /// Width the list reserves for its per-row icon column: [`ROW_ICON_SLOT`]
+    /// when the payload carries row icons, 0.0 otherwise. Not a rasterized
+    /// section — the icons arrive as their own textures — but the column
+    /// shifts where the items block starts and how wide the card wants to be.
+    pub(crate) row_icons: f32,
 }
 
 impl SectionSizes {
@@ -171,6 +190,10 @@ pub(crate) struct PanelContents {
     pub(crate) items: Option<[f32; 2]>,
     /// Height of one list row, i.e. the rasterizer's line height.
     pub(crate) row_height: f32,
+    /// Width of the icon column the items block was shifted by; 0.0 for
+    /// text-only panels. The hit test subtracts it back out of a row's text
+    /// offset, and the renderer places the column's icons with it.
+    pub(crate) row_icons: f32,
     pub(crate) selection: Option<Rect>,
     /// Hairline between the list and the footer.
     pub(crate) divider: Option<Rect>,
@@ -191,6 +214,9 @@ pub(crate) struct HitGeometry {
     items: Option<Rect>,
     row_height: f32,
     rows: usize,
+    /// The icon column the items text was shifted by, subtracted back out of a
+    /// row's text offset.
+    row_icons: f32,
     /// The side preview's painted frame, when one is on screen. It is a dead
     /// zone: a press there must do nothing — neither pick a row nor dismiss
     /// the panel the way a scrim click would.
@@ -224,6 +250,7 @@ impl HitGeometry {
             items,
             row_height: contents.row_height,
             rows,
+            row_icons: contents.row_icons,
             side_preview: None,
         }
     }
@@ -254,9 +281,11 @@ impl HitGeometry {
             return Hit::Panel;
         }
         let row = ((y - items[1]) / self.row_height).floor().max(0.0) as usize;
-        // The list texture is drawn at panel_x + PAD; the offset into it is
-        // what a row consumer (a slider bar at a known text position) wants.
-        let text_x = x - self.panel[0] - PAD;
+        // The list texture is drawn at panel_x + PAD plus the icon column; the
+        // offset into it is what a row consumer (a slider bar at a known text
+        // position) wants. Text-only panels reserve no column, so their offset
+        // is unchanged.
+        let text_x = x - self.panel[0] - PAD - self.row_icons;
         Hit::Item(row.min(self.rows.saturating_sub(1)), text_x)
     }
 }
@@ -282,7 +311,7 @@ pub(crate) fn target_size(sizes: &SectionSizes, screen_w: f32, width_floor: f32)
         .title
         .0
         .max(sizes.query.0 + 2.0 * QUERY_PAD)
-        .max(sizes.items.0)
+        .max(sizes.items.0 + sizes.row_icons)
         .max(sizes.hint.0)
         .max(MIN_CONTENT_W);
     // Round up to the step before the floor is applied, so a panel that grows
@@ -340,7 +369,11 @@ pub(crate) fn contents(
     if items_h > 0.0 {
         cy += GAP;
         let items_y = cy;
-        out.items = Some([x + PAD, items_y]);
+        // The icon column sits between the card's padding and the text; the
+        // whole block moves right by the reserved slot, so a panel without
+        // icons (slot 0.0) lays out exactly as before.
+        out.items = Some([x + PAD + sizes.row_icons, items_y]);
+        out.row_icons = sizes.row_icons;
         if rows > 0 {
             // The list is one texture, so a row's height is only recoverable
             // from the block: the rasterizer padded it once, top and bottom.
@@ -418,6 +451,22 @@ pub(crate) fn side_preview_frame(panel: Rect, viewport: [f32; 4]) -> Option<Rect
     Some([x, y, w, h])
 }
 
+/// The square one row's icon letterboxes into: left of the (already shifted)
+/// items text by [`ROW_ICON_SLOT`], vertically centred in its row. The row
+/// height comes from the painted layout, so the column tracks the same rows
+/// the selection pill covers. A row shorter than the slot — a very small
+/// panel font — shrinks the frame rather than bleeding into the next row.
+#[must_use]
+pub(crate) fn row_icon_frame(items: [f32; 2], row_height: f32, row: usize) -> Rect {
+    let edge = ROW_ICON_PX.min((row_height - 2.0 * ROW_ICON_PAD_Y).max(1.0));
+    [
+        items[0] - ROW_ICON_SLOT,
+        items[1] + row as f32 * row_height + (row_height - edge) * 0.5,
+        edge,
+        edge,
+    ]
+}
+
 /// The image inside `frame`: aspect-preserved, centered, never upscaled past
 /// the decoded size (a tiny source stays tiny rather than blurring up).
 /// `None` for a degenerate frame or image, which is how a zero-sized decode
@@ -448,6 +497,7 @@ mod tests {
             query,
             items,
             hint,
+            row_icons: 0.0,
         }
     }
 
@@ -898,5 +948,78 @@ mod tests {
 
         // And a frame that was not painted protects nothing.
         assert_eq!(bare.with_side_preview(None).hit_test(cx, cy), Hit::Outside);
+    }
+
+    #[test]
+    fn a_zero_icon_column_is_byte_identical_to_no_icon_column() {
+        // The text-only path must not move a single pixel: same target size,
+        // same contents, same hit geometry whether the field is absent from
+        // the caller's mind or explicitly zero.
+        let s = sizes((40.0, 24.0), (200.0, 22.0), (300.0, 204.0), (300.0, 20.0));
+        let panel = [100.0, 50.0, 600.0, 400.0];
+        let contents = contents(panel, &s, 10, Some(3), None);
+        assert_eq!(contents.row_icons, 0.0);
+        assert_eq!(contents.items.unwrap()[0], 100.0 + PAD);
+        let hit = HitGeometry::new(panel, &contents, 10);
+        let items_y = contents.items.unwrap()[1];
+        assert_eq!(
+            hit.hit_test(172.0, items_y as f64 + 1.0),
+            Hit::Item(0, 42.0)
+        );
+    }
+
+    #[test]
+    fn the_icon_column_shifts_only_the_items_block_and_the_card_width() {
+        let bare = sizes((40.0, 24.0), (0.0, 0.0), (400.0, 204.0), (300.0, 20.0));
+        let with_icons = SectionSizes {
+            row_icons: ROW_ICON_SLOT,
+            ..bare
+        };
+        let (w_bare, h) = target_size(&bare, SCREEN_W, 0.0);
+        let (w_icons, h_icons) = target_size(&with_icons, SCREEN_W, 0.0);
+        assert_eq!(h, h_icons, "the column never changes the card's height");
+        // The width is quantized to WIDTH_STEP; here the slot tips the content
+        // (400 vs 432) across exactly one step boundary.
+        assert_eq!(w_bare, 400.0 + 2.0 * PAD);
+        assert_eq!(w_icons, 440.0 + 2.0 * PAD);
+
+        let panel = [100.0, 50.0, w_icons, h_icons];
+        let rows = 10;
+        let c = contents(panel, &with_icons, rows, Some(3), None);
+        let items = c.items.unwrap();
+        assert_eq!(items[0], 100.0 + PAD + ROW_ICON_SLOT);
+        assert_eq!(c.row_icons, ROW_ICON_SLOT);
+        // Title, pill and row metrics are untouched by the column.
+        assert_eq!(c.title, [130.0, 80.0]);
+        let row_h = (204.0 - 2.0 * TEXT_PAD) / rows as f32;
+        assert_eq!(c.row_height, row_h);
+        let pill = c.selection.unwrap();
+        assert_eq!(pill[0], 100.0 + PAD - SELECTION_BLEED);
+
+        // The hit test hands out offsets into the text texture, so the column
+        // comes back out of the x it reports.
+        let hit = HitGeometry::new(panel, &c, rows);
+        let text_x = f64::from(100.0 + PAD + ROW_ICON_SLOT + 42.0);
+        assert_eq!(
+            hit.hit_test(text_x, items[1] as f64 + 1.0),
+            Hit::Item(0, 42.0)
+        );
+    }
+
+    #[test]
+    fn the_row_icon_frame_sits_left_of_the_text_centered_in_its_row() {
+        let items = [130.0 + ROW_ICON_SLOT, 200.0];
+        let row_h = 28.0;
+        let frame = row_icon_frame(items, row_h, 3);
+        assert_eq!(frame[0], 130.0, "the column starts at the content edge");
+        assert_eq!(frame[2], ROW_ICON_PX);
+        assert_eq!(frame[3], ROW_ICON_PX);
+        // Row 3 starts at 200 + 3*28; the 24 px icon is centred in it.
+        assert_eq!(frame[1], 200.0 + 3.0 * row_h + (row_h - ROW_ICON_PX) * 0.5);
+
+        // A row shorter than the slot shrinks the frame instead of bleeding.
+        let tiny = row_icon_frame(items, 12.0, 0);
+        assert_eq!(tiny[2], 12.0 - 2.0 * ROW_ICON_PAD_Y);
+        assert_eq!(tiny[1], 200.0 + ROW_ICON_PAD_Y);
     }
 }

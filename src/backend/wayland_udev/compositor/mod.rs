@@ -1364,6 +1364,18 @@ pub(crate) struct WaylandCompositor {
     tab_hover: Option<(usize, usize)>,
     /// Fade-in of the hovered cell's chip, keyed by the same (group, tab).
     tab_hover_ease: crate::backend::compositor_common::dynamic_island::HoverEase<(usize, usize)>,
+    /// Which cells the last title refresh ellipsized, in `window_groups`
+    /// order: only those earn a dwell tooltip, so a cell whose title fits
+    /// whole never floats one. Rebuilt with the textures.
+    tab_titles_truncated: Vec<Vec<bool>>,
+    /// Rest-then-show state for the tooltip chip. The dwell is information
+    /// policy, not animation, so it is tracked apart from the fade.
+    tab_tooltip_dwell: crate::backend::compositor_common::window_tabs::TooltipDwell,
+    /// Fade-in of the tooltip chip, keyed by the same (group, tab).
+    tab_tooltip_ease: crate::backend::compositor_common::dynamic_island::HoverEase<(usize, usize)>,
+    /// The chip's rasterised line, keyed by its text; freed on every title
+    /// refresh and at teardown, the same bargain `tab_title_textures` strikes.
+    tab_tooltip_texture: Option<(String, u32, u32, u32)>,
 
     // Monitors info
     monitors: Vec<(u32, i32, i32, u32, u32, u32)>,
@@ -1601,6 +1613,20 @@ pub(crate) struct WaylandCompositor {
     /// the dropped receiver makes the superseded worker's send a no-op, so
     /// held-down arrow keys never queue a backlog.
     pending_system_ui_preview: Option<std::sync::mpsc::Receiver<WallpaperImageData>>,
+    /// The open panel's row-icon band: resolved raster paths aligned with the
+    /// overlay's items, picked up from `compositor_common::row_icons` on every
+    /// sync. `Some` reserves the list's icon column; `None` (any other panel,
+    /// or a synthesized row set that no longer matches) keeps the text-only
+    /// layout pixel-identical.
+    system_ui_row_icons: Option<Arc<[Option<String>]>>,
+    /// Row-icon textures keyed by resolved path, plus in-flight decodes and
+    /// remembered misses. Owns raw texture names between upload and clear.
+    system_ui_row_icon_cache:
+        crate::backend::compositor_common::row_icons::RowIconCache<(u32, u32, u32)>,
+    /// Row-icon textures cleared without a current GL context (panel close,
+    /// identity change); deleted on the next polled frame, the
+    /// retired-wallpaper pattern.
+    retired_system_ui_row_icons: Vec<u32>,
     /// Open/morph spring for the docked debug HUD card.
     hud_island: crate::backend::compositor_common::dynamic_island::IslandMotion,
     compositor_start_time: Instant,
@@ -2781,6 +2807,10 @@ impl WaylandCompositor {
                 tab_titles_dirty: false,
                 tab_hover: None,
                 tab_hover_ease: Default::default(),
+                tab_titles_truncated: Vec::new(),
+                tab_tooltip_dwell: Default::default(),
+                tab_tooltip_ease: Default::default(),
+                tab_tooltip_texture: None,
 
                 // Monitors
                 monitors: Vec::new(),
@@ -2949,6 +2979,10 @@ impl WaylandCompositor {
                 system_ui_preview: None,
                 system_ui_preview_path: String::new(),
                 pending_system_ui_preview: None,
+                system_ui_row_icons: None,
+                system_ui_row_icon_cache:
+                    crate::backend::compositor_common::row_icons::RowIconCache::new(),
+                retired_system_ui_row_icons: Vec::new(),
                 hud_island: Default::default(),
                 compositor_start_time: now,
 
@@ -3103,6 +3137,11 @@ impl WaylandCompositor {
                     }
                 }
             }
+            if let Some((_, texture, _, _)) = self.tab_tooltip_texture.take()
+                && texture != 0
+            {
+                gl.DeleteTextures(1, &texture);
+            }
             for (texture, _, _) in self.annotation_label_textures.drain(..).flatten() {
                 if texture != 0 {
                     gl.DeleteTextures(1, &texture);
@@ -3134,6 +3173,17 @@ impl WaylandCompositor {
                 && texture != 0
             {
                 gl.DeleteTextures(1, &texture);
+            }
+            for texture in self
+                .system_ui_row_icon_cache
+                .clear()
+                .into_iter()
+                .map(|(texture, _, _)| texture)
+                .chain(self.retired_system_ui_row_icons.drain(..))
+            {
+                if texture != 0 {
+                    gl.DeleteTextures(1, &texture);
+                }
             }
             for (_, set) in self.toast_textures.drain() {
                 for (texture, _, _) in set.text.into_iter().chain(set.buttons).flatten() {
@@ -3440,12 +3490,15 @@ mod gpu_release_contract_tests {
         "overview_title_textures",
         "expose_title_textures",
         "tab_title_textures",
+        "tab_tooltip_texture",
         "annotation_label_textures",
         "screenshot_toolbar_icons",
         "tags_grid_labels",
         "hud_textures",
         "sysui_textures",
         "system_ui_preview",
+        "system_ui_row_icon_cache",
+        "retired_system_ui_row_icons",
         "toast_textures",
         "osd_texture",
         "recording_indicator_texture",

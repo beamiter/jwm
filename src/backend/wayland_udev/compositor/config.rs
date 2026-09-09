@@ -341,11 +341,40 @@ impl WaylandCompositor {
         // keystroke, a finished scan — keeps both, which is the whole point of
         // carrying them.
         let identity = overlay.as_ref().map_or("", |o| o.title.as_str());
-        if identity != self.system_ui_identity || viewport_changed {
+        let identity_changed = identity != self.system_ui_identity || viewport_changed;
+        if identity_changed {
             self.system_ui_identity = identity.to_string();
             self.system_ui_width_floor = 0.0;
             self.system_ui_highlight.reset();
             self.system_ui_hovered = None;
+        }
+        // Row icons belong to one panel surface the way the width floor does.
+        // A close or an identity change retires every texture without a GL
+        // context: the next polled frame deletes them, and the dropped decode
+        // receivers turn in-flight workers into no-ops.
+        if overlay.is_none() || identity_changed {
+            self.retired_system_ui_row_icons.extend(
+                self.system_ui_row_icon_cache
+                    .clear()
+                    .into_iter()
+                    .map(|(texture, _, _)| texture),
+            );
+        }
+        // The band is picked up only when it provably belongs to this overlay
+        // (a synthesized row set replaces the items after the parts were
+        // built); otherwise the panel keeps the text-only layout.
+        let had_row_icons = self.system_ui_row_icons.is_some();
+        self.system_ui_row_icons = overlay
+            .as_ref()
+            .and_then(|ui| crate::backend::compositor_common::row_icons::icons_for(&ui.items));
+        if self.system_ui_row_icons.is_some() != had_row_icons {
+            // The icon column changes the width the items text must fit, so
+            // the text re-rasterizes even when the strings are unchanged.
+            self.sysui_text_dirty = true;
+            self.system_ui_hit_geometry = None;
+        }
+        if let Some(icons) = self.system_ui_row_icons.as_deref() {
+            self.system_ui_row_icon_cache.sync(icons);
         }
         // The wallpaper picker's side preview follows the payload's path.
         // Latest wins: a new highlight drops the in-flight decode (the

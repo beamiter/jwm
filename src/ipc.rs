@@ -837,15 +837,15 @@ fn parse_window_id_arg(args: &Value) -> Result<WMArgEnum, String> {
 }
 
 /// Snap directions accepted by `snap_window` — the keyboard/IPC form of the
-/// mouse drop zones (left/right halves, top-edge maximize). Kept in sync with
-/// `SnapDirection::from_name` in `jwm::layout::drag_attach`; both sides pin
-/// the accepted names in their tests. Unlike most commands the direction is
-/// required: snapping has no sensible default.
+/// mouse drop zones (left/right halves, top-edge maximize, corner quarters).
+/// Kept in sync with `SnapDirection::from_name` in `jwm::layout::drag_attach`;
+/// both sides pin the accepted names in their tests. Unlike most commands the
+/// direction is required: snapping has no sensible default.
 fn parse_snap_direction_arg(args: &Value) -> Result<String, String> {
     let Some(value) = scalar_arg_value(args, &["direction", "value", "v"], "a snap direction")?
     else {
         return Err(
-            "snap_window requires a direction: \"left\", \"right\", or \"maximize\"".to_string(),
+            "snap_window requires a direction: \"left\", \"right\", \"maximize\", \"top-left\", \"top-right\", \"bottom-left\", or \"bottom-right\"".to_string(),
         );
     };
     let Value::String(name) = value else {
@@ -855,9 +855,10 @@ fn parse_snap_direction_arg(args: &Value) -> Result<String, String> {
     };
     let normalized = name.to_lowercase();
     match normalized.as_str() {
-        "left" | "right" | "maximize" => Ok(normalized),
+        "left" | "right" | "maximize" | "top-left" | "top-right" | "bottom-left"
+        | "bottom-right" => Ok(normalized),
         _ => Err(format!(
-            "snap_window unknown direction {name:?}; expected \"left\", \"right\", or \"maximize\""
+            "snap_window unknown direction {name:?}; expected \"left\", \"right\", \"maximize\", \"top-left\", \"top-right\", \"bottom-left\", or \"bottom-right\""
         )),
     }
 }
@@ -1219,6 +1220,10 @@ mod tests {
             (serde_json::json!({"direction": "Right"}), "right"),
             (serde_json::json!({"value": "maximize"}), "maximize"),
             (serde_json::json!({"v": "LEFT"}), "left"),
+            (serde_json::json!("top-left"), "top-left"),
+            (serde_json::json!({"direction": "Top-Right"}), "top-right"),
+            (serde_json::json!({"value": "bottom-left"}), "bottom-left"),
+            (serde_json::json!({"v": "BOTTOM-RIGHT"}), "bottom-right"),
         ] {
             let (func, arg) = dispatch_command("snap_window", &args).unwrap();
             assert!(std::ptr::fn_addr_eq(func, Jwm::snap_window as WMFuncType));
@@ -1233,8 +1238,12 @@ mod tests {
             serde_json::json!({}),
             serde_json::json!({"direction": null}),
             serde_json::json!("bottom"),
+            serde_json::json!("top"),
             serde_json::json!({"direction": ""}),
             serde_json::json!({"direction": "maximize!"}),
+            serde_json::json!({"direction": "topleft"}),
+            serde_json::json!({"direction": "top_left"}),
+            serde_json::json!({"direction": "left-top"}),
             serde_json::json!(7),
             serde_json::json!(["left", "right"]),
             serde_json::json!({"dir": "left"}),

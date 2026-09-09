@@ -2152,7 +2152,11 @@ impl Config {
                 argument: ArgumentConfig::Int(0),
             },
             KeyConfig {
-                modifier: vec!["Mod1".to_string(), "Control".to_string(), "Shift".to_string()],
+                modifier: vec![
+                    "Mod1".to_string(),
+                    "Control".to_string(),
+                    "Shift".to_string(),
+                ],
                 key: "b".to_string(),
                 function: "bluetooth_picker".to_string(),
                 argument: ArgumentConfig::Int(0),
@@ -2606,6 +2610,9 @@ impl Config {
             },
             // Floating-window edge snapping: the keyboard form of dropping a
             // dragged window on a monitor edge (left/right halves, maximize).
+            // The corner quarters (top-left, top-right, bottom-left,
+            // bottom-right) are bindable but deliberately ship without
+            // defaults: corners do not map honestly onto arrow keys.
             KeyConfig {
                 modifier: vec!["Mod1".to_string(), "Shift".to_string()],
                 key: "Left".to_string(),
@@ -4510,6 +4517,21 @@ mod tests {
             key.arg,
             crate::jwm::WMArgEnum::StringVec(vec!["left".to_string()])
         );
+
+        // A corner quarter flows through the same parse_function arm and the
+        // same string conversion — no snap_window-specific plumbing needed.
+        let key = config
+            .convert_key_config(&KeyConfig {
+                modifier: vec!["Mod1".into(), "Shift".into()],
+                key: "Home".into(),
+                function: "snap_window".into(),
+                argument: ArgumentConfig::String("top-left".into()),
+            })
+            .expect("snap_window quarter binding should convert");
+        assert_eq!(
+            key.arg,
+            crate::jwm::WMArgEnum::StringVec(vec!["top-left".to_string()])
+        );
     }
 
     #[test]
@@ -4517,7 +4539,9 @@ mod tests {
         // Alt+Shift+arrows were an uncontested family in the default table;
         // pin the wiring so a future default cannot silently take it over
         // (the duplicate-shortcut diagnostic only fires when two bindings
-        // collide, not when one disappears).
+        // collide, not when one disappears). The exact-equality assertion
+        // also pins that the corner quarters deliberately have no default
+        // binding — corners do not map honestly onto arrow keys.
         let config = Config::default();
         let mut snaps: Vec<(Vec<String>, String, String)> = config
             .inner

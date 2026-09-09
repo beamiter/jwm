@@ -693,16 +693,27 @@ impl WaylandCompositor {
                 gl.DeleteTextures(1, &texture);
             }
         }
+        // The chip's cached line derives from the same titles (and the same
+        // font and ink), so it goes with them and re-rasterises lazily the
+        // next time the dwell shows it.
+        if let Some((_, texture, _, _)) = self.tab_tooltip_texture.take()
+            && texture != 0
+        {
+            unsafe { gl.DeleteTextures(1, &texture) };
+        }
 
         let ui = ui_theme::palette();
         let config = crate::config::CONFIG.load();
         let font = config.system_ui_font();
 
         let mut cache = Vec::with_capacity(self.window_groups.len());
+        let mut truncated = Vec::with_capacity(self.window_groups.len());
         for group in &self.window_groups {
             let count = group.tabs.len();
             let mut row = Vec::with_capacity(count);
+            let mut truncated_row = Vec::with_capacity(count);
             for (index, tab) in group.tabs.iter().enumerate() {
+                let mut cell_truncated = false;
                 row.push(window_tabs::cell_rect(group.bar, count, index).and_then(
                     |[_, _, cell_w, cell_h]| {
                         // The strip's height is configurable, so the type is
@@ -711,6 +722,12 @@ impl WaylandCompositor {
                         let size = window_tabs::title_font_size(cell_h);
                         let budget = window_tabs::title_budget(cell_w);
                         let text = compositor_font::fit_ui_text(&tab.title, font, size, budget);
+                        // A cell whose raster differs from the whole line was
+                        // cut — exactly the set that earns a dwell tooltip.
+                        // The uncut reference costs one extra fit per title,
+                        // paid once per refresh rather than per frame.
+                        cell_truncated =
+                            text != compositor_font::fit_ui_text(&tab.title, font, size, u32::MAX);
                         if text.is_empty() {
                             return None;
                         }
@@ -767,10 +784,13 @@ impl WaylandCompositor {
                         Some((texture, w, h))
                     },
                 ));
+                truncated_row.push(cell_truncated);
             }
             cache.push(row);
+            truncated.push(truncated_row);
         }
         self.tab_title_textures = cache;
+        self.tab_titles_truncated = truncated;
     }
 
     /// Paint every tab bar into the strip the window manager reserved for it.
@@ -794,6 +814,35 @@ impl WaylandCompositor {
             crate::config::CONFIG.load().motion_enabled(),
         );
         if self.tab_hover_ease.animating() {
+            self.needs_render = true;
+        }
+        // The dwell tooltip rides the same channel: rest the pointer on a
+        // truncated cell for `window_tabs::TOOLTIP_DWELL` and its full title
+        // floats up in a chip off the strip. The dwell is policy, not motion,
+        // so it advances regardless of the motion setting; only the chip's
+        // fade eases. Both advance ahead of the empty early-return so a
+        // cleared strip releases them the same frame.
+        let tooltip_eligible = self.tab_hover.is_some_and(|(group_index, index)| {
+            self.tab_titles_truncated
+                .get(group_index)
+                .and_then(|row| row.get(index))
+                .copied()
+                == Some(true)
+        });
+        self.tab_tooltip_dwell
+            .advance(std::time::Instant::now(), self.tab_hover, tooltip_eligible);
+        if self.tab_tooltip_dwell.needs_frame() {
+            // The dwell lapses on a clock, not on an event: frames must keep
+            // coming or an idle screen sleeps through the chip's due moment.
+            self.needs_render = true;
+        }
+        let tooltip_key = self.tab_tooltip_dwell.visible_key();
+        let tooltip_p = self.tab_tooltip_ease.advance_with_motion(
+            std::time::Instant::now(),
+            tooltip_key,
+            crate::config::CONFIG.load().motion_enabled(),
+        );
+        if self.tab_tooltip_ease.animating() {
             self.needs_render = true;
         }
         if self.window_groups.is_empty() {
@@ -927,6 +976,157 @@ impl WaylandCompositor {
                 }
             }
         }
+
+        // The chip draws over every strip and under nothing: placed off the
+        // band, it can never cover the cell whose clicks must still land.
+        if let Some((group_index, index)) = tooltip_key
+            && tooltip_p > 0.0
+        {
+            self.render_tab_tooltip(gl, projection, group_index, index, tooltip_p);
+        }
+    }
+
+    /// Float the full title of the truncated cell `(group_index, index)` in a
+    /// chip off its strip, at `p` fade strength. Pure overlay: hit-testing is
+    /// untouched, and [`window_tabs::tooltip_rect`] keeps the chip off the
+    /// band and on the screen, so the pointer path and the click path are
+    /// exactly as without it.
+    fn render_tab_tooltip(
+        &mut self,
+        gl: &ffi::Gles2,
+        projection: &[f32; 16],
+        group_index: usize,
+        index: usize,
+        p: f32,
+    ) {
+        let Some((bar, cell, title)) = self.window_groups.get(group_index).and_then(|group| {
+            let cell = window_tabs::cell_rect(group.bar, group.tabs.len(), index)?;
+            Some((group.bar, cell, group.tabs.get(index)?.title.clone()))
+        }) else {
+            return;
+        };
+        let config = crate::config::CONFIG.load();
+        let font = config.system_ui_font();
+        let size = compositor_font::ui_font_pixel_size(font);
+        // The chip re-ellipsizes against its own budget: a title that would
+        // run off the screen is still cut, just against the screen instead
+        // of the cell.
+        let text =
+            compositor_font::fit_ui_text(&title, font, size, window_tabs::TOOLTIP_MAX_TEXT_WIDTH);
+        if text.is_empty() {
+            return;
+        }
+        self.update_tab_tooltip_texture(gl, &text);
+        let Some((texture, tw, th)) = self
+            .tab_tooltip_texture
+            .as_ref()
+            .map(|&(_, texture, tw, th)| (texture, tw, th))
+        else {
+            return;
+        };
+
+        let chip_w = tw as f32 + 2.0 * window_tabs::TOOLTIP_PAD_X;
+        let chip_h = th as f32 + 2.0 * window_tabs::TOOLTIP_PAD_Y;
+        let Some([x, y, w, h]) = window_tabs::tooltip_rect(
+            bar,
+            cell,
+            chip_w,
+            chip_h,
+            self.screen_w as f32,
+            self.screen_h as f32,
+        ) else {
+            return;
+        };
+
+        let ui = ui_theme::palette();
+        unsafe {
+            gl.BindVertexArray(self.quad_vao);
+            let radius = window_tabs::pill_radius(h);
+            self.ui_fill_island(gl, projection, ui, x, y, w, h, radius, radius, ui.osd, p);
+
+            gl.UseProgram(self.sysui_text_program);
+            let text_rect = super::get_uniform_loc(gl, self.sysui_text_program, "u_rect");
+            let text_proj = super::get_uniform_loc(gl, self.sysui_text_program, "u_projection");
+            let text_tex = super::get_uniform_loc(gl, self.sysui_text_program, "u_texture");
+            let text_opacity = super::get_uniform_loc(gl, self.sysui_text_program, "u_opacity");
+            self.set_projection_uniform(gl, text_proj, projection);
+            gl.Uniform1i(text_tex, 0);
+            gl.Uniform1f(text_opacity, p);
+            gl.ActiveTexture(ffi::TEXTURE0);
+            self.set_rect_uniform(
+                gl,
+                text_rect,
+                (x + window_tabs::TOOLTIP_PAD_X).round(),
+                (y + (h - th as f32) * 0.5).round(),
+                tw as f32,
+                th as f32,
+            );
+            gl.BindTexture(ffi::TEXTURE_2D, texture);
+            gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+            gl.BindTexture(ffi::TEXTURE_2D, 0);
+        }
+    }
+
+    /// Rasterise the chip's one line, re-rendering only when the text
+    /// changed — the same text-keyed bargain `update_osd_texture` strikes.
+    /// The cell's own title textures use NEAREST (they never scale); the
+    /// chip matches the exposé labels' LINEAR instead, the family it reads
+    /// as. [`Self::refresh_tab_titles`] frees the cache with the titles it
+    /// derives from.
+    fn update_tab_tooltip_texture(&mut self, gl: &ffi::Gles2, text: &str) {
+        if self
+            .tab_tooltip_texture
+            .as_ref()
+            .is_some_and(|(cached, _, _, _)| cached == text)
+        {
+            return;
+        }
+        if let Some((_, texture, _, _)) = self.tab_tooltip_texture.take()
+            && texture != 0
+        {
+            unsafe { gl.DeleteTextures(1, &texture) };
+        }
+        let config = crate::config::CONFIG.load();
+        let font = config.system_ui_font();
+        let size = compositor_font::ui_font_pixel_size(font);
+        let (pixels, w, h) =
+            compositor_font::render_ui_text_to_rgba(text, font, size, ui_theme::palette().osd_ink);
+        if w == 0 || h == 0 {
+            return;
+        }
+        let mut texture = 0u32;
+        unsafe {
+            gl.GenTextures(1, &mut texture);
+            if texture == 0 {
+                return;
+            }
+            gl.BindTexture(ffi::TEXTURE_2D, texture);
+            gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_MIN_FILTER, ffi::LINEAR as i32);
+            gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_MAG_FILTER, ffi::LINEAR as i32);
+            gl.TexParameteri(
+                ffi::TEXTURE_2D,
+                ffi::TEXTURE_WRAP_S,
+                ffi::CLAMP_TO_EDGE as i32,
+            );
+            gl.TexParameteri(
+                ffi::TEXTURE_2D,
+                ffi::TEXTURE_WRAP_T,
+                ffi::CLAMP_TO_EDGE as i32,
+            );
+            gl.TexImage2D(
+                ffi::TEXTURE_2D,
+                0,
+                ffi::RGBA as i32,
+                w as i32,
+                h as i32,
+                0,
+                ffi::RGBA,
+                ffi::UNSIGNED_BYTE,
+                pixels.as_ptr() as *const _,
+            );
+            gl.BindTexture(ffi::TEXTURE_2D, 0);
+        }
+        self.tab_tooltip_texture = Some((text.to_string(), texture, w, h));
     }
 
     #[allow(dead_code)]
@@ -1001,5 +1201,54 @@ mod tests {
         let (hidden, hidden_outline) = snap_preview_colors([0.2, 0.4, 0.6, 0.3], -1.0);
         assert_eq!(hidden[3], 0.0);
         assert_eq!(hidden_outline[3], 0.0);
+    }
+
+    /// The dwell chip appears on a clock, not on an event, so the strip's
+    /// render path must keep the frame loop alive while a rest is pending —
+    /// an idle screen would otherwise sleep through the moment the chip is
+    /// due. Pin the wiring: the truncation set is recorded at title refresh,
+    /// the live hover feeds the dwell every drawn frame, a pending dwell
+    /// arms `needs_render`, the fade follows the motion setting, and only
+    /// the dwell's visible cell is ever chipped.
+    #[test]
+    fn the_tab_bar_pumps_frames_while_a_tooltip_dwell_is_pending() {
+        let compact: String = include_str!("expose.rs")
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect();
+
+        // Eligibility is the per-(group, index) truncation recorded when the
+        // titles were last rasterised: a cell cut against its budget earns a
+        // chip, one drawn whole never does.
+        assert!(compact.contains(
+            "cell_truncated=text!=compositor_font::fit_ui_text(&tab.title,font,size,u32::MAX);"
+        ));
+        assert!(compact.contains("self.tab_titles_truncated=truncated;"));
+
+        // Every drawn frame feeds the live hover into the dwell.
+        assert!(compact.contains("self.tab_tooltip_dwell.advance("));
+        // While a chip is due but not up yet the pump stays armed: the
+        // `needs_render = true` lands inside the `needs_frame` guard, behind
+        // only its explaining comment.
+        let guard = compact
+            .find("ifself.tab_tooltip_dwell.needs_frame(){")
+            .expect("the dwell pump guards on needs_frame");
+        let armed = compact[guard..]
+            .find("self.needs_render=true;")
+            .expect("the dwell pump arms needs_render");
+        assert!(
+            armed < 400,
+            "needs_render must be armed by the needs_frame guard"
+        );
+
+        // The fade takes the dwell's visible cell and the motion setting, so
+        // reduced motion snaps the chip but never skips the dwell.
+        assert!(compact.contains("self.tab_tooltip_ease.advance_with_motion("));
+        assert!(compact.contains("tooltip_key,crate::config::CONFIG.load().motion_enabled()"));
+        // The chip draws for that visible cell only, and only at a strength
+        // above zero.
+        assert!(compact.contains(
+            "ifletSome((group_index,index))=tooltip_key&&tooltip_p>0.0{self.render_tab_tooltip("
+        ));
     }
 }

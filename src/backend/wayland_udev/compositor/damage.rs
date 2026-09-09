@@ -370,6 +370,10 @@ impl WaylandCompositor {
         if self.pending_system_ui_preview.is_some() {
             return true;
         }
+        // So do the row-icon decodes of the launcher and the switcher.
+        if self.system_ui_row_icon_cache.has_pending() {
+            return true;
+        }
         false
     }
 

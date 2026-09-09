@@ -19,14 +19,18 @@ use crate::jwm::{Jwm, WMArgEnum};
 use log::info;
 
 /// Edge-snap targets shared by the mouse drop below and the bindable
-/// `snap_window` command. There is deliberately no `Bottom` (the mouse path
-/// never snaps to the bottom edge) and no quarter-tiling: corner drops
-/// resolve to a horizontal half, left winning over right.
+/// `snap_window` command: left/right halves, top-edge maximize, and the four
+/// corner quarters. There is deliberately no plain `Top`/`Bottom` half — the
+/// mouse path never snaps to the bottom edge, and the top edge maximizes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SnapDirection {
     Left,
     Right,
     Maximize,
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
 }
 
 impl SnapDirection {
@@ -38,6 +42,10 @@ impl SnapDirection {
             "left" => SnapDirection::Left,
             "right" => SnapDirection::Right,
             "maximize" => SnapDirection::Maximize,
+            "top-left" => SnapDirection::TopLeft,
+            "top-right" => SnapDirection::TopRight,
+            "bottom-left" => SnapDirection::BottomLeft,
+            "bottom-right" => SnapDirection::BottomRight,
             _ => return None,
         })
     }
@@ -47,6 +55,10 @@ impl SnapDirection {
             SnapDirection::Left => "left",
             SnapDirection::Right => "right",
             SnapDirection::Maximize => "maximize",
+            SnapDirection::TopLeft => "top-left",
+            SnapDirection::TopRight => "top-right",
+            SnapDirection::BottomLeft => "bottom-left",
+            SnapDirection::BottomRight => "bottom-right",
         }
     }
 
@@ -56,7 +68,7 @@ impl SnapDirection {
     pub(crate) fn from_arg(arg: &WMArgEnum) -> Result<Self, String> {
         let WMArgEnum::StringVec(values) = arg else {
             return Err(format!(
-                "snap_window takes a direction string (\"left\", \"right\", \"maximize\"), got {arg:?}"
+                "snap_window takes a direction string (\"left\", \"right\", \"maximize\", \"top-left\", \"top-right\", \"bottom-left\", \"bottom-right\"), got {arg:?}"
             ));
         };
         let [name] = values.as_slice() else {
@@ -67,15 +79,17 @@ impl SnapDirection {
         };
         Self::from_name(name).ok_or_else(|| {
             format!(
-                "unknown snap direction {name:?}; expected \"left\", \"right\", or \"maximize\""
+                "unknown snap direction {name:?}; expected \"left\", \"right\", \"maximize\", \"top-left\", \"top-right\", \"bottom-left\", or \"bottom-right\""
             )
         })
     }
 }
 
 /// The snap geometry of the classic mouse float snap, extracted so the
-/// keyboard command produces the same rect: left/right halves of the monitor
-/// and the full monitor for a top-edge maximize.
+/// keyboard command produces the same rect: left/right halves of the monitor,
+/// the four corner quarters, and the full monitor for a top-edge maximize.
+/// Quarters reuse the halves' integer rule — both dimensions floor, so an odd
+/// width or height leaves the last column/row uncovered.
 pub(crate) fn snap_rect(monitor: Rect, direction: SnapDirection) -> Rect {
     match direction {
         SnapDirection::Left => Rect::new(monitor.x, monitor.y, monitor.w / 2, monitor.h),
@@ -86,6 +100,57 @@ pub(crate) fn snap_rect(monitor: Rect, direction: SnapDirection) -> Rect {
             monitor.h,
         ),
         SnapDirection::Maximize => monitor,
+        SnapDirection::TopLeft => Rect::new(monitor.x, monitor.y, monitor.w / 2, monitor.h / 2),
+        SnapDirection::TopRight => Rect::new(
+            monitor.x + monitor.w / 2,
+            monitor.y,
+            monitor.w / 2,
+            monitor.h / 2,
+        ),
+        SnapDirection::BottomLeft => Rect::new(
+            monitor.x,
+            monitor.y + monitor.h / 2,
+            monitor.w / 2,
+            monitor.h / 2,
+        ),
+        SnapDirection::BottomRight => Rect::new(
+            monitor.x + monitor.w / 2,
+            monitor.y + monitor.h / 2,
+            monitor.w / 2,
+            monitor.h / 2,
+        ),
+    }
+}
+
+/// Map the near-edge booleans of a drop to its classic float-snap direction.
+/// The corner hitbox is the overlap of the two near-edge bands: near one
+/// horizontal and one vertical edge plans that corner's quarter, a lone edge
+/// keeps the round-13 behavior (left/right halves, top maximizes, the bottom
+/// edge has no zone). On a monitor smaller than twice the snap distance three
+/// or four edges read "near" at once — the check order then keeps the
+/// round-13 priority, left before right and top before bottom.
+fn float_snap_direction(
+    near_left: bool,
+    near_right: bool,
+    near_top: bool,
+    near_bottom: bool,
+) -> Option<SnapDirection> {
+    if near_left && near_top {
+        Some(SnapDirection::TopLeft)
+    } else if near_right && near_top {
+        Some(SnapDirection::TopRight)
+    } else if near_left && near_bottom {
+        Some(SnapDirection::BottomLeft)
+    } else if near_right && near_bottom {
+        Some(SnapDirection::BottomRight)
+    } else if near_left {
+        Some(SnapDirection::Left)
+    } else if near_right {
+        Some(SnapDirection::Right)
+    } else if near_top {
+        Some(SnapDirection::Maximize)
+    } else {
+        None
     }
 }
 
@@ -211,18 +276,10 @@ impl Jwm {
             return self.plan_layout_attach(mon_key, drag_key, &layout, px, py);
         }
 
-        // Classic float snap: left/right halves, top edge maximizes. Corner
-        // drops resolve to the horizontal half (left before right); the
-        // bottom edge has no zone.
-        let direction = if near_left {
-            SnapDirection::Left
-        } else if near_right {
-            SnapDirection::Right
-        } else if near_top {
-            SnapDirection::Maximize
-        } else {
-            return None;
-        };
+        // Classic float snap: left/right halves, top edge maximizes, and a
+        // corner drop (near one horizontal and one vertical edge) plans that
+        // corner's quarter. The bottom edge alone has no zone.
+        let direction = float_snap_direction(near_left, near_right, near_top, near_bottom)?;
         let rect = snap_rect(Rect::new(mx, my, mw, mh), direction);
         Some(DragSnapPlan::Float { rect })
     }
@@ -487,8 +544,9 @@ impl Jwm {
     }
 
     /// `snap_window` command: the keyboard/IPC form of dropping a dragged
-    /// window on a monitor edge — snap the focused window to a half or the
-    /// full monitor rect, using the same geometry as the mouse float snap.
+    /// window on a monitor edge — snap the focused window to a half, a corner
+    /// quarter, or the full monitor rect, using the same geometry as the
+    /// mouse float snap.
     ///
     /// Snapping is a floating-geometry operation: a focused *tiled* window is
     /// a deliberate no-op (tile it to floating first with `togglefloating`),
@@ -707,7 +765,8 @@ mod tests {
 
     /// Pin the extraction: these are the exact rects the inline math in
     /// `plan_drag_snap` produced before `snap_rect` existed, for the
-    /// geometries that exercise the math (ultrawide, small, offset origin).
+    /// geometries that exercise the math (ultrawide, small, offset origin),
+    /// plus the corner quarters added on top of the same integer rule.
     #[test]
     fn snap_rect_matches_the_classic_mouse_drop_geometry() {
         // Plain 1080p at the origin.
@@ -721,6 +780,22 @@ mod tests {
             Rect::new(960, 0, 960, 1080)
         );
         assert_eq!(snap_rect(mon, SnapDirection::Maximize), mon);
+        assert_eq!(
+            snap_rect(mon, SnapDirection::TopLeft),
+            Rect::new(0, 0, 960, 540)
+        );
+        assert_eq!(
+            snap_rect(mon, SnapDirection::TopRight),
+            Rect::new(960, 0, 960, 540)
+        );
+        assert_eq!(
+            snap_rect(mon, SnapDirection::BottomLeft),
+            Rect::new(0, 540, 960, 540)
+        );
+        assert_eq!(
+            snap_rect(mon, SnapDirection::BottomRight),
+            Rect::new(960, 540, 960, 540)
+        );
 
         // Ultrawide.
         let mon = Rect::new(0, 0, 3440, 1440);
@@ -733,6 +808,22 @@ mod tests {
             Rect::new(1720, 0, 1720, 1440)
         );
         assert_eq!(snap_rect(mon, SnapDirection::Maximize), mon);
+        assert_eq!(
+            snap_rect(mon, SnapDirection::TopLeft),
+            Rect::new(0, 0, 1720, 720)
+        );
+        assert_eq!(
+            snap_rect(mon, SnapDirection::TopRight),
+            Rect::new(1720, 0, 1720, 720)
+        );
+        assert_eq!(
+            snap_rect(mon, SnapDirection::BottomLeft),
+            Rect::new(0, 720, 1720, 720)
+        );
+        assert_eq!(
+            snap_rect(mon, SnapDirection::BottomRight),
+            Rect::new(1720, 720, 1720, 720)
+        );
 
         // Small monitor.
         let mon = Rect::new(0, 0, 1024, 600);
@@ -745,6 +836,22 @@ mod tests {
             Rect::new(512, 0, 512, 600)
         );
         assert_eq!(snap_rect(mon, SnapDirection::Maximize), mon);
+        assert_eq!(
+            snap_rect(mon, SnapDirection::TopLeft),
+            Rect::new(0, 0, 512, 300)
+        );
+        assert_eq!(
+            snap_rect(mon, SnapDirection::TopRight),
+            Rect::new(512, 0, 512, 300)
+        );
+        assert_eq!(
+            snap_rect(mon, SnapDirection::BottomLeft),
+            Rect::new(0, 300, 512, 300)
+        );
+        assert_eq!(
+            snap_rect(mon, SnapDirection::BottomRight),
+            Rect::new(512, 300, 512, 300)
+        );
 
         // Non-zero origin: a right-hand output in a dual-monitor setup.
         let mon = Rect::new(1920, 40, 2560, 1440);
@@ -757,12 +864,30 @@ mod tests {
             Rect::new(3200, 40, 1280, 1440)
         );
         assert_eq!(snap_rect(mon, SnapDirection::Maximize), mon);
+        assert_eq!(
+            snap_rect(mon, SnapDirection::TopLeft),
+            Rect::new(1920, 40, 1280, 720)
+        );
+        assert_eq!(
+            snap_rect(mon, SnapDirection::TopRight),
+            Rect::new(3200, 40, 1280, 720)
+        );
+        assert_eq!(
+            snap_rect(mon, SnapDirection::BottomLeft),
+            Rect::new(1920, 760, 1280, 720)
+        );
+        assert_eq!(
+            snap_rect(mon, SnapDirection::BottomRight),
+            Rect::new(3200, 760, 1280, 720)
+        );
     }
 
     #[test]
-    fn snap_rect_halves_odd_widths_the_way_the_mouse_path_did() {
+    fn snap_rect_floors_odd_dimensions_the_same_for_halves_and_quarters() {
         // Odd widths floor the half and start the right half there, leaving
         // the last column uncovered — the pre-extraction integer math.
+        // Quarters apply the same floor to both dimensions, so an odd height
+        // likewise leaves the last row uncovered.
         let mon = Rect::new(0, 0, 1921, 1080);
         assert_eq!(
             snap_rect(mon, SnapDirection::Left),
@@ -771,6 +896,28 @@ mod tests {
         assert_eq!(
             snap_rect(mon, SnapDirection::Right),
             Rect::new(960, 0, 960, 1080)
+        );
+        assert_eq!(
+            snap_rect(mon, SnapDirection::TopLeft),
+            Rect::new(0, 0, 960, 540)
+        );
+        assert_eq!(
+            snap_rect(mon, SnapDirection::BottomRight),
+            Rect::new(960, 540, 960, 540)
+        );
+
+        let mon = Rect::new(0, 0, 1920, 1081);
+        assert_eq!(
+            snap_rect(mon, SnapDirection::TopLeft),
+            Rect::new(0, 0, 960, 540)
+        );
+        assert_eq!(
+            snap_rect(mon, SnapDirection::BottomLeft),
+            Rect::new(0, 540, 960, 540)
+        );
+        assert_eq!(
+            snap_rect(mon, SnapDirection::BottomRight),
+            Rect::new(960, 540, 960, 540)
         );
     }
 
@@ -785,14 +932,109 @@ mod tests {
             SnapDirection::from_name("MAXIMIZE"),
             Some(SnapDirection::Maximize)
         );
+        assert_eq!(
+            SnapDirection::from_name("top-left"),
+            Some(SnapDirection::TopLeft)
+        );
+        assert_eq!(
+            SnapDirection::from_name("Top-Right"),
+            Some(SnapDirection::TopRight)
+        );
+        assert_eq!(
+            SnapDirection::from_name("BOTTOM-LEFT"),
+            Some(SnapDirection::BottomLeft)
+        );
+        assert_eq!(
+            SnapDirection::from_name("bottom-right"),
+            Some(SnapDirection::BottomRight)
+        );
     }
 
     #[test]
     fn snap_direction_rejects_unknown_names() {
-        // No bottom/quarter directions exist; nothing silently maps to a half.
-        for name in ["", "bottom", "up", "max", "full", "quarter", "top"] {
+        // No plain top/bottom halves exist, and only the kebab corner names
+        // are accepted; nothing silently maps to a half or quarter.
+        for name in [
+            "",
+            "bottom",
+            "up",
+            "max",
+            "full",
+            "quarter",
+            "top",
+            "topleft",
+            "top_left",
+            "left-top",
+            "bottomright",
+        ] {
             assert_eq!(SnapDirection::from_name(name), None, "accepted {name:?}");
         }
+    }
+
+    #[test]
+    fn corner_drops_plan_quarters_and_lone_edges_keep_the_classic_directions() {
+        // A lone edge is byte-identical to round 13, including the bottom
+        // edge having no zone at all.
+        assert_eq!(
+            float_snap_direction(true, false, false, false),
+            Some(SnapDirection::Left)
+        );
+        assert_eq!(
+            float_snap_direction(false, true, false, false),
+            Some(SnapDirection::Right)
+        );
+        assert_eq!(
+            float_snap_direction(false, false, true, false),
+            Some(SnapDirection::Maximize)
+        );
+        assert_eq!(float_snap_direction(false, false, false, true), None);
+        assert_eq!(float_snap_direction(false, false, false, false), None);
+
+        // The corner hitbox is the overlap of the two near-edge bands: near
+        // one horizontal and one vertical edge plans that corner's quarter.
+        assert_eq!(
+            float_snap_direction(true, false, true, false),
+            Some(SnapDirection::TopLeft)
+        );
+        assert_eq!(
+            float_snap_direction(false, true, true, false),
+            Some(SnapDirection::TopRight)
+        );
+        assert_eq!(
+            float_snap_direction(true, false, false, true),
+            Some(SnapDirection::BottomLeft)
+        );
+        assert_eq!(
+            float_snap_direction(false, true, false, true),
+            Some(SnapDirection::BottomRight)
+        );
+    }
+
+    #[test]
+    fn float_snap_direction_keeps_left_then_top_priority_on_tiny_monitors() {
+        // A monitor smaller than twice the snap distance can read three or
+        // four edges "near" at once; the check order then keeps the round-13
+        // priority, left before right and top before bottom.
+        assert_eq!(
+            float_snap_direction(true, true, true, false),
+            Some(SnapDirection::TopLeft)
+        );
+        assert_eq!(
+            float_snap_direction(true, true, false, true),
+            Some(SnapDirection::BottomLeft)
+        );
+        assert_eq!(
+            float_snap_direction(true, false, true, true),
+            Some(SnapDirection::TopLeft)
+        );
+        assert_eq!(
+            float_snap_direction(false, true, true, true),
+            Some(SnapDirection::TopRight)
+        );
+        assert_eq!(
+            float_snap_direction(true, true, true, true),
+            Some(SnapDirection::TopLeft)
+        );
     }
 
     #[test]
@@ -809,6 +1051,22 @@ mod tests {
             SnapDirection::from_arg(&WMArgEnum::StringVec(vec!["maximize".into()])).unwrap(),
             SnapDirection::Maximize
         );
+        assert_eq!(
+            SnapDirection::from_arg(&WMArgEnum::StringVec(vec!["top-left".into()])).unwrap(),
+            SnapDirection::TopLeft
+        );
+        assert_eq!(
+            SnapDirection::from_arg(&WMArgEnum::StringVec(vec!["Top-Right".into()])).unwrap(),
+            SnapDirection::TopRight
+        );
+        assert_eq!(
+            SnapDirection::from_arg(&WMArgEnum::StringVec(vec!["bottom-left".into()])).unwrap(),
+            SnapDirection::BottomLeft
+        );
+        assert_eq!(
+            SnapDirection::from_arg(&WMArgEnum::StringVec(vec!["BOTTOM-RIGHT".into()])).unwrap(),
+            SnapDirection::BottomRight
+        );
 
         // Missing, extra, non-string, and unknown arguments are all errors.
         for arg in [
@@ -818,6 +1076,8 @@ mod tests {
             WMArgEnum::StringVec(Vec::new()),
             WMArgEnum::StringVec(vec!["left".into(), "right".into()]),
             WMArgEnum::StringVec(vec!["bottom".into()]),
+            WMArgEnum::StringVec(vec!["top".into()]),
+            WMArgEnum::StringVec(vec!["topleft".into()]),
         ] {
             assert!(
                 SnapDirection::from_arg(&arg).is_err(),

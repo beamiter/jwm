@@ -242,6 +242,7 @@ impl<C: CompositorConnection> Compositor<C> {
         if self.pending_wallpaper.is_some()
             || !self.pending_monitor_wallpapers.is_empty()
             || self.pending_system_ui_preview.is_some()
+            || self.system_ui_row_icon_cache.has_pending()
         {
             return true;
         }

@@ -3,8 +3,9 @@
 //! What the compositor remembers of the clipboard, and what it refuses to
 //! remember. The backends differ completely — X11 needs XFIXES monitoring and
 //! selection ownership, Wayland reads its own data device — so everything
-//! they share lives here: the bounded store, deduplication, the previews the
-//! picker renders, and the rules that keep secrets out.
+//! they share lives here: the bounded store, deduplication, the previews and
+//! the type-to-filter match the picker renders, and the rules that keep
+//! secrets out.
 //!
 //! The history is **memory only**. It is never written to disk and does not
 //! survive a restart; a clipboard manager that persisted passwords to a file
@@ -166,6 +167,19 @@ pub fn picker_row(entry: &ClipboardEntry, index: usize) -> String {
         shape,
         preview(&entry.text)
     )
+}
+
+/// The picker's type-to-filter: a case-insensitive substring test against the
+/// entry's full text, so a match can be anywhere in what was copied rather
+/// than only in what the one-line preview happens to show. An empty query
+/// matches everything — the unfiltered picker is this same code path with an
+/// empty query.
+#[must_use]
+pub fn matches_query(entry_text: &str, query: &str) -> bool {
+    if query.is_empty() {
+        return true;
+    }
+    entry_text.to_lowercase().contains(&query.to_lowercase())
 }
 
 /// Wall-clock milliseconds, shared with the notification history.
@@ -422,6 +436,28 @@ mod tests {
         let row = picker_row(&multi, 1);
         assert!(row.contains("3L"), "multi-line copies show a line count");
         assert!(row.contains("one two three"));
+    }
+
+    #[test]
+    fn the_filter_matches_a_case_insensitive_substring() {
+        assert!(matches_query("Hello, World", "hello"));
+        assert!(matches_query("Hello, World", "WORLD"));
+        assert!(matches_query("https://example.com/docs", "example.COm"));
+        // A match can live past what the one-line preview shows.
+        assert!(matches_query("start\nmiddle\nend", "middle"));
+        assert!(!matches_query("Hello, World", "goodbye"));
+    }
+
+    #[test]
+    fn an_empty_query_keeps_every_entry() {
+        assert!(matches_query("anything", ""));
+        assert!(matches_query("", ""));
+    }
+
+    #[test]
+    fn the_filter_lowercases_both_sides_for_unicode() {
+        assert!(matches_query("Café au lait", "CAFÉ"));
+        assert!(matches_query("RÉSUMÉ.md", "résumé"));
     }
 
     #[test]

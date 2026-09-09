@@ -22,6 +22,7 @@ pub(crate) mod prism;
 pub(crate) mod recording_indicator;
 pub mod recording_nv12;
 pub mod recording_sink;
+pub(crate) mod row_icons;
 pub mod rules;
 pub mod screenshot;
 pub mod screenshot_toolbar;

@@ -44,6 +44,11 @@ pub struct LaunchEntry {
     /// `Terminal=true` in the desktop entry: the program draws no window of
     /// its own and has to be given one.
     pub terminal: bool,
+    /// The desktop entry's `Icon=` value: an icon-theme name or an absolute
+    /// raster path. Resolved to a file lazily, one visible row at a time —
+    /// never during the scan, so a theme walk cannot slow the catalog worker
+    /// down by a directory read per entry.
+    pub icon: Option<String>,
     search: String,
     /// Lowercased display name retained beside the catalog entry so every
     /// query can use it as a sort tie-breaker without allocating in the
@@ -52,12 +57,19 @@ pub struct LaunchEntry {
 }
 
 impl LaunchEntry {
-    fn new(name: String, command: Vec<String>, terminal: bool, search: String) -> Self {
+    fn new(
+        name: String,
+        command: Vec<String>,
+        terminal: bool,
+        icon: Option<String>,
+        search: String,
+    ) -> Self {
         let sort_key = name.to_lowercase();
         Self {
             name,
             command,
             terminal,
+            icon,
             search,
             sort_key,
         }
@@ -82,6 +94,12 @@ pub struct OverlayParts {
     /// Search-field content; `Some` renders a query bar with a caret.
     pub query: Option<String>,
     pub items: Vec<String>,
+    /// Raster icon paths resolved for `items`, one slot per row. `Some` only
+    /// for the panels that carry row icons (the launcher and the window
+    /// switcher) when at least one row resolved one — and then always exactly
+    /// as long as `items`. Every other panel leaves this `None` and lays out
+    /// byte-identically to before.
+    pub icons: Option<Vec<Option<String>>>,
     /// Row in `items` to highlight.
     pub selected: Option<usize>,
     pub hint: String,
@@ -89,6 +107,13 @@ pub struct OverlayParts {
     /// of one. The renderer draws a scroll indicator from it; without it a
     /// windowed list looks exactly like a complete one.
     pub scroll: Option<crate::backend::api::ScrollWindow>,
+}
+
+/// The payload's icon contract: a panel carries row icons only when the vec
+/// covers every row and at least one of them resolved. Otherwise `None` — the
+/// panel keeps the text-only layout it has always had, pixel for pixel.
+fn row_icon_payload(icons: Vec<Option<String>>, items_len: usize) -> Option<Vec<Option<String>>> {
+    (icons.len() == items_len && icons.iter().any(Option::is_some)).then_some(icons)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -189,11 +214,21 @@ pub enum SystemUiState {
     ListPanel {
         kind: ListKind,
         rows: Vec<ListRow>,
+        /// Raster icon paths aligned with `rows`, resolved when the list was
+        /// built; empty for every kind but the window switcher, the one list
+        /// whose rows stand for applications. Kept beside the rows rather than
+        /// inside them: `ListRow` literals exist in code this crate does not
+        /// own, so the row type cannot grow a field.
+        row_icons: Vec<Option<String>>,
         selected: usize,
         /// Status line: scanning, connecting, or why something failed.
         message: String,
         /// What the panel is currently asking for, if anything.
         prompt: Option<PromptKind>,
+        /// Type-to-filter query. Only the clipboard picker collects one; its
+        /// rows are the filtered view, so a refresh of the history reapplies
+        /// it. Every other kind leaves this empty and renders no query bar.
+        query: String,
         /// Shown when the list is empty and there is no message.
         empty: String,
     },
@@ -343,7 +378,9 @@ impl ListKind {
             Self::Notifications => {
                 "Click/Enter  activate    \u{f060}/\u{f061} 1-6  action    d  dismiss    c  clear    Esc"
             }
-            Self::Clipboard => "Click/Enter  copy    d  forget    c  clear all    Esc  close",
+            Self::Clipboard => {
+                "Click/Enter  copy    type  filter    d  forget    c  clear all    Esc  close"
+            }
             Self::Wifi => "Click/Enter  join    \u{f062}/\u{f063}  select    Esc  close",
             Self::Bluetooth => {
                 "Enter  connect/pair    s  scan    a  accept incoming    r  refresh    Esc"
@@ -921,17 +958,21 @@ impl Clone for SystemUiState {
             Self::ListPanel {
                 kind,
                 rows,
+                row_icons,
                 selected,
                 message,
                 prompt,
+                query,
                 empty,
             } => Self::ListPanel {
                 kind: *kind,
                 rows: rows.clone(),
+                row_icons: row_icons.clone(),
                 selected: *selected,
                 message: message.clone(),
                 // Never duplicate a passphrase or PIN into another allocation.
                 prompt: prompt.as_ref().map(PromptKind::redacted_clone),
+                query: query.clone(),
                 empty: empty.clone(),
             },
             Self::Calendar { view, clock } => Self::Calendar {
@@ -1430,9 +1471,11 @@ impl SystemUiState {
         Self::ListPanel {
             kind,
             rows: Vec::new(),
+            row_icons: Vec::new(),
             selected: 0,
             message: message.into(),
             prompt: None,
+            query: String::new(),
             empty: empty.into(),
         }
     }
@@ -1461,9 +1504,11 @@ impl SystemUiState {
         Self::ListPanel {
             kind: ListKind::Notifications,
             rows,
+            row_icons: Vec::new(),
             selected: 0,
             message: String::new(),
             prompt: None,
+            query: String::new(),
             empty: "No notifications".to_string(),
         }
     }
@@ -1632,10 +1677,19 @@ impl SystemUiState {
 
     // --- Clipboard picker ---
 
-    fn clipboard_rows(history: &crate::jwm::features::ClipboardHistory) -> Vec<ListRow> {
+    /// The picker's rows under `query`. Each row keeps the entry's position
+    /// in the *history* — as its key, its `RowData`, and the number it draws
+    /// — so Enter, `d` and clicks act on the filtered selection with no
+    /// index translation, and a gap in the numbering is what a filtered list
+    /// looks like.
+    fn clipboard_rows(
+        history: &crate::jwm::features::ClipboardHistory,
+        query: &str,
+    ) -> Vec<ListRow> {
         history
             .entries()
             .enumerate()
+            .filter(|(_, entry)| crate::jwm::features::clipboard::matches_query(&entry.text, query))
             .map(|(index, entry)| ListRow {
                 key: index.to_string(),
                 text: crate::jwm::features::clipboard::picker_row(entry, index),
@@ -1644,14 +1698,17 @@ impl SystemUiState {
             .collect()
     }
 
-    /// Build the clipboard picker from the live history, newest first.
+    /// Build the clipboard picker from the live history, newest first. The
+    /// filter starts empty on every open, like the launcher's query.
     pub fn clipboard_picker(history: &crate::jwm::features::ClipboardHistory) -> Self {
         Self::ListPanel {
             kind: ListKind::Clipboard,
-            rows: Self::clipboard_rows(history),
+            rows: Self::clipboard_rows(history, ""),
+            row_icons: Vec::new(),
             selected: 0,
             message: String::new(),
             prompt: None,
+            query: String::new(),
             empty: "Clipboard history is empty".to_string(),
         }
     }
@@ -1668,13 +1725,64 @@ impl SystemUiState {
         }
     }
 
-    /// Rebuild the open clipboard picker after the history changed.
+    /// The open clipboard picker's filter query.
+    pub fn clipboard_query(&self) -> Option<&str> {
+        let Self::ListPanel { kind, query, .. } = self else {
+            return None;
+        };
+        (*kind == ListKind::Clipboard).then_some(query.as_str())
+    }
+
+    /// Append one typed character to the clipboard filter and rebuild the
+    /// rows from the history. Unlike the launcher's `push_char` this takes
+    /// the history as an argument: the panel borrows the list it filters
+    /// rather than owning a copy, so every keystroke re-filters live data.
+    /// The selection stays on the same entry when it still matches.
+    pub fn push_clipboard_query(
+        &mut self,
+        ch: char,
+        history: &crate::jwm::features::ClipboardHistory,
+    ) {
+        let Self::ListPanel { kind, query, .. } = self else {
+            return;
+        };
+        if *kind != ListKind::Clipboard {
+            return;
+        }
+        query.push(ch);
+        let rows = Self::clipboard_rows(history, query);
+        self.set_rows(ListKind::Clipboard, rows);
+    }
+
+    /// Backspace one character off the clipboard filter. A no-op on an empty
+    /// query, so holding BackSpace does not churn the rows for nothing.
+    pub fn pop_clipboard_query(&mut self, history: &crate::jwm::features::ClipboardHistory) {
+        let Self::ListPanel { kind, query, .. } = self else {
+            return;
+        };
+        if *kind != ListKind::Clipboard || query.is_empty() {
+            return;
+        }
+        query.pop();
+        let rows = Self::clipboard_rows(history, query);
+        self.set_rows(ListKind::Clipboard, rows);
+    }
+
+    /// Rebuild the open clipboard picker after the history changed,
+    /// reapplying the filter the user has typed.
     ///
     /// Rows are keyed by position rather than content, so the selection stays
     /// where the user put it instead of chasing an entry that just moved to
     /// the top.
     pub fn refresh_clipboard(&mut self, history: &crate::jwm::features::ClipboardHistory) {
-        self.set_rows(ListKind::Clipboard, Self::clipboard_rows(history));
+        let Self::ListPanel { kind, query, .. } = self else {
+            return;
+        };
+        if *kind != ListKind::Clipboard {
+            return;
+        }
+        let rows = Self::clipboard_rows(history, query);
+        self.set_rows(ListKind::Clipboard, rows);
     }
 
     /// Replace the clipboard picker's status line.
@@ -1953,9 +2061,11 @@ impl SystemUiState {
         Self::ListPanel {
             kind: ListKind::Wallpaper,
             rows,
+            row_icons: Vec::new(),
             selected,
             message: String::new(),
             prompt: None,
+            query: String::new(),
             empty: format!("No images in {directory}"),
         }
     }
@@ -1995,9 +2105,11 @@ impl SystemUiState {
         Self::ListPanel {
             kind: Self::audio_kind(direction),
             rows,
+            row_icons: Vec::new(),
             selected,
             message: String::new(),
             prompt: None,
+            query: String::new(),
             empty: format!("No audio {} devices to choose from", direction.label()),
         }
     }
@@ -2066,12 +2178,31 @@ impl SystemUiState {
     /// gesture started and `selected` the row its direction picked; from
     /// there on the switcher's own key path steps the highlight.
     pub fn window_switcher(rows: Vec<ListRow>, selected: usize) -> Self {
+        Self::window_switcher_with_icons(rows, Vec::new(), selected)
+    }
+
+    /// The switcher with per-row icon paths resolved from each window's
+    /// class. `row_icons` aligns with `rows`; a row whose class resolved to
+    /// nothing keeps a `None` and draws exactly as before — its generic glyph
+    /// prefix stays, there is no empty hole. Test and compact callers without
+    /// icons keep using [`Self::window_switcher`].
+    pub fn window_switcher_with_icons(
+        rows: Vec<ListRow>,
+        row_icons: Vec<Option<String>>,
+        selected: usize,
+    ) -> Self {
+        debug_assert!(
+            row_icons.is_empty() || row_icons.len() == rows.len(),
+            "switcher row icons align with the rows or are absent"
+        );
         Self::ListPanel {
             kind: ListKind::WindowSwitcher,
             rows,
+            row_icons,
             selected,
             message: String::new(),
             prompt: None,
+            query: String::new(),
             // The opener no-ops on an empty list, so this line never renders.
             empty: "No windows".to_string(),
         }
@@ -3099,7 +3230,21 @@ impl SystemUiState {
     /// Structured overlay content the compositor renders as a styled panel:
     /// headline, optional search field, list rows with an optional highlighted
     /// row, and a footer hint.
+    ///
+    /// Building the parts also publishes their row icons into the compositor's
+    /// side band (`compositor_common::row_icons`): every system-UI sync calls
+    /// this on the same thread immediately before handing the overlay to the
+    /// backend, so the band always describes the payload in flight — and a
+    /// panel without icons publishes `None`, which is what keeps a stale band
+    /// from ever attaching to a text-only overlay.
     pub fn overlay_parts(&self) -> OverlayParts {
+        let parts = self.build_overlay_parts();
+        crate::backend::compositor_common::row_icons::publish(&parts.items, parts.icons.as_deref());
+        parts
+    }
+
+    /// Structured overlay content: the pure half of [`Self::overlay_parts`].
+    fn build_overlay_parts(&self) -> OverlayParts {
         match self {
             Self::Inactive => OverlayParts::default(),
             // The film strip draws its own panel. Only the words come from
@@ -3111,6 +3256,7 @@ impl SystemUiState {
                     title: "\u{f008}  LAYOUT".into(),
                     query: None,
                     items: vec![format!("{}   {}", layout.symbol(), layout.label())],
+                    icons: None,
                     selected: Some(0),
                     hint: "\u{f060}/\u{f061}  browse    Enter / click  apply    Esc  cancel".into(),
                     scroll: None,
@@ -3123,6 +3269,7 @@ impl SystemUiState {
                 title: "\u{f00a}  TAGS".into(),
                 query: None,
                 items: vec![format!("Tag {}", overview.selected + 1)],
+                icons: None,
                 selected: Some(0),
                 hint: "\u{f060}\u{f061}\u{f062}\u{f063}  choose    Enter  jump    1-9  direct    Esc  close"
                     .into(),
@@ -3162,6 +3309,7 @@ impl SystemUiState {
                     title: "\u{f023}  JWM LOCKED".into(),
                     query: None,
                     items,
+                    icons: None,
                     selected: None,
                     hint: "Enter  unlock    Esc  clear".into(),
                     scroll: None,
@@ -3183,6 +3331,7 @@ impl SystemUiState {
                         query: Some(query.clone()),
                         selected: Some(0),
                         items: vec![format!("=  {result}")],
+                        icons: None,
                         hint: "Click/Enter  copy    Esc  close".into(),
                         scroll: None,
                     };
@@ -3192,6 +3341,11 @@ impl SystemUiState {
                     crate::jwm::features::launcher::QueryMode::Windows(_)
                 );
                 let start = selected.saturating_sub(11);
+                // Row icons are resolved here, one visible row at a time, never
+                // for the whole catalog: the resolver's cache makes a re-resolve
+                // per keystroke cheap, and a row whose icon resolves to nothing
+                // keeps a `None` — the text row is exactly what it was.
+                let mut row_icons: Vec<Option<String>> = Vec::new();
                 let items: Vec<String> = if matches.is_empty() {
                     vec![if windows_only {
                         "  No matching windows".into()
@@ -3207,10 +3361,22 @@ impl SystemUiState {
                         .take(12)
                         .map(|row| match row {
                             LauncherRow::Window(index) => {
-                                crate::jwm::features::launcher::window_row(&windows[*index])
+                                let entry = &windows[*index];
+                                row_icons.push(
+                                    crate::jwm::features::launcher::resolve_window_icon(
+                                        &entry.class,
+                                        &entry.instance,
+                                    ),
+                                );
+                                crate::jwm::features::launcher::window_row(entry)
                             }
                             LauncherRow::App(index) => {
                                 let entry = &entries[*index];
+                                row_icons.push(
+                                    entry.icon.as_deref().and_then(
+                                        crate::jwm::features::launcher::resolve_row_icon,
+                                    ),
+                                );
                                 if entry.terminal {
                                     format!("{}  \u{f120}", entry.name)
                                 } else {
@@ -3220,6 +3386,7 @@ impl SystemUiState {
                         })
                         .collect()
                 };
+                let icons = row_icon_payload(row_icons, items.len());
                 let scroll = (!matches.is_empty()).then(|| crate::backend::api::ScrollWindow {
                     first: start,
                     visible: items.len(),
@@ -3234,6 +3401,7 @@ impl SystemUiState {
                     query: Some(query.clone()),
                     selected: (!matches.is_empty()).then(|| selected - start),
                     items,
+                    icons,
                     // `/` lists open windows; it cannot be arithmetic, so the
                     // two modes never compete for the same query.
                     hint:
@@ -3268,6 +3436,7 @@ impl SystemUiState {
                     title: title.clone(),
                     query: Some(query.clone()),
                     items,
+                    icons: None,
                     selected: None,
                     hint:
                         "Type  search    Backspace  erase    Esc  close    \u{f062}/\u{f063}  scroll"
@@ -3309,6 +3478,7 @@ impl SystemUiState {
                     },
                     query: None,
                     items,
+                    icons: None,
                     selected: visual_selection,
                     hint: if *armed {
                         "Click/Enter  confirm    Esc  back".into()
@@ -3324,9 +3494,11 @@ impl SystemUiState {
             Self::ListPanel {
                 kind,
                 rows,
+                row_icons,
                 selected,
                 message,
                 prompt,
+                query,
                 empty,
             } => {
                 // One renderer for the notification center and the three
@@ -3344,10 +3516,16 @@ impl SystemUiState {
                     total: rows.len(),
                 });
                 let mut items: Vec<String> = if rows.is_empty() {
-                    vec![format!(
-                        "  {}",
-                        if message.is_empty() { empty } else { message }
-                    )]
+                    // A clipboard filter that matches nothing is not an empty
+                    // history — say which; a status line still outranks both.
+                    let fallback: &str = if !message.is_empty() {
+                        message.as_str()
+                    } else if *kind == ListKind::Clipboard && !query.is_empty() {
+                        "No matching entries"
+                    } else {
+                        empty.as_str()
+                    };
+                    vec![format!("  {fallback}")]
                 } else {
                     rows.iter()
                         .skip(start)
@@ -3355,8 +3533,28 @@ impl SystemUiState {
                         .map(|row| row.text.clone())
                         .collect()
                 };
+                // The switcher's icons align with the visible slice of `rows`;
+                // every line appended or inserted below gets a `None` so the
+                // payload keeps `icons.len() == items.len()`. Other lists carry
+                // no icons at all, and their payload stays `None` throughout.
+                let mut icons: Option<Vec<Option<String>>> =
+                    if row_icons.is_empty() || row_icons.len() != rows.len() {
+                        None
+                    } else {
+                        Some(
+                            row_icons
+                                .iter()
+                                .skip(start)
+                                .take(window)
+                                .cloned()
+                                .collect(),
+                        )
+                    };
                 if let Some(prompt) = prompt {
                     items.push(String::new());
+                    if let Some(icons) = &mut icons {
+                        icons.push(None);
+                    }
                     match prompt {
                         PromptKind::Passphrase(typed) => {
                             // Name the network: the selection highlight is
@@ -3397,9 +3595,16 @@ impl SystemUiState {
                             });
                         }
                     }
+                    if let Some(icons) = &mut icons {
+                        icons.push(None);
+                    }
                 } else if !message.is_empty() && !rows.is_empty() {
                     items.push(String::new());
                     items.push(format!("  {message}"));
+                    if let Some(icons) = &mut icons {
+                        icons.push(None);
+                        icons.push(None);
+                    }
                 }
                 // The selected notification's buttons go on the line *after*
                 // its row, so `selected` still indexes the row itself and the
@@ -3410,13 +3615,21 @@ impl SystemUiState {
                     let under = selected - start + 1;
                     if under <= items.len() {
                         items.insert(under, strip);
+                        if let Some(icons) = &mut icons {
+                            icons.insert(under.min(icons.len()), None);
+                        }
                     }
                 }
+                let icons = icons.and_then(|icons| row_icon_payload(icons, items.len()));
                 OverlayParts {
                     title: kind.title().to_string(),
-                    query: None,
+                    // The clipboard picker's filter gets the launcher's query
+                    // bar, caret included. Other kinds never collect one and
+                    // draw no bar.
+                    query: (*kind == ListKind::Clipboard).then(|| query.clone()),
                     selected: (!rows.is_empty() && prompt.is_none()).then(|| selected - start),
                     items,
+                    icons,
                     hint: kind.hint(prompt.as_ref()).to_string(),
                     scroll,
                 }
@@ -3428,6 +3641,7 @@ impl SystemUiState {
                     title: format!("\u{f073}  {}", view.title()),
                     query: None,
                     items,
+                    icons: None,
                     selected: None,
                     hint: "\u{f060}/\u{f061}  month    \u{f062}/\u{f063}  year    t  today    Esc  close"
                         .into(),
@@ -3458,6 +3672,7 @@ impl SystemUiState {
                     title: "\u{f011}  SESSION".into(),
                     query: None,
                     items,
+                    icons: None,
                     selected: Some((*selected).min(entries.len().saturating_sub(1))),
                     hint,
                     scroll: None,
@@ -3489,6 +3704,7 @@ impl SystemUiState {
                     title,
                     query: None,
                     items,
+                    icons: None,
                     selected: None,
                     hint,
                     scroll: None,
@@ -3509,7 +3725,7 @@ impl SystemUiState {
         {
             return monitor_layout_overlay(entries, *selected, *reference, message);
         }
-        let parts = self.overlay_parts();
+        let parts = self.build_overlay_parts();
         if !parts.title.is_empty() || !parts.items.is_empty() {
             let mut out = format!("{}\n\n", parts.title);
             if let Some(query) = &parts.query {
@@ -3872,6 +4088,8 @@ fn scan_path_applications(
                 // A bare executable on PATH declares nothing, so it is
                 // launched as-is rather than guessed at.
                 false,
+                // ...and declares no icon either; the row stays text-only.
+                None,
                 search,
             ));
         }
@@ -3927,6 +4145,7 @@ fn scan_desktop_dir(
             let mut in_entry = false;
             let mut name = None;
             let mut exec = None;
+            let mut icon = None;
             let mut hidden = false;
             let mut terminal = false;
             for line in body.lines() {
@@ -3942,6 +4161,16 @@ fn scan_desktop_dir(
                 }
                 if let Some(v) = line.strip_prefix("Exec=") {
                     exec = Some(v.to_string());
+                }
+                // Like `Name`, the first plain `Icon=` wins: a localized
+                // `Icon[de]` never carries a different picture, and an action
+                // group's `Icon` further down describes a menu item. Empty is
+                // as good as absent — the row just keeps its text.
+                if let Some(v) = line.strip_prefix("Icon=") {
+                    let v = v.trim();
+                    if !v.is_empty() {
+                        icon.get_or_insert_with(|| v.to_string());
+                    }
                 }
                 if matches!(line, "Hidden=true" | "NoDisplay=true") {
                     hidden = true;
@@ -3961,7 +4190,7 @@ fn scan_desktop_dir(
                 continue;
             }
             let search = format!("{} {}", name.to_lowercase(), exec.to_lowercase());
-            entries.push(LaunchEntry::new(name, command, terminal, search));
+            entries.push(LaunchEntry::new(name, command, terminal, icon, search));
         }
     }
 }
@@ -4688,9 +4917,11 @@ mod tests {
                 row(2, Vec::new()),
                 row(3, Vec::new()),
             ],
+            row_icons: Vec::new(),
             selected: 0,
             message: String::new(),
             prompt: None,
+            query: String::new(),
             empty: String::new(),
         };
 
@@ -4741,9 +4972,11 @@ mod tests {
         let mut panel = SystemUiState::ListPanel {
             kind: ListKind::Notifications,
             rows,
+            row_icons: Vec::new(),
             selected: 15,
             message: String::new(),
             prompt: None,
+            query: String::new(),
             empty: String::new(),
         };
 
@@ -4778,6 +5011,145 @@ mod tests {
         assert!(panel.selected_bluetooth().is_none());
         assert!(panel.selected_wallpaper().is_none());
         assert!(panel.selected_notification().is_none());
+    }
+
+    /// A history with `copies` recorded in order, so the last one sits at
+    /// history position 0.
+    fn clipboard_history(copies: &[&str]) -> crate::jwm::features::ClipboardHistory {
+        let mut history = crate::jwm::features::ClipboardHistory::new();
+        for (index, text) in copies.iter().enumerate() {
+            history.record(text, index as u64);
+        }
+        history
+    }
+
+    #[test]
+    fn the_clipboard_filter_narrows_rows_but_keeps_history_positions() {
+        let history = clipboard_history(&[
+            "https://example.com/docs",
+            "sudo apt install",
+            "John <john@example.com>",
+        ]);
+        let mut panel = SystemUiState::clipboard_picker(&history);
+        assert_eq!(panel.selected_clipboard(), Some(0));
+
+        for ch in "example".chars() {
+            panel.push_clipboard_query(ch, &history);
+        }
+
+        // The matching rows still name their place in the history — 1 and 3,
+        // not renumbered 1 and 2 — so acting on the filtered selection needs
+        // no translation.
+        let SystemUiState::ListPanel { rows, .. } = &panel else {
+            panic!("the clipboard picker is a list panel");
+        };
+        let keys: Vec<&str> = rows.iter().map(|row| row.key.as_str()).collect();
+        assert_eq!(keys, ["0", "2"], "the gap in numbering shows a filter");
+        assert!(rows[0].text.contains(" 1"), "history position, not row");
+        assert!(rows[1].text.contains(" 3"));
+
+        assert_eq!(panel.selected_clipboard(), Some(0));
+        panel.move_selection(1);
+        assert_eq!(panel.selected_clipboard(), Some(2));
+    }
+
+    #[test]
+    fn the_selection_holds_on_an_entry_that_still_matches_the_filter() {
+        let history = clipboard_history(&["alpha", "beta", "alphabet soup"]);
+        let mut panel = SystemUiState::clipboard_picker(&history);
+        // "alpha" is history position 2, the last row.
+        panel.move_selection(2);
+        assert_eq!(panel.selected_clipboard(), Some(2));
+
+        for ch in "alph".chars() {
+            panel.push_clipboard_query(ch, &history);
+        }
+
+        // "alphabet soup" (0) and "alpha" (2) both match; the selection
+        // stayed on "alpha" rather than snapping back to the top.
+        assert_eq!(panel.selected_clipboard(), Some(2));
+    }
+
+    #[test]
+    fn backspace_widens_the_filter_and_stops_at_empty() {
+        let history = clipboard_history(&["alpha", "beta", "alphabet soup"]);
+        let mut panel = SystemUiState::clipboard_picker(&history);
+
+        for ch in "alph".chars() {
+            panel.push_clipboard_query(ch, &history);
+        }
+        assert_eq!(panel.clipboard_query(), Some("alph"));
+        for _ in 0..4 {
+            panel.pop_clipboard_query(&history);
+        }
+        assert_eq!(panel.clipboard_query(), Some(""));
+        assert_eq!(panel.selected_clipboard(), Some(0));
+
+        // Backspace on an empty query is a no-op: the rows are not rebuilt
+        // and the selection does not move.
+        panel.move_selection(1);
+        panel.pop_clipboard_query(&history);
+        assert_eq!(panel.selected_clipboard(), Some(1));
+
+        // Nothing to type into: other panels have no query at all.
+        assert_eq!(SystemUiState::wifi_picker("").clipboard_query(), None);
+    }
+
+    #[test]
+    fn a_history_refresh_reapplies_the_filter() {
+        let mut history = clipboard_history(&["alpha", "beta"]);
+        let mut panel = SystemUiState::clipboard_picker(&history);
+        panel.push_clipboard_query('z', &history);
+        assert_eq!(panel.selected_clipboard(), None, "nothing matches yet");
+
+        // A copy that arrives while the picker is filtered still has to pass
+        // the filter before it appears.
+        history.record("zulu time", 2);
+        panel.refresh_clipboard(&history);
+        assert_eq!(panel.selected_clipboard(), Some(0));
+        assert_eq!(
+            panel
+                .selected_clipboard()
+                .map(|index| history.get(index).unwrap().text.as_str()),
+            Some("zulu time")
+        );
+    }
+
+    #[test]
+    fn a_filter_that_matches_nothing_says_so_instead_of_claiming_empty() {
+        let history = clipboard_history(&["alpha", "beta"]);
+        let mut panel = SystemUiState::clipboard_picker(&history);
+        for ch in "zzz".chars() {
+            panel.push_clipboard_query(ch, &history);
+        }
+
+        let parts = panel.overlay_parts();
+        assert_eq!(parts.query.as_deref(), Some("zzz"));
+        assert_eq!(parts.items, vec!["  No matching entries".to_string()]);
+        assert_eq!(parts.selected, None);
+    }
+
+    #[test]
+    fn the_clipboard_picker_draws_a_query_bar_and_reopens_with_it_empty() {
+        let history = clipboard_history(&["alpha"]);
+        let mut panel = SystemUiState::clipboard_picker(&history);
+
+        // Launcher-style: the bar is there from the start, caret included, so
+        // the affordance is visible before the first keystroke. The hint says
+        // the same in words.
+        assert_eq!(panel.overlay_parts().query.as_deref(), Some(""));
+        assert!(panel.overlay_parts().hint.contains("type  filter"));
+        // Other list panels collect no query and draw no bar.
+        assert_eq!(SystemUiState::wifi_picker("").overlay_parts().query, None);
+
+        panel.push_clipboard_query('a', &history);
+        assert_eq!(panel.overlay_parts().query.as_deref(), Some("a"));
+
+        // Closing and reopening rebuilds the panel from scratch, so the next
+        // open starts unfiltered — the launcher's reopen behavior.
+        let reopened = SystemUiState::clipboard_picker(&history);
+        assert_eq!(reopened.clipboard_query(), Some(""));
+        assert_eq!(reopened.overlay_parts().query.as_deref(), Some(""));
     }
 
     #[test]
@@ -5290,6 +5662,8 @@ mod tests {
             artist: "Miles Davis".into(),
             can_go_next: true,
             can_go_previous: true,
+            position_us: Some(161_000_000),
+            length_us: Some(245_000_000),
         };
         let state = SystemUiState::control_center(&ControlCenterInputs {
             media: Some(&media),
@@ -5300,6 +5674,11 @@ mod tests {
         assert_eq!(state.selected_control(), Some(ControlKind::Media));
         let parts = state.overlay_parts();
         assert!(parts.items[0].contains("Blue in Green"));
+        assert!(
+            parts.items[0].contains("2:41 / 4:05"),
+            "the row carries the polled position: {}",
+            parts.items[0]
+        );
         assert!(parts.items[1].contains("45%"));
     }
 
@@ -5812,6 +6191,7 @@ mod tests {
             "ÉDiteur".into(),
             vec!["editor".into()],
             false,
+            None,
             "éditeur editor".into(),
         );
         assert_eq!(entry.sort_key, "éditeur");
@@ -5822,7 +6202,7 @@ mod tests {
         let entries: Vec<LaunchEntry> = (0..20)
             .map(|i| {
                 let name = format!("app{i:02}");
-                LaunchEntry::new(name.clone(), vec![name.clone()], false, name)
+                LaunchEntry::new(name.clone(), vec![name.clone()], false, None, name)
             })
             .collect();
         let mut state = SystemUiState::Launcher {
@@ -5882,6 +6262,7 @@ mod tests {
                     (*name).to_string(),
                     vec![(*name).to_string()],
                     *terminal,
+                    None,
                     name.to_lowercase(),
                 )
             })
@@ -5914,6 +6295,7 @@ mod tests {
             "firefox".into(),
             vec!["firefox".into()],
             false,
+            None,
             "firefox web browser".into(),
         )]
         .into();
@@ -5939,7 +6321,7 @@ mod tests {
 
         let refreshed: Arc<[LaunchEntry]> = ["aardvark", "alpha", "beta", "gamma"]
             .into_iter()
-            .map(|name| LaunchEntry::new(name.into(), vec![name.into()], false, name.into()))
+            .map(|name| LaunchEntry::new(name.into(), vec![name.into()], false, None, name.into()))
             .collect::<Vec<_>>()
             .into();
         assert!(state.set_launcher_entries(refreshed));
@@ -5961,6 +6343,235 @@ mod tests {
             unreachable!();
         };
         assert!(Arc::ptr_eq(left, right));
+    }
+
+    #[test]
+    fn a_desktop_entrys_icon_key_is_parsed_but_never_required() {
+        let root = std::env::temp_dir().join(format!(
+            "jwm-launcher-icons-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let entry = |name: &str, icon_line: &str| {
+            format!("[Desktop Entry]\nName={name}\nExec={name}\n{icon_line}\n")
+        };
+        std::fs::write(
+            root.join("themed.desktop"),
+            entry("themed", "Icon=some-theme-name"),
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("absolute.desktop"),
+            entry("absolute", "Icon=/usr/share/pixmaps/absolute.png"),
+        )
+        .unwrap();
+        std::fs::write(root.join("plain.desktop"), entry("plain", "")).unwrap();
+        // A localized key never supplies the icon, and an empty one neither.
+        std::fs::write(
+            root.join("localized.desktop"),
+            entry("localized", "Icon[de]=lokales-icon\nIcon="),
+        )
+        .unwrap();
+        // An action group's Icon is not the application's.
+        std::fs::write(
+            root.join("actioned.desktop"),
+            &format!(
+                "{}\n[Desktop Action new-window]\nIcon=action-icon\n",
+                entry("actioned", "")
+            ),
+        )
+        .unwrap();
+
+        let mut entries = Vec::new();
+        let mut seen = HashSet::new();
+        let mut budget = ApplicationScanBudget::default();
+        scan_desktop_dir(&root, &mut entries, &mut seen, &mut budget);
+        std::fs::remove_dir_all(&root).unwrap();
+
+        let icon_of = |name: &str| {
+            entries
+                .iter()
+                .find(|entry| entry.name == name)
+                .map(|entry| entry.icon.as_deref())
+        };
+        assert_eq!(icon_of("themed"), Some(Some("some-theme-name")));
+        assert_eq!(
+            icon_of("absolute"),
+            Some(Some("/usr/share/pixmaps/absolute.png"))
+        );
+        assert_eq!(icon_of("plain"), Some(None));
+        assert_eq!(icon_of("localized"), Some(None));
+        assert_eq!(icon_of("actioned"), Some(None));
+    }
+
+    #[test]
+    fn launcher_rows_carry_their_icons_aligned_with_the_items() {
+        // Absolute Icon= paths resolve without touching the disk, so this
+        // payload is deterministic on any host.
+        let entries: Vec<LaunchEntry> = vec![
+            LaunchEntry::new(
+                "firefox".into(),
+                vec!["firefox".into()],
+                false,
+                Some("/usr/share/pixmaps/firefox.png".into()),
+                "firefox".into(),
+            ),
+            LaunchEntry::new(
+                "terminal".into(),
+                vec!["terminal".into()],
+                true,
+                Some("/usr/share/pixmaps/terminal.png".into()),
+                "terminal".into(),
+            ),
+            LaunchEntry::new(
+                "plain".into(),
+                vec!["plain".into()],
+                false,
+                None,
+                "plain".into(),
+            ),
+        ];
+        let mut state = SystemUiState::Launcher {
+            query: String::new(),
+            entries: entries.into(),
+            windows: Vec::new(),
+            matches: Vec::new(),
+            selected: 0,
+            usage: crate::jwm::features::launcher::UsageStore::default(),
+            computed: None,
+            indexing: false,
+        };
+        state.refresh_matches();
+
+        let parts = state.overlay_parts();
+        let icons = parts.icons.expect("resolved icons ride the payload");
+        assert_eq!(icons.len(), parts.items.len(), "one icon slot per row");
+        let firefox = parts
+            .items
+            .iter()
+            .position(|item| item == "firefox")
+            .unwrap();
+        assert_eq!(
+            icons[firefox].as_deref(),
+            Some("/usr/share/pixmaps/firefox.png")
+        );
+        let terminal = parts
+            .items
+            .iter()
+            .position(|item| item == "terminal  \u{f120}")
+            .unwrap();
+        assert_eq!(
+            icons[terminal].as_deref(),
+            Some("/usr/share/pixmaps/terminal.png"),
+            "the terminal glyph stays in the text; the icon is additive"
+        );
+        let plain = parts.items.iter().position(|item| item == "plain").unwrap();
+        assert_eq!(icons[plain], None, "no icon resolved: no hole either");
+        // The row text itself is byte-identical to a build without icons.
+        assert!(!parts.items.iter().any(|item| item.contains(".png")));
+    }
+
+    #[test]
+    fn a_launcher_without_any_icon_carries_no_icon_payload() {
+        let state = launcher_with(&[("alpha", false), ("beta", false)], "");
+        let parts = state.overlay_parts();
+        assert_eq!(parts.icons, None, "the text-only layout is untouched");
+    }
+
+    #[test]
+    fn the_calculator_and_the_empty_list_carry_no_icons() {
+        let mut state = launcher_with(&[("alpha", false)], "");
+        for ch in "1+1".chars() {
+            state.push_char(ch);
+        }
+        assert_eq!(state.overlay_parts().icons, None);
+
+        let mut state = launcher_with(&[("alpha", false)], "");
+        for ch in "zzz".chars() {
+            state.push_char(ch);
+        }
+        assert_eq!(state.overlay_parts().items, ["  No matching applications"]);
+        assert_eq!(state.overlay_parts().icons, None);
+    }
+
+    #[test]
+    fn the_switchers_icons_follow_its_scroll_window_and_a_removed_row() {
+        let rows: Vec<ListRow> = (0..20u64)
+            .map(|n| ListRow {
+                key: n.to_string(),
+                text: format!("window {n}"),
+                data: RowData::WindowSwitcher { window: n },
+            })
+            .collect();
+        let icons: Vec<Option<String>> = (0..20)
+            .map(|n| (n % 2 == 0).then(|| format!("/icons/app{n}.png")))
+            .collect();
+        let mut panel = SystemUiState::window_switcher_with_icons(rows, icons, 15);
+
+        // The visible window is 12 rows ending at the selection (15): rows
+        // 4..=15, and the payload slice aligns with the items.
+        let parts = panel.overlay_parts();
+        assert_eq!(parts.items.len(), 12);
+        let payload = parts.icons.expect("the switcher carries icons");
+        assert_eq!(payload.len(), parts.items.len());
+        for (index, item) in parts.items.iter().enumerate() {
+            let row_number: usize = item.strip_prefix("window ").unwrap().parse().unwrap();
+            assert_eq!(
+                payload[index],
+                (row_number % 2 == 0).then(|| format!("/icons/app{row_number}.png")),
+                "row {item} carries its own icon"
+            );
+        }
+
+        // Deleting the selected row drops its icon with it: no misalignment.
+        assert!(panel.remove_selected_switcher_row().is_some());
+        let parts = panel.overlay_parts();
+        let payload = parts.icons.unwrap();
+        assert_eq!(payload.len(), parts.items.len());
+        assert!(
+            !parts.items.iter().any(|item| item == "window 15"),
+            "the row is gone"
+        );
+        assert!(
+            !payload
+                .iter()
+                .flatten()
+                .any(|path| path == "/icons/app15.png"),
+            "its icon went with it"
+        );
+
+        // A list with nothing resolved carries no payload at all.
+        let rows: Vec<ListRow> = (0..3u64)
+            .map(|n| ListRow {
+                key: n.to_string(),
+                text: format!("window {n}"),
+                data: RowData::WindowSwitcher { window: n },
+            })
+            .collect();
+        let panel = SystemUiState::window_switcher_with_icons(rows, vec![None, None, None], 0);
+        assert_eq!(panel.overlay_parts().icons, None);
+    }
+
+    #[test]
+    fn the_notification_center_carries_no_icon_payload() {
+        let mut center = crate::jwm::features::NotificationCenter::new();
+        center.push(
+            &crate::jwm::features::notifications::NotificationRequest {
+                app: "mail".into(),
+                summary: "New mail".into(),
+                ..Default::default()
+            },
+            1_000,
+            false,
+        );
+        let panel = SystemUiState::notification_center(&center, 1_000);
+        let parts = panel.overlay_parts();
+        assert!(!parts.items.is_empty());
+        assert_eq!(parts.icons, None);
     }
 
     #[test]

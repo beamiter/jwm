@@ -659,8 +659,14 @@ impl Jwm {
                 },
             })
             .collect();
-        self.features.system_ui =
-            crate::jwm::features::SystemUiState::window_switcher(rows, selected);
+        // Resolved once at the gesture's start, per row: the switcher's rows
+        // are a frozen snapshot, and the resolver's cache makes the repeated
+        // classes of a long MRU list cheap. A window without a desktop entry
+        // keeps a `None` and its generic glyph — never a hole.
+        let row_icons = entries.iter().map(switcher::switcher_row_icon).collect();
+        self.features.system_ui = crate::jwm::features::SystemUiState::window_switcher_with_icons(
+            rows, row_icons, selected,
+        );
         self.sync_system_ui(backend);
 
         if held.is_empty() {

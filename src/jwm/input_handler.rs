@@ -2033,6 +2033,11 @@ impl Jwm {
                 return Ok(());
             }
             if self.features.system_ui.is_clipboard_picker() {
+                // The picker is type-to-filter: printable characters narrow
+                // the list and BackSpace edits the query. `d`, `c`, Delete,
+                // space and Return keep their picker meanings and act on the
+                // filtered selection — what you see is what they touch — so
+                // those letters never land in the query itself.
                 if keysym == keys::KEY_Return || keysym == keys::KEY_space {
                     self.copy_selected_clipboard(backend);
                 } else if keysym == keys::KEY_d || keysym == keys::KEY_Delete {
@@ -2040,12 +2045,23 @@ impl Jwm {
                 } else if keysym == keys::KEY_c {
                     self.clear_clipboard_history();
                     self.sync_system_ui(backend);
+                } else if keysym == keys::KEY_BackSpace {
+                    self.features
+                        .system_ui
+                        .pop_clipboard_query(&self.features.clipboard);
+                    self.sync_system_ui(backend);
+                } else if keysym == keys::KEY_Up {
+                    self.features.system_ui.move_selection(-1);
+                    self.sync_system_ui(backend);
+                } else if keysym == keys::KEY_Down || keysym == keys::KEY_Tab {
+                    self.features.system_ui.move_selection(1);
+                    self.sync_system_ui(backend);
+                } else if let Some(ch) = Self::system_ui_char(keysym, clean_state) {
+                    self.features
+                        .system_ui
+                        .push_clipboard_query(ch, &self.features.clipboard);
+                    self.sync_system_ui(backend);
                 } else {
-                    if keysym == keys::KEY_Up {
-                        self.features.system_ui.move_selection(-1);
-                    } else if keysym == keys::KEY_Down || keysym == keys::KEY_Tab {
-                        self.features.system_ui.move_selection(1);
-                    }
                     self.sync_system_ui(backend);
                 }
                 return Ok(());

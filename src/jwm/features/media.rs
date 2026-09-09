@@ -113,6 +113,14 @@ pub struct MediaState {
     pub artist: String,
     pub can_go_next: bool,
     pub can_go_previous: bool,
+    /// Player-reported track position in microseconds, as of the bridge's
+    /// last poll. `None` when the player did not report one. Kept exactly as
+    /// received — pauses do not advance it, and mid-track-change values can
+    /// be garbage; only the display clamps, never the state.
+    pub position_us: Option<i64>,
+    /// `mpris:length` in microseconds. `None` when the track does not say —
+    /// streams routinely do not.
+    pub length_us: Option<i64>,
 }
 
 impl MediaState {
@@ -152,6 +160,26 @@ impl MediaState {
     pub fn is_active(&self) -> bool {
         !self.player.trim().is_empty()
     }
+
+    /// The row's `2:41 / 4:05` suffix, when there is anything honest to show.
+    ///
+    /// Both halves must come from the player: a length without a position has
+    /// no progress to show, and a position without a usable length (a stream)
+    /// cannot be read as a fraction of anything — so either one missing means
+    /// no suffix at all, never a placeholder. A position past the length is a
+    /// stale read around a track change; it is clamped for this display only,
+    /// never written back into the state. While paused the player does not
+    /// advance `Position`, so the suffix simply holds the last polled value.
+    #[must_use]
+    pub fn position_label(&self) -> Option<String> {
+        let length = self.length_us.filter(|length| *length > 0)?;
+        let position = self.position_us?.clamp(0, length);
+        Some(format!(
+            "{} / {}",
+            format_clock(position),
+            format_clock(length)
+        ))
+    }
 }
 
 /// Last known player, or none when every player went away.
@@ -174,7 +202,13 @@ impl MediaStatus {
     /// Replace the state, reporting whether this counts as a *track change* —
     /// a different player, or a different track on the same one. Volume-style
     /// churn (pause/resume of the same track) returns false so the OSD does
-    /// not pop up on every property change.
+    /// not pop up on every property change; position and length churn from
+    /// the bridge's polling is deliberately not a change either, or the OSD
+    /// would re-raise on every sweep.
+    ///
+    /// The state replaces wholesale, so a track change also resets the
+    /// position to whatever the push that announced the new track carried —
+    /// the previous track's counter can never linger into the new one.
     pub fn update(&mut self, state: Option<MediaState>) -> bool {
         let changed = match (&self.current, &state) {
             (_, None) => false,
@@ -190,19 +224,43 @@ impl MediaStatus {
     }
 }
 
+/// `m:ss` under an hour, `h:mm:ss` past it — the same shape the recording
+/// indicator's clock draws; that formatter lives backend-side of the
+/// architecture boundary, so this tiny copy is the WM-side one. Negative
+/// input, which players produce around track changes, reads as the start of
+/// the track.
+fn format_clock(micros: i64) -> String {
+    let secs = micros.max(0) / 1_000_000;
+    let (hours, minutes, seconds) = (secs / 3600, (secs / 60) % 60, secs % 60);
+    if hours > 0 {
+        format!("{hours}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{minutes}:{seconds:02}")
+    }
+}
+
 /// Truncate a label to the control-center row budget.
 #[must_use]
 pub fn clip_row_label(label: &str) -> String {
-    if label.chars().count() <= MAX_ROW_CHARS {
+    clip_row_label_within(label, MAX_ROW_CHARS)
+}
+
+/// Truncate a label to a given budget; [`clip_row_label`] is this with the
+/// row's full width. A position suffix takes its share out of the budget so
+/// the row's total width — and the transport glyphs at its end — stays put.
+#[must_use]
+fn clip_row_label_within(label: &str, max_chars: usize) -> String {
+    if label.chars().count() <= max_chars {
         return label.to_string();
     }
-    let mut out: String = label.chars().take(MAX_ROW_CHARS - 1).collect();
+    let mut out: String = label.chars().take(max_chars.saturating_sub(1)).collect();
     out.push('\u{2026}');
     out
 }
 
 /// The control-center row: status icon, track, and which transport controls
-/// the player says it supports.
+/// the player says it supports. When the player reports both a position and
+/// a length, the row carries them as `2:41 / 4:05` after the track label.
 #[must_use]
 pub fn control_row(state: &MediaState) -> String {
     let previous = if state.can_go_previous {
@@ -215,10 +273,17 @@ pub fn control_row(state: &MediaState) -> String {
     } else {
         " "
     };
+    let position = state
+        .position_label()
+        .map(|label| format!("  {label}"))
+        .unwrap_or_default();
+    let label = clip_row_label_within(
+        &state.track_label(),
+        MAX_ROW_CHARS.saturating_sub(position.chars().count()),
+    );
     format!(
-        "{}  {}   {previous} {} {next}",
+        "{}  {label}{position}   {previous} {} {next}",
         "\u{f001}", // fa-music
-        clip_row_label(&state.track_label()),
         state.status.icon(),
     )
 }
@@ -241,6 +306,11 @@ impl crate::jwm::Jwm {
                 "artist": state.artist,
                 "can_go_next": state.can_go_next,
                 "can_go_previous": state.can_go_previous,
+                // Append-only: microseconds as reported, plus the display
+                // label so bars do not each reimplement the clamping rules.
+                "position_us": state.position_us,
+                "length_us": state.length_us,
+                "position_label": state.position_label(),
             }),
             None => serde_json::json!({ "player": serde_json::Value::Null }),
         };
@@ -287,6 +357,9 @@ impl crate::jwm::Jwm {
                 "label": state.track_label(),
                 "can_go_next": state.can_go_next,
                 "can_go_previous": state.can_go_previous,
+                "position_us": state.position_us,
+                "length_us": state.length_us,
+                "position_label": state.position_label(),
             }),
             None => serde_json::json!({ "active": false }),
         }
@@ -313,6 +386,10 @@ pub fn parse_state_args(args: &serde_json::Value) -> Option<MediaState> {
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false)
     };
+    // Microsecond counters are optional on the wire: an old bridge never
+    // sends them, and a player that did not report one sends null. Anything
+    // that is not an integer — or does not fit one — reads as unreported.
+    let micros = |key: &str| args.get(key).and_then(serde_json::Value::as_i64);
     Some(MediaState {
         player: bounded_text(player, MAX_PLAYER_BYTES),
         identity: text("identity"),
@@ -325,6 +402,8 @@ pub fn parse_state_args(args: &serde_json::Value) -> Option<MediaState> {
         artist: text("artist"),
         can_go_next: flag("can_go_next"),
         can_go_previous: flag("can_go_previous"),
+        position_us: micros("position_us"),
+        length_us: micros("length_us"),
     })
 }
 
@@ -341,6 +420,8 @@ mod tests {
             artist: artist.into(),
             can_go_next: true,
             can_go_previous: true,
+            position_us: None,
+            length_us: None,
         }
     }
 
@@ -520,5 +601,145 @@ mod tests {
         assert_eq!(parsed.status, PlaybackStatus::Stopped);
         assert_eq!(parsed.title, "");
         assert!(!parsed.can_go_next);
+        assert_eq!(parsed.position_us, None, "old bridges send no counters");
+        assert_eq!(parsed.length_us, None);
+    }
+
+    #[test]
+    fn state_args_parse_the_position_and_length_the_bridge_polls() {
+        let parsed = parse_state_args(&serde_json::json!({
+            "player": "mpv",
+            "position_us": 161_000_000i64,
+            "length_us": 245_000_000i64,
+        }))
+        .expect("player parses");
+        assert_eq!(parsed.position_us, Some(161_000_000));
+        assert_eq!(parsed.length_us, Some(245_000_000));
+        assert_eq!(parsed.position_label().as_deref(), Some("2:41 / 4:05"));
+    }
+
+    #[test]
+    fn state_args_read_null_or_garbage_counters_as_unreported() {
+        let parsed = parse_state_args(&serde_json::json!({
+            "player": "mpv",
+            "position_us": null,
+            "length_us": "forever",
+        }))
+        .expect("player parses");
+        assert_eq!(parsed.position_us, None);
+        assert_eq!(parsed.length_us, None);
+        assert_eq!(parsed.position_label(), None);
+    }
+
+    #[test]
+    fn the_clock_is_minute_seconds_until_an_hour() {
+        assert_eq!(format_clock(0), "0:00");
+        assert_eq!(format_clock(59_999_999), "0:59", "rounds down, not over");
+        assert_eq!(format_clock(161_000_000), "2:41");
+        assert_eq!(format_clock(245_000_000), "4:05");
+        assert_eq!(format_clock(3_599_000_000), "59:59");
+        assert_eq!(format_clock(3_600_000_000), "1:00:00");
+        assert_eq!(format_clock(5_025_000_000), "1:23:45");
+        assert_eq!(format_clock(-5_000_000), "0:00", "garbage reads as zero");
+    }
+
+    #[test]
+    fn the_position_label_needs_both_halves_of_the_fraction() {
+        let mut both = state("Track", "Artist");
+        both.position_us = Some(161_000_000);
+        both.length_us = Some(245_000_000);
+        assert_eq!(both.position_label().as_deref(), Some("2:41 / 4:05"));
+
+        let mut no_position = state("Track", "Artist");
+        no_position.length_us = Some(245_000_000);
+        assert_eq!(
+            no_position.position_label(),
+            None,
+            "a length without a position shows no placeholder"
+        );
+
+        let mut no_length = state("Track", "Artist");
+        no_length.position_us = Some(161_000_000);
+        assert_eq!(no_length.position_label(), None);
+
+        let mut stream = state("Track", "Artist");
+        stream.position_us = Some(161_000_000);
+        stream.length_us = Some(0);
+        assert_eq!(stream.position_label(), None, "streams report no length");
+    }
+
+    #[test]
+    fn the_displayed_position_is_clamped_but_the_state_keeps_what_was_said() {
+        // Mid-track-change the position can be the previous track's: past the
+        // new length. The row shows the end of the track, and the state keeps
+        // the player's value untouched for the next update to compare.
+        let mut stale = state("Track", "Artist");
+        stale.position_us = Some(300_000_000);
+        stale.length_us = Some(245_000_000);
+        assert_eq!(stale.position_label().as_deref(), Some("4:05 / 4:05"));
+        assert_eq!(stale.position_us, Some(300_000_000));
+
+        let mut negative = state("Track", "Artist");
+        negative.position_us = Some(-1_000_000);
+        negative.length_us = Some(245_000_000);
+        assert_eq!(negative.position_label().as_deref(), Some("0:00 / 4:05"));
+        assert_eq!(negative.position_us, Some(-1_000_000));
+    }
+
+    #[test]
+    fn the_row_carries_the_position_suffix_within_its_budget() {
+        let mut timed = state("Track", "Artist");
+        timed.position_us = Some(161_000_000);
+        timed.length_us = Some(245_000_000);
+        let row = control_row(&timed);
+        assert!(row.contains("Track \u{2014} Artist  2:41 / 4:05"), "{row}");
+        assert!(row.contains('\u{f04b}'), "transport glyphs survive");
+
+        // The suffix's width comes out of the label's budget, so a long title
+        // plus the suffix is exactly as wide as a long title alone was.
+        let mut wordy = state(&"x".repeat(MAX_ROW_CHARS + 10), "");
+        wordy.position_us = Some(161_000_000);
+        wordy.length_us = Some(245_000_000);
+        let row = control_row(&wordy);
+        assert!(row.contains('\u{2026}'), "the label still clips");
+        assert!(row.contains("2:41 / 4:05"), "the suffix is never clipped");
+
+        // Nothing reported, nothing shown — no placeholder dashes.
+        assert!(!control_row(&state("Track", "Artist")).contains(" / "));
+    }
+
+    #[test]
+    fn position_churn_is_not_a_track_change() {
+        let mut status = MediaStatus::default();
+        let mut first = state("Track", "Artist");
+        first.position_us = Some(10_000_000);
+        first.length_us = Some(245_000_000);
+        assert!(status.update(Some(first)));
+
+        // The 3-second sweep pushes a fresh position for the same track; the
+        // OSD must not re-raise for it.
+        let mut later = state("Track", "Artist");
+        later.position_us = Some(13_000_000);
+        later.length_us = Some(245_000_000);
+        assert!(!status.update(Some(later)));
+        assert_eq!(status.get().unwrap().position_us, Some(13_000_000));
+    }
+
+    #[test]
+    fn a_track_change_resets_the_position_to_the_new_push() {
+        let mut status = MediaStatus::default();
+        let mut first = state("First", "Artist");
+        first.position_us = Some(200_000_000);
+        first.length_us = Some(245_000_000);
+        status.update(Some(first));
+
+        // The push announcing the next track came before the player reported
+        // its position: the old track's counter must not linger.
+        let mut next = state("Second", "Artist");
+        next.length_us = Some(180_000_000);
+        assert!(status.update(Some(next)));
+        let current = status.get().unwrap();
+        assert_eq!(current.position_us, None);
+        assert_eq!(current.position_label(), None);
     }
 }

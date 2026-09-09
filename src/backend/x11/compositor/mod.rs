@@ -567,6 +567,17 @@ where
     /// the dropped receiver makes the superseded worker's send a no-op, so
     /// held-down arrow keys never queue a backlog.
     pending_system_ui_preview: Option<mpsc::Receiver<WallpaperImageData>>,
+    /// The open panel's row-icon band: resolved raster paths aligned with the
+    /// overlay's items, picked up from `compositor_common::row_icons` on every
+    /// sync. `Some` reserves the list's icon column; `None` (any other panel,
+    /// or a synthesized row set that no longer matches) keeps the text-only
+    /// layout pixel-identical.
+    system_ui_row_icons: Option<Arc<[Option<String>]>>,
+    /// Row-icon textures keyed by resolved path, plus in-flight decodes and
+    /// remembered misses. The GL context outlives every caller here, so
+    /// cleared or evicted textures are deleted immediately.
+    system_ui_row_icon_cache:
+        crate::backend::compositor_common::row_icons::RowIconCache<(glow::Texture, u32, u32)>,
     /// Open/morph spring for the docked debug HUD card.
     hud_island: crate::backend::compositor_common::dynamic_island::IslandMotion,
     debug_hud: bool,
@@ -804,6 +815,18 @@ where
     tab_hover: Option<(usize, usize)>,
     /// Fade-in of the hovered cell's chip, keyed by the same (group, tab).
     tab_hover_ease: crate::backend::compositor_common::dynamic_island::HoverEase<(usize, usize)>,
+    /// Which cells the last title refresh ellipsized, in `window_groups`
+    /// order: only those earn a dwell tooltip, so a cell whose title fits
+    /// whole never floats one. Rebuilt with the textures.
+    tab_titles_truncated: Vec<Vec<bool>>,
+    /// Rest-then-show state for the tooltip chip. The dwell is information
+    /// policy, not animation, so it is tracked apart from the fade.
+    tab_tooltip_dwell: crate::backend::compositor_common::window_tabs::TooltipDwell,
+    /// Fade-in of the tooltip chip, keyed by the same (group, tab).
+    tab_tooltip_ease: crate::backend::compositor_common::dynamic_island::HoverEase<(usize, usize)>,
+    /// The chip's rasterised line, keyed by its text; freed on every title
+    /// refresh and in `Drop`, the same bargain `tab_title_textures` strikes.
+    tab_tooltip_texture: Option<(String, glow::Texture, u32, u32)>,
 
     // --- Particle effects ---
     particle_program: glow::Program,
@@ -1151,6 +1174,9 @@ impl<C: CompositorConnection> Drop for Compositor<C> {
             if let Some((_, tex, _, _)) = self.system_ui_preview.take() {
                 self.gl.delete_texture(tex);
             }
+            for (tex, _, _) in self.system_ui_row_icon_cache.clear() {
+                self.gl.delete_texture(tex);
+            }
             for (_, set) in self.toast_textures.drain() {
                 for slot in set.text.into_iter().chain(set.buttons).flatten() {
                     self.gl.delete_texture(slot.0);
@@ -1168,6 +1194,9 @@ impl<C: CompositorConnection> Drop for Compositor<C> {
                 }
             }
             for (tex, _, _) in self.tab_title_textures.drain(..).flatten().flatten() {
+                self.gl.delete_texture(tex);
+            }
+            if let Some((_, tex, _, _)) = self.tab_tooltip_texture.take() {
                 self.gl.delete_texture(tex);
             }
             for (tex, _, _) in self.expose_title_textures.drain(..).flatten() {

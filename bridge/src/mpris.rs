@@ -35,6 +35,15 @@ pub struct PlayerSnapshot {
     pub artist: String,
     pub can_go_next: bool,
     pub can_go_previous: bool,
+    /// The `Position` property in microseconds. It is a live counter, not
+    /// metadata, and players only emit `Seeked` for it — so it is read on the
+    /// same sweep as everything else. `None` when the player did not report
+    /// one; the value is passed through as-is, garbage included, and the
+    /// display side decides what is sane to show.
+    pub position_us: Option<i64>,
+    /// `mpris:length` from the track metadata, microseconds. `None` when the
+    /// track does not say — streams routinely do not.
+    pub length_us: Option<i64>,
 }
 
 impl PlayerSnapshot {
@@ -55,6 +64,10 @@ impl PlayerSnapshot {
             "artist": self.artist,
             "can_go_next": self.can_go_next,
             "can_go_previous": self.can_go_previous,
+            // Append-only wire fields: an old jwm ignores them, and a new jwm
+            // reads a missing key (old bridge) as `None`.
+            "position_us": self.position_us,
+            "length_us": self.length_us,
         })
     }
 }
@@ -105,6 +118,25 @@ fn bool_of(value: &OwnedValue) -> bool {
     bool::try_from(value.clone()).unwrap_or(false)
 }
 
+/// Microseconds as the spec sends them (`x`, a signed 64-bit). Players that
+/// send the value unsigned are tolerated; anything else — or an unsigned
+/// value past `i64::MAX` — reads as "not reported" rather than failing the
+/// whole snapshot.
+fn i64_of(value: &OwnedValue) -> Option<i64> {
+    if let Ok(value) = i64::try_from(value.clone()) {
+        return Some(value);
+    }
+    u64::try_from(value.clone())
+        .ok()
+        .and_then(|value| i64::try_from(value).ok())
+}
+
+/// `mpris:length` from an MPRIS metadata dict, in microseconds.
+#[must_use]
+pub fn length_from_metadata(metadata: &HashMap<String, OwnedValue>) -> Option<i64> {
+    metadata.get("mpris:length").and_then(i64_of)
+}
+
 /// Read one player's properties. A player that disappears mid-read yields
 /// `None` rather than failing the whole sweep.
 async fn snapshot(connection: &Connection, name: &OwnedBusName) -> Option<PlayerSnapshot> {
@@ -144,6 +176,12 @@ async fn snapshot(connection: &Connection, name: &OwnedBusName) -> Option<Player
         artist: artist_from_metadata(&metadata),
         can_go_next: player.get("CanGoNext").is_some_and(bool_of),
         can_go_previous: player.get("CanGoPrevious").is_some_and(bool_of),
+        // `Position` rides the same GetAll as everything else: it does not
+        // emit PropertiesChanged reliably, so the sweep's re-read is the
+        // update mechanism — a separate subscription would add per-player
+        // proxies for nothing.
+        position_us: player.get("Position").and_then(i64_of),
+        length_us: length_from_metadata(&metadata),
     })
 }
 
@@ -309,6 +347,8 @@ mod tests {
             artist: "Artist".to_string(),
             can_go_next: true,
             can_go_previous: true,
+            position_us: None,
+            length_us: None,
         }
     }
 
@@ -390,5 +430,55 @@ mod tests {
         assert_eq!(args["title"], "Track");
         assert_eq!(args["artist"], "Artist");
         assert_eq!(args["can_go_next"], true);
+    }
+
+    #[test]
+    fn track_lengths_come_from_mpris_length_in_microseconds() {
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            "mpris:length".to_string(),
+            OwnedValue::try_from(zvariant::Value::from(245_000_000i64)).expect("i64"),
+        );
+        assert_eq!(length_from_metadata(&metadata), Some(245_000_000));
+    }
+
+    #[test]
+    fn an_unsigned_length_is_tolerated() {
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            "mpris:length".to_string(),
+            OwnedValue::try_from(zvariant::Value::from(245_000_000u64)).expect("u64"),
+        );
+        assert_eq!(length_from_metadata(&metadata), Some(245_000_000));
+    }
+
+    #[test]
+    fn missing_or_misshapen_lengths_read_as_unreported() {
+        let mut metadata = HashMap::new();
+        assert_eq!(length_from_metadata(&metadata), None, "no metadata at all");
+
+        // A stream that published a string here must not fail the snapshot.
+        metadata.insert(
+            "mpris:length".to_string(),
+            OwnedValue::from(zvariant::Str::from("forever")),
+        );
+        assert_eq!(length_from_metadata(&metadata), None);
+    }
+
+    #[test]
+    fn snapshot_args_push_position_and_length_as_nullable_microseconds() {
+        let mut with_progress = player("spotify", "Playing");
+        with_progress.position_us = Some(161_000_000);
+        with_progress.length_us = Some(245_000_000);
+        let args = with_progress.to_args();
+        assert_eq!(args["position_us"], 161_000_000);
+        assert_eq!(args["length_us"], 245_000_000);
+
+        // A player that reports neither still sends the keys, as nulls: an
+        // old jwm ignores unknown keys either way, and a new one reads a
+        // missing or null value as "not reported".
+        let args = player("spotify", "Playing").to_args();
+        assert_eq!(args["position_us"], Value::Null);
+        assert_eq!(args["length_us"], Value::Null);
     }
 }

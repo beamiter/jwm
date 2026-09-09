@@ -1481,6 +1481,13 @@ impl<C: CompositorConnection> Compositor<C> {
         let viewport = overlay.effective_viewport(self.screen_w as i32, self.screen_h as i32);
         let content_width = panel::max_content_width(viewport[2]);
         let query_width = panel::max_query_text_width(viewport[2]);
+        // A list with an icon column fits its text into what the column
+        // leaves; every other panel rasterizes against the full budget.
+        let items_width = if self.system_ui_row_icons.is_some() {
+            content_width.saturating_sub(panel::ROW_ICON_SLOT as u32)
+        } else {
+            content_width
+        };
         let title_text = crate::backend::compositor_font::fit_ui_text_lines(
             &overlay.title,
             description,
@@ -1499,7 +1506,7 @@ impl<C: CompositorConnection> Compositor<C> {
             &overlay.items.join("\n"),
             description,
             size,
-            content_width,
+            items_width,
         );
         let hint_text = crate::backend::compositor_font::fit_ui_text_lines(
             &overlay.hint,
@@ -2478,6 +2485,76 @@ impl<C: CompositorConnection> Compositor<C> {
         }
     }
 
+    /// Poll the row-icon pipeline: upload whatever the decode workers
+    /// delivered over their channels — nothing here blocks the frame. An
+    /// upload the GL side refuses joins the remembered misses rather than
+    /// retrying forever.
+    fn poll_system_ui_row_icons(&mut self) {
+        let mut landed = false;
+        for (path, data) in self.system_ui_row_icon_cache.drain_completed() {
+            let uploaded =
+                unsafe {
+                    if data.rgba.is_empty() || data.width == 0 || data.height == 0 {
+                        None
+                    } else {
+                        self.gl.create_texture().ok().and_then(|tex| {
+                        self.gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+                        self.gl.tex_image_2d(
+                            glow::TEXTURE_2D,
+                            0,
+                            glow::RGBA8 as i32,
+                            data.width as i32,
+                            data.height as i32,
+                            0,
+                            glow::RGBA,
+                            glow::UNSIGNED_BYTE,
+                            glow::PixelUnpackData::Slice(Some(&data.rgba)),
+                        );
+                        for filter in [glow::TEXTURE_MIN_FILTER, glow::TEXTURE_MAG_FILTER] {
+                            self.gl
+                                .tex_parameter_i32(glow::TEXTURE_2D, filter, glow::LINEAR as i32);
+                        }
+                        for wrap in [glow::TEXTURE_WRAP_S, glow::TEXTURE_WRAP_T] {
+                            self.gl.tex_parameter_i32(
+                                glow::TEXTURE_2D,
+                                wrap,
+                                glow::CLAMP_TO_EDGE as i32,
+                            );
+                        }
+                        self.gl.bind_texture(glow::TEXTURE_2D, None);
+                        let upload_error = self.gl.get_error();
+                        if upload_error != glow::NO_ERROR {
+                            self.gl.delete_texture(tex);
+                            log::warn!(
+                                "compositor: row icon upload failed: GL error 0x{upload_error:x}"
+                            );
+                            None
+                        } else {
+                            Some(tex)
+                        }
+                    })
+                    }
+                };
+            match uploaded {
+                Some(texture) => {
+                    if let Some((evicted, _, _)) = self
+                        .system_ui_row_icon_cache
+                        .insert_texture(path, (texture, data.width, data.height))
+                    {
+                        unsafe { self.gl.delete_texture(evicted) };
+                    }
+                    landed = true;
+                }
+                None => self.system_ui_row_icon_cache.mark_missed(&path),
+            }
+        }
+        // A landed icon is the one change a frame must show; the rows' text
+        // was drawn with its glyph placeholders all along.
+        if landed {
+            self.needs_render = true;
+        }
+    }
+
     /// The wallpaper picker's side preview: the highlighted candidate's
     /// thumbnail on a panel-tinted card to the right of the list, vertically
     /// centered on it. Purely additive — the list card's geometry and hit
@@ -2680,6 +2757,13 @@ impl<C: CompositorConnection> Compositor<C> {
             query: (query_w, query_h),
             items: (items_w, items_h),
             hint: (hint_w, hint_h),
+            // The column is reserved from the payload's first frame, so an
+            // icon arriving later never moves the text.
+            row_icons: if self.system_ui_row_icons.is_some() {
+                panel::ROW_ICON_SLOT
+            } else {
+                0.0
+            },
         };
         // The lock card centres on its own backdrop and has nothing to jitter
         // against, so it hugs its content instead of carrying a floor.
@@ -3066,6 +3150,33 @@ impl<C: CompositorConnection> Compositor<C> {
                 );
                 self.gl.bind_texture(glow::TEXTURE_2D, Some(tex));
                 self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            }
+            // Row icons of the launcher and the switcher, in the same pass:
+            // same program, same content alpha as the text. A row whose icon
+            // is still decoding — or will never resolve — keeps its text as
+            // it is; the icon pops in on a later frame without moving it.
+            if let (Some(icons), Some(items_pos)) =
+                (self.system_ui_row_icons.as_deref(), layout.items)
+                && layout.row_height > 0.0
+            {
+                for (row, icon) in icons.iter().enumerate() {
+                    let Some(path) = icon.as_deref() else {
+                        continue;
+                    };
+                    let Some(&(tex, img_w, img_h)) = self.system_ui_row_icon_cache.get(path) else {
+                        continue;
+                    };
+                    let frame = panel::row_icon_frame(items_pos, layout.row_height, row);
+                    let Some([ix, iy, iw, ih]) =
+                        panel::letterbox(frame, img_w as f32, img_h as f32)
+                    else {
+                        continue;
+                    };
+                    self.gl
+                        .uniform_4_f32(self.hud_text_uniforms.rect.as_ref(), ix, iy, iw, ih);
+                    self.gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+                    self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                }
             }
             self.gl.bind_vertex_array(None);
             self.gl.use_program(None);
@@ -4727,6 +4838,8 @@ impl<C: CompositorConnection> Compositor<C> {
         // superseded requests' receivers are gone, so only the latest
         // highlight's decode can land.
         self.poll_system_ui_preview();
+        // The launcher/switcher row icons ride the same channel pattern.
+        self.poll_system_ui_row_icons();
 
         // Skip-unchanged-frame: if scene hasn't changed and no textures are
         // dirty, we can skip the entire GL render (unless screenshot pending or HUD active).

@@ -596,6 +596,65 @@ pub fn fuzzy_score(haystack: &str, needle: &str) -> Option<usize> {
 }
 
 // -------------------------------------------------------------------------
+// Row icons
+// -------------------------------------------------------------------------
+
+/// Pixel size the panels draw row icons at, handed to the resolver as a hint:
+/// the closest theme size at or above it wins, and a larger source is
+/// preferred to a smaller one because downscaling keeps more of the artwork.
+/// Matches `compositor_common::system_ui_panel::ROW_ICON_PX`.
+pub(crate) const ROW_ICON_PIXELS: u32 = 24;
+
+thread_local! {
+    /// One resolver per calling thread — in practice the event thread, which
+    /// resolves the visible rows' icons at row-build time. The resolver's own
+    /// cache (hits and misses alike) is what makes a per-keystroke re-resolve
+    /// cheap; the directory walk a cold answer costs happens once per identity.
+    static ROW_ICON_RESOLVER: std::cell::RefCell<xbar_core::app_icon::AppIconResolver> =
+        std::cell::RefCell::new(xbar_core::app_icon::AppIconResolver::new(ROW_ICON_PIXELS));
+}
+
+/// Resolve a desktop entry's `Icon=` value to a raster file the compositor can
+/// decode. An absolute path is no theme lookup — it is only validated
+/// (absolute, bounded, a supported raster extension) without touching the
+/// disk; a theme name goes through the cached resolver. `None` leaves the row
+/// exactly as it was: no hole where an icon would be.
+#[must_use]
+pub(crate) fn resolve_row_icon(icon: &str) -> Option<String> {
+    let icon = icon.trim();
+    if icon.is_empty() {
+        return None;
+    }
+    if std::path::Path::new(icon).is_absolute() {
+        return xbar_core::app_icon::AppIcon::new(std::path::PathBuf::from(icon))
+            .normalized()
+            .map(|icon| icon.path.to_string_lossy().into_owned());
+    }
+    resolve_app_icon(icon)
+}
+
+/// Resolve a window's icon from the identity a compositor actually has: its
+/// class, then its instance. The resolver matches desktop entries by name and
+/// `StartupWMClass` and caches the answer — including a negative one.
+#[must_use]
+pub(crate) fn resolve_window_icon(class: &str, instance: &str) -> Option<String> {
+    resolve_app_icon(class).or_else(|| resolve_app_icon(instance))
+}
+
+fn resolve_app_icon(app_id: &str) -> Option<String> {
+    let app_id = app_id.trim();
+    if app_id.is_empty() {
+        return None;
+    }
+    ROW_ICON_RESOLVER.with(|resolver| {
+        resolver
+            .borrow_mut()
+            .resolve(app_id)
+            .map(|found| found.path.to_string_lossy().into_owned())
+    })
+}
+
+// -------------------------------------------------------------------------
 // Terminal applications
 // -------------------------------------------------------------------------
 
@@ -1230,6 +1289,34 @@ mod tests {
                 assert!((ch as u32) < 0xf600, "{ch:?} is outside FontAwesome 4");
             }
         }
+    }
+
+    #[test]
+    fn an_absolute_icon_path_is_validated_without_touching_the_disk() {
+        // The pure half of row-icon resolution: absolute paths never reach the
+        // resolver's directory walk, so these answers are deterministic.
+        assert_eq!(
+            resolve_row_icon("/usr/share/pixmaps/app.png").as_deref(),
+            Some("/usr/share/pixmaps/app.png")
+        );
+        assert_eq!(
+            resolve_row_icon("  /opt/app/share/icon.webp  ").as_deref(),
+            Some("/opt/app/share/icon.webp"),
+            "desktop-entry values are trimmed"
+        );
+        // Nothing a renderer here can decode is offered — the row keeps its
+        // text instead of a hole.
+        assert_eq!(resolve_row_icon("/usr/share/pixmaps/app.svg"), None);
+        assert_eq!(resolve_row_icon("/usr/share/pixmaps/app"), None);
+        assert_eq!(resolve_row_icon("relative/icon.png"), None);
+        assert_eq!(resolve_row_icon(""), None);
+        assert_eq!(resolve_row_icon("   "), None);
+    }
+
+    #[test]
+    fn a_blank_window_identity_resolves_to_no_icon() {
+        assert_eq!(resolve_window_icon("", ""), None);
+        assert_eq!(resolve_window_icon("  ", "  "), None);
     }
 
     #[test]

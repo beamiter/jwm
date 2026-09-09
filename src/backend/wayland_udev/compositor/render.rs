@@ -2470,6 +2470,11 @@ impl WaylandCompositor {
         unsafe {
             self.poll_pending_wallpapers(gl);
         }
+        // Row icons ride the same channel pattern: upload what the decode
+        // workers delivered since the last frame.
+        unsafe {
+            self.poll_system_ui_row_icons(gl);
+        }
         if self.wallpaper_texture.is_some() || !self.monitor_wallpapers.is_empty() {
             unsafe {
                 self.render_wallpaper(gl, &projection, damage_scissor);
@@ -4552,6 +4557,13 @@ impl WaylandCompositor {
         let viewport = overlay.effective_viewport(self.screen_w as i32, self.screen_h as i32);
         let content_width = panel::max_content_width(viewport[2]);
         let query_width = panel::max_query_text_width(viewport[2]);
+        // A list with an icon column fits its text into what the column
+        // leaves; every other panel rasterizes against the full budget.
+        let items_width = if self.system_ui_row_icons.is_some() {
+            content_width.saturating_sub(panel::ROW_ICON_SLOT as u32)
+        } else {
+            content_width
+        };
         let title_text = crate::backend::compositor_font::fit_ui_text_lines(
             &overlay.title,
             description,
@@ -4570,7 +4582,7 @@ impl WaylandCompositor {
             &overlay.items.join("\n"),
             description,
             size,
-            content_width,
+            items_width,
         );
         let hint_text = crate::backend::compositor_font::fit_ui_text_lines(
             &overlay.hint,
@@ -5479,6 +5491,71 @@ impl WaylandCompositor {
         }
     }
 
+    /// Poll the row-icon pipeline: delete the textures a GL-less path retired,
+    /// then upload whatever the decode workers delivered. The workers send
+    /// over a channel, so nothing here ever blocks the frame; an upload the GL
+    /// side refuses joins the remembered misses rather than retrying forever.
+    pub(crate) unsafe fn poll_system_ui_row_icons(&mut self, gl: &ffi::Gles2) {
+        for texture in self.retired_system_ui_row_icons.drain(..) {
+            if texture != 0 {
+                unsafe { gl.DeleteTextures(1, &texture) };
+            }
+        }
+        let mut landed = false;
+        for (path, data) in self.system_ui_row_icon_cache.drain_completed() {
+            let uploaded = if data.rgba.is_empty() || data.width == 0 || data.height == 0 {
+                None
+            } else {
+                unsafe {
+                    let mut tex: u32 = 0;
+                    gl.GenTextures(1, &mut tex);
+                    if tex != 0 {
+                        gl.BindTexture(ffi::TEXTURE_2D, tex);
+                        gl.TexImage2D(
+                            ffi::TEXTURE_2D,
+                            0,
+                            ffi::RGBA8 as i32,
+                            data.width as i32,
+                            data.height as i32,
+                            0,
+                            ffi::RGBA,
+                            ffi::UNSIGNED_BYTE,
+                            data.rgba.as_ptr() as *const _,
+                        );
+                        for filter in [ffi::TEXTURE_MIN_FILTER, ffi::TEXTURE_MAG_FILTER] {
+                            gl.TexParameteri(ffi::TEXTURE_2D, filter, ffi::LINEAR as i32);
+                        }
+                        for wrap in [ffi::TEXTURE_WRAP_S, ffi::TEXTURE_WRAP_T] {
+                            gl.TexParameteri(ffi::TEXTURE_2D, wrap, ffi::CLAMP_TO_EDGE as i32);
+                        }
+                        gl.BindTexture(ffi::TEXTURE_2D, 0);
+                        Some(tex)
+                    } else {
+                        None
+                    }
+                }
+            };
+            match uploaded {
+                Some(texture) => {
+                    if let Some((evicted, _, _)) = self
+                        .system_ui_row_icon_cache
+                        .insert_texture(path, (texture, data.width, data.height))
+                        && evicted != 0
+                    {
+                        unsafe { gl.DeleteTextures(1, &evicted) };
+                    }
+                    landed = true;
+                }
+                None => self.system_ui_row_icon_cache.mark_missed(&path),
+            }
+        }
+        // A landed icon is the one change a frame must show; the rows' text
+        // was drawn with its glyph placeholders all along.
+        if landed {
+            self.needs_render = true;
+        }
+    }
+
     /// The on-screen tag's live cell content: every window's texture scaled
     /// into the rectangle its wireframe would occupy — the identical
     /// [`crate::backend::compositor_common::layout_strip::window_rect`]
@@ -5695,6 +5772,13 @@ impl WaylandCompositor {
             query: (query_w, query_h),
             items: (items_w, items_h),
             hint: (hint_w, hint_h),
+            // The column is reserved from the payload's first frame, so an
+            // icon arriving later never moves the text.
+            row_icons: if self.system_ui_row_icons.is_some() {
+                panel::ROW_ICON_SLOT
+            } else {
+                0.0
+            },
         };
         // The lock card centres on its own backdrop and has nothing to jitter
         // against, so it hugs its content instead of carrying a floor.
@@ -6062,6 +6146,32 @@ impl WaylandCompositor {
                 gl.Uniform4f(text_rect, tx, ty, w as f32, h as f32);
                 gl.BindTexture(ffi::TEXTURE_2D, tex);
                 gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+            }
+            // Row icons of the launcher and the switcher, in the same pass:
+            // same program, same content alpha as the text. A row whose icon
+            // is still decoding — or will never resolve — keeps its text as
+            // it is; the icon pops in on a later frame without moving it.
+            if let (Some(icons), Some(items_pos)) =
+                (self.system_ui_row_icons.as_deref(), layout.items)
+                && layout.row_height > 0.0
+            {
+                for (row, icon) in icons.iter().enumerate() {
+                    let Some(path) = icon.as_deref() else {
+                        continue;
+                    };
+                    let Some(&(tex, img_w, img_h)) = self.system_ui_row_icon_cache.get(path) else {
+                        continue;
+                    };
+                    let frame = panel::row_icon_frame(items_pos, layout.row_height, row);
+                    let Some([ix, iy, iw, ih]) =
+                        panel::letterbox(frame, img_w as f32, img_h as f32)
+                    else {
+                        continue;
+                    };
+                    gl.Uniform4f(text_rect, ix, iy, iw, ih);
+                    gl.BindTexture(ffi::TEXTURE_2D, tex);
+                    gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+                }
             }
             gl.BindVertexArray(0);
             gl.UseProgram(0);

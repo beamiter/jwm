@@ -164,6 +164,15 @@ pub(crate) fn switcher_row(entry: &SwitcherEntry) -> String {
     })
 }
 
+/// One row's icon: the window's class resolved through the shared cached
+/// resolver — the same source the bars draw the focused window's icon from.
+/// A miss is cached there, so a window without a desktop entry costs one
+/// bounded lookup per session, and the row keeps its generic glyph prefix:
+/// no empty hole.
+pub(crate) fn switcher_row_icon(entry: &SwitcherEntry) -> Option<String> {
+    crate::jwm::features::launcher::resolve_window_icon(&entry.class, "")
+}
+
 /// The commit-time state of a snapshotted window, as the live session
 /// answers it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -211,6 +220,7 @@ impl SystemUiState {
         let Self::ListPanel {
             kind,
             rows,
+            row_icons,
             selected,
             ..
         } = self
@@ -225,6 +235,11 @@ impl SystemUiState {
             _ => return None,
         };
         rows.remove(*selected);
+        // The icons ride beside the rows; dropping one without the other
+        // would misalign every row below it.
+        if *selected < row_icons.len() {
+            row_icons.remove(*selected);
+        }
         if *selected >= rows.len() {
             *selected = rows.len().saturating_sub(1);
         }
@@ -493,9 +508,11 @@ mod tests {
                     cursor: 0,
                 },
             }],
+            row_icons: Vec::new(),
             selected: 0,
             message: String::new(),
             prompt: None,
+            query: String::new(),
             empty: "No notifications".to_string(),
         };
         assert_eq!(notifications.remove_selected_switcher_row(), None);

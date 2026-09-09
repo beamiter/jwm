@@ -1059,6 +1059,9 @@ impl<C: CompositorConnection> Compositor<C> {
             system_ui_preview: None,
             system_ui_preview_path: String::new(),
             pending_system_ui_preview: None,
+            system_ui_row_icons: None,
+            system_ui_row_icon_cache:
+                crate::backend::compositor_common::row_icons::RowIconCache::new(),
             hud_island: Default::default(),
             debug_hud: behavior.debug_hud,
             sys_stats: crate::backend::sys_stats::SysStatsSampler::new(),
@@ -1236,6 +1239,10 @@ impl<C: CompositorConnection> Compositor<C> {
             tags_grid_labels_key: None,
             tab_hover: None,
             tab_hover_ease: Default::default(),
+            tab_titles_truncated: Vec::new(),
+            tab_tooltip_dwell: Default::default(),
+            tab_tooltip_ease: Default::default(),
+            tab_tooltip_texture: None,
             // Particle effects
             particle_program,
             particle_uniforms,
