@@ -1500,6 +1500,120 @@ pub fn has_saved_profile(ssid: &str) -> bool {
     })
 }
 
+/// The UUID of the profile `nmcli -t -f NAME,UUID connection show` lists
+/// under `name`, or `None` when no saved profile carries it.
+///
+/// The name match is exact, the same test [`has_saved_profile`] makes: a
+/// profile named after a prefix of the SSID is a different network's. Two
+/// profiles may share a name; the first is the answer, so the delete below
+/// removes one deterministic profile rather than whichever nmcli happened to
+/// pick for an ambiguous `id`.
+#[must_use]
+pub fn profile_uuid_for(output: &str, name: &str) -> Option<String> {
+    output.lines().find_map(|line| {
+        let fields = split_nmcli_fields(line);
+        (fields.first().map(String::as_str) == Some(name))
+            .then(|| fields.get(1).cloned())
+            .flatten()
+    })
+}
+
+/// [`profile_uuid_for`] against the live `NetworkManager` inventory. Runs on
+/// a worker thread like every other nmcli call.
+fn saved_profile_uuid(name: &str) -> Option<String> {
+    let output = run("nmcli", &["-t", "-f", "NAME,UUID", "connection", "show"])?;
+    profile_uuid_for(&output, name)
+}
+
+/// Delete the saved profile behind a network, on a worker thread.
+///
+/// The picker's rows are scan results; whether a profile backs the
+/// highlighted one is knowable only by asking `NetworkManager`, and asking
+/// blocks. So the saved-only scope is enforced here, in the worker: no
+/// profile is the honest error on the status line, never a key the picker
+/// silently refused. Deleting the profile the link is running on drops the
+/// link with it — allowed; the re-read the completion kicks off lands the
+/// truth on the control-center row.
+#[must_use]
+pub fn start_forget_profile(ssid: &str) -> BackgroundJob<Result<String, String>> {
+    let ssid = ssid.to_string();
+    BackgroundJob::spawn(move || {
+        let Some(uuid) = saved_profile_uuid(&ssid) else {
+            // The SSID is an access point's chosen bytes; the status line is
+            // a place they are *read*, so the display form is what shows.
+            return Err(format!("no saved profile for {}", display_ssid(&ssid)));
+        };
+        match connectivity_output(
+            "nmcli",
+            &["connection", "delete", "uuid", &uuid],
+            CONNECTIVITY_ACTION_TIMEOUT,
+            MAX_CONNECTIVITY_OUTPUT_BYTES,
+        ) {
+            Ok(output) if output.status.success() => Ok(ssid),
+            Ok(output) => Err(summarize_nmcli_error(&String::from_utf8_lossy(
+                &output.stderr,
+            ))),
+            Err(error) => Err(format!("could not run nmcli: {error}")),
+        }
+    })
+}
+
+/// The profile delete currently being applied, process-wide.
+///
+/// This handle cannot ride `features.wifi_connect`: that slot's completion
+/// closes the picker and logs a join, and a profile delete is neither. It
+/// cannot live in the picker state either — the panel's exhaustive literals
+/// exist in code this module does not own — so until the features table
+/// grows a slot of its own the handle lives here. One delete at a time is
+/// the coalescing rule either way; [`Jwm::poll_connectivity_job`] adopts the
+/// finished job beside the state reads it already polls.
+static WIFI_FORGET: std::sync::Mutex<Option<BackgroundJob<Result<String, String>>>> =
+    std::sync::Mutex::new(None);
+
+/// Tests in more than one module drive the process-wide slot; this lock
+/// serializes them so one test's parked job cannot be adopted by another's
+/// poll (the `BAND_TESTS` precedent for a shared static).
+#[cfg(test)]
+pub(crate) static FORGET_SLOT_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Whether a profile delete is still being applied. The picker's `d` key
+/// coalesces on it the way the `s`/`r` keys coalesce on their scan slot: two
+/// concurrent nmcli writes race, and the profile ends wherever the slower
+/// one left it.
+#[must_use]
+pub fn wifi_forget_in_flight() -> bool {
+    let guard = WIFI_FORGET
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    job_in_flight(guard.as_ref())
+}
+
+/// Park a just-started delete where [`Jwm::poll_connectivity_job`] adopts it.
+/// The job arrives already carrying its event-loop notifier.
+pub(crate) fn track_wifi_forget(job: BackgroundJob<Result<String, String>>) {
+    *WIFI_FORGET
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(job);
+}
+
+/// The finished delete, once. A handle whose thread the OS refused never
+/// publishes; it is dropped here rather than holding
+/// [`wifi_forget_in_flight`] shut — the same recovery `poll_connectivity_job`
+/// gives the state-read slot.
+fn take_finished_wifi_forget() -> Option<Result<String, String>> {
+    let mut guard = WIFI_FORGET
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let job = guard.as_ref()?;
+    if !job.started() {
+        *guard = None;
+        return None;
+    }
+    let result = job.take()?;
+    *guard = None;
+    Some(result)
+}
+
 /// Start a scan on a worker thread. `None` when there is no nmcli to scan
 /// with — the picker then reports that instead of showing an empty list.
 #[must_use]
@@ -1694,8 +1808,36 @@ impl crate::jwm::Jwm {
 
     /// Adopt a finished background connectivity read and refresh an open
     /// control center. Called from the frame tick; does nothing while the
-    /// read is still running.
+    /// read is still running. Also adopts a finished profile forget — the
+    /// tick already polls here, so the delete needs no poll site of its own.
     pub(crate) fn poll_connectivity_job(&mut self) {
+        // A finished forget lands beside the reads. Success re-reads the
+        // radios: deleting the profile the link runs on drops the link with
+        // it, and the control-center row must show that truth rather than
+        // the connection the cache still claims. Either outcome reaches an
+        // open picker's status line; a picker closed mid-delete simply never
+        // gets the message, and the periodic read covers the row instead.
+        if let Some(result) = take_finished_wifi_forget() {
+            let picker_open = self.features.system_ui.is_wifi_picker();
+            match result {
+                Ok(ssid) => {
+                    log::info!("Wi-Fi: forgot profile for {}", display_ssid(&ssid));
+                    self.refresh_connectivity();
+                    self.features
+                        .system_ui
+                        .set_wifi_message(format!("Forgot {}", display_ssid(&ssid)));
+                }
+                Err(error) => {
+                    log::warn!("Wi-Fi: {error}");
+                    self.features.system_ui.set_wifi_message(error);
+                }
+            }
+            if picker_open {
+                // Rebuilt in memory only; the frame tick's flush pushes it,
+                // exactly as `refresh_open_control_center` arranges.
+                self.mark_system_ui_dirty();
+            }
+        }
         // A job whose thread the OS refused will never publish anything, and
         // the periodic re-read in the frame tick coalesces on this slot being
         // empty. Drop the dead handle here so that guard — and every other
@@ -2129,6 +2271,114 @@ mod tests {
         assert!(
             guard_at < submit_at,
             "request_radio_set must test for a running flip before starting another"
+        );
+    }
+
+    #[test]
+    fn the_saved_profile_uuid_matches_the_profile_name_exactly() {
+        let output = "ENGINEAI 1:6f3d2c10-0000-0000-0000-000000000001\n\
+                      Wired connection 1:6f3d2c10-0000-0000-0000-000000000002\n";
+        assert_eq!(
+            profile_uuid_for(output, "ENGINEAI 1").as_deref(),
+            Some("6f3d2c10-0000-0000-0000-000000000001")
+        );
+        // A prefix is not the network: deleting by a looser match could
+        // remove another network's profile.
+        assert_eq!(profile_uuid_for(output, "ENGINEAI"), None);
+        assert_eq!(profile_uuid_for("", "ENGINEAI 1"), None);
+        // A profile named with a colon arrives escaped, exactly as the
+        // active-connection parse sees it.
+        assert_eq!(
+            profile_uuid_for(r"net\:work:uuid-3", "net:work").as_deref(),
+            Some("uuid-3")
+        );
+        // Duplicate names exist; the first is the deterministic answer.
+        assert_eq!(
+            profile_uuid_for("Home:uuid-a\nHome:uuid-b", "Home").as_deref(),
+            Some("uuid-a")
+        );
+    }
+
+    /// The profile delete must never run on the frame thread: `nmcli
+    /// connection delete` waits on `NetworkManager` behind the same possibly
+    /// wedged bus the scan starters exist to avoid — and so does the profile
+    /// lookup ahead of it. Same construction as the scan-starter pin: the
+    /// needles are assembled at runtime and the haystack is one function's
+    /// body, so this test cannot match its own source.
+    #[test]
+    fn the_forget_starter_runs_lookup_and_delete_inside_the_worker() {
+        const SOURCE: &str = include_str!("connectivity.rs");
+        let body = SOURCE
+            .split_once("fn start_forget_profile")
+            .expect("start_forget_profile not found")
+            .1
+            .split_once("static WIFI_FORGET")
+            .expect("start_forget_profile is no longer followed by the WIFI_FORGET slot")
+            .0;
+        let (gate, worker) = body
+            .split_once("BackgroundJob::spawn")
+            .expect("start_forget_profile has no worker spawn");
+        for needle in [
+            format!("{}(", "saved_profile_uuid"),
+            format!("{:?}", "delete"),
+            format!("{}(", "connectivity_output"),
+        ] {
+            assert!(
+                !gate.contains(&needle),
+                "start_forget_profile's frame-thread half runs {needle}"
+            );
+            assert!(
+                worker.contains(&needle),
+                "start_forget_profile's worker never runs {needle}"
+            );
+        }
+    }
+
+    /// A finished forget is adopted by the connectivity poll — the tick that
+    /// already adopts the state reads — so the delete needs no poll site of
+    /// its own. Success re-reads the radios: deleting the live profile drops
+    /// the link, and the control-center row must land on that truth.
+    #[test]
+    fn the_connectivity_poll_adopts_a_finished_forget() {
+        const SOURCE: &str = include_str!("connectivity.rs");
+        let body = SOURCE
+            .split_once(&format!("fn {}(", "poll_connectivity_job"))
+            .expect("poll_connectivity_job not found")
+            .1
+            .split_once(&format!("fn {}(", "connectivity_json"))
+            .expect("poll_connectivity_job is no longer followed by connectivity_json")
+            .0;
+        let adopt = format!("{}()", "take_finished_wifi_forget");
+        let reread = format!("self.{}()", "refresh_connectivity");
+        let adopt_at = body.find(&adopt).expect("the poll adopts the forget");
+        let reread_at = body
+            .find(&reread)
+            .expect("a successful forget re-reads the radios");
+        assert!(
+            adopt_at < reread_at,
+            "the forget is adopted ahead of the re-read its success kicks off"
+        );
+        assert!(
+            body.contains(&format!("self.features.system_ui.{}(", "set_wifi_message")),
+            "the forget's outcome no longer reaches the picker's status line"
+        );
+    }
+
+    #[test]
+    fn a_refused_forget_thread_never_holds_the_slot_shut() {
+        // The `d` key coalesces on `wifi_forget_in_flight`; a handle the OS
+        // refused a thread for publishes nothing, ever, so it must read as
+        // "no work in flight" and be dropped on the next poll — the same
+        // recovery the state-read slot gets.
+        let _serial = FORGET_SLOT_TESTS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        track_wifi_forget(BackgroundJob::<Result<String, String>>::refused());
+        assert!(!wifi_forget_in_flight());
+        assert_eq!(take_finished_wifi_forget(), None);
+        assert!(
+            !wifi_forget_in_flight(),
+            "the dead handle was dropped, so the guard recovers"
         );
     }
 

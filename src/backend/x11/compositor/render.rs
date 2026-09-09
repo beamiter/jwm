@@ -3673,7 +3673,9 @@ impl<C: CompositorConnection> Compositor<C> {
 
         let ui = ui_theme::palette();
         self.ensure_glass_backdrop(ui);
-        let target_h = 64.0f32;
+        // The very target `OsdSlot::spring_animating` derives, so the pump
+        // query and this advance can never drift apart.
+        let target_h = crate::backend::compositor_common::osd::OSD_CARD_HEIGHT;
         let pad = 24.0;
         // Fixed label zone so the bar does not shift as digits change.
         let label_zone = 118.0;
@@ -3809,8 +3811,9 @@ impl<C: CompositorConnection> Compositor<C> {
     /// clock parked in the bottom-right corner of the screen. The call site is
     /// after the frame's PBO capture, so the cue is visible locally but never
     /// lands in the encoded video; screenshots read the framebuffer earlier
-    /// still, so it cannot leak into a PNG either.
-    fn render_recording_indicator(&mut self, proj: &[f32; 16]) {
+    /// still, so it cannot leak into a PNG either. Returns the drawn chip's
+    /// height so the MIC chip can park above it when both recordings run.
+    fn render_recording_indicator(&mut self, proj: &[f32; 16]) -> Option<f32> {
         use crate::backend::compositor_common::recording_indicator as indicator;
 
         let Some(label) = indicator::recording_indicator_label(
@@ -3822,7 +3825,7 @@ impl<C: CompositorConnection> Compositor<C> {
             if let Some((_, tex, _, _)) = self.recording_indicator_texture.take() {
                 unsafe { self.gl.delete_texture(tex) };
             }
-            return;
+            return None;
         };
         self.update_recording_indicator_texture(&label);
         let Some((tex, text_w, text_h)) = self
@@ -3830,7 +3833,7 @@ impl<C: CompositorConnection> Compositor<C> {
             .as_ref()
             .map(|&(_, tex, w, h)| (tex, w, h))
         else {
-            return;
+            return None;
         };
 
         let ui = ui_theme::palette();
@@ -3853,6 +3856,139 @@ impl<C: CompositorConnection> Compositor<C> {
             // Flat pill rather than frosted glass: the chip is up for the
             // whole recording, and a glass backdrop re-blurs the screen on
             // every one of those frames.
+            self.sysui_fill_rounded(chip_x, chip_y, chip_w, chip_h, chip_h / 2.0, ui.osd);
+            self.sysui_fill_rounded(
+                layout.dot[0],
+                layout.dot[1],
+                layout.dot[2],
+                layout.dot[3],
+                indicator::CHIP_DOT / 2.0,
+                indicator::DOT_COLOR,
+            );
+
+            self.gl.use_program(Some(self.hud_text_program));
+            self.gl.uniform_matrix_4_f32_slice(
+                self.hud_text_uniforms.projection.as_ref(),
+                false,
+                proj,
+            );
+            self.gl
+                .uniform_1_i32(self.hud_text_uniforms.texture.as_ref(), 0);
+            self.gl
+                .uniform_1_f32(self.hud_text_uniforms.opacity.as_ref(), 1.0);
+            self.gl.active_texture(glow::TEXTURE0);
+            self.gl.uniform_4_f32(
+                self.hud_text_uniforms.rect.as_ref(),
+                layout.text[0],
+                layout.text[1],
+                layout.text[2],
+                layout.text[3],
+            );
+            self.gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+            self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+
+            self.gl.bind_vertex_array(None);
+            self.gl.use_program(None);
+        }
+        Some(chip_h)
+    }
+
+    /// Rasterize (and cache) the MIC-chip label texture. The label is static
+    /// ("MIC"), so the text-keyed cache re-renders once per chip appearance —
+    /// no per-second re-raster, no frame pump.
+    fn update_mic_indicator_texture(&mut self, text: &str) {
+        if self
+            .mic_indicator_texture
+            .as_ref()
+            .is_some_and(|(cached, _, _, _)| cached == text)
+        {
+            return;
+        }
+        if let Some((_, tex, _, _)) = self.mic_indicator_texture.take() {
+            unsafe { self.gl.delete_texture(tex) };
+        }
+        let config = crate::config::CONFIG.load();
+        let description = config.system_ui_font();
+        let size = crate::backend::compositor_font::ui_font_pixel_size(description);
+        let (pixels, w, h) = crate::backend::compositor_font::render_ui_text_to_rgba(
+            text,
+            description,
+            size,
+            ui_theme::palette().osd_ink,
+        );
+        if w == 0 || h == 0 {
+            return;
+        }
+        unsafe {
+            if let Ok(tex) = self.gl.create_texture() {
+                self.gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+                self.gl.tex_image_2d(
+                    glow::TEXTURE_2D,
+                    0,
+                    glow::RGBA8 as i32,
+                    w as i32,
+                    h as i32,
+                    0,
+                    glow::RGBA,
+                    glow::UNSIGNED_BYTE,
+                    glow::PixelUnpackData::Slice(Some(&pixels)),
+                );
+                for filter in [glow::TEXTURE_MIN_FILTER, glow::TEXTURE_MAG_FILTER] {
+                    self.gl
+                        .tex_parameter_i32(glow::TEXTURE_2D, filter, glow::LINEAR as i32);
+                }
+                self.gl.bind_texture(glow::TEXTURE_2D, None);
+                self.mic_indicator_texture = Some((text.to_string(), tex, w, h));
+            }
+        }
+    }
+
+    /// The persistent "microphone in use" chip for standalone audio
+    /// recording: a red dot and a static `MIC` label, parked in the REC
+    /// chip's bottom-right slot — directly above the REC chip (`rec_chip_h`
+    /// is the height it drew this frame) when both recordings run together.
+    /// Shares the REC chip's post-capture slot, so the cue is visible locally
+    /// but never lands in the encoded video or a screenshot.
+    fn render_mic_indicator(&mut self, proj: &[f32; 16], rec_chip_h: Option<f32>) {
+        use crate::backend::compositor_common::recording_indicator as indicator;
+
+        let Some(label) = indicator::mic_indicator_label(self.mic_indicator_active) else {
+            // Standalone audio stopped: the label texture goes with the chip.
+            if let Some((_, tex, _, _)) = self.mic_indicator_texture.take() {
+                unsafe { self.gl.delete_texture(tex) };
+            }
+            return;
+        };
+        self.update_mic_indicator_texture(label);
+        let Some((tex, text_w, text_h)) = self
+            .mic_indicator_texture
+            .as_ref()
+            .map(|&(_, tex, w, h)| (tex, w, h))
+        else {
+            return;
+        };
+
+        let ui = ui_theme::palette();
+        let layout = indicator::mic_indicator_layout(
+            self.screen_w as f32,
+            self.screen_h as f32,
+            text_w as f32,
+            text_h as f32,
+            rec_chip_h,
+        );
+        let [chip_x, chip_y, chip_w, chip_h] = layout.chip;
+
+        unsafe {
+            self.gl.use_program(Some(self.border_program));
+            self.gl.uniform_matrix_4_f32_slice(
+                self.border_uniforms.projection.as_ref(),
+                false,
+                proj,
+            );
+            self.gl.bind_vertex_array(Some(self.quad_vao));
+            // Flat pill rather than frosted glass, same as the REC chip: the
+            // chip is up for the whole recording, and a glass backdrop
+            // re-blurs the screen on every one of those frames.
             self.sysui_fill_rounded(chip_x, chip_y, chip_w, chip_h, chip_h / 2.0, ui.osd);
             self.sysui_fill_rounded(
                 layout.dot[0],
@@ -4791,7 +4927,7 @@ impl<C: CompositorConnection> Compositor<C> {
         // Toasts and the OSD still count as animation for the damage
         // tracker's thresholds while any card is visible. The frame pump
         // itself is narrower: `force_render` below arms only while a toast's
-        // envelope or spring actually moves.
+        // or the OSD's envelope or spring actually moves.
         let toasts_active = !self.toast_stack.is_empty() || !self.osd_slot.is_empty();
 
         // Tick Phase 5 animations
@@ -5002,17 +5138,18 @@ impl<C: CompositorConnection> Compositor<C> {
             // dirty. Without them here the push frame draws the card at the
             // very start of its fade and the gate below throws every later
             // frame away, leaving it frozen at ~0 alpha and invisible.
-            // A toast claims this only while its envelope or open spring is
-            // actually moving — or it is owed the frame that prunes it: a
-            // settled hold composites nothing. The fade-out's first frame
-            // still lands on time, because a composited session keeps the
-            // 20 ms idle cadence (`scheduling::idle_poll_required`) and every
-            // wake re-evaluates this gate; hover, unhover and dismiss are
-            // pointer events that set `needs_render` themselves. The OSD arm
-            // stays unconditional this round: its holds are ~2-3 s, and
-            // sharing the toast mechanism was considered and descoped.
+            // A toast or the OSD claims this only while its envelope or open
+            // spring is actually moving — or it is owed the frame that prunes
+            // it: a settled hold composites nothing. The fade-out's first
+            // frame still lands on time, because a composited session keeps
+            // the 20 ms idle cadence (`scheduling::idle_poll_required`) and
+            // every wake re-evaluates this gate; toast hover, unhover and
+            // dismiss are pointer events that set `needs_render` themselves,
+            // and every OSD show/refresh — a held volume key's repeats
+            // included — is an input event that arms its own frame. The OSD
+            // has no pointer interaction to pause on.
             || self.toast_stack.needs_frames(std::time::Instant::now())
-            || !self.osd_slot.is_empty()
+            || self.osd_slot.needs_frames(std::time::Instant::now())
             || self.system_ui.is_some()
             || explicit_render;
         let hash = Self::scene_hash(scene, focused);
@@ -7623,7 +7760,11 @@ impl<C: CompositorConnection> Compositor<C> {
         }
         // The REC chip follows the same rule: on screen now, never in the
         // video or a screenshot (both read the frame before this point).
-        self.render_recording_indicator(&proj);
+        // The MIC chip shares the slot: standalone audio recording owns no
+        // capture pipeline, but its cue must not leak into a screen
+        // recording's frames either.
+        let rec_chip_h = self.render_recording_indicator(&proj);
+        self.render_mic_indicator(&proj, rec_chip_h);
 
         // Preserve the exact final composited image while the default back
         // buffer is still defined. A valid persistent texture follows partial
@@ -8369,6 +8510,114 @@ mod tests {
         assert!(
             !draw.contains(&format!("notification.{}", "app")),
             "the draw pass must not grow a sender case: it reads the merged texture"
+        );
+    }
+
+    /// The MIC chip mirrors the REC chip's discipline: it draws in the same
+    /// post-capture slot (so it can never leak into the encoded video or a
+    /// screenshot), reads its geometry and label from the shared
+    /// `recording_indicator` module, and frees the label texture the frame
+    /// the state clears. Needles are assembled at runtime so this cannot
+    /// match its own source.
+    #[test]
+    fn the_mic_chip_shares_the_rec_chips_post_capture_slot() {
+        const RENDER_SRC: &str = include_str!("render.rs");
+        let at = |needle: &str| {
+            RENDER_SRC
+                .find(needle)
+                .unwrap_or_else(|| panic!("render.rs must contain `{needle}`"))
+        };
+        let capture = at(&format!("self.{}();", "capture_recording_frame"));
+        let rec = at(&format!(
+            "let rec_chip_h = self.{}(&proj);",
+            "render_recording_indicator"
+        ));
+        let mic = at(&format!(
+            "self.{}(&proj, rec_chip_h);",
+            "render_mic_indicator"
+        ));
+        assert!(
+            capture < rec && rec < mic,
+            "the MIC chip must draw after the frame capture, in the REC chip's slot"
+        );
+
+        let draw = body_of(RENDER_SRC, &format!("fn render_{}(", "mic_indicator"));
+        assert!(
+            draw.contains(&format!("indicator::{}(", "mic_indicator_label")),
+            "the MIC label must come from the shared module"
+        );
+        assert!(
+            draw.contains(&format!("indicator::{}(", "mic_indicator_layout")),
+            "the MIC geometry must come from the shared module"
+        );
+        assert!(
+            draw.contains(&format!("self.{}.take()", "mic_indicator_texture")),
+            "the label texture must go with the chip when the state clears"
+        );
+        assert!(
+            draw.contains(&format!("ui.{}", "osd")),
+            "the MIC chip keeps the REC chip's flat ui.osd pill (no glass)"
+        );
+    }
+
+    /// The compositor-side setter exists for the trait forwarder to call,
+    /// stores the pushed state, and requests exactly one frame per flip —
+    /// the static label needs no pump.
+    #[test]
+    fn the_mic_indicator_setter_forces_one_repaint_per_flip() {
+        const FEATURES_SRC: &str = include_str!("features.rs");
+        let setter = body_of(
+            FEATURES_SRC,
+            &format!(
+                "pub(crate) fn {}(&mut self, active: bool)",
+                "set_mic_indicator"
+            ),
+        );
+        assert!(
+            setter.contains(&format!("self.{} = active;", "mic_indicator_active")),
+            "the setter must store the pushed state"
+        );
+        assert!(
+            setter.contains(&format!("self.{}();", "force_full_redraw")),
+            "the flag flip must request the frame that shows or clears the chip"
+        );
+        assert!(
+            setter.contains("== active"),
+            "a redundant push must not cost a full repaint"
+        );
+    }
+
+    /// The MIC chip's GPU state is declared next to the REC chip's, starts
+    /// empty, and is drained where the REC chip's is.
+    #[test]
+    fn the_mic_indicator_texture_follows_the_rec_texture_lifecycle() {
+        const MOD_SRC: &str = include_str!("mod.rs");
+        let field = format!(
+            "{}: Option<(String, glow::Texture, u32, u32)>",
+            "mic_indicator_texture"
+        );
+        assert!(
+            MOD_SRC.contains(&field),
+            "the MIC label texture must be declared with the REC chip's shape"
+        );
+        assert!(
+            MOD_SRC.contains(&format!("{}: bool,", "mic_indicator_active")),
+            "the pushed mic state must be a compositor field"
+        );
+        let drop = body_of(MOD_SRC, &format!("fn {}(&mut self)", "drop"));
+        assert!(
+            drop.contains(&format!("self.{}.take()", "mic_indicator_texture")),
+            "drop must free the MIC label texture with the REC chip's"
+        );
+
+        const INIT_SRC: &str = include_str!("init.rs");
+        assert!(
+            INIT_SRC.contains(&format!("{}: false,", "mic_indicator_active")),
+            "the mic indicator starts inactive"
+        );
+        assert!(
+            INIT_SRC.contains(&format!("{}: None,", "mic_indicator_texture")),
+            "the mic label texture starts empty"
         );
     }
 }

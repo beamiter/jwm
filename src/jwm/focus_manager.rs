@@ -1000,6 +1000,11 @@ mod scratchpad_reveal_tests {
         }
     }
 
+    // Tests built on this helper observe the global `CONFIG`, which unit-test
+    // builds pin to `Config::default()` (see the `CONFIG` static in
+    // src/config.rs): the developer's own ~/.config/jwm file must not change
+    // test behavior. Do not read the host config here; if a test needs a
+    // non-default value, set it up explicitly in the test itself.
     fn empty_jwm() -> Jwm {
         Jwm {
             state: WMState::new(),

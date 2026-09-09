@@ -529,6 +529,13 @@ where
     /// only when the shown second flips. Drawn after the recording readback so
     /// it never lands in the encoded video.
     recording_indicator_texture: Option<(String, glow::Texture, u32, u32)>,
+    /// Standalone audio recording in progress, pushed by the WM (the recorder
+    /// lives there, so unlike the REC chip this cannot be derived from the
+    /// compositor's own pipeline). Drawn in the same post-capture slot.
+    mic_indicator_active: bool,
+    /// Cached MIC-chip label texture keyed by its text (always "MIC"): the
+    /// static label rasterizes once per chip appearance, never per frame.
+    mic_indicator_texture: Option<(String, glow::Texture, u32, u32)>,
     hud_text_cache: String,
     /// An Arc makes the render snapshot cheap while input may replace the
     /// owned overlay between frames; cloning the old value copied every row.
@@ -1195,6 +1202,9 @@ impl<C: CompositorConnection> Drop for Compositor<C> {
                 self.gl.delete_texture(tex);
             }
             if let Some((_, tex, _, _)) = self.recording_indicator_texture.take() {
+                self.gl.delete_texture(tex);
+            }
+            if let Some((_, tex, _, _)) = self.mic_indicator_texture.take() {
                 self.gl.delete_texture(tex);
             }
             for slot in &mut self.hud_textures {

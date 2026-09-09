@@ -1106,6 +1106,9 @@ impl Jwm {
                         // Swap the panel for the lock overlay; the keyboard and
                         // pointer grabs stay in place for the lock screen.
                         self.features.system_ui = crate::jwm::features::SystemUiState::lock();
+                        self.features
+                            .system_ui
+                            .set_lock_now_playing(self.features.media.get());
                         self.sync_system_ui(backend);
                         return;
                     }
@@ -1218,26 +1221,65 @@ impl Jwm {
     }
 
     /// Delete or BackSpace with expose up: close the highlighted thumbnail's
-    /// window without leaving the gesture. The close is the one `killclient`
-    /// sends — `window_ops().close_window`, the graceful WM_DELETE request
-    /// with its forced fallback — then the grid rebuilds in place from the
-    /// survivors: the entry after the closed one slides under the highlight,
-    /// the tail clamps, and no survivor changes its order. Closing the last
-    /// entry ends the gesture through the same exit sequence Escape uses,
-    /// focusing nothing: the opener refuses an empty grid, so the overlay
-    /// never sits open over one either — and with the gesture over, no later
-    /// key or release can commit the window just closed (expose has no
-    /// modifier-release commit to guard; the switcher needs one because its
-    /// commit *is* the release). The grabs stay until then — the close is a
-    /// request to the client, not an expose hand-over.
+    /// window without leaving the gesture — the highlighted cell, not the
+    /// focused window (the two usually differ mid-gesture; the switcher
+    /// resolves its row the same way). The close itself, the in-place grid
+    /// rebuild and the close-to-empty exit live in [`Self::apply_expose_close`],
+    /// shared with the middle-click path.
     fn close_expose_highlighted(
         &mut self,
         backend: &mut dyn Backend,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        // The highlighted cell, not the focused window — the two usually
-        // differ mid-gesture (the switcher resolves its row the same way).
         let highlighted = backend.compositor_expose_selected();
-        match expose_plan::plan_close(self.expose_candidates(), highlighted) {
+        let action = expose_plan::plan_close(self.expose_candidates(), highlighted);
+        self.apply_expose_close(backend, action)
+    }
+
+    /// Middle-click with expose up: close the clicked cell's window —
+    /// browser-tab semantics: the clicked cell, not the highlighted one
+    /// (the two may differ). A middle click never commits the gesture, so a
+    /// click on empty space is a plain no-op and expose stays up; so is a
+    /// click whose cell names a window that already died mid-expose — the
+    /// compositor owns the grid, so the WM's only knowledge of it is the
+    /// live candidate list, the same asymmetry `ExposeCloseAction::Keep`
+    /// records for a Delete naming a dead window.
+    fn close_expose_clicked(
+        &mut self,
+        backend: &mut dyn Backend,
+        hit: Option<WindowId>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let Some(hit) = hit else {
+            return Ok(());
+        };
+        let candidates = self.expose_candidates();
+        // The compositor's grid is the eligible candidates in entry order,
+        // so the clicked window resolves to its cell's index there.
+        let Some(index) = expose_plan::grid_index(&candidates, hit) else {
+            return Ok(());
+        };
+        let action = expose_plan::plan_close_at(candidates, index);
+        self.apply_expose_close(backend, action)
+    }
+
+    /// Execute a planned expose close, keeping the gesture alive. The close
+    /// is the one `killclient` sends — `window_ops().close_window`, the
+    /// graceful WM_DELETE request with its forced fallback — then the grid
+    /// rebuilds in place from the survivors: the entry after the closed one
+    /// slides under the highlight, the tail clamps, and no survivor changes
+    /// its order. Closing the last entry ends the gesture through the same
+    /// exit sequence Escape uses, focusing nothing: the opener refuses an
+    /// empty grid, so the overlay never sits open over one either — and with
+    /// the gesture over, no later key, click or release can commit the window
+    /// just closed (expose has no modifier-release commit to guard; the
+    /// switcher needs one because its commit *is* the release). The grabs
+    /// stay until then — the close is a request to the client, not an expose
+    /// hand-over.
+    fn apply_expose_close(
+        &mut self,
+        backend: &mut dyn Backend,
+        action: expose_plan::ExposeCloseAction,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        match action {
             expose_plan::ExposeCloseAction::Keep => {}
             expose_plan::ExposeCloseAction::Close {
                 window,
@@ -1256,7 +1298,13 @@ impl Jwm {
                 // expose: the compositors rebuild each thumbnail's label
                 // texture with the entry set it names, so grid and labels
                 // can never disagree. The highlight is re-pointed at the
-                // survivor the plan kept under it.
+                // survivor the plan kept under it — for a click close that
+                // is the cell that slid into the clicked slot; the rebuild
+                // itself cleared the compositor's hover (a fresh entry set
+                // starts unhovered), and on Wayland the next pointer motion
+                // re-derives the hover from the pointer's true position
+                // anyway, while X11's hover only ever moves through this
+                // select call.
                 let select_id = survivors.get(select).map(|&(win, ..)| win);
                 backend.compositor_set_expose_mode(true, survivors);
                 backend.compositor_expose_select(select_id);
@@ -1342,7 +1390,9 @@ impl Jwm {
 
     /// Key handling while the Wi-Fi picker is open: Up/Down select, Return
     /// joins (prompting for a passphrase first when one is needed), `r`
-    /// rescans, and typing feeds the prompt.
+    /// rescans, `d` forgets the highlighted network's saved profile (arming
+    /// on the first press, deleting on the second), and typing feeds the
+    /// prompt.
     fn handle_wifi_picker_key(&mut self, backend: &mut dyn Backend, keysym: u32, mods: Mods) {
         let prompting = self.features.system_ui.is_prompting_wifi_passphrase();
 
@@ -1367,17 +1417,55 @@ impl Jwm {
                     .system_ui
                     .set_wifi_message("nmcli is not available"),
             }
+        } else if !prompting && keysym == keys::KEY_d {
+            self.forget_selected_wifi();
         } else if prompting && let Some(ch) = Self::system_ui_char(keysym, mods) {
             self.features.system_ui.push_char(ch);
         }
         self.sync_system_ui(backend);
     }
 
+    /// `d` in the Wi-Fi picker: arm the highlighted row on the first press,
+    /// delete its saved profile on the second. The delete — and the lookup
+    /// that decides whether a profile even backs the row — runs on a worker;
+    /// the frame tick's connectivity poll adopts the outcome, so the status
+    /// line and the control-center row land on the truth.
+    fn forget_selected_wifi(&mut self) {
+        use crate::jwm::features::connectivity;
+        use crate::jwm::features::system_ui::ForgetPlan;
+
+        // Coalesce the way leaning on `r` does: while a delete — or a join —
+        // is still being applied, another press is a no-op rather than a
+        // second racing nmcli write.
+        if connectivity::wifi_forget_in_flight()
+            || connectivity::job_in_flight(self.features.wifi_connect.as_ref())
+        {
+            return;
+        }
+        match self.features.system_ui.plan_wifi_forget() {
+            // Wi-Fi rows arm unconditionally; `Unavailable` is the Bluetooth
+            // gate's answer and cannot come back from `plan_wifi_forget`.
+            ForgetPlan::Armed | ForgetPlan::Unavailable => {}
+            ForgetPlan::Execute(ssid) => {
+                // The SSID is the access point's chosen bytes; the status
+                // line gets the display form, the worker gets the join key.
+                self.features.system_ui.set_wifi_message(format!(
+                    "Forgetting {}\u{2026}",
+                    connectivity::display_ssid(&ssid)
+                ));
+                let job = connectivity::start_forget_profile(&ssid);
+                connectivity::track_wifi_forget(self.track_background_job(job));
+            }
+        }
+    }
+
     /// Key handling while the Bluetooth picker is open: Up/Down select,
     /// Return connects/disconnects (or starts pairing on a device never
     /// bonded), `s` runs a bounded discovery scan, `r` re-reads the list,
     /// `a` arms a bounded window in which an incoming request may be
-    /// accepted. While a pairing prompt is up, the prompt owns the keys.
+    /// accepted, and `d` removes a bonded device (arming on the first press,
+    /// removing on the second). While a pairing prompt is up, the prompt
+    /// owns the keys.
     fn handle_bluetooth_picker_key(&mut self, backend: &mut dyn Backend, keysym: u32, mods: Mods) {
         use crate::jwm::features::system_ui::PromptKind;
 
@@ -1464,8 +1552,47 @@ impl Jwm {
                     .system_ui
                     .set_bluetooth_message("bluetoothctl is not available"),
             }
+        } else if keysym == keys::KEY_d {
+            self.forget_selected_bluetooth();
         }
         self.sync_system_ui(backend);
+    }
+
+    /// `d` in the Bluetooth picker: arm the highlighted device on the first
+    /// press, remove its bond on the second. The removal rides the same
+    /// worker slot and completion as connect/disconnect — the device-list
+    /// re-read that completion kicks off is what makes the row disappear —
+    /// so a press while one of them runs coalesces to a no-op. Forgetting
+    /// the connected device drops the connection with the bond; the re-read
+    /// shows both gone.
+    fn forget_selected_bluetooth(&mut self) {
+        use crate::jwm::features::connectivity;
+        use crate::jwm::features::system_ui::ForgetPlan;
+
+        if connectivity::job_in_flight(self.features.bluetooth_action.as_ref()) {
+            return;
+        }
+        match self.features.system_ui.plan_bluetooth_forget() {
+            ForgetPlan::Armed => {}
+            ForgetPlan::Unavailable => {
+                self.features
+                    .system_ui
+                    .set_bluetooth_message("Not paired \u{2014} nothing to forget");
+            }
+            ForgetPlan::Execute(address) => {
+                let name = self
+                    .features
+                    .system_ui
+                    .selected_bluetooth()
+                    .map(|(_, name, _)| name)
+                    .unwrap_or_else(|| address.clone());
+                self.features
+                    .system_ui
+                    .set_bluetooth_message(format!("Forgetting {name}\u{2026}"));
+                let job = connectivity::start_device_action(&address, "remove");
+                self.features.bluetooth_action = Some(self.track_background_job(job));
+            }
+        }
     }
 
     /// Activate the launcher's current result. Returns `true` when the panel
@@ -2832,11 +2959,17 @@ impl Jwm {
             return Ok(());
         }
 
-        // Expose mode intercept: route clicks to compositor. A hit focuses the
-        // clicked window; hit or miss, expose exits.
+        // Expose mode intercept: route clicks to compositor. Every button
+        // except middle commits exactly as it always has — a hit focuses the
+        // clicked window; hit or miss, expose exits. A middle click instead
+        // closes the clicked cell's window, browser-tab style, and never
+        // commits: on a miss it is a no-op and the gesture stays up.
         if self.features.expose_active {
             let (rx, ry) = self.last_mouse_root;
             let hit = backend.compositor_expose_click(rx as f32, ry as f32);
+            if MouseButton::from_u8(detail_btn) == MouseButton::Middle {
+                return self.close_expose_clicked(backend, hit);
+            }
             return self.apply_expose_action(backend, expose_plan::plan_click(hit));
         }
 
@@ -3404,9 +3537,9 @@ mod tests {
         Backend, BackendDiagnostics, Capabilities, CloseResult, ColorAllocator,
         CompositorAnnotation, CompositorBenchmark, CompositorControl, CompositorMedia,
         CompositorWindowEffects, CompositorWorkspaceEffects, DisplayControl, EventHandler,
-        Geometry, RenderScheduler, WindowAttributes, WindowChanges, WindowOps,
+        Geometry, HitTarget, RenderScheduler, WindowAttributes, WindowChanges, WindowOps,
     };
-    use crate::backend::common_define::{ConfigWindowBits, Pixel, WindowId};
+    use crate::backend::common_define::{ConfigWindowBits, MouseButton, Pixel, WindowId};
     use crate::backend::error::BackendError;
     use crate::backend::wayland_dummy_ops::{
         DummyColorAllocator, DummyCursorProvider, DummyInputOps, DummyKeyOps, DummyOutputOps,
@@ -3766,6 +3899,8 @@ mod tests {
         /// (empty while expose is off), and the highlighted entry.
         expose_windows: Vec<WindowId>,
         expose_selected: Option<WindowId>,
+        /// What the next expose click hit-test answers.
+        expose_click_hit: Option<WindowId>,
     }
 
     impl ConfigureReplyBackend {
@@ -3782,6 +3917,7 @@ mod tests {
                 toast_log: std::sync::Arc::new(Mutex::new(Vec::new())),
                 expose_windows: Vec::new(),
                 expose_selected: None,
+                expose_click_hit: None,
             }
         }
     }
@@ -3818,6 +3954,10 @@ mod tests {
             if !active {
                 self.expose_selected = None;
             }
+        }
+
+        fn compositor_expose_click(&mut self, _x: f32, _y: f32) -> Option<WindowId> {
+            self.expose_click_hit
         }
 
         fn compositor_expose_selected(&mut self) -> Option<WindowId> {
@@ -4497,6 +4637,160 @@ mod tests {
         assert_eq!(backend.expose_windows, &[live, dead]);
     }
 
+    #[test]
+    fn middle_click_closes_the_clicked_expose_cell_and_rebuilds_the_grid() {
+        let mut backend = ConfigureReplyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let monitor = jwm.state.monitor_order[0];
+        let before = WindowId::from_raw(0x7f30);
+        let clicked = WindowId::from_raw(0x7f31);
+        let highlighted = WindowId::from_raw(0x7f32);
+        add_floating_configure_client(&mut jwm, before, monitor, 0, false);
+        add_floating_configure_client(&mut jwm, clicked, monitor, 0, false);
+        add_floating_configure_client(&mut jwm, highlighted, monitor, 0, false);
+        // The highlight sits on a different cell than the click: browser-tab
+        // semantics close the clicked one, not the highlighted one.
+        open_expose(
+            &mut jwm,
+            &mut backend,
+            &[before, clicked, highlighted],
+            highlighted,
+        );
+        backend.expose_click_hit = Some(clicked);
+
+        jwm.on_button_press_internal(
+            &mut backend,
+            HitTarget::Background { output: None },
+            0,
+            MouseButton::Middle.to_u8(),
+            0,
+        )
+        .unwrap();
+
+        // The close is the one killclient sends, on the clicked cell's
+        // window — the highlighted one stays open.
+        assert_eq!(
+            backend
+                .window_ops
+                .closed
+                .lock()
+                .expect("closed windows lock")
+                .as_slice(),
+            &[clicked]
+        );
+        // The grid rebuilt in place from the survivors in their old order
+        // and the gesture, grabs and all, is still up; the highlight landed
+        // on the survivor that slid into the clicked slot (index 1).
+        assert!(jwm.features.expose_active);
+        assert_eq!(backend.expose_windows, &[before, highlighted]);
+        assert_eq!(backend.expose_selected, Some(highlighted));
+    }
+
+    #[test]
+    fn middle_click_on_expose_empty_space_closes_nothing_and_stays_up() {
+        let mut backend = ConfigureReplyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let monitor = jwm.state.monitor_order[0];
+        let window = WindowId::from_raw(0x7f33);
+        add_floating_configure_client(&mut jwm, window, monitor, 0, false);
+        open_expose(&mut jwm, &mut backend, &[window], window);
+        // A middle click never commits the gesture, so missing every cell is
+        // a plain no-op — unlike the other buttons, whose miss exits.
+        backend.expose_click_hit = None;
+
+        jwm.on_button_press_internal(
+            &mut backend,
+            HitTarget::Background { output: None },
+            0,
+            MouseButton::Middle.to_u8(),
+            0,
+        )
+        .unwrap();
+
+        assert!(
+            backend
+                .window_ops
+                .closed
+                .lock()
+                .expect("closed windows lock")
+                .is_empty(),
+            "a middle click on empty space has nothing to close"
+        );
+        assert!(jwm.features.expose_active);
+        assert_eq!(backend.expose_windows, &[window]);
+        assert_eq!(backend.expose_selected, Some(window));
+    }
+
+    /// The expose pointer branch discriminates exactly one button: middle
+    /// routes to the close helper (the clicked cell's index drives the same
+    /// close execution the keyboard path uses); every other button — the
+    /// left commit, right, scroll — falls through to the `plan_click` it
+    /// always took. Round 16 deliberately shipped this branch
+    /// button-agnostic; this round intentionally changes THAT and nothing
+    /// else about it. The haystack is the shipped source, and the needles
+    /// are built at runtime so this test cannot match its own.
+    #[test]
+    fn only_the_middle_button_routes_to_the_expose_close() {
+        const SOURCE: &str = include_str!("input_handler.rs");
+        let compact: String = SOURCE.chars().filter(|c| !c.is_whitespace()).collect();
+
+        let press = compact
+            .split_once(concat!("fnon_button_press", "_internal("))
+            .expect("the button-press handler")
+            .1;
+        let branch = press
+            .split_once(concat!("ifself.features.expose", "_active{"))
+            .expect("the expose pointer branch")
+            .1
+            .split_once(concat!("letpress=toast", "_press("))
+            .expect("the end of the expose pointer branch")
+            .0;
+        // The one and only button check: middle goes to the close helper…
+        let routing = concat!(
+            "MouseButton::from_u8(detail",
+            "_btn)==MouseButton::Middle{returnself.close_expose",
+            "_clicked(backend,hit);}"
+        );
+        assert!(
+            branch.contains(routing),
+            "the expose pointer branch must route the middle button to the close helper"
+        );
+        // …and no other button is named in the branch: left, right and
+        // scroll keep the plan_click fall-through they always had.
+        for button in [
+            "MouseButton::Left",
+            "MouseButton::Right",
+            "MouseButton::Other",
+        ] {
+            assert!(
+                !branch.contains(button),
+                "the expose pointer branch grew a {button} special case"
+            );
+        }
+        assert!(
+            branch.contains(concat!(
+                "apply_expose_action(backend,expose_plan::plan",
+                "_click(hit))"
+            )),
+            "the non-middle buttons no longer fall through to plan_click"
+        );
+
+        // The click-close helper resolves the clicked window to its grid
+        // index, a miss is a no-op, and the close itself rides the shared
+        // execution with the keyboard path.
+        let helper = compact
+            .split_once(concat!("fnclose_expose", "_clicked("))
+            .expect("the expose click-close helper")
+            .1
+            .split_once(concat!("fnapply_expose", "_close("))
+            .expect("the end of the expose click-close helper")
+            .0;
+        assert!(helper.contains(concat!("letSome(hit)=hitelse{returnOk(());}")));
+        assert!(helper.contains(concat!("expose_plan::grid", "_index(&candidates,hit)")));
+        assert!(helper.contains(concat!("expose_plan::plan", "_close_at(candidates,index)")));
+        assert!(helper.contains(concat!("self.apply_expose", "_close(backend,action)")));
+    }
+
     /// The expose Delete/BackSpace branch must close through the same call
     /// killclient uses — `window_ops().close_window`, graceful with its
     /// forced fallback — never a window-killing call of its own; the grid
@@ -4662,6 +4956,144 @@ mod tests {
         assert!(
             toast_log.lock().expect("toast log lock").is_empty(),
             "a toggle confirmation must not be a DND-gated toast"
+        );
+    }
+
+    /// The pickers' `d` removes a bond or a saved profile — seconds behind a
+    /// possibly wedged bus — so like every other connectivity action it goes
+    /// through the workers, never a child process on the event thread. The
+    /// haystack is the shipped source alone (the test modules are cut away)
+    /// and the needles are built at runtime, so this test cannot match its
+    /// own source.
+    #[test]
+    fn picker_forget_keys_submit_workers_and_never_spawn() {
+        const SOURCE: &str = include_str!("input_handler.rs");
+        let shipped = SOURCE
+            .split_once("#[cfg(test)]")
+            .expect("the first test module")
+            .0;
+        for needle in [
+            format!("{}{}", "Command", "::new"),
+            format!("{}{}", "std::process", "::Command"),
+            format!("{}{}", "connectivity", "_output("),
+        ] {
+            assert!(
+                !shipped.contains(&needle),
+                "input handling regained an event-thread spawn: {needle}"
+            );
+        }
+        // Each handler's `d` branch routes to its forget helper...
+        let wifi = SOURCE
+            .split_once("fn handle_wifi_picker_key")
+            .expect("handle_wifi_picker_key")
+            .1
+            .split_once("fn forget_selected_wifi")
+            .expect("handle_wifi_picker_key is no longer followed by forget_selected_wifi")
+            .0;
+        let key = format!("keys::KEY_{}", "d");
+        assert!(
+            wifi.contains(&key),
+            "the Wi-Fi picker no longer routes {key} to the forget"
+        );
+        // ...and each helper starts its worker: the profile delete for
+        // Wi-Fi, the device-action slot carrying `remove` for Bluetooth.
+        let wifi_forget = SOURCE
+            .split_once("fn forget_selected_wifi")
+            .expect("forget_selected_wifi")
+            .1
+            .split_once("fn handle_bluetooth_picker_key")
+            .expect("forget_selected_wifi is no longer followed by handle_bluetooth_picker_key")
+            .0;
+        for helper in ["start_forget_profile", "track_wifi_forget"] {
+            let needle = format!("connectivity::{}(", helper);
+            assert!(
+                wifi_forget.contains(&needle),
+                "the Wi-Fi forget no longer queues the worker ({needle})"
+            );
+        }
+        let bluetooth_forget = SOURCE
+            .split_once("fn forget_selected_bluetooth")
+            .expect("forget_selected_bluetooth")
+            .1
+            .split_once("fn activate_launcher_selection")
+            .expect(
+                "forget_selected_bluetooth is no longer followed by activate_launcher_selection",
+            )
+            .0;
+        let action = format!("connectivity::{}(", "start_device_action");
+        assert!(
+            bluetooth_forget.contains(&action),
+            "the Bluetooth forget no longer rides the device-action worker ({action})"
+        );
+        let remove = format!("{:?}", "remove");
+        assert!(
+            bluetooth_forget.contains(&remove),
+            "the Bluetooth forget no longer asks bluetoothctl for {remove}"
+        );
+    }
+
+    /// A finished profile delete is adopted by the connectivity poll: the
+    /// picker's status line says so, success and failure alike. The fake
+    /// jobs' closures are pure — no nmcli — so only the adoption path is
+    /// under test; the delete itself is pinned by source scan above.
+    ///
+    /// The slot is process-wide (see `WIFI_FORGET` in connectivity.rs) and
+    /// every test handler's tick polls it, so a concurrent test can take a
+    /// job this test parked — the thief's adoption is inert (no Wi-Fi panel
+    /// open, nothing marked dirty). Rather than serialize half the suite
+    /// against the slot, this test parks afresh and polls again until one
+    /// adoption lands on *this* handler.
+    #[test]
+    fn a_finished_wifi_forget_lands_on_the_picker_status_line() {
+        use crate::jwm::features::connectivity;
+
+        fn adopt_until(
+            jwm: &mut Jwm,
+            park: impl Fn() -> connectivity::BackgroundJob<Result<String, String>>,
+            wanted: &str,
+        ) -> bool {
+            for _ in 0..400 {
+                // An empty slot means the last park was adopted — by this
+                // handler, or stolen by a concurrent test's tick.
+                if !connectivity::wifi_forget_in_flight() {
+                    connectivity::track_wifi_forget(park());
+                }
+                jwm.poll_connectivity_job();
+                let parts = jwm.features.system_ui.overlay_parts();
+                if parts.items.iter().any(|row| row.contains(wanted)) {
+                    return true;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            false
+        }
+
+        let _serial = connectivity::FORGET_SLOT_TESTS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut backend = ConfigureReplyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        jwm.features.system_ui = crate::jwm::features::SystemUiState::wifi_picker("");
+
+        assert!(
+            adopt_until(
+                &mut jwm,
+                || connectivity::BackgroundJob::spawn(|| Ok::<String, String>("TestNet".into())),
+                "Forgot TestNet"
+            ),
+            "the finished forget never reached the picker's status line"
+        );
+        // The honest error surface is the same line: a delete that found no
+        // profile says so rather than vanishing.
+        assert!(
+            adopt_until(
+                &mut jwm,
+                || connectivity::BackgroundJob::spawn(|| Err::<String, String>(
+                    "no saved profile for Ghost".into()
+                )),
+                "no saved profile for Ghost"
+            ),
+            "the failed forget never reached the status line"
         );
     }
 }

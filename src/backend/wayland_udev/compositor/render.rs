@@ -967,6 +967,93 @@ mod tests {
             assert!(!is_opaque_output_occluder(candidate));
         }
     }
+
+    /// The MIC chip mirrors the REC chip's discipline: it draws in the merged
+    /// post-delivery chrome block after the recording readback (so it can
+    /// never leak into the encoded video or a screenshot), reads its geometry
+    /// and label from the shared `recording_indicator` module, and frees the
+    /// label texture the frame the state clears. Needles are assembled at
+    /// runtime so this cannot match its own source.
+    #[test]
+    fn the_mic_chip_shares_the_rec_chips_post_delivery_slot() {
+        let source = include_str!("render.rs");
+        let readback = format!("self.recording.{}(", "capture_frame");
+        let rec = format!(
+            "let rec_chip_h = self.{}(gl, &projection);",
+            "render_recording_indicator"
+        );
+        let mic = format!(
+            "self.{}(gl, &projection, rec_chip_h);",
+            "render_mic_indicator"
+        );
+        let at = |needle: &str| {
+            source
+                .find(needle)
+                .unwrap_or_else(|| panic!("render.rs must contain `{needle}`"))
+        };
+        assert!(
+            at(&readback) < at(&rec) && at(&rec) < at(&mic),
+            "the MIC chip must draw after the recording readback, in the REC chip's slot"
+        );
+
+        let frame = body_of(source, &format!("pub(crate) fn render_{}(", "frame"));
+        assert!(
+            frame.contains(&format!("|| self.{}", "mic_indicator_active")),
+            "the merged post-delivery block must stay open while the MIC chip is up"
+        );
+        assert!(
+            frame.contains(&format!("self.{}.is_some()", "mic_indicator_texture")),
+            "the block must survive one frame past the MIC state clearing, so the label texture is freed while GL is current"
+        );
+        assert!(
+            frame.contains(&format!(
+                "self.render_{}(gl, &projection);",
+                "recording_region_overlay"
+            )),
+            "the crop outline's own draw must remain"
+        );
+
+        let draw = body_of(source, &format!("unsafe fn render_{}(", "mic_indicator"));
+        assert!(
+            draw.contains(&format!("indicator::{}(", "mic_indicator_label")),
+            "the MIC label must come from the shared module"
+        );
+        assert!(
+            draw.contains(&format!("indicator::{}(", "mic_indicator_layout")),
+            "the MIC geometry must come from the shared module"
+        );
+        assert!(
+            draw.contains(&format!("self.{}.take()", "mic_indicator_texture")),
+            "the label texture must go with the chip when the state clears"
+        );
+        assert!(
+            draw.contains(&format!("ui.{}", "osd")),
+            "the MIC chip keeps the REC chip's flat ui.osd pill (no glass)"
+        );
+    }
+
+    /// A fullscreen client presented directly to the scanout would bury the
+    /// MIC chip for the whole standalone audio recording — the same reason
+    /// the REC chip's `recording_requires_composition` blocks direct scanout.
+    #[test]
+    fn the_mic_indicator_blocks_direct_scanout_while_it_is_up() {
+        let source = include_str!("render.rs");
+        let reason = format!("{} requires composition", "mic indicator");
+        let needle = format!("block_for_composition(\"{reason}\")");
+        assert!(
+            source.contains(&needle),
+            "the direct-scanout path must block for the MIC chip ({needle})"
+        );
+        let arm_at = source.find(&needle).expect("the MIC scanout arm");
+        let rec_reason = format!("{} requires composition", "screen recording");
+        let rec_arm_at = source
+            .find(&rec_reason)
+            .expect("the recording scanout arm must remain");
+        assert!(
+            rec_arm_at < arm_at,
+            "the MIC arm sits beside the recording arm, after the overlay blockers"
+        );
+    }
 }
 
 impl WaylandCompositor {
@@ -1969,6 +2056,14 @@ impl WaylandCompositor {
         if self.recording_requires_composition() {
             self.direct_scanout_mgr
                 .block_for_composition("screen recording requires composition");
+            return;
+        }
+        // A directly scanned-out client would bury the MIC chip for the whole
+        // standalone audio recording — the same reason the REC chip holds
+        // composition above.
+        if self.mic_indicator_active {
+            self.direct_scanout_mgr
+                .block_for_composition("mic indicator requires composition");
             return;
         }
 
@@ -4140,8 +4235,16 @@ impl WaylandCompositor {
 
         // The crop outline and the REC chip are deliberately rendered after
         // the recording readback: they are visible on the local output but
-        // never encoded into the video.
-        if self.recording_region_overlay.is_some() || self.recording.is_active() {
+        // never encoded into the video. The MIC chip shares the slot (and the
+        // rule): standalone audio recording owns no capture pipeline, but its
+        // cue must not leak into a screen recording's frames either. The
+        // texture arm keeps the block alive for the one frame after the MIC
+        // state clears, so the label texture is freed while GL is current.
+        if self.recording_region_overlay.is_some()
+            || self.recording.is_active()
+            || self.mic_indicator_active
+            || self.mic_indicator_texture.is_some()
+        {
             self.bind_post_delivery_overlay_target(
                 gl,
                 tail_domain::TailOverlayClass::RecordingRegionOverlay,
@@ -4150,7 +4253,8 @@ impl WaylandCompositor {
                 if self.recording_region_overlay.is_some() {
                     self.render_recording_region_overlay(gl, &projection);
                 }
-                self.render_recording_indicator(gl, &projection);
+                let rec_chip_h = self.render_recording_indicator(gl, &projection);
+                self.render_mic_indicator(gl, &projection, rec_chip_h);
                 gl.BindFramebuffer(ffi::FRAMEBUFFER, 0);
             }
         }
@@ -6775,15 +6879,20 @@ impl WaylandCompositor {
     /// post-delivery encoded target *after* the recording readback (the same
     /// slot the crop outline uses), so the cue is visible locally but never
     /// lands in the encoded video; screenshots read the capture view earlier
-    /// still, so it cannot leak into a PNG either.
-    unsafe fn render_recording_indicator(&mut self, gl: &ffi::Gles2, projection: &[f32; 16]) {
+    /// still, so it cannot leak into a PNG either. Returns the drawn chip's
+    /// height so the MIC chip can park above it when both recordings run.
+    unsafe fn render_recording_indicator(
+        &mut self,
+        gl: &ffi::Gles2,
+        projection: &[f32; 16],
+    ) -> Option<f32> {
         use crate::backend::compositor_common::recording_indicator as indicator;
 
         let Some(label) = indicator::recording_indicator_label(
             self.recording.is_active(),
             self.recording.elapsed(),
         ) else {
-            return;
+            return None;
         };
         unsafe { self.update_recording_indicator_texture(gl, &label) };
         let Some((tex, text_w, text_h)) = self
@@ -6791,7 +6900,7 @@ impl WaylandCompositor {
             .as_ref()
             .map(|&(_, tex, w, h)| (tex, w, h))
         else {
-            return;
+            return None;
         };
 
         let ui = ui_theme::palette();
@@ -6815,6 +6924,146 @@ impl WaylandCompositor {
             // Flat pill rather than frosted glass: the chip is up for the
             // whole recording, and a glass backdrop re-blurs the screen on
             // every one of those frames.
+            self.sysui_fill_rounded(gl, chip_x, chip_y, chip_w, chip_h, chip_h / 2.0, ui.osd);
+            self.sysui_fill_rounded(
+                gl,
+                layout.dot[0],
+                layout.dot[1],
+                layout.dot[2],
+                layout.dot[3],
+                indicator::CHIP_DOT / 2.0,
+                indicator::DOT_COLOR,
+            );
+
+            gl.UseProgram(self.sysui_text_program);
+            let text_rect = super::get_uniform_loc(gl, self.sysui_text_program, "u_rect");
+            let text_proj = super::get_uniform_loc(gl, self.sysui_text_program, "u_projection");
+            let text_tex = super::get_uniform_loc(gl, self.sysui_text_program, "u_texture");
+            let text_opacity = super::get_uniform_loc(gl, self.sysui_text_program, "u_opacity");
+            gl.UniformMatrix4fv(text_proj, 1, ffi::FALSE as u8, projection.as_ptr());
+            gl.Uniform1i(text_tex, 0);
+            gl.Uniform1f(text_opacity, 1.0);
+            gl.ActiveTexture(ffi::TEXTURE0);
+            gl.Uniform4f(
+                text_rect,
+                layout.text[0],
+                layout.text[1],
+                layout.text[2],
+                layout.text[3],
+            );
+            gl.BindTexture(ffi::TEXTURE_2D, tex);
+            gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+
+            gl.BindVertexArray(0);
+            gl.UseProgram(0);
+        }
+        Some(chip_h)
+    }
+
+    /// Rasterize (and cache) the MIC-chip label texture. The label is static
+    /// ("MIC"), so the text-keyed cache re-renders once per chip appearance —
+    /// no per-second re-raster, no frame pump.
+    unsafe fn update_mic_indicator_texture(&mut self, gl: &ffi::Gles2, text: &str) {
+        if self
+            .mic_indicator_texture
+            .as_ref()
+            .is_some_and(|(cached, _, _, _)| cached == text)
+        {
+            return;
+        }
+        if let Some((_, tex, _, _)) = self.mic_indicator_texture.take() {
+            unsafe { gl.DeleteTextures(1, &tex) };
+        }
+        let config = crate::config::CONFIG.load();
+        let description = config.system_ui_font();
+        let size = crate::backend::compositor_font::ui_font_pixel_size(description);
+        let (pixels, w, h) = crate::backend::compositor_font::render_ui_text_to_rgba(
+            text,
+            description,
+            size,
+            ui_theme::palette().osd_ink,
+        );
+        if w == 0 || h == 0 {
+            return;
+        }
+        unsafe {
+            let mut tex = 0;
+            gl.GenTextures(1, &mut tex);
+            gl.BindTexture(ffi::TEXTURE_2D, tex);
+            gl.TexImage2D(
+                ffi::TEXTURE_2D,
+                0,
+                ffi::RGBA as i32,
+                w as i32,
+                h as i32,
+                0,
+                ffi::RGBA,
+                ffi::UNSIGNED_BYTE,
+                pixels.as_ptr().cast(),
+            );
+            gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_MIN_FILTER, ffi::LINEAR as i32);
+            gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_MAG_FILTER, ffi::LINEAR as i32);
+            self.mic_indicator_texture = Some((text.to_string(), tex, w, h));
+        }
+    }
+
+    /// The persistent "microphone in use" chip for standalone audio
+    /// recording: a red dot and a static `MIC` label, parked in the REC
+    /// chip's bottom-right slot — directly above the REC chip (`rec_chip_h`
+    /// is the height it drew this frame) when both recordings run together.
+    /// Shares the REC chip's post-delivery slot, so the cue is visible
+    /// locally but never lands in the encoded video or a screenshot.
+    unsafe fn render_mic_indicator(
+        &mut self,
+        gl: &ffi::Gles2,
+        projection: &[f32; 16],
+        rec_chip_h: Option<f32>,
+    ) {
+        use crate::backend::compositor_common::recording_indicator as indicator;
+
+        let Some(label) = indicator::mic_indicator_label(self.mic_indicator_active) else {
+            // Standalone audio stopped: the label texture goes with the chip.
+            // The merged post-delivery block keeps running for one more frame
+            // (its condition holds while the texture is still cached) so this
+            // free lands while a GL context is current.
+            if let Some((_, texture, _, _)) = self.mic_indicator_texture.take()
+                && texture != 0
+            {
+                unsafe { gl.DeleteTextures(1, &texture) };
+            }
+            return;
+        };
+        unsafe { self.update_mic_indicator_texture(gl, label) };
+        let Some((tex, text_w, text_h)) = self
+            .mic_indicator_texture
+            .as_ref()
+            .map(|&(_, tex, w, h)| (tex, w, h))
+        else {
+            return;
+        };
+
+        let ui = ui_theme::palette();
+        let layout = indicator::mic_indicator_layout(
+            self.screen_w as f32,
+            self.screen_h as f32,
+            text_w as f32,
+            text_h as f32,
+            rec_chip_h,
+        );
+        let [chip_x, chip_y, chip_w, chip_h] = layout.chip;
+
+        unsafe {
+            // The recording capture above restores the frame's blend state as
+            // *disabled*; the pill and the glyph coverage both need the
+            // compositor's canonical premultiplied state back.
+            self.enable_premultiplied_blend(gl);
+            self.bind_quad_vao(gl);
+            gl.UseProgram(self.border_program);
+            self.set_projection_uniform(gl, self.border_uniforms.projection, projection);
+            gl.Uniform1i(self.border_uniforms.scene_linear, 0);
+            // Flat pill rather than frosted glass, same as the REC chip: the
+            // chip is up for the whole recording, and a glass backdrop
+            // re-blurs the screen on every one of those frames.
             self.sysui_fill_rounded(gl, chip_x, chip_y, chip_w, chip_h, chip_h / 2.0, ui.osd);
             self.sysui_fill_rounded(
                 gl,

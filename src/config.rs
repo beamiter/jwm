@@ -2696,6 +2696,20 @@ impl Config {
         Ok(cfg)
     }
 
+    /// Load from [`Self::resolve_load_path`], falling back to the built-in
+    /// defaults (with a stderr note) when the file is missing or invalid.
+    ///
+    /// This is the production load path behind [`CONFIG`]. Unit tests never
+    /// reach it through the global (see the `CONFIG` docs), so the doctest
+    /// below is what keeps the real resolve-and-read path exercised against
+    /// the host's actual config location. It is read-only: the template
+    /// generation on first launch lives in the `CONFIG` initializer, not
+    /// here.
+    ///
+    /// ```
+    /// let config = jwm::config::Config::load_default();
+    /// assert!(config.tags_length() >= 1);
+    /// ```
     pub fn load_default() -> Self {
         let path = Self::resolve_load_path();
         match Self::load_from_file(&path) {
@@ -4176,6 +4190,22 @@ impl From<toml::ser::Error> for ConfigError {
 }
 
 pub static CONFIG: LazyLock<ArcSwap<Config>> = LazyLock::new(|| {
+    // Unit tests always start from the built-in defaults, never from the
+    // developer's own ~/.config/jwm file. Host customizations (per-tag
+    // layouts, focus rules, border widths, ...) would otherwise leak through
+    // this global and make unrelated tests fail on some machines only —
+    // e.g. a hand-written `monocle` entry for tag 1 lets arrange rewrite
+    // `lt_symbol` to "[N]" and breaks monitor snapshot assertions in
+    // empty_jwm-based tests (recorded in handoff.md, rounds 15-17). The file
+    // loader itself stays covered by dedicated tests that call
+    // `Config::load_from_file` / `save_to_file` / `persist_layout_tags_to`
+    // against fixture paths. Production and integration-test builds (the lib
+    // compiled without cfg(test)) keep the real load path below, including
+    // the template-generation side effect and the "Configuration loaded
+    // from" log line.
+    #[cfg(test)]
+    let config = Config::default();
+    #[cfg(not(test))]
     let config = if !LOAD_LOCAL_CONFIG {
         Config::default()
     } else {

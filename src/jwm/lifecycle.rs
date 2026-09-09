@@ -1025,6 +1025,7 @@ impl Jwm {
                 );
             }
         }
+        backend.compositor_set_mic_indicator(false);
 
         let result = run_best_effort_cleanup(X11_CLEANUP_STAGES, |stage| match stage {
             X11CleanupStage::ClientState => {

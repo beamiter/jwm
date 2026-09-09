@@ -537,6 +537,12 @@ macro_rules! delegate_compositor_capabilities {
                 }
             }
 
+            fn compositor_set_mic_indicator(&mut self, active: bool) {
+                if let Some(compositor) = self.compositor.as_mut() {
+                    compositor.set_mic_indicator(active);
+                }
+            }
+
             fn compositor_stop_recording(&mut self) {
                 if let Some(compositor) = self.compositor.as_mut() {
                     compositor.stop_recording();

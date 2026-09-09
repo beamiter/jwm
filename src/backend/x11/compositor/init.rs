@@ -1047,6 +1047,8 @@ impl<C: CompositorConnection> Compositor<C> {
             osd_slot: Default::default(),
             osd_texture: None,
             recording_indicator_texture: None,
+            mic_indicator_active: false,
+            mic_indicator_texture: None,
             hud_text_cache: String::new(),
             system_ui: None,
             system_ui_island: Default::default(),

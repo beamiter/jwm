@@ -205,6 +205,15 @@ pub enum SystemUiState {
         /// Whether the "Caps Lock is on" row is showing. Read back from the
         /// live modifier mask on every key event the lock receives.
         caps_lock: bool,
+        /// The now-playing row, formatted by the media feature exactly as
+        /// the control center renders it minus the transport cluster. `None`
+        /// when no player is active — the row is absent then, not blank, so
+        /// a player-less lock screen is byte-identical to one built before
+        /// the row existed. Every bridge push re-feeds it through
+        /// [`Self::set_lock_now_playing`]; like the clock it is display text
+        /// only, and like the auth slot it lives inside the lock state, so
+        /// unlocking clears nothing extra.
+        now_playing: Option<String>,
         /// The one-shot PAM authentication behind Enter. It lives in the
         /// lock state itself — not beside it on the WM — so a lock that
         /// goes away takes its worker handle with it (the worker still
@@ -401,9 +410,11 @@ impl ListKind {
             Self::Clipboard => {
                 "Click/Enter  copy    type  filter    d  forget    c  clear all    Esc  close"
             }
-            Self::Wifi => "Click/Enter  join    \u{f062}/\u{f063}  select    Esc  close",
+            Self::Wifi => {
+                "Click/Enter  join    \u{f062}/\u{f063}  select    d  forget    Esc  close"
+            }
             Self::Bluetooth => {
-                "Enter  connect/pair    s  scan    a  accept incoming    r  refresh    Esc"
+                "Enter  connect/pair    s  scan    a  accept incoming    r  refresh    d  forget    Esc"
             }
             Self::Wallpaper => "Click/Enter  apply    \u{f062}/\u{f063}  select    Esc  close",
             Self::AudioOutput | Self::AudioInput => {
@@ -440,16 +451,22 @@ pub enum RowData {
     Clipboard {
         index: usize,
     },
-    /// Whether the network is secured, i.e. may need a passphrase.
+    /// Whether the network is secured, i.e. may need a passphrase. `armed`
+    /// is the two-press forget confirm (`d` arms, `d` again deletes the
+    /// saved profile); it lives on the row so a refresh — which rebuilds the
+    /// rows — disarms it, the way moving the selection does.
     Wifi {
         secured: bool,
+        armed: bool,
     },
     /// `connect`, `disconnect`, or `pair`, decided when the list was built.
     /// `name` is the display name, which pairing prompts use to name the
-    /// device even after a refresh shuffled the rows.
+    /// device even after a refresh shuffled the rows. `armed` is the same
+    /// two-press forget confirm the Wi-Fi row carries.
     Bluetooth {
         action: &'static str,
         name: String,
+        armed: bool,
     },
     Wallpaper,
     /// The device id lives in the row's key, the way the wallpaper path does.
@@ -469,6 +486,51 @@ pub struct ListRow {
     pub key: String,
     pub text: String,
     pub data: RowData,
+}
+
+impl RowData {
+    /// Whether this row is armed for the two-press forget confirm.
+    fn forget_armed(&self) -> bool {
+        matches!(
+            self,
+            Self::Wifi { armed: true, .. } | Self::Bluetooth { armed: true, .. }
+        )
+    }
+
+    /// Arm or disarm the row's forget confirm. Kinds with nothing to forget
+    /// carry no flag and ignore this.
+    fn set_forget_armed(&mut self, value: bool) {
+        match self {
+            Self::Wifi { armed, .. } | Self::Bluetooth { armed, .. } => *armed = value,
+            _ => {}
+        }
+    }
+}
+
+/// Moving the selection cancels an armed forget, the way the control
+/// center's armed rows disarm: the confirmation belongs to the row the user
+/// was looking at.
+fn disarm_forget_rows(rows: &mut [ListRow]) {
+    for row in rows {
+        row.data.set_forget_armed(false);
+    }
+}
+
+/// What a `d` press in a picker decided: the two-press confirm for a
+/// destructive row, mirroring the control center's armed Enter — the first
+/// press arms, moving the selection disarms, the second press on the same
+/// row executes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ForgetPlan {
+    /// First press on a forgettable row: it is armed now; nothing was
+    /// removed.
+    Armed,
+    /// Second press on the armed row: remove it. The payload is the row's
+    /// stable key — the byte-exact SSID, the device address.
+    Execute(String),
+    /// The row names nothing that can be forgotten: a Bluetooth device the
+    /// controller never bonded has no bond to remove.
+    Unavailable,
 }
 
 /// Step (in percent) that Left/Right and scroll-on-slider apply to a
@@ -956,6 +1018,7 @@ impl Clone for SystemUiState {
                 clock,
                 date,
                 caps_lock,
+                now_playing,
                 ..
             } => Self::Locked {
                 password: String::new(),
@@ -963,7 +1026,10 @@ impl Clone for SystemUiState {
                 clock: clock.clone(),
                 date: date.clone(),
                 caps_lock: *caps_lock,
-                // Nor inherit an in-flight authentication: the worker's
+                // A render-time snapshot draws what the original draws, so
+                // the display rows ride along…
+                now_playing: now_playing.clone(),
+                // …but no in-flight authentication: the worker's
                 // answer belongs to the state that asked for it.
                 auth: AuthAttempt::Idle,
             },
@@ -1196,6 +1262,7 @@ impl SystemUiState {
             clock: lock_clock_line(&now),
             date: lock_date_line(&now),
             caps_lock: false,
+            now_playing: None,
             auth: AuthAttempt::Idle,
         }
     }
@@ -1852,6 +1919,7 @@ impl SystemUiState {
                 text: crate::jwm::features::connectivity::picker_row(network),
                 data: RowData::Wifi {
                     secured: !network.is_open(),
+                    armed: false,
                 },
             })
             .collect();
@@ -1862,9 +1930,17 @@ impl SystemUiState {
     pub fn selected_wifi(&self) -> Option<(String, bool)> {
         let row = self.selected_row(ListKind::Wifi)?;
         match row.data {
-            RowData::Wifi { secured } => Some((row.key.clone(), secured)),
+            RowData::Wifi { secured, .. } => Some((row.key.clone(), secured)),
             _ => None,
         }
+    }
+
+    /// `d` on the highlighted network: arm it, or — already armed — hand its
+    /// SSID back for the profile delete. Every row may name a saved profile;
+    /// whether it actually does is `NetworkManager`'s answer, which the
+    /// worker waits for and reports instead of guessing on the frame thread.
+    pub fn plan_wifi_forget(&mut self) -> ForgetPlan {
+        self.plan_list_forget(ListKind::Wifi, |data| matches!(data, RowData::Wifi { .. }))
     }
 
     /// Start prompting for the selected network's passphrase.
@@ -1963,6 +2039,7 @@ impl SystemUiState {
                 data: RowData::Bluetooth {
                     action: crate::jwm::features::connectivity::device_action(device),
                     name: device.name.clone(),
+                    armed: false,
                 },
             })
             .collect();
@@ -1974,9 +2051,61 @@ impl SystemUiState {
     pub fn selected_bluetooth(&self) -> Option<(String, String, &'static str)> {
         let row = self.selected_row(ListKind::Bluetooth)?;
         match &row.data {
-            RowData::Bluetooth { action, name } => Some((row.key.clone(), name.clone(), action)),
+            RowData::Bluetooth { action, name, .. } => {
+                Some((row.key.clone(), name.clone(), action))
+            }
             _ => None,
         }
+    }
+
+    /// `d` on the highlighted device: arm it, or — already armed — hand its
+    /// address back for the bond removal. Only a bonded device arms: `pair`
+    /// is the action a bond-less row carries (see
+    /// [`crate::jwm::features::connectivity::device_action`]), and removing a
+    /// device the controller never bonded would only make its beacon
+    /// reappear on the next scan.
+    pub fn plan_bluetooth_forget(&mut self) -> ForgetPlan {
+        self.plan_list_forget(
+            ListKind::Bluetooth,
+            |data| matches!(data, RowData::Bluetooth { action, .. } if *action != "pair"),
+        )
+    }
+
+    /// The shared two-press confirm over a list panel's rows: arm the
+    /// highlighted row when `forgettable` allows it, or hand its key back
+    /// when it was armed already. At most the highlighted row is ever armed;
+    /// the arm is cleared across the list rather than assumed away.
+    fn plan_list_forget(
+        &mut self,
+        wanted: ListKind,
+        forgettable: fn(&RowData) -> bool,
+    ) -> ForgetPlan {
+        let Self::ListPanel {
+            kind,
+            rows,
+            selected,
+            ..
+        } = self
+        else {
+            return ForgetPlan::Unavailable;
+        };
+        if *kind != wanted {
+            return ForgetPlan::Unavailable;
+        }
+        let Some(row) = rows.get(*selected) else {
+            return ForgetPlan::Unavailable;
+        };
+        if row.data.forget_armed() {
+            let key = row.key.clone();
+            rows[*selected].data.set_forget_armed(false);
+            return ForgetPlan::Execute(key);
+        }
+        if !forgettable(&row.data) {
+            return ForgetPlan::Unavailable;
+        }
+        disarm_forget_rows(rows);
+        rows[*selected].data.set_forget_armed(true);
+        ForgetPlan::Armed
     }
 
     /// Replace the Bluetooth picker's status line.
@@ -2841,6 +2970,9 @@ impl SystemUiState {
             }
             *selected = (*selected as isize + delta).rem_euclid(entries.len() as isize) as usize;
         } else if let Self::ListPanel { rows, selected, .. } = self {
+            // Moving off an armed row cancels the forget confirmation: it
+            // belonged to the row the user was looking at.
+            disarm_forget_rows(rows);
             if rows.is_empty() {
                 *selected = 0;
                 return;
@@ -3006,8 +3138,18 @@ impl SystemUiState {
     /// `Some(changed)` means the row is interactive.
     pub fn select_visible_row(&mut self, visual_row: usize) -> Option<bool> {
         let target = self.visible_row_target(visual_row)?;
+        // A list panel's armed forget belongs to the row it was armed on, so
+        // pointer-selecting another row cancels it like an arrow key does.
+        if let Self::ListPanel { rows, selected, .. } = self {
+            let changed = *selected != target;
+            if changed {
+                *selected = target;
+                disarm_forget_rows(rows);
+            }
+            return Some(changed);
+        }
         let (selected, armed) = match self {
-            Self::Launcher { selected, .. } | Self::ListPanel { selected, .. } => (selected, None),
+            Self::Launcher { selected, .. } => (selected, None),
             Self::ControlCenter {
                 selected, armed, ..
             }
@@ -3053,7 +3195,10 @@ impl SystemUiState {
                 *armed = false;
                 *selected = edge(entries.len());
             }
-            Self::ListPanel { rows, selected, .. } => *selected = edge(rows.len()),
+            Self::ListPanel { rows, selected, .. } => {
+                disarm_forget_rows(rows);
+                *selected = edge(rows.len());
+            }
             Self::SessionMenu {
                 entries,
                 selected,
@@ -3117,7 +3262,10 @@ impl SystemUiState {
                 rows,
                 selected,
                 ..
-            } => *selected = stepped(*selected, rows.len(), kind.window(), direction),
+            } => {
+                disarm_forget_rows(rows);
+                *selected = stepped(*selected, rows.len(), kind.window(), direction);
+            }
             Self::SessionMenu {
                 entries,
                 selected,
@@ -3331,6 +3479,25 @@ impl SystemUiState {
         changed
     }
 
+    /// Show, refresh, or drop the lock screen's now-playing row from the
+    /// media feature's last known state. Returns true only when what the row
+    /// shows actually changed, so callers can tell a re-sync is warranted:
+    /// the bridge re-pushes the state every few seconds, and a paused
+    /// player's re-polls format to the same row. Always false outside the
+    /// lock screen, where a push costs one state check.
+    pub fn set_lock_now_playing(
+        &mut self,
+        state: Option<&crate::jwm::features::MediaState>,
+    ) -> bool {
+        let Self::Locked { now_playing, .. } = self else {
+            return false;
+        };
+        let row = state.map(crate::jwm::features::media::lock_row);
+        let changed = *now_playing != row;
+        *now_playing = row;
+        changed
+    }
+
     /// Structured overlay content the compositor renders as a styled panel:
     /// headline, optional search field, list rows with an optional highlighted
     /// row, and a footer hint.
@@ -3384,13 +3551,17 @@ impl SystemUiState {
             // follow as before; the caps-lock note sits directly under the
             // password row it applies to, as its own row — never the message
             // row — so a wrong-password error and the indicator can be on
-            // screen together without either clearing the other.
+            // screen together without either clearing the other. While a
+            // player is active its now-playing row trails the card: appended
+            // last, it leaves every row above in its pinned place whether or
+            // not one is playing.
             Self::Locked {
                 password,
                 message,
                 clock,
                 date,
                 caps_lock,
+                now_playing,
                 // The auth worker is not a row: "Verifying…" travels through
                 // the status message, the outcome through the same paths a
                 // keystroke would take.
@@ -3412,6 +3583,9 @@ impl SystemUiState {
                 ];
                 if *caps_lock {
                     items.push("\u{f11c}  Caps Lock is on".into());
+                }
+                if let Some(row) = now_playing {
+                    items.push(row.clone());
                 }
                 OverlayParts {
                     title: "\u{f023}  JWM LOCKED".into(),
@@ -3638,7 +3812,15 @@ impl SystemUiState {
                     rows.iter()
                         .skip(start)
                         .take(window)
-                        .map(|row| row.text.clone())
+                        .map(|row| {
+                            // The armed forget names its confirm key on the
+                            // row, the way the control center's armed rows do.
+                            if row.data.forget_armed() {
+                                format!("{}   \u{2190} d again to forget", row.text)
+                            } else {
+                                row.text.clone()
+                            }
+                        })
                         .collect()
                 };
                 // The row icons align with the visible slice of `rows`;
@@ -3730,6 +3912,11 @@ impl SystemUiState {
                     }
                 }
                 let icons = icons.and_then(|icons| row_icon_payload(icons, items.len()));
+                // An armed forget swaps the key list for its own confirm
+                // hint, the way the control center's armed rows do; a prompt
+                // on screen still outranks both.
+                let forget_armed =
+                    prompt.is_none() && rows.iter().any(|row| row.data.forget_armed());
                 OverlayParts {
                     title: kind.title().to_string(),
                     // The clipboard picker's filter gets the launcher's query
@@ -3739,7 +3926,11 @@ impl SystemUiState {
                     selected: (!rows.is_empty() && prompt.is_none()).then(|| selected - start),
                     items,
                     icons,
-                    hint: kind.hint(prompt.as_ref()).to_string(),
+                    hint: if forget_armed {
+                        "d  confirm forget    Esc  close".to_string()
+                    } else {
+                        kind.hint(prompt.as_ref()).to_string()
+                    },
                     scroll,
                 }
             }
@@ -4691,6 +4882,110 @@ mod tests {
         assert!(menu.is_session_menu());
     }
 
+    #[test]
+    fn a_wifi_profile_delete_runs_only_on_the_second_d() {
+        let mut panel = SystemUiState::wifi_picker("");
+        panel.set_wifi_networks(&[wifi("Alpha", false), wifi("Beta", false)]);
+
+        // First `d` arms and says so; nothing is deleted yet.
+        assert_eq!(panel.plan_wifi_forget(), ForgetPlan::Armed);
+        let parts = panel.overlay_parts();
+        assert!(parts.items[0].contains("d again to forget"));
+        assert!(parts.hint.contains("confirm forget"));
+        assert!(!parts.items[1].contains("forget"));
+
+        // Second `d` on the same row hands the SSID to the worker and
+        // disarms, mirroring the session menu's armed Enter.
+        assert_eq!(
+            panel.plan_wifi_forget(),
+            ForgetPlan::Execute("Alpha".to_string())
+        );
+        assert!(!panel.overlay_parts().items[0].contains("d again to forget"));
+        assert_eq!(panel.plan_wifi_forget(), ForgetPlan::Armed);
+    }
+
+    #[test]
+    fn moving_off_an_armed_network_cancels_the_forget() {
+        let mut panel = SystemUiState::wifi_picker("");
+        panel.set_wifi_networks(&[wifi("Alpha", false), wifi("Beta", false)]);
+        assert_eq!(panel.plan_wifi_forget(), ForgetPlan::Armed);
+        panel.move_selection(1);
+        panel.move_selection(-1);
+
+        // Back on the same row, but disarmed: it must arm again, not delete.
+        assert!(!panel.overlay_parts().items[0].contains("d again to forget"));
+        assert_eq!(panel.plan_wifi_forget(), ForgetPlan::Armed);
+
+        // The jump and page movers disarm the same way.
+        assert_eq!(
+            panel.plan_wifi_forget(),
+            ForgetPlan::Execute("Alpha".into())
+        );
+        assert_eq!(panel.plan_wifi_forget(), ForgetPlan::Armed);
+        panel.jump_selection(true);
+        assert_eq!(panel.plan_wifi_forget(), ForgetPlan::Armed);
+        panel.page_selection(-1);
+        assert!(
+            !panel
+                .overlay_parts()
+                .items
+                .iter()
+                .any(|row| row.contains("d again to forget"))
+        );
+    }
+
+    #[test]
+    fn pointer_selecting_another_row_cancels_the_forget() {
+        let mut panel = SystemUiState::wifi_picker("");
+        panel.set_wifi_networks(&[wifi("Alpha", false), wifi("Beta", false)]);
+        assert_eq!(panel.plan_wifi_forget(), ForgetPlan::Armed);
+        // The pointer's row indexes the rendered slice; with two rows it is
+        // the row index itself.
+        assert_eq!(panel.select_visible_row(1), Some(true));
+        assert!(
+            !panel
+                .overlay_parts()
+                .items
+                .iter()
+                .any(|row| row.contains("d again to forget"))
+        );
+        // Clicking the row already selected changes nothing: the arm stands.
+        assert_eq!(panel.plan_wifi_forget(), ForgetPlan::Armed);
+        assert_eq!(panel.select_visible_row(1), Some(false));
+        assert_eq!(
+            panel.plan_wifi_forget(),
+            ForgetPlan::Execute("Beta".to_string())
+        );
+    }
+
+    #[test]
+    fn a_scan_refresh_disarms_the_forget() {
+        // The rows a refresh builds are new state: the network the confirm
+        // named may be gone, so the armed press dies with the old rows.
+        let mut panel = SystemUiState::wifi_picker("");
+        panel.set_wifi_networks(&[wifi("Alpha", false), wifi("Beta", false)]);
+        assert_eq!(panel.plan_wifi_forget(), ForgetPlan::Armed);
+        panel.set_wifi_networks(&[wifi("Beta", false), wifi("Alpha", false)]);
+        assert!(
+            !panel
+                .overlay_parts()
+                .items
+                .iter()
+                .any(|row| row.contains("d again to forget"))
+        );
+        // The selection held on Alpha by key; a fresh `d` arms it again
+        // rather than deleting.
+        assert_eq!(panel.plan_wifi_forget(), ForgetPlan::Armed);
+    }
+
+    #[test]
+    fn an_empty_picker_arms_nothing() {
+        let mut panel = SystemUiState::wifi_picker("Scanning\u{2026}");
+        assert_eq!(panel.plan_wifi_forget(), ForgetPlan::Unavailable);
+        let mut devices = SystemUiState::bluetooth_picker("Reading devices\u{2026}");
+        assert_eq!(devices.plan_bluetooth_forget(), ForgetPlan::Unavailable);
+    }
+
     fn wifi(ssid: &str, open: bool) -> crate::jwm::features::WifiNetwork {
         crate::jwm::features::WifiNetwork {
             ssid: ssid.to_string(),
@@ -4779,6 +5074,20 @@ mod tests {
                 .overlay_parts()
                 .hint
                 .contains("a  accept incoming")
+        );
+        // Same discoverability for the forget key, in both pickers it now
+        // works in.
+        assert!(
+            SystemUiState::wifi_picker("")
+                .overlay_parts()
+                .hint
+                .contains("d  forget")
+        );
+        assert!(
+            SystemUiState::bluetooth_picker("")
+                .overlay_parts()
+                .hint
+                .contains("d  forget")
         );
         assert!(
             SystemUiState::wallpaper_picker(&[], "", "/walls")
@@ -4891,6 +5200,81 @@ mod tests {
                 "pair"
             ))
         );
+    }
+
+    fn bt_device(
+        address: &str,
+        name: &str,
+        connected: bool,
+        paired: bool,
+    ) -> crate::jwm::features::BluetoothDevice {
+        crate::jwm::features::BluetoothDevice {
+            address: address.to_string(),
+            name: name.to_string(),
+            connected,
+            paired,
+            rssi: None,
+            battery: None,
+        }
+    }
+
+    #[test]
+    fn a_bonded_device_forgets_only_on_the_second_d() {
+        let mut panel = SystemUiState::bluetooth_picker("");
+        panel.set_bluetooth_devices(&[bt_device("5C:FB:7C:1A:2B:3C", "WH-1000XM4", false, true)]);
+
+        assert_eq!(panel.plan_bluetooth_forget(), ForgetPlan::Armed);
+        let parts = panel.overlay_parts();
+        assert!(parts.items[0].contains("d again to forget"));
+        assert!(parts.hint.contains("confirm forget"));
+
+        assert_eq!(
+            panel.plan_bluetooth_forget(),
+            ForgetPlan::Execute("5C:FB:7C:1A:2B:3C".to_string())
+        );
+        assert!(!panel.overlay_parts().items[0].contains("d again to forget"));
+    }
+
+    #[test]
+    fn the_connected_device_is_bonded_enough_to_forget() {
+        // Forgetting the device in use drops the bond and the connection
+        // with it — allowed, and the re-read shows both gone. Its action is
+        // `disconnect`, which is not `pair`, so the row arms.
+        let mut panel = SystemUiState::bluetooth_picker("");
+        panel.set_bluetooth_devices(&[bt_device("5C:FB:7C:1A:2B:3C", "WH-1000XM4", true, true)]);
+        assert_eq!(panel.plan_bluetooth_forget(), ForgetPlan::Armed);
+        assert_eq!(
+            panel.plan_bluetooth_forget(),
+            ForgetPlan::Execute("5C:FB:7C:1A:2B:3C".to_string())
+        );
+    }
+
+    #[test]
+    fn an_unpaired_device_has_nothing_to_forget() {
+        // A discovery row names no bond: `d` refuses rather than arming a
+        // removal whose beacon would be back on the next scan.
+        let mut panel = bluetooth_panel();
+        assert_eq!(panel.plan_bluetooth_forget(), ForgetPlan::Unavailable);
+        assert!(!panel.overlay_parts().items[0].contains("d again to forget"));
+        // And it never armed: a second press is the same refusal, not a
+        // delete.
+        assert_eq!(panel.plan_bluetooth_forget(), ForgetPlan::Unavailable);
+    }
+
+    #[test]
+    fn moving_off_an_armed_device_cancels_the_forget() {
+        let mut panel = SystemUiState::bluetooth_picker("");
+        panel.set_bluetooth_devices(&[
+            bt_device("5C:FB:7C:1A:2B:3C", "WH-1000XM4", false, true),
+            bt_device("7C:10:C9:AA:BB:CC", "Magic Keyboard", false, true),
+        ]);
+        assert_eq!(panel.plan_bluetooth_forget(), ForgetPlan::Armed);
+        panel.move_selection(1);
+        panel.move_selection(-1);
+
+        // Back on the same row, but disarmed: it must arm again, not remove.
+        assert!(!panel.overlay_parts().items[0].contains("d again to forget"));
+        assert_eq!(panel.plan_bluetooth_forget(), ForgetPlan::Armed);
     }
 
     #[test]
@@ -7097,6 +7481,7 @@ mod tests {
             clock: "15:42".into(),
             date: "Monday, 27 July 2026".into(),
             caps_lock: false,
+            now_playing: None,
             auth: AuthAttempt::Idle,
         };
 
@@ -7175,6 +7560,139 @@ mod tests {
         assert_eq!(parts.items[0], "\u{f017}  15:42");
         assert_eq!(parts.items[2], "Authentication failed");
         assert!(!SystemUiState::Inactive.set_lock_caps_lock(true));
+    }
+
+    /// A media state the lock-row tests share: playing, with both halves of
+    /// the position fraction the bridge polls.
+    fn now_playing_state() -> crate::jwm::features::MediaState {
+        crate::jwm::features::MediaState {
+            player: "spotify".into(),
+            identity: "Spotify".into(),
+            status: crate::jwm::features::PlaybackStatus::Playing,
+            title: "Blue in Green".into(),
+            artist: "Miles Davis".into(),
+            can_go_next: true,
+            can_go_previous: true,
+            position_us: Some(161_000_000),
+            length_us: Some(245_000_000),
+        }
+    }
+
+    #[test]
+    fn the_now_playing_row_trails_the_lock_rows_while_a_player_is_active() {
+        let mut state = SystemUiState::locked_at(lock_test_time());
+        assert!(state.set_lock_now_playing(Some(&now_playing_state())));
+        let parts = state.overlay_parts();
+        // Every interactive row keeps its pinned place…
+        assert_eq!(parts.items[0], "\u{f017}  15:42");
+        assert_eq!(parts.items[1], "Monday, 27 July 2026");
+        assert_eq!(parts.items[2], "Enter password to unlock");
+        assert_eq!(parts.items[3], "\u{f084}  Password  ");
+        // …and the media row comes last, in the control center's grammar
+        // minus the transport cluster: title, artist, the polled position.
+        assert_eq!(parts.items.len(), 5);
+        assert_eq!(
+            parts.items[4],
+            "\u{f001}  Blue in Green \u{2014} Miles Davis  2:41 / 4:05   \u{f04b}"
+        );
+        // A render-time snapshot draws the row too.
+        assert_eq!(state.clone().overlay_parts().items, parts.items);
+        // The caps row still glues itself to the password row, ahead of the
+        // media row.
+        assert!(state.set_lock_caps_lock(true));
+        let parts = state.overlay_parts();
+        assert_eq!(parts.items.len(), 6);
+        assert_eq!(parts.items[4], "\u{f11c}  Caps Lock is on");
+        assert_eq!(
+            parts.items[5],
+            "\u{f001}  Blue in Green \u{2014} Miles Davis  2:41 / 4:05   \u{f04b}"
+        );
+    }
+
+    #[test]
+    fn the_now_playing_row_mirrors_the_paused_shape_and_holds_its_position() {
+        let mut paused = now_playing_state();
+        paused.status = crate::jwm::features::PlaybackStatus::Paused;
+        let mut state = SystemUiState::locked_at(lock_test_time());
+        assert!(state.set_lock_now_playing(Some(&paused)));
+        let parts = state.overlay_parts();
+        // Paused shows exactly what the control center shows for paused: the
+        // same row with the pause icon, the position holding its last poll.
+        assert_eq!(
+            parts.items[4],
+            "\u{f001}  Blue in Green \u{2014} Miles Davis  2:41 / 4:05   \u{f04c}"
+        );
+        let control = crate::jwm::features::media::control_row(&paused);
+        let prefix = parts.items[4]
+            .strip_suffix('\u{f04c}')
+            .expect("the status icon trails the lock row");
+        assert!(
+            control.starts_with(prefix),
+            "the control row extends the lock row's text with its transport cluster: {control}"
+        );
+    }
+
+    #[test]
+    fn the_now_playing_row_repaints_only_when_what_it_shows_changes() {
+        let mut state = SystemUiState::locked_at(lock_test_time());
+        // No player: no row, and an absent push reports no change — a
+        // player-less lock screen stays byte-identical to before.
+        assert!(!state.set_lock_now_playing(None));
+        assert_eq!(state.overlay_parts().items.len(), 4);
+
+        let playing = now_playing_state();
+        assert!(state.set_lock_now_playing(Some(&playing)));
+        // The sweep re-pushing an unchanged state formats to the same row.
+        assert!(!state.set_lock_now_playing(Some(&playing)));
+        // Pausing changes the icon once; the frozen position then holds the
+        // row across every later sweep.
+        let mut paused = playing.clone();
+        paused.status = crate::jwm::features::PlaybackStatus::Paused;
+        assert!(state.set_lock_now_playing(Some(&paused)));
+        assert!(!state.set_lock_now_playing(Some(&paused)));
+        // A playing track's position advances every sweep, and the label
+        // changes with it: an honest repaint each time.
+        let mut later = playing.clone();
+        later.position_us = Some(164_000_000);
+        assert!(state.set_lock_now_playing(Some(&later)));
+        // Churn the row cannot show — the transport capabilities — is free.
+        let mut capabilities = later.clone();
+        capabilities.can_go_next = false;
+        assert!(!state.set_lock_now_playing(Some(&capabilities)));
+        // The player going away drops the row once; then nothing changes.
+        assert!(state.set_lock_now_playing(None));
+        assert_eq!(state.overlay_parts().items.len(), 4);
+        assert!(!state.set_lock_now_playing(None));
+        // Outside the lock the setter is inert.
+        assert!(!SystemUiState::Inactive.set_lock_now_playing(Some(&playing)));
+    }
+
+    #[test]
+    fn the_now_playing_row_leaves_the_password_and_status_rows_untouched() {
+        let mut state = SystemUiState::locked_at(lock_test_time());
+        for ch in "pw".chars() {
+            state.push_char(ch);
+        }
+        assert!(state.set_lock_now_playing(Some(&now_playing_state())));
+        let parts = state.overlay_parts();
+        assert_eq!(parts.items[2], "Enter password to unlock");
+        assert_eq!(parts.items[3], "\u{f084}  Password  **");
+        assert!(parts.items[4].starts_with('\u{f001}'));
+        // A failed attempt wipes the field and keeps the error row, exactly
+        // as without a player; the media row rides through both.
+        state.authentication_failed();
+        let parts = state.overlay_parts();
+        assert_eq!(parts.items[2], "Authentication failed");
+        assert_eq!(parts.items[3], "\u{f084}  Password  ");
+        assert!(parts.items[4].starts_with('\u{f001}'));
+        // Typing the next attempt clears the error, not the media row; and
+        // "Verifying…" takes the same status row with it undisturbed.
+        state.push_char('x');
+        state.authentication_started();
+        let parts = state.overlay_parts();
+        assert_eq!(parts.items[2], "Verifying\u{2026}");
+        assert_eq!(parts.items[3], "\u{f084}  Password  *");
+        assert!(parts.items[4].starts_with('\u{f001}'));
     }
 
     fn poll_until_settled(state: &mut SystemUiState) -> AuthPoll {

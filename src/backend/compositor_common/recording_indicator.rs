@@ -1,16 +1,21 @@
-//! Backend-neutral "recording in progress" chip.
+//! Backend-neutral "recording in progress" chips.
 //!
 //! A screen recording used to be discoverable only over IPC: nothing on
 //! screen answered "did it actually start?" or warned that every pixel is
-//! still being encoded. This chip is the persistent cue — a red dot and a
+//! still being encoded. The REC chip is the persistent cue — a red dot and a
 //! running clock parked in the bottom-right corner for as long as the capture
-//! pipeline reports itself active.
+//! pipeline reports itself active. The MIC chip is the same cue for
+//! standalone audio recording: the recorder lives WM-side, so the compositor
+//! cannot derive its state the way it derives the REC chip's — the WM pushes
+//! it, and the chip carries a static `MIC` label (no clock, one raster per
+//! state change, no frame pump). When both recordings run together the MIC
+//! chip parks directly above the REC chip so the two never overlap.
 //!
-//! Both compositors draw it *after* the frame's screenshot and recording
-//! readbacks (the same slot the interactive crop outline uses), so it is
-//! visible on the local output but can never leak into a PNG or the encoded
-//! video. Everything that is not GL — the label text and the chip geometry —
-//! lives here so the two compositors cannot drift.
+//! Both compositors draw the chips *after* the frame's screenshot and
+//! recording readbacks (the same slot the interactive crop outline uses), so
+//! they are visible on the local output but can never leak into a PNG or the
+//! encoded video. Everything that is not GL — the label text and the chip
+//! geometry — lives here so the two compositors cannot drift.
 
 use std::time::Duration;
 
@@ -24,6 +29,9 @@ pub(crate) const CHIP_PAD_Y: f32 = 7.0;
 pub(crate) const CHIP_DOT: f32 = 9.0;
 /// Space between the dot and the label.
 pub(crate) const CHIP_DOT_GAP: f32 = 8.0;
+/// Vertical gap between the two recording cues when screen and standalone
+/// audio recording share the bottom-right corner.
+pub(crate) const CHIP_STACK_GAP: f32 = 10.0;
 
 /// The recording red the interactive crop outline already draws with
 /// (`render_recording_region_overlay`), so both recording cues read as one
@@ -99,6 +107,45 @@ pub(crate) fn recording_indicator_layout(
             text_h,
         ],
     }
+}
+
+/// The standalone-audio-recording chip's label: `MIC` while the WM-side
+/// recorder runs, `None` otherwise — the renderer draws nothing and frees
+/// the label texture.
+///
+/// The label is deliberately static. The REC chip re-rasterizes because its
+/// `m:ss` clock flips the shown second; a fixed label rasterizes once per
+/// state change and needs no frame pump, so this function takes no elapsed
+/// time by construction.
+pub(crate) fn mic_indicator_label(active: bool) -> Option<&'static str> {
+    active.then_some("MIC")
+}
+
+/// Lay the MIC chip out for a rasterized label of `text_w` × `text_h`. The
+/// chip takes the REC slot — bottom-right, `CHIP_MARGIN` from the corner —
+/// when the corner is free, and parks directly above the REC chip (same
+/// right margin, `CHIP_STACK_GAP` between the pills) when both recordings
+/// run together: `rec_chip_h` is the height the REC chip drew this frame,
+/// `None` when it is not up. The REC chip's own slot never moves.
+pub(crate) fn mic_indicator_layout(
+    screen_w: f32,
+    screen_h: f32,
+    text_w: f32,
+    text_h: f32,
+    rec_chip_h: Option<f32>,
+) -> RecordingIndicatorLayout {
+    let mut layout = recording_indicator_layout(screen_w, screen_h, text_w, text_h);
+    if let Some(rec_chip_h) = rec_chip_h {
+        // A screen too short to hold both chips pins the MIC chip to the top
+        // edge rather than pushing it off-screen: the cue staying visible
+        // matters more than the degenerate-case overlap, the same honesty
+        // as the REC chip's origin clamp.
+        let lift = (rec_chip_h + CHIP_STACK_GAP).min(layout.chip[1]);
+        layout.chip[1] -= lift;
+        layout.dot[1] -= lift;
+        layout.text[1] -= lift;
+    }
+    layout
 }
 
 #[cfg(test)]
@@ -178,5 +225,49 @@ mod tests {
         let tiny = recording_indicator_layout(10.0, 8.0, 60.0, 19.0);
         assert_eq!(tiny.chip[0], 0.0);
         assert_eq!(tiny.chip[1], 0.0);
+    }
+
+    #[test]
+    fn the_mic_label_is_static() {
+        // No recording, no chip — the same transition rule as the REC chip.
+        assert_eq!(mic_indicator_label(false), None);
+        // The label never carries a clock: one raster per state change, and
+        // nothing ever repumps frames for the digits.
+        assert_eq!(mic_indicator_label(true), Some("MIC"));
+    }
+
+    #[test]
+    fn the_mic_chip_takes_the_rec_slot_when_the_corner_is_free() {
+        // Standalone audio recording alone: the chip sits exactly where the
+        // REC chip would, byte for byte.
+        let mic = mic_indicator_layout(1920.0, 1080.0, 48.0, 19.0, None);
+        assert_eq!(mic, recording_indicator_layout(1920.0, 1080.0, 48.0, 19.0));
+    }
+
+    #[test]
+    fn the_mic_chip_stacks_above_the_rec_chip_without_overlapping() {
+        let rec = recording_indicator_layout(1920.0, 1080.0, 60.0, 19.0);
+        let mic = mic_indicator_layout(1920.0, 1080.0, 48.0, 19.0, Some(rec.chip[3]));
+
+        // Same right margin, `CHIP_STACK_GAP` between the pills, and the REC
+        // chip's slot is whatever it would have been on its own.
+        assert_eq!(mic.chip[0] + mic.chip[2] + CHIP_MARGIN, 1920.0);
+        assert_eq!(mic.chip[1] + mic.chip[3] + CHIP_STACK_GAP, rec.chip[1]);
+        // Dot and label ride the same lift, so their centers stay inside.
+        let chip_mid = mic.chip[1] + mic.chip[3] / 2.0;
+        assert!((mic.dot[1] + mic.dot[3] / 2.0 - chip_mid).abs() < 1e-4);
+        assert!((mic.text[1] + mic.text[3] / 2.0 - chip_mid).abs() < 1e-4);
+        // No overlap on any screen tall enough to hold both chips.
+        assert!(mic.chip[1] + mic.chip[3] <= rec.chip[1]);
+    }
+
+    #[test]
+    fn the_mic_chip_never_leaves_the_screen_on_degenerate_displays() {
+        let rec = recording_indicator_layout(200.0, 70.0, 60.0, 19.0);
+        let mic = mic_indicator_layout(200.0, 70.0, 48.0, 19.0, Some(rec.chip[3]));
+        // Too short for both pills plus the gap: the MIC chip pins to the
+        // top edge (fully visible) instead of sliding off-screen.
+        assert_eq!(mic.chip[1], 0.0);
+        assert_eq!(mic.dot[1], (mic.chip[3] - CHIP_DOT) / 2.0);
     }
 }

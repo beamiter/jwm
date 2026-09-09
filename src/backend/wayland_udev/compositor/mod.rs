@@ -1586,6 +1586,13 @@ pub(crate) struct WaylandCompositor {
     /// only when the shown second flips. Drawn after the recording readback so
     /// it never lands in the encoded video.
     recording_indicator_texture: Option<(String, u32, u32, u32)>,
+    /// Standalone audio recording in progress, pushed by the WM (the recorder
+    /// lives there, so unlike the REC chip this cannot be derived from the
+    /// compositor's own pipeline). Drawn in the same post-delivery slot.
+    mic_indicator_active: bool,
+    /// Cached MIC-chip label texture keyed by its text (always "MIC"): the
+    /// static label rasterizes once per chip appearance, never per frame.
+    mic_indicator_texture: Option<(String, u32, u32, u32)>,
     /// Toast ids evicted outside the render pass; their textures are freed
     /// on the next frame while a GL context is current.
     toast_retired: Vec<u64>,
@@ -2984,6 +2991,8 @@ impl WaylandCompositor {
                 osd_slot: Default::default(),
                 osd_texture: None,
                 recording_indicator_texture: None,
+                mic_indicator_active: false,
+                mic_indicator_texture: None,
                 hud_text_cache: String::new(),
                 system_ui: None,
                 system_ui_island: Default::default(),
@@ -3220,6 +3229,11 @@ impl WaylandCompositor {
                 gl.DeleteTextures(1, &texture);
             }
             if let Some((_, texture, _, _)) = self.recording_indicator_texture.take()
+                && texture != 0
+            {
+                gl.DeleteTextures(1, &texture);
+            }
+            if let Some((_, texture, _, _)) = self.mic_indicator_texture.take()
                 && texture != 0
             {
                 gl.DeleteTextures(1, &texture);
@@ -3518,6 +3532,41 @@ mod toast_frame_scheduling_tests {
             "the deadline must be named and joined with the others"
         );
     }
+
+    #[test]
+    fn a_due_osd_boundary_runs_an_update_on_a_static_desktop() {
+        // Same contract as the toast's: the udev loop only runs
+        // `handler.update` — and therefore any render — when
+        // `needs_render()` answers true, so the OSD envelope boundary
+        // `next_wakeup` sleeps until must also be reported here.
+        let source = include_str!("mod.rs");
+        let body = compact_item(source, &format!("pub(crate) fn {}(", "needs_render"));
+        assert!(
+            body.contains(&format!("self.{}.needs_frames(", "osd_slot")),
+            "an OSD owed a frame must gate handler.update like a due capture"
+        );
+    }
+
+    #[test]
+    fn the_loop_sleeps_until_the_osd_envelope_boundary() {
+        // The OSD's 1400 ms settled hold is the long pole this mechanism
+        // exists for: without the join the fade-out would start whenever
+        // some unrelated event happened to render, not 1400 ms after the
+        // last repeat.
+        let source = include_str!("mod.rs");
+        let body = compact_item(source, &format!("pub(crate) fn {}(", "next_wakeup"));
+        assert!(
+            body.contains(&format!(
+                "self.{}.{}(",
+                "osd_slot", "next_envelope_change_at"
+            )),
+            "the OSD envelope boundary must join the wakeup set"
+        );
+        assert!(
+            body.contains("osd_boundary"),
+            "the deadline must be named and joined with the others"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -3590,6 +3639,7 @@ mod gpu_release_contract_tests {
         "toast_textures",
         "osd_texture",
         "recording_indicator_texture",
+        "mic_indicator_texture",
         "wallpaper_texture",
         "old_wallpaper_texture",
         "monitor_wallpapers",
@@ -3650,6 +3700,17 @@ mod gpu_release_contract_tests {
         }
         assert!(compact_release.contains("self.glass_backdrop=None"));
         assert!(!compact_release.contains("delete_texture_name(gl,&mutself.glass_backdrop"));
+    }
+
+    /// The MIC chip's label texture is a raw GLES owner with the REC chip's
+    /// exact discipline: manifested here, drained in `release_gpu_resources`
+    /// (enforced by the teardown test above).
+    #[test]
+    fn the_mic_indicator_texture_is_a_manifested_raw_gpu_owner() {
+        assert!(
+            RAW_GPU_OWNER_FIELDS.contains(&"mic_indicator_texture"),
+            "the MIC label texture must be registered in the raw GPU owner manifest"
+        );
     }
 
     #[test]
@@ -4119,6 +4180,11 @@ impl WaylandCompositor {
             // replacement arrive as pointer/push events that set the flag
             // itself, so they never depend on this term.
             || self.toast_stack.needs_frames(Instant::now())
+            // The OSD holds the same way (1400 ms, then a 250 ms fade): a
+            // boundary owes its frame here too, and every show/refresh — a
+            // held volume key's repeats included — arrives as an input
+            // event that sets the flag itself.
+            || self.osd_slot.needs_frames(Instant::now())
             // Start and stop both run inside render_frame, where the GL context
             // is current. Without this a stop requested after the encoder pipe
             // broke — which clears the active flag, and with it `frame_due` —
@@ -4162,7 +4228,13 @@ impl WaylandCompositor {
             .toast_stack
             .next_envelope_change_at(Instant::now())
             .map(|at| at.saturating_duration_since(Instant::now()));
-        [recording, preview_lease, toast_boundary]
+        // The OSD's 1400 ms hold works the same way: its boundary is the
+        // wakeup, so the hold composites nothing either.
+        let osd_boundary = self
+            .osd_slot
+            .next_envelope_change_at(Instant::now())
+            .map(|at| at.saturating_duration_since(Instant::now()));
+        [recording, preview_lease, toast_boundary, osd_boundary]
             .into_iter()
             .flatten()
             .min()
@@ -4270,6 +4342,20 @@ impl WaylandCompositor {
             || self.pending_recording_start.is_some()
             || self.pending_recording_stop
             || self.recording_region_overlay.is_some()
+    }
+
+    /// The standalone-audio-recording cue, pushed by the WM: the recorder
+    /// lives WM-side, so unlike the REC chip this state cannot be derived
+    /// from the compositor's own capture pipeline. The static `MIC` label
+    /// rasterizes once per chip appearance — the flag flip below requests
+    /// the only frame the chip ever needs.
+    pub(crate) fn set_mic_indicator(&mut self, active: bool) {
+        if self.mic_indicator_active == active {
+            return;
+        }
+        self.mic_indicator_active = active;
+        self.needs_render = true;
+        self.force_full_damage_next = true;
     }
 
     fn clamp_recording_region(&self, region: (i32, i32, u32, u32)) -> (i32, i32, u32, u32) {

@@ -2775,12 +2775,39 @@ pub trait CompositorMedia: Send {
         None
     }
 
+    /// Standalone-audio-recording cue: show (`true`) or hide (`false`) the
+    /// persistent MIC chip. The REC chip derives from the compositor's own
+    /// capture pipeline, but the microphone recorder lives WM-side, so the
+    /// WM pushes the state here — set only once the recorder actually
+    /// started, cleared on stop whether or not finalizing the file
+    /// succeeded. The no-op default (the `compositor_push_toast` precedent)
+    /// keeps test mocks and the panel-less nested backends unchanged.
+    fn compositor_set_mic_indicator(&mut self, _active: bool) {}
+
     fn compositor_notify_audio_timing(
         &mut self,
         _window: WindowId,
         _fps: f32,
         _buffer_latency_ms: u32,
     ) {
+    }
+}
+
+#[cfg(test)]
+mod mic_indicator_api_tests {
+    use super::CompositorMedia;
+
+    /// The MIC chip's trait method ships with a no-op default (the
+    /// `compositor_push_toast` precedent), so the many test mocks and the
+    /// nested backends — which have no shell panels and therefore no chip —
+    /// compile and run without an arm.
+    #[test]
+    fn the_mic_indicator_defaults_to_a_no_op() {
+        struct Stub;
+        impl CompositorMedia for Stub {}
+        let mut stub = Stub;
+        stub.compositor_set_mic_indicator(true);
+        stub.compositor_set_mic_indicator(false);
     }
 }
 

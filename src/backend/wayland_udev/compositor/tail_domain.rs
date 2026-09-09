@@ -42,7 +42,7 @@ pub(crate) enum TailOverlayStage {
     LinearTarget,
     /// Drawn into the encoded output target after the delivery point (debug
     /// HUD, annotation, screenshot toolbar, toasts, OSD, system UI, recording
-    /// crop outline and its REC chip). Migrating such a class additionally
+    /// crop outline and its REC/MIC chips). Migrating such a class additionally
     /// requires moving its draw ahead of the delivery point, so these stay
     /// encoded-only for now.
     PostDelivery,
@@ -96,8 +96,8 @@ pub(crate) enum TailOverlayClass {
     Osd,
     /// Modal system UI (launcher, lock shield, prompts, ...).
     SystemUi,
-    /// Recording crop outline and the REC chip, deliberately kept out of the
-    /// encoded stream.
+    /// Recording crop outline and the REC/MIC chips, deliberately kept out of
+    /// the encoded stream.
     RecordingRegionOverlay,
 }
 
@@ -341,7 +341,12 @@ impl WaylandCompositor {
             osd: !self.osd_slot.is_empty(),
             system_ui: self.system_ui.is_some(),
             recording_region_overlay: self.recording_region_overlay.is_some()
-                || self.recording.is_active(),
+                || self.recording.is_active()
+                // The MIC chip draws in the same post-delivery slot, so while
+                // standalone audio recording runs the frame takes the
+                // exact-sRGB fallback too (the round-13 REC-chip extension;
+                // same side effect as a visible toast).
+                || self.mic_indicator_active,
         }
     }
 
@@ -526,5 +531,35 @@ mod tests {
             overlay_blockers: tail_overlay_blockers(&visibility_with(TailOverlayClass::Expose)),
         };
         assert!(status.linear_tail_safe());
+    }
+
+    /// The MIC chip draws in the recording overlay's post-delivery slot, so
+    /// the linear-tail blocker predicate must extend to it exactly the way
+    /// round 13 extended it to `recording.is_active()` — otherwise the chip
+    /// would be invisible on the deferred/HDR routes. Side effect, recorded:
+    /// standalone audio recording holds the exact-sRGB fallback route while
+    /// the chip is up, the same treatment a visible toast gets.
+    #[test]
+    fn the_mic_indicator_extends_the_recording_overlay_blocker_predicate() {
+        const SOURCE: &str = include_str!("tail_domain.rs");
+        let visibility = SOURCE
+            .split_once("fn tail_overlay_visibility(&self)")
+            .expect("tail_overlay_visibility")
+            .1
+            .split_once("fn linear_tail_status(&self)")
+            .expect("linear_tail_status follows tail_overlay_visibility")
+            .0;
+        let predicate = visibility
+            .split_once(&format!("{}: self.", "recording_region_overlay"))
+            .expect("the recording overlay predicate")
+            .1;
+        assert!(
+            predicate.contains(&format!("self.{}.is_active()", "recording")),
+            "the REC chip's own arm must remain"
+        );
+        assert!(
+            predicate.contains(&format!("self.{}", "mic_indicator_active")),
+            "the MIC chip must hold the exact-sRGB fallback while it is up"
+        );
     }
 }

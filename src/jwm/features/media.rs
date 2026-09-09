@@ -258,6 +258,22 @@ fn clip_row_label_within(label: &str, max_chars: usize) -> String {
     out
 }
 
+/// The text both now-playing rows share: the track label clipped to the
+/// budget the position suffix leaves behind, and the suffix itself, so the
+/// control center and the lock screen can never format the same state
+/// differently.
+fn row_text(state: &MediaState) -> (String, String) {
+    let position = state
+        .position_label()
+        .map(|label| format!("  {label}"))
+        .unwrap_or_default();
+    let label = clip_row_label_within(
+        &state.track_label(),
+        MAX_ROW_CHARS.saturating_sub(position.chars().count()),
+    );
+    (label, position)
+}
+
 /// The control-center row: status icon, track, and which transport controls
 /// the player says it supports. When the player reports both a position and
 /// a length, the row carries them as `2:41 / 4:05` after the track label.
@@ -273,16 +289,25 @@ pub fn control_row(state: &MediaState) -> String {
     } else {
         " "
     };
-    let position = state
-        .position_label()
-        .map(|label| format!("  {label}"))
-        .unwrap_or_default();
-    let label = clip_row_label_within(
-        &state.track_label(),
-        MAX_ROW_CHARS.saturating_sub(position.chars().count()),
-    );
+    let (label, position) = row_text(state);
     format!(
         "{}  {label}{position}   {previous} {} {next}",
+        "\u{f001}", // fa-music
+        state.status.icon(),
+    )
+}
+
+/// The lock screen's now-playing row: the control-center row minus its
+/// transport cluster. The lock reveals only what the session's own control
+/// center already shows — title, artist, position — and never controls (the
+/// transport keys already work while locked; they need no on-screen cluster).
+/// The status icon keeps its trailing place, so a paused player reads paused
+/// exactly as it does in the control center.
+#[must_use]
+pub fn lock_row(state: &MediaState) -> String {
+    let (label, position) = row_text(state);
+    format!(
+        "{}  {label}{position}   {}",
         "\u{f001}", // fa-music
         state.status.icon(),
     )
@@ -322,6 +347,19 @@ impl crate::jwm::Jwm {
             backend.compositor_show_media_osd(&current.osd_label());
         }
         self.refresh_open_control_center();
+        // The lock screen mirrors the now-playing row while it is up, with
+        // the lock clock's discipline: the bridge re-pushes this state on
+        // every sweep, so the setter reports only a change to what the row
+        // shows, and only then is the overlay re-synced. A paused player's
+        // sweeps format to the same row and cost one comparison; an
+        // unlocked session returns before even that.
+        if self
+            .features
+            .system_ui
+            .set_lock_now_playing(self.features.media.get())
+        {
+            self.sync_system_ui(backend);
+        }
         self.broadcast_ipc_event("media/status", payload);
     }
 
@@ -741,5 +779,225 @@ mod tests {
         let current = status.get().unwrap();
         assert_eq!(current.position_us, None);
         assert_eq!(current.position_label(), None);
+    }
+
+    #[test]
+    fn the_lock_row_is_the_control_row_minus_its_transport_cluster() {
+        let mut timed = state("Blue in Green", "Miles Davis");
+        timed.position_us = Some(161_000_000);
+        timed.length_us = Some(245_000_000);
+        let row = lock_row(&timed);
+        assert_eq!(
+            row,
+            "\u{f001}  Blue in Green \u{2014} Miles Davis  2:41 / 4:05   \u{f04b}"
+        );
+        // No transport glyphs: the lock screen shows what is playing, never
+        // the controls.
+        assert!(!row.contains('\u{f048}'));
+        assert!(!row.contains('\u{f051}'));
+        // The grammar is shared, not paraphrased: the control row extends
+        // the lock row's text with its cluster.
+        let prefix = row.strip_suffix('\u{f04b}').expect("status icon trails");
+        assert!(control_row(&timed).starts_with(prefix));
+
+        // Paused reads exactly as the control center's paused does; the
+        // position holds its last poll.
+        let mut paused = timed.clone();
+        paused.status = PlaybackStatus::Paused;
+        assert_eq!(
+            lock_row(&paused),
+            "\u{f001}  Blue in Green \u{2014} Miles Davis  2:41 / 4:05   \u{f04c}"
+        );
+
+        // Nothing reported, nothing shown — no suffix, no placeholder.
+        assert_eq!(
+            lock_row(&state("Track", "Artist")),
+            "\u{f001}  Track \u{2014} Artist   \u{f04b}"
+        );
+    }
+
+    #[test]
+    fn the_lock_row_clips_the_label_and_keeps_the_suffix() {
+        let mut wordy = state(&"x".repeat(MAX_ROW_CHARS + 10), "");
+        wordy.position_us = Some(161_000_000);
+        wordy.length_us = Some(245_000_000);
+        let row = lock_row(&wordy);
+        assert!(row.contains('\u{2026}'), "the label still clips");
+        assert!(row.contains("2:41 / 4:05"), "the suffix is never clipped");
+        assert!(row.ends_with('\u{f04b}'), "the status icon survives");
+    }
+
+    /// A backend built from the shared dummy ops, counting the WM's
+    /// system-UI pushes and keeping the last overlay, so the lock screen's
+    /// re-sync discipline can be asserted.
+    struct SystemUiSpyBackend {
+        window_ops: crate::backend::wayland_dummy_ops::DummyWindowOps,
+        input_ops: crate::backend::wayland_dummy_ops::DummyInputOps,
+        property_ops: crate::backend::wayland_dummy_ops::DummyPropertyOps,
+        output_ops: crate::backend::wayland_dummy_ops::DummyOutputOps,
+        key_ops: crate::backend::wayland_dummy_ops::DummyKeyOps,
+        cursor_provider: crate::backend::wayland_dummy_ops::DummyCursorProvider,
+        color_allocator: crate::backend::wayland_dummy_ops::DummyColorAllocator,
+        overlay_pushes: usize,
+        last_overlay: Option<crate::backend::api::SystemUiOverlay>,
+    }
+
+    impl SystemUiSpyBackend {
+        fn new() -> Self {
+            Self {
+                window_ops: crate::backend::wayland_dummy_ops::DummyWindowOps,
+                input_ops: crate::backend::wayland_dummy_ops::DummyInputOps,
+                property_ops: crate::backend::wayland_dummy_ops::DummyPropertyOps,
+                output_ops: crate::backend::wayland_dummy_ops::DummyOutputOps,
+                key_ops: crate::backend::wayland_dummy_ops::DummyKeyOps,
+                cursor_provider: crate::backend::wayland_dummy_ops::DummyCursorProvider,
+                color_allocator: crate::backend::wayland_dummy_ops::DummyColorAllocator,
+                overlay_pushes: 0,
+                last_overlay: None,
+            }
+        }
+    }
+
+    impl crate::backend::api::CompositorBenchmark for SystemUiSpyBackend {}
+    impl crate::backend::api::BackendDiagnostics for SystemUiSpyBackend {}
+    impl crate::backend::api::CompositorControl for SystemUiSpyBackend {}
+    impl crate::backend::api::CompositorMedia for SystemUiSpyBackend {}
+    impl crate::backend::api::CompositorWorkspaceEffects for SystemUiSpyBackend {
+        fn compositor_set_system_ui(
+            &mut self,
+            overlay: Option<crate::backend::api::SystemUiOverlay>,
+        ) {
+            self.overlay_pushes += 1;
+            self.last_overlay = overlay;
+        }
+    }
+    impl crate::backend::api::CompositorWindowEffects for SystemUiSpyBackend {}
+    impl crate::backend::api::CompositorAnnotation for SystemUiSpyBackend {}
+    impl crate::backend::api::DisplayControl for SystemUiSpyBackend {}
+    impl crate::backend::api::RenderScheduler for SystemUiSpyBackend {}
+
+    impl crate::backend::api::Backend for SystemUiSpyBackend {
+        fn capabilities(&self) -> crate::backend::api::Capabilities {
+            crate::backend::api::Capabilities::default()
+        }
+
+        fn root_window(&self) -> Option<crate::backend::common_define::WindowId> {
+            Some(crate::backend::common_define::WindowId::from_raw(0))
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+
+        fn check_existing_wm(&self) -> Result<(), crate::backend::error::BackendError> {
+            Ok(())
+        }
+
+        fn window_ops(&self) -> &dyn crate::backend::api::WindowOps {
+            &self.window_ops
+        }
+
+        fn input_ops(&self) -> &dyn crate::backend::api::InputOps {
+            &self.input_ops
+        }
+
+        fn property_ops(&self) -> &dyn crate::backend::api::PropertyOps {
+            &self.property_ops
+        }
+
+        fn output_ops(&self) -> &dyn crate::backend::api::OutputOps {
+            &self.output_ops
+        }
+
+        fn key_ops(&self) -> &dyn crate::backend::api::KeyOps {
+            &self.key_ops
+        }
+
+        fn key_ops_mut(&mut self) -> &mut dyn crate::backend::api::KeyOps {
+            &mut self.key_ops
+        }
+
+        fn cursor_provider(&mut self) -> &mut dyn crate::backend::api::CursorProvider {
+            &mut self.cursor_provider
+        }
+
+        fn color_allocator(&mut self) -> &mut dyn crate::backend::api::ColorAllocator {
+            &mut self.color_allocator
+        }
+
+        fn run(
+            &mut self,
+            _handler: &mut dyn crate::backend::api::EventHandler,
+        ) -> Result<(), crate::backend::error::BackendError> {
+            Ok(())
+        }
+    }
+
+    fn playing_at(position_secs: i64) -> MediaState {
+        MediaState {
+            status: PlaybackStatus::Playing,
+            position_us: Some(position_secs * 1_000_000),
+            length_us: Some(245_000_000),
+            ..state("Blue in Green", "Miles Davis")
+        }
+    }
+
+    #[test]
+    fn the_lock_screen_resyncs_only_when_the_pushed_row_changes() {
+        let mut backend = SystemUiSpyBackend::new();
+        let mut jwm = crate::Jwm::new_with_runtime_backend(&mut backend, "test").expect("test jwm");
+
+        // Unlocked: a push updates the state but syncs no lock overlay.
+        jwm.set_media_status(&mut backend, Some(playing_at(161)));
+        assert_eq!(backend.overlay_pushes, 0);
+
+        // Lock the screen; the next push is the first one the lock sees, and
+        // the row appears with it.
+        jwm.features.system_ui = crate::jwm::features::SystemUiState::lock();
+        jwm.set_media_status(&mut backend, Some(playing_at(161)));
+        assert_eq!(backend.overlay_pushes, 1);
+        let overlay = backend.last_overlay.as_ref().expect("a locked overlay");
+        assert!(overlay.locked);
+        assert_eq!(
+            overlay.items.last().map(String::as_str),
+            Some("\u{f001}  Blue in Green \u{2014} Miles Davis  2:41 / 4:05   \u{f04b}")
+        );
+
+        // The sweep re-pushing an unchanged state costs no re-sync.
+        jwm.set_media_status(&mut backend, Some(playing_at(161)));
+        assert_eq!(backend.overlay_pushes, 1);
+        // Pausing changes the icon once; a paused track's frozen position
+        // then holds the row across every later sweep.
+        let mut paused = playing_at(161);
+        paused.status = PlaybackStatus::Paused;
+        jwm.set_media_status(&mut backend, Some(paused.clone()));
+        assert_eq!(backend.overlay_pushes, 2);
+        jwm.set_media_status(&mut backend, Some(paused));
+        assert_eq!(backend.overlay_pushes, 2);
+        // A playing track's position advances every sweep, and the label
+        // changes with it: an honest repaint each time.
+        jwm.set_media_status(&mut backend, Some(playing_at(164)));
+        assert_eq!(backend.overlay_pushes, 3);
+        let overlay = backend.last_overlay.as_ref().expect("a locked overlay");
+        assert!(
+            overlay
+                .items
+                .last()
+                .is_some_and(|row| row.contains("2:44 / 4:05"))
+        );
+
+        // The player going away drops the row in one re-sync.
+        jwm.set_media_status(&mut backend, None);
+        assert_eq!(backend.overlay_pushes, 4);
+        let overlay = backend.last_overlay.as_ref().expect("a locked overlay");
+        assert!(!overlay.items.iter().any(|row| row.contains('\u{f001}')));
+        jwm.set_media_status(&mut backend, None);
+        assert_eq!(backend.overlay_pushes, 4);
+
+        // After the unlock the pushes are free again: the row lived inside
+        // the lock state, so nothing extra needed clearing.
+        jwm.features.system_ui = crate::jwm::features::SystemUiState::Inactive;
+        jwm.set_media_status(&mut backend, Some(playing_at(167)));
+        assert_eq!(backend.overlay_pushes, 4);
     }
 }

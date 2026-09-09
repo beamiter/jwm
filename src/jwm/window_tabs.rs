@@ -376,6 +376,9 @@ mod tests {
         (0..n).map(|_| sm.insert(())).collect()
     }
 
+    // Unit tests always start from the built-in default configuration: the
+    // `CONFIG` static's initializer is cfg(test)-gated (src/config.rs), so
+    // the host's real user config can no longer leak in here.
     fn empty_jwm() -> Jwm {
         Jwm {
             state: WMState::new(),

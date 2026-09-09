@@ -1910,6 +1910,19 @@ impl<C: CompositorConnection> Compositor<C> {
         self.force_full_redraw();
     }
 
+    /// The standalone-audio-recording cue, pushed by the WM: the recorder
+    /// lives WM-side, so unlike the REC chip this state cannot be derived
+    /// from the compositor's own capture pipeline. The static `MIC` label
+    /// rasterizes once per chip appearance — the flag flip below requests
+    /// the only frame the chip ever needs.
+    pub(crate) fn set_mic_indicator(&mut self, active: bool) {
+        if self.mic_indicator_active == active {
+            return;
+        }
+        self.mic_indicator_active = active;
+        self.force_full_redraw();
+    }
+
     pub(crate) fn stop_recording(&mut self) {
         // `capture_recording_frame` clears recording_active when the ffmpeg
         // pipe breaks.  The child and PBOs still need cleanup in that case;

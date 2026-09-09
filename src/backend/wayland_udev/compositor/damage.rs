@@ -291,8 +291,12 @@ impl WaylandCompositor {
         if self.toast_stack.needs_frames(std::time::Instant::now()) {
             return true;
         }
-        // Same for the volume/brightness OSD card.
-        if !self.osd_slot.is_empty() {
+        // Same for the volume/brightness OSD card: the fade-in, the
+        // fade-out, the open/morph spring, and a card owed its pruning
+        // frame ask for frames here; a settled hold is silent and gets its
+        // fade-out's first frame from `next_wakeup`, which carries the
+        // envelope boundary to the loop.
+        if self.osd_slot.needs_frames(std::time::Instant::now()) {
             return true;
         }
         // A rotating gradient border needs continuous frames while any
@@ -656,5 +660,73 @@ mod tests {
             hover[paused_at..].contains(&format!("self.{} = true", "needs_render")),
             "a hover change must arm a frame for the paused card"
         );
+    }
+
+    #[test]
+    fn a_settled_osd_hold_does_not_arm_the_animation_pump() {
+        // The OSD rides the toast's mechanism: the envelope moves for
+        // 120 ms into and 250 ms out of a 1400 ms hold, and the open/morph
+        // spring settles inside that, so `has_active_animations` must ask
+        // the slot whether frames are owed rather than whether a card
+        // exists — a visible but settled hold used to composite full frames
+        // at display cadence for its whole hold. The fade-out's first frame
+        // is scheduled through `next_wakeup`, not through this pump.
+        let source = include_str!("damage.rs");
+        let body = body_of(
+            source,
+            &format!("pub(crate) fn {}(", "has_active_animations"),
+        );
+        let frames = format!("self.{}.needs_frames(", "osd_slot");
+        let any_card = format!("!self.{}.is_empty()", "osd_slot");
+        assert!(
+            body.contains(&frames),
+            "the OSD term must ask the slot whether frames are owed"
+        );
+        assert!(
+            !body.contains(&any_card),
+            "a visible-but-settled hold must not arm the pump"
+        );
+    }
+
+    #[test]
+    fn a_settled_osd_still_blocks_direct_scanout() {
+        // Narrowing the pump must not narrow the scanout exclusion: a
+        // settled card is not animating, but its pixels still live only in
+        // the composited overlay, so a fullscreen client below it can never
+        // take over the CRTC while it shows.
+        let source = include_str!("damage.rs");
+        let body = body_of(
+            source,
+            &format!("pub(crate) fn {}(", "direct_scanout_block_reason"),
+        );
+        let any_card = format!("!self.{}.is_empty()", "osd_slot");
+        assert!(
+            body.contains(&any_card),
+            "any visible card — settled or not — must keep blocking scanout"
+        );
+    }
+
+    #[test]
+    fn osd_show_events_make_their_own_frames() {
+        // This is why the pump needs no show/refresh term: every OSD
+        // change — a volume key repeat held down, a brightness step, a
+        // media track change — arrives through one of these setters, and
+        // each arms a frame from the event itself, so the envelope
+        // boundaries are the only clock-driven transitions the loop has to
+        // schedule. The card has no pointer interaction to pause on.
+        let source = include_str!("config.rs");
+        for (needle, what) in [
+            (format!("pub(crate) fn {}(", "show_osd"), "a value card"),
+            (
+                format!("pub(crate) fn {}(", "show_media_osd"),
+                "a media card",
+            ),
+        ] {
+            let body = body_of(source, &needle);
+            assert!(
+                body.contains(&format!("self.{} = true", "needs_render")),
+                "{what} must arm its own frame"
+            );
+        }
     }
 }

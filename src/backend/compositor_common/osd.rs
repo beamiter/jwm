@@ -2,8 +2,11 @@
 //!
 //! One card, replace-in-place: a new event restarts the hold timer instead of
 //! stacking (macOS / DMS / Noctalia behavior). Everything that is not GL —
-//! the hold+fade envelope and the display strings — lives here so the two
-//! compositors cannot drift.
+//! the hold+fade envelope, the display strings, and the frame-scheduling
+//! queries the compositors pace themselves with — lives here so the two
+//! compositors cannot drift. A settled hold draws nothing until its next
+//! envelope boundary; only the fades, the open/morph spring, and the final
+//! pruning frame ask for compositor frames.
 
 use crate::backend::api::OsdKind;
 use crate::backend::compositor_common::dynamic_island::IslandMotion;
@@ -60,6 +63,43 @@ impl ActiveOsd {
     fn expired(&self, now: Instant) -> bool {
         now.saturating_duration_since(self.refreshed).as_secs_f32()
             >= OSD_HOLD.as_secs_f32() + OSD_FADE_OUT
+    }
+
+    /// Whether the card's on-screen state is moving at `now`: inside the
+    /// fade-in or the fade-out. A settled hold reads false — its next change
+    /// is a scheduled boundary ([`Self::next_envelope_change_at`]), not a
+    /// running curve.
+    pub(crate) fn envelope_active(&self, now: Instant) -> bool {
+        if now.saturating_duration_since(self.appeared).as_secs_f32() < OSD_FADE_IN {
+            return true;
+        }
+        let since_refresh = now.saturating_duration_since(self.refreshed).as_secs_f32();
+        let hold = OSD_HOLD.as_secs_f32();
+        since_refresh >= hold && since_refresh < hold + OSD_FADE_OUT
+    }
+
+    /// Whether the compositor owes this card frames right now: the envelope
+    /// is moving, or the card reached its end and is owed the frame that
+    /// prunes it and erases its pixels.
+    pub(crate) fn needs_frames(&self, now: Instant) -> bool {
+        self.envelope_active(now) || self.expired(now)
+    }
+
+    /// The next instant the card's on-screen state changes without further
+    /// input: the fade-in completing, the hold ending and the fade-out
+    /// beginning, or the card expiring. Unlike a toast the card has no
+    /// pointer interaction — it is a transient value display with nothing to
+    /// hover or click — so there is no frozen state that could answer `None`
+    /// while the card lives; past the expiry nothing is scheduled because
+    /// [`Self::needs_frames`] already reports the owed pruning frame.
+    pub(crate) fn next_envelope_change_at(&self, now: Instant) -> Option<Instant> {
+        let fade_in_end = self.appeared + Duration::from_secs_f32(OSD_FADE_IN);
+        let fade_out_start = self.refreshed + OSD_HOLD;
+        let expiry = self.refreshed + OSD_HOLD + Duration::from_secs_f32(OSD_FADE_OUT);
+        [fade_in_end, fade_out_start, expiry]
+            .into_iter()
+            .filter(|&at| at > now)
+            .min()
     }
 
     /// Icon glyph + label text the renderer shows, e.g. `("\u{f028}", "45%")`.
@@ -209,6 +249,41 @@ impl OsdSlot {
         &mut self.motion
     }
 
+    /// Whether the open/morph spring is still travelling toward the current
+    /// card's size. The target is derived from the card itself — both
+    /// renderers advance the spring toward exactly
+    /// `(card_width(), OSD_CARD_HEIGHT)` — so a replacement that changed the
+    /// card's width (a volume slider swapping to a wider media card) reports
+    /// animating until the morph arrives, with no queued state of its own.
+    pub(crate) fn spring_animating(&self) -> bool {
+        self.active
+            .as_ref()
+            .is_some_and(|osd| self.motion.animating(osd.card_width(), OSD_CARD_HEIGHT))
+    }
+
+    /// Whether the compositor owes the card frames right now: the envelope
+    /// or the open/morph spring is moving, or the card reached its end and
+    /// is owed the frame that prunes it. A fully settled hold answers false —
+    /// its next change is a scheduled boundary
+    /// ([`Self::next_envelope_change_at`]), not a running curve.
+    pub(crate) fn needs_frames(&self, now: Instant) -> bool {
+        self.spring_animating()
+            || self
+                .active
+                .as_ref()
+                .is_some_and(|osd| osd.needs_frames(now))
+    }
+
+    /// The next instant the card's on-screen state changes without input, so
+    /// the event loop can sleep until then and still start the fade-out on
+    /// time. `None` when the slot is empty — a `show` is an input event that
+    /// makes its own frame.
+    pub(crate) fn next_envelope_change_at(&self, now: Instant) -> Option<Instant> {
+        self.active
+            .as_ref()
+            .and_then(|osd| osd.next_envelope_change_at(now))
+    }
+
     pub(crate) fn get(&self) -> Option<&ActiveOsd> {
         self.active.as_ref()
     }
@@ -239,6 +314,156 @@ mod tests {
         assert!(!slot.prune(near_expiry + Duration::from_millis(1000)));
         assert!(slot.prune(near_expiry + Duration::from_millis(1650)));
         assert!(slot.is_empty());
+    }
+
+    #[test]
+    fn a_settled_hold_needs_no_frames_but_its_boundaries_do() {
+        let start = Instant::now();
+        let mut slot = OsdSlot::default();
+        slot.show(OsdKind::Volume, 40, start);
+        {
+            let osd = slot.get().unwrap();
+            // Fade-in: the envelope is moving and owes frames.
+            assert!(osd.envelope_active(start));
+            assert!(osd.needs_frames(start));
+            assert!(osd.envelope_active(start + Duration::from_millis(119)));
+            // Settled hold: nothing moves, nothing is owed.
+            let hold = start + Duration::from_millis(500);
+            assert!(!osd.envelope_active(hold));
+            assert!(!osd.needs_frames(hold));
+            // The fade-out begins when the 1400 ms hold ends ...
+            assert!(!osd.envelope_active(start + Duration::from_millis(1399)));
+            let fade_out = start + Duration::from_millis(1401);
+            assert!(osd.envelope_active(fade_out));
+            assert!(osd.needs_frames(fade_out));
+            // ... and once the fade has run the card is owed its pruning frame.
+            let expiry = start + Duration::from_millis(1651);
+            assert!(!osd.envelope_active(expiry));
+            assert!(osd.needs_frames(expiry));
+        }
+        // Pruned, the slot goes quiet.
+        assert!(slot.prune(start + Duration::from_millis(1651)));
+        assert!(!slot.needs_frames(start + Duration::from_millis(1651)));
+        assert_eq!(slot.next_envelope_change_at(start), None);
+    }
+
+    #[test]
+    fn next_envelope_change_walks_the_boundaries() {
+        let start = Instant::now();
+        let mut slot = OsdSlot::default();
+        slot.show(OsdKind::Volume, 40, start);
+        let osd = slot.get().unwrap();
+        // While fading in, the next change is the fade-in completing.
+        assert_eq!(
+            osd.next_envelope_change_at(start),
+            Some(start + Duration::from_secs_f32(OSD_FADE_IN))
+        );
+        // In the hold it is the fade-out's start, when the hold expires.
+        assert_eq!(
+            osd.next_envelope_change_at(start + Duration::from_millis(500)),
+            Some(start + OSD_HOLD)
+        );
+        // Once the fade-out runs, only the expiry is left.
+        assert_eq!(
+            osd.next_envelope_change_at(start + OSD_HOLD),
+            Some(start + OSD_HOLD + Duration::from_secs_f32(OSD_FADE_OUT))
+        );
+        // Past the expiry nothing is scheduled: the card is owed a prune,
+        // which `needs_frames` already reports.
+        assert_eq!(
+            osd.next_envelope_change_at(start + Duration::from_millis(1651)),
+            None
+        );
+        // The slot-level query follows the card, and an empty slot schedules
+        // nothing: a `show` is an input event that makes its own frame.
+        assert_eq!(
+            slot.next_envelope_change_at(start + Duration::from_millis(500)),
+            Some(start + OSD_HOLD)
+        );
+        assert_eq!(OsdSlot::default().next_envelope_change_at(start), None);
+    }
+
+    #[test]
+    fn a_refresh_moves_the_fade_out_boundary_without_new_frames() {
+        let start = Instant::now();
+        let mut slot = OsdSlot::default();
+        slot.show(OsdKind::Volume, 40, start);
+        // A held volume key repeats `show`: each repeat is an input event
+        // that arms its own frame, restarts the hold, and — the spring being
+        // settled at an unchanged width — asks for nothing further.
+        let repeat = start + Duration::from_millis(500);
+        slot.show(OsdKind::Volume, 45, repeat);
+        assert!(!slot.needs_frames(repeat));
+        assert_eq!(
+            slot.next_envelope_change_at(repeat),
+            Some(repeat + OSD_HOLD)
+        );
+    }
+
+    #[test]
+    fn the_open_spring_keeps_frames_coming_until_it_settles() {
+        let start = Instant::now();
+        let mut slot = OsdSlot::default();
+        slot.show(OsdKind::Volume, 40, start);
+        // Mid-hold, so the envelope itself is quiet and only the spring can
+        // ask for frames.
+        let hold = start + Duration::from_millis(500);
+        // Before the renderer's first advance the spring has never opened;
+        // the size it reports is the seed, nowhere near the card's target.
+        let (w, h) =
+            slot.motion_mut()
+                .advance_with_motion(hold, SLIDER_CARD_WIDTH, OSD_CARD_HEIGHT, true);
+        assert!((w, h) != (SLIDER_CARD_WIDTH, OSD_CARD_HEIGHT));
+        assert!(slot.spring_animating());
+        assert!(slot.needs_frames(hold), "a travelling spring owes frames");
+        // Motion disabled snaps straight to the target: nothing left to draw.
+        let (w, h) =
+            slot.motion_mut()
+                .advance_with_motion(hold, SLIDER_CARD_WIDTH, OSD_CARD_HEIGHT, false);
+        assert_eq!((w, h), (SLIDER_CARD_WIDTH, OSD_CARD_HEIGHT));
+        assert!(!slot.spring_animating());
+        assert!(
+            !slot.needs_frames(hold),
+            "a snapped spring settles on the spot"
+        );
+    }
+
+    #[test]
+    fn a_replacement_morph_keeps_frames_coming_until_the_new_width_arrives() {
+        let start = Instant::now();
+        let mut slot = OsdSlot::default();
+        slot.show(OsdKind::Volume, 40, start);
+        // Open the slider card and run the spring to rest, mid-hold.
+        let mut t = start;
+        slot.motion_mut()
+            .advance_with_motion(t, SLIDER_CARD_WIDTH, OSD_CARD_HEIGHT, true);
+        while slot.spring_animating() {
+            t += Duration::from_millis(16);
+            slot.motion_mut()
+                .advance_with_motion(t, SLIDER_CARD_WIDTH, OSD_CARD_HEIGHT, true);
+        }
+        let hold = start + Duration::from_millis(500);
+        assert!(
+            !slot.needs_frames(hold),
+            "a settled card with a settled spring is quiet"
+        );
+
+        // A wider media card replaces the slider in place: the swap has no
+        // queued state of its own — the spring simply owes the morph to the
+        // new target, and the hold restarts on the new card.
+        slot.show_media("Blue in Green", hold);
+        assert!(
+            slot.spring_animating(),
+            "the morph to the wider card owes frames"
+        );
+        assert!(slot.needs_frames(hold));
+        assert_eq!(slot.next_envelope_change_at(hold), Some(hold + OSD_HOLD));
+
+        // The morph arrived and the envelope quiet, the slot goes quiet again.
+        slot.motion_mut()
+            .advance_with_motion(hold, MEDIA_CARD_WIDTH, OSD_CARD_HEIGHT, false);
+        assert!(!slot.spring_animating());
+        assert!(!slot.needs_frames(hold + Duration::from_millis(100)));
     }
 
     #[test]

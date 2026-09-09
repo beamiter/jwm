@@ -192,8 +192,12 @@ impl<C: CompositorConnection> Compositor<C> {
         if self.toast_stack.needs_frames(std::time::Instant::now()) {
             return true;
         }
-        // Same for the volume/brightness OSD card.
-        if !self.osd_slot.is_empty() {
+        // Same for the volume/brightness OSD card: its envelope moves for
+        // 120 ms into and 250 ms out of a 1400 ms hold, so a settled hold
+        // arms nothing either. Its fade-out boundary rides the same idle
+        // cadence, and every show/refresh — a held volume key's repeats
+        // included — is an input event that arms its own frame.
+        if self.osd_slot.needs_frames(std::time::Instant::now()) {
             return true;
         }
         // Need render while a rotating gradient border is visible
@@ -1354,12 +1358,51 @@ mod tests {
     }
 
     #[test]
-    fn the_composited_idle_cadence_delivers_the_toast_envelope_boundaries() {
-        // X11 needs no toast term in `compositor_frame_deadline`: a
+    fn a_settled_osd_hold_arms_neither_x11_render_gate() {
+        // The OSD rides the toast's mechanism: the envelope moves for
+        // 120 ms into and 250 ms out of a 1400 ms hold, and the open/morph
+        // spring settles inside that, so both frame gates must ask the slot
+        // whether frames are owed rather than whether a card exists — a
+        // visible but settled hold used to composite full frames at display
+        // cadence for its whole hold.
+        const CONFIG_SRC: &str = include_str!("config.rs");
+        const RENDER_SRC: &str = include_str!("render.rs");
+        let frames = format!("self.{}.needs_frames(", "osd_slot");
+
+        let needs = body_of(CONFIG_SRC, "pub(crate) fn needs_render");
+        assert!(
+            needs.contains(&frames),
+            "needs_render must ask the slot whether the OSD owes frames"
+        );
+        assert!(
+            !needs.contains(&format!("!self.{}.is_empty()", "osd_slot")),
+            "a visible-but-settled hold must not keep the loop at frame cadence"
+        );
+
+        let frame = body_of(RENDER_SRC, "pub(crate) fn render_frame");
+        assert!(
+            frame.contains(&frames),
+            "render_frame must composite while the OSD envelope moves"
+        );
+        // `toasts_active` keeps the broader `is_empty` form for the damage
+        // tracker's thresholds on purpose, so the settled-hold ban is scoped
+        // to the `force_render` expression onward.
+        let force = &frame[frame
+            .find("let force_render")
+            .expect("render_frame computes force_render")..];
+        assert!(
+            !force.contains(&format!("|| !self.{}.is_empty()", "osd_slot")),
+            "force_render must not arm on a settled hold"
+        );
+    }
+
+    #[test]
+    fn the_composited_idle_cadence_delivers_the_overlay_envelope_boundaries() {
+        // X11 needs no toast or OSD term in `compositor_frame_deadline`: a
         // composited session intentionally keeps the idle safety poll, so
         // the loop wakes at least every 20 ms and every wake re-evaluates
-        // the render gate — the fade-out's first frame lands within one idle
-        // tick of its boundary. Pin the policy that guarantees it.
+        // the render gate — each card's fade-out first frame lands within
+        // one idle tick of its boundary. Pin the policy that guarantees it.
         use crate::backend::x11::scheduling::{
             IDLE_UPDATE_INTERVAL, idle_poll_required, update_interval,
         };
@@ -1407,5 +1450,29 @@ mod tests {
             hover[paused_at..].contains(&format!("self.{} = true", "needs_render")),
             "a hover change must arm a frame for the paused card"
         );
+    }
+
+    #[test]
+    fn osd_show_events_make_their_own_frames() {
+        // This is why the narrowed pump needs no show/refresh term: every
+        // OSD change — a volume key repeat held down, a brightness step, a
+        // media track change — arrives through one of these setters, and
+        // each arms a frame from the event itself, so the envelope
+        // boundaries are the only clock-driven transitions the idle cadence
+        // has to catch. The card has no pointer interaction to pause on.
+        const FEATURES_SRC: &str = include_str!("features.rs");
+        for (needle, what) in [
+            (format!("pub(crate) fn {}(", "show_osd"), "a value card"),
+            (
+                format!("pub(crate) fn {}(", "show_media_osd"),
+                "a media card",
+            ),
+        ] {
+            let body = body_of(FEATURES_SRC, &needle);
+            assert!(
+                body.contains(&format!("self.{} = true", "needs_render")),
+                "{what} must arm its own frame"
+            );
+        }
     }
 }

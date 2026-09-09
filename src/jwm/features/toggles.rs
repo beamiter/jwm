@@ -1027,6 +1027,9 @@ impl Jwm {
                 // to, so the Escape target goes with the panel it belonged to.
                 self.features.system_ui_return_to_hub = false;
                 self.features.system_ui = crate::jwm::features::SystemUiState::lock();
+                self.features
+                    .system_ui
+                    .set_lock_now_playing(self.features.media.get());
                 self.sync_system_ui(backend);
                 return Ok(());
             }
@@ -2324,6 +2327,9 @@ impl Jwm {
         // failed. Wayland-udev performs interception in its input pipeline.
         self.prepare_system_ui(backend, "lock screen", SystemUiPointerGrab::Buttons)?;
         self.features.system_ui = crate::jwm::features::SystemUiState::lock();
+        self.features
+            .system_ui
+            .set_lock_now_playing(self.features.media.get());
         self.sync_system_ui(backend);
         Ok(())
     }
@@ -3178,6 +3184,11 @@ impl Jwm {
             );
             return Err(error.into());
         }
+        // The recorder actually started (the same gate the start toast below
+        // fires on): park the persistent MIC chip. The compositor cannot
+        // derive this the way it derives the REC chip — the audio recorder
+        // lives WM-side — so the state is pushed through the backend.
+        backend.compositor_set_mic_indicator(true);
         info!(
             "[audio-recording] start → {} (backend={}, format={}, device={}, {} Hz, {} channel(s))",
             output_path.display(),
@@ -3192,9 +3203,9 @@ impl Jwm {
             serde_json::json!({"output_path": output_path}),
         );
         // Mirror the screen recorder's start toast: the request was
-        // accepted. (No persistent MIC chip this round — the screen REC
-        // chip is derived from the compositor's own recording state, while
-        // audio recording lives WM-side.)
+        // accepted, and the persistent MIC chip pushed above confirms the
+        // rest — deliberately a static label, unlike the REC chip's running
+        // clock.
         self.push_system_toast(
             backend,
             crate::backend::api::ToastNotification {
@@ -3214,9 +3225,15 @@ impl Jwm {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let was_active = self.features.audio_recording.active;
         let path = self.features.audio_recording.output_path.clone();
-        if let Err(error) = self.features.audio_recording.stop() {
-            // A stop that failed leaves the mic open and the file unfinalized
-            // — say so, through do-not-disturb like any recording failure.
+        let stopped = self.features.audio_recording.stop();
+        // The chip answers "is the microphone live right now?", so it clears
+        // with the stop request either way: a failed stop means the capture
+        // thread could not be joined (it panicked — it is not still
+        // recording), and the urgency-2 toast below covers the file.
+        backend.compositor_set_mic_indicator(false);
+        if let Err(error) = stopped {
+            // A stop that failed leaves the file unfinalized — say so,
+            // through do-not-disturb like any recording failure.
             self.push_system_toast(
                 backend,
                 crate::backend::api::ToastNotification {
@@ -4419,6 +4436,96 @@ mod shell_entry_tests {
         assert!(
             handoff.contains(&stop_call),
             "the synchronized-capture handoff no longer stops through the toasting path ({stop_call})"
+        );
+    }
+
+    /// The MIC chip mirrors the round-16 toast's "actually started"
+    /// discipline: it appears only once the recorder is really running, and
+    /// it clears on stop whether or not the file finalized. Recorded
+    /// decision: a screen recording keeps only the compositor-derived REC
+    /// chip even when it captures the microphone — the MIC chip is for
+    /// standalone audio recording only. Needles are assembled at runtime so
+    /// this cannot match its own source.
+    #[test]
+    fn audio_recording_drives_the_mic_indicator_chip() {
+        const SOURCE: &str = include_str!("toggles.rs");
+        let shipped = SOURCE
+            .split_once("#[cfg(test)]")
+            .expect("the first test module")
+            .0;
+        let start = shipped
+            .split_once("pub(crate) fn start_audio_recording")
+            .expect("start_audio_recording")
+            .1
+            .split_once("pub(crate) fn stop_audio_recording")
+            .expect("stop_audio_recording")
+            .0;
+        let stop = shipped
+            .split_once("pub(crate) fn stop_audio_recording")
+            .expect("stop_audio_recording")
+            .1
+            .split_once("pub(crate) fn start_recording_region")
+            .expect("the end of stop_audio_recording")
+            .0;
+
+        let chip_on = format!("backend.compositor_{}(true)", "set_mic_indicator");
+        let chip_off = format!("backend.compositor_{}(false)", "set_mic_indicator");
+        // Exactly one drive point each: the key toggle, the IPC commands and
+        // the screen recorder's microphone handoff all share these two
+        // functions.
+        assert_eq!(
+            start.matches(&chip_on).count(),
+            1,
+            "start must park the MIC chip exactly once"
+        );
+        assert!(
+            !start.contains(&chip_off),
+            "start must never clear the chip it just parked"
+        );
+        assert_eq!(
+            stop.matches(&chip_off).count(),
+            1,
+            "stop must clear the MIC chip exactly once"
+        );
+        assert!(
+            !stop.contains(&chip_on),
+            "stop must never park the chip it is tearing down"
+        );
+
+        // The chip goes on only past the failure early-return: a start that
+        // did not happen (or an encoder that never initialized) must not
+        // leave the privacy cue up.
+        let gate = start
+            .find("return Err(error.into());")
+            .expect("the start failure gate");
+        let chip = start.find(&chip_on).expect("the chip call");
+        assert!(
+            chip > gate,
+            "the MIC chip must wait for the recorder to actually start"
+        );
+
+        // The chip clears before either stop exit (the failure toast or the
+        // success path) — a joined or panicked capture thread is not a live
+        // microphone, so no path may leave the cue behind.
+        let chip = stop.find(&chip_off).expect("the chip call");
+        let first_toast = stop
+            .find(&format!("self.{}(", "push_system_toast"))
+            .expect("a stop toast");
+        assert!(
+            chip < first_toast,
+            "every stop path must clear the MIC chip"
+        );
+
+        let screen = shipped
+            .split_once("pub(crate) fn start_recording_region")
+            .expect("start_recording_region")
+            .1
+            .split_once("pub(crate) fn normalize_initial_recording_region")
+            .expect("the end of start_recording_region")
+            .0;
+        assert!(
+            !screen.contains(&format!("compositor_{}", "set_mic_indicator")),
+            "screen recording keeps only the compositor-derived REC chip"
         );
     }
 }
