@@ -1286,6 +1286,29 @@ fn default_blur_strength() -> u32 {
 fn default_ui_theme() -> String {
     "glass".to_string()
 }
+
+/// Canonical `appearance.ui_theme` values accepted by [`Config::set_value`] and
+/// shown in the Shell Hub Theme picker, in stable picker order.
+pub const KNOWN_UI_THEMES: &[&str] = &[
+    "material",
+    "glass",
+    "glass-dark",
+    "aurora",
+    "nord",
+    "tokyo-night",
+    "paper",
+];
+
+/// Normalize a candidate the way `set_value` does, then return the canonical
+/// allowlist entry. Unknown names yield `None`.
+#[must_use]
+pub fn normalize_ui_theme(value: &str) -> Option<&'static str> {
+    let normalized = value.trim().to_ascii_lowercase().replace('_', "-");
+    KNOWN_UI_THEMES
+        .iter()
+        .copied()
+        .find(|&theme| theme == normalized)
+}
 fn default_fade_step() -> f32 {
     0.03
 }
@@ -3907,23 +3930,13 @@ impl Config {
             }
             "appearance.ui_theme" => {
                 let v = as_string()?;
-                let normalized = v.trim().to_ascii_lowercase().replace('_', "-");
-                if !matches!(
-                    normalized.as_str(),
-                    "material"
-                        | "glass"
-                        | "glass-dark"
-                        | "aurora"
-                        | "nord"
-                        | "tokyo-night"
-                        | "paper"
-                ) {
+                let Some(normalized) = normalize_ui_theme(&v) else {
                     return Err(format!(
-                        "appearance.ui_theme={v} is not one of: material, glass, glass-dark, \
-                         aurora, nord, tokyo-night, paper"
+                        "appearance.ui_theme={v} is not one of: {}",
+                        KNOWN_UI_THEMES.join(", ")
                     ));
-                }
-                self.inner.appearance.ui_theme = normalized;
+                };
+                self.inner.appearance.ui_theme = normalized.to_string();
             }
             "layout.m_fact" => {
                 let v = as_f32()?;
@@ -5561,6 +5574,20 @@ border_px = 3
         let mut cfg = Config::default();
         // An untouched config gets the flagship look.
         assert_eq!(cfg.ui_theme(), "glass");
+        assert_eq!(
+            super::KNOWN_UI_THEMES,
+            &[
+                "material",
+                "glass",
+                "glass-dark",
+                "aurora",
+                "nord",
+                "tokyo-night",
+                "paper",
+            ]
+        );
+        assert_eq!(super::normalize_ui_theme("Tokyo_Night"), Some("tokyo-night"));
+        assert_eq!(super::normalize_ui_theme("neumorphic"), None);
 
         cfg.set_value("appearance.ui_theme", &serde_json::json!("Material"))
             .expect("a known theme is accepted, case-insensitively");

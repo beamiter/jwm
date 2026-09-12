@@ -77,7 +77,8 @@ type ShellRoute =
   | "notifications"
   | "clipboard"
   | "calendar"
-  | "wallpaper";
+  | "wallpaper"
+  | "theme";
 
 // Pages of JWM's own shell surface, in the order the hub itself lists them.
 // Every entry is one request to the window manager: the bar renders no shell
@@ -89,6 +90,7 @@ const SHELL_ROUTES: { route: ShellRoute; icon: string; label: string }[] = [
   { route: "clipboard", icon: "\u{F0192}", label: "Clipboard" },
   { route: "calendar", icon: "\u{F00ED}", label: "Calendar" },
   { route: "wallpaper", icon: "\u{F02E9}", label: "Wallpaper" },
+  { route: "theme", icon: "\u{F1FC}", label: "Theme" },
 ];
 
 type ActionRequest =

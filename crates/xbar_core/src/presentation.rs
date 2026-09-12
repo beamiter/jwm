@@ -683,7 +683,7 @@ pub struct PresentationLabels {
     pub media_playing: String,
     pub media_paused: String,
     /// Icon per shell route, in [`ShellRoute::ALL`] order.
-    pub shell_routes: [String; 6],
+    pub shell_routes: [String; 7],
 }
 
 impl Default for PresentationLabels {
@@ -713,7 +713,8 @@ impl Default for PresentationLabels {
 impl PresentationLabels {
     /// Emoji rather than Nerd Font glyphs, matching every other default here:
     /// a bar with no patched font still shows something recognizable.
-    pub const DEFAULT_SHELL_ROUTE_ICONS: [&'static str; 6] = ["◈", "🚀", "🔔", "📋", "📅", "🖼"];
+    pub const DEFAULT_SHELL_ROUTE_ICONS: [&'static str; 7] =
+        ["◈", "🚀", "🔔", "📋", "📅", "🖼", "🎨"];
 
     /// Icon for one route, falling back to the built-in default when a host
     /// supplies a blank override.
@@ -769,13 +770,14 @@ impl PresentationLabels {
         Self::from(&IconSet::nerd_font())
     }
 
-    pub const NERD_FONT_SHELL_ROUTE_ICONS: [&'static str; 6] = [
+    pub const NERD_FONT_SHELL_ROUTE_ICONS: [&'static str; 7] = [
         "\u{f009}", // grid — hub home
         "\u{f135}", // rocket — applications
         "\u{f0f3}", // bell — notifications
         "\u{f0ea}", // clipboard
         "\u{f073}", // calendar
         "\u{f03e}", // image — wallpaper
+        "\u{f1fc}", // paint-brush — theme
     ];
 }
 

@@ -16,15 +16,18 @@ pub enum ShellHubRoute {
     Clipboard,
     Calendar,
     Wallpaper,
+    /// After Wallpaper: Theme lists the known `appearance.ui_theme` values.
+    Theme,
 }
 
 impl ShellHubRoute {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Applications,
         Self::Notifications,
         Self::Clipboard,
         Self::Calendar,
         Self::Wallpaper,
+        Self::Theme,
     ];
 
     #[must_use]
@@ -35,6 +38,7 @@ impl ShellHubRoute {
             Self::Clipboard => "Clipboard",
             Self::Calendar => "Calendar",
             Self::Wallpaper => "Wallpaper",
+            Self::Theme => "Theme",
         }
     }
 
@@ -46,6 +50,7 @@ impl ShellHubRoute {
             Self::Clipboard => "\u{f0ea}",     // clipboard
             Self::Calendar => "\u{f073}",      // calendar
             Self::Wallpaper => "\u{f03e}",     // image
+            Self::Theme => "\u{f1fc}",         // paint-brush (FA-4, <0xf600)
         }
     }
 
@@ -57,6 +62,7 @@ impl ShellHubRoute {
             Self::Clipboard => 'c',
             Self::Calendar => 'd',
             Self::Wallpaper => 'w',
+            Self::Theme => 't',
         }
     }
 
@@ -68,6 +74,7 @@ impl ShellHubRoute {
             'c' => Some(Self::Clipboard),
             'd' => Some(Self::Calendar),
             'w' => Some(Self::Wallpaper),
+            't' => Some(Self::Theme),
             _ => None,
         }
     }
@@ -92,6 +99,10 @@ impl ShellHubRoute {
                 .filter(|name| !name.is_empty())
                 .map(compact_status)
                 .unwrap_or_else(|| "choose image".to_string()),
+            Self::Theme => detail
+                .filter(|name| !name.is_empty())
+                .map(compact_status)
+                .unwrap_or_else(|| "choose theme".to_string()),
         };
         let shortcut = self.shortcut().to_ascii_uppercase();
         format!(
@@ -101,6 +112,17 @@ impl ShellHubRoute {
             compact_status(&status)
         )
     }
+}
+
+/// One Theme picker row: the canonical theme id, marked when it is current.
+#[must_use]
+pub fn theme_picker_row(theme: &str, current: &str) -> String {
+    let marker = if theme == current {
+        "\u{f00c}" // fa-check
+    } else {
+        " "
+    };
+    format!("{} {marker} {theme}", ShellHubRoute::Theme.icon())
 }
 
 fn compact_status(text: &str) -> String {
@@ -118,7 +140,15 @@ mod tests {
 
     #[test]
     fn shortcuts_are_case_insensitive_and_unique() {
+        let mut seen = [false; 26];
         for route in ShellHubRoute::ALL {
+            let index = (route.shortcut() as u8 - b'a') as usize;
+            assert!(
+                !seen[index],
+                "shortcut '{}' is claimed twice",
+                route.shortcut()
+            );
+            seen[index] = true;
             assert_eq!(ShellHubRoute::from_shortcut(route.shortcut()), Some(route));
             assert_eq!(
                 ShellHubRoute::from_shortcut(route.shortcut().to_ascii_uppercase()),
@@ -126,6 +156,7 @@ mod tests {
             );
         }
         assert_eq!(ShellHubRoute::from_shortcut('x'), None);
+        assert_eq!(ShellHubRoute::from_shortcut('t'), Some(ShellHubRoute::Theme));
     }
 
     #[test]
@@ -138,6 +169,11 @@ mod tests {
             ShellHubRoute::Wallpaper.row(None, Some("/home/user/Pictures/aurora-night.png"));
         assert!(wallpaper.contains("aurora-night.png"));
         assert!(!wallpaper.contains("/home/user"));
+
+        let theme = ShellHubRoute::Theme.row(None, Some("tokyo-night"));
+        assert!(theme.contains("tokyo-night"));
+        assert!(theme.contains("[T]"));
+        assert!(theme.contains(ShellHubRoute::Theme.icon()));
     }
 
     #[test]
@@ -148,5 +184,12 @@ mod tests {
         );
         assert!(row.contains('\u{2026}'));
         assert!(!row.contains("far-too-wide-for-the-card.png"));
+    }
+
+    #[test]
+    fn theme_picker_row_marks_the_current_theme() {
+        assert!(theme_picker_row("glass", "glass").contains('\u{f00c}'));
+        assert!(!theme_picker_row("nord", "glass").contains('\u{f00c}'));
+        assert!(theme_picker_row("paper", "nord").contains("paper"));
     }
 }

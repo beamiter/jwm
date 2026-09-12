@@ -283,7 +283,8 @@ type ShellRoute =
   | 'notifications'
   | 'clipboard'
   | 'calendar'
-  | 'wallpaper';
+  | 'wallpaper'
+  | 'theme';
 
 type ActionRequest =
   | { action: 'view_tag_on'; tag_index: number; monitor_id: number }
@@ -361,6 +362,7 @@ const SHELL_ROUTES: { route: ShellRoute; icon: string; label: string }[] = [
   { route: 'clipboard', icon: '\u{F0192}', label: 'Clipboard' },
   { route: 'calendar', icon: '\u{F00ED}', label: 'Calendar' },
   { route: 'wallpaper', icon: '\u{F02E9}', label: 'Wallpaper' },
+  { route: 'theme', icon: '\u{F1FC}', label: 'Theme' },
 ];
 const ICON_TIME = '\u{F0954}';
 const ICON_MON = '\u{F0379}';

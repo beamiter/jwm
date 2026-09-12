@@ -656,6 +656,7 @@ impl Jwm {
                     .then_some(self.features.clipboard.len()),
                 wallpaper: (!behavior.wallpaper.trim().is_empty())
                     .then_some(behavior.wallpaper.as_str()),
+                ui_theme: Some(cfg.ui_theme()),
                 media: self.features.media.get(),
                 volume,
                 brightness,
@@ -786,6 +787,11 @@ impl Jwm {
         )
     }
 
+    fn theme_picker_state() -> crate::jwm::features::SystemUiState {
+        let current = CONFIG.load().ui_theme().to_string();
+        crate::jwm::features::SystemUiState::theme_picker(&current)
+    }
+
     /// Adopt a completed application scan into the long-lived cache. If the
     /// launcher is currently visible, replace its immutable snapshot and let
     /// the frame tick redraw the current query once.
@@ -862,6 +868,7 @@ impl Jwm {
             }
             ShellHubRoute::Calendar => SystemUiState::calendar(chrono::Local::now().naive_local()),
             ShellHubRoute::Wallpaper => Self::wallpaper_picker_state(),
+            ShellHubRoute::Theme => Self::theme_picker_state(),
         };
 
         self.features.system_ui_return_to_hub = true;
@@ -1235,6 +1242,31 @@ impl Jwm {
         self.broadcast_ipc_event(
             "config/changed",
             serde_json::json!({ "key": "behavior.wallpaper", "value": path }),
+        );
+        self.close_system_ui(backend);
+    }
+
+    /// Apply the selected UI theme through the same configuration path a
+    /// `set_config` takes, so both compositors rebuild their palettes on the
+    /// next `apply_config` exactly as they would from a reload.
+    pub(crate) fn apply_selected_theme(&mut self, backend: &mut dyn Backend) {
+        let Some(theme) = self.features.system_ui.selected_theme().map(str::to_string) else {
+            return;
+        };
+        let mut updated = (**CONFIG.load()).clone();
+        if let Err(error) = updated.set_value(
+            "appearance.ui_theme",
+            &serde_json::Value::String(theme.clone()),
+        ) {
+            error!("Theme: {error}");
+            return;
+        }
+        CONFIG.store(std::sync::Arc::new(updated));
+        self.apply_config_changes(backend);
+        info!("Theme: {theme}");
+        self.broadcast_ipc_event(
+            "config/changed",
+            serde_json::json!({ "key": "appearance.ui_theme", "value": theme }),
         );
         self.close_system_ui(backend);
     }
@@ -4192,6 +4224,36 @@ mod shell_entry_tests {
             .unwrap()
             .0;
         assert!(!open_paths.contains("AudioDefaults::read()"));
+    }
+
+    /// Theme apply must mirror wallpaper: set_value → CONFIG.store →
+    /// apply_config_changes → config/changed → close_system_ui.
+    #[test]
+    fn apply_selected_theme_follows_the_wallpaper_set_config_path() {
+        const SOURCE: &str = include_str!("toggles.rs");
+        let apply = SOURCE
+            .split_once("pub(crate) fn apply_selected_theme")
+            .expect("apply_selected_theme")
+            .1
+            .split_once("pub(crate) fn clipboard_picker")
+            .expect("clipboard_picker follows theme apply")
+            .0;
+        for needle in [
+            "appearance.ui_theme",
+            "CONFIG.store",
+            "apply_config_changes",
+            "config/changed",
+            "close_system_ui",
+        ] {
+            assert!(
+                apply.contains(needle),
+                "apply_selected_theme lost {needle}"
+            );
+        }
+        assert!(
+            SOURCE.contains("ShellHubRoute::Theme => Self::theme_picker_state()"),
+            "open_shell_hub_route must open Theme via theme_picker_state"
+        );
     }
 
     /// The volume/brightness key handlers used to run the session's tools on

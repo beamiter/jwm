@@ -227,7 +227,7 @@ fn open_or_create() -> std::io::Result<()> {
 | `PreviewMinimized` | 6 | 0；`flags` 指定显示/收起预览，anchor 指定触发项 |
 | `SetMinimizedGeometry` | 7 | 0；`window_id == 0` 表示 tray/shelf，非零表示具体 item |
 
-`ShellHubRoute` 是状态栏请求窗口管理器打开自带 shell 页面时使用的纯协议枚举：`Hub`(0)、`Applications`(1)、`Notifications`(2)、`Clipboard`(3)、`Calendar`(4)、`Wallpaper`(5)。两端都不需要知道对方如何实现这些页面。
+`ShellHubRoute` 是状态栏请求窗口管理器打开自带 shell 页面时使用的纯协议枚举：`Hub`(0)、`Applications`(1)、`Notifications`(2)、`Clipboard`(3)、`Calendar`(4)、`Wallpaper`(5)、`Theme`(6)。两端都不需要知道对方如何实现这些页面。
 
 `SharedCommand::shell_hub(route, monitor_id)` 构造这类命令，`shell_hub_route()` 读回路由（其它命令类型返回 `None`）。
 

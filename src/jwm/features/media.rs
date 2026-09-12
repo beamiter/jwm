@@ -300,14 +300,30 @@ pub fn next_player<'a>(players: &'a [String], active: &str) -> Option<&'a str> {
     Some(players[index % players.len()].as_str())
 }
 
-/// The control-center row: status icon, track, and which transport controls
-/// the player says it supports. When the player reports both a position and
-/// a length, the row carries them as `2:41 / 4:05` after the track label.
-/// With more than one player on the bus the row ends with a `· p ‹next›`
-/// hint naming the player the `p` key would switch to; a one-player row —
-/// or one fed by an old bridge — stays byte-identical to before.
+/// What a pointer press on the control-center media row does. The whole row
+/// used to Return-replay PlayPause; with more than one player the trailing
+/// `· p ‹next›` hint is the pointer twin of the `p` key, and everything to
+/// its left keeps PlayPause so ordinary track clicks are unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MediaRowClick {
+    Cycle,
+    PlayPause,
+}
+
+/// The trailing switch hint `control_row` appends when `p` has somewhere to
+/// go. `None` with fewer than two players — the row then has no clickable
+/// switch zone and a press is PlayPause everywhere.
 #[must_use]
-pub fn control_row(state: &MediaState) -> String {
+pub fn switch_hint(state: &MediaState) -> Option<String> {
+    next_player(&state.players, &state.player)
+        .map(|player| format!(" \u{b7} p {player}"))
+}
+
+/// The control-center row without the switch suffix — the prefix a press to
+/// the left of the hint measures against. Kept in lockstep with
+/// [`control_row`] so hit-testing never drifts from what was drawn.
+#[must_use]
+fn control_row_prefix(state: &MediaState) -> String {
     let previous = if state.can_go_previous {
         "\u{f048}" // fa-step-backward
     } else {
@@ -319,14 +335,56 @@ pub fn control_row(state: &MediaState) -> String {
         " "
     };
     let (label, position) = row_text(state);
-    let switch = next_player(&state.players, &state.player)
-        .map(|player| format!(" \u{b7} p {player}"))
-        .unwrap_or_default();
     format!(
-        "{}  {label}{position}   {previous} {} {next}{switch}",
+        "{}  {label}{position}   {previous} {} {next}",
         "\u{f001}", // fa-music
         state.status.icon(),
     )
+}
+
+/// The control-center row: status icon, track, and which transport controls
+/// the player says it supports. When the player reports both a position and
+/// a length, the row carries them as `2:41 / 4:05` after the track label.
+/// With more than one player on the bus the row ends with a `· p ‹next›`
+/// hint naming the player the `p` key would switch to; a one-player row —
+/// or one fed by an old bridge — stays byte-identical to before.
+#[must_use]
+pub fn control_row(state: &MediaState) -> String {
+    let switch = switch_hint(state).unwrap_or_default();
+    format!("{}{switch}", control_row_prefix(state))
+}
+
+/// Pointer counterpart of `p` on the media row. `measure` is the panel font's
+/// advance in px (the same probe the slider and notification chips use);
+/// `TEXT_PAD` matches the texture margin baked into those measurements so
+/// the switch zone starts where the drawn hint starts.
+///
+/// A press on the trailing `· p ‹next›` cycles; anywhere else — including
+/// the whole row when there is no hint — is PlayPause, preserving today's
+/// single-player click.
+#[must_use]
+pub fn click_action(
+    text_x_px: f32,
+    measure: impl Fn(&str) -> f32,
+    state: &MediaState,
+) -> MediaRowClick {
+    let Some(switch) = switch_hint(state) else {
+        return MediaRowClick::PlayPause;
+    };
+    if !text_x_px.is_finite() {
+        return MediaRowClick::PlayPause;
+    }
+    // Same pad the slider/chip hit-tests subtract: measure_ui_text_width
+    // includes it on both ends, so the drawn switch begins here.
+    const TEXT_PAD: f32 = 2.0;
+    let prefix = control_row_prefix(state);
+    let switch_start = measure(&prefix) - TEXT_PAD;
+    let switch_end = measure(&format!("{prefix}{switch}")) - TEXT_PAD;
+    if text_x_px >= switch_start && text_x_px < switch_end {
+        MediaRowClick::Cycle
+    } else {
+        MediaRowClick::PlayPause
+    }
 }
 
 /// The lock screen's now-playing row: the control-center row minus its
@@ -370,6 +428,11 @@ impl crate::jwm::Jwm {
                 "position_us": state.position_us,
                 "length_us": state.length_us,
                 "position_label": state.position_label(),
+                // Append-only: the sweep's player list so a bar can show a
+                // picker without scraping the control-center row. Old bars
+                // ignore the field; a one-player session still sends the
+                // list (possibly empty) rather than omitting it.
+                "players": state.players,
             }),
             None => serde_json::json!({ "player": serde_json::Value::Null }),
         };
@@ -455,6 +518,7 @@ impl crate::jwm::Jwm {
                 "position_us": state.position_us,
                 "length_us": state.length_us,
                 "position_label": state.position_label(),
+                "players": state.players,
             }),
             None => serde_json::json!({ "active": false }),
         }
@@ -807,6 +871,77 @@ mod tests {
             lock_row(&multi),
             "\u{f001}  Blue in Green \u{2014} Miles Davis   \u{f04b}"
         );
+    }
+
+    /// Monospace stand-in for the panel font: one unit per char so the switch
+    /// zone is exactly `prefix.len()` units wide after the TEXT_PAD cancel.
+    fn mono(text: &str) -> f32 {
+        // measure_ui_text_width includes TEXT_PAD on both ends; mimic that
+        // so click_action's `- TEXT_PAD` lands on the glyph boundary.
+        text.chars().count() as f32 + 4.0
+    }
+
+    #[test]
+    fn a_press_on_the_switch_hint_cycles_and_the_rest_plays() {
+        let mut multi = state("Track", "Artist");
+        multi.players = vec!["spotify".to_string(), "mpv".to_string()];
+        let prefix = control_row_prefix(&multi);
+        let switch = switch_hint(&multi).expect("multi-player has a switch");
+        let switch_start = mono(&prefix) - 2.0;
+        let switch_end = mono(&format!("{prefix}{switch}")) - 2.0;
+
+        assert_eq!(
+            click_action(switch_start, mono, &multi),
+            MediaRowClick::Cycle,
+            "the first pixel of the hint cycles"
+        );
+        assert_eq!(
+            click_action((switch_start + switch_end) * 0.5, mono, &multi),
+            MediaRowClick::Cycle
+        );
+        assert_eq!(
+            click_action(switch_start - 1.0, mono, &multi),
+            MediaRowClick::PlayPause,
+            "just left of the hint still plays"
+        );
+        assert_eq!(
+            click_action(0.0, mono, &multi),
+            MediaRowClick::PlayPause
+        );
+        assert_eq!(
+            click_action(switch_end, mono, &multi),
+            MediaRowClick::PlayPause,
+            "past the hint is PlayPause (exclusive end)"
+        );
+    }
+
+    #[test]
+    fn a_single_player_row_click_is_always_play_pause() {
+        let single = state("Track", "Artist");
+        assert!(switch_hint(&single).is_none());
+        for x in [0.0, 50.0, 500.0, -1.0, f32::NAN] {
+            assert_eq!(
+                click_action(x, mono, &single),
+                MediaRowClick::PlayPause,
+                "x={x}"
+            );
+        }
+    }
+
+    #[test]
+    fn control_row_is_prefix_plus_switch_hint() {
+        let mut multi = state("Track", "Artist");
+        multi.players = vec!["spotify".to_string(), "mpv".to_string()];
+        assert_eq!(
+            control_row(&multi),
+            format!(
+                "{}{}",
+                control_row_prefix(&multi),
+                switch_hint(&multi).unwrap()
+            )
+        );
+        let single = state("Track", "Artist");
+        assert_eq!(control_row(&single), control_row_prefix(&single));
     }
 
     #[test]

@@ -2182,83 +2182,11 @@ impl Jwm {
         info!("[show_keybindings]");
 
         let cfg = CONFIG.load();
-        let mut lines: Vec<String> = Vec::new();
-        for kc in cfg.key_configs() {
-            let mods = kc.modifier.join("+");
-            let shortcut = if mods.is_empty() {
-                kc.key.clone()
-            } else {
-                format!("{}+{}", mods, kc.key)
-            };
-
-            let desc = match kc.function.as_str() {
-                "spawn" => match &kc.argument {
-                    crate::config::ArgumentConfig::StringVec(v) => {
-                        format!("spawn {}", v.first().map(|s| s.as_str()).unwrap_or(""))
-                    }
-                    _ => "spawn".to_string(),
-                },
-                "setlayout" => match &kc.argument {
-                    crate::config::ArgumentConfig::String(s) => format!("layout: {}", s),
-                    _ => "previous layout".to_string(),
-                },
-                "lastlayout" => "previous layout".to_string(),
-                "focusstack" => match &kc.argument {
-                    crate::config::ArgumentConfig::Int(i) => {
-                        if *i > 0 {
-                            "focus next".to_string()
-                        } else {
-                            "focus prev".to_string()
-                        }
-                    }
-                    _ => "focusstack".to_string(),
-                },
-                "incnmaster" => match &kc.argument {
-                    crate::config::ArgumentConfig::Int(i) => {
-                        if *i > 0 {
-                            "master +1".to_string()
-                        } else {
-                            "master -1".to_string()
-                        }
-                    }
-                    _ => "incnmaster".to_string(),
-                },
-                "setmfact" => match &kc.argument {
-                    crate::config::ArgumentConfig::Float(f) => {
-                        if *f > 0.0 {
-                            "mfact +".to_string()
-                        } else {
-                            "mfact -".to_string()
-                        }
-                    }
-                    _ => "setmfact".to_string(),
-                },
-                "view" | "tag" | "toggleview" | "toggletag" => match &kc.argument {
-                    crate::config::ArgumentConfig::UInt(u) => format!("{} tag {}", kc.function, u),
-                    _ => kc.function.clone(),
-                },
-                other => other.to_string(),
-            };
-
-            lines.push(format!("{:<28} {}", shortcut, desc));
-        }
-
-        // 添加 tag 快捷键说明
-        let tags_len = cfg.tags_length();
-        lines.push(format!("{:<28} view tag 1-{}", "Mod1+[1-9]", tags_len));
-        lines.push(format!(
-            "{:<28} move to tag 1-{}",
-            "Mod1+Shift+[1-9]", tags_len
-        ));
-        lines.push(format!(
-            "{:<28} toggle view tag 1-{}",
-            "Mod1+Ctrl+[1-9]", tags_len
-        ));
-        lines.push(format!(
-            "{:<28} toggle tag 1-{}",
-            "Mod1+Ctrl+Shift+[1-9]", tags_len
-        ));
-        lines.push(format!("{:<28} {}", "Mod1+0", "view all tags"));
+        let lines = keybinding_viewer_lines(
+            cfg.key_configs(),
+            cfg.tags_length(),
+            &cfg.behavior().gesture_swipe,
+        );
 
         self.prepare_system_ui(
             backend,
@@ -2580,6 +2508,179 @@ fn shell_page_for(
         Wire::Clipboard => Some(ShellHubRoute::Clipboard),
         Wire::Calendar => Some(ShellHubRoute::Calendar),
         Wire::Wallpaper => Some(ShellHubRoute::Wallpaper),
+        Wire::Theme => Some(ShellHubRoute::Theme),
+    }
+}
+
+/// Action text for one keybinding-viewer row. Special-cases a few common
+/// functions the same way keys always have; everything else stays the
+/// configured function name (no cosmetic rename).
+fn keybinding_action_desc(function: &str, argument: &crate::config::ArgumentConfig) -> String {
+    match function {
+        "spawn" => match argument {
+            crate::config::ArgumentConfig::StringVec(v) => {
+                format!("spawn {}", v.first().map(|s| s.as_str()).unwrap_or(""))
+            }
+            _ => "spawn".to_string(),
+        },
+        "setlayout" => match argument {
+            crate::config::ArgumentConfig::String(s) => format!("layout: {}", s),
+            _ => "previous layout".to_string(),
+        },
+        "lastlayout" => "previous layout".to_string(),
+        "focusstack" => match argument {
+            crate::config::ArgumentConfig::Int(i) => {
+                if *i > 0 {
+                    "focus next".to_string()
+                } else {
+                    "focus prev".to_string()
+                }
+            }
+            _ => "focusstack".to_string(),
+        },
+        "incnmaster" => match argument {
+            crate::config::ArgumentConfig::Int(i) => {
+                if *i > 0 {
+                    "master +1".to_string()
+                } else {
+                    "master -1".to_string()
+                }
+            }
+            _ => "incnmaster".to_string(),
+        },
+        "setmfact" => match argument {
+            crate::config::ArgumentConfig::Float(f) => {
+                if *f > 0.0 {
+                    "mfact +".to_string()
+                } else {
+                    "mfact -".to_string()
+                }
+            }
+            _ => "setmfact".to_string(),
+        },
+        "view" | "tag" | "toggleview" | "toggletag" => match argument {
+            crate::config::ArgumentConfig::UInt(u) => format!("{} tag {}", function, u),
+            _ => function.to_string(),
+        },
+        other => other.to_string(),
+    }
+}
+
+/// Lines shown by `show_keybindings`: configured keys, the synthetic tag
+/// chords, then any `behavior.gesture_swipe` rows (`3f left` style). An empty
+/// swipe table adds nothing so the viewer stays byte-identical.
+fn keybinding_viewer_lines(
+    keys: &[crate::config::KeyConfig],
+    tags_len: usize,
+    gestures: &[crate::config::GestureSwipeConfig],
+) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    for kc in keys {
+        let mods = kc.modifier.join("+");
+        let shortcut = if mods.is_empty() {
+            kc.key.clone()
+        } else {
+            format!("{}+{}", mods, kc.key)
+        };
+        let desc = keybinding_action_desc(&kc.function, &kc.argument);
+        lines.push(format!("{:<28} {}", shortcut, desc));
+    }
+
+    lines.push(format!("{:<28} view tag 1-{}", "Mod1+[1-9]", tags_len));
+    lines.push(format!(
+        "{:<28} move to tag 1-{}",
+        "Mod1+Shift+[1-9]", tags_len
+    ));
+    lines.push(format!(
+        "{:<28} toggle view tag 1-{}",
+        "Mod1+Ctrl+[1-9]", tags_len
+    ));
+    lines.push(format!(
+        "{:<28} toggle tag 1-{}",
+        "Mod1+Ctrl+Shift+[1-9]", tags_len
+    ));
+    lines.push(format!("{:<28} {}", "Mod1+0", "view all tags"));
+
+    for g in gestures {
+        let shortcut = format!("{}f {}", g.fingers, g.direction);
+        let desc = keybinding_action_desc(&g.function, &g.argument);
+        lines.push(format!("{:<28} {}", shortcut, desc));
+    }
+    lines
+}
+
+#[cfg(test)]
+mod keybinding_viewer_tests {
+    use super::{keybinding_action_desc, keybinding_viewer_lines};
+    use crate::config::{ArgumentConfig, GestureSwipeConfig, KeyConfig};
+
+    fn sample_key() -> KeyConfig {
+        KeyConfig {
+            modifier: vec!["Mod1".into(), "Shift".into()],
+            key: "slash".into(),
+            function: "show_keybindings".into(),
+            argument: ArgumentConfig::Int(0),
+        }
+    }
+
+    #[test]
+    fn empty_gesture_swipe_leaves_viewer_lines_unchanged() {
+        let keys = [sample_key()];
+        let lines = keybinding_viewer_lines(&keys, 9, &[]);
+        assert_eq!(lines.len(), keys.len() + 5, "{lines:?}");
+        let last = format!("{:<28} {}", "Mod1+0", "view all tags");
+        assert_eq!(lines.last().map(String::as_str), Some(last.as_str()));
+        // Rebuilding with another empty slice is byte-identical.
+        assert_eq!(lines.join("\n"), keybinding_viewer_lines(&keys, 9, &[]).join("\n"));
+    }
+
+    #[test]
+    fn gesture_swipe_rows_use_finger_direction_and_raw_function_names() {
+        let keys = [sample_key()];
+        let gestures = [
+            GestureSwipeConfig {
+                fingers: 3,
+                direction: "left".into(),
+                function: "scrolling_focus_column".into(),
+                argument: ArgumentConfig::Int(1),
+            },
+            GestureSwipeConfig {
+                fingers: 4,
+                direction: "up".into(),
+                function: "focusstack".into(),
+                argument: ArgumentConfig::Int(1),
+            },
+        ];
+        let lines = keybinding_viewer_lines(&keys, 9, &gestures);
+        let expected_raw = format!(
+            "{:<28} {}",
+            "3f left",
+            keybinding_action_desc("scrolling_focus_column", &ArgumentConfig::Int(1))
+        );
+        let expected_special = format!(
+            "{:<28} {}",
+            "4f up",
+            keybinding_action_desc("focusstack", &ArgumentConfig::Int(1))
+        );
+        assert_eq!(
+            keybinding_action_desc("scrolling_focus_column", &ArgumentConfig::Int(1)),
+            "scrolling_focus_column"
+        );
+        assert_eq!(
+            keybinding_action_desc("focusstack", &ArgumentConfig::Int(1)),
+            "focus next"
+        );
+        assert!(
+            lines.iter().any(|line| line == &expected_raw),
+            "missing raw-function gesture row {expected_raw:?} in {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|line| line == &expected_special),
+            "missing special-cased gesture row {expected_special:?} in {lines:?}"
+        );
+        let keys_only = keybinding_viewer_lines(&keys, 9, &[]);
+        assert_eq!(&lines[..keys_only.len()], keys_only.as_slice());
+        assert_eq!(lines.len(), keys_only.len() + gestures.len());
     }
 }
 
@@ -2768,6 +2869,7 @@ mod shell_hub_command_tests {
             (Wire::Clipboard, Some(ShellHubRoute::Clipboard)),
             (Wire::Calendar, Some(ShellHubRoute::Calendar)),
             (Wire::Wallpaper, Some(ShellHubRoute::Wallpaper)),
+            (Wire::Theme, Some(ShellHubRoute::Theme)),
         ];
         assert_eq!(
             cases.len(),

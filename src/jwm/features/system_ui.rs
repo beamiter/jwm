@@ -365,6 +365,7 @@ pub enum ListKind {
     Wifi,
     Bluetooth,
     Wallpaper,
+    Theme,
     AudioOutput,
     AudioInput,
     /// The Alt+Tab MRU switcher. Unlike the other lists it is not opened to
@@ -381,6 +382,7 @@ impl ListKind {
             Self::Wifi => "\u{f1eb}  WI-FI",
             Self::Bluetooth => "\u{f293}  BLUETOOTH",
             Self::Wallpaper => "\u{f03e}  WALLPAPER",
+            Self::Theme => "\u{f1fc}  THEME",
             Self::AudioOutput => "\u{f028}  AUDIO OUTPUT",
             Self::AudioInput => "\u{f130}  AUDIO INPUT",
             Self::WindowSwitcher => "\u{f0ec}  WINDOWS",
@@ -416,7 +418,9 @@ impl ListKind {
             Self::Bluetooth => {
                 "Enter  connect/pair    s  scan    a  accept incoming    r  refresh    d  forget    Esc"
             }
-            Self::Wallpaper => "Click/Enter  apply    \u{f062}/\u{f063}  select    Esc  close",
+            Self::Wallpaper | Self::Theme => {
+                "Click/Enter  apply    \u{f062}/\u{f063}  select    Esc  close"
+            }
             Self::AudioOutput | Self::AudioInput => {
                 "Click/Enter  use    \u{f062}/\u{f063}  select    Esc  close"
             }
@@ -469,6 +473,7 @@ pub enum RowData {
         armed: bool,
     },
     Wallpaper,
+    Theme,
     /// The device id lives in the row's key, the way the wallpaper path does.
     AudioDevice,
     /// The Alt+Tab switcher: the row stands for this raw window id, resolved
@@ -601,6 +606,8 @@ pub struct ControlCenterInputs<'a> {
     pub clipboard_count: Option<usize>,
     /// Current wallpaper path, copied into a compact file-name status.
     pub wallpaper: Option<&'a str>,
+    /// Current `appearance.ui_theme` id for the Theme hub badge.
+    pub ui_theme: Option<&'a str>,
     pub media: Option<&'a crate::jwm::features::MediaState>,
     /// Percentage and mute state, when a working audio control exists.
     pub volume: Option<(u8, bool)>,
@@ -1279,6 +1286,7 @@ impl SystemUiState {
             notification_count,
             clipboard_count,
             wallpaper,
+            ui_theme,
             media,
             volume,
             brightness,
@@ -1327,6 +1335,13 @@ impl SystemUiState {
                 percent: 0,
                 enabled: false,
                 label: ShellHubRoute::Wallpaper.row(None, wallpaper),
+            });
+            // Theme follows Wallpaper in the Shell section (appearance pair).
+            entries.push(ControlEntry {
+                kind: ControlKind::Shell(ShellHubRoute::Theme),
+                percent: 0,
+                enabled: false,
+                label: ShellHubRoute::Theme.row(None, ui_theme),
             });
         }
         if let Some(media) = media {
@@ -2268,6 +2283,40 @@ impl SystemUiState {
     /// request, so the thumbnail always shows exactly what a commit would.
     pub fn selected_wallpaper(&self) -> Option<&str> {
         Some(self.selected_row(ListKind::Wallpaper)?.key.as_str())
+    }
+
+    // --- Theme picker ---
+
+    /// Build the Theme picker from the known `appearance.ui_theme` allowlist.
+    pub fn theme_picker(current: &str) -> Self {
+        let rows: Vec<ListRow> = crate::config::KNOWN_UI_THEMES
+            .iter()
+            .map(|&theme| ListRow {
+                key: theme.to_string(),
+                text: crate::jwm::features::shell_hub::theme_picker_row(theme, current),
+                data: RowData::Theme,
+            })
+            .collect();
+        let selected = rows.iter().position(|row| row.key == current).unwrap_or(0);
+        Self::ListPanel {
+            kind: ListKind::Theme,
+            rows,
+            row_icons: Vec::new(),
+            selected,
+            message: String::new(),
+            prompt: None,
+            query: String::new(),
+            empty: "No themes".to_string(),
+        }
+    }
+
+    pub fn is_theme_picker(&self) -> bool {
+        self.is_list(ListKind::Theme)
+    }
+
+    /// The theme id the selection rests on — what Enter would apply.
+    pub fn selected_theme(&self) -> Option<&str> {
+        Some(self.selected_row(ListKind::Theme)?.key.as_str())
     }
 
     // --- Audio device pickers ---
@@ -5657,8 +5706,10 @@ mod tests {
         assert!(!panel.is_bluetooth_picker());
         assert!(!panel.is_notification_center());
         assert!(!panel.is_wallpaper_picker());
+        assert!(!panel.is_theme_picker());
         assert!(panel.selected_bluetooth().is_none());
         assert!(panel.selected_wallpaper().is_none());
+        assert!(panel.selected_theme().is_none());
         assert!(panel.selected_notification().is_none());
     }
 
@@ -5836,6 +5887,28 @@ mod tests {
         let wifi = SystemUiState::wifi_picker("");
         assert!(wifi.selected_wallpaper().is_none());
         assert!(SystemUiState::Inactive.selected_wallpaper().is_none());
+    }
+
+    #[test]
+    fn the_theme_picker_lists_known_themes_and_preselects_current() {
+        let mut panel = SystemUiState::theme_picker("nord");
+        assert!(panel.is_theme_picker());
+        assert!(!panel.is_wallpaper_picker());
+        assert_eq!(panel.selected_theme(), Some("nord"));
+        assert!(panel.selected_wallpaper().is_none());
+
+        {
+            let SystemUiState::ListPanel { rows, selected, .. } = &panel else {
+                panic!("theme picker is a list panel");
+            };
+            assert_eq!(rows.len(), crate::config::KNOWN_UI_THEMES.len());
+            assert_eq!(rows[*selected].key, "nord");
+            assert!(rows[*selected].text.contains('\u{f00c}'));
+            assert!(rows.iter().any(|row| row.key == "tokyo-night"));
+        }
+
+        panel.move_selection(1);
+        assert_eq!(panel.selected_theme(), Some("tokyo-night"));
     }
 
     #[test]
@@ -6144,6 +6217,7 @@ mod tests {
             notification_count: 3,
             clipboard_count: Some(8),
             wallpaper: Some("/home/test/Pictures/aurora.png"),
+            ui_theme: Some("tokyo-night"),
             volume: Some((45, false)),
             network: Some(&network),
             ..Default::default()
@@ -6167,6 +6241,8 @@ mod tests {
         assert!(parts.items.iter().any(|row| row.contains("3 waiting")));
         assert!(parts.items.iter().any(|row| row.contains("8 saved")));
         assert!(parts.items.iter().any(|row| row.contains("aurora.png")));
+        assert!(parts.items.iter().any(|row| row.contains("tokyo-night")));
+        assert!(parts.items.iter().any(|row| row.contains("[T]")));
     }
 
     #[test]

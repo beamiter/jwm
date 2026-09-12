@@ -1723,6 +1723,31 @@ impl Jwm {
         }
 
         if let Some(control) = self.features.system_ui.selected_control() {
+            // Media row: a press on the trailing `· p ‹next›` hint is the
+            // pointer twin of the `p` key; everywhere else keeps the
+            // Return → PlayPause path a whole-row click always took.
+            if control == crate::jwm::features::system_ui::ControlKind::Media
+                && let Some(state) = self.features.media.get().cloned()
+            {
+                use crate::jwm::features::media::MediaRowClick;
+                let config = CONFIG.load();
+                let description = config.system_ui_font();
+                let pixel_size =
+                    crate::backend::compositor_font::ui_font_pixel_size(description);
+                let measure = |text: &str| {
+                    crate::backend::compositor_font::measure_ui_text_width(
+                        text,
+                        description,
+                        pixel_size,
+                    ) as f32
+                };
+                if crate::jwm::features::media::click_action(text_x, measure, &state)
+                    == MediaRowClick::Cycle
+                {
+                    let _ = self.cycle_media_player();
+                    return Ok(());
+                }
+            }
             self.handle_control_center_key(backend, control, keys::KEY_Return, Mods::empty());
         } else if self.features.system_ui.is_notification_center() {
             self.handle_notification_center_key(backend, keys::KEY_Return);
@@ -1738,6 +1763,8 @@ impl Jwm {
             self.copy_selected_clipboard(backend);
         } else if self.features.system_ui.is_wallpaper_picker() {
             self.apply_selected_wallpaper(backend);
+        } else if self.features.system_ui.is_theme_picker() {
+            self.apply_selected_theme(backend);
         } else {
             let _ = self.activate_launcher_selection(backend)?;
         }
@@ -2402,6 +2429,19 @@ impl Jwm {
             if self.features.system_ui.is_wallpaper_picker() {
                 if keysym == keys::KEY_Return || keysym == keys::KEY_space {
                     self.apply_selected_wallpaper(backend);
+                } else {
+                    if keysym == keys::KEY_Up {
+                        self.features.system_ui.move_selection(-1);
+                    } else if keysym == keys::KEY_Down || keysym == keys::KEY_Tab {
+                        self.features.system_ui.move_selection(1);
+                    }
+                    self.sync_system_ui(backend);
+                }
+                return Ok(());
+            }
+            if self.features.system_ui.is_theme_picker() {
+                if keysym == keys::KEY_Return || keysym == keys::KEY_space {
+                    self.apply_selected_theme(backend);
                 } else {
                     if keysym == keys::KEY_Up {
                         self.features.system_ui.move_selection(-1);

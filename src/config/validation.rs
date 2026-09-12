@@ -1028,15 +1028,7 @@ impl Config {
             &mut diagnostics,
             "appearance.ui_theme",
             &self.inner.appearance.ui_theme,
-            &[
-                "material",
-                "glass",
-                "glass-dark",
-                "aurora",
-                "nord",
-                "tokyo-night",
-                "paper",
-            ],
+            super::KNOWN_UI_THEMES,
         );
         validate_choice(
             &mut diagnostics,

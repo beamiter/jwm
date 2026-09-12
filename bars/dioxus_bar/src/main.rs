@@ -414,17 +414,18 @@ fn format_bytes(bytes: u64) -> String {
 
 /// JWM 自带 shell 的入口。
 ///
-/// 每一行只是向窗口管理器请求打开对应页面：应用、通知、剪贴板、日历、壁纸都
-/// 由窗口管理器绘制，状态栏不持有任何 shell 状态。
+/// 每一行只是向窗口管理器请求打开对应页面：应用、通知、剪贴板、日历、壁纸、
+/// 主题都由窗口管理器绘制，状态栏不持有任何 shell 状态。
 #[component]
 fn ShellButton(wm_available: bool, on_action: EventHandler<UserAction>) -> Element {
-    const ROUTES: [(ShellRoute, &str, &str); 6] = [
+    const ROUTES: [(ShellRoute, &str, &str); 7] = [
         (ShellRoute::Hub, "\u{F0F2A}", "Shell Hub"),
         (ShellRoute::Applications, "\u{F0D22}", "Applications"),
         (ShellRoute::Notifications, "\u{F009A}", "Notifications"),
         (ShellRoute::Clipboard, "\u{F0192}", "Clipboard"),
         (ShellRoute::Calendar, "\u{F00ED}", "Calendar"),
         (ShellRoute::Wallpaper, "\u{F02E9}", "Wallpaper"),
+        (ShellRoute::Theme, "\u{F1FC}", "Theme"),
     ];
 
     let class = if wm_available {

@@ -208,6 +208,7 @@ fn shell_route_to_shared(route: ShellRoute) -> shared_structures::ShellHubRoute 
         ShellRoute::Clipboard => Wire::Clipboard,
         ShellRoute::Calendar => Wire::Calendar,
         ShellRoute::Wallpaper => Wire::Wallpaper,
+        ShellRoute::Theme => Wire::Theme,
     }
 }
 

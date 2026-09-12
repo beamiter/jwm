@@ -207,15 +207,17 @@ enum ShellRoute {
     Clipboard,
     Calendar,
     Wallpaper,
+    Theme,
 }
 
-const SHELL_ROUTES: [(ShellRoute, &str, &str); 6] = [
+const SHELL_ROUTES: [(ShellRoute, &str, &str); 7] = [
     (ShellRoute::Hub, "\u{F0F2A}", "Shell Hub"),
     (ShellRoute::Applications, "\u{F0D22}", "Applications"),
     (ShellRoute::Notifications, "\u{F009A}", "Notifications"),
     (ShellRoute::Clipboard, "\u{F0192}", "Clipboard"),
     (ShellRoute::Calendar, "\u{F00ED}", "Calendar"),
     (ShellRoute::Wallpaper, "\u{F02E9}", "Wallpaper"),
+    (ShellRoute::Theme, "\u{F1FC}", "Theme"),
 ];
 
 #[derive(Serialize)]
