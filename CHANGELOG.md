@@ -7,6 +7,17 @@ monorepo use independent Semantic Versions.
 
 ### Added
 
+- Shell Hub **Theme** page (`T`, wire parameter `6`): lists the seven known
+  `appearance.ui_theme` values, applies via the wallpaper `set_config` path,
+  session-only. See [docs/control-center.md](docs/control-center.md) and
+  [docs/ui-theme.md](docs/ui-theme.md).
+
+- A click on the control-center media row's trailing `· p ‹next›` hint
+  cycles players like the `p` key; the rest of the row still play/pauses.
+  `media/status` and `get_media_status` now carry the append-only `players`
+  list so bars can build a picker without scraping the row. See
+  [docs/media-controls.md](docs/media-controls.md).
+
 - Clipboard history now keeps PNG images alongside text. Image-only copies
   (and screenshots published to the clipboard) land in `Alt+Ctrl+V` as text
   labels — `PNG 1920×1080  1.2M` when the IHDR is readable — filtered by
@@ -58,6 +69,11 @@ monorepo use independent Semantic Versions.
   the header remain no-ops. See [docs/calendar.md](docs/calendar.md).
 
 ### Changed
+
+- `Alt+Shift+/` (`show_keybindings`) lists configured `behavior.gesture_swipe`
+  rows after the keyboard binds — `3f left`-style shortcuts with the same
+  action-description style as keys (raw function names stay as configured).
+  An empty swipe table leaves the viewer unchanged.
 
 - The lock screen's now-playing row is documented as the control-center
   media row minus its transport cluster **and** the player-switch hint, so

@@ -200,7 +200,7 @@ bindable and scriptable over IPC like the three defaults.
 | Alt+Shift+F11 | Toggle the WaterLily simulation |
 | Alt+Shift+F10 | Cycle the WaterLily simulation case |
 | Alt+Shift+F9 | Cycle the WaterLily render palette |
-| Alt+Shift+/ | Show all bindings |
+| Alt+Shift+/ | Show all key and touchpad-gesture bindings |
 
 During interactive screenshot or recording selection, press `G`, `W`, `M`, or
 `D` to choose a dragged region, a window, the monitor under the pointer, or the

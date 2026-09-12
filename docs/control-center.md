@@ -19,6 +19,13 @@ The first section routes to the shell's pages:
 | `C` | Clipboard | number of memory-only entries; hidden when history is disabled |
 | `D` | Calendar | current month |
 | `W` | Wallpaper | current image name |
+| `T` | Theme | current `appearance.ui_theme` |
+
+Shell section order is Applications → Notifications → Clipboard (optional) →
+Calendar → Wallpaper → Theme. Theme lists the seven known
+`appearance.ui_theme` values; `Enter` applies through the same in-memory
+`set_config` path Wallpaper uses (session-only — not written to TOML). There
+is no standalone Theme keybind.
 
 `Up`/`Down` and `Tab`/`Shift+Tab` move between selectable rows,
 `Page Up`/`Page Down` move through a long page, `Home`/`End` jump to its edges,
@@ -134,6 +141,7 @@ ring buffer, with the page in `parameter`:
 | `3` | Clipboard |
 | `4` | Calendar |
 | `5` | Wallpaper |
+| `6` | Theme |
 
 JWM handles it exactly like the key-bound paths, which is what makes the two
 entry points behave identically:

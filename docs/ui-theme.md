@@ -138,6 +138,14 @@ config setter:
 jwm-tool msg set_config --args '{"key": "appearance.ui_theme", "value": "glass"}'
 ```
 
+The Shell Hub also has a **Theme** page (`T` from the Hub, or bar parameter
+`6`): it lists the seven known values from `KNOWN_UI_THEMES`, marks the
+current one, and applies the selection through the same in-memory
+`set_config` / `apply_config_changes` path Wallpaper uses. Like every other
+`set_config`, the change lasts for the session and is **not** written back to
+the TOML file — set `appearance.ui_theme` in the config to make a theme
+permanent. There are no live previews and no motion/blur rows on that page.
+
 Both compositors rebuild the blur chain if the switch needs one, and
 re-rasterize the panel text so the new theme's inks take effect immediately —
 no restart, no relaunch of the overlays.
