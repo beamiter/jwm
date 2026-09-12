@@ -38,7 +38,9 @@ pub enum ScreenshotCompletion {
     /// The PNG landed (file destination); carries the published path.
     Saved(String),
     /// The image was handed to the system clipboard (clipboard destination).
-    CopiedToClipboard,
+    /// Carries the PNG bytes so history can record them — X11 self-ownership
+    /// would otherwise skip the capture path.
+    CopiedToClipboard(Vec<u8>),
     /// The capture never produced its file, or the clipboard publish failed.
     /// Carries what the toast body should say.
     Failed(String),
@@ -72,7 +74,7 @@ pub(crate) fn screenshot_completion_toast(
             timeout_ms: 5000,
             ..Default::default()
         },
-        ScreenshotCompletion::CopiedToClipboard => crate::backend::api::ToastNotification {
+        ScreenshotCompletion::CopiedToClipboard(_) => crate::backend::api::ToastNotification {
             title: "\u{f030}  Screenshot copied to clipboard".into(),
             urgency: 1,
             timeout_ms: 5000,
@@ -1212,6 +1214,12 @@ impl Jwm {
         for job in std::mem::take(&mut self.features.screenshot_completions) {
             match job.take() {
                 Some(completion) => {
+                    if let ScreenshotCompletion::CopiedToClipboard(ref png) = completion {
+                        // X11 never re-captures self-owned PNG offers; Wayland
+                        // may also see the wl-copy selection — byte dedup makes
+                        // a double record a reorder/no-op.
+                        self.record_clipboard_png(png);
+                    }
                     self.push_system_toast(backend, screenshot_completion_toast(&completion));
                 }
                 // A job the OS refused a thread for never fills; drop it so
@@ -1495,8 +1503,10 @@ impl Jwm {
         if !to_clipboard {
             return ScreenshotCompletion::Saved(save_path);
         }
-        if Self::publish_image_path_to_clipboard(&save_path, image_sender, use_wl_copy) {
-            ScreenshotCompletion::CopiedToClipboard
+        if let Some(png) =
+            Self::publish_image_path_to_clipboard(&save_path, image_sender, use_wl_copy)
+        {
+            ScreenshotCompletion::CopiedToClipboard(png)
         } else {
             ScreenshotCompletion::Failed(capture_failure_detail(true, &save_path))
         }
@@ -1984,7 +1994,7 @@ impl Jwm {
     }
 
     /// Publish a PNG through the backend's native clipboard owner, returning
-    /// whether the image actually reached the clipboard.
+    /// the bytes on success so history can record them.
     ///
     /// X11 goes straight to JWM's selection thread, including ICCCM INCR for
     /// large payloads. Wayland keeps `wl-copy` as the platform fallback until
@@ -1995,7 +2005,7 @@ impl Jwm {
         png_path: &str,
         image_sender: Option<crate::backend::clipboard_offer::ClipboardImageSender>,
         use_wl_copy: bool,
-    ) -> bool {
+    ) -> Option<Vec<u8>> {
         if let Some(image_sender) = image_sender {
             let result = std::fs::read(png_path);
             // Once the bytes are memory-owned the staging file has served its
@@ -2003,17 +2013,17 @@ impl Jwm {
             let _ = std::fs::remove_file(png_path);
             return match result {
                 Ok(png) => {
-                    if image_sender.send_png(png) {
+                    if image_sender.send_png(png.clone()) {
                         info!("[take_screenshot] copied image to native X11 clipboard");
-                        true
+                        Some(png)
                     } else {
                         error!("[take_screenshot] native X11 clipboard owner is unavailable");
-                        false
+                        None
                     }
                 }
                 Err(error) => {
                     error!("[take_screenshot] clipboard source read failed: {error}");
-                    false
+                    None
                 }
             };
         }
@@ -2021,43 +2031,67 @@ impl Jwm {
         if !use_wl_copy || !Self::path_has_executable("wl-copy") {
             error!("[take_screenshot] clipboard copy failed: native owner unavailable");
             let _ = std::fs::remove_file(png_path);
-            return false;
+            return None;
         }
 
-        let file = match std::fs::File::open(png_path) {
-            Ok(file) => file,
+        let png = match std::fs::read(png_path) {
+            Ok(png) => png,
             Err(error) => {
-                error!("[take_screenshot] clipboard source open failed: {error}");
+                error!("[take_screenshot] clipboard source read failed: {error}");
                 let _ = std::fs::remove_file(png_path);
-                return false;
+                return None;
             }
         };
+        let _ = std::fs::remove_file(png_path);
+        if Self::publish_png_bytes_via_wl_copy(&png) {
+            info!("[take_screenshot] copied image to clipboard via wl-copy");
+            Some(png)
+        } else {
+            None
+        }
+    }
 
+    /// Publish in-memory PNG bytes via `wl-copy` (Wayland fallback).
+    ///
+    /// Used when re-offering a history PNG and when a screenshot lands on a
+    /// backend without a native image clipboard sender.
+    pub(crate) fn publish_png_bytes_via_wl_copy(png: &[u8]) -> bool {
+        if png.is_empty() || !Self::path_has_executable("wl-copy") {
+            return false;
+        }
+        let Ok((read, mut write)) = std::io::pipe() else {
+            return false;
+        };
+        let bytes = png.to_vec();
+        let writer = std::thread::Builder::new()
+            .name("jwm-wl-copy-stdin".to_string())
+            .spawn(move || {
+                use std::io::Write as _;
+                let _ = write.write_all(&bytes);
+            });
+        let Ok(_writer) = writer else {
+            return false;
+        };
         let output = clipboard_helper_output(
             "wl-copy",
             &["-t", "image/png"],
-            file,
+            std::fs::File::from(std::os::fd::OwnedFd::from(read)),
             CLIPBOARD_HELPER_TIMEOUT,
             MAX_CLIPBOARD_HELPER_STDERR_BYTES,
         );
-        let _ = std::fs::remove_file(png_path);
-
         match output {
-            Ok(output) if output.status.success() => {
-                info!("[take_screenshot] copied image to clipboard via wl-copy");
-                true
-            }
+            Ok(output) if output.status.success() => true,
             Ok(output) => {
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 error!(
-                    "[take_screenshot] clipboard copy via wl-copy failed: status={} stderr={}",
+                    "[clipboard] wl-copy failed: status={} stderr={}",
                     output.status,
                     stderr.trim()
                 );
                 false
             }
             Err(error) => {
-                error!("[take_screenshot] failed to run clipboard helper wl-copy: {error}");
+                error!("[clipboard] failed to run wl-copy: {error}");
                 false
             }
         }
@@ -2162,7 +2196,8 @@ mod tests {
         assert!(saved.actions.is_empty() && saved.notification_id == 0);
 
         // Clipboard destination: the private staging path must not surface.
-        let copied = screenshot_completion_toast(&ScreenshotCompletion::CopiedToClipboard);
+        let copied =
+            screenshot_completion_toast(&ScreenshotCompletion::CopiedToClipboard(vec![1, 2, 3]));
         assert_eq!(copied.title, "\u{f030}  Screenshot copied to clipboard");
         assert!(copied.body.is_empty());
         assert!(!copied.body.contains("/tmp/.jwm-screenshot-clipboard"));

@@ -430,8 +430,15 @@ impl Jwm {
 
         // Clipboard capture runs on its own thread and connection; adopt what
         // it copied here.
-        for text in backend.drain_clipboard() {
-            self.record_clipboard(&text);
+        for payload in backend.drain_clipboard() {
+            match payload {
+                crate::backend::clipboard_offer::CapturedClipboard::Text(text) => {
+                    self.record_clipboard(&text);
+                }
+                crate::backend::clipboard_offer::CapturedClipboard::Png(bytes) => {
+                    self.record_clipboard_png(&bytes);
+                }
+            }
         }
 
         // Application discovery traverses desktop-entry trees and every PATH

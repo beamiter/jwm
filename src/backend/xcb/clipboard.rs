@@ -11,9 +11,10 @@
 //! be the thing waiting.
 
 use crate::backend::clipboard_offer::{
-    self as clipboard, ClipboardImageSender, ClipboardOffer, X11_DIRECT_PROPERTY_BYTES,
-    X11_INCR_CHUNK_BYTES, X11_MAX_ACTIVE_INCR_BYTES, X11_MAX_MULTIPLE_CONVERSIONS,
-    next_x11_incr_chunk_with_limit, x11_selection_time_is_valid,
+    self as clipboard, CapturedClipboard, ClipboardImageSender, ClipboardOffer,
+    MAX_IMAGE_HISTORY_BYTES, X11_DIRECT_PROPERTY_BYTES, X11_INCR_CHUNK_BYTES,
+    X11_MAX_ACTIVE_INCR_BYTES, X11_MAX_MULTIPLE_CONVERSIONS, next_x11_incr_chunk_with_limit,
+    x11_selection_time_is_valid,
 };
 use std::os::fd::AsRawFd as _;
 use xcb::x::{self, ATOM_ANY, ATOM_ATOM, ATOM_INTEGER, Atom};
@@ -56,11 +57,12 @@ struct Atoms {
 enum Conversion {
     TargetList,
     Text,
+    Png,
 }
 
 /// Handle held by the backend.
 pub(crate) struct Clipboard {
-    captured: std::sync::mpsc::Receiver<String>,
+    captured: std::sync::mpsc::Receiver<CapturedClipboard>,
     serve: std::sync::mpsc::Sender<ClipboardOffer>,
     worker_wake: crate::backend::update_notifier::AsyncUpdateNotifier,
     notifier: std::sync::Arc<
@@ -156,8 +158,8 @@ impl Clipboard {
         })
     }
 
-    /// Text copied since the last call, oldest first.
-    pub(crate) fn drain_captured(&self) -> Vec<String> {
+    /// Payloads copied since the last call, oldest first.
+    pub(crate) fn drain_captured(&self) -> Vec<CapturedClipboard> {
         self.captured.try_iter().collect()
     }
 
@@ -415,7 +417,7 @@ impl Watcher {
 
     fn run(
         &mut self,
-        captured: &std::sync::mpsc::Sender<String>,
+        captured: &std::sync::mpsc::Sender<CapturedClipboard>,
         serve: &std::sync::mpsc::Receiver<ClipboardOffer>,
         notifier: &std::sync::Mutex<Option<crate::backend::update_notifier::AsyncUpdateNotifier>>,
         wake: &crate::backend::update_notifier::AsyncUpdateNotifier,
@@ -455,9 +457,9 @@ impl Watcher {
                 match self.conn.poll_for_event() {
                     Ok(Some(event)) => {
                         handled_event = true;
-                        if let Some(text) = self.handle(&event)
+                        if let Some(payload) = self.handle(&event)
                             && capture_connected
-                            && !publish_capture(captured, notifier, text)
+                            && !publish_capture(captured, notifier, payload)
                         {
                             capture_connected = false;
                         }
@@ -727,7 +729,7 @@ impl Watcher {
         }
     }
 
-    fn handle(&mut self, event: &xcb::Event) -> Option<String> {
+    fn handle(&mut self, event: &xcb::Event) -> Option<CapturedClipboard> {
         match event {
             xcb::Event::XFixes(xcb::xfixes::Event::SelectionNotify(e)) => {
                 self.on_owner_changed(e.owner(), e.timestamp(), e.selection_timestamp());
@@ -864,7 +866,7 @@ impl Watcher {
         let _ = self.conn.flush();
     }
 
-    fn convert_capture_to_text(&mut self, target: Atom) -> bool {
+    fn convert_capture_to_payload(&mut self, conversion: Conversion, target: Atom) -> bool {
         let Some(capture) = self.capture.as_ref() else {
             return false;
         };
@@ -876,7 +878,7 @@ impl Watcher {
             return false;
         }
         if let Some(capture) = self.capture.as_mut() {
-            capture.conversion = Conversion::Text;
+            capture.conversion = conversion;
             capture.target = target;
             capture.incoming_incr = None;
             capture.last_activity = std::time::Instant::now();
@@ -891,7 +893,10 @@ impl Watcher {
         self.conn.flush().is_ok()
     }
 
-    fn on_selection_notify(&mut self, event: &x::SelectionNotifyEvent) -> Option<String> {
+    fn on_selection_notify(
+        &mut self,
+        event: &x::SelectionNotifyEvent,
+    ) -> Option<CapturedClipboard> {
         let Some(capture) = self.capture.as_ref() else {
             return None;
         };
@@ -917,6 +922,7 @@ impl Watcher {
         let cap = match conversion {
             Conversion::TargetList => MAX_TARGET_LIST_BYTES,
             Conversion::Text => clipboard::MAX_TEXT_BYTES,
+            Conversion::Png => MAX_IMAGE_HISTORY_BYTES,
         };
 
         let cookie = self.conn.send_request(&x::GetProperty {
@@ -965,7 +971,7 @@ impl Watcher {
                     return None;
                 }
                 let targets: Vec<Atom> = reply.value::<Atom>().to_vec();
-                self.request_text_if_allowed(&targets);
+                self.request_payload_if_allowed(&targets);
                 None
             }
             Conversion::Text => {
@@ -975,14 +981,24 @@ impl Watcher {
                 }
                 let text = String::from_utf8(reply.value::<u8>().to_vec()).ok();
                 self.cancel_capture();
-                text
+                text.map(CapturedClipboard::Text)
+            }
+            Conversion::Png => {
+                if reply.r#type() != event.target() || reply.format() != 8 {
+                    self.cancel_capture();
+                    return None;
+                }
+                let bytes = reply.value::<u8>().to_vec();
+                self.cancel_capture();
+                (!bytes.is_empty()).then_some(CapturedClipboard::Png(bytes))
             }
         }
     }
 
     /// Decide from the target list whether to ask for the payload at all.
-    /// Names are resolved so the shared policy makes the call.
-    fn request_text_if_allowed(&mut self, targets: &[Atom]) {
+    /// Names are resolved so the shared policy makes the call. Text wins
+    /// over PNG when both are advertised.
+    fn request_payload_if_allowed(&mut self, targets: &[Atom]) {
         let mut unique = std::collections::HashSet::with_capacity(targets.len());
         let targets: Vec<Atom> = targets
             .iter()
@@ -1011,17 +1027,22 @@ impl Watcher {
             self.cancel_capture();
             return;
         }
-        let Some(target) = [
+        let (conversion, target) = if let Some(target) = [
             self.atoms.text_plain_utf8,
             self.atoms.utf8_string,
             self.atoms.text_plain,
         ]
         .into_iter()
-        .find(|wanted| targets.contains(wanted)) else {
+        .find(|wanted| targets.contains(wanted))
+        {
+            (Conversion::Text, target)
+        } else if targets.contains(&self.atoms.image_png) {
+            (Conversion::Png, self.atoms.image_png)
+        } else {
             self.cancel_capture();
             return;
         };
-        if !self.convert_capture_to_text(target) {
+        if !self.convert_capture_to_payload(conversion, target) {
             self.cancel_capture();
         }
     }
@@ -1287,7 +1308,7 @@ impl Watcher {
         true
     }
 
-    fn on_property_notify(&mut self, event: &x::PropertyNotifyEvent) -> Option<String> {
+    fn on_property_notify(&mut self, event: &x::PropertyNotifyEvent) -> Option<CapturedClipboard> {
         if event.state() == x::Property::NewValue
             && event.window() == self.window
             && event.atom() == self.atoms.timestamp_probe
@@ -1336,7 +1357,11 @@ impl Watcher {
         None
     }
 
-    fn on_incoming_incr_property(&mut self, window: x::Window, property: Atom) -> Option<String> {
+    fn on_incoming_incr_property(
+        &mut self,
+        window: x::Window,
+        property: Atom,
+    ) -> Option<CapturedClipboard> {
         let Some(capture) = self.capture.as_ref() else {
             return None;
         };
@@ -1365,7 +1390,7 @@ impl Watcher {
         let peek = self.conn.wait_for_reply(cookie).ok()?;
         let expected_format = match conversion {
             Conversion::TargetList => 32,
-            Conversion::Text => 8,
+            Conversion::Text | Conversion::Png => 8,
         };
         let valid_type = peek.r#type() == target && peek.format() == expected_format;
 
@@ -1383,63 +1408,77 @@ impl Watcher {
                 self.cancel_capture();
                 return None;
             }
-            if conversion == Conversion::TargetList {
-                self.cancel_capture();
-                return None;
-            }
-            self.cancel_capture();
-            return String::from_utf8(incoming.bytes).ok();
-        }
-
-        // We do not need an enormous or incrementally encoded TARGETS list to
-        // classify a clipboard. Delete each chunk to release the source owner,
-        // but retain bytes only for a bounded format-8 text conversion.
-        if conversion == Conversion::TargetList
-            || peek.bytes_after() > MAX_INCOMING_CHUNK_BYTES
-            || !valid_type
-        {
-            self.conn
-                .send_request(&x::DeleteProperty { window, property });
-            if let Some(incoming) = self
-                .capture
-                .as_mut()
-                .and_then(|capture| capture.incoming_incr.as_mut())
-            {
-                incoming.oversized = true;
-            }
-            if let Some(capture) = self.capture.as_mut() {
-                capture.last_activity = std::time::Instant::now();
-            }
-            let _ = self.conn.flush();
-            return None;
-        }
-
-        let cookie = self.conn.send_request(&x::GetProperty {
-            delete: true,
-            window,
-            property,
-            r#type: ATOM_ANY,
-            long_offset: 0,
-            long_length: peek.bytes_after().div_ceil(4),
-        });
-        let reply = self.conn.wait_for_reply(cookie).ok()?;
-        if let Some(capture) = self.capture.as_mut() {
-            if let Some(incoming) = capture.incoming_incr.as_mut() {
-                if reply.r#type() != target || reply.format() != 8 {
-                    incoming.oversized = true;
-                } else {
-                    let value = reply.value::<u8>();
-                    if incoming.bytes.len().saturating_add(value.len()) > clipboard::MAX_TEXT_BYTES
-                    {
-                        incoming.oversized = true;
-                    } else if !incoming.oversized {
-                        incoming.bytes.extend_from_slice(value);
-                    }
+            match conversion {
+                Conversion::TargetList => {
+                    self.cancel_capture();
+                    None
+                }
+                Conversion::Text => {
+                    self.cancel_capture();
+                    String::from_utf8(incoming.bytes)
+                        .ok()
+                        .map(CapturedClipboard::Text)
+                }
+                Conversion::Png => {
+                    self.cancel_capture();
+                    (!incoming.bytes.is_empty()).then_some(CapturedClipboard::Png(incoming.bytes))
                 }
             }
-            capture.last_activity = std::time::Instant::now();
+        } else {
+            // We do not need an enormous or incrementally encoded TARGETS list to
+            // classify a clipboard. Delete each chunk to release the source owner,
+            // but retain bytes only for a bounded format-8 text/PNG conversion.
+            if conversion == Conversion::TargetList
+                || peek.bytes_after() > MAX_INCOMING_CHUNK_BYTES
+                || !valid_type
+            {
+                self.conn
+                    .send_request(&x::DeleteProperty { window, property });
+                if let Some(incoming) = self
+                    .capture
+                    .as_mut()
+                    .and_then(|capture| capture.incoming_incr.as_mut())
+                {
+                    incoming.oversized = true;
+                }
+                if let Some(capture) = self.capture.as_mut() {
+                    capture.last_activity = std::time::Instant::now();
+                }
+                let _ = self.conn.flush();
+                return None;
+            }
+
+            let cookie = self.conn.send_request(&x::GetProperty {
+                delete: true,
+                window,
+                property,
+                r#type: ATOM_ANY,
+                long_offset: 0,
+                long_length: peek.bytes_after().div_ceil(4),
+            });
+            let reply = self.conn.wait_for_reply(cookie).ok()?;
+            let cap = match conversion {
+                Conversion::TargetList => MAX_TARGET_LIST_BYTES,
+                Conversion::Text => clipboard::MAX_TEXT_BYTES,
+                Conversion::Png => MAX_IMAGE_HISTORY_BYTES,
+            };
+            if let Some(capture) = self.capture.as_mut() {
+                if let Some(incoming) = capture.incoming_incr.as_mut() {
+                    if reply.r#type() != target || reply.format() != 8 {
+                        incoming.oversized = true;
+                    } else {
+                        let value = reply.value::<u8>();
+                        if incoming.bytes.len().saturating_add(value.len()) > cap {
+                            incoming.oversized = true;
+                        } else if !incoming.oversized {
+                            incoming.bytes.extend_from_slice(value);
+                        }
+                    }
+                }
+                capture.last_activity = std::time::Instant::now();
+            }
+            None
         }
-        None
     }
 
     fn expire_outgoing_incr(&mut self) {
@@ -1498,11 +1537,11 @@ impl Watcher {
 }
 
 fn publish_capture(
-    captured: &std::sync::mpsc::Sender<String>,
+    captured: &std::sync::mpsc::Sender<CapturedClipboard>,
     notifier: &std::sync::Mutex<Option<crate::backend::update_notifier::AsyncUpdateNotifier>>,
-    text: String,
+    payload: CapturedClipboard,
 ) -> bool {
-    if captured.send(text).is_err() {
+    if captured.send(payload).is_err() {
         return false;
     }
     let notifier = notifier
@@ -1657,6 +1696,7 @@ mod tests {
     #[test]
     fn conversions_are_routed_by_the_replys_own_target() {
         assert_ne!(Conversion::TargetList, Conversion::Text);
+        assert_ne!(Conversion::Text, Conversion::Png);
     }
 
     #[test]
@@ -1665,9 +1705,16 @@ mod tests {
         let slot = std::sync::Mutex::new(Some(notifier.clone()));
         let (send, receive) = std::sync::mpsc::channel();
 
-        assert!(publish_capture(&send, &slot, "ready".to_string()));
+        assert!(publish_capture(
+            &send,
+            &slot,
+            CapturedClipboard::Text("ready".to_string())
+        ));
         assert_eq!(notifier.drain().unwrap(), 1);
-        assert_eq!(receive.try_recv().unwrap(), "ready");
+        assert_eq!(
+            receive.try_recv().unwrap(),
+            CapturedClipboard::Text("ready".to_string())
+        );
     }
 
     #[test]
@@ -2046,7 +2093,12 @@ mod tests {
         loop {
             let captured = clipboard_watcher.drain_captured();
             if !captured.is_empty() {
-                assert_eq!(captured, vec![String::from_utf8(expected).unwrap()]);
+                assert_eq!(
+                    captured,
+                    vec![CapturedClipboard::Text(
+                        String::from_utf8(expected).unwrap()
+                    )]
+                );
                 break;
             }
             assert!(

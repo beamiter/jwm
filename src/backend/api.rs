@@ -3172,9 +3172,9 @@ pub trait Backend:
     }
 
     /// Text copied by other applications since the last call, oldest first.
-    /// The backend has already dropped offers marked as secrets and anything
-    /// that is not text, so a password never reaches the history.
-    fn drain_clipboard(&mut self) -> Vec<String> {
+    /// The backend has already dropped offers marked as secrets. Payloads may
+    /// be text or PNG under the history caps.
+    fn drain_clipboard(&mut self) -> Vec<crate::backend::clipboard_offer::CapturedClipboard> {
         Vec::new()
     }
 

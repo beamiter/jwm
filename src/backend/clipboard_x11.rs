@@ -7,7 +7,7 @@
 //!
 //! * **Watch** — XFIXES reports every change of CLIPBOARD ownership. On each
 //!   change the current owner is asked for its target list, and only if that
-//!   list is text and is not marked secret is the payload requested at all.
+//!   list is text or PNG and is not marked secret is the payload requested.
 //! * **Serve** — putting an entry back means *becoming* the owner and
 //!   answering `SelectionRequest` for as long as JWM holds it.
 //!
@@ -37,8 +37,9 @@ use x11rb::wrapper::ConnectionExt as _;
 #[cfg(feature = "backend-x11rb")]
 use crate::backend::clipboard_offer::ClipboardImageSender;
 use crate::backend::clipboard_offer::{
-    ClipboardOffer, X11_DIRECT_PROPERTY_BYTES, X11_INCR_CHUNK_BYTES, X11_MAX_ACTIVE_INCR_BYTES,
-    X11_MAX_MULTIPLE_CONVERSIONS, next_x11_incr_chunk_with_limit, x11_selection_time_is_valid,
+    CapturedClipboard, ClipboardOffer, MAX_IMAGE_HISTORY_BYTES, X11_DIRECT_PROPERTY_BYTES,
+    X11_INCR_CHUNK_BYTES, X11_MAX_ACTIVE_INCR_BYTES, X11_MAX_MULTIPLE_CONVERSIONS,
+    next_x11_incr_chunk_with_limit, x11_selection_time_is_valid,
 };
 
 /// A requester that never deletes the INCR property must not retain transfer
@@ -86,6 +87,7 @@ struct Atoms {
 enum Conversion {
     TargetList,
     Text,
+    Png,
 }
 
 /// The watcher, living on its own thread.
@@ -193,10 +195,10 @@ struct OutgoingIncr {
     last_activity: std::time::Instant,
 }
 
-/// Handle held by the backend: captured text arrives on `captured`, entries
-/// to serve are sent on `serve`.
+/// Handle held by the backend: captured payloads arrive on `captured`,
+/// entries to serve are sent on `serve`.
 pub(crate) struct Clipboard {
-    captured: std::sync::mpsc::Receiver<String>,
+    captured: std::sync::mpsc::Receiver<CapturedClipboard>,
     serve: std::sync::mpsc::Sender<ClipboardOffer>,
     worker_wake: crate::backend::update_notifier::AsyncUpdateNotifier,
     #[cfg(feature = "backend-x11rb")]
@@ -301,9 +303,9 @@ impl Clipboard {
         })
     }
 
-    /// Text copied since the last call, oldest first.
+    /// Payloads copied since the last call, oldest first.
     #[cfg(feature = "backend-x11rb")]
-    pub(crate) fn drain_captured(&self) -> Vec<String> {
+    pub(crate) fn drain_captured(&self) -> Vec<CapturedClipboard> {
         self.captured.try_iter().collect()
     }
 
@@ -381,9 +383,12 @@ impl Clipboard {
 }
 
 /// Receiving half: text copied on this display.
+///
+/// Remote clipboard sharing stays text-only (`docs/clipboard.md`); PNG
+/// captures are drained and discarded here so they never leave the session.
 #[cfg(feature = "remote-x11")]
 pub(crate) struct ClipboardCaptures {
-    captured: std::sync::mpsc::Receiver<String>,
+    captured: std::sync::mpsc::Receiver<CapturedClipboard>,
     worker: std::sync::Arc<ClipboardWorkerLifetime>,
 }
 
@@ -392,10 +397,32 @@ impl ClipboardCaptures {
     /// Block for the next captured text, giving up after `timeout`.
     ///
     /// Returning on a timeout rather than parking forever lets the caller
-    /// notice session shutdown without a second wake channel.
+    /// notice session shutdown without a second wake channel. PNG captures
+    /// are skipped so a local image copy cannot stall text forwarding.
     pub(crate) fn recv_timeout(&self, timeout: std::time::Duration) -> Option<String> {
         let _keep_worker_alive = &self.worker;
-        self.captured.recv_timeout(timeout).ok()
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            let remaining = if timeout.is_zero() {
+                std::time::Duration::ZERO
+            } else {
+                deadline.saturating_duration_since(std::time::Instant::now())
+            };
+            if !timeout.is_zero() && remaining.is_zero() {
+                return None;
+            }
+            match self.captured.recv_timeout(remaining) {
+                Ok(CapturedClipboard::Text(text)) => return Some(text),
+                Ok(CapturedClipboard::Png(_)) => {
+                    if timeout.is_zero() {
+                        continue;
+                    }
+                    continue;
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => return None,
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return None,
+            }
+        }
     }
 }
 
@@ -539,7 +566,7 @@ impl Watcher {
     /// one blocking poll, so an idle session performs no timer wakeups.
     fn run(
         &mut self,
-        captured: &std::sync::mpsc::Sender<String>,
+        captured: &std::sync::mpsc::Sender<CapturedClipboard>,
         serve: &std::sync::mpsc::Receiver<ClipboardOffer>,
         notifier: &std::sync::Mutex<Option<crate::backend::update_notifier::AsyncUpdateNotifier>>,
         wake: &crate::backend::update_notifier::AsyncUpdateNotifier,
@@ -583,9 +610,9 @@ impl Watcher {
                 match self.conn.poll_for_event() {
                     Ok(Some(event)) => {
                         handled_event = true;
-                        if let Some(text) = self.handle(&event)
+                        if let Some(payload) = self.handle(&event)
                             && capture_connected
-                            && !publish_capture(captured, notifier, text)
+                            && !publish_capture(captured, notifier, payload)
                         {
                             capture_connected = false;
                         }
@@ -855,8 +882,8 @@ impl Watcher {
         }
     }
 
-    /// Route one X event. Returns copied text when a conversion completed.
-    fn handle(&mut self, event: &x11rb::protocol::Event) -> Option<String> {
+    /// Route one X event. Returns a captured payload when a conversion completed.
+    fn handle(&mut self, event: &x11rb::protocol::Event) -> Option<CapturedClipboard> {
         use x11rb::protocol::Event;
         match event {
             Event::XfixesSelectionNotify(e) => {
@@ -1014,9 +1041,9 @@ impl Watcher {
         let _ = self.conn.flush();
     }
 
-    /// A conversion finished. Returns the copied text once it has been asked
+    /// A conversion finished. Returns the copied payload once it has been asked
     /// for and delivered.
-    fn on_selection_notify(&mut self, event: &SelectionNotifyEvent) -> Option<String> {
+    fn on_selection_notify(&mut self, event: &SelectionNotifyEvent) -> Option<CapturedClipboard> {
         let Some(capture) = self.capture.as_ref() else {
             return None;
         };
@@ -1042,6 +1069,7 @@ impl Watcher {
         let cap = match conversion {
             Conversion::TargetList => MAX_TARGET_LIST_BYTES,
             Conversion::Text => crate::backend::clipboard_offer::MAX_TEXT_BYTES,
+            Conversion::Png => MAX_IMAGE_HISTORY_BYTES,
         };
         let reply = self
             .conn
@@ -1093,7 +1121,7 @@ impl Watcher {
                     return None;
                 };
                 let targets: Vec<Atom> = values.collect();
-                self.request_text_if_allowed(&targets);
+                self.request_payload_if_allowed(&targets);
                 None
             }
             Conversion::Text => {
@@ -1102,7 +1130,17 @@ impl Watcher {
                     return None;
                 }
                 self.cancel_capture();
-                String::from_utf8(reply.value).ok()
+                String::from_utf8(reply.value)
+                    .ok()
+                    .map(CapturedClipboard::Text)
+            }
+            Conversion::Png => {
+                if reply.type_ != event.target || reply.format != 8 {
+                    self.cancel_capture();
+                    return None;
+                }
+                self.cancel_capture();
+                (!reply.value.is_empty()).then_some(CapturedClipboard::Png(reply.value))
             }
         }
     }
@@ -1110,9 +1148,10 @@ impl Watcher {
     /// Decide from the target list whether to ask for the payload at all.
     ///
     /// The names are resolved so the shared policy in
-    /// `jwm::features::clipboard` makes the call — one round trip on a copy,
-    /// and worth it to keep one definition of "this is a secret".
-    fn request_text_if_allowed(&mut self, targets: &[Atom]) {
+    /// `clipboard_offer` makes the call — one round trip on a copy,
+    /// and worth it to keep one definition of "this is a secret". Text
+    /// wins over PNG when both are advertised.
+    fn request_payload_if_allowed(&mut self, targets: &[Atom]) {
         let mut unique = std::collections::HashSet::with_capacity(targets.len());
         let targets: Vec<Atom> = targets
             .iter()
@@ -1150,14 +1189,19 @@ impl Watcher {
             self.cancel_capture();
             return;
         }
-        // Ask for the richest text form the owner actually advertises.
-        let Some(target) = [
+        // Ask for the richest text form the owner actually advertises; else PNG.
+        let (conversion, target) = if let Some(target) = [
             self.atoms.text_plain_utf8,
             self.atoms.utf8_string,
             self.atoms.text_plain,
         ]
         .into_iter()
-        .find(|wanted| targets.contains(wanted)) else {
+        .find(|wanted| targets.contains(wanted))
+        {
+            (Conversion::Text, target)
+        } else if targets.contains(&self.atoms.image_png) {
+            (Conversion::Png, self.atoms.image_png)
+        } else {
             self.cancel_capture();
             return;
         };
@@ -1173,7 +1217,7 @@ impl Watcher {
             return;
         }
         if let Some(capture) = self.capture.as_mut() {
-            capture.conversion = Conversion::Text;
+            capture.conversion = conversion;
             capture.target = target;
             capture.incoming_incr = None;
             capture.last_activity = std::time::Instant::now();
@@ -1190,7 +1234,7 @@ impl Watcher {
             )
             .map(|_| ());
         if let Err(error) = request {
-            log::debug!("clipboard: requesting text failed: {error}");
+            log::debug!("clipboard: requesting payload failed: {error}");
             self.cancel_capture();
             return;
         }
@@ -1494,7 +1538,7 @@ impl Watcher {
     /// The requestor deletes the property once for every chunk it is ready to
     /// consume. After the last data chunk, one more delete is answered with a
     /// zero-length property, which terminates the transfer.
-    fn on_property_notify(&mut self, event: &PropertyNotifyEvent) -> Option<String> {
+    fn on_property_notify(&mut self, event: &PropertyNotifyEvent) -> Option<CapturedClipboard> {
         if event.state == Property::NEW_VALUE
             && event.window == self.window
             && event.atom == self.atoms.timestamp_probe
@@ -1545,7 +1589,11 @@ impl Watcher {
         None
     }
 
-    fn on_incoming_incr_property(&mut self, window: Window, property: Atom) -> Option<String> {
+    fn on_incoming_incr_property(
+        &mut self,
+        window: Window,
+        property: Atom,
+    ) -> Option<CapturedClipboard> {
         let Some(capture) = self.capture.as_ref() else {
             return None;
         };
@@ -1571,7 +1619,7 @@ impl Watcher {
             .ok()?;
         let expected_format = match conversion {
             Conversion::TargetList => 32,
-            Conversion::Text => 8,
+            Conversion::Text | Conversion::Png => 8,
         };
         let valid_type = peek.type_ == target && peek.format == expected_format;
 
@@ -1626,6 +1674,7 @@ impl Watcher {
         let cap = match conversion {
             Conversion::TargetList => MAX_TARGET_LIST_BYTES,
             Conversion::Text => crate::backend::clipboard_offer::MAX_TEXT_BYTES,
+            Conversion::Png => MAX_IMAGE_HISTORY_BYTES,
         };
         if let Some(capture) = self.capture.as_mut() {
             if let Some(incoming) = capture.incoming_incr.as_mut() {
@@ -1647,7 +1696,7 @@ impl Watcher {
         &mut self,
         conversion: Conversion,
         bytes: Vec<u8>,
-    ) -> Option<String> {
+    ) -> Option<CapturedClipboard> {
         match conversion {
             Conversion::TargetList => {
                 let _ = bytes;
@@ -1656,7 +1705,11 @@ impl Watcher {
             }
             Conversion::Text => {
                 self.cancel_capture();
-                String::from_utf8(bytes).ok()
+                String::from_utf8(bytes).ok().map(CapturedClipboard::Text)
+            }
+            Conversion::Png => {
+                self.cancel_capture();
+                (!bytes.is_empty()).then_some(CapturedClipboard::Png(bytes))
             }
         }
     }
@@ -1701,13 +1754,13 @@ impl Watcher {
 }
 
 fn publish_capture(
-    captured: &std::sync::mpsc::Sender<String>,
+    captured: &std::sync::mpsc::Sender<CapturedClipboard>,
     notifier: &std::sync::Mutex<Option<crate::backend::update_notifier::AsyncUpdateNotifier>>,
-    text: String,
+    payload: CapturedClipboard,
 ) -> bool {
     // Channel publication happens first. Once the eventfd is readable the
-    // handler must be able to drain this text without another timer tick.
-    if captured.send(text).is_err() {
+    // handler must be able to drain this payload without another timer tick.
+    if captured.send(payload).is_err() {
         return false;
     }
     let notifier = notifier
@@ -1854,6 +1907,7 @@ mod tests {
         // every other copy, because a late reply from the previous owner was
         // read as the new owner's target list.
         assert_ne!(Conversion::TargetList, Conversion::Text);
+        assert_ne!(Conversion::Text, Conversion::Png);
     }
 
     #[test]
@@ -1862,9 +1916,16 @@ mod tests {
         let slot = std::sync::Mutex::new(Some(notifier.clone()));
         let (send, receive) = std::sync::mpsc::channel();
 
-        assert!(publish_capture(&send, &slot, "ready".to_string()));
+        assert!(publish_capture(
+            &send,
+            &slot,
+            CapturedClipboard::Text("ready".to_string())
+        ));
         assert_eq!(notifier.drain().unwrap(), 1);
-        assert_eq!(receive.try_recv().unwrap(), "ready");
+        assert_eq!(
+            receive.try_recv().unwrap(),
+            CapturedClipboard::Text("ready".to_string())
+        );
     }
 
     #[cfg(feature = "backend-x11rb")]
@@ -2227,7 +2288,12 @@ mod tests {
         loop {
             let captured = clipboard_watcher.drain_captured();
             if !captured.is_empty() {
-                assert_eq!(captured, vec![String::from_utf8(expected).unwrap()]);
+                assert_eq!(
+                    captured,
+                    vec![CapturedClipboard::Text(
+                        String::from_utf8(expected).unwrap()
+                    )]
+                );
                 break;
             }
             assert!(

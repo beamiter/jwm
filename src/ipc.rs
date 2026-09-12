@@ -303,6 +303,7 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "get_idle_status",
         "get_media_status",
         "get_metrics",
+        "get_mic_mute",
         "get_monitors",
         "get_notifications",
         "get_power_status",
@@ -1340,6 +1341,12 @@ mod tests {
             "deprecated aliases must not be advertised"
         );
         assert!(capabilities.queries.iter().any(|name| name == "get_status"));
+        assert!(
+            capabilities
+                .queries
+                .iter()
+                .any(|name| name == "get_mic_mute")
+        );
         assert!(
             capabilities
                 .queries

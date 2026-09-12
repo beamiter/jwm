@@ -9,10 +9,27 @@
 //! clipboard history re-exports them, so policy callers and backends decide
 //! alike by construction.
 
-/// Clipboard payloads larger than this are ignored: a copied image or a
-/// multi-megabyte log is not something the picker can usefully show, and
-/// holding fifty of them would be a real memory cost.
+/// Clipboard text payloads larger than this are ignored: a multi-megabyte
+/// log is not something the picker can usefully show, and holding fifty of
+/// them would be a real memory cost.
 pub const MAX_TEXT_BYTES: usize = 256 * 1024;
+
+/// PNG history payloads larger than this are ignored.
+///
+/// Separate from [`MAX_TEXT_BYTES`] and from the X11 serve caps: screenshots
+/// and copied images are useful well past 256 KiB, but fifty uncompressed
+/// desktop captures would still be a memory liability.
+pub const MAX_IMAGE_HISTORY_BYTES: usize = 4 * 1024 * 1024;
+
+/// One clipboard payload a backend captured for the history to adopt.
+///
+/// Remote clipboard sharing remains text-only; PNG variants are filtered
+/// before they leave the local session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CapturedClipboard {
+    Text(String),
+    Png(Vec<u8>),
+}
 
 /// Keep direct X11 `ChangeProperty` requests comfortably below the core
 /// protocol limit. Larger payloads use ICCCM INCR, irrespective of whether a
@@ -214,9 +231,9 @@ pub fn is_secret(mime_types: &[String]) -> bool {
 
 /// Pick the text-ish MIME type to ask for, preferring UTF-8.
 ///
-/// Returns `None` when the offer holds nothing this history can store — an
-/// image or a file list is a legitimate clipboard payload the picker simply
-/// has no way to show.
+/// Returns `None` when the offer holds no text the history can store. Image
+/// offers fall through to [`preferred_image_mime`] under the capture policy
+/// (text wins when both are present).
 #[must_use]
 pub fn preferred_text_mime(mime_types: &[String]) -> Option<String> {
     const PREFERRED: [&str; 4] = [
@@ -234,6 +251,26 @@ pub fn preferred_text_mime(mime_types: &[String]) -> Option<String> {
         }
     }
     None
+}
+
+/// Pick an `image/png` offer for history capture.
+///
+/// JPEG/BMP are intentionally ignored: the picker stores and re-offers PNG
+/// only. Callers still prefer text when [`preferred_text_mime`] finds one.
+#[must_use]
+pub fn preferred_image_mime(mime_types: &[String]) -> Option<String> {
+    mime_types
+        .iter()
+        .find(|mime| mime.eq_ignore_ascii_case("image/png"))
+        .cloned()
+}
+
+/// What the history should request from an offer, after secret filtering.
+///
+/// Policy: text wins when present; otherwise PNG. Everything else is skipped.
+#[must_use]
+pub fn preferred_history_mime(mime_types: &[String]) -> Option<String> {
+    preferred_text_mime(mime_types).or_else(|| preferred_image_mime(mime_types))
 }
 
 #[cfg(test)]
@@ -301,5 +338,47 @@ mod tests {
         assert!(x11_selection_time_is_valid(1, Some(acquired)));
         assert!(!x11_selection_time_is_valid(acquired - 1, Some(acquired)));
         assert!(x11_selection_time_is_valid(42, None));
+    }
+
+    #[test]
+    fn image_png_is_the_only_history_image_mime() {
+        assert_eq!(
+            preferred_image_mime(&["image/png".to_string()]).as_deref(),
+            Some("image/png")
+        );
+        assert_eq!(
+            preferred_image_mime(&["IMAGE/PNG".to_string()]).as_deref(),
+            Some("IMAGE/PNG")
+        );
+        assert_eq!(
+            preferred_image_mime(&["image/jpeg".to_string(), "image/bmp".to_string()]),
+            None
+        );
+    }
+
+    #[test]
+    fn history_mime_prefers_text_over_png() {
+        let both = vec![
+            "image/png".to_string(),
+            "text/plain;charset=utf-8".to_string(),
+        ];
+        assert_eq!(
+            preferred_history_mime(&both).as_deref(),
+            Some("text/plain;charset=utf-8")
+        );
+        assert_eq!(
+            preferred_history_mime(&["image/png".to_string()]).as_deref(),
+            Some("image/png")
+        );
+        assert_eq!(
+            preferred_history_mime(&["image/jpeg".to_string(), "text/uri-list".to_string()]),
+            None
+        );
+    }
+
+    #[test]
+    fn image_history_cap_dwarfs_the_text_cap() {
+        assert!(MAX_IMAGE_HISTORY_BYTES > MAX_TEXT_BYTES);
+        assert_eq!(MAX_IMAGE_HISTORY_BYTES, 4 * 1024 * 1024);
     }
 }

@@ -1816,7 +1816,7 @@ impl SystemUiState {
         history
             .entries()
             .enumerate()
-            .filter(|(_, entry)| crate::jwm::features::clipboard::matches_query(&entry.text, query))
+            .filter(|(_, entry)| crate::jwm::features::clipboard::matches_query(entry, query))
             .map(|(index, entry)| ListRow {
                 key: index.to_string(),
                 text: crate::jwm::features::clipboard::picker_row(entry, index),
@@ -5759,7 +5759,10 @@ mod tests {
         assert_eq!(
             panel
                 .selected_clipboard()
-                .map(|index| history.get(index).unwrap().text.as_str()),
+                .and_then(|index| match history.get(index)? {
+                    crate::jwm::features::ClipboardEntry::Text { text, .. } => Some(text.as_str()),
+                    crate::jwm::features::ClipboardEntry::Png { .. } => None,
+                }),
             Some("zulu time")
         );
     }

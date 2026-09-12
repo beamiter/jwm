@@ -476,7 +476,15 @@ impl Jwm {
                         .as_ref()
                         .and_then(|snapshot| snapshot.mic_muted);
                     if current != previous {
-                        self.mutate_control_snapshot(|snapshot| snapshot.mic_muted = previous);
+                        // A confirmed bool publishes `audio/mic`; reverting
+                        // to "never read" only clears the cache — there is
+                        // no honest bool to broadcast.
+                        match previous {
+                            Some(muted) => self.cache_control_mic_mute(muted),
+                            None => self.mutate_control_snapshot(|snapshot| {
+                                snapshot.mic_muted = None;
+                            }),
+                        }
                         panel_changed = true;
                     }
                     log::debug!("[controls] mic mute change did not take; estimate reverted");
@@ -742,8 +750,14 @@ impl Jwm {
         self.mutate_control_snapshot(|snapshot| snapshot.brightness = Some(percent));
     }
 
+    /// Cache the shown mic-mute flag and publish `audio/mic` so bars and
+    /// scripts following the `audio` topic see the same optimistic /
+    /// adopted value the control-center Input row does. Callers that only
+    /// clear the flag back to unread use `mutate_control_snapshot` instead
+    /// — a null is not an event payload.
     pub(crate) fn cache_control_mic_mute(&mut self, muted: bool) {
         self.mutate_control_snapshot(|snapshot| snapshot.mic_muted = Some(muted));
+        self.broadcast_ipc_event("audio/mic", serde_json::json!({ "muted": muted }));
     }
 
     pub(crate) fn cache_control_power_profiles(&mut self, available: Vec<String>, active: String) {
@@ -1253,18 +1267,28 @@ impl Jwm {
         let Some(index) = self.features.system_ui.selected_clipboard() else {
             return;
         };
-        let Some(text) = self
-            .features
-            .clipboard
-            .get(index)
-            .map(|entry| entry.text.clone())
-        else {
+        let Some(entry) = self.features.clipboard.get(index).cloned() else {
             return;
         };
-        if backend.set_clipboard_text(&text) {
+        let offered = match &entry {
+            crate::jwm::features::ClipboardEntry::Text { text, .. } => {
+                backend.set_clipboard_text(text)
+            }
+            crate::jwm::features::ClipboardEntry::Png { bytes, .. } => {
+                self.offer_clipboard_png(backend, bytes.clone())
+            }
+        };
+        if offered {
             // Copying an old entry makes it the most recent one, exactly as
             // if the user had copied it again from the source.
-            self.record_clipboard(&text);
+            match entry {
+                crate::jwm::features::ClipboardEntry::Text { text, .. } => {
+                    self.record_clipboard(&text);
+                }
+                crate::jwm::features::ClipboardEntry::Png { bytes, .. } => {
+                    self.record_clipboard_png(&bytes);
+                }
+            }
             self.close_system_ui(backend);
         } else {
             self.features

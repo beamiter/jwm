@@ -2114,7 +2114,7 @@ impl Backend for XcbBackend {
             .map(super::clipboard::Clipboard::image_sender)
     }
 
-    fn drain_clipboard(&mut self) -> Vec<String> {
+    fn drain_clipboard(&mut self) -> Vec<crate::backend::clipboard_offer::CapturedClipboard> {
         self.clipboard
             .as_ref()
             .map(super::clipboard::Clipboard::drain_captured)

@@ -9,7 +9,8 @@
 //!
 //! The history is **memory only**. It is never written to disk and does not
 //! survive a restart; a clipboard manager that persisted passwords to a file
-//! would be a liability, not a feature.
+//! would be a liability, not a feature. Text and PNG shares one newest-first
+//! list; JPEG/BMP and remote image payloads are out of scope.
 
 use crate::config::CONFIG;
 use std::collections::VecDeque;
@@ -20,13 +21,50 @@ pub const MAX_ENTRIES: usize = 50;
 const MAX_PREVIEW_CHARS: usize = 72;
 /// What may be recorded and which type to ask for are judged from MIME names
 /// alone, so the backends share those rules rather than reimplementing them.
-pub use crate::backend::clipboard_offer::{MAX_TEXT_BYTES, is_secret, preferred_text_mime};
+pub use crate::backend::clipboard_offer::{
+    MAX_IMAGE_HISTORY_BYTES, MAX_TEXT_BYTES, is_secret, preferred_image_mime, preferred_text_mime,
+};
 
+/// One remembered clipboard payload.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ClipboardEntry {
-    pub text: String,
-    /// Wall-clock milliseconds when it was captured.
-    pub captured_unix_ms: u64,
+pub enum ClipboardEntry {
+    Text {
+        text: String,
+        /// Wall-clock milliseconds when it was captured.
+        captured_unix_ms: u64,
+    },
+    Png {
+        bytes: Vec<u8>,
+        width: Option<u32>,
+        height: Option<u32>,
+        /// Wall-clock milliseconds when it was captured.
+        captured_unix_ms: u64,
+    },
+}
+
+impl ClipboardEntry {
+    #[must_use]
+    pub fn captured_unix_ms(&self) -> u64 {
+        match self {
+            Self::Text {
+                captured_unix_ms, ..
+            }
+            | Self::Png {
+                captured_unix_ms, ..
+            } => *captured_unix_ms,
+        }
+    }
+
+    fn set_captured_unix_ms(&mut self, now_unix_ms: u64) {
+        match self {
+            Self::Text {
+                captured_unix_ms, ..
+            }
+            | Self::Png {
+                captured_unix_ms, ..
+            } => *captured_unix_ms = now_unix_ms,
+        }
+    }
 }
 
 /// Bounded clipboard history, newest first.
@@ -41,7 +79,7 @@ impl ClipboardHistory {
         Self::default()
     }
 
-    /// Record a copy, returning whether the history changed.
+    /// Record a text copy, returning whether the history changed.
     ///
     /// Copying something already in the history moves it back to the top
     /// rather than adding a duplicate — the list is "what I might paste
@@ -50,29 +88,69 @@ impl ClipboardHistory {
         if text.trim().is_empty() || text.len() > MAX_TEXT_BYTES {
             return false;
         }
-        if let Some(index) = self.entries.iter().position(|entry| entry.text == text) {
-            if index == 0 {
-                // Already the most recent: nothing to reorder.
-                if let Some(entry) = self.entries.front_mut() {
-                    entry.captured_unix_ms = now_unix_ms;
-                }
-                return false;
-            }
-            let Some(mut entry) = self.entries.remove(index) else {
-                return false;
-            };
-            entry.captured_unix_ms = now_unix_ms;
-            self.entries.push_front(entry);
-            return true;
+        if let Some(index) = self.entries.iter().position(|entry| match entry {
+            ClipboardEntry::Text { text: existing, .. } => existing == text,
+            ClipboardEntry::Png { .. } => false,
+        }) {
+            return self.reorder_existing(index, now_unix_ms);
         }
-        self.entries.push_front(ClipboardEntry {
+        self.entries.push_front(ClipboardEntry::Text {
             text: text.to_string(),
             captured_unix_ms: now_unix_ms,
         });
+        self.trim_to_capacity();
+        true
+    }
+
+    /// Record a PNG copy under the image history cap.
+    ///
+    /// Empty and oversized payloads are rejected. Byte-identical images are
+    /// reordered like text rather than duplicated, so a Wayland screenshot
+    /// that both publishes via `wl-copy` and records explicitly collapses to
+    /// one newest entry.
+    pub fn record_png(&mut self, bytes: &[u8], now_unix_ms: u64) -> bool {
+        if bytes.is_empty() || bytes.len() > MAX_IMAGE_HISTORY_BYTES {
+            return false;
+        }
+        if let Some(index) = self.entries.iter().position(|entry| match entry {
+            ClipboardEntry::Png {
+                bytes: existing, ..
+            } => existing.as_slice() == bytes,
+            ClipboardEntry::Text { .. } => false,
+        }) {
+            return self.reorder_existing(index, now_unix_ms);
+        }
+        let (width, height) = png_dimensions(bytes);
+        self.entries.push_front(ClipboardEntry::Png {
+            bytes: bytes.to_vec(),
+            width,
+            height,
+            captured_unix_ms: now_unix_ms,
+        });
+        self.trim_to_capacity();
+        true
+    }
+
+    fn reorder_existing(&mut self, index: usize, now_unix_ms: u64) -> bool {
+        if index == 0 {
+            // Already the most recent: nothing to reorder.
+            if let Some(entry) = self.entries.front_mut() {
+                entry.set_captured_unix_ms(now_unix_ms);
+            }
+            return false;
+        }
+        let Some(mut entry) = self.entries.remove(index) else {
+            return false;
+        };
+        entry.set_captured_unix_ms(now_unix_ms);
+        self.entries.push_front(entry);
+        true
+    }
+
+    fn trim_to_capacity(&mut self) {
         while self.entries.len() > MAX_ENTRIES {
             self.entries.pop_back();
         }
-        true
     }
 
     /// Newest first — the order the picker lists them.
@@ -152,34 +230,110 @@ fn push_preview_char(out: &mut String, output_chars: &mut usize, ch: char) -> bo
     false
 }
 
-/// One picker row: position, a hint of how much was copied, and the preview.
+/// Compact byte size for PNG picker labels (`1.2M`, `512K`, `42B`).
 #[must_use]
-pub fn picker_row(entry: &ClipboardEntry, index: usize) -> String {
-    let lines = entry.text.lines().count();
-    let shape = if lines > 1 {
-        format!("{lines}L")
+pub fn format_byte_size(bytes: usize) -> String {
+    const KIB: f64 = 1024.0;
+    const MIB: f64 = 1024.0 * 1024.0;
+    if bytes < 1024 {
+        format!("{bytes}B")
+    } else if (bytes as f64) < MIB {
+        let kib = bytes as f64 / KIB;
+        if kib < 10.0 {
+            format!("{kib:.1}K")
+        } else {
+            format!("{kib:.0}K")
+        }
     } else {
-        format!("{}c", entry.text.chars().count())
-    };
-    format!(
-        "\u{f0ea} {:>2}  {:<6} {}",
-        index + 1,
-        shape,
-        preview(&entry.text)
-    )
+        format!("{:.1}M", bytes as f64 / MIB)
+    }
 }
 
-/// The picker's type-to-filter: a case-insensitive substring test against the
-/// entry's full text, so a match can be anywhere in what was copied rather
-/// than only in what the one-line preview happens to show. An empty query
-/// matches everything — the unfiltered picker is this same code path with an
-/// empty query.
+/// Human label for a PNG history entry (also the IPC preview).
 #[must_use]
-pub fn matches_query(entry_text: &str, query: &str) -> bool {
+pub fn png_preview_label(bytes: usize, width: Option<u32>, height: Option<u32>) -> String {
+    let size = format_byte_size(bytes);
+    match (width, height) {
+        (Some(w), Some(h)) => format!("PNG {w}\u{00d7}{h}  {size}"),
+        _ => format!("PNG \u{00b7} {size}"),
+    }
+}
+
+/// Read width/height from a PNG IHDR when the leading bytes look valid.
+#[must_use]
+pub fn png_dimensions(bytes: &[u8]) -> (Option<u32>, Option<u32>) {
+    // signature(8) + length(4) + type(4) + width(4) + height(4)
+    const IHDR_PREFIX: &[u8] = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR";
+    if bytes.len() < 24 || !bytes.starts_with(IHDR_PREFIX) {
+        return (None, None);
+    }
+    let width = u32::from_be_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]);
+    let height = u32::from_be_bytes([bytes[20], bytes[21], bytes[22], bytes[23]]);
+    if width == 0 || height == 0 {
+        return (None, None);
+    }
+    (Some(width), Some(height))
+}
+
+/// One picker row: position, a hint of how much was copied, and the preview.
+///
+/// PNG rows are text labels only — no thumbnails and no per-row image icons
+/// beyond the shared FontAwesome-4 glyph.
+#[must_use]
+pub fn picker_row(entry: &ClipboardEntry, index: usize) -> String {
+    match entry {
+        ClipboardEntry::Text { text, .. } => {
+            let lines = text.lines().count();
+            let shape = if lines > 1 {
+                format!("{lines}L")
+            } else {
+                format!("{}c", text.chars().count())
+            };
+            format!("\u{f0ea} {:>2}  {:<6} {}", index + 1, shape, preview(text))
+        }
+        ClipboardEntry::Png {
+            bytes,
+            width,
+            height,
+            ..
+        } => {
+            // FA4 `file-image-o` stays below the 0xf600 FA5 floor the glyph
+            // pin test enforces.
+            format!(
+                "\u{f1c5} {:>2}  {}",
+                index + 1,
+                png_preview_label(bytes.len(), *width, *height)
+            )
+        }
+    }
+}
+
+/// The picker's type-to-filter. Text matches a case-insensitive substring of
+/// the full payload; PNG matches a synthetic haystack (`png`, `image`, and
+/// dimension tokens). An empty query matches everything.
+#[must_use]
+pub fn matches_query(entry: &ClipboardEntry, query: &str) -> bool {
     if query.is_empty() {
         return true;
     }
-    entry_text.to_lowercase().contains(&query.to_lowercase())
+    let needle = query.to_lowercase();
+    match entry {
+        ClipboardEntry::Text { text, .. } => text.to_lowercase().contains(&needle),
+        ClipboardEntry::Png { width, height, .. } => {
+            let mut haystack = String::from("png image");
+            if let (Some(w), Some(h)) = (*width, *height) {
+                haystack.push(' ');
+                haystack.push_str(&w.to_string());
+                haystack.push(' ');
+                haystack.push_str(&h.to_string());
+                haystack.push(' ');
+                haystack.push_str(&format!("{w}x{h}"));
+                haystack.push(' ');
+                haystack.push_str(&format!("{w}\u{00d7}{h}"));
+            }
+            haystack.to_lowercase().contains(&needle)
+        }
+    }
 }
 
 /// Wall-clock milliseconds, shared with the notification history.
@@ -198,16 +352,46 @@ impl crate::jwm::Jwm {
         }
         let changed = self.features.clipboard.record(text, now_unix_ms());
         if changed {
-            self.features
-                .system_ui
-                .refresh_clipboard(&self.features.clipboard);
-            self.broadcast_ipc_event(
-                "clipboard/changed",
-                serde_json::json!({ "count": self.features.clipboard.len() }),
-            );
-            self.refresh_open_control_center();
+            self.on_clipboard_history_changed();
         }
         changed
+    }
+
+    /// Record a PNG the backend captured or that a screenshot published.
+    pub(crate) fn record_clipboard_png(&mut self, bytes: &[u8]) -> bool {
+        if !CONFIG.load().behavior().clipboard_history {
+            return false;
+        }
+        let changed = self.features.clipboard.record_png(bytes, now_unix_ms());
+        if changed {
+            self.on_clipboard_history_changed();
+        }
+        changed
+    }
+
+    fn on_clipboard_history_changed(&mut self) {
+        self.features
+            .system_ui
+            .refresh_clipboard(&self.features.clipboard);
+        self.broadcast_ipc_event(
+            "clipboard/changed",
+            serde_json::json!({ "count": self.features.clipboard.len() }),
+        );
+        self.refresh_open_control_center();
+    }
+
+    /// Re-offer a PNG through the backend's native owner (X11) or `wl-copy`
+    /// (Wayland). There is no compositor-native Wayland data-device PNG path
+    /// yet — screenshots use the same helper.
+    pub(crate) fn offer_clipboard_png(
+        &self,
+        backend: &mut dyn crate::backend::api::Backend,
+        png: Vec<u8>,
+    ) -> bool {
+        if let Some(sender) = backend.clipboard_image_sender() {
+            return sender.send_png(png);
+        }
+        Self::publish_png_bytes_via_wl_copy(&png)
     }
 
     /// Drop the whole history.
@@ -228,21 +412,47 @@ impl crate::jwm::Jwm {
 
     /// JSON snapshot for the `get_clipboard` query.
     ///
-    /// Previews only: the full text of every copy is exactly what a
-    /// compromised IPC client should not be handed in one request.
+    /// Previews only: the full text of every copy (and never raw image bytes)
+    /// is exactly what a compromised IPC client should not be handed in one
+    /// request.
     pub(crate) fn clipboard_json(&self) -> serde_json::Value {
         let items: Vec<serde_json::Value> = self
             .features
             .clipboard
             .entries()
             .enumerate()
-            .map(|(index, entry)| {
-                serde_json::json!({
+            .map(|(index, entry)| match entry {
+                ClipboardEntry::Text {
+                    text,
+                    captured_unix_ms,
+                } => serde_json::json!({
                     "index": index,
-                    "preview": preview(&entry.text),
-                    "chars": entry.text.chars().count(),
-                    "captured_unix_ms": entry.captured_unix_ms,
-                })
+                    "kind": "text",
+                    "preview": preview(text),
+                    "chars": text.chars().count(),
+                    "captured_unix_ms": captured_unix_ms,
+                }),
+                ClipboardEntry::Png {
+                    bytes,
+                    width,
+                    height,
+                    captured_unix_ms,
+                } => {
+                    let mut item = serde_json::json!({
+                        "index": index,
+                        "kind": "png",
+                        "preview": png_preview_label(bytes.len(), *width, *height),
+                        "bytes": bytes.len(),
+                        "captured_unix_ms": captured_unix_ms,
+                    });
+                    if let Some(width) = width {
+                        item["width"] = serde_json::json!(width);
+                    }
+                    if let Some(height) = height {
+                        item["height"] = serde_json::json!(height);
+                    }
+                    item
+                }
             })
             .collect();
         serde_json::json!({
@@ -258,13 +468,37 @@ impl crate::jwm::Jwm {
 mod tests {
     use super::*;
 
+    fn text_entry(text: &str) -> ClipboardEntry {
+        ClipboardEntry::Text {
+            text: text.to_string(),
+            captured_unix_ms: 0,
+        }
+    }
+
+    fn sample_png(width: u32, height: u32, pad: usize) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(24 + pad);
+        bytes.extend_from_slice(b"\x89PNG\r\n\x1a\n");
+        bytes.extend_from_slice(&13u32.to_be_bytes());
+        bytes.extend_from_slice(b"IHDR");
+        bytes.extend_from_slice(&width.to_be_bytes());
+        bytes.extend_from_slice(&height.to_be_bytes());
+        bytes.resize(24 + pad, 0);
+        bytes
+    }
+
     #[test]
     fn copies_are_recorded_newest_first() {
         let mut history = ClipboardHistory::new();
         assert!(history.record("first", 1_000));
         assert!(history.record("second", 2_000));
 
-        let texts: Vec<&str> = history.entries().map(|e| e.text.as_str()).collect();
+        let texts: Vec<&str> = history
+            .entries()
+            .map(|e| match e {
+                ClipboardEntry::Text { text, .. } => text.as_str(),
+                ClipboardEntry::Png { .. } => panic!("expected text"),
+            })
+            .collect();
         assert_eq!(texts, ["second", "first"]);
     }
 
@@ -276,10 +510,16 @@ mod tests {
         history.record("c", 3_000);
 
         assert!(history.record("a", 4_000));
-        let texts: Vec<&str> = history.entries().map(|e| e.text.as_str()).collect();
+        let texts: Vec<&str> = history
+            .entries()
+            .map(|e| match e {
+                ClipboardEntry::Text { text, .. } => text.as_str(),
+                ClipboardEntry::Png { .. } => panic!("expected text"),
+            })
+            .collect();
         assert_eq!(texts, ["a", "c", "b"], "no duplicate, just reordered");
         assert_eq!(history.len(), 3);
-        assert_eq!(history.get(0).unwrap().captured_unix_ms, 4_000);
+        assert_eq!(history.get(0).unwrap().captured_unix_ms(), 4_000);
     }
 
     #[test]
@@ -290,7 +530,7 @@ mod tests {
         // report a change and churn the panel.
         assert!(!history.record("a", 2_000));
         assert_eq!(history.len(), 1);
-        assert_eq!(history.get(0).unwrap().captured_unix_ms, 2_000);
+        assert_eq!(history.get(0).unwrap().captured_unix_ms(), 2_000);
     }
 
     #[test]
@@ -320,9 +560,56 @@ mod tests {
         }
         assert_eq!(history.len(), MAX_ENTRIES);
         assert_eq!(
-            history.get(0).unwrap().text,
+            match history.get(0).unwrap() {
+                ClipboardEntry::Text { text, .. } => text.as_str(),
+                ClipboardEntry::Png { .. } => panic!("expected text"),
+            },
             format!("entry {}", MAX_ENTRIES + 9)
         );
+    }
+
+    #[test]
+    fn png_copies_share_the_newest_first_list_with_text() {
+        let mut history = ClipboardHistory::new();
+        assert!(history.record("note", 1_000));
+        let png = sample_png(1920, 1080, 8);
+        assert!(history.record_png(&png, 2_000));
+        assert!(history.record("later", 3_000));
+
+        let kinds: Vec<&str> = history
+            .entries()
+            .map(|entry| match entry {
+                ClipboardEntry::Text { .. } => "text",
+                ClipboardEntry::Png { .. } => "png",
+            })
+            .collect();
+        assert_eq!(kinds, ["text", "png", "text"]);
+    }
+
+    #[test]
+    fn identical_pngs_are_reordered_not_duplicated() {
+        let mut history = ClipboardHistory::new();
+        let png = sample_png(64, 48, 4);
+        assert!(history.record_png(&png, 1_000));
+        history.record("interrupt", 2_000);
+        assert!(history.record_png(&png, 3_000));
+        assert_eq!(history.len(), 2);
+        assert!(matches!(history.get(0), Some(ClipboardEntry::Png { .. })));
+        assert_eq!(history.get(0).unwrap().captured_unix_ms(), 3_000);
+        // Same bytes already newest: timestamp updates, no churn flag.
+        assert!(!history.record_png(&png, 4_000));
+        assert_eq!(history.get(0).unwrap().captured_unix_ms(), 4_000);
+    }
+
+    #[test]
+    fn empty_and_oversized_pngs_are_ignored() {
+        let mut history = ClipboardHistory::new();
+        assert!(!history.record_png(&[], 1_000));
+        let huge = vec![0u8; MAX_IMAGE_HISTORY_BYTES + 1];
+        assert!(!history.record_png(&huge, 1_000));
+        assert!(history.is_empty());
+        let exact = vec![1u8; MAX_IMAGE_HISTORY_BYTES];
+        assert!(history.record_png(&exact, 1_000));
     }
 
     #[test]
@@ -332,7 +619,13 @@ mod tests {
         history.record("b", 2);
 
         assert!(history.remove(0));
-        assert_eq!(history.get(0).unwrap().text, "a");
+        assert_eq!(
+            match history.get(0).unwrap() {
+                ClipboardEntry::Text { text, .. } => text.as_str(),
+                ClipboardEntry::Png { .. } => panic!("expected text"),
+            },
+            "a"
+        );
         assert!(!history.remove(5));
 
         history.record("c", 3);
@@ -381,8 +674,7 @@ mod tests {
     }
 
     #[test]
-    fn an_offer_without_text_is_skipped() {
-        // A copied image is a legitimate payload this history cannot show.
+    fn an_offer_without_text_is_skipped_by_text_policy() {
         assert_eq!(
             preferred_text_mime(&["image/png".to_string(), "image/bmp".to_string()]),
             None
@@ -420,61 +712,160 @@ mod tests {
 
     #[test]
     fn rows_show_the_position_and_the_shape_of_what_was_copied() {
-        let single = ClipboardEntry {
-            text: "hello".to_string(),
-            captured_unix_ms: 0,
-        };
+        let single = text_entry("hello");
         let row = picker_row(&single, 0);
         assert!(row.contains(" 1"));
         assert!(row.contains("5c"), "single-line copies show a length");
         assert!(row.contains("hello"));
 
-        let multi = ClipboardEntry {
-            text: "one\ntwo\nthree".to_string(),
-            captured_unix_ms: 0,
-        };
+        let multi = text_entry("one\ntwo\nthree");
         let row = picker_row(&multi, 1);
         assert!(row.contains("3L"), "multi-line copies show a line count");
         assert!(row.contains("one two three"));
     }
 
     #[test]
+    fn png_rows_are_text_labels_with_dims_and_size() {
+        let png = sample_png(1920, 1080, 100);
+        let entry = ClipboardEntry::Png {
+            bytes: png,
+            width: Some(1920),
+            height: Some(1080),
+            captured_unix_ms: 0,
+        };
+        let row = picker_row(&entry, 3);
+        assert!(row.contains(" 4"));
+        assert!(row.contains("PNG 1920\u{00d7}1080"));
+        assert!(row.contains('\u{f1c5}'));
+
+        let unknown = ClipboardEntry::Png {
+            bytes: vec![1, 2, 3, 4],
+            width: None,
+            height: None,
+            captured_unix_ms: 0,
+        };
+        let row = picker_row(&unknown, 0);
+        assert!(row.contains("PNG \u{00b7} 4B"));
+    }
+
+    #[test]
     fn the_filter_matches_a_case_insensitive_substring() {
-        assert!(matches_query("Hello, World", "hello"));
-        assert!(matches_query("Hello, World", "WORLD"));
-        assert!(matches_query("https://example.com/docs", "example.COm"));
+        assert!(matches_query(&text_entry("Hello, World"), "hello"));
+        assert!(matches_query(&text_entry("Hello, World"), "WORLD"));
+        assert!(matches_query(
+            &text_entry("https://example.com/docs"),
+            "example.COm"
+        ));
         // A match can live past what the one-line preview shows.
-        assert!(matches_query("start\nmiddle\nend", "middle"));
-        assert!(!matches_query("Hello, World", "goodbye"));
+        assert!(matches_query(&text_entry("start\nmiddle\nend"), "middle"));
+        assert!(!matches_query(&text_entry("Hello, World"), "goodbye"));
+    }
+
+    #[test]
+    fn png_filter_matches_synthetic_tokens() {
+        let entry = ClipboardEntry::Png {
+            bytes: sample_png(800, 600, 0),
+            width: Some(800),
+            height: Some(600),
+            captured_unix_ms: 0,
+        };
+        assert!(matches_query(&entry, ""));
+        assert!(matches_query(&entry, "png"));
+        assert!(matches_query(&entry, "IMAGE"));
+        assert!(matches_query(&entry, "800"));
+        assert!(matches_query(&entry, "600"));
+        assert!(matches_query(&entry, "800x600"));
+        assert!(!matches_query(&entry, "jpeg"));
     }
 
     #[test]
     fn an_empty_query_keeps_every_entry() {
-        assert!(matches_query("anything", ""));
-        assert!(matches_query("", ""));
+        assert!(matches_query(&text_entry("anything"), ""));
+        assert!(matches_query(&text_entry(""), ""));
     }
 
     #[test]
     fn the_filter_lowercases_both_sides_for_unicode() {
-        assert!(matches_query("Café au lait", "CAFÉ"));
-        assert!(matches_query("RÉSUMÉ.md", "résumé"));
+        assert!(matches_query(&text_entry("Café au lait"), "CAFÉ"));
+        assert!(matches_query(&text_entry("RÉSUMÉ.md"), "résumé"));
     }
 
     #[test]
     fn every_glyph_stays_in_the_widely_available_range() {
-        let entry = ClipboardEntry {
-            text: "hello".to_string(),
+        let text = text_entry("hello");
+        let png = ClipboardEntry::Png {
+            bytes: sample_png(1, 1, 0),
+            width: Some(1),
+            height: Some(1),
             captured_unix_ms: 0,
         };
-        let row = picker_row(&entry, 0);
-        for ch in row
-            .chars()
-            .filter(|ch| ('\u{f000}'..'\u{f900}').contains(ch))
-        {
-            assert!(
-                (ch as u32) < 0xf600,
-                "{ch:?} is outside the FontAwesome-4 range"
-            );
+        for entry in [&text, &png] {
+            let row = picker_row(entry, 0);
+            for ch in row
+                .chars()
+                .filter(|ch| ('\u{f000}'..'\u{f900}').contains(ch))
+            {
+                assert!(
+                    (ch as u32) < 0xf600,
+                    "{ch:?} is outside the FontAwesome-4 range"
+                );
+            }
         }
+    }
+
+    #[test]
+    fn png_ihdr_dimensions_are_parsed_when_present() {
+        let png = sample_png(1280, 720, 0);
+        assert_eq!(png_dimensions(&png), (Some(1280), Some(720)));
+        assert_eq!(png_dimensions(&[0, 1, 2]), (None, None));
+    }
+
+    #[test]
+    fn clipboard_json_exposes_png_metadata_never_bytes() {
+        let mut history = ClipboardHistory::new();
+        history.record("hello", 1_000);
+        let png = sample_png(10, 20, 5);
+        history.record_png(&png, 2_000);
+
+        // Exercise the JSON shape helpers used by `clipboard_json` without
+        // constructing a full `Jwm`.
+        let items: Vec<serde_json::Value> = history
+            .entries()
+            .enumerate()
+            .map(|(index, entry)| match entry {
+                ClipboardEntry::Text {
+                    text,
+                    captured_unix_ms,
+                } => serde_json::json!({
+                    "index": index,
+                    "kind": "text",
+                    "preview": preview(text),
+                    "chars": text.chars().count(),
+                    "captured_unix_ms": captured_unix_ms,
+                }),
+                ClipboardEntry::Png {
+                    bytes,
+                    width,
+                    height,
+                    captured_unix_ms,
+                } => serde_json::json!({
+                    "index": index,
+                    "kind": "png",
+                    "preview": png_preview_label(bytes.len(), *width, *height),
+                    "bytes": bytes.len(),
+                    "width": width,
+                    "height": height,
+                    "captured_unix_ms": captured_unix_ms,
+                }),
+            })
+            .collect();
+
+        assert_eq!(items[0]["kind"], "png");
+        assert_eq!(items[0]["width"], 10);
+        assert_eq!(items[0]["height"], 20);
+        assert!(items[0].get("data").is_none());
+        assert!(items[0].get("png").is_none());
+        assert_eq!(items[1]["kind"], "text");
+        assert_eq!(items[1]["chars"], 5);
     }
 }

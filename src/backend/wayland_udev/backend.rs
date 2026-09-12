@@ -4754,7 +4754,7 @@ impl Backend for UdevBackend {
         self.state.offer_clipboard_text(text)
     }
 
-    fn drain_clipboard(&mut self) -> Vec<String> {
+    fn drain_clipboard(&mut self) -> Vec<crate::backend::clipboard_offer::CapturedClipboard> {
         self.state.drain_clipboard_captured()
     }
 

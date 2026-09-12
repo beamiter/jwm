@@ -263,7 +263,8 @@ pub struct JwmWaylandState {
     pub display_handle: DisplayHandle,
     /// Text copied by clients, waiting to be drained into the history. Filled
     /// by the reader threads started in `SelectionHandler::new_selection`.
-    pub clipboard_captured: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    pub clipboard_captured:
+        std::sync::Arc<std::sync::Mutex<Vec<crate::backend::clipboard_offer::CapturedClipboard>>>,
     /// Entry JWM is currently offering as the selection source, if any.
     /// `send_selection` writes this; a client taking the selection clears it.
     pub clipboard_offered: Option<String>,
@@ -3564,10 +3565,11 @@ fn write_selection_async(text: &str, fd: std::os::fd::OwnedFd) {
 }
 
 impl JwmWaylandState {
-    /// Ask the selection owner for its text and record it in the history.
+    /// Ask the selection owner for its payload and record it in the history.
     ///
-    /// Offers marked as secrets never get this far, and the payload is read
-    /// on a thread: the owning client writes at its own pace, and a
+    /// Offers marked as secrets never get this far. Text wins when present;
+    /// otherwise `image/png` is read under the image history cap. The payload
+    /// is read on a thread: the owning client writes at its own pace, and a
     /// compositor that waited would stall every other client with it.
     fn capture_clipboard(&mut self, mime_types: &[String]) {
         if !crate::config::CONFIG.load().behavior().clipboard_history {
@@ -3577,7 +3579,14 @@ impl JwmWaylandState {
             debug!("clipboard: offer marked secret, not reading it");
             return;
         }
-        let Some(mime) = crate::backend::clipboard_offer::preferred_text_mime(mime_types) else {
+        let (mime, as_png) = if let Some(mime) =
+            crate::backend::clipboard_offer::preferred_text_mime(mime_types)
+        {
+            (mime, false)
+        } else if let Some(mime) = crate::backend::clipboard_offer::preferred_image_mime(mime_types)
+        {
+            (mime, true)
+        } else {
             return;
         };
         let Some(permit) = acquire_clipboard_io_permit() else {
@@ -3601,7 +3610,11 @@ impl JwmWaylandState {
             .name("jwm-clipboard-read".to_string())
             .spawn(move || {
                 let _permit = permit;
-                let limit = crate::backend::clipboard_offer::MAX_TEXT_BYTES + 1;
+                let limit = if as_png {
+                    crate::backend::clipboard_offer::MAX_IMAGE_HISTORY_BYTES + 1
+                } else {
+                    crate::backend::clipboard_offer::MAX_TEXT_BYTES + 1
+                };
                 let Ok(buffer) = read_clipboard_payload(
                     std::fs::File::from(std::os::fd::OwnedFd::from(read)),
                     limit,
@@ -3609,14 +3622,24 @@ impl JwmWaylandState {
                 ) else {
                     return;
                 };
-                if buffer.len() > crate::backend::clipboard_offer::MAX_TEXT_BYTES {
-                    return;
-                }
-                let Ok(text) = String::from_utf8(buffer) else {
-                    return;
+                let payload = if as_png {
+                    if buffer.is_empty()
+                        || buffer.len() > crate::backend::clipboard_offer::MAX_IMAGE_HISTORY_BYTES
+                    {
+                        return;
+                    }
+                    crate::backend::clipboard_offer::CapturedClipboard::Png(buffer)
+                } else {
+                    if buffer.len() > crate::backend::clipboard_offer::MAX_TEXT_BYTES {
+                        return;
+                    }
+                    let Ok(text) = String::from_utf8(buffer) else {
+                        return;
+                    };
+                    crate::backend::clipboard_offer::CapturedClipboard::Text(text)
                 };
                 if let Ok(mut captured) = captured.lock() {
-                    captured.push(text);
+                    captured.push(payload);
                 }
             });
         if let Err(error) = worker {
@@ -3624,11 +3647,13 @@ impl JwmWaylandState {
         }
     }
 
-    /// Text copied since the last call, oldest first.
+    /// Payloads copied since the last call, oldest first.
     ///
     /// Also starts the read for a selection announced since the last call:
     /// by now smithay has stored it on the seat and it can be asked for.
-    pub fn drain_clipboard_captured(&mut self) -> Vec<String> {
+    pub fn drain_clipboard_captured(
+        &mut self,
+    ) -> Vec<crate::backend::clipboard_offer::CapturedClipboard> {
         if let Some(mime_types) = self.clipboard_pending.take() {
             self.capture_clipboard(&mime_types);
         }

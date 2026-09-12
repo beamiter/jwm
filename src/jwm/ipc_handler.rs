@@ -1864,18 +1864,28 @@ impl Jwm {
                 .get("index")
                 .and_then(|value| value.as_u64())
                 .unwrap_or(0) as usize;
-            let Some(text) = self
-                .features
-                .clipboard
-                .get(index)
-                .map(|entry| entry.text.clone())
-            else {
+            let Some(entry) = self.features.clipboard.get(index).cloned() else {
                 return IpcResponse::err(format!("clipboard_copy: no entry at index {index}"));
             };
-            if !backend.set_clipboard_text(&text) {
+            let offered = match &entry {
+                crate::jwm::features::ClipboardEntry::Text { text, .. } => {
+                    backend.set_clipboard_text(text)
+                }
+                crate::jwm::features::ClipboardEntry::Png { bytes, .. } => {
+                    self.offer_clipboard_png(backend, bytes.clone())
+                }
+            };
+            if !offered {
                 return IpcResponse::err("this backend cannot set the clipboard");
             }
-            self.record_clipboard(&text);
+            match entry {
+                crate::jwm::features::ClipboardEntry::Text { text, .. } => {
+                    self.record_clipboard(&text);
+                }
+                crate::jwm::features::ClipboardEntry::Png { bytes, .. } => {
+                    self.record_clipboard_png(&bytes);
+                }
+            }
             return IpcResponse::ok(None);
         }
 
@@ -1951,9 +1961,9 @@ impl Jwm {
         // the adopted value). This is deliberately unlike `set_audio_device`'s
         // synchronous confirmed reply: the controls worker exists precisely
         // to keep the helper's blocking read-back off the event thread an
-        // IPC call runs on. No `audio/mic` broadcast or `get_mic_mute` query
-        // rides along — those are a possible follow-up, and the 2s snapshot
-        // already keeps an open control center current.
+        // IPC call runs on. Caching the estimate (and later adopt/revert)
+        // also publishes `audio/mic` on the `audio` topic; `get_mic_mute`
+        // answers the same cached flag.
         if name == "set_mic_mute" {
             let Some(muted) = args.get("muted").and_then(|value| value.as_bool()) else {
                 return IpcResponse::err("set_mic_mute: expected boolean field 'muted'");
@@ -2320,6 +2330,20 @@ impl Jwm {
                 // nothing to switch") from an unread one.
                 self.ensure_control_snapshot_refresh(std::time::Instant::now());
                 IpcResponse::ok(Some(self.audio_devices_json()))
+            }
+            "get_mic_mute" => {
+                // Same stale-while-revalidate contract as `get_audio_devices`:
+                // warm the coalesced snapshot, then answer from memory. A
+                // null `muted` means the flag was never read (no tool / not
+                // yet sampled) — never invent unmuted.
+                self.ensure_control_snapshot_refresh(std::time::Instant::now());
+                IpcResponse::ok(Some(serde_json::json!({
+                    "muted": self
+                        .features
+                        .control_snapshot
+                        .as_ref()
+                        .and_then(|snapshot| snapshot.mic_muted),
+                })))
             }
             "get_wallpaper_colors" => IpcResponse::ok(Some(self.wallpaper_theme_json())),
             "get_idle_status" => IpcResponse::ok(Some(self.idle_status_json())),
@@ -5271,7 +5295,7 @@ mod tests {
                 .map_or(arm, |(body, _)| body)
                 .to_string()
         };
-        for query in ["get_power_status", "get_audio_devices"] {
+        for query in ["get_power_status", "get_audio_devices", "get_mic_mute"] {
             assert!(
                 arm_of(query).contains(&refresh),
                 "{query} must start the coalesced snapshot refresh before answering"
@@ -5607,6 +5631,69 @@ mod tests {
         assert!(
             arm.contains(&error),
             "set_mic_mute must answer the key path's no-tool error ({error})"
+        );
+    }
+
+    /// `get_mic_mute` answers the cached flag — never invents unmuted — and
+    /// seeding the flag through the same cache helper `set_mic_mute` uses is
+    /// what a subsequent query reads. The seed bypasses the audio-tool peek
+    /// so a parallel suite that once marked the tool absent cannot starve
+    /// this read.
+    #[test]
+    fn get_mic_mute_answers_the_cached_flag() {
+        let mut backend = PairingIpcBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+
+        let unread = jwm.handle_ipc_query("get_mic_mute", &serde_json::json!({}), &backend);
+        assert!(unread.success, "{unread:?}");
+        assert_eq!(
+            unread.data.as_ref().and_then(|data| data.get("muted")),
+            Some(&serde_json::Value::Null),
+            "never invent unmuted when the flag was never read"
+        );
+
+        jwm.cache_control_mic_mute(true);
+
+        let muted = jwm.handle_ipc_query("get_mic_mute", &serde_json::json!({}), &backend);
+        assert!(muted.success, "{muted:?}");
+        assert_eq!(
+            muted.data.as_ref().and_then(|data| data.get("muted")),
+            Some(&serde_json::Value::Bool(true)),
+            "the query reads the same estimate the cache helper published"
+        );
+    }
+
+    /// Caching a shown mic flag publishes `audio/mic` so the `audio` topic
+    /// carries the same value `get_mic_mute` answers. The haystack is the
+    /// cache helper alone; the event name is assembled at runtime so this
+    /// test cannot match its own source.
+    #[test]
+    fn caching_mic_mute_publishes_audio_mic() {
+        const TOGGLES: &str = include_str!("features/toggles.rs");
+        let helper = TOGGLES
+            .split_once("pub(crate) fn cache_control_mic_mute")
+            .expect("cache_control_mic_mute")
+            .1
+            .split_once("pub(crate) fn cache_control_power_profiles")
+            .expect("the end of cache_control_mic_mute")
+            .0;
+        let event = format!("\"{}/{}\"", "audio", "mic");
+        let broadcast = format!("self.{}(", "broadcast_ipc_event");
+        assert!(
+            helper.contains(&broadcast) && helper.contains(&event),
+            "cache_control_mic_mute must publish {event} ({broadcast})"
+        );
+        // Revert-to-unread stays on mutate: a null is not an event payload.
+        let poll = TOGGLES
+            .split_once("pub(crate) fn poll_control_feedback")
+            .expect("poll_control_feedback")
+            .1
+            .split_once("fn adopt_audio_switch")
+            .expect("the end of poll_control_feedback")
+            .0;
+        assert!(
+            poll.contains("snapshot.mic_muted = None"),
+            "revert-to-unread must clear without inventing an audio/mic bool"
         );
     }
 }
