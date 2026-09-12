@@ -4,6 +4,26 @@
 
 ---
 
+## 2026-09-12：UI/UX 二十轮（Theme Hub、手势一览、媒体行点击切换）
+
+选题 = 十九轮「仍然开着的」：Theme Hub（discoverability）+ 媒体点击循环（交互补齐 `p`）+ 手势进 keybinding viewer（小抛光）。三 explore 后划分：**Theme 与 media click 同抢 `activate_system_ui_pointer_row` → 不双 agent 并行该函数**。Wave 1：Theme Hub（全栈含 input_handler theme 臂）∥ gesture lines（仅 `jwm.rs` show_keybindings）。Wave 2：media click + bars `players` 暴露（media.rs 纯函数 + input_handler Media 臂 + JSON）。
+
+1. **Shell Hub Theme 路由（wallpaper 先例）**。`ShellHubRoute::Theme`（快捷键 `t`，FA-4 paint-brush）；`KNOWN_UI_THEMES` 七值共享（config set_value / validation 同源）；列表勾当前主题；Enter → `set_value("appearance.ui_theme")` → `CONFIG.store` → `apply_config_changes` → `config/changed` → `close_system_ui`；Esc/`system_ui_return_to_hub` 回 Hub；**session-only**（不写 TOML）。Wire `ShellHubRoute::Theme = 6`（shared_structures + xbar + bars 前端）；`shell_page_for` 映射。docs/control-center.md + ui-theme.md。**刻意不做**：motion/blur 行、落盘、独立键绑、实时预览。
+
+2. **`show_keybindings` 追加 gesture_swipe 行**。空表逐字节不变；格式 `{n}f {dir}` + 既有 action-desc（函数名不美化——成文勿再提）；README Alt+Shift+/ 文案扩。
+
+3. **媒体行点击切换 + bars `players`**。`MediaRowClick::{Cycle,PlayPause}` + `switch_hint` / `control_row_prefix` / `click_action`（measure − TEXT_PAD=2.0，与 slider/chip 同纪律）；`activate_system_ui_pointer_row` 在 Media 上：hint 区 → `cycle_media_player`，其余 → 既有 Return/PlayPause。单播放器无 hint → 整行 PlayPause。`media/status` 与 `get_media_status` append-only `"players"`（旧 bar 忽略）。**刻意不做**：播放器 picker 面板、per-player position、transport 字形点击、pin 持久化。
+
+**集成**：无额外波边界缺口（Theme 先落 input_handler theme 臂；media 臂后加在 selected_control Media 分支）。
+
+**验证**：clippy -D warnings（0）；lib **3212 passed / 0 failed**（3204 → +8）。**无真机显示会话**。真机优先：Hub `T` 切 theme 即时生效、Esc 回 Hub、重启丢 session 主题；Alt+Shift+/ 见配置的 swipe 行；双播放器点 `· p ‹next›` 切换、点曲名仍暂停/播放；bar 订阅 `media/status` 见 `players`。
+
+**过程笔记**：Theme Hub 与 media click 不可双 agent 同改 `activate_system_ui_pointer_row`——先 Theme 后 Media，或一手写完；gesture 独占 `show_keybindings` 可与 Theme 真并行。
+
+**仍然开着的**（二十一轮候选）：IPC `set_audio_device` 仍同步（刻意留）；多播放器 picker 面板 / per-player position / pin 持久化；剪贴板缩略图 / 原生 Wayland PNG offer；X11 `compositor_frame_deadline` 不接 overlay 边界；IPC/activate PNG 端到端测仍薄；Theme 落盘到 TOML（若有人要持久化）。**成文勿再提**：sync_window_groups dirty 门控、嵌套后端无面板、toast NotificationClosed(1)、clear-all 指针路径、toast/OSD 进录制画面、X11 视觉特征不扩只做 easing、锁屏 backdrop 瞬间不透明、show_keybindings 原始函数名（cosmetic）。
+
+---
+
 ## 2026-09-12：UI/UX 十九轮（剪贴板图片历史、mic IPC 闭环、idle 文档锐化）
 
 选题 = 十八轮「仍然开着的」里日常价值最高的两项 + 免费 docs 收口。三 explore 先出 sketch（剪贴板图片 / mic·media / Appearance Hub）；**Appearance theme-only Hub 路线**与剪贴板争 `system_ui`/`toggles` 且日常命中率低 → 本轮拒做，记入二十轮候选。两波实质并行：mic IPC（小、错开剪贴板热点）+ 剪贴板图片历史（medium-large，独占 capture/store/activate）。
