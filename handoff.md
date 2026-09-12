@@ -4,6 +4,26 @@
 
 ---
 
+## 2026-09-12：UI/UX 十九轮（剪贴板图片历史、mic IPC 闭环、idle 文档锐化）
+
+选题 = 十八轮「仍然开着的」里日常价值最高的两项 + 免费 docs 收口。三 explore 先出 sketch（剪贴板图片 / mic·media / Appearance Hub）；**Appearance theme-only Hub 路线**与剪贴板争 `system_ui`/`toggles` 且日常命中率低 → 本轮拒做，记入二十轮候选。两波实质并行：mic IPC（小、错开剪贴板热点）+ 剪贴板图片历史（medium-large，独占 capture/store/activate）。
+
+1. **剪贴板图片历史（headline）**。`ClipboardEntry::{Text,Png}`；`MAX_IMAGE_HISTORY_BYTES = 4 MiB`（与 `MAX_TEXT_BYTES` / serve 帽分离）；`record_png` 空/超大拒、字节去重重排、与文本共用 `MAX_ENTRIES=50` 最新优先；`picker_row` 纯文本标签（FA-4 `\u{f1c5}` + `PNG WxH  size` / IHDR 缺失时 `PNG · size`——**无缩略图**）；`matches_query` 对 PNG 走合成 haystack（`png`/`image`/尺寸）；`clipboard_json` 只暴露 kind/尺寸/dims，永不吐 bytes。捕获策略：secret 丢 → 有文本 MIME 优先 → 否则 `image/png`；X11 `Conversion::Png`（x11rb+xcb）+ Wayland `capture_clipboard`；`drain` → `CapturedClipboard` → `rendering` 收养 `record_clipboard_png`。激活：`copy_selected_clipboard` / IPC `clipboard_copy` 分支 PNG → 原生 `send_png` 或 `publish_png_bytes_via_wl_copy`，再 record。截图：`CopiedToClipboard(Vec<u8>)` 完成时显式 record（关 X11 自拥有不回捕洞；Wayland 双记靠字节去重）。`clipboard_record` 仍纯文本。docs/clipboard.md 成文。**刻意不做**：行内缩略图、JPEG/BMP、原生 Wayland data-device PNG offer、remote 图片、落盘。
+
+2. **`get_mic_mute` + `audio/mic`（十八轮 MicMuteSet IPC follow-up）**。查询臂暖 `ensure_control_snapshot_refresh` 后答 `{muted: bool|null}`（null=从未读，不发明 unmuted）；`cache_control_mic_mute` 写缓存即广播 `audio/mic`（乐观 set/toggle、adopt、revert-到-bool）；revert-到-unread 只 `mutate` 清槽、不广播 null。`ipc.rs` queries 登记；capabilities 自动扩。`set_mic_mute` 注释改「已闭环」。docs/media-controls.md。`get_mic_mute` 测例直接 `cache_control_mic_mute` 播种——避开并行套件里 `volume_tool_known_absent` OnceLock 污染把 set 饿死。
+
+3. **docs/idle.md 锁屏 now-playing 锐化**：控制中心媒体行减去 transport **与** player-switch hint（十八轮记录的 defensible drift，本轮顺手关）。
+
+**集成**：无波边界缺口（mic 不碰 clipboard 路径；clipboard agent 保留已在场的 mic 改动）。Theme Hub 未开做。
+
+**验证**：clippy -D warnings（0）/ check --all-targets / no-default-features 绿；lib **3204 passed / 0 failed**（3192 → +12：clipboard PNG 单元 + mic query/broadcast pins；沙箱内 deadline/kill 类测失败为环境 PermissionDenied，非沙箱全绿）。**无真机显示会话**。真机优先验证：浏览器/文件管理器复制 PNG → Alt+Ctrl+V 见标签、过滤 `png`、Enter 再贴；截图到剪贴板进历史；`jwm-msg get_mic_mute` + 订阅 `audio` 见 `audio/mic`；Input 行与 OSD 仍跟 mute。
+
+**过程笔记**：① 大项（clipboard）与小项（mic）并行时，小项先落热点外的 registry/query，大项独占 capture 栈，`toggles`/`ipc_handler` 分区编辑可并存；② `get_mic_mute` 行为测不要依赖 `set_mic_mute` 的 tool peek——并行 OnceLock 污染是既有形状；③ 沙箱不能可靠 SIGKILL 子进程时，deadline 家族测全红——验证需 `all` 权限或宿主机。
+
+**仍然开着的**（二十轮候选，均有记录在案）：IPC `set_audio_device` 仍同步（刻意留：reply 语义 confirmed 非 queued）；多播放器 follow-up 包（picker 面板 / per-player position / 行上点击循环 / bars 暴露列表 / pin 持久化）；**Shell Hub theme-only 路由**（wallpaper 先例，`appearance.ui_theme` 七值；session-only；勿夹 motion/blur）；剪贴板图片缩略图 / 原生 Wayland PNG offer；X11 `compositor_frame_deadline` 不接 overlay 边界（20ms idle cadence 已覆盖）；IPC/activate PNG 路径的端到端测仍薄（单元与文档已钉）。**成文勿再提**：sync_window_groups dirty 门控、嵌套后端无面板、toast NotificationClosed(1)、clear-all 指针路径、toast/OSD 进录制画面（改捕获顺序风险高）、X11 视觉特征不扩只做 easing、锁屏 backdrop 瞬间不透明（安全属性）、show_keybindings 原始函数名（cosmetic）。
+
+---
+
 ## 2026-09-09：UI/UX 十八轮（forget 正形、mic 消费者、日历点击、工具条 appear、多播放器）
 
 选题 = 十七轮候选清单。三 explore 先出 sketch，两波实施：wave 1 三路（A forget 正形 / B mic 消费者双半 / D 工具条 appear ease），wave 2 一路（C+E 合一：日历点击 + 多播放器——两者同需 input_handler.rs，十五轮锁屏包先例）。**波划分关键**：A 的 toggles.rs join 守卫依赖 B 完工后的独占 → 启动即定为计划集成项（非缺口）。docs 与全量验证并行（docs agent 只读代码，验证不碰 docs/）。
