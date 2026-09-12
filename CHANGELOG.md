@@ -7,6 +7,23 @@ monorepo use independent Semantic Versions.
 
 ### Added
 
+- Clipboard history now keeps PNG images alongside text. Image-only copies
+  (and screenshots published to the clipboard) land in `Alt+Ctrl+V` as text
+  labels — `PNG 1920×1080  1.2M` when the IHDR is readable — filtered by
+  tokens like `png` / `image` / dimensions, and re-offered on activate
+  through the native X11 image sender or `wl-copy` on Wayland. Text still
+  wins when an offer carries both; payloads over 4 MiB are skipped; the
+  store stays memory-only and never writes images to disk. `get_clipboard`
+  exposes kind/size/dims metadata only — never raw PNG bytes. See
+  [docs/clipboard.md](docs/clipboard.md).
+
+- Bars and scripts can follow the microphone mute flag end to end.
+  `get_mic_mute` answers `{ "muted": true|false|null }` from the same
+  cached flag the control-center Input row reads (`null` means never read),
+  warming the coalesced control snapshot first like `get_audio_devices`.
+  Every shown-flag change publishes `audio/mic` on the `audio` topic. See
+  [docs/media-controls.md](docs/media-controls.md).
+
 - The microphone's mute flag is settable over IPC and visible in the shell.
   `set_mic_mute {"muted": bool}` sets the default source's mute with the
   volume keys' queued semantics — an immediate `ok` ack and the mic OSD
@@ -41,6 +58,11 @@ monorepo use independent Semantic Versions.
   the header remain no-ops. See [docs/calendar.md](docs/calendar.md).
 
 ### Changed
+
+- The lock screen's now-playing row is documented as the control-center
+  media row minus its transport cluster **and** the player-switch hint, so
+  a multi-player session does not grow a `· p …` control on the lock card.
+  See [docs/idle.md](docs/idle.md).
 
 - The screenshot editor's toolbar eases in when it appears instead of
   popping in at full alpha: one blank frame after publish, then a 120 ms

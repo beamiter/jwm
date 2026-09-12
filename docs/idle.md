@@ -22,14 +22,14 @@ behaves.
 While a media player is active the card trails a now-playing row:
 `Title — Artist`, the `m:ss / m:ss` position when the player reports one,
 and the trailing status icon — the control-center media row minus its
-transport cluster, so a paused player reads exactly as paused as it does
-there. The lock reveals only what the session's own control center already
-shows: no album art, and no controls (the transport keys already work
-while locked; they need no on-screen cluster). With no player active the
-row is absent rather than blank, so a player-less lock is byte-identical
-to one built before the row existed. The row rides the bridge's
-three-second push — the overlay re-syncs only when the visible text
-actually changes, so a paused player's identical re-polls cost one
+transport cluster and player-switch hint, so a paused player reads exactly
+as paused as it does there. The lock reveals only what the session's own
+control center already shows: no album art, and no controls (the transport
+keys already work while locked; they need no on-screen cluster). With no
+player active the row is absent rather than blank, so a player-less lock is
+byte-identical to one built before the row existed. The row rides the
+bridge's three-second push — the overlay re-syncs only when the visible
+text actually changes, so a paused player's identical re-polls cost one
 comparison — and it is seeded when the lock opens, so it is there from
 the first frame.
 

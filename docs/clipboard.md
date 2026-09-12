@@ -6,7 +6,7 @@ puts the entry you choose back on the clipboard.
 | Key | Action |
 | --- | --- |
 | `Up` / `Down` | move the selection |
-| type | filter the list — case-insensitive substring on the entry text |
+| type | filter the list — case-insensitive substring on text, or tokens like `png` / dimensions for images |
 | `BackSpace` | edit the filter |
 | `Enter` | copy the entry back |
 | `d` / `Delete` | forget the selected entry |
@@ -17,31 +17,36 @@ The filter bar mirrors the launcher's, caret included, and starts empty on
 every open. Row numbers keep their history positions, so a filtered list
 shows gaps; with nothing matching, the panel says so instead of going blank.
 
-Each row shows its position, how much was copied (`31c` for a single line of
-31 characters, `3L` for three lines), and a one-line preview with whitespace
-collapsed.
+Each text row shows its position, how much was copied (`31c` for a single
+line of 31 characters, `3L` for three lines), and a one-line preview with
+whitespace collapsed. PNG rows are text labels only (no thumbnails): position
+plus something like `PNG 1920×1080  1.2M`.
 
 Copying something already in the history moves it back to the top instead of
 adding a duplicate — the list is "what I might paste next", so recency is the
-useful order.
+useful order. Text and PNG share one newest-first list; identical PNG bytes
+are reordered the same way.
 
 ## Privacy
 
 This is a feature that remembers what you copy, so what it *refuses* to
 remember matters as much as what it keeps:
 
-- **Nothing is written to disk.** The history is in memory only and does not
-  survive a restart. A clipboard manager that persisted passwords to a file
-  would be a liability, not a feature.
+- **Nothing is written to disk.** The history is in memory only (text and
+  PNG alike) and does not survive a restart. A clipboard manager that
+  persisted passwords to a file would be a liability, not a feature.
 - **Offers marked as secrets are never recorded.** Password managers tag the
   clipboard with `x-kde-passwordManagerHint`; JWM drops those before reading
   the payload, so the password never reaches the compositor's memory at all.
   `application/x-secret` and `x-secret` are honored the same way.
 - **The IPC hands out previews, not contents.** `get_clipboard` returns
-  truncated, whitespace-collapsed previews — a compromised IPC client cannot
-  ask for every password you have copied in one request.
-- **Payloads over 256 KiB are ignored**, and non-text offers (images, file
-  lists) are never captured.
+  truncated, whitespace-collapsed text previews and PNG metadata (kind,
+  byte size, dimensions, label) — never raw image bytes. A compromised IPC
+  client cannot ask for every password or screenshot you have copied in one
+  request.
+- **Payloads over the caps are ignored.** Text over 256 KiB and PNG over
+  4 MiB are dropped. JPEG/BMP and other non-PNG image types are never
+  captured. Remote clipboard sharing stays text-only.
 
 Turn it off entirely with:
 
@@ -54,32 +59,46 @@ With it off, nothing is recorded and the picker refuses to open.
 
 ## How capture works
 
+Policy is shared across backends: secret → drop; else preferred text MIME
+wins when present; else `image/png` is read under the image history cap.
+
 On X11 the clipboard is not storage but a protocol: the copying application
 keeps the data and hands it over on request. JWM therefore watches CLIPBOARD
 ownership through XFIXES, asks each new owner for its target list, and only
-requests the payload when that list is text and carries no secret marker.
-Putting an entry back means *becoming* the owner and answering requests for
-as long as JWM holds the selection. Each external owner is read through a new
-temporary requestor window, so a late reply from an older owner cannot cross
-into a newer password-manager offer and bypass its secret marker.
+requests the payload when that list is text or PNG and carries no secret
+marker. Putting an entry back means *becoming* the owner and answering
+requests for as long as JWM holds the selection. Each external owner is read
+through a new temporary requestor window, so a late reply from an older owner
+cannot cross into a newer password-manager offer and bypass its secret
+marker.
+
+Screenshots published to the clipboard are also recorded into history. On
+X11, JWM ignores its own selection ownership for capture (so serving an entry
+back does not loop), which means screenshot PNG must be recorded explicitly
+after a successful publish — otherwise those images would never appear in the
+picker. On Wayland, `wl-copy` becomes an external owner, so capture may also
+see the same bytes; byte-identical dedup makes the double record a reorder or
+no-op.
 
 The native X11 owner implements the required ICCCM `TARGETS`, `TIMESTAMP`, and
 `MULTIPLE` conversions. It obtains a real server timestamp before every
 ownership change and rejects requests from an older ownership period. Large
 text and `image/png` data uses INCR in both directions: outgoing chunks follow
 the server's advertised request limit, while incoming text is retained only up
-to 256 KiB and oversized transfers are still drained to their terminator so the
-source application is never left blocked. Concurrent and stalled transfers
-have per-client, count, byte, and inactivity bounds.
+to 256 KiB, incoming history PNG up to 4 MiB, and oversized transfers are
+still drained to their terminator so the source application is never left
+blocked. Concurrent and stalled transfers have per-client, count, byte, and
+inactivity bounds.
 
 On Wayland JWM *is* the selection owner's counterpart: a client setting the
 clipboard is announced through smithay's selection handler, and JWM asks that
-client for the text over a pipe. The announcement arrives one step before
-smithay records the selection, so the read is deferred by one turn of the
-event loop — asking inside the handler always answers "no selection". Reading
-and writing both happen on threads: the other end is another process that
-writes at its own pace, and a compositor that waited would stall every client
-with it.
+client for the text or PNG over a pipe. The announcement arrives one step
+before smithay records the selection, so the read is deferred by one turn of
+the event loop — asking inside the handler always answers "no selection".
+Reading and writing both happen on threads: the other end is another process
+that writes at its own pace, and a compositor that waited would stall every
+client with it. Re-offering a PNG (and screenshot publish) still uses
+`wl-copy`; there is no compositor-native Wayland data-device PNG offer yet.
 
 The X11 watcher runs on **its own X connection and thread**, not the window
 manager's.
@@ -96,14 +115,14 @@ Support by backend:
 
 | Backend | Capture | Serve |
 | --- | --- | --- |
-| `x11rb`, `xcb` | yes | yes |
-| `wayland-udev`, `wayland-x11`, `wayland-winit` | yes | yes |
+| `x11rb`, `xcb` | yes (text + PNG) | yes (text + PNG) |
+| `wayland-udev`, `wayland-x11`, `wayland-winit` | yes (text + PNG) | text native; PNG via `wl-copy` |
 
 Every backend is wired. A backend that could not start its watcher logs the
 reason and runs without a history rather than failing the session; activating
 a row then reports that the backend cannot set the clipboard rather than
-pretending to have done it. Entries can still arrive through
-`clipboard_record`.
+pretending to have done it. Text entries can still arrive through
+`clipboard_record` (text-only).
 
 ## IPC
 
@@ -115,9 +134,10 @@ jwm-msg '{"command": "clear_clipboard"}'
 ```
 
 `clipboard_copy` puts a history entry back on the clipboard by index — the
-same thing the picker's `Enter` does, available to bars and scripts.
+same thing the picker's `Enter` does, available to bars and scripts. Image
+entries are re-offered as PNG; `get_clipboard` still returns metadata only.
 
-`clipboard_record` is how a backend helper or a script feeds the history;
-callers are responsible for dropping secret-marked offers before calling it.
-The `clipboard` subscription topic carries `clipboard/changed` whenever the
-history actually changed.
+`clipboard_record` is how a backend helper or a script feeds **text** into the
+history; callers are responsible for dropping secret-marked offers before
+calling it. The `clipboard` subscription topic carries `clipboard/changed`
+whenever the history actually changed.

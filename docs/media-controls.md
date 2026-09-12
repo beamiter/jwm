@@ -60,11 +60,11 @@ read-back corrects it if the toggle did not take. The feedback is a labeled OSD 
 Muted` / `Microphone Unmuted` with fa-microphone(-slash) icons — which,
 unlike the volume card, carries no bar: the flag is the whole story.
 
-The flag has two more consumers. The control center's Input row is the
+The flag has three more consumers. The control center's Input row is the
 indicator: while the default source is muted it wears the slashed
 microphone icon the OSD uses, and an unmuted or never-read flag draws the
 row exactly as before; an open control center repaints when a read-back
-corrects or reverts the shown state. And `set_mic_mute {"muted": bool}`
+corrects or reverts the shown state. `set_mic_mute {"muted": bool}`
 sets the flag over IPC — queued, like the volume keys, and deliberately
 unlike `set_audio_device`'s synchronous confirmed reply: the `ok` ack is
 immediate and the OSD draws the optimistic estimate, then the worker's
@@ -73,7 +73,13 @@ Input row follows). A non-boolean `muted` is rejected with
 `set_mic_mute: expected boolean field 'muted'`, and a session with no
 working audio tool gets the key path's own answer,
 `no working audio control (wpctl/pactl/amixer)`. The command is advertised
-through `get_capabilities`.
+through `get_capabilities`. And bars can follow without scraping the OSD:
+`get_mic_mute` answers `{ "muted": true|false|null }` from the same
+cached flag (`null` means never read — never invent unmuted), warming the
+coalesced control snapshot first like `get_audio_devices`, while every
+shown-flag change publishes `audio/mic` on the `audio` topic with a bool
+payload (optimistic set/toggle, adopt, and revert-to-a-bool; clearing back
+to unread is silent).
 
 One deliberate absence stands: the key is *not* in the lock-screen media
 passthrough (unmuting a microphone while locked is a privacy risk, so the
@@ -117,6 +123,10 @@ picked up by a 3-second sweep.
   optimistic estimate, with the controls worker's read-back confirming or
   correcting it after — deliberately unlike `set_audio_device`'s synchronous
   re-read reply. See [Microphone mute](#microphone-mute).
+- `get_mic_mute` — `{ "muted": true|false|null }` from the cached flag after
+  warming the coalesced control snapshot. `null` means never read.
+- the `audio` subscription topic carries `audio/devices` and `audio/mic`
+  (bool `muted` whenever the shown flag becomes a known bool).
 - `get_media_status` — the current state plus the rendered `label` and a
   pre-formatted nullable `position_label`, so bars don't reimplement the
   clamping.
