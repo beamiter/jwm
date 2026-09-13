@@ -545,6 +545,18 @@ impl WMController for Jwm {
                     }
                     SystemUiHitTarget::Panel | SystemUiHitTarget::Unavailable => {}
                 },
+                // Clipboard middle-click: the pointer twin of `d` / Delete —
+                // select the pointed row and forget it in one shot (no arm).
+                // A miss on blank is inert, same shape as switcher/expose
+                // middle-click; never clear-all. Other panels leave button 2
+                // inert (Wi-Fi/BT forget stays keyboard-armed for now).
+                2 if self.features.system_ui.is_clipboard_picker() => {
+                    if let SystemUiHitTarget::Item(row, _) = hit
+                        && self.features.system_ui.select_visible_row(row).is_some()
+                    {
+                        self.forget_selected_clipboard(backend);
+                    }
+                }
                 _ => {}
             }
             return;
@@ -2608,6 +2620,146 @@ mod tests {
         assert!(
             jwm.features.system_ui.is_locked(),
             "the lock screen must ignore scrim clicks"
+        );
+    }
+
+    #[test]
+    fn middle_click_forgets_the_pointed_clipboard_row() {
+        use crate::jwm::features::ClipboardEntry;
+        use crate::jwm::features::system_ui::SystemUiState;
+
+        let mut jwm = empty_jwm();
+        let mut backend = RenderSpyBackend::new();
+        // Recorded in order: newest ("gamma") is history index 0.
+        jwm.features.clipboard.record("alpha", 1);
+        jwm.features.clipboard.record("beta", 2);
+        jwm.features.clipboard.record("gamma", 3);
+        jwm.features.system_ui = SystemUiState::clipboard_picker(&jwm.features.clipboard);
+        assert_eq!(jwm.features.system_ui.selected_clipboard(), Some(0));
+
+        // Highlight stays on newest; middle-click the second visible row
+        // (history index 1 = "beta") — point-who-forgets, like switcher close.
+        backend.system_ui_hit = SystemUiHitTarget::Item(1, 0.0);
+        <Jwm as WMController>::on_button_press(
+            &mut jwm,
+            &mut backend,
+            HitTarget::Background { output: None },
+            0,
+            2,
+            0,
+        );
+
+        let texts: Vec<&str> = jwm
+            .features
+            .clipboard
+            .entries()
+            .map(|entry| match entry {
+                ClipboardEntry::Text { text, .. } => text.as_str(),
+                ClipboardEntry::Png { .. } => "png",
+            })
+            .collect();
+        assert_eq!(texts, ["gamma", "alpha"], "the pointed row is forgotten");
+        assert!(
+            jwm.features.system_ui.is_clipboard_picker(),
+            "forget keeps the picker open"
+        );
+        assert_eq!(
+            jwm.features.clipboard.len(),
+            2,
+            "one entry gone — never clear-all"
+        );
+    }
+
+    #[test]
+    fn middle_click_on_clipboard_blank_is_inert() {
+        use crate::jwm::features::ClipboardEntry;
+        use crate::jwm::features::system_ui::SystemUiState;
+
+        let mut jwm = empty_jwm();
+        let mut backend = RenderSpyBackend::new();
+        jwm.features.clipboard.record("keep-me", 1);
+        jwm.features.system_ui = SystemUiState::clipboard_picker(&jwm.features.clipboard);
+
+        for hit in [
+            SystemUiHitTarget::Panel,
+            SystemUiHitTarget::Outside,
+            SystemUiHitTarget::Unavailable,
+        ] {
+            backend.system_ui_hit = hit;
+            <Jwm as WMController>::on_button_press(
+                &mut jwm,
+                &mut backend,
+                HitTarget::Background { output: None },
+                0,
+                2,
+                0,
+            );
+            assert!(
+                jwm.features.system_ui.is_clipboard_picker(),
+                "blank middle-click must not dismiss the picker ({hit:?})"
+            );
+            let texts: Vec<&str> = jwm
+                .features
+                .clipboard
+                .entries()
+                .map(|entry| match entry {
+                    ClipboardEntry::Text { text, .. } => text.as_str(),
+                    ClipboardEntry::Png { .. } => "png",
+                })
+                .collect();
+            assert_eq!(
+                texts,
+                ["keep-me"],
+                "blank middle-click must forget nothing ({hit:?})"
+            );
+        }
+    }
+
+    /// The system-UI button-press arm must route clipboard button 2 through
+    /// `forget_selected_clipboard` (after selecting the pointed row) and must
+    /// not grow a clear-all or notification clear path. Needles are built at
+    /// runtime so this cannot match its own source.
+    #[test]
+    fn clipboard_middle_click_routes_through_the_forget_path() {
+        const SOURCE: &str = include_str!("event_dispatcher.rs");
+        let compact: String = SOURCE.chars().filter(|c| !c.is_whitespace()).collect();
+
+        let press = compact
+            .split_once("fnon_button_press(")
+            .expect("on_button_press")
+            .1;
+        let system_ui = press
+            .split_once("ifself.features.system_ui.is_active(){")
+            .expect("the system-ui pointer branch")
+            .1
+            .split_once("//Annotationmode:")
+            .expect("the end of the system-ui pointer branch")
+            .0;
+
+        let arm = concat!(
+            "2ifself.features.system_ui.is_clipboard",
+            "_picker()=>{ifletSystemUiHitTarget::Item(row,_)="
+        );
+        assert!(
+            system_ui.contains(arm),
+            "clipboard middle-click must gate on the picker and an Item hit"
+        );
+        assert!(
+            system_ui.contains("select_visible_row(row)"),
+            "middle-click must select the pointed row before forgetting"
+        );
+        assert!(
+            system_ui.contains(&format!("{}(", "forget_selected_clipboard")),
+            "middle-click must share the keyboard forget path"
+        );
+        assert!(
+            !system_ui.contains(&format!("{}(", "clear_clipboard_history")),
+            "middle-click must never clear-all"
+        );
+        assert!(
+            !system_ui.contains("clear_notifications")
+                && !system_ui.contains("clear_all"),
+            "middle-click must not touch notification clear-all"
         );
     }
 

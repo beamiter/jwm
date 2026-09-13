@@ -93,6 +93,29 @@ const fn shell_entry(active: bool, locked: bool, mine: bool) -> ShellEntry {
     }
 }
 
+/// Whether a status-bar ShellHub request targets the surface already on screen.
+///
+/// Hub home (`None`) mirrors `Alt+F10`: the hub itself, or any child page
+/// reached from it (`system_ui_return_to_hub`). A named route matches only that
+/// page — the same predicate each panel key uses for `toggle_off_system_ui`.
+fn status_bar_shell_is_mine(
+    return_to_hub: bool,
+    state: &crate::jwm::features::SystemUiState,
+    route: Option<crate::jwm::features::ShellHubRoute>,
+) -> bool {
+    use crate::jwm::features::ShellHubRoute;
+
+    match route {
+        None => return_to_hub || state.is_control_center(),
+        Some(ShellHubRoute::Applications) => state.is_launcher(),
+        Some(ShellHubRoute::Notifications) => state.is_notification_center(),
+        Some(ShellHubRoute::Clipboard) => state.is_clipboard_picker(),
+        Some(ShellHubRoute::Calendar) => state.is_calendar(),
+        Some(ShellHubRoute::Wallpaper) => state.is_wallpaper_picker(),
+        Some(ShellHubRoute::Theme) => state.is_theme_picker(),
+    }
+}
+
 fn should_start_control_snapshot(
     in_flight: bool,
     refreshed_at: Option<std::time::Instant>,
@@ -880,10 +903,13 @@ impl Jwm {
     /// Open the shell from a status bar rather than from a key binding.
     ///
     /// `None` opens the hub home page; a route opens that page directly with
-    /// Escape returning to the hub, matching what the keyboard path does. This
-    /// is the only shell entry point that starts from an unfocused surface, so
-    /// unlike [`Self::open_shell_hub_route`] it has to acquire the grabs first
-    /// and hand them back if the requested page turns out to be unavailable.
+    /// Escape returning to the hub, matching what the keyboard path does. While
+    /// a panel is already up the request follows the same toggle / hand-over
+    /// rule as the panel keys: same page (or Hub home) dismisses, a different
+    /// page takes over. This is the only shell entry point that starts from an
+    /// unfocused surface, so unlike [`Self::open_shell_hub_route`] it has to
+    /// acquire the grabs first and hand them back if the requested page turns
+    /// out to be unavailable.
     pub(crate) fn open_shell_from_status_bar(
         &mut self,
         backend: &mut dyn Backend,
@@ -910,11 +936,18 @@ impl Jwm {
         backend: &mut dyn Backend,
         route: Option<crate::jwm::features::ShellHubRoute>,
     ) -> Result<bool, Box<dyn std::error::Error>> {
+        // Mirror the panel keys while anything is already up: same page (or
+        // Hub home / Alt+F10) dismisses; a different page hands over inside
+        // `prepare_system_ui_inner`. The lock refuses via `toggle_off_system_ui`.
         if self.features.system_ui.is_active() {
-            // The user is already in the shell. Re-opening would steal the
-            // grabs and throw away the page they are on, so a stray click on
-            // the bar does nothing instead.
-            return Ok(true);
+            let mine = status_bar_shell_is_mine(
+                self.features.system_ui_return_to_hub,
+                &self.features.system_ui,
+                route,
+            );
+            if self.toggle_off_system_ui(backend, |_| mine) {
+                return Ok(true);
+            }
         }
 
         // A status bar click holds an implicit pointer grab for as long as the
@@ -945,6 +978,8 @@ impl Jwm {
             .inspect_err(|_| {
                 // A disabled route (clipboard history switched off, say) must
                 // not leave the keyboard grabbed with nothing on screen.
+                // After a hand-over the outgoing panel is already gone, so
+                // this also clears the empty grab rather than restoring it.
                 self.close_system_ui(backend);
             })
             .map(|()| true)
@@ -1335,7 +1370,8 @@ impl Jwm {
         }
     }
 
-    /// Forget the selected entry.
+    /// Forget the selected entry — keyboard `d` / Delete and middle-click
+    /// on a row share this path. One shot, no arm; never clear-all.
     pub(crate) fn forget_selected_clipboard(&mut self, backend: &mut dyn Backend) {
         let Some(index) = self.features.system_ui.selected_clipboard() else {
             return;
@@ -4023,9 +4059,10 @@ mod recording_finalization_tests {
 #[cfg(test)]
 mod shell_entry_tests {
     use super::{
-        ShellEntry, control_snapshot_epoch_matches, shell_entry,
+        ShellEntry, control_snapshot_epoch_matches, shell_entry, status_bar_shell_is_mine,
         should_refresh_after_pairing_close, should_start_control_snapshot,
     };
+    use crate::jwm::features::{ShellHubRoute, SystemUiState, system_ui::ControlCenterInputs};
 
     #[test]
     fn an_empty_screen_just_opens() {
@@ -4057,6 +4094,85 @@ mod shell_entry_tests {
         for mine in [false, true] {
             assert_eq!(shell_entry(true, true, mine), ShellEntry::Refuse);
         }
+    }
+
+    #[test]
+    fn status_bar_hub_home_mirrors_alt_f10_ownership() {
+        let hub = SystemUiState::control_center(&ControlCenterInputs::default());
+        let calendar = SystemUiState::calendar(chrono::NaiveDate::from_ymd_opt(2026, 9, 13)
+            .unwrap()
+            .and_hms_opt(12, 0, 0)
+            .unwrap());
+        let session = SystemUiState::session_menu();
+
+        // Hub home while the hub itself is up — dismiss.
+        assert!(status_bar_shell_is_mine(false, &hub, None));
+        // Hub home while a child reached from the hub is up — dismiss (Alt+F10).
+        assert!(status_bar_shell_is_mine(true, &calendar, None));
+        // Hub home over an unrelated panel — hand over, not dismiss.
+        assert!(!status_bar_shell_is_mine(false, &calendar, None));
+        assert!(!status_bar_shell_is_mine(false, &session, None));
+    }
+
+    #[test]
+    fn status_bar_named_route_matches_only_that_page() {
+        let calendar = SystemUiState::calendar(chrono::NaiveDate::from_ymd_opt(2026, 9, 13)
+            .unwrap()
+            .and_hms_opt(12, 0, 0)
+            .unwrap());
+        let launcher = SystemUiState::open_launcher(std::sync::Arc::from([]), Vec::new(), false);
+        let hub = SystemUiState::control_center(&ControlCenterInputs::default());
+
+        assert!(status_bar_shell_is_mine(
+            false,
+            &calendar,
+            Some(ShellHubRoute::Calendar)
+        ));
+        assert!(!status_bar_shell_is_mine(
+            false,
+            &calendar,
+            Some(ShellHubRoute::Applications)
+        ));
+        assert!(status_bar_shell_is_mine(
+            true,
+            &launcher,
+            Some(ShellHubRoute::Applications)
+        ));
+        // Same page only: Hub home is not the Calendar route.
+        assert!(!status_bar_shell_is_mine(
+            false,
+            &hub,
+            Some(ShellHubRoute::Calendar)
+        ));
+    }
+
+    /// The status-bar opener must toggle / hand over while a panel is up,
+    /// not swallow the click. Pins the ownership helper and the dismiss path
+    /// so a regression cannot quietly restore the old early return.
+    #[test]
+    fn begin_shell_from_status_bar_toggles_and_hands_over_while_open() {
+        const SOURCE: &str = include_str!("toggles.rs");
+        let begin = SOURCE
+            .split_once("pub(crate) fn begin_shell_from_status_bar")
+            .expect("begin_shell_from_status_bar")
+            .1
+            .split_once("pub(crate) fn return_to_shell_hub")
+            .expect("return_to_shell_hub follows")
+            .0;
+        for needle in [
+            "status_bar_shell_is_mine",
+            "toggle_off_system_ui",
+            "prepare_system_ui_inner",
+        ] {
+            assert!(
+                begin.contains(needle),
+                "begin_shell_from_status_bar lost {needle}"
+            );
+        }
+        assert!(
+            !begin.contains("stray click on the bar does nothing"),
+            "status-bar ShellHub must not ignore clicks while the shell is open"
+        );
     }
 
     #[test]

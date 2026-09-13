@@ -575,7 +575,8 @@ pub enum ControlKind {
     Memory,
     /// Read-only network throughput.
     NetworkThroughput,
-    /// Power profile selector: Left/Right cycles the driver's profiles.
+    /// Power profile selector: Left/Right / Enter / wheel cycle the driver's
+    /// profiles.
     PowerProfile,
     NightLight,
     DoNotDisturb,
@@ -2719,10 +2720,11 @@ impl SystemUiState {
         entries.get(target).map(|entry| entry.kind)
     }
 
-    /// What a wheel click does in the control center: over a slider row it
-    /// adjusts that row's value (scroll-on-slider, the pointer counterpart
-    /// of Left/Right); anywhere else the caller browses the list. Wheel-up
-    /// arrives as `direction < 0` and raises the value, matching the keys.
+    /// What a wheel click does in the control center: over a Volume/
+    /// Brightness slider it adjusts that value; over Power Profile it
+    /// cycles (same signed `SLIDER_STEP` the keys use). Anywhere else the
+    /// caller browses the list. Wheel-up arrives as `direction < 0` and
+    /// raises / advances, matching the keys.
     #[must_use]
     pub fn wheel_slider_step(
         &self,
@@ -2730,7 +2732,10 @@ impl SystemUiState {
         direction: isize,
     ) -> Option<(ControlKind, i32)> {
         let kind = self.control_at_visible_row(visual_row)?;
-        if !matches!(kind, ControlKind::Volume | ControlKind::Brightness) {
+        if !matches!(
+            kind,
+            ControlKind::Volume | ControlKind::Brightness | ControlKind::PowerProfile
+        ) {
             return None;
         }
         Some((kind, -direction.signum() as i32 * SLIDER_STEP))
@@ -6662,10 +6667,38 @@ mod tests {
             state.wheel_slider_step(1, 1),
             Some((ControlKind::Brightness, -SLIDER_STEP))
         );
-        // Rows that are not sliders keep the browsing behavior, and a row
-        // past the end is nobody's slider.
+        // Rows that are not sliders / Power Profile keep the browsing
+        // behavior, and a row past the end is nobody's step target.
         assert_eq!(state.wheel_slider_step(2, -1), None);
         assert_eq!(state.wheel_slider_step(99, -1), None);
+    }
+
+    #[test]
+    fn wheel_over_power_profile_cycles_like_a_slider() {
+        let state = SystemUiState::control_center(&ControlCenterInputs {
+            volume: Some((45, false)),
+            brightness: Some(60),
+            power_profile: Some("balanced"),
+            ..Default::default()
+        });
+        // Flat: Volume, Brightness, Power Profile, Night Light, …
+        assert_eq!(
+            state.control_at_visible_row(2),
+            Some(ControlKind::PowerProfile)
+        );
+        assert_eq!(
+            state.wheel_slider_step(2, -1),
+            Some((ControlKind::PowerProfile, SLIDER_STEP))
+        );
+        assert_eq!(
+            state.wheel_slider_step(2, 1),
+            Some((ControlKind::PowerProfile, -SLIDER_STEP))
+        );
+        assert_eq!(
+            state.control_at_visible_row(3),
+            Some(ControlKind::NightLight)
+        );
+        assert_eq!(state.wheel_slider_step(3, -1), None);
     }
 
     #[test]

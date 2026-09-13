@@ -4,6 +4,22 @@
 
 ---
 
+## 2026-09-13：UI/UX 二十六轮（Power Profile 指针、Shell bar 切换、剪贴板中键 forget）
+
+选题 = 二十五轮后新鲜日常命中：Power Profile Enter/click/wheel（死行）∥ Shell bar while-open toggle/hand-over ∥ 剪贴板中键 forget。文件几乎不交。拒做：pin、缩略图、`set_audio_device` sync、X11 frame deadline、Wi-Fi/BT 中键。
+
+1. **Power Profile Enter/click + wheel**。activate=Right 步进 + OSD；`wheel_slider_step` 含 PowerProfile → Left/Right 键臂。docs/control-center.md。
+
+2. **Shell bar while-open**。`begin_shell_from_status_bar`：同页/Hub home → dismiss；异页 → hand_over 开路由；锁仍 Refuse。docs/control-center.md。
+
+3. **Clipboard middle-click forget**。button 2 命中行 → select + `forget_selected_clipboard`（同 `d`）；空白 inert。docs/clipboard.md。
+
+**验证**：clippy -D warnings（0）；lib **3252 passed / 0 failed / 11 ignored**（3244→+8）。**无真机显示会话**。真机优先：Hub Power Profile 点/滚轮；bar 再点同页关、异页切换；Alt+Ctrl+V 中键丢弃条目。
+
+**仍然开着的**（二十七轮）：pin 持久化；剪贴板缩略图；`set_audio_device` sync；X11 `compositor_frame_deadline`；Wi-Fi/BT 中键 forget；音频设备切换命名 OSD；媒体 click-to-seek。**成文勿再提**：……（继承二十五轮）+ Power Profile 指针死行（本轮关闭）+ bar 开着时忽略 ShellHub（本轮关闭）+ 剪贴板中键 inert（本轮关闭）。
+
+---
+
 ## 2026-09-13：UI/UX 二十五轮（Input mic 点击、媒体 · o、X11 toast 诚实）
 
 选题 = 二十四轮开放项里日常命中最高：Input mic mute 点击+`m` ∥ X11 screenshot toast 诚实；Wave C（mic 落盘后）补媒体指针 OpenPicker。拒做：pin 持久化、缩略图、`set_audio_device` sync、X11 frame deadline。

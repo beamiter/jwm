@@ -1087,12 +1087,16 @@ impl Jwm {
                     // Read-only: the row is information, not a control.
                 }
                 ControlKind::PowerProfile => {
+                    // Enter / left-click advances one notch (Right's delta);
+                    // Left/Right keep their signed cycle. Pointer wheel
+                    // synthesizes those keys from `wheel_slider_step`.
+                    let delta = slider_delta.or(activate.then_some(SLIDER_STEP));
                     let profiles = self
                         .features
                         .control_snapshot
                         .as_ref()
                         .and_then(|snapshot| snapshot.power_profiles.clone());
-                    if let Some(delta) = slider_delta
+                    if let Some(delta) = delta
                         && let Some((available, active)) = profiles
                         && let Some(next) = crate::jwm::features::power::cycle_profile(
                             &available,
@@ -1936,14 +1940,27 @@ impl Jwm {
     ) {
         backend.compositor_set_system_ui_hover(None);
         // Scroll-on-slider: a wheel click over a Volume/Brightness row
-        // adjusts the value under the pointer instead of browsing the list.
-        // The selection pill follows, so a subsequent Left/Right acts on
-        // the row the pointer is on.
+        // adjusts the value under the pointer instead of browsing the list;
+        // over Power Profile it cycles like Left/Right (with OSD). The
+        // selection pill follows, so a subsequent keypress acts on the row
+        // the pointer is on.
         if let Some(row) = hit_row
             && let Some((kind, delta)) = self.features.system_ui.wheel_slider_step(row, direction)
         {
+            use crate::jwm::features::ControlKind;
             let _ = self.features.system_ui.select_visible_row(row);
-            self.adjust_control_slider(kind, delta);
+            if kind == ControlKind::PowerProfile {
+                // Same arm as keyboard Left/Right — keeps the OSD and
+                // cache write in one place.
+                let keysym = if delta > 0 {
+                    keys::KEY_Right
+                } else {
+                    keys::KEY_Left
+                };
+                self.handle_control_center_key(backend, kind, keysym, Mods::empty());
+            } else {
+                self.adjust_control_slider(kind, delta);
+            }
             self.sync_system_ui(backend);
             return;
         }
@@ -3868,7 +3885,8 @@ mod tests {
 
     /// Power Profile Left/Right used to mutate silently while every other
     /// Hub toggle raised a labeled card. The successful cycle must show the
-    /// same acknowledgement.
+    /// same acknowledgement — and Enter / left-click must share that path
+    /// (one notch forward) rather than staying a dead row.
     #[test]
     fn the_power_profile_row_raises_the_osd_after_a_successful_cycle() {
         const SOURCE: &str = include_str!("input_handler.rs");
@@ -3893,6 +3911,44 @@ mod tests {
         assert!(
             arm.contains(&format!("{}(", "set_profile")),
             "the Power Profile row no longer switches the profile"
+        );
+        // Enter / space (and therefore left-click) must feed the same cycle
+        // as Right — assembled so this pin cannot match its own prose.
+        let activate_delta = format!("{}.{}", "activate", "then_some");
+        assert!(
+            arm.contains(&activate_delta),
+            "Enter / left-click on Power Profile no longer cycles (+1)"
+        );
+    }
+
+    /// Wheel over Power Profile must cycle through the Left/Right arm (OSD
+    /// included), not fall into `adjust_control_slider`'s empty match arm.
+    /// Selection-follow stays on the shared `wheel_slider_step` path.
+    #[test]
+    fn wheel_over_power_profile_routes_through_the_cycle_arm() {
+        const SOURCE: &str = include_str!("input_handler.rs");
+        let body = SOURCE
+            .split_once(&format!("fn {}(", "scroll_system_ui_from_pointer"))
+            .expect("scroll_system_ui_from_pointer")
+            .1
+            .split_once(&format!("fn {}(", "adjust_control_slider"))
+            .expect("the function after it")
+            .0;
+        assert!(
+            body.contains(&format!("{}::{}", "ControlKind", "PowerProfile")),
+            "wheel over Power Profile no longer branches to the cycle path"
+        );
+        assert!(
+            body.contains(&format!("{}(", "handle_control_center_key")),
+            "wheel over Power Profile no longer reuses the Left/Right arm"
+        );
+        assert!(
+            body.contains(&format!("{}(", "wheel_slider_step")),
+            "wheel over Power Profile left the shared step helper"
+        );
+        assert!(
+            body.contains(&format!("{}(", "select_visible_row")),
+            "wheel over Power Profile no longer follows selection"
         );
     }
 

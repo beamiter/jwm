@@ -8,10 +8,18 @@ puts the entry you choose back on the clipboard.
 | `Up` / `Down` | move the selection |
 | type | filter the list — case-insensitive substring on text, or tokens like `png` / dimensions for images |
 | `BackSpace` | edit the filter |
-| `Enter` | copy the entry back |
-| `d` / `Delete` | forget the selected entry |
+| `Enter` / left click | copy the entry back |
+| `d` / `Delete` / middle click | forget the selected (or pointed) entry |
 | `c` | clear the whole history |
 | `Esc` or `Alt+Ctrl+V` | close — the key that opened the list also dismisses it |
+
+## Pointer
+
+Left click on a row copies it back — the same as `Enter`. The wheel browses
+the list. Middle click on a row selects that row and forgets it in one shot
+(the pointer twin of `d` / `Delete`; no arm, and never clear-all). A middle
+click on blank space is inert. Wi-Fi and Bluetooth pickers keep their
+keyboard-armed forget for now.
 
 The filter bar mirrors the launcher's, caret included, and starts empty on
 every open. Row numbers keep their history positions, so a filtered list

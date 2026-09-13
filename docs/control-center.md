@@ -38,8 +38,9 @@ pages still close with one `Esc`.
 The same surface is pointer-operable: hover shows a quiet cue without moving
 keyboard focus or making the list jump, a left click performs the row's `Enter` action, and the
 wheel browses the current list — except over a Volume or Brightness slider row,
-where it adjusts that value by 5% per click instead (the pointer counterpart of
-`Left`/`Right`, and the selection pill follows so a later keypress stays on the
+where it adjusts that value by 5% per click, and over Power Profile, where it
+cycles one notch per click (both the pointer counterpart of `Left`/`Right`, and
+the selection pill follows so a later keypress stays on the
 row you scrolled). A slider's 20-cell bar itself takes press-and-drag: pressing
 on the bar sets the value to the pointed position and tracks the pointer until
 release, while pressing anywhere else on the row keeps the row's `Enter`
@@ -107,7 +108,7 @@ PipeWire output and input defaults come from one shared `wpctl status` read.
 | CPU | `/proc/stat` is readable | read-only ([resource rows](resources.md)) |
 | Memory | `/proc/meminfo` is readable | read-only |
 | Network I/O | an interface worth counting exists in `/proc/net/dev` | read-only |
-| Power Profile | `powerprofilesctl` or ACPI `platform_profile` | `Left`/`Right` cycle |
+| Power Profile | `powerprofilesctl` or ACPI `platform_profile` | `Left`/`Right` / `Enter` / wheel cycle |
 | Night Light | always | `Enter` toggles |
 | Do Not Disturb | always | `Enter` toggles |
 | Caffeine | always | `Enter` holds the session awake ([idle policy](idle.md)) |
@@ -121,8 +122,9 @@ because toasts are DND-gated. The Network and Bluetooth rows' `Left`/
 `Right` radio flips (and a confirmed Bluetooth power-off) raise the same
 Wi-Fi / Bluetooth OSD the key bindings use; the first press that only
 arms Bluetooth power-off stays quiet. The Power Profile row's `Left`/
-`Right` cycle raises a labeled Power Profile OSD with the active name
-(and the same icon the row already uses) after a successful switch.
+`Right` cycle, `Enter` / left-click (one notch forward), and wheel over the
+row raise a labeled Power Profile OSD with the active name (and the same
+icon the row already uses) after a successful switch.
 
 The panel rebuilds itself when the state behind a row changes — a track
 change, a battery poll — so an open card never shows a stale value, and the
@@ -164,9 +166,12 @@ entry points behave identically:
 
 - A request that names a page opens it with `Esc` returning to the Hub, the
   same as selecting the row from the Hub itself.
-- A request arriving while the shell is already open is **ignored**. Stealing
-  the grabs and throwing away the page the user is on is worse than dropping a
-  stray click on the bar.
+- A request for the page already on screen — or for Hub home while any shell
+  page reached from the Hub is up — **dismisses** it, mirroring `Alt+F10` and
+  the other panel keys.
+- A request for a *different* page hands the screen over and opens that route,
+  keeping the grabs the same way a panel key replaces another panel.
+- The lock screen still refuses every request; nothing from the bar replaces it.
 - A page the configuration disables — clipboard history switched off, say —
   fails without leaving the keyboard grabbed and nothing on screen.
 - An unknown page number from a bar newer than JWM opens the Hub instead of
@@ -523,9 +528,12 @@ Charging clears the memory, so unplugging later warns afresh.
 `powerprofilesctl` is preferred, falling back to
 `/sys/firmware/acpi/platform_profile`; whichever answers first is cached for
 the session. `Left`/`Right` cycle through the driver's own profile list and
-wrap, raise the labeled Power Profile OSD with the active name (same card
-`set_power_profile` shows), and the row re-reads afterwards so it shows what
-actually took effect rather than what was requested.
+wrap; `Enter` / left-click advances one notch (same as `Right`); the wheel
+over the row uses the same signed step as Volume/Brightness and follows
+selection like those sliders. A successful switch raises the labeled Power
+Profile OSD with the active name (same card `set_power_profile` shows), and
+the row re-reads afterwards so it shows what actually took effect rather
+than what was requested.
 
 ## IPC
 

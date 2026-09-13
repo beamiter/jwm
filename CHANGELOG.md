@@ -7,6 +7,19 @@ monorepo use independent Semantic Versions.
 
 ### Added
 
+- Control-center Power Profile Enter/click and wheel cycle like
+  Right / Left–Right (labeled OSD), so the row is no longer pointer-dead.
+  See [docs/control-center.md](docs/control-center.md).
+
+- Status-bar ShellHub while the shell is open: same page / Hub home
+  dismisses (Alt+F10 twin); a different page hands over and opens that
+  route. Lock still refuses. See
+  [docs/control-center.md](docs/control-center.md).
+
+- Clipboard history middle-click forgets the pointed row (same one-shot
+  path as `d`/`Delete`); blank middle-click stays inert. See
+  [docs/clipboard.md](docs/clipboard.md).
+
 - Control-center Input row: click the mic icon (or press `m` while the row is
   selected) toggles mute through the same OSD path as `XF86AudioMicMute`;
   the rest of the row still opens the audio-input device picker. See
