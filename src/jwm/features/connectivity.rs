@@ -1759,8 +1759,9 @@ impl crate::jwm::Jwm {
             }
         }
         // No-op when the control center is not on screen; the estimate still
-        // stands in the cache for the next opening, and the OSD (key-bound
-        // path) already acknowledged the press.
+        // stands in the cache for the next opening. The OSD acknowledges the
+        // press from both the key-bound toggle and the Hub row before this
+        // call, so a silent Hub flip is no longer the shape.
         self.refresh_open_control_center();
         let payload = self.connectivity_json();
         self.broadcast_ipc_event("network/status", payload);

@@ -392,8 +392,9 @@ impl WMController for Jwm {
         // The switcher holds the pointer like every other clickable panel, so
         // every press reaches here rather than the client its rows are drawn
         // over — the wheel included, which X11 delivers as buttons 4-7. A
-        // click ends the gesture (button 1 on a row picks that window,
-        // anything else cancels); the wheel browses the list the way it does
+        // left click on a row picks that window; a middle click closes the
+        // pointed row without ending the gesture (Delete's pointer twin);
+        // anything else cancels. The wheel browses the list the way it does
         // on every other panel, because a scroll asks for the next row, not
         // for the switch in flight to be thrown away.
         if self.features.system_ui.is_window_switcher() {
@@ -415,6 +416,24 @@ impl WMController for Jwm {
                         return;
                     }
                     self.cancel_window_switcher(backend);
+                }
+                SwitcherPress::CloseRow => {
+                    // Browser-tab / expose shape: close the row under the
+                    // pointer, not necessarily the keyboard highlight. A miss
+                    // on blank is inert — middle-click must not throw away
+                    // the Alt+Tab in flight the way a right-click still does.
+                    let (x, y) = backend
+                        .input_ops()
+                        .get_pointer_position()
+                        .unwrap_or(self.last_mouse_root);
+                    if let SystemUiHitTarget::Item(row, _) =
+                        backend.compositor_system_ui_hit_test(x, y)
+                        && self.features.system_ui.select_visible_row(row).is_some()
+                    {
+                        if let Err(e) = self.close_window_switcher_row(backend) {
+                            error!("Error closing window switcher row from pointer: {:?}", e);
+                        }
+                    }
                 }
                 SwitcherPress::Browse(step) => {
                     let (x, y) = backend

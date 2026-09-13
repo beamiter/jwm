@@ -380,9 +380,11 @@ impl crate::jwm::Jwm {
         self.refresh_open_control_center();
     }
 
-    /// Re-offer a PNG through the backend's native owner (X11) or `wl-copy`
-    /// (Wayland). There is no compositor-native Wayland data-device PNG path
-    /// yet — screenshots use the same helper.
+    /// Re-offer a PNG through the backend's native owner when available.
+    ///
+    /// Preference: X11 `clipboard_image_sender`, then Wayland
+    /// [`Backend::set_clipboard_png`](crate::backend::api::Backend::set_clipboard_png),
+    /// then `wl-copy` as a last-resort platform helper.
     pub(crate) fn offer_clipboard_png(
         &self,
         backend: &mut dyn crate::backend::api::Backend,
@@ -390,6 +392,9 @@ impl crate::jwm::Jwm {
     ) -> bool {
         if let Some(sender) = backend.clipboard_image_sender() {
             return sender.send_png(png);
+        }
+        if backend.set_clipboard_png(png.clone()) {
+            return true;
         }
         Self::publish_png_bytes_via_wl_copy(&png)
     }
@@ -867,5 +872,181 @@ mod tests {
         assert!(items[0].get("png").is_none());
         assert_eq!(items[1]["kind"], "text");
         assert_eq!(items[1]["chars"], 5);
+    }
+
+    /// Minimal backend that records PNG offers through `set_clipboard_png`.
+    struct PngOfferBackend {
+        window_ops: crate::backend::wayland_dummy_ops::DummyWindowOps,
+        input_ops: crate::backend::wayland_dummy_ops::DummyInputOps,
+        property_ops: crate::backend::wayland_dummy_ops::DummyPropertyOps,
+        output_ops: crate::backend::wayland_dummy_ops::DummyOutputOps,
+        key_ops: crate::backend::wayland_dummy_ops::DummyKeyOps,
+        cursor_provider: crate::backend::wayland_dummy_ops::DummyCursorProvider,
+        color_allocator: crate::backend::wayland_dummy_ops::DummyColorAllocator,
+        offered_png: Option<Vec<u8>>,
+        image_sender: Option<crate::backend::clipboard_offer::ClipboardImageSender>,
+        set_clipboard_png_calls: usize,
+    }
+
+    impl PngOfferBackend {
+        fn with_set_png() -> Self {
+            Self {
+                window_ops: crate::backend::wayland_dummy_ops::DummyWindowOps,
+                input_ops: crate::backend::wayland_dummy_ops::DummyInputOps,
+                property_ops: crate::backend::wayland_dummy_ops::DummyPropertyOps,
+                output_ops: crate::backend::wayland_dummy_ops::DummyOutputOps,
+                key_ops: crate::backend::wayland_dummy_ops::DummyKeyOps,
+                cursor_provider: crate::backend::wayland_dummy_ops::DummyCursorProvider,
+                color_allocator: crate::backend::wayland_dummy_ops::DummyColorAllocator,
+                offered_png: None,
+                image_sender: None,
+                set_clipboard_png_calls: 0,
+            }
+        }
+
+        fn with_image_sender(
+            sender: crate::backend::clipboard_offer::ClipboardImageSender,
+        ) -> Self {
+            let mut backend = Self::with_set_png();
+            backend.image_sender = Some(sender);
+            backend
+        }
+    }
+
+    impl crate::backend::api::CompositorBenchmark for PngOfferBackend {}
+    impl crate::backend::api::BackendDiagnostics for PngOfferBackend {}
+    impl crate::backend::api::CompositorControl for PngOfferBackend {}
+    impl crate::backend::api::CompositorMedia for PngOfferBackend {}
+    impl crate::backend::api::CompositorWorkspaceEffects for PngOfferBackend {}
+    impl crate::backend::api::CompositorWindowEffects for PngOfferBackend {}
+    impl crate::backend::api::CompositorAnnotation for PngOfferBackend {}
+    impl crate::backend::api::DisplayControl for PngOfferBackend {}
+    impl crate::backend::api::RenderScheduler for PngOfferBackend {}
+
+    impl crate::backend::api::Backend for PngOfferBackend {
+        fn set_clipboard_png(&mut self, png: Vec<u8>) -> bool {
+            self.set_clipboard_png_calls += 1;
+            self.offered_png = Some(png);
+            true
+        }
+
+        fn clipboard_image_sender(
+            &self,
+        ) -> Option<crate::backend::clipboard_offer::ClipboardImageSender> {
+            self.image_sender.clone()
+        }
+
+        fn capabilities(&self) -> crate::backend::api::Capabilities {
+            crate::backend::api::Capabilities::default()
+        }
+
+        fn root_window(&self) -> Option<crate::backend::common_define::WindowId> {
+            Some(crate::backend::common_define::WindowId::from_raw(0))
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+
+        fn check_existing_wm(&self) -> Result<(), crate::backend::error::BackendError> {
+            Ok(())
+        }
+
+        fn window_ops(&self) -> &dyn crate::backend::api::WindowOps {
+            &self.window_ops
+        }
+
+        fn input_ops(&self) -> &dyn crate::backend::api::InputOps {
+            &self.input_ops
+        }
+
+        fn property_ops(&self) -> &dyn crate::backend::api::PropertyOps {
+            &self.property_ops
+        }
+
+        fn output_ops(&self) -> &dyn crate::backend::api::OutputOps {
+            &self.output_ops
+        }
+
+        fn key_ops(&self) -> &dyn crate::backend::api::KeyOps {
+            &self.key_ops
+        }
+
+        fn key_ops_mut(&mut self) -> &mut dyn crate::backend::api::KeyOps {
+            &mut self.key_ops
+        }
+
+        fn cursor_provider(&mut self) -> &mut dyn crate::backend::api::CursorProvider {
+            &mut self.cursor_provider
+        }
+
+        fn color_allocator(&mut self) -> &mut dyn crate::backend::api::ColorAllocator {
+            &mut self.color_allocator
+        }
+
+        fn run(
+            &mut self,
+            _handler: &mut dyn crate::backend::api::EventHandler,
+        ) -> Result<(), crate::backend::error::BackendError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn offer_clipboard_png_prefers_set_clipboard_png_when_sender_absent() {
+        let mut backend = PngOfferBackend::with_set_png();
+        let jwm = crate::Jwm::new_with_runtime_backend(&mut backend, "test").expect("test jwm");
+        let png = sample_png(8, 8, 2);
+        assert!(jwm.offer_clipboard_png(&mut backend, png.clone()));
+        assert_eq!(backend.set_clipboard_png_calls, 1);
+        assert_eq!(backend.offered_png.as_deref(), Some(png.as_slice()));
+    }
+
+    #[test]
+    fn offer_clipboard_png_prefers_image_sender_over_set_clipboard_png() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let sender = crate::backend::clipboard_offer::ClipboardImageSender::new(tx);
+        let mut backend = PngOfferBackend::with_image_sender(sender);
+        let jwm = crate::Jwm::new_with_runtime_backend(&mut backend, "test").expect("test jwm");
+        let png = sample_png(4, 4, 1);
+        assert!(jwm.offer_clipboard_png(&mut backend, png.clone()));
+        assert_eq!(backend.set_clipboard_png_calls, 0);
+        match rx.try_recv() {
+            Ok(crate::backend::clipboard_offer::ClipboardOffer::Png(got)) => {
+                assert_eq!(got, png);
+            }
+            other => panic!("expected PNG offer on image sender, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn activate_and_ipc_png_paths_call_offer_clipboard_png() {
+        const TOGGLES: &str = include_str!("toggles.rs");
+        const IPC: &str = include_str!("../ipc_handler.rs");
+        assert!(
+            TOGGLES.contains("self.offer_clipboard_png(backend, bytes.clone())"),
+            "picker activate must re-offer PNG through offer_clipboard_png"
+        );
+        assert!(
+            IPC.contains("self.offer_clipboard_png(backend, bytes.clone())"),
+            "clipboard_copy IPC must re-offer PNG through offer_clipboard_png"
+        );
+        const OFFER: &str = include_str!("clipboard.rs");
+        let offer = OFFER
+            .split_once("fn offer_clipboard_png(")
+            .expect("offer_clipboard_png")
+            .1;
+        assert!(
+            offer.contains("clipboard_image_sender()")
+                && offer.contains("set_clipboard_png(")
+                && offer.contains("publish_png_bytes_via_wl_copy"),
+            "PNG offer must prefer sender, then set_clipboard_png, then wl-copy"
+        );
+        let sender_at = offer.find("clipboard_image_sender()").expect("sender");
+        let set_at = offer.find("set_clipboard_png(").expect("set_clipboard_png");
+        let wl_at = offer
+            .find("publish_png_bytes_via_wl_copy")
+            .expect("wl-copy");
+        assert!(sender_at < set_at && set_at < wl_at);
     }
 }

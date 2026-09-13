@@ -25,15 +25,19 @@ player --MPRIS--> jwm-bridge --set_media_status--> jwm --> control center row
 
 In the control center the media row is first when a player is running:
 `Left`/`Right` skip tracks, `Return` toggles playback, and — with more than
-one player on the bus — `p` hands the row to the next player (see
-[Which player wins](#which-player-wins)). The row hides the
-skip glyphs a player says it cannot honor (`CanGoNext` / `CanGoPrevious`),
-and disappears entirely when no player is running. When the player reports
-both a position and a length, the row shows `m:ss / m:ss` (`h:mm:ss` past
-an hour) — clamped to the track's length for display, refreshed on the
-bridge's sweep, holding the last polled position while paused, and reset on
-a track change; streams and players that don't report both show no suffix,
-never a placeholder. It is display-only — no seeking.
+one player on the bus — `p` hands the row to the next player and `o` opens
+the Players picker (see [Which player wins](#which-player-wins)). The row
+hides the skip glyphs a player says it cannot honor (`CanGoNext` /
+`CanGoPrevious`), and disappears entirely when no player is running. The
+pointer mirrors the keyboard on those glyphs: a click on the previous /
+next arrow skips, a click on the title or status icon play/pauses, and —
+with more than one player — a click on the trailing `· p ‹next›` hint
+cycles players. When the player reports both a position and a length, the
+row shows `m:ss / m:ss` (`h:mm:ss` past an hour) — clamped to the track's
+length for display, refreshed on the bridge's sweep, holding the last
+polled position while paused, and reset on a track change; streams and
+players that don't report both show no suffix, never a placeholder. It is
+display-only — no seeking.
 
 A media key on a session with no player reports `no media player is running`
 rather than failing silently.
@@ -96,13 +100,16 @@ The ranking loses to a pin. With more than one player running, the media row
 ends with a `· p ‹next player›` hint naming what the key would switch to
 (`· p spotify`), and pressing `p` — or clicking that hint — pins the row —
 and the transport keys with it — to that next player, wrapping around the
-list. A click anywhere else on the row still play/pauses, so ordinary track
-clicks stay the same. The bridge holds the pin while the pinned player's bus
-name is alive and re-publishes its state, so the switch raises the media OSD
-like any track change; when the pinned player exits, the pin clears itself
-and the ranking takes the row back. A single-player session is untouched:
-`p` is a no-op and the row carries no hint. The lock screen's now-playing
-row never grows the hint either — it is a control, and the lock shows none.
+list. Pressing `o` opens a Players picker listing every bus suffix the
+sweep saw (filled marker on the active one); Enter / click pins the
+selection and returns to the hub. A click on the previous / next glyph
+skips; a click on the title or status icon still play/pauses. The bridge
+holds the pin while the pinned player's bus name is alive and re-publishes
+its state, so the switch raises the media OSD like any track change; when
+the pinned player exits, the pin clears itself and the ranking takes the
+row back. A single-player session is untouched: `p` and `o` are no-ops and
+the row carries no hint. The lock screen's now-playing row never grows the
+hint either — it is a control, and the lock shows none.
 
 Player start/stop is picked up from bus name-owner changes; track changes are
 picked up by a 3-second sweep.

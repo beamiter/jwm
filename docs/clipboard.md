@@ -97,8 +97,11 @@ before smithay records the selection, so the read is deferred by one turn of
 the event loop — asking inside the handler always answers "no selection".
 Reading and writing both happen on threads: the other end is another process
 that writes at its own pace, and a compositor that waited would stall every
-client with it. Re-offering a PNG (and screenshot publish) still uses
-`wl-copy`; there is no compositor-native Wayland data-device PNG offer yet.
+client with it. Re-offering a PNG (and picker activate / `clipboard_copy`)
+uses the compositor-native data-device `image/png` offer; `wl-copy` remains
+the fallback when that path is unavailable. Asynchronous screenshot publish
+still prefers `wl-copy` on Wayland until a thread-safe image sender exists
+there — activate/IPC go through the native route.
 
 The X11 watcher runs on **its own X connection and thread**, not the window
 manager's.
@@ -116,7 +119,7 @@ Support by backend:
 | Backend | Capture | Serve |
 | --- | --- | --- |
 | `x11rb`, `xcb` | yes (text + PNG) | yes (text + PNG) |
-| `wayland-udev`, `wayland-x11`, `wayland-winit` | yes (text + PNG) | text native; PNG via `wl-copy` |
+| `wayland-udev`, `wayland-x11`, `wayland-winit` | yes (text + PNG) | yes (text + PNG native; `wl-copy` fallback) |
 
 Every backend is wired. A backend that could not start its watcher logs the
 reason and runs without a history rather than failing the session; activating

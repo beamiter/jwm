@@ -84,8 +84,12 @@ modal panel.
 The switcher takes the same button grab every other clickable panel takes,
 so every press reaches the panel rather than the window its rows are drawn
 over — which matters because the row a click lands on is drawn over exactly
-that window. A left click on a row commits it; a left click anywhere else,
-and any other button anywhere, cancels.
+that window. A left click on a row commits it; a left click anywhere else
+cancels. A middle click on a row closes that window without leaving the
+gesture — the pointer twin of `Delete` / `BackSpace`, and the same
+point-who-closes shape expose uses — while a middle click on blank is
+inert so it cannot throw the Alt+Tab away. A right click, and any other
+non-wheel button, still cancels.
 
 The wheel is the exception, and it browses rather than cancels: a scroll
 over the panel steps the highlight the way it does on every other panel,

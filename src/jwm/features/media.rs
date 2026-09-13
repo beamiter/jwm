@@ -300,30 +300,42 @@ pub fn next_player<'a>(players: &'a [String], active: &str) -> Option<&'a str> {
     Some(players[index % players.len()].as_str())
 }
 
-/// What a pointer press on the control-center media row does. The whole row
-/// used to Return-replay PlayPause; with more than one player the trailing
-/// `· p ‹next›` hint is the pointer twin of the `p` key, and everything to
-/// its left keeps PlayPause so ordinary track clicks are unchanged.
+/// What a pointer press on the control-center media row does. The keyboard
+/// already owns Left/Right skip, Return play/pause, and `p` cycle; the
+/// pointer mirrors each on the glyph that draws it. Track title and status
+/// icon stay PlayPause so ordinary clicks are unchanged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MediaRowClick {
-    Cycle,
+    Previous,
     PlayPause,
+    Next,
+    Cycle,
 }
 
 /// The trailing switch hint `control_row` appends when `p` has somewhere to
 /// go. `None` with fewer than two players — the row then has no clickable
-/// switch zone and a press is PlayPause everywhere.
+/// switch zone.
 #[must_use]
 pub fn switch_hint(state: &MediaState) -> Option<String> {
     next_player(&state.players, &state.player)
         .map(|player| format!(" \u{b7} p {player}"))
 }
 
-/// The control-center row without the switch suffix — the prefix a press to
-/// the left of the hint measures against. Kept in lockstep with
-/// [`control_row`] so hit-testing never drifts from what was drawn.
-#[must_use]
-fn control_row_prefix(state: &MediaState) -> String {
+/// Pieces of [`control_row_prefix`] measured separately so pointer hit-tests
+/// land on the same glyphs the panel drew. Kept in lockstep with
+/// [`control_row`] — a drift here would click the wrong transport.
+struct ControlRowParts {
+    /// Music glyph + title + position, ending just before the previous glyph.
+    before_previous: String,
+    /// `before_previous` plus the previous glyph (or its blank stand-in).
+    with_previous: String,
+    /// Through the status icon and the space before next.
+    before_next: String,
+    /// Full prefix (through the next glyph), without the switch hint.
+    prefix: String,
+}
+
+fn control_row_parts(state: &MediaState) -> ControlRowParts {
     let previous = if state.can_go_previous {
         "\u{f048}" // fa-step-backward
     } else {
@@ -335,11 +347,24 @@ fn control_row_prefix(state: &MediaState) -> String {
         " "
     };
     let (label, position) = row_text(state);
-    format!(
-        "{}  {label}{position}   {previous} {} {next}",
-        "\u{f001}", // fa-music
-        state.status.icon(),
-    )
+    let before_previous = format!("{}  {label}{position}   ", "\u{f001}"); // fa-music
+    let with_previous = format!("{before_previous}{previous}");
+    let before_next = format!("{with_previous} {} ", state.status.icon());
+    let prefix = format!("{before_next}{next}");
+    ControlRowParts {
+        before_previous,
+        with_previous,
+        before_next,
+        prefix,
+    }
+}
+
+/// The control-center row without the switch suffix — the prefix a press to
+/// the left of the hint measures against. Kept in lockstep with
+/// [`control_row`] so hit-testing never drifts from what was drawn.
+#[must_use]
+fn control_row_prefix(state: &MediaState) -> String {
+    control_row_parts(state).prefix
 }
 
 /// The control-center row: status icon, track, and which transport controls
@@ -354,37 +379,54 @@ pub fn control_row(state: &MediaState) -> String {
     format!("{}{switch}", control_row_prefix(state))
 }
 
-/// Pointer counterpart of `p` on the media row. `measure` is the panel font's
-/// advance in px (the same probe the slider and notification chips use);
-/// `TEXT_PAD` matches the texture margin baked into those measurements so
-/// the switch zone starts where the drawn hint starts.
+/// Pointer counterparts of Left / Return / Right / `p` on the media row.
+/// `measure` is the panel font's advance in px (the same probe the slider
+/// and notification chips use); `TEXT_PAD` matches the texture margin baked
+/// into those measurements so each zone starts where the drawn glyph starts.
 ///
-/// A press on the trailing `· p ‹next›` cycles; anywhere else — including
-/// the whole row when there is no hint — is PlayPause, preserving today's
-/// single-player click.
+/// Zones, left to right: title → previous glyph → status → next glyph →
+/// optional `· p ‹next›`. A blank stand-in for a disabled skip still maps to
+/// PlayPause, so a press there never invents a command the player refused.
 #[must_use]
 pub fn click_action(
     text_x_px: f32,
     measure: impl Fn(&str) -> f32,
     state: &MediaState,
 ) -> MediaRowClick {
-    let Some(switch) = switch_hint(state) else {
-        return MediaRowClick::PlayPause;
-    };
     if !text_x_px.is_finite() {
         return MediaRowClick::PlayPause;
     }
     // Same pad the slider/chip hit-tests subtract: measure_ui_text_width
-    // includes it on both ends, so the drawn switch begins here.
+    // includes it on both ends, so the drawn glyph begins here.
     const TEXT_PAD: f32 = 2.0;
-    let prefix = control_row_prefix(state);
-    let switch_start = measure(&prefix) - TEXT_PAD;
-    let switch_end = measure(&format!("{prefix}{switch}")) - TEXT_PAD;
-    if text_x_px >= switch_start && text_x_px < switch_end {
-        MediaRowClick::Cycle
-    } else {
-        MediaRowClick::PlayPause
+    let parts = control_row_parts(state);
+    let previous_start = measure(&parts.before_previous) - TEXT_PAD;
+    let previous_end = measure(&parts.with_previous) - TEXT_PAD;
+    let next_start = measure(&parts.before_next) - TEXT_PAD;
+    let next_end = measure(&parts.prefix) - TEXT_PAD;
+
+    if text_x_px >= previous_start && text_x_px < previous_end {
+        return if state.can_go_previous {
+            MediaRowClick::Previous
+        } else {
+            MediaRowClick::PlayPause
+        };
     }
+    if text_x_px >= next_start && text_x_px < next_end {
+        return if state.can_go_next {
+            MediaRowClick::Next
+        } else {
+            MediaRowClick::PlayPause
+        };
+    }
+    if let Some(switch) = switch_hint(state) {
+        let switch_start = next_end;
+        let switch_end = measure(&format!("{}{switch}", parts.prefix)) - TEXT_PAD;
+        if text_x_px >= switch_start && text_x_px < switch_end {
+            return MediaRowClick::Cycle;
+        }
+    }
+    MediaRowClick::PlayPause
 }
 
 /// The lock screen's now-playing row: the control-center row minus its
@@ -403,6 +445,18 @@ pub fn lock_row(state: &MediaState) -> String {
         "\u{f001}", // fa-music
         state.status.icon(),
     )
+}
+
+/// One Players picker row: a filled marker for the player in use, hollow
+/// otherwise — the same grammar the audio device picker uses.
+#[must_use]
+pub fn player_picker_row(name: &str, active: bool) -> String {
+    let marker = if active {
+        "\u{f192}" // fa-dot-circle-o
+    } else {
+        "\u{f10c}" // fa-circle-o
+    };
+    format!("{marker}  {name}")
 }
 
 impl crate::jwm::Jwm {
@@ -444,6 +498,15 @@ impl crate::jwm::Jwm {
             backend.compositor_show_media_osd(&current.osd_label());
         }
         self.refresh_open_control_center();
+        // An open Players picker follows the bridge's re-publish the way an
+        // audio picker follows a device switch: the marker moves, and the
+        // selection holds on the same suffix when it is still listed.
+        if self.features.system_ui.is_media_players_picker()
+            && let Some(current) = self.features.media.get().cloned()
+        {
+            self.features.system_ui.set_media_players(&current);
+            self.mark_system_ui_dirty();
+        }
         // The lock screen mirrors the now-playing row while it is up, with
         // the lock clock's discipline: the bridge re-pushes this state on
         // every sweep, so the setter reports only a change to what the row
@@ -479,6 +542,53 @@ impl crate::jwm::Jwm {
         Ok(())
     }
 
+    /// Ask the bridge to pin the row — and the transport keys with it — to
+    /// `player` (an MPRIS bus suffix). When the bridge reported a non-empty
+    /// list, the suffix must be on it; an empty list (old bridge) accepts any
+    /// non-empty name. The bridge re-publishes the pinned player's state.
+    pub(crate) fn select_media_player(&mut self, player: &str) -> Result<(), String> {
+        let player = player.trim();
+        if player.is_empty() {
+            return Err("no media player selected".to_string());
+        }
+        {
+            let state = self
+                .features
+                .media
+                .get()
+                .ok_or("no media player is running")?;
+            if !state.players.is_empty() && !state.players.iter().any(|name| name == player) {
+                return Err(format!("unknown media player: {player}"));
+            }
+        }
+        self.broadcast_ipc_event(
+            "media/command",
+            serde_json::json!({ "action": "select_player", "player": player }),
+        );
+        Ok(())
+    }
+
+    /// Pin the Players picker's selection and return to the hub so the media
+    /// row can show the newly chosen player once the bridge re-publishes.
+    pub(crate) fn apply_selected_media_player(
+        &mut self,
+        backend: &mut dyn crate::backend::api::Backend,
+    ) {
+        let Some(player) = self
+            .features
+            .system_ui
+            .selected_media_player()
+            .map(str::to_string)
+        else {
+            return;
+        };
+        if let Err(error) = self.select_media_player(&player) {
+            log::debug!("media players picker: {error}");
+            return;
+        }
+        self.return_to_shell_hub(backend);
+    }
+
     /// Ask the bridge to hand the row — and the transport keys with it — to
     /// the next player in its reported list. The bridge re-publishes the
     /// pinned player's state, which rebuilds this row and raises the media
@@ -495,11 +605,7 @@ impl crate::jwm::Jwm {
                 .ok_or("no other media player is running")?
                 .to_string()
         };
-        self.broadcast_ipc_event(
-            "media/command",
-            serde_json::json!({ "action": "select_player", "player": next }),
-        );
-        Ok(())
+        self.select_media_player(&next)
     }
 
     /// JSON snapshot for the `get_media_status` query.
@@ -882,13 +988,13 @@ mod tests {
     }
 
     #[test]
-    fn a_press_on_the_switch_hint_cycles_and_the_rest_plays() {
+    fn a_press_on_the_switch_hint_cycles_and_the_title_plays() {
         let mut multi = state("Track", "Artist");
         multi.players = vec!["spotify".to_string(), "mpv".to_string()];
-        let prefix = control_row_prefix(&multi);
+        let parts = control_row_parts(&multi);
         let switch = switch_hint(&multi).expect("multi-player has a switch");
-        let switch_start = mono(&prefix) - 2.0;
-        let switch_end = mono(&format!("{prefix}{switch}")) - 2.0;
+        let switch_start = mono(&parts.prefix) - 2.0;
+        let switch_end = mono(&format!("{}{switch}", parts.prefix)) - 2.0;
 
         assert_eq!(
             click_action(switch_start, mono, &multi),
@@ -900,13 +1006,9 @@ mod tests {
             MediaRowClick::Cycle
         );
         assert_eq!(
-            click_action(switch_start - 1.0, mono, &multi),
-            MediaRowClick::PlayPause,
-            "just left of the hint still plays"
-        );
-        assert_eq!(
             click_action(0.0, mono, &multi),
-            MediaRowClick::PlayPause
+            MediaRowClick::PlayPause,
+            "the title still plays"
         );
         assert_eq!(
             click_action(switch_end, mono, &multi),
@@ -916,13 +1018,71 @@ mod tests {
     }
 
     #[test]
-    fn a_single_player_row_click_is_always_play_pause() {
+    fn a_press_on_the_transport_glyphs_skips() {
+        let single = state("Track", "Artist");
+        let parts = control_row_parts(&single);
+        let previous_start = mono(&parts.before_previous) - 2.0;
+        let previous_end = mono(&parts.with_previous) - 2.0;
+        let next_start = mono(&parts.before_next) - 2.0;
+        let next_end = mono(&parts.prefix) - 2.0;
+
+        assert_eq!(
+            click_action(previous_start, mono, &single),
+            MediaRowClick::Previous,
+            "the previous glyph skips back"
+        );
+        assert_eq!(
+            click_action((previous_start + previous_end) * 0.5, mono, &single),
+            MediaRowClick::Previous
+        );
+        assert_eq!(
+            click_action(next_start, mono, &single),
+            MediaRowClick::Next,
+            "the next glyph skips forward"
+        );
+        assert_eq!(
+            click_action((next_start + next_end) * 0.5, mono, &single),
+            MediaRowClick::Next
+        );
+        assert_eq!(
+            click_action(0.0, mono, &single),
+            MediaRowClick::PlayPause,
+            "the title still plays"
+        );
+        // Status icon sits between previous and next.
+        let status_x = (previous_end + next_start) * 0.5;
+        assert_eq!(
+            click_action(status_x, mono, &single),
+            MediaRowClick::PlayPause,
+            "the status icon plays"
+        );
+    }
+
+    #[test]
+    fn a_blank_skip_stand_in_plays_instead_of_skipping() {
+        let mut only_next = state("Track", "Artist");
+        only_next.can_go_previous = false;
+        let parts = control_row_parts(&only_next);
+        let previous_start = mono(&parts.before_previous) - 2.0;
+        assert_eq!(
+            click_action(previous_start, mono, &only_next),
+            MediaRowClick::PlayPause,
+            "a hidden previous glyph must not invent a Previous command"
+        );
+        assert_eq!(
+            click_action(mono(&parts.before_next) - 2.0, mono, &only_next),
+            MediaRowClick::Next
+        );
+    }
+
+    #[test]
+    fn a_single_player_row_without_a_hint_never_cycles() {
         let single = state("Track", "Artist");
         assert!(switch_hint(&single).is_none());
-        for x in [0.0, 50.0, 500.0, -1.0, f32::NAN] {
-            assert_eq!(
+        for x in [0.0, -1.0, f32::NAN, 500.0] {
+            assert_ne!(
                 click_action(x, mono, &single),
-                MediaRowClick::PlayPause,
+                MediaRowClick::Cycle,
                 "x={x}"
             );
         }
@@ -1349,6 +1509,48 @@ mod tests {
         let mut multi = state("Track", "Artist");
         multi.players = vec!["spotify".to_string(), "mpv".to_string()];
         jwm.set_media_status(&mut backend, Some(multi));
+        assert!(jwm.cycle_media_player().is_ok());
+    }
+
+    #[test]
+    fn player_picker_row_marks_the_active_player() {
+        assert!(player_picker_row("mpv", true).starts_with('\u{f192}'));
+        assert!(player_picker_row("spotify", false).starts_with('\u{f10c}'));
+        assert!(player_picker_row("mpv", true).ends_with("mpv"));
+    }
+
+    #[test]
+    fn select_media_player_broadcasts_the_select_player_command() {
+        // The payload shape is the bridge's select_player contract; pins are
+        // assembled at runtime so this test cannot match its own source.
+        const SOURCE: &str = include_str!("media.rs");
+        let body = SOURCE
+            .split_once("fn select_media_player(")
+            .expect("select_media_player")
+            .1
+            .split_once("fn apply_selected_media_player(")
+            .expect("the function that follows it")
+            .0;
+        assert!(
+            body.contains(r#""action": "select_player""#),
+            "select_media_player lost the select_player action"
+        );
+        assert!(
+            body.contains(r#""player": player"#),
+            "select_media_player no longer names the chosen suffix"
+        );
+
+        let mut backend = SystemUiSpyBackend::new();
+        let mut jwm = crate::Jwm::new_with_runtime_backend(&mut backend, "test").expect("test jwm");
+        assert!(jwm.select_media_player("mpv").is_err());
+
+        let mut multi = state("Track", "Artist");
+        multi.players = vec!["spotify".to_string(), "mpv".to_string()];
+        jwm.set_media_status(&mut backend, Some(multi));
+        assert!(jwm.select_media_player("").is_err());
+        assert!(jwm.select_media_player("vlc").is_err());
+        assert!(jwm.select_media_player("mpv").is_ok());
+        // Cycle rides the same path.
         assert!(jwm.cycle_media_player().is_ok());
     }
 }

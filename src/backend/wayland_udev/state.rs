@@ -267,7 +267,7 @@ pub struct JwmWaylandState {
         std::sync::Arc<std::sync::Mutex<Vec<crate::backend::clipboard_offer::CapturedClipboard>>>,
     /// Entry JWM is currently offering as the selection source, if any.
     /// `send_selection` writes this; a client taking the selection clears it.
-    pub clipboard_offered: Option<String>,
+    pub(crate) clipboard_offered: Option<crate::backend::clipboard_offer::ClipboardOffer>,
     /// MIME types of a selection to read on the next tick.
     ///
     /// `new_selection` fires *before* smithay stores the new selection on the
@@ -3359,9 +3359,13 @@ impl SelectionHandler for JwmWaylandState {
         // A history entry JWM is offering is served here; anything else is
         // XWayland's selection and stays its business.
         if ty == SelectionTarget::Clipboard
-            && let Some(text) = self.clipboard_offered.as_deref()
+            && let Some(offer) = self.clipboard_offered.as_ref()
         {
-            write_selection_async(text, fd);
+            if let Some(payload) = selection_payload_for_mime(offer, &mime_type) {
+                write_selection_async(payload.to_vec(), fd);
+            }
+            // Mismatched MIME: close without data. Do not hand JWM's offer to
+            // Xwayland — we own the clipboard selection.
             return;
         }
         if let Some(xwm) = self.x11_wm.as_mut() {
@@ -3372,13 +3376,42 @@ impl SelectionHandler for JwmWaylandState {
     }
 }
 
-/// MIME types JWM advertises when it offers a history entry.
+/// MIME types JWM advertises when it offers a text history entry.
 pub(crate) const CLIPBOARD_OFFER_MIMES: [&str; 4] = [
     "text/plain;charset=utf-8",
     "text/plain",
     "UTF8_STRING",
     "STRING",
 ];
+
+/// MIME type JWM advertises when it offers a PNG history entry.
+pub(crate) const CLIPBOARD_PNG_OFFER_MIMES: [&str; 1] = ["image/png"];
+
+/// Whether `mime` is a text type we are willing to serve for a text offer.
+fn is_text_clipboard_mime(mime: &str) -> bool {
+    CLIPBOARD_OFFER_MIMES
+        .iter()
+        .any(|offered| mime.eq_ignore_ascii_case(offered))
+        || mime.to_ascii_lowercase().starts_with("text/")
+}
+
+/// Whether `mime` is an `image/png` request (including case variants).
+fn is_png_clipboard_mime(mime: &str) -> bool {
+    mime.eq_ignore_ascii_case("image/png")
+}
+
+/// Bytes to write for a client MIME request against the current offer, if any.
+fn selection_payload_for_mime<'a>(
+    offer: &'a crate::backend::clipboard_offer::ClipboardOffer,
+    mime_type: &str,
+) -> Option<&'a [u8]> {
+    use crate::backend::clipboard_offer::ClipboardOffer;
+    match offer {
+        ClipboardOffer::Text(text) if is_text_clipboard_mime(mime_type) => Some(text.as_bytes()),
+        ClipboardOffer::Png(png) if is_png_clipboard_mime(mime_type) => Some(png.as_slice()),
+        ClipboardOffer::Text(_) | ClipboardOffer::Png(_) => None,
+    }
+}
 
 /// A clipboard peer is another Wayland client and is not trusted to consume
 /// or produce its pipe promptly. Keep both the lifetime and the number of the
@@ -3536,27 +3569,24 @@ fn read_clipboard_payload(
     Ok(buffer)
 }
 
-/// Hand `text` to a client on `fd` without blocking the compositor.
+/// Hand `payload` to a client on `fd` without blocking the compositor.
 ///
 /// The reader is another process and may be slow or may never read at all. A
 /// bounded worker keeps that peer off the compositor thread without letting it
 /// pin an unbounded detached thread.
-fn write_selection_async(text: &str, fd: std::os::fd::OwnedFd) {
+fn write_selection_async(payload: Vec<u8>, fd: std::os::fd::OwnedFd) {
     let Some(permit) = acquire_clipboard_io_permit() else {
         debug!("clipboard: rejecting transfer because all I/O workers are occupied");
         return;
     };
-    let text = text.to_owned();
     let worker = std::thread::Builder::new()
         .name("jwm-clipboard-write".to_string())
         .spawn(move || {
             let _permit = permit;
-            if let Err(error) = write_clipboard_payload(
-                std::fs::File::from(fd),
-                text.as_bytes(),
-                CLIPBOARD_IO_TIMEOUT,
-            ) {
-                debug!("clipboard: client did not consume offered text: {error}");
+            if let Err(error) =
+                write_clipboard_payload(std::fs::File::from(fd), &payload, CLIPBOARD_IO_TIMEOUT)
+            {
+                debug!("clipboard: client did not consume offered selection: {error}");
             }
         });
     if let Err(error) = worker {
@@ -3665,11 +3695,28 @@ impl JwmWaylandState {
 
     /// Offer `text` to clients as the clipboard selection.
     pub fn offer_clipboard_text(&mut self, text: &str) -> bool {
-        self.clipboard_offered = Some(text.to_string());
+        self.clipboard_offered = Some(crate::backend::clipboard_offer::ClipboardOffer::Text(
+            text.to_string(),
+        ));
         set_data_device_selection(
             &self.display_handle,
             &self.seat,
             CLIPBOARD_OFFER_MIMES
+                .iter()
+                .map(|m| (*m).to_string())
+                .collect(),
+            (),
+        );
+        true
+    }
+
+    /// Offer PNG bytes to clients as the clipboard selection.
+    pub fn offer_clipboard_png(&mut self, png: Vec<u8>) -> bool {
+        self.clipboard_offered = Some(crate::backend::clipboard_offer::ClipboardOffer::Png(png));
+        set_data_device_selection(
+            &self.display_handle,
+            &self.seat,
+            CLIPBOARD_PNG_OFFER_MIMES
                 .iter()
                 .map(|m| (*m).to_string())
                 .collect(),
@@ -4512,9 +4559,11 @@ mod ime_popup_warn_tests {
 #[cfg(test)]
 mod clipboard_io_tests {
     use super::{
-        read_clipboard_payload, set_clipboard_fd_nonblocking, try_acquire_clipboard_io_permit,
+        is_png_clipboard_mime, is_text_clipboard_mime, read_clipboard_payload,
+        selection_payload_for_mime, set_clipboard_fd_nonblocking, try_acquire_clipboard_io_permit,
         write_clipboard_payload,
     };
+    use crate::backend::clipboard_offer::ClipboardOffer;
     use nix::unistd::pipe;
     use std::fs::File;
     use std::io::{Read, Write};
@@ -4602,5 +4651,72 @@ mod clipboard_io_tests {
         let replacement = try_acquire_clipboard_io_permit(&active, 2).unwrap();
         drop((second, replacement));
         assert_eq!(active.load(std::sync::atomic::Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn text_offers_only_serve_text_mimes() {
+        let offer = ClipboardOffer::Text("hello".into());
+        assert_eq!(
+            selection_payload_for_mime(&offer, "text/plain;charset=utf-8"),
+            Some(b"hello".as_slice())
+        );
+        assert_eq!(
+            selection_payload_for_mime(&offer, "UTF8_STRING"),
+            Some(b"hello".as_slice())
+        );
+        assert_eq!(
+            selection_payload_for_mime(&offer, "text/html"),
+            Some(b"hello".as_slice())
+        );
+        assert_eq!(selection_payload_for_mime(&offer, "image/png"), None);
+        assert!(is_text_clipboard_mime("STRING"));
+        assert!(!is_text_clipboard_mime("image/png"));
+    }
+
+    #[test]
+    fn png_offers_only_serve_image_png() {
+        let offer = ClipboardOffer::Png(vec![0x89, 0x50, 0x4e, 0x47]);
+        assert_eq!(
+            selection_payload_for_mime(&offer, "image/png"),
+            Some(&[0x89, 0x50, 0x4e, 0x47][..])
+        );
+        assert_eq!(
+            selection_payload_for_mime(&offer, "IMAGE/PNG"),
+            Some(&[0x89, 0x50, 0x4e, 0x47][..])
+        );
+        assert_eq!(
+            selection_payload_for_mime(&offer, "text/plain;charset=utf-8"),
+            None
+        );
+        assert_eq!(selection_payload_for_mime(&offer, "image/jpeg"), None);
+        assert!(is_png_clipboard_mime("image/png"));
+        assert!(!is_png_clipboard_mime("text/plain"));
+    }
+
+    #[test]
+    fn send_selection_mime_branching_is_pinned_in_source() {
+        const SOURCE: &str = include_str!("state.rs");
+        // Exclude this test module so pin strings cannot false-positive.
+        let production = SOURCE
+            .split_once("mod clipboard_io_tests")
+            .map(|(code, _)| code)
+            .unwrap_or(SOURCE);
+        let handler = production
+            .split("impl SelectionHandler for JwmWaylandState")
+            .nth(1)
+            .expect("SelectionHandler impl");
+        assert!(
+            handler.contains("selection_payload_for_mime(offer, &mime_type)"),
+            "SelectionHandler::send_selection must mime-match before writing"
+        );
+        assert!(
+            production.contains("fn is_text_clipboard_mime")
+                && production.contains("fn is_png_clipboard_mime"),
+            "text and PNG MIME matchers must exist"
+        );
+        assert!(
+            !handler.contains("clipboard_offered.as_deref()"),
+            "send_selection must not treat every offer as bare text"
+        );
     }
 }

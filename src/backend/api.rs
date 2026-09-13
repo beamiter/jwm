@@ -3158,6 +3158,16 @@ pub trait Backend:
         false
     }
 
+    /// Offer PNG bytes as the clipboard selection on the main loop.
+    ///
+    /// Wayland backends advertise `image/png` through the data device.
+    /// X11 backends leave this as `false` and serve images through
+    /// [`clipboard_image_sender`] instead (selection ownership lives on a
+    /// dedicated worker thread).
+    fn set_clipboard_png(&mut self, _png: Vec<u8>) -> bool {
+        false
+    }
+
     /// Return a thread-safe route to the backend's native image clipboard.
     ///
     /// Screenshot PNG encoding completes asynchronously, so the producer

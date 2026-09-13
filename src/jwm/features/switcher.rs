@@ -2,12 +2,12 @@
 //!
 //! Hold Alt, tap Tab to walk the most-recently-used windows, let go of Alt
 //! to switch to the highlighted one; Escape or a click elsewhere cancels,
-//! and Delete closes the highlighted window without leaving the gesture.
-//! This file carries the gesture's pure logic — eligibility, the first
-//! selection, row text, commit validation, row removal — and the `Jwm`
-//! snapshot builder. The panel is an ordinary system-UI list panel; the
-//! grabs and the key routing live in `navigation.rs`, `input_handler.rs`
-//! and `event_dispatcher.rs`.
+//! and Delete (or a middle-click on a row) closes that window without
+//! leaving the gesture. This file carries the gesture's pure logic —
+//! eligibility, the first selection, row text, commit validation, row
+//! removal — and the `Jwm` snapshot builder. The panel is an ordinary
+//! system-UI list panel; the grabs and the key routing live in
+//! `navigation.rs`, `input_handler.rs` and `event_dispatcher.rs`.
 
 use crate::backend::common_define::{Mods, keys};
 use crate::core::models::MonitorKey;
@@ -117,6 +117,10 @@ pub(crate) enum SwitcherPress {
     /// Button 1: commit the row under the pointer, or cancel when the press
     /// landed on no row at all.
     PickRow,
+    /// Button 2: close the row under the pointer without leaving the gesture —
+    /// the pointer twin of Delete / BackSpace. A miss on blank is inert (the
+    /// expose grid's middle-click shape), not a cancel.
+    CloseRow,
     /// The wheel: step the highlight by this much without committing, the
     /// way it browses every other panel the grab hands presses to.
     Browse(isize),
@@ -135,10 +139,13 @@ pub(crate) enum SwitcherPress {
 /// middle of making; a scroll asks to *browse*, which is exactly what the
 /// same wheel does over the control center, the launcher and the layout
 /// picker. Same rule, same reason as `input_handler::toast_press`: the
-/// wheel is not a click.
+/// wheel is not a click. Middle-click closes the pointed row the way Delete
+/// closes the highlight and expose's middle-click closes a cell; right-click
+/// and other buttons still cancel.
 pub(crate) fn switcher_press(button: u8) -> SwitcherPress {
     match button {
         1 => SwitcherPress::PickRow,
+        2 => SwitcherPress::CloseRow,
         4 => SwitcherPress::Browse(-1),
         5 => SwitcherPress::Browse(1),
         6 | 7 => SwitcherPress::Inert,
@@ -375,12 +382,13 @@ mod tests {
         // on X11 that same grab delivers the wheel as buttons 4-7. Losing an
         // Alt+Tab to a touchpad flick is the regression this pins.
         assert_eq!(switcher_press(1), SwitcherPress::PickRow);
+        assert_eq!(switcher_press(2), SwitcherPress::CloseRow);
         assert_eq!(switcher_press(4), SwitcherPress::Browse(-1));
         assert_eq!(switcher_press(5), SwitcherPress::Browse(1));
         assert_eq!(switcher_press(6), SwitcherPress::Inert);
         assert_eq!(switcher_press(7), SwitcherPress::Inert);
-        // A real click that is not the picking one still ends it.
-        for button in [2u8, 3, 8, 9] {
+        // A real click that is not pick or close still ends it.
+        for button in [3u8, 8, 9] {
             assert_eq!(
                 switcher_press(button),
                 SwitcherPress::Cancel,

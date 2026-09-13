@@ -368,6 +368,9 @@ pub enum ListKind {
     Theme,
     AudioOutput,
     AudioInput,
+    /// MPRIS bus suffixes the control-center media row can pin — the `o`
+    /// picker counterpart of the `p` cycle key.
+    MediaPlayers,
     /// The Alt+Tab MRU switcher. Unlike the other lists it is not opened to
     /// be browsed: it exists for one held-modifier gesture and closes the
     /// moment the modifier comes up.
@@ -385,6 +388,7 @@ impl ListKind {
             Self::Theme => "\u{f1fc}  THEME",
             Self::AudioOutput => "\u{f028}  AUDIO OUTPUT",
             Self::AudioInput => "\u{f130}  AUDIO INPUT",
+            Self::MediaPlayers => "\u{f001}  PLAYERS",
             Self::WindowSwitcher => "\u{f0ec}  WINDOWS",
         }
     }
@@ -421,7 +425,7 @@ impl ListKind {
             Self::Wallpaper | Self::Theme => {
                 "Click/Enter  apply    \u{f062}/\u{f063}  select    Esc  close"
             }
-            Self::AudioOutput | Self::AudioInput => {
+            Self::AudioOutput | Self::AudioInput | Self::MediaPlayers => {
                 "Click/Enter  use    \u{f062}/\u{f063}  select    Esc  close"
             }
             Self::WindowSwitcher => {
@@ -476,6 +480,8 @@ pub enum RowData {
     Theme,
     /// The device id lives in the row's key, the way the wallpaper path does.
     AudioDevice,
+    /// The MPRIS bus suffix lives in the row's key.
+    MediaPlayer,
     /// The Alt+Tab switcher: the row stands for this raw window id, resolved
     /// back through `wintoclient` when the gesture commits.
     WindowSwitcher {
@@ -2408,6 +2414,60 @@ impl SystemUiState {
         text: impl Into<String>,
     ) {
         self.set_list_message(Self::audio_kind(direction), text);
+    }
+
+    // --- Media players picker ---
+
+    /// Build the Players picker from the bridge's last sweep list, starting on
+    /// the player already pinned so reopening keeps the user's place.
+    pub fn media_players_picker(state: &crate::jwm::features::MediaState) -> Self {
+        let rows: Vec<ListRow> = state
+            .players
+            .iter()
+            .map(|name| ListRow {
+                key: name.clone(),
+                text: crate::jwm::features::media::player_picker_row(name, name == &state.player),
+                data: RowData::MediaPlayer,
+            })
+            .collect();
+        let selected = rows
+            .iter()
+            .position(|row| row.key == state.player)
+            .unwrap_or(0);
+        Self::ListPanel {
+            kind: ListKind::MediaPlayers,
+            rows,
+            row_icons: Vec::new(),
+            selected,
+            message: String::new(),
+            prompt: None,
+            query: String::new(),
+            empty: "No media players to choose from".to_string(),
+        }
+    }
+
+    pub fn is_media_players_picker(&self) -> bool {
+        self.is_list(ListKind::MediaPlayers)
+    }
+
+    /// The MPRIS bus suffix the selection rests on — what Enter would pin.
+    pub fn selected_media_player(&self) -> Option<&str> {
+        Some(self.selected_row(ListKind::MediaPlayers)?.key.as_str())
+    }
+
+    /// Replace the Players picker's rows after a status push, holding the
+    /// selection on the same suffix when it survived the refresh.
+    pub fn set_media_players(&mut self, state: &crate::jwm::features::MediaState) {
+        let rows = state
+            .players
+            .iter()
+            .map(|name| ListRow {
+                key: name.clone(),
+                text: crate::jwm::features::media::player_picker_row(name, name == &state.player),
+                data: RowData::MediaPlayer,
+            })
+            .collect();
+        self.set_rows(ListKind::MediaPlayers, rows);
     }
 
     // --- Window switcher ---
@@ -8142,5 +8202,48 @@ mod tests {
         assert!(parts.items[1].starts_with('\u{f192}'));
         assert!(parts.items[0].starts_with('\u{f10c}'));
         assert_eq!(state.selected_audio_device().as_deref(), Some("2"));
+    }
+
+    #[test]
+    fn media_players_picker_opens_on_the_active_player() {
+        let state = crate::jwm::features::MediaState {
+            player: "mpv".into(),
+            identity: "mpv".into(),
+            status: crate::jwm::features::PlaybackStatus::Playing,
+            title: "Track".into(),
+            artist: "Artist".into(),
+            can_go_next: true,
+            can_go_previous: true,
+            position_us: None,
+            length_us: None,
+            players: vec!["spotify".into(), "mpv".into(), "firefox".into()],
+        };
+        let panel = SystemUiState::media_players_picker(&state);
+        assert!(panel.is_media_players_picker());
+        assert_eq!(panel.selected_media_player(), Some("mpv"));
+        let parts = panel.overlay_parts();
+        assert!(parts.items[1].starts_with('\u{f192}'), "active row is marked");
+        assert!(parts.items[0].starts_with('\u{f10c}'));
+        assert!(parts.items[2].starts_with('\u{f10c}'));
+
+        // Fewer than two players: the Media-row `o` arm must not open this
+        // picker. The constructor itself still builds an empty/single list
+        // for the refresh path; the gate lives on the key.
+        const SOURCE: &str = include_str!("../input_handler.rs");
+        let arm = SOURCE
+            .split_once("ControlKind::Media =>")
+            .expect("the Media control arm")
+            .1
+            .split_once("ControlKind::Volume =>")
+            .expect("the arm that follows it")
+            .0;
+        assert!(
+            arm.contains("KEY_o") && arm.contains("players.len() >= 2"),
+            "o must refuse to open with fewer than two players"
+        );
+        assert!(
+            arm.contains("media_players_picker"),
+            "o no longer opens the Players picker"
+        );
     }
 }

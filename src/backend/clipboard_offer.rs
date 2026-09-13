@@ -150,6 +150,7 @@ pub(crate) fn x11_selection_time_is_valid(request: u32, acquired: Option<u32>) -
         feature = "backend-x11rb",
         feature = "backend-xcb",
         feature = "remote-x11",
+        feature = "wayland-backends",
         test
     )),
     allow(dead_code)

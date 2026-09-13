@@ -1997,8 +1997,9 @@ impl Jwm {
     /// the bytes on success so history can record them.
     ///
     /// X11 goes straight to JWM's selection thread, including ICCCM INCR for
-    /// large payloads. Wayland keeps `wl-copy` as the platform fallback until
-    /// its data-device offer is routed through the compositor event loop.
+    /// large payloads. Wayland still uses `wl-copy` here: screenshot encoding
+    /// finishes off the main loop, so it cannot call `set_clipboard_png`.
+    /// Picker activate / IPC re-offers use the native Wayland path instead.
     /// Clipboard staging files contain private screen contents, so the file
     /// is unlinked on every path — success and failure alike.
     fn publish_image_path_to_clipboard(

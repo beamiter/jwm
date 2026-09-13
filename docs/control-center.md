@@ -88,7 +88,7 @@ PipeWire output and input defaults come from one shared `wpctl status` read.
 
 | Row | Appears when | Keys |
 | --- | --- | --- |
-| Media | An MPRIS player is running | `Left`/`Right` skip, `Enter` play/pause, `p` pins the next player |
+| Media | An MPRIS player is running | `Left`/`Right` skip, `Enter` play/pause, `p` pins the next player, `o` opens the Players picker |
 | Network | A wireless radio exists (`nmcli` or `rfkill`) | `Enter` opens the picker, `Left`/`Right` toggles the radio |
 | Bluetooth | A controller exists (`bluetoothctl` or `rfkill`) | `Enter` opens the picker, `Left`/`Right` toggles power |
 | Volume | `wpctl`, `pactl`, or `amixer` works | `Left`/`Right` adjust, `Enter`/`m` mute |
@@ -106,10 +106,13 @@ PipeWire output and input defaults come from one shared `wpctl status` read.
 | Lock Screen | always | `Enter` locks |
 | Session… | always | `Enter` opens the [session menu](session-menu.md) |
 
-The Do Not Disturb and Caffeine rows flip through the same toggles their
-key bindings use, so `Enter` there raises the labeled OSD card too — DND's
-confirmation is an OSD rather than a toast precisely because toasts are
-DND-gated.
+The Do Not Disturb, Caffeine, and Night Light rows flip through the same
+toggles their key bindings use, so `Enter` there raises the labeled OSD
+card too — DND's confirmation is an OSD rather than a toast precisely
+because toasts are DND-gated. The Network and Bluetooth rows' `Left`/
+`Right` radio flips (and a confirmed Bluetooth power-off) raise the same
+Wi-Fi / Bluetooth OSD the key bindings use; the first press that only
+arms Bluetooth power-off stays quiet.
 
 The panel rebuilds itself when the state behind a row changes — a track
 change, a battery poll — so an open card never shows a stale value, and the
@@ -201,12 +204,13 @@ the requested state is already what the row shows.
 
 `toggle_wifi` and `toggle_bluetooth` are also bindable and dispatchable over
 IPC; they report which tools were missing rather than failing silently.
-Bound to a key, the press is acknowledged on the OSD at once with the
-requested target — `Wi-Fi On` / `Wi-Fi Off`, likewise Bluetooth — while the
-worker applies it. One known shape on a machine with neither tool: the
-*first* press still shows the optimistic card once, because tool detection
-has not concluded yet; the worker's re-read then takes the state back, and
-later presses keep the old error path.
+Bound to a key — and from the Hub Network / Bluetooth rows' `Left`/`Right`
+(or a confirmed Bluetooth power-off) — the press is acknowledged on the OSD
+at once with the requested target — `Wi-Fi On` / `Wi-Fi Off`, likewise
+Bluetooth — while the worker applies it. One known shape on a machine with
+neither tool: the *first* press still shows the optimistic card once,
+because tool detection has not concluded yet; the worker's re-read then
+takes the state back, and later presses keep the old error path.
 
 ## Wi-Fi picker
 

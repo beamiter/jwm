@@ -920,6 +920,18 @@ impl Jwm {
                     {
                         log::debug!("control center media: {error}");
                     }
+                    // `o` opens the Players picker when there is somewhere to
+                    // choose from; a single-player row has nothing to list.
+                    if keysym == keys::KEY_o
+                        && let Some(state) = self.features.media.get()
+                        && state.players.len() >= 2
+                    {
+                        self.features.system_ui_return_to_hub = true;
+                        self.features.system_ui =
+                            crate::jwm::features::SystemUiState::media_players_picker(state);
+                        self.sync_system_ui(backend);
+                        return;
+                    }
                 }
                 ControlKind::Volume => {
                     if let Some(delta) = slider_delta {
@@ -967,10 +979,19 @@ impl Jwm {
                             // Off the event thread: the worker flips the
                             // radio and re-reads, and the row lands on the
                             // truth — the radio may be hard-blocked and
-                            // refuse to come back on.
+                            // refuse to come back on. The OSD mirrors the
+                            // key-bound toggle so Hub Left/Right is not silent.
+                            backend.compositor_show_osd(
+                                crate::backend::api::OsdKind::Wifi(true),
+                                0,
+                            );
                             self.request_radio_set(connectivity::RadioKind::Wifi, true);
                         }
                         NetworkRowAction::SetRadio(enabled) => {
+                            backend.compositor_show_osd(
+                                crate::backend::api::OsdKind::Wifi(enabled),
+                                0,
+                            );
                             self.request_radio_set(connectivity::RadioKind::Wifi, enabled);
                         }
                         NetworkRowAction::Nothing => {}
@@ -999,17 +1020,33 @@ impl Jwm {
                             }
                         }
                         BluetoothRowAction::PowerOn => {
+                            backend.compositor_show_osd(
+                                crate::backend::api::OsdKind::Bluetooth(true),
+                                0,
+                            );
                             self.request_radio_set(connectivity::RadioKind::Bluetooth, true);
                         }
                         // Powering down can take a Bluetooth keyboard with it,
                         // so `activate_control` withholds it until a second
-                        // press confirms.
+                        // press confirms. The OSD fires only on that confirm —
+                        // the armed first press stays quiet.
                         BluetoothRowAction::SetPower(false) => {
                             if self.features.system_ui.activate_control().is_some() {
-                                self.request_radio_set(connectivity::RadioKind::Bluetooth, false);
+                                backend.compositor_show_osd(
+                                    crate::backend::api::OsdKind::Bluetooth(false),
+                                    0,
+                                );
+                                self.request_radio_set(
+                                    connectivity::RadioKind::Bluetooth,
+                                    false,
+                                );
                             }
                         }
                         BluetoothRowAction::SetPower(true) => {
+                            backend.compositor_show_osd(
+                                crate::backend::api::OsdKind::Bluetooth(true),
+                                0,
+                            );
                             self.request_radio_set(connectivity::RadioKind::Bluetooth, true);
                         }
                         BluetoothRowAction::Nothing => {}
@@ -1065,8 +1102,12 @@ impl Jwm {
                 }
                 ControlKind::NightLight => {
                     if activate {
-                        let enabled = !self.night_light_active();
-                        self.set_night_light_override(backend, enabled);
+                        // Through the toggle so the Night Light OSD and the
+                        // `night_light/toggle` broadcast happen here exactly
+                        // as they do from a keybinding — DND and Caffeine
+                        // already took this shape.
+                        let _ = self.toggle_night_light(backend, &WMArgEnum::Int(0));
+                        let enabled = self.night_light_active();
                         self.features
                             .system_ui
                             .update_control(ControlKind::NightLight, 0, enabled);
@@ -1184,7 +1225,11 @@ impl Jwm {
     /// refuses an empty list, so the panel never sits open over one either.
     /// The grabs stay until then — the close is a request to the client, not
     /// a panel hand-over, and the gesture's modifier is still down.
-    fn close_window_switcher_row(
+    ///
+    /// Middle-click on a row takes the same path after selecting that row,
+    /// so the pointed window closes even when the keyboard highlight sits
+    /// elsewhere (expose / browser-tab shape).
+    pub(crate) fn close_window_switcher_row(
         &mut self,
         backend: &mut dyn Backend,
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -1723,8 +1768,8 @@ impl Jwm {
         }
 
         if let Some(control) = self.features.system_ui.selected_control() {
-            // Media row: a press on the trailing `· p ‹next›` hint is the
-            // pointer twin of the `p` key; everywhere else keeps the
+            // Media row: each transport glyph is the pointer twin of its key
+            // (← / Return / → / `p`); the title and status icon keep the
             // Return → PlayPause path a whole-row click always took.
             if control == crate::jwm::features::system_ui::ControlKind::Media
                 && let Some(state) = self.features.media.get().cloned()
@@ -1741,11 +1786,23 @@ impl Jwm {
                         pixel_size,
                     ) as f32
                 };
-                if crate::jwm::features::media::click_action(text_x, measure, &state)
-                    == MediaRowClick::Cycle
-                {
-                    let _ = self.cycle_media_player();
-                    return Ok(());
+                match crate::jwm::features::media::click_action(text_x, measure, &state) {
+                    MediaRowClick::Cycle => {
+                        let _ = self.cycle_media_player();
+                        return Ok(());
+                    }
+                    MediaRowClick::Previous => {
+                        let _ = self.send_media_command(
+                            crate::jwm::features::MediaCommand::Previous,
+                        );
+                        return Ok(());
+                    }
+                    MediaRowClick::Next => {
+                        let _ = self
+                            .send_media_command(crate::jwm::features::MediaCommand::Next);
+                        return Ok(());
+                    }
+                    MediaRowClick::PlayPause => {}
                 }
             }
             self.handle_control_center_key(backend, control, keys::KEY_Return, Mods::empty());
@@ -1759,6 +1816,8 @@ impl Jwm {
             self.handle_bluetooth_picker_key(backend, keys::KEY_Return, Mods::empty());
         } else if self.features.system_ui.audio_picker_direction().is_some() {
             self.use_selected_audio_device(backend);
+        } else if self.features.system_ui.is_media_players_picker() {
+            self.apply_selected_media_player(backend);
         } else if self.features.system_ui.is_clipboard_picker() {
             self.copy_selected_clipboard(backend);
         } else if self.features.system_ui.is_wallpaper_picker() {
@@ -2382,6 +2441,21 @@ impl Jwm {
             if self.features.system_ui.audio_picker_direction().is_some() {
                 if keysym == keys::KEY_Return || keysym == keys::KEY_space {
                     self.use_selected_audio_device(backend);
+                } else {
+                    if keysym == keys::KEY_Up {
+                        self.features.system_ui.move_selection(-1);
+                    } else if keysym == keys::KEY_Down || keysym == keys::KEY_Tab {
+                        self.features.system_ui.move_selection(1);
+                    }
+                    self.sync_system_ui(backend);
+                }
+                return Ok(());
+            }
+            // Before the clipboard's type-to-filter arm so printable keys
+            // never land in a query that does not exist on this picker.
+            if self.features.system_ui.is_media_players_picker() {
+                if keysym == keys::KEY_Return || keysym == keys::KEY_space {
+                    self.apply_selected_media_player(backend);
                 } else {
                     if keysym == keys::KEY_Up {
                         self.features.system_ui.move_selection(-1);
@@ -3685,6 +3759,54 @@ mod tests {
         assert!(
             arm.contains(&format!("{}(", "update_control")),
             "the row no longer refreshes its own panel entry"
+        );
+    }
+
+    /// Night Light used to call `set_night_light_override` directly and skip
+    /// the OSD the keybinding raises. Route through `toggle_night_light` so
+    /// Hub Enter matches DND/Caffeine and the labeled card appears.
+    #[test]
+    fn the_night_light_row_toggles_through_the_osd_path() {
+        const SOURCE: &str = include_str!("input_handler.rs");
+        let arm = SOURCE
+            .split_once(&format!("fn {}(", "handle_control_center_key"))
+            .expect("handle_control_center_key")
+            .1
+            .split_once(&format!("{}::{} =>", "ControlKind", "NightLight"))
+            .expect("the night-light arm")
+            .1
+            .split_once(&format!("{}::{} =>", "ControlKind", "DoNotDisturb"))
+            .expect("the arm that follows it")
+            .0;
+        assert!(
+            arm.contains(&format!("{}(", "toggle_night_light")),
+            "the row flips night light without the OSD / broadcast path"
+        );
+        assert!(
+            !arm.contains(&format!("{}(", "set_night_light_override")),
+            "the row still bypasses the toggle"
+        );
+    }
+
+    /// Wi-Fi and Bluetooth Hub rows used to flip silently while the key
+    /// bindings raised an OSD. Both paths must acknowledge the target state.
+    #[test]
+    fn the_radio_rows_raise_the_osd_before_queuing_the_flip() {
+        const SOURCE: &str = include_str!("input_handler.rs");
+        let region = SOURCE
+            .split_once("fn handle_control_center_key")
+            .expect("handle_control_center_key")
+            .1
+            .split_once("fn dismiss_system_ui_from_pointer")
+            .expect("the end of the control-center input region")
+            .0;
+        assert!(
+            region.contains("OsdKind::Wifi"),
+            "the Network row no longer raises a Wi-Fi OSD"
+        );
+        assert!(
+            region.contains("OsdKind::Bluetooth"),
+            "the Bluetooth row no longer raises a Bluetooth OSD"
         );
     }
 

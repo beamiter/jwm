@@ -7,6 +7,29 @@ monorepo use independent Semantic Versions.
 
 ### Added
 
+- With more than one MPRIS player, `o` on the control-center media row opens a
+  Players picker (audio-device shape): Enter/click pins that bus suffix via
+  `select_player` and returns to the Hub; `p` and the `· p ‹next›` hint still
+  cycle. Single-player sessions leave `o` a no-op. See
+  [docs/media-controls.md](docs/media-controls.md) and
+  [docs/control-center.md](docs/control-center.md).
+
+- Wayland sessions re-offer clipboard PNG history through the compositor's
+  own data-device `image/png` selection (`Backend::set_clipboard_png` on the
+  three Wayland backends). Picker activate and `clipboard_copy` prefer the
+  native image sender, then that path, then `wl-copy`. See
+  [docs/clipboard.md](docs/clipboard.md).
+
+- Control-center media row transport glyphs are pointer-operable: a click on
+  the previous / next arrow skips like `Left`/`Right`, while the title and
+  status icon still play/pause and the trailing `· p ‹next›` hint still
+  cycles players. See [docs/media-controls.md](docs/media-controls.md).
+
+- Alt+Tab switcher middle-click closes the pointed row without ending the
+  gesture — the pointer twin of `Delete` / `BackSpace`, matching expose and
+  the window tab strip. A middle click on blank is inert. See
+  [docs/window-switcher.md](docs/window-switcher.md).
+
 - Shell Hub **Theme** page (`T`, wire parameter `6`): lists the seven known
   `appearance.ui_theme` values, applies via the wallpaper `set_config` path,
   session-only. See [docs/control-center.md](docs/control-center.md) and
@@ -22,11 +45,11 @@ monorepo use independent Semantic Versions.
   (and screenshots published to the clipboard) land in `Alt+Ctrl+V` as text
   labels — `PNG 1920×1080  1.2M` when the IHDR is readable — filtered by
   tokens like `png` / `image` / dimensions, and re-offered on activate
-  through the native X11 image sender or `wl-copy` on Wayland. Text still
-  wins when an offer carries both; payloads over 4 MiB are skipped; the
-  store stays memory-only and never writes images to disk. `get_clipboard`
-  exposes kind/size/dims metadata only — never raw PNG bytes. See
-  [docs/clipboard.md](docs/clipboard.md).
+  through the native X11 image sender, the Wayland data-device PNG offer, or
+  `wl-copy` as fallback. Text still wins when an offer carries both;
+  payloads over 4 MiB are skipped; the store stays memory-only and never
+  writes images to disk. `get_clipboard` exposes kind/size/dims metadata
+  only — never raw PNG bytes. See [docs/clipboard.md](docs/clipboard.md).
 
 - Bars and scripts can follow the microphone mute flag end to end.
   `get_mic_mute` answers `{ "muted": true|false|null }` from the same
@@ -69,6 +92,13 @@ monorepo use independent Semantic Versions.
   the header remain no-ops. See [docs/calendar.md](docs/calendar.md).
 
 ### Changed
+
+- The Hub Night Light row toggles through `toggle_night_light`, so Enter
+  raises the same labeled OSD the keybinding does. Network and Bluetooth
+  row radio flips (and a confirmed Bluetooth power-off) raise the Wi-Fi /
+  Bluetooth OSD too; the first press that only arms Bluetooth power-off
+  stays quiet. See [docs/control-center.md](docs/control-center.md) and
+  [docs/session-menu.md](docs/session-menu.md).
 
 - `Alt+Shift+/` (`show_keybindings`) lists configured `behavior.gesture_swipe`
   rows after the keyboard binds — `3f left`-style shortcuts with the same
