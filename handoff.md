@@ -4,6 +4,36 @@
 
 ---
 
+## 2026-09-13：UI/UX 二十二轮（Players ListPanel、原生 Wayland PNG offer）
+
+选题 = 二十一轮「仍然开着的」里日常命中与正确性最高的两项并行：多播放器 picker（audio 同形）∥ 原生 Wayland PNG offer（夹 activate/IPC 测）。文件集几乎不交（media/system_ui/input_handler vs state/clipboard/api）。拒做：pin 持久化、rich `players`、缩略图、Theme 落盘、`set_audio_device` sync。
+
+1. **Players ListPanel（`o`）**。`ListKind::MediaPlayers` + `RowData::MediaPlayer`；`media_players_picker` 行=后缀、marker=active；Media 行 `KEY_o`（`players≥2`）开面板、`system_ui_return_to_hub`；Enter/click → `select_media_player` → 回 Hub；`p`/hint/transport 不动；`set_media_status` 刷新开着的 picker 保 key。docs/media-controls.md + control-center.md。**刻意不做**：pin 持久化、identity/position 对象 wire、改 Return、独立键绑。
+
+2. **原生 Wayland PNG offer + 测钉子**。`clipboard_offered: Option<ClipboardOffer::{Text,Png}>`；`offer_clipboard_png` + `Backend::set_clipboard_png`（三 Wayland 后端）；`send_selection` 按 mime 分流；activate/IPC：image sender → set_clipboard_png → wl-copy。截图异步路径仍 wl-copy（worker 无 Backend）。docs/clipboard.md Serve 表。**刻意不做**：缩略图、JPEG、改 text 优先政策、截图线程原生 offer。
+
+**验证**：clippy -D warnings（0）；lib **3225 passed / 0 failed**（3216 → +9：Players picker + Wayland PNG mime/activate 针）。**无真机显示会话**。真机优先：双播放器 Hub `o` 列表直达、Enter 回 Hub + OSD；无 `wl-copy` 的 Wayland 会话历史 Enter 贴 PNG。
+
+**仍然开着的**（二十三轮候选）：IPC `set_audio_device` 仍同步（刻意留）；per-player position / rich `players` 对象 / pin 持久化；剪贴板缩略图；Theme 落盘到 TOML；截图→clipboard Wayland 仍 wl-copy（需 thread-safe sender）；X11 `compositor_frame_deadline` 不接 overlay 边界。**成文勿再提**：……（继承二十一轮勿再提清单）+ 多播放器仅 cycle 无列表（本轮关闭）+ Wayland PNG 仅 wl-copy（本轮关闭，截图异步除外）。
+
+---
+
+## 2026-09-13：UI/UX 二十一轮（媒体 transport 点击、Hub OSD 对齐、Switcher 中键关窗）
+
+选题 = 二十轮「仍然开着的」之外、三 explore 选出的**日常命中 × 可交付性**最高三项：媒体行 transport 字形可点（二十轮刻意不做的指针半边）+ Hub 开关 OSD 与键绑对齐（十五轮记录的不对称）+ Alt+Tab 中键关窗（对齐 expose / tab）。拒做本轮：多播放器 picker / pin 持久化 / 剪贴板缩略图 / Theme 落盘 / `set_audio_device` sync。
+
+1. **媒体行 transport 字形点击**。`MediaRowClick::{Previous,PlayPause,Next,Cycle}`；`control_row_parts` 与绘制同形切区（`measure − TEXT_PAD`）；禁用 skip 的空白站位 → PlayPause（不发明命令）；hint 区仍 Cycle。`activate_system_ui_pointer_row` Media 臂 match 四向。docs/media-controls.md。**刻意不做**：播放器 picker、transport 区外 Seek、改 Return 语义。
+
+2. **Hub OSD 对齐**。Night Light 行改走 `toggle_night_light`（DND/Caffeine 同形 → OSD + `night_light/toggle`）。Network/BT 行在 `request_radio_set` 前弹 `OsdKind::Wifi/Bluetooth`；BT `SetPower(false)` **仅二段确认执行时**弹，武装首按静默。源契约 pin：`the_night_light_row_toggles_through_the_osd_path` / `the_radio_rows_raise_the_osd_before_queuing_the_flip`。docs/control-center.md + session-menu.md。
+
+3. **Switcher 中键关窗**。`SwitcherPress::CloseRow`（button 2）；命中行 → `select_visible_row` + `close_window_switcher_row`（升 `pub(crate)`）；空白 Inert（expose 同形）；右键等仍 Cancel。docs/window-switcher.md。
+
+**验证**：clippy -D warnings（0）；lib **3216 passed / 0 failed**（3212 → +4：transport 点击针 + Night Light/radio OSD 源契约；switcher 针改写）。**无真机显示会话**。真机优先：Hub 媒体点 ←/→/曲名/hint；Night Light / Wi-Fi Left 起 OSD；Alt+Tab 中键关被点行、空白中键不退手势。
+
+**仍然开着的**（二十二轮候选）：IPC `set_audio_device` 仍同步（刻意留）；多播放器 picker 面板 / per-player position（rich `players` 对象）/ pin 持久化；剪贴板缩略图 / 原生 Wayland PNG offer；IPC/activate PNG 端到端测仍薄；Theme 落盘到 TOML；X11 `compositor_frame_deadline` 不接 overlay 边界。**成文勿再提**：sync_window_groups dirty 门控、嵌套后端无面板、toast NotificationClosed(1)、clear-all 指针路径、toast/OSD 进录制画面、X11 视觉特征不扩只做 easing、锁屏 backdrop 瞬间不透明、show_keybindings 原始函数名（cosmetic）、Hub Night Light/射频无 OSD（本轮关闭）、媒体 transport 仅键盘（本轮关闭）、switcher 中键=Cancel（本轮关闭）。
+
+---
+
 ## 2026-09-12：UI/UX 二十轮（Theme Hub、手势一览、媒体行点击切换）
 
 选题 = 十九轮「仍然开着的」：Theme Hub（discoverability）+ 媒体点击循环（交互补齐 `p`）+ 手势进 keybinding viewer（小抛光）。三 explore 后划分：**Theme 与 media click 同抢 `activate_system_ui_pointer_row` → 不双 agent 并行该函数**。Wave 1：Theme Hub（全栈含 input_handler theme 臂）∥ gesture lines（仅 `jwm.rs` show_keybindings）。Wave 2：media click + bars `players` 暴露（media.rs 纯函数 + input_handler Media 臂 + JSON）。
