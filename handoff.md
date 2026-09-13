@@ -4,6 +4,20 @@
 
 ---
 
+## 2026-09-13：UI/UX 二十三轮（Theme TOML 落盘、截图原生 PNG defer）
+
+选题 = 二十二轮开放项：Theme Hub 持久化 ∥ 截图异步关 R22「仍 wl-copy」例外。文件不交。拒做：缩略图、rich players、pin 持久化、Wayland ClipboardImageSender 大造。
+
+1. **Theme TOML 外科落盘**。`Config::persist_ui_theme`（仿 layout tags）；`apply_selected_theme` 成功后写盘 + `note_config_written_by_us`。IPC `set_config` 仍 session-only。docs/ui-theme.md + control-center.md。
+
+2. **截图→clipboard poll defer**。无 image sender 时 worker 只回 `CopiedToClipboard(png)`；`poll_screenshot_completion_jobs` 先 `offer_clipboard_png` 再 record/toast。X11 sender 路径仍 worker 直送。docs/clipboard.md。
+
+**验证**：clippy/lib 未在本轮单独全跑（与 bars major 同提交）；真机优先：Hub `T` 写 TOML 重启保留；无 wl-copy 的 Wayland 截图到剪贴板。
+
+**仍然开着的**（二十四轮）：per-player rich `players` / pin 持久化；剪贴板缩略图；X11 double-offer 若 poll 再 offer 失败文案（X11 worker 已发时）；`set_audio_device` sync；X11 `compositor_frame_deadline`。
+
+---
+
 ## 2026-09-13：UI/UX 二十二轮（Players ListPanel、原生 Wayland PNG offer）
 
 选题 = 二十一轮「仍然开着的」里日常命中与正确性最高的两项并行：多播放器 picker（audio 同形）∥ 原生 Wayland PNG offer（夹 activate/IPC 测）。文件集几乎不交（media/system_ui/input_handler vs state/clipboard/api）。拒做：pin 持久化、rich `players`、缩略图、Theme 落盘、`set_audio_device` sync。
