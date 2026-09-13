@@ -4,6 +4,20 @@
 
 ---
 
+## 2026-09-13：UI/UX 二十八轮（通知中键 dismiss、pending_osd 双槽）
+
+选题 = 二十七轮开放：notif middle-dismiss ∥ pending_osd volume/mic vs 设备名争用。文件几乎不交。拒做：pin、缩略图、`set_audio_device` sync、X11 deadline、媒体 seek、clear-all 指针。
+
+1. **通知中键 dismiss**。button 2 → select + `close_notification(..., Dismissed)`（同 `d`）；空白/strip inert；永不 clear-all。docs/notifications.md。
+
+2. **pending_osd 双槽**。`pending_level` + `pending_device`；两者皆有时 prefer AudioDevice。docs/control-center.md + media-controls.md。
+
+**验证**：clippy -D warnings（0）；lib **3271 passed / 0 failed / 11 ignored**（3264→+7）。**无真机显示会话**。真机优先：通知中心中键关条目；切设备时音量键同帧不吞命名 OSD。
+
+**仍然开着的**（二十九轮）：pin 持久化；剪贴板缩略图；`set_audio_device` sync；X11 `compositor_frame_deadline`；媒体 click-to-seek（需 bridge CanSeek）；Volume 行中键 mute（可选）。**成文勿再提**：……（继承二十七轮）+ 通知中键 inert（本轮关闭）+ pending_osd 单槽 last-write-wins 吞设备名（本轮关闭）。
+
+---
+
 ## 2026-09-13：UI/UX 二十七轮（Wi-Fi/BT 中键 forget、音频设备命名 OSD）
 
 选题 = 二十六轮 defer：Wi-Fi/BT middle-click forget ∥ 音频设备确认后命名 OSD。文件几乎不交。拒做：pin、缩略图、`set_audio_device` sync→queued、X11 frame deadline、媒体 seek。
