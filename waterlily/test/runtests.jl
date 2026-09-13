@@ -108,6 +108,26 @@ end
     end
 end
 
+@testset "volumetric material frame protocol" begin
+    mktempdir() do directory
+        path = joinpath(directory, "frame")
+        publisher = FramePublisher(path, 2, 2; depth=2, material_aux=true)
+        color = UInt8[repeat([0x11, 0x22, 0x33, 0x40], 8)...]
+        material = UInt8[repeat([0x80, 0x90, 0xa0, 0xff], 8)...]
+        @test publish!(publisher, color, material, 321) == 1
+        close(publisher)
+
+        bytes = read(path)
+        @test read_u32_le(bytes, 8) == 3
+        @test read_u32_le(bytes, 12) == 96
+        @test read_u32_le(bytes, 64) == 2
+        @test read_u32_le(bytes, 68) == 1
+        @test bytes[97:128] == color
+        @test bytes[129:160] == material
+        @test length(bytes) == 96 + 2 * 64
+    end
+end
+
 @testset "RGBA renderer helpers" begin
     @test JwmWaterLily.seismic_color(-1, 1) !=
           JwmWaterLily.seismic_color(1, 1)
@@ -441,7 +461,7 @@ end
     @test case.domain == (32, 16, 32)
     @test JwmWaterLily.jelly_domain((1280, 800)) == (96, 32, 64)
     @test JwmWaterLily.jelly_domain((1280, 800); accelerated=true) ==
-          (128, 48, 80)
+          (160, 64, 96)
     # Keep the transport's (width, vertical, depth) order observable on a
     # non-square domain; the main 64x64 fixture has nx == nz and cannot catch
     # an accidental width/height swap by itself.
@@ -449,6 +469,7 @@ end
     @test rectangular_case.domain == (64, 16, 32)
     @test JwmWaterLily.frame_geometry(rectangular_case) == (64, 32, 16)
     @test length(rectangular_case.volume_rgba) == 4 * 64 * 32 * 16
+    @test length(rectangular_case.volume_material) == 4 * 64 * 32 * 16
     @test JwmWaterLily.jelly_volume_offset(64, 32, 1, 1, 32) == 1
     @test JwmWaterLily.jelly_volume_offset(64, 32, 64, 1, 32) == 4 * 63 + 1
     @test JwmWaterLily.jelly_volume_offset(64, 32, 1, 1, 1) ==
@@ -522,6 +543,8 @@ end
     volume = JwmWaterLily.render_volume!(case)
     @test volume === case.volume_rgba
     @test length(volume) == 4 * 32 * 32 * 16
+    @test length(case.volume_material) == length(volume)
+    @test any(>(0x7f), @view case.volume_material[4:4:end])
     alphas = @view volume[4:4:end]
     # The bells shed vorticity above the wake floor while every cell remains
     # translucent. Wake opacity is bounded below the dense anatomy range, the
@@ -750,7 +773,7 @@ end
     @test JwmWaterLily.turbulence_domain((128, 64)) == (64, 16, 32)
     @test JwmWaterLily.turbulence_domain((1280, 800)) == (96, 32, 64)
     @test JwmWaterLily.turbulence_domain((1280, 800); accelerated=true) ==
-          (128, 48, 80)
+          (160, 64, 96)
 
     # A rectangular fixture makes every transport axis independently
     # observable: solver (x, depth, vertical) becomes frame
@@ -764,6 +787,7 @@ end
     @test JwmWaterLily.publish_geometry(case, false) == (64, 32, 16)
     @test JwmWaterLily.publish_geometry(case, true) == (128, 64, 1)
     @test length(case.volume_rgba) == 4 * 64 * 32 * 16
+    @test length(case.volume_material) == 4 * 64 * 32 * 16
 
     @test JwmWaterLily.turbulence_volume_offset(64, 32, 1, 1, 32) == 1
     @test JwmWaterLily.turbulence_volume_offset(64, 32, 64, 1, 32) ==

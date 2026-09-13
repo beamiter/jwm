@@ -57,9 +57,12 @@ struct JellyCase{S} <: AbstractWaterLilyCase
     # Maximum-intensity projection of vorticity magnitude along depth,
     # (nx, nz). Only used by the planar fallback path.
     projected::Matrix{Float32}
-    # Version-2 volume scratch: nx * nz * ny RGBA voxels, slices front to
-    # back, reused every frame to keep the publish loop garbage-free.
+    # Version-2/3 volume scratch: nx * nz * ny RGBA voxels, slices front to
+    # back, reused every frame to keep the publish loop garbage-free. The
+    # material plane packs octahedral normals and optical thickness for the
+    # compositor's version-3 shading path.
     volume_rgba::Vector{UInt8}
+    volume_material::Vector{UInt8}
 end
 
 const JELLY_REYNOLDS = 500.0
@@ -115,8 +118,8 @@ Pick the 3D tank from the canvas. Vertical resolution sets fidelity and cost,
 width follows the display aspect so jellies stay round after compositor
 projection, and every extent is a multiple of 16 for the multigrid pressure
 solver. CPU publication is capped at 64 vertical cells; accelerated backends
-use an 80-cell ceiling so a 1280x800 canvas rises from a 96x32x64 CPU domain
-to 128x48x80 on CUDA or ROCm.
+use a 96-cell ceiling so a 1280x800 canvas rises from a 96x32x64 CPU domain
+to 160x64x96 on CUDA or ROCm.
 """
 function jelly_domain(
     dimensions::Tuple{Int,Int};
@@ -124,13 +127,16 @@ function jelly_domain(
 )
     width, height = dimensions
     # CPU stays capped at 64 layers: the 80-layer tank measured ~190 ms per
-    # frame there. CUDA/ROCm get an 80-layer ceiling, which raises a 1280x800
-    # publication from 96x64x32 to 128x80x48; the finer curved coverage is a
+    # frame there. CUDA/ROCm get a 96-layer ceiling, which raises a 1280x800
+    # publication from 96x64x32 to 160x96x64; the finer curved coverage is a
     # direct spatial antialiasing improvement before compositor reconstruction.
-    layer_cap = accelerated ? 5 : 4
-    nz = 16 * clamp(round(Int, height / 160), 2, layer_cap)
+    layer_cap = accelerated ? 6 : 4
+    # Accelerated backends use a denser vertical mapping so the default
+    # 1280x800 canvas actually reaches the six-block (96-cell) ceiling.
+    vertical_divisor = accelerated ? 133 : 160
+    nz = 16 * clamp(round(Int, height / vertical_divisor), 2, layer_cap)
     aspect = width / height
-    nx = 16 * clamp(round(Int, nz * aspect / 16), 2, 12)
+    nx = 16 * clamp(round(Int, nz * aspect / 16), 2, accelerated ? 14 : 12)
     ny = 16 * max(1, round(Int, nz * 0.6 / 16))
     return (nx, ny, nz)
 end
@@ -275,6 +281,7 @@ function build_jelly_case(
         specs,
         Array{Float32,3}(undef, nx + 2, ny + 2, nz + 2),
         Matrix{Float32}(undef, nx, nz),
+        Vector{UInt8}(undef, 4 * nx * nz * ny),
         Vector{UInt8}(undef, 4 * nx * nz * ny),
     )
 end
@@ -690,28 +697,80 @@ analytic and crisp.
     return min(filtered, floatmax(Float32))
 end
 
+# Encode a unit world-space normal into RG as [0,1] octahedral coordinates
+# matching the compositor's `decode_octahedral`.
+function encode_octahedral(nx::Float32, ny::Float32, nz::Float32)
+    length = sqrt(nx * nx + ny * ny + nz * nz)
+    if length <= 1.0f-8
+        return (UInt8(128), UInt8(128))
+    end
+    inv = 1.0f0 / length
+    x = nx * inv
+    y = ny * inv
+    z = nz * inv
+    scale = abs(x) + abs(y) + abs(z)
+    px = x / scale
+    pz = z / scale
+    if y < 0.0f0
+        ox = px
+        px = (1.0f0 - abs(pz)) * (ox >= 0.0f0 ? 1.0f0 : -1.0f0)
+        pz = (1.0f0 - abs(ox)) * (pz >= 0.0f0 ? 1.0f0 : -1.0f0)
+    end
+    return (
+        round(UInt8, clamp(px * 0.5f0 + 0.5f0, 0.0f0, 1.0f0) * 255.0f0),
+        round(UInt8, clamp(pz * 0.5f0 + 0.5f0, 0.0f0, 1.0f0) * 255.0f0),
+    )
+end
+
+"""
+Sample every display material of the smack at one point. Returns
+`(surface, tentacles, arms, organs, polar, tissue)` where `tissue` is the
+max coverage used for normals and optical thickness.
+"""
+function jelly_sample_materials(
+    poses::Vector{JellyPose},
+    voxel_x::Float32,
+    voxel_y::Float32,
+    voxel_z::Float32,
+)
+    surface = 0.0f0
+    polar = 0.0f0
+    tentacles = 0.0f0
+    arms = 0.0f0
+    organs = 0.0f0
+    for pose in poses
+        coverage = pose_material(pose, voxel_x, voxel_y, voxel_z)
+        if coverage[1] > surface
+            surface = coverage[1]
+            polar = coverage[5]
+        end
+        tentacles = max(tentacles, coverage[2])
+        arms = max(arms, coverage[3])
+        organs = max(organs, coverage[4])
+    end
+    tissue = max(surface, max(tentacles, max(arms, organs)))
+    return (surface, tentacles, arms, organs, polar, tissue)
+end
+
 """
 Materialize the animated analytic anatomy and colorize the filtered vorticity
-magnitude voxel-by-voxel into the version-2 volume buffer. Emission runs
-through the palette's positive half while the apex-to-rim shaded membranes,
-rose gonad crowns, blush oral arms, and lavender filaments give the compositor
-coherent, distinctly colored surfaces and a stable front-interface normal.
-Quiescent water remains transparent; opacity follows a soft rational knee for
-the wake and bounded translucent coverage for the body. Wake opacity is capped
-below about 0.115, while anatomy feathers continuously from zero to its dense
-interior so the compositor can blend medium and tissue lighting smoothly.
+magnitude voxel-by-voxel into the version-3 volume and material buffers.
+Wake stays at solver resolution; analytic anatomy is 2× supersampled so
+filaments and membranes antialias before they hit the tricubic marcher.
+Material RG stores an octahedral unit normal, B optical thickness, and A a
+validity flag for the compositor's tissue lighting path. Wake opacity is
+capped below about 0.115, while anatomy feathers continuously from zero to
+its dense interior.
 """
 function render_volume!(case::JellyCase; palette::Tuple=case_palette(case))
     sigma = download_vorticity_magnitude!(case)
     nx, ny, nz = case.domain
     rgba = case.volume_rgba
+    material = case.volume_material
     τ = Float32(simulation_time(case))
     poses = [jelly_pose(spec, τ) for spec in case.jellies]
+    half = 0.25f0
     Threads.@threads :static for y in 1:ny
-        # `sigma[x + 1, ...]` is WaterLily's first interior cell, whose
-        # physical centre is `loc(0, I) = I - 1.5`.  Sample the analytic
-        # tissue at that exact point so the anatomy remains registered with
-        # the simulated wake instead of being shifted by one voxel per axis.
         voxel_y = jelly_voxel_center(y)
         @inbounds for row in 1:nz
             z = nz - row + 1
@@ -720,32 +779,32 @@ function render_volume!(case::JellyCase; palette::Tuple=case_palette(case))
             for x in 1:nx
                 value = jelly_filtered_vorticity(sigma, x, y, z)
                 wake = max(value - JELLY_WAKE_FLOOR, 0.0f0)
-                # Soft knee keeps the shell/wake dynamic range on the palette
-                # without clipping; the deterministic mapping avoids per-frame
-                # autoscale flicker in the marched image.
                 wake_density = wake / (wake + 6.0f0)
                 voxel_x = jelly_voxel_center(x)
+
                 surface = 0.0f0
                 polar = 0.0f0
                 tentacles = 0.0f0
                 arms = 0.0f0
                 organs = 0.0f0
-                for pose in poses
-                    coverage = pose_material(pose, voxel_x, voxel_y, voxel_z)
-                    if coverage[1] > surface
-                        surface = coverage[1]
-                        polar = coverage[5]
+                tissue = 0.0f0
+                for dz in (-half, half), dy in (-half, half), dx in (-half, half)
+                    sample = jelly_sample_materials(
+                        poses,
+                        voxel_x + dx,
+                        voxel_y + dy,
+                        voxel_z + dz,
+                    )
+                    if sample[1] > surface
+                        surface = sample[1]
+                        polar = sample[5]
                     end
-                    tentacles = max(tentacles, coverage[2])
-                    arms = max(arms, coverage[3])
-                    organs = max(organs, coverage[4])
+                    tentacles = max(tentacles, sample[2])
+                    arms = max(arms, sample[3])
+                    organs = max(organs, sample[4])
+                    tissue = max(tissue, sample[6])
                 end
-                # All materials remain genuinely translucent. A ray crosses
-                # many voxels, so modest per-cell absorption is enough to form
-                # a legible bell. Bounding the turbulent wake below the dense
-                # anatomy range prevents individual high-vorticity cells from
-                # becoming opaque pepper-like particles; the analytic anatomy
-                # feather itself remains continuous down to transparent.
+
                 density = max(
                     0.15f0 * wake_density,
                     max(
@@ -756,9 +815,6 @@ function render_volume!(case::JellyCase; palette::Tuple=case_palette(case))
                         ),
                     ),
                 )
-                # Reserve the palette's darkest positive endpoint for the
-                # planar plot.  Volumetric color is integrated repeatedly and
-                # therefore uses the luminous middle of the green ramp.
                 color = palette_color(palette, 0.60f0 * wake_density, 1.0)
                 if tentacles > 0.0f0
                     color = blend_color(
@@ -792,9 +848,43 @@ function render_volume!(case::JellyCase; palette::Tuple=case_palette(case))
                 rgba[output] = color[1]
                 rgba[output + 1] = color[2]
                 rgba[output + 2] = color[3]
-                # Per-voxel opacity for one straight-through voxel crossing;
-                # the shader renormalizes it by its actual step length.
                 rgba[output + 3] = round(UInt8, 190 * density)
+
+                if tissue > 0.02f0
+                    ε = 0.45f0
+                    t_px = jelly_sample_materials(
+                        poses, voxel_x + ε, voxel_y, voxel_z,
+                    )[6]
+                    t_mx = jelly_sample_materials(
+                        poses, voxel_x - ε, voxel_y, voxel_z,
+                    )[6]
+                    t_pz = jelly_sample_materials(
+                        poses, voxel_x, voxel_y, voxel_z + ε,
+                    )[6]
+                    t_mz = jelly_sample_materials(
+                        poses, voxel_x, voxel_y, voxel_z - ε,
+                    )[6]
+                    t_py = jelly_sample_materials(
+                        poses, voxel_x, voxel_y + ε, voxel_z,
+                    )[6]
+                    t_my = jelly_sample_materials(
+                        poses, voxel_x, voxel_y - ε, voxel_z,
+                    )[6]
+                    gx = t_px - t_mx
+                    gy = t_pz - t_mz
+                    gz = t_py - t_my
+                    packed = encode_octahedral(-gx, -gy, -gz)
+                    thickness = clamp(tissue * 0.85f0, 0.0f0, 1.0f0)
+                    material[output] = packed[1]
+                    material[output + 1] = packed[2]
+                    material[output + 2] = round(UInt8, thickness * 255.0f0)
+                    material[output + 3] = 0xff
+                else
+                    material[output] = 0x80
+                    material[output + 1] = 0x80
+                    material[output + 2] = 0x00
+                    material[output + 3] = 0x00
+                end
                 output += 4
             end
         end

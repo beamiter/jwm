@@ -413,6 +413,7 @@ function run_worker_with_backend(options::RunnerOptions, backend::SelectedBacken
         geometry[1],
         geometry[2];
         depth=geometry[3],
+        material_aux=geometry[3] > 1,
     )
     wakeups = WakeClient(options.socket_path)
     cleaned = Ref(false)
@@ -471,6 +472,7 @@ function run_worker_with_backend(options::RunnerOptions, backend::SelectedBacken
                                 requested_geometry[2];
                                 depth=requested_geometry[3],
                                 start_sequence=previous_publisher.sequence,
+                                material_aux=requested_geometry[3] > 1,
                             )
                             close(previous_publisher)
                             geometry = requested_geometry
@@ -520,7 +522,12 @@ function run_worker_with_backend(options::RunnerOptions, backend::SelectedBacken
                     simulation_case;
                     palette=PALETTE_REGISTRY[frame_palette],
                 )
-                publish!(publisher, volume, time_ns())
+                publish!(
+                    publisher,
+                    volume,
+                    simulation_case.volume_material,
+                    time_ns(),
+                )
             else
                 pose_time = simulation_time(simulation_case)
                 compute_vorticity!(scratch, simulation_case)

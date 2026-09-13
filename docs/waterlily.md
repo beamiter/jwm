@@ -40,11 +40,13 @@ Julia WaterLily worker
   CPU Array / CUDA CuArray / AMDGPU ROCArray
               |
               | RGBA8 double-buffer file + Unix socket wakeups
-              | (version 1: planar frame; version 2: RGBA voxel volume)
+              | (version 1: planar frame; version 2/3: RGBA voxel volume;
+              |  version 3 also packs a material plane for normals/thickness)
               v
 JWM X11 compositor
   planar frame -> upload TEXTURE_2D -> full-screen frosted canvas layer
-  volume frame -> upload TEXTURE_3D -> near-full-screen perspective glass aquarium
+  volume frame -> upload TEXTURE_3D (+ optional material) -> near-full-screen
+                  perspective glass aquarium
 ```
 
 Planar cases publish a display-shaped 2D frame exactly as before. Cases with
@@ -117,13 +119,18 @@ remapping the transmitted desktop.
 
 The aquarium has perspective-correct front and rear glass rims and a
 world-space open water surface below a narrow air gap. Rays through the water
-refract the frosted desktop and gain path-length-dependent Beer-Lambert cyan
-attenuation; the surface catches grazing reflections, carries a gentle
-traveling swell whose crests throw moving glints, and forms a visible
-waterline. Like the camera pose, the swell phase derives from the frame
-timestamp, so re-rendering an unchanged frame stays bit-stable for damage
-tracking. Rays that miss the projected tank stay transparent, leaving the
-desktop around its near-full-screen silhouette sharp.
+take a multi-IOR air→glass→water path with a mild fixed chromatic split,
+refract the frosted desktop, and gain path-length-dependent Beer-Lambert cyan
+attenuation; glass and waterline sample the same frosted scene snapshot along
+`reflect(V, N)` for deterministic reflections. The surface catches grazing
+reflections, carries a gentle traveling swell whose crests throw moving glints,
+forms a visible waterline, and brightens a thin meniscus against the glass.
+Like the camera pose, the swell phase derives from the frame timestamp, so
+re-rendering an unchanged frame stays bit-stable for damage tracking. Rays that
+miss the projected tank stay transparent, leaving the desktop around its
+near-full-screen silhouette sharp. Version-3 material planes additionally feed
+thickness-aware tissue SSS, deterministic key-light caustics on the transmitted
+desktop, and a gated soft transmittance shadow.
 
 The transmitted desktop is sampled from its mip pyramid with a nine-tap
 LOD-2.5 frost kernel. It preserves the broad low-frequency glass lobe of the
@@ -396,7 +403,7 @@ sampled inside the projected aquarium, so either way the `--sim-size` choice
 trades solver cost against on-screen sharpness; `640x400` reads well on common
 16:9/16:10 outputs, and `1280x800` is comfortable on a discrete GPU. At
 `1280x800`, both Jelly and turbulence cap their `(width, depth, height)` CPU
-solve at `96x32x64`, while CUDA and ROCm use the finer `128x48x80` domain.
+solve at `96x32x64`, while CUDA and ROCm use the finer `160x64x96` domain.
 The higher accelerator ceiling improves curved anatomy and vortex-filament
 coverage before tricubic reconstruction; the CPU cap keeps 3D solve and
 publication latency practical. Start the worker with `--threads=auto` to keep
@@ -413,13 +420,15 @@ sustained simulation speed when it stays below real time; reduce
 The frame file begins with a fixed little-endian header. Two equally sized
 pixel slots follow it. Version 1 describes a planar frame with a 64-byte
 header; version 2 describes a voxel volume with a 96-byte header whose first
-64 bytes are the version-1 prefix byte-for-byte.
+64 bytes are the version-1 prefix byte-for-byte; version 3 keeps that same
+96-byte header and doubles each slot so an RGBA8 material plane (octahedral
+normal + optical thickness) sits immediately behind the color volume.
 
 | Offset | Size | Type | Field and required value |
 | ---: | ---: | --- | --- |
 | 0 | 8 | bytes | magic `JWMLILY\0` |
-| 8 | 4 | `u32` LE | version, `1` planar or `2` volumetric |
-| 12 | 4 | `u32` LE | header length, `64` (v1) or `96` (v2) |
+| 8 | 4 | `u32` LE | version, `1` planar, `2` volumetric, or `3` volumetric+material |
+| 12 | 4 | `u32` LE | header length, `64` (v1) or `96` (v2/v3) |
 | 16 | 4 | `u32` LE | width in pixels |
 | 20 | 4 | `u32` LE | height in pixels |
 | 24 | 4 | `u32` LE | row stride in bytes |
@@ -430,11 +439,13 @@ header; version 2 describes a voxel volume with a 96-byte header whose first
 | 44 | 4 | `u32` LE | published slot, `0` or `1` |
 | 48 | 8 | `u64` LE | monotonically increasing sequence |
 | 56 | 8 | `u64` LE | producer timestamp in nanoseconds |
-| 64 | 4 | `u32` LE | (v2 only) depth in slices, at least `1` |
-| 68 | 28 | bytes | (v2 only) reserved, zero |
+| 64 | 4 | `u32` LE | (v2/v3 only) depth in slices, at least `1` |
+| 68 | 4 | `u32` LE | (v2/v3 only) material aux flag, `1` when version is `3` |
+| 72 | 24 | bytes | (v2/v3 only) reserved, zero |
 
-For a header length `H`, a slot size `S = stride * height * depth` (depth is
-`1` in version 1), the byte ranges are:
+For a header length `H`, a color-plane size `C = stride * height * depth`
+(depth is `1` in version 1), and a slot size `S = C` (v1/v2) or `S = 2*C`
+(v3), the byte ranges are:
 
 ```text
 header: [0, H)
@@ -443,18 +454,26 @@ slot 1: [H + S, H + 2*S)
 total file length: H + 2*S
 ```
 
+In version 3 each slot stores the color volume in `[0, C)` followed by the
+material plane in `[C, 2*C)`. Material RG is an octahedral unit normal in
+`[0,1]`, B is optical thickness, and A above `127` marks a valid normal.
+Compositors that only speak version 2 continue to accept producers that omit
+the material plane; the bundled worker publishes version 3 for native
+volumes.
+
 Both versions use top-to-bottom rows and R, G, B, A byte order. `stride` must
 be at least `width * 4`; the built-in worker writes tight rows with equality.
 Width, height, depth, stride, slot, checked slot offsets, and total file
 length must all validate before JWM uploads a frame.
 The generic planar transport permits slots up to 512 MiB. A frame with
-`depth > 1` has a stricter 64 MiB padded-slot ceiling, checked from the header
-before allocating either the tight RGBA result or a stride-compaction buffer;
-this bounds the additional occupancy and 3D-texture working set.
+`depth > 1` has a stricter 64 MiB padded color-plane ceiling, checked from the
+header before allocating either the tight RGBA result or a stride-compaction
+buffer; this bounds the additional occupancy, material, and 3D-texture
+working set.
 
 In version 1 alpha carries per-case semantics over an opaque contract (the
 rain case encodes optical height in inverted alpha; plain cases write `255`).
-A version-2 slot is a stack of `depth` planar slices ordered front (nearest
+A version-2/3 slot is a stack of `depth` planar slices ordered front (nearest
 the resting camera) to back, each laid out exactly like a version-1 frame;
 voxel RGB is emission color and voxel alpha is the opacity a ray accumulates
 crossing one voxel straight through, which the compositor renormalizes by its
@@ -466,9 +485,13 @@ field. Alpha at or below `0.115` is low-density wake and receives
 hue-preserving forward scattering without contributing a tissue-interface
 normal. The smooth material transition begins at `0.12` and reaches tissue by
 `0.28`; Jelly's analytic anatomy occupies that higher band for coherent
-lighting and scene refraction. Turbulence deliberately publishes at most
-`0x1c` (`28/255`) and therefore remains entirely below the wake ceiling, while
-zero-alpha voxels remain eligible for conservative empty-space skipping.
+lighting and scene refraction. When a version-3 material plane is present,
+authored octahedral normals and optical thickness drive tissue refraction,
+thickness-aware SSS, deterministic caustics, and a gated soft transmittance
+shadow instead of density-gradient reconstruction. Turbulence deliberately
+publishes at most `0x1c` (`28/255`) and therefore remains entirely below the
+wake ceiling, while zero-alpha voxels remain eligible for conservative
+empty-space skipping.
 
 The producer takes an exclusive advisory file lock, writes a complete
 non-published slot, publishes its slot, sequence, and timestamp, and then

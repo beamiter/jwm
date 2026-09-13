@@ -858,6 +858,8 @@ fn render_waterlily_volume_frame(
         );
         gl.uniform_1_i32(uniform("u_volume").as_ref(), 0);
         gl.uniform_1_i32(uniform("u_occupancy").as_ref(), 2);
+        gl.uniform_1_i32(uniform("u_material").as_ref(), 3);
+        gl.uniform_1_i32(uniform("u_material_available").as_ref(), 0);
         gl.uniform_1_i32(uniform("u_scene_texture").as_ref(), 1);
         gl.uniform_1_i32(
             uniform("u_scene_available").as_ref(),

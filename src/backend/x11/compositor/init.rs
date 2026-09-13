@@ -355,6 +355,9 @@ impl<C: CompositorConnection> Compositor<C> {
                 rect: gl.get_uniform_location(waterlily_volume_program, "u_rect"),
                 volume: gl.get_uniform_location(waterlily_volume_program, "u_volume"),
                 occupancy: gl.get_uniform_location(waterlily_volume_program, "u_occupancy"),
+                material: gl.get_uniform_location(waterlily_volume_program, "u_material"),
+                material_available: gl
+                    .get_uniform_location(waterlily_volume_program, "u_material_available"),
                 scene_texture: gl.get_uniform_location(waterlily_volume_program, "u_scene_texture"),
                 scene_available: gl
                     .get_uniform_location(waterlily_volume_program, "u_scene_available"),

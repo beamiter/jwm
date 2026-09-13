@@ -31,8 +31,10 @@ mutable struct TurbulenceCase{S} <: AbstractWaterLilyCase
     signed_host::Array{Float32,3}
     # Signed max-absolute projection used only by the planar fallback.
     projected::Matrix{Float32}
-    # Version-2 scratch: nx * nz rows * ny front-to-back slices.
+    # Version-2/3 scratch: nx * nz rows * ny front-to-back slices, plus a
+    # material plane reserved for the compositor's version-3 contract.
     volume_rgba::Vector{UInt8}
+    volume_material::Vector{UInt8}
 end
 
 const TURBULENCE_SEED_VORTICES = 24
@@ -61,10 +63,13 @@ function turbulence_domain(
     accelerated::Bool=false,
 )
     width, height = dimensions
-    layer_cap = accelerated ? 5 : 4
-    nz = 16 * clamp(round(Int, height / 160), 2, layer_cap)
+    # Match jelly_domain: CPU 64-layer / GPU 96-layer ceilings so both native
+    # volume cases share the same publication footprint at a given canvas size.
+    layer_cap = accelerated ? 6 : 4
+    vertical_divisor = accelerated ? 133 : 160
+    nz = 16 * clamp(round(Int, height / vertical_divisor), 2, layer_cap)
     aspect = width / height
-    nx = 16 * clamp(round(Int, nz * aspect / 16), 2, 12)
+    nx = 16 * clamp(round(Int, nz * aspect / 16), 2, accelerated ? 14 : 12)
     ny = 16 * max(1, round(Int, nz * 0.6 / 16))
     return (nx, ny, nz)
 end
@@ -156,6 +161,7 @@ function build_turbulence_case(
         Array{Float32,3}(undef, nx + 2, ny + 2, nz + 2),
         Matrix{Float32}(undef, nx, nz),
         Vector{UInt8}(undef, 4 * nx * nz * ny),
+        fill(UInt8(0), 4 * nx * nz * ny),
     )
 end
 
@@ -417,10 +423,12 @@ Float32 field finite even when all seven inputs sit at the numeric limit.
 end
 
 """
-Materialize the sparse signed-vorticity medium into the version-2 RGBA
+Materialize the sparse signed-vorticity medium into the version-3 RGBA
 volume. Nonzero voxels are kept away from every palette's near-white midpoint
 and alpha never exceeds 0x1c, preserving color in the compositor's dedicated
-low-alpha wake-scattering branch.
+low-alpha wake-scattering branch. A Q-style filament shell (magnitude
+gradient) wraps vortex cores so thin tubes read as tubes rather than fog.
+The material plane stays empty: turbulence never enters the tissue band.
 """
 function render_volume!(
     case::TurbulenceCase;
@@ -429,6 +437,8 @@ function render_volume!(
     magnitude_field, signed_field = download_turbulence_vorticity!(case)
     nx, ny, nz = case.domain
     rgba = case.volume_rgba
+    material = case.volume_material
+    fill!(material, 0x00)
     Threads.@threads :static for depth in 1:ny
         @inbounds for row in 1:nz
             vertical = nz - row + 1
@@ -441,6 +451,23 @@ function render_volume!(
                 signed = turbulence_filtered_scalar(signed_field, x, depth, vertical)
                 activity = max(magnitude - TURBULENCE_WAKE_FLOOR, 0.0f0)
                 density = activity / (activity + TURBULENCE_WAKE_KNEE)
+
+                # Filament shell from the local magnitude gradient: brighten
+                # the tube wall without raising the core above the wake α cap.
+                gx = turbulence_filtered_scalar(magnitude_field, min(x + 1, nx), depth, vertical) -
+                     turbulence_filtered_scalar(magnitude_field, max(x - 1, 1), depth, vertical)
+                gy = turbulence_filtered_scalar(magnitude_field, x, min(depth + 1, ny), vertical) -
+                     turbulence_filtered_scalar(magnitude_field, x, max(depth - 1, 1), vertical)
+                gz = turbulence_filtered_scalar(magnitude_field, x, depth, min(vertical + 1, nz)) -
+                     turbulence_filtered_scalar(magnitude_field, x, depth, max(vertical - 1, 1))
+                grad = sqrt(gx * gx + gy * gy + gz * gz)
+                shell = grad / (grad + 1.8f0)
+                density = clamp(
+                    max(density, 0.55f0 * shell * density + 0.35f0 * shell),
+                    0.0f0,
+                    1.0f0,
+                )
+
                 orientation = clamp(
                     abs(signed) / max(magnitude, eps(Float32)),
                     0.0f0,

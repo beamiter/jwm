@@ -243,6 +243,9 @@ pub(super) struct WaterlilyTexture {
     pub(super) occupancy_texture: Option<glow::Texture>,
     occupancy: Vec<u8>,
     occupancy_scratch: Vec<u8>,
+    /// Version-3 authored material volume (octahedral normal + thickness).
+    /// Absent for planar and version-2 frames.
+    pub(super) material_texture: Option<glow::Texture>,
     /// GL binding target: `TEXTURE_2D` for planar frames, `TEXTURE_3D` for
     /// volumetric frames that the compositor ray-marches natively.
     pub(super) target: u32,
@@ -964,6 +967,11 @@ impl<C: CompositorConnection> Compositor<C> {
             );
             self.gl.uniform_1_i32(uniforms.volume.as_ref(), 0);
             self.gl.uniform_1_i32(uniforms.occupancy.as_ref(), 2);
+            self.gl.uniform_1_i32(uniforms.material.as_ref(), 3);
+            self.gl.uniform_1_i32(
+                uniforms.material_available.as_ref(),
+                i32::from(frame.material_texture.is_some()),
+            );
             self.gl.uniform_1_i32(uniforms.scene_texture.as_ref(), 1);
             self.gl.uniform_1_i32(
                 uniforms.scene_available.as_ref(),
@@ -1020,6 +1028,9 @@ impl<C: CompositorConnection> Compositor<C> {
             self.gl.active_texture(glow::TEXTURE2);
             self.gl
                 .bind_texture(glow::TEXTURE_3D, frame.occupancy_texture);
+            self.gl.active_texture(glow::TEXTURE3);
+            self.gl
+                .bind_texture(glow::TEXTURE_3D, frame.material_texture);
             self.gl.active_texture(glow::TEXTURE0);
             self.gl.bind_texture(glow::TEXTURE_3D, Some(texture));
             // The shader emits premultiplied RGBA.  Reassert the matching
@@ -1045,6 +1056,8 @@ impl<C: CompositorConnection> Compositor<C> {
             self.gl.active_texture(glow::TEXTURE1);
             self.gl.bind_texture(glow::TEXTURE_2D, None);
             self.gl.active_texture(glow::TEXTURE2);
+            self.gl.bind_texture(glow::TEXTURE_3D, None);
+            self.gl.active_texture(glow::TEXTURE3);
             self.gl.bind_texture(glow::TEXTURE_3D, None);
             self.gl.active_texture(glow::TEXTURE0);
             self.gl.bind_texture(glow::TEXTURE_3D, None);
@@ -1106,11 +1119,13 @@ impl<C: CompositorConnection> Compositor<C> {
             return false;
         }
 
+        let wants_material = frame.material.is_some();
         let recreate = self.waterlily_texture.as_ref().is_none_or(|current| {
             current.width != frame.width
                 || current.height != frame.height
                 || current.depth != frame.depth
                 || current.target != target
+                || current.material_texture.is_some() != wants_material
         });
         if recreate {
             let (mut occupancy, mut occupancy_scratch) = (Vec::new(), Vec::new());
@@ -1139,6 +1154,33 @@ impl<C: CompositorConnection> Compositor<C> {
                             self.gl.delete_texture(texture);
                             log::warn!(
                                 "compositor: WaterLily occupancy texture creation failed: {error}"
+                            );
+                            return false;
+                        }
+                    }
+                } else {
+                    None
+                };
+                let material_texture = if let Some(ref material) = frame.material {
+                    if material.len() != frame.rgba.len() {
+                        self.gl.delete_texture(texture);
+                        if let Some(mask) = occupancy_texture {
+                            self.gl.delete_texture(mask);
+                        }
+                        log::warn!(
+                            "compositor: WaterLily material plane size does not match color volume"
+                        );
+                        return false;
+                    }
+                    match self.gl.create_texture() {
+                        Ok(texture) => Some(texture),
+                        Err(error) => {
+                            self.gl.delete_texture(texture);
+                            if let Some(mask) = occupancy_texture {
+                                self.gl.delete_texture(mask);
+                            }
+                            log::warn!(
+                                "compositor: WaterLily material texture creation failed: {error}"
                             );
                             return false;
                         }
@@ -1235,11 +1277,47 @@ impl<C: CompositorConnection> Compositor<C> {
                     }
                     self.gl.bind_texture(glow::TEXTURE_3D, None);
                 }
+                if let (Some(material_tex), Some(material)) =
+                    (material_texture, frame.material.as_ref())
+                {
+                    self.gl.bind_texture(glow::TEXTURE_3D, Some(material_tex));
+                    self.gl.tex_image_3d(
+                        glow::TEXTURE_3D,
+                        0,
+                        glow::RGBA8 as i32,
+                        frame.width as i32,
+                        frame.height as i32,
+                        frame.depth as i32,
+                        0,
+                        glow::RGBA,
+                        glow::UNSIGNED_BYTE,
+                        glow::PixelUnpackData::Slice(Some(material)),
+                    );
+                    for filter in [glow::TEXTURE_MIN_FILTER, glow::TEXTURE_MAG_FILTER] {
+                        self.gl
+                            .tex_parameter_i32(glow::TEXTURE_3D, filter, glow::LINEAR as i32);
+                    }
+                    for wrap in [
+                        glow::TEXTURE_WRAP_S,
+                        glow::TEXTURE_WRAP_T,
+                        glow::TEXTURE_WRAP_R,
+                    ] {
+                        self.gl.tex_parameter_i32(
+                            glow::TEXTURE_3D,
+                            wrap,
+                            glow::CLAMP_TO_EDGE as i32,
+                        );
+                    }
+                    self.gl.bind_texture(glow::TEXTURE_3D, None);
+                }
                 let allocation_error = self.gl.get_error();
                 if allocation_error != glow::NO_ERROR {
                     self.gl.delete_texture(texture);
                     if let Some(mask) = occupancy_texture {
                         self.gl.delete_texture(mask);
+                    }
+                    if let Some(material) = material_texture {
+                        self.gl.delete_texture(material);
                     }
                     log::warn!(
                         "compositor: WaterLily texture allocation failed with GL error 0x{allocation_error:x}"
@@ -1257,6 +1335,7 @@ impl<C: CompositorConnection> Compositor<C> {
                     occupancy_texture,
                     occupancy,
                     occupancy_scratch,
+                    material_texture,
                     target,
                     width: frame.width,
                     height: frame.height,
@@ -1268,6 +1347,9 @@ impl<C: CompositorConnection> Compositor<C> {
                     self.gl.delete_texture(previous.texture);
                     if let Some(mask) = previous.occupancy_texture {
                         self.gl.delete_texture(mask);
+                    }
+                    if let Some(material) = previous.material_texture {
+                        self.gl.delete_texture(material);
                     }
                 }
             }
@@ -1313,6 +1395,26 @@ impl<C: CompositorConnection> Compositor<C> {
             if !uploaded {
                 return false;
             }
+            if let Some(ref material) = frame.material {
+                if material.len() != frame.rgba.len() {
+                    drop(unpack_state);
+                    if let Some(failed) = self.waterlily_texture.take() {
+                        unsafe {
+                            self.gl.delete_texture(failed.texture);
+                            if let Some(mask) = failed.occupancy_texture {
+                                self.gl.delete_texture(mask);
+                            }
+                            if let Some(material) = failed.material_texture {
+                                self.gl.delete_texture(material);
+                            }
+                        }
+                    }
+                    log::warn!(
+                        "compositor: WaterLily material plane size does not match color volume"
+                    );
+                    return false;
+                }
+            }
             {
                 let current = self.waterlily_texture.as_mut().unwrap();
                 if let Some(mask) = current.occupancy_texture {
@@ -1342,6 +1444,27 @@ impl<C: CompositorConnection> Compositor<C> {
                         self.gl.bind_texture(glow::TEXTURE_3D, None);
                     }
                 }
+                if let (Some(material_tex), Some(material)) =
+                    (current.material_texture, frame.material.as_ref())
+                {
+                    unsafe {
+                        self.gl.bind_texture(glow::TEXTURE_3D, Some(material_tex));
+                        self.gl.tex_sub_image_3d(
+                            glow::TEXTURE_3D,
+                            0,
+                            0,
+                            0,
+                            0,
+                            frame.width as i32,
+                            frame.height as i32,
+                            frame.depth as i32,
+                            glow::RGBA,
+                            glow::UNSIGNED_BYTE,
+                            glow::PixelUnpackData::Slice(Some(material)),
+                        );
+                        self.gl.bind_texture(glow::TEXTURE_3D, None);
+                    }
+                }
             }
 
             let transfer_error = unsafe { self.gl.get_error() };
@@ -1350,15 +1473,18 @@ impl<C: CompositorConnection> Compositor<C> {
                 log::warn!(
                     "compositor: WaterLily texture update failed with GL error 0x{transfer_error:x}"
                 );
-                // Main RGBA and occupancy are a coupled snapshot. If either
-                // transfer failed, retaining the pair could combine different
-                // frame generations and reintroduce holes. Hide this frame and
-                // recreate both textures on the next producer publication.
+                // Main RGBA, occupancy, and material are a coupled snapshot. If
+                // any transfer failed, retaining the set could combine different
+                // frame generations. Hide this frame and recreate all textures
+                // on the next producer publication.
                 if let Some(failed) = self.waterlily_texture.take() {
                     unsafe {
                         self.gl.delete_texture(failed.texture);
                         if let Some(mask) = failed.occupancy_texture {
                             self.gl.delete_texture(mask);
+                        }
+                        if let Some(material) = failed.material_texture {
+                            self.gl.delete_texture(material);
                         }
                     }
                 }

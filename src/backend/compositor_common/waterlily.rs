@@ -16,6 +16,9 @@ pub const WATERLILY_PROTOCOL_VERSION: u32 = 1;
 /// Version 2 stacks `depth` two-dimensional slices per slot, front (nearest
 /// the viewer) to back, so a planar frame is exactly a volume of depth one.
 pub const WATERLILY_PROTOCOL_VERSION_VOLUMETRIC: u32 = 2;
+/// Version 3 keeps the version-2 header layout and doubles each slot so an
+/// RGBA8 material plane (octahedral normal + thickness) sits behind color.
+pub const WATERLILY_PROTOCOL_VERSION_VOLUME_MATERIAL: u32 = 3;
 pub const WATERLILY_HEADER_BYTES: usize = 64;
 /// The volumetric header keeps the version-1 prefix byte-for-byte and appends
 /// the depth plus reserved space, so both versions parse from one prefix.
@@ -46,6 +49,8 @@ pub struct WaterlilyFrameHeader {
     pub timestamp_ns: u64,
     /// Bytes the header occupies in the file; slots start right behind it.
     pub header_len: u32,
+    /// Version-3 slots carry a second RGBA plane (material) behind color.
+    pub has_material: bool,
 }
 
 impl WaterlilyFrameHeader {
@@ -61,13 +66,26 @@ impl WaterlilyFrameHeader {
         }
         let version = read_u32(bytes, 8);
         let header_len = read_u32(bytes, 12);
-        let (expected_header, depth) = match version {
-            WATERLILY_PROTOCOL_VERSION => (WATERLILY_HEADER_BYTES, 1),
+        let (expected_header, depth, has_material) = match version {
+            WATERLILY_PROTOCOL_VERSION => (WATERLILY_HEADER_BYTES, 1, false),
             WATERLILY_PROTOCOL_VERSION_VOLUMETRIC => {
                 if bytes.len() < WATERLILY_VOLUME_HEADER_BYTES {
                     return Err(invalid_data("truncated WaterLily volumetric header"));
                 }
-                (WATERLILY_VOLUME_HEADER_BYTES, read_u32(bytes, 64))
+                (WATERLILY_VOLUME_HEADER_BYTES, read_u32(bytes, 64), false)
+            }
+            WATERLILY_PROTOCOL_VERSION_VOLUME_MATERIAL => {
+                if bytes.len() < WATERLILY_VOLUME_HEADER_BYTES {
+                    return Err(invalid_data("truncated WaterLily volumetric header"));
+                }
+                let depth = read_u32(bytes, 64);
+                let material_flag = read_u32(bytes, 68);
+                if material_flag != 1 {
+                    return Err(invalid_data(
+                        "WaterLily version-3 material flag must be one",
+                    ));
+                }
+                (WATERLILY_VOLUME_HEADER_BYTES, depth, true)
             }
             _ => return Err(invalid_data("unsupported WaterLily protocol version")),
         };
@@ -116,14 +134,23 @@ impl WaterlilyFrameHeader {
             return Err(invalid_data("WaterLily frame sequence must be non-zero"));
         }
 
-        let slot_bytes = u64::from(stride)
+        // Color plane size drives the compositor volume ceiling; the published
+        // slot may be twice that when a material aux plane is present.
+        let color_bytes = u64::from(stride)
             .checked_mul(u64::from(height))
             .and_then(|plane| plane.checked_mul(u64::from(depth)))
             .ok_or_else(|| invalid_data("WaterLily slot size overflow"))?;
+        let slot_bytes = if has_material {
+            color_bytes
+                .checked_mul(2)
+                .ok_or_else(|| invalid_data("WaterLily slot size overflow"))?
+        } else {
+            color_bytes
+        };
         if slot_bytes > MAX_FRAME_BYTES {
             return Err(invalid_data("WaterLily frame exceeds the transport limit"));
         }
-        if depth > 1 && slot_bytes > MAX_WATERLILY_VOLUME_BYTES as u64 {
+        if depth > 1 && color_bytes > MAX_WATERLILY_VOLUME_BYTES as u64 {
             return Err(invalid_data(
                 "WaterLily volume exceeds the compositor limit",
             ));
@@ -138,11 +165,21 @@ impl WaterlilyFrameHeader {
             sequence,
             timestamp_ns,
             header_len,
+            has_material,
         })
     }
 
-    fn slot_bytes(self) -> u64 {
+    fn color_bytes(self) -> u64 {
         u64::from(self.stride) * u64::from(self.height) * u64::from(self.depth)
+    }
+
+    fn slot_bytes(self) -> u64 {
+        let color = self.color_bytes();
+        if self.has_material {
+            color * 2
+        } else {
+            color
+        }
     }
 
     fn slot_offset(self) -> io::Result<u64> {
@@ -177,6 +214,9 @@ pub struct WaterlilyFrame {
     pub sequence: u64,
     pub timestamp_ns: u64,
     pub rgba: Vec<u8>,
+    /// Version-3 material plane: same tight dimensions as `rgba`. RG =
+    /// octahedral normal in [0,1], B = thickness, A = validity (>127 valid).
+    pub material: Option<Vec<u8>>,
 }
 
 pub struct WaterlilyFrameReader {
@@ -234,17 +274,28 @@ impl WaterlilyFrameReader {
             .and_then(|plane| plane.checked_mul(header.depth as usize))
             .ok_or_else(|| invalid_data("WaterLily pixel buffer overflow"))?;
         let mut rgba = vec![0u8; pixel_bytes];
+        let mut material = if header.has_material {
+            Some(vec![0u8; pixel_bytes])
+        } else {
+            None
+        };
         let base = header.slot_offset()?;
         if header.stride as usize == tight_stride {
             file.read_exact_at(&mut rgba, base)?;
+            if let Some(ref mut material) = material {
+                file.read_exact_at(material, base + pixel_bytes as u64)?;
+            }
         } else {
             // Read a padded slot in one operation, then compact it in memory.
             // Doing one pread per row is prohibitively expensive for full-screen
             // producers (for example, 1080 syscalls for each 1080p frame).
             // Depth slices are row-contiguous, so one pass over every row of
-            // every slice compacts planar and volumetric slots alike.
+            // every slice compacts planar and volumetric slots alike. Version-3
+            // slots append a second padded plane immediately behind color.
             let slot_bytes = usize::try_from(header.slot_bytes())
                 .map_err(|_| invalid_data("WaterLily slot size does not fit memory"))?;
+            let color_plane = usize::try_from(header.color_bytes())
+                .map_err(|_| invalid_data("WaterLily color plane does not fit memory"))?;
             let mut padded = vec![0u8; slot_bytes];
             file.read_exact_at(&mut padded, base)?;
             let source_stride = header.stride as usize;
@@ -252,6 +303,14 @@ impl WaterlilyFrameReader {
             for row in 0..total_rows {
                 let source = &padded[row * source_stride..row * source_stride + tight_stride];
                 rgba[row * tight_stride..(row + 1) * tight_stride].copy_from_slice(source);
+            }
+            if let Some(ref mut material) = material {
+                let material_padded = &padded[color_plane..];
+                for row in 0..total_rows {
+                    let source =
+                        &material_padded[row * source_stride..row * source_stride + tight_stride];
+                    material[row * tight_stride..(row + 1) * tight_stride].copy_from_slice(source);
+                }
             }
         }
 
@@ -263,6 +322,7 @@ impl WaterlilyFrameReader {
             sequence: header.sequence,
             timestamp_ns: header.timestamp_ns,
             rgba,
+            material,
         }))
     }
 }
@@ -410,6 +470,20 @@ mod tests {
         bytes
     }
 
+    fn volume_material_header(
+        width: u32,
+        height: u32,
+        depth: u32,
+        stride: u32,
+        slot: u32,
+        sequence: u64,
+    ) -> [u8; 96] {
+        let mut bytes = volume_header(width, height, depth, stride, slot, sequence);
+        bytes[8..12].copy_from_slice(&WATERLILY_PROTOCOL_VERSION_VOLUME_MATERIAL.to_le_bytes());
+        bytes[68..72].copy_from_slice(&1u32.to_le_bytes());
+        bytes
+    }
+
     fn temp_frame_path() -> PathBuf {
         let id = NEXT_FILE.fetch_add(1, Ordering::Relaxed);
         std::env::temp_dir().join(format!("jwm-waterlily-{}-{id}.frame", std::process::id()))
@@ -429,6 +503,7 @@ mod tests {
                 sequence: 7,
                 timestamp_ns: 1234,
                 header_len: WATERLILY_HEADER_BYTES as u32,
+                has_material: false,
             }
         );
     }
@@ -447,8 +522,33 @@ mod tests {
                 sequence: 4,
                 timestamp_ns: 1234,
                 header_len: WATERLILY_VOLUME_HEADER_BYTES as u32,
+                has_material: false,
             }
         );
+    }
+
+    #[test]
+    fn parses_the_volume_material_contract() {
+        let parsed =
+            WaterlilyFrameHeader::parse(&volume_material_header(2, 3, 5, 8, 0, 4)).unwrap();
+        assert_eq!(
+            parsed,
+            WaterlilyFrameHeader {
+                width: 2,
+                height: 3,
+                depth: 5,
+                stride: 8,
+                slot: 0,
+                sequence: 4,
+                timestamp_ns: 1234,
+                header_len: WATERLILY_VOLUME_HEADER_BYTES as u32,
+                has_material: true,
+            }
+        );
+        assert_eq!(parsed.slot_bytes(), parsed.color_bytes() * 2);
+        let mut bad_flag = volume_material_header(2, 3, 5, 8, 0, 4);
+        bad_flag[68..72].copy_from_slice(&0u32.to_le_bytes());
+        assert!(WaterlilyFrameHeader::parse(&bad_flag).is_err());
     }
 
     #[test]
@@ -573,6 +673,48 @@ mod tests {
         assert_eq!(frame.depth, 3);
         assert_eq!(frame.sequence, 6);
         assert_eq!(frame.rgba, (1..=24).collect::<Vec<u8>>());
+        assert!(frame.material.is_none());
+
+        drop(file);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn reader_returns_volume_material_planes() {
+        let path = temp_frame_path();
+        let file = OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .mode(0o600)
+            .open(&path)
+            .unwrap();
+        // 1x2 pixels, 3 depth slices, padded stride 12: color plane 72 bytes,
+        // material plane another 72, doubled slots behind the 96-byte header.
+        let color_plane = 72usize;
+        let slot_bytes = color_plane * 2;
+        file.set_len(96 + 2 * slot_bytes as u64).unwrap();
+        file.write_all_at(&volume_material_header(1, 2, 3, 12, 1, 6), 0)
+            .unwrap();
+        let mut slot = vec![0u8; slot_bytes];
+        for row in 0..6 {
+            for byte in 0..4 {
+                slot[row * 12 + byte] = (row * 4 + byte + 1) as u8;
+                slot[color_plane + row * 12 + byte] = (100 + row * 4 + byte) as u8;
+            }
+        }
+        file.write_all_at(&vec![0u8; slot_bytes], 96).unwrap();
+        file.write_all_at(&slot, 96 + slot_bytes as u64).unwrap();
+
+        let mut reader = WaterlilyFrameReader::new(path.clone());
+        let frame = reader.read_latest().unwrap().unwrap();
+        assert_eq!(frame.depth, 3);
+        assert_eq!(frame.sequence, 6);
+        assert_eq!(frame.rgba, (1..=24).collect::<Vec<u8>>());
+        assert_eq!(
+            frame.material.as_ref().unwrap(),
+            &(100..=123).collect::<Vec<u8>>()
+        );
 
         drop(file);
         std::fs::remove_file(path).unwrap();

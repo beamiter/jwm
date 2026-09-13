@@ -360,6 +360,12 @@ pub(super) const WATERLILY_VOLUME_FRAGMENT_SHADER: &str = r#"#version 330 core
 
 uniform sampler3D u_volume;
 uniform sampler3D u_occupancy;
+// Optional version-3 material volume: RG = octahedral unit normal in [0,1],
+// B = optical thickness, A > 0 marks a valid authored normal. Absent on
+// version-2 frames (u_material_available == 0), the marcher falls back to
+// density-gradient normals exactly as before.
+uniform sampler3D u_material;
+uniform int u_material_available;
 uniform sampler2D u_scene_texture;
 uniform int u_scene_available;
 uniform vec2 u_screen_size;
@@ -396,6 +402,13 @@ const float WATER_BACKDROP_ALPHA = 0.42;
 // top glass rim.
 const float WATER_LEVEL_RATIO = 0.88;
 const float WATER_F0 = 0.0203731878;
+const float GLASS_IOR = 1.52;
+const float WATER_IOR = 1.333;
+// Fixed screen-space scale that maps a unit world reflection direction onto
+// the frosted desktop snapshot. Deterministic and bit-stable.
+const float SCENE_REFLECT_SCALE = 0.085;
+const float GLASS_WALL_THICKNESS = 0.018;
+const float CHROMATIC_DISPERSION = 0.55;
 
 vec2 clamp_scene_uv(vec2 uv) {
     vec2 guard_uv = 0.5 / max(u_screen_size, vec2(1.0));
@@ -426,6 +439,43 @@ vec3 frosted_scene(vec2 uv) {
         }
     }
     return sum / max(total, 1e-5);
+}
+
+// Reflect a view ray off a unit normal into the frosted desktop snapshot.
+// Uses the same scene texture as transmission so an unchanged frame stays
+// bit-identical; LOD 1.75 keeps wallpaper grain from stippling the glass.
+vec3 frosted_scene_reflect(vec2 screen_uv, vec3 ray, vec3 normal) {
+    vec3 reflected = reflect(ray, normal);
+    vec2 offset = vec2(
+        dot(reflected, u_camera_right),
+        dot(reflected, u_camera_up)
+    ) * SCENE_REFLECT_SCALE;
+    return textureLod(
+        u_scene_texture,
+        clamp_scene_uv(screen_uv + offset),
+        1.75
+    ).rgb;
+}
+
+// Decode an octahedral unit normal packed into RG as [0,1] → [-1,1].
+vec3 decode_octahedral(vec2 encoded) {
+    vec2 f = encoded * 2.0 - 1.0;
+    vec3 n = vec3(f.x, 1.0 - abs(f.x) - abs(f.y), f.y);
+    float t = clamp(-n.y, 0.0, 1.0);
+    n.x += n.x >= 0.0 ? -t : t;
+    n.z += n.z >= 0.0 ? -t : t;
+    return normalize(n);
+}
+
+// Snell refraction of a unit incident into a unit normal; returns the
+// incident unchanged when total internal reflection would occur.
+vec3 snell_refract(vec3 incident, vec3 normal, float eta) {
+    float n_dot_i = dot(normal, incident);
+    float k = 1.0 - eta * eta * (1.0 - n_dot_i * n_dot_i);
+    if (k < 0.0) {
+        return incident;
+    }
+    return normalize(eta * incident - (eta * n_dot_i + sqrt(k)) * normal);
 }
 
 // Slab intersection with the volume box. IEEE infinities from axis-parallel
@@ -630,6 +680,8 @@ void main() {
     vec3 front_normal_sum = vec3(0.0);
     float front_surface_weight = 0.0;
     float front_depth_sum = 0.0;
+    float front_thickness_sum = 0.0;
+    float tissue_shadow = 1.0;
 
     vec2 tank_span = box_span(u_camera_position, ray);
     float tank_entry = max(tank_span.x, 0.0);
@@ -739,23 +791,41 @@ void main() {
             float material = smoothstep(0.12, 0.28, voxel.a);
             vec3 normal = view_direction;
             float boundary = 0.0;
+            float authored_thickness = 0.0;
             if (u_scene_available == 1
                 && front_surface_weight < 0.10
                 && material > 0.0) {
-                vec3 gradient = stable_tissue_gradient(tex);
-                float gradient_length = length(gradient);
-                boundary = smoothstep(0.012, 0.14, gradient_length);
-                if (gradient_length > 1e-5) {
-                    normal = -gradient / gradient_length;
-                    if (dot(normal, view_direction) < 0.0) {
-                        normal = -normal;
+                bool used_authored_normal = false;
+                if (u_material_available == 1) {
+                    vec4 authored = texture(u_material, clamp(tex, vec3(0.0), vec3(1.0)));
+                    authored_thickness = authored.b;
+                    if (authored.a > 0.5) {
+                        // Producer publishes world-space octahedral normals
+                        // (x, vertical, depth) matching the aquarium basis.
+                        normal = decode_octahedral(authored.rg);
+                        if (dot(normal, view_direction) < 0.0) {
+                            normal = -normal;
+                        }
+                        boundary = clamp(authored.a, 0.0, 1.0);
+                        used_authored_normal = true;
                     }
-                    // A near-zero gradient (the flat middle of the shell
-                    // profile) has a noisy direction; fade such normals
-                    // toward the view vector instead of making refraction
-                    // shimmer. Both inputs are unit vectors
-                    // in the same hemisphere, so the mix cannot collapse.
-                    normal = normalize(mix(view_direction, normal, boundary));
+                }
+                if (!used_authored_normal) {
+                    vec3 gradient = stable_tissue_gradient(tex);
+                    float gradient_length = length(gradient);
+                    boundary = smoothstep(0.012, 0.14, gradient_length);
+                    if (gradient_length > 1e-5) {
+                        normal = -gradient / gradient_length;
+                        if (dot(normal, view_direction) < 0.0) {
+                            normal = -normal;
+                        }
+                        // A near-zero gradient (the flat middle of the shell
+                        // profile) has a noisy direction; fade such normals
+                        // toward the view vector instead of making refraction
+                        // shimmer. Both inputs are unit vectors
+                        // in the same hemisphere, so the mix cannot collapse.
+                        normal = normalize(mix(view_direction, normal, boundary));
+                    }
                 }
             }
 
@@ -784,8 +854,15 @@ void main() {
             // and salt-and-pepper points. The producer's apex-to-rim albedo,
             // world-height key and front-to-back haze still give coherent 3D
             // form, while the reconstructed normal is reserved for the one
-            // actual front interface used by refraction below.
+            // actual front interface used by refraction below. When the
+            // producer publishes optical thickness (version 3), a single
+            // Beer-wrap SSS lift replaces the former flat tissue fill.
             float tissue_fill = mix(0.88, 1.04, haze);
+            if (u_material_available == 1 && authored_thickness > 1e-4) {
+                float sss = exp(-1.8 * authored_thickness)
+                          * mix(0.92, 1.12, haze);
+                tissue_fill = mix(tissue_fill, sss, material * 0.85);
+            }
             vec3 tissue_emission = albedo * depth_light * tissue_fill;
 
             vec3 emission = mix(wake_emission, tissue_emission, material);
@@ -821,8 +898,36 @@ void main() {
                 front_normal_sum += normal * accepted_interface_weight;
                 front_depth_sum += (t - entry) / max(chord, 1e-5)
                                  * accepted_interface_weight;
+                front_thickness_sum += authored_thickness * accepted_interface_weight;
                 front_surface_weight += accepted_interface_weight;
             }
+        }
+
+        // Soft transmittance shadow toward the fixed key light, evaluated
+        // once from the captured front interface. Strictly gated on tissue
+        // so wake-only volumes never pick up concentric shell darkening.
+        if (u_material_available == 1
+            && front_surface_weight > 1e-4
+            && length(front_normal_sum) > 1e-4) {
+            vec3 shadow_origin = u_camera_position
+                + ray * (entry + (front_depth_sum / max(front_surface_weight, 1e-5))
+                         * max(chord, 1e-5));
+            float shadow_accum = 0.0;
+            for (int s = 0; s < 6; ++s) {
+                float shadow_t = (float(s) + 0.5) * reference * 0.85;
+                vec3 shadow_pos = shadow_origin + light_direction * shadow_t;
+                vec3 shadow_tex = world_to_texture(shadow_pos);
+                if (any(lessThan(shadow_tex, vec3(0.0)))
+                    || any(greaterThan(shadow_tex, vec3(1.0)))) {
+                    break;
+                }
+                if (texture(u_occupancy, shadow_tex).a <= 1e-6) {
+                    continue;
+                }
+                float shadow_alpha = texture(u_volume, shadow_tex).a;
+                shadow_accum += max(shadow_alpha - WAKE_ALPHA_CEILING, 0.0);
+            }
+            tissue_shadow = exp(-2.4 * shadow_accum);
         }
     }
 
@@ -853,6 +958,7 @@ void main() {
         );
         float surface_light = mix(0.96, 1.06, surface_key);
         accumulated *= mix(1.0, surface_light, interface_confidence);
+        accumulated *= mix(1.0, tissue_shadow, interface_confidence * 0.55);
     }
 
     // Refract the captured desktop only through the water actually crossed by
@@ -868,7 +974,23 @@ void main() {
         1.0
     );
     if (u_scene_available == 1 && wet_fraction > 1e-4) {
-        vec2 refracted_uv = screen_uv;
+        // Multi-IOR path: air → glass → water, then an optional tissue bend.
+        // Fixed chromatic offsets keep the rainbow subtle and bit-stable.
+        vec3 glass_normal = tank_entry_normal;
+        vec3 through_glass = snell_refract(ray, glass_normal, 1.0 / GLASS_IOR);
+        through_glass = normalize(
+            through_glass + glass_normal * (-GLASS_WALL_THICKNESS * 0.35)
+        );
+        vec3 through_water = snell_refract(
+            through_glass,
+            glass_normal,
+            GLASS_IOR / WATER_IOR
+        );
+        vec2 base_offset = vec2(
+            dot(through_water - ray, u_camera_right),
+            dot(through_water - ray, u_camera_up)
+        ) * (10.0 + 18.0 * wet_fraction);
+        vec2 refracted_uv = screen_uv + base_offset / max(u_screen_size, vec2(1.0));
         float reflection_mix = 0.0;
         if (front_surface_weight > 1e-4 && front_normal_length > 1e-4) {
             normal_screen = vec2(
@@ -890,22 +1012,42 @@ void main() {
                 front_surface_weight
             );
         }
-        vec3 transmission = frosted_scene(refracted_uv);
+        // Mild fixed chromatic split of the multi-IOR offset.
+        vec2 chroma = normalize(base_offset + vec2(1e-5))
+                    * CHROMATIC_DISPERSION / max(u_screen_size, vec2(1.0));
+        vec3 transmission = vec3(
+            frosted_scene(refracted_uv - chroma).r,
+            frosted_scene(refracted_uv).g,
+            frosted_scene(refracted_uv + chroma).b
+        );
         if (reflection_mix > 0.0) {
             // A gently prefiltered tap: a full-resolution one re-imported the
             // desktop's pixel-level texture as noise on every tissue surface.
             // Keep it behind the confidence gate so clear water and wake-only
             // rays do not pay for a sample whose blend weight is exactly zero.
-            vec3 reflection = textureLod(
-                u_scene_texture,
-                clamp_scene_uv(screen_uv - normal_screen * 0.010),
-                1.5
-            ).rgb;
+            vec3 reflection = frosted_scene_reflect(screen_uv, ray, front_normal);
             transmission = mix(
                 transmission,
                 reflection,
                 reflection_mix * 0.68
             );
+        }
+
+        // Deterministic caustic: project front thickness / coverage toward the
+        // fixed key light into transmission UV and brighten the frosted desktop.
+        float caustic = 0.0;
+        if (front_surface_weight > 1e-4) {
+            float thickness = front_thickness_sum
+                            / max(front_surface_weight, 1e-5);
+            vec3 light_direction = normalize(vec3(-0.46, 0.78, -0.42));
+            vec2 caustic_uv = refracted_uv
+                + vec2(
+                    dot(light_direction, u_camera_right),
+                    dot(light_direction, u_camera_up)
+                ) * (0.012 + 0.04 * thickness);
+            float lens = smoothstep(0.02, 0.22, thickness + coverage * 0.35);
+            caustic = lens * (0.55 + 0.45 * frosted_scene(caustic_uv).g);
+            transmission *= 1.0 + 0.22 * caustic * interface_confidence;
         }
 
         float optical_depth = clamp(chord / diagonal * 2.4, 0.0, 1.4);
@@ -931,8 +1073,11 @@ void main() {
     // it catches a broad reflection; near its intersection with the four tank
     // walls it becomes the clearly visible water line.  Three traveling
     // sine waves animate a gentle open-water swell whose crests catch
-    // moving glints, driven by the frame timestamp through u_time.
+    // moving glints, driven by the frame timestamp through u_time. A thin
+    // meniscus band brightens the contact line against the glass.
     float surface_strength = 0.0;
+    vec3 surface_reflect = vec3(0.0);
+    float surface_reflect_weight = 0.0;
     if (abs(ray.y) > 1e-6) {
         float surface_y = u_box_half_extents.y * WATER_LEVEL_RATIO;
         float surface_t = (surface_y - u_camera_position.y) / ray.y;
@@ -957,14 +1102,37 @@ void main() {
                     0.996,
                     max(surface_q.x, surface_q.y)
                 );
+                // Thin meniscus: a second, slightly inset rim that reads as
+                // the water climbing the glass rather than a hard rectangle.
+                float meniscus = smoothstep(0.905, 0.975, max(surface_q.x, surface_q.y))
+                               * (1.0 - smoothstep(0.985, 0.999, max(surface_q.x, surface_q.y)));
                 float surface_fresnel = WATER_F0
                     + (1.0 - WATER_F0) * pow(1.0 - abs(ray.y), 5.0);
                 surface_strength = (0.014
                                     + 0.11 * surface_fresnel
-                                    + 0.26 * surface_edge)
+                                    + 0.26 * surface_edge
+                                    + 0.18 * meniscus)
                                  * (0.80 + 0.28 * swell)
                                  + 0.10 * glint
-                                     * (0.35 + 0.65 * surface_fresnel);
+                                     * (0.35 + 0.65 * surface_fresnel)
+                                 + 0.08 * meniscus * (0.6 + 0.4 * glint);
+                if (u_scene_available == 1) {
+                    vec3 water_normal = normalize(vec3(
+                        0.045 * cos(dot(span, vec2(9.1, 4.7)) + wave_phase * 13.0),
+                        1.0,
+                        0.045 * cos(dot(span, vec2(-5.3, 7.9)) + wave_phase * 21.0)
+                    ));
+                    surface_reflect = frosted_scene_reflect(
+                        screen_uv,
+                        ray,
+                        water_normal
+                    );
+                    surface_reflect_weight = clamp(
+                        0.20 * surface_fresnel + 0.35 * surface_edge + 0.25 * meniscus,
+                        0.0,
+                        0.55
+                    );
+                }
             }
         }
     }
@@ -985,11 +1153,16 @@ void main() {
     // The front pane/rim and water surface are then composited over it.  All
     // terms remain premultiplied to match the compositor blend state.
     float rear_glass_alpha = 0.20 * back_edge;
-    vec3 rear_glass_color = mix(
+    vec3 rear_glass_tint = mix(
         vec3(0.10, 0.55, 0.62),
         vec3(0.78, 0.98, 1.0),
         back_edge
     );
+    if (u_scene_available == 1 && rear_glass_alpha > 1e-4) {
+        vec3 rear_reflect = frosted_scene_reflect(screen_uv, ray, tank_exit_normal);
+        rear_glass_tint = mix(rear_glass_tint, rear_reflect, 0.42 * back_edge);
+    }
+    vec3 rear_glass_color = rear_glass_tint;
     vec3 behind = rear_glass_color * rear_glass_alpha
                 + (1.0 - rear_glass_alpha) * water_backdrop;
     float behind_alpha = rear_glass_alpha
@@ -1018,6 +1191,22 @@ void main() {
         vec3(0.88, 1.0, 0.98),
         glass_highlight
     );
+    if (u_scene_available == 1 && front_glass_alpha > 1e-4) {
+        vec3 front_reflect = frosted_scene_reflect(screen_uv, ray, tank_entry_normal);
+        float reflect_mix = clamp(
+            0.28 * glass_fresnel + 0.45 * front_edge + surface_reflect_weight,
+            0.0,
+            0.72
+        );
+        front_glass_color = mix(front_glass_color, front_reflect, reflect_mix);
+        if (surface_reflect_weight > 1e-4) {
+            front_glass_color = mix(
+                front_glass_color,
+                surface_reflect,
+                surface_reflect_weight * 0.65
+            );
+        }
+    }
     premultiplied = front_glass_color * front_glass_alpha
                   + premultiplied * (1.0 - front_glass_alpha);
     alpha = front_glass_alpha + alpha * (1.0 - front_glass_alpha);

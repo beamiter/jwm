@@ -761,12 +761,14 @@ pub(super) struct WaterlilyUniforms {
     pub(super) opacity: Option<glow::UniformLocation>,
 }
 
-/// Uniforms of the volumetric WaterLily ray-marcher (version-2 frames).
+/// Uniforms of the volumetric WaterLily ray-marcher (version-2/3 frames).
 pub(super) struct WaterlilyVolumeUniforms {
     pub(super) projection: Option<glow::UniformLocation>,
     pub(super) rect: Option<glow::UniformLocation>,
     pub(super) volume: Option<glow::UniformLocation>,
     pub(super) occupancy: Option<glow::UniformLocation>,
+    pub(super) material: Option<glow::UniformLocation>,
+    pub(super) material_available: Option<glow::UniformLocation>,
     pub(super) scene_texture: Option<glow::UniformLocation>,
     pub(super) scene_available: Option<glow::UniformLocation>,
     pub(super) screen_size: Option<glow::UniformLocation>,
