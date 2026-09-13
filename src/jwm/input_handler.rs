@@ -1053,7 +1053,15 @@ impl Jwm {
                     }
                 }
                 ControlKind::AudioOutput | ControlKind::AudioInput => {
-                    if activate {
+                    // Input's `m` mirrors Volume's sink mute: only while this
+                    // row is selected, so Volume keeps its own `m`.
+                    if control == ControlKind::AudioInput && keysym == keys::KEY_m {
+                        if let Err(error) =
+                            self.toggle_mic_mute(backend, &WMArgEnum::Int(0))
+                        {
+                            log::debug!("control center mic mute: {error}");
+                        }
+                    } else if activate {
                         let direction = if control == ControlKind::AudioOutput {
                             system_controls::AudioDirection::Output
                         } else {
@@ -1776,7 +1784,7 @@ impl Jwm {
 
         if let Some(control) = self.features.system_ui.selected_control() {
             // Media row: each transport glyph is the pointer twin of its key
-            // (← / Return / → / `p`); the title and status icon keep the
+            // (← / Return / → / `p` / `o`); the title and status icon keep the
             // Return → PlayPause path a whole-row click always took.
             if control == crate::jwm::features::system_ui::ControlKind::Media
                 && let Some(state) = self.features.media.get().cloned()
@@ -1798,6 +1806,14 @@ impl Jwm {
                         let _ = self.cycle_media_player();
                         return Ok(());
                     }
+                    MediaRowClick::OpenPicker => {
+                        // Same path as KEY_o: open Players and return to Hub.
+                        self.features.system_ui_return_to_hub = true;
+                        self.features.system_ui =
+                            crate::jwm::features::SystemUiState::media_players_picker(&state);
+                        self.sync_system_ui(backend);
+                        return Ok(());
+                    }
                     MediaRowClick::Previous => {
                         let _ = self.send_media_command(
                             crate::jwm::features::MediaCommand::Previous,
@@ -1810,6 +1826,39 @@ impl Jwm {
                         return Ok(());
                     }
                     MediaRowClick::PlayPause => {}
+                }
+            }
+            // Input row: the microphone glyph toggles mute (same path as
+            // `m` / XF86AudioMicMute); the label and device name keep opening
+            // the input picker via Return.
+            if control == crate::jwm::features::system_ui::ControlKind::AudioInput {
+                use crate::jwm::features::system_ui::AudioInputClick;
+                let mic_muted = self
+                    .features
+                    .control_snapshot
+                    .as_ref()
+                    .and_then(|snapshot| snapshot.mic_muted);
+                let config = CONFIG.load();
+                let description = config.system_ui_font();
+                let pixel_size =
+                    crate::backend::compositor_font::ui_font_pixel_size(description);
+                let measure = |text: &str| {
+                    crate::backend::compositor_font::measure_ui_text_width(
+                        text,
+                        description,
+                        pixel_size,
+                    ) as f32
+                };
+                if crate::jwm::features::system_ui::audio_input_click_action(
+                    text_x, measure, mic_muted,
+                ) == AudioInputClick::ToggleMute
+                {
+                    if let Err(error) =
+                        self.toggle_mic_mute(backend, &WMArgEnum::Int(0))
+                    {
+                        log::debug!("control center mic mute: {error}");
+                    }
+                    return Ok(());
                 }
             }
             self.handle_control_center_key(backend, control, keys::KEY_Return, Mods::empty());
@@ -3844,6 +3893,123 @@ mod tests {
         assert!(
             arm.contains(&format!("{}(", "set_profile")),
             "the Power Profile row no longer switches the profile"
+        );
+    }
+
+    /// The Input row's microphone glyph and `m` must ride `toggle_mic_mute`
+    /// (OSD + worker), while the rest of the row — and Return — still open
+    /// the device picker. Volume keeps its own `m`; the Media transport
+    /// match stays byte-stable. Needles are built at runtime so this cannot
+    /// match its own source.
+    #[test]
+    fn the_input_row_routes_mic_mute_through_the_key_path() {
+        const SOURCE: &str = include_str!("input_handler.rs");
+        let audio_arm = SOURCE
+            .split_once(&format!("fn {}(", "handle_control_center_key"))
+            .expect("handle_control_center_key")
+            .1
+            .split_once("ControlKind::AudioOutput | ControlKind::AudioInput =>")
+            .expect("the audio Output/Input arm")
+            .1
+            .split_once("ControlKind::Battery")
+            .expect("the arm that follows it")
+            .0;
+        assert!(
+            audio_arm.contains("keys::KEY_m"),
+            "the Input row no longer accepts m for mic mute"
+        );
+        assert!(
+            audio_arm.contains(&format!("{}(", "toggle_mic_mute")),
+            "Input's m must call toggle_mic_mute (OSD path), not invent a mute"
+        );
+        assert!(
+            audio_arm.contains("AudioDirection::Input"),
+            "Return on the Input row must still open the input picker"
+        );
+
+        let volume_arm = SOURCE
+            .split_once(&format!("fn {}(", "handle_control_center_key"))
+            .expect("handle_control_center_key")
+            .1
+            .split_once(&format!("{}::{} =>", "ControlKind", "Volume"))
+            .expect("the Volume arm")
+            .1
+            .split_once(&format!("{}::{} =>", "ControlKind", "Brightness"))
+            .expect("the arm that follows Volume")
+            .0;
+        assert!(
+            volume_arm.contains("keys::KEY_m"),
+            "Volume must keep m for sink mute — Input must not steal it"
+        );
+
+        let pointer = SOURCE
+            .split_once(&format!("fn {}(", "activate_system_ui_pointer_row"))
+            .expect("activate_system_ui_pointer_row")
+            .1
+            .split_once(&format!("fn {}(", "notification_strip_chip_at"))
+            .expect("the end of activate_system_ui_pointer_row")
+            .0;
+        assert!(
+            pointer.contains(&format!("{}(", "audio_input_click_action")),
+            "the Input row pointer path no longer hit-tests the mic glyph"
+        );
+        assert!(
+            pointer.contains("AudioInputClick::ToggleMute"),
+            "an icon-zone press must take the mute arm"
+        );
+        assert!(
+            pointer.contains(&format!("{}(", "toggle_mic_mute")),
+            "an icon-zone press must call toggle_mic_mute"
+        );
+        // OpenPicker falls through to Return — the picker path.
+        assert!(
+            pointer.contains("keys::KEY_Return"),
+            "the rest of the Input row must still activate via Return"
+        );
+        // Media pointer zones stay on their own match; OpenPicker mirrors KEY_o
+        // without touching the AudioInput mic arm that follows.
+        assert!(
+            pointer.contains("MediaRowClick::Cycle"),
+            "media pointer routing drifted"
+        );
+        assert!(
+            pointer.contains("MediaRowClick::PlayPause"),
+            "media pointer routing drifted"
+        );
+        assert!(
+            pointer.contains("MediaRowClick::OpenPicker"),
+            "media pointer must route · o to OpenPicker"
+        );
+        let media = pointer
+            .split_once("ControlKind::Media")
+            .expect("the Media pointer arm")
+            .1
+            .split_once("ControlKind::AudioInput")
+            .expect("the AudioInput pointer arm follows Media")
+            .0;
+        assert!(
+            media.contains("media_players_picker"),
+            "OpenPicker must open the Players picker like KEY_o"
+        );
+        assert!(
+            media.contains("system_ui_return_to_hub"),
+            "OpenPicker must set return-to-hub like KEY_o"
+        );
+        assert!(
+            !media.contains("toggle_mic_mute"),
+            "the Media pointer arm must not call toggle_mic_mute"
+        );
+        let audio_input = pointer
+            .split_once("ControlKind::AudioInput")
+            .expect("the AudioInput pointer arm")
+            .1;
+        assert!(
+            audio_input.contains(&format!("{}(", "audio_input_click_action")),
+            "AudioInput mic hit-test must stay intact"
+        );
+        assert!(
+            audio_input.contains("AudioInputClick::ToggleMute"),
+            "AudioInput mute arm must stay intact"
         );
     }
 

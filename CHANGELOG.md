@@ -7,6 +7,16 @@ monorepo use independent Semantic Versions.
 
 ### Added
 
+- Control-center Input row: click the mic icon (or press `m` while the row is
+  selected) toggles mute through the same OSD path as `XF86AudioMicMute`;
+  the rest of the row still opens the audio-input device picker. See
+  [docs/control-center.md](docs/control-center.md) and
+  [docs/media-controls.md](docs/media-controls.md).
+
+- Multi-player media rows append a trailing `· o` hit target that opens the
+  Players picker like the `o` key; `· p ‹next›` still cycles. Single-player
+  rows stay unchanged. See [docs/media-controls.md](docs/media-controls.md).
+
 - Control-center Power Profile `Left`/`Right` and IPC `set_power_profile`
   raise a labeled Power Profile OSD (same icons as the Hub row, no bar).
   See [docs/control-center.md](docs/control-center.md).
@@ -139,6 +149,11 @@ monorepo use independent Semantic Versions.
   geometry is untouched. See [README.md](README.md#the-screenshot-editor).
 
 ### Fixed
+
+- X11 screenshot→clipboard no longer toasts a false failure when the worker
+  already offered the PNG and a later poll re-offer fails; Wayland’s
+  first-offer-on-poll failure path stays Failed. See
+  [docs/clipboard.md](docs/clipboard.md).
 
 - `Enter` (join) in the Wi-Fi picker while a forget is still deleting its
   profile is now a no-op instead of racing the delete and the re-read its

@@ -32,7 +32,8 @@ hides the skip glyphs a player says it cannot honor (`CanGoNext` /
 pointer mirrors the keyboard on those glyphs: a click on the previous /
 next arrow skips, a click on the title or status icon play/pauses, and —
 with more than one player — a click on the trailing `· p ‹next›` hint
-cycles players. When the player reports both a position and a length, the
+cycles players while a click on the trailing `· o` opens the Players
+picker. When the player reports both a position and a length, the
 row shows `m:ss / m:ss` (`h:mm:ss` past an hour) — clamped to the track's
 length for display, refreshed on the bridge's sweep, holding the last
 polled position while paused, and reset on a track change; streams and
@@ -68,7 +69,10 @@ The flag has three more consumers. The control center's Input row is the
 indicator: while the default source is muted it wears the slashed
 microphone icon the OSD uses, and an unmuted or never-read flag draws the
 row exactly as before; an open control center repaints when a read-back
-corrects or reverts the shown state. `set_mic_mute {"muted": bool}`
+corrects or reverts the shown state. A click on that microphone glyph —
+or `m` while the Input row is selected — toggles mute the same way the
+key does (OSD included); a click on the rest of the row still opens the
+input device picker. `set_mic_mute {"muted": bool}`
 sets the flag over IPC — queued, like the volume keys, and deliberately
 unlike `set_audio_device`'s synchronous confirmed reply: the `ok` ack is
 immediate and the OSD draws the optimistic estimate, then the worker's
@@ -98,9 +102,10 @@ request, so pressing play after switching players drives the one now in front.
 
 The ranking loses to a pin. With more than one player running, the media row
 ends with a `· p ‹next player›` hint naming what the key would switch to
-(`· p spotify`), and pressing `p` — or clicking that hint — pins the row —
-and the transport keys with it — to that next player, wrapping around the
-list. Pressing `o` opens a Players picker listing every player the sweep
+(`· p spotify`), then a `· o` hint for the Players picker, and pressing `p`
+— or clicking that `· p` hint — pins the row — and the transport keys with
+it — to that next player, wrapping around the list. Pressing `o` — or
+clicking `· o` — opens a Players picker listing every player the sweep
 saw (filled marker on the active one). When the bridge sends
 `player_details`, each row prefers the player's MPRIS `Identity` over the
 bus suffix and trails a Playing/Paused/Stopped icon; without details (an

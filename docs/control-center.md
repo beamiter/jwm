@@ -44,7 +44,13 @@ row you scrolled). A slider's 20-cell bar itself takes press-and-drag: pressing
 on the bar sets the value to the pointed position and tracks the pointer until
 release, while pressing anywhere else on the row keeps the row's `Enter`
 action — so a click beside the bar still toggles mute on Volume, and setting a
-level on a muted sink unmutes it. However a change is made, the row and the
+level on a muted sink unmutes it. On the Input row, a click on the
+microphone glyph toggles mic mute (the pointer twin of `m`); a click on
+the label or device name still opens the input picker. On the Media row,
+with more than one player, a click on `· p ‹next›` cycles players and a
+click on trailing `· o` opens the Players picker (the pointer twins of
+`p` and `o`); transport glyphs and the title keep their skip / play-pause
+roles. However a change is made, the row and the
 OSD redraw instantly from an optimistic estimate while the real adjustment
 runs on a background controls worker that coalesces to the newest level — a
 full drag sweep costs a couple of tool invocations, not two per percent —
@@ -90,12 +96,12 @@ PipeWire output and input defaults come from one shared `wpctl status` read.
 
 | Row | Appears when | Keys |
 | --- | --- | --- |
-| Media | An MPRIS player is running | `Left`/`Right` skip, `Enter` play/pause, `p` pins the next player, `o` opens the Players picker |
+| Media | An MPRIS player is running | `Left`/`Right` skip, `Enter` play/pause, `p` pins the next player, `o` opens the Players picker (pointer: `· p` / `· o`) |
 | Network | A wireless radio exists (`nmcli` or `rfkill`) | `Enter` opens the picker, `Left`/`Right` toggles the radio |
 | Bluetooth | A controller exists (`bluetoothctl` or `rfkill`) | `Enter` opens the picker, `Left`/`Right` toggles power |
 | Volume | `wpctl`, `pactl`, or `amixer` works | `Left`/`Right` adjust, `Enter`/`m` mute |
 | Output | The sound server can switch devices (`wpctl` or `pactl`) | `Enter` opens the [device picker](#audio-device-pickers) |
-| Input | Same | `Enter` opens the input picker |
+| Input | Same | `Enter` opens the input picker, `m` toggles the microphone |
 | Brightness | `brightnessctl` or `/sys/class/backlight` | `Left`/`Right` adjust |
 | Battery | A `power_supply` device of type `Battery` exists | read-only |
 | CPU | `/proc/stat` is readable | read-only ([resource rows](resources.md)) |
@@ -128,7 +134,10 @@ The Input row doubles as the microphone's mute indicator: it wears the
 slashed microphone icon while the default source is muted, and renders
 exactly as it always has when the flag is unmuted or was never read. A mic
 read-back that corrects or reverts the shown flag repaints an open panel
-through the same rebuild. See
+through the same rebuild. A click on the microphone glyph — or `m` while
+the row is selected — toggles mute through the same path as
+`XF86AudioMicMute` (optimistic OSD, worker read-back); a click anywhere
+else on the row still opens the input device picker. See
 [media controls](media-controls.md#microphone-mute).
 
 ## Opening the shell from a status bar

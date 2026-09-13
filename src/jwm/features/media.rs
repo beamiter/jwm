@@ -343,15 +343,17 @@ pub fn next_player<'a>(players: &'a [String], active: &str) -> Option<&'a str> {
 }
 
 /// What a pointer press on the control-center media row does. The keyboard
-/// already owns Left/Right skip, Return play/pause, and `p` cycle; the
-/// pointer mirrors each on the glyph that draws it. Track title and status
-/// icon stay PlayPause so ordinary clicks are unchanged.
+/// already owns Left/Right skip, Return play/pause, `p` cycle, and `o`
+/// Players picker; the pointer mirrors each on the glyph that draws it.
+/// Track title and status icon stay PlayPause so ordinary clicks are
+/// unchanged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MediaRowClick {
     Previous,
     PlayPause,
     Next,
     Cycle,
+    OpenPicker,
 }
 
 /// The trailing switch hint `control_row` appends when `p` has somewhere to
@@ -361,6 +363,15 @@ pub enum MediaRowClick {
 pub fn switch_hint(state: &MediaState) -> Option<String> {
     next_player(&state.players, &state.player)
         .map(|player| format!(" \u{b7} p {player}"))
+}
+
+/// The trailing Players-picker hint `control_row` appends when `o` has a
+/// list to open. Kept separate from [`switch_hint`] so a press on `· o`
+/// never lands in the `· p ‹next›` Cycle zone. `None` with fewer than two
+/// players — single-player rows stay byte-identical.
+#[must_use]
+pub fn picker_hint(state: &MediaState) -> Option<&'static str> {
+    (state.players.len() >= 2).then_some(" \u{b7} o")
 }
 
 /// Pieces of [`control_row_prefix`] measured separately so pointer hit-tests
@@ -413,22 +424,26 @@ fn control_row_prefix(state: &MediaState) -> String {
 /// the player says it supports. When the player reports both a position and
 /// a length, the row carries them as `2:41 / 4:05` after the track label.
 /// With more than one player on the bus the row ends with a `· p ‹next›`
-/// hint naming the player the `p` key would switch to; a one-player row —
-/// or one fed by an old bridge — stays byte-identical to before.
+/// hint naming the player the `p` key would switch to, then a `· o` hint
+/// for the Players picker; a one-player row — or one fed by an old bridge —
+/// stays byte-identical to before.
 #[must_use]
 pub fn control_row(state: &MediaState) -> String {
     let switch = switch_hint(state).unwrap_or_default();
-    format!("{}{switch}", control_row_prefix(state))
+    let picker = picker_hint(state).unwrap_or_default();
+    format!("{}{switch}{picker}", control_row_prefix(state))
 }
 
-/// Pointer counterparts of Left / Return / Right / `p` on the media row.
-/// `measure` is the panel font's advance in px (the same probe the slider
-/// and notification chips use); `TEXT_PAD` matches the texture margin baked
-/// into those measurements so each zone starts where the drawn glyph starts.
+/// Pointer counterparts of Left / Return / Right / `p` / `o` on the media
+/// row. `measure` is the panel font's advance in px (the same probe the
+/// slider and notification chips use); `TEXT_PAD` matches the texture
+/// margin baked into those measurements so each zone starts where the drawn
+/// glyph starts.
 ///
 /// Zones, left to right: title → previous glyph → status → next glyph →
-/// optional `· p ‹next›`. A blank stand-in for a disabled skip still maps to
-/// PlayPause, so a press there never invents a command the player refused.
+/// optional `· p ‹next›` → optional `· o`. A blank stand-in for a disabled
+/// skip still maps to PlayPause, so a press there never invents a command
+/// the player refused.
 #[must_use]
 pub fn click_action(
     text_x_px: f32,
@@ -461,11 +476,23 @@ pub fn click_action(
             MediaRowClick::PlayPause
         };
     }
+    let after_transport = format!(
+        "{}{}",
+        parts.prefix,
+        switch_hint(state).unwrap_or_default()
+    );
     if let Some(switch) = switch_hint(state) {
         let switch_start = next_end;
         let switch_end = measure(&format!("{}{switch}", parts.prefix)) - TEXT_PAD;
         if text_x_px >= switch_start && text_x_px < switch_end {
             return MediaRowClick::Cycle;
+        }
+    }
+    if let Some(picker) = picker_hint(state) {
+        let picker_start = measure(&after_transport) - TEXT_PAD;
+        let picker_end = measure(&format!("{after_transport}{picker}")) - TEXT_PAD;
+        if text_x_px >= picker_start && text_x_px < picker_end {
+            return MediaRowClick::OpenPicker;
         }
     }
     MediaRowClick::PlayPause
@@ -476,8 +503,8 @@ pub fn click_action(
 /// center already shows — title, artist, position — and never controls (the
 /// transport keys already work while locked; they need no on-screen cluster).
 /// The status icon keeps its trailing place, so a paused player reads paused
-/// exactly as it does in the control center. The control row's `p` switch
-/// hint is a control too: it never appears here, so multi-player state
+/// exactly as it does in the control center. The control row's `p` / `o`
+/// hints are controls too: they never appear here, so multi-player state
 /// formats byte-identically to single-player.
 #[must_use]
 pub fn lock_row(state: &MediaState) -> String {
@@ -1133,6 +1160,10 @@ mod tests {
         multi.players = vec!["spotify".to_string(), "mpv".to_string()];
         let row = control_row(&multi);
         assert!(row.contains("\u{b7} p mpv"), "{row}");
+        assert!(
+            row.ends_with("\u{b7} o"),
+            "multi-player rows trail the o picker hint: {row}"
+        );
 
         // One player — or an old bridge that sends no list — keeps the row
         // byte-identical to before switching existed.
@@ -1140,6 +1171,7 @@ mod tests {
         single.players = vec!["spotify".to_string()];
         assert_eq!(control_row(&single), control_row(&state("Track", "Artist")));
         assert!(!control_row(&single).contains('\u{b7}'));
+        assert!(picker_hint(&single).is_none());
     }
 
     #[test]
@@ -1191,8 +1223,42 @@ mod tests {
         );
         assert_eq!(
             click_action(switch_end, mono, &multi),
+            MediaRowClick::OpenPicker,
+            "past the p hint is the o picker zone, not PlayPause"
+        );
+    }
+
+    #[test]
+    fn a_press_on_the_picker_hint_opens_the_players_list() {
+        let mut multi = state("Track", "Artist");
+        multi.players = vec!["spotify".to_string(), "mpv".to_string()];
+        let parts = control_row_parts(&multi);
+        let switch = switch_hint(&multi).expect("multi-player has a switch");
+        let picker = picker_hint(&multi).expect("multi-player has a picker");
+        let with_switch = format!("{}{switch}", parts.prefix);
+        let picker_start = mono(&with_switch) - 2.0;
+        let picker_end = mono(&format!("{with_switch}{picker}")) - 2.0;
+
+        assert_eq!(
+            click_action(picker_start, mono, &multi),
+            MediaRowClick::OpenPicker,
+            "the first pixel of · o opens the picker"
+        );
+        assert_eq!(
+            click_action((picker_start + picker_end) * 0.5, mono, &multi),
+            MediaRowClick::OpenPicker
+        );
+        assert_eq!(
+            click_action(picker_end, mono, &multi),
             MediaRowClick::PlayPause,
-            "past the hint is PlayPause (exclusive end)"
+            "past · o is PlayPause (exclusive end)"
+        );
+        // The Cycle zone must stay intact — OpenPicker never eats · p ….
+        let switch_mid = (mono(&parts.prefix) - 2.0 + picker_start) * 0.5;
+        assert_eq!(
+            click_action(switch_mid, mono, &multi),
+            MediaRowClick::Cycle,
+            "· p … still cycles"
         );
     }
 
@@ -1255,28 +1321,35 @@ mod tests {
     }
 
     #[test]
-    fn a_single_player_row_without_a_hint_never_cycles() {
+    fn a_single_player_row_without_a_hint_never_cycles_or_opens_picker() {
         let single = state("Track", "Artist");
         assert!(switch_hint(&single).is_none());
+        assert!(picker_hint(&single).is_none());
         for x in [0.0, -1.0, f32::NAN, 500.0] {
             assert_ne!(
                 click_action(x, mono, &single),
                 MediaRowClick::Cycle,
                 "x={x}"
             );
+            assert_ne!(
+                click_action(x, mono, &single),
+                MediaRowClick::OpenPicker,
+                "x={x}"
+            );
         }
     }
 
     #[test]
-    fn control_row_is_prefix_plus_switch_hint() {
+    fn control_row_is_prefix_plus_switch_and_picker_hints() {
         let mut multi = state("Track", "Artist");
         multi.players = vec!["spotify".to_string(), "mpv".to_string()];
         assert_eq!(
             control_row(&multi),
             format!(
-                "{}{}",
+                "{}{}{}",
                 control_row_prefix(&multi),
-                switch_hint(&multi).unwrap()
+                switch_hint(&multi).unwrap(),
+                picker_hint(&multi).unwrap()
             )
         );
         let single = state("Track", "Artist");

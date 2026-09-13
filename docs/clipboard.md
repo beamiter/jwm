@@ -80,6 +80,14 @@ picker. On Wayland, `wl-copy` becomes an external owner, so capture may also
 see the same bytes; byte-identical dedup makes the double record a reorder or
 no-op.
 
+On X11 with a `clipboard_image_sender`, the screenshot completion worker
+offers the PNG immediately and tags the completion as already offered. The
+main-loop poll still re-offers (reclaim / history gate) before recording; if
+that second offer fails, the toast stays a success — the clipboard already
+holds the PNG — and history is still recorded. Without a sender (Wayland), the
+worker only returns bytes; the poll makes the first offer, and a failed land
+keeps the honest Failed toast.
+
 The native X11 owner implements the required ICCCM `TARGETS`, `TIMESTAMP`, and
 `MULTIPLE` conversions. It obtains a real server timestamp before every
 ownership change and rejects requests from an older ownership period. Large
@@ -100,10 +108,12 @@ that writes at its own pace, and a compositor that waited would stall every
 client with it. Re-offering a PNG (and picker activate / `clipboard_copy`)
 uses the compositor-native data-device `image/png` offer; `wl-copy` remains
 the fallback when that path is unavailable. Asynchronous screenshot publish
-returns PNG bytes from the worker and defers the offer to the main-loop
-completion poll (`offer_clipboard_png` → `set_clipboard_png`, then
-`wl-copy`), so nested Wayland backends share the same native path as
-activate/IPC.
+returns PNG bytes from the worker and defers the *first* offer to the
+main-loop completion poll when no X11 image sender is present
+(`offer_clipboard_png` → `set_clipboard_png`, then `wl-copy`). When an X11
+sender already offered on the worker, the poll re-offers but soft-succeeds
+on re-offer failure so the toast stays honest. Nested Wayland backends share
+the same native path as activate/IPC.
 
 The X11 watcher runs on **its own X connection and thread**, not the window
 manager's.

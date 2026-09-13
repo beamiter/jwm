@@ -863,6 +863,45 @@ fn slider_bar(percent: u8) -> String {
 /// so it comes back out when a measured width becomes a glyph offset.
 const TEXT_PAD: f32 = 2.0;
 
+/// Pointer counterparts of mute vs device-picker on the Audio Input row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AudioInputClick {
+    /// The microphone glyph — twin of `m` / `XF86AudioMicMute`.
+    ToggleMute,
+    /// Anywhere else on the row — twin of Return (open the input picker).
+    OpenPicker,
+}
+
+/// Whether a press at `text_x_px` on the Audio Input row hits the microphone
+/// icon (toggle mute) or the rest of the row (device picker).
+///
+/// `measure` is the panel font's advance in px (same probe as the slider and
+/// media hit-tests); `TEXT_PAD` cancels the texture margin baked into those
+/// measurements so the zone starts where the drawn glyph starts. The icon is
+/// the same `f130` / `f131` [`control_center`] paints from `mic_muted`.
+#[must_use]
+pub fn audio_input_click_action(
+    text_x_px: f32,
+    measure: impl Fn(&str) -> f32,
+    mic_muted: Option<bool>,
+) -> AudioInputClick {
+    if !text_x_px.is_finite() {
+        return AudioInputClick::OpenPicker;
+    }
+    let icon = if mic_muted == Some(true) {
+        "\u{f131}" // fa-microphone-slash
+    } else {
+        "\u{f130}" // fa-microphone
+    };
+    let icon_start = measure("") - TEXT_PAD;
+    let icon_end = measure(icon) - TEXT_PAD;
+    if text_x_px >= icon_start && text_x_px < icon_end {
+        AudioInputClick::ToggleMute
+    } else {
+        AudioInputClick::OpenPicker
+    }
+}
+
 /// The (prefix, bar, suffix) a slider row is drawn from. Pointer positioning
 /// measures these pieces, so they must stay exactly what
 /// [`SystemUiState::control_row_text`] joins and draws.
@@ -4989,6 +5028,61 @@ mod tests {
             input_label(Some(true)),
             "\u{f131}  Input         Headset Microphone"
         );
+    }
+
+    /// Monospace stand-in for the panel font: one unit per char so the icon
+    /// zone is exactly one glyph wide after the TEXT_PAD cancel.
+    fn mono(text: &str) -> f32 {
+        text.chars().count() as f32 + 4.0
+    }
+
+    #[test]
+    fn the_input_row_icon_toggles_mute_and_the_rest_opens_the_picker() {
+        let icon_start = mono("") - 2.0;
+        let unmuted_end = mono("\u{f130}") - 2.0;
+        let muted_end = mono("\u{f131}") - 2.0;
+
+        assert_eq!(
+            audio_input_click_action(icon_start, mono, Some(false)),
+            AudioInputClick::ToggleMute,
+            "the first pixel of the microphone glyph mutes"
+        );
+        assert_eq!(
+            audio_input_click_action((icon_start + unmuted_end) * 0.5, mono, None),
+            AudioInputClick::ToggleMute,
+            "never-read draws f130 and still mutes on the glyph"
+        );
+        assert_eq!(
+            audio_input_click_action(icon_start, mono, Some(true)),
+            AudioInputClick::ToggleMute,
+            "the muted glyph is still the mute zone"
+        );
+        assert_eq!(
+            audio_input_click_action(unmuted_end, mono, Some(false)),
+            AudioInputClick::OpenPicker,
+            "past the glyph opens the picker (exclusive end)"
+        );
+        assert_eq!(
+            audio_input_click_action(muted_end, mono, Some(true)),
+            AudioInputClick::OpenPicker
+        );
+        assert_eq!(
+            audio_input_click_action(0.0, mono, Some(false)),
+            AudioInputClick::OpenPicker,
+            "the texture's left pad is not the glyph"
+        );
+        assert_eq!(
+            audio_input_click_action(80.0, mono, Some(false)),
+            AudioInputClick::OpenPicker,
+            "the label and device name open the picker"
+        );
+        for x in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            assert_eq!(
+                audio_input_click_action(x, mono, Some(true)),
+                AudioInputClick::OpenPicker,
+                "non-finite x={x}"
+            );
+        }
     }
 
     #[test]

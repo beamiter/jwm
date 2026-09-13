@@ -4,6 +4,22 @@
 
 ---
 
+## 2026-09-13：UI/UX 二十五轮（Input mic 点击、媒体 · o、X11 toast 诚实）
+
+选题 = 二十四轮开放项里日常命中最高：Input mic mute 点击+`m` ∥ X11 screenshot toast 诚实；Wave C（mic 落盘后）补媒体指针 OpenPicker。拒做：pin 持久化、缩略图、`set_audio_device` sync、X11 frame deadline。
+
+1. **Input mic mute 点击 + `m`**。`AudioInputClick` + `audio_input_click_action`（measure − TEXT_PAD）；图标区/`m` → `toggle_mic_mute`；其余 → 设备 picker。Volume `m` 不动。docs/control-center.md + media-controls.md。
+
+2. **X11 screenshot double-offer 诚实**。`CopiedToClipboard { png, offered }`；worker 已 offer 且 poll 再 offer 失败 → 仍成功 toast + record；未 offer 失败 → Failed（Wayland）。docs/clipboard.md。
+
+3. **媒体指针 OpenPicker**。多播放器行尾 `· o`；`MediaRowClick::OpenPicker` → 同 KEY_o；单播放器逐字节不变。docs/media-controls.md。
+
+**验证**：clippy -D warnings（0）；lib **3244 passed / 0 failed / 11 ignored**（3239→+5）。**无真机显示会话**。真机优先：Input 点图标 mute；双播放器点 `· o` 开 Players；X11 截图到剪贴板不因二次 offer 假失败。
+
+**仍然开着的**（二十六轮）：pin 持久化；剪贴板缩略图；`set_audio_device` sync；X11 `compositor_frame_deadline`。**成文勿再提**：……（继承二十四轮）+ Input 仅整行开 picker 无 mute 区（本轮关闭）+ 媒体指针无 OpenPicker（本轮关闭）+ X11 二次 offer 假失败 toast（本轮关闭）。
+
+---
+
 ## 2026-09-13：UI/UX 二十四轮（Power Profile OSD、rich player_details）
 
 选题 = 二十三轮「仍然开着的」里日常命中最高的两项并行：Hub/IPC Power Profile OSD（S）∥ rich `player_details`（M）。文件几乎不交（osd/api/input/ipc vs bridge/media/system_ui）。拒做：pin 持久化、缩略图、mic 点击区、媒体 OpenPicker 指针、`set_audio_device` sync、X11 frame deadline。

@@ -39,14 +39,37 @@ pub enum ScreenshotCompletion {
     Saved(String),
     /// Clipboard destination: PNG bytes are ready for the main loop.
     ///
-    /// With an X11 `clipboard_image_sender`, the worker already offered; the
-    /// poll path still calls [`Jwm::offer_clipboard_png`] before recording.
-    /// Without a sender (Wayland), the worker only returns bytes — the poll
-    /// path owns the native offer (`set_clipboard_png`, then `wl-copy`).
-    CopiedToClipboard(Vec<u8>),
+    /// With an X11 `clipboard_image_sender`, the worker already offered
+    /// (`offered = true`); the poll path still re-offers before recording,
+    /// but a failed re-offer must not claim the screenshot failed — the
+    /// clipboard already holds the PNG. Without a sender (Wayland),
+    /// `offered = false` and the poll path owns the first native offer
+    /// (`set_clipboard_png`, then `wl-copy`); that failure stays a Failed toast.
+    CopiedToClipboard {
+        png: Vec<u8>,
+        /// True when the completion worker already landed the PNG on the
+        /// clipboard (X11 image sender). False when the main-loop poll must
+        /// make the first offer (Wayland / no sender).
+        offered: bool,
+    },
     /// The capture never produced its file, or the clipboard publish failed.
     /// Carries what the toast body should say.
     Failed(String),
+}
+
+/// Whether the poll path should treat a clipboard-destination capture as a
+/// success after attempting [`Jwm::offer_clipboard_png`].
+///
+/// A successful land always wins. A failed land still succeeds when the
+/// worker already offered (X11 sender path) — the clipboard already has the
+/// PNG, so a "Screenshot failed" toast would be a lie. When the worker never
+/// offered (Wayland), a failed poll offer remains a real failure.
+#[must_use]
+pub(crate) fn screenshot_clipboard_poll_succeeded(
+    offer_ok: bool,
+    worker_already_offered: bool,
+) -> bool {
+    offer_ok || worker_already_offered
 }
 
 /// What a failed capture's toast body says. The file destination names the
@@ -77,7 +100,7 @@ pub(crate) fn screenshot_completion_toast(
             timeout_ms: 5000,
             ..Default::default()
         },
-        ScreenshotCompletion::CopiedToClipboard(_) => crate::backend::api::ToastNotification {
+        ScreenshotCompletion::CopiedToClipboard { .. } => crate::backend::api::ToastNotification {
             title: "\u{f030}  Screenshot copied to clipboard".into(),
             urgency: 1,
             timeout_ms: 5000,
@@ -1216,12 +1239,20 @@ impl Jwm {
         let mut waiting = Vec::new();
         for job in std::mem::take(&mut self.features.screenshot_completions) {
             match job.take() {
-                Some(ScreenshotCompletion::CopiedToClipboard(png)) => {
-                    // Worker may already have offered via X11 image sender;
-                    // Wayland defers the native offer until here (Backend is
-                    // borrowable on the main loop). Offer before record so a
-                    // failed land never enters history under a success toast.
-                    if self.offer_clipboard_png(backend, png.clone()) {
+                Some(ScreenshotCompletion::CopiedToClipboard { png, offered }) => {
+                    // Re-offer for reclaim/history gate even when the worker
+                    // already landed (X11). Wayland's first offer is here.
+                    // Offer before record so a *true* failed land (never
+                    // offered) never enters history under a success toast.
+                    let offer_ok = self.offer_clipboard_png(backend, png.clone());
+                    if screenshot_clipboard_poll_succeeded(offer_ok, offered) {
+                        if !offer_ok {
+                            // Worker already served the PNG; soft-fail the
+                            // redundant re-offer rather than lying to the user.
+                            log::debug!(
+                                "[take_screenshot] poll re-offer failed; worker already offered"
+                            );
+                        }
                         // X11 never re-captures self-owned PNG offers; a
                         // Wayland native offer or wl-copy fallback may also
                         // be seen by capture — byte dedup makes a double
@@ -1229,9 +1260,10 @@ impl Jwm {
                         self.record_clipboard_png(&png);
                         self.push_system_toast(
                             backend,
-                            screenshot_completion_toast(&ScreenshotCompletion::CopiedToClipboard(
+                            screenshot_completion_toast(&ScreenshotCompletion::CopiedToClipboard {
                                 png,
-                            )),
+                                offered,
+                            }),
                         );
                     } else {
                         self.push_system_toast(
@@ -1523,8 +1555,10 @@ impl Jwm {
         if !to_clipboard {
             return ScreenshotCompletion::Saved(save_path);
         }
-        if let Some(png) = Self::publish_image_path_to_clipboard(&save_path, image_sender) {
-            ScreenshotCompletion::CopiedToClipboard(png)
+        if let Some((png, offered)) =
+            Self::publish_image_path_to_clipboard(&save_path, image_sender)
+        {
+            ScreenshotCompletion::CopiedToClipboard { png, offered }
         } else {
             ScreenshotCompletion::Failed(capture_failure_detail(true, &save_path))
         }
@@ -2014,15 +2048,16 @@ impl Jwm {
     /// Read clipboard-staging PNG bytes for the completion watcher.
     ///
     /// With an X11 `clipboard_image_sender`, offers immediately on the worker
-    /// (ICCCM INCR lives on that thread). Without a sender (Wayland), only
-    /// returns the bytes — `poll_screenshot_completion_jobs` calls
-    /// [`Jwm::offer_clipboard_png`] on the main loop where `Backend` is
-    /// borrowable (`set_clipboard_png`, then `wl-copy` fallback). Staging
-    /// files hold private screen contents and are unlinked on every path.
+    /// (ICCCM INCR lives on that thread) and returns `(png, offered: true)`.
+    /// Without a sender (Wayland), only returns `(png, offered: false)` —
+    /// `poll_screenshot_completion_jobs` calls [`Jwm::offer_clipboard_png`]
+    /// on the main loop where `Backend` is borrowable (`set_clipboard_png`,
+    /// then `wl-copy` fallback). Staging files hold private screen contents
+    /// and are unlinked on every path.
     fn publish_image_path_to_clipboard(
         png_path: &str,
         image_sender: Option<crate::backend::clipboard_offer::ClipboardImageSender>,
-    ) -> Option<Vec<u8>> {
+    ) -> Option<(Vec<u8>, bool)> {
         let result = std::fs::read(png_path);
         // Once the bytes are memory-owned the staging file has served its
         // purpose; an unavailable clipboard must not leak it in /tmp.
@@ -2038,7 +2073,7 @@ impl Jwm {
         if let Some(image_sender) = image_sender {
             if image_sender.send_png(png.clone()) {
                 info!("[take_screenshot] copied image to native X11 clipboard");
-                Some(png)
+                Some((png, true))
             } else {
                 error!("[take_screenshot] native X11 clipboard owner is unavailable");
                 None
@@ -2046,7 +2081,7 @@ impl Jwm {
         } else {
             // Defer the offer to the main loop — worker cannot borrow Backend.
             info!("[take_screenshot] clipboard PNG ready for main-loop offer");
-            Some(png)
+            Some((png, false))
         }
     }
 
@@ -2196,8 +2231,10 @@ mod tests {
         assert!(saved.actions.is_empty() && saved.notification_id == 0);
 
         // Clipboard destination: the private staging path must not surface.
-        let copied =
-            screenshot_completion_toast(&ScreenshotCompletion::CopiedToClipboard(vec![1, 2, 3]));
+        let copied = screenshot_completion_toast(&ScreenshotCompletion::CopiedToClipboard {
+            png: vec![1, 2, 3],
+            offered: false,
+        });
         assert_eq!(copied.title, "\u{f030}  Screenshot copied to clipboard");
         assert!(copied.body.is_empty());
         assert!(!copied.body.contains("/tmp/.jwm-screenshot-clipboard"));
@@ -2329,6 +2366,29 @@ mod tests {
     }
 
     #[test]
+    fn native_clipboard_sender_marks_completion_as_already_offered() {
+        let scratch = ScratchDir::new("native-clipboard-offered-flag");
+        let input = scratch.path().join("image.png");
+        let expected = b"already-offered-png".to_vec();
+        std::fs::write(&input, &expected).unwrap();
+        let (send, receive) = std::sync::mpsc::channel();
+        let image_sender = crate::backend::clipboard_offer::ClipboardImageSender::new(send);
+
+        let (png, offered) =
+            Jwm::publish_image_path_to_clipboard(input.to_str().unwrap(), Some(image_sender))
+                .expect("sender path must return bytes");
+        assert_eq!(png, expected);
+        assert!(offered, "successful send_png must tag offered=true for poll honesty");
+        assert!(!input.exists());
+        let crate::backend::clipboard_offer::ClipboardOffer::Png(actual) =
+            receive.recv_timeout(Duration::from_secs(1)).unwrap()
+        else {
+            panic!("native clipboard received a non-PNG offer");
+        };
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
     fn clipboard_staging_without_sender_returns_bytes_without_wl_copy() {
         let scratch = ScratchDir::new("clipboard-defer-no-sender");
         let input = scratch.path().join("image.png");
@@ -2337,7 +2397,7 @@ mod tests {
 
         let got = Jwm::publish_image_path_to_clipboard(input.to_str().unwrap(), None)
             .expect("bytes must return without a sender");
-        assert_eq!(got, expected);
+        assert_eq!(got, (expected, false));
         assert!(!input.exists(), "staging file must still be unlinked");
 
         // Source pin: the worker path must not arm wl-copy anymore.
@@ -2382,6 +2442,14 @@ mod tests {
             "offer_clipboard_png must run before record_clipboard_png"
         );
         assert!(
+            poll.contains("screenshot_clipboard_poll_succeeded(offer_ok, offered)"),
+            "poll must soft-succeed when the worker already offered"
+        );
+        assert!(
+            poll.contains("worker already offered"),
+            "failed re-offer after worker land must log soft-fail, not claim failure"
+        );
+        assert!(
             !shipped.contains("use_wl_copy"),
             "wl-copy arming via is_udev_backend must not return to the watcher path"
         );
@@ -2395,6 +2463,52 @@ mod tests {
         assert!(
             !track.contains("is_udev_backend"),
             "nested Wayland must not be gated on udev for clipboard deferral"
+        );
+    }
+
+    #[test]
+    fn clipboard_poll_honesty_keeps_worker_offer_and_wayland_first_offer() {
+        // X11: worker already offered; a redundant poll re-offer failure must
+        // still count as success — the clipboard already has the PNG.
+        assert!(screenshot_clipboard_poll_succeeded(false, true));
+        assert!(screenshot_clipboard_poll_succeeded(true, true));
+        // Wayland / no sender: first offer is on poll; failure stays failure.
+        assert!(!screenshot_clipboard_poll_succeeded(false, false));
+        assert!(screenshot_clipboard_poll_succeeded(true, false));
+
+        // Worker tags offered=true only after send_png; no sender → false.
+        const SOURCE: &str = include_str!("screenshot.rs");
+        let publish = SOURCE
+            .split_once("fn publish_image_path_to_clipboard(")
+            .expect("publish_image_path_to_clipboard")
+            .1
+            .split_once("pub(crate) fn publish_png_bytes_via_wl_copy(")
+            .expect("publish_png_bytes_via_wl_copy follows")
+            .0;
+        assert!(
+            publish.contains("Some((png, true))") && publish.contains("Some((png, false))"),
+            "worker must tag offered=true on send_png success and false when deferred"
+        );
+        let poll = SOURCE
+            .split_once("fn poll_screenshot_completion_jobs(")
+            .expect("poll_screenshot_completion_jobs")
+            .1
+            .split_once("fn take_screenshot_fullscreen(")
+            .expect("next fn after poll")
+            .0;
+        let success_gate = poll
+            .find("screenshot_clipboard_poll_succeeded(offer_ok, offered)")
+            .expect("poll must gate toast on soft-success helper");
+        let failed_toast = poll
+            .find("ScreenshotCompletion::Failed(")
+            .expect("never-offered poll failure must still push Failed toast");
+        assert!(
+            success_gate < failed_toast,
+            "soft-success path must precede the Failed toast branch"
+        );
+        assert!(
+            poll.contains("record_clipboard_png(&png)"),
+            "worker-offered soft-success must still record into history"
         );
     }
 
