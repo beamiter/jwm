@@ -498,7 +498,9 @@ until the re-read lands. A switch that actually took then raises a labeled
 audio-device OSD with the device description (speaker glyph for outputs,
 microphone glyph for inputs) — the same card `set_audio_device` shows.
 Queueing and a failed re-read stay quiet: the OSD is confirmation, not an
-optimistic estimate.
+optimistic estimate. The named device card and a concurrent volume/mic
+correction use separate pending slots; when both are ready at flush the
+device card wins (the next volume key re-raises the level card).
 
 ### The exit code is not the answer
 

@@ -81,19 +81,23 @@ text-only exactly as before.
 | `Left` / `Right` | move between the selected notification's buttons |
 | `1` - `6` | invoke that button directly |
 | `Enter` | invoke the button under the cursor, or dismiss when there is none |
-| `d` / `Delete` | dismiss the selected notification |
+| `d` / `Delete` / middle click | dismiss the selected (or pointed) notification |
 | `c` | clear the whole history |
 | `Esc` or `Alt+F11` | close the panel — the key that opened it also dismisses it |
 | another panel key | hand the screen to that panel, closing this one |
 
-Pointer input follows the same model: hover highlights a notification, click
-invokes its current/default action (or dismisses an action-less row), the wheel
-browses history, and clicking outside closes the card. The numbered action
-strip is clickable too: a click on a chip invokes that action directly —
+Pointer input follows the same model: hover highlights a notification, left
+click invokes its current/default action (or dismisses an action-less row),
+the wheel browses history, and left-clicking outside closes the card. Middle
+click on a notification row selects that row and dismisses it in one shot —
+the pointer twin of `d` / `Delete`, not of `Enter`. A middle click on blank
+space (panel chrome, outside, or a miss) is inert. The numbered action strip
+is left-click only: a left click on a chip invokes that action directly —
 through the same pipeline as its digit key — with the hit geometry measured
 off the exact drawn string in the configured UI font, so the gutter and the
 gaps between chips are deliberate no-ops rather than near-misses that fire a
-neighbour. Hovering a chip moves the row's ✓ cursor onto it, so a following
+neighbour. A middle click on the strip is likewise inert (chips do not
+dismiss). Hovering a chip moves the row's ✓ cursor onto it, so a following
 `Enter` or digit acts on what the pointer was over.
 
 `Up`/`Down` always move *between* rows and `Left`/`Right` always move *within*

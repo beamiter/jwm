@@ -58,7 +58,9 @@ A confirmed audio-device switch — picker Enter after the worker's re-read, or
 a successful `set_audio_device` — raises a labeled card with the device
 description (speaker glyph for outputs, microphone glyph for inputs), truncated
 like a media label. Queueing and a failed re-read stay quiet; see
-[control center](control-center.md#audio-device-pickers).
+[control center](control-center.md#audio-device-pickers). A concurrent
+volume/mic correction shares the flush path but not the pending slot: when
+both are ready the device card is shown.
 
 ## Microphone mute
 

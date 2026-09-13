@@ -545,17 +545,29 @@ impl WMController for Jwm {
                     }
                     SystemUiHitTarget::Panel | SystemUiHitTarget::Unavailable => {}
                 },
-                // List-picker middle-click forget. Clipboard is one-shot (the
-                // twin of `d` / Delete, no arm). Wi-Fi / Bluetooth keep the
-                // two-press armed confirm keyboard `d` uses — first press
-                // arms, second deletes — and stay inert while a passphrase
-                // or pairing prompt owns the surface. Blank is inert on
-                // every picker; never clear-all.
+                // List-picker middle-click forget / dismiss. Clipboard and the
+                // notification center are one-shot (the twin of `d` / Delete,
+                // no arm). Wi-Fi / Bluetooth keep the two-press armed confirm
+                // keyboard `d` uses — first press arms, second deletes — and
+                // stay inert while a passphrase or pairing prompt owns the
+                // surface. Blank is inert on every picker; the notification
+                // action strip stays left-only (middle-click there is a miss).
                 2 if self.features.system_ui.is_clipboard_picker() => {
                     if let SystemUiHitTarget::Item(row, _) = hit
                         && self.features.system_ui.select_visible_row(row).is_some()
                     {
                         self.forget_selected_clipboard(backend);
+                    }
+                }
+                2 if self.features.system_ui.is_notification_center() => {
+                    if let SystemUiHitTarget::Item(row, _) = hit
+                        && self.features.system_ui.select_visible_row(row).is_some()
+                    {
+                        use crate::jwm::features::notifications::CloseReason;
+                        if let Some((id, _)) = self.features.system_ui.selected_notification() {
+                            self.close_notification(id, CloseReason::Dismissed);
+                        }
+                        self.sync_system_ui(backend);
                     }
                 }
                 2 if (self.features.system_ui.is_wifi_picker()
@@ -2779,6 +2791,252 @@ mod tests {
         );
     }
 
+    /// Notification-center button 2 must select the pointed row and dismiss
+    /// through `close_notification(..., Dismissed)` — the twin of `d` /
+    /// Delete — never Return (invoke) and never clear-all. Needles are built
+    /// at runtime so this cannot match its own source.
+    #[test]
+    fn notification_center_middle_click_routes_through_the_dismiss_path() {
+        const SOURCE: &str = include_str!("event_dispatcher.rs");
+        let compact: String = SOURCE.chars().filter(|c| !c.is_whitespace()).collect();
+
+        let press = compact
+            .split_once("fnon_button_press(")
+            .expect("on_button_press")
+            .1;
+        let system_ui = press
+            .split_once("ifself.features.system_ui.is_active(){")
+            .expect("the system-ui pointer branch")
+            .1
+            .split_once("//Annotationmode:")
+            .expect("the end of the system-ui pointer branch")
+            .0;
+
+        let arm = concat!(
+            "2ifself.features.system_ui.is_notification",
+            "_center()=>{ifletSystemUiHitTarget::Item(row,_)="
+        );
+        assert!(
+            system_ui.contains(arm),
+            "notification middle-click must gate on the center and an Item hit"
+        );
+        assert!(
+            system_ui.contains("select_visible_row(row)"),
+            "middle-click must select the pointed row before dismissing"
+        );
+        assert!(
+            system_ui.contains(&format!("{}(", "close_notification")),
+            "middle-click must share the keyboard dismiss path"
+        );
+        assert!(
+            system_ui.contains("CloseReason::Dismissed"),
+            "middle-click must dismiss, not request/expire"
+        );
+        // The dismiss arm must not replay Return (invoke / action-less
+        // dismiss-via-Enter) and must not clear the whole history.
+        let notif = system_ui
+            .find("is_notification_center()")
+            .expect("notification middle-click arm");
+        let wifi_bt = system_ui
+            .find("is_wifi_picker()")
+            .expect("Wi-Fi/BT middle-click arm");
+        let arm_body = &system_ui[notif..wifi_bt];
+        assert!(
+            !arm_body.contains("KEY_Return") && !arm_body.contains("invoke_notification_action"),
+            "middle-click must dismiss, not invoke"
+        );
+        assert!(
+            !arm_body.contains(&format!("{}(", "clear_notifications")),
+            "middle-click must never clear-all"
+        );
+        // One-shot clipboard stays ahead; armed Wi-Fi/BT stays after.
+        let clipboard = system_ui
+            .find("is_clipboard_picker()")
+            .expect("clipboard middle-click arm");
+        assert!(
+            clipboard < notif && notif < wifi_bt,
+            "notification dismiss must sit between clipboard and Wi-Fi/BT"
+        );
+    }
+
+    #[test]
+    fn middle_click_dismisses_the_pointed_notification_row() {
+        use crate::jwm::features::notifications::NotificationRequest;
+        use crate::jwm::features::NotificationCenter;
+
+        let mut jwm = empty_jwm();
+        let mut backend = RenderSpyBackend::new();
+        jwm.features.notifications = NotificationCenter::new();
+        let older = jwm.features.notifications.push(
+            &NotificationRequest {
+                app: "mail".into(),
+                summary: "older".into(),
+                ..Default::default()
+            },
+            1_000,
+            false,
+        );
+        let newer = jwm.features.notifications.push(
+            &NotificationRequest {
+                app: "chat".into(),
+                summary: "newer".into(),
+                ..Default::default()
+            },
+            2_000,
+            false,
+        );
+        jwm.features.system_ui = crate::jwm::features::SystemUiState::notification_center(
+            &jwm.features.notifications,
+            3_000,
+        );
+        // Newest first: row 0 = newer, row 1 = older. Highlight stays on
+        // newest; middle-click the second row — point-who-dismisses.
+        assert_eq!(
+            jwm.features.system_ui.selected_notification().map(|(id, _)| id),
+            Some(newer)
+        );
+        backend.system_ui_hit = SystemUiHitTarget::Item(1, 0.0);
+        <Jwm as WMController>::on_button_press(
+            &mut jwm,
+            &mut backend,
+            HitTarget::Background { output: None },
+            0,
+            2,
+            0,
+        );
+
+        assert!(
+            jwm.features.notifications.get(older).is_none(),
+            "the pointed row is dismissed"
+        );
+        assert!(
+            jwm.features.notifications.get(newer).is_some(),
+            "the highlighted sibling stays"
+        );
+        assert!(
+            jwm.features.system_ui.is_notification_center(),
+            "dismiss keeps the panel open"
+        );
+        assert_eq!(
+            jwm.features.notifications.len(),
+            1,
+            "one row gone — never clear-all"
+        );
+    }
+
+    #[test]
+    fn middle_click_on_notification_blank_is_inert() {
+        use crate::jwm::features::notifications::NotificationRequest;
+        use crate::jwm::features::NotificationCenter;
+
+        let mut jwm = empty_jwm();
+        let mut backend = RenderSpyBackend::new();
+        jwm.features.notifications = NotificationCenter::new();
+        let id = jwm.features.notifications.push(
+            &NotificationRequest {
+                app: "keep".into(),
+                summary: "keep-me".into(),
+                ..Default::default()
+            },
+            1_000,
+            false,
+        );
+        jwm.features.system_ui = crate::jwm::features::SystemUiState::notification_center(
+            &jwm.features.notifications,
+            2_000,
+        );
+
+        for hit in [
+            SystemUiHitTarget::Panel,
+            SystemUiHitTarget::Outside,
+            SystemUiHitTarget::Unavailable,
+        ] {
+            backend.system_ui_hit = hit;
+            <Jwm as WMController>::on_button_press(
+                &mut jwm,
+                &mut backend,
+                HitTarget::Background { output: None },
+                0,
+                2,
+                0,
+            );
+            assert!(
+                jwm.features.system_ui.is_notification_center(),
+                "blank middle-click must not dismiss the panel ({hit:?})"
+            );
+            assert!(
+                jwm.features.notifications.get(id).is_some(),
+                "blank middle-click must dismiss nothing ({hit:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn middle_click_dismisses_a_row_with_actions_without_invoking() {
+        let mut jwm = empty_jwm();
+        let mut backend = RenderSpyBackend::new();
+        let id = notification_center_with_chips(&mut jwm);
+        // Row 0 is the notification itself (strip is row 1). Middle-click
+        // must share `d`, not Return — the record closes as dismissed.
+        // (Invoke would also close it; the route pin above is what forbids
+        // ActionInvoked on this path.)
+        backend.system_ui_hit = SystemUiHitTarget::Item(0, 0.0);
+        <Jwm as WMController>::on_button_press(
+            &mut jwm,
+            &mut backend,
+            HitTarget::Background { output: None },
+            0,
+            2,
+            0,
+        );
+        assert!(
+            jwm.features.notifications.get(id).is_none(),
+            "middle-click dismisses even when the row offers actions"
+        );
+        assert!(
+            jwm.features.system_ui.is_notification_center(),
+            "dismiss keeps the panel open"
+        );
+    }
+
+    #[test]
+    fn middle_click_on_the_action_strip_is_inert() {
+        let mut jwm = empty_jwm();
+        let mut backend = RenderSpyBackend::new();
+        let id = notification_center_with_chips(&mut jwm);
+        let strip = jwm
+            .features
+            .system_ui
+            .notification_strip_visible_row()
+            .expect("selected row draws a strip");
+
+        // text_x past the gutter lands on a chip for left-click; middle-click
+        // must still refuse — chips stay left-only, and the strip is not a
+        // selectable row so select_visible_row misses.
+        backend.system_ui_hit = SystemUiHitTarget::Item(strip, 94.0);
+        <Jwm as WMController>::on_button_press(
+            &mut jwm,
+            &mut backend,
+            HitTarget::Background { output: None },
+            0,
+            2,
+            0,
+        );
+        assert!(
+            jwm.features.notifications.get(id).is_some(),
+            "middle-click on a chip must neither invoke nor dismiss"
+        );
+        assert_eq!(
+            jwm.features.system_ui.selected_notification(),
+            Some((id, Some("default".to_string()))),
+            "the row and its action cursor are untouched"
+        );
+        assert!(
+            jwm.features.system_ui.is_notification_center(),
+            "strip middle-click must not dismiss the panel"
+        );
+    }
+
     /// Wi-Fi / Bluetooth middle-click must share keyboard `d`'s two-press
     /// armed forget (select → forget helper), stay inert under a prompt, and
     /// leave the one-shot clipboard arm alone. Needles are built at runtime.
@@ -3246,7 +3504,9 @@ mod tests {
 
     fn notification_center_with_chips(jwm: &mut Jwm) -> u32 {
         use crate::jwm::features::notifications::{NotificationAction, NotificationRequest};
+        use crate::jwm::features::NotificationCenter;
 
+        jwm.features.notifications = NotificationCenter::new();
         let act = |key: &str, label: &str| NotificationAction {
             key: key.into(),
             label: label.into(),

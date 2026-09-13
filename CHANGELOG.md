@@ -7,6 +7,10 @@ monorepo use independent Semantic Versions.
 
 ### Added
 
+- Notification center middle-click dismisses the pointed row (same path as
+  `d`/`Delete`); blank and the action strip stay inert — never clear-all.
+  See [docs/notifications.md](docs/notifications.md).
+
 - Wi-Fi and Bluetooth pickers middle-click forget with the same two-press
   arm as `d` (blank and passphrase/PIN/confirm stay inert). See
   [docs/control-center.md](docs/control-center.md).
@@ -171,6 +175,11 @@ monorepo use independent Semantic Versions.
   geometry is untouched. See [README.md](README.md#the-screenshot-editor).
 
 ### Fixed
+
+- Pending OSD no longer drops a confirmed audio-device name card when a
+  volume/mic correction races the same flush: dual slots prefer the named
+  device card; the next volume key re-raises the level OSD. See
+  [docs/control-center.md](docs/control-center.md).
 
 - X11 screenshot→clipboard no longer toasts a false failure when the worker
   already offered the PNG and a later poll re-offer fails; Wayland’s

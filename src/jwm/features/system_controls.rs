@@ -1571,8 +1571,8 @@ pub(crate) fn decide_feedback<T: Copy>(
 /// backend to show it with).
 ///
 /// Not `Copy`: a confirmed audio-device switch carries the device description
-/// so [`ControlDomain::AudioDevice`] can raise a named card through the same
-/// pending slot the level domains use.
+/// so [`ControlDomain::AudioDevice`] can raise a named card. Level and device
+/// corrections live in separate pending slots — see [`ControlFeedback`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct OsdCorrection {
     pub(crate) domain: ControlDomain,
@@ -1639,8 +1639,13 @@ pub struct ControlFeedback {
     brightness_osd_owed: Option<u64>,
     mic_osd_owed: Option<u64>,
     last_osd: Option<LastOsd>,
-    /// A read-back that contradicts the visible card queues a re-show here.
-    pending_osd: Option<OsdCorrection>,
+    /// Volume / brightness / mic correction for the next panel flush.
+    /// Same-domain latest-wins; never shares a slot with a named device card.
+    pending_level: Option<OsdCorrection>,
+    /// Confirmed audio-device switch for the next panel flush. Separate from
+    /// [`Self::pending_level`] so a concurrent volume/mic resolve cannot
+    /// overwrite a named switch confirm before flush.
+    pending_device: Option<OsdCorrection>,
 }
 
 impl ControlFeedback {
@@ -1749,16 +1754,28 @@ impl ControlFeedback {
         }
     }
 
-    /// The queued OSD refresh, if any.
+    /// The queued OSD refresh, if any. When both a level correction and a
+    /// named device card are pending, the device card wins: an intentional
+    /// switch confirm beats a concurrent volume/mic resolve, and the next
+    /// volume key re-raises the level card. Same-domain writes still
+    /// latest-win inside each slot.
     pub(crate) fn take_pending_osd(&mut self) -> Option<OsdCorrection> {
-        self.pending_osd.take()
+        if let Some(device) = self.pending_device.take() {
+            // Drop a concurrent level correction rather than defer it: the
+            // device card is the confirm, and a stale level re-show after
+            // it would fight the user's next press.
+            self.pending_level = None;
+            return Some(device);
+        }
+        self.pending_level.take()
     }
 
     /// Queue a named audio-device OSD for the next panel flush. Only the
     /// adopt path that saw `audio_switch_verdict.took` calls this — never on
-    /// queue / "Switching…", and never on a failed re-read.
+    /// queue / "Switching…", and never on a failed re-read. Writes the
+    /// device slot only — a pending level correction is not overwritten.
     pub(crate) fn queue_audio_device_osd(&mut self, input: bool, name: String) {
-        self.pending_osd = Some(OsdCorrection::audio_device(input, name));
+        self.pending_device = Some(OsdCorrection::audio_device(input, name));
     }
 
     /// Resolve a volume report against the estimate on screen, clearing the
@@ -1847,7 +1864,7 @@ impl ControlFeedback {
             *owed = None;
             if let Some((percent, muted)) = value {
                 self.note_osd_shown(domain, percent, muted, now);
-                self.pending_osd = Some(OsdCorrection::level(domain, percent, muted));
+                self.pending_level = Some(OsdCorrection::level(domain, percent, muted));
             }
             return;
         }
@@ -1862,7 +1879,7 @@ impl ControlFeedback {
                 <= crate::backend::compositor_common::osd::OSD_VISIBLE_WINDOW
         {
             self.note_osd_shown(domain, percent, muted, now);
-            self.pending_osd = Some(OsdCorrection::level(domain, percent, muted));
+            self.pending_level = Some(OsdCorrection::level(domain, percent, muted));
         }
     }
 }
@@ -2909,6 +2926,63 @@ Source #51
         );
         // Device switches do not owe a card through the level path.
         feedback.owe_osd(ControlDomain::AudioDevice, 1);
+        assert_eq!(feedback.take_pending_osd(), None);
+    }
+
+    /// Level and device live in separate slots: a volume resolve after a
+    /// named switch confirm must not drop the device card before take.
+    #[test]
+    fn a_device_then_volume_pending_prefers_the_named_device_card() {
+        let mut feedback = ControlFeedback::default();
+        let now = Instant::now();
+        feedback.queue_audio_device_osd(false, "HDMI Output".into());
+        feedback.owe_osd(ControlDomain::Volume, 1);
+        feedback.resolve_volume(
+            VolumeReport::Applied(
+                1,
+                AudioState {
+                    percent: 40,
+                    muted: false,
+                },
+            ),
+            now,
+        );
+        assert_eq!(
+            feedback.take_pending_osd(),
+            Some(OsdCorrection::audio_device(false, "HDMI Output".into()))
+        );
+        // Preferring the device discards the concurrent level correction —
+        // the next volume key re-raises the level card.
+        assert_eq!(feedback.take_pending_osd(), None);
+    }
+
+    /// Volume-only and device-only takes stay independent of the other slot.
+    #[test]
+    fn volume_only_and_device_only_pending_take_as_before() {
+        let mut feedback = ControlFeedback::default();
+        let now = Instant::now();
+        feedback.owe_osd(ControlDomain::Volume, 2);
+        feedback.resolve_volume(
+            VolumeReport::Applied(
+                2,
+                AudioState {
+                    percent: 55,
+                    muted: false,
+                },
+            ),
+            now,
+        );
+        assert_eq!(
+            feedback.take_pending_osd(),
+            Some(OsdCorrection::level(ControlDomain::Volume, 55, false))
+        );
+        assert_eq!(feedback.take_pending_osd(), None);
+
+        feedback.queue_audio_device_osd(true, "Headset Microphone".into());
+        assert_eq!(
+            feedback.take_pending_osd(),
+            Some(OsdCorrection::audio_device(true, "Headset Microphone".into()))
+        );
         assert_eq!(feedback.take_pending_osd(), None);
     }
 
