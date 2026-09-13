@@ -1096,8 +1096,15 @@ impl Jwm {
                         // The mutation is authoritative until the next worker
                         // verifies it; its epoch prevents an older read from
                         // rolling the row back.
-                        self.cache_control_power_profiles(available, next);
+                        self.cache_control_power_profiles(available, next.clone());
                         self.refresh_open_control_center();
+                        // Same labeled acknowledgement the other Hub toggles
+                        // raise — volume/brightness already had a bar card;
+                        // Night Light / radios joined in round 21.
+                        backend.compositor_show_osd(
+                            crate::backend::api::OsdKind::PowerProfile(next),
+                            0,
+                        );
                     }
                 }
                 ControlKind::NightLight => {
@@ -3807,6 +3814,36 @@ mod tests {
         assert!(
             region.contains("OsdKind::Bluetooth"),
             "the Bluetooth row no longer raises a Bluetooth OSD"
+        );
+    }
+
+    /// Power Profile Left/Right used to mutate silently while every other
+    /// Hub toggle raised a labeled card. The successful cycle must show the
+    /// same acknowledgement.
+    #[test]
+    fn the_power_profile_row_raises_the_osd_after_a_successful_cycle() {
+        const SOURCE: &str = include_str!("input_handler.rs");
+        let arm = SOURCE
+            .split_once(&format!("fn {}(", "handle_control_center_key"))
+            .expect("handle_control_center_key")
+            .1
+            .split_once(&format!("{}::{} =>", "ControlKind", "PowerProfile"))
+            .expect("the power-profile arm")
+            .1
+            .split_once(&format!("{}::{} =>", "ControlKind", "NightLight"))
+            .expect("the arm that follows it")
+            .0;
+        assert!(
+            arm.contains("OsdKind::PowerProfile"),
+            "the Power Profile row no longer raises an OSD"
+        );
+        assert!(
+            arm.contains(&format!("{}(", "compositor_show_osd")),
+            "the Power Profile row no longer calls compositor_show_osd"
+        );
+        assert!(
+            arm.contains(&format!("{}(", "set_profile")),
+            "the Power Profile row no longer switches the profile"
         );
     }
 

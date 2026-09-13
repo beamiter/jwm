@@ -2029,6 +2029,12 @@ impl Jwm {
                     "power profile stayed on {active:?} after requesting {profile:?}"
                 ));
             }
+            // Same labeled card the Hub Left/Right path raises, so a bar or
+            // script that flips the profile gets the same confirmation.
+            backend.compositor_show_osd(
+                crate::backend::api::OsdKind::PowerProfile(active),
+                0,
+            );
             return IpcResponse::ok(None);
         }
 
@@ -5631,6 +5637,42 @@ mod tests {
         assert!(
             arm.contains(&error),
             "set_mic_mute must answer the key path's no-tool error ({error})"
+        );
+    }
+
+    /// A successful `set_power_profile` must raise the same labeled OSD the
+    /// Hub Left/Right cycle does — a silent IPC switch left the card for
+    /// keybindings only. Failure paths stay quiet; the haystack is the arm
+    /// alone so this pin cannot match its own source.
+    #[test]
+    fn set_power_profile_raises_the_osd_on_success() {
+        const SOURCE: &str = include_str!("ipc_handler.rs");
+        let arm = SOURCE
+            .split_once(&format!("if name == \"{}\"", "set_power_profile"))
+            .expect("set_power_profile handler")
+            .1
+            .split_once(&format!("if name == \"{}\"", "media_control"))
+            .expect("the command handled after set_power_profile")
+            .0;
+        assert!(
+            arm.contains("OsdKind::PowerProfile"),
+            "set_power_profile no longer raises a Power Profile OSD"
+        );
+        assert!(
+            arm.contains(&format!("{}(", "compositor_show_osd")),
+            "set_power_profile no longer calls compositor_show_osd"
+        );
+        // The card is the success acknowledgement — it must sit after the
+        // post-switch identity check, not before a rejected flip.
+        let show = arm
+            .find("OsdKind::PowerProfile")
+            .expect("PowerProfile OSD construction");
+        let reject = arm
+            .find("power profile stayed on")
+            .expect("the post-switch reject");
+        assert!(
+            show > reject,
+            "the OSD must not fire when the profile stayed put"
         );
     }
 

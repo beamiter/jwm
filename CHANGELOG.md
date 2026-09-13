@@ -7,6 +7,17 @@ monorepo use independent Semantic Versions.
 
 ### Added
 
+- Control-center Power Profile `Left`/`Right` and IPC `set_power_profile`
+  raise a labeled Power Profile OSD (same icons as the Hub row, no bar).
+  See [docs/control-center.md](docs/control-center.md).
+
+- Bridge `player_details` (`{player, identity?, status?}`) rides beside the
+  existing `players` string list. The Hub Players picker prefers MPRIS
+  Identity and shows a Playing/Paused/Stopped cue when details arrive;
+  cycle/select keys stay bus suffixes. Old bridge↔jwm pairs stay
+  suffix-only. `media/status` and `get_media_status` expose the field
+  append-only. See [docs/media-controls.md](docs/media-controls.md).
+
 - Hub Theme selection surgically persists `appearance.ui_theme` to the live
   TOML (comments preserved); IPC `set_config` stays session-only. See
   [docs/ui-theme.md](docs/ui-theme.md).

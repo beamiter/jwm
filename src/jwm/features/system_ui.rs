@@ -2419,14 +2419,20 @@ impl SystemUiState {
     // --- Media players picker ---
 
     /// Build the Players picker from the bridge's last sweep list, starting on
-    /// the player already pinned so reopening keeps the user's place.
+    /// the player already pinned so reopening keeps the user's place. Row
+    /// keys stay bus suffixes (cycle/select); text prefers Identity and a
+    /// status cue when `player_details` arrived.
     pub fn media_players_picker(state: &crate::jwm::features::MediaState) -> Self {
         let rows: Vec<ListRow> = state
             .players
             .iter()
             .map(|name| ListRow {
                 key: name.clone(),
-                text: crate::jwm::features::media::player_picker_row(name, name == &state.player),
+                text: crate::jwm::features::media::player_picker_row(
+                    name,
+                    state.player_detail(name),
+                    name == &state.player,
+                ),
                 data: RowData::MediaPlayer,
             })
             .collect();
@@ -2463,7 +2469,11 @@ impl SystemUiState {
             .iter()
             .map(|name| ListRow {
                 key: name.clone(),
-                text: crate::jwm::features::media::player_picker_row(name, name == &state.player),
+                text: crate::jwm::features::media::player_picker_row(
+                    name,
+                    state.player_detail(name),
+                    name == &state.player,
+                ),
                 data: RowData::MediaPlayer,
             })
             .collect();
@@ -6453,6 +6463,7 @@ mod tests {
             position_us: Some(161_000_000),
             length_us: Some(245_000_000),
             players: Vec::new(),
+            player_details: Vec::new(),
         };
         let state = SystemUiState::control_center(&ControlCenterInputs {
             media: Some(&media),
@@ -7793,6 +7804,7 @@ mod tests {
             position_us: Some(161_000_000),
             length_us: Some(245_000_000),
             players: Vec::new(),
+            player_details: Vec::new(),
         }
     }
 
@@ -8217,6 +8229,23 @@ mod tests {
             position_us: None,
             length_us: None,
             players: vec!["spotify".into(), "mpv".into(), "firefox".into()],
+            player_details: vec![
+                crate::jwm::features::PlayerDetail {
+                    player: "spotify".into(),
+                    identity: "Spotify".into(),
+                    status: crate::jwm::features::PlaybackStatus::Paused,
+                },
+                crate::jwm::features::PlayerDetail {
+                    player: "mpv".into(),
+                    identity: "mpv".into(),
+                    status: crate::jwm::features::PlaybackStatus::Playing,
+                },
+                crate::jwm::features::PlayerDetail {
+                    player: "firefox".into(),
+                    identity: "Mozilla Firefox".into(),
+                    status: crate::jwm::features::PlaybackStatus::Stopped,
+                },
+            ],
         };
         let panel = SystemUiState::media_players_picker(&state);
         assert!(panel.is_media_players_picker());
@@ -8225,6 +8254,22 @@ mod tests {
         assert!(parts.items[1].starts_with('\u{f192}'), "active row is marked");
         assert!(parts.items[0].starts_with('\u{f10c}'));
         assert!(parts.items[2].starts_with('\u{f10c}'));
+        // Keys stay bus suffixes; labels prefer Identity + status cue.
+        assert!(
+            parts.items[0].contains("Spotify") && parts.items[0].ends_with('\u{f04c}'),
+            "{}",
+            parts.items[0]
+        );
+        assert!(
+            parts.items[1].contains("mpv") && parts.items[1].ends_with('\u{f04b}'),
+            "{}",
+            parts.items[1]
+        );
+        assert!(
+            parts.items[2].contains("Mozilla Firefox") && parts.items[2].ends_with('\u{f04d}'),
+            "{}",
+            parts.items[2]
+        );
 
         // Fewer than two players: the Media-row `o` arm must not open this
         // picker. The constructor itself still builds an empty/single list
@@ -8245,5 +8290,31 @@ mod tests {
             arm.contains("media_players_picker"),
             "o no longer opens the Players picker"
         );
+    }
+
+    #[test]
+    fn media_players_picker_falls_back_to_suffix_without_details() {
+        let state = crate::jwm::features::MediaState {
+            player: "mpv".into(),
+            identity: "mpv".into(),
+            status: crate::jwm::features::PlaybackStatus::Playing,
+            title: "Track".into(),
+            artist: "Artist".into(),
+            can_go_next: true,
+            can_go_previous: true,
+            position_us: None,
+            length_us: None,
+            players: vec!["spotify".into(), "mpv".into()],
+            player_details: Vec::new(),
+        };
+        let panel = SystemUiState::media_players_picker(&state);
+        let parts = panel.overlay_parts();
+        assert_eq!(
+            parts.items[0],
+            format!("{}  spotify", '\u{f10c}'),
+            "old-bridge push keeps suffix-only rows"
+        );
+        assert_eq!(parts.items[1], format!("{}  mpv", '\u{f192}'));
+        assert_eq!(panel.selected_media_player(), Some("mpv"));
     }
 }

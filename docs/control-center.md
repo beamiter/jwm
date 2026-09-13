@@ -114,7 +114,9 @@ card too — DND's confirmation is an OSD rather than a toast precisely
 because toasts are DND-gated. The Network and Bluetooth rows' `Left`/
 `Right` radio flips (and a confirmed Bluetooth power-off) raise the same
 Wi-Fi / Bluetooth OSD the key bindings use; the first press that only
-arms Bluetooth power-off stays quiet.
+arms Bluetooth power-off stays quiet. The Power Profile row's `Left`/
+`Right` cycle raises a labeled Power Profile OSD with the active name
+(and the same icon the row already uses) after a successful switch.
 
 The panel rebuilds itself when the state behind a row changes — a track
 change, a battery poll — so an open card never shows a stale value, and the
@@ -512,8 +514,9 @@ Charging clears the memory, so unplugging later warns afresh.
 `powerprofilesctl` is preferred, falling back to
 `/sys/firmware/acpi/platform_profile`; whichever answers first is cached for
 the session. `Left`/`Right` cycle through the driver's own profile list and
-wrap, and the row re-reads afterwards so it shows what actually took effect
-rather than what was requested.
+wrap, raise the labeled Power Profile OSD with the active name (same card
+`set_power_profile` shows), and the row re-reads afterwards so it shows what
+actually took effect rather than what was requested.
 
 ## IPC
 
@@ -529,9 +532,10 @@ jwm-msg '{"command": "set_mic_mute", "args": {"muted": true}}'
 
 `get_power_status` reports the battery and the available/active profiles.
 `set_power_profile` rejects a name the driver does not offer, listing what it
-does. The `power` subscription topic carries `power/battery` (only when the
-reading actually changed) and `power/profile`; the `network` topic carries
-`network/status`, likewise only on a real change.
+does. A successful switch raises the same labeled Power Profile OSD the Hub
+`Left`/`Right` cycle does. The `power` subscription topic carries
+`power/battery` (only when the reading actually changed) and `power/profile`;
+the `network` topic carries `network/status`, likewise only on a real change.
 
 `get_audio_devices` lists both ends with the device in use marked; the `id` it
 reports is what `set_audio_device` takes — a wpctl node id or a PulseAudio

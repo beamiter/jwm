@@ -142,6 +142,10 @@ impl ActiveOsd {
             // range for the same reason as `VolumeMuted` above.
             OsdKind::MicMute(true) => ("\u{f131}", "Microphone Muted".into()),
             OsdKind::MicMute(false) => ("\u{f130}", "Microphone Unmuted".into()),
+            // Same FA-4 glyphs as `jwm::features::power::profile_icon` so the
+            // OSD and the Hub row cannot drift; the label is the driver name
+            // the row already shows.
+            OsdKind::PowerProfile(ref name) => (power_profile_icon(name), name.clone()),
         }
     }
 
@@ -155,7 +159,8 @@ impl ActiveOsd {
             | OsdKind::NightLight(_)
             | OsdKind::Wifi(_)
             | OsdKind::Bluetooth(_)
-            | OsdKind::MicMute(_) => None,
+            | OsdKind::MicMute(_)
+            | OsdKind::PowerProfile(_) => None,
             OsdKind::VolumeMuted => Some(0.0),
             _ => Some(f32::from(self.percent.min(100)) / 100.0),
         }
@@ -168,6 +173,17 @@ impl ActiveOsd {
             OsdKind::Media => MEDIA_CARD_WIDTH,
             _ => SLIDER_CARD_WIDTH,
         }
+    }
+}
+
+/// Icon for a power-profile OSD card. Kept byte-identical to
+/// [`crate::jwm::features::power::profile_icon`] (pinned below) so the Hub
+/// row and this card cannot pick different glyphs for the same name.
+fn power_profile_icon(name: &str) -> &'static str {
+    match name {
+        "power-saver" | "low-power" | "quiet" => "\u{f06c}", // fa-leaf
+        "performance" => "\u{f135}",                         // fa-rocket
+        _ => "\u{f24e}",                                     // fa-balance-scale
     }
 }
 
@@ -545,9 +561,35 @@ mod tests {
             (OsdKind::Bluetooth(false), "\u{f293}", "Bluetooth Off"),
             (OsdKind::MicMute(true), "\u{f131}", "Microphone Muted"),
             (OsdKind::MicMute(false), "\u{f130}", "Microphone Unmuted"),
+            (
+                OsdKind::PowerProfile("power-saver".into()),
+                "\u{f06c}",
+                "power-saver",
+            ),
+            (
+                OsdKind::PowerProfile("performance".into()),
+                "\u{f135}",
+                "performance",
+            ),
+            (
+                OsdKind::PowerProfile("balanced".into()),
+                "\u{f24e}",
+                "balanced",
+            ),
+            (
+                OsdKind::PowerProfile("low-power".into()),
+                "\u{f06c}",
+                "low-power",
+            ),
+            (OsdKind::PowerProfile("quiet".into()), "\u{f06c}", "quiet"),
+            (
+                OsdKind::PowerProfile("custom-driver-profile".into()),
+                "\u{f24e}",
+                "custom-driver-profile",
+            ),
         ] {
             let mut slot = OsdSlot::default();
-            slot.show(kind, 0, now);
+            slot.show(kind.clone(), 0, now);
             let osd = slot.get().unwrap();
             assert_eq!(osd.icon_and_label(), (icon, label.to_string()), "{kind:?}");
             assert_eq!(osd.fill(), None, "{kind:?} draws no bar");
@@ -562,6 +604,28 @@ mod tests {
                     ch as u32
                 );
             }
+        }
+    }
+
+    /// The OSD's power-profile glyphs must stay byte-identical to the Hub
+    /// row's `profile_icon`, or Left/Right would flash one icon and the row
+    /// would show another.
+    #[test]
+    fn power_profile_osd_icons_match_the_hub_row() {
+        use crate::jwm::features::power::profile_icon;
+        for name in [
+            "power-saver",
+            "low-power",
+            "quiet",
+            "performance",
+            "balanced",
+            "something-driver-specific",
+        ] {
+            assert_eq!(
+                power_profile_icon(name),
+                profile_icon(name),
+                "{name} drifted between OSD and Hub"
+            );
         }
     }
 }

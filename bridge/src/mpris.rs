@@ -111,7 +111,10 @@ fn resolve_active<'a>(
 /// state, plus every bus suffix the sweep saw in sweep order, so jwm can
 /// offer player switching without a second channel. The list is an
 /// append-only key — an old jwm ignores it, and a new jwm reading a missing
-/// one (an old bridge) treats the session as single-player.
+/// one (an old bridge) treats the session as single-player. `player_details`
+/// rides alongside with Identity and PlaybackStatus so the Players picker
+/// can label rows without scraping the active push; an old jwm ignores it
+/// the same way, and a new jwm without it still keys/cycles on `players`.
 fn publish_args(players: &[PlayerSnapshot], pinned: Option<&str>) -> (Value, Option<String>) {
     let (active, pin) = resolve_active(players, pinned);
     let args = match active {
@@ -120,6 +123,18 @@ fn publish_args(players: &[PlayerSnapshot], pinned: Option<&str>) -> (Value, Opt
             args["players"] = players
                 .iter()
                 .map(|player| Value::String(player.player.clone()))
+                .collect();
+            // Append-only rich rows: same sweep order as `players`. Old jwm
+            // ignores the key; the string list stays the cycle/select key.
+            args["player_details"] = players
+                .iter()
+                .map(|player| {
+                    serde_json::json!({
+                        "player": player.player,
+                        "identity": player.identity,
+                        "status": player.status,
+                    })
+                })
                 .collect();
             args
         }
@@ -440,6 +455,12 @@ mod tests {
         }
     }
 
+    fn player_named(name: &str, identity: &str, status: &str) -> PlayerSnapshot {
+        let mut snapshot = player(name, status);
+        snapshot.identity = identity.to_string();
+        snapshot
+    }
+
     #[test]
     fn a_playing_player_outranks_a_paused_one() {
         let players = vec![player("mpv", "Paused"), player("spotify", "Playing")];
@@ -576,17 +597,53 @@ mod tests {
         let (args, pin) = publish_args(&players, None);
         assert_eq!(args["player"], "spotify", "the active pick still leads");
         assert_eq!(args["players"], serde_json::json!(["mpv", "spotify"]));
+        assert_eq!(
+            args["player_details"],
+            serde_json::json!([
+                {"player": "mpv", "identity": "mpv", "status": "Paused"},
+                {"player": "spotify", "identity": "spotify", "status": "Playing"},
+            ])
+        );
         assert_eq!(pin, None, "no pin was given, none comes back");
 
         // The list is the sweep's, not the resolved player's: a pin does not
         // reorder or trim it.
         let (args, _) = publish_args(&players, Some("mpv"));
         assert_eq!(args["players"], serde_json::json!(["mpv", "spotify"]));
+        assert_eq!(
+            args["player_details"],
+            serde_json::json!([
+                {"player": "mpv", "identity": "mpv", "status": "Paused"},
+                {"player": "spotify", "identity": "spotify", "status": "Playing"},
+            ])
+        );
         // A player-less sweep keeps the null signal, with no list key at all.
         let (args, pin) = publish_args(&[], Some("mpv"));
         assert_eq!(args["player"], Value::Null);
         assert!(args.get("players").is_none());
+        assert!(args.get("player_details").is_none());
         assert_eq!(pin, None);
+    }
+
+    #[test]
+    fn player_details_carry_identity_alongside_the_string_list() {
+        let players = vec![
+            player_named("spotify", "Spotify", "Playing"),
+            player_named("chromium", "Google Chrome", "Paused"),
+        ];
+        let (args, _) = publish_args(&players, None);
+        assert_eq!(
+            args["players"],
+            serde_json::json!(["spotify", "chromium"]),
+            "string list stays the cycle key"
+        );
+        assert_eq!(
+            args["player_details"],
+            serde_json::json!([
+                {"player": "spotify", "identity": "Spotify", "status": "Playing"},
+                {"player": "chromium", "identity": "Google Chrome", "status": "Paused"},
+            ])
+        );
     }
 
     #[test]

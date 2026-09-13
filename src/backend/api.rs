@@ -1315,7 +1315,12 @@ pub struct TagsGridCell {
 
 /// What the OSD card depicts. Unlike toasts the OSD is a single
 /// replace-in-place card at the bottom center of the primary output.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+///
+/// Not `Copy`: [`Self::PowerProfile`] carries the driver-reported name so
+/// Hub Left/Right and IPC can raise the card through
+/// [`CompositorWorkspaceEffects::compositor_show_osd`] like the other
+/// labeled toggles.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum OsdKind {
     Volume,
     VolumeMuted,
@@ -1342,6 +1347,10 @@ pub enum OsdKind {
     /// labeled card like the other toggle kinds: the mic shows only its
     /// live/cut state, never a level bar.
     MicMute(bool),
+    /// Power profile switched; the payload is the active profile name as the
+    /// driver reports it (same string the Hub row shows). Labeled card, no
+    /// bar; the icon matches the Hub row's `profile_icon` mapping.
+    PowerProfile(String),
 }
 
 /// One keyboard navigation step in Expose / Mission Control, in the grid the

@@ -100,15 +100,18 @@ The ranking loses to a pin. With more than one player running, the media row
 ends with a `· p ‹next player›` hint naming what the key would switch to
 (`· p spotify`), and pressing `p` — or clicking that hint — pins the row —
 and the transport keys with it — to that next player, wrapping around the
-list. Pressing `o` opens a Players picker listing every bus suffix the
-sweep saw (filled marker on the active one); Enter / click pins the
-selection and returns to the hub. A click on the previous / next glyph
-skips; a click on the title or status icon still play/pauses. The bridge
-holds the pin while the pinned player's bus name is alive and re-publishes
-its state, so the switch raises the media OSD like any track change; when
-the pinned player exits, the pin clears itself and the ranking takes the
-row back. A single-player session is untouched: `p` and `o` are no-ops and
-the row carries no hint. The lock screen's now-playing row never grows the
+list. Pressing `o` opens a Players picker listing every player the sweep
+saw (filled marker on the active one). When the bridge sends
+`player_details`, each row prefers the player's MPRIS `Identity` over the
+bus suffix and trails a Playing/Paused/Stopped icon; without details (an
+old bridge) the rows stay suffix-only. Enter / click pins by bus suffix
+and returns to the hub. A click on the previous / next glyph skips; a
+click on the title or status icon still play/pauses. The bridge holds the
+pin while the pinned player's bus name is alive and re-publishes its
+state, so the switch raises the media OSD like any track change; when the
+pinned player exits, the pin clears itself and the ranking takes the row
+back. A single-player session is untouched: `p` and `o` are no-ops and the
+row carries no hint. The lock screen's now-playing row never grows the
 hint either — it is a control, and the lock shows none.
 
 Player start/stop is picked up from bus name-owner changes; track changes are
@@ -119,11 +122,14 @@ picked up by a 3-second sweep.
 - `set_media_status` — what the bridge pushes: `player`, `identity`, `status`
   (`Playing`/`Paused`/`Stopped`), `title`, `artist`, `can_go_next`,
   `can_go_previous`, the append-only `position_us` / `length_us` microsecond
-  fields (nullable), and the append-only `players` list naming every player
-  the sweep saw, in sweep order. Mixed old/new bridge↔jwm pairs are
-  tolerated; a missing list reads as a single-player session. A missing
-  or null `player` clears the state, which is how
-  the bridge reports that every player went away.
+  fields (nullable), the append-only `players` string list naming every
+  player the sweep saw (in sweep order — the cycle/select key), and the
+  append-only `player_details` array of `{player, identity?, status?}` in
+  the same order so the Players picker can show Identity and a status cue.
+  Mixed old/new bridge↔jwm pairs are tolerated; a missing `players` list
+  reads as a single-player session, and a missing `player_details` keeps
+  suffix-only picker rows. A missing or null `player` clears the state,
+  which is how the bridge reports that every player went away.
 - `media_control` — `{"action": "play_pause" | "next" | "previous" | "stop"}`.
   `toggle`, `playpause`, and `prev` are accepted aliases.
 - `set_mic_mute` — `{"muted": bool}` sets the default microphone's mute flag.
@@ -136,11 +142,13 @@ picked up by a 3-second sweep.
 - the `audio` subscription topic carries `audio/devices` and `audio/mic`
   (bool `muted` whenever the shown flag becomes a known bool).
 - `get_media_status` — the current state plus the rendered `label`, a
-  pre-formatted nullable `position_label`, and the append-only `players`
-  list (same order as the bridge push), so bars don't reimplement the
-  clamping or scrape the control-center row for a picker.
+  pre-formatted nullable `position_label`, the append-only `players` list
+  (same order as the bridge push), and append-only `player_details` (status
+  as `playing`/`paused`/`stopped`), so bars don't reimplement the clamping
+  or scrape the control-center row for a picker.
 - the `media` subscription topic carries `media/status` and `media/command`.
-  `media/status` also carries the append-only `players` list.
+  `media/status` also carries the append-only `players` and `player_details`
+  fields.
 
 Bars can subscribe to `media/status` for a now-playing widget without talking
 to MPRIS themselves. See [notifications](notifications.md) for building and

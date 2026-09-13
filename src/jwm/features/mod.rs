@@ -59,7 +59,7 @@ pub use deferred_grab::{DeferredGrab, DeferredGrabAction};
 pub use expose_plan::ExposeAction;
 pub use layout_picker::LayoutPickerState;
 pub use magnifier::MagnifierState;
-pub use media::{MediaCommand, MediaState, MediaStatus, PlaybackStatus};
+pub use media::{MediaCommand, MediaState, MediaStatus, PlaybackStatus, PlayerDetail};
 pub use notifications::{NotificationCenter, NotificationRecord, NotificationRequest};
 pub use overview::OverviewState;
 pub use overview_plan::CyclePlan;

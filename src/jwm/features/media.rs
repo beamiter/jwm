@@ -105,6 +105,33 @@ impl MediaCommand {
     }
 }
 
+/// Per-player Identity / PlaybackStatus from the bridge's append-only
+/// `player_details` list. Keys and cycle order still live on
+/// [`MediaState::players`]; this is display-only for the Players picker.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PlayerDetail {
+    /// MPRIS bus suffix — matches an entry in [`MediaState::players`].
+    pub player: String,
+    /// Human-readable `Identity`, when the player published one.
+    pub identity: String,
+    pub status: PlaybackStatus,
+}
+
+impl PlayerDetail {
+    /// Label the Players picker shows: Identity when present, else the
+    /// bus suffix. Never blank for a real detail — the parse path drops
+    /// entries without a player name.
+    #[must_use]
+    pub fn label(&self) -> &str {
+        let identity = self.identity.trim();
+        if identity.is_empty() {
+            self.player.as_str()
+        } else {
+            identity
+        }
+    }
+}
+
 /// The active player as the shell last heard about it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MediaState {
@@ -130,9 +157,24 @@ pub struct MediaState {
     /// when the bridge is too old to send one, which reads exactly like a
     /// one-player session: no switch hint on the row, nothing for `p` to do.
     pub players: Vec<String>,
+    /// Optional Identity / status for each suffix in [`Self::players`].
+    /// Empty when the bridge is too old to send `player_details` — the
+    /// Players picker then falls back to suffix-only rows. Bounded by the
+    /// same [`MAX_PLAYERS`] cap as the string list.
+    pub player_details: Vec<PlayerDetail>,
 }
 
 impl MediaState {
+    /// Look up rich picker metadata for a bus suffix. `None` when the
+    /// bridge sent no details, or none matching this suffix — the picker
+    /// then draws today's suffix-only row.
+    #[must_use]
+    pub fn player_detail(&self, suffix: &str) -> Option<&PlayerDetail> {
+        self.player_details
+            .iter()
+            .find(|detail| detail.player == suffix)
+    }
+
     /// `Title — Artist`, falling back to whichever half exists, then to the
     /// player's own name so the row is never blank.
     #[must_use]
@@ -448,15 +490,23 @@ pub fn lock_row(state: &MediaState) -> String {
 }
 
 /// One Players picker row: a filled marker for the player in use, hollow
-/// otherwise — the same grammar the audio device picker uses.
+/// otherwise — the same grammar the audio device picker uses. When the
+/// bridge sent `player_details`, the label prefers Identity over the bus
+/// suffix and a Playing/Paused/Stopped icon trails; without details the
+/// row stays suffix-only, byte-identical to the old picker.
 #[must_use]
-pub fn player_picker_row(name: &str, active: bool) -> String {
+pub fn player_picker_row(player: &str, detail: Option<&PlayerDetail>, active: bool) -> String {
     let marker = if active {
         "\u{f192}" // fa-dot-circle-o
     } else {
         "\u{f10c}" // fa-circle-o
     };
-    format!("{marker}  {name}")
+    match detail {
+        Some(detail) => {
+            format!("{marker}  {}  {}", detail.label(), detail.status.icon())
+        }
+        None => format!("{marker}  {player}"),
+    }
 }
 
 impl crate::jwm::Jwm {
@@ -487,6 +537,20 @@ impl crate::jwm::Jwm {
                 // ignore the field; a one-player session still sends the
                 // list (possibly empty) rather than omitting it.
                 "players": state.players,
+                // Append-only: Identity / status per suffix for rich picker
+                // rows. Old bars ignore it; missing details stay an empty
+                // array rather than omitting the key on an active push.
+                "player_details": state
+                    .player_details
+                    .iter()
+                    .map(|detail| {
+                        serde_json::json!({
+                            "player": detail.player,
+                            "identity": detail.identity,
+                            "status": detail.status.as_str(),
+                        })
+                    })
+                    .collect::<Vec<_>>(),
             }),
             None => serde_json::json!({ "player": serde_json::Value::Null }),
         };
@@ -625,6 +689,17 @@ impl crate::jwm::Jwm {
                 "length_us": state.length_us,
                 "position_label": state.position_label(),
                 "players": state.players,
+                "player_details": state
+                    .player_details
+                    .iter()
+                    .map(|detail| {
+                        serde_json::json!({
+                            "player": detail.player,
+                            "identity": detail.identity,
+                            "status": detail.status.as_str(),
+                        })
+                    })
+                    .collect::<Vec<_>>(),
             }),
             None => serde_json::json!({ "active": false }),
         }
@@ -671,6 +746,41 @@ pub fn parse_state_args(args: &serde_json::Value) -> Option<MediaState> {
                 .collect()
         })
         .unwrap_or_default();
+    // Append-only rich rows: an old bridge never sends them, garbage
+    // entries are dropped, and the same MAX_PLAYERS cap bounds the list.
+    // Missing details leave the picker on today's suffix-only rows; the
+    // string `players` list remains the cycle/select key either way.
+    let player_details = args
+        .get("player_details")
+        .and_then(serde_json::Value::as_array)
+        .map(|list| {
+            list.iter()
+                .filter_map(|entry| {
+                    let player = entry.get("player")?.as_str()?.trim();
+                    if player.is_empty() {
+                        return None;
+                    }
+                    let identity = entry
+                        .get("identity")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("")
+                        .trim();
+                    let status = PlaybackStatus::from_mpris(
+                        entry
+                            .get("status")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("Stopped"),
+                    );
+                    Some(PlayerDetail {
+                        player: bounded_text(player, MAX_PLAYER_BYTES),
+                        identity: bounded_text(identity, MAX_METADATA_BYTES),
+                        status,
+                    })
+                })
+                .take(MAX_PLAYERS)
+                .collect()
+        })
+        .unwrap_or_default();
     Some(MediaState {
         player: bounded_text(player, MAX_PLAYER_BYTES),
         identity: text("identity"),
@@ -686,6 +796,7 @@ pub fn parse_state_args(args: &serde_json::Value) -> Option<MediaState> {
         position_us: micros("position_us"),
         length_us: micros("length_us"),
         players,
+        player_details,
     })
 }
 
@@ -705,6 +816,7 @@ mod tests {
             position_us: None,
             length_us: None,
             players: Vec::new(),
+            player_details: Vec::new(),
         }
     }
 
@@ -887,6 +999,10 @@ mod tests {
         assert_eq!(parsed.position_us, None, "old bridges send no counters");
         assert_eq!(parsed.length_us, None);
         assert!(parsed.players.is_empty(), "old bridges send no player list");
+        assert!(
+            parsed.player_details.is_empty(),
+            "old bridges send no player details"
+        );
     }
 
     #[test]
@@ -899,6 +1015,10 @@ mod tests {
         assert_eq!(
             parsed.players,
             vec!["mpv".to_string(), "spotify".to_string()]
+        );
+        assert!(
+            parsed.player_details.is_empty(),
+            "string-only push keeps suffix-only picker rows"
         );
 
         // An empty list reads like a missing key: one-player behavior.
@@ -919,6 +1039,65 @@ mod tests {
         assert_eq!(
             parsed.players,
             vec!["mpv".to_string(), "spotify".to_string()]
+        );
+    }
+
+    #[test]
+    fn state_args_parse_player_details_append_only() {
+        let parsed = parse_state_args(&serde_json::json!({
+            "player": "mpv",
+            "players": ["mpv", "spotify"],
+            "player_details": [
+                {"player": "mpv", "identity": "mpv", "status": "Paused"},
+                {"player": "spotify", "identity": "Spotify", "status": "Playing"},
+            ],
+        }))
+        .expect("player parses");
+        assert_eq!(parsed.players, vec!["mpv".to_string(), "spotify".to_string()]);
+        assert_eq!(
+            parsed.player_details,
+            vec![
+                PlayerDetail {
+                    player: "mpv".into(),
+                    identity: "mpv".into(),
+                    status: PlaybackStatus::Paused,
+                },
+                PlayerDetail {
+                    player: "spotify".into(),
+                    identity: "Spotify".into(),
+                    status: PlaybackStatus::Playing,
+                },
+            ]
+        );
+
+        // Missing identity/status are tolerated; garbage entries drop.
+        let parsed = parse_state_args(&serde_json::json!({
+            "player": "mpv",
+            "players": ["mpv", "spotify"],
+            "player_details": [
+                {"player": "mpv"},
+                7,
+                null,
+                {"player": "  "},
+                {"identity": "Orphan"},
+                {"player": "spotify", "identity": "Spotify", "status": "nonsense"},
+            ],
+        }))
+        .expect("player parses");
+        assert_eq!(
+            parsed.player_details,
+            vec![
+                PlayerDetail {
+                    player: "mpv".into(),
+                    identity: String::new(),
+                    status: PlaybackStatus::Stopped,
+                },
+                PlayerDetail {
+                    player: "spotify".into(),
+                    identity: "Spotify".into(),
+                    status: PlaybackStatus::Stopped,
+                },
+            ]
         );
     }
 
@@ -1514,9 +1693,62 @@ mod tests {
 
     #[test]
     fn player_picker_row_marks_the_active_player() {
-        assert!(player_picker_row("mpv", true).starts_with('\u{f192}'));
-        assert!(player_picker_row("spotify", false).starts_with('\u{f10c}'));
-        assert!(player_picker_row("mpv", true).ends_with("mpv"));
+        assert!(player_picker_row("mpv", None, true).starts_with('\u{f192}'));
+        assert!(player_picker_row("spotify", None, false).starts_with('\u{f10c}'));
+        assert!(player_picker_row("mpv", None, true).ends_with("mpv"));
+    }
+
+    #[test]
+    fn player_picker_row_prefers_identity_and_shows_status() {
+        let spotify = PlayerDetail {
+            player: "spotify".into(),
+            identity: "Spotify".into(),
+            status: PlaybackStatus::Playing,
+        };
+        let mpv = PlayerDetail {
+            player: "mpv".into(),
+            identity: String::new(),
+            status: PlaybackStatus::Paused,
+        };
+        let rich = player_picker_row("spotify", Some(&spotify), true);
+        assert!(rich.starts_with('\u{f192}'));
+        assert!(rich.contains("Spotify"), "{rich}");
+        assert!(!rich.contains("spotify"), "suffix stays off the label when Identity exists");
+        assert!(rich.ends_with('\u{f04b}'), "Playing icon trails: {rich}");
+
+        let fallback = player_picker_row("mpv", Some(&mpv), false);
+        assert!(fallback.contains("mpv"), "empty Identity falls back to suffix");
+        assert!(fallback.ends_with('\u{f04c}'), "Paused icon trails: {fallback}");
+
+        // Without details the row is byte-identical to the old picker.
+        assert_eq!(
+            player_picker_row("spotify", None, true),
+            format!("{}  spotify", '\u{f192}')
+        );
+    }
+
+    #[test]
+    fn cycling_and_select_still_key_on_bus_suffixes() {
+        let mut multi = state("Track", "Artist");
+        multi.players = vec!["spotify".to_string(), "mpv".to_string()];
+        multi.player_details = vec![
+            PlayerDetail {
+                player: "spotify".into(),
+                identity: "Spotify".into(),
+                status: PlaybackStatus::Playing,
+            },
+            PlayerDetail {
+                player: "mpv".into(),
+                identity: "mpv media player".into(),
+                status: PlaybackStatus::Paused,
+            },
+        ];
+        // Cycle order is the string list, never the Identity label.
+        assert_eq!(next_player(&multi.players, &multi.player), Some("mpv"));
+        assert_eq!(
+            player_picker_row("mpv", multi.player_detail("mpv"), false),
+            format!("{}  mpv media player  {}", '\u{f10c}', '\u{f04c}')
+        );
     }
 
     #[test]

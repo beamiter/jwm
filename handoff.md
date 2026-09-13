@@ -4,6 +4,20 @@
 
 ---
 
+## 2026-09-13：UI/UX 二十四轮（Power Profile OSD、rich player_details）
+
+选题 = 二十三轮「仍然开着的」里日常命中最高的两项并行：Hub/IPC Power Profile OSD（S）∥ rich `player_details`（M）。文件几乎不交（osd/api/input/ipc vs bridge/media/system_ui）。拒做：pin 持久化、缩略图、mic 点击区、媒体 OpenPicker 指针、`set_audio_device` sync、X11 frame deadline。
+
+1. **Power Profile OSD**。`OsdKind::PowerProfile(String)`（Clone、非 Copy）；`osd.rs` icon/label 钉 `power::profile_icon`；Hub `Left`/`Right` 成功后 `compositor_show_osd`；IPC `set_power_profile` 确认后同形。docs/control-center.md。
+
+2. **Rich `player_details`**。bridge `publish_args` 并排 `players` + `player_details[{player,identity?,status?}]`；WM dual-tolerant 解析；`player_picker_row` Identity + status 图标，无 details → 旧后缀行；`media/status` / `get_media_status` append-only。cycle/select 仍总线后缀。docs/media-controls.md。
+
+**验证**：clippy -D warnings（0）；lib **3239 passed / 0 failed / 11 ignored**（3225→+14 量级）；bridge `mpris::` **19/0**。**无真机显示会话**。真机优先：Hub Power Profile 切档起 OSD；双播放器 `o` 见 Identity 行 + 状态图标。
+
+**仍然开着的**（二十五轮）：pin 持久化；Input 行 mic mute 点击（+可选 `m`）；媒体指针 OpenPicker；剪贴板缩略图；X11 screenshot double-offer 文案诚实；`set_audio_device` sync；X11 `compositor_frame_deadline`。**成文勿再提**：……（继承二十三轮勿再提）+ Hub/IPC Power Profile 无 OSD（本轮关闭）+ Players 仅后缀无 Identity（本轮关闭）。
+
+---
+
 ## 2026-09-13：UI/UX 二十三轮（Theme TOML 落盘、截图原生 PNG defer）
 
 选题 = 二十二轮开放项：Theme Hub 持久化 ∥ 截图异步关 R22「仍 wl-copy」例外。文件不交。拒做：缩略图、rich players、pin 持久化、Wayland ClipboardImageSender 大造。
