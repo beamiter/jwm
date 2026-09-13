@@ -1248,7 +1248,8 @@ impl Jwm {
 
     /// Apply the selected UI theme through the same configuration path a
     /// `set_config` takes, so both compositors rebuild their palettes on the
-    /// next `apply_config` exactly as they would from a reload.
+    /// next `apply_config` exactly as they would from a reload, then surgically
+    /// persist `appearance.ui_theme` to the live TOML (comments preserved).
     pub(crate) fn apply_selected_theme(&mut self, backend: &mut dyn Backend) {
         let Some(theme) = self.features.system_ui.selected_theme().map(str::to_string) else {
             return;
@@ -1263,6 +1264,10 @@ impl Jwm {
         }
         CONFIG.store(std::sync::Arc::new(updated));
         self.apply_config_changes(backend);
+        match CONFIG.load().persist_ui_theme(&theme) {
+            Ok(revision) => self.note_config_written_by_us(revision),
+            Err(error) => error!("Theme: failed to persist {theme}: {error}"),
+        }
         info!("Theme: {theme}");
         self.broadcast_ipc_event(
             "config/changed",
@@ -4226,8 +4231,8 @@ mod shell_entry_tests {
         assert!(!open_paths.contains("AudioDefaults::read()"));
     }
 
-    /// Theme apply must mirror wallpaper: set_value → CONFIG.store →
-    /// apply_config_changes → config/changed → close_system_ui.
+    /// Theme apply must mirror wallpaper's in-memory path, then surgically
+    /// persist `appearance.ui_theme` (never a wholesale `save_to_file`).
     #[test]
     fn apply_selected_theme_follows_the_wallpaper_set_config_path() {
         const SOURCE: &str = include_str!("toggles.rs");
@@ -4242,6 +4247,8 @@ mod shell_entry_tests {
             "appearance.ui_theme",
             "CONFIG.store",
             "apply_config_changes",
+            "persist_ui_theme",
+            "note_config_written_by_us",
             "config/changed",
             "close_system_ui",
         ] {
@@ -4250,6 +4257,10 @@ mod shell_entry_tests {
                 "apply_selected_theme lost {needle}"
             );
         }
+        assert!(
+            !apply.contains("save_to_file"),
+            "apply_selected_theme must not wholesale-save the config"
+        );
         assert!(
             SOURCE.contains("ShellHubRoute::Theme => Self::theme_picker_state()"),
             "open_shell_hub_route must open Theme via theme_picker_state"

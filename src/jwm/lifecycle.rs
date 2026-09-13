@@ -1365,9 +1365,10 @@ impl Jwm {
         self.config_reload_tracker.has_pending()
     }
 
-    /// Record a revision JWM wrote itself — the per-tag layout save is the
-    /// only one today. Without this the watcher would see the new mtime as an
-    /// edit and reload the config a second or two after every layout change.
+    /// Record a revision JWM wrote itself — per-tag layout saves and Hub
+    /// Theme persistence today. Without this the watcher would see the new
+    /// mtime as an edit and reload the config a second or two after every
+    /// write.
     pub(crate) fn note_config_written_by_us(&mut self, revision: SystemTime) {
         self.config_reload_tracker.mark_attempted(revision);
         self.config_last_modified = Some(revision);

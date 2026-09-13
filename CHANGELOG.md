@@ -7,6 +7,15 @@ monorepo use independent Semantic Versions.
 
 ### Added
 
+- Hub Theme selection surgically persists `appearance.ui_theme` to the live
+  TOML (comments preserved); IPC `set_config` stays session-only. See
+  [docs/ui-theme.md](docs/ui-theme.md).
+
+- Screenshot→clipboard on Wayland defers the native data-device PNG offer to
+  the completion poll (no worker `wl-copy`); nested Wayland shares the same
+  path. See [docs/clipboard.md](docs/clipboard.md).
+
+
 - With more than one MPRIS player, `o` on the control-center media row opens a
   Players picker (audio-device shape): Enter/click pins that bus suffix via
   `select_player` and returns to the Hub; `p` and the `· p ‹next›` hint still

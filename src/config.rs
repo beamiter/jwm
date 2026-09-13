@@ -3590,6 +3590,147 @@ impl Config {
         self.persist_layout_tags_to(Self::resolve_load_path(), entries)
     }
 
+    /// Write `theme` into the live config file's `appearance.ui_theme` key,
+    /// leaving every other byte of the file exactly as it was.
+    ///
+    /// Same rationale as [`Self::persist_layout_tags`]: a full
+    /// [`Self::save_to_file`] would re-serialize the document and drop the
+    /// user's comments. Unknown theme names are rejected without touching
+    /// the file. When no config file exists yet, the whole config is written
+    /// once (as on first start) with the theme applied.
+    ///
+    /// Returns the file's new modification time, which the caller records so
+    /// the config watcher does not treat JWM's own write as an edit to reload.
+    pub fn persist_ui_theme(
+        &self,
+        theme: &str,
+    ) -> Result<std::time::SystemTime, ConfigError> {
+        self.persist_ui_theme_to(Self::resolve_load_path(), theme)
+    }
+
+    /// [`Self::persist_ui_theme`] against an explicit path.
+    pub fn persist_ui_theme_to<P: AsRef<Path>>(
+        &self,
+        path: P,
+        theme: &str,
+    ) -> Result<std::time::SystemTime, ConfigError> {
+        let Some(normalized) = normalize_ui_theme(theme) else {
+            return Err(ConfigError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "appearance.ui_theme={theme} is not one of: {}",
+                    KNOWN_UI_THEMES.join(", ")
+                ),
+            )));
+        };
+        let path = path.as_ref();
+        let existing = match read_config_text(path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let mut whole = self.clone();
+                whole.inner.appearance.ui_theme = normalized.to_string();
+                whole.save_to_file(&path)?;
+                return Ok(fs::metadata(&path)?.modified()?);
+            }
+            Err(error) => return Err(error.into()),
+        };
+
+        let text = Self::surgical_set_ui_theme(&existing, normalized);
+        atomic_write(&path, text.as_bytes())?;
+        Ok(fs::metadata(&path)?.modified()?)
+    }
+
+    /// Replace or insert `ui_theme = "..."` under `[appearance]` in raw TOML
+    /// text. Comments, ordering, and every other key stay put.
+    fn surgical_set_ui_theme(existing: &str, theme: &str) -> String {
+        let assignment = format!("ui_theme = {}", toml_string_literal(theme));
+        let mut out = String::with_capacity(existing.len() + assignment.len() + 32);
+        let mut in_appearance = false;
+        let mut appearance_seen = false;
+        let mut key_done = false;
+        // Blank lines at the end of `[appearance]` are held so a missing key
+        // lands with the other keys, not after the section's trailing spacer.
+        let mut held_blanks = String::new();
+
+        for line in existing.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with('[') {
+                if in_appearance && !key_done {
+                    out.push_str(&assignment);
+                    out.push('\n');
+                    key_done = true;
+                }
+                out.push_str(&held_blanks);
+                held_blanks.clear();
+                in_appearance = trimmed == "[appearance]";
+                if in_appearance {
+                    appearance_seen = true;
+                }
+                out.push_str(line);
+                out.push('\n');
+                continue;
+            }
+
+            if in_appearance && !key_done {
+                if trimmed.is_empty() {
+                    held_blanks.push_str(line);
+                    held_blanks.push('\n');
+                    continue;
+                }
+                if Self::line_assigns_ui_theme(trimmed) {
+                    out.push_str(&held_blanks);
+                    held_blanks.clear();
+                    let indent_len = line.len() - line.trim_start().len();
+                    out.push_str(&line[..indent_len]);
+                    out.push_str(&assignment);
+                    out.push('\n');
+                    key_done = true;
+                    continue;
+                }
+                out.push_str(&held_blanks);
+                held_blanks.clear();
+            }
+
+            out.push_str(line);
+            out.push('\n');
+        }
+
+        if in_appearance && !key_done {
+            out.push_str(&assignment);
+            out.push('\n');
+        }
+        out.push_str(&held_blanks);
+
+        if !appearance_seen {
+            if !out.is_empty() && !out.ends_with("\n\n") {
+                if !out.ends_with('\n') {
+                    out.push('\n');
+                }
+                out.push('\n');
+            }
+            out.push_str("[appearance]\n");
+            out.push_str(&assignment);
+            out.push('\n');
+        }
+
+        // `str::lines` drops a final newline; keep files newline-terminated.
+        if out.is_empty() {
+            return out;
+        }
+        if !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out
+    }
+
+    /// True when `trimmed` is an assignment to `ui_theme` (not a comment).
+    fn line_assigns_ui_theme(trimmed: &str) -> bool {
+        let Some(after_key) = trimmed.strip_prefix("ui_theme") else {
+            return false;
+        };
+        after_key.trim_start().starts_with('=')
+    }
+
     /// [`Self::persist_layout_tags`] against an explicit path.
     pub fn persist_layout_tags_to<P: AsRef<Path>>(
         &self,
@@ -4211,8 +4352,8 @@ pub static CONFIG: LazyLock<ArcSwap<Config>> = LazyLock::new(|| {
     // `lt_symbol` to "[N]" and breaks monitor snapshot assertions in
     // empty_jwm-based tests (recorded in handoff.md, rounds 15-17). The file
     // loader itself stays covered by dedicated tests that call
-    // `Config::load_from_file` / `save_to_file` / `persist_layout_tags_to`
-    // against fixture paths. Production and integration-test builds (the lib
+    // `Config::load_from_file` / `save_to_file` / `persist_layout_tags_to` /
+    // `persist_ui_theme_to` against fixture paths. Production and integration-test builds (the lib
     // compiled without cfg(test)) keep the real load path below, including
     // the template-generation side effect and the "Configuration loaded
     // from" log line.
@@ -5053,6 +5194,130 @@ border_px = 3
 
         let loaded = Config::load_from_file(&path).unwrap();
         assert_eq!(loaded.layout_tags(), [layout_tag(3, 1, "bstack")]);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    /// Theme persistence is the same kind of surgical edit as per-tag
+    /// layouts: the user's comments and neighbouring keys must survive.
+    #[test]
+    fn persisting_ui_theme_leaves_the_rest_of_the_file_alone() {
+        let path = temporary_config_path("ui-theme-comments");
+        let handwritten = "\
+# my window manager
+[layout]
+m_fact = 0.55 # golden-ish
+
+[appearance]
+border_px = 3 # keep me
+ui_theme = \"material\"
+# trailing note
+";
+        std::fs::write(&path, handwritten).unwrap();
+
+        Config::default()
+            .persist_ui_theme_to(&path, "glass")
+            .unwrap();
+        let written = std::fs::read_to_string(&path).unwrap();
+
+        assert!(written.contains("# my window manager"), "{written}");
+        assert!(written.contains("m_fact = 0.55 # golden-ish"), "{written}");
+        assert!(written.contains("border_px = 3 # keep me"), "{written}");
+        assert!(written.contains("# trailing note"), "{written}");
+        assert!(written.contains("ui_theme = \"glass\""), "{written}");
+        assert!(!written.contains("ui_theme = \"material\""), "{written}");
+        std::fs::remove_file(path).unwrap();
+    }
+
+    /// A config that never named a theme still gets the key under the
+    /// existing `[appearance]` table — not a second section.
+    #[test]
+    fn persisting_ui_theme_inserts_a_missing_key() {
+        let path = temporary_config_path("ui-theme-insert-key");
+        std::fs::write(
+            &path,
+            "\
+[appearance]
+border_px = 3
+
+[behavior]
+wallpaper_mode = \"fill\"
+",
+        )
+        .unwrap();
+
+        Config::default()
+            .persist_ui_theme_to(&path, "nord")
+            .unwrap();
+        let written = std::fs::read_to_string(&path).unwrap();
+
+        assert!(
+            written.contains("[appearance]\nborder_px = 3\nui_theme = \"nord\"\n"),
+            "{written}"
+        );
+        assert_eq!(written.matches("[appearance]").count(), 1, "{written}");
+        assert!(written.contains("[behavior]\nwallpaper_mode"), "{written}");
+        std::fs::remove_file(path).unwrap();
+    }
+
+    /// No `[appearance]` at all: append the section rather than rewriting
+    /// the document.
+    #[test]
+    fn persisting_ui_theme_inserts_a_missing_section() {
+        let path = temporary_config_path("ui-theme-insert-section");
+        let handwritten = "\
+# only layout today
+[layout]
+n_master = 1
+";
+        std::fs::write(&path, handwritten).unwrap();
+
+        Config::default()
+            .persist_ui_theme_to(&path, "tokyo-night")
+            .unwrap();
+        let written = std::fs::read_to_string(&path).unwrap();
+
+        assert!(written.starts_with(handwritten), "{written}");
+        assert!(
+            written.contains("[appearance]\nui_theme = \"tokyo-night\"\n"),
+            "{written}"
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+
+    /// Rejected names must not touch the file — even when the path exists.
+    #[test]
+    fn an_invalid_ui_theme_does_not_write() {
+        let path = temporary_config_path("ui-theme-invalid");
+        let handwritten = "\
+[appearance]
+ui_theme = \"glass\"
+";
+        std::fs::write(&path, handwritten).unwrap();
+        let before = std::fs::metadata(&path).unwrap().modified().unwrap();
+
+        let error = Config::default()
+            .persist_ui_theme_to(&path, "neumorphic")
+            .expect_err("unknown theme");
+        assert!(error.to_string().contains("neumorphic"), "{error}");
+
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(after, handwritten);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().modified().unwrap(),
+            before
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn a_missing_config_file_gets_a_whole_ui_theme_write() {
+        let path = temporary_config_path("ui-theme-missing");
+        let _ = std::fs::remove_file(&path);
+        Config::default()
+            .persist_ui_theme_to(&path, "paper")
+            .unwrap();
+
+        assert_eq!(Config::load_from_file(&path).unwrap().ui_theme(), "paper");
         std::fs::remove_file(path).unwrap();
     }
 

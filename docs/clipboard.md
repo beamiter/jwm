@@ -100,8 +100,10 @@ that writes at its own pace, and a compositor that waited would stall every
 client with it. Re-offering a PNG (and picker activate / `clipboard_copy`)
 uses the compositor-native data-device `image/png` offer; `wl-copy` remains
 the fallback when that path is unavailable. Asynchronous screenshot publish
-still prefers `wl-copy` on Wayland until a thread-safe image sender exists
-there — activate/IPC go through the native route.
+returns PNG bytes from the worker and defers the offer to the main-loop
+completion poll (`offer_clipboard_png` → `set_clipboard_png`, then
+`wl-copy`), so nested Wayland backends share the same native path as
+activate/IPC.
 
 The X11 watcher runs on **its own X connection and thread**, not the window
 manager's.

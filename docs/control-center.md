@@ -24,8 +24,10 @@ The first section routes to the shell's pages:
 Shell section order is Applications → Notifications → Clipboard (optional) →
 Calendar → Wallpaper → Theme. Theme lists the seven known
 `appearance.ui_theme` values; `Enter` applies through the same in-memory
-`set_config` path Wallpaper uses (session-only — not written to TOML). There
-is no standalone Theme keybind.
+`set_config` path Wallpaper uses, then surgically writes
+`appearance.ui_theme` into the live TOML (comments and other keys preserved).
+IPC `set_config` for the same key remains session-only. There is no
+standalone Theme keybind.
 
 `Up`/`Down` and `Tab`/`Shift+Tab` move between selectable rows,
 `Page Up`/`Page Down` move through a long page, `Home`/`End` jump to its edges,
