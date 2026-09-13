@@ -417,10 +417,10 @@ impl ListKind {
                 "Click/Enter  copy    type  filter    d  forget    c  clear all    Esc  close"
             }
             Self::Wifi => {
-                "Click/Enter  join    \u{f062}/\u{f063}  select    d  forget    Esc  close"
+                "Click/Enter  join    \u{f062}/\u{f063}  select    d / middle-click  forget    Esc  close"
             }
             Self::Bluetooth => {
-                "Enter  connect/pair    s  scan    a  accept incoming    r  refresh    d  forget    Esc"
+                "Enter  connect/pair    s  scan    a  accept incoming    r  refresh    d / middle-click  forget    Esc"
             }
             Self::Wallpaper | Self::Theme => {
                 "Click/Enter  apply    \u{f062}/\u{f063}  select    Esc  close"
@@ -460,9 +460,9 @@ pub enum RowData {
         index: usize,
     },
     /// Whether the network is secured, i.e. may need a passphrase. `armed`
-    /// is the two-press forget confirm (`d` arms, `d` again deletes the
-    /// saved profile); it lives on the row so a refresh — which rebuilds the
-    /// rows — disarms it, the way moving the selection does.
+    /// is the two-press forget confirm (`d` / middle-click arms, same again
+    /// deletes the saved profile); it lives on the row so a refresh — which
+    /// rebuilds the rows — disarms it, the way moving the selection does.
     Wifi {
         secured: bool,
         armed: bool,
@@ -3996,10 +3996,13 @@ impl SystemUiState {
                         .skip(start)
                         .take(window)
                         .map(|row| {
-                            // The armed forget names its confirm key on the
+                            // The armed forget names its confirm keys on the
                             // row, the way the control center's armed rows do.
                             if row.data.forget_armed() {
-                                format!("{}   \u{2190} d again to forget", row.text)
+                                format!(
+                                    "{}   \u{2190} d / middle-click again to forget",
+                                    row.text
+                                )
                             } else {
                                 row.text.clone()
                             }
@@ -4110,7 +4113,7 @@ impl SystemUiState {
                     items,
                     icons,
                     hint: if forget_armed {
-                        "d  confirm forget    Esc  close".to_string()
+                        "d / middle-click  confirm forget    Esc  close".to_string()
                     } else {
                         kind.hint(prompt.as_ref()).to_string()
                     },
@@ -5160,7 +5163,7 @@ mod tests {
         // First `d` arms and says so; nothing is deleted yet.
         assert_eq!(panel.plan_wifi_forget(), ForgetPlan::Armed);
         let parts = panel.overlay_parts();
-        assert!(parts.items[0].contains("d again to forget"));
+        assert!(parts.items[0].contains("again to forget"));
         assert!(parts.hint.contains("confirm forget"));
         assert!(!parts.items[1].contains("forget"));
 
@@ -5170,7 +5173,7 @@ mod tests {
             panel.plan_wifi_forget(),
             ForgetPlan::Execute("Alpha".to_string())
         );
-        assert!(!panel.overlay_parts().items[0].contains("d again to forget"));
+        assert!(!panel.overlay_parts().items[0].contains("again to forget"));
         assert_eq!(panel.plan_wifi_forget(), ForgetPlan::Armed);
     }
 
@@ -5183,7 +5186,7 @@ mod tests {
         panel.move_selection(-1);
 
         // Back on the same row, but disarmed: it must arm again, not delete.
-        assert!(!panel.overlay_parts().items[0].contains("d again to forget"));
+        assert!(!panel.overlay_parts().items[0].contains("again to forget"));
         assert_eq!(panel.plan_wifi_forget(), ForgetPlan::Armed);
 
         // The jump and page movers disarm the same way.
@@ -5200,7 +5203,7 @@ mod tests {
                 .overlay_parts()
                 .items
                 .iter()
-                .any(|row| row.contains("d again to forget"))
+                .any(|row| row.contains("again to forget"))
         );
     }
 
@@ -5217,7 +5220,7 @@ mod tests {
                 .overlay_parts()
                 .items
                 .iter()
-                .any(|row| row.contains("d again to forget"))
+                .any(|row| row.contains("again to forget"))
         );
         // Clicking the row already selected changes nothing: the arm stands.
         assert_eq!(panel.plan_wifi_forget(), ForgetPlan::Armed);
@@ -5241,7 +5244,7 @@ mod tests {
                 .overlay_parts()
                 .items
                 .iter()
-                .any(|row| row.contains("d again to forget"))
+                .any(|row| row.contains("again to forget"))
         );
         // The selection held on Alpha by key; a fresh `d` arms it again
         // rather than deleting.
@@ -5346,18 +5349,18 @@ mod tests {
                 .contains("a  accept incoming")
         );
         // Same discoverability for the forget key, in both pickers it now
-        // works in.
+        // works in — keyboard `d` and its middle-click twin.
         assert!(
             SystemUiState::wifi_picker("")
                 .overlay_parts()
                 .hint
-                .contains("d  forget")
+                .contains("d / middle-click  forget")
         );
         assert!(
             SystemUiState::bluetooth_picker("")
                 .overlay_parts()
                 .hint
-                .contains("d  forget")
+                .contains("d / middle-click  forget")
         );
         assert!(
             SystemUiState::wallpaper_picker(&[], "", "/walls")
@@ -5495,14 +5498,14 @@ mod tests {
 
         assert_eq!(panel.plan_bluetooth_forget(), ForgetPlan::Armed);
         let parts = panel.overlay_parts();
-        assert!(parts.items[0].contains("d again to forget"));
+        assert!(parts.items[0].contains("again to forget"));
         assert!(parts.hint.contains("confirm forget"));
 
         assert_eq!(
             panel.plan_bluetooth_forget(),
             ForgetPlan::Execute("5C:FB:7C:1A:2B:3C".to_string())
         );
-        assert!(!panel.overlay_parts().items[0].contains("d again to forget"));
+        assert!(!panel.overlay_parts().items[0].contains("again to forget"));
     }
 
     #[test]
@@ -5525,7 +5528,7 @@ mod tests {
         // removal whose beacon would be back on the next scan.
         let mut panel = bluetooth_panel();
         assert_eq!(panel.plan_bluetooth_forget(), ForgetPlan::Unavailable);
-        assert!(!panel.overlay_parts().items[0].contains("d again to forget"));
+        assert!(!panel.overlay_parts().items[0].contains("again to forget"));
         // And it never armed: a second press is the same refusal, not a
         // delete.
         assert_eq!(panel.plan_bluetooth_forget(), ForgetPlan::Unavailable);
@@ -5543,7 +5546,7 @@ mod tests {
         panel.move_selection(-1);
 
         // Back on the same row, but disarmed: it must arm again, not remove.
-        assert!(!panel.overlay_parts().items[0].contains("d again to forget"));
+        assert!(!panel.overlay_parts().items[0].contains("again to forget"));
         assert_eq!(panel.plan_bluetooth_forget(), ForgetPlan::Armed);
     }
 

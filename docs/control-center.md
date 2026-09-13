@@ -243,25 +243,27 @@ dropped — there is nothing to select.
 | `Up` / `Down` | move the selection |
 | `Enter` | join, prompting for a passphrase when one is needed |
 | `r` | rescan |
-| `d` | forget the highlighted network's saved profile — arms on the first press, deletes on the second |
+| `d` / middle click | forget the highlighted network's saved profile — arms on the first press, deletes on the second |
 | `Esc` or `Alt+F12` | close — or, while prompting, `Esc` cancels the prompt and keeps the list |
 
 The forget is the two-press confirm the shell uses for destructive rows:
-the first `d` arms the highlighted row (the row names its confirm key and
-the hint swaps to it), moving the selection disarms, and the second `d` on
-the same row deletes. The delete runs on a worker like every other nmcli
-call, and it goes by UUID — `nmcli connection delete uuid …` — never by
-name, so two profiles sharing a name cannot remove the wrong one. Whether
-a profile backs the highlighted row at all is knowable only by asking
-NetworkManager, so the worker checks and answers honestly: `no saved
-profile for <ssid>` on the status line rather than a key that silently did
-nothing. Deleting the profile the link is running on is allowed — the link
-drops with it, and the re-read the completion kicks off lands that truth
-on the control-center row. A press while a delete — or a join — is still
-being applied coalesces to a no-op, the way leaning on `r` does, and the
-gate runs both directions: `Enter` while a forget is still deleting its
-profile is a no-op too, rather than racing the delete and the re-read its
-completion kicks off.
+the first `d` or middle click arms the highlighted (or pointed) row (the
+row names its confirm keys and the hint swaps to them), moving the
+selection disarms, and the second `d` or middle click on the same row
+deletes. A middle click on blank space is inert, and while a passphrase
+prompt is up middle click stays inert too. The delete runs on a worker
+like every other nmcli call, and it goes by UUID — `nmcli connection
+delete uuid …` — never by name, so two profiles sharing a name cannot
+remove the wrong one. Whether a profile backs the highlighted row at all
+is knowable only by asking NetworkManager, so the worker checks and
+answers honestly: `no saved profile for <ssid>` on the status line rather
+than a key that silently did nothing. Deleting the profile the link is
+running on is allowed — the link drops with it, and the re-read the
+completion kicks off lands that truth on the control-center row. A press
+while a delete — or a join — is still being applied coalesces to a no-op,
+the way leaning on `r` does, and the gate runs both directions: `Enter`
+while a forget is still deleting its profile is a no-op too, rather than
+racing the delete and the re-read its completion kicks off.
 
 ### Scanning does not block the compositor
 
@@ -290,8 +292,8 @@ devices in the same state — strongest signal first, then by name. `Enter`
 connects the selected device, or disconnects it if it is already connected;
 on a device that was never bonded, `Enter` starts pairing (below). `s` runs a
 bounded discovery scan and merges what it hears into the list; `r` re-reads
-the list; `d` removes a bonded device (below); `Esc` — or `Alt+Ctrl+F12`
-again — closes. Leaning on `s` does not
+the list; `d` or a middle click removes a bonded device (below); `Esc` — or
+`Alt+Ctrl+F12` again — closes. Leaning on `s` does not
 stack scans: while one is running the key just says `Scanning…` again.
 
 ### Where the list comes from
@@ -330,17 +332,20 @@ After a connect or disconnect the list is re-read, so the row shows what
 actually took rather than what was asked — `bluetoothctl` exits 0 even when
 the attempt failed, so the outcome is read out of what it printed.
 
-`d` forgets the highlighted device: the same two-press armed confirm as
-switching the controller off — the first press arms the row (the row and
-the hint say so), moving the selection disarms, and the second removes the
-bond through an async `bluetoothctl remove` worker. The removal rides the
-same worker slot connect and disconnect use, so a press while one of them
-is still being applied is a no-op, and the list re-read its completion
-kicks off is what makes the row disappear. Only a bonded device arms: on a
-device the controller never bonded the key refuses on the status line —
-removing it would only make its beacon reappear on the next scan.
-Forgetting the connected device is allowed and drops the connection with
-the bond; the re-read shows both gone.
+`d` or a middle click forgets the highlighted (or pointed) device: the
+same two-press armed confirm as switching the controller off — the first
+press arms the row (the row and the hint say so), moving the selection
+disarms, and the second removes the bond through an async `bluetoothctl
+remove` worker. A middle click on blank space is inert, and while a
+pairing prompt (PIN / confirm / display / authorize) is up middle click
+stays inert too. The removal rides the same worker slot connect and
+disconnect use, so a press while one of them is still being applied is a
+no-op, and the list re-read its completion kicks off is what makes the
+row disappear. Only a bonded device arms: on a device the controller
+never bonded the key refuses on the status line — removing it would only
+make its beacon reappear on the next scan. Forgetting the connected
+device is allowed and drops the connection with the bond; the re-read
+shows both gone.
 
 ### Pairing
 
@@ -489,7 +494,11 @@ one stream at a time.
 `Enter` queues the switch onto the same controls worker the sliders use —
 the set and the verifying re-read are two bounded-but-blocking tool runs,
 so they no longer stall the panel — and the status line reads `Switching…`
-until the re-read lands.
+until the re-read lands. A switch that actually took then raises a labeled
+audio-device OSD with the device description (speaker glyph for outputs,
+microphone glyph for inputs) — the same card `set_audio_device` shows.
+Queueing and a failed re-read stay quiet: the OSD is confirmation, not an
+optimistic estimate.
 
 ### The exit code is not the answer
 
@@ -556,8 +565,10 @@ the `network` topic carries `network/status`, likewise only on a real change.
 
 `get_audio_devices` lists both ends with the device in use marked; the `id` it
 reports is what `set_audio_device` takes — a wpctl node id or a PulseAudio
-node name, depending on which tool the session uses. The `audio` subscription
-topic carries `audio/devices` after a switch.
+node name, depending on which tool the session uses. A successful
+`set_audio_device` raises the same labeled audio-device OSD the picker shows
+after a confirmed adopt. The `audio` subscription topic carries
+`audio/devices` after a switch.
 
 `set_mic_mute` sets the default microphone's mute flag with the queued
 semantics of the volume keys, not `set_audio_device`'s confirmed-after-re-read

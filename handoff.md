@@ -4,6 +4,20 @@
 
 ---
 
+## 2026-09-13：UI/UX 二十七轮（Wi-Fi/BT 中键 forget、音频设备命名 OSD）
+
+选题 = 二十六轮 defer：Wi-Fi/BT middle-click forget ∥ 音频设备确认后命名 OSD。文件几乎不交。拒做：pin、缩略图、`set_audio_device` sync→queued、X11 frame deadline、媒体 seek。
+
+1. **Wi-Fi/BT 中键 forget**。button 2 → select + `forget_selected_*`，**保留二段 arm**（同 `d`）；空白/prompt inert；剪贴板仍 one-shot。docs/control-center.md + clipboard.md。
+
+2. **AudioDevice 命名 OSD**。`OsdKind::AudioDevice { input, name }`；仅 `took`/`kept` 后弹；picker 经 pending flush；IPC 仍同步。docs/control-center.md + media-controls.md。
+
+**验证**：clippy -D warnings（0）；lib **3264 passed / 0 failed / 11 ignored**（3252→+12）。**无真机显示会话**。真机优先：Wi-Fi/BT 中键二段删档；切默认输出起命名 OSD。
+
+**仍然开着的**（二十八轮）：pin 持久化；剪贴板缩略图；`set_audio_device` sync；X11 `compositor_frame_deadline`；媒体 click-to-seek；notif 中键 dismiss；pending_osd 槽争用（volume/mic vs 设备名）。**成文勿再提**：……（继承二十六轮）+ Wi-Fi/BT 仅键盘 forget（本轮关闭）+ 音频设备切换无命名 OSD（本轮关闭）。
+
+---
+
 ## 2026-09-13：UI/UX 二十六轮（Power Profile 指针、Shell bar 切换、剪贴板中键 forget）
 
 选题 = 二十五轮后新鲜日常命中：Power Profile Enter/click/wheel（死行）∥ Shell bar while-open toggle/hand-over ∥ 剪贴板中键 forget。文件几乎不交。拒做：pin、缩略图、`set_audio_device` sync、X11 frame deadline、Wi-Fi/BT 中键。

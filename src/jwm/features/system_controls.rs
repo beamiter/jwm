@@ -1569,11 +1569,46 @@ pub(crate) fn decide_feedback<T: Copy>(
 /// A queued OSD refresh: the confirmed value to put on the card, consumed by
 /// the frame tick's panel flush (the poll that resolves feedback has no
 /// backend to show it with).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Not `Copy`: a confirmed audio-device switch carries the device description
+/// so [`ControlDomain::AudioDevice`] can raise a named card through the same
+/// pending slot the level domains use.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct OsdCorrection {
     pub(crate) domain: ControlDomain,
     pub(crate) percent: u8,
     pub(crate) muted: bool,
+    /// True when `domain` is [`ControlDomain::AudioDevice`] and the switch
+    /// was an input (microphone) device.
+    pub(crate) input: bool,
+    /// Device description when `domain` is [`ControlDomain::AudioDevice`].
+    pub(crate) name: Option<String>,
+}
+
+impl OsdCorrection {
+    /// A level / mute correction — the shape every volume, brightness, and
+    /// mic read-back uses.
+    pub(crate) fn level(domain: ControlDomain, percent: u8, muted: bool) -> Self {
+        Self {
+            domain,
+            percent,
+            muted,
+            input: false,
+            name: None,
+        }
+    }
+
+    /// A confirmed audio-device switch — raised only when the re-read says
+    /// the asked device took.
+    pub(crate) fn audio_device(input: bool, name: String) -> Self {
+        Self {
+            domain: ControlDomain::AudioDevice,
+            percent: 0,
+            muted: false,
+            input,
+            name: Some(name),
+        }
+    }
 }
 
 /// The card currently on screen, if one is: the OSD is a single
@@ -1707,8 +1742,9 @@ impl ControlFeedback {
             ControlDomain::Volume => self.volume_osd_owed = Some(seq),
             ControlDomain::Brightness => self.brightness_osd_owed = Some(seq),
             ControlDomain::MicMute => self.mic_osd_owed = Some(seq),
-            // A device switch owes no card: its feedback is the picker's
-            // re-read rows, not the OSD.
+            // A device switch does not owe a first card through this path:
+            // the named OSD is queued explicitly from `adopt_audio_switch`
+            // only when the re-read says the switch took.
             ControlDomain::AudioDevice => {}
         }
     }
@@ -1716,6 +1752,13 @@ impl ControlFeedback {
     /// The queued OSD refresh, if any.
     pub(crate) fn take_pending_osd(&mut self) -> Option<OsdCorrection> {
         self.pending_osd.take()
+    }
+
+    /// Queue a named audio-device OSD for the next panel flush. Only the
+    /// adopt path that saw `audio_switch_verdict.took` calls this — never on
+    /// queue / "Switching…", and never on a failed re-read.
+    pub(crate) fn queue_audio_device_osd(&mut self, input: bool, name: String) {
+        self.pending_osd = Some(OsdCorrection::audio_device(input, name));
     }
 
     /// Resolve a volume report against the estimate on screen, clearing the
@@ -1804,11 +1847,7 @@ impl ControlFeedback {
             *owed = None;
             if let Some((percent, muted)) = value {
                 self.note_osd_shown(domain, percent, muted, now);
-                self.pending_osd = Some(OsdCorrection {
-                    domain,
-                    percent,
-                    muted,
-                });
+                self.pending_osd = Some(OsdCorrection::level(domain, percent, muted));
             }
             return;
         }
@@ -1823,11 +1862,7 @@ impl ControlFeedback {
                 <= crate::backend::compositor_common::osd::OSD_VISIBLE_WINDOW
         {
             self.note_osd_shown(domain, percent, muted, now);
-            self.pending_osd = Some(OsdCorrection {
-                domain,
-                percent,
-                muted,
-            });
+            self.pending_osd = Some(OsdCorrection::level(domain, percent, muted));
         }
     }
 }
@@ -2825,11 +2860,7 @@ Source #51
         feedback.resolve_mic(MicReport::Applied(3, true), now);
         assert_eq!(
             feedback.take_pending_osd(),
-            Some(OsdCorrection {
-                domain: ControlDomain::MicMute,
-                percent: 0,
-                muted: true,
-            })
+            Some(OsdCorrection::level(ControlDomain::MicMute, 0, true))
         );
 
         // …while a failed change pays nothing, matching the binding's old
@@ -2851,17 +2882,33 @@ Source #51
         feedback.resolve_mic(MicReport::Applied(1, false), now);
         assert_eq!(
             feedback.take_pending_osd(),
-            Some(OsdCorrection {
-                domain: ControlDomain::MicMute,
-                percent: 0,
-                muted: false,
-            })
+            Some(OsdCorrection::level(ControlDomain::MicMute, 0, false))
         );
 
         // Another domain's card owns the slot now; a mic read-back must not
         // yank the volume card off the screen.
         feedback.note_osd_shown(ControlDomain::Volume, 60, false, now);
         feedback.resolve_mic(MicReport::Applied(2, true), now);
+        assert_eq!(feedback.take_pending_osd(), None);
+    }
+
+    /// A confirmed device switch queues a named card for the flush path —
+    /// never an owed first-card debt, and never without a description.
+    #[test]
+    fn a_confirmed_audio_device_switch_queues_a_named_osd() {
+        let mut feedback = ControlFeedback::default();
+        feedback.queue_audio_device_osd(false, "Built-in Speakers".into());
+        assert_eq!(
+            feedback.take_pending_osd(),
+            Some(OsdCorrection::audio_device(false, "Built-in Speakers".into()))
+        );
+        feedback.queue_audio_device_osd(true, "Headset Microphone".into());
+        assert_eq!(
+            feedback.take_pending_osd(),
+            Some(OsdCorrection::audio_device(true, "Headset Microphone".into()))
+        );
+        // Device switches do not owe a card through the level path.
+        feedback.owe_osd(ControlDomain::AudioDevice, 1);
         assert_eq!(feedback.take_pending_osd(), None);
     }
 
@@ -3044,11 +3091,7 @@ Source #51
         );
         assert_eq!(
             feedback.take_pending_osd(),
-            Some(OsdCorrection {
-                domain: ControlDomain::Volume,
-                percent: 55,
-                muted: false,
-            })
+            Some(OsdCorrection::level(ControlDomain::Volume, 55, false))
         );
 
         // Past the card's envelope the same correction would pop a new card
@@ -3117,11 +3160,7 @@ Source #51
         );
         assert_eq!(
             feedback.take_pending_osd(),
-            Some(OsdCorrection {
-                domain: ControlDomain::Volume,
-                percent: 45,
-                muted: false,
-            })
+            Some(OsdCorrection::level(ControlDomain::Volume, 45, false))
         );
 
         // …while a failed change pays nothing, matching the binding's old

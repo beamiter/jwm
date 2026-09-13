@@ -1316,8 +1316,8 @@ pub struct TagsGridCell {
 /// What the OSD card depicts. Unlike toasts the OSD is a single
 /// replace-in-place card at the bottom center of the primary output.
 ///
-/// Not `Copy`: [`Self::PowerProfile`] carries the driver-reported name so
-/// Hub Left/Right and IPC can raise the card through
+/// Not `Copy`: [`Self::PowerProfile`] and [`Self::AudioDevice`] carry a
+/// name so Hub / picker / IPC can raise the card through
 /// [`CompositorWorkspaceEffects::compositor_show_osd`] like the other
 /// labeled toggles.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1351,6 +1351,11 @@ pub enum OsdKind {
     /// driver reports it (same string the Hub row shows). Labeled card, no
     /// bar; the icon matches the Hub row's `profile_icon` mapping.
     PowerProfile(String),
+    /// Default audio device switched; raised only after the re-read confirms
+    /// the asked device took. `input` picks the mic glyph; otherwise the
+    /// speaker/headphones glyph the Hub Output row already uses. The label is
+    /// the device description (truncated like Media).
+    AudioDevice { input: bool, name: String },
 }
 
 /// One keyboard navigation step in Expose / Mission Control, in the grid the

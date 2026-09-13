@@ -7,6 +7,15 @@ monorepo use independent Semantic Versions.
 
 ### Added
 
+- Wi-Fi and Bluetooth pickers middle-click forget with the same two-press
+  arm as `d` (blank and passphrase/PIN/confirm stay inert). See
+  [docs/control-center.md](docs/control-center.md).
+
+- Confirmed audio device switches raise a labeled Audio Device OSD (picker
+  after adopt-took; IPC `set_audio_device` after kept) — still sync, not
+  queued. See [docs/control-center.md](docs/control-center.md) and
+  [docs/media-controls.md](docs/media-controls.md).
+
 - Control-center Power Profile Enter/click and wheel cycle like
   Right / Left–Right (labeled OSD), so the row is no longer pointer-dead.
   See [docs/control-center.md](docs/control-center.md).

@@ -545,16 +545,32 @@ impl WMController for Jwm {
                     }
                     SystemUiHitTarget::Panel | SystemUiHitTarget::Unavailable => {}
                 },
-                // Clipboard middle-click: the pointer twin of `d` / Delete —
-                // select the pointed row and forget it in one shot (no arm).
-                // A miss on blank is inert, same shape as switcher/expose
-                // middle-click; never clear-all. Other panels leave button 2
-                // inert (Wi-Fi/BT forget stays keyboard-armed for now).
+                // List-picker middle-click forget. Clipboard is one-shot (the
+                // twin of `d` / Delete, no arm). Wi-Fi / Bluetooth keep the
+                // two-press armed confirm keyboard `d` uses — first press
+                // arms, second deletes — and stay inert while a passphrase
+                // or pairing prompt owns the surface. Blank is inert on
+                // every picker; never clear-all.
                 2 if self.features.system_ui.is_clipboard_picker() => {
                     if let SystemUiHitTarget::Item(row, _) = hit
                         && self.features.system_ui.select_visible_row(row).is_some()
                     {
                         self.forget_selected_clipboard(backend);
+                    }
+                }
+                2 if (self.features.system_ui.is_wifi_picker()
+                    || self.features.system_ui.is_bluetooth_picker())
+                    && !self.features.system_ui.is_prompting() =>
+                {
+                    if let SystemUiHitTarget::Item(row, _) = hit
+                        && self.features.system_ui.select_visible_row(row).is_some()
+                    {
+                        if self.features.system_ui.is_wifi_picker() {
+                            self.forget_selected_wifi();
+                        } else {
+                            self.forget_selected_bluetooth();
+                        }
+                        self.sync_system_ui(backend);
                     }
                 }
                 _ => {}
@@ -2761,6 +2777,380 @@ mod tests {
                 && !system_ui.contains("clear_all"),
             "middle-click must not touch notification clear-all"
         );
+    }
+
+    /// Wi-Fi / Bluetooth middle-click must share keyboard `d`'s two-press
+    /// armed forget (select → forget helper), stay inert under a prompt, and
+    /// leave the one-shot clipboard arm alone. Needles are built at runtime.
+    #[test]
+    fn wifi_and_bluetooth_middle_click_route_through_the_armed_forget() {
+        const SOURCE: &str = include_str!("event_dispatcher.rs");
+        let compact: String = SOURCE.chars().filter(|c| !c.is_whitespace()).collect();
+
+        let press = compact
+            .split_once("fnon_button_press(")
+            .expect("on_button_press")
+            .1;
+        let system_ui = press
+            .split_once("ifself.features.system_ui.is_active(){")
+            .expect("the system-ui pointer branch")
+            .1
+            .split_once("//Annotationmode:")
+            .expect("the end of the system-ui pointer branch")
+            .0;
+
+        let arm = concat!(
+            "2if(self.features.system_ui.is_wifi_picker()",
+            "||self.features.system_ui.is_bluetooth_picker())",
+            "&&!self.features.system_ui.is_prompting()"
+        );
+        assert!(
+            system_ui.contains(arm),
+            "Wi-Fi/BT middle-click must gate on those pickers and no prompt"
+        );
+        assert!(
+            system_ui.contains(&format!("{}(", "forget_selected_wifi")),
+            "Wi-Fi middle-click must share the keyboard forget path"
+        );
+        assert!(
+            system_ui.contains(&format!("{}(", "forget_selected_bluetooth")),
+            "Bluetooth middle-click must share the keyboard forget path"
+        );
+        // Clipboard stays the one-shot arm ahead of the armed Wi-Fi/BT arm.
+        let clipboard = system_ui
+            .find("is_clipboard_picker()")
+            .expect("clipboard middle-click arm");
+        let wifi_bt = system_ui
+            .find("is_wifi_picker()")
+            .expect("Wi-Fi/BT middle-click arm");
+        assert!(
+            clipboard < wifi_bt,
+            "clipboard one-shot must stay a separate arm ahead of Wi-Fi/BT"
+        );
+    }
+
+    fn wifi_row(ssid: &str) -> crate::jwm::features::WifiNetwork {
+        crate::jwm::features::WifiNetwork {
+            ssid: ssid.to_string(),
+            signal: 70,
+            security: "WPA2".into(),
+            in_use: false,
+        }
+    }
+
+    fn bonded_bt(address: &str, name: &str) -> crate::jwm::features::BluetoothDevice {
+        crate::jwm::features::BluetoothDevice {
+            address: address.to_string(),
+            name: name.to_string(),
+            connected: false,
+            paired: true,
+            rssi: None,
+            battery: None,
+        }
+    }
+
+    fn unpaired_bt(address: &str, name: &str) -> crate::jwm::features::BluetoothDevice {
+        crate::jwm::features::BluetoothDevice {
+            address: address.to_string(),
+            name: name.to_string(),
+            connected: false,
+            paired: false,
+            rssi: None,
+            battery: None,
+        }
+    }
+
+    #[test]
+    fn middle_click_arms_then_confirms_wifi_forget() {
+        use crate::jwm::features::system_ui::SystemUiState;
+
+        let mut jwm = empty_jwm();
+        let mut backend = RenderSpyBackend::new();
+        jwm.features.system_ui = SystemUiState::wifi_picker("");
+        jwm.features
+            .system_ui
+            .set_wifi_networks(&[wifi_row("Alpha"), wifi_row("Beta")]);
+
+        backend.system_ui_hit = SystemUiHitTarget::Item(1, 0.0);
+        <Jwm as WMController>::on_button_press(
+            &mut jwm,
+            &mut backend,
+            HitTarget::Background { output: None },
+            0,
+            2,
+            0,
+        );
+        assert!(
+            jwm.features
+                .system_ui
+                .overlay_parts()
+                .items
+                .iter()
+                .any(|row| row.contains("again to forget")),
+            "first middle-click arms the pointed row"
+        );
+        assert!(
+            jwm.features.wifi_forget.is_none(),
+            "first middle-click must not delete yet"
+        );
+        assert_eq!(
+            jwm.features
+                .system_ui
+                .selected_wifi()
+                .map(|(ssid, _)| ssid)
+                .as_deref(),
+            Some("Beta"),
+            "middle-click selects the pointed row before arming"
+        );
+
+        // Second middle-click on the same armed row confirms — same as `d`.
+        <Jwm as WMController>::on_button_press(
+            &mut jwm,
+            &mut backend,
+            HitTarget::Background { output: None },
+            0,
+            2,
+            0,
+        );
+        assert!(
+            !jwm.features
+                .system_ui
+                .overlay_parts()
+                .items
+                .iter()
+                .any(|row| row.contains("again to forget")),
+            "second middle-click disarms and hands the SSID to the worker"
+        );
+        assert!(
+            jwm.features.wifi_forget.is_some(),
+            "confirm queues the profile-delete worker"
+        );
+        assert!(
+            jwm.features.system_ui.is_wifi_picker(),
+            "forget keeps the picker open"
+        );
+    }
+
+    #[test]
+    fn middle_click_on_wifi_blank_is_inert() {
+        use crate::jwm::features::system_ui::SystemUiState;
+
+        let mut jwm = empty_jwm();
+        let mut backend = RenderSpyBackend::new();
+        jwm.features.system_ui = SystemUiState::wifi_picker("");
+        jwm.features
+            .system_ui
+            .set_wifi_networks(&[wifi_row("Keep")]);
+
+        for hit in [
+            SystemUiHitTarget::Panel,
+            SystemUiHitTarget::Outside,
+            SystemUiHitTarget::Unavailable,
+        ] {
+            backend.system_ui_hit = hit;
+            <Jwm as WMController>::on_button_press(
+                &mut jwm,
+                &mut backend,
+                HitTarget::Background { output: None },
+                0,
+                2,
+                0,
+            );
+            assert!(
+                jwm.features.system_ui.is_wifi_picker(),
+                "blank middle-click must not dismiss the picker ({hit:?})"
+            );
+            assert!(
+                !jwm.features
+                    .system_ui
+                    .overlay_parts()
+                    .items
+                    .iter()
+                    .any(|row| row.contains("again to forget")),
+                "blank middle-click must arm nothing ({hit:?})"
+            );
+            assert!(
+                jwm.features.wifi_forget.is_none(),
+                "blank middle-click must forget nothing ({hit:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn middle_click_is_inert_under_a_wifi_passphrase_prompt() {
+        use crate::jwm::features::system_ui::SystemUiState;
+
+        let mut jwm = empty_jwm();
+        let mut backend = RenderSpyBackend::new();
+        jwm.features.system_ui = SystemUiState::wifi_picker("");
+        jwm.features
+            .system_ui
+            .set_wifi_networks(&[wifi_row("Alpha")]);
+        jwm.features.system_ui.prompt_wifi_passphrase();
+        assert!(jwm.features.system_ui.is_prompting_wifi_passphrase());
+
+        backend.system_ui_hit = SystemUiHitTarget::Item(0, 0.0);
+        <Jwm as WMController>::on_button_press(
+            &mut jwm,
+            &mut backend,
+            HitTarget::Background { output: None },
+            0,
+            2,
+            0,
+        );
+        assert!(
+            jwm.features.system_ui.is_prompting_wifi_passphrase(),
+            "middle-click must not dismiss the passphrase prompt"
+        );
+        assert!(
+            !jwm.features
+                .system_ui
+                .overlay_parts()
+                .items
+                .iter()
+                .any(|row| row.contains("again to forget")),
+            "middle-click under a prompt must not arm forget"
+        );
+        assert!(jwm.features.wifi_forget.is_none());
+    }
+
+    #[test]
+    fn middle_click_arms_then_confirms_bluetooth_forget() {
+        use crate::jwm::features::system_ui::SystemUiState;
+
+        let mut jwm = empty_jwm();
+        let mut backend = RenderSpyBackend::new();
+        jwm.features.system_ui = SystemUiState::bluetooth_picker("");
+        jwm.features.system_ui.set_bluetooth_devices(&[bonded_bt(
+            "5C:FB:7C:1A:2B:3C",
+            "WH-1000XM4",
+        )]);
+
+        backend.system_ui_hit = SystemUiHitTarget::Item(0, 0.0);
+        <Jwm as WMController>::on_button_press(
+            &mut jwm,
+            &mut backend,
+            HitTarget::Background { output: None },
+            0,
+            2,
+            0,
+        );
+        assert!(
+            jwm.features
+                .system_ui
+                .overlay_parts()
+                .items
+                .iter()
+                .any(|row| row.contains("again to forget")),
+            "first middle-click arms the bonded device"
+        );
+        assert!(jwm.features.bluetooth_action.is_none());
+
+        <Jwm as WMController>::on_button_press(
+            &mut jwm,
+            &mut backend,
+            HitTarget::Background { output: None },
+            0,
+            2,
+            0,
+        );
+        assert!(
+            !jwm.features
+                .system_ui
+                .overlay_parts()
+                .items
+                .iter()
+                .any(|row| row.contains("again to forget")),
+            "second middle-click hands the address to the remove worker"
+        );
+        assert!(
+            jwm.features.bluetooth_action.is_some(),
+            "confirm queues the device-action worker"
+        );
+    }
+
+    #[test]
+    fn middle_click_on_unpaired_bluetooth_refuses_like_d() {
+        use crate::jwm::features::system_ui::SystemUiState;
+
+        let mut jwm = empty_jwm();
+        let mut backend = RenderSpyBackend::new();
+        jwm.features.system_ui = SystemUiState::bluetooth_picker("");
+        jwm.features.system_ui.set_bluetooth_devices(&[unpaired_bt(
+            "AA:BB:CC:DD:EE:FF",
+            "Beacon",
+        )]);
+
+        backend.system_ui_hit = SystemUiHitTarget::Item(0, 0.0);
+        <Jwm as WMController>::on_button_press(
+            &mut jwm,
+            &mut backend,
+            HitTarget::Background { output: None },
+            0,
+            2,
+            0,
+        );
+        assert!(
+            !jwm.features
+                .system_ui
+                .overlay_parts()
+                .items
+                .iter()
+                .any(|row| row.contains("again to forget")),
+            "an unpaired row must not arm"
+        );
+        assert!(
+            jwm.features
+                .system_ui
+                .overlay_parts()
+                .items
+                .iter()
+                .any(|row| row.contains("Not paired")),
+            "unpaired middle-click must share keyboard `d`'s status refusal"
+        );
+        assert!(jwm.features.bluetooth_action.is_none());
+    }
+
+    #[test]
+    fn middle_click_is_inert_under_a_bluetooth_pairing_prompt() {
+        use crate::jwm::features::system_ui::SystemUiState;
+
+        let mut jwm = empty_jwm();
+        let mut backend = RenderSpyBackend::new();
+        jwm.features.system_ui = SystemUiState::bluetooth_picker("");
+        jwm.features.system_ui.set_bluetooth_devices(&[bonded_bt(
+            "5C:FB:7C:1A:2B:3C",
+            "WH-1000XM4",
+        )]);
+        jwm.features.system_ui.prompt_bluetooth_pairing(
+            &crate::jwm::features::pairing::PairingPrompt::Pin,
+            "WH-1000XM4",
+        );
+        assert!(jwm.features.system_ui.pairing_prompt().is_some());
+
+        backend.system_ui_hit = SystemUiHitTarget::Item(0, 0.0);
+        <Jwm as WMController>::on_button_press(
+            &mut jwm,
+            &mut backend,
+            HitTarget::Background { output: None },
+            0,
+            2,
+            0,
+        );
+        assert!(
+            jwm.features.system_ui.pairing_prompt().is_some(),
+            "middle-click must not dismiss the pairing prompt"
+        );
+        assert!(
+            !jwm.features
+                .system_ui
+                .overlay_parts()
+                .items
+                .iter()
+                .any(|row| row.contains("again to forget")),
+            "middle-click under a pairing prompt must not arm forget"
+        );
+        assert!(jwm.features.bluetooth_action.is_none());
     }
 
     #[test]

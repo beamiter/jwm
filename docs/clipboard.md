@@ -18,8 +18,9 @@ puts the entry you choose back on the clipboard.
 Left click on a row copies it back — the same as `Enter`. The wheel browses
 the list. Middle click on a row selects that row and forgets it in one shot
 (the pointer twin of `d` / `Delete`; no arm, and never clear-all). A middle
-click on blank space is inert. Wi-Fi and Bluetooth pickers keep their
-keyboard-armed forget for now.
+click on blank space is inert. Wi-Fi and Bluetooth pickers use the same
+middle-click hit shape, but keep their two-press armed confirm (first
+press arms, second deletes — the pointer twin of `d`).
 
 The filter bar mirrors the launcher's, caret included, and starts empty on
 every open. Row numbers keep their history positions, so a filtered list

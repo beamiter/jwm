@@ -537,6 +537,13 @@ impl Jwm {
         match (verdict.took, verdict.in_use.as_deref()) {
             (true, Some(name)) => {
                 log::info!("audio: {} is now {name}", report.direction.label());
+                // Named OSD only when the re-read says the switch took — never
+                // on queue / "Switching…". Poll has no backend, so the card
+                // rides the pending-OSD slot flushed by `flush_system_ui`.
+                self.features.control_feedback.queue_audio_device_osd(
+                    matches!(report.direction, system_controls::AudioDirection::Input),
+                    name.to_string(),
+                );
             }
             (false, Some(name)) => {
                 log::warn!(
@@ -4615,6 +4622,49 @@ mod shell_entry_tests {
         assert!(
             handler.contains(&osd),
             "the mic-mute key no longer acknowledges the press with the mic OSD ({osd})"
+        );
+    }
+
+    /// A picker device switch raises a named OSD only after the re-read says
+    /// it took — never on queue / "Switching…". Needles are built at runtime
+    /// so this cannot match its own source.
+    #[test]
+    fn adopt_audio_switch_queues_a_named_osd_only_when_took() {
+        const SOURCE: &str = include_str!("toggles.rs");
+        let body = SOURCE
+            .split_once("fn adopt_audio_switch")
+            .expect("adopt_audio_switch")
+            .1
+            .split_once("fn show_volume_osd")
+            .expect("the end of adopt_audio_switch")
+            .0;
+        let queue = format!("self.features.control_feedback.{}(", "queue_audio_device_osd");
+        assert!(
+            body.contains(&queue),
+            "adopt_audio_switch no longer queues a named audio-device OSD ({queue})"
+        );
+        // The queue must sit on the took arm, not fire unconditionally.
+        let took_arm = body
+            .split_once("(true, Some(name))")
+            .expect("the took arm")
+            .1
+            .split_once("(false, Some(name))")
+            .expect("the failed arm")
+            .0;
+        assert!(
+            took_arm.contains(&queue),
+            "the named OSD must queue only when the switch took"
+        );
+        let failed_arm = body
+            .split_once("(false, Some(name))")
+            .expect("the failed arm")
+            .1
+            .split_once("if self.features.system_ui.audio_picker_direction()")
+            .expect("after the verdict match")
+            .0;
+        assert!(
+            !failed_arm.contains(&queue),
+            "a failed re-read must not queue an optimistic audio-device OSD"
         );
     }
 

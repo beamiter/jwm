@@ -146,6 +146,16 @@ impl ActiveOsd {
             // OSD and the Hub row cannot drift; the label is the driver name
             // the row already shows.
             OsdKind::PowerProfile(ref name) => (power_profile_icon(name), name.clone()),
+            // Same FA-4 glyphs as the Hub Output / Input rows (`device_control_row`);
+            // the label is the confirmed device description, truncated like Media.
+            OsdKind::AudioDevice { input, ref name } => (
+                if input {
+                    "\u{f130}" // fa-microphone
+                } else {
+                    "\u{f028}" // fa-volume-up (speaker)
+                },
+                sanitize_label(name),
+            ),
         }
     }
 
@@ -160,7 +170,8 @@ impl ActiveOsd {
             | OsdKind::Wifi(_)
             | OsdKind::Bluetooth(_)
             | OsdKind::MicMute(_)
-            | OsdKind::PowerProfile(_) => None,
+            | OsdKind::PowerProfile(_)
+            | OsdKind::AudioDevice { .. } => None,
             OsdKind::VolumeMuted => Some(0.0),
             _ => Some(f32::from(self.percent.min(100)) / 100.0),
         }
@@ -587,6 +598,22 @@ mod tests {
                 "\u{f24e}",
                 "custom-driver-profile",
             ),
+            (
+                OsdKind::AudioDevice {
+                    input: false,
+                    name: "Built-in Speakers".into(),
+                },
+                "\u{f028}",
+                "Built-in Speakers",
+            ),
+            (
+                OsdKind::AudioDevice {
+                    input: true,
+                    name: "Headset Microphone".into(),
+                },
+                "\u{f130}",
+                "Headset Microphone",
+            ),
         ] {
             let mut slot = OsdSlot::default();
             slot.show(kind.clone(), 0, now);
@@ -627,5 +654,28 @@ mod tests {
                 "{name} drifted between OSD and Hub"
             );
         }
+    }
+
+    /// Long device descriptions truncate like Media labels so the card does
+    /// not grow past the slider width.
+    #[test]
+    fn audio_device_osd_truncates_long_names() {
+        let now = Instant::now();
+        let long = format!("  {}", "x".repeat(80));
+        let mut slot = OsdSlot::default();
+        slot.show(
+            OsdKind::AudioDevice {
+                input: false,
+                name: long,
+            },
+            0,
+            now,
+        );
+        let osd = slot.get().unwrap();
+        let (_, label) = osd.icon_and_label();
+        assert!(label.chars().count() <= MAX_MEDIA_LABEL_CHARS);
+        assert!(label.ends_with('\u{2026}'));
+        assert_eq!(osd.fill(), None);
+        assert_eq!(osd.card_width(), SLIDER_CARD_WIDTH);
     }
 }

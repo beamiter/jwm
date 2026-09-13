@@ -273,9 +273,15 @@ impl Jwm {
                 ControlDomain::MicMute => {
                     Some(crate::backend::api::OsdKind::MicMute(correction.muted))
                 }
-                // A device switch never queues an OSD correction: its
-                // feedback is the picker's re-read rows, not a value card.
-                ControlDomain::AudioDevice => None,
+                // A confirmed device switch queues a named card (description
+                // + direction glyph) from `adopt_audio_switch` when the
+                // re-read says it took — never on queue / "Switching…".
+                ControlDomain::AudioDevice => correction.name.map(|name| {
+                    crate::backend::api::OsdKind::AudioDevice {
+                        input: correction.input,
+                        name,
+                    }
+                }),
             };
             if let Some(kind) = kind {
                 backend.compositor_show_osd(kind, correction.percent);
@@ -1498,12 +1504,12 @@ impl Jwm {
         self.sync_system_ui(backend);
     }
 
-    /// `d` in the Wi-Fi picker: arm the highlighted row on the first press,
-    /// delete its saved profile on the second. The delete — and the lookup
-    /// that decides whether a profile even backs the row — runs on a worker;
-    /// the frame tick's connectivity poll adopts the outcome, so the status
-    /// line and the control-center row land on the truth.
-    fn forget_selected_wifi(&mut self) {
+    /// `d` / middle-click in the Wi-Fi picker: arm the highlighted row on the
+    /// first press, delete its saved profile on the second. The delete — and
+    /// the lookup that decides whether a profile even backs the row — runs on
+    /// a worker; the frame tick's connectivity poll adopts the outcome, so
+    /// the status line and the control-center row land on the truth.
+    pub(crate) fn forget_selected_wifi(&mut self) {
         use crate::jwm::features::connectivity;
         use crate::jwm::features::system_ui::ForgetPlan;
 
@@ -1631,14 +1637,14 @@ impl Jwm {
         self.sync_system_ui(backend);
     }
 
-    /// `d` in the Bluetooth picker: arm the highlighted device on the first
-    /// press, remove its bond on the second. The removal rides the same
-    /// worker slot and completion as connect/disconnect — the device-list
-    /// re-read that completion kicks off is what makes the row disappear —
-    /// so a press while one of them runs coalesces to a no-op. Forgetting
-    /// the connected device drops the connection with the bond; the re-read
-    /// shows both gone.
-    fn forget_selected_bluetooth(&mut self) {
+    /// `d` / middle-click in the Bluetooth picker: arm the highlighted device
+    /// on the first press, remove its bond on the second. The removal rides
+    /// the same worker slot and completion as connect/disconnect — the
+    /// device-list re-read that completion kicks off is what makes the row
+    /// disappear — so a press while one of them runs coalesces to a no-op.
+    /// Forgetting the connected device drops the connection with the bond;
+    /// the re-read shows both gone.
+    pub(crate) fn forget_selected_bluetooth(&mut self) {
         use crate::jwm::features::connectivity;
         use crate::jwm::features::system_ui::ForgetPlan;
 
@@ -3949,6 +3955,36 @@ mod tests {
         assert!(
             body.contains(&format!("{}(", "select_visible_row")),
             "wheel over Power Profile no longer follows selection"
+        );
+    }
+
+    /// The pending audio-device OSD from a confirmed picker switch must ride
+    /// `flush_system_ui` — poll has no backend. Needles are built at runtime
+    /// so this cannot match its own source.
+    #[test]
+    fn flush_system_ui_raises_the_named_audio_device_osd() {
+        const SOURCE: &str = include_str!("input_handler.rs");
+        let body = SOURCE
+            .split_once(&format!("fn {}(", "flush_system_ui"))
+            .expect("flush_system_ui")
+            .1
+            .split_once("ControlDomain::AudioDevice =>")
+            .expect("the AudioDevice pending-OSD arm")
+            .1
+            .split_once("};")
+            .expect("the end of the kind match")
+            .0;
+        assert!(
+            body.contains("OsdKind::AudioDevice"),
+            "flush_system_ui no longer raises a named AudioDevice OSD"
+        );
+        assert!(
+            body.contains("correction.name"),
+            "the AudioDevice arm must carry the confirmed description"
+        );
+        assert!(
+            !body.trim_start().starts_with("None"),
+            "ControlDomain::AudioDevice must not stay a silent None arm"
         );
     }
 

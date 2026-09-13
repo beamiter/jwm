@@ -54,6 +54,12 @@ cards and carries no progress bar.
 Media keys also echo the current track on the OSD immediately, so a keypress
 gives feedback before the player has answered.
 
+A confirmed audio-device switch — picker Enter after the worker's re-read, or
+a successful `set_audio_device` — raises a labeled card with the device
+description (speaker glyph for outputs, microphone glyph for inputs), truncated
+like a media label. Queueing and a failed re-read stay quiet; see
+[control center](control-center.md#audio-device-pickers).
+
 ## Microphone mute
 
 `XF86AudioMicMute` (`toggle_mic_mute`, bound by default) toggles the default
@@ -141,7 +147,8 @@ picked up by a 3-second sweep.
   Queued, not confirmed: the `ok` ack is immediate and the OSD draws the
   optimistic estimate, with the controls worker's read-back confirming or
   correcting it after — deliberately unlike `set_audio_device`'s synchronous
-  re-read reply. See [Microphone mute](#microphone-mute).
+  re-read reply (which raises a named device OSD only after the switch took).
+  See [Microphone mute](#microphone-mute).
 - `get_mic_mute` — `{ "muted": true|false|null }` from the cached flag after
   warming the coalesced control snapshot. `null` means never read.
 - the `audio` subscription topic carries `audio/devices` and `audio/mic`
