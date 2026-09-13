@@ -21,11 +21,11 @@ xbar_core = { path = "../../crates/xbar_core", default-features = false, feature
 ] }
 xbar_linux_actions = { path = "../../crates/xbar_core/crates/xbar_linux_actions" }
 softbuffer = "0.4.8"
-log = "0.4.33"
+log = "0.4.34"
 anyhow = "1.0.104"
 bytemuck = "1.25.2"
-cairo-rs = "0.22.0"
-pango = "0.22.8"
-tao = "0.36.0"
+cairo-rs = "0.22.9"
+pango = "0.22.9"
+tao = "0.37.0"
 x11rb = "0.14"
 raw-window-handle = "0.6"

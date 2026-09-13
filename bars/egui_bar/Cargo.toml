@@ -6,7 +6,7 @@ authors = ["Your Name <your.email@example.com>"]
 description = "A modern system status bar built with egui"
 
 [dependencies]
-log = "0.4.33"
+log = "0.4.34"
 anyhow = "1.0.104"
 xbar_core = { path = "../../crates/xbar_core", default-features = false, features = ["clock-chrono", "config-toml", "glass", "logging-flexi", "provider-alsa", "provider-battery-sysfs", "provider-brightnessctl", "provider-network-sysfs", "provider-system", "transport-shared"] }
 xbar_linux_actions = { path = "../../crates/xbar_core/crates/xbar_linux_actions" }
@@ -31,5 +31,5 @@ raw-window-handle = "0.6"
 wgpu = "30"
 pollster = "1"
 
-eframe = "0.36.0"
-egui = "0.36.0"
+eframe = "0.36.2"
+egui = "0.36.2"

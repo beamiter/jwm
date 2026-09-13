@@ -1096,6 +1096,7 @@ fn renderer_alpha_capable(conn: &XCBConnection, screen_num: usize) -> bool {
                         power_preference: wgpu::PowerPreference::LowPower,
                         force_fallback_adapter: false,
                         compatible_surface: Some(&surface),
+                        ..Default::default()
                     }))
                     .ok()?;
                 let modes = surface.get_capabilities(&adapter).alpha_modes;

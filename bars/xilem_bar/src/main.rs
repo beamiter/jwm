@@ -196,7 +196,7 @@ impl<D> GeometryDriver<D> {
         }
     }
 
-    fn sync_window(&mut self, window_id: WindowId, ctx: &mut DriverCtx<'_, '_>) {
+    fn sync_window(&mut self, window_id: WindowId, ctx: &mut DriverCtx<'_>) {
         let bridge = self.bridge.snapshot();
         let window = ctx.window(window_id).handle();
         let scale_factor = window.scale_factor().max(f64::EPSILON);
@@ -249,7 +249,7 @@ impl<D: AppDriver> AppDriver for GeometryDriver<D> {
     fn on_action(
         &mut self,
         window_id: WindowId,
-        ctx: &mut DriverCtx<'_, '_>,
+        ctx: &mut DriverCtx<'_>,
         widget_id: WidgetId,
         action: ErasedAction,
     ) {
@@ -260,18 +260,18 @@ impl<D: AppDriver> AppDriver for GeometryDriver<D> {
     fn on_async_action(
         &mut self,
         window_id: WindowId,
-        ctx: &mut DriverCtx<'_, '_>,
+        ctx: &mut DriverCtx<'_>,
         action: ErasedAction,
     ) {
         self.inner.on_async_action(window_id, ctx, action);
         self.sync_window(window_id, ctx);
     }
 
-    fn on_start(&mut self, state: &mut MasonryState<'_>) {
+    fn on_start(&mut self, state: &mut MasonryState) {
         self.inner.on_start(state);
     }
 
-    fn on_close_requested(&mut self, window_id: WindowId, ctx: &mut DriverCtx<'_, '_>) {
+    fn on_close_requested(&mut self, window_id: WindowId, ctx: &mut DriverCtx<'_>) {
         self.inner.on_close_requested(window_id, ctx);
     }
 
@@ -416,7 +416,7 @@ fn surface_alpha_capable(conn: &XCBConnection, screen_num: usize) -> bool {
     };
     // Env-aware, like the instance masonry itself will build: a `WGPU_BACKEND`
     // override must steer the probe onto the same backend it steers vello onto.
-    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::from_env_or_default());
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
     let capable = instance
         .create_surface(target)
         .ok()
@@ -426,6 +426,7 @@ fn surface_alpha_capable(conn: &XCBConnection, screen_num: usize) -> bool {
                     power_preference: wgpu::PowerPreference::LowPower,
                     compatible_surface: Some(&surface),
                     force_fallback_adapter: false,
+                    ..Default::default()
                 },
             ))
             .ok()?;

@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-log = "0.4.29"
+log = "0.4.34"
 # The provider set matches xcb_bar's: this bar shows the same cells, so it has
 # to be able to fill them. Only the Cairo renderer and the epoll/timerfd loop
 # are left out — GTK owns the main loop and does its own drawing.

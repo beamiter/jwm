@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-libc = "0.2.186"
+libc = "0.2.189"
 xbar_core = { path = "../../crates/xbar_core", default-features = false, features = [
     "clock-chrono",
     "config-toml",
@@ -22,11 +22,11 @@ xbar_core = { path = "../../crates/xbar_core", default-features = false, feature
 xbar_linux_actions = { path = "../../crates/xbar_core/crates/xbar_linux_actions" }
 glow = "0.18.0"
 glutin = "0.32.3"
-pango = "0.22.8"
-cairo-rs = "0.22.0"
-log = "0.4.33"
+pango = "0.22.9"
+cairo-rs = "0.22.9"
+log = "0.4.34"
 winit = "0.30.13"
-anyhow = "1.0.103"
-bytemuck = "1.25.1"
-x11rb = "0.13"
+anyhow = "1.0.104"
+bytemuck = "1.25.2"
+x11rb = "0.14"
 raw-window-handle = "0.6"

@@ -326,6 +326,7 @@ const fn shell_class(route: ShellRoute) -> &'static str {
         ShellRoute::Clipboard => "shell-clipboard",
         ShellRoute::Calendar => "shell-calendar",
         ShellRoute::Wallpaper => "shell-wallpaper",
+        ShellRoute::Theme => "shell-theme",
     }
 }
 

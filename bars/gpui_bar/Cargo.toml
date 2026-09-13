@@ -20,10 +20,10 @@ xbar_linux_actions = { path = "../../crates/xbar_core/crates/xbar_linux_actions"
 # window and a wgpu surface-capabilities query, asked and torn down before
 # gpui owns the display. Versions match this bar's existing lock (wgpu 29.x,
 # x11rb 0.13.2, pollster 0.4) so none of them compile twice.
-x11rb = { version = "0.13", features = ["allow-unsafe-code", "dl-libxcb"] }
-wgpu = "29"
+x11rb = { version = "0.14", features = ["allow-unsafe-code", "dl-libxcb"] }
+wgpu = "30"
 raw-window-handle = "0.6"
-pollster = "0.4"
+pollster = "1.0"
 
 # Linux-only offline build: gpui pins exact macOS-only versions that aren't in
 # the local cargo cache. These crates are gated on `cfg(target_os = "macos")`

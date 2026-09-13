@@ -219,6 +219,7 @@ fn surface_alpha_capable(conn: &XCBConnection, screen_num: usize) -> bool {
                     power_preference: wgpu::PowerPreference::LowPower,
                     compatible_surface: Some(&surface),
                     force_fallback_adapter: false,
+                    ..Default::default()
                 },
             ))
             .ok()?;
@@ -272,7 +273,7 @@ fn main() -> iced::Result {
             level: window::Level::AlwaysOnTop,
             ..Default::default()
         })
-        .default_font(NERD_FONT)
+        .font(NERD_FONT)
         .subscription(IcedBar::subscription)
         .style(IcedBar::style)
         .title("iced_bar")
