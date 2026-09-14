@@ -84,8 +84,8 @@ corrects or reverts the shown state. A click on that microphone glyph —
 or `m` / middle click while the Input row is selected — toggles mute the same way the
 key does (OSD included); a click on the rest of the row still opens the
 input device picker. `set_mic_mute {"muted": bool}`
-sets the flag over IPC — queued, like the volume keys, and deliberately
-unlike `set_audio_device`'s synchronous confirmed reply: the `ok` ack is
+sets the flag over IPC — queued, like the volume keys and
+`set_audio_device`: the `ok` ack is
 immediate and the OSD draws the optimistic estimate, then the worker's
 read-back confirms or corrects it (the OSD refreshes in place and the
 Input row follows). A non-boolean `muted` is rejected with
@@ -158,8 +158,8 @@ picked up by a 3-second sweep.
 - `set_mic_mute` — `{"muted": bool}` sets the default microphone's mute flag.
   Queued, not confirmed: the `ok` ack is immediate and the OSD draws the
   optimistic estimate, with the controls worker's read-back confirming or
-  correcting it after — deliberately unlike `set_audio_device`'s synchronous
-  re-read reply (which raises a named device OSD only after the switch took).
+  correcting it after — same queued shape as `set_audio_device` (which raises
+  a named device OSD only after the worker's re-read says the switch took).
   See [Microphone mute](#microphone-mute).
 - `get_mic_mute` — `{ "muted": true|false|null }` from the cached flag after
   warming the coalesced control snapshot. `null` means never read.

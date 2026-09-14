@@ -577,7 +577,12 @@ impl Jwm {
             .as_ref()
             .map(|snapshot| snapshot.audio_defaults.clone());
         let new_defaults = report.inventory.defaults();
+        let devices_payload = system_controls::audio_inventory_json(&report.inventory);
         self.cache_control_audio_inventory(report.inventory);
+        // Bars subscribe to `audio/devices`; publish after every resolved
+        // switch (took or not) so a poll right after an IPC / picker flip
+        // sees the re-read, not the pre-switch marker.
+        self.broadcast_ipc_event("audio/devices", devices_payload);
         if old_defaults.as_ref() != Some(&new_defaults) {
             self.refresh_open_control_center();
         }
@@ -4641,6 +4646,12 @@ mod shell_entry_tests {
         assert!(
             body.contains(&queue),
             "adopt_audio_switch no longer queues a named audio-device OSD ({queue})"
+        );
+        let event = format!("\"{}/{}\"", "audio", "devices");
+        let broadcast = format!("self.{}(", "broadcast_ipc_event");
+        assert!(
+            body.contains(&broadcast) && body.contains(&event),
+            "adopt_audio_switch must publish {event} so IPC and the picker share the bus"
         );
         // The queue must sit on the took arm, not fire unconditionally.
         let took_arm = body

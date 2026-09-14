@@ -797,9 +797,7 @@ impl RenderScheduler for X11rbBackend {
         self.compositor.as_ref().is_some_and(|c| c.needs_render())
     }
     fn compositor_frame_deadline(&self) -> Option<std::time::Duration> {
-        self.compositor
-            .as_ref()
-            .and_then(|c| c.recording_frame_deadline())
+        self.compositor.as_ref().and_then(|c| c.frame_deadline())
     }
     fn compositor_overlay_window(&self) -> Option<WindowId> {
         self.compositor

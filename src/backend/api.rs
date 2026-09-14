@@ -3063,8 +3063,9 @@ pub trait RenderScheduler: Send {
     /// itself needs a frame. Screen recording is the case that matters: it must
     /// composite at the recording rate even on a completely static desktop, and
     /// without a deadline the loop would either block until some client happens
-    /// to send an event or spin at 1 ms for the whole recording. `None` means
-    /// the compositor has no self-imposed deadline.
+    /// to send an event or spin at 1 ms for the whole recording. X11 also joins
+    /// toast / OSD envelope boundaries here (Wayland carries those on
+    /// `next_wakeup`). `None` means the compositor has no self-imposed deadline.
     fn compositor_frame_deadline(&self) -> Option<std::time::Duration> {
         None
     }

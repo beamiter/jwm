@@ -2051,6 +2051,29 @@ impl<C: CompositorConnection> Compositor<C> {
         }
     }
 
+    /// Time until the compositor itself needs a frame on an otherwise idle
+    /// desktop: the next recording capture, or a toast / OSD envelope
+    /// boundary (fade-out start / prune). Matches Wayland's `next_wakeup`
+    /// overlay terms so a settled card's first fade frame is scheduled
+    /// exactly, rather than waiting up to one idle tick. `None` when none
+    /// of those clocks are armed.
+    pub(crate) fn frame_deadline(&self) -> Option<std::time::Duration> {
+        let now = std::time::Instant::now();
+        let recording = self.recording_frame_deadline();
+        let toast_boundary = self
+            .toast_stack
+            .next_envelope_change_at(now)
+            .map(|at| at.saturating_duration_since(now));
+        let osd_boundary = self
+            .osd_slot
+            .next_envelope_change_at(now)
+            .map(|at| at.saturating_duration_since(now));
+        [recording, toast_boundary, osd_boundary]
+            .into_iter()
+            .flatten()
+            .min()
+    }
+
     /// Time until the next recording frame, or `None` when not recording. The
     /// event loop sleeps on this so a static desktop still gets captured at the
     /// configured rate without polling for it.

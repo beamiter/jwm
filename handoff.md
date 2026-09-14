@@ -4,6 +4,20 @@
 
 ---
 
+## 2026-09-14：关闭两个 refuse pin（set_audio_device queued、X11 frame_deadline 接 overlay）
+
+选题 = 三十四轮起一直挂着的两项政策/源 pin，用户要求正面修掉。
+
+1. **IPC `set_audio_device` → queued**。校验 id（缓存 inventory，否则一次 sync peek）后 `queue_control_request(AudioSetDefault)`；立即 ok；OSD / cache / `audio/devices` 走 `adopt_audio_switch`（并补 broadcast，picker 同路）。源 pin 改写为要求 queue、禁止 sync set/OSD。docs/control-center.md + media-controls.md。
+
+2. **X11 `compositor_frame_deadline` 接 overlay 边界**。`Compositor::frame_deadline` = min(recording, toast_boundary, osd_boundary)；xcb/x11rb 发布之。idle 20ms 仍为 composited safety net（单独 pin）。原「不需要 toast/OSD term」政策 pin 改写。
+
+**验证**：clippy -D warnings（0）；lib **3304 passed / 0 failed / 11 ignored**（3303→+1）。**无真机显示会话**。
+
+**仍然开着的**：无（两 refuse 本轮关闭）。**成文勿再提**：`set_audio_device` sync confirmed reply；X11 deadline 不接 toast/OSD（仅靠 20ms idle）。
+
+---
+
 ## 2026-09-14：UI/UX 三十四轮（layout 右键 cancel、快捷键面板指针 dismiss）
 
 选题 = 三十三轮开放已尽（仅剩两个 refuse pin）→ 另起两项 S：layout right-cancel ∥ keybindings pointer grab。文件几乎不交（event_dispatcher/layout docs vs jwm.rs/toggles/system_ui）。拒做：`set_audio_device` sync→queued（源 pin）、X11 `compositor_frame_deadline`（20ms idle 政策 pin）、Hub DND/Caffeine/NightLight 中键。

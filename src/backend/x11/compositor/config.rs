@@ -1397,12 +1397,60 @@ mod tests {
     }
 
     #[test]
-    fn the_composited_idle_cadence_delivers_the_overlay_envelope_boundaries() {
-        // X11 needs no toast or OSD term in `compositor_frame_deadline`: a
-        // composited session intentionally keeps the idle safety poll, so
-        // the loop wakes at least every 20 ms and every wake re-evaluates
-        // the render gate — each card's fade-out first frame lands within
-        // one idle tick of its boundary. Pin the policy that guarantees it.
+    fn compositor_frame_deadline_joins_overlay_envelope_boundaries() {
+        // Like Wayland `next_wakeup`, X11's compositor deadline carries toast
+        // and OSD envelope boundaries so a settled card's fade-out first
+        // frame is scheduled exactly. The composited idle cadence remains a
+        // separate safety net (`idle_poll_required`) — this pin is the
+        // overlay terms themselves.
+        const FEATURES: &str = include_str!("features.rs");
+        let body = FEATURES
+            .split_once(&format!("pub(crate) fn {}(", "frame_deadline"))
+            .expect("frame_deadline")
+            .1
+            .split_once("pub(crate) fn recording_frame_deadline")
+            .expect("the end of frame_deadline")
+            .0;
+        assert!(
+            body.contains("recording_frame_deadline"),
+            "frame_deadline must still pace recording"
+        );
+        assert!(
+            body.contains("toast_stack") && body.contains("next_envelope_change_at"),
+            "frame_deadline must join toast envelope boundaries"
+        );
+        assert!(
+            body.contains("osd_slot") && body.contains("next_envelope_change_at"),
+            "frame_deadline must join OSD envelope boundaries"
+        );
+
+        for backend in [
+            include_str!("../../xcb/backend.rs"),
+            include_str!("../../x11rb/backend.rs"),
+        ] {
+            let arm = backend
+                .split_once("fn compositor_frame_deadline(")
+                .expect("compositor_frame_deadline")
+                .1
+                .split_once("fn compositor_overlay_window(")
+                .expect("the end of compositor_frame_deadline")
+                .0;
+            assert!(
+                arm.contains("frame_deadline()"),
+                "backend must publish the joined frame_deadline"
+            );
+            assert!(
+                !arm.contains("recording_frame_deadline()"),
+                "backend must not bypass overlay terms via recording alone"
+            );
+        }
+    }
+
+    #[test]
+    fn the_composited_idle_cadence_remains_a_safety_net() {
+        // Overlay boundaries ride `frame_deadline`; the 20 ms idle poll is
+        // still retained for every composited session so other maintenance
+        // (pixmap refresh, readiness gaps) keeps a floor.
         use crate::backend::x11::scheduling::{
             IDLE_UPDATE_INTERVAL, idle_poll_required, update_interval,
         };

@@ -7,6 +7,14 @@ monorepo use independent Semantic Versions.
 
 ### Added
 
+- IPC `set_audio_device` queues on the controls worker (picker path); the
+  named OSD and `audio/devices` publish follow the verifying re-read via
+  `adopt_audio_switch`. See [docs/control-center.md](docs/control-center.md).
+
+- X11 `compositor_frame_deadline` joins toast and OSD envelope boundaries
+  (with recording), matching Wayland `next_wakeup` overlay terms; the 20 ms
+  composited idle cadence remains a safety net.
+
 - Layout picker right-click cancels and restores the origin layout (pointer
   twin of `Esc`); middle-click stays inert. See
   [docs/layout-picker.md](docs/layout-picker.md).
@@ -65,9 +73,9 @@ monorepo use independent Semantic Versions.
   [docs/control-center.md](docs/control-center.md).
 
 - Confirmed audio device switches raise a labeled Audio Device OSD (picker
-  after adopt-took; IPC `set_audio_device` after kept) — still sync, not
-  queued. See [docs/control-center.md](docs/control-center.md) and
-  [docs/media-controls.md](docs/media-controls.md).
+  after adopt-took; IPC `set_audio_device` after the worker re-read) — queued
+  like volume / mic mute. See [docs/control-center.md](docs/control-center.md)
+  and [docs/media-controls.md](docs/media-controls.md).
 
 - Control-center Power Profile Enter/click and wheel cycle like
   Right / Left–Right (labeled OSD), so the row is no longer pointer-dead.
@@ -167,8 +175,8 @@ monorepo use independent Semantic Versions.
   `set_mic_mute {"muted": bool}` sets the default source's mute with the
   volume keys' queued semantics — an immediate `ok` ack and the mic OSD
   drawn from the optimistic estimate, then the controls worker's read-back
-  confirming or correcting it (the OSD refreshes in place) — deliberately
-  unlike `set_audio_device`'s synchronous confirmed reply. A non-boolean
+  confirming or correcting it (the OSD refreshes in place) — same queued
+  shape as `set_audio_device`. A non-boolean
   `muted` is rejected (`set_mic_mute: expected boolean field 'muted'`), a
   session with no audio tool gets the key path's own
   `no working audio control (wpctl/pactl/amixer)` answer, and the command is

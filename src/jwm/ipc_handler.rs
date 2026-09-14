@@ -1896,6 +1896,13 @@ impl Jwm {
         }
 
         // Special command: set_audio_device — switch the default sink/source.
+        //
+        // Reply semantics: queued, like `set_mic_mute` and the volume keys.
+        // The reply acknowledges the submission; the controls worker runs the
+        // set plus verifying re-read off the event thread, and
+        // `adopt_audio_switch` then moves the marker, publishes
+        // `audio/devices`, and raises the named OSD only when the re-read
+        // says the switch took — the same path the picker uses.
         if name == "set_audio_device" {
             use crate::jwm::features::system_controls::{self, AudioDirection};
 
@@ -1911,7 +1918,15 @@ impl Jwm {
             let Some(id) = args.get("id").and_then(|value| value.as_str()) else {
                 return IpcResponse::err("set_audio_device: expected string field 'id'");
             };
-            let inventory = system_controls::audio_inventory();
+            // Prefer the cached inventory bars already poll; fall back to one
+            // sync peek only when nothing has been read yet so a bad id is
+            // rejected before a worker round-trip.
+            let inventory = self
+                .features
+                .control_snapshot
+                .as_ref()
+                .map(|snapshot| snapshot.audio_inventory.clone())
+                .unwrap_or_else(system_controls::audio_inventory);
             let devices = inventory.devices(direction);
             if !devices.iter().any(|device| device.id == id) {
                 return IpcResponse::err(format!(
@@ -1919,55 +1934,16 @@ impl Jwm {
                     direction.label()
                 ));
             }
-            if !system_controls::set_audio_device(direction, id) {
-                return IpcResponse::err(format!(
-                    "could not switch the audio {}",
-                    direction.label()
-                ));
-            }
-            // Re-read rather than trust the exit code: sound servers accept a
-            // switch to an unavailable device and then quietly revert it.
-            let post = system_controls::audio_inventory();
-            let kept = post
-                .devices(direction)
-                .iter()
-                .any(|device| device.id == id && device.is_default);
-            // Capture the confirmed description before the inventory moves
-            // into the cache — same string the picker OSD would show.
-            let device_name = kept
-                .then(|| {
-                    post.devices(direction)
-                        .iter()
-                        .find(|device| device.id == id)
-                        .map(|device| device.description.clone())
-                })
-                .flatten();
-            self.broadcast_ipc_event(
-                "audio/devices",
-                system_controls::audio_inventory_json(&post),
-            );
-            // The whole inventory, not just the two defaults: this is the
-            // read `get_audio_devices` answers from, and a bar polling right
-            // after a switch must not be told the pre-switch marker until the
-            // worker's next pass catches up.
-            self.cache_control_audio_inventory(post);
-            self.refresh_open_control_center();
-            if !kept {
-                return IpcResponse::err(format!(
-                    "the sound server did not keep {id:?} as the {} device; it is likely unavailable",
-                    direction.label()
-                ));
-            }
-            // Same labeled card the picker raises after a confirmed adopt, so
-            // a bar or script that flips the default gets the same ack.
-            if let Some(name) = device_name {
-                backend.compositor_show_osd(
-                    crate::backend::api::OsdKind::AudioDevice {
-                        input: matches!(direction, AudioDirection::Input),
-                        name,
-                    },
-                    0,
-                );
+            if system_controls::queue_control_request(
+                system_controls::ControlRequest::AudioSetDefault {
+                    direction,
+                    id: id.to_string(),
+                },
+                self.async_update_notifier.clone(),
+            )
+            .is_none()
+            {
+                return IpcResponse::err("no working audio control (wpctl/pactl/amixer)");
             }
             return IpcResponse::ok(None);
         }
@@ -1975,16 +1951,13 @@ impl Jwm {
         // Special command: set_mic_mute — set the default microphone's mute
         // flag.
         //
-        // Reply semantics: queued, like the volume keys. The reply
-        // acknowledges the submission and the optimistic card is drawn at
-        // once; the controls worker's read-back then confirms or corrects it
-        // (the OSD refreshes in place, the control-center Input row follows
-        // the adopted value). This is deliberately unlike `set_audio_device`'s
-        // synchronous confirmed reply: the controls worker exists precisely
-        // to keep the helper's blocking read-back off the event thread an
-        // IPC call runs on. Caching the estimate (and later adopt/revert)
-        // also publishes `audio/mic` on the `audio` topic; `get_mic_mute`
-        // answers the same cached flag.
+        // Reply semantics: queued, like the volume keys and
+        // `set_audio_device`. The reply acknowledges the submission and the
+        // optimistic card is drawn at once; the controls worker's read-back
+        // then confirms or corrects it (the OSD refreshes in place, the
+        // control-center Input row follows the adopted value). Caching the
+        // estimate (and later adopt/revert) also publishes `audio/mic` on
+        // the `audio` topic; `get_mic_mute` answers the same cached flag.
         if name == "set_mic_mute" {
             let Some(muted) = args.get("muted").and_then(|value| value.as_bool()) else {
                 return IpcResponse::err("set_mic_mute: expected boolean field 'muted'");
@@ -5709,12 +5682,12 @@ mod tests {
         );
     }
 
-    /// A successful `set_audio_device` must raise the same named OSD the
-    /// picker adopt path does — only after the re-read confirms the switch
-    /// took. Failure paths stay quiet; the haystack is the arm alone so this
-    /// pin cannot match its own source.
+    /// A successful `set_audio_device` must queue on the controls worker —
+    /// never block the IPC thread on `set_audio_device` / a verifying
+    /// re-read — and leave the named OSD to `adopt_audio_switch` after the
+    /// re-read confirms the switch took. Needles are built at runtime.
     #[test]
-    fn set_audio_device_raises_the_osd_on_success() {
+    fn set_audio_device_queues_like_the_picker() {
         const SOURCE: &str = include_str!("ipc_handler.rs");
         let arm = SOURCE
             .split_once(&format!("if name == \"{}\"", "set_audio_device"))
@@ -5723,30 +5696,25 @@ mod tests {
             .split_once(&format!("if name == \"{}\"", "set_mic_mute"))
             .expect("the command handled after set_audio_device")
             .0;
+        let queue = format!("{}(", "queue_control_request");
         assert!(
-            arm.contains("OsdKind::AudioDevice"),
-            "set_audio_device no longer raises a named AudioDevice OSD"
+            arm.contains(&queue) && arm.contains("ControlRequest::AudioSetDefault"),
+            "set_audio_device must queue AudioSetDefault on the controls worker ({queue})"
         );
+        for needle in [
+            "system_controls::set_audio_device(",
+            "compositor_show_osd",
+            "OsdKind::AudioDevice",
+            "did not keep",
+        ] {
+            assert!(
+                !arm.contains(needle),
+                "set_audio_device regained a sync confirmed path: {needle}"
+            );
+        }
         assert!(
-            arm.contains(&format!("{}(", "compositor_show_osd")),
-            "set_audio_device no longer calls compositor_show_osd"
-        );
-        // The card is the success acknowledgement — it must sit after the
-        // kept check, not before a rejected flip.
-        let show = arm
-            .find("OsdKind::AudioDevice")
-            .expect("AudioDevice OSD construction");
-        let reject = arm
-            .find("did not keep")
-            .expect("the post-switch reject");
-        assert!(
-            show > reject,
-            "the OSD must not fire when the sound server did not keep the device"
-        );
-        // Reply stays confirmed-after-re-read — never flip to queued.
-        assert!(
-            !arm.contains("queue_audio") && !arm.contains("ControlRequest::AudioSetDefault"),
-            "set_audio_device must stay synchronous confirmed, not queued"
+            arm.contains("no working audio control"),
+            "set_audio_device must mirror the no-tool answer when the worker is absent"
         );
     }
 

@@ -5141,9 +5141,10 @@ impl<C: CompositorConnection> Compositor<C> {
             // A toast or the OSD claims this only while its envelope or open
             // spring is actually moving — or it is owed the frame that prunes
             // it: a settled hold composites nothing. The fade-out's first
-            // frame still lands on time, because a composited session keeps
-            // the 20 ms idle cadence (`scheduling::idle_poll_required`) and
-            // every wake re-evaluates this gate; toast hover, unhover and
+            // frame is scheduled through `frame_deadline` (toast / OSD
+            // envelope boundaries, joined with recording), and a composited
+            // session also keeps the 20 ms idle cadence as a safety net
+            // (`scheduling::idle_poll_required`). Toast hover, unhover and
             // dismiss are pointer events that set `needs_render` themselves,
             // and every OSD show/refresh — a held volume key's repeats
             // included — is an input event that arms its own frame. The OSD

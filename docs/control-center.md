@@ -517,8 +517,10 @@ quietly put the default back. `pactl` exits 0 either way. So the worker
 re-reads the device list after the set and the panel reports what it finds:
 the marker moves only if the switch actually took, and the panel says
 `Unavailable — still using …` when it did not. `set_audio_device` over IPC
-fails with the same reasoning rather than reporting a success that did not
-happen.
+queues the switch on the controls worker (same path as the picker): the ack
+is immediate, and the panel / `audio/devices` bus update / named OSD follow
+the worker's verifying re-read — failing quietly when the sound server did
+not keep the device.
 
 ## Battery
 
@@ -576,13 +578,14 @@ the `network` topic carries `network/status`, likewise only on a real change.
 reports is what `set_audio_device` takes — a wpctl node id or a PulseAudio
 node name, depending on which tool the session uses. A successful
 `set_audio_device` raises the same labeled audio-device OSD the picker shows
-after a confirmed adopt. The `audio` subscription topic carries
-`audio/devices` after a switch.
+after a confirmed adopt — queued like `set_mic_mute`, not confirmed on the
+IPC reply. The `audio` subscription topic carries `audio/devices` after a
+switch resolves.
 
-`set_mic_mute` sets the default microphone's mute flag with the queued
-semantics of the volume keys, not `set_audio_device`'s confirmed-after-re-read
-reply: the ack is immediate, the mic OSD draws the optimistic estimate, and
-the controls worker's read-back confirms or corrects it. See
+`set_mic_mute` sets the default microphone's mute flag with the same queued
+semantics as the volume keys and `set_audio_device`: the ack is immediate,
+the mic OSD draws the optimistic estimate, and the controls worker's
+read-back confirms or corrects it. See
 [media controls](media-controls.md#microphone-mute).
 
 ### Reading them is free, and says when it has nothing yet
