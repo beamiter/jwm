@@ -4,6 +4,20 @@
 
 ---
 
+## 2026-09-14：UI/UX 二十九轮（Volume 中键 mute、MPRIS pin 持久化）
+
+选题 = 二十八轮开放：Volume middle-mute ∥ pin 持久化。文件几乎不交（event_dispatcher/input vs bridge/mpris）。拒做：剪贴板缩略图、`set_audio_device` sync→queued、X11 `compositor_frame_deadline`、媒体 click-to-seek（需 bridge CanSeek）。
+
+1. **Volume 中键 mute**。button 2 → select Volume + `handle_control_center_key(..., KEY_m)`（同 `m`/Enter）；其它 Hub 行 / blank inert；不走 Return（不 seek）；不碰 Input mic。docs/control-center.md。
+
+2. **MPRIS pin 持久化**。`$XDG_STATE_HOME/jwm/mpris-pin`（else `~/.local/state/jwm/mpris-pin`）；启动 load；Select / publish 后 sync；空总线保 pin、有其它播放器而无 pin 名则清；atomic 0600。docs/media-controls.md。
+
+**验证**：clippy -D warnings（0）；lib **3288 passed / 0 failed / 11 ignored**（3284→+4）；bridge `mpris::` **23/0**（19→+4）。**无真机显示会话**。真机优先：Hub Volume 中键 mute；`p` 钉播放器后重启 bridge 仍钉。
+
+**仍然开着的**（三十轮）：剪贴板缩略图；`set_audio_device` sync；X11 `compositor_frame_deadline`；媒体 click-to-seek（需 bridge CanSeek）。**成文勿再提**：……（继承二十八轮）+ Volume 仅键盘 mute（本轮关闭）+ pin 仅进程内存（本轮关闭）。
+
+---
+
 ## 2026-09-13：UI/UX 二十八轮（通知中键 dismiss、pending_osd 双槽）
 
 选题 = 二十七轮开放：notif middle-dismiss ∥ pending_osd volume/mic vs 设备名争用。文件几乎不交。拒做：pin、缩略图、`set_audio_device` sync、X11 deadline、媒体 seek、clear-all 指针。

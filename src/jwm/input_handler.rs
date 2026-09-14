@@ -857,7 +857,8 @@ impl Jwm {
 
     /// Key handling while the control center is open: Up/Down move between
     /// rows, Left/Right drive sliders, Return/space activates toggles.
-    fn handle_control_center_key(
+    /// Pointer middle-click on Volume calls this with `m` (mute, not seek).
+    pub(crate) fn handle_control_center_key(
         &mut self,
         backend: &mut dyn Backend,
         control: crate::jwm::features::ControlKind,

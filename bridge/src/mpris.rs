@@ -6,13 +6,23 @@
 //! jwm's `media/command` broadcasts back into method calls. When several
 //! players are on the bus the push also names them all, and jwm can pin the
 //! row to one of them with a `select_player` command; the pin holds while
-//! its bus name is alive and clears itself when the player goes away.
+//! its bus name is alive, survives bridge restart via
+//! `$XDG_STATE_HOME/jwm/mpris-pin` (else `~/.local/state/jwm/mpris-pin`),
+//! and clears itself when the player goes away while another is still on
+//! the bus. An empty sweep keeps the pin so a later launch of the same
+//! player — or a session that starts the bridge before any player — can
+//! reclaim it.
 //!
 //! Player selection and metadata extraction are pure functions so the rules
 //! (a playing player outranks a paused one; `xesam:artist` is a list) are unit
 //! tested without a bus.
 
 use std::collections::HashMap;
+use std::fs::{self, OpenOptions};
+use std::io::{self, Write};
+use std::os::unix::fs::OpenOptionsExt;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::Value;
 use zbus::Connection;
@@ -94,15 +104,21 @@ pub fn pick_active(players: &[PlayerSnapshot]) -> Option<&PlayerSnapshot> {
 /// Which player one sweep publishes and transport commands target: the
 /// pinned one while its bus name is still alive, else the ordinary active
 /// pick. The second return is the pin to keep — a pin that named nobody
-/// alive comes back cleared, so a player that quit cannot hold the row.
+/// alive while other players remain comes back cleared, so a player that
+/// quit cannot hold the row. An empty sweep keeps the pin: nobody on the
+/// bus is not the same as "this name is gone", and a restart (or a later
+/// launch of the same player) must be able to reclaim it.
 fn resolve_active<'a>(
     players: &'a [PlayerSnapshot],
     pinned: Option<&str>,
 ) -> (Option<&'a PlayerSnapshot>, Option<String>) {
-    if let Some(pin) = pinned
-        && let Some(player) = players.iter().find(|player| player.player == pin)
-    {
-        return (Some(player), Some(pin.to_string()));
+    if let Some(pin) = pinned {
+        if let Some(player) = players.iter().find(|player| player.player == pin) {
+            return (Some(player), Some(pin.to_string()));
+        }
+        if players.is_empty() {
+            return (None, Some(pin.to_string()));
+        }
     }
     (pick_active(players), None)
 }
@@ -332,6 +348,131 @@ async fn call_active(connection: &Connection, player: &str, method: &'static str
     }
 }
 
+const PIN_FILE_NAME: &str = "mpris-pin";
+const MAX_PIN_LEN: usize = 128;
+static PIN_WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn absolute_env_path(name: &str) -> Option<PathBuf> {
+    std::env::var_os(name)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+}
+
+/// `$XDG_STATE_HOME/jwm/mpris-pin`, else `~/.local/state/jwm/mpris-pin`,
+/// else a uid-scoped `/tmp` file when neither home is usable. Split out
+/// so tests can pin the layout without racing process-wide env.
+fn pin_state_path(xdg_state_home: Option<&Path>, home: Option<&Path>, uid: u32) -> PathBuf {
+    if let Some(path) = xdg_state_home {
+        return path.join("jwm").join(PIN_FILE_NAME);
+    }
+    if let Some(home) = home {
+        return home
+            .join(".local")
+            .join("state")
+            .join("jwm")
+            .join(PIN_FILE_NAME);
+    }
+    PathBuf::from(format!("/tmp/jwm-{uid}")).join(PIN_FILE_NAME)
+}
+
+fn stored_pin_path() -> PathBuf {
+    pin_state_path(
+        absolute_env_path("XDG_STATE_HOME").as_deref(),
+        absolute_env_path("HOME").as_deref(),
+        unsafe { libc::geteuid() },
+    )
+}
+
+/// Bus suffixes the pin file will accept: ASCII alphanumerics plus the
+/// `.`/`-`/`_` MPRIS instance names already use. Anything else — a path,
+/// whitespace, a 129th byte — is refused rather than written.
+fn pin_suffix(raw: &str) -> Option<String> {
+    let pin = raw.trim();
+    if pin.is_empty() || pin.len() > MAX_PIN_LEN {
+        return None;
+    }
+    pin.bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'))
+        .then(|| pin.to_string())
+}
+
+fn parse_stored_pin(contents: &str) -> Option<String> {
+    pin_suffix(contents.lines().next().unwrap_or(""))
+}
+
+fn read_stored_pin(path: &Path) -> Option<String> {
+    let contents = fs::read_to_string(path).ok()?;
+    parse_stored_pin(&contents)
+}
+
+fn atomic_write_pin(path: &Path, contents: &[u8]) -> io::Result<()> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent)?;
+    if fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("refusing to replace pin symlink: {}", path.display()),
+        ));
+    }
+    let temporary = parent.join(format!(
+        ".mpris-pin-{}-{}.tmp",
+        std::process::id(),
+        PIN_WRITE_COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    let result = (|| {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&temporary)?;
+        file.write_all(contents)?;
+        if !contents.ends_with(b"\n") {
+            file.write_all(b"\n")?;
+        }
+        file.sync_all()?;
+        Ok(())
+    })();
+    match result {
+        Ok(()) => {
+            if let Err(error) = fs::rename(&temporary, path) {
+                let _ = fs::remove_file(&temporary);
+                return Err(error);
+            }
+            Ok(())
+        }
+        Err(error) => {
+            let _ = fs::remove_file(&temporary);
+            Err(error)
+        }
+    }
+}
+
+fn write_stored_pin(path: &Path, pin: Option<&str>) {
+    match pin.and_then(pin_suffix) {
+        Some(pin) => {
+            if let Err(error) = atomic_write_pin(path, pin.as_bytes()) {
+                log::warn!("cannot persist mpris pin {}: {error}", path.display());
+            }
+        }
+        None => {
+            if let Err(error) = fs::remove_file(path)
+                && error.kind() != io::ErrorKind::NotFound
+            {
+                log::warn!("cannot clear mpris pin file {}: {error}", path.display());
+            }
+        }
+    }
+}
+
+fn sync_stored_pin(path: &Path, pin: Option<&str>, last: &mut Option<String>) {
+    if last.as_deref() == pin {
+        return;
+    }
+    write_stored_pin(path, pin);
+    *last = pin.map(str::to_string);
+}
+
 /// Drive the watcher: re-publish when players come and go, and act on jwm's
 /// `media/command` broadcasts.
 ///
@@ -343,9 +484,14 @@ pub async fn run(
     ipc: JwmIpc,
     mut events: tokio::sync::mpsc::Receiver<Value>,
 ) {
-    // The player jwm pinned the row to, while its bus name stays alive.
-    let mut pinned: Option<String> = None;
+    // The player jwm pinned the row to. Loaded from disk so a restart keeps
+    // the choice; the first publish still drops a name nobody on the bus
+    // owns (while other players remain).
+    let pin_path = stored_pin_path();
+    let mut last_written = read_stored_pin(&pin_path);
+    let mut pinned = last_written.clone();
     pinned = publish(&connection, &ipc, pinned.as_deref()).await;
+    sync_stored_pin(&pin_path, pinned.as_deref(), &mut last_written);
 
     let mut owner_changes = match DBusProxy::new(&connection).await {
         Ok(dbus) => match dbus.receive_name_owner_changed().await {
@@ -381,11 +527,12 @@ pub async fn run(
                 };
                 match request {
                     MediaRequest::Select(player) => {
-                        // The publish right after validates the name against
-                        // the live sweep: a player nobody owns clears the
-                        // pin again on the spot.
-                        pinned = (!player.is_empty()).then_some(player);
+                        // Empty / malformed names clear the pin. The publish
+                        // right after still drops a well-formed name nobody
+                        // on the bus owns (while other players remain).
+                        pinned = pin_suffix(&player);
                         pinned = publish(&connection, &ipc, pinned.as_deref()).await;
+                        sync_stored_pin(&pin_path, pinned.as_deref(), &mut last_written);
                     }
                     MediaRequest::Transport(method) => {
                         // Re-resolve the active player instead of trusting a
@@ -410,14 +557,17 @@ pub async fn run(
                             }
                         }
                         pinned = publish(&connection, &ipc, pinned.as_deref()).await;
+                        sync_stored_pin(&pin_path, pinned.as_deref(), &mut last_written);
                     }
                 }
             }
             Some(_) = next_owner_change(&mut owner_changes) => {
                 pinned = publish(&connection, &ipc, pinned.as_deref()).await;
+                sync_stored_pin(&pin_path, pinned.as_deref(), &mut last_written);
             }
             _ = poll.tick() => {
                 pinned = publish(&connection, &ipc, pinned.as_deref()).await;
+                sync_stored_pin(&pin_path, pinned.as_deref(), &mut last_written);
             }
         }
     }
@@ -617,12 +767,14 @@ mod tests {
                 {"player": "spotify", "identity": "spotify", "status": "Playing"},
             ])
         );
-        // A player-less sweep keeps the null signal, with no list key at all.
+        // A player-less sweep keeps the null signal, with no list key at all,
+        // but holds the pin so a later launch of the same player can reclaim
+        // it (a restart that beats the player onto the bus must not forget).
         let (args, pin) = publish_args(&[], Some("mpv"));
         assert_eq!(args["player"], Value::Null);
         assert!(args.get("players").is_none());
         assert!(args.get("player_details").is_none());
-        assert_eq!(pin, None);
+        assert_eq!(pin.as_deref(), Some("mpv"));
     }
 
     #[test]
@@ -690,5 +842,86 @@ mod tests {
             None
         );
         assert_eq!(parse_request(&serde_json::json!({})), None);
+    }
+
+    #[test]
+    fn an_empty_sweep_keeps_a_pin_so_a_later_launch_can_reclaim_it() {
+        let (args, pin) = publish_args(&[], Some("mpv"));
+        assert_eq!(args["player"], Value::Null);
+        assert_eq!(
+            pin.as_deref(),
+            Some("mpv"),
+            "nobody on the bus must not forget the pin"
+        );
+    }
+
+    #[test]
+    fn pin_suffixes_reject_paths_and_oversized_names() {
+        assert_eq!(pin_suffix("spotify").as_deref(), Some("spotify"));
+        assert_eq!(
+            pin_suffix("  firefox.instance_1-23  ").as_deref(),
+            Some("firefox.instance_1-23")
+        );
+        assert_eq!(pin_suffix(""), None);
+        assert_eq!(pin_suffix("   "), None);
+        assert_eq!(pin_suffix("a/b"), None);
+        assert_eq!(pin_suffix("has space"), None);
+        assert_eq!(pin_suffix(&"x".repeat(MAX_PIN_LEN + 1)), None);
+        assert_eq!(pin_suffix("播放器"), None);
+    }
+
+    #[test]
+    fn pin_state_path_prefers_xdg_then_home_then_tmp() {
+        assert_eq!(
+            pin_state_path(
+                Some(Path::new("/var/state")),
+                Some(Path::new("/home/me")),
+                1000
+            ),
+            PathBuf::from("/var/state/jwm/mpris-pin")
+        );
+        assert_eq!(
+            pin_state_path(None, Some(Path::new("/home/me")), 1000),
+            PathBuf::from("/home/me/.local/state/jwm/mpris-pin")
+        );
+        assert_eq!(
+            pin_state_path(None, None, 42),
+            PathBuf::from("/tmp/jwm-42/mpris-pin")
+        );
+    }
+
+    #[test]
+    fn stored_pin_round_trips_and_clears() {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "jwm-mpris-pin-test-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&dir).expect("temp pin dir");
+        let path = dir.join("mpris-pin");
+
+        write_stored_pin(&path, Some("spotify"));
+        assert_eq!(read_stored_pin(&path).as_deref(), Some("spotify"));
+        assert_eq!(
+            parse_stored_pin("spotify\nignored\n").as_deref(),
+            Some("spotify")
+        );
+
+        // A second write of the same name is a no-op for sync; a clear
+        // removes the file so a restart does not resurrect a dead pin.
+        let mut last = Some("spotify".to_string());
+        sync_stored_pin(&path, Some("spotify"), &mut last);
+        assert!(path.is_file());
+        sync_stored_pin(&path, None, &mut last);
+        assert_eq!(last, None);
+        assert!(!path.exists());
+        assert_eq!(read_stored_pin(&path), None);
+
+        // Junk on disk is ignored rather than trusted as a bus suffix.
+        fs::write(&path, "not a/valid pin\n").expect("junk pin");
+        assert_eq!(read_stored_pin(&path), None);
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

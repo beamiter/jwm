@@ -122,8 +122,13 @@ and returns to the hub. A click on the previous / next glyph skips; a
 click on the title or status icon still play/pauses. The bridge holds the
 pin while the pinned player's bus name is alive and re-publishes its
 state, so the switch raises the media OSD like any track change; when the
-pinned player exits, the pin clears itself and the ranking takes the row
-back. A single-player session is untouched: `p` and `o` are no-ops and the
+pinned player exits while another player remains, the pin clears itself
+and the ranking takes the row back. An empty bus keeps the pin so a later
+launch of the same player — or a restart that starts the bridge before
+any player — can reclaim it. The choice is also written to
+`$XDG_STATE_HOME/jwm/mpris-pin` (else `~/.local/state/jwm/mpris-pin`), so
+a bridge restart restores it; a dead or empty select clears the file. A
+single-player session is untouched: `p` and `o` are no-ops and the
 row carries no hint. The lock screen's now-playing row never grows the
 hint either — it is a control, and the lock shows none.
 

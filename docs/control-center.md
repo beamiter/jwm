@@ -45,7 +45,10 @@ row you scrolled). A slider's 20-cell bar itself takes press-and-drag: pressing
 on the bar sets the value to the pointed position and tracks the pointer until
 release, while pressing anywhere else on the row keeps the row's `Enter`
 action — so a click beside the bar still toggles mute on Volume, and setting a
-level on a muted sink unmutes it. On the Input row, a click on the
+level on a muted sink unmutes it. Middle click on the Volume row selects that
+row and mutes through the same path as `m` / `Enter`, even when the press
+lands on the bar (it never seeks); middle click on every other Hub row,
+including Input, is inert. On the Input row, a click on the
 microphone glyph toggles mic mute (the pointer twin of `m`); a click on
 the label or device name still opens the input picker. On the Media row,
 with more than one player, a click on `· p ‹next›` cycles players and a
@@ -100,7 +103,7 @@ PipeWire output and input defaults come from one shared `wpctl status` read.
 | Media | An MPRIS player is running | `Left`/`Right` skip, `Enter` play/pause, `p` pins the next player, `o` opens the Players picker (pointer: `· p` / `· o`) |
 | Network | A wireless radio exists (`nmcli` or `rfkill`) | `Enter` opens the picker, `Left`/`Right` toggles the radio |
 | Bluetooth | A controller exists (`bluetoothctl` or `rfkill`) | `Enter` opens the picker, `Left`/`Right` toggles power |
-| Volume | `wpctl`, `pactl`, or `amixer` works | `Left`/`Right` adjust, `Enter`/`m` mute |
+| Volume | `wpctl`, `pactl`, or `amixer` works | `Left`/`Right` adjust, `Enter`/`m`/middle click mute |
 | Output | The sound server can switch devices (`wpctl` or `pactl`) | `Enter` opens the [device picker](#audio-device-pickers) |
 | Input | Same | `Enter` opens the input picker, `m` toggles the microphone |
 | Brightness | `brightnessctl` or `/sys/class/backlight` | `Left`/`Right` adjust |

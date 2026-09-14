@@ -7,6 +7,17 @@ monorepo use independent Semantic Versions.
 
 ### Added
 
+- Control-center Volume middle-click mutes the pointed row (same path as
+  `m` / `Enter`); other Hub rows and blank stay inert — never seeks, never
+  mutes the microphone. See
+  [docs/control-center.md](docs/control-center.md).
+
+- MPRIS player pin persists across bridge restarts in
+  `$XDG_STATE_HOME/jwm/mpris-pin` (else `~/.local/state/jwm/mpris-pin`); an
+  empty bus keeps the pin so a later launch can reclaim it, while a dead
+  name among live players still clears. See
+  [docs/media-controls.md](docs/media-controls.md).
+
 - Notification center middle-click dismisses the pointed row (same path as
   `d`/`Delete`); blank and the action strip stay inert — never clear-all.
   See [docs/notifications.md](docs/notifications.md).
