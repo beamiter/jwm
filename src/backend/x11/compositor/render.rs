@@ -4053,6 +4053,7 @@ impl<C: CompositorConnection> Compositor<C> {
         focused: Option<u32>,
     ) -> bool {
         if self.needs_postprocess()
+            || self.needs_final_brightness()
             || self.screenshot_requests.has_pending()
             || screenshot_freeze_requires_composition(
                 self.screenshot_freeze_pending,
@@ -6970,9 +6971,10 @@ impl<C: CompositorConnection> Compositor<C> {
                     self.postprocess_uniforms.saturation.as_ref(),
                     self.saturation,
                 );
+                // Idle dim / user brightness is applied after toast/OSD/system UI.
                 self.gl.uniform_1_f32(
                     self.postprocess_uniforms.brightness.as_ref(),
-                    self.brightness,
+                    1.0,
                 );
                 self.gl
                     .uniform_1_f32(self.postprocess_uniforms.contrast.as_ref(), self.contrast);
@@ -7739,13 +7741,15 @@ impl<C: CompositorConnection> Compositor<C> {
         }
 
         // Keep the repair scissor active through post-processing and overlays,
-        // then reset it before capture/swap so the next full frame starts from a
-        // known state.
+        // then reset it before the final brightness multiply / capture / swap.
         if use_scissor {
             unsafe {
                 self.gl.disable(glow::SCISSOR_TEST);
             }
         }
+
+        // Final brightness after toast/OSD/system UI so idle dim covers chrome.
+        self.apply_final_brightness(&proj);
 
         // Capture before swapping: the graphics back buffer's contents are no
         // longer defined after SwapBuffers, which caused intermittent black or

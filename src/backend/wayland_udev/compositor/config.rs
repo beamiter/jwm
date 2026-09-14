@@ -10,7 +10,6 @@ use crate::core::animation::AnimationSpeed;
 fn postprocess_is_active(
     color_temperature: f32,
     saturation: f32,
-    brightness: f32,
     contrast: f32,
     invert_colors: bool,
     grayscale: bool,
@@ -18,15 +17,21 @@ fn postprocess_is_active(
     colorblind_mode: i32,
     hdr_enabled: bool,
 ) -> bool {
+    // Brightness is applied in a final fullscreen pass after toast/OSD/system
+    // UI so idle dim covers compositor chrome. Mid-frame postprocess keeps
+    // night light / sat / contrast / … only.
     color_temperature != 0.0
         || saturation != 1.0
-        || brightness != 1.0
         || contrast != 1.0
         || invert_colors
         || grayscale
         || magnifier_enabled
         || colorblind_mode != 0
         || hdr_enabled
+}
+
+pub(crate) fn final_brightness_is_active(brightness: f32) -> bool {
+    (brightness - 1.0).abs() > f32::EPSILON
 }
 
 fn mouse_position_requires_render(
@@ -295,7 +300,6 @@ impl WaylandCompositor {
         self.postprocess_active = postprocess_is_active(
             self.color_temperature,
             self.saturation,
-            self.brightness,
             self.contrast,
             self.invert_colors,
             self.grayscale,
@@ -2731,7 +2735,7 @@ mod tests {
         clear_immediate_restore_collections, collect_absent_auxiliary_window_ids,
         disabled_genie_action, is_auxiliary_window_id, legacy_retained_placement_changed,
         legacy_retained_preview_placement_changed, mouse_position_requires_render,
-        postprocess_is_active, retained_color_generation_action,
+        postprocess_is_active, final_brightness_is_active, retained_color_generation_action,
         retained_color_plan_context_changed, retained_color_plan_geometry,
         retained_output_profiles_compatible, retirement_uses_genie,
         should_request_static_minimized_capture, tab_hover_for_pointer,
@@ -2955,47 +2959,42 @@ mod tests {
 
     #[test]
     fn postprocess_activation_tracks_runtime_controls() {
-        let neutral = (0.0, 1.0, 1.0, 1.0, false, false, false, 0, false);
+        let neutral = (0.0, 1.0, 1.0, false, false, false, 0, false);
 
         assert!(!postprocess_is_active(
-            neutral.0, neutral.1, neutral.2, neutral.3, neutral.4, neutral.5, neutral.6, neutral.7,
-            neutral.8,
+            neutral.0, neutral.1, neutral.2, neutral.3, neutral.4, neutral.5, neutral.6,
+            neutral.7,
         ));
         assert!(postprocess_is_active(
             0.1, neutral.1, neutral.2, neutral.3, neutral.4, neutral.5, neutral.6, neutral.7,
-            neutral.8,
         ));
         assert!(postprocess_is_active(
             neutral.0, 0.9, neutral.2, neutral.3, neutral.4, neutral.5, neutral.6, neutral.7,
-            neutral.8,
         ));
+        // Brightness alone does not arm mid-frame postprocess.
+        assert!(!postprocess_is_active(
+            neutral.0, neutral.1, neutral.2, neutral.3, neutral.4, neutral.5, neutral.6,
+            neutral.7,
+        ));
+        assert!(final_brightness_is_active(0.9));
+        assert!(!final_brightness_is_active(1.0));
         assert!(postprocess_is_active(
             neutral.0, neutral.1, 0.9, neutral.3, neutral.4, neutral.5, neutral.6, neutral.7,
-            neutral.8,
         ));
         assert!(postprocess_is_active(
-            neutral.0, neutral.1, neutral.2, 0.9, neutral.4, neutral.5, neutral.6, neutral.7,
-            neutral.8,
+            neutral.0, neutral.1, neutral.2, true, neutral.4, neutral.5, neutral.6, neutral.7,
         ));
         assert!(postprocess_is_active(
             neutral.0, neutral.1, neutral.2, neutral.3, true, neutral.5, neutral.6, neutral.7,
-            neutral.8,
         ));
         assert!(postprocess_is_active(
             neutral.0, neutral.1, neutral.2, neutral.3, neutral.4, true, neutral.6, neutral.7,
-            neutral.8,
         ));
         assert!(postprocess_is_active(
-            neutral.0, neutral.1, neutral.2, neutral.3, neutral.4, neutral.5, true, neutral.7,
-            neutral.8,
+            neutral.0, neutral.1, neutral.2, neutral.3, neutral.4, neutral.5, 1, neutral.7,
         ));
         assert!(postprocess_is_active(
-            neutral.0, neutral.1, neutral.2, neutral.3, neutral.4, neutral.5, neutral.6, 1,
-            neutral.8,
-        ));
-        assert!(postprocess_is_active(
-            neutral.0, neutral.1, neutral.2, neutral.3, neutral.4, neutral.5, neutral.6, neutral.7,
-            true,
+            neutral.0, neutral.1, neutral.2, neutral.3, neutral.4, neutral.5, neutral.6, true,
         ));
     }
 

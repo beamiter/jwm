@@ -7,6 +7,14 @@ monorepo use independent Semantic Versions.
 
 ### Added
 
+- Edge glow is common-linear-aware (`u_scene_linear`) so glow-only frames no
+  longer force the exact-sRGB HDR fallback. See
+  [docs/sota-gap-queue.md](docs/sota-gap-queue.md).
+
+- Idle dim is a final fullscreen brightness multiply after toast/OSD/system UI
+  on X11 and Wayland, so compositor chrome dims with the desktop. See
+  [docs/idle.md](docs/idle.md).
+
 - SOTA daily-drive positioning: `wayland-udev` is the primary production
   backend and the CLI/`JWM_BACKEND` default when compiled in; X11 remains a
   first-class compatibility surface. See [README](README.md),

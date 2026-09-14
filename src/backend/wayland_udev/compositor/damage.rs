@@ -88,6 +88,9 @@ impl WaylandCompositor {
         if self.postprocess_active {
             return Some("post-processing requires composition");
         }
+        if super::config::final_brightness_is_active(self.brightness) {
+            return Some("final brightness multiply requires composition");
+        }
         if self.any_color_transform_active {
             return Some("surface color transform requires composition");
         }

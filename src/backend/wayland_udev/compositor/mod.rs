@@ -568,6 +568,7 @@ pub(crate) struct EdgeGlowUniforms {
     pub mouse: i32,
     pub screen_size: i32,
     pub time: i32,
+    pub scene_linear: i32,
 }
 
 // ---------------------------------------------------------------------------
@@ -2465,6 +2466,7 @@ impl WaylandCompositor {
                 mouse: get_uniform_loc(gl, edge_glow_program, "u_mouse"),
                 screen_size: get_uniform_loc(gl, edge_glow_program, "u_screen_size"),
                 time: get_uniform_loc(gl, edge_glow_program, "u_time"),
+                scene_linear: get_uniform_loc(gl, edge_glow_program, "u_scene_linear"),
             };
 
             // ----- Create quad VAO/VBO -----

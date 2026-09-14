@@ -369,17 +369,109 @@ impl<C: CompositorConnection> Compositor<C> {
         }
     }
 
-    /// Whether post-processing is active.
+    /// Fullscreen brightness multiply after toast/OSD/system UI.
+    ///
+    /// Reuses the postprocess program with identity filters. Mid-frame Pass 4
+    /// keeps `u_brightness = 1.0` so glass backdrops are not double-dimmed.
+    pub(super) fn apply_final_brightness(&mut self, proj: &[f32; 16]) {
+        if !self.needs_final_brightness() {
+            return;
+        }
+        self.ensure_postprocess_fbo();
+        let Some((pp_fbo, pp_tex)) = self.postprocess_fbo else {
+            return;
+        };
+        let w = self.screen_w as i32;
+        let h = self.screen_h as i32;
+        unsafe {
+            self.gl.disable(glow::SCISSOR_TEST);
+            // Blit the present (default) framebuffer into the staging FBO.
+            self.gl
+                .bind_framebuffer(glow::READ_FRAMEBUFFER, None);
+            self.gl
+                .bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(pp_fbo));
+            self.gl.blit_framebuffer(
+                0,
+                0,
+                w,
+                h,
+                0,
+                0,
+                w,
+                h,
+                glow::COLOR_BUFFER_BIT,
+                glow::NEAREST,
+            );
+
+            self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+            self.gl.viewport(0, 0, w, h);
+            self.gl.use_program(Some(self.postprocess_program));
+            self.gl.uniform_matrix_4_f32_slice(
+                self.postprocess_uniforms.projection.as_ref(),
+                false,
+                proj,
+            );
+            self.gl.uniform_4_f32(
+                self.postprocess_uniforms.rect.as_ref(),
+                0.0,
+                0.0,
+                self.screen_w as f32,
+                self.screen_h as f32,
+            );
+            self.gl
+                .uniform_1_i32(self.postprocess_uniforms.texture.as_ref(), 0);
+            self.gl
+                .uniform_1_f32(self.postprocess_uniforms.color_temp.as_ref(), 0.0);
+            self.gl
+                .uniform_1_f32(self.postprocess_uniforms.saturation.as_ref(), 1.0);
+            self.gl.uniform_1_f32(
+                self.postprocess_uniforms.brightness.as_ref(),
+                self.brightness,
+            );
+            self.gl
+                .uniform_1_f32(self.postprocess_uniforms.contrast.as_ref(), 1.0);
+            self.gl
+                .uniform_1_i32(self.postprocess_uniforms.invert.as_ref(), 0);
+            self.gl
+                .uniform_1_i32(self.postprocess_uniforms.grayscale.as_ref(), 0);
+            self.gl.uniform_1_i32(
+                self.postprocess_uniforms.hdr_enabled.as_ref(),
+                0,
+            );
+            self.gl.uniform_1_i32(
+                self.magnifier_uniforms.magnifier_enabled.as_ref(),
+                0,
+            );
+            self.gl.uniform_1_i32(
+                self.magnifier_uniforms.colorblind_mode.as_ref(),
+                0,
+            );
+            self.gl.active_texture(glow::TEXTURE0);
+            self.gl.bind_texture(glow::TEXTURE_2D, Some(pp_tex));
+            self.gl.bind_vertex_array(Some(self.quad_vao));
+            self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            self.gl.bind_vertex_array(None);
+            self.gl.use_program(None);
+        }
+    }
+
+    /// Whether mid-frame post-processing (night light / sat / contrast / …) is
+    /// active. Brightness is applied later via [`Self::needs_final_brightness`].
     pub(super) fn needs_postprocess(&self) -> bool {
         self.color_temperature != 0.0
             || self.saturation != 1.0
-            || self.brightness != 1.0
             || self.contrast != 1.0
             || self.invert_colors
             || self.grayscale
             || self.magnifier_enabled
             || self.colorblind_mode != 0
             || self.hdr_enabled
+    }
+
+    /// Whether the final fullscreen brightness multiply should run after
+    /// toast/OSD/system UI (idle dim covering compositor chrome).
+    pub(super) fn needs_final_brightness(&self) -> bool {
+        (self.brightness - 1.0).abs() > f32::EPSILON
     }
 
     /// Capture the current framebuffer to a PNG file.

@@ -901,6 +901,39 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn final_brightness_runs_after_system_ui_and_before_recording_chrome() {
+        // Needles are assembled at runtime so this cannot match its own text.
+        // Avoid `body_of(render_frame)`: the signature's type path contains `{`.
+        let source = include_str!("render.rs");
+        let system_ui = format!(
+            "TailOverlayClass::{});\n            unsafe {{\n                self.{}(gl, &projection);",
+            "SystemUi", "render_system_ui"
+        );
+        let final_brightness = format!("self.{}(gl, &projection);", "apply_final_brightness");
+        let recording = format!("// 21. {} capture", "Recording");
+        let mid = format!(
+            "// Idle dim / user brightness is applied after toast/OSD/{}.",
+            "system UI"
+        );
+        let at = |needle: &str| {
+            source
+                .find(needle)
+                .unwrap_or_else(|| panic!("render.rs must contain `{needle}`"))
+        };
+        let system_ui_at = at(&system_ui);
+        let final_at = at(&final_brightness);
+        let recording_at = at(&recording);
+        assert!(
+            system_ui_at < final_at && final_at < recording_at,
+            "idle dim must cover system UI and stay before REC/MIC local chrome"
+        );
+        assert!(
+            at(&mid) < final_at,
+            "mid-frame brightness=1.0 comment must precede the final multiply"
+        );
+    }
+
     fn opaque_fullscreen_candidate() -> OcclusionCandidate {
         OcclusionCandidate {
             rect: (0, 0, 1920, 1080),
@@ -1685,6 +1718,58 @@ impl WaylandCompositor {
                 ffi::COLOR_BUFFER_BIT,
                 ffi::NEAREST,
             );
+        }
+    }
+
+    /// Fullscreen brightness multiply after toast/OSD/system UI.
+    ///
+    /// Reuses `postprocess_program` with identity filters so idle dim covers
+    /// compositor chrome without double-dimming glass (mid-frame brightness
+    /// stays 1.0). REC/MIC chips are drawn after this on purpose.
+    fn apply_final_brightness(&self, gl: &ffi::Gles2, projection: &[f32; 16]) {
+        if !super::config::final_brightness_is_active(self.brightness) {
+            return;
+        }
+        if self.postprocess_fbo == 0 || self.postprocess_texture == 0 {
+            return;
+        }
+        self.blit_fbo(
+            gl,
+            self.output_fbo,
+            self.postprocess_fbo,
+            self.screen_w,
+            self.screen_h,
+        );
+        unsafe {
+            gl.Disable(ffi::SCISSOR_TEST);
+            gl.BindFramebuffer(ffi::FRAMEBUFFER, self.output_fbo);
+            gl.Viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
+            gl.UseProgram(self.postprocess_program);
+            self.set_projection_uniform(gl, self.postprocess_uniforms.projection, projection);
+            self.set_rect_uniform(
+                gl,
+                self.postprocess_uniforms.rect,
+                0.0,
+                0.0,
+                self.screen_w as f32,
+                self.screen_h as f32,
+            );
+            gl.Uniform1i(self.postprocess_uniforms.texture, 0);
+            gl.Uniform1f(self.postprocess_uniforms.color_temp, 0.0);
+            gl.Uniform1f(self.postprocess_uniforms.saturation, 1.0);
+            gl.Uniform1f(self.postprocess_uniforms.brightness, self.brightness);
+            gl.Uniform1f(self.postprocess_uniforms.contrast, 1.0);
+            gl.Uniform1i(self.postprocess_uniforms.invert, 0);
+            gl.Uniform1i(self.postprocess_uniforms.grayscale, 0);
+            gl.Uniform1i(self.postprocess_uniforms.magnifier_enabled, 0);
+            gl.Uniform1i(self.postprocess_uniforms.colorblind_mode, 0);
+            gl.Uniform1i(self.postprocess_uniforms.hdr_enabled, 0);
+            gl.ActiveTexture(ffi::TEXTURE0);
+            gl.BindTexture(ffi::TEXTURE_2D, self.postprocess_texture);
+            gl.BindVertexArray(self.quad_vao);
+            gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+            gl.BindVertexArray(0);
+            gl.UseProgram(0);
         }
     }
 
@@ -2572,6 +2657,7 @@ impl WaylandCompositor {
                 self.snap_preview_opacity,
             )
             && !self.postprocess_active
+            && !super::config::final_brightness_is_active(self.brightness)
             && self.overview_opacity <= 0.0001
             && self.expose_opacity <= 0.0001
             && self.expose_entries.is_empty()
@@ -3849,9 +3935,13 @@ impl WaylandCompositor {
         }
 
         // =================================================================
-        // 17. Edge glow
+        // 17. Edge glow (common-linear-aware: honors the bound target domain)
         // =================================================================
         if edge_glow_continuous {
+            debug_assert_eq!(
+                tail_domain::TailOverlayClass::EdgeGlow.domain(),
+                tail_domain::TailOverlayDomain::CommonLinearAware
+            );
             unsafe {
                 gl.UseProgram(self.edge_glow_program);
                 self.set_projection_uniform(gl, self.edge_glow_uniforms.projection, &projection);
@@ -3880,6 +3970,10 @@ impl WaylandCompositor {
                 );
                 // Use frame_count as a time proxy (at ~60fps, 1 frame = ~16.6ms)
                 gl.Uniform1f(self.edge_glow_uniforms.time, self.frame_count as f32 / 60.0);
+                gl.Uniform1i(
+                    self.edge_glow_uniforms.scene_linear,
+                    i32::from(tail_draws_linear),
+                );
                 gl.BindVertexArray(self.quad_vao);
                 gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
                 gl.BindVertexArray(0);
@@ -3919,7 +4013,8 @@ impl WaylandCompositor {
                 gl.Uniform1i(self.postprocess_uniforms.texture, 0);
                 gl.Uniform1f(self.postprocess_uniforms.color_temp, self.color_temperature);
                 gl.Uniform1f(self.postprocess_uniforms.saturation, self.saturation);
-                gl.Uniform1f(self.postprocess_uniforms.brightness, self.brightness);
+                // Idle dim / user brightness is applied after toast/OSD/system UI.
+                gl.Uniform1f(self.postprocess_uniforms.brightness, 1.0);
                 gl.Uniform1f(self.postprocess_uniforms.contrast, self.contrast);
                 gl.Uniform1i(
                     self.postprocess_uniforms.invert,
@@ -4153,6 +4248,10 @@ impl WaylandCompositor {
             unsafe { self.clear_tags_grid_labels(gl) };
             unsafe { self.clear_system_ui_preview(gl) };
         }
+
+        // Final brightness multiply after toast/OSD/system UI so idle dim
+        // covers compositor chrome. Mid-frame postprocess keeps u_brightness=1.
+        self.apply_final_brightness(gl, &projection);
 
         // =================================================================
         // 20. Finalize - unbind FBO

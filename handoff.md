@@ -4,6 +4,19 @@
 
 ---
 
+## 2026-09-14：SOTA 下一步 — EdgeGlow CommonLinearAware + idle 最终亮度
+
+选题 = push master 后继续 gap queue。
+
+1. **EdgeGlow → CommonLinearAware**：`u_scene_linear` + domain/blocker 翻转；headless oracle `wayland_tail_overlay_edge_glow_matches_legacy_srgb_scanout`。
+2. **Idle final brightness**：中帧 postprocess `u_brightness=1.0`；toast/OSD/system UI 之后复用 postprocess 程序做全屏亮度；X11+Wayland；damage/partial/composition 门接上。截图 bake-in 仍 follow-up。
+
+**验证**：相关 lib 测绿（含 headless）。**无真机**。
+
+**仍然开着的**：真机 Phase 6；particles/tab bar 迁移；capture bake brightness；tearing；FB envelope。
+
+---
+
 ## 2026-09-14：SOTA 战略落地（身份 / Phase6 门禁 / Wayland 缺口队列）
 
 选题 = 用户批准的 SOTA 计划：停功能竞赛 → 真机发布门禁 → Wayland 日用缺口 → 壳差异化 → 生态。

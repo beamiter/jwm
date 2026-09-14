@@ -80,7 +80,8 @@ pub(crate) enum TailOverlayClass {
     TabBar,
     /// Particle effects (dedicated shader without a linear-domain ingress).
     Particles,
-    /// Edge glow (dedicated time-varying shader without linear ingress).
+    /// Edge glow (dedicated time-varying shader; common-linear-aware via
+    /// `u_scene_linear` color ingress).
     EdgeGlow,
     /// Full-frame postprocess filter chain operating on encoded pixels.
     Postprocess,
@@ -124,13 +125,14 @@ impl TailOverlayClass {
 
     pub(crate) const fn domain(self) -> TailOverlayDomain {
         match self {
-            Self::SnapPreview | Self::Overview | Self::Expose | Self::Peek => {
-                TailOverlayDomain::CommonLinearAware
-            }
+            Self::SnapPreview
+            | Self::Overview
+            | Self::Expose
+            | Self::Peek
+            | Self::EdgeGlow => TailOverlayDomain::CommonLinearAware,
             Self::WorkspaceTransition
             | Self::TabBar
             | Self::Particles
-            | Self::EdgeGlow
             | Self::Postprocess
             | Self::DebugHud
             | Self::Annotation
@@ -148,11 +150,14 @@ impl TailOverlayClass {
     /// `api::LINEAR_TAIL_BLOCKER_NAMES` (a unit test enforces it).
     pub(crate) const fn blocker_wire_name(self) -> Option<&'static str> {
         match self {
-            Self::SnapPreview | Self::Overview | Self::Expose | Self::Peek => None,
+            Self::SnapPreview
+            | Self::Overview
+            | Self::Expose
+            | Self::Peek
+            | Self::EdgeGlow => None,
             Self::WorkspaceTransition => Some("workspace_transition_overlay"),
             Self::TabBar => Some("tab_bar_overlay"),
             Self::Particles => Some("particle_overlay"),
-            Self::EdgeGlow => Some("edge_glow_overlay"),
             Self::Postprocess => Some("postprocess_filter"),
             Self::DebugHud => Some("debug_hud_overlay"),
             Self::Annotation => Some("annotation_overlay"),

@@ -4765,6 +4765,177 @@ fn wayland_tail_overlay_snap_preview_matches_legacy_srgb_scanout() {
     }
 }
 
+/// CPU model of `EDGE_GLOW_FRAGMENT_SHADER` blended over an opaque background.
+/// `linear` selects common-linear draw (color decoded at ingress, blend in
+/// linear light, one sRGB OETF) versus the legacy encoded draw.
+fn edge_glow_pixel_oracle(
+    pixel: (f32, f32),
+    mouse: (f32, f32),
+    screen: (f32, f32),
+    glow_color: [f32; 4],
+    glow_width: f32,
+    background: [u8; 4],
+    linear: bool,
+) -> [u8; 4] {
+    use crate::backend::wayland_udev::color_pipeline::TransferKind;
+    let glow_width = glow_width.max(0.001);
+    let (px, py) = pixel;
+    let dist_left = px;
+    let dist_right = screen.0 - px;
+    let dist_top = py;
+    let dist_bottom = screen.1 - py;
+    let mouse_dist_left = mouse.0;
+    let mouse_dist_right = screen.0 - mouse.0;
+    let mouse_dist_top = mouse.1;
+    let mouse_dist_bottom = screen.1 - mouse.1;
+    let mouse_min = mouse_dist_left
+        .min(mouse_dist_right)
+        .min(mouse_dist_top)
+        .min(mouse_dist_bottom);
+    let mut edge_dist = glow_width;
+    if mouse_min < glow_width {
+        edge_dist = if (mouse_min - mouse_dist_left).abs() < f32::EPSILON {
+            dist_left
+        } else if (mouse_min - mouse_dist_right).abs() < f32::EPSILON {
+            dist_right
+        } else if (mouse_min - mouse_dist_top).abs() < f32::EPSILON {
+            dist_top
+        } else {
+            dist_bottom
+        };
+    }
+    let mut alpha = 1.0 - smoothstep_oracle(0.0, glow_width, edge_dist);
+    alpha *= alpha;
+    let mouse_factor = 1.0 - smoothstep_oracle(0.0, glow_width, mouse_min);
+    alpha *= mouse_factor;
+    let final_a = (glow_color[3] * alpha).clamp(0.0, 1.0);
+    let quantize = |value: f32| (value.clamp(0.0, 1.0) * 255.0).round() as u8;
+    let mut out = [0u8; 4];
+    for channel in 0..3 {
+        let bg = f32::from(background[channel]) / 255.0;
+        let value = if linear {
+            let src = TransferKind::Srgb.inverse(glow_color[channel]) * final_a
+                + TransferKind::Srgb.inverse(bg) * (1.0 - final_a);
+            TransferKind::Srgb.forward(src)
+        } else {
+            glow_color[channel] * final_a + bg * (1.0 - final_a)
+        };
+        out[channel] = quantize(value);
+    }
+    out[3] = 255;
+    out
+}
+
+/// Migrated edge glow (dedicated shader + `u_scene_linear`) keeps the legacy
+/// SDR picture on opaque edge cores and follows per-domain blend semantics
+/// for the soft falloff — pinned by CPU oracles.
+#[test]
+fn wayland_tail_overlay_edge_glow_matches_legacy_srgb_scanout() {
+    let Some(_headless) = HeadlessGl::new(GlApi::Gles3) else {
+        eprintln!("headless GL unavailable - skipping edge glow tail-domain test");
+        return;
+    };
+    use smithay::backend::renderer::gles::ffi;
+    let gl = ffi::Gles2::load_with(|symbol| egl::get_proc_address(symbol) as *const c_void);
+    const W: i32 = 64;
+    const H: i32 = 48;
+    let srgb_region = crate::backend::wayland_udev::color_pipeline::OutputColorRegion {
+        rect: [0, 0, W, H],
+        output_tf: crate::backend::wayland_udev::color_pipeline::TransferKind::Srgb,
+        working_to_output_row_major: crate::backend::wayland_udev::color_pipeline::IDENTITY_CTM,
+        tone_map: crate::backend::wayland_udev::color_pipeline::OutputToneMapPlan::IDENTITY,
+    };
+    unsafe {
+        let mut compositor = super::WaylandCompositor::new(&gl, W as u32, H as u32, false)
+            .expect("headless Wayland compositor must initialize");
+        compositor.scene_linear_requested = true;
+        compositor.sync_scene_linear_target(&gl);
+        assert_ne!(compositor.linear_fbo, 0);
+        compositor.edge_glow_enabled = true;
+        compositor.edge_glow_active = true;
+        compositor.edge_glow_suppressed = false;
+        compositor.edge_glow_width = 16.0;
+        // Mouse on the left edge center so glow cores there are fully opaque.
+        compositor.mouse_x = 0.0;
+        compositor.mouse_y = H as f32 * 0.5;
+        let background = background_texel();
+        let screen = (W as f32, H as f32);
+        let mouse = (compositor.mouse_x, compositor.mouse_y);
+
+        let render_pair = |compositor: &mut super::WaylandCompositor| -> (Vec<u8>, Vec<u8>) {
+            compositor.force_full_redraw();
+            assert!(compositor.render_frame(&gl, &[], None, false, false, false, None, false));
+            let legacy = read_fbo_frame(&gl, compositor.output_fbo, W, H);
+            compositor.force_full_redraw();
+            assert!(compositor.render_frame(
+                &gl,
+                &[],
+                None,
+                true,
+                false,
+                false,
+                Some(std::slice::from_ref(&srgb_region)),
+                false,
+            ));
+            let linear = read_fbo_frame(&gl, compositor.output_fbo, W, H);
+            (legacy, linear)
+        };
+
+        // Opaque authored color on the edge core: legacy ≈ migrated.
+        compositor.edge_glow_color = [0.2, 0.4, 0.8, 1.0];
+        let (legacy, linear) = render_pair(&mut compositor);
+        let core = (0usize, (H as usize) / 2);
+        let a = frame_pixel(&legacy, W as usize, H as usize, core.0, core.1);
+        let b = frame_pixel(&linear, W as usize, H as usize, core.0, core.1);
+        assert_pixel(a, [51, 102, 204, 255], 2, "legacy opaque edge-glow core");
+        assert_pixel(b, a, 2, "migrated opaque edge-glow core matches legacy SDR");
+
+        // Soft translucent band: pin each domain against its CPU oracle.
+        compositor.edge_glow_color = [0.3, 0.6, 1.0, 0.6];
+        let glow = compositor.edge_glow_color;
+        let width = compositor.edge_glow_width;
+        let (legacy, linear) = render_pair(&mut compositor);
+        for (x, y, label) in [
+            (0usize, H as usize / 2, "opaque-ish core"),
+            (6usize, H as usize / 2, "soft falloff"),
+        ] {
+            let pixel = (x as f32 + 0.5, y as f32 + 0.5);
+            assert_pixel(
+                frame_pixel(&legacy, W as usize, H as usize, x, y),
+                edge_glow_pixel_oracle(pixel, mouse, screen, glow, width, background, false),
+                3,
+                &format!("legacy edge glow {label} blends in the encoded domain"),
+            );
+            assert_pixel(
+                frame_pixel(&linear, W as usize, H as usize, x, y),
+                edge_glow_pixel_oracle(pixel, mouse, screen, glow, width, background, true),
+                3,
+                &format!("migrated edge glow {label} blends in linear light with a single OETF"),
+            );
+        }
+        // Far from the mouse edge the glow must leave the background untouched.
+        assert_pixel(
+            frame_pixel(&linear, W as usize, H as usize, W as usize - 2, H as usize / 2),
+            background,
+            1,
+            "edge glow must not bleed onto the far edge",
+        );
+
+        assert!(compositor.release_gpu_resources(
+            &gl,
+            super::CompositorOutputTextureOwnership::RawCompositor,
+        ));
+    }
+}
+
+#[test]
+fn edge_glow_fragment_shader_declares_scene_linear_ingress() {
+    assert!(
+        super::shaders::EDGE_GLOW_FRAGMENT_SHADER.contains("u_scene_linear"),
+        "edge glow must honor the bound target's color domain"
+    );
+}
+
 #[test]
 fn wayland_runtime_gpu_release_is_complete_idempotent_and_recreatable() {
     let Some(_headless) = HeadlessGl::new(GlApi::Gles3) else {

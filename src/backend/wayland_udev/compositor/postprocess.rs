@@ -38,7 +38,7 @@ impl WaylandCompositor {
             // Set all post-processing uniforms
             gl.Uniform1f(self.postprocess_uniforms.color_temp, self.color_temperature);
             gl.Uniform1f(self.postprocess_uniforms.saturation, self.saturation);
-            gl.Uniform1f(self.postprocess_uniforms.brightness, self.brightness);
+            gl.Uniform1f(self.postprocess_uniforms.brightness, 1.0);
             gl.Uniform1f(self.postprocess_uniforms.contrast, self.contrast);
             gl.Uniform1i(
                 self.postprocess_uniforms.invert,

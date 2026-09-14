@@ -225,12 +225,11 @@ jwm-tool msg set_config --args '{"key": "behavior.idle_lock_secs", "value": 600}
 
 ## Known limitation
 
-The dim applies to the composited desktop, not yet to JWM's own overlays: a
-lock screen or control center drawn while the session is dim renders at full
-brightness. It looks slightly odd and costs nothing else.
+None for on-screen chrome: idle dim is a **final fullscreen brightness
+multiply** after toast / OSD / system UI on both X11 and Wayland. Mid-frame
+postprocess keeps night light / saturation / contrast with `u_brightness =
+1.0`, so glass backdrops are not double-dimmed.
 
-**Tracked fix** (see [sota-gap-queue](sota-gap-queue.md)): keep mid-frame
-postprocess for night light / saturation / contrast with `u_brightness = 1.0`,
-then apply a final fullscreen brightness multiply after toast / OSD / system UI
-on both X11 and Wayland. Per-overlay multiply is wrong — glass backdrops already
-sampled the postprocessed framebuffer and would double-dim.
+Wayland screenshot/recording readback still runs before that final pass, so a
+capture taken while dimmed may show undimmed chrome; the on-screen session is
+dimmed. Tracked follow-up: bake brightness into the capture view.

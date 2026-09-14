@@ -1343,13 +1343,20 @@ void main() {
 pub const EDGE_GLOW_FRAGMENT_SHADER: &str = r#"#version 300 es
 precision highp float;
 
-uniform vec4  u_glow_color;     // glow RGBA
+uniform vec4  u_glow_color;     // glow RGBA (authored encoded sRGB)
 uniform float u_glow_width;     // glow width in pixels
 uniform vec2  u_mouse;          // mouse position in pixels
 uniform vec2  u_screen_size;    // screen dimensions
 uniform float u_time;           // reserved
+uniform int   u_scene_linear;   // 1 = decode color into common-linear target
 in vec2 v_uv;
 out vec4 frag_color;
+
+vec3 srgb_inverse(vec3 c) {
+    vec3 lo = c / 12.92;
+    vec3 hi = pow(max((c + 0.055) / 1.055, 0.0), vec3(2.4));
+    return mix(lo, hi, step(0.04045, c));
+}
 
 void main() {
     float glow_width = max(u_glow_width, 0.001);
@@ -1381,8 +1388,11 @@ void main() {
     float mouse_factor = 1.0 - smoothstep(0.0, glow_width, mouse_min);
     alpha *= mouse_factor;
 
+    vec3 rgb = u_scene_linear != 0
+        ? srgb_inverse(u_glow_color.rgb)
+        : u_glow_color.rgb;
     float final_a = u_glow_color.a * alpha;
-    frag_color = vec4(u_glow_color.rgb * final_a, final_a);
+    frag_color = vec4(rgb * final_a, final_a);
 }
 "#;
 
