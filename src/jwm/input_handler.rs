@@ -1749,9 +1749,9 @@ impl Jwm {
         }
         // The calendar card's rows have no selection to activate; a click
         // maps onto the grid instead — the pointer counterpart of the
-        // ←/→/t keys. The edge cells the neighboring months would occupy
-        // flip the view to them, today's cell returns to it, and any other
-        // cell keeps being the no-op a click on the card always was.
+        // ←/→/↑/↓/t keys. Edge month cells and weekday-header year halves
+        // flip the view; today's cell returns to it; anything else stays
+        // the no-op a click on the card always was.
         if let Some(view) = self.features.system_ui.calendar_view() {
             use crate::jwm::features::calendar::CalendarClick;
             let config = CONFIG.load();
@@ -1769,15 +1769,17 @@ impl Jwm {
             let char_width = measure("0000000000000000000000000000")
                 .saturating_sub(measure("000000000000000000000000000"))
                 as f32;
-            let (months, today) = match crate::jwm::features::calendar::click_action(
+            let (months, years, today) = match crate::jwm::features::calendar::click_action(
                 row, text_x, char_width, &view,
             ) {
-                CalendarClick::PrevMonth => (-1, false),
-                CalendarClick::NextMonth => (1, false),
-                CalendarClick::Today => (0, true),
+                CalendarClick::PrevMonth => (-1, 0, false),
+                CalendarClick::NextMonth => (1, 0, false),
+                CalendarClick::PrevYear => (0, -1, false),
+                CalendarClick::NextYear => (0, 1, false),
+                CalendarClick::Today => (0, 0, true),
                 CalendarClick::None => return Ok(()),
             };
-            self.features.system_ui.shift_calendar(months, 0, today);
+            self.features.system_ui.shift_calendar(months, years, today);
             self.sync_system_ui(backend);
             return Ok(());
         }

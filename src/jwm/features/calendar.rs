@@ -150,6 +150,10 @@ pub enum CalendarClick {
     PrevMonth,
     /// Step one month forward.
     NextMonth,
+    /// Step one year back.
+    PrevYear,
+    /// Step one year forward.
+    NextYear,
     /// Return to the month containing today.
     Today,
     /// Nothing the calendar answers to; the click stays a no-op.
@@ -161,7 +165,11 @@ pub enum CalendarClick {
 /// texture. The rule, pinned:
 ///
 /// * The overlay's rows are fixed: 0 is the clock line, 1 is blank, 2 the
-///   weekday header, and 3 on are the week rows — only week rows answer.
+///   weekday header, and 3 on are the week rows.
+/// * On the weekday header the same seven 4-column cells apply: the left
+///   three (`Mo`–`We`) step a year back and the right three (`Fr`–`Su`)
+///   step a year forward — the pointer twin of `Up`/`Down`. The middle
+///   (`Th`) stays a no-op.
 /// * On a week row the grid is seven 4-column cells (see [`month_grid`]). A
 ///   click on a LEADING cell before the 1st — where the previous month's
 ///   tail days would sit — steps a month back; a click on a TRAILING cell
@@ -169,9 +177,9 @@ pub enum CalendarClick {
 ///   on today's own cell returns the view to the current month, mirroring
 ///   the `t` key.
 /// * Everything else — real day cells, the clock, the blank row, the
-///   header, the texture's margins, anywhere past the grid — is
-///   [`CalendarClick::None`], and the press keeps being the no-op a click
-///   on the card always was.
+///   header's middle cell, the texture's margins, anywhere past the grid —
+///   is [`CalendarClick::None`], and the press keeps being the no-op a
+///   click on the card always was.
 ///
 /// `char_width_px` is the measured advance of one glyph in the panel's
 /// monospace font (the caller measures; this stays backend-free), and the
@@ -183,13 +191,8 @@ pub fn click_action(
     char_width_px: f32,
     view: &CalendarView,
 ) -> CalendarClick {
-    // The clock, the blank row and the weekday header name nothing.
-    let Some(week) = visual_row.checked_sub(3) else {
-        return CalendarClick::None;
-    };
-    // The grid never draws more than six week rows; a row past them (or a
-    // width that cannot measure) is nobody's cell.
-    if week >= 6 || !char_width_px.is_finite() || char_width_px <= 0.0 {
+    // A width that cannot measure names nothing on any row.
+    if !char_width_px.is_finite() || char_width_px <= 0.0 {
         return CalendarClick::None;
     }
     let column = ((text_x_px - TEXT_PAD) / char_width_px).floor();
@@ -198,6 +201,24 @@ pub fn click_action(
     }
     let cell = (column as usize) / 4;
     if cell > 6 {
+        return CalendarClick::None;
+    }
+
+    // Weekday header: left three cells previous year, right three next —
+    // the pointer twin of Up/Down. Clock and blank stay inert.
+    if visual_row == 2 {
+        return match cell {
+            0..=2 => CalendarClick::PrevYear,
+            4..=6 => CalendarClick::NextYear,
+            _ => CalendarClick::None,
+        };
+    }
+    let Some(week) = visual_row.checked_sub(3) else {
+        return CalendarClick::None;
+    };
+    // The grid never draws more than six week rows; a row past them is
+    // nobody's cell.
+    if week >= 6 {
         return CalendarClick::None;
     }
     let position = week * 7 + cell;
@@ -448,9 +469,9 @@ mod tests {
         // leading the third.
         assert_eq!(click_action(3, cell_x(2), 12.0, &view), CalendarClick::None);
         assert_eq!(click_action(5, cell_x(0), 12.0, &view), CalendarClick::None);
-        // The clock, the blank row and the weekday header never answer,
-        // wherever on them the press lands.
-        for row in 0..=2 {
+        // The clock and blank row never answer, wherever on them the press
+        // lands. The weekday header's middle cell (`Th`) stays inert too.
+        for row in 0..=1 {
             assert_eq!(
                 click_action(row, cell_x(0), 12.0, &view),
                 CalendarClick::None
@@ -460,6 +481,33 @@ mod tests {
                 CalendarClick::None
             );
         }
+        assert_eq!(
+            click_action(2, cell_x(3), 12.0, &view),
+            CalendarClick::None
+        );
+    }
+
+    #[test]
+    fn weekday_header_sides_step_a_year() {
+        let view = CalendarView::new(date(2026, 7, 27));
+        // Left three cells (Mo–We): previous year — twin of Up.
+        assert_eq!(
+            click_action(2, cell_x(0), 12.0, &view),
+            CalendarClick::PrevYear
+        );
+        assert_eq!(
+            click_action(2, cell_x(2), 12.0, &view),
+            CalendarClick::PrevYear
+        );
+        // Right three cells (Fr–Su): next year — twin of Down.
+        assert_eq!(
+            click_action(2, cell_x(4), 12.0, &view),
+            CalendarClick::NextYear
+        );
+        assert_eq!(
+            click_action(2, cell_x(6), 12.0, &view),
+            CalendarClick::NextYear
+        );
     }
 
     #[test]

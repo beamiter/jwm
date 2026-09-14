@@ -550,10 +550,10 @@ impl WMController for Jwm {
                 // no arm). Wi-Fi / Bluetooth keep the two-press armed confirm
                 // keyboard `d` uses — first press arms, second deletes — and
                 // stay inert while a passphrase or pairing prompt owns the
-                // surface. Hub Volume middle-click mutes (the twin of `m` /
-                // Enter, ignoring the slider bar so it never seeks); every
-                // other Hub row, including Input, stays inert. Blank is inert
-                // on every picker; the notification action strip stays
+                // surface. Hub Volume and Input middle-click mute (the twin of
+                // `m` — Volume also of Enter, ignoring the slider bar so it
+                // never seeks); every other Hub row stays inert. Blank is
+                // inert on every picker; the notification action strip stays
                 // left-only (middle-click there is a miss).
                 2 if self.features.system_ui.is_clipboard_picker() => {
                     if let SystemUiHitTarget::Item(row, _) = hit
@@ -592,13 +592,14 @@ impl WMController for Jwm {
                     use crate::backend::common_define::keys;
                     use crate::jwm::features::ControlKind;
                     if let SystemUiHitTarget::Item(row, _) = hit
-                        && self.features.system_ui.control_at_visible_row(row)
-                            == Some(ControlKind::Volume)
+                        && let Some(kind) =
+                            self.features.system_ui.control_at_visible_row(row)
+                        && matches!(kind, ControlKind::Volume | ControlKind::AudioInput)
                         && self.features.system_ui.select_visible_row(row).is_some()
                     {
                         self.handle_control_center_key(
                             backend,
-                            ControlKind::Volume,
+                            kind,
                             keys::KEY_m,
                             Mods::empty(),
                         );
@@ -3110,12 +3111,12 @@ mod tests {
         );
     }
 
-    /// Hub Volume button 2 must select the pointed row and mute through
-    /// `handle_control_center_key(..., KEY_m)` — the twin of `m` / Enter —
-    /// never Return (slider seek) and never Input's mic mute. Needles are
-    /// built at runtime so this cannot match its own source.
+    /// Hub Volume / Input button 2 must select the pointed row and mute
+    /// through `handle_control_center_key(..., KEY_m)` — the twin of `m`
+    /// (Volume also of Enter) — never Return (slider seek / open picker).
+    /// Needles are built at runtime so this cannot match its own source.
     #[test]
-    fn control_center_volume_middle_click_routes_through_m() {
+    fn control_center_volume_and_input_middle_click_route_through_m() {
         const SOURCE: &str = include_str!("event_dispatcher.rs");
         let compact: String = SOURCE.chars().filter(|c| !c.is_whitespace()).collect();
 
@@ -3139,11 +3140,11 @@ mod tests {
         );
         assert!(
             system_ui.contains(arm),
-            "Volume middle-click must gate on the Hub and an Item hit"
+            "Hub mute middle-click must gate on the Hub and an Item hit"
         );
         assert!(
-            system_ui.contains("control_at_visible_row(row)==Some(ControlKind::Volume)"),
-            "middle-click must mute only the Volume row"
+            system_ui.contains("ControlKind::Volume|ControlKind::AudioInput"),
+            "middle-click must mute Volume and Input only"
         );
         assert!(
             system_ui.contains("select_visible_row(row)"),
@@ -3157,28 +3158,28 @@ mod tests {
         let wifi_bt = system_ui
             .find("is_wifi_picker()")
             .expect("Wi-Fi/BT middle-click arm");
-        let volume = system_ui
+        let hub = system_ui
             .find("2ifself.features.system_ui.is_control_center()")
-            .expect("Volume middle-click arm");
-        let catch_all = system_ui[volume..]
+            .expect("Hub mute middle-click arm");
+        let catch_all = system_ui[hub..]
             .find("_=>{}")
             .expect("the middle-click catch-all");
-        let arm_body = &system_ui[volume..volume + catch_all];
+        let arm_body = &system_ui[hub..hub + catch_all];
         assert!(
             arm_body.contains("keys::KEY_m"),
             "middle-click must mute with m, not Return"
         );
         assert!(
             !arm_body.contains("KEY_Return") && !arm_body.contains("KEY_space"),
-            "middle-click must not replay Enter (slider seek / activate)"
+            "middle-click must not replay Enter (slider seek / open picker)"
         );
         assert!(
-            !arm_body.contains("toggle_mic_mute") && !arm_body.contains("AudioInput"),
-            "middle-click must not mute the microphone"
+            !arm_body.contains("toggle_mic_mute"),
+            "middle-click must reach mic mute through KEY_m, not call toggle_mic_mute directly"
         );
         assert!(
-            wifi_bt < volume,
-            "Hub Volume mute must sit after the picker forget arms"
+            wifi_bt < hub,
+            "Hub mute must sit after the picker forget arms"
         );
     }
 
@@ -3638,7 +3639,49 @@ mod tests {
     }
 
     #[test]
-    fn middle_click_on_a_non_volume_hub_row_is_inert() {
+    fn middle_click_on_the_input_row_selects_and_mutes_like_m() {
+        use crate::jwm::features::{ControlCenterInputs, ControlKind, SystemUiState};
+
+        let mut jwm = empty_jwm();
+        let mut backend = RenderSpyBackend::new();
+        jwm.features.system_ui = SystemUiState::control_center(&ControlCenterInputs {
+            volume: Some((45, false)),
+            brightness: Some(60),
+            audio_input: Some("Headset Microphone"),
+            ..Default::default()
+        });
+        assert_eq!(
+            jwm.features.system_ui.control_at_visible_row(2),
+            Some(ControlKind::AudioInput)
+        );
+        jwm.features.system_ui.move_selection(1);
+        assert_eq!(
+            jwm.features.system_ui.selected_control(),
+            Some(ControlKind::Brightness)
+        );
+
+        backend.system_ui_hit = SystemUiHitTarget::Item(2, 0.0);
+        <Jwm as WMController>::on_button_press(
+            &mut jwm,
+            &mut backend,
+            HitTarget::Background { output: None },
+            0,
+            2,
+            0,
+        );
+        assert_eq!(
+            jwm.features.system_ui.selected_control(),
+            Some(ControlKind::AudioInput),
+            "middle-click selects the Input row before muting"
+        );
+        assert!(
+            jwm.features.system_ui.is_control_center(),
+            "mute keeps the Hub open"
+        );
+    }
+
+    #[test]
+    fn middle_click_on_a_non_mute_hub_row_is_inert() {
         use crate::jwm::features::{ControlCenterInputs, ControlKind, SystemUiState};
 
         let mut jwm = empty_jwm();
@@ -3657,27 +3700,21 @@ mod tests {
             jwm.features.system_ui.control_at_visible_row(1),
             Some(ControlKind::Brightness)
         );
-        assert_eq!(
-            jwm.features.system_ui.control_at_visible_row(2),
-            Some(ControlKind::AudioInput)
-        );
 
-        for row in [1usize, 2] {
-            backend.system_ui_hit = SystemUiHitTarget::Item(row, 0.0);
-            <Jwm as WMController>::on_button_press(
-                &mut jwm,
-                &mut backend,
-                HitTarget::Background { output: None },
-                0,
-                2,
-                0,
-            );
-            assert_eq!(
-                jwm.features.system_ui.selected_control(),
-                Some(ControlKind::Volume),
-                "non-Volume Hub rows stay inert (row {row})"
-            );
-        }
+        backend.system_ui_hit = SystemUiHitTarget::Item(1, 0.0);
+        <Jwm as WMController>::on_button_press(
+            &mut jwm,
+            &mut backend,
+            HitTarget::Background { output: None },
+            0,
+            2,
+            0,
+        );
+        assert_eq!(
+            jwm.features.system_ui.selected_control(),
+            Some(ControlKind::Volume),
+            "Brightness (and other non-mute Hub rows) stay inert"
+        );
     }
 
     #[test]

@@ -81,7 +81,7 @@ indicator: while the default source is muted it wears the slashed
 microphone icon the OSD uses, and an unmuted or never-read flag draws the
 row exactly as before; an open control center repaints when a read-back
 corrects or reverts the shown state. A click on that microphone glyph —
-or `m` while the Input row is selected — toggles mute the same way the
+or `m` / middle click while the Input row is selected — toggles mute the same way the
 key does (OSD included); a click on the rest of the row still opens the
 input device picker. `set_mic_mute {"muted": bool}`
 sets the flag over IPC — queued, like the volume keys, and deliberately

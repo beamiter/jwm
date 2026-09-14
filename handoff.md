@@ -4,6 +4,20 @@
 
 ---
 
+## 2026-09-14：UI/UX 三十一轮（Hub Input 中键 mute、日历 weekday 两侧翻年）
+
+选题 = 三十轮开放已尽（仅剩两个 refuse pin）→ 另起两项 S：Input middle-mute ∥ calendar year click。文件几乎不交（event_dispatcher vs calendar/input_handler/system_ui）。拒做：`set_audio_device` sync→queued（源 pin）、X11 `compositor_frame_deadline`（20ms idle 政策 pin）、Hub DND/Caffeine/NightLight 中键（会抢同一 button-2 臂）。
+
+1. **Hub Input 中键 mute**。button 2 门从仅 `Volume` 扩到 `Volume | AudioInput`；仍 `select_visible_row` + `handle_control_center_key(..., KEY_m)`（不直调 `toggle_mic_mute`、不走 Return）。Brightness 等仍 inert。docs/control-center.md。
+
+2. **日历 weekday 两侧翻年**。`CalendarClick::PrevYear/NextYear`；行 2 左三 cell（Mo–We）→ 上年、右三（Fr–Su）→ 下年、中（Th）→ None；`activate_system_ui_pointer_row` 传 `shift_calendar(0, ±1, false)`。hint 加 `click weekday sides  year`。docs/calendar.md。
+
+**验证**：clippy -D warnings（0）；lib **3294 passed / 0 failed / 11 ignored**（3292→+2）。**无真机显示会话**。真机优先：Hub Input 中键 mute；日历点 weekday 左/右翻年。
+
+**仍然开着的**（三十二轮）：`set_audio_device` sync；X11 `compositor_frame_deadline`。**成文勿再提**：……（继承三十轮）+ Input 仅键盘/`glyph` mute、中键 inert（本轮关闭）+ 日历 year 仅键盘（本轮关闭）。
+
+---
+
 ## 2026-09-14：UI/UX 三十轮（剪贴板 PNG 缩略图、媒体 click-to-seek）
 
 选题 = 二十九轮开放：clipboard thumbs ∥ media click-to-seek。文件几乎不交（row_icons/clipboard/system_ui vs bridge/media/input）。拒做：`set_audio_device` sync→queued（源 pin）、X11 `compositor_frame_deadline`（20ms idle 政策 pin）。

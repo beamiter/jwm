@@ -15,10 +15,12 @@ The grid's blank edge cells answer the pointer: a click on a leading cell
 before the 1st — where the previous month's tail days would sit — flips to
 the previous month, a click on a trailing cell past the month's end flips to
 the next, and a click on today's bracketed cell returns to the current
-month, the pointer counterparts of `Left`/`Right` and `t`. Clicks on
-ordinary days, the clock line and the header remain no-ops. The footer hint
-advertises the gesture:
-`←/→  month    ↑/↓  year    t  today    click edge days  month    Esc  close`.
+month, the pointer counterparts of `Left`/`Right` and `t`. The weekday
+header's left three cells (`Mo`–`We`) step a year back and the right three
+(`Fr`–`Su`) step a year forward — the pointer twin of `Up`/`Down`; the
+middle (`Th`) stays inert. Clicks on ordinary days, the clock line and the
+blank row remain no-ops. The footer hint advertises the gesture:
+`←/→  month    ↑/↓  year    t  today    click edge days  month    click weekday sides  year    Esc  close`.
 
 Weeks start on Monday (the ISO week). Today is only bracketed in its own
 month, so paging away makes it clear you are looking somewhere else.

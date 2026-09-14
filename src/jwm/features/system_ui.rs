@@ -4176,7 +4176,7 @@ impl SystemUiState {
                     items,
                     icons: None,
                     selected: None,
-                    hint: "\u{f060}/\u{f061}  month    \u{f062}/\u{f063}  year    t  today    click edge days  month    Esc  close"
+                    hint: "\u{f060}/\u{f061}  month    \u{f062}/\u{f063}  year    t  today    click edge days  month    click weekday sides  year    Esc  close"
                         .into(),
                     scroll: None,
                 }
@@ -7931,10 +7931,15 @@ mod tests {
     fn the_calendar_hint_advertises_clicking_the_edge_days() {
         let state = SystemUiState::calendar(lock_test_time());
         let parts = state.overlay_parts();
-        // The pointer's month-flip sits next to the keyboard's, in the same
-        // "gesture  action" grammar the hint line always used.
+        // The pointer's month/year flips sit next to the keyboard's, in the
+        // same "gesture  action" grammar the hint line always used.
         assert!(
             parts.hint.contains("click edge days  month"),
+            "{}",
+            parts.hint
+        );
+        assert!(
+            parts.hint.contains("click weekday sides  year"),
             "{}",
             parts.hint
         );

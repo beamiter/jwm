@@ -7,6 +7,15 @@ monorepo use independent Semantic Versions.
 
 ### Added
 
+- Control-center Input middle-click mutes the microphone on the pointed row
+  (same path as `m`); Volume middle-click mute is unchanged. Other Hub rows
+  and blank stay inert. See
+  [docs/control-center.md](docs/control-center.md).
+
+- Calendar weekday-header sides step the year (left `Mo`–`We` previous,
+  right `Fr`–`Su` next — pointer twin of `Up`/`Down`); middle `Th` stays
+  inert. See [docs/calendar.md](docs/calendar.md).
+
 - Clipboard history PNG rows show an in-memory thumbnail in the picker's
   icon column (never written to disk); text rows stay text-only. See
   [docs/clipboard.md](docs/clipboard.md).
@@ -17,9 +26,8 @@ monorepo use independent Semantic Versions.
   [docs/media-controls.md](docs/media-controls.md).
 
 - Control-center Volume middle-click mutes the pointed row (same path as
-  `m` / `Enter`); other Hub rows and blank stay inert — never seeks, never
-  mutes the microphone. See
-  [docs/control-center.md](docs/control-center.md).
+  `m` / `Enter`); other Hub rows and blank stay inert — never seeks.
+  See [docs/control-center.md](docs/control-center.md).
 
 - MPRIS player pin persists across bridge restarts in
   `$XDG_STATE_HOME/jwm/mpris-pin` (else `~/.local/state/jwm/mpris-pin`); an
