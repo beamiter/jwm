@@ -277,8 +277,10 @@ pub fn png_dimensions(bytes: &[u8]) -> (Option<u32>, Option<u32>) {
 
 /// One picker row: position, a hint of how much was copied, and the preview.
 ///
-/// PNG rows are text labels only — no thumbnails and no per-row image icons
-/// beyond the shared FontAwesome-4 glyph.
+/// PNG rows lead with FontAwesome-4 `file-image-o`; when a thumbnail texture
+/// has uploaded the compositor strips that glyph (see
+/// `compositor_common::row_icons::CLIPBOARD_PNG_GLYPH`) so the icon and the
+/// glyph never show side by side.
 #[must_use]
 pub fn picker_row(entry: &ClipboardEntry, index: usize) -> String {
     match entry {

@@ -80,6 +80,8 @@ pub enum MediaCommand {
     Next,
     Previous,
     Stop,
+    /// Absolute seek to this position in microseconds.
+    Seek(i64),
 }
 
 impl MediaCommand {
@@ -95,12 +97,13 @@ impl MediaCommand {
     }
 
     #[must_use]
-    pub fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> Option<&'static str> {
         match self {
-            Self::PlayPause => "play_pause",
-            Self::Next => "next",
-            Self::Previous => "previous",
-            Self::Stop => "stop",
+            Self::PlayPause => Some("play_pause"),
+            Self::Next => Some("next"),
+            Self::Previous => Some("previous"),
+            Self::Stop => Some("stop"),
+            Self::Seek(_) => None,
         }
     }
 }
@@ -144,6 +147,10 @@ pub struct MediaState {
     pub artist: String,
     pub can_go_next: bool,
     pub can_go_previous: bool,
+    /// Whether the bridge reported `CanSeek`. Without it the position
+    /// suffix stays display-only, matching an old bridge that never sent
+    /// the flag.
+    pub can_seek: bool,
     /// Player-reported track position in microseconds, as of the bridge's
     /// last poll. `None` when the player did not report one. Kept exactly as
     /// received — pauses do not advance it, and mid-track-change values can
@@ -354,6 +361,9 @@ pub enum MediaRowClick {
     Next,
     Cycle,
     OpenPicker,
+    /// Absolute seek within the position suffix; only when `can_seek` and
+    /// both counters are present.
+    Seek(i64),
 }
 
 /// The trailing switch hint `control_row` appends when `p` has somewhere to
@@ -378,7 +388,11 @@ pub fn picker_hint(state: &MediaState) -> Option<&'static str> {
 /// land on the same glyphs the panel drew. Kept in lockstep with
 /// [`control_row`] — a drift here would click the wrong transport.
 struct ControlRowParts {
-    /// Music glyph + title + position, ending just before the previous glyph.
+    /// Music glyph + title, ending just before the position suffix.
+    before_position: String,
+    /// `before_position` plus the position suffix (or equal when none).
+    with_position: String,
+    /// Through the spaces before the previous glyph.
     before_previous: String,
     /// `before_previous` plus the previous glyph (or its blank stand-in).
     with_previous: String,
@@ -400,11 +414,15 @@ fn control_row_parts(state: &MediaState) -> ControlRowParts {
         " "
     };
     let (label, position) = row_text(state);
-    let before_previous = format!("{}  {label}{position}   ", "\u{f001}"); // fa-music
+    let before_position = format!("{}  {label}", "\u{f001}"); // fa-music
+    let with_position = format!("{before_position}{position}");
+    let before_previous = format!("{with_position}   ");
     let with_previous = format!("{before_previous}{previous}");
     let before_next = format!("{with_previous} {} ", state.status.icon());
     let prefix = format!("{before_next}{next}");
     ControlRowParts {
+        before_position,
+        with_position,
         before_previous,
         with_previous,
         before_next,
@@ -435,15 +453,17 @@ pub fn control_row(state: &MediaState) -> String {
 }
 
 /// Pointer counterparts of Left / Return / Right / `p` / `o` on the media
-/// row. `measure` is the panel font's advance in px (the same probe the
+/// row, plus a click on the `m:ss / m:ss` suffix when the player can seek.
+/// `measure` is the panel font's advance in px (the same probe the
 /// slider and notification chips use); `TEXT_PAD` matches the texture
 /// margin baked into those measurements so each zone starts where the drawn
 /// glyph starts.
 ///
-/// Zones, left to right: title → previous glyph → status → next glyph →
-/// optional `· p ‹next›` → optional `· o`. A blank stand-in for a disabled
-/// skip still maps to PlayPause, so a press there never invents a command
-/// the player refused.
+/// Zones, left to right: title → optional seekable position → previous glyph
+/// → status → next glyph → optional `· p ‹next›` → optional `· o`. A blank
+/// stand-in for a disabled skip still maps to PlayPause, so a press there
+/// never invents a command the player refused. Without `can_seek` (or
+/// without both counters) the position suffix stays PlayPause.
 #[must_use]
 pub fn click_action(
     text_x_px: f32,
@@ -457,6 +477,19 @@ pub fn click_action(
     // includes it on both ends, so the drawn glyph begins here.
     const TEXT_PAD: f32 = 2.0;
     let parts = control_row_parts(state);
+    if state.can_seek
+        && let (Some(length), Some(_)) = (state.length_us.filter(|l| *l > 0), state.position_us)
+        && !state.position_label().unwrap_or_default().is_empty()
+    {
+        let position_start = measure(&parts.before_position) - TEXT_PAD;
+        let position_end = measure(&parts.with_position) - TEXT_PAD;
+        if text_x_px >= position_start && text_x_px < position_end {
+            let width = (position_end - position_start).max(1.0);
+            let fraction = ((text_x_px - position_start) / width).clamp(0.0, 1.0);
+            let target = (f64::from(fraction) * length as f64).round() as i64;
+            return MediaRowClick::Seek(target.clamp(0, length));
+        }
+    }
     let previous_start = measure(&parts.before_previous) - TEXT_PAD;
     let previous_end = measure(&parts.with_previous) - TEXT_PAD;
     let next_start = measure(&parts.before_next) - TEXT_PAD;
@@ -554,6 +587,7 @@ impl crate::jwm::Jwm {
                 "artist": state.artist,
                 "can_go_next": state.can_go_next,
                 "can_go_previous": state.can_go_previous,
+                "can_seek": state.can_seek,
                 // Append-only: microseconds as reported, plus the display
                 // label so bars do not each reimplement the clamping rules.
                 "position_us": state.position_us,
@@ -628,7 +662,12 @@ impl crate::jwm::Jwm {
         }
         self.broadcast_ipc_event(
             "media/command",
-            serde_json::json!({ "action": command.as_str() }),
+            match command {
+                MediaCommand::Seek(position_us) => {
+                    serde_json::json!({ "action": "seek", "position_us": position_us })
+                }
+                other => serde_json::json!({ "action": other.as_str().expect("transport") }),
+            },
         );
         Ok(())
     }
@@ -712,6 +751,7 @@ impl crate::jwm::Jwm {
                 "label": state.track_label(),
                 "can_go_next": state.can_go_next,
                 "can_go_previous": state.can_go_previous,
+                "can_seek": state.can_seek,
                 "position_us": state.position_us,
                 "length_us": state.length_us,
                 "position_label": state.position_label(),
@@ -820,6 +860,7 @@ pub fn parse_state_args(args: &serde_json::Value) -> Option<MediaState> {
         artist: text("artist"),
         can_go_next: flag("can_go_next"),
         can_go_previous: flag("can_go_previous"),
+        can_seek: flag("can_seek"),
         position_us: micros("position_us"),
         length_us: micros("length_us"),
         players,
@@ -840,6 +881,7 @@ mod tests {
             artist: artist.into(),
             can_go_next: true,
             can_go_previous: true,
+            can_seek: false,
             position_us: None,
             length_us: None,
             players: Vec::new(),
@@ -1300,6 +1342,33 @@ mod tests {
             click_action(status_x, mono, &single),
             MediaRowClick::PlayPause,
             "the status icon plays"
+        );
+    }
+
+    #[test]
+    fn a_press_on_the_position_suffix_seeks_when_can_seek() {
+        let mut timed = state("Track", "Artist");
+        timed.position_us = Some(61_000_000);
+        timed.length_us = Some(245_000_000);
+        timed.can_seek = true;
+        let parts = control_row_parts(&timed);
+        let start = mono(&parts.before_position) - 2.0;
+        let end = mono(&parts.with_position) - 2.0;
+        assert_eq!(
+            click_action((start + end) * 0.5, mono, &timed),
+            MediaRowClick::Seek(122_500_000),
+            "mid-suffix seeks to half the track"
+        );
+        assert_eq!(
+            click_action(0.0, mono, &timed),
+            MediaRowClick::PlayPause,
+            "the title keeps PlayPause"
+        );
+        timed.can_seek = false;
+        assert_eq!(
+            click_action((start + end) * 0.5, mono, &timed),
+            MediaRowClick::PlayPause,
+            "without CanSeek the suffix stays display-only"
         );
     }
 

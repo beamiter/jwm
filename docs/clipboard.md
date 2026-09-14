@@ -28,8 +28,10 @@ shows gaps; with nothing matching, the panel says so instead of going blank.
 
 Each text row shows its position, how much was copied (`31c` for a single
 line of 31 characters, `3L` for three lines), and a one-line preview with
-whitespace collapsed. PNG rows are text labels only (no thumbnails): position
-plus something like `PNG 1920×1080  1.2M`.
+whitespace collapsed. PNG rows show a decoded thumbnail in the list's icon
+column (in memory only — never written to disk) plus position and a label
+like `PNG 1920×1080  1.2M`; while the thumbnail is still decoding the
+FontAwesome image glyph stands in.
 
 Copying something already in the history moves it back to the top instead of
 adding a duplicate — the list is "what I might paste next", so recency is the

@@ -1865,34 +1865,83 @@ impl SystemUiState {
 
     // --- Clipboard picker ---
 
-    /// The picker's rows under `query`. Each row keeps the entry's position
-    /// in the *history* — as its key, its `RowData`, and the number it draws
-    /// — so Enter, `d` and clicks act on the filtered selection with no
-    /// index translation, and a gap in the numbering is what a filtered list
-    /// looks like.
+    /// The picker's rows under `query`, plus a parallel icon band: PNG
+    /// entries register their bytes under a `jwm-mem:` key (never a file)
+    /// so the compositor can decode a thumbnail; text rows stay `None`.
     fn clipboard_rows(
         history: &crate::jwm::features::ClipboardHistory,
         query: &str,
-    ) -> Vec<ListRow> {
-        history
+    ) -> (Vec<ListRow>, Vec<Option<String>>) {
+        use crate::backend::compositor_common::row_icons::{
+            memory_icon_key, register_memory_icon,
+        };
+        use crate::jwm::features::ClipboardEntry;
+        use std::sync::Arc;
+
+        let mut rows = Vec::new();
+        let mut row_icons = Vec::new();
+        for (index, entry) in history
             .entries()
             .enumerate()
             .filter(|(_, entry)| crate::jwm::features::clipboard::matches_query(entry, query))
-            .map(|(index, entry)| ListRow {
+        {
+            let icon = match entry {
+                ClipboardEntry::Png { bytes, .. } if !bytes.is_empty() => {
+                    let key = memory_icon_key(bytes);
+                    register_memory_icon(key.clone(), Arc::<[u8]>::from(bytes.as_slice()));
+                    Some(key)
+                }
+                _ => None,
+            };
+            row_icons.push(icon);
+            rows.push(ListRow {
                 key: index.to_string(),
                 text: crate::jwm::features::clipboard::picker_row(entry, index),
                 data: RowData::Clipboard { index },
-            })
-            .collect()
+            });
+        }
+        (rows, row_icons)
+    }
+
+    /// Rebuild the open clipboard picker's rows and icons from `history`,
+    /// holding the selection on the same history index when it still matches.
+    fn rebuild_clipboard_rows(
+        &mut self,
+        history: &crate::jwm::features::ClipboardHistory,
+    ) {
+        let Self::ListPanel {
+            kind,
+            rows,
+            row_icons,
+            selected,
+            query,
+            message,
+            ..
+        } = self
+        else {
+            return;
+        };
+        if *kind != ListKind::Clipboard {
+            return;
+        }
+        let previous = rows.get(*selected).map(|row| row.key.clone());
+        let (next_rows, next_icons) = Self::clipboard_rows(history, query);
+        *rows = next_rows;
+        *row_icons = next_icons;
+        *selected = previous
+            .and_then(|key| rows.iter().position(|row| row.key == key))
+            .unwrap_or(0);
+        message.clear();
     }
 
     /// Build the clipboard picker from the live history, newest first. The
     /// filter starts empty on every open, like the launcher's query.
     pub fn clipboard_picker(history: &crate::jwm::features::ClipboardHistory) -> Self {
+        let (rows, row_icons) = Self::clipboard_rows(history, "");
         Self::ListPanel {
             kind: ListKind::Clipboard,
-            rows: Self::clipboard_rows(history, ""),
-            row_icons: Vec::new(),
+            rows,
+            row_icons,
             selected: 0,
             message: String::new(),
             prompt: None,
@@ -1931,29 +1980,31 @@ impl SystemUiState {
         ch: char,
         history: &crate::jwm::features::ClipboardHistory,
     ) {
-        let Self::ListPanel { kind, query, .. } = self else {
-            return;
-        };
-        if *kind != ListKind::Clipboard {
-            return;
+        {
+            let Self::ListPanel { kind, query, .. } = self else {
+                return;
+            };
+            if *kind != ListKind::Clipboard {
+                return;
+            }
+            query.push(ch);
         }
-        query.push(ch);
-        let rows = Self::clipboard_rows(history, query);
-        self.set_rows(ListKind::Clipboard, rows);
+        self.rebuild_clipboard_rows(history);
     }
 
     /// Backspace one character off the clipboard filter. A no-op on an empty
     /// query, so holding BackSpace does not churn the rows for nothing.
     pub fn pop_clipboard_query(&mut self, history: &crate::jwm::features::ClipboardHistory) {
-        let Self::ListPanel { kind, query, .. } = self else {
-            return;
-        };
-        if *kind != ListKind::Clipboard || query.is_empty() {
-            return;
+        {
+            let Self::ListPanel { kind, query, .. } = self else {
+                return;
+            };
+            if *kind != ListKind::Clipboard || query.is_empty() {
+                return;
+            }
+            query.pop();
         }
-        query.pop();
-        let rows = Self::clipboard_rows(history, query);
-        self.set_rows(ListKind::Clipboard, rows);
+        self.rebuild_clipboard_rows(history);
     }
 
     /// Rebuild the open clipboard picker after the history changed,
@@ -1963,14 +2014,10 @@ impl SystemUiState {
     /// where the user put it instead of chasing an entry that just moved to
     /// the top.
     pub fn refresh_clipboard(&mut self, history: &crate::jwm::features::ClipboardHistory) {
-        let Self::ListPanel { kind, query, .. } = self else {
-            return;
-        };
-        if *kind != ListKind::Clipboard {
+        if !self.is_clipboard_picker() {
             return;
         }
-        let rows = Self::clipboard_rows(history, query);
-        self.set_rows(ListKind::Clipboard, rows);
+        self.rebuild_clipboard_rows(history);
     }
 
     /// Replace the clipboard picker's status line.
@@ -5943,6 +5990,50 @@ mod tests {
     }
 
     #[test]
+    fn the_clipboard_picker_registers_png_row_icons_in_memory() {
+        use crate::jwm::features::clipboard::ClipboardHistory;
+
+        let mut history = ClipboardHistory::new();
+        history.record("plain text", 1_000);
+        let png = {
+            // Minimal IHDR-bearing PNG the history accepts.
+            let mut bytes = Vec::new();
+            bytes.extend_from_slice(b"\x89PNG\r\n\x1a\n");
+            bytes.extend_from_slice(&13u32.to_be_bytes());
+            bytes.extend_from_slice(b"IHDR");
+            bytes.extend_from_slice(&8u32.to_be_bytes());
+            bytes.extend_from_slice(&8u32.to_be_bytes());
+            bytes.resize(24, 0);
+            bytes
+        };
+        assert!(history.record_png(&png, 2_000));
+
+        let panel = SystemUiState::clipboard_picker(&history);
+        let SystemUiState::ListPanel {
+            rows, row_icons, ..
+        } = &panel
+        else {
+            panic!("clipboard picker is a list panel");
+        };
+        assert_eq!(row_icons.len(), rows.len());
+        // Newest first: PNG then text.
+        assert!(
+            row_icons[0]
+                .as_deref()
+                .is_some_and(|key| key.starts_with("jwm-mem:")),
+            "PNG rows register a memory icon key, not a path"
+        );
+        assert!(row_icons[1].is_none(), "text rows stay without icons");
+        let parts = panel.overlay_parts();
+        assert!(
+            parts.icons.as_ref().is_some_and(|icons| {
+                icons.len() == parts.items.len() && icons.iter().any(Option::is_some)
+            }),
+            "the overlay band carries the clipboard PNG thumbnail keys"
+        );
+    }
+
+    #[test]
     fn backspace_widens_the_filter_and_stops_at_empty() {
         let history = clipboard_history(&["alpha", "beta", "alphabet soup"]);
         let mut panel = SystemUiState::clipboard_picker(&history);
@@ -6562,6 +6653,7 @@ mod tests {
             artist: "Miles Davis".into(),
             can_go_next: true,
             can_go_previous: true,
+            can_seek: false,
             position_us: Some(161_000_000),
             length_us: Some(245_000_000),
             players: Vec::new(),
@@ -7931,6 +8023,7 @@ mod tests {
             artist: "Miles Davis".into(),
             can_go_next: true,
             can_go_previous: true,
+            can_seek: false,
             position_us: Some(161_000_000),
             length_us: Some(245_000_000),
             players: Vec::new(),
@@ -8356,6 +8449,7 @@ mod tests {
             artist: "Artist".into(),
             can_go_next: true,
             can_go_previous: true,
+            can_seek: false,
             position_us: None,
             length_us: None,
             players: vec!["spotify".into(), "mpv".into(), "firefox".into()],
@@ -8432,6 +8526,7 @@ mod tests {
             artist: "Artist".into(),
             can_go_next: true,
             can_go_previous: true,
+            can_seek: false,
             position_us: None,
             length_us: None,
             players: vec!["spotify".into(), "mpv".into()],

@@ -2064,10 +2064,22 @@ impl Jwm {
             let Some(action) = args.get("action").and_then(|value| value.as_str()) else {
                 return IpcResponse::err("media_control: expected string field 'action'");
             };
-            let Some(command) = crate::jwm::features::MediaCommand::from_name(action) else {
-                return IpcResponse::err(format!(
-                    "media_control: unknown action {action:?} (play_pause, next, previous, stop)"
-                ));
+            let command = if action == "seek" {
+                let Some(position_us) = args.get("position_us").and_then(|value| value.as_i64())
+                else {
+                    return IpcResponse::err(
+                        "media_control: seek expects integer field 'position_us'",
+                    );
+                };
+                crate::jwm::features::MediaCommand::Seek(position_us.max(0))
+            } else {
+                let Some(command) = crate::jwm::features::MediaCommand::from_name(action) else {
+                    return IpcResponse::err(format!(
+                        "media_control: unknown action {action:?} \
+                         (play_pause, next, previous, stop, seek)"
+                    ));
+                };
+                command
             };
             return match self.send_media_command(command) {
                 Ok(()) => IpcResponse::ok(None),

@@ -48,6 +48,9 @@ pub struct PlayerSnapshot {
     pub artist: String,
     pub can_go_next: bool,
     pub can_go_previous: bool,
+    /// Whether the player reports `CanSeek` — the shell only offers a
+    /// clickable position zone when this is true and both counters exist.
+    pub can_seek: bool,
     /// The `Position` property in microseconds. It is a live counter, not
     /// metadata, and players only emit `Seeked` for it — so it is read on the
     /// same sweep as everything else. `None` when the player did not report
@@ -57,6 +60,9 @@ pub struct PlayerSnapshot {
     /// `mpris:length` from the track metadata, microseconds. `None` when the
     /// track does not say — streams routinely do not.
     pub length_us: Option<i64>,
+    /// `mpris:trackid` object path, needed for absolute `SetPosition`. Kept
+    /// bridge-side only — jwm never sees it.
+    pub track_id: Option<String>,
 }
 
 impl PlayerSnapshot {
@@ -78,7 +84,8 @@ impl PlayerSnapshot {
             "can_go_next": self.can_go_next,
             "can_go_previous": self.can_go_previous,
             // Append-only wire fields: an old jwm ignores them, and a new jwm
-            // reads a missing key (old bridge) as `None`.
+            // reads a missing key (old bridge) as `None` / false.
+            "can_seek": self.can_seek,
             "position_us": self.position_us,
             "length_us": self.length_us,
         })
@@ -208,6 +215,19 @@ pub fn length_from_metadata(metadata: &HashMap<String, OwnedValue>) -> Option<i6
     metadata.get("mpris:length").and_then(i64_of)
 }
 
+/// `mpris:trackid` from an MPRIS metadata dict — the object path
+/// `SetPosition` needs. Players that publish a bare string are tolerated.
+#[must_use]
+pub fn track_id_from_metadata(metadata: &HashMap<String, OwnedValue>) -> Option<String> {
+    let value = metadata.get("mpris:trackid")?;
+    if let Ok(path) = zvariant::ObjectPath::try_from(value.clone()) {
+        let path = path.as_str();
+        return (!path.is_empty()).then(|| path.to_string());
+    }
+    let path = string_of(value);
+    (!path.is_empty()).then_some(path)
+}
+
 /// Read one player's properties. A player that disappears mid-read yields
 /// `None` rather than failing the whole sweep.
 async fn snapshot(connection: &Connection, name: &OwnedBusName) -> Option<PlayerSnapshot> {
@@ -247,12 +267,14 @@ async fn snapshot(connection: &Connection, name: &OwnedBusName) -> Option<Player
         artist: artist_from_metadata(&metadata),
         can_go_next: player.get("CanGoNext").is_some_and(bool_of),
         can_go_previous: player.get("CanGoPrevious").is_some_and(bool_of),
+        can_seek: player.get("CanSeek").is_some_and(bool_of),
         // `Position` rides the same GetAll as everything else: it does not
         // emit PropertiesChanged reliably, so the sweep's re-read is the
         // update mechanism — a separate subscription would add per-player
         // proxies for nothing.
         position_us: player.get("Position").and_then(i64_of),
         length_us: length_from_metadata(&metadata),
+        track_id: track_id_from_metadata(&metadata),
     })
 }
 
@@ -307,6 +329,8 @@ enum MediaRequest {
     /// Pin resolution to this bus suffix; an empty name clears the pin back
     /// to the active pick.
     Select(String),
+    /// Seek the resolved player to an absolute position in microseconds.
+    Seek(i64),
 }
 
 /// Parse a command's payload. Unknown actions are `None`, which the caller
@@ -324,6 +348,10 @@ fn parse_request(payload: &Value) -> Option<MediaRequest> {
             .unwrap_or_default()
             .trim();
         return Some(MediaRequest::Select(player.to_string()));
+    }
+    if action == "seek" {
+        let position = payload.get("position_us").and_then(Value::as_i64)?;
+        return Some(MediaRequest::Seek(position.max(0)));
     }
     method_for(action).map(MediaRequest::Transport)
 }
@@ -345,6 +373,53 @@ async fn call_active(connection: &Connection, player: &str, method: &'static str
     {
         Ok(_) => log::debug!("{method} on {destination}"),
         Err(error) => log::warn!("{method} on {destination} failed: {error}"),
+    }
+}
+
+/// Absolute seek via `SetPosition` when the player published a track id,
+/// else a relative `Seek` from the last reported position. Players that
+/// refuse `CanSeek` are left alone.
+async fn seek_active(connection: &Connection, player: &PlayerSnapshot, position_us: i64) {
+    if !player.can_seek {
+        return;
+    }
+    let destination = format!("{MPRIS_PREFIX}{}", player.player);
+    let Ok(bus_name) = BusName::try_from(destination.clone()) else {
+        return;
+    };
+    let position_us = position_us.max(0);
+    if let Some(track_id) = player.track_id.as_deref()
+        && let Ok(path) = zvariant::ObjectPath::try_from(track_id)
+    {
+        match connection
+            .call_method(
+                Some(bus_name.clone()),
+                PLAYER_PATH,
+                Some(PLAYER_INTERFACE),
+                "SetPosition",
+                &(path, position_us),
+            )
+            .await
+        {
+            Ok(_) => log::debug!("SetPosition {position_us} on {destination}"),
+            Err(error) => log::warn!("SetPosition on {destination} failed: {error}"),
+        }
+        return;
+    }
+    // No track id: fall back to a relative Seek from the last Position.
+    let offset = position_us.saturating_sub(player.position_us.unwrap_or(0));
+    match connection
+        .call_method(
+            Some(bus_name),
+            PLAYER_PATH,
+            Some(PLAYER_INTERFACE),
+            "Seek",
+            &(offset,),
+        )
+        .await
+    {
+        Ok(_) => log::debug!("Seek {offset} on {destination}"),
+        Err(error) => log::warn!("Seek on {destination} failed: {error}"),
     }
 }
 
@@ -534,6 +609,28 @@ pub async fn run(
                         pinned = publish(&connection, &ipc, pinned.as_deref()).await;
                         sync_stored_pin(&pin_path, pinned.as_deref(), &mut last_written);
                     }
+                    MediaRequest::Seek(position_us) => {
+                        if let Ok(dbus) = DBusProxy::new(&connection).await
+                            && let Ok(names) = dbus.list_names().await
+                        {
+                            let mut players = Vec::new();
+                            for name in names
+                                .into_iter()
+                                .filter(|name| name.as_str().starts_with(MPRIS_PREFIX))
+                            {
+                                if let Some(snapshot) = snapshot(&connection, &name).await {
+                                    players.push(snapshot);
+                                }
+                            }
+                            let (active, keep) = resolve_active(&players, pinned.as_deref());
+                            pinned = keep;
+                            if let Some(active) = active {
+                                seek_active(&connection, active, position_us).await;
+                            }
+                        }
+                        pinned = publish(&connection, &ipc, pinned.as_deref()).await;
+                        sync_stored_pin(&pin_path, pinned.as_deref(), &mut last_written);
+                    }
                     MediaRequest::Transport(method) => {
                         // Re-resolve the active player instead of trusting a
                         // cached one: the user may have switched players since
@@ -600,8 +697,10 @@ mod tests {
             artist: "Artist".to_string(),
             can_go_next: true,
             can_go_previous: true,
+            can_seek: false,
             position_us: None,
             length_us: None,
+            track_id: None,
         }
     }
 
@@ -835,6 +934,20 @@ mod tests {
             parse_request(&serde_json::json!({"action": "play_pause"})),
             Some(MediaRequest::Transport("PlayPause"))
         );
+        assert_eq!(
+            parse_request(&serde_json::json!({"action": "seek", "position_us": 90_000_000i64})),
+            Some(MediaRequest::Seek(90_000_000))
+        );
+        assert_eq!(
+            parse_request(&serde_json::json!({"action": "seek", "position_us": -5i64})),
+            Some(MediaRequest::Seek(0)),
+            "a negative seek clamps to the start"
+        );
+        assert_eq!(
+            parse_request(&serde_json::json!({"action": "seek"})),
+            None,
+            "seek without a position is ignorable"
+        );
         // Unknown actions stay ignorable, so old and new ends tolerate each
         // other in either direction.
         assert_eq!(
@@ -842,6 +955,31 @@ mod tests {
             None
         );
         assert_eq!(parse_request(&serde_json::json!({})), None);
+    }
+
+    #[test]
+    fn track_ids_come_from_mpris_trackid() {
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            "mpris:trackid".to_string(),
+            OwnedValue::from(
+                zvariant::ObjectPath::try_from("/org/mpris/MediaPlayer2/Track/1").expect("path"),
+            ),
+        );
+        assert_eq!(
+            track_id_from_metadata(&metadata).as_deref(),
+            Some("/org/mpris/MediaPlayer2/Track/1")
+        );
+        assert_eq!(track_id_from_metadata(&HashMap::new()), None);
+    }
+
+    #[test]
+    fn snapshot_args_advertise_can_seek_append_only() {
+        let mut seeking = player("spotify", "Playing");
+        seeking.can_seek = true;
+        let args = seeking.to_args();
+        assert_eq!(args["can_seek"], true);
+        assert_eq!(player("spotify", "Playing").to_args()["can_seek"], false);
     }
 
     #[test]

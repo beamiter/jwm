@@ -4,6 +4,20 @@
 
 ---
 
+## 2026-09-14：UI/UX 三十轮（剪贴板 PNG 缩略图、媒体 click-to-seek）
+
+选题 = 二十九轮开放：clipboard thumbs ∥ media click-to-seek。文件几乎不交（row_icons/clipboard/system_ui vs bridge/media/input）。拒做：`set_audio_device` sync→queued（源 pin）、X11 `compositor_frame_deadline`（20ms idle 政策 pin）。
+
+1. **剪贴板 PNG 缩略图**。`jwm-mem:` 键注册 PNG 字节进 `row_icons`（永不落盘）；picker 填 `row_icons`；上传后剥 `\u{f1c5}` glyph。docs/clipboard.md。
+
+2. **媒体 click-to-seek**。bridge `CanSeek` + `SetPosition`/`Seek`；WM `can_seek` + `MediaRowClick::Seek`；点 `m:ss / m:ss` 后缀按比例 seek。docs/media-controls.md。
+
+**验证**：clippy -D warnings（0）；lib **3292 passed / 0 failed / 11 ignored**（3288→+4）；bridge `mpris::` **25/0**（23→+2）。**无真机显示会话**。真机优先：Alt+Ctrl+V 见 PNG 缩略图；Hub 媒体行点进度后缀 seek。
+
+**仍然开着的**（三十一轮）：`set_audio_device` sync；X11 `compositor_frame_deadline`。**成文勿再提**：……（继承二十九轮）+ PNG 仅文字标签无缩略图（本轮关闭）+ 进度仅 display-only（本轮关闭）。
+
+---
+
 ## 2026-09-14：UI/UX 二十九轮（Volume 中键 mute、MPRIS pin 持久化）
 
 选题 = 二十八轮开放：Volume middle-mute ∥ pin 持久化。文件几乎不交（event_dispatcher/input vs bridge/mpris）。拒做：剪贴板缩略图、`set_audio_device` sync→queued、X11 `compositor_frame_deadline`、媒体 click-to-seek（需 bridge CanSeek）。

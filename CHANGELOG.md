@@ -7,6 +7,15 @@ monorepo use independent Semantic Versions.
 
 ### Added
 
+- Clipboard history PNG rows show an in-memory thumbnail in the picker's
+  icon column (never written to disk); text rows stay text-only. See
+  [docs/clipboard.md](docs/clipboard.md).
+
+- Media row position suffix is click-to-seek when the player reports
+  `CanSeek` (bridge `SetPosition` / relative `Seek`); without the flag the
+  suffix stays display-only. See
+  [docs/media-controls.md](docs/media-controls.md).
+
 - Control-center Volume middle-click mutes the pointed row (same path as
   `m` / `Enter`); other Hub rows and blank stay inert — never seeks, never
   mutes the microphone. See

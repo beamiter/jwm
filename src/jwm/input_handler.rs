@@ -1836,6 +1836,12 @@ impl Jwm {
                             .send_media_command(crate::jwm::features::MediaCommand::Next);
                         return Ok(());
                     }
+                    MediaRowClick::Seek(position_us) => {
+                        let _ = self.send_media_command(
+                            crate::jwm::features::MediaCommand::Seek(position_us),
+                        );
+                        return Ok(());
+                    }
                     MediaRowClick::PlayPause => {}
                 }
             }
@@ -4072,6 +4078,10 @@ mod tests {
         assert!(
             pointer.contains("MediaRowClick::OpenPicker"),
             "media pointer must route · o to OpenPicker"
+        );
+        assert!(
+            pointer.contains("MediaRowClick::Seek"),
+            "media pointer must route the position suffix to Seek"
         );
         let media = pointer
             .split_once("ControlKind::Media")

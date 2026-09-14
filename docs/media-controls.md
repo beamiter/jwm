@@ -37,8 +37,11 @@ picker. When the player reports both a position and a length, the
 row shows `m:ss / m:ss` (`h:mm:ss` past an hour) — clamped to the track's
 length for display, refreshed on the bridge's sweep, holding the last
 polled position while paused, and reset on a track change; streams and
-players that don't report both show no suffix, never a placeholder. It is
-display-only — no seeking.
+players that don't report both show no suffix, never a placeholder. When
+the player also reports `CanSeek`, a click on that suffix seeks to the
+pointed fraction of the track (the pointer twin of an absolute seek); the
+title and status icon still play/pause. Without `CanSeek` — or on an old
+bridge that never sent the flag — the suffix stays display-only.
 
 A media key on a session with no player reports `no media player is running`
 rather than failing silently.
@@ -139,7 +142,8 @@ picked up by a 3-second sweep.
 
 - `set_media_status` — what the bridge pushes: `player`, `identity`, `status`
   (`Playing`/`Paused`/`Stopped`), `title`, `artist`, `can_go_next`,
-  `can_go_previous`, the append-only `position_us` / `length_us` microsecond
+  `can_go_previous`, the append-only `can_seek` bool, the append-only
+  `position_us` / `length_us` microsecond
   fields (nullable), the append-only `players` string list naming every
   player the sweep saw (in sweep order — the cycle/select key), and the
   append-only `player_details` array of `{player, identity?, status?}` in
@@ -148,7 +152,8 @@ picked up by a 3-second sweep.
   reads as a single-player session, and a missing `player_details` keeps
   suffix-only picker rows. A missing or null `player` clears the state,
   which is how the bridge reports that every player went away.
-- `media_control` — `{"action": "play_pause" | "next" | "previous" | "stop"}`.
+- `media_control` — `{"action": "play_pause" | "next" | "previous" | "stop" |
+  "seek"}`. Seek carries `position_us` (absolute microseconds).
   `toggle`, `playpause`, and `prev` are accepted aliases.
 - `set_mic_mute` — `{"muted": bool}` sets the default microphone's mute flag.
   Queued, not confirmed: the `ok` ack is immediate and the OSD draws the

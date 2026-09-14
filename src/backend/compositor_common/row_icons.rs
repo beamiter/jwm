@@ -24,8 +24,14 @@
 //! *Text-only panels are untouched.* The band is `None` for them, the
 //! geometry module reserves no icon column, and the pixels are identical to a
 //! build without this feature.
+//!
+//! *In-memory PNGs stay off disk.* Clipboard history never writes files; its
+//! picker registers PNG bytes under a `jwm-mem:` key the decode worker reads
+//! back. The store is GC'd against the published band so a closed panel
+//! cannot keep thumbnail copies forever.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Condvar, Mutex, OnceLock, mpsc};
 
 use crate::sync_ext::MutexExt as _;
@@ -34,6 +40,15 @@ use crate::sync_ext::MutexExt as _;
 /// ([`super::system_ui_panel::ROW_ICON_PX`]), so the texture lands sharp when
 /// the source is larger and is never upscaled at decode time when it is not.
 pub(crate) const ROW_ICON_DECODE_EDGE: u32 = 48;
+
+/// Prefix of every in-memory PNG key the clipboard picker registers. The
+/// decode worker treats these as byte bags, never as filesystem paths.
+pub(crate) const MEMORY_ICON_PREFIX: &str = "jwm-mem:";
+
+/// The FontAwesome-4 `file-image-o` glyph clipboard PNG rows lead with —
+/// stripped from the rasterized text once the real thumbnail texture has
+/// uploaded, the same way [`WINDOW_ROW_GLYPH`] is stripped for windows.
+pub(crate) const CLIPBOARD_PNG_GLYPH: &str = "\u{f1c5} ";
 
 /// Textures held at once. The visible window is at most 14 rows today; the
 /// headroom lets a list scrolled back and forth keep its icons without
@@ -101,18 +116,29 @@ impl Drop for DecodePermit {
 /// Decode one icon on a background thread. Same worker pattern as the
 /// wallpaper picker's side preview — decode gate, bounded thumbnail, channel
 /// back — and the same quiet failure: an unreadable file sends nothing, which
-/// the cache records as a miss instead of retrying.
+/// the cache records as a miss instead of retrying. `jwm-mem:` keys load
+/// registered PNG bytes instead of touching the filesystem.
 pub(crate) fn decode_async(path: &str) -> mpsc::Receiver<RowIconData> {
     let (tx, rx) = mpsc::channel();
     let path = path.to_string();
     std::thread::spawn(move || {
         // Bound concurrent decodes; released when this thread exits.
         let _permit = DecodePermit::acquire();
-        let img = match image::open(&path) {
-            Ok(img) => img,
-            Err(e) => {
-                log::debug!("compositor: no row icon for '{}': {}", path, e);
-                return;
+        let img = if let Some(bytes) = memory_icon_bytes(&path) {
+            match image::load_from_memory(&bytes) {
+                Ok(img) => img,
+                Err(e) => {
+                    log::debug!("compositor: no row icon for memory key '{path}': {e}");
+                    return;
+                }
+            }
+        } else {
+            match image::open(&path) {
+                Ok(img) => img,
+                Err(e) => {
+                    log::debug!("compositor: no row icon for '{path}': {e}");
+                    return;
+                }
             }
         };
         let img = if img.width() > ROW_ICON_DECODE_EDGE || img.height() > ROW_ICON_DECODE_EDGE {
@@ -133,6 +159,47 @@ pub(crate) fn decode_async(path: &str) -> mpsc::Receiver<RowIconData> {
         });
     });
     rx
+}
+
+static MEMORY_ICONS: OnceLock<Mutex<HashMap<String, Arc<[u8]>>>> = OnceLock::new();
+
+fn memory_icons() -> &'static Mutex<HashMap<String, Arc<[u8]>>> {
+    MEMORY_ICONS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Stable key for an in-memory PNG: content hash so identical screenshots
+/// share one decode. Never a filesystem path.
+#[must_use]
+pub(crate) fn memory_icon_key(png_bytes: &[u8]) -> String {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    png_bytes.hash(&mut hasher);
+    format!("{MEMORY_ICON_PREFIX}{:016x}", hasher.finish())
+}
+
+/// Remember PNG bytes under `key` for the decode worker. Clipboard history
+/// never writes these to disk; the compositor reads them back by key.
+pub(crate) fn register_memory_icon(key: String, png_bytes: Arc<[u8]>) {
+    if !key.starts_with(MEMORY_ICON_PREFIX) || png_bytes.is_empty() {
+        return;
+    }
+    memory_icons().lock_safe().entry(key).or_insert(png_bytes);
+}
+
+fn memory_icon_bytes(key: &str) -> Option<Arc<[u8]>> {
+    key.starts_with(MEMORY_ICON_PREFIX)
+        .then(|| memory_icons().lock_safe().get(key).cloned())
+        .flatten()
+}
+
+fn retain_memory_icons(keep: Option<&[Option<String>]>) {
+    let mut store = memory_icons().lock_safe();
+    match keep {
+        None => store.clear(),
+        Some(icons) => {
+            let wanted: HashSet<&str> = icons.iter().flatten().map(String::as_str).collect();
+            store.retain(|key, _| wanted.contains(key.as_str()));
+        }
+    }
 }
 
 /// The band one panel's row icons travel in: the exact rows they belong to,
@@ -162,6 +229,9 @@ pub(crate) fn publish(items: &[String], icons: Option<&[Option<String>]>) {
             icons: Arc::from(icons),
         })
     });
+    // Drop memory PNGs the new band does not need — a closed clipboard
+    // picker must not keep thumbnail copies around after its rows leave.
+    retain_memory_icons(band.as_ref().map(|band| band.icons.as_ref()));
     *ROW_ICON_BAND.lock_safe() = band;
 }
 
@@ -204,7 +274,10 @@ pub(crate) fn items_text(
         .enumerate()
         .map(
             |(row, text)| match icons.get(row).and_then(Option::as_deref) {
-                Some(path) if uploaded(path) => text.strip_prefix(WINDOW_ROW_GLYPH).unwrap_or(text),
+                Some(path) if uploaded(path) => text
+                    .strip_prefix(WINDOW_ROW_GLYPH)
+                    .or_else(|| text.strip_prefix(CLIPBOARD_PNG_GLYPH))
+                    .unwrap_or(text),
                 _ => text.as_str(),
             },
         )
@@ -612,5 +685,27 @@ mod tests {
             Some("/icons/terminal.png".to_string()),
         ];
         assert_eq!(items_text(&items, Some(&icons), |_| true), items.join("\n"));
+    }
+
+    #[test]
+    fn an_uploaded_clipboard_png_glyph_is_stripped_like_a_window_glyph() {
+        let items = strings(&[&format!("{CLIPBOARD_PNG_GLYPH}1  PNG 10×10  24B")]);
+        let icons = vec![Some("jwm-mem:abc".into())];
+        let text = items_text(&items, Some(&icons), |_| true);
+        assert_eq!(text, "1  PNG 10×10  24B");
+        let text = items_text(&items, Some(&icons), |_| false);
+        assert_eq!(text, items.join("\n"), "pending decode keeps the glyph");
+    }
+
+    #[test]
+    fn memory_icon_keys_are_stable_for_identical_bytes() {
+        let png = b"\x89PNG\r\n\x1a\nnot-a-real-png";
+        let key = memory_icon_key(png);
+        assert!(key.starts_with(MEMORY_ICON_PREFIX));
+        assert_eq!(key, memory_icon_key(png));
+        register_memory_icon(key.clone(), Arc::<[u8]>::from(png.as_slice()));
+        assert_eq!(memory_icon_bytes(&key).as_deref(), Some(png.as_slice()));
+        retain_memory_icons(None);
+        assert!(memory_icon_bytes(&key).is_none());
     }
 }
