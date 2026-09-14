@@ -23,8 +23,10 @@ It creates `jwm-<version>-source.tar.gz` with `git archive`, writes and verifies
 
 ## Maintainer checklist
 
-1. Confirm CI and supply-chain checks are green. Complete direct DRM/KMS,
-   driver, upgrade, rollback, and uninstall tests that hosted CI cannot run.
+1. Confirm CI and supply-chain checks are green. Complete the
+   [hardware validation](hardware-validation.md) matrix (direct DRM/KMS,
+   driver, upgrade, rollback, uninstall) that hosted CI cannot run. Record
+   labeled `jwm-tool perf` baselines for cited machines.
 2. Move relevant changelog entries from `Unreleased` to the new JWM version and
    verify all bundled component versions and known limitations.
 3. Update the root version and lockfile in a reviewed commit; do not align

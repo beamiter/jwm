@@ -7,6 +7,20 @@ monorepo use independent Semantic Versions.
 
 ### Added
 
+- SOTA daily-drive positioning: `wayland-udev` is the primary production
+  backend and the CLI/`JWM_BACKEND` default when compiled in; X11 remains a
+  first-class compatibility surface. See [README](README.md),
+  [docs/architecture.md](docs/architecture.md),
+  [docs/hardware-validation.md](docs/hardware-validation.md),
+  [docs/daily-drive.md](docs/daily-drive.md), and
+  [docs/sota-gap-queue.md](docs/sota-gap-queue.md).
+
+- XWayland interactive move/resize: `XwmHandler` move/resize requests feed
+  the shared `_NET_WM_MOVERESIZE` drag pipeline.
+
+- Official status bar designation (`tao_glow_bar`) plus packaging sketches
+  under [bars/README.md](bars/README.md) and [packaging/README.md](packaging/README.md).
+
 - Native X11 clipboard contract tests self-host an isolated Xvfb and run in
   the default `cargo test` suite (no longer `#[ignore]` / separate CI step).
   `xcb` `Clipboard::start` takes an optional display name like the x11rb

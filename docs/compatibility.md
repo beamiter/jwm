@@ -7,10 +7,10 @@ current development/testing contract, not a production-support promise.
 
 | Surface | Current status | Important gaps |
 | --- | --- | --- |
-| X11RB | Primary development backend; integrated compositor | Inherits X11's session-wide trust model; server/driver extensions vary |
-| XCB | Differential policy coverage with X11RB | Parity tests cannot cover every server, extension, or GPU |
-| Wayland DRM/KMS | Direct-session development backend | Needs DRM/GBM/EGL, input, seat permissions, and real-hardware validation |
+| Wayland DRM/KMS | **Primary production backend** | Needs DRM/GBM/EGL, input, seat permissions, and real-hardware validation ([hardware-validation](hardware-validation.md)) |
 | Nested Wayland | CI/development smoke backends | Not a production DRM/KMS substitute; capture is absent where unsupported; no shell panels or lock screen |
+| X11RB | First-class compatibility; integrated compositor | Inherits X11's session-wide trust model; server/driver extensions vary |
+| XCB | Differential policy coverage with X11RB | Parity tests cannot cover every server, extension, or GPU |
 | XWayland | Available in Wayland sessions | Inherits X11 isolation limits and application/driver quirks |
 | Portal/bars | Optional, separate components | Portal needs PipeWire 1.2 metadata; some toolkit bars have narrower gates |
 

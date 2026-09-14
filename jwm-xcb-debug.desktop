@@ -1,6 +1,6 @@
 [Desktop Entry]
-Name=JWM Debug (xcb backend via daemon)
-Comment=JWM Window Manager managed by jwm-tool with verbose debug logging
+Name=JWM Debug (X11 / xcb)
+Comment=JWM X11 compatibility debug session — prefer Wayland for daily use
 Exec=env JWM_BACKEND=xcb JWM_DEBUG_KEYS=1 JWM_DEBUG_DRAG=1 RUST_LOG=debug,smithay=warn,libseat=warn,drm=warn RUST_BACKTRACE=1 /usr/local/bin/jwm-tool daemon
 TryExec=/usr/local/bin/jwm-tool
 Type=Application

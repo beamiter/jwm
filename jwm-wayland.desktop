@@ -1,10 +1,8 @@
 [Desktop Entry]
-Name=JWM (wayland-udev backend via daemon)
-Comment=JWM compositor using wayland-udev (DRM/KMS)
+Name=JWM
+Comment=JWM Wayland compositor (DRM/KMS) — recommended daily-drive session
 Exec=env JWM_BACKEND=wayland-udev XDG_SESSION_TYPE=wayland XDG_SESSION_CLASS=user XDG_CURRENT_DESKTOP=jwm XDG_SESSION_DESKTOP=jwm DESKTOP_SESSION=jwm /usr/local/bin/jwm-tool daemon
 TryExec=/usr/local/bin/jwm-tool
 Type=Application
-
-# 这些字段不是必须，但建议给
 DesktopNames=JWM
 X-GDM-SessionRegisters=true

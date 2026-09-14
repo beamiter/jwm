@@ -1212,6 +1212,22 @@ impl XWaylandShellHandler for JwmWaylandState {
     }
 }
 
+/// Map Smithay's `XwmResizeEdge` onto the `_NET_WM_MOVERESIZE` direction
+/// codes that [`crate::jwm::event_dispatcher::Jwm::on_moveresize_request`]
+/// already understands (0..=7 resize, 8 move).
+fn xwm_resize_edge_direction(edge: XwmResizeEdge) -> u32 {
+    match edge {
+        XwmResizeEdge::TopLeft => 0,
+        XwmResizeEdge::Top => 1,
+        XwmResizeEdge::TopRight => 2,
+        XwmResizeEdge::Right => 3,
+        XwmResizeEdge::BottomRight => 4,
+        XwmResizeEdge::Bottom => 5,
+        XwmResizeEdge::BottomLeft => 6,
+        XwmResizeEdge::Left => 7,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // XWM Handler – manages X11 windows running under XWayland
 // ---------------------------------------------------------------------------
@@ -1474,15 +1490,33 @@ impl XwmHandler for JwmWaylandState {
     fn resize_request(
         &mut self,
         _xwm: XwmId,
-        _window: X11Surface,
-        _button: u32,
-        _resize_edge: XwmResizeEdge,
+        window: X11Surface,
+        button: u32,
+        resize_edge: XwmResizeEdge,
     ) {
-        // Interactive resize not yet supported for X11 windows.
+        // Feed the existing Jwm `_NET_WM_MOVERESIZE` drag pipeline (same
+        // direction encoding Smithay already decoded from the client message).
+        let x11_id = window.window_id();
+        let Some(win_id) = self.x11_surface_to_window.get(&x11_id).copied() else {
+            return;
+        };
+        self.push_event(BackendEvent::MoveResizeRequest {
+            window: win_id,
+            direction: xwm_resize_edge_direction(resize_edge),
+            button,
+        });
     }
 
-    fn move_request(&mut self, _xwm: XwmId, _window: X11Surface, _button: u32) {
-        // Interactive move not yet supported for X11 windows.
+    fn move_request(&mut self, _xwm: XwmId, window: X11Surface, button: u32) {
+        let x11_id = window.window_id();
+        let Some(win_id) = self.x11_surface_to_window.get(&x11_id).copied() else {
+            return;
+        };
+        self.push_event(BackendEvent::MoveResizeRequest {
+            window: win_id,
+            direction: 8, // _NET_WM_MOVERESIZE_MOVE
+            button,
+        });
     }
 
     fn property_notify(&mut self, _xwm: XwmId, window: X11Surface, property: WmWindowProperty) {
@@ -4277,6 +4311,44 @@ fn match_x11_window_by_surface_id(
         .into_iter()
         .find(|(_, id)| *id == Some(protocol_id))
         .map(|(win, _)| win)
+}
+
+#[cfg(test)]
+mod xwayland_moveresize_tests {
+    use super::xwm_resize_edge_direction;
+    use smithay::xwayland::xwm::ResizeEdge as XwmResizeEdge;
+
+    #[test]
+    fn xwm_resize_edges_match_net_wm_moveresize_codes() {
+        assert_eq!(xwm_resize_edge_direction(XwmResizeEdge::TopLeft), 0);
+        assert_eq!(xwm_resize_edge_direction(XwmResizeEdge::Top), 1);
+        assert_eq!(xwm_resize_edge_direction(XwmResizeEdge::TopRight), 2);
+        assert_eq!(xwm_resize_edge_direction(XwmResizeEdge::Right), 3);
+        assert_eq!(xwm_resize_edge_direction(XwmResizeEdge::BottomRight), 4);
+        assert_eq!(xwm_resize_edge_direction(XwmResizeEdge::Bottom), 5);
+        assert_eq!(xwm_resize_edge_direction(XwmResizeEdge::BottomLeft), 6);
+        assert_eq!(xwm_resize_edge_direction(XwmResizeEdge::Left), 7);
+    }
+
+    #[test]
+    fn xwayland_moveresize_stubs_feed_the_shared_drag_pipeline() {
+        const SOURCE: &str = include_str!("state.rs");
+        let production = SOURCE.split_once("#[cfg(test)]").unwrap().0;
+        assert!(
+            production.contains("fn xwm_resize_edge_direction"),
+            "XWayland resize must map edges onto _NET_WM_MOVERESIZE codes"
+        );
+        assert!(
+            production.contains("BackendEvent::MoveResizeRequest")
+                && production.contains("direction: 8"),
+            "XWayland move/resize stubs must emit MoveResizeRequest into Jwm drag policy"
+        );
+        assert!(
+            !production.contains("Interactive resize not yet supported for X11 windows.")
+                && !production.contains("Interactive move not yet supported for X11 windows."),
+            "XWayland interactive move/resize stubs must not remain empty"
+        );
+    }
 }
 
 #[cfg(test)]

@@ -1,21 +1,41 @@
 # JWM
 
-JWM is a Rust window manager and compositor with native X11 and Wayland
-backends. It combines tag-based tiling, multiple layouts, multi-monitor control,
-animations and compositor effects with a JSON IPC control plane. The project is
-under active development and supports both direct DRM/KMS sessions and nested
-development backends.
+**JWM is a tag-based window manager and compositor with Compiz-style aesthetics
+and a built-in desktop shell.** The primary production surface is Wayland DRM/KMS
+(`wayland-udev`); X11 (`x11rb` / `xcb`) remains a first-class compatibility
+surface with the same policy and IPC. Nested Wayland backends exist for CI and
+development only.
+
+It combines tag-based tiling, multiple layouts, multi-monitor control, animations
+and compositor effects with a JSON IPC control plane that is designed to be
+diagnosable (`doctor`, `health`, `capabilities`, support bundles).
 
 > **Release status:** JWM has not published a stable release. The manifest
 > version identifies development builds, not a production-support commitment.
 > See [compatibility](docs/compatibility.md), the tested
-> [upgrade/rollback lifecycle](docs/upgrade.md), and the maintainer
-> [release process](docs/release-process.md).
+> [upgrade/rollback lifecycle](docs/upgrade.md), the maintainer
+> [release process](docs/release-process.md), and the
+> [hardware validation gate](docs/hardware-validation.md) for the first release.
+
+## Why JWM (comparison)
+
+| | Reliability | Built-in shell | Effects |
+| --- | --- | --- | --- |
+| **JWM** | Doctor / health / capabilities / support bundles; dual X11 + Wayland | Control center, notifications, launcher, lock, clipboard, idle | Cube/prism, expose, wobbly, glow — damage-aware |
+| Hyprland | Large community daily-drive | Typically external (Quickshell, …) | Strong visual polish |
+| niri | Focused scrollable model | Typically external | Clean, lighter chrome |
+| Sway | Protocol maturity and trust | External | Minimal by design |
+
+JWM's bet is **shell + effects + control-plane hardness** on one policy tree —
+not a new tiling paradigm and not a feature-count race.
 
 ## Highlights
 
-- X11RB and XCB window-manager backends with an integrated X11 compositor.
-- Direct Wayland DRM/KMS, nested X11, and nested winit backends with XWayland.
+- **Production backend:** direct Wayland DRM/KMS (`wayland-udev`). Bare `jwm`
+  selects it when compiled in (`JWM_BACKEND` / `--backend` still override).
+- X11RB and XCB window-manager backends with an integrated X11 compositor
+  (equal policy parity; not the default session).
+- Nested X11 and nested winit Wayland backends with XWayland for development.
 - Tile, monocle, floating, scrolling, grid, deck, fibonacci, centered-master,
   bstack, three-column, tatami, fullscreen, and vertical-stack layouts.
 - Tags, per-monitor state, overview/expose, display layout UI, screenshots,
@@ -62,30 +82,37 @@ The release build produces `jwm`, `jwm-tool`, `jwm-support`, and `jwm-remote`.
 Before starting a display backend, inspect the environment and configuration:
 
 ```bash
-target/release/jwm --backend x11rb --doctor
-target/release/jwm --backend wayland-udev --doctor --json
+target/release/jwm --backend wayland-udev --doctor
+target/release/jwm --backend x11rb --doctor --json
 ```
+
+Doctor is the **daily-drive gate**: a blocking error means do not treat the
+session as production-ready. See [hardware validation](docs/hardware-validation.md).
 
 ## Configure and run
 
-X11 and Wayland use separate files under `~/.config/jwm`:
+X11 and Wayland use separate files under `~/.config/jwm`. Prefer a Wayland
+session for day-to-day use:
 
 ```bash
 target/release/jwm --gen-config
+target/release/jwm --backend wayland-udev --check-config
 target/release/jwm --backend x11rb --check-config
-target/release/jwm --backend wayland --check-config
 
-target/release/jwm --backend x11rb
-# Direct DRM/KMS session:
+# Primary production session (also the CLI default when compiled in):
 target/release/jwm --backend wayland-udev
+# X11 compatibility:
+target/release/jwm --backend x11rb
 ```
 
 Supported backend names are `x11rb`, `xcb`, `wayland-udev`, `wayland-x11`, and
 `wayland-winit`. See [startup and configuration](docs/startup.md) for aliases,
 logging, benchmarking, restart behavior, and doctor output.
 
-The installation helper builds JWM and one selectable status bar, installs the
-session files, and keeps existing configuration unless `--gen-config` is used:
+The installation helper builds JWM and the **official status bar**
+(`tao_glow_bar` by default; other crates under `bars/` are examples), installs
+the session files (Wayland session recommended), and keeps existing
+configuration unless `--gen-config` is used:
 
 ```bash
 scripts/install_jwm_scripts.sh --help
@@ -137,8 +164,8 @@ and floating-window state.
 capability queries in a versioned JSON document:
 
 ```bash
-jwm-support --backend x11rb --output jwm-support.json
-jwm-support --backend wayland-udev --offline --output jwm-support.json
+jwm-support --backend wayland-udev --output jwm-support.json
+jwm-support --backend x11rb --offline --output jwm-support.json
 jwm-support --strict --compact > jwm-support.json
 ```
 
@@ -259,9 +286,11 @@ the hit geometry is unchanged.
 
 The status bars' screenshot pill drives exactly this editor over the control
 socket (the `take_screenshot` IPC command) rather than launching an external
-grabber. X11 clipboard copies are served natively by JWM, including large
-ICCCM INCR transfers; Wayland clipboard copies currently use `wl-copy`.
-`take_screenshot_fullscreen` captures the whole desktop with no interaction.
+grabber. Clipboard PNG offers prefer a native owner: X11 uses JWM's ICCCM/INCR
+path; Wayland uses the compositor data-device selection
+(`Backend::set_clipboard_png`). `wl-copy` remains a last-resort helper only when
+neither native path is available. `take_screenshot_fullscreen` captures the
+whole desktop with no interaction.
 
 A finished capture announces itself: a toast carries the saved path (or
 confirms the clipboard copy), and a failed one surfaces even while Do Not
@@ -363,7 +392,11 @@ The external Julia simulation worker and frame protocol are documented in
 [docs/waterlily.md](docs/waterlily.md).
 Architecture boundaries and the incremental migration plan are in
 [docs/architecture.md](docs/architecture.md). The delivery sequence for larger
-changes is tracked in [the evolution roadmap](docs/roadmap.md).
+changes is tracked in [the evolution roadmap](docs/roadmap.md). Daily-drive
+acceptance loops and the control-plane selling points are in
+[docs/daily-drive.md](docs/daily-drive.md); remaining Wayland gaps are queued in
+[docs/sota-gap-queue.md](docs/sota-gap-queue.md). First-release hardware
+sign-off uses [docs/hardware-validation.md](docs/hardware-validation.md).
 
 ## Releases and versioning
 

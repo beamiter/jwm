@@ -79,14 +79,31 @@ fn request_daemon_shutdown() {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BackendChoice {
-    #[default]
     X11rb,
     Xcb,
+    /// Primary production backend (direct DRM/KMS). Preferred default when compiled.
     WaylandUdev,
     WaylandX11,
     WaylandWinit,
+}
+
+impl Default for BackendChoice {
+    /// Prefer the production Wayland DRM/KMS backend when it is compiled in;
+    /// otherwise the first compiled transport in canonical order.
+    fn default() -> Self {
+        [
+            Self::WaylandUdev,
+            Self::X11rb,
+            Self::Xcb,
+            Self::WaylandX11,
+            Self::WaylandWinit,
+        ]
+        .into_iter()
+        .find(|choice| choice.is_compiled())
+        .unwrap_or(Self::WaylandUdev)
+    }
 }
 
 impl BackendChoice {
@@ -1069,8 +1086,22 @@ mod tests {
         assert_eq!(
             ApplicationOptions::default(),
             ApplicationOptions {
-                backend: BackendChoice::X11rb,
+                backend: BackendChoice::default(),
                 benchmark: None,
+            }
+        );
+        assert_eq!(
+            BackendChoice::default(),
+            if cfg!(feature = "backend-wayland-udev") {
+                BackendChoice::WaylandUdev
+            } else if cfg!(feature = "backend-x11rb") {
+                BackendChoice::X11rb
+            } else if cfg!(feature = "backend-xcb") {
+                BackendChoice::Xcb
+            } else if cfg!(feature = "backend-wayland-nested") {
+                BackendChoice::WaylandX11
+            } else {
+                BackendChoice::WaylandUdev
             }
         );
     }

@@ -26,7 +26,7 @@ struct Cli {
     #[arg(
         long,
         env = "JWM_BACKEND",
-        default_value = "x11rb",
+        default_value = "wayland-udev",
         value_parser = parse_backend,
         value_name = "BACKEND"
     )]
@@ -403,6 +403,17 @@ fn ensure_dbus_session() {
 mod tests {
     use super::{Cli, parse_dbus_launch_output};
     use clap::Parser;
+
+    #[test]
+    fn cli_default_value_names_wayland_udev_production_backend() {
+        // clap still reads `JWM_BACKEND` under `try_parse_from`, so assert the
+        // declared default rather than ambient process environment.
+        const SOURCE: &str = include_str!("main.rs");
+        assert!(
+            SOURCE.contains("default_value = \"wayland-udev\""),
+            "bare `jwm` must default to the Wayland DRM production backend"
+        );
+    }
 
     #[test]
     fn cli_accepts_backend_alias_and_benchmark_options() {

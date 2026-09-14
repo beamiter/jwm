@@ -8,16 +8,25 @@ runs the window-manager lifecycle.
 ## Select a backend
 
 ```bash
+# Primary production (CLI default when compiled in):
+jwm --backend wayland-udev
+# X11 compatibility:
 jwm --backend x11rb
 jwm --backend xcb
-jwm --backend wayland-udev
+# Nested development / CI only:
 jwm --backend wayland-x11
 jwm --backend wayland-winit
 ```
 
 The existing `JWM_BACKEND` environment variable remains supported. Command-line
 values take precedence when both are present. The short aliases `wayland`,
-`udev`, `windowed` and `winit` are accepted for compatibility.
+`udev`, `windowed` and `winit` are accepted for compatibility. When neither
+`--backend` nor `JWM_BACKEND` is set, JWM prefers `wayland-udev` if that
+feature was compiled into the binary.
+
+Display managers should launch the **Wayland** session entry
+(`jwm-wayland.desktop`) for day-to-day use; the X11 session entries remain for
+compatibility.
 
 ## Inspect and validate configuration
 
@@ -59,8 +68,9 @@ The doctor is read-only: it does not generate configuration, open a display,
 or probe DRM devices by taking control of them.
 
 ```bash
-jwm --backend x11rb --doctor
+jwm --backend wayland-udev --doctor
 jwm --backend wayland-udev --doctor --json
+jwm --backend x11rb --doctor
 ```
 
 It checks the selected configuration, status-bar and `jwm-tool` executables,
@@ -68,6 +78,11 @@ runtime-directory ownership and permissions, display/DRM prerequisites, and
 the D-Bus session environment. JSON output has a versioned schema and is useful
 for installers and support bundles. Warnings return success; a blocking error
 returns a non-zero status.
+
+Treat a green `wayland-udev` doctor run as the **minimum daily-drive gate**
+before calling a machine production-ready. Hosted CI cannot certify
+kernel/GPU/driver combinations — complete
+[hardware validation](hardware-validation.md) on real hardware.
 
 ## Inspect a running instance
 

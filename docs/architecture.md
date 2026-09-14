@@ -3,6 +3,11 @@
 JWM is split into a process shell, an application composition root, window
 management policy, platform backends, and reusable state/layout code.
 
+**Production surface:** `wayland-udev` (direct DRM/KMS) is the primary day-to-day
+backend. X11 (`x11rb` / `xcb`) shares the same policy tree and remains fully
+supported. Nested Wayland (`wayland-x11`, `wayland-winit`) is for CI and
+development smoke only — not a substitute for real hardware validation.
+
 ```text
 src/main.rs                 process setup (CLI, logging, locale, D-Bus)
     |
@@ -10,6 +15,7 @@ src/main.rs                 process setup (CLI, logging, locale, D-Bus)
     |
     v
 src/application.rs          backend selection and application lifecycle
+    |                       default: wayland-udev when compiled in
     |
     +-------> src/jwm/      window-management policy and use cases
     |              |
@@ -19,8 +25,9 @@ src/application.rs          backend selection and application lifecycle
     v
 src/backend/api.rs          platform boundary
     |
-    +-- x11rb / xcb / X11 compositor
-    +-- Wayland udev / X11 / winit
+    +-- wayland-udev (primary production)
+    +-- x11rb / xcb / X11 compositor (compatibility)
+    +-- Wayland nested X11 / winit (dev/CI)
 
 tools/jwm_remote.rs         separate trusted-LAN X11 helper
     |
@@ -230,16 +237,15 @@ tools/jwm_remote.rs         separate trusted-LAN X11 helper
   painter-sorted stream. Linear-tail-safe frames use either per-output software
   regions (nonnegative physical origin, unit scale, normal transform and no
   conflicting overlap) or one coherent all-output CRTC CTM+GAMMA_LUT pair.
-  Encoded-only late overlays, capture, KMS-external cursor/drag/lock/top/overlay
-  elements, unsupported topology or a missing FP16 target select the global
-  sRGB fallback for the whole frame. A normal pointer usually intersects an
-  active output, so current interactive desktop frames mostly take that
-  fallback; per-output live delivery remains infrastructure until external
-  elements gain color adapters. DRM HDR signalling is therefore fail-closed:
-  enabling `HDR_OUTPUT_METADATA` is rejected for now, inherited metadata is
-  cleared at KMS ownership boundaries, and the runtime target remains exact
-  sRGB. Status IPC reports EDID profiles as capabilities rather than active
-  output signals and has no last-frame delivery-route snapshot. The GLES adapters
+  Encoded-only late overlays (see `compositor/tail_domain.rs`), capture,
+  unsupported topology, a missing FP16 target, or a still-external session lock
+  select the global sRGB fallback for the whole frame. KMS-external cursor,
+  DnD, layer-top, and layer-overlay trees are internalized into the common
+  linear workspace when importable. DRM HDR signalling is therefore
+  **conditional**: intent latches across momentary blockers and is withdrawn
+  while any encoded-only chrome class is visible; permanent refusals fail the
+  enable command. Status IPC reports EDID profiles, last-frame delivery routes,
+  and typed linear-tail blockers. The GLES adapters
   transform straight color
   (unpremultiply, decode, gamut matrix, optional encode, repremultiply), retain
   explicit PQ/HLG decode plans when entering the common workspace, and normalize
@@ -249,8 +255,10 @@ tools/jwm_remote.rs         separate trusted-LAN X11 helper
   are domain- and matrix-validated before an image description becomes ready.
   The workspace remains relative rather than absolute-luminance-normalized.
   Dynamic surface-description changes are not yet latched to the corresponding
-  `wl_surface.commit`, KMS-external elements are not adapted, and color
-  properties plus framebuffer are not committed as one atomic transaction. All
+  `wl_surface.commit`, and color properties plus framebuffer are not always
+  committed as one atomic transaction. Remaining encoded-only chrome classes
+  migrate one at a time via `TailOverlayClass` (tracked in
+  [docs/sota-gap-queue.md](sota-gap-queue.md)). All
   close paths go through `OverviewState::deactivate`, which also resets the
   slide offset the inline Escape path used to leave stale.
 - Session snapshots load through an explicit version-probed migration

@@ -222,18 +222,18 @@ mock implementing the complete backend surface. (First met by
   linear tail. Supported nonnegative, unit-scale, unrotated physical regions are
   finalized independently in software; coherent hardware delivery requires the
   matching CTM+GAMMA_LUT pair on every participating CRTC and rolls back a
-  LUT-only result. Encoded late overlays, capture, KMS-external elements,
-  unsupported topology and missing FP16 targets choose the global-sRGB fallback
-  for the whole frame. The normal cursor is currently one such external element,
-  so interactive sessions mostly exercise that fallback. Native HDR signalling
-  remains fail-closed SDR/sRGB in this slice: the enable command is rejected and
-  inherited connector metadata is cleared until those external elements can be
-  adapted without mixing domains. Explicit non-D65 descriptions now use
-  Bradford chromatic adaptation. The next slice is to color-adapt or internalize
-  the external elements, establish an absolute-luminance working-white
-  convention, latch dynamic surface descriptions to their matching surface
-  commit, and coordinate KMS color properties with the matching framebuffer
-  atomically.
+  LUT-only result. Encoded late overlays (see `compositor/tail_domain.rs`),
+  capture, unsupported topology and missing FP16 targets choose the
+  global-sRGB fallback for the whole frame. KMS-external cursor, DnD,
+  layer-top, and layer-overlay trees are internalized into the common linear
+  workspace when importable; session lock stays external on purpose. HDR
+  signalling is therefore conditional (intent latches; encoded chrome
+  withdraws it for the frame) rather than permanently fail-closed. Explicit
+  non-D65 descriptions now use Bradford chromatic adaptation. The next slices
+  migrate remaining `EncodedOnly` chrome classes one at a time, latch dynamic
+  surface descriptions to their matching surface commit, and coordinate KMS
+  color properties with the matching framebuffer atomically — tracked in
+  [sota-gap-queue.md](sota-gap-queue.md).
 - Keep GLX and EGL/GLES resource ownership in explicit platform adapters.
   Started: the graphics platform is now a directory module with one adapter
   per API — `compositor/platform/glx.rs` owns the GLX context, overlay
@@ -372,9 +372,12 @@ contract.
       legacy paths.
 - [x] Document the ABI target, driver/backend gaps, verification, configuration
       backup, rollback, uninstall, and schema deprecation windows.
+- [x] Document the real-hardware validation matrix and daily-drive doctor/perf
+      gate in [hardware-validation.md](hardware-validation.md).
 - [ ] Enable release immutability in GitHub repository settings; this is an
       administrator policy and cannot be asserted by a workflow.
-- [ ] Complete real-hardware validation and publish the first release.
+- [ ] Complete real-hardware validation on the matrix and publish the first
+      release (sign the checklist in hardware-validation.md).
 
 A release is ready when a fresh installation can be diagnosed, upgraded, and
 rolled back using documented commands, not merely when a release build succeeds.

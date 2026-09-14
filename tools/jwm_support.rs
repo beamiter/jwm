@@ -53,7 +53,7 @@ struct Cli {
     #[arg(
         long,
         env = "JWM_BACKEND",
-        default_value = "x11rb",
+        default_value = "wayland-udev",
         value_parser = parse_backend
     )]
     backend: BackendChoice,

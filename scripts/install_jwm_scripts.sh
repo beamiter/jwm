@@ -105,6 +105,8 @@ usage() {
   -h, --help                  显示此帮助信息
 
 说明:
+  - 推荐日用会话是 Wayland（jwm-wayland.desktop / wayland-udev）；X11 会话条目仍会安装，作为兼容面。
+  - 官方推荐 status bar 是 tao_glow_bar（脚本默认）；bars/ 下其它 crate 是可选示例，不是日用默认。
   - 所有 bar 的源码都在本仓库 bars/ 目录下，随 jwm 一起版本化，无需克隆外部仓库。
   - 真正会被安装的 bar 只有 JWM_BAR_NAME（即 -b 的第一个参数，或脚本顶部默认值）。
   - 原生 Rust bar 使用 cargo install --path ... 安装到 cargo bin 目录（通常是 ~/.cargo/bin）。
@@ -116,11 +118,11 @@ usage() {
     如果任一配置文件不存在，会先运行 jwm --gen-config 生成默认配置。
 
 示例:
-  $(basename "$0")                           # 安装 jwm + 默认 bar
+  $(basename "$0")                           # 安装 jwm + 官方默认 bar（tao_glow_bar）
   $(basename "$0") --gen-config              # 同上，并重新生成默认配置
   $(basename "$0") -m debug                  # debug 模式编译安装
-  $(basename "$0") -b xcb_bar                # 安装 xcb_bar
-  $(basename "$0") -b xcb_bar --skip-jwm     # 仅安装 xcb_bar
+  $(basename "$0") -b xcb_bar                # 安装示例 bar（非官方默认）
+  $(basename "$0") -b xcb_bar --skip-jwm     # 仅安装该 bar
   $(basename "$0") --gen-config --skip-bar   # 仅重新生成配置，不安装 bar
 EOF
     exit 0
@@ -701,3 +703,8 @@ fi
 
 echo ""
 ok "全部完成！"
+echo ""
+info "日用推荐: 在显示管理器里选「JWM」Wayland 会话（jwm-wayland.desktop）。"
+info "启动前跑: jwm --backend wayland-udev --doctor"
+info "官方 bar: ${JWM_BAR_NAME:-tao_glow_bar}（见 bars/README.md）"
+info "真机验收清单: docs/hardware-validation.md"

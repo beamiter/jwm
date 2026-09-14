@@ -2,6 +2,11 @@
 
 This implementation records deterministic demo windows through JWM's own X11 compositor recorder. Formal runs deliberately require the real X11 login session; they do not fall back to Xephyr or Xvfb.
 
+For SOTA / first-release marketing footage, prefer a **real `wayland-udev`
+DRM/KMS session** that shows cold start, Shell Hub audio switch, screenshot →
+clipboard, and one cube/expose transition, then link that capture from the
+README. The X11 profiles below remain the automated regression path.
+
 Build, install/restart the modified JWM, and check the environment. Building only
 the demo client does not update the already-running window manager:
 

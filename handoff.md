@@ -4,6 +4,21 @@
 
 ---
 
+## 2026-09-14：SOTA 战略落地（身份 / Phase6 门禁 / Wayland 缺口队列）
+
+选题 = 用户批准的 SOTA 计划：停功能竞赛 → 真机发布门禁 → Wayland 日用缺口 → 壳差异化 → 生态。
+
+1. **身份**：`wayland-udev` 为生产默认（`BackendChoice::default` / CLI / `jwm-support`）；README 一句话定位 + 三列对比；desktop/安装脚本偏向 Wayland；官方 bar = `tao_glow_bar`。
+2. **Phase 6 文档门禁**：[docs/hardware-validation.md](docs/hardware-validation.md)（真机矩阵 + doctor/perf + 发布签字）；roadmap/release-process 已链上。**真机跑矩阵 / GitHub release immutability / 打 tag 仍需管理员与硬件**。
+3. **缺口**：XWayland move/resize → `MoveResizeRequest`；剪贴板叙事改为 native 优先；HDR 文档去陈旧「cursor fail-closed」；队列在 [docs/sota-gap-queue.md](docs/sota-gap-queue.md)（idle 最终亮度、EncodedOnly chrome、tearing、FB envelope）。
+4. **差异化/生态**：[docs/daily-drive.md](docs/daily-drive.md)；[bars/README.md](bars/README.md)；[packaging/README.md](packaging/README.md)。
+
+**验证**：跑相关 lib 测（application default、xwayland moveresize）。**无真机显示会话**。
+
+**仍然开着的**：真机 Phase 6 签字；idle overlay dim；EncodedOnly→CommonLinearAware 逐项；tearing/FB envelope。
+
+---
+
 ## 2026-09-14：去掉 11 个 ignored（native X11 clipboard 自启 Xvfb）
 
 选题 = 用户要求 lib 的 11 ignored 要么修要么删。全是 `#[ignore = "requires an isolated X11 server in DISPLAY"]` 的 clipboard 契约测（x11rb 6 + xcb 5）；CI 原先另跑 `xvfb-run … --ignored`。

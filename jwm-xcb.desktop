@@ -1,6 +1,6 @@
 [Desktop Entry]
-Name=JWM (xcb backend via daemon)
-Comment=JWM Window Manager managed by jwm-tool
+Name=JWM (X11 / xcb)
+Comment=JWM X11 compatibility session (xcb) — prefer the Wayland session for daily use
 Exec=env JWM_BACKEND=xcb JWM_DEBUG_KEYS=0 JWM_DEBUG_DRAG=0 RUST_LOG=info /usr/local/bin/jwm-tool daemon
 TryExec=/usr/local/bin/jwm-tool
 Type=Application
