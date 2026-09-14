@@ -7,6 +7,11 @@ monorepo use independent Semantic Versions.
 
 ### Added
 
+- Native X11 clipboard contract tests self-host an isolated Xvfb and run in
+  the default `cargo test` suite (no longer `#[ignore]` / separate CI step).
+  `xcb` `Clipboard::start` takes an optional display name like the x11rb
+  path. See [docs/clipboard.md](docs/clipboard.md).
+
 - IPC `set_audio_device` queues on the controls worker (picker path); the
   named OSD and `audio/devices` publish follow the verifying re-read via
   `adopt_audio_switch`. See [docs/control-center.md](docs/control-center.md).

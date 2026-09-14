@@ -97,6 +97,93 @@ pub(crate) const X11_MAX_OFFER_BYTES: usize = 512 * 1024 * 1024;
 #[cfg(test)]
 pub(crate) static X11_CLIPBOARD_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// One private Xvfb for a native X11 clipboard contract.
+///
+/// Serializes on [`X11_CLIPBOARD_TEST_LOCK`] so concurrent clipboard tests do
+/// not pile up headless servers. Callers pass [`Self::name`] into
+/// `Clipboard::start` / `connect` — the process `$DISPLAY` is left alone.
+#[cfg(test)]
+pub(crate) struct IsolatedXvfb {
+    _lock: std::sync::MutexGuard<'static, ()>,
+    child: std::process::Child,
+    display: String,
+}
+
+#[cfg(test)]
+impl IsolatedXvfb {
+    pub(crate) fn acquire() -> Self {
+        let lock = X11_CLIPBOARD_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        for display_number in 90..200 {
+            let display = format!(":{display_number}");
+            let mut child = match std::process::Command::new("Xvfb")
+                .args([
+                    display.as_str(),
+                    "-screen",
+                    "0",
+                    "1280x720x24",
+                    "-nolisten",
+                    "tcp",
+                    "-ac",
+                ])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+            {
+                Ok(child) => child,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    panic!(
+                        "Xvfb is required for native X11 clipboard tests; install the xvfb package"
+                    );
+                }
+                Err(error) => panic!("spawn Xvfb: {error}"),
+            };
+
+            let socket = std::path::PathBuf::from(format!("/tmp/.X11-unix/X{display_number}"));
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            let mut ready = false;
+            while std::time::Instant::now() < deadline {
+                if let Ok(Some(_)) = child.try_wait() {
+                    break;
+                }
+                if socket.exists() {
+                    ready = true;
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            if ready {
+                // Give the server a beat to accept connections after the
+                // socket appears.
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                return Self {
+                    _lock: lock,
+                    child,
+                    display,
+                };
+            }
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        panic!("could not start an isolated Xvfb for clipboard tests");
+    }
+
+    pub(crate) fn name(&self) -> &str {
+        &self.display
+    }
+}
+
+#[cfg(test)]
+impl Drop for IsolatedXvfb {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
 /// Return the next byte range for an outgoing INCR transfer and whether it is
 /// the required zero-length terminator.
 #[cfg_attr(

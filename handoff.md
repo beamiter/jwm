@@ -4,6 +4,20 @@
 
 ---
 
+## 2026-09-14：去掉 11 个 ignored（native X11 clipboard 自启 Xvfb）
+
+选题 = 用户要求 lib 的 11 ignored 要么修要么删。全是 `#[ignore = "requires an isolated X11 server in DISPLAY"]` 的 clipboard 契约测（x11rb 6 + xcb 5）；CI 原先另跑 `xvfb-run … --ignored`。
+
+1. **`IsolatedXvfb`**（`clipboard_offer`）：拿锁 → 起私有 Xvfb → 测完杀进程；**不改**进程 `$DISPLAY`。调用方把 `name()` 传进 `Clipboard::start` / `connect`。
+2. **xcb `Clipboard::start(Option<&str>)`** 对齐 x11rb；生产仍 `None`。
+3. 去掉全部 `#[ignore]`；CI 删除单独 ignored 步骤（主 `cargo test` 覆盖；apt 仍装 xvfb）。
+
+**验证**：clippy -D warnings（0）；lib **3315 passed / 0 failed / 0 ignored**（3304→+11）。**无真机显示会话**。
+
+**仍然开着的**：无。**成文勿再提**：native clipboard 靠 `#[ignore]` + CI `--ignored`。
+
+---
+
 ## 2026-09-14：关闭两个 refuse pin（set_audio_device queued、X11 frame_deadline 接 overlay）
 
 选题 = 三十四轮起一直挂着的两项政策/源 pin，用户要求正面修掉。

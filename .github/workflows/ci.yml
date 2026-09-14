@@ -125,15 +125,6 @@ jobs:
           EGL_PLATFORM: surfaceless
           JWM_REQUIRE_HEADLESS_GL: 1
 
-      - name: Run native X11 clipboard contracts
-        run: |
-          timeout 90s xvfb-run -a cargo test --locked --lib \
-            'backend::clipboard_x11::tests::native_' -- \
-            --ignored --test-threads=1
-          timeout 90s xvfb-run -a cargo test --locked --lib \
-            'backend::xcb::clipboard::tests::native_' -- \
-            --ignored --test-threads=1
-
   feature-profiles:
     name: Feature profile (${{ matrix.profile.name }})
     runs-on: ubuntu-latest

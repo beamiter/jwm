@@ -150,6 +150,11 @@ a row then reports that the backend cannot set the clipboard rather than
 pretending to have done it. Text entries can still arrive through
 `clipboard_record` (text-only).
 
+Native X11 clipboard contract tests (`native_*` in the x11rb and xcb clipboard
+modules) spawn their own isolated Xvfb and pass that display into
+`Clipboard::start` / `connect`, so they run in the default `cargo test` suite
+when the `xvfb` package is installed.
+
 ## IPC
 
 ```sh

@@ -1299,7 +1299,7 @@ impl XcbBackend {
         };
         // Watch CLIPBOARD on its own connection and thread. Failing here
         // costs the clipboard history, not the session.
-        match super::clipboard::Clipboard::start() {
+        match super::clipboard::Clipboard::start(None) {
             Ok(clipboard) => backend.clipboard = Some(clipboard),
             Err(error) => log::warn!("clipboard: history unavailable: {error}"),
         }

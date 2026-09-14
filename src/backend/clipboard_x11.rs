@@ -1930,13 +1930,11 @@ mod tests {
 
     #[cfg(feature = "backend-x11rb")]
     #[test]
-    #[ignore = "requires an isolated X11 server in DISPLAY"]
     fn native_png_offer_serves_payload_beyond_xclips_one_mib_cliff() {
-        let _serial = crate::backend::clipboard_offer::X11_CLIPBOARD_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let clipboard_owner = Clipboard::start(None).unwrap();
-        let (conn, screen_num) = x11rb::connect(None).unwrap();
+        let x11 = crate::backend::clipboard_offer::IsolatedXvfb::acquire();
+        let display = x11.name();
+        let clipboard_owner = Clipboard::start(Some(display)).unwrap();
+        let (conn, screen_num) = x11rb::connect(Some(display)).unwrap();
         let root = conn.setup().roots[screen_num].root;
         let clipboard = intern(&conn, "CLIPBOARD").unwrap();
         let image_png = intern(&conn, "image/png").unwrap();
@@ -1974,13 +1972,11 @@ mod tests {
 
     #[cfg(feature = "backend-x11rb")]
     #[test]
-    #[ignore = "requires an isolated X11 server in DISPLAY"]
     fn native_owner_metadata_multiple_and_direct_round_trip() {
-        let _serial = crate::backend::clipboard_offer::X11_CLIPBOARD_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let clipboard_owner = Clipboard::start(None).unwrap();
-        let (conn, screen_num) = x11rb::connect(None).unwrap();
+        let x11 = crate::backend::clipboard_offer::IsolatedXvfb::acquire();
+        let display = x11.name();
+        let clipboard_owner = Clipboard::start(Some(display)).unwrap();
+        let (conn, screen_num) = x11rb::connect(Some(display)).unwrap();
         let root = conn.setup().roots[screen_num].root;
         let clipboard = intern(&conn, "CLIPBOARD").unwrap();
         let targets = intern(&conn, "TARGETS").unwrap();
@@ -2149,13 +2145,11 @@ mod tests {
 
     #[cfg(feature = "backend-x11rb")]
     #[test]
-    #[ignore = "requires an isolated X11 server in DISPLAY"]
     fn native_watcher_collects_and_drains_incoming_incr() {
-        let _serial = crate::backend::clipboard_offer::X11_CLIPBOARD_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let clipboard_watcher = Clipboard::start(None).unwrap();
-        let (conn, screen_num) = x11rb::connect(None).unwrap();
+        let x11 = crate::backend::clipboard_offer::IsolatedXvfb::acquire();
+        let display = x11.name();
+        let clipboard_watcher = Clipboard::start(Some(display)).unwrap();
+        let (conn, screen_num) = x11rb::connect(Some(display)).unwrap();
         let root = conn.setup().roots[screen_num].root;
         let clipboard = intern(&conn, "CLIPBOARD").unwrap();
         let targets = intern(&conn, "TARGETS").unwrap();
@@ -2308,19 +2302,17 @@ mod tests {
 
     #[cfg(feature = "backend-x11rb")]
     #[test]
-    #[ignore = "requires an isolated X11 server in DISPLAY"]
     fn native_owner_hands_text_to_clipboard_manager_on_drop() {
-        let _serial = crate::backend::clipboard_offer::X11_CLIPBOARD_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let clipboard_owner = Clipboard::start(None).unwrap();
+        let x11 = crate::backend::clipboard_offer::IsolatedXvfb::acquire();
+        let display = x11.name().to_string();
+        let clipboard_owner = Clipboard::start(Some(display.as_str())).unwrap();
         assert!(clipboard_owner.set_text("persist across restart"));
 
         let (manager_ready_tx, manager_ready_rx) = std::sync::mpsc::channel();
         let (saved_tx, saved_rx) = std::sync::mpsc::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
         let manager = std::thread::spawn(move || {
-            let (conn, screen_num) = x11rb::connect(None).unwrap();
+            let (conn, screen_num) = x11rb::connect(Some(display.as_str())).unwrap();
             let root = conn.setup().roots[screen_num].root;
             let clipboard = intern(&conn, "CLIPBOARD").unwrap();
             let clipboard_manager = intern(&conn, "CLIPBOARD_MANAGER").unwrap();
@@ -2451,12 +2443,9 @@ mod tests {
 
     #[cfg(feature = "backend-x11rb")]
     #[test]
-    #[ignore = "requires an isolated X11 server in DISPLAY"]
     fn native_worker_shutdown_does_not_wait_for_image_sender_clone() {
-        let _serial = crate::backend::clipboard_offer::X11_CLIPBOARD_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let clipboard = Clipboard::start(None).unwrap();
+        let x11 = crate::backend::clipboard_offer::IsolatedXvfb::acquire();
+        let clipboard = Clipboard::start(Some(x11.name())).unwrap();
         let image_sender = clipboard.image_sender();
         let started = std::time::Instant::now();
         drop(clipboard);
@@ -2466,17 +2455,15 @@ mod tests {
 
     #[cfg(all(feature = "backend-x11rb", feature = "remote-x11"))]
     #[test]
-    #[ignore = "requires an isolated X11 server in DISPLAY"]
     fn native_split_setter_keeps_serving_after_capture_half_drops() {
-        let _serial = crate::backend::clipboard_offer::X11_CLIPBOARD_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let clipboard = Clipboard::start(None).unwrap();
+        let x11 = crate::backend::clipboard_offer::IsolatedXvfb::acquire();
+        let display = x11.name();
+        let clipboard = Clipboard::start(Some(display)).unwrap();
         let (captures, setter) = clipboard.split();
         drop(captures);
         assert!(setter.set_text("setter survives"));
 
-        let (conn, screen_num) = x11rb::connect(None).unwrap();
+        let (conn, screen_num) = x11rb::connect(Some(display)).unwrap();
         let root = conn.setup().roots[screen_num].root;
         let selection = intern(&conn, "CLIPBOARD").unwrap();
         let utf8 = intern(&conn, "UTF8_STRING").unwrap();

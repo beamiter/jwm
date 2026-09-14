@@ -106,7 +106,11 @@ impl Drop for ClipboardWorkerLifetime {
 
 impl Clipboard {
     /// Start watching CLIPBOARD on a dedicated connection and thread.
-    pub(crate) fn start() -> Result<Self, String> {
+    ///
+    /// `display` selects the X server (same contract as the x11rb clipboard),
+    /// so tests can point at an isolated Xvfb without mutating `$DISPLAY`.
+    pub(crate) fn start(display: Option<&str>) -> Result<Self, String> {
+        let display = display.map(str::to_string);
         let (captured_tx, captured) = std::sync::mpsc::channel();
         let (serve, serve_rx) = std::sync::mpsc::channel();
         let (shutdown, shutdown_rx) = std::sync::mpsc::channel();
@@ -120,7 +124,7 @@ impl Clipboard {
         let join = std::thread::Builder::new()
             .name("jwm-clipboard".to_string())
             .spawn(move || {
-                match Watcher::new() {
+                match Watcher::new(display.as_deref()) {
                     Ok(mut watcher) => {
                         let _ = ready_tx.send(Ok(()));
                         watcher.run(
@@ -312,12 +316,12 @@ fn intern(conn: &Connection, name: &str) -> Result<Atom, String> {
 }
 
 impl Watcher {
-    fn new() -> Result<Self, String> {
+    fn new(display: Option<&str>) -> Result<Self, String> {
         // XFIXES has to be named at connect time: the crate resolves an
         // extension's event codes then, and an unlisted extension's events
         // arrive as unrecognized rather than as SelectionNotify.
         let (conn, screen_num) =
-            Connection::connect_with_extensions(None, &[], &[xcb::Extension::XFixes])
+            Connection::connect_with_extensions(display, &[], &[xcb::Extension::XFixes])
                 .map_err(|error| format!("clipboard connect: {error}"))?;
         let root = conn
             .get_setup()
@@ -1718,13 +1722,11 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires an isolated X11 server in DISPLAY"]
     fn native_png_offer_serves_payload_beyond_xclips_one_mib_cliff() {
-        let _serial = crate::backend::clipboard_offer::X11_CLIPBOARD_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let clipboard_owner = Clipboard::start().unwrap();
-        let (conn, screen_num) = Connection::connect(None).unwrap();
+        let x11 = crate::backend::clipboard_offer::IsolatedXvfb::acquire();
+        let display = x11.name();
+        let clipboard_owner = Clipboard::start(Some(display)).unwrap();
+        let (conn, screen_num) = Connection::connect(Some(display)).unwrap();
         let root = conn
             .get_setup()
             .roots()
@@ -1764,13 +1766,11 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires an isolated X11 server in DISPLAY"]
     fn native_owner_metadata_multiple_and_direct_round_trip() {
-        let _serial = crate::backend::clipboard_offer::X11_CLIPBOARD_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let clipboard_owner = Clipboard::start().unwrap();
-        let (conn, screen_num) = Connection::connect(None).unwrap();
+        let x11 = crate::backend::clipboard_offer::IsolatedXvfb::acquire();
+        let display = x11.name();
+        let clipboard_owner = Clipboard::start(Some(display)).unwrap();
+        let (conn, screen_num) = Connection::connect(Some(display)).unwrap();
         let root = conn
             .get_setup()
             .roots()
@@ -1959,13 +1959,11 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires an isolated X11 server in DISPLAY"]
     fn native_watcher_collects_and_drains_incoming_incr() {
-        let _serial = crate::backend::clipboard_offer::X11_CLIPBOARD_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let clipboard_watcher = Clipboard::start().unwrap();
-        let (conn, screen_num) = Connection::connect(None).unwrap();
+        let x11 = crate::backend::clipboard_offer::IsolatedXvfb::acquire();
+        let display = x11.name();
+        let clipboard_watcher = Clipboard::start(Some(display)).unwrap();
+        let (conn, screen_num) = Connection::connect(Some(display)).unwrap();
         let root = conn
             .get_setup()
             .roots()
@@ -2112,19 +2110,17 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires an isolated X11 server in DISPLAY"]
     fn native_owner_hands_text_to_clipboard_manager_on_drop() {
-        let _serial = crate::backend::clipboard_offer::X11_CLIPBOARD_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let clipboard_owner = Clipboard::start().unwrap();
+        let x11 = crate::backend::clipboard_offer::IsolatedXvfb::acquire();
+        let display = x11.name().to_string();
+        let clipboard_owner = Clipboard::start(Some(display.as_str())).unwrap();
         assert!(clipboard_owner.set_text("persist across restart"));
 
         let (manager_ready_tx, manager_ready_rx) = std::sync::mpsc::channel();
         let (saved_tx, saved_rx) = std::sync::mpsc::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
         let manager = std::thread::spawn(move || {
-            let (conn, screen_num) = Connection::connect(None).unwrap();
+            let (conn, screen_num) = Connection::connect(Some(display.as_str())).unwrap();
             let root = conn
                 .get_setup()
                 .roots()
@@ -2261,12 +2257,9 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires an isolated X11 server in DISPLAY"]
     fn native_worker_shutdown_does_not_wait_for_image_sender_clone() {
-        let _serial = crate::backend::clipboard_offer::X11_CLIPBOARD_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let clipboard = Clipboard::start().unwrap();
+        let x11 = crate::backend::clipboard_offer::IsolatedXvfb::acquire();
+        let clipboard = Clipboard::start(Some(x11.name())).unwrap();
         let image_sender = clipboard.image_sender();
         let started = std::time::Instant::now();
         drop(clipboard);
