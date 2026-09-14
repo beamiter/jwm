@@ -13,8 +13,9 @@ arrows never queue decodes — the latest highlight wins. The image is
 aspect-fit into a 480×360 frame and never upscaled, and on outputs too
 narrow to fit the frame the picker stays exactly the text list it always
 was. There is no placeholder or spinner: until the thumbnail lands — or if
-the file cannot be decoded — the picker looks unchanged, and clicks on the
-preview are inert.
+the file cannot be decoded — the picker looks unchanged. A click on the
+preview applies the highlighted wallpaper — the pointer twin of `Enter` —
+and closes the picker the same way a list-row click does.
 
 ## Which directory
 

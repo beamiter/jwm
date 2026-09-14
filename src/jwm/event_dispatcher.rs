@@ -540,6 +540,15 @@ impl WMController for Jwm {
                             }
                         }
                     }
+                    SystemUiHitTarget::Preview => {
+                        // Wallpaper side preview: apply the highlighted
+                        // candidate — the pointer twin of Enter. Other
+                        // panels never paint a preview, so the hit is a
+                        // no-op there.
+                        if self.features.system_ui.is_wallpaper_picker() {
+                            self.apply_selected_wallpaper(backend);
+                        }
+                    }
                     SystemUiHitTarget::Outside => {
                         self.dismiss_system_ui_from_pointer(backend);
                     }
@@ -3196,6 +3205,51 @@ mod tests {
         assert!(
             wifi_bt < hub,
             "Hub middle-click must sit after the picker forget arms"
+        );
+    }
+
+    /// Wallpaper side-preview left-click must apply the highlight through
+    /// `apply_selected_wallpaper` — the twin of Enter — never dismiss like
+    /// Outside and never pick a list row. Needles are built at runtime.
+    #[test]
+    fn wallpaper_preview_click_applies_the_highlight() {
+        const SOURCE: &str = include_str!("event_dispatcher.rs");
+        let compact: String = SOURCE.chars().filter(|c| !c.is_whitespace()).collect();
+
+        let press = compact
+            .split_once("fnon_button_press(")
+            .expect("on_button_press")
+            .1;
+        let system_ui = press
+            .split_once("ifself.features.system_ui.is_active(){")
+            .expect("the system-ui pointer branch")
+            .1
+            .split_once("//Annotationmode:")
+            .expect("the end of the system-ui pointer branch")
+            .0;
+
+        let preview = system_ui
+            .find("SystemUiHitTarget::Preview=>{")
+            .expect("Preview left-click arm");
+        let arm = &system_ui[preview..];
+        assert!(
+            arm.contains("is_wallpaper_picker()")
+                && arm.contains(&format!("{}(", "apply_selected_wallpaper")),
+            "Preview must apply only while the wallpaper picker is up"
+        );
+        assert!(
+            !arm[..arm.find("SystemUiHitTarget::Outside").unwrap_or(arm.len())]
+                .contains("dismiss_system_ui_from_pointer"),
+            "Preview must not dismiss like the scrim"
+        );
+        assert!(
+            system_ui.contains("SystemUiHitTarget::Outside=>{")
+                && system_ui.contains(&format!("{}(", "dismiss_system_ui_from_pointer")),
+            "Outside must still dismiss"
+        );
+        assert!(
+            system_ui.contains("SystemUiHitTarget::Panel|SystemUiHitTarget::Unavailable=>{}"),
+            "Panel chrome must stay inert"
         );
     }
 

@@ -426,6 +426,7 @@ impl WaylandCompositor {
             .map(|geometry| geometry.hit_test(x, y))
         {
             Some(Hit::Panel) => SystemUiHitTarget::Panel,
+            Some(Hit::Preview) => SystemUiHitTarget::Preview,
             Some(Hit::Item(row, text_x)) => SystemUiHitTarget::Item(row, text_x),
             Some(Hit::Outside) => SystemUiHitTarget::Outside,
             None => SystemUiHitTarget::Unavailable,

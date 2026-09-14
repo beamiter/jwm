@@ -1140,6 +1140,10 @@ pub enum SystemUiHitTarget {
     Outside,
     /// Inside the card, but not on a selectable list row.
     Panel,
+    /// The wallpaper side-preview thumbnail — apply the highlighted
+    /// candidate (pointer twin of Enter), without picking a list row or
+    /// dismissing like a scrim click.
+    Preview,
     /// A visible row in [`SystemUiOverlay::items`], with the pointer's x as
     /// an offset into the row's text texture (the card's padding removed,
     /// the rasterizer's margin kept) so a row can tell a press on its slider

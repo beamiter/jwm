@@ -3105,6 +3105,11 @@ impl Jwm {
                 } else {
                     self.commit_recording_capture_target(backend, target);
                 }
+            } else if button == MouseButton::Middle {
+                // Twin of Tab: cycle the capture target. Right-click still
+                // cancels (below).
+                self.features.capture.swallow_next_button_release();
+                self.cycle_recording_capture_target(backend, false);
             } else {
                 self.features.capture.swallow_next_button_release();
                 self.cancel_recording_region_interaction(backend);
@@ -3196,6 +3201,12 @@ impl Jwm {
                     backend.compositor_set_snap_preview(Some((x as f32, y as f32, 1.0, 1.0)));
                     backend.compositor_force_full_redraw();
                 }
+            } else if btn == MouseButton::Middle {
+                // Twin of Tab: cycle region/window/monitor/desktop. Right-
+                // click (and any other non-left) still cancels without
+                // leaking the release.
+                self.features.capture.swallow_next_button_release();
+                self.cycle_screenshot_capture_target(backend, false);
             } else {
                 // Right-click or other button → cancel without leaking the release.
                 self.features.capture.swallow_next_button_release();
@@ -5342,6 +5353,66 @@ mod tests {
         assert!(helper.contains(concat!("expose_plan::grid", "_index(&candidates,hit)")));
         assert!(helper.contains(concat!("expose_plan::plan", "_close_at(candidates,index)")));
         assert!(helper.contains(concat!("self.apply_expose", "_close(backend,action)")));
+    }
+
+    /// Screenshot / recording middle-click must cycle the capture target
+    /// (twin of Tab); right-click keeps cancel. Needles are built at
+    /// runtime so this cannot match its own source.
+    #[test]
+    fn middle_click_cycles_capture_target_instead_of_cancelling() {
+        const SOURCE: &str = include_str!("input_handler.rs");
+        let compact: String = SOURCE.chars().filter(|c| !c.is_whitespace()).collect();
+
+        let press = compact
+            .split_once(concat!("fnon_button_press", "_internal("))
+            .expect("the button-press handler")
+            .1;
+
+        let recording = press
+            .split_once("ifself.features.recording.selecting_region{")
+            .expect("the recording select branch")
+            .1
+            .split_once("ifself.features.screenshot.active{")
+            .expect("the end of the recording select branch")
+            .0;
+        assert!(
+            recording.contains("MouseButton::Middle")
+                && recording.contains(&format!("{}(", "cycle_recording_capture_target")),
+            "recording middle-click must cycle like Tab"
+        );
+        assert!(
+            recording.contains(&format!("{}(", "cancel_recording_region_interaction")),
+            "recording non-middle still cancels"
+        );
+
+        let screenshot = press
+            .split_once("ifself.features.screenshot.active{")
+            .expect("the screenshot select branch")
+            .1
+            .split_once("ifself.features.expose_active{")
+            .expect("the end of the screenshot select branch")
+            .0;
+        assert!(
+            screenshot.contains("MouseButton::Middle")
+                && screenshot.contains(&format!("{}(", "cycle_screenshot_capture_target")),
+            "screenshot middle-click must cycle like Tab"
+        );
+        assert!(
+            screenshot.contains(&format!("{}(", "cancel_screenshot_select")),
+            "screenshot right-click still cancels"
+        );
+        // Middle must not share the cancel call in its arm body.
+        let mid = screenshot
+            .find("MouseButton::Middle")
+            .expect("screenshot Middle arm");
+        let mid_arm = &screenshot[mid..];
+        let mid_end = mid_arm
+            .find("}else{")
+            .expect("screenshot Middle arm ends before the cancel else");
+        assert!(
+            !mid_arm[..mid_end].contains("cancel_screenshot_select"),
+            "screenshot middle-click must not cancel"
+        );
     }
 
     /// The expose Delete/BackSpace branch must close through the same call

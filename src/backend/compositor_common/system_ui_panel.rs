@@ -217,9 +217,9 @@ pub(crate) struct HitGeometry {
     /// The icon column the items text was shifted by, subtracted back out of a
     /// row's text offset.
     row_icons: f32,
-    /// The side preview's painted frame, when one is on screen. It is a dead
-    /// zone: a press there must do nothing — neither pick a row nor dismiss
-    /// the panel the way a scrim click would.
+    /// The side preview's painted frame, when one is on screen. A press there
+    /// applies the highlighted wallpaper (the pointer twin of Enter) rather
+    /// than picking a list row or dismissing like a scrim click.
     side_preview: Option<Rect>,
 }
 
@@ -227,6 +227,8 @@ pub(crate) struct HitGeometry {
 pub(crate) enum Hit {
     Outside,
     Panel,
+    /// The wallpaper side-preview card — apply, do not dismiss or pick a row.
+    Preview,
     /// The row, plus the pointer's x inside the list's text texture: the
     /// card's left padding removed, the rasterizer's own margin kept, so
     /// `compositor_font::measure_ui_text_width` numbers (pad included) line
@@ -270,7 +272,7 @@ impl HitGeometry {
         let y = y as f32;
         if !contains(self.panel, x, y) {
             return match self.side_preview {
-                Some(frame) if contains(frame, x, y) => Hit::Panel,
+                Some(frame) if contains(frame, x, y) => Hit::Preview,
                 _ => Hit::Outside,
             };
         }
@@ -918,7 +920,7 @@ mod tests {
     }
 
     #[test]
-    fn the_side_preview_is_a_dead_zone_that_never_moves_a_row() {
+    fn the_side_preview_applies_without_picking_a_row_or_dismissing() {
         let s = sizes((40.0, 24.0), (0.0, 0.0), (300.0, 204.0), (0.0, 0.0));
         let panel = [100.0, 50.0, 600.0, 400.0];
         let contents = contents(panel, &s, 10, Some(3), None);
@@ -929,12 +931,12 @@ mod tests {
         let bare = HitGeometry::new(panel, &contents, 10);
         let guarded = bare.with_side_preview(Some(frame));
 
-        // Inside the frame a press reads as panel body — inert — instead of
-        // the scrim's dismiss.
+        // Inside the frame a press reads as Preview — apply the highlight —
+        // instead of the scrim's dismiss or a list row.
         let cx = f64::from(frame[0] + frame[2] * 0.5);
         let cy = f64::from(frame[1] + frame[3] * 0.5);
         assert_eq!(bare.hit_test(cx, cy), Hit::Outside);
-        assert_eq!(guarded.hit_test(cx, cy), Hit::Panel);
+        assert_eq!(guarded.hit_test(cx, cy), Hit::Preview);
 
         // Every existing region is byte-identical with the zone attached.
         for (x, y) in [

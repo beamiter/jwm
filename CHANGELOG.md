@@ -7,6 +7,13 @@ monorepo use independent Semantic Versions.
 
 ### Added
 
+- Wallpaper side-preview click applies the highlighted candidate (pointer
+  twin of `Enter`). See [docs/wallpaper.md](docs/wallpaper.md).
+
+- Interactive screenshot and recording middle-click cycles the capture
+  target (pointer twin of `Tab`); right-click still cancels. See
+  [README.md](README.md).
+
 - Calendar clock-line click returns to today (pointer twin of `t` /
   `Home`). See [docs/calendar.md](docs/calendar.md).
 

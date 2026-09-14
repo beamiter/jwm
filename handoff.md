@@ -4,6 +4,20 @@
 
 ---
 
+## 2026-09-14：UI/UX 三十三轮（墙纸预览点击 apply、截图/录屏中键 cycle）
+
+选题 = 三十二轮开放已尽（仅剩两个 refuse pin）→ 另起两项 S：wallpaper preview apply ∥ capture middle-cycle。文件几乎不交（panel/api/backends/event_dispatcher vs input_handler）。拒做：`set_audio_device` sync→queued（源 pin）、X11 `compositor_frame_deadline`（20ms idle 政策 pin）、Hub DND/Caffeine/NightLight 中键。
+
+1. **墙纸预览点击 apply**。`Hit::Preview` / `SystemUiHitTarget::Preview`；side_preview 命中不再当 Panel dead zone；button 1 → `apply_selected_wallpaper`（仅 wallpaper picker）。docs/wallpaper.md。
+
+2. **截图/录屏中键 cycle**。interactive select 时 Middle → `cycle_*_capture_target`（Tab twin）；Right 仍 cancel。README.md。
+
+**验证**：clippy -D warnings（0）；lib **3299 passed / 0 failed / 11 ignored**（3297→+2）。**无真机显示会话**。真机优先：墙纸预览点一下 apply；截图中键切换 G/W/M/D。
+
+**仍然开着的**（三十四轮）：`set_audio_device` sync；X11 `compositor_frame_deadline`。**成文勿再提**：……（继承三十二轮）+ 墙纸预览点击 inert（本轮关闭）+ 截图中键 cancel（本轮关闭）。
+
+---
+
 ## 2026-09-14：UI/UX 三十二轮（日历 clock→today、Hub Network/BT 中键切无线电）
 
 选题 = 三十一轮开放已尽（仅剩两个 refuse pin）→ 另起两项 S：calendar clock→today ∥ Hub Network/BT middle radio。文件几乎不交（calendar/system_ui vs event_dispatcher）。拒做：`set_audio_device` sync→queued（源 pin）、X11 `compositor_frame_deadline`（20ms idle 政策 pin）、Hub DND/Caffeine/NightLight 中键。
