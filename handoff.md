@@ -4,6 +4,20 @@
 
 ---
 
+## 2026-09-14：UI/UX 三十二轮（日历 clock→today、Hub Network/BT 中键切无线电）
+
+选题 = 三十一轮开放已尽（仅剩两个 refuse pin）→ 另起两项 S：calendar clock→today ∥ Hub Network/BT middle radio。文件几乎不交（calendar/system_ui vs event_dispatcher）。拒做：`set_audio_device` sync→queued（源 pin）、X11 `compositor_frame_deadline`（20ms idle 政策 pin）、Hub DND/Caffeine/NightLight 中键。
+
+1. **日历 clock → today**。`click_action` 行 0 → `Today`（整行，不依赖字宽）；blank 仍 None。hint 加 `click clock  today`。docs/calendar.md。
+
+2. **Hub Network/BT 中键切无线电**。button 2 门扩到 `Volume|AudioInput|Network|Bluetooth`；mute 行 `KEY_m`，连通性行 `KEY_Left`（BT 关仍走 `activate_control` 两按）。Brightness 等 inert。docs/control-center.md。
+
+**验证**：clippy -D warnings（0）；lib **3297 passed / 0 failed / 11 ignored**（3294→+3）。**无真机显示会话**。真机优先：日历点时钟行回今天；Hub Network/BT 中键切无线电。
+
+**仍然开着的**（三十三轮）：`set_audio_device` sync；X11 `compositor_frame_deadline`。**成文勿再提**：……（继承三十一轮）+ 日历 year/month 有指针 twin 但 today 仅键盘/今天格（本轮关闭）+ Hub Network/BT 中键 inert（本轮关闭）。
+
+---
+
 ## 2026-09-14：UI/UX 三十一轮（Hub Input 中键 mute、日历 weekday 两侧翻年）
 
 选题 = 三十轮开放已尽（仅剩两个 refuse pin）→ 另起两项 S：Input middle-mute ∥ calendar year click。文件几乎不交（event_dispatcher vs calendar/input_handler/system_ui）。拒做：`set_audio_device` sync→queued（源 pin）、X11 `compositor_frame_deadline`（20ms idle 政策 pin）、Hub DND/Caffeine/NightLight 中键（会抢同一 button-2 臂）。

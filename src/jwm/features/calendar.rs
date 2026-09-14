@@ -166,6 +166,9 @@ pub enum CalendarClick {
 ///
 /// * The overlay's rows are fixed: 0 is the clock line, 1 is blank, 2 the
 ///   weekday header, and 3 on are the week rows.
+/// * A click anywhere on the clock line returns to the month containing
+///   today — the pointer twin of `t` / `Home` (useful when today's cell is
+///   not on the grid because the view has paged away).
 /// * On the weekday header the same seven 4-column cells apply: the left
 ///   three (`Mo`–`We`) step a year back and the right three (`Fr`–`Su`)
 ///   step a year forward — the pointer twin of `Up`/`Down`. The middle
@@ -176,10 +179,10 @@ pub enum CalendarClick {
 ///   past the month's end — drawn or not — steps a month forward; a click
 ///   on today's own cell returns the view to the current month, mirroring
 ///   the `t` key.
-/// * Everything else — real day cells, the clock, the blank row, the
-///   header's middle cell, the texture's margins, anywhere past the grid —
-///   is [`CalendarClick::None`], and the press keeps being the no-op a
-///   click on the card always was.
+/// * Everything else — real day cells, the blank row, the header's middle
+///   cell, the texture's margins, anywhere past the grid — is
+///   [`CalendarClick::None`], and the press keeps being the no-op a click
+///   on the card always was.
 ///
 /// `char_width_px` is the measured advance of one glyph in the panel's
 /// monospace font (the caller measures; this stays backend-free), and the
@@ -191,7 +194,15 @@ pub fn click_action(
     char_width_px: f32,
     view: &CalendarView,
 ) -> CalendarClick {
-    // A width that cannot measure names nothing on any row.
+    // Clock line: twin of t / Home — whole row, no cell math.
+    if visual_row == 0 {
+        return CalendarClick::Today;
+    }
+    // Blank row stays inert.
+    if visual_row == 1 {
+        return CalendarClick::None;
+    }
+    // A width that cannot measure names nothing on header/week rows.
     if !char_width_px.is_finite() || char_width_px <= 0.0 {
         return CalendarClick::None;
     }
@@ -205,7 +216,7 @@ pub fn click_action(
     }
 
     // Weekday header: left three cells previous year, right three next —
-    // the pointer twin of Up/Down. Clock and blank stay inert.
+    // the pointer twin of Up/Down.
     if visual_row == 2 {
         return match cell {
             0..=2 => CalendarClick::PrevYear,
@@ -469,21 +480,36 @@ mod tests {
         // leading the third.
         assert_eq!(click_action(3, cell_x(2), 12.0, &view), CalendarClick::None);
         assert_eq!(click_action(5, cell_x(0), 12.0, &view), CalendarClick::None);
-        // The clock and blank row never answer, wherever on them the press
-        // lands. The weekday header's middle cell (`Th`) stays inert too.
-        for row in 0..=1 {
-            assert_eq!(
-                click_action(row, cell_x(0), 12.0, &view),
-                CalendarClick::None
-            );
-            assert_eq!(
-                click_action(row, cell_x(3), 12.0, &view),
-                CalendarClick::None
-            );
-        }
+        // The blank row never answers. The weekday header's middle cell
+        // (`Th`) stays inert too.
+        assert_eq!(
+            click_action(1, cell_x(0), 12.0, &view),
+            CalendarClick::None
+        );
+        assert_eq!(
+            click_action(1, cell_x(3), 12.0, &view),
+            CalendarClick::None
+        );
         assert_eq!(
             click_action(2, cell_x(3), 12.0, &view),
             CalendarClick::None
+        );
+    }
+
+    #[test]
+    fn clock_line_returns_to_today() {
+        let mut view = CalendarView::new(date(2026, 7, 27));
+        view.shift_month(5);
+        view.shift_year(1);
+        assert_ne!((view.year, view.month), (2026, 7));
+        // Whole clock row — twin of t — even with an unmeasurable width.
+        assert_eq!(
+            click_action(0, cell_x(0), 12.0, &view),
+            CalendarClick::Today
+        );
+        assert_eq!(
+            click_action(0, cell_x(3), 0.0, &view),
+            CalendarClick::Today
         );
     }
 

@@ -4176,7 +4176,7 @@ impl SystemUiState {
                     items,
                     icons: None,
                     selected: None,
-                    hint: "\u{f060}/\u{f061}  month    \u{f062}/\u{f063}  year    t  today    click edge days  month    click weekday sides  year    Esc  close"
+                    hint: "\u{f060}/\u{f061}  month    \u{f062}/\u{f063}  year    t  today    click edge days  month    click weekday sides  year    click clock  today    Esc  close"
                         .into(),
                     scroll: None,
                 }
@@ -7940,6 +7940,11 @@ mod tests {
         );
         assert!(
             parts.hint.contains("click weekday sides  year"),
+            "{}",
+            parts.hint
+        );
+        assert!(
+            parts.hint.contains("click clock  today"),
             "{}",
             parts.hint
         );

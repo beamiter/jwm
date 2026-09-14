@@ -18,9 +18,10 @@ the next, and a click on today's bracketed cell returns to the current
 month, the pointer counterparts of `Left`/`Right` and `t`. The weekday
 header's left three cells (`Mo`–`We`) step a year back and the right three
 (`Fr`–`Su`) step a year forward — the pointer twin of `Up`/`Down`; the
-middle (`Th`) stays inert. Clicks on ordinary days, the clock line and the
-blank row remain no-ops. The footer hint advertises the gesture:
-`←/→  month    ↑/↓  year    t  today    click edge days  month    click weekday sides  year    Esc  close`.
+middle (`Th`) stays inert. A click on the clock line returns to the month
+containing today — the pointer twin of `t` / `Home`. Clicks on ordinary
+days and the blank row remain no-ops. The footer hint advertises the gesture:
+`←/→  month    ↑/↓  year    t  today    click edge days  month    click weekday sides  year    click clock  today    Esc  close`.
 
 Weeks start on Monday (the ISO week). Today is only bracketed in its own
 month, so paging away makes it clear you are looking somewhere else.

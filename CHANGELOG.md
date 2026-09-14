@@ -7,6 +7,13 @@ monorepo use independent Semantic Versions.
 
 ### Added
 
+- Calendar clock-line click returns to today (pointer twin of `t` /
+  `Home`). See [docs/calendar.md](docs/calendar.md).
+
+- Control-center Network and Bluetooth middle-click toggle the radio
+  (same path as `Left`/`Right`; Bluetooth power-off still arms). See
+  [docs/control-center.md](docs/control-center.md).
+
 - Control-center Input middle-click mutes the microphone on the pointed row
   (same path as `m`); Volume middle-click mute is unchanged. Other Hub rows
   and blank stay inert. See

@@ -552,9 +552,11 @@ impl WMController for Jwm {
                 // stay inert while a passphrase or pairing prompt owns the
                 // surface. Hub Volume and Input middle-click mute (the twin of
                 // `m` — Volume also of Enter, ignoring the slider bar so it
-                // never seeks); every other Hub row stays inert. Blank is
-                // inert on every picker; the notification action strip stays
-                // left-only (middle-click there is a miss).
+                // never seeks); Network and Bluetooth middle-click toggle the
+                // radio (the twin of Left/Right — BT power-off still arms);
+                // every other Hub row stays inert. Blank is inert on every
+                // picker; the notification action strip stays left-only
+                // (middle-click there is a miss).
                 2 if self.features.system_ui.is_clipboard_picker() => {
                     if let SystemUiHitTarget::Item(row, _) = hit
                         && self.features.system_ui.select_visible_row(row).is_some()
@@ -594,13 +596,23 @@ impl WMController for Jwm {
                     if let SystemUiHitTarget::Item(row, _) = hit
                         && let Some(kind) =
                             self.features.system_ui.control_at_visible_row(row)
-                        && matches!(kind, ControlKind::Volume | ControlKind::AudioInput)
+                        && matches!(
+                            kind,
+                            ControlKind::Volume
+                                | ControlKind::AudioInput
+                                | ControlKind::Network
+                                | ControlKind::Bluetooth
+                        )
                         && self.features.system_ui.select_visible_row(row).is_some()
                     {
+                        let keysym = match kind {
+                            ControlKind::Network | ControlKind::Bluetooth => keys::KEY_Left,
+                            _ => keys::KEY_m,
+                        };
                         self.handle_control_center_key(
                             backend,
                             kind,
-                            keys::KEY_m,
+                            keysym,
                             Mods::empty(),
                         );
                     }
@@ -3111,12 +3123,13 @@ mod tests {
         );
     }
 
-    /// Hub Volume / Input button 2 must select the pointed row and mute
-    /// through `handle_control_center_key(..., KEY_m)` — the twin of `m`
-    /// (Volume also of Enter) — never Return (slider seek / open picker).
-    /// Needles are built at runtime so this cannot match its own source.
+    /// Hub Volume / Input / Network / Bluetooth button 2 must select the
+    /// pointed row and share the keyboard path — `KEY_m` for mute rows,
+    /// `KEY_Left` for connectivity radios — never Return (slider seek /
+    /// open picker). Needles are built at runtime so this cannot match its
+    /// own source.
     #[test]
-    fn control_center_volume_and_input_middle_click_route_through_m() {
+    fn control_center_hub_middle_click_routes_mute_and_radio() {
         const SOURCE: &str = include_str!("event_dispatcher.rs");
         let compact: String = SOURCE.chars().filter(|c| !c.is_whitespace()).collect();
 
@@ -3140,19 +3153,22 @@ mod tests {
         );
         assert!(
             system_ui.contains(arm),
-            "Hub mute middle-click must gate on the Hub and an Item hit"
+            "Hub middle-click must gate on the Hub and an Item hit"
         );
         assert!(
-            system_ui.contains("ControlKind::Volume|ControlKind::AudioInput"),
-            "middle-click must mute Volume and Input only"
+            system_ui.contains("ControlKind::Volume")
+                && system_ui.contains("ControlKind::AudioInput")
+                && system_ui.contains("ControlKind::Network")
+                && system_ui.contains("ControlKind::Bluetooth"),
+            "middle-click must cover mute and radio Hub rows"
         );
         assert!(
             system_ui.contains("select_visible_row(row)"),
-            "middle-click must select the pointed row before muting"
+            "middle-click must select the pointed row before acting"
         );
         assert!(
             system_ui.contains(&format!("{}(", "handle_control_center_key")),
-            "middle-click must share the keyboard mute path"
+            "middle-click must share the keyboard path"
         );
 
         let wifi_bt = system_ui
@@ -3160,26 +3176,26 @@ mod tests {
             .expect("Wi-Fi/BT middle-click arm");
         let hub = system_ui
             .find("2ifself.features.system_ui.is_control_center()")
-            .expect("Hub mute middle-click arm");
+            .expect("Hub middle-click arm");
         let catch_all = system_ui[hub..]
             .find("_=>{}")
             .expect("the middle-click catch-all");
         let arm_body = &system_ui[hub..hub + catch_all];
         assert!(
-            arm_body.contains("keys::KEY_m"),
-            "middle-click must mute with m, not Return"
+            arm_body.contains("keys::KEY_m") && arm_body.contains("keys::KEY_Left"),
+            "middle-click must mute with m and toggle radios with Left"
         );
         assert!(
             !arm_body.contains("KEY_Return") && !arm_body.contains("KEY_space"),
             "middle-click must not replay Enter (slider seek / open picker)"
         );
         assert!(
-            !arm_body.contains("toggle_mic_mute"),
-            "middle-click must reach mic mute through KEY_m, not call toggle_mic_mute directly"
+            !arm_body.contains("toggle_mic_mute") && !arm_body.contains("request_radio_set"),
+            "middle-click must reach mute/radio through the key path, not call helpers directly"
         );
         assert!(
             wifi_bt < hub,
-            "Hub mute must sit after the picker forget arms"
+            "Hub middle-click must sit after the picker forget arms"
         );
     }
 
@@ -3681,7 +3697,104 @@ mod tests {
     }
 
     #[test]
-    fn middle_click_on_a_non_mute_hub_row_is_inert() {
+    fn middle_click_on_the_network_row_selects_and_toggles_like_left() {
+        use crate::jwm::features::{ControlCenterInputs, ControlKind, LinkKind, SystemUiState};
+
+        let mut jwm = empty_jwm();
+        let mut backend = RenderSpyBackend::new();
+        let network = crate::jwm::features::NetworkState {
+            wifi_enabled: true,
+            connection: Some("ENGINEAI".into()),
+            kind: LinkKind::Wireless,
+            signal: Some(72),
+        };
+        jwm.features.connectivity.network = Some(network.clone());
+        jwm.features.system_ui = SystemUiState::control_center(&ControlCenterInputs {
+            volume: Some((45, false)),
+            brightness: Some(60),
+            network: Some(&network),
+            ..Default::default()
+        });
+        let network_row = (0..32)
+            .find(|row| {
+                jwm.features.system_ui.control_at_visible_row(*row) == Some(ControlKind::Network)
+            })
+            .expect("Network row");
+        assert_eq!(
+            jwm.features.system_ui.selected_control(),
+            Some(ControlKind::Volume)
+        );
+
+        backend.system_ui_hit = SystemUiHitTarget::Item(network_row, 0.0);
+        <Jwm as WMController>::on_button_press(
+            &mut jwm,
+            &mut backend,
+            HitTarget::Background { output: None },
+            0,
+            2,
+            0,
+        );
+        assert_eq!(
+            jwm.features.system_ui.selected_control(),
+            Some(ControlKind::Network),
+            "middle-click selects the Network row before toggling"
+        );
+        assert!(
+            jwm.features.system_ui.is_control_center(),
+            "radio toggle keeps the Hub open"
+        );
+    }
+
+    #[test]
+    fn middle_click_on_the_bluetooth_row_selects_like_left() {
+        use crate::jwm::features::{ControlCenterInputs, ControlKind, SystemUiState};
+
+        let mut jwm = empty_jwm();
+        let mut backend = RenderSpyBackend::new();
+        let bluetooth = crate::jwm::features::BluetoothState {
+            present: true,
+            powered: true,
+        };
+        jwm.features.connectivity.bluetooth = bluetooth;
+        jwm.features.system_ui = SystemUiState::control_center(&ControlCenterInputs {
+            volume: Some((45, false)),
+            brightness: Some(60),
+            bluetooth: Some(&bluetooth),
+            ..Default::default()
+        });
+        let bluetooth_row = (0..32)
+            .find(|row| {
+                jwm.features.system_ui.control_at_visible_row(*row)
+                    == Some(ControlKind::Bluetooth)
+            })
+            .expect("Bluetooth row");
+        assert_eq!(
+            jwm.features.system_ui.selected_control(),
+            Some(ControlKind::Volume)
+        );
+
+        backend.system_ui_hit = SystemUiHitTarget::Item(bluetooth_row, 0.0);
+        <Jwm as WMController>::on_button_press(
+            &mut jwm,
+            &mut backend,
+            HitTarget::Background { output: None },
+            0,
+            2,
+            0,
+        );
+        assert_eq!(
+            jwm.features.system_ui.selected_control(),
+            Some(ControlKind::Bluetooth),
+            "middle-click selects the Bluetooth row before arming/toggling"
+        );
+        assert!(
+            jwm.features.system_ui.is_control_center(),
+            "BT power path keeps the Hub open"
+        );
+    }
+
+    #[test]
+    fn middle_click_on_a_non_hub_action_row_is_inert() {
         use crate::jwm::features::{ControlCenterInputs, ControlKind, SystemUiState};
 
         let mut jwm = empty_jwm();
@@ -3713,7 +3826,7 @@ mod tests {
         assert_eq!(
             jwm.features.system_ui.selected_control(),
             Some(ControlKind::Volume),
-            "Brightness (and other non-mute Hub rows) stay inert"
+            "Brightness (and other non-mute/non-radio Hub rows) stay inert"
         );
     }
 
