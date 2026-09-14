@@ -670,18 +670,79 @@ mod secondary_bar_child_tests {
         drop(notifier);
     }
 
+    /// Owns a spawned test child and guarantees it never outlives the test:
+    /// the child is killed with SIGKILL and reaped on drop, including when
+    /// the test panics before reaching its own cleanup.
+    struct ReapOnDrop(Child);
+
+    impl Drop for ReapOnDrop {
+        fn drop(&mut self) {
+            if matches!(self.0.try_wait(), Ok(Some(_))) {
+                return;
+            }
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    /// Spawns a shell that ignores SIGTERM and burns CPU, mimicking a bar
+    /// that refuses a polite shutdown. The loop is bounded by an iteration
+    /// count (a few seconds on any machine; `$SECONDS` is not POSIX and
+    /// `/bin/sh` is often dash) and the kernel delivers SIGKILL if the test
+    /// process dies first, so a panic, an interrupted harness or a sandbox
+    /// that denies `kill()` can never leave a runaway `sh` behind.
+    ///
+    /// The child prints `ready` once the trap is installed and this function
+    /// waits for it, so the caller's SIGTERM cannot race ahead of the trap
+    /// (which would silently test the polite path instead of the escalation).
+    fn spawn_stubborn_child() -> ReapOnDrop {
+        let mut command = Command::new("/bin/sh");
+        command
+            .args([
+                "-c",
+                "trap '' TERM; echo ready; i=0; while [ \"$i\" -lt 5000000 ]; do i=$((i + 1)); done",
+            ])
+            .stdout(Stdio::piped());
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::process::CommandExt;
+            // SAFETY: `prctl` is async-signal-safe and only touches the
+            // forked child's own process state before `exec`.
+            unsafe {
+                command.pre_exec(|| {
+                    if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
+                        return Err(io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
+        }
+        let mut child = ReapOnDrop(command.spawn().expect("spawn stubborn child"));
+        let mut stdout = child.0.stdout.take().expect("piped stdout");
+        let mut ready = [0u8; 6];
+        std::io::Read::read_exact(&mut stdout, &mut ready).expect("child readiness");
+        assert_eq!(&ready, b"ready\n");
+        child
+    }
+
     #[test]
     fn terminate_secondary_bar_child_reaps_forced_exit() {
-        let mut child = Command::new("/bin/sh")
-            .args(["-c", "trap '' TERM; while :; do :; done"])
-            .spawn()
-            .expect("spawn stubborn child");
+        let mut child = spawn_stubborn_child();
 
-        let status = terminate_secondary_bar_child(&mut child, Duration::from_millis(20))
+        let status = terminate_secondary_bar_child(&mut child.0, Duration::from_millis(20))
             .expect("terminate and reap child");
 
         assert!(!status.success());
-        assert_eq!(child.try_wait().expect("query cached status"), Some(status));
+        // The child must have been forced out, not have exited on its own:
+        // that proves the SIGTERM -> SIGKILL escalation actually ran.
+        assert_eq!(
+            std::os::unix::process::ExitStatusExt::signal(&status),
+            Some(libc::SIGKILL)
+        );
+        assert_eq!(
+            child.0.try_wait().expect("query cached status"),
+            Some(status)
+        );
     }
 
     #[test]

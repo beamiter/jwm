@@ -1,0 +1,31 @@
+---
+description: How to run and interpret tests in jwm (avoid leaking child processes)
+alwaysApply: true
+---
+
+# Running tests
+
+- Run the suite through `scripts/test.sh` (e.g. `scripts/test.sh --lib`,
+  `scripts/test.sh --lib -- some_test_name`). Do NOT invoke bare `cargo test`.
+  The wrapper runs cargo in its own process group, kills the whole group on
+  exit and sweeps leaked test children.
+- Never `kill` / `pkill` a running `cargo test` or test binary to "speed things
+  up". Wait for it, or wrap the call in `timeout` from the start. Killing the
+  harness orphans the subprocesses spawned by process-management tests.
+- Several tests deliberately spawn real subprocesses (`sleep`, `cat`, a shell
+  that ignores SIGTERM) to exercise terminate/reap logic.
+
+# Sandbox failures are not code bugs
+
+- If tests fail with `Permission denied` / `EPERM` from `kill`, or messages
+  like `survived its process group`, `process_alive(...)` assertion failures,
+  or `scripts/test.sh` exits with code 2, the environment (Cursor's terminal
+  sandbox) is blocking signals. This is NOT a defect in the code.
+- In that case: stop, do not edit source to "fix" the failure, and tell the
+  user the tests must be re-run outside the sandbox.
+
+# After every test run
+
+- Check for stragglers: `pgrep -af "trap '' TERM"` and
+  `pgrep -af "deps/jwm-"`. If anything is left, `kill -KILL` it and mention it
+  to the user.
