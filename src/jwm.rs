@@ -2191,7 +2191,7 @@ impl Jwm {
         self.prepare_system_ui(
             backend,
             "keybinding viewer",
-            crate::jwm::features::toggles::SystemUiPointerGrab::None,
+            crate::jwm::features::toggles::SystemUiPointerGrab::Buttons,
         )?;
         self.features.system_ui =
             crate::jwm::features::SystemUiState::info("JWM KEYBINDINGS", lines);

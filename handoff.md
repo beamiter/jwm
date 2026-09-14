@@ -4,6 +4,20 @@
 
 ---
 
+## 2026-09-14：UI/UX 三十四轮（layout 右键 cancel、快捷键面板指针 dismiss）
+
+选题 = 三十三轮开放已尽（仅剩两个 refuse pin）→ 另起两项 S：layout right-cancel ∥ keybindings pointer grab。文件几乎不交（event_dispatcher/layout docs vs jwm.rs/toggles/system_ui）。拒做：`set_audio_device` sync→queued（源 pin）、X11 `compositor_frame_deadline`（20ms idle 政策 pin）、Hub DND/Caffeine/NightLight 中键。
+
+1. **Layout picker 右键 cancel**。button 3 → `cancel_layout_picker`（Esc twin）；button 1 仍 `click_layout_picker`；middle inert（不再 `_ => commit`）。hint/docs。
+
+2. **Keybinding viewer 指针 grab + 外侧 dismiss**。`SystemUiPointerGrab::Buttons`；Outside → `dismiss_system_ui_from_pointer`；Info 行点击本就 inert。hint 加 `click outside  close`。
+
+**验证**：clippy -D warnings（0）；lib **3303 passed / 0 failed / 11 ignored**（3299→+4）。**无真机显示会话**。真机优先：Alt+Space 浏览后右键还原；Alt+Shift+/ 点外侧关闭。
+
+**仍然开着的**（三十五轮）：`set_audio_device` sync；X11 `compositor_frame_deadline`。**成文勿再提**：……（继承三十三轮）+ layout 非滚轮全 commit（本轮关闭）+ keybindings 无指针 grab/点穿（本轮关闭）。
+
+---
+
 ## 2026-09-14：UI/UX 三十三轮（墙纸预览点击 apply、截图/录屏中键 cycle）
 
 选题 = 三十二轮开放已尽（仅剩两个 refuse pin）→ 另起两项 S：wallpaper preview apply ∥ capture middle-cycle。文件几乎不交（panel/api/backends/event_dispatcher vs input_handler）。拒做：`set_audio_device` sync→queued（源 pin）、X11 `compositor_frame_deadline`（20ms idle 政策 pin）、Hub DND/Caffeine/NightLight 中键。

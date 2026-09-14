@@ -24,7 +24,7 @@ treated as if it began at `(0, 0)`.
     │  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  │
     │                     |M|  Centered Master                      │
     │  ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁                                   │
-    │  ←/→ browse    Enter / click  apply    Esc  cancel            │
+    │  ←/→ browse    Enter / click  apply    Esc / right-click  cancel            │
     └───────────────────────────────────────────────────────────────┘
 ```
 
@@ -43,11 +43,11 @@ the windows are already doing, and confirming only takes the panel down.
 | `Enter` | apply the highlighted layout |
 | click | apply the layout under the pointer, or the highlighted one |
 | wait | after 2.6 s without interaction, the highlighted layout stands |
-| `Esc` | cancel, restoring the layout the picker opened on |
+| `Esc` / right-click | cancel, restoring the layout the picker opened on |
 
-Anything that moves the selection — a key, the wheel, the pointer crossing into
-another cell — restarts the delay. Someone still driving the picker has not
-finished choosing.
+Middle-click is inert. Anything that moves the selection — a key, the wheel,
+the pointer crossing into another cell — restarts the delay. Someone still
+driving the picker has not finished choosing.
 
 Inside the picker: `←`/`→`, `↑`/`↓`, `Tab`/`Shift+Tab` and the wheel browse;
 `Space` steps forward and `Shift+Space` back, so holding `Alt` and tapping

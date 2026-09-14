@@ -7,6 +7,13 @@ monorepo use independent Semantic Versions.
 
 ### Added
 
+- Layout picker right-click cancels and restores the origin layout (pointer
+  twin of `Esc`); middle-click stays inert. See
+  [docs/layout-picker.md](docs/layout-picker.md).
+
+- Keybinding viewer takes a pointer grab; click outside dismisses like
+  `Esc`. See [README.md](README.md).
+
 - Wallpaper side-preview click applies the highlighted candidate (pointer
   twin of `Enter`). See [docs/wallpaper.md](docs/wallpaper.md).
 

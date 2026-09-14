@@ -474,7 +474,12 @@ impl WMController for Jwm {
                 5 => {
                     let _ = self.layout_picker(backend, &WMArgEnum::Int(1));
                 }
-                _ => self.click_layout_picker(backend, x, y),
+                // Right-click: Esc twin — restore the origin layout.
+                3 => self.cancel_layout_picker(backend),
+                // Left-click: apply under the pointer (or the highlight).
+                1 => self.click_layout_picker(backend, x, y),
+                // Middle stays inert (never commits a browsed layout by accident).
+                _ => {}
             }
             return;
         }
@@ -4109,11 +4114,9 @@ mod tests {
     }
 
     #[test]
-    fn taking_over_from_a_keyboard_only_panel_still_takes_the_pointer() {
-        // The keybinding viewer is the one panel opened without a pointer
-        // grab. A panel inheriting its grabs would be modal for the keyboard
-        // and transparent to the mouse, so clicks would land on the windows
-        // underneath it.
+    fn the_keybinding_viewer_grabs_the_pointer_like_other_panels() {
+        // Outside-click dismiss needs the grab; without it presses fall
+        // through to the windows under the card.
         let mut jwm = empty_jwm();
         let mut backend = RenderSpyBackend::new();
 
@@ -4121,23 +4124,49 @@ mod tests {
             .unwrap();
         assert_eq!(
             backend.input_ops.pointer_grabs.load(AtomicOrdering::SeqCst),
-            0
+            1,
+            "the keybinding viewer must take the pointer"
         );
 
         jwm.calendar(&mut backend, &WMArgEnum::Int(0)).unwrap();
         assert!(jwm.features.system_ui.is_calendar());
         assert_eq!(
             backend.input_ops.pointer_grabs.load(AtomicOrdering::SeqCst),
-            1,
-            "the incoming panel never took the pointer"
+            2,
+            "take-over re-grabs rather than inheriting a missing grab"
         );
-        // ... and it was taken without the screen ever being un-grabbed.
+        // Hand-over must not flap: no ungrab between the two panels.
         assert_eq!(
             backend
                 .input_ops
                 .pointer_ungrabs
                 .load(AtomicOrdering::SeqCst),
             0
+        );
+    }
+
+    #[test]
+    fn clicking_outside_the_keybinding_viewer_closes_it() {
+        use crate::backend::api::SystemUiHitTarget;
+
+        let mut jwm = empty_jwm();
+        let mut backend = RenderSpyBackend::new();
+        jwm.show_keybindings(&mut backend, &WMArgEnum::Int(0))
+            .unwrap();
+        assert!(jwm.features.system_ui.is_active());
+
+        backend.system_ui_hit = SystemUiHitTarget::Outside;
+        <Jwm as WMController>::on_button_press(
+            &mut jwm,
+            &mut backend,
+            HitTarget::Background { output: None },
+            0,
+            1,
+            0,
+        );
+        assert!(
+            !jwm.features.system_ui.is_active(),
+            "outside click is the pointer twin of Esc"
         );
     }
 
@@ -5589,6 +5618,93 @@ mod tests {
 
         assert!(!jwm.features.system_ui.is_active());
         assert_eq!(current_layout(&jwm), start);
+    }
+
+    #[test]
+    fn right_click_cancels_the_layout_picker_like_esc() {
+        let mut jwm = jwm_with_monitor();
+        let mut backend = RenderSpyBackend::new();
+        let start = current_layout(&jwm);
+
+        jwm.cyclelayout(&mut backend, &WMArgEnum::Int(1)).unwrap();
+        jwm.cyclelayout(&mut backend, &WMArgEnum::Int(1)).unwrap();
+        assert_ne!(current_layout(&jwm), start);
+
+        <Jwm as WMController>::on_button_press(
+            &mut jwm,
+            &mut backend,
+            HitTarget::Background { output: None },
+            0,
+            3,
+            0,
+        );
+
+        assert!(!jwm.features.system_ui.is_active());
+        assert_eq!(
+            current_layout(&jwm),
+            start,
+            "right-click restores the origin layout"
+        );
+    }
+
+    #[test]
+    fn middle_click_on_the_layout_picker_is_inert() {
+        let mut jwm = jwm_with_monitor();
+        let mut backend = RenderSpyBackend::new();
+        let after_open = {
+            jwm.cyclelayout(&mut backend, &WMArgEnum::Int(1)).unwrap();
+            current_layout(&jwm)
+        };
+
+        <Jwm as WMController>::on_button_press(
+            &mut jwm,
+            &mut backend,
+            HitTarget::Background { output: None },
+            0,
+            2,
+            0,
+        );
+
+        assert!(
+            jwm.features.system_ui.is_layout_picker(),
+            "middle-click must not commit"
+        );
+        assert_eq!(current_layout(&jwm), after_open);
+    }
+
+    /// Layout-picker button 3 must cancel (Esc twin); button 1 still
+    /// commits; the old catch-all `_ => click_layout_picker` must not
+    /// swallow right-click. Needles are built at runtime.
+    #[test]
+    fn layout_picker_right_click_routes_through_cancel() {
+        const SOURCE: &str = include_str!("event_dispatcher.rs");
+        let compact: String = SOURCE.chars().filter(|c| !c.is_whitespace()).collect();
+
+        let press = compact
+            .split_once("fnon_button_press(")
+            .expect("on_button_press")
+            .1;
+        let arm = press
+            .split_once("ifself.features.system_ui.is_layout_picker(){")
+            .expect("layout picker pointer branch")
+            .1
+            .split_once("ifself.features.system_ui.is_tags_overview(){")
+            .expect("end of layout picker branch")
+            .0;
+        assert!(
+            arm.contains("3=>self.cancel_layout_picker(backend)")
+                || arm.contains(&format!("{}(", "cancel_layout_picker")),
+            "right-click must cancel"
+        );
+        assert!(
+            arm.contains("1=>self.click_layout_picker(backend,x,y)")
+                || arm.contains(&format!("{}(", "click_layout_picker")),
+            "left-click must still commit"
+        );
+        assert!(
+            !arm.contains("_=>self.click_layout_picker"),
+            "the catch-all must no longer commit on every non-wheel button"
+        );
     }
 
     #[test]

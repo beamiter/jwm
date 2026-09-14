@@ -3759,7 +3759,7 @@ impl SystemUiState {
                     items: vec![format!("{}   {}", layout.symbol(), layout.label())],
                     icons: None,
                     selected: Some(0),
-                    hint: "\u{f060}/\u{f061}  browse    Enter / click  apply    Esc  cancel".into(),
+                    hint: "\u{f060}/\u{f061}  browse    Enter / click  apply    Esc / right-click  cancel".into(),
                     scroll: None,
                 }
             }
@@ -3951,7 +3951,7 @@ impl SystemUiState {
                     icons: None,
                     selected: None,
                     hint:
-                        "Type  search    Backspace  erase    Esc  close    \u{f062}/\u{f063}  scroll"
+                        "Type  search    Backspace  erase    Esc / click outside  close    \u{f062}/\u{f063}  scroll"
                             .into(),
                     scroll,
                 }

@@ -2107,15 +2107,14 @@ impl Jwm {
         // compositor and open a window for the desktop to take the keyboard
         // back mid-swap.
         if self.features.system_ui.is_active() {
-            // The pointer is *not* guaranteed: the keybinding viewer opens
-            // keyboard-only, and a panel that inherited its grabs would let
-            // clicks through to the windows underneath. Re-grabbing costs a
-            // round-trip and always succeeds for the client that already holds
-            // it, so ask before anything is torn down — a refusal has to leave
-            // the panel on screen alone. (The reverse case is harmless: a
-            // keyboard-only panel taking over from one that held the pointer
-            // simply stays more modal than it asked to be, and
-            // `close_system_ui` hands both back.)
+            // The pointer is usually already held (every clickable shell
+            // panel grabs Buttons or more). Re-grabbing costs a round-trip
+            // and always succeeds for the client that already holds it, so
+            // ask before anything is torn down — a refusal has to leave the
+            // panel on screen alone. The rare keyboard-only open (window
+            // switcher when another client holds the pointer) taking over
+            // from a grabbed panel simply stays more modal than it asked
+            // to be, and `close_system_ui` hands both back.
             if let Some(pointer_mask) = pointer_grab.event_mask()
                 && !backend.input_ops().grab_pointer(pointer_mask, None)?
             {
