@@ -400,11 +400,15 @@ impl WMClient {
     }
 
     pub fn total_width(&self) -> i32 {
-        self.geometry.w + 2 * self.geometry.border_w
+        self.geometry
+            .w
+            .saturating_add(self.geometry.border_w.saturating_mul(2))
     }
 
     pub fn total_height(&self) -> i32 {
-        self.geometry.h + 2 * self.geometry.border_w
+        self.geometry
+            .h
+            .saturating_add(self.geometry.border_w.saturating_mul(2))
     }
 
     pub fn is_status_bar(&self, status_bar_name: &str) -> bool {
@@ -501,6 +505,47 @@ impl Pertag {
             prev_lts: vec![default_prev_layout; len],
             show_bars: vec![show_bar; len],
             sel: vec![None; len],
+        }
+    }
+
+    /// Slot 0 is "view all"; 1..=tags_length are the numbered tags.
+    pub fn clamp_tag(&self, idx: usize) -> usize {
+        match self.sel.len() {
+            0 => 0,
+            n => idx.min(n - 1),
+        }
+    }
+
+    /// Grow or shrink every per-tag vec to `tags_length + 1`. New slots copy
+    /// the current layout so a live `tags_length` reload can view the new
+    /// tags without indexing off the end of a createmon-sized block.
+    pub fn resize_for_tags(
+        &mut self,
+        tags_length: usize,
+        n_master: u32,
+        m_fact: f32,
+        gap: i32,
+        lt: Rc<LayoutEnum>,
+        prev_lt: Rc<LayoutEnum>,
+        show_bar: bool,
+    ) {
+        let tags_length = tags_length.clamp(1, 31);
+        let len = tags_length + 1;
+        if self.sel.len() == len {
+            return;
+        }
+        self.n_masters.resize(len, n_master);
+        self.m_facts.resize(len, m_fact);
+        self.gaps.resize(len, gap);
+        self.lts.resize(len, lt);
+        self.prev_lts.resize(len, prev_lt);
+        self.show_bars.resize(len, show_bar);
+        self.sel.resize(len, None);
+        if self.cur_tag >= len {
+            self.cur_tag = tags_length;
+        }
+        if self.prev_tag >= len {
+            self.prev_tag = self.cur_tag;
         }
     }
 }
@@ -606,15 +651,26 @@ impl WMMonitor {
     /// 应用 Pertag 上下文 (logic from: apply_pertag_settings/apply_pertag_settings_for_monitor)
     fn apply_pertag_context(&mut self, new_tag_idx: usize) {
         if let Some(ref mut pertag) = self.pertag {
+            let idx = pertag.clamp_tag(new_tag_idx);
             pertag.prev_tag = pertag.cur_tag;
-            pertag.cur_tag = new_tag_idx;
+            pertag.cur_tag = idx;
 
             // 从 Pertag 恢复布局状态到 Monitor
-            self.layout.n_master = pertag.n_masters[new_tag_idx];
-            self.layout.m_fact = pertag.m_facts[new_tag_idx];
-            self.layout.gap = pertag.gaps[new_tag_idx];
-            self.lt = pertag.lts[new_tag_idx].clone();
-            self.prev_lt = pertag.prev_lts[new_tag_idx].clone();
+            if let Some(&n_master) = pertag.n_masters.get(idx) {
+                self.layout.n_master = n_master;
+            }
+            if let Some(&m_fact) = pertag.m_facts.get(idx) {
+                self.layout.m_fact = m_fact;
+            }
+            if let Some(&gap) = pertag.gaps.get(idx) {
+                self.layout.gap = gap;
+            }
+            if let Some(lt) = pertag.lts.get(idx) {
+                self.lt = lt.clone();
+            }
+            if let Some(prev) = pertag.prev_lts.get(idx) {
+                self.prev_lt = prev.clone();
+            }
         }
         // 更新符号
         self.lt_symbol = self.lt.symbol().to_string();
@@ -623,24 +679,73 @@ impl WMMonitor {
     /// 更新当前 Tag 的布局参数 (当 incnmaster 或 setmfact 时调用)
     pub fn update_current_tag_layout_params(&mut self) {
         if let Some(ref mut pertag) = self.pertag {
-            let cur = pertag.cur_tag;
-            pertag.n_masters[cur] = self.layout.n_master;
-            pertag.m_facts[cur] = self.layout.m_fact;
-            pertag.gaps[cur] = self.layout.gap;
+            let cur = pertag.clamp_tag(pertag.cur_tag);
+            if let Some(slot) = pertag.n_masters.get_mut(cur) {
+                *slot = self.layout.n_master;
+            }
+            if let Some(slot) = pertag.m_facts.get_mut(cur) {
+                *slot = self.layout.m_fact;
+            }
+            if let Some(slot) = pertag.gaps.get_mut(cur) {
+                *slot = self.layout.gap;
+            }
         }
     }
 
     /// 获取当前 Tag 记录的选中客户端
     pub fn get_selected_client_for_current_tag(&self) -> Option<ClientKey> {
-        self.pertag.as_ref().and_then(|p| p.sel[p.cur_tag])
+        self.pertag
+            .as_ref()
+            .and_then(|p| p.sel.get(p.clamp_tag(p.cur_tag)).copied().flatten())
     }
 
     /// 设置当前 Tag 的选中客户端
     pub fn set_selected_client_for_current_tag(&mut self, client: Option<ClientKey>) {
         if let Some(ref mut pertag) = self.pertag {
-            pertag.sel[pertag.cur_tag] = client;
+            let cur = pertag.clamp_tag(pertag.cur_tag);
+            if let Some(slot) = pertag.sel.get_mut(cur) {
+                *slot = client;
+            }
         }
         self.sel = client;
+    }
+
+    /// Keep this monitor's Pertag and tag_set aligned with a live
+    /// `layout.tags_length` change. New slots copy the current layout;
+    /// retired high tags are masked out so the selection cannot point at a
+    /// tag the config no longer has.
+    pub fn sync_tag_slots(&mut self, tags_length: usize, tagmask: u32) {
+        if let Some(ref mut pertag) = self.pertag {
+            let show_bar = pertag.show_bars.first().copied().unwrap_or(true);
+            pertag.resize_for_tags(
+                tags_length,
+                self.layout.n_master,
+                self.layout.m_fact,
+                self.layout.gap,
+                self.lt.clone(),
+                self.prev_lt.clone(),
+                show_bar,
+            );
+        }
+        self.tag_set[0] &= tagmask;
+        self.tag_set[1] &= tagmask;
+        let idx = self.sel_tags & 1;
+        if self.tag_set[idx] == 0 {
+            if let Some(ref mut pertag) = self.pertag {
+                if pertag.cur_tag == 0 || pertag.cur_tag > tags_length {
+                    pertag.cur_tag = 1.min(tags_length);
+                }
+                let bit = 1u32.checked_shl((pertag.cur_tag - 1) as u32).unwrap_or(0);
+                self.tag_set[idx] = bit & tagmask;
+                if self.tag_set[idx] == 0 {
+                    self.tag_set[idx] = 1;
+                    pertag.cur_tag = 1;
+                }
+            } else {
+                self.tag_set[idx] = 1;
+            }
+        }
+        self.reload_current_tag_context();
     }
 
     /// 清除该显示器对某 client 的所有"上次选中"记录(monitor.sel 及全部 per-tag
@@ -708,6 +813,16 @@ mod tests {
         c.geometry.w = 800;
         c.geometry.border_w = 2;
         assert_eq!(c.total_width(), 804); // 800 + 2*2
+    }
+
+    #[test]
+    fn total_dimensions_saturate_instead_of_overflowing_a_huge_border() {
+        let mut c = WMClient::new(win(1));
+        c.geometry.w = 800;
+        c.geometry.h = 600;
+        c.geometry.border_w = i32::MAX;
+        assert_eq!(c.total_width(), i32::MAX);
+        assert_eq!(c.total_height(), i32::MAX);
     }
 
     #[test]
@@ -961,6 +1076,74 @@ mod tests {
         assert!(p.n_masters.iter().all(|&n| n == 0));
         assert!(p.m_facts.iter().all(|&f| f == 0.0));
         assert!(p.sel.iter().all(Option::is_none));
+    }
+
+    #[test]
+    fn pertag_grows_and_preserves_existing_slots() {
+        let mut sm: slotmap::SlotMap<ClientKey, ()> = slotmap::SlotMap::new();
+        let key = sm.insert(());
+        let mut p = Pertag::new(true, 9);
+        p.cur_tag = 3;
+        p.n_masters[3] = 4;
+        p.sel[3] = Some(key);
+        p.resize_for_tags(
+            12,
+            1,
+            0.55,
+            8,
+            p.lts[0].clone(),
+            p.prev_lts[0].clone(),
+            true,
+        );
+        assert_eq!(p.sel.len(), 13);
+        assert_eq!(p.n_masters[3], 4);
+        assert_eq!(p.sel[3], Some(key));
+        assert_eq!(p.n_masters[12], 1);
+        assert_eq!(p.gaps[12], 8);
+        assert_eq!(p.cur_tag, 3);
+    }
+
+    #[test]
+    fn pertag_shrink_clamps_cur_tag_to_the_new_last_slot() {
+        let mut p = Pertag::new(true, 12);
+        p.cur_tag = 12;
+        p.prev_tag = 11;
+        p.resize_for_tags(9, 1, 0.55, 0, p.lts[0].clone(), p.prev_lts[0].clone(), true);
+        assert_eq!(p.sel.len(), 10);
+        assert_eq!(p.cur_tag, 9);
+        assert_eq!(p.prev_tag, 9);
+    }
+
+    #[test]
+    fn sync_tag_slots_lets_view_reach_a_newly_added_tag() {
+        let mut m = WMMonitor::new();
+        m.pertag = Some(Pertag::new(true, 9));
+        if let Some(pertag) = m.pertag.as_mut() {
+            pertag.cur_tag = 1;
+            for i in 0..=9 {
+                pertag.n_masters[i] = 1;
+            }
+        }
+        m.tag_set[0] = 1;
+        m.sync_tag_slots(12, (1 << 12) - 1);
+        let new_tag = m.view_tag(1 << 11, false);
+        assert_eq!(new_tag, 12);
+        assert_eq!(m.pertag.as_ref().unwrap().n_masters.len(), 13);
+        assert_eq!(m.layout.n_master, 1);
+    }
+
+    #[test]
+    fn sync_tag_slots_masks_a_retired_high_tag_onto_a_live_one() {
+        let mut m = WMMonitor::new();
+        m.pertag = Some(Pertag::new(true, 12));
+        if let Some(pertag) = m.pertag.as_mut() {
+            pertag.cur_tag = 12;
+        }
+        m.tag_set[0] = 1 << 11;
+        m.sync_tag_slots(9, (1 << 9) - 1);
+        assert_eq!(m.pertag.as_ref().unwrap().sel.len(), 10);
+        assert_eq!(m.pertag.as_ref().unwrap().cur_tag, 9);
+        assert_eq!(m.get_active_tags(), 1 << 8);
     }
 
     // -----------------------------------------------------------------------

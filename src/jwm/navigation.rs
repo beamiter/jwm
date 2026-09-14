@@ -959,10 +959,11 @@ impl Jwm {
 
             if let Some(pertag) = sel_mon_mut.pertag.as_mut() {
                 pertag.prev_tag = pertag.cur_tag;
-                pertag.cur_tag = new_cur_tag;
+                pertag.cur_tag = pertag.clamp_tag(new_cur_tag);
+                pertag.cur_tag
+            } else {
+                new_cur_tag
             }
-
-            new_cur_tag
         } else {
             if let Some(pertag) = sel_mon_mut.pertag.as_mut() {
                 std::mem::swap(&mut pertag.prev_tag, &mut pertag.cur_tag);
@@ -999,12 +1000,29 @@ impl Jwm {
                 .as_ref()
                 .ok_or("No pertag information available")?;
 
+            let idx = pertag.clamp_tag(cur_tag);
             (
-                pertag.n_masters[cur_tag],
-                pertag.m_facts[cur_tag],
-                pertag.lts[cur_tag].clone(),
-                pertag.prev_lts[cur_tag].clone(),
-                pertag.sel[cur_tag],
+                pertag
+                    .n_masters
+                    .get(idx)
+                    .copied()
+                    .unwrap_or(monitor.layout.n_master),
+                pertag
+                    .m_facts
+                    .get(idx)
+                    .copied()
+                    .unwrap_or(monitor.layout.m_fact),
+                pertag
+                    .lts
+                    .get(idx)
+                    .cloned()
+                    .unwrap_or_else(|| monitor.lt.clone()),
+                pertag
+                    .prev_lts
+                    .get(idx)
+                    .cloned()
+                    .unwrap_or_else(|| monitor.prev_lt.clone()),
+                pertag.sel.get(idx).copied().flatten(),
             )
         };
 

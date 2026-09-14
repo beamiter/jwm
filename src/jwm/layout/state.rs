@@ -1,7 +1,7 @@
 // Layout state management functions
 
 use crate::backend::api::Backend;
-use crate::config::CONFIG;
+use crate::config::{CONFIG, MAX_N_MASTER};
 use crate::core::layout::LayoutEnum;
 use crate::core::models::{ClientKey, MonitorKey};
 use crate::jwm::Jwm;
@@ -10,7 +10,10 @@ use log::info;
 use std::rc::Rc;
 
 fn adjusted_n_master(current: u32, delta: i32) -> u32 {
-    current.saturating_add_signed(delta)
+    current
+        .min(MAX_N_MASTER)
+        .saturating_add_signed(delta)
+        .min(MAX_N_MASTER)
 }
 
 fn adjusted_gap(current: i32, delta: i32) -> i32 {
@@ -411,8 +414,16 @@ impl Jwm {
             monitor.prev_lt = monitor.lt.clone();
             monitor.lt = layout.clone();
             if let Some(ref mut pertag) = monitor.pertag {
-                pertag.prev_lts[cur_tag] = pertag.lts[cur_tag].clone();
-                pertag.lts[cur_tag] = layout.clone();
+                if cur_tag < pertag.lts.len() {
+                    if let Some(prev) = pertag.lts.get(cur_tag) {
+                        if let Some(slot) = pertag.prev_lts.get_mut(cur_tag) {
+                            *slot = prev.clone();
+                        }
+                    }
+                    if let Some(slot) = pertag.lts.get_mut(cur_tag) {
+                        *slot = layout.clone();
+                    }
+                }
             }
         }
     }
@@ -434,6 +445,7 @@ impl Jwm {
 #[cfg(test)]
 mod tests {
     use super::{adjusted_gap, adjusted_n_master};
+    use crate::config::MAX_N_MASTER;
 
     #[test]
     fn adjusted_n_master_preserves_normal_adjustments() {
@@ -443,10 +455,12 @@ mod tests {
     }
 
     #[test]
-    fn adjusted_n_master_saturates_at_u32_boundaries() {
-        assert_eq!(adjusted_n_master(u32::MAX, i32::MAX), u32::MAX);
+    fn adjusted_n_master_caps_at_the_persist_limit() {
+        assert_eq!(adjusted_n_master(MAX_N_MASTER, 1), MAX_N_MASTER);
+        assert_eq!(adjusted_n_master(1, i32::MAX), MAX_N_MASTER);
         assert_eq!(adjusted_n_master(0, i32::MIN), 0);
-        assert_eq!(adjusted_n_master(u32::MAX, i32::MIN), i32::MAX as u32);
+        assert_eq!(adjusted_n_master(5, i32::MIN), 0);
+        assert_eq!(adjusted_n_master(u32::MAX, 1), MAX_N_MASTER);
     }
 
     #[test]

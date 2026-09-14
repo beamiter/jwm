@@ -642,7 +642,7 @@ fn centered_columns<K: Copy>(
     let area = usable_area(params.screen_area, gap);
     let (wx, wy, ww, wh) = (area.x, area.y, area.w, area.h);
 
-    let n_stack = (n as i32 - n_master as i32).max(0);
+    let n_stack = n.saturating_sub(n_master).min(i32::MAX as u32) as i32;
 
     if n_stack == 0 {
         // 全部是 master：纵向排满，与其他布局一样尊重 client_fact
@@ -715,7 +715,7 @@ pub fn calculate_bstack<K: Copy>(
 
     let n_master = params.n_master;
     let n_master_count = n.min(n_master) as i32;
-    let n_stack = (n as i32 - n_master as i32).max(0);
+    let n_stack = n.saturating_sub(n_master).min(i32::MAX as u32) as i32;
 
     if n_master == 0 {
         return calculate_grid(params, clients);
@@ -1992,6 +1992,29 @@ mod tests {
             calculate_vstack(&p, &clients),
         ];
 
+        for layout in layouts {
+            assert_eq!(layout.len(), clients.len());
+            for res in layout {
+                assert!(res.rect.w > 0 && res.rect.h > 0);
+            }
+        }
+    }
+
+    #[test]
+    fn a_huge_n_master_does_not_overflow_signed_stack_count() {
+        let p = LayoutParams {
+            screen_area: Rect::new(0, 0, 800, 600),
+            n_master: 1 << 31,
+            m_fact: 0.55,
+            gap: 0,
+        };
+        let clients = vec![client(1, 1.0), client(2, 1.0)];
+        let layouts = [
+            calculate_centered_master(&p, &clients),
+            calculate_bstack(&p, &clients),
+            calculate_tile(&p, &clients),
+            calculate_deck(&p, &clients),
+        ];
         for layout in layouts {
             assert_eq!(layout.len(), clients.len());
             for res in layout {

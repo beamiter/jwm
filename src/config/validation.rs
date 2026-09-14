@@ -598,6 +598,22 @@ impl Config {
                 "zero disables the master area",
                 Some("use 1 for the conventional master/stack layout".into()),
             );
+        } else if layout.n_master > i32::MAX as u32 {
+            diagnostics.error(
+                "layout.n_master",
+                "value cannot be represented by the signed layout pipeline",
+                Some(format!("use at most {}", i32::MAX)),
+            );
+        } else if layout.n_master > super::MAX_N_MASTER {
+            diagnostics.warning(
+                "layout.n_master",
+                format!(
+                    "{} masters is unusually large; interactive commands cap at {}",
+                    layout.n_master,
+                    super::MAX_N_MASTER
+                ),
+                Some(format!("use at most {}", super::MAX_N_MASTER)),
+            );
         }
 
         for (path, value, min, max) in [

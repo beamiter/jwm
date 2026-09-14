@@ -22,7 +22,7 @@
 //! ([`Config::persist_layout_tags`]), not a re-serialization of the file, so
 //! the comments and formatting around it survive.
 
-use crate::config::{CONFIG, Config, ConfigError, LayoutTagConfig};
+use crate::config::{CONFIG, Config, ConfigError, LayoutTagConfig, MAX_N_MASTER};
 use crate::core::layout::LayoutEnum;
 use crate::core::models::WMMonitor;
 use crate::jwm::Jwm;
@@ -41,7 +41,6 @@ const PERSIST_DEBOUNCE: Duration = Duration::from_secs(2);
 /// into a state the keybindings could not have produced.
 const MIN_M_FACT: f32 = 0.05;
 const MAX_M_FACT: f32 = 0.95;
-const MAX_N_MASTER: u32 = 32;
 const MAX_GAP: i32 = 100;
 
 fn settle_layout_persist_dirty(dirty: &mut Option<Instant>, retry_at: Instant, succeeded: bool) {
@@ -237,6 +236,7 @@ impl Jwm {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::MAX_N_MASTER;
     use crate::core::models::Pertag;
 
     fn monitor_with_tags(tags: usize) -> WMMonitor {

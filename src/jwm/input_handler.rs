@@ -3376,8 +3376,8 @@ impl Jwm {
         &mut self,
         backend: &mut dyn Backend,
         _window: Option<WindowId>,
-        root_x: i16,
-        root_y: i16,
+        root_x: i32,
+        root_y: i32,
         _time: u32,
     ) -> Result<(), Box<dyn std::error::Error>> {
         // A left press on a tab cell turns into a reorder drag once the

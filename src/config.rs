@@ -27,6 +27,9 @@ pub use validation::{ConfigDiagnostic, ConfigDiagnosticLevel, ConfigDiagnostics}
 
 pub const LOAD_LOCAL_CONFIG: bool = true;
 pub(crate) const MAX_CURSOR_SIZE: u32 = 512;
+/// Interactive `incnmaster` / `set_config layout.n_master` cap. Persist restore
+/// uses the same ceiling so a hand-edited file cannot outrun the keybindings.
+pub(crate) const MAX_N_MASTER: u32 = 32;
 const DEFAULT_CURSOR_SIZE: u32 = 24;
 
 /// Resolve the effective scene-linear render-path gate.
@@ -4055,10 +4058,19 @@ impl Config {
             }
             Ok(rgba)
         };
+        let as_geometry_px = || {
+            let v = as_u32()?;
+            if v > i32::MAX as u32 {
+                return Err(format!(
+                    "{key}={v} cannot be represented by the signed geometry pipeline"
+                ));
+            }
+            Ok(v)
+        };
         match key {
-            "appearance.border_px" => self.inner.appearance.border_px = as_u32()?,
-            "appearance.gap_px" => self.inner.appearance.gap_px = as_u32()?,
-            "appearance.snap" => self.inner.appearance.snap = as_u32()?,
+            "appearance.border_px" => self.inner.appearance.border_px = as_geometry_px()?,
+            "appearance.gap_px" => self.inner.appearance.gap_px = as_geometry_px()?,
+            "appearance.snap" => self.inner.appearance.snap = as_geometry_px()?,
             "appearance.cursor_theme" => self.inner.appearance.cursor_theme = as_string()?,
             "appearance.cursor_size" => {
                 let v = as_u32()?;
@@ -4086,7 +4098,13 @@ impl Config {
                 }
                 self.inner.layout.m_fact = v;
             }
-            "layout.n_master" => self.inner.layout.n_master = as_u32()?,
+            "layout.n_master" => {
+                let v = as_u32()?;
+                if v > MAX_N_MASTER {
+                    return Err(format!("layout.n_master={v} out of [0, {MAX_N_MASTER}]"));
+                }
+                self.inner.layout.n_master = v;
+            }
             "status_bar.show_bar" => self.inner.status_bar.show_bar = as_bool()?,
             "behavior.active_opacity" => {
                 let v = as_f32()?;
@@ -4393,11 +4411,11 @@ mod tests {
     use super::{
         ArgumentConfig, ButtonConfig, CONFIG_WRITE_COUNTER, ClientMoveResize, Config,
         ConfigDiagnosticLevel, ConfigError, GestureSwipeConfig, KeyConfig, LayoutTagConfig,
-        MAX_CONFIG_FILE_BYTES, MAX_CURSOR_SIZE, Mods, NewClientPosition, Ordering, STATUS_BAR_NAME,
-        TomlConfig, WallpaperMonitorConfig, WallpaperTagConfig, configured_scratchpad_terminal,
-        configured_terminal_execution_prefix, key_function_is_repeatable,
-        migrate_legacy_terminal_argument, parse_terminal_override, resolve_cursor_size,
-        scene_linear_render_path_requested, x11_compositor_override,
+        MAX_CONFIG_FILE_BYTES, MAX_CURSOR_SIZE, MAX_N_MASTER, Mods, NewClientPosition, Ordering,
+        STATUS_BAR_NAME, TomlConfig, WallpaperMonitorConfig, WallpaperTagConfig,
+        configured_scratchpad_terminal, configured_terminal_execution_prefix,
+        key_function_is_repeatable, migrate_legacy_terminal_argument, parse_terminal_override,
+        resolve_cursor_size, scene_linear_render_path_requested, x11_compositor_override,
     };
 
     #[test]
@@ -5714,6 +5732,41 @@ ui_theme = \"glass\"
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn set_value_rejects_geometry_and_n_master_that_overflow_the_signed_pipeline() {
+        let mut cfg = Config::default();
+        let original_border = cfg.border_px();
+        let original_gap = cfg.gap_px();
+        let original_n_master = cfg.n_master();
+
+        assert!(
+            cfg.set_value("appearance.border_px", &serde_json::json!(u32::MAX))
+                .is_err()
+        );
+        assert!(
+            cfg.set_value("appearance.gap_px", &serde_json::json!(u32::MAX))
+                .is_err()
+        );
+        assert!(
+            cfg.set_value("appearance.snap", &serde_json::json!(u32::MAX))
+                .is_err()
+        );
+        assert!(
+            cfg.set_value("layout.n_master", &serde_json::json!(MAX_N_MASTER + 1))
+                .is_err()
+        );
+        assert_eq!(cfg.border_px(), original_border);
+        assert_eq!(cfg.gap_px(), original_gap);
+        assert_eq!(cfg.n_master(), original_n_master);
+
+        cfg.set_value("layout.n_master", &serde_json::json!(MAX_N_MASTER))
+            .unwrap();
+        assert_eq!(cfg.n_master(), MAX_N_MASTER);
+        cfg.set_value("appearance.border_px", &serde_json::json!(8))
+            .unwrap();
+        assert_eq!(cfg.border_px(), 8);
     }
 
     #[test]

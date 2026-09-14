@@ -1131,9 +1131,13 @@ impl WMController for Jwm {
         }
 
         self.last_mouse_root = (root_x, root_y);
-        if let Err(e) =
-            self.on_motion_notify_internal(backend, win_opt, root_x as i16, root_y as i16, time)
-        {
+        if let Err(e) = self.on_motion_notify_internal(
+            backend,
+            win_opt,
+            root_x.round() as i32,
+            root_y.round() as i32,
+            time,
+        ) {
             error!("Error handling MotionNotify: {:?}", e);
         }
     }
@@ -6018,6 +6022,32 @@ mod tests {
                 .expect("the drag survives the motion")
                 .activated,
             "the threshold must be read before the focus guard"
+        );
+    }
+
+    #[test]
+    fn wide_desktop_motion_does_not_wrap_through_i16() {
+        use crate::jwm::window_tabs::TabDragCtl;
+
+        let (mut jwm, mon_key, first, _second) = jwm_with_tab_group();
+        let mut backend = RenderSpyBackend::new();
+        // Four 8K outputs sit past 32767; truncating to i16 would wrap
+        // 32770 to -25536 and fire a reorder drag from a 10px nudge.
+        jwm.tab_drag = Some(TabDragCtl {
+            client: first,
+            mon: mon_key,
+            start_root: (32760.0, 10.0),
+            activated: false,
+        });
+
+        jwm.on_motion_notify_internal(&mut backend, None, 32770, 10, 0)
+            .unwrap();
+
+        assert!(
+            !jwm.tab_drag
+                .expect("the drag survives the motion")
+                .activated,
+            "root coords past i16::MAX must keep the true pixel delta"
         );
     }
 

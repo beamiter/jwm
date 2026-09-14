@@ -1471,13 +1471,25 @@ impl Jwm {
         }
         let _ = alloc.allocate_schemes_pixels();
 
-        // 3. Re-arrange all monitors (border/gap changes take effect)
+        // 3. Keep per-tag slot vectors in lockstep with layout.tags_length.
+        // Pertag is sized once at createmon; a live reload that grows the
+        // count used to leave monitors with a short vec, and the next
+        // unmanage or view indexed off the end.
+        let tags_length = cfg.tags_length();
+        let tagmask = cfg.tagmask();
         let mon_keys: Vec<MonitorKey> = self.state.monitor_order.clone();
+        for mk in &mon_keys {
+            if let Some(monitor) = self.state.monitors.get_mut(*mk) {
+                monitor.sync_tag_slots(tags_length, tagmask);
+            }
+        }
+
+        // 4. Re-arrange all monitors (border/gap changes take effect)
         for mk in &mon_keys {
             self.arrange(backend, Some(*mk));
         }
 
-        // 4. Update decoration on all visible clients
+        // 5. Update decoration on all visible clients
         let sel_ck = self.get_selected_client_key();
 
         // 5. Apply settings to an already-running compositor before any mode
@@ -1569,6 +1581,22 @@ impl Jwm {
 #[cfg(test)]
 mod config_reload_tests {
     use super::*;
+
+    #[test]
+    fn apply_config_changes_resizes_pertag_when_tags_length_moves() {
+        const SOURCE: &str = include_str!("lifecycle.rs");
+        let body = SOURCE
+            .split_once("fn apply_config_changes(")
+            .expect("apply_config_changes")
+            .1
+            .split_once("#[cfg(test)]")
+            .expect("the test module")
+            .0;
+        assert!(
+            body.contains("sync_tag_slots"),
+            "growing tags_length on reload used to leave Pertag short and panic on close/view"
+        );
+    }
 
     fn revision(seconds: u64) -> SystemTime {
         std::time::UNIX_EPOCH + Duration::from_secs(seconds)

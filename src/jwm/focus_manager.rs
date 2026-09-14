@@ -690,36 +690,42 @@ impl Jwm {
         (wanted != 0).then_some(wanted)
     }
 
-    /// 获取标签组信息（当前未实现）
-    fn get_tab_group(&self, _group_id: u32) -> Option<(u32, Vec<(u32, String)>)> {
-        None
-    }
-
-    /// 切换到窗口组中的某个标签页
+    /// Focus the tab cell `tab_index` on the monitor at `group_id` in
+    /// `monitor_order`. Pointer clicks go through [`Jwm::click_window_tab`];
+    /// this is the IPC/keybinding twin.
     pub fn focus_tab(
         &mut self,
         backend: &mut dyn Backend,
         arg: &WMArgEnum,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        // Tab info passed as Vec of [group_id, tab_index]
         let args = match arg {
             WMArgEnum::StringVec(v) if v.len() >= 2 => v,
             _ => return Err("focus_tab requires group_id and tab_index".into()),
         };
 
-        let group_id: u32 = args[0].parse()?;
+        let group_id: usize = args[0].parse()?;
         let tab_index: usize = args[1].parse()?;
         info!("[focus_tab] group_id={}, tab_index={}", group_id, tab_index);
 
-        // Get the focused window in this group
-        if let Some((_, tabs_info)) = self.get_tab_group(group_id) {
-            if tab_index < tabs_info.len() {
-                let target_win = tabs_info[tab_index].0; // x11_win from tab info
-                self.focus_window(backend, &WMArgEnum::UInt64(target_win as u64))?;
-                return Ok(());
-            }
+        let mon_key = self
+            .state
+            .monitor_order
+            .get(group_id)
+            .copied()
+            .ok_or_else(|| format!("tab group {group_id}/{tab_index} not found"))?;
+        let group = self.tab_group_clients(mon_key);
+        let Some(&client_key) = group.get(tab_index) else {
+            return Err(format!("tab group {group_id}/{tab_index} not found").into());
+        };
+        if self.get_selected_client_key() == Some(client_key) {
+            return Ok(());
         }
-        Err(format!("tab group {}/{} not found", group_id, tab_index).into())
+        self.focus(backend, Some(client_key))?;
+        if let Some(mon_key) = self.state.sel_mon {
+            self.last_stacking.remove(mon_key);
+        }
+        let _ = self.restack(backend, self.state.sel_mon);
+        Ok(())
     }
 
     /// IPC: refocus — unfocus 当前窗口再 focus 回来（用于刷新焦点状态）
@@ -864,7 +870,7 @@ mod scratchpad_reveal_tests {
     use crate::core::models::WMClient;
     use crate::core::state::WMState;
     use crate::jwm::features::FeatureStates;
-    use crate::jwm::types::SecondaryBarInstance;
+    use crate::jwm::types::{SecondaryBarInstance, WMArgEnum};
     use slotmap::SecondaryMap;
     use std::any::Any;
     use std::collections::{HashMap, HashSet};
@@ -1155,6 +1161,65 @@ mod scratchpad_reveal_tests {
             .expect("focus must publish without a periodic update");
         assert_eq!(published.monitor_info.client_name_lossy(), "second");
         assert!(jwm.pending_bar_updates.is_empty());
+    }
+
+    fn jwm_with_two_tiled_windows() -> (Jwm, ClientKey, ClientKey) {
+        let mut jwm = empty_jwm();
+        jwm.add_monitor(output(1, 0));
+        let monitor_key = jwm.state.monitor_order[0];
+        if let Some(monitor) = jwm.state.monitors.get_mut(monitor_key) {
+            monitor.geometry.m_w = 1920;
+            monitor.geometry.m_h = 1080;
+            monitor.geometry.w_w = 1920;
+            monitor.geometry.w_h = 1080;
+        }
+        jwm.state.sel_mon = Some(monitor_key);
+
+        let mut keys = Vec::new();
+        for raw in [0x901, 0x902] {
+            let mut client = WMClient::new(WindowId::from_raw(raw));
+            client.mon = Some(monitor_key);
+            client.state.tags = 1;
+            client.geometry.w = 800;
+            client.geometry.h = 600;
+            let client_key = jwm.insert_client(client);
+            jwm.attach_to_monitor(client_key, monitor_key);
+            keys.push(client_key);
+        }
+        jwm.state.monitors[monitor_key].set_selected_client_for_current_tag(Some(keys[0]));
+        (jwm, keys[0], keys[1])
+    }
+
+    #[test]
+    fn focus_tab_selects_the_cell_on_the_named_monitor() {
+        let (mut jwm, first, second) = jwm_with_two_tiled_windows();
+        assert_eq!(jwm.tab_group_clients(jwm.state.monitor_order[0]).len(), 2);
+        jwm.focus_tab(
+            &mut ScratchpadBackend::new(),
+            &WMArgEnum::StringVec(vec!["0".into(), "1".into()]),
+        )
+        .expect("focus the second cell");
+        assert_eq!(jwm.get_selected_client_key(), Some(second));
+
+        jwm.focus_tab(
+            &mut ScratchpadBackend::new(),
+            &WMArgEnum::StringVec(vec!["0".into(), "0".into()]),
+        )
+        .expect("focus the first cell");
+        assert_eq!(jwm.get_selected_client_key(), Some(first));
+    }
+
+    #[test]
+    fn focus_tab_reports_a_missing_group_instead_of_succeeding() {
+        let (mut jwm, first, _second) = jwm_with_two_tiled_windows();
+        let error = jwm
+            .focus_tab(
+                &mut ScratchpadBackend::new(),
+                &WMArgEnum::StringVec(vec!["9".into(), "0".into()]),
+            )
+            .expect_err("no monitor 9");
+        assert!(error.to_string().contains("tab group 9/0 not found"));
+        assert_eq!(jwm.get_selected_client_key(), Some(first));
     }
 
     fn jwm_with_cross_monitor_scratchpad(

@@ -187,9 +187,9 @@ impl ActiveOsd {
     }
 }
 
-/// Icon for a power-profile OSD card. Kept byte-identical to
-/// [`crate::jwm::features::power::profile_icon`] (pinned below) so the Hub
-/// row and this card cannot pick different glyphs for the same name.
+/// Icon for a power-profile OSD card. Kept byte-identical to the Hub row's
+/// `profile_icon` (pinned below) so the Hub row and this card cannot pick
+/// different glyphs for the same name.
 fn power_profile_icon(name: &str) -> &'static str {
     match name {
         "power-saver" | "low-power" | "quiet" => "\u{f06c}", // fa-leaf
@@ -636,24 +636,29 @@ mod tests {
 
     /// The OSD's power-profile glyphs must stay byte-identical to the Hub
     /// row's `profile_icon`, or Left/Right would flash one icon and the row
-    /// would show another.
+    /// would show another. The pin is `include_str` rather than an import:
+    /// compositor_common must not depend on jwm policy.
     #[test]
     fn power_profile_osd_icons_match_the_hub_row() {
-        use crate::jwm::features::power::profile_icon;
-        for name in [
-            "power-saver",
-            "low-power",
-            "quiet",
-            "performance",
-            "balanced",
-            "something-driver-specific",
-        ] {
-            assert_eq!(
-                power_profile_icon(name),
-                profile_icon(name),
-                "{name} drifted between OSD and Hub"
-            );
+        fn match_arms<'a>(source: &'a str, fn_name: &str) -> Vec<&'a str> {
+            source
+                .split_once(&format!("fn {fn_name}("))
+                .expect(fn_name)
+                .1
+                .lines()
+                .take_while(|line| line.trim() != "}")
+                .map(str::trim)
+                .filter(|line| line.contains("=>"))
+                .collect()
         }
+
+        const HUB: &str = include_str!("../../jwm/features/power.rs");
+        const OSD: &str = include_str!("osd.rs");
+        assert_eq!(
+            match_arms(HUB, "profile_icon"),
+            match_arms(OSD, "power_profile_icon"),
+            "power-profile OSD glyphs drifted from the Hub row"
+        );
     }
 
     /// Long device descriptions truncate like Media labels so the card does

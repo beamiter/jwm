@@ -1794,13 +1794,7 @@ impl Jwm {
 
     pub(crate) fn clear_pertag_references(&mut self, client_key: ClientKey, mon_key: MonitorKey) {
         if let Some(monitor) = self.state.monitors.get_mut(mon_key) {
-            if let Some(ref mut pertag) = monitor.pertag {
-                for i in 0..=CONFIG.load().tags_length() {
-                    if pertag.sel[i] == Some(client_key) {
-                        pertag.sel[i] = None;
-                    }
-                }
-            }
+            monitor.clear_selection_of(client_key);
         }
     }
 
