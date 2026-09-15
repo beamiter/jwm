@@ -4,6 +4,21 @@
 
 ---
 
+## 2026-09-15：补缺口 — Particles + TabBar CommonLinear + capture bake + envelope 文档
+
+选题 = 用户「把剩下的缺口补全优化掉」。
+
+1. **Particles → CommonLinearAware**（`u_scene_linear` + cached uniforms）。
+2. **TabBar → CommonLinearAware**：frosted glass 按域捕获 backdrop；tint/rim decode；flat fill 走 border `u_scene_linear`。
+3. **Capture bake**：`apply_brightness_multiply` 共用；dedicated capture encode 后 bake；EncodedOutput 截图挪到 final brightness 之后。
+4. **Envelope / tearing**：[docs/output-layout.md](docs/output-layout.md) 诚实说明 refuse；tearing 仍 blocked（Smithay）。
+
+仍开着：PostDelivery chrome（toast/OSD/system UI）、postprocess、workspace transition；原子 DRM+GLES envelope；Phase 6 真机。
+
+**验证**：cargo check + 相关 lib 测。**无真机**。
+
+---
+
 ## 2026-09-14：SOTA 下一步 — EdgeGlow CommonLinearAware + idle 最终亮度
 
 选题 = push master 后继续 gap queue。

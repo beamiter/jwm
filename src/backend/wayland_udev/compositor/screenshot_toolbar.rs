@@ -207,7 +207,7 @@ impl WaylandCompositor {
             return;
         }
         let ui = ui_theme::palette();
-        self.ensure_glass_backdrop(gl, ui, projection);
+        self.ensure_glass_backdrop(gl, ui, projection, false);
         let accent = self.border_gradient_color_a;
         let (text_rect, text_proj, text_tex, text_opacity) = text_uniforms(gl, self);
 
@@ -228,6 +228,7 @@ impl WaylandCompositor {
                 track_radius,
                 ui.card,
                 appear,
+                false,
             );
 
             for (index, button) in bar.buttons.iter().enumerate() {

@@ -4937,6 +4937,35 @@ fn edge_glow_fragment_shader_declares_scene_linear_ingress() {
 }
 
 #[test]
+fn particle_fragment_shader_declares_scene_linear_ingress() {
+    assert!(
+        super::shaders::PARTICLE_FRAGMENT_SHADER.contains("u_scene_linear"),
+        "particles must honor the bound target's color domain"
+    );
+    assert!(
+        super::shaders::PARTICLE_FRAGMENT_SHADER.contains("srgb_inverse"),
+        "particles must decode authored RGB before premultiply when linear"
+    );
+}
+
+#[test]
+fn glass_fragment_shader_declares_scene_linear_ingress() {
+    assert!(
+        super::shaders::GLASS_FRAGMENT_SHADER.contains("u_scene_linear"),
+        "frosted glass must honor the bound target's color domain"
+    );
+    assert!(
+        super::shaders::GLASS_FRAGMENT_SHADER.contains("srgb_inverse(u_tint.rgb)")
+            || super::shaders::GLASS_FRAGMENT_SHADER.contains("srgb_inverse(u_tint"),
+        "glass must decode authored tint before mixing when linear"
+    );
+    assert!(
+        super::shaders::GLASS_FRAGMENT_SHADER.contains("srgb_inverse(u_rim_tint)"),
+        "glass must decode authored rim tint when linear"
+    );
+}
+
+#[test]
 fn wayland_runtime_gpu_release_is_complete_idempotent_and_recreatable() {
     let Some(_headless) = HeadlessGl::new(GlApi::Gles3) else {
         eprintln!("headless GL unavailable - skipping runtime GPU release test");

@@ -29,9 +29,11 @@ macOS, or Windows.
 
 Hosted CI cannot certify a kernel/GPU/driver combination. Run `jwm --backend
 wayland-udev --doctor` and validate modeset, hotplug, suspend/resume, VT switch,
-multi-monitor, capture, and rendering on real hardware. HDR remains fail-closed
+multi-monitor, capture, and rendering on real hardware. HDR remains conditional
 where output coherence is not guaranteed; VRR, direct scanout, color management,
-and EGL/GBM behavior remain driver-sensitive.
+and EGL/GBM behavior remain driver-sensitive. Live output layouts that would
+grow or shrink the global framebuffer envelope are refused until a full KMS
+reinit — see [output layout](output-layout.md).
 
 ## Variable refresh rate (VRR)
 

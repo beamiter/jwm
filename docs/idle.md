@@ -225,11 +225,12 @@ jwm-tool msg set_config --args '{"key": "behavior.idle_lock_secs", "value": 600}
 
 ## Known limitation
 
-None for on-screen chrome: idle dim is a **final fullscreen brightness
-multiply** after toast / OSD / system UI on both X11 and Wayland. Mid-frame
-postprocess keeps night light / saturation / contrast with `u_brightness =
-1.0`, so glass backdrops are not double-dimmed.
+None for on-screen chrome or capture honesty: idle dim is a **final fullscreen
+brightness multiply** after toast / OSD / system UI on both X11 and Wayland.
+Mid-frame postprocess keeps night light / saturation / contrast with
+`u_brightness = 1.0`, so glass backdrops are not double-dimmed.
 
-Wayland screenshot/recording readback still runs before that final pass, so a
-capture taken while dimmed may show undimmed chrome; the on-screen session is
-dimmed. Tracked follow-up: bake brightness into the capture view.
+Wayland screenshots and recording match the dimmed session: dedicated capture
+views bake brightness at encode time, and EncodedOutput screenshot readback
+runs after the final multiply. REC/MIC chips stay local-only (drawn after
+capture).

@@ -591,16 +591,21 @@ void main() {
                      / max(u_screen_size, vec2(1.0));
     vec3 backdrop = texture(u_backdrop, clamp(backdrop_uv, 0.0, 1.0)).rgb;
     float luma = dot(backdrop, vec3(0.2126, 0.7152, 0.0722));
+    // Backdrop is captured from the bound target's domain, so saturation /
+    // luminance stay in that domain. Authored tint + rim are exact-sRGB and
+    // decode when writing into the common-linear target.
     backdrop = clamp(mix(vec3(luma), backdrop, u_saturation) * u_luminance, 0.0, 1.0);
 
-    vec3 color = mix(backdrop, (u_scene_linear == 1 ? srgb_inverse(u_tint.rgb) : u_tint.rgb), clamp(u_tint.a, 0.0, 1.0));
+    vec3 tint_rgb = u_scene_linear == 1 ? srgb_inverse(u_tint.rgb) : u_tint.rgb;
+    vec3 rim_rgb = u_scene_linear == 1 ? srgb_inverse(u_rim_tint) : u_rim_tint;
+    vec3 color = mix(backdrop, tint_rgb, clamp(u_tint.a, 0.0, 1.0));
 
     // Broad sheen: the face is brightest toward the top-left, as if lit from
     // over the user's shoulder.
     color += vec3(u_sheen * (1.0 - clamp((v_uv.x + v_uv.y) * 0.5, 0.0, 1.0)));
 
     // The bevel is thicker glass, so it carries a soft inner glow.
-    color += u_rim_tint * (lens * u_rim_intensity * 0.30);
+    color += rim_rgb * (lens * u_rim_intensity * 0.30);
 
     // Rim hairline around the whole perimeter. Taking |dot| with the light
     // direction lights both the edge facing the light and the one facing away
@@ -608,7 +613,7 @@ void main() {
     float rim = smoothstep(-max(u_rim_width, 0.5), 0.0, dist);
     rim *= rim;
     float facing = abs(dot(normal, normalize(vec2(-0.55, 0.83))));
-    color += u_rim_tint * (rim * u_rim_intensity * (0.45 + 0.55 * facing));
+    color += rim_rgb * (rim * u_rim_intensity * (0.45 + 0.55 * facing));
 
     // Contact shade along the bottom edge keeps the sheet seated.
     color -= vec3(u_edge_shade * bevel * v_uv.y);
@@ -1749,9 +1754,16 @@ void main() {
 pub const PARTICLE_FRAGMENT_SHADER: &str = r#"#version 300 es
 precision highp float;
 
+uniform int u_scene_linear; // 1 = decode color into common-linear target
 in vec4 v_color;
 in float v_life;
 out vec4 frag_color;
+
+vec3 srgb_inverse(vec3 c) {
+    vec3 lo = c / 12.92;
+    vec3 hi = pow(max((c + 0.055) / 1.055, 0.0), vec3(2.4));
+    return mix(lo, hi, step(0.04045, c));
+}
 
 void main() {
     // Circular point
@@ -1760,7 +1772,10 @@ void main() {
     if (dist > 0.5) discard;
 
     float alpha = v_color.a * v_life * (1.0 - smoothstep(0.3, 0.5, dist));
-    frag_color = vec4(v_color.rgb * alpha, alpha);
+    vec3 rgb = u_scene_linear != 0
+        ? srgb_inverse(v_color.rgb)
+        : v_color.rgb;
+    frag_color = vec4(rgb * alpha, alpha);
 }
 "#;
 

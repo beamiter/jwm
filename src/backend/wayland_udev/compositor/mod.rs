@@ -571,6 +571,12 @@ pub(crate) struct EdgeGlowUniforms {
     pub scene_linear: i32,
 }
 
+pub(crate) struct ParticleUniforms {
+    pub projection: i32,
+    pub point_size: i32,
+    pub scene_linear: i32,
+}
+
 // ---------------------------------------------------------------------------
 // Blur FBO level
 // ---------------------------------------------------------------------------
@@ -1070,6 +1076,12 @@ pub(crate) struct WaylandCompositor {
     /// self-drawn panels so each of them can sample what it covers. `None`
     /// under the Material theme, or when no blur chain is available.
     glass_backdrop: Option<u32>,
+    /// Whether [`Self::glass_backdrop`] was captured from the common-linear
+    /// target (`true`) or the encoded output FBO (`false`). A domain mismatch
+    /// forces a recapture so post-delivery chrome never samples a linear
+    /// backdrop (and tab-bar glass never samples an encoded one on deferred
+    /// routes).
+    glass_backdrop_linear: bool,
 
     // Uniform locations
     win_uniforms: WindowUniforms,
@@ -1089,6 +1101,7 @@ pub(crate) struct WaylandCompositor {
     #[allow(dead_code)]
     genie_uniforms: GenieUniforms,
     edge_glow_uniforms: EdgeGlowUniforms,
+    particle_uniforms: ParticleUniforms,
 
     // GL resources
     quad_vao: u32,
@@ -2469,6 +2482,12 @@ impl WaylandCompositor {
                 scene_linear: get_uniform_loc(gl, edge_glow_program, "u_scene_linear"),
             };
 
+            let particle_uniforms = ParticleUniforms {
+                projection: get_uniform_loc(gl, particle_program, "u_projection"),
+                point_size: get_uniform_loc(gl, particle_program, "u_point_size"),
+                scene_linear: get_uniform_loc(gl, particle_program, "u_scene_linear"),
+            };
+
             // ----- Create quad VAO/VBO -----
             //
             // Keep attribute 0 backed by a tiny static buffer. Several quad
@@ -2625,6 +2644,7 @@ impl WaylandCompositor {
                 sysui_text_program,
                 temporal_blur_mix_program,
                 glass_backdrop: None,
+                glass_backdrop_linear: false,
 
                 // Uniform locations
                 win_uniforms,
@@ -2643,6 +2663,7 @@ impl WaylandCompositor {
                 wobbly_uniforms,
                 genie_uniforms,
                 edge_glow_uniforms,
+                particle_uniforms,
 
                 // GL resources
                 quad_vao,

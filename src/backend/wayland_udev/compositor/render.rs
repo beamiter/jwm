@@ -911,6 +911,7 @@ mod tests {
             "SystemUi", "render_system_ui"
         );
         let final_brightness = format!("self.{}(gl, &projection);", "apply_final_brightness");
+        let screenshot = format!("// 19. {} capture", "Screenshot");
         let recording = format!("// 21. {} capture", "Recording");
         let mid = format!(
             "// Idle dim / user brightness is applied after toast/OSD/{}.",
@@ -923,14 +924,19 @@ mod tests {
         };
         let system_ui_at = at(&system_ui);
         let final_at = at(&final_brightness);
+        let screenshot_at = at(&screenshot);
         let recording_at = at(&recording);
         assert!(
-            system_ui_at < final_at && final_at < recording_at,
-            "idle dim must cover system UI and stay before REC/MIC local chrome"
+            system_ui_at < final_at && final_at < screenshot_at && screenshot_at < recording_at,
+            "idle dim must cover system UI; screenshots must read after dim and before REC chrome"
         );
         assert!(
             at(&mid) < final_at,
             "mid-frame brightness=1.0 comment must precede the final multiply"
+        );
+        assert!(
+            source.contains("apply_brightness_multiply(gl, projection, self.capture_view_fbo)"),
+            "dedicated capture view must bake idle brightness"
         );
     }
 
@@ -1727,22 +1733,35 @@ impl WaylandCompositor {
     /// compositor chrome without double-dimming glass (mid-frame brightness
     /// stays 1.0). REC/MIC chips are drawn after this on purpose.
     fn apply_final_brightness(&self, gl: &ffi::Gles2, projection: &[f32; 16]) {
+        self.apply_brightness_multiply(gl, projection, self.output_fbo);
+    }
+
+    /// Multiply `target_fbo`'s contents by `self.brightness` in place.
+    ///
+    /// Used for scanout (after overlays) and for baking dim into the dedicated
+    /// capture view so screenshots/recordings match the idle-dimmed session.
+    fn apply_brightness_multiply(
+        &self,
+        gl: &ffi::Gles2,
+        projection: &[f32; 16],
+        target_fbo: u32,
+    ) {
         if !super::config::final_brightness_is_active(self.brightness) {
             return;
         }
-        if self.postprocess_fbo == 0 || self.postprocess_texture == 0 {
+        if target_fbo == 0 || self.postprocess_fbo == 0 || self.postprocess_texture == 0 {
             return;
         }
         self.blit_fbo(
             gl,
-            self.output_fbo,
+            target_fbo,
             self.postprocess_fbo,
             self.screen_w,
             self.screen_h,
         );
         unsafe {
             gl.Disable(ffi::SCISSOR_TEST);
-            gl.BindFramebuffer(ffi::FRAMEBUFFER, self.output_fbo);
+            gl.BindFramebuffer(ffi::FRAMEBUFFER, target_fbo);
             gl.Viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
             gl.UseProgram(self.postprocess_program);
             self.set_projection_uniform(gl, self.postprocess_uniforms.projection, projection);
@@ -3911,27 +3930,28 @@ impl WaylandCompositor {
         }
 
         // Early-sRGB fallback: the staged external elements go above the
-        // linear-aware overlays that just drew into the encoded output, and
-        // below nothing — every class from 15c on is encoded-only, so none of
-        // them is visible on a frame that staged elements (the staging
-        // condition is the compositor's own linear-tail verdict).
+        // linear-aware overlays drawn so far (expose/peek) into the encoded
+        // output. Tab bar / particles / edge glow that follow are also
+        // common-linear-aware but keep this historical draw order; on the
+        // early-fallback route `tail_draws_linear` is false so they write
+        // encoded pixels after the staged elements.
         if external_elements_pass == ExternalElementPass::EncodedAfterLinearAwareOverlays {
             self.render_external_elements_encoded(gl, &projection);
         }
 
         // =================================================================
-        // 15c. Tab bar for window groups
+        // 15c. Tab bar for window groups (common-linear-aware)
         // =================================================================
         if self.window_tabs_enabled && !self.window_groups.is_empty() {
             self.refresh_tab_titles(gl);
-            self.render_tab_bar(gl, &projection);
+            self.render_tab_bar(gl, &projection, tail_draws_linear);
         }
 
         // =================================================================
-        // 16. Particles
+        // 16. Particles (common-linear-aware)
         // =================================================================
         if !self.particle_systems.is_empty() {
-            self.render_particles(gl, &projection);
+            self.render_particles(gl, &projection, tail_draws_linear);
         }
 
         // =================================================================
@@ -4159,35 +4179,6 @@ impl WaylandCompositor {
         }
 
         // =================================================================
-        // 19. Screenshot capture (region or full)
-        // =================================================================
-        if self.screenshot_requests.has_pending() {
-            match self.capture_readback_fbo() {
-                Some(fbo) => unsafe {
-                    gl.BindFramebuffer(ffi::FRAMEBUFFER, fbo);
-                    self.capture_pending_screenshots(gl);
-                },
-                // A deferred route without a fresh capture view (allocation
-                // failure) must not read output-referred pixels. Retrying on
-                // every frame would repeat the same allocation failure while
-                // keeping an otherwise static desktop rendering forever, so
-                // the queued requests fail now, loudly, instead of silently
-                // never completing.
-                None => {
-                    for request in self.screenshot_requests.take_all() {
-                        log::error!(
-                            "[compositor] screenshot {} dropped: encoded capture view unavailable",
-                            screenshot_request_path(&request).display()
-                        );
-                    }
-                }
-            }
-        }
-        unsafe {
-            self.screenshot_readback.drain_ready(gl);
-        }
-
-        // =================================================================
         // 19b. Debug HUD — `debug_hud_extended` only adds sections to the
         // card, so the basic HUD must draw on its own like it does on X11.
         // =================================================================
@@ -4252,6 +4243,37 @@ impl WaylandCompositor {
         // Final brightness multiply after toast/OSD/system UI so idle dim
         // covers compositor chrome. Mid-frame postprocess keeps u_brightness=1.
         self.apply_final_brightness(gl, &projection);
+
+        // =================================================================
+        // 19. Screenshot capture (region or full)
+        // =================================================================
+        // After final brightness so EncodedOutput readbacks match the dimmed
+        // session. Dedicated capture views already baked brightness in 18c.
+        if self.screenshot_requests.has_pending() {
+            match self.capture_readback_fbo() {
+                Some(fbo) => unsafe {
+                    gl.BindFramebuffer(ffi::FRAMEBUFFER, fbo);
+                    self.capture_pending_screenshots(gl);
+                },
+                // A deferred route without a fresh capture view (allocation
+                // failure) must not read output-referred pixels. Retrying on
+                // every frame would repeat the same allocation failure while
+                // keeping an otherwise static desktop rendering forever, so
+                // the queued requests fail now, loudly, instead of silently
+                // never completing.
+                None => {
+                    for request in self.screenshot_requests.take_all() {
+                        log::error!(
+                            "[compositor] screenshot {} dropped: encoded capture view unavailable",
+                            screenshot_request_path(&request).display()
+                        );
+                    }
+                }
+            }
+        }
+        unsafe {
+            self.screenshot_readback.drain_ready(gl);
+        }
 
         // =================================================================
         // 20. Finalize - unbind FBO
@@ -4444,6 +4466,10 @@ impl WaylandCompositor {
             crate::backend::wayland_udev::color_pipeline::OutputToneMapPlan::IDENTITY,
             None,
         );
+        // Bake idle/user brightness into the dedicated capture view so
+        // screenshots and recording match the dimmed on-screen session.
+        // Scanout still dims later via `apply_final_brightness` after overlays.
+        self.apply_brightness_multiply(gl, projection, self.capture_view_fbo);
         self.capture_view_fresh = true;
     }
 
@@ -4689,7 +4715,7 @@ impl WaylandCompositor {
         tone: [f32; 4],
     ) {
         let ui = ui_theme::palette();
-        self.ensure_glass_backdrop(gl, ui, projection);
+        self.ensure_glass_backdrop(gl, ui, projection, false);
         let dims = |slot: usize| -> (f32, f32) {
             self.hud_textures[slot]
                 .map(|(_, w, h)| (w as f32, h as f32))
@@ -4721,7 +4747,7 @@ impl WaylandCompositor {
         // rounded-fill mode. The overlay draws onto the display-encoded
         // output, so scene-linear conversion stays off.
         self.ui_fill_island(
-            gl, projection, ui, cx, cy, cw, ch, radius, radius_top, ui.card, 1.0,
+            gl, projection, ui, cx, cy, cw, ch, radius, radius_top, ui.card, 1.0, false,
         );
         if layout.chip_pill.2 > 0.0 {
             let (px, py, pw, ph) = layout.chip_pill;
@@ -4920,18 +4946,31 @@ impl WaylandCompositor {
     /// Capture a blurred copy of the frame for the frosted-glass panels to
     /// sample.
     ///
-    /// Reads `output_fbo`, i.e. the composited scene as it will be scanned out,
-    /// so the glass shows the desktop the user sees. No blur chain (a driver
-    /// that refused the FBOs) leaves the backdrop unset and the panels fall
-    /// back to flat translucent fills.
-    fn capture_glass_backdrop(&mut self, gl: &ffi::Gles2, palette: &UiPalette, proj: &[f32; 16]) {
+    /// Reads the bound delivery target for this draw — the common-linear FBO
+    /// when `scene_linear`, otherwise `output_fbo` — so the glass shows the
+    /// desktop in the same domain the panel will write into. No blur chain (a
+    /// driver that refused the FBOs) leaves the backdrop unset and the panels
+    /// fall back to flat translucent fills.
+    fn capture_glass_backdrop(
+        &mut self,
+        gl: &ffi::Gles2,
+        palette: &UiPalette,
+        proj: &[f32; 16],
+        scene_linear: bool,
+    ) {
         self.glass_backdrop = None;
+        self.glass_backdrop_linear = scene_linear;
         if palette.glass.is_none() || self.blur_fbos.is_empty() || self.scene_fbo == 0 {
             return;
         }
+        let source_fbo = if scene_linear && self.linear_fbo != 0 {
+            self.linear_fbo
+        } else {
+            self.output_fbo
+        };
         self.blit_fbo(
             gl,
-            self.output_fbo,
+            source_fbo,
             self.scene_fbo,
             self.screen_w,
             self.screen_h,
@@ -4939,17 +4978,18 @@ impl WaylandCompositor {
         self.run_blur_passes(gl, self.scene_texture, proj, BlurQuality::Full);
         self.glass_backdrop = Some(self.blur_fbos[0].texture);
         // run_blur_passes leaves its last level bound; overlays keep drawing
-        // into the output.
+        // into the same target they sampled.
         unsafe {
-            gl.BindFramebuffer(ffi::FRAMEBUFFER, self.output_fbo);
+            gl.BindFramebuffer(ffi::FRAMEBUFFER, source_fbo);
             gl.Viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
         }
     }
 
-    /// Capture the backdrop unless this frame already has one. Panels drawn
-    /// back to back share a single capture: re-blurring the whole screen per
-    /// card would cost more than the parallax it buys, and the only thing the
-    /// later cards miss is the earlier cards themselves.
+    /// Capture the backdrop unless this frame already has one in the requested
+    /// color domain. Panels drawn back to back in the same domain share a
+    /// single capture: re-blurring the whole screen per card would cost more
+    /// than the parallax it buys, and the only thing the later cards miss is
+    /// the earlier cards themselves.
     /// Where the compositor's own panels dock: under the status bar.
     ///
     /// The bar's class is matched against the tracked windows and its rect read
@@ -4987,10 +5027,12 @@ impl WaylandCompositor {
         gl: &ffi::Gles2,
         palette: &UiPalette,
         proj: &[f32; 16],
+        scene_linear: bool,
     ) {
-        if self.glass_backdrop.is_none() {
-            self.capture_glass_backdrop(gl, palette, proj);
+        if self.glass_backdrop.is_some() && self.glass_backdrop_linear == scene_linear {
+            return;
         }
+        self.capture_glass_backdrop(gl, palette, proj, scene_linear);
     }
 
     /// Draw one frosted-glass surface. Binds its own program, so callers that
@@ -5009,6 +5051,7 @@ impl WaylandCompositor {
         tint: [f32; 4],
         alpha: f32,
         params: &crate::backend::compositor_common::ui_theme::GlassParams,
+        scene_linear: bool,
     ) {
         let Some(backdrop) = self.glass_backdrop else {
             return;
@@ -5042,9 +5085,7 @@ impl WaylandCompositor {
             gl.Uniform1f(u.edge_shade, params.edge_shade);
             gl.Uniform1f(u.grain, params.grain);
             gl.Uniform1f(u.alpha, alpha.clamp(0.0, 1.0));
-            // Overlays draw onto the display-encoded output, so scene-linear
-            // conversion stays off — matching the border programs.
-            gl.Uniform1i(u.scene_linear, 0);
+            gl.Uniform1i(u.scene_linear, i32::from(scene_linear));
             self.set_rect_uniform(gl, u.rect, x, y, w, h);
             gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
         }
@@ -5068,8 +5109,24 @@ impl WaylandCompositor {
         r: f32,
         surface: [f32; 4],
         alpha: f32,
+        scene_linear: bool,
     ) {
-        unsafe { self.ui_fill_island(gl, proj, palette, x, y, w, h, r, r, surface, alpha) }
+        unsafe {
+            self.ui_fill_island(
+                gl,
+                proj,
+                palette,
+                x,
+                y,
+                w,
+                h,
+                r,
+                r,
+                surface,
+                alpha,
+                scene_linear,
+            )
+        }
     }
 
     /// As [`Self::ui_fill_surface`], but the top two corners take their own
@@ -5088,12 +5145,24 @@ impl WaylandCompositor {
         r_top: f32,
         surface: [f32; 4],
         alpha: f32,
+        scene_linear: bool,
     ) {
         unsafe {
             let drew_glass = match palette.glass {
                 Some(params) if self.glass_backdrop.is_some() => {
                     self.glass_fill_rounded(
-                        gl, proj, x, y, w, h, r, r_top, surface, alpha, &params,
+                        gl,
+                        proj,
+                        x,
+                        y,
+                        w,
+                        h,
+                        r,
+                        r_top,
+                        surface,
+                        alpha,
+                        &params,
+                        scene_linear,
                     );
                     true
                 }
@@ -5101,7 +5170,7 @@ impl WaylandCompositor {
             };
             gl.UseProgram(self.border_program);
             self.set_projection_uniform(gl, self.border_uniforms.projection, proj);
-            gl.Uniform1i(self.border_uniforms.scene_linear, 0);
+            gl.Uniform1i(self.border_uniforms.scene_linear, i32::from(scene_linear));
             if !drew_glass {
                 self.sysui_fill_island(gl, x, y, w, h, r, r_top, UiPalette::faded(surface, alpha));
             }
@@ -5260,7 +5329,7 @@ impl WaylandCompositor {
             gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
         }
 
-        self.capture_glass_backdrop(gl, ui, projection);
+        self.capture_glass_backdrop(gl, ui, projection, false);
 
         unsafe {
             // Drop shadow, then the card.
@@ -5299,6 +5368,7 @@ impl WaylandCompositor {
                 film::PANEL_RADIUS,
                 ui.panel,
                 1.0,
+                false,
             );
 
             // The film base: the palette's recessed tone, which reads darker
@@ -5542,7 +5612,7 @@ impl WaylandCompositor {
             gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
         }
 
-        self.capture_glass_backdrop(gl, ui, projection);
+        self.capture_glass_backdrop(gl, ui, projection, false);
 
         unsafe {
             // Drop shadow, then the card.
@@ -5581,6 +5651,7 @@ impl WaylandCompositor {
                 film::PANEL_RADIUS,
                 ui.panel,
                 1.0,
+                false,
             );
 
             let line = UiPalette::ink(ui.item_ink, 0.72);
@@ -5980,6 +6051,7 @@ impl WaylandCompositor {
                 panel::PREVIEW_RADIUS,
                 ui.panel,
                 content_a,
+                false,
             );
             // The image through the ordinary window program, whose radius
             // uniform rounds it like any other drawn texture. Its uniforms
@@ -6182,7 +6254,7 @@ impl WaylandCompositor {
         // after it — otherwise the glass would show an undimmed desktop inside
         // a dimmed one. Forced rather than lazy for the same reason.
         if !overlay.locked {
-            self.capture_glass_backdrop(gl, ui, projection);
+            self.capture_glass_backdrop(gl, ui, projection, false);
         }
 
         unsafe {
@@ -6220,6 +6292,7 @@ impl WaylandCompositor {
             // display-encoded output, so scene-linear conversion stays off.
             self.ui_fill_island(
                 gl, projection, ui, x, y, panel_w, panel_h, radius, radius_top, panel_fill, 1.0,
+                false,
             );
 
             let layout = panel::contents(
@@ -6585,7 +6658,7 @@ impl WaylandCompositor {
         }
 
         let ui = ui_theme::palette();
-        self.ensure_glass_backdrop(gl, ui, projection);
+        self.ensure_glass_backdrop(gl, ui, projection, false);
         let motion_enabled = crate::config::CONFIG.load().motion_enabled();
         let button_hover = self.toast_button_hover;
         let pad = 18.0;
@@ -6676,6 +6749,7 @@ impl WaylandCompositor {
                 // shadow spreading up over it is the seam this removes.
                 self.ui_fill_island(
                     gl, projection, ui, x, y, card_w, card_h, radius, radius_top, ui.toast, a,
+                    false,
                 );
                 self.sysui_fill_rounded(
                     gl,
@@ -6843,7 +6917,7 @@ impl WaylandCompositor {
         };
 
         let ui = ui_theme::palette();
-        self.ensure_glass_backdrop(gl, ui, projection);
+        self.ensure_glass_backdrop(gl, ui, projection, false);
         let target_h = crate::backend::compositor_common::osd::OSD_CARD_HEIGHT;
         let pad = 24.0;
         // Fixed label zone so the bar does not shift as digits change.
@@ -6870,6 +6944,7 @@ impl WaylandCompositor {
             // spreading up over it is exactly the seam the effect removes.
             self.ui_fill_island(
                 gl, projection, ui, x, y, card_w, card_h, radius, radius_top, ui.osd, a,
+                false,
             );
 
             // Progress bar: dim track + accent fill. Label-only kinds (media)

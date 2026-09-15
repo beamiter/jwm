@@ -969,7 +969,16 @@ impl WaylandCompositor {
     /// Taking `&mut self` is what the frosted themes cost: the track samples
     /// the blurred scene, and that capture has to happen before the first
     /// cell is filled.
-    pub(crate) fn render_tab_bar(&mut self, gl: &ffi::Gles2, projection: &[f32; 16]) {
+    pub(crate) fn render_tab_bar(
+        &mut self,
+        gl: &ffi::Gles2,
+        projection: &[f32; 16],
+        scene_linear: bool,
+    ) {
+        debug_assert_eq!(
+            tail_domain::TailOverlayClass::TabBar.domain(),
+            tail_domain::TailOverlayDomain::CommonLinearAware
+        );
         // The hover chip eases in under the pointer like the other cues and
         // snaps off the frame the hover leaves. Advanced ahead of the empty
         // early-return so a cleared strip still releases the envelope.
@@ -1041,7 +1050,7 @@ impl WaylandCompositor {
             return;
         }
         let ui = ui_theme::palette();
-        self.ensure_glass_backdrop(gl, ui, projection);
+        self.ensure_glass_backdrop(gl, ui, projection, scene_linear);
         let accent = self.border_gradient_color_a;
         let tab_hover = self.tab_hover;
         let hover_scale = ui_theme::TAB_HOVER_ALPHA_SCALE * hover_p;
@@ -1091,6 +1100,7 @@ impl WaylandCompositor {
                     track_radius,
                     ui.card,
                     appear,
+                    scene_linear,
                 );
 
                 for (index, tab) in group.tabs.iter().enumerate() {
@@ -1208,7 +1218,7 @@ impl WaylandCompositor {
             && tooltip_p > 0.0
             && let Some((group_index, index)) = window_tabs::find_tab(&self.window_groups, window)
         {
-            self.render_tab_tooltip(gl, projection, group_index, index, tooltip_p);
+            self.render_tab_tooltip(gl, projection, group_index, index, tooltip_p, scene_linear);
         }
     }
 
@@ -1224,6 +1234,7 @@ impl WaylandCompositor {
         group_index: usize,
         index: usize,
         p: f32,
+        scene_linear: bool,
     ) {
         let Some((bar, cell, title)) = self.window_groups.get(group_index).and_then(|group| {
             let cell = window_tabs::cell_rect(group.bar, group.tabs.len(), index)?;
@@ -1274,7 +1285,20 @@ impl WaylandCompositor {
         unsafe {
             gl.BindVertexArray(self.quad_vao);
             let radius = window_tabs::pill_radius(h);
-            self.ui_fill_island(gl, projection, ui, x, y, w, h, radius, radius, ui.osd, p);
+            self.ui_fill_island(
+                gl,
+                projection,
+                ui,
+                x,
+                y,
+                w,
+                h,
+                radius,
+                radius,
+                ui.osd,
+                p,
+                scene_linear,
+            );
 
             gl.UseProgram(self.sysui_text_program);
             let text_rect = super::get_uniform_loc(gl, self.sysui_text_program, "u_rect");

@@ -7,6 +7,20 @@ monorepo use independent Semantic Versions.
 
 ### Added
 
+- Tab bar frosted glass is common-linear-aware: backdrop capture follows the
+  bound target domain and tint/rim decode via `u_scene_linear`, so tab-only
+  frames no longer force the exact-sRGB HDR fallback.
+
+- Particles are common-linear-aware (`u_scene_linear`), matching EdgeGlow, so
+  particle-only frames no longer force the exact-sRGB HDR fallback.
+
+- Idle-dimmed Wayland screenshots/recordings: dedicated capture views bake
+  brightness at encode time; EncodedOutput screenshot readback runs after the
+  final brightness pass. See [docs/idle.md](docs/idle.md).
+
+- Documented the framebuffer-envelope refuse path and workarounds in
+  [docs/output-layout.md](docs/output-layout.md).
+
 - Edge glow is common-linear-aware (`u_scene_linear`) so glow-only frames no
   longer force the exact-sRGB HDR fallback. See
   [docs/sota-gap-queue.md](docs/sota-gap-queue.md).

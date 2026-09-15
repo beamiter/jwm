@@ -963,27 +963,31 @@ impl WaylandCompositor {
     }
 
     /// Render particle systems
-    pub(crate) fn render_particles(&mut self, gl: &ffi::Gles2, projection: &[f32; 16]) {
+    pub(crate) fn render_particles(
+        &mut self,
+        gl: &ffi::Gles2,
+        projection: &[f32; 16],
+        scene_linear: bool,
+    ) {
         if self.particle_systems.is_empty() {
             return;
         }
+        debug_assert_eq!(
+            super::tail_domain::TailOverlayClass::Particles.domain(),
+            super::tail_domain::TailOverlayDomain::CommonLinearAware
+        );
         unsafe {
             gl.UseProgram(self.particle_program);
             gl.UniformMatrix4fv(
-                gl.GetUniformLocation(
-                    self.particle_program,
-                    b"u_projection\0".as_ptr() as *const _,
-                ),
+                self.particle_uniforms.projection,
                 1,
                 ffi::FALSE as u8,
                 projection.as_ptr(),
             );
-            gl.Uniform1f(
-                gl.GetUniformLocation(
-                    self.particle_program,
-                    b"u_point_size\0".as_ptr() as *const _,
-                ),
-                8.0,
+            gl.Uniform1f(self.particle_uniforms.point_size, 8.0);
+            gl.Uniform1i(
+                self.particle_uniforms.scene_linear,
+                i32::from(scene_linear),
             );
 
             // Build vertex data: [x, y, r, g, b, a, normalized life].

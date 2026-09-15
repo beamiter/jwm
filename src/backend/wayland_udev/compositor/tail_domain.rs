@@ -76,9 +76,11 @@ pub(crate) enum TailOverlayClass {
     Expose,
     /// Peek spotlight: dim scrim plus the focused window redrawn on top.
     Peek,
-    /// Tab bar: frosted variants sample the encoded backdrop.
+    /// Tab bar: frosted glass samples the bound-target backdrop domain;
+    /// flat fills honor `u_scene_linear` like the border program.
     TabBar,
-    /// Particle effects (dedicated shader without a linear-domain ingress).
+    /// Particle effects (dedicated shader; common-linear-aware via
+    /// `u_scene_linear` color ingress).
     Particles,
     /// Edge glow (dedicated time-varying shader; common-linear-aware via
     /// `u_scene_linear` color ingress).
@@ -129,10 +131,10 @@ impl TailOverlayClass {
             | Self::Overview
             | Self::Expose
             | Self::Peek
-            | Self::EdgeGlow => TailOverlayDomain::CommonLinearAware,
-            Self::WorkspaceTransition
             | Self::TabBar
-            | Self::Particles
+            | Self::EdgeGlow
+            | Self::Particles => TailOverlayDomain::CommonLinearAware,
+            Self::WorkspaceTransition
             | Self::Postprocess
             | Self::DebugHud
             | Self::Annotation
@@ -154,10 +156,10 @@ impl TailOverlayClass {
             | Self::Overview
             | Self::Expose
             | Self::Peek
-            | Self::EdgeGlow => None,
+            | Self::TabBar
+            | Self::EdgeGlow
+            | Self::Particles => None,
             Self::WorkspaceTransition => Some("workspace_transition_overlay"),
-            Self::TabBar => Some("tab_bar_overlay"),
-            Self::Particles => Some("particle_overlay"),
             Self::Postprocess => Some("postprocess_filter"),
             Self::DebugHud => Some("debug_hud_overlay"),
             Self::Annotation => Some("annotation_overlay"),
