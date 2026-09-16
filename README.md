@@ -229,11 +229,12 @@ bindable and scriptable over IPC like the three defaults.
 | Alt+Shift+F9 | Cycle the WaterLily render palette |
 | Alt+Shift+/ | Show all key and touchpad-gesture bindings (click outside to close) |
 
-During interactive screenshot or recording selection, press `G`, `W`, `M`, or
-`D` to choose a dragged region, a window, the monitor under the pointer, or the
-entire desktop. `Tab` and `Shift+Tab` cycle the same choices; middle-click is
-the pointer twin of `Tab`. Window capture shows a hover preview and is
-confirmed with the left mouse button; `Enter` saves a screenshot or
+During interactive screenshot or recording selection, hover highlights the
+window under the pointer; a left click picks that window. Press `G`, `W`, `M`,
+or `D` to choose a dragged region, window mode, the monitor under the pointer,
+or the entire desktop. `Tab` and `Shift+Tab` cycle the same choices; middle-click
+is the pointer twin of `Tab`. Dragging still draws a free region; a near-zero
+click over empty desktop leaves selection armed. `Enter` saves a screenshot or
 starts/commits recording. Arrow keys nudge a committed selection (`Shift`
 uses 10-pixel steps), while `Escape`, right-click, or the recording shortcut
 again cancels safely.

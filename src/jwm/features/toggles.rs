@@ -3135,9 +3135,16 @@ impl Jwm {
             self.features.recording.cancel_region_selection();
             return Err(error);
         }
-        backend.compositor_set_recording_region_overlay(None);
-        backend.compositor_force_full_redraw();
-        info!("[recording] select a region, then press Enter to start → {output_path}");
+        // Soft-probe the window under the pointer so hover/click picking works
+        // before the first motion event.
+        self.preview_recording_capture_target(
+            backend,
+            crate::backend::api::HitTarget::Background { output: None },
+            self.last_mouse_root,
+        );
+        info!(
+            "[recording] hover/click a window or drag a region, then Enter to start → {output_path}"
+        );
         Ok(())
     }
 

@@ -185,6 +185,12 @@ impl RecordingState {
         self.drag = RecordingRegionDrag::None;
     }
 
+    /// True while a region create / move / resize drag owns the pointer.
+    #[must_use]
+    pub fn is_region_dragging(&self) -> bool {
+        !matches!(self.drag, RecordingRegionDrag::None)
+    }
+
     pub fn begin_region_drag(&mut self, pointer_x: i32, pointer_y: i32) {
         if !self.selecting_region {
             return;

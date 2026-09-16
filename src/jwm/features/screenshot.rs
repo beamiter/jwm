@@ -1168,8 +1168,15 @@ impl Jwm {
         self.features
             .screenshot
             .set_output_path(screenshot_path.to_owned());
+        // Soft-probe the window under the pointer immediately so hover/click
+        // picking works without waiting for the first motion event.
+        self.preview_screenshot_capture_target(
+            backend,
+            crate::backend::api::HitTarget::Background { output: None },
+            self.last_mouse_root,
+        );
         info!(
-            "[take_screenshot] interactive capture → {} (scene={}, G/W/M/D or Tab selects source)",
+            "[take_screenshot] interactive capture → {} (scene={}, hover/click picks a window; G/W/M/D or Tab selects source)",
             screenshot_path,
             if freeze_enabled { "frozen" } else { "live" }
         );

@@ -1,6 +1,8 @@
 //! Shared interactive capture target selection for screenshots and recordings.
 
 use crate::backend::api::{Backend, HitTarget};
+use crate::config::CONFIG;
+use crate::core::models::ClientKey;
 use crate::core::types::Rect;
 use crate::jwm::Jwm;
 use log::{info, warn};
@@ -8,6 +10,12 @@ use log::{info, warn};
 use crate::jwm::features::capture_plan::MIN_SCREENSHOT_SIZE;
 
 const MIN_RECORDING_SIZE: i32 = 16;
+
+/// Whether `(x, y)` lands inside `rect` (half-open on the right/bottom edges).
+#[must_use]
+pub(crate) fn rect_contains_point(rect: Rect, x: i32, y: i32) -> bool {
+    x >= rect.x && y >= rect.y && x < rect.x.saturating_add(rect.w) && y < rect.y.saturating_add(rect.h)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CaptureTarget {
@@ -120,7 +128,108 @@ impl Jwm {
         ))
     }
 
-    fn window_capture_rect(&self, backend: &mut dyn Backend, hit: HitTarget) -> Option<Rect> {
+    /// Monitor whose output rectangle contains the pointer, preferring geometry
+    /// over backend output maps so capture probing stays usable under a grab.
+    fn monitor_at_capture_pointer(&self, x: i32, y: i32) -> Option<crate::core::models::MonitorKey> {
+        for (mon_key, _) in self.state.monitors.iter() {
+            let (mx, my, mw, mh) = self.monitor_rect(mon_key);
+            let (Ok(mw), Ok(mh)) = (i32::try_from(mw), i32::try_from(mh)) else {
+                continue;
+            };
+            if x >= mx && y >= my && x < mx.saturating_add(mw) && y < my.saturating_add(mh) {
+                return Some(mon_key);
+            }
+        }
+        self.state.sel_mon
+    }
+
+    /// Whether this client is a sensible interactive capture source under the
+    /// pointer: visible, not chrome (bar/dock), and covering the point.
+    fn capture_client_covers_point(
+        &self,
+        client_key: ClientKey,
+        x: i32,
+        y: i32,
+        status_bar_name: &str,
+    ) -> bool {
+        let Some(client) = self.state.clients.get(client_key) else {
+            return false;
+        };
+        if client.state.is_hidden
+            || client.state.is_swallowed
+            || client.state.is_dock
+            || client.is_status_bar(status_bar_name)
+        {
+            return false;
+        }
+        if !self.is_client_visible_by_key(client_key) {
+            return false;
+        }
+        let rect = Rect::new(
+            client.geometry.x,
+            client.geometry.y,
+            client.total_width(),
+            client.total_height(),
+        );
+        rect_contains_point(rect, x, y)
+    }
+
+    /// Topmost managed client under the pointer, walked from the compositor's
+    /// stacking order. Interactive capture runs under an overlay / pointer
+    /// grab, so backend hit-testing sees the overlay (or nothing on Wayland)
+    /// rather than the window the user is pointing at — the WM has to probe
+    /// itself from client geometry.
+    fn capture_client_at_pointer(&self, pointer: (f64, f64)) -> Option<ClientKey> {
+        let x = pointer.0.round() as i32;
+        let y = pointer.1.round() as i32;
+        let mon_key = self.monitor_at_capture_pointer(x, y)?;
+        let config = CONFIG.load();
+        let status_bar_name = config.status_bar_name();
+
+        if let Some(stacking) = self.last_stacking.get(mon_key) {
+            for &win in stacking.iter().rev() {
+                let Some(client_key) = self.wintoclient(win) else {
+                    continue;
+                };
+                if self.capture_client_covers_point(client_key, x, y, status_bar_name) {
+                    return Some(client_key);
+                }
+            }
+        } else {
+            for &client_key in self.get_monitor_stack(mon_key) {
+                if self.capture_client_covers_point(client_key, x, y, status_bar_name) {
+                    return Some(client_key);
+                }
+            }
+        }
+        None
+    }
+
+    /// Capture rectangle for the managed window currently under the pointer.
+    fn probe_window_capture_rect(&self, pointer: (f64, f64)) -> Option<Rect> {
+        let client_key = self.capture_client_at_pointer(pointer)?;
+        let client = self.state.clients.get(client_key)?;
+        self.clamp_capture_rect(Rect::new(
+            client.geometry.x,
+            client.geometry.y,
+            client.total_width(),
+            client.total_height(),
+        ))
+    }
+
+    fn window_capture_rect(
+        &self,
+        backend: &mut dyn Backend,
+        hit: HitTarget,
+        pointer: (f64, f64),
+    ) -> Option<Rect> {
+        // Prefer the WM stacking probe: see `capture_client_at_pointer`.
+        if let Some(rect) = self.probe_window_capture_rect(pointer) {
+            return Some(rect);
+        }
+
+        // Fallback for unmanaged / override-redirect surfaces that are not in
+        // the client map (menus, tooltips) when the backend can still see them.
         let window = match hit {
             HitTarget::Surface(window) => Some(window),
             HitTarget::Background { .. } => {
@@ -135,7 +244,12 @@ impl Jwm {
 
         let rect = if let Some(client_key) = self.wintoclient(window) {
             let client = self.state.clients.get(client_key)?;
-            if client.state.is_hidden || client.state.is_swallowed {
+            let config = CONFIG.load();
+            if client.state.is_hidden
+                || client.state.is_swallowed
+                || client.state.is_dock
+                || client.is_status_bar(config.status_bar_name())
+            {
                 return None;
             }
             Rect::new(
@@ -167,10 +281,36 @@ impl Jwm {
     ) -> Option<Rect> {
         match target {
             CaptureTarget::Region => None,
-            CaptureTarget::Window => self.window_capture_rect(backend, hit),
+            CaptureTarget::Window => self.window_capture_rect(backend, hit, pointer),
             CaptureTarget::Monitor => self.monitor_capture_rect(backend, pointer),
             CaptureTarget::Desktop => self.desktop_capture_rect(),
         }
+    }
+
+    /// Commit the window currently under the pointer as the screenshot source.
+    /// Used for Window mode clicks and for Region mode click-to-pick (a near-
+    /// zero drag over a window).
+    pub(crate) fn commit_probed_window_screenshot(
+        &mut self,
+        backend: &mut dyn Backend,
+        pointer: (f64, f64),
+    ) -> bool {
+        let Some(rect) = self.probe_window_capture_rect(pointer) else {
+            return false;
+        };
+        self.commit_screenshot_rect(backend, rect)
+    }
+
+    /// Same probe commit for recording source selection.
+    pub(crate) fn commit_probed_window_recording(
+        &mut self,
+        backend: &mut dyn Backend,
+        pointer: (f64, f64),
+    ) -> bool {
+        let Some(rect) = self.probe_window_capture_rect(pointer) else {
+            return false;
+        };
+        self.apply_recording_rect(backend, rect)
     }
 
     fn commit_screenshot_rect(&mut self, backend: &mut dyn Backend, rect: Rect) -> bool {
@@ -214,18 +354,28 @@ impl Jwm {
             backend.compositor_set_snap_preview(None);
         }
 
-        if matches!(target, CaptureTarget::Monitor | CaptureTarget::Desktop) {
-            let hit = HitTarget::Background { output: None };
-            if let Some(rect) = self.capture_target_rect(backend, hit, self.last_mouse_root, target)
-            {
-                self.commit_screenshot_rect(backend, rect);
+        match target {
+            CaptureTarget::Monitor | CaptureTarget::Desktop => {
+                let hit = HitTarget::Background { output: None };
+                if let Some(rect) =
+                    self.capture_target_rect(backend, hit, self.last_mouse_root, target)
+                {
+                    self.commit_screenshot_rect(backend, rect);
+                }
             }
-        } else {
-            backend.compositor_force_full_redraw();
+            CaptureTarget::Window | CaptureTarget::Region => {
+                // Seed the hover highlight immediately so the user does not
+                // have to jiggle the pointer before the first window lights up.
+                self.preview_screenshot_capture_target(
+                    backend,
+                    HitTarget::Background { output: None },
+                    self.last_mouse_root,
+                );
+            }
         }
 
         info!(
-            "[capture] screenshot target={} (G region, W window, M monitor, D desktop, Tab cycle)",
+            "[capture] screenshot target={} (G region, W window, M monitor, D desktop, Tab cycle; hover probes a window, click picks it)",
             target.label()
         );
     }
@@ -274,13 +424,17 @@ impl Jwm {
         }
 
         let target = self.features.capture.screenshot;
-        if target == CaptureTarget::Region {
-            return;
-        }
-
-        let preview = self
-            .capture_target_rect(backend, hit, pointer, target)
-            .map(|rect| (rect.x as f32, rect.y as f32, rect.w as f32, rect.h as f32));
+        // Region and Window both soft-probe the managed window under the
+        // cursor. Region keeps drag-to-draw; a near-zero click still commits
+        // the probed window on release.
+        let preview = match target {
+            CaptureTarget::Region | CaptureTarget::Window => self
+                .probe_window_capture_rect(pointer)
+                .map(|rect| (rect.x as f32, rect.y as f32, rect.w as f32, rect.h as f32)),
+            CaptureTarget::Monitor | CaptureTarget::Desktop => self
+                .capture_target_rect(backend, hit, pointer, target)
+                .map(|rect| (rect.x as f32, rect.y as f32, rect.w as f32, rect.h as f32)),
+        };
         backend.compositor_set_snap_preview(preview);
         backend.compositor_force_full_redraw();
     }
@@ -320,11 +474,19 @@ impl Jwm {
                 if !self.features.recording.adjusting_region {
                     self.features.recording.region = None;
                 }
-                self.sync_recording_region_overlay(backend);
+                self.preview_recording_capture_target(
+                    backend,
+                    HitTarget::Background { output: None },
+                    self.last_mouse_root,
+                );
             }
             CaptureTarget::Window => {
                 self.features.recording.region = None;
-                self.sync_recording_region_overlay(backend);
+                self.preview_recording_capture_target(
+                    backend,
+                    HitTarget::Background { output: None },
+                    self.last_mouse_root,
+                );
             }
             CaptureTarget::Monitor | CaptureTarget::Desktop => {
                 let hit = HitTarget::Background { output: None };
@@ -337,7 +499,7 @@ impl Jwm {
         }
 
         info!(
-            "[capture] recording target={} (G region, W window, M monitor, D desktop, Tab cycle, Enter confirm)",
+            "[capture] recording target={} (G region, W window, M monitor, D desktop, Tab cycle, Enter confirm; hover probes a window, click picks it)",
             target.label()
         );
     }
@@ -378,15 +540,24 @@ impl Jwm {
         hit: HitTarget,
         pointer: (f64, f64),
     ) {
-        if !self.features.recording.selecting_region
-            || self.features.capture.recording != CaptureTarget::Window
-        {
+        if !self.features.recording.selecting_region {
+            return;
+        }
+        // While a region drag is in flight the overlay follows the drag, not
+        // the soft probe.
+        if self.features.recording.is_region_dragging() {
             return;
         }
 
-        let preview = self
-            .capture_target_rect(backend, hit, pointer, CaptureTarget::Window)
-            .and_then(Self::recording_region_tuple);
+        let target = self.features.capture.recording;
+        let preview = match target {
+            CaptureTarget::Region | CaptureTarget::Window => self
+                .probe_window_capture_rect(pointer)
+                .and_then(Self::recording_region_tuple),
+            CaptureTarget::Monitor | CaptureTarget::Desktop => self
+                .capture_target_rect(backend, hit, pointer, target)
+                .and_then(Self::recording_region_tuple),
+        };
         backend.compositor_set_recording_region_overlay(preview);
         backend.compositor_force_full_redraw();
     }
@@ -451,5 +622,15 @@ mod tests {
             intersect_rect(Rect::new(10, 10, 0, 20), Rect::new(0, 0, 100, 100)),
             None
         );
+    }
+
+    #[test]
+    fn rect_contains_point_is_half_open() {
+        let rect = Rect::new(10, 20, 30, 40);
+        assert!(rect_contains_point(rect, 10, 20));
+        assert!(rect_contains_point(rect, 39, 59));
+        assert!(!rect_contains_point(rect, 40, 20));
+        assert!(!rect_contains_point(rect, 10, 60));
+        assert!(!rect_contains_point(rect, 9, 20));
     }
 }

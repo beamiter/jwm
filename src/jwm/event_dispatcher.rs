@@ -692,7 +692,20 @@ impl WMController for Jwm {
         }
 
         if self.features.recording.selecting_region {
+            let was_dragging = self.features.recording.is_region_dragging();
+            let pointer = self.last_mouse_root;
             self.features.recording.end_region_drag();
+            // A near-zero region drag is a click: pick the probed window.
+            if was_dragging
+                && self.features.recording.region.is_none()
+                && !self.features.recording.adjusting_region
+                && matches!(
+                    self.features.capture.recording,
+                    CaptureTarget::Region | CaptureTarget::Window
+                )
+            {
+                let _ = self.commit_probed_window_recording(backend, pointer);
+            }
             if self.features.recording.adjusting_region {
                 if let Some(region) = self
                     .features
@@ -730,14 +743,30 @@ impl WMController for Jwm {
             self.features
                 .screenshot
                 .update_drag(self.last_mouse_root.0, self.last_mouse_root.1);
+            let pointer = self.last_mouse_root;
             let Some(rect) = self.features.screenshot.get_selection_rect() else {
-                info!("[take_screenshot] selection too small, cancelling");
-                self.cancel_screenshot_select(backend);
+                // Empty drag: try click-to-pick the window under the pointer.
+                self.features.screenshot.dragging = false;
+                if self.commit_probed_window_screenshot(backend, pointer) {
+                    return;
+                }
+                if backend.has_compositor() {
+                    backend.compositor_set_snap_preview(None);
+                    self.preview_screenshot_capture_target(backend, _target, pointer);
+                }
                 return;
             };
             if rect.w < 3 || rect.h < 3 {
-                info!("[take_screenshot] selection too small, cancelling");
-                self.cancel_screenshot_select(backend);
+                // Near-zero drag is a click: pick the hovered window instead of
+                // aborting the whole interactive capture.
+                self.features.screenshot.dragging = false;
+                if self.commit_probed_window_screenshot(backend, pointer) {
+                    return;
+                }
+                if backend.has_compositor() {
+                    backend.compositor_set_snap_preview(None);
+                    self.preview_screenshot_capture_target(backend, _target, pointer);
+                }
                 return;
             }
             self.features.screenshot.commit();
@@ -950,7 +979,9 @@ impl WMController for Jwm {
         if self.features.recording.selecting_region {
             self.last_mouse_root = (root_x, root_y);
             backend.compositor_set_mouse_position(root_x as f32, root_y as f32);
-            if self.features.capture.recording == CaptureTarget::Region {
+            if self.features.capture.recording == CaptureTarget::Region
+                && self.features.recording.is_region_dragging()
+            {
                 let region = self.features.recording.update_region_drag(
                     root_x.round() as i32,
                     root_y.round() as i32,
@@ -971,7 +1002,6 @@ impl WMController for Jwm {
         if self.features.screenshot.active
             && !self.features.screenshot.committed
             && !self.features.screenshot.dragging
-            && self.features.capture.screenshot != CaptureTarget::Region
         {
             self.last_mouse_root = (root_x, root_y);
             backend.compositor_set_mouse_position(root_x as f32, root_y as f32);
