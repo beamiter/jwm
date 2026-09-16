@@ -3175,7 +3175,8 @@ impl Jwm {
                 backend,
                 crate::backend::api::ToastNotification {
                     title: "\u{f03d}  Pick a recording source".into(),
-                    body: "Hover a window and click, or drag a region, then press Enter".into(),
+                    body: "Hover a window and click, or drag a region, then press Enter or Space"
+                        .into(),
                     urgency: 1,
                     timeout_ms: 4000,
                     ..Default::default()

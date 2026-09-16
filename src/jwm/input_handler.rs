@@ -2677,7 +2677,10 @@ impl Jwm {
 
             if keysym == keys::KEY_Escape {
                 self.cancel_recording_region_interaction(backend);
-            } else if keysym == keys::KEY_Return || keysym == keys::KEY_KP_Enter {
+            } else if keysym == keys::KEY_Return
+                || keysym == keys::KEY_KP_Enter
+                || keysym == keys::KEY_space
+            {
                 self.finish_recording_region_interaction(backend)?;
             } else if matches!(
                 keysym,
@@ -2801,6 +2804,7 @@ impl Jwm {
 
                 if keysym == keys::KEY_Return
                     || keysym == keys::KEY_KP_Enter
+                    || keysym == keys::KEY_space
                     || (ctrl && keysym == keys::KEY_s)
                 {
                     self.finish_screenshot_select(backend, false);
@@ -2861,12 +2865,15 @@ impl Jwm {
                     self.sync_screenshot_toolbar(backend);
                 }
                 // Other keys are consumed silently
-            } else if keysym == keys::KEY_Return || keysym == keys::KEY_KP_Enter {
+            } else if keysym == keys::KEY_Return
+                || keysym == keys::KEY_KP_Enter
+                || keysym == keys::KEY_space
+            {
                 self.push_system_toast(
                     backend,
                     crate::backend::api::ToastNotification {
                         title: "\u{f030}  Pick a screenshot source".into(),
-                        body: "Hover a window and click, or drag a region, then Enter to save"
+                        body: "Hover a window and click, or drag a region, then Enter/Space to save"
                             .into(),
                         urgency: 1,
                         timeout_ms: 4000,
@@ -3190,6 +3197,32 @@ impl Jwm {
             }
 
             if btn == MouseButton::Left && self.features.screenshot.committed {
+                let xi = px.round() as i32;
+                let yi = py.round() as i32;
+                let outside = self
+                    .features
+                    .screenshot
+                    .get_selection_rect()
+                    .is_none_or(|rect| {
+                        !crate::jwm::features::capture::rect_contains_point(rect, xi, yi)
+                    });
+                let double_click = self
+                    .features
+                    .capture
+                    .note_confirm_double_click(time, xi, yi);
+                // Double-click the dimmed veil (outside the crop) to save —
+                // keeps drawing tools free of an accidental double-tap save.
+                if outside {
+                    if double_click {
+                        self.features.capture.swallow_next_button_release();
+                        self.finish_screenshot_select(backend, false);
+                    } else {
+                        // A lone veil click is not a stroke; swallow the release
+                        // so it cannot fall through to the desktop.
+                        self.features.capture.swallow_next_button_release();
+                    }
+                    return Ok(());
+                }
                 let (x, y) = (px, py);
                 self.features
                     .screenshot

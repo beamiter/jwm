@@ -49,11 +49,11 @@ pub(crate) fn capture_hint_label(
             format!("Screenshot · {target} · click window · drag region · Esc")
         }
     } else if armed {
-        format!("Recording · {target} · Enter / double-click to start · Esc")
+        format!("Recording · {target} · Enter / Space / double-click · Esc")
     } else if let Some(title) = probe.as_deref() {
-        format!("Recording · {title} · click to pick · Enter · Esc")
+        format!("Recording · {title} · click to pick · Enter / Space · Esc")
     } else {
-        format!("Recording · {target} · click window · drag region · Enter · Esc")
+        format!("Recording · {target} · click window · drag · Enter / Space · Esc")
     }
 }
 

@@ -65,13 +65,14 @@ pub struct CaptureInteractionState {
     pub screenshot: CaptureTarget,
     pub recording: CaptureTarget,
     swallow_button_release: bool,
-    /// Last left-press used to detect a double-click confirm on an armed
-    /// recording region (X11/Wayland button `time` is milliseconds).
-    recording_press: Option<(u32, i32, i32)>,
+    /// Last left-press used to detect a double-click confirm (X11/Wayland
+    /// button `time` is milliseconds). Shared across screenshot / recording
+    /// because the two interactive modes never overlap.
+    confirm_press: Option<(u32, i32, i32)>,
 }
 
-const RECORDING_DOUBLE_CLICK_MS: u32 = 400;
-const RECORDING_DOUBLE_CLICK_SLOP: i32 = 8;
+const CONFIRM_DOUBLE_CLICK_MS: u32 = 400;
+const CONFIRM_DOUBLE_CLICK_SLOP: i32 = 8;
 
 impl CaptureInteractionState {
     pub(crate) fn swallow_next_button_release(&mut self) {
@@ -83,14 +84,14 @@ impl CaptureInteractionState {
     }
 
     /// Record a left press and return true when it completes a double-click
-    /// near the previous press (used to start an armed recording region).
-    pub(crate) fn note_recording_double_click(&mut self, time: u32, x: i32, y: i32) -> bool {
-        let hit = self.recording_press.is_some_and(|(prev_t, prev_x, prev_y)| {
-            time.wrapping_sub(prev_t) <= RECORDING_DOUBLE_CLICK_MS
-                && (x - prev_x).abs() <= RECORDING_DOUBLE_CLICK_SLOP
-                && (y - prev_y).abs() <= RECORDING_DOUBLE_CLICK_SLOP
+    /// near the previous press (armed recording start, screenshot save on veil).
+    pub(crate) fn note_confirm_double_click(&mut self, time: u32, x: i32, y: i32) -> bool {
+        let hit = self.confirm_press.is_some_and(|(prev_t, prev_x, prev_y)| {
+            time.wrapping_sub(prev_t) <= CONFIRM_DOUBLE_CLICK_MS
+                && (x - prev_x).abs() <= CONFIRM_DOUBLE_CLICK_SLOP
+                && (y - prev_y).abs() <= CONFIRM_DOUBLE_CLICK_SLOP
         });
-        self.recording_press = if hit {
+        self.confirm_press = if hit {
             None
         } else {
             Some((time, x, y))
@@ -98,8 +99,17 @@ impl CaptureInteractionState {
         hit
     }
 
+    pub(crate) fn clear_confirm_double_click(&mut self) {
+        self.confirm_press = None;
+    }
+
+    /// Back-compat alias used by recording call sites.
+    pub(crate) fn note_recording_double_click(&mut self, time: u32, x: i32, y: i32) -> bool {
+        self.note_confirm_double_click(time, x, y)
+    }
+
     pub(crate) fn clear_recording_double_click(&mut self) {
-        self.recording_press = None;
+        self.clear_confirm_double_click();
     }
 }
 
@@ -362,6 +372,13 @@ impl Jwm {
                 probe,
             );
             backend.compositor_set_capture_hint(Some(label));
+            return;
+        }
+        if self.features.screenshot.active && self.features.screenshot.committed {
+            backend.compositor_set_capture_hint(Some(
+                "Screenshot · Enter / Space save · double-click veil · Ctrl+C copy · Esc"
+                    .into(),
+            ));
             return;
         }
         if self.features.recording.selecting_region {
@@ -814,11 +831,11 @@ mod tests {
     #[test]
     fn recording_double_click_requires_near_repeat() {
         let mut state = CaptureInteractionState::default();
-        assert!(!state.note_recording_double_click(1000, 10, 10));
-        assert!(state.note_recording_double_click(1200, 12, 11));
-        assert!(!state.note_recording_double_click(1300, 12, 11));
-        assert!(!state.note_recording_double_click(2000, 12, 11));
-        assert!(!state.note_recording_double_click(2100, 40, 40));
+        assert!(!state.note_confirm_double_click(1000, 10, 10));
+        assert!(state.note_confirm_double_click(1200, 12, 11));
+        assert!(!state.note_confirm_double_click(1300, 12, 11));
+        assert!(!state.note_confirm_double_click(2000, 12, 11));
+        assert!(!state.note_confirm_double_click(2100, 40, 40));
     }
 
     #[test]
