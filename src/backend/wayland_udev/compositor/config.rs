@@ -665,6 +665,7 @@ impl WaylandCompositor {
         let new_frosted = Self::parse_frosted_glass_rules(&b.frosted_glass_rules);
         let frosted_rules_changed = new_frosted != self.frosted_glass_rules;
         self.frosted_glass_rules = new_frosted;
+        self.frosted_glass_strength = b.frosted_glass_strength;
         self.shadow_exclude.clone_from(&b.shadow_exclude);
         self.blur_exclude.clone_from(&b.blur_exclude);
         self.rounded_corners_exclude

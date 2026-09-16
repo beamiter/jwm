@@ -20,7 +20,13 @@ impl WaylandCompositor {
         if self.blur_fbos.is_empty() {
             return;
         }
-        let base_levels = (self.blur_strength as usize).min(self.blur_fbos.len());
+        let base_levels = (super::rules::frosted_blur_strength(
+            self.blur_strength,
+            self.frosted_glass_strength,
+            self.status_bar_frosted(),
+            quality,
+        ) as usize)
+            .min(self.blur_fbos.len());
         let levels = match quality {
             BlurQuality::Full => base_levels,
             BlurQuality::Reduced => (base_levels / 2).max(1),

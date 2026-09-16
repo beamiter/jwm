@@ -39,6 +39,28 @@ pub(crate) fn status_bar_frost_strength(
     }
 }
 
+/// Kawase depth for the single global blur pass.
+///
+/// `blur_strength` is the cost dial for client backdrop blur, while a status
+/// bar frosted through `blur_status_bar` is chrome the glass theme owns and
+/// `frosted_glass_strength` is that theme's dial (X11 swaps the two outright
+/// for frosted windows). `compute_max_visible_blur_quality` already keeps the
+/// pass at Full while such a bar is up; without this, a low `blur_strength`
+/// still left the bar's frost reading as flat alpha at that quality.
+///
+/// Taking the deeper of the two never shallows the pass a client asked for.
+pub(crate) fn frosted_blur_strength(
+    blur_strength: u32,
+    frosted_glass_strength: u32,
+    status_bar_frosted: bool,
+    quality: BlurQuality,
+) -> u32 {
+    if status_bar_frosted && matches!(quality, BlurQuality::Full) {
+        return blur_strength.max(frosted_glass_strength);
+    }
+    blur_strength
+}
+
 /// Effective backdrop-blur strength for a window, or `None` when it composites
 /// against the unfiltered desktop.
 ///
@@ -148,6 +170,21 @@ impl WaylandCompositor {
             return (true, strength);
         }
         (false, 0.0)
+    }
+
+    /// Whether a tracked window is the configured status bar and is frosted.
+    ///
+    /// Membership, not visibility: a bar on another tag keeps the chrome dial
+    /// applied for the frame it comes back on, which is the flash this is
+    /// here to avoid.
+    pub(crate) fn status_bar_frosted(&self) -> bool {
+        let cfg = crate::config::CONFIG.load();
+        let bar_name = cfg.status_bar_name();
+        !bar_name.is_empty()
+            && self.windows.values().any(|win| {
+                win.is_frosted
+                    && (win.class_name == bar_name || win.class_name.contains(bar_name))
+            })
     }
 
     /// Backdrop-blur strength for one window of this frame's scene, with the
@@ -916,6 +953,18 @@ mod tests {
             status_bar_frost_strength(true, "tao_glow_bar", "firefox"),
             None
         );
+    }
+
+    #[test]
+    fn a_frosted_status_bar_lifts_a_shallow_global_blur() {
+        // The bar's own dial wins when it is deeper than the client dial.
+        assert_eq!(frosted_blur_strength(1, 3, true, BlurQuality::Full), 3);
+        // ...and never shallows a deeper client pass.
+        assert_eq!(frosted_blur_strength(5, 2, true, BlurQuality::Full), 5);
+        // No frosted bar, or a pass already being cut for cost: untouched.
+        assert_eq!(frosted_blur_strength(1, 3, false, BlurQuality::Full), 1);
+        assert_eq!(frosted_blur_strength(1, 3, true, BlurQuality::Reduced), 1);
+        assert_eq!(frosted_blur_strength(1, 3, true, BlurQuality::Minimal), 1);
     }
 
     #[test]

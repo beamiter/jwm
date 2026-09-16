@@ -1523,6 +1523,9 @@ pub(crate) struct WaylandCompositor {
     corner_radius_rules: Vec<CornerRadiusRule>,
     scale_rules: Vec<ScaleRule>,
     frosted_glass_rules: Vec<(String, f32)>,
+    /// Kawase depth the frosted-glass theme asks for, independent of
+    /// `blur_strength` (mirrors the X11 field of the same name).
+    frosted_glass_strength: u32,
     shadow_exclude: Vec<String>,
     blur_exclude: Vec<String>,
     rounded_corners_exclude: Vec<String>,
@@ -2979,6 +2982,8 @@ impl WaylandCompositor {
                 corner_radius_rules: Vec::new(),
                 scale_rules: Vec::new(),
                 frosted_glass_rules: Vec::new(),
+                // Config default; apply_config installs the live value.
+                frosted_glass_strength: 2,
                 shadow_exclude: Vec::new(),
                 blur_exclude: Vec::new(),
                 rounded_corners_exclude: Vec::new(),
