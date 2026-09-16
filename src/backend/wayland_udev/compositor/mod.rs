@@ -1197,6 +1197,9 @@ pub(crate) struct WaylandCompositor {
     inactive_desaturate: f32,
     blur_enabled: bool,
     blur_strength: u32,
+    /// When true, the configured status bar receives backdrop frost even
+    /// without an entry in `frosted_glass_rules` (matches X11 `blur_status_bar`).
+    blur_status_bar: bool,
     fade_in_step: f32,
     fade_out_step: f32,
 
@@ -2733,6 +2736,7 @@ impl WaylandCompositor {
                 inactive_desaturate: 0.25,
                 blur_enabled: false,
                 blur_strength: 3,
+                blur_status_bar: true,
                 fade_in_step: 0.03,
                 fade_out_step: 0.03,
 

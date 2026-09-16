@@ -20,6 +20,25 @@ pub(crate) fn contains_ignore_case(haystack: &str, needle: &str) -> bool {
     common_rules::contains_ignore_case(haystack, needle)
 }
 
+/// Frost strength for the configured status bar when `blur_status_bar` is on.
+///
+/// An empty configured name matches nothing (`contains("")` is true for every
+/// class and would otherwise frost the whole desktop).
+pub(crate) fn status_bar_frost_strength(
+    blur_status_bar: bool,
+    status_bar_name: &str,
+    class_name: &str,
+) -> Option<f32> {
+    if !blur_status_bar || status_bar_name.is_empty() {
+        return None;
+    }
+    if class_name == status_bar_name || class_name.contains(status_bar_name) {
+        Some(1.0)
+    } else {
+        None
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Exclusion and rule matching
 // ---------------------------------------------------------------------------
@@ -75,6 +94,55 @@ impl WaylandCompositor {
             }
         }
         None
+    }
+
+    /// Resolve frosted-glass membership for a window class.
+    ///
+    /// Explicit `frosted_glass_rules` win; otherwise the configured status bar
+    /// is frosted when `blur_status_bar` is on so Wayland matches X11's default
+    /// bar backdrop path without requiring a TOML rule.
+    pub(crate) fn resolve_frosted_for_class(&self, class_name: &str) -> (bool, f32) {
+        if let Some(strength) = self.lookup_frosted_glass_rule(class_name) {
+            return (true, strength);
+        }
+        let cfg = crate::config::CONFIG.load();
+        if let Some(strength) =
+            status_bar_frost_strength(self.blur_status_bar, cfg.status_bar_name(), class_name)
+        {
+            return (true, strength);
+        }
+        (false, 0.0)
+    }
+
+    /// Re-apply frosted membership after `blur_status_bar` / rules hot-reload.
+    pub(crate) fn reapply_frosted_rules(&mut self) {
+        let classes: Vec<(u64, String)> = self
+            .windows
+            .iter()
+            .map(|(&id, win)| (id, win.class_name.clone()))
+            .collect();
+        for (id, class_name) in classes {
+            let (is_frosted, strength) = self.resolve_frosted_for_class(&class_name);
+            if let Some(win) = self.windows.get_mut(&id) {
+                if win.is_frosted != is_frosted || (win.frosted_strength - strength).abs() > 1e-6 {
+                    win.is_frosted = is_frosted;
+                    win.frosted_strength = strength;
+                    self.needs_render = true;
+                }
+            }
+        }
+        let minimized: Vec<(u64, String)> = self
+            .minimized_window_metadata
+            .iter()
+            .map(|(&id, metadata)| (id, metadata.class_name.clone()))
+            .collect();
+        for (id, class_name) in minimized {
+            let (is_frosted, strength) = self.resolve_frosted_for_class(&class_name);
+            if let Some(metadata) = self.minimized_window_metadata.get_mut(&id) {
+                metadata.is_frosted = is_frosted;
+                metadata.frosted_strength = strength;
+            }
+        }
     }
 
     /// Parse frosted glass rules. Supports:
@@ -764,6 +832,28 @@ mod tests {
         let list: Vec<String> = vec![];
         assert!(WaylandCompositor::class_matches_exclude("flameshot", &list));
         assert!(WaylandCompositor::class_matches_exclude("Flameshot", &list));
+    }
+
+    #[test]
+    fn status_bar_frost_follows_blur_status_bar_flag() {
+        assert_eq!(
+            status_bar_frost_strength(true, "tao_glow_bar", "tao_glow_bar"),
+            Some(1.0)
+        );
+        assert_eq!(
+            status_bar_frost_strength(true, "tao_glow_bar", "prefix-tao_glow_bar"),
+            Some(1.0)
+        );
+        assert_eq!(
+            status_bar_frost_strength(false, "tao_glow_bar", "tao_glow_bar"),
+            None
+        );
+        // Empty name must not match every class.
+        assert_eq!(status_bar_frost_strength(true, "", "tao_glow_bar"), None);
+        assert_eq!(
+            status_bar_frost_strength(true, "tao_glow_bar", "firefox"),
+            None
+        );
     }
 
     #[test]

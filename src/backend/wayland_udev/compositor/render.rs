@@ -3026,7 +3026,11 @@ impl WaylandCompositor {
                 .wrapping_add(glow_hash);
             let can_reuse = self.temporal_blur_enabled
                 && current_hash == self.prev_window_positions_hash
-                && self.prev_blur_fbo.is_some();
+                && self.prev_blur_fbo.is_some()
+                // Position hash alone misses in-place texture updates (video,
+                // animated wallpaper under a frosted bar). Content damage must
+                // force a fresh blur or the frost freezes / ghosts.
+                && self.content_dirty_ids.is_empty();
 
             let tex = if can_reuse {
                 self.temporal_blur_reuse_count += 1;
@@ -3088,6 +3092,16 @@ impl WaylandCompositor {
         } else {
             None
         };
+
+        // Seed chrome glass from the client blur result. The window blur pass
+        // already filtered the encoded desktop; toast/OSD/system UI in that
+        // domain can reuse it and skip a second full-screen Kawase. Linear
+        // overlays (tab bar when `tail_draws_linear`) still recapture via
+        // `ensure_glass_backdrop` when the domain flag mismatches.
+        if let Some(tex) = blur_result_tex {
+            self.glass_backdrop = Some(tex);
+            self.glass_backdrop_linear = false;
+        }
 
         self.frame_profiler.zone_end();
 

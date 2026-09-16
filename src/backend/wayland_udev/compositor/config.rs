@@ -544,6 +544,8 @@ impl WaylandCompositor {
         self.shadow_inactive_opacity = finite_clamp(b.shadow_inactive_opacity, 0.0, 1.0, 1.0);
         self.blur_enabled = b.blur_enabled;
         self.blur_strength = b.blur_strength;
+        let blur_status_bar_changed = self.blur_status_bar != b.blur_status_bar;
+        self.blur_status_bar = b.blur_status_bar;
         self.inactive_opacity = finite_clamp(b.inactive_opacity, 0.0, 1.0, 0.9);
         self.active_opacity = finite_clamp(b.active_opacity, 0.0, 1.0, 1.0);
         self.inactive_dim = finite_clamp(b.inactive_dim, 0.0, 1.0, 1.0);
@@ -660,7 +662,9 @@ impl WaylandCompositor {
         self.opacity_rules = Self::parse_opacity_rules(&b.opacity_rules);
         self.corner_radius_rules = Self::parse_corner_radius_rules(&b.corner_radius_rules);
         self.scale_rules = Self::parse_scale_rules(&b.scale_rules);
-        self.frosted_glass_rules = Self::parse_frosted_glass_rules(&b.frosted_glass_rules);
+        let new_frosted = Self::parse_frosted_glass_rules(&b.frosted_glass_rules);
+        let frosted_rules_changed = new_frosted != self.frosted_glass_rules;
+        self.frosted_glass_rules = new_frosted;
         self.shadow_exclude.clone_from(&b.shadow_exclude);
         self.blur_exclude.clone_from(&b.blur_exclude);
         self.rounded_corners_exclude
@@ -668,6 +672,10 @@ impl WaylandCompositor {
         self.detect_client_opacity = b.detect_client_opacity;
         self.blur_use_frame_extents = b.blur_use_frame_extents;
         self.shadow_bottom_extra = b.shadow_bottom_extra;
+
+        if blur_status_bar_changed || frosted_rules_changed {
+            self.reapply_frosted_rules();
+        }
 
         // --- Window tabs ---
         self.window_tabs_enabled = b.window_tabs;
@@ -2464,15 +2472,15 @@ impl WaylandCompositor {
             return;
         }
 
-        let frosted = self.lookup_frosted_glass_rule(class_name);
+        let frosted = self.resolve_frosted_for_class(class_name);
         let opacity_override = self.lookup_opacity_rule(class_name);
         let corner_radius_override = self.lookup_corner_radius_rule(class_name);
         let scale = self.lookup_scale_rule(class_name);
 
         if let Some(win) = self.windows.get_mut(&window_id) {
             win.class_name = class_name.to_string();
-            win.is_frosted = frosted.is_some();
-            win.frosted_strength = frosted.unwrap_or(0.0);
+            win.is_frosted = frosted.0;
+            win.frosted_strength = frosted.1;
             win.opacity_override = opacity_override;
             win.corner_radius_override = corner_radius_override;
             if let Some(s) = scale {
@@ -2483,8 +2491,8 @@ impl WaylandCompositor {
         }
         if let Some(metadata) = self.minimized_window_metadata.get_mut(&window_id) {
             metadata.class_name = class_name.to_string();
-            metadata.is_frosted = frosted.is_some();
-            metadata.frosted_strength = frosted.unwrap_or(0.0);
+            metadata.is_frosted = frosted.0;
+            metadata.frosted_strength = frosted.1;
             metadata.opacity_override = opacity_override;
             metadata.corner_radius_override = corner_radius_override;
             if let Some(s) = scale {
