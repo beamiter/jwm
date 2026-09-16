@@ -4965,6 +4965,45 @@ fn glass_fragment_shader_declares_scene_linear_ingress() {
     );
 }
 
+/// The two backends draw the same material from two separately maintained
+/// copies of the same program, so the solid-glass optics are asserted on both
+/// strings at once. A backend that keeps only the old thin-film sheen would
+/// otherwise diverge silently — nothing links these two files.
+#[test]
+fn both_glass_fragment_shaders_carry_the_solid_glass_optics() {
+    let mut sources: Vec<(&str, &str)> = vec![("wayland", super::shaders::GLASS_FRAGMENT_SHADER)];
+    #[cfg(feature = "x11-backends")]
+    sources.push((
+        "x11",
+        crate::backend::x11::compositor::shaders::GLASS_FRAGMENT_SHADER,
+    ));
+
+    for (backend, src) in sources {
+        for token in [
+            // Fresnel reflectance, and the normalized weight the rim and the
+            // inner glow are gated by.
+            "fresnel",
+            "fresnel_w",
+            // Interior parallax: the sheet is a slab, not a film.
+            "thickness",
+            // Real specular instead of a flat diagonal wash.
+            "spec",
+            // Dual-tap backdrop fetch that keeps the half-res chain stable
+            // under refraction.
+            "backdrop_uv + tap",
+            "backdrop_uv - tap",
+            // Softer, never-sub-pixel edge band.
+            "fwidth(dist) * 1.25",
+        ] {
+            assert!(
+                src.contains(token),
+                "{backend} glass shader is missing `{token}`: the two backends' \
+                 glass must stay in lockstep"
+            );
+        }
+    }
+}
+
 #[test]
 fn wayland_runtime_gpu_release_is_complete_idempotent_and_recreatable() {
     let Some(_headless) = HeadlessGl::new(GlApi::Gles3) else {
