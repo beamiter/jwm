@@ -2251,7 +2251,7 @@ impl WaylandCompositor {
         self.start_pending_genie_restores(scene);
         // Last frame's frosted-glass backdrop describes a framebuffer that is
         // about to be overwritten; the first panel that needs one recaptures.
-        self.glass_backdrop = None;
+        self.invalidate_glass_backdrop();
         // A calm desktop must be cheap even when the backend asks us to check
         // for a frame.  Do this before profiler/fence/hot-reload bookkeeping:
         // those are useful only when a frame can actually be produced.  The
@@ -3097,9 +3097,10 @@ impl WaylandCompositor {
         // already filtered the encoded desktop; toast/OSD/system UI in that
         // domain can reuse it and skip a second full-screen Kawase. Linear
         // overlays (tab bar when `tail_draws_linear`) still recapture via
-        // `ensure_glass_backdrop` when the domain flag mismatches.
+        // `ensure_glass_backdrop` when the domain flag mismatches — and taking
+        // an owned copy here is what keeps the seed intact when they do.
         if let Some(tex) = blur_result_tex {
-            self.glass_backdrop = Some(tex);
+            self.glass_backdrop = self.store_glass_backdrop(gl, tex, false);
             self.glass_backdrop_linear = false;
         }
 
@@ -4998,12 +4999,87 @@ impl WaylandCompositor {
             self.screen_h,
         );
         self.run_blur_passes(gl, self.scene_texture, proj, BlurQuality::Full);
-        self.glass_backdrop = Some(self.blur_fbos[0].texture);
+        self.glass_backdrop = self.store_glass_backdrop(gl, self.blur_fbos[0].texture, scene_linear);
         // run_blur_passes leaves its last level bound; overlays keep drawing
         // into the same target they sampled.
         unsafe {
             gl.BindFramebuffer(ffi::FRAMEBUFFER, source_fbo);
             gl.Viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
+        }
+    }
+
+    /// Copy a blurred frame into this domain's owned backdrop cache and return
+    /// the texture the panels should sample.
+    ///
+    /// The copy is what makes two domains possible at once: `blur_fbos[0]` is
+    /// rewritten by the next capture and by the client blur pass, while these
+    /// half-res mirrors keep describing the frame they were taken from.
+    ///
+    /// Falls back to the source texture when no cache could be allocated — an
+    /// aliased backdrop for the rest of this frame still beats no glass.
+    fn store_glass_backdrop(
+        &mut self,
+        gl: &ffi::Gles2,
+        blurred: u32,
+        scene_linear: bool,
+    ) -> Option<u32> {
+        let (bw, bh) = match self.blur_fbos.first() {
+            Some(level) => (level.width, level.height),
+            None => return Some(blurred),
+        };
+        let index = super::glass_domain_index(scene_linear);
+        unsafe {
+            let (fbo, texture) = match self.glass_backdrop_caches[index].target {
+                Some(target) => target,
+                None => {
+                    let target = if self.hdr_enabled {
+                        super::create_fbo_texture_10bit(gl, bw, bh)
+                    } else {
+                        super::create_fbo_texture(gl, bw, bh)
+                    };
+                    self.glass_backdrop_caches[index].target = Some(target);
+                    target
+                }
+            };
+
+            // Same reusable read-framebuffer the temporal-blur history blit
+            // uses: re-attaching a texture is cheap, gen/deleting an FBO every
+            // frame is not.
+            if self.blur_blit_src_fbo == 0 {
+                gl.GenFramebuffers(1, &mut self.blur_blit_src_fbo);
+            }
+            gl.BindFramebuffer(ffi::READ_FRAMEBUFFER, self.blur_blit_src_fbo);
+            gl.FramebufferTexture2D(
+                ffi::READ_FRAMEBUFFER,
+                ffi::COLOR_ATTACHMENT0,
+                ffi::TEXTURE_2D,
+                blurred,
+                0,
+            );
+            gl.BindFramebuffer(ffi::DRAW_FRAMEBUFFER, fbo);
+            gl.BlitFramebuffer(
+                0,
+                0,
+                bw as i32,
+                bh as i32,
+                0,
+                0,
+                bw as i32,
+                bh as i32,
+                ffi::COLOR_BUFFER_BIT,
+                ffi::NEAREST,
+            );
+            self.glass_backdrop_caches[index].valid = true;
+            Some(texture)
+        }
+    }
+
+    /// Drop every cached glass backdrop. The next panel that needs one
+    /// recaptures in its own domain; the storage itself is kept for reuse.
+    pub(super) fn invalidate_glass_backdrop(&mut self) {
+        self.glass_backdrop = None;
+        for cache in &mut self.glass_backdrop_caches {
+            cache.valid = false;
         }
     }
 
@@ -5052,6 +5128,17 @@ impl WaylandCompositor {
         scene_linear: bool,
     ) {
         if self.glass_backdrop.is_some() && self.glass_backdrop_linear == scene_linear {
+            return;
+        }
+        // The other domain's capture may have run since this one was taken,
+        // but each domain owns its copy: re-select a still-valid one instead
+        // of blurring the whole screen again on every domain flip.
+        let cache = &self.glass_backdrop_caches[super::glass_domain_index(scene_linear)];
+        if cache.valid
+            && let Some((_, texture)) = cache.target
+        {
+            self.glass_backdrop = Some(texture);
+            self.glass_backdrop_linear = scene_linear;
             return;
         }
         self.capture_glass_backdrop(gl, palette, proj, scene_linear);
@@ -6234,7 +6321,7 @@ impl WaylandCompositor {
         // it draws solid even under the glass theme.
         let mut panel_fill = ui.panel;
         if overlay.locked {
-            self.glass_backdrop = None;
+            self.invalidate_glass_backdrop();
             panel_fill[3] = 1.0;
         }
         unsafe {

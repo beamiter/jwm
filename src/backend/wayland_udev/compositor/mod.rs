@@ -588,6 +588,27 @@ pub(crate) struct BlurFboLevel {
     pub height: u32,
 }
 
+/// Owned half-resolution copy of the blurred desktop for one color domain.
+///
+/// The chrome glass used to alias `blur_fbos[0].texture`, so a capture in the
+/// other domain — or the next client blur pass — overwrote a backdrop that
+/// panels were still sampling. An owned copy lets the encoded and
+/// common-linear backdrops coexist in one frame and survive anything that
+/// rewrites the blur chain.
+#[derive(Default)]
+pub(crate) struct GlassBackdropCache {
+    /// `(fbo, texture)` at `blur_fbos[0]` resolution, allocated on first use.
+    target: Option<(u32, u32)>,
+    /// Whether [`Self::target`] still describes the frame being drawn.
+    valid: bool,
+}
+
+/// Index of the owned glass-backdrop cache for a color domain: the encoded
+/// output domain first, the common-linear one second.
+pub(crate) fn glass_domain_index(scene_linear: bool) -> usize {
+    usize::from(scene_linear)
+}
+
 pub(crate) struct MonitorWallpaper {
     pub mon_x: i32,
     pub mon_y: i32,
@@ -1072,16 +1093,21 @@ pub(crate) struct WaylandCompositor {
     sysui_text_program: u32,
     temporal_blur_mix_program: u32,
 
-    /// Blurred copy of the frame, captured once per frame just before the
-    /// self-drawn panels so each of them can sample what it covers. `None`
-    /// under the Material theme, or when no blur chain is available.
+    /// Blurred copy of the frame the self-drawn panels sample, so each of them
+    /// shows what it covers. Points into [`Self::glass_backdrop_caches`].
+    /// `None` under the Material theme, or when no blur chain is available.
     glass_backdrop: Option<u32>,
     /// Whether [`Self::glass_backdrop`] was captured from the common-linear
     /// target (`true`) or the encoded output FBO (`false`). A domain mismatch
-    /// forces a recapture so post-delivery chrome never samples a linear
+    /// selects the other cache so post-delivery chrome never samples a linear
     /// backdrop (and tab-bar glass never samples an encoded one on deferred
     /// routes).
     glass_backdrop_linear: bool,
+    /// One owned backdrop copy per color domain, indexed by
+    /// [`glass_domain_index`]. Both domains can be live at once: a tab bar
+    /// drawing linear glass no longer costs the encoded toast behind it a
+    /// second full-screen Kawase.
+    glass_backdrop_caches: [GlassBackdropCache; 2],
 
     // Uniform locations
     win_uniforms: WindowUniforms,
@@ -2657,6 +2683,7 @@ impl WaylandCompositor {
                 temporal_blur_mix_program,
                 glass_backdrop: None,
                 glass_backdrop_linear: false,
+                glass_backdrop_caches: Default::default(),
 
                 // Uniform locations
                 win_uniforms,
@@ -3148,6 +3175,25 @@ unsafe fn delete_vertex_array_name(gl: &ffi::Gles2, name: &mut u32) {
 }
 
 impl WaylandCompositor {
+    /// Free both owned glass-backdrop copies. They are half-res mirrors of
+    /// `blur_fbos[0]`, so anything that replaces the blur chain must drop them
+    /// too rather than leave a mismatched size behind.
+    ///
+    /// # Safety
+    /// Caller must ensure `gl` is current.
+    pub(crate) unsafe fn release_glass_backdrop_caches(&mut self, gl: &ffi::Gles2) {
+        self.glass_backdrop = None;
+        for cache in &mut self.glass_backdrop_caches {
+            cache.valid = false;
+            if let Some((mut framebuffer, mut texture)) = cache.target.take() {
+                unsafe {
+                    delete_framebuffer_name(gl, &mut framebuffer);
+                    delete_texture_name(gl, &mut texture);
+                }
+            }
+        }
+    }
+
     /// Release every raw GLES object owned by this compositor while the KMS
     /// renderer's EGL context is current.
     ///
@@ -3187,9 +3233,10 @@ impl WaylandCompositor {
             gl.ActiveTexture(ffi::TEXTURE0);
             gl.BindTexture(ffi::TEXTURE_2D, 0);
 
-            // `glass_backdrop` aliases blur_fbos[0].texture; it is never an
-            // independent owner.
+            // `glass_backdrop` points into the per-domain caches; the caches
+            // own the storage, the pointer itself is never an owner.
             self.glass_backdrop = None;
+            self.release_glass_backdrop_caches(gl);
 
             // Dropping the staged external element set releases its Smithay
             // texture owners through the renderer's normal teardown channel.
@@ -3676,6 +3723,7 @@ mod gpu_release_contract_tests {
         "temporal_mix_fbo",
         "blur_blit_src_fbo",
         "glass_backdrop",
+        "glass_backdrop_caches",
         "overview_title_textures",
         "expose_title_textures",
         "expose_title_bright_textures",
@@ -3744,6 +3792,7 @@ mod gpu_release_contract_tests {
         for field in RAW_GPU_OWNER_FIELDS {
             let release_reference = match *field {
                 "overview_title_textures" => "self.clear_overview_textures(gl)".to_string(),
+                "glass_backdrop_caches" => "self.release_glass_backdrop_caches(gl)".to_string(),
                 _ => format!("self.{field}"),
             };
             assert!(
@@ -3753,6 +3802,9 @@ mod gpu_release_contract_tests {
         }
         assert!(compact_release.contains("self.glass_backdrop=None"));
         assert!(!compact_release.contains("delete_texture_name(gl,&mutself.glass_backdrop"));
+        // The pointer stays alias-only; the per-domain copies behind it are
+        // the owners and go out through their own release helper.
+        assert!(compact_release.contains("self.release_glass_backdrop_caches(gl)"));
     }
 
     /// The MIC chip's label texture is a raw GLES owner with the REC chip's
@@ -4889,7 +4941,8 @@ impl WaylandCompositor {
             self.screen_h = h;
             self.sysui_text_dirty = true;
             self.output_texture_generation = next_output_texture_generation();
-            self.glass_backdrop = None;
+            // Half-res mirrors of the blur chain that was just replaced.
+            self.release_glass_backdrop_caches(gl);
             self.last_output_color_frame_state = None;
             self.transition_active = false;
             self.transition_snapshot_pending = false;
