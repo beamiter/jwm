@@ -461,11 +461,20 @@ impl<C: CompositorConnection> Compositor<C> {
     }
 
     /// Render snap preview rectangle. Called from render_frame.
+    ///
+    /// Tiling snap keeps the classic filled blue rect. Interactive screenshot
+    /// selection (`capture_selection_active`) switches to the outside-dim
+    /// veil so the pick matches recording's crop cue.
     pub(super) fn render_snap_preview(&self, proj: &[f32; 16]) {
         let sp = match &self.snap_target {
             Some(sp) if sp.opacity > 0.0 => sp,
             _ => return,
         };
+
+        if self.capture_selection_active {
+            self.render_capture_veil(proj, sp.x, sp.y, sp.w, sp.h, sp.opacity, false);
+            return;
+        }
 
         unsafe {
             // Use the border shader to draw a filled translucent rectangle
@@ -511,30 +520,37 @@ impl<C: CompositorConnection> Compositor<C> {
         }
     }
 
-    /// Draw the interactive recording crop cue after frame capture so the
-    /// highlight stays visible locally without being baked into the video.
-    ///
-    /// Uses the same translucent blue fill + brighter outline as the screenshot
-    /// / snap preview so hover-probe and region pick read as one selection
-    /// language. Corner handles stay for resize affordance, tinted to match.
-    pub(super) fn render_recording_region_overlay(&self, proj: &[f32; 16]) {
-        let Some((x, y, width, height)) = self.recording_region_overlay else {
-            return;
+    /// Outside-dim veil + clear hole + blue outline shared by screenshot
+    /// selection and the recording crop cue.
+    fn render_capture_veil(
+        &self,
+        proj: &[f32; 16],
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        opacity: f32,
+        interactive: bool,
+    ) {
+        use crate::backend::compositor_common::capture_veil::{
+            CAPTURE_HOLE_WASH, CAPTURE_SCRIM, outside_dim_rects,
         };
-        let x = x as f32;
-        let y = y as f32;
-        let width = width as f32;
-        let height = height as f32;
-        if width <= 0.0 || height <= 0.0 {
+
+        if width <= 0.0 || height <= 0.0 || opacity <= 0.0 {
             return;
         }
 
-        let [r, g, b, a] = self.snap_preview_color;
-        let fill_alpha = a;
-        let outline_r = (r * 1.5).min(1.0);
-        let outline_g = (g * 1.5).min(1.0);
-        let outline_b = (b * 1.5).min(1.0);
-        let outline_alpha = (a * 2.0).min(1.0);
+        let screen_w = self.screen_w as f32;
+        let screen_h = self.screen_h as f32;
+        let [sr, sg, sb, sa] = CAPTURE_SCRIM;
+        let [wr, wg, wb, wa] = CAPTURE_HOLE_WASH;
+        let [pr, pg, pb, pa] = self.snap_preview_color;
+        let outline_r = (pr * 1.5).min(1.0);
+        let outline_g = (pg * 1.5).min(1.0);
+        let outline_b = (pb * 1.5).min(1.0);
+        let outline_a = (pa * 2.0 * opacity).min(1.0);
+        let scrim_a = sa * opacity;
+        let wash_a = wa * opacity;
 
         unsafe {
             self.gl.use_program(Some(self.border_program));
@@ -544,72 +560,104 @@ impl<C: CompositorConnection> Compositor<C> {
                 proj,
             );
             self.gl.bind_vertex_array(Some(self.quad_vao));
+            self.set_border_radii(0.0, 0.0);
+
+            for (rx, ry, rw, rh) in outside_dim_rects(screen_w, screen_h, (x, y, width, height)) {
+                if rw <= 0.0 || rh <= 0.0 {
+                    continue;
+                }
+                self.gl
+                    .uniform_2_f32(self.border_uniforms.size.as_ref(), rw, rh);
+                self.gl
+                    .uniform_4_f32(self.border_uniforms.rect.as_ref(), rx, ry, rw, rh);
+                self.gl
+                    .uniform_1_f32(self.border_uniforms.border_width.as_ref(), rw.max(rh));
+                self.gl.uniform_4_f32(
+                    self.border_uniforms.border_color.as_ref(),
+                    sr,
+                    sg,
+                    sb,
+                    scrim_a,
+                );
+                self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            }
+
+            // Soft wash inside the pick so it still reads as selected.
             self.set_border_radii(self.corner_radius, self.corner_radius);
             self.gl
                 .uniform_2_f32(self.border_uniforms.size.as_ref(), width, height);
             self.gl
                 .uniform_4_f32(self.border_uniforms.rect.as_ref(), x, y, width, height);
-
-            // Soft fill — same "蒙皮" treatment as screenshot snap preview.
-            let fill_size = width.max(height);
             self.gl
-                .uniform_1_f32(self.border_uniforms.border_width.as_ref(), fill_size);
+                .uniform_1_f32(self.border_uniforms.border_width.as_ref(), width.max(height));
             self.gl.uniform_4_f32(
                 self.border_uniforms.border_color.as_ref(),
-                r,
-                g,
-                b,
-                fill_alpha,
+                wr,
+                wg,
+                wb,
+                wash_a,
             );
             self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
 
             // Brighter outline.
             self.gl
-                .uniform_1_f32(self.border_uniforms.border_width.as_ref(), 2.0);
+                .uniform_1_f32(self.border_uniforms.border_width.as_ref(), 2.5);
             self.gl.uniform_4_f32(
                 self.border_uniforms.border_color.as_ref(),
                 outline_r,
                 outline_g,
                 outline_b,
-                outline_alpha,
+                outline_a,
             );
             self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
 
-            let handle_size = 10.0;
-            self.gl.uniform_4_f32(
-                self.border_uniforms.border_color.as_ref(),
-                outline_r,
-                outline_g,
-                outline_b,
-                outline_alpha,
-            );
-            for (handle_x, handle_y) in [
-                (x, y),
-                (x + width * 0.5, y),
-                (x + width, y),
-                (x, y + height * 0.5),
-                (x + width, y + height * 0.5),
-                (x, y + height),
-                (x + width * 0.5, y + height),
-                (x + width, y + height),
-            ] {
-                self.gl
-                    .uniform_2_f32(self.border_uniforms.size.as_ref(), handle_size, handle_size);
-                self.gl.uniform_4_f32(
-                    self.border_uniforms.rect.as_ref(),
-                    handle_x - handle_size * 0.5,
-                    handle_y - handle_size * 0.5,
-                    handle_size,
-                    handle_size,
-                );
-                self.gl
-                    .uniform_1_f32(self.border_uniforms.border_width.as_ref(), handle_size);
-                self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            if interactive {
+                let handle_size = 10.0;
+                for (handle_x, handle_y) in [
+                    (x, y),
+                    (x + width * 0.5, y),
+                    (x + width, y),
+                    (x, y + height * 0.5),
+                    (x + width, y + height * 0.5),
+                    (x, y + height),
+                    (x + width * 0.5, y + height),
+                    (x + width, y + height),
+                ] {
+                    self.gl
+                        .uniform_2_f32(self.border_uniforms.size.as_ref(), handle_size, handle_size);
+                    self.gl.uniform_4_f32(
+                        self.border_uniforms.rect.as_ref(),
+                        handle_x - handle_size * 0.5,
+                        handle_y - handle_size * 0.5,
+                        handle_size,
+                        handle_size,
+                    );
+                    self.gl
+                        .uniform_1_f32(self.border_uniforms.border_width.as_ref(), handle_size);
+                    self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                }
             }
 
             self.gl.bind_vertex_array(None);
             self.gl.use_program(None);
         }
+    }
+
+    /// Draw the interactive recording crop cue after frame capture so the
+    /// highlight stays visible locally without being baked into the video.
+    pub(super) fn render_recording_region_overlay(&self, proj: &[f32; 16]) {
+        let Some((x, y, width, height)) = self.recording_region_overlay else {
+            return;
+        };
+        self.render_capture_veil(
+            proj,
+            x as f32,
+            y as f32,
+            width as f32,
+            height as f32,
+            1.0,
+            self.recording_region_interactive,
+        );
     }
 
     // =========================================================================

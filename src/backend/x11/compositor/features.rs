@@ -1908,6 +1908,25 @@ impl<C: CompositorConnection> Compositor<C> {
 
     pub(crate) fn set_recording_region_overlay(&mut self, region: Option<(i32, i32, u32, u32)>) {
         self.recording_region_overlay = region;
+        if region.is_none() {
+            self.recording_region_interactive = false;
+        }
+        self.force_full_redraw();
+    }
+
+    pub(crate) fn set_recording_region_interactive(&mut self, interactive: bool) {
+        if self.recording_region_interactive == interactive {
+            return;
+        }
+        self.recording_region_interactive = interactive;
+        self.force_full_redraw();
+    }
+
+    pub(crate) fn set_capture_selection_active(&mut self, active: bool) {
+        if self.capture_selection_active == active {
+            return;
+        }
+        self.capture_selection_active = active;
         self.force_full_redraw();
     }
 

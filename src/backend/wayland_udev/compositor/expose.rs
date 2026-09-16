@@ -592,7 +592,10 @@ impl WaylandCompositor {
     }
 
     /// Render the snap preview highlight rectangle.
-    /// Shows a translucent blue rounded rect where a window will snap to.
+    ///
+    /// Tiling snap keeps the classic filled blue rect. Interactive screenshot
+    /// selection (`capture_selection_active`) switches to the outside-dim
+    /// veil so the pick matches recording's crop cue.
     ///
     /// The border program's `u_scene_linear` tracks the bound target via
     /// `sync_overlay_color_domain`, so this draw needs no per-route branch;
@@ -607,6 +610,20 @@ impl WaylandCompositor {
             None => return,
         };
         if self.snap_preview_opacity <= 0.0 {
+            return;
+        }
+
+        if self.capture_selection_active {
+            self.render_capture_veil(
+                gl,
+                projection,
+                x,
+                y,
+                w,
+                h,
+                self.snap_preview_opacity,
+                false,
+            );
             return;
         }
 
@@ -652,26 +669,34 @@ impl WaylandCompositor {
         }
     }
 
-    /// Render the interactive recording crop cue after the recorder has copied
-    /// the frame, keeping this overlay out of the encoded stream.
-    ///
-    /// Matches the screenshot / snap preview's translucent blue fill + outline
-    /// so window hover-probe and region pick share one selection look. Resize
-    /// handles remain, tinted to the outline colour.
-    pub(crate) fn render_recording_region_overlay(&self, gl: &ffi::Gles2, projection: &[f32; 16]) {
-        let Some((x, y, width, height)) = self.recording_region_overlay else {
-            return;
+    /// Outside-dim veil + clear hole + blue outline shared by screenshot
+    /// selection and the recording crop cue.
+    fn render_capture_veil(
+        &self,
+        gl: &ffi::Gles2,
+        projection: &[f32; 16],
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        opacity: f32,
+        interactive: bool,
+    ) {
+        use crate::backend::compositor_common::capture_veil::{
+            CAPTURE_HOLE_WASH, CAPTURE_SCRIM, outside_dim_rects,
         };
-        let x = x as f32;
-        let y = y as f32;
-        let width = width as f32;
-        let height = height as f32;
-        if width <= 0.0 || height <= 0.0 {
+
+        if width <= 0.0 || height <= 0.0 || opacity <= 0.0 {
             return;
         }
 
-        let (fill_color, outline_color) =
-            snap_preview_colors(self.snap_preview_color, 1.0);
+        let screen_w = self.screen_w as f32;
+        let screen_h = self.screen_h as f32;
+        let [sr, sg, sb, sa] = CAPTURE_SCRIM;
+        let [wr, wg, wb, wa] = CAPTURE_HOLE_WASH;
+        let (_, outline_color) = snap_preview_colors(self.snap_preview_color, opacity);
+        let scrim_a = sa * opacity;
+        let wash_a = wa * opacity;
 
         unsafe {
             self.bind_quad_vao(gl);
@@ -682,23 +707,40 @@ impl WaylandCompositor {
                 ffi::FALSE as u8,
                 projection.as_ptr(),
             );
-            gl.Uniform4f(self.border_uniforms.rect, x, y, width, height);
-            gl.Uniform2f(self.border_uniforms.size, width, height);
+            gl.Uniform1f(self.border_uniforms.radius, 0.0);
+            gl.Uniform1f(self.border_uniforms.radius_top, 0.0);
+
+            for (rx, ry, rw, rh) in outside_dim_rects(screen_w, screen_h, (x, y, width, height)) {
+                if rw <= 0.0 || rh <= 0.0 {
+                    continue;
+                }
+                gl.Uniform4f(self.border_uniforms.rect, rx, ry, rw, rh);
+                gl.Uniform2f(self.border_uniforms.size, rw, rh);
+                gl.Uniform1f(self.border_uniforms.border_width, rw.max(rh));
+                gl.Uniform4f(
+                    self.border_uniforms.border_color,
+                    sr,
+                    sg,
+                    sb,
+                    scrim_a,
+                );
+                gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+            }
+
             gl.Uniform1f(self.border_uniforms.radius, 8.0);
             gl.Uniform1f(self.border_uniforms.radius_top, 8.0);
-
-            // Soft fill — same treatment as `render_snap_preview`.
+            gl.Uniform4f(self.border_uniforms.rect, x, y, width, height);
+            gl.Uniform2f(self.border_uniforms.size, width, height);
+            gl.Uniform1f(self.border_uniforms.border_width, width.max(height));
             gl.Uniform4f(
                 self.border_uniforms.border_color,
-                fill_color[0],
-                fill_color[1],
-                fill_color[2],
-                fill_color[3],
+                wr,
+                wg,
+                wb,
+                wash_a,
             );
-            gl.Uniform1f(self.border_uniforms.border_width, width.max(height));
             gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
 
-            // Brighter outline.
             gl.Uniform4f(
                 self.border_uniforms.border_color,
                 outline_color[0],
@@ -706,32 +748,52 @@ impl WaylandCompositor {
                 outline_color[2],
                 outline_color[3],
             );
-            gl.Uniform1f(self.border_uniforms.border_width, 2.0);
+            gl.Uniform1f(self.border_uniforms.border_width, 2.5);
             gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
 
-            let handle_size = 10.0;
-            for (handle_x, handle_y) in [
-                (x, y),
-                (x + width * 0.5, y),
-                (x + width, y),
-                (x, y + height * 0.5),
-                (x + width, y + height * 0.5),
-                (x, y + height),
-                (x + width * 0.5, y + height),
-                (x + width, y + height),
-            ] {
-                gl.Uniform2f(self.border_uniforms.size, handle_size, handle_size);
-                gl.Uniform4f(
-                    self.border_uniforms.rect,
-                    handle_x - handle_size * 0.5,
-                    handle_y - handle_size * 0.5,
-                    handle_size,
-                    handle_size,
-                );
-                gl.Uniform1f(self.border_uniforms.border_width, handle_size);
-                gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+            if interactive {
+                let handle_size = 10.0;
+                for (handle_x, handle_y) in [
+                    (x, y),
+                    (x + width * 0.5, y),
+                    (x + width, y),
+                    (x, y + height * 0.5),
+                    (x + width, y + height * 0.5),
+                    (x, y + height),
+                    (x + width * 0.5, y + height),
+                    (x + width, y + height),
+                ] {
+                    gl.Uniform2f(self.border_uniforms.size, handle_size, handle_size);
+                    gl.Uniform4f(
+                        self.border_uniforms.rect,
+                        handle_x - handle_size * 0.5,
+                        handle_y - handle_size * 0.5,
+                        handle_size,
+                        handle_size,
+                    );
+                    gl.Uniform1f(self.border_uniforms.border_width, handle_size);
+                    gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+                }
             }
         }
+    }
+
+    /// Render the interactive recording crop cue after the recorder has copied
+    /// the frame, keeping this overlay out of the encoded stream.
+    pub(crate) fn render_recording_region_overlay(&self, gl: &ffi::Gles2, projection: &[f32; 16]) {
+        let Some((x, y, width, height)) = self.recording_region_overlay else {
+            return;
+        };
+        self.render_capture_veil(
+            gl,
+            projection,
+            x as f32,
+            y as f32,
+            width as f32,
+            height as f32,
+            1.0,
+            self.recording_region_interactive,
+        );
     }
 
     /// Render peek mode ("boss key") overlay.

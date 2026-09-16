@@ -1572,6 +1572,12 @@ pub(crate) struct WaylandCompositor {
     pending_recording_start: Option<(String, (i32, i32, u32, u32))>,
     pending_recording_stop: bool,
     recording_region_overlay: Option<(i32, i32, u32, u32)>,
+    /// Resize handles for an armed / adjustable recording crop. Soft
+    /// hover-probe keeps this false so the pick does not look editable.
+    recording_region_interactive: bool,
+    /// Interactive screenshot / recording selection: snap preview uses the
+    /// outside-dim veil instead of the tiling-snap fill style.
+    capture_selection_active: bool,
 
     // --- Debug HUD extended ---
     debug_hud_extended: bool,
@@ -3005,6 +3011,8 @@ impl WaylandCompositor {
                 pending_recording_start: None,
                 pending_recording_stop: false,
                 recording_region_overlay: None,
+                recording_region_interactive: false,
+                capture_selection_active: false,
 
                 // Debug HUD extended
                 debug_hud_extended: false,
@@ -4364,6 +4372,27 @@ impl WaylandCompositor {
 
     pub(crate) fn set_recording_region_overlay(&mut self, region: Option<(i32, i32, u32, u32)>) {
         self.recording_region_overlay = region;
+        if region.is_none() {
+            self.recording_region_interactive = false;
+        }
+        self.needs_render = true;
+        self.force_full_damage_next = true;
+    }
+
+    pub(crate) fn set_recording_region_interactive(&mut self, interactive: bool) {
+        if self.recording_region_interactive == interactive {
+            return;
+        }
+        self.recording_region_interactive = interactive;
+        self.needs_render = true;
+        self.force_full_damage_next = true;
+    }
+
+    pub(crate) fn set_capture_selection_active(&mut self, active: bool) {
+        if self.capture_selection_active == active {
+            return;
+        }
+        self.capture_selection_active = active;
         self.needs_render = true;
         self.force_full_damage_next = true;
     }

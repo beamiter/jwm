@@ -3044,6 +3044,7 @@ impl Jwm {
             self.features.recording.cancel_region_selection();
             return Err(error);
         }
+        backend.compositor_set_capture_selection_active(true);
         self.sync_recording_region_overlay(backend);
         info!("[recording] interactive region adjustment started");
         Ok(())
@@ -3135,6 +3136,7 @@ impl Jwm {
             self.features.recording.cancel_region_selection();
             return Err(error);
         }
+        backend.compositor_set_capture_selection_active(true);
         // Soft-probe the window under the pointer so hover/click picking works
         // before the first motion event.
         self.preview_recording_capture_target(
@@ -3154,7 +3156,9 @@ impl Jwm {
             .recording
             .region
             .and_then(Self::recording_region_tuple);
+        let interactive = region.is_some();
         backend.compositor_set_recording_region_overlay(region);
+        backend.compositor_set_recording_region_interactive(interactive);
         backend.compositor_force_full_redraw();
     }
 
@@ -3163,6 +3167,16 @@ impl Jwm {
         backend: &mut dyn Backend,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let Some(region) = self.features.recording.region else {
+            self.push_system_toast(
+                backend,
+                crate::backend::api::ToastNotification {
+                    title: "\u{f03d}  Pick a recording source".into(),
+                    body: "Hover a window and click, or drag a region, then press Enter".into(),
+                    urgency: 1,
+                    timeout_ms: 4000,
+                    ..Default::default()
+                },
+            );
             return Ok(());
         };
         let Some(region_tuple) = Self::recording_region_tuple(region) else {
@@ -3172,6 +3186,7 @@ impl Jwm {
         let pending_path = self.features.recording.pending_output_path.clone();
         self.features.recording.finish_region_selection();
         self.release_recording_region_input(backend);
+        backend.compositor_set_capture_selection_active(false);
         backend.compositor_set_recording_region_overlay(None);
 
         if adjusting {
@@ -3199,6 +3214,7 @@ impl Jwm {
         let was_adjusting = self.features.recording.adjusting_region;
         let restored = self.features.recording.cancel_region_selection();
         self.release_recording_region_input(backend);
+        backend.compositor_set_capture_selection_active(false);
         backend.compositor_set_recording_region_overlay(None);
         if was_adjusting {
             if let Some(region) = restored.and_then(Self::recording_region_tuple) {

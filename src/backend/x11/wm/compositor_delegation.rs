@@ -537,6 +537,18 @@ macro_rules! delegate_compositor_capabilities {
                 }
             }
 
+            fn compositor_set_recording_region_interactive(&mut self, interactive: bool) {
+                if let Some(compositor) = self.compositor.as_mut() {
+                    compositor.set_recording_region_interactive(interactive);
+                }
+            }
+
+            fn compositor_set_capture_selection_active(&mut self, active: bool) {
+                if let Some(compositor) = self.compositor.as_mut() {
+                    compositor.set_capture_selection_active(active);
+                }
+            }
+
             fn compositor_set_mic_indicator(&mut self, active: bool) {
                 if let Some(compositor) = self.compositor.as_mut() {
                     compositor.set_mic_indicator(active);

@@ -2787,6 +2787,13 @@ pub trait CompositorMedia: Send {
     }
     fn compositor_set_recording_region(&mut self, _region: (i32, i32, u32, u32)) {}
     fn compositor_set_recording_region_overlay(&mut self, _region: Option<(i32, i32, u32, u32)>) {}
+    /// Whether the recording crop cue shows resize handles. Soft hover-probe
+    /// keeps this off so the pick does not look editable until it is armed.
+    fn compositor_set_recording_region_interactive(&mut self, _interactive: bool) {}
+    /// Dim-outside / clear-hole veil used by interactive screenshot and
+    /// recording selection. Tiling snap preview stays on the lighter fill
+    /// style when this is off.
+    fn compositor_set_capture_selection_active(&mut self, _active: bool) {}
     fn compositor_stop_recording(&mut self) {}
     /// How the recording in progress is actually going, or `None` when none is.
     fn compositor_recording_stats(&self) -> Option<RecordingStats> {

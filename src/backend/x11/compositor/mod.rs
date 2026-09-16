@@ -957,6 +957,12 @@ where
     recording_output_size: (u32, u32),
     recording_fbo: Option<(glow::Framebuffer, glow::Texture)>,
     recording_region_overlay: Option<(i32, i32, u32, u32)>,
+    /// Resize handles for an armed / adjustable recording crop. Soft
+    /// hover-probe keeps this false so the pick does not look editable.
+    recording_region_interactive: bool,
+    /// Interactive screenshot / recording selection: snap preview uses the
+    /// outside-dim veil instead of the tiling-snap fill style.
+    capture_selection_active: bool,
     recording_current_pbo: usize,
     recording_captured_frames: u64,
 

@@ -1164,6 +1164,7 @@ impl Jwm {
             .screenshot_freeze_enabled;
         self.features.screenshot.start();
         backend.compositor_set_screenshot_freeze(freeze_enabled);
+        backend.compositor_set_capture_selection_active(true);
         self.features.capture.screenshot = CaptureTarget::Region;
         self.features
             .screenshot
@@ -1343,6 +1344,7 @@ impl Jwm {
         info!("[take_screenshot] cancelling region selection");
         self.features.screenshot.cancel();
         backend.compositor_set_screenshot_freeze(false);
+        backend.compositor_set_capture_selection_active(false);
         backend.compositor_set_annotation_mode(false);
         backend.compositor_set_screenshot_toolbar(None);
         if backend.has_compositor() {
@@ -1403,6 +1405,7 @@ impl Jwm {
                 // still on screen would be baked into the PNG.
                 self.features.screenshot.cancel();
                 backend.compositor_set_screenshot_freeze(false);
+                backend.compositor_set_capture_selection_active(false);
                 backend.compositor_set_annotation_mode(false);
                 backend.compositor_set_screenshot_toolbar(None);
                 if backend.has_compositor() {

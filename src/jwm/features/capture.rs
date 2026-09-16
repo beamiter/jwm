@@ -548,6 +548,12 @@ impl Jwm {
         if self.features.recording.is_region_dragging() {
             return;
         }
+        // Once a region is armed, keep it until the user clicks again or
+        // switches mode — otherwise hover would drift the veil away from the
+        // rect Enter is about to encode.
+        if self.features.recording.region.is_some() {
+            return;
+        }
 
         let target = self.features.capture.recording;
         let preview = match target {
@@ -559,6 +565,7 @@ impl Jwm {
                 .and_then(Self::recording_region_tuple),
         };
         backend.compositor_set_recording_region_overlay(preview);
+        backend.compositor_set_recording_region_interactive(false);
         backend.compositor_force_full_redraw();
     }
 
