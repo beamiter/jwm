@@ -2124,6 +2124,10 @@ pub trait InputOps: Send {
         Ok(None)
     }
 
+    fn update_grab_cursor(&self, _cursor: Option<u64>) -> Result<(), BackendError> {
+        Ok(())
+    }
+
     fn grab_pointer(&self, mask: u32, cursor: Option<u64>) -> Result<bool, BackendError>;
 
     fn ungrab_pointer(&self) -> Result<(), BackendError>;
@@ -2794,6 +2798,9 @@ pub trait CompositorMedia: Send {
     /// recording selection. Tiling snap preview stays on the lighter fill
     /// style when this is off.
     fn compositor_set_capture_selection_active(&mut self, _active: bool) {}
+    /// Persistent bottom-center hint while capture selection is armed.
+    /// `None` clears the chip (cancel / editor commit / recording start).
+    fn compositor_set_capture_hint(&mut self, _hint: Option<String>) {}
     fn compositor_stop_recording(&mut self) {}
     /// How the recording in progress is actually going, or `None` when none is.
     fn compositor_recording_stats(&self) -> Option<RecordingStats> {

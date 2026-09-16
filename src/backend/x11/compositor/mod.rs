@@ -963,6 +963,9 @@ where
     /// Interactive screenshot / recording selection: snap preview uses the
     /// outside-dim veil instead of the tiling-snap fill style.
     capture_selection_active: bool,
+    /// Bottom-center selection hint text while capture is armed.
+    capture_hint: Option<String>,
+    capture_hint_texture: Option<(String, glow::Texture, u32, u32)>,
     recording_current_pbo: usize,
     recording_captured_frames: u64,
 
@@ -1218,6 +1221,9 @@ impl<C: CompositorConnection> Drop for Compositor<C> {
                 self.gl.delete_texture(tex);
             }
             if let Some((_, tex, _, _)) = self.mic_indicator_texture.take() {
+                self.gl.delete_texture(tex);
+            }
+            if let Some((_, tex, _, _)) = self.capture_hint_texture.take() {
                 self.gl.delete_texture(tex);
             }
             for slot in &mut self.hud_textures {

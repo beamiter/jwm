@@ -231,15 +231,17 @@ bindable and scriptable over IPC like the three defaults.
 
 During interactive screenshot or recording selection, hover highlights the
 window under the pointer with an outside-dim veil (same blue language as the
-screenshot editor); a left click picks that window. Press `G`, `W`, `M`, or
-`D` to choose a dragged region, window mode, the monitor under the pointer,
-or the entire desktop. `Tab` and `Shift+Tab` cycle the same choices; middle-click
-is the pointer twin of `Tab`. Dragging still draws a free region; a near-zero
-click over empty desktop leaves selection armed. Recording shows resize
-handles only after a source is armed. `Enter` saves a screenshot or
-starts/commits recording (and nudges with a toast if nothing is selected yet).
-Arrow keys nudge a committed selection (`Shift` uses 10-pixel steps), while
-`Escape`, right-click, or the recording shortcut again cancels safely.
+screenshot editor); a left click picks that window. A bottom-center hint chip
+lists the mode and primary actions. Press `G`, `W`, `M`, or `D` to choose a
+dragged region, window mode, the monitor under the pointer, or the entire
+desktop. `Tab` and `Shift+Tab` cycle the same choices; middle-click is the
+pointer twin of `Tab`. Dragging still draws a free region; a near-zero click
+over empty desktop leaves selection armed. Recording shows resize handles only
+after a source is armed, and the cursor switches to move/resize intents over
+those handles. `Enter` saves a screenshot or starts/commits recording (and
+nudges with a toast if nothing is selected yet). Arrow keys nudge a committed
+selection (`Shift` uses 10-pixel steps), while `Escape`, right-click, or the
+recording shortcut again cancels safely.
 
 ### The screenshot editor
 

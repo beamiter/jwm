@@ -1329,6 +1329,8 @@ impl<C: CompositorConnection> Compositor<C> {
             recording_region_overlay: None,
             recording_region_interactive: false,
             capture_selection_active: false,
+            capture_hint: None,
+            capture_hint_texture: None,
             recording_current_pbo: 0,
             recording_captured_frames: 0,
             // Phase 3.1: Motion trail

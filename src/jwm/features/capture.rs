@@ -298,7 +298,11 @@ impl Jwm {
         let Some(rect) = self.probe_window_capture_rect(pointer) else {
             return false;
         };
-        self.commit_screenshot_rect(backend, rect)
+        let ok = self.commit_screenshot_rect(backend, rect);
+        if ok {
+            self.sync_capture_hint(backend);
+        }
+        ok
     }
 
     /// Same probe commit for recording source selection.
@@ -310,7 +314,66 @@ impl Jwm {
         let Some(rect) = self.probe_window_capture_rect(pointer) else {
             return false;
         };
-        self.apply_recording_rect(backend, rect)
+        let ok = self.apply_recording_rect(backend, rect);
+        if ok {
+            self.sync_capture_hint(backend);
+        }
+        ok
+    }
+
+    /// Push / clear the bottom-center selection hint chip.
+    pub(crate) fn sync_capture_hint(&mut self, backend: &mut dyn Backend) {
+        use crate::backend::compositor_common::capture_hint::capture_hint_label;
+
+        if self.features.screenshot.active && !self.features.screenshot.committed {
+            let label = capture_hint_label(
+                true,
+                self.features.capture.screenshot.label(),
+                false,
+            );
+            backend.compositor_set_capture_hint(Some(label));
+            return;
+        }
+        if self.features.recording.selecting_region {
+            let label = capture_hint_label(
+                false,
+                self.features.capture.recording.label(),
+                self.features.recording.region.is_some(),
+            );
+            backend.compositor_set_capture_hint(Some(label));
+            return;
+        }
+        backend.compositor_set_capture_hint(None);
+    }
+
+    /// Update the grab cursor for an armed recording region under the pointer.
+    pub(crate) fn sync_recording_selection_cursor(
+        &mut self,
+        backend: &mut dyn Backend,
+        pointer: (f64, f64),
+    ) {
+        use crate::backend::common_define::StdCursorKind;
+        use crate::jwm::features::recording::RecordingPointerIntent;
+
+        if !self.features.recording.selecting_region
+            || self.features.recording.is_region_dragging()
+        {
+            return;
+        }
+        let intent = if self.features.recording.region.is_some() {
+            self.features
+                .recording
+                .pointer_intent(pointer.0.round() as i32, pointer.1.round() as i32)
+        } else {
+            RecordingPointerIntent::New
+        };
+        let kind = intent.cursor();
+        let _ = backend.input_ops().set_cursor(kind);
+        if let Ok(handle) = backend.cursor_provider().get(kind) {
+            let _ = backend.input_ops().update_grab_cursor(Some(handle.0));
+        } else if kind == StdCursorKind::Crosshair {
+            let _ = backend.input_ops().update_grab_cursor(None);
+        }
     }
 
     fn commit_screenshot_rect(&mut self, backend: &mut dyn Backend, rect: Rect) -> bool {
@@ -336,6 +399,7 @@ impl Jwm {
         // without a drag, so this is the other door into the editor and it
         // needs its tools too.
         self.sync_screenshot_toolbar(backend);
+        self.sync_capture_hint(backend);
         true
     }
 
@@ -378,6 +442,7 @@ impl Jwm {
             "[capture] screenshot target={} (G region, W window, M monitor, D desktop, Tab cycle; hover probes a window, click picks it)",
             target.label()
         );
+        self.sync_capture_hint(backend);
     }
 
     pub(crate) fn cycle_screenshot_capture_target(
@@ -502,6 +567,7 @@ impl Jwm {
             "[capture] recording target={} (G region, W window, M monitor, D desktop, Tab cycle, Enter confirm; hover probes a window, click picks it)",
             target.label()
         );
+        self.sync_capture_hint(backend);
     }
 
     pub(crate) fn cycle_recording_capture_target(

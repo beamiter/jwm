@@ -3676,6 +3676,18 @@ mod input_ops {
             Ok(reply.status == GrabStatus::SUCCESS)
         }
 
+        fn update_grab_cursor(&self, cursor: Option<u64>) -> Result<(), BackendError> {
+            use x11rb::protocol::xproto::{Cursor, EventMask};
+            let cursor_id = Cursor::from(cursor.unwrap_or(0) as u32);
+            let mask = EventMask::BUTTON_PRESS
+                | EventMask::BUTTON_RELEASE
+                | EventMask::POINTER_MOTION
+                | EventMask::POINTER_MOTION_HINT;
+            self.conn
+                .change_active_pointer_grab(cursor_id, 0u32, mask)?;
+            Ok(())
+        }
+
         fn set_cursor(&self, _kind: StdCursorKind) -> Result<(), BackendError> {
             Ok(())
         }

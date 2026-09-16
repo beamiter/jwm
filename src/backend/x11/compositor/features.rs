@@ -1930,6 +1930,14 @@ impl<C: CompositorConnection> Compositor<C> {
         self.force_full_redraw();
     }
 
+    pub(crate) fn set_capture_hint(&mut self, hint: Option<String>) {
+        if self.capture_hint == hint {
+            return;
+        }
+        self.capture_hint = hint;
+        self.force_full_redraw();
+    }
+
     /// The standalone-audio-recording cue, pushed by the WM: the recorder
     /// lives WM-side, so unlike the REC chip this state cannot be derived
     /// from the compositor's own capture pipeline. The static `MIC` label

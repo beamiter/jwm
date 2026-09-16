@@ -4167,6 +4167,13 @@ impl CompositorMedia for UdevBackend {
         self.request_render();
     }
 
+    fn compositor_set_capture_hint(&mut self, hint: Option<String>) {
+        if let Some(compositor) = self.compositor.as_mut() {
+            compositor.set_capture_hint(hint);
+        }
+        self.request_render();
+    }
+
     fn compositor_set_mic_indicator(&mut self, active: bool) {
         if let Some(compositor) = self.compositor.as_mut() {
             compositor.set_mic_indicator(active);

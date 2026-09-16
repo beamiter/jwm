@@ -4025,6 +4025,116 @@ impl<C: CompositorConnection> Compositor<C> {
         }
     }
 
+    fn update_capture_hint_texture(&mut self, text: &str) {
+        if self
+            .capture_hint_texture
+            .as_ref()
+            .is_some_and(|(cached, _, _, _)| cached == text)
+        {
+            return;
+        }
+        if let Some((_, tex, _, _)) = self.capture_hint_texture.take() {
+            unsafe { self.gl.delete_texture(tex) };
+        }
+        let config = crate::config::CONFIG.load();
+        let description = config.system_ui_font();
+        let size = crate::backend::compositor_font::ui_font_pixel_size(description);
+        let (pixels, w, h) = crate::backend::compositor_font::render_ui_text_to_rgba(
+            text,
+            description,
+            size,
+            ui_theme::palette().osd_ink,
+        );
+        if w == 0 || h == 0 {
+            return;
+        }
+        unsafe {
+            if let Ok(tex) = self.gl.create_texture() {
+                self.gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+                self.gl.tex_image_2d(
+                    glow::TEXTURE_2D,
+                    0,
+                    glow::RGBA8 as i32,
+                    w as i32,
+                    h as i32,
+                    0,
+                    glow::RGBA,
+                    glow::UNSIGNED_BYTE,
+                    glow::PixelUnpackData::Slice(Some(&pixels)),
+                );
+                for filter in [glow::TEXTURE_MIN_FILTER, glow::TEXTURE_MAG_FILTER] {
+                    self.gl
+                        .tex_parameter_i32(glow::TEXTURE_2D, filter, glow::LINEAR as i32);
+                }
+                self.gl.bind_texture(glow::TEXTURE_2D, None);
+                self.capture_hint_texture = Some((text.to_string(), tex, w, h));
+            }
+        }
+    }
+
+    fn render_capture_hint(&mut self, proj: &[f32; 16]) {
+        use crate::backend::compositor_common::capture_hint as hint;
+
+        let Some(label) = self.capture_hint.clone() else {
+            if let Some((_, tex, _, _)) = self.capture_hint_texture.take() {
+                unsafe { self.gl.delete_texture(tex) };
+            }
+            return;
+        };
+        self.update_capture_hint_texture(&label);
+        let Some((tex, text_w, text_h)) = self
+            .capture_hint_texture
+            .as_ref()
+            .map(|&(_, tex, w, h)| (tex, w, h))
+        else {
+            return;
+        };
+
+        let ui = ui_theme::palette();
+        let layout = hint::capture_hint_layout(
+            self.screen_w as f32,
+            self.screen_h as f32,
+            text_w as f32,
+            text_h as f32,
+        );
+        let [chip_x, chip_y, chip_w, chip_h] = layout.chip;
+
+        unsafe {
+            self.gl.use_program(Some(self.border_program));
+            self.gl.uniform_matrix_4_f32_slice(
+                self.border_uniforms.projection.as_ref(),
+                false,
+                proj,
+            );
+            self.gl.bind_vertex_array(Some(self.quad_vao));
+            self.sysui_fill_rounded(chip_x, chip_y, chip_w, chip_h, chip_h / 2.0, ui.osd);
+
+            self.gl.use_program(Some(self.hud_text_program));
+            self.gl.uniform_matrix_4_f32_slice(
+                self.hud_text_uniforms.projection.as_ref(),
+                false,
+                proj,
+            );
+            self.gl
+                .uniform_1_i32(self.hud_text_uniforms.texture.as_ref(), 0);
+            self.gl
+                .uniform_1_f32(self.hud_text_uniforms.opacity.as_ref(), 1.0);
+            self.gl.active_texture(glow::TEXTURE0);
+            self.gl.uniform_4_f32(
+                self.hud_text_uniforms.rect.as_ref(),
+                layout.text[0],
+                layout.text[1],
+                layout.text[2],
+                layout.text[3],
+            );
+            self.gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+            self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+
+            self.gl.bind_vertex_array(None);
+            self.gl.use_program(None);
+        }
+    }
+
     // =====================================================================
     // Feature 12: Screenshot
     // =====================================================================
@@ -7770,6 +7880,7 @@ impl<C: CompositorConnection> Compositor<C> {
         // recording's frames either.
         let rec_chip_h = self.render_recording_indicator(&proj);
         self.render_mic_indicator(&proj, rec_chip_h);
+        self.render_capture_hint(&proj);
 
         // Preserve the exact final composited image while the default back
         // buffer is still defined. A valid persistent texture follows partial

@@ -2676,7 +2676,7 @@ impl Jwm {
 
             if keysym == keys::KEY_Escape {
                 self.cancel_recording_region_interaction(backend);
-            } else if keysym == keys::KEY_Return {
+            } else if keysym == keys::KEY_Return || keysym == keys::KEY_KP_Enter {
                 self.finish_recording_region_interaction(backend)?;
             } else if matches!(
                 keysym,
@@ -2859,6 +2859,18 @@ impl Jwm {
                     self.sync_screenshot_toolbar(backend);
                 }
                 // Other keys are consumed silently
+            } else if keysym == keys::KEY_Return || keysym == keys::KEY_KP_Enter {
+                self.push_system_toast(
+                    backend,
+                    crate::backend::api::ToastNotification {
+                        title: "\u{f030}  Pick a screenshot source".into(),
+                        body: "Hover a window and click, or drag a region, then Enter to save"
+                            .into(),
+                        urgency: 1,
+                        timeout_ms: 4000,
+                        ..Default::default()
+                    },
+                );
             }
             return Ok(());
         }

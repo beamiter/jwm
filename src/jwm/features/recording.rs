@@ -9,6 +9,48 @@ const EDGE_RIGHT: u8 = 2;
 const EDGE_TOP: u8 = 4;
 const EDGE_BOTTOM: u8 = 8;
 
+/// What the pointer is doing over an armed recording region.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecordingPointerIntent {
+    /// Outside the region — a press starts a new drag.
+    New,
+    /// Interior — move the region.
+    Move,
+    /// Near an edge / corner — resize. Bits use the EDGE_* flags.
+    Resize(u8),
+}
+
+impl RecordingPointerIntent {
+    /// Cursor that advertises this intent.
+    #[must_use]
+    pub fn cursor(self) -> crate::backend::common_define::StdCursorKind {
+        use crate::backend::common_define::StdCursorKind;
+        match self {
+            Self::New => StdCursorKind::Crosshair,
+            Self::Move => StdCursorKind::Fleur,
+            Self::Resize(edges) => {
+                let left = edges & EDGE_LEFT != 0;
+                let right = edges & EDGE_RIGHT != 0;
+                let top = edges & EDGE_TOP != 0;
+                let bottom = edges & EDGE_BOTTOM != 0;
+                match (left, right, top, bottom) {
+                    (true, false, true, false) => StdCursorKind::TopLeftCorner,
+                    (false, true, true, false) => StdCursorKind::TopRightCorner,
+                    (true, false, false, true) => StdCursorKind::BottomLeftCorner,
+                    (false, true, false, true) => StdCursorKind::BottomRightCorner,
+                    (true, false, false, false) | (false, true, false, false) => {
+                        StdCursorKind::HDoubleArrow
+                    }
+                    (false, false, true, false) | (false, false, false, true) => {
+                        StdCursorKind::VDoubleArrow
+                    }
+                    _ => StdCursorKind::Sizing,
+                }
+            }
+        }
+    }
+}
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 enum RecordingRegionDrag {
     #[default]
@@ -191,16 +233,12 @@ impl RecordingState {
         !matches!(self.drag, RecordingRegionDrag::None)
     }
 
-    pub fn begin_region_drag(&mut self, pointer_x: i32, pointer_y: i32) {
-        if !self.selecting_region {
-            return;
-        }
+    /// Probe what a press at `(pointer_x, pointer_y)` would do to the armed
+    /// region. Soft-probe (no region) always returns [`RecordingPointerIntent::New`].
+    #[must_use]
+    pub fn pointer_intent(&self, pointer_x: i32, pointer_y: i32) -> RecordingPointerIntent {
         let Some(region) = self.region else {
-            self.drag = RecordingRegionDrag::New {
-                anchor_x: pointer_x,
-                anchor_y: pointer_y,
-            };
-            return;
+            return RecordingPointerIntent::New;
         };
 
         let right = region.x + region.w;
@@ -223,26 +261,45 @@ impl RecordingState {
             edges |= EDGE_BOTTOM;
         }
 
-        self.drag = if edges != 0 {
-            RecordingRegionDrag::Resize {
-                edges,
-                initial: region,
-            }
+        if edges != 0 {
+            RecordingPointerIntent::Resize(edges)
         } else if pointer_x >= region.x
             && pointer_x <= right
             && pointer_y >= region.y
             && pointer_y <= bottom
         {
-            RecordingRegionDrag::Move {
+            RecordingPointerIntent::Move
+        } else {
+            RecordingPointerIntent::New
+        }
+    }
+
+    pub fn begin_region_drag(&mut self, pointer_x: i32, pointer_y: i32) {
+        if !self.selecting_region {
+            return;
+        }
+        let Some(region) = self.region else {
+            self.drag = RecordingRegionDrag::New {
+                anchor_x: pointer_x,
+                anchor_y: pointer_y,
+            };
+            return;
+        };
+
+        self.drag = match self.pointer_intent(pointer_x, pointer_y) {
+            RecordingPointerIntent::Resize(edges) => RecordingRegionDrag::Resize {
+                edges,
+                initial: region,
+            },
+            RecordingPointerIntent::Move => RecordingRegionDrag::Move {
                 pointer_x,
                 pointer_y,
                 initial: region,
-            }
-        } else {
-            RecordingRegionDrag::New {
+            },
+            RecordingPointerIntent::New => RecordingRegionDrag::New {
                 anchor_x: pointer_x,
                 anchor_y: pointer_y,
-            }
+            },
         };
     }
 
@@ -460,5 +517,29 @@ mod tests {
 
         assert_eq!(state.region, None);
         assert_eq!(state.output_size, None);
+    }
+
+    #[test]
+    fn pointer_intent_classifies_edges_interior_and_outside() {
+        let mut state = RecordingState::new();
+        state.selecting_region = true;
+        state.region = Some(Rect::new(100, 100, 200, 150));
+
+        assert_eq!(
+            state.pointer_intent(100, 100),
+            RecordingPointerIntent::Resize(EDGE_LEFT | EDGE_TOP)
+        );
+        assert_eq!(
+            state.pointer_intent(200, 175),
+            RecordingPointerIntent::Move
+        );
+        assert_eq!(
+            state.pointer_intent(10, 10),
+            RecordingPointerIntent::New
+        );
+        assert_eq!(
+            RecordingPointerIntent::Move.cursor(),
+            crate::backend::common_define::StdCursorKind::Fleur
+        );
     }
 }

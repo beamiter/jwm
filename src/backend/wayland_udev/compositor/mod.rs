@@ -1578,6 +1578,9 @@ pub(crate) struct WaylandCompositor {
     /// Interactive screenshot / recording selection: snap preview uses the
     /// outside-dim veil instead of the tiling-snap fill style.
     capture_selection_active: bool,
+    /// Bottom-center selection hint text while capture is armed.
+    capture_hint: Option<String>,
+    capture_hint_texture: Option<(String, u32, u32, u32)>,
 
     // --- Debug HUD extended ---
     debug_hud_extended: bool,
@@ -3013,6 +3016,8 @@ impl WaylandCompositor {
                 recording_region_overlay: None,
                 recording_region_interactive: false,
                 capture_selection_active: false,
+                capture_hint: None,
+                capture_hint_texture: None,
 
                 // Debug HUD extended
                 debug_hud_extended: false,
@@ -3273,6 +3278,11 @@ impl WaylandCompositor {
                 gl.DeleteTextures(1, &texture);
             }
             if let Some((_, texture, _, _)) = self.mic_indicator_texture.take()
+                && texture != 0
+            {
+                gl.DeleteTextures(1, &texture);
+            }
+            if let Some((_, texture, _, _)) = self.capture_hint_texture.take()
                 && texture != 0
             {
                 gl.DeleteTextures(1, &texture);
@@ -4393,6 +4403,15 @@ impl WaylandCompositor {
             return;
         }
         self.capture_selection_active = active;
+        self.needs_render = true;
+        self.force_full_damage_next = true;
+    }
+
+    pub(crate) fn set_capture_hint(&mut self, hint: Option<String>) {
+        if self.capture_hint == hint {
+            return;
+        }
+        self.capture_hint = hint;
         self.needs_render = true;
         self.force_full_damage_next = true;
     }

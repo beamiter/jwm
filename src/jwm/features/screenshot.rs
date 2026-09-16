@@ -1176,6 +1176,7 @@ impl Jwm {
             crate::backend::api::HitTarget::Background { output: None },
             self.last_mouse_root,
         );
+        self.sync_capture_hint(backend);
         info!(
             "[take_screenshot] interactive capture → {} (scene={}, hover/click picks a window; G/W/M/D or Tab selects source)",
             screenshot_path,
@@ -1347,6 +1348,7 @@ impl Jwm {
         backend.compositor_set_capture_selection_active(false);
         backend.compositor_set_annotation_mode(false);
         backend.compositor_set_screenshot_toolbar(None);
+        backend.compositor_set_capture_hint(None);
         if backend.has_compositor() {
             backend.compositor_set_snap_preview(None);
         }
@@ -1408,6 +1410,7 @@ impl Jwm {
                 backend.compositor_set_capture_selection_active(false);
                 backend.compositor_set_annotation_mode(false);
                 backend.compositor_set_screenshot_toolbar(None);
+                backend.compositor_set_capture_hint(None);
                 if backend.has_compositor() {
                     backend.compositor_clear_snap_preview_immediate();
                 }

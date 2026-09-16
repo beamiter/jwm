@@ -3144,6 +3144,7 @@ impl Jwm {
             crate::backend::api::HitTarget::Background { output: None },
             self.last_mouse_root,
         );
+        self.sync_capture_hint(backend);
         info!(
             "[recording] hover/click a window or drag a region, then Enter to start → {output_path}"
         );
@@ -3160,6 +3161,7 @@ impl Jwm {
         backend.compositor_set_recording_region_overlay(region);
         backend.compositor_set_recording_region_interactive(interactive);
         backend.compositor_force_full_redraw();
+        self.sync_capture_hint(backend);
     }
 
     pub(crate) fn finish_recording_region_interaction(
@@ -3188,6 +3190,7 @@ impl Jwm {
         self.release_recording_region_input(backend);
         backend.compositor_set_capture_selection_active(false);
         backend.compositor_set_recording_region_overlay(None);
+        backend.compositor_set_capture_hint(None);
 
         if adjusting {
             backend.compositor_set_recording_region(region_tuple);
@@ -3216,6 +3219,7 @@ impl Jwm {
         self.release_recording_region_input(backend);
         backend.compositor_set_capture_selection_active(false);
         backend.compositor_set_recording_region_overlay(None);
+        backend.compositor_set_capture_hint(None);
         if was_adjusting {
             if let Some(region) = restored.and_then(Self::recording_region_tuple) {
                 backend.compositor_set_recording_region(region);

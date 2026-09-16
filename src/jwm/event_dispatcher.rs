@@ -996,6 +996,7 @@ impl WMController for Jwm {
                 self.sync_recording_region_overlay(backend);
             } else {
                 self.preview_recording_capture_target(backend, target, (root_x, root_y));
+                self.sync_recording_selection_cursor(backend, (root_x, root_y));
             }
             return;
         }

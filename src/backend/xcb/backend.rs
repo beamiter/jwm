@@ -3374,6 +3374,20 @@ impl InputOps for XcbInputOps {
         Ok(())
     }
 
+    fn update_grab_cursor(&self, cursor: Option<u64>) -> XcbResult<()> {
+        let event_mask = x::EventMask::BUTTON_PRESS
+            | x::EventMask::BUTTON_RELEASE
+            | x::EventMask::POINTER_MOTION;
+        self.conn
+            .send_and_check_request(&x::ChangeActivePointerGrab {
+                cursor: cursor.map_or(x::CURSOR_NONE, |c| x::Cursor::new(c as u32)),
+                time: x::CURRENT_TIME,
+                event_mask,
+            })
+            .map_err(xcb_err)?;
+        Ok(())
+    }
+
     fn get_pointer_position(&self) -> XcbResult<(f64, f64)> {
         let (x, y, _, _) = self.query_pointer_root()?;
         Ok((x as f64, y as f64))

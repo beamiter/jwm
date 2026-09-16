@@ -4365,6 +4365,8 @@ impl WaylandCompositor {
             || self.recording.is_active()
             || self.mic_indicator_active
             || self.mic_indicator_texture.is_some()
+            || self.capture_hint.is_some()
+            || self.capture_hint_texture.is_some()
         {
             self.bind_post_delivery_overlay_target(
                 gl,
@@ -4376,6 +4378,7 @@ impl WaylandCompositor {
                 }
                 let rec_chip_h = self.render_recording_indicator(gl, &projection);
                 self.render_mic_indicator(gl, &projection, rec_chip_h);
+                self.render_capture_hint(gl, &projection);
                 gl.BindFramebuffer(ffi::FRAMEBUFFER, 0);
             }
         }
@@ -7248,6 +7251,112 @@ impl WaylandCompositor {
                 indicator::CHIP_DOT / 2.0,
                 indicator::DOT_COLOR,
             );
+
+            gl.UseProgram(self.sysui_text_program);
+            let text_rect = super::get_uniform_loc(gl, self.sysui_text_program, "u_rect");
+            let text_proj = super::get_uniform_loc(gl, self.sysui_text_program, "u_projection");
+            let text_tex = super::get_uniform_loc(gl, self.sysui_text_program, "u_texture");
+            let text_opacity = super::get_uniform_loc(gl, self.sysui_text_program, "u_opacity");
+            gl.UniformMatrix4fv(text_proj, 1, ffi::FALSE as u8, projection.as_ptr());
+            gl.Uniform1i(text_tex, 0);
+            gl.Uniform1f(text_opacity, 1.0);
+            gl.ActiveTexture(ffi::TEXTURE0);
+            gl.Uniform4f(
+                text_rect,
+                layout.text[0],
+                layout.text[1],
+                layout.text[2],
+                layout.text[3],
+            );
+            gl.BindTexture(ffi::TEXTURE_2D, tex);
+            gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+
+            gl.BindVertexArray(0);
+            gl.UseProgram(0);
+        }
+    }
+
+    unsafe fn update_capture_hint_texture(&mut self, gl: &ffi::Gles2, text: &str) {
+        if self
+            .capture_hint_texture
+            .as_ref()
+            .is_some_and(|(cached, _, _, _)| cached == text)
+        {
+            return;
+        }
+        if let Some((_, tex, _, _)) = self.capture_hint_texture.take() {
+            unsafe { gl.DeleteTextures(1, &tex) };
+        }
+        let config = crate::config::CONFIG.load();
+        let description = config.system_ui_font();
+        let size = crate::backend::compositor_font::ui_font_pixel_size(description);
+        let (pixels, w, h) = crate::backend::compositor_font::render_ui_text_to_rgba(
+            text,
+            description,
+            size,
+            ui_theme::palette().osd_ink,
+        );
+        if w == 0 || h == 0 {
+            return;
+        }
+        let mut tex = 0;
+        unsafe {
+            gl.GenTextures(1, &mut tex);
+            gl.BindTexture(ffi::TEXTURE_2D, tex);
+            gl.TexImage2D(
+                ffi::TEXTURE_2D,
+                0,
+                ffi::RGBA8 as i32,
+                w as i32,
+                h as i32,
+                0,
+                ffi::RGBA,
+                ffi::UNSIGNED_BYTE,
+                pixels.as_ptr() as *const _,
+            );
+            gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_MIN_FILTER, ffi::LINEAR as i32);
+            gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_MAG_FILTER, ffi::LINEAR as i32);
+            gl.BindTexture(ffi::TEXTURE_2D, 0);
+        }
+        self.capture_hint_texture = Some((text.to_string(), tex, w, h));
+    }
+
+    unsafe fn render_capture_hint(&mut self, gl: &ffi::Gles2, projection: &[f32; 16]) {
+        use crate::backend::compositor_common::capture_hint as hint;
+
+        let Some(label) = self.capture_hint.clone() else {
+            if let Some((_, texture, _, _)) = self.capture_hint_texture.take()
+                && texture != 0
+            {
+                unsafe { gl.DeleteTextures(1, &texture) };
+            }
+            return;
+        };
+        unsafe { self.update_capture_hint_texture(gl, &label) };
+        let Some((tex, text_w, text_h)) = self
+            .capture_hint_texture
+            .as_ref()
+            .map(|&(_, tex, w, h)| (tex, w, h))
+        else {
+            return;
+        };
+
+        let ui = ui_theme::palette();
+        let layout = hint::capture_hint_layout(
+            self.screen_w as f32,
+            self.screen_h as f32,
+            text_w as f32,
+            text_h as f32,
+        );
+        let [chip_x, chip_y, chip_w, chip_h] = layout.chip;
+
+        unsafe {
+            self.enable_premultiplied_blend(gl);
+            self.bind_quad_vao(gl);
+            gl.UseProgram(self.border_program);
+            self.set_projection_uniform(gl, self.border_uniforms.projection, projection);
+            gl.Uniform1i(self.border_uniforms.scene_linear, 0);
+            self.sysui_fill_rounded(gl, chip_x, chip_y, chip_w, chip_h, chip_h / 2.0, ui.osd);
 
             gl.UseProgram(self.sysui_text_program);
             let text_rect = super::get_uniform_loc(gl, self.sysui_text_program, "u_rect");
