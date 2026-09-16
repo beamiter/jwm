@@ -3162,6 +3162,7 @@ impl Jwm {
         backend.compositor_set_recording_region_interactive(interactive);
         backend.compositor_force_full_redraw();
         self.sync_capture_hint(backend);
+        self.sync_recording_selection_cursor(backend, self.last_mouse_root);
     }
 
     pub(crate) fn finish_recording_region_interaction(

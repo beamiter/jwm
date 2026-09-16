@@ -1007,6 +1007,7 @@ impl WMController for Jwm {
             self.last_mouse_root = (root_x, root_y);
             backend.compositor_set_mouse_position(root_x as f32, root_y as f32);
             self.preview_screenshot_capture_target(backend, target, (root_x, root_y));
+            self.sync_screenshot_selection_cursor(backend, (root_x, root_y));
             return;
         }
 

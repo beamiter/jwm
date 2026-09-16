@@ -1177,6 +1177,7 @@ impl Jwm {
             self.last_mouse_root,
         );
         self.sync_capture_hint(backend);
+        self.sync_screenshot_selection_cursor(backend, self.last_mouse_root);
         info!(
             "[take_screenshot] interactive capture → {} (scene={}, hover/click picks a window; G/W/M/D or Tab selects source)",
             screenshot_path,

@@ -238,10 +238,10 @@ desktop. `Tab` and `Shift+Tab` cycle the same choices; middle-click is the
 pointer twin of `Tab`. Dragging still draws a free region; a near-zero click
 over empty desktop leaves selection armed. Recording shows resize handles only
 after a source is armed, and the cursor switches to move/resize intents over
-those handles. `Enter` saves a screenshot or starts/commits recording (and
-nudges with a toast if nothing is selected yet). Arrow keys nudge a committed
-selection (`Shift` uses 10-pixel steps), while `Escape`, right-click, or the
-recording shortcut again cancels safely.
+those handles (a hand while soft-probing a window). `Enter` saves a screenshot
+or starts/commits recording (and nudges with a toast if nothing is selected
+yet). Arrow keys nudge a committed selection (`Shift` uses 10-pixel steps),
+while `Escape`, right-click, or the recording shortcut again cancels safely.
 
 ### The screenshot editor
 

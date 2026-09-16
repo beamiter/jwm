@@ -346,6 +346,23 @@ impl Jwm {
         backend.compositor_set_capture_hint(None);
     }
 
+    /// Apply a cursor through both the soft set_cursor path and the active
+    /// pointer grab (ChangeActivePointerGrab), so X11 selection modes update.
+    fn apply_grab_cursor(
+        &self,
+        backend: &mut dyn Backend,
+        kind: crate::backend::common_define::StdCursorKind,
+    ) {
+        use crate::backend::common_define::StdCursorKind;
+
+        let _ = backend.input_ops().set_cursor(kind);
+        if let Ok(handle) = backend.cursor_provider().get(kind) {
+            let _ = backend.input_ops().update_grab_cursor(Some(handle.0));
+        } else if matches!(kind, StdCursorKind::Crosshair | StdCursorKind::LeftPtr) {
+            let _ = backend.input_ops().update_grab_cursor(None);
+        }
+    }
+
     /// Update the grab cursor for an armed recording region under the pointer.
     pub(crate) fn sync_recording_selection_cursor(
         &mut self,
@@ -360,20 +377,48 @@ impl Jwm {
         {
             return;
         }
-        let intent = if self.features.recording.region.is_some() {
+        let kind = if self.features.recording.region.is_some() {
             self.features
                 .recording
                 .pointer_intent(pointer.0.round() as i32, pointer.1.round() as i32)
+                .cursor()
+        } else if matches!(
+            self.features.capture.recording,
+            CaptureTarget::Region | CaptureTarget::Window
+        ) && self.probe_window_capture_rect(pointer).is_some()
+        {
+            // Soft-probe: advertise click-to-pick with a hand.
+            StdCursorKind::Hand
         } else {
-            RecordingPointerIntent::New
+            RecordingPointerIntent::New.cursor()
         };
-        let kind = intent.cursor();
-        let _ = backend.input_ops().set_cursor(kind);
-        if let Ok(handle) = backend.cursor_provider().get(kind) {
-            let _ = backend.input_ops().update_grab_cursor(Some(handle.0));
-        } else if kind == StdCursorKind::Crosshair {
-            let _ = backend.input_ops().update_grab_cursor(None);
+        self.apply_grab_cursor(backend, kind);
+    }
+
+    /// Crosshair vs hand while screenshot selection is still uncommitted.
+    pub(crate) fn sync_screenshot_selection_cursor(
+        &mut self,
+        backend: &mut dyn Backend,
+        pointer: (f64, f64),
+    ) {
+        use crate::backend::common_define::StdCursorKind;
+
+        if !self.features.screenshot.active
+            || self.features.screenshot.committed
+            || self.features.screenshot.dragging
+        {
+            return;
         }
+        let kind = if matches!(
+            self.features.capture.screenshot,
+            CaptureTarget::Region | CaptureTarget::Window
+        ) && self.probe_window_capture_rect(pointer).is_some()
+        {
+            StdCursorKind::Hand
+        } else {
+            StdCursorKind::Crosshair
+        };
+        self.apply_grab_cursor(backend, kind);
     }
 
     fn commit_screenshot_rect(&mut self, backend: &mut dyn Backend, rect: Rect) -> bool {
@@ -443,6 +488,7 @@ impl Jwm {
             target.label()
         );
         self.sync_capture_hint(backend);
+        self.sync_screenshot_selection_cursor(backend, self.last_mouse_root);
     }
 
     pub(crate) fn cycle_screenshot_capture_target(
@@ -568,6 +614,7 @@ impl Jwm {
             target.label()
         );
         self.sync_capture_hint(backend);
+        self.sync_recording_selection_cursor(backend, self.last_mouse_root);
     }
 
     pub(crate) fn cycle_recording_capture_target(
