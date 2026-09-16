@@ -39,6 +39,42 @@ pub(crate) fn status_bar_frost_strength(
     }
 }
 
+/// Effective backdrop-blur strength for a window, or `None` when it composites
+/// against the unfiltered desktop.
+///
+/// `fade_opacity` is deliberately not a trigger. On Wayland that channel
+/// carries the open/close animation, so keying off it would frost every window
+/// for the length of its map animation and unfrost it again — motion the user
+/// never asked for. A rule-driven `opacity_override` is the opposite: a
+/// standing "let the desktop show through", which reads better as a frosted
+/// pane than as a flat wash of whatever happens to be behind it. X11 has
+/// blurred those since forever (`needs_backdrop_blur`); this is the Wayland
+/// half of that parity.
+pub(crate) fn backdrop_blur_strength(
+    is_frosted: bool,
+    frosted_strength: f32,
+    opacity_override: Option<f32>,
+    blur_excluded: bool,
+    large_alpha_overlay: bool,
+) -> Option<f32> {
+    if blur_excluded {
+        return None;
+    }
+    if is_frosted {
+        return Some(frosted_strength);
+    }
+    // Screen-sharing overlays and selection tools are intentionally
+    // see-through across most of a monitor. Frosting one hides the very thing
+    // the user is pointing at, so size keeps them out of the opacity path —
+    // an explicit frosted-glass rule still wins above.
+    if large_alpha_overlay {
+        return None;
+    }
+    opacity_override
+        .is_some_and(|opacity| opacity < 1.0)
+        .then_some(1.0)
+}
+
 // ---------------------------------------------------------------------------
 // Exclusion and rule matching
 // ---------------------------------------------------------------------------
@@ -112,6 +148,32 @@ impl WaylandCompositor {
             return (true, strength);
         }
         (false, 0.0)
+    }
+
+    /// Backdrop-blur strength for one window of this frame's scene, with the
+    /// exclusion list and the large-overlay guard resolved against live state.
+    pub(crate) fn window_backdrop_blur_strength(
+        &self,
+        window: &WindowState,
+        w: u32,
+        h: u32,
+    ) -> Option<f32> {
+        let blur_excluded = !window.class_name.is_empty()
+            && Self::class_matches_exclude(&window.class_name, &self.blur_exclude);
+        // "Large" = at least 80% of a single monitor in both dimensions, the
+        // same threshold X11 applies to override-redirect RGBA windows.
+        let large_alpha_overlay = window.has_alpha
+            && self
+                .monitors
+                .iter()
+                .any(|&(_, _, _, mon_w, mon_h, _)| w >= mon_w * 4 / 5 && h >= mon_h * 4 / 5);
+        backdrop_blur_strength(
+            window.is_frosted,
+            window.frosted_strength,
+            window.opacity_override,
+            blur_excluded,
+            large_alpha_overlay,
+        )
     }
 
     /// Re-apply frosted membership after `blur_status_bar` / rules hot-reload.
@@ -852,6 +914,47 @@ mod tests {
         assert_eq!(status_bar_frost_strength(true, "", "tao_glow_bar"), None);
         assert_eq!(
             status_bar_frost_strength(true, "tao_glow_bar", "firefox"),
+            None
+        );
+    }
+
+    #[test]
+    fn a_rule_frosted_window_keeps_its_configured_strength() {
+        assert_eq!(
+            backdrop_blur_strength(true, 0.6, None, false, false),
+            Some(0.6)
+        );
+        // An explicit rule outranks the large-overlay guard.
+        assert_eq!(
+            backdrop_blur_strength(true, 1.0, None, false, true),
+            Some(1.0)
+        );
+    }
+
+    #[test]
+    fn an_opacity_override_frosts_a_window_without_a_rule() {
+        assert_eq!(
+            backdrop_blur_strength(false, 0.0, Some(0.85), false, false),
+            Some(1.0)
+        );
+        // A fully opaque override is not translucency.
+        assert_eq!(
+            backdrop_blur_strength(false, 0.0, Some(1.0), false, false),
+            None
+        );
+        assert_eq!(backdrop_blur_strength(false, 0.0, None, false, false), None);
+    }
+
+    #[test]
+    fn exclusion_and_fullscreen_overlays_stay_unfrosted() {
+        assert_eq!(
+            backdrop_blur_strength(true, 1.0, Some(0.5), true, false),
+            None
+        );
+        // A near-fullscreen translucent overlay — a screen-share or selection
+        // tool — must keep showing what it covers.
+        assert_eq!(
+            backdrop_blur_strength(false, 0.0, Some(0.5), false, true),
             None
         );
     }

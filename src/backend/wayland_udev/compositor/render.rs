@@ -2989,12 +2989,11 @@ impl WaylandCompositor {
         // 8. Blur pass (for frosted/translucent windows)
         // =================================================================
         self.frame_profiler.zone_start("blur");
-        let has_frosted = visible_scene.iter().any(|&(win_id, _, _, _, _)| {
-            self.windows.get(&win_id).map_or(false, |ws| {
-                ws.is_frosted
-                    && (ws.class_name.is_empty()
-                        || !Self::class_matches_exclude(&ws.class_name, &self.blur_exclude))
-            })
+        let has_frosted = visible_scene.iter().any(|&(win_id, _, _, w, h)| {
+            self.windows
+                .get(&win_id)
+                .and_then(|ws| self.window_backdrop_blur_strength(ws, w, h))
+                .is_some()
         });
 
         let blur_result_tex = if self.blur_enabled && has_frosted && !self.blur_fbos.is_empty() {
@@ -3250,8 +3249,10 @@ impl WaylandCompositor {
                 let [uv_x, uv_y, uv_w, uv_h] = oriented_content_uv(wt.content_uv, wt.y_inverted);
 
                 // --- Draw blur behind frosted window ---
-                if wt.is_frosted && self.blur_enabled && blur_result_tex.is_some() {
-                    let blur_tex = blur_result_tex.unwrap();
+                if self.blur_enabled
+                    && let Some(blur_tex) = blur_result_tex
+                    && let Some(frosted_strength) = self.window_backdrop_blur_strength(wt, w, h)
+                {
                     gl.ActiveTexture(ffi::TEXTURE0);
                     gl.BindTexture(ffi::TEXTURE_2D, blur_tex);
 
@@ -3262,7 +3263,7 @@ impl WaylandCompositor {
                     let uv_sh = draw_h / self.screen_h as f32;
 
                     // Per-window frosted strength modulates blur opacity
-                    let blur_opacity = fade * wt.frosted_strength.max(0.1);
+                    let blur_opacity = fade * frosted_strength.max(0.1);
 
                     gl.Uniform4f(self.win_uniforms.uv_rect, uv_sx, uv_sy, uv_sw, uv_sh);
                     gl.Uniform1f(self.win_uniforms.opacity, blur_opacity);
