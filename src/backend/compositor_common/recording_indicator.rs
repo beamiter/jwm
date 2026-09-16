@@ -33,9 +33,9 @@ pub(crate) const CHIP_DOT_GAP: f32 = 8.0;
 /// audio recording share the bottom-right corner.
 pub(crate) const CHIP_STACK_GAP: f32 = 10.0;
 
-/// The recording red the interactive crop outline already draws with
-/// (`render_recording_region_overlay`), so both recording cues read as one
-/// feature.
+/// The recording red used by the REC / MIC chips. The interactive crop cue
+/// shares the screenshot snap-preview blue instead — these chips stay red so
+/// "recording is live" remains distinct from "selecting a source".
 pub(crate) const DOT_COLOR: [f32; 4] = [1.0, 0.2, 0.12, 0.95];
 
 /// Rects the renderer draws, in screen coordinates (top-left origin).

@@ -511,8 +511,12 @@ impl<C: CompositorConnection> Compositor<C> {
         }
     }
 
-    /// Draw the interactive recording crop outline after frame capture so the
-    /// controls remain visible locally without being baked into the video.
+    /// Draw the interactive recording crop cue after frame capture so the
+    /// highlight stays visible locally without being baked into the video.
+    ///
+    /// Uses the same translucent blue fill + brighter outline as the screenshot
+    /// / snap preview so hover-probe and region pick read as one selection
+    /// language. Corner handles stay for resize affordance, tinted to match.
     pub(super) fn render_recording_region_overlay(&self, proj: &[f32; 16]) {
         let Some((x, y, width, height)) = self.recording_region_overlay else {
             return;
@@ -525,6 +529,13 @@ impl<C: CompositorConnection> Compositor<C> {
             return;
         }
 
+        let [r, g, b, a] = self.snap_preview_color;
+        let fill_alpha = a;
+        let outline_r = (r * 1.5).min(1.0);
+        let outline_g = (g * 1.5).min(1.0);
+        let outline_b = (b * 1.5).min(1.0);
+        let outline_alpha = (a * 2.0).min(1.0);
+
         unsafe {
             self.gl.use_program(Some(self.border_program));
             self.gl.uniform_matrix_4_f32_slice(
@@ -533,23 +544,45 @@ impl<C: CompositorConnection> Compositor<C> {
                 proj,
             );
             self.gl.bind_vertex_array(Some(self.quad_vao));
-            self.gl.uniform_4_f32(
-                self.border_uniforms.border_color.as_ref(),
-                1.0,
-                0.2,
-                0.12,
-                0.95,
-            );
-            self.set_border_radii(2.0, 2.0);
+            self.set_border_radii(self.corner_radius, self.corner_radius);
             self.gl
                 .uniform_2_f32(self.border_uniforms.size.as_ref(), width, height);
             self.gl
                 .uniform_4_f32(self.border_uniforms.rect.as_ref(), x, y, width, height);
+
+            // Soft fill — same "蒙皮" treatment as screenshot snap preview.
+            let fill_size = width.max(height);
             self.gl
-                .uniform_1_f32(self.border_uniforms.border_width.as_ref(), 3.0);
+                .uniform_1_f32(self.border_uniforms.border_width.as_ref(), fill_size);
+            self.gl.uniform_4_f32(
+                self.border_uniforms.border_color.as_ref(),
+                r,
+                g,
+                b,
+                fill_alpha,
+            );
+            self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+
+            // Brighter outline.
+            self.gl
+                .uniform_1_f32(self.border_uniforms.border_width.as_ref(), 2.0);
+            self.gl.uniform_4_f32(
+                self.border_uniforms.border_color.as_ref(),
+                outline_r,
+                outline_g,
+                outline_b,
+                outline_alpha,
+            );
             self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
 
             let handle_size = 10.0;
+            self.gl.uniform_4_f32(
+                self.border_uniforms.border_color.as_ref(),
+                outline_r,
+                outline_g,
+                outline_b,
+                outline_alpha,
+            );
             for (handle_x, handle_y) in [
                 (x, y),
                 (x + width * 0.5, y),

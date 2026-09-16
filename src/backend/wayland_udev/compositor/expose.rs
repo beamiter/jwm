@@ -652,8 +652,12 @@ impl WaylandCompositor {
         }
     }
 
-    /// Render local recording crop controls after the recorder has copied the
-    /// frame, keeping this overlay out of the encoded stream.
+    /// Render the interactive recording crop cue after the recorder has copied
+    /// the frame, keeping this overlay out of the encoded stream.
+    ///
+    /// Matches the screenshot / snap preview's translucent blue fill + outline
+    /// so window hover-probe and region pick share one selection look. Resize
+    /// handles remain, tinted to the outline colour.
     pub(crate) fn render_recording_region_overlay(&self, gl: &ffi::Gles2, projection: &[f32; 16]) {
         let Some((x, y, width, height)) = self.recording_region_overlay else {
             return;
@@ -666,6 +670,9 @@ impl WaylandCompositor {
             return;
         }
 
+        let (fill_color, outline_color) =
+            snap_preview_colors(self.snap_preview_color, 1.0);
+
         unsafe {
             self.bind_quad_vao(gl);
             gl.UseProgram(self.border_program);
@@ -675,12 +682,31 @@ impl WaylandCompositor {
                 ffi::FALSE as u8,
                 projection.as_ptr(),
             );
-            gl.Uniform4f(self.border_uniforms.border_color, 1.0, 0.2, 0.12, 0.95);
-            gl.Uniform1f(self.border_uniforms.radius, 2.0);
-            gl.Uniform1f(self.border_uniforms.radius_top, 2.0);
-            gl.Uniform2f(self.border_uniforms.size, width, height);
             gl.Uniform4f(self.border_uniforms.rect, x, y, width, height);
-            gl.Uniform1f(self.border_uniforms.border_width, 3.0);
+            gl.Uniform2f(self.border_uniforms.size, width, height);
+            gl.Uniform1f(self.border_uniforms.radius, 8.0);
+            gl.Uniform1f(self.border_uniforms.radius_top, 8.0);
+
+            // Soft fill — same treatment as `render_snap_preview`.
+            gl.Uniform4f(
+                self.border_uniforms.border_color,
+                fill_color[0],
+                fill_color[1],
+                fill_color[2],
+                fill_color[3],
+            );
+            gl.Uniform1f(self.border_uniforms.border_width, width.max(height));
+            gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+
+            // Brighter outline.
+            gl.Uniform4f(
+                self.border_uniforms.border_color,
+                outline_color[0],
+                outline_color[1],
+                outline_color[2],
+                outline_color[3],
+            );
+            gl.Uniform1f(self.border_uniforms.border_width, 2.0);
             gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
 
             let handle_size = 10.0;
