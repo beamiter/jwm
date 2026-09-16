@@ -2619,6 +2619,8 @@ impl Jwm {
                         "hz_table": hz_table,
                         "per_monitor_hz": per_monitor_hz,
                         "blur_quality_by_monitor": quality,
+                        "status_bar_frosted": b.status_bar_frosted,
+                        "glass_backdrop_valid": b.glass_backdrop_valid,
                     })))
                 }
                 None => IpcResponse::err("compositor not active".to_string()),
@@ -2826,6 +2828,8 @@ impl Jwm {
                     .iter()
                     .map(|(monitor_id, quality)| serde_json::json!({ "monitor_id": monitor_id, "quality": quality }))
                     .collect::<Vec<_>>(),
+                "status_bar_frosted": b.status_bar_frosted,
+                "glass_backdrop_valid": b.glass_backdrop_valid,
             })
         });
         let tearing_hint_count = backend.compositor_tearing_hint_count();

@@ -212,6 +212,14 @@ pub struct BlurStatus {
     pub per_monitor_hz: Vec<(u32, u32)>,
     /// Per-monitor blur-quality overrides: (monitor_id, "Full"|"Reduced"|"Minimal").
     pub blur_quality_by_monitor: Vec<(u32, String)>,
+    /// Whether the configured status bar is currently being frosted by the
+    /// compositor. Lets automation tell "the bar looks flat" apart from "the
+    /// bar was never in the frost path".
+    pub status_bar_frosted: bool,
+    /// Whether a captured frosted-glass backdrop is live and reusable. The
+    /// backdrop survives frames that do not repaint the desktop, so this
+    /// reports the cache the panels will actually draw from.
+    pub glass_backdrop_valid: bool,
 }
 
 /// Snapshot of the WaterLily layer, used by the `get_waterlily_status` IPC.
@@ -1163,6 +1171,23 @@ impl SystemUiOverlay {
         } else {
             self.viewport.rect()
         }
+    }
+}
+
+#[cfg(test)]
+mod blur_status_tests {
+    use super::BlurStatus;
+
+    #[test]
+    fn a_default_snapshot_claims_no_frost_and_no_captured_backdrop() {
+        // A backend that cannot answer must not look like a frosted bar over a
+        // live backdrop. Both additions default to false, so an old caller
+        // reading only the original fields is unaffected.
+        let status = BlurStatus::default();
+        assert!(!status.status_bar_frosted);
+        assert!(!status.glass_backdrop_valid);
+        assert_eq!(status.current_strength, 0);
+        assert!(!status.temporal_enabled);
     }
 }
 

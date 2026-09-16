@@ -4685,6 +4685,11 @@ impl WaylandCompositor {
             hz_table: self.blur_strength_by_hz.clone(),
             per_monitor_hz,
             blur_quality_by_monitor: quality_by_monitor,
+            status_bar_frosted: self.status_bar_frosted(),
+            glass_backdrop_valid: self
+                .glass_backdrop_caches
+                .iter()
+                .any(|cache| cache.valid && cache.target.is_some()),
         }
     }
 

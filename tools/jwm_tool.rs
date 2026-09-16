@@ -4658,10 +4658,33 @@ fn print_unified_wayland_status(status: &serde_json::Value) {
                 .get("temporal_reuse_rate_pct")
                 .and_then(|v| v.as_f64())
                 .unwrap_or(0.0);
-            println!("blur: strength={} temporal_reuse={:.1}%", strength, reuse);
+            println!(
+                "blur: strength={} temporal_reuse={:.1}% {}",
+                strength,
+                reuse,
+                blur_frost_summary(blur)
+            );
         }
         None => println!("blur: unavailable"),
     }
+}
+
+/// Frost half of the blur line: whether the bar is in the frost path and
+/// whether a captured glass backdrop is live. Both are recent additions, so a
+/// payload without them prints `unknown` rather than a confident `no`.
+fn blur_frost_summary(blur: &serde_json::Value) -> String {
+    fn tri_state(blur: &serde_json::Value, key: &str) -> &'static str {
+        match blur.get(key).and_then(|value| value.as_bool()) {
+            Some(true) => "yes",
+            Some(false) => "no",
+            None => "unknown",
+        }
+    }
+    format!(
+        "status_bar_frosted={} glass_backdrop={}",
+        tri_state(blur, "status_bar_frosted"),
+        tri_state(blur, "glass_backdrop_valid")
+    )
 }
 
 fn should_attempt_wayland_status_fallback(error: &io::Error) -> bool {
@@ -5048,7 +5071,12 @@ fn run_wayland_status(json_output: bool) -> io::Result<i32> {
                 .get("temporal_reuse_rate_pct")
                 .and_then(|v| v.as_f64())
                 .unwrap_or(0.0);
-            println!("blur: strength={} temporal_reuse={:.1}%", strength, reuse);
+            println!(
+                "blur: strength={} temporal_reuse={:.1}% {}",
+                strength,
+                reuse,
+                blur_frost_summary(blur)
+            );
         }
         None => {
             let err = queries

@@ -54,6 +54,7 @@ pub(super) fn status_bar_steady_blur_quality() -> BlurQuality {
     frosted_steady_blur_quality()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn blur_status_snapshot(
     current_strength: u32,
     temporal_enabled: bool,
@@ -62,6 +63,8 @@ fn blur_status_snapshot(
     mut hz_table: Vec<(u32, u32)>,
     mut per_monitor_hz: Vec<(u32, u32)>,
     mut blur_quality_by_monitor: Vec<(u32, String)>,
+    status_bar_frosted: bool,
+    glass_backdrop_valid: bool,
 ) -> crate::backend::api::BlurStatus {
     hz_table.sort_by_key(|&(hz, _)| hz);
     per_monitor_hz.sort_by_key(|&(id, _)| id);
@@ -79,6 +82,8 @@ fn blur_status_snapshot(
         hz_table,
         per_monitor_hz,
         blur_quality_by_monitor,
+        status_bar_frosted,
+        glass_backdrop_valid,
     }
 }
 
@@ -303,7 +308,26 @@ impl<C: CompositorConnection> Compositor<C> {
                 .iter()
                 .map(|(&id, quality)| (id, format!("{quality:?}")))
                 .collect(),
+            self.status_bar_frosted(),
+            self.glass_backdrop.is_some(),
         )
+    }
+
+    /// Whether the configured status bar is currently in the frost path.
+    ///
+    /// The bar gets its backdrop from `blur_status_bar` rather than a
+    /// frosted-glass rule, so an explicit rule match counts too.
+    pub(super) fn status_bar_frosted(&self) -> bool {
+        let cfg = crate::config::CONFIG.load();
+        let bar_name = cfg.status_bar_name();
+        if bar_name.is_empty() {
+            return false;
+        }
+        self.windows.values().any(|wt| {
+            (wt.class_name == bar_name || wt.class_name.contains(bar_name))
+                && (self.blur_status_bar || wt.is_frosted)
+                && !class_matches_exclude(&wt.class_name, &self.blur_exclude)
+        })
     }
 
     /// Rebuild monitor geometry + refresh-rate maps from RandR after a layout
@@ -873,6 +897,8 @@ mod tests {
             vec![(144, 4), (60, 2)],
             vec![(2, 75), (0, 60)],
             vec![(2, "Minimal".to_string()), (0, "Full".to_string())],
+            true,
+            false,
         );
 
         assert_eq!(status.current_strength, 3);
@@ -884,8 +910,10 @@ mod tests {
             status.blur_quality_by_monitor,
             vec![(0, "Full".to_string()), (2, "Minimal".to_string())]
         );
+        assert!(status.status_bar_frosted);
+        assert!(!status.glass_backdrop_valid);
 
-        let no_samples = blur_status_snapshot(1, false, 9, 0, vec![], vec![], vec![]);
+        let no_samples = blur_status_snapshot(1, false, 9, 0, vec![], vec![], vec![], false, false);
         assert_eq!(no_samples.temporal_reuse_rate_pct, 0.0);
     }
 }
