@@ -444,11 +444,39 @@ impl Jwm {
     }
 
     /// Tool-aware cursor once the screenshot editor owns a committed region.
-    pub(crate) fn sync_screenshot_editor_cursor(&mut self, backend: &mut dyn Backend) {
+    /// Inside the selection (or while drawing) the active tool's cursor wins;
+    /// over the toolbar or outside the crop, fall back to a plain pointer.
+    pub(crate) fn sync_screenshot_editor_cursor(
+        &mut self,
+        backend: &mut dyn Backend,
+        pointer: (f64, f64),
+    ) {
+        use crate::backend::common_define::StdCursorKind;
+
         if !self.features.screenshot.active || !self.features.screenshot.committed {
             return;
         }
-        self.apply_grab_cursor(backend, self.features.screenshot.tool.cursor());
+        if self.features.screenshot.drawing_annotation {
+            self.apply_grab_cursor(backend, self.features.screenshot.tool.cursor());
+            return;
+        }
+        if self.screenshot_toolbar_contains(pointer.0, pointer.1) {
+            self.apply_grab_cursor(backend, StdCursorKind::LeftPtr);
+            return;
+        }
+        let px = pointer.0.round() as i32;
+        let py = pointer.1.round() as i32;
+        let inside = self
+            .features
+            .screenshot
+            .get_selection_rect()
+            .is_some_and(|rect| rect_contains_point(rect, px, py));
+        let kind = if inside {
+            self.features.screenshot.tool.cursor()
+        } else {
+            StdCursorKind::LeftPtr
+        };
+        self.apply_grab_cursor(backend, kind);
     }
 
     fn commit_screenshot_rect(&mut self, backend: &mut dyn Backend, rect: Rect) -> bool {
@@ -475,7 +503,7 @@ impl Jwm {
         // needs its tools too.
         self.sync_screenshot_toolbar(backend);
         self.sync_capture_hint(backend);
-        self.sync_screenshot_editor_cursor(backend);
+        self.sync_screenshot_editor_cursor(backend, self.last_mouse_root);
         true
     }
 

@@ -57,7 +57,23 @@ pub(crate) fn capture_hint_label(
     }
 }
 
+/// Extra lift so the center hint clears the bottom-right REC / MIC stack.
+/// `rec_h` / `mic_h` are the chip heights drawn this frame (`None` when absent).
+#[must_use]
+pub(crate) fn capture_hint_bottom_lift(rec_h: Option<f32>, mic_h: Option<f32>) -> f32 {
+    use super::recording_indicator::{CHIP_MARGIN, CHIP_STACK_GAP};
+
+    let stack = match (rec_h, mic_h) {
+        (Some(r), Some(m)) => CHIP_MARGIN + r + CHIP_STACK_GAP + m,
+        (Some(r), None) => CHIP_MARGIN + r,
+        (None, Some(m)) => CHIP_MARGIN + m,
+        (None, None) => return 0.0,
+    };
+    (stack + CHIP_STACK_GAP - HINT_MARGIN).max(0.0)
+}
+
 /// Bottom-center pill layout for a rasterized label of `text_w` × `text_h`.
+/// `bottom_lift` raises the chip above bottom-right chrome (REC / MIC).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct CaptureHintLayout {
     pub(crate) chip: [f32; 4],
@@ -70,11 +86,12 @@ pub(crate) fn capture_hint_layout(
     screen_h: f32,
     text_w: f32,
     text_h: f32,
+    bottom_lift: f32,
 ) -> CaptureHintLayout {
     let chip_w = text_w + 2.0 * HINT_PAD_X;
     let chip_h = text_h + 2.0 * HINT_PAD_Y;
     let x = ((screen_w - chip_w) * 0.5).max(0.0);
-    let y = (screen_h - HINT_MARGIN - chip_h).max(0.0);
+    let y = (screen_h - HINT_MARGIN - bottom_lift.max(0.0) - chip_h).max(0.0);
     CaptureHintLayout {
         chip: [x, y, chip_w, chip_h],
         text: [x + HINT_PAD_X, y + HINT_PAD_Y, text_w, text_h],
@@ -84,6 +101,7 @@ pub(crate) fn capture_hint_layout(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::recording_indicator::{CHIP_MARGIN, CHIP_STACK_GAP};
 
     #[test]
     fn labels_name_the_mode_and_primary_actions() {
@@ -114,11 +132,20 @@ mod tests {
 
     #[test]
     fn layout_centers_on_the_bottom_edge() {
-        let layout = capture_hint_layout(200.0, 100.0, 80.0, 12.0);
+        let layout = capture_hint_layout(200.0, 100.0, 80.0, 12.0, 0.0);
         // chip_w = 80 + 2*HINT_PAD_X = 112 → centered at (200-112)/2 = 44
         assert!((layout.chip[0] - 44.0).abs() < f32::EPSILON);
         assert!((layout.chip[1] - (100.0 - HINT_MARGIN - 28.0)).abs() < f32::EPSILON);
         assert_eq!(layout.chip[2], 80.0 + 2.0 * HINT_PAD_X);
         assert_eq!(layout.chip[3], 12.0 + 2.0 * HINT_PAD_Y);
+    }
+
+    #[test]
+    fn layout_lifts_above_corner_recording_chrome() {
+        let lift = capture_hint_bottom_lift(Some(30.0), None);
+        assert!((lift - (CHIP_MARGIN + 30.0 + CHIP_STACK_GAP - HINT_MARGIN)).abs() < f32::EPSILON);
+        let layout = capture_hint_layout(200.0, 100.0, 80.0, 12.0, lift);
+        assert!((layout.chip[1] - (100.0 - HINT_MARGIN - lift - 28.0)).abs() < f32::EPSILON);
+        assert_eq!(capture_hint_bottom_lift(None, None), 0.0);
     }
 }

@@ -1022,7 +1022,7 @@ mod tests {
             "render_recording_indicator"
         );
         let mic = format!(
-            "self.{}(gl, &projection, rec_chip_h);",
+            "let mic_chip_h = self.{}(gl, &projection, rec_chip_h);",
             "render_mic_indicator"
         );
         let at = |needle: &str| {
@@ -4377,8 +4377,13 @@ impl WaylandCompositor {
                     self.render_recording_region_overlay(gl, &projection);
                 }
                 let rec_chip_h = self.render_recording_indicator(gl, &projection);
-                self.render_mic_indicator(gl, &projection, rec_chip_h);
-                self.render_capture_hint(gl, &projection);
+                let mic_chip_h = self.render_mic_indicator(gl, &projection, rec_chip_h);
+                let hint_lift =
+                    crate::backend::compositor_common::capture_hint::capture_hint_bottom_lift(
+                        rec_chip_h,
+                        mic_chip_h,
+                    );
+                self.render_capture_hint(gl, &projection, hint_lift);
                 gl.BindFramebuffer(ffi::FRAMEBUFFER, 0);
             }
         }
@@ -7195,7 +7200,7 @@ impl WaylandCompositor {
         gl: &ffi::Gles2,
         projection: &[f32; 16],
         rec_chip_h: Option<f32>,
-    ) {
+    ) -> Option<f32> {
         use crate::backend::compositor_common::recording_indicator as indicator;
 
         let Some(label) = indicator::mic_indicator_label(self.mic_indicator_active) else {
@@ -7208,7 +7213,7 @@ impl WaylandCompositor {
             {
                 unsafe { gl.DeleteTextures(1, &texture) };
             }
-            return;
+            return None;
         };
         unsafe { self.update_mic_indicator_texture(gl, label) };
         let Some((tex, text_w, text_h)) = self
@@ -7216,7 +7221,7 @@ impl WaylandCompositor {
             .as_ref()
             .map(|&(_, tex, w, h)| (tex, w, h))
         else {
-            return;
+            return None;
         };
 
         let ui = ui_theme::palette();
@@ -7274,6 +7279,7 @@ impl WaylandCompositor {
             gl.BindVertexArray(0);
             gl.UseProgram(0);
         }
+        Some(chip_h)
     }
 
     unsafe fn update_capture_hint_texture(&mut self, gl: &ffi::Gles2, text: &str) {
@@ -7321,7 +7327,12 @@ impl WaylandCompositor {
         self.capture_hint_texture = Some((text.to_string(), tex, w, h));
     }
 
-    unsafe fn render_capture_hint(&mut self, gl: &ffi::Gles2, projection: &[f32; 16]) {
+    unsafe fn render_capture_hint(
+        &mut self,
+        gl: &ffi::Gles2,
+        projection: &[f32; 16],
+        bottom_lift: f32,
+    ) {
         use crate::backend::compositor_common::capture_hint as hint;
 
         let Some(label) = self.capture_hint.clone() else {
@@ -7347,6 +7358,7 @@ impl WaylandCompositor {
             self.screen_h as f32,
             text_w as f32,
             text_h as f32,
+            bottom_lift,
         );
         let [chip_x, chip_y, chip_w, chip_h] = layout.chip;
 

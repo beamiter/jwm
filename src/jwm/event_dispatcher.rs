@@ -778,7 +778,7 @@ impl WMController for Jwm {
             self.sync_screenshot_annotation_overlay(backend, false);
             // The selection is now an editor, so it gets its tools.
             self.sync_screenshot_toolbar(backend);
-            self.sync_screenshot_editor_cursor(backend);
+            self.sync_screenshot_editor_cursor(backend, self.last_mouse_root);
             // Keep the snap preview visible so the user can see the selection
             return;
         }
@@ -1083,6 +1083,7 @@ impl WMController for Jwm {
                 self.features.screenshot.hovered_button = hovered;
                 self.sync_screenshot_toolbar(backend);
             }
+            self.sync_screenshot_editor_cursor(backend, (root_x, root_y));
             if self.screenshot_toolbar_contains(root_x, root_y) {
                 backend.compositor_set_mouse_position(root_x as f32, root_y as f32);
                 return;

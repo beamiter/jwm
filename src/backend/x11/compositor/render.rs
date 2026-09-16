@@ -3949,7 +3949,7 @@ impl<C: CompositorConnection> Compositor<C> {
     /// is the height it drew this frame) when both recordings run together.
     /// Shares the REC chip's post-capture slot, so the cue is visible locally
     /// but never lands in the encoded video or a screenshot.
-    fn render_mic_indicator(&mut self, proj: &[f32; 16], rec_chip_h: Option<f32>) {
+    fn render_mic_indicator(&mut self, proj: &[f32; 16], rec_chip_h: Option<f32>) -> Option<f32> {
         use crate::backend::compositor_common::recording_indicator as indicator;
 
         let Some(label) = indicator::mic_indicator_label(self.mic_indicator_active) else {
@@ -3957,7 +3957,7 @@ impl<C: CompositorConnection> Compositor<C> {
             if let Some((_, tex, _, _)) = self.mic_indicator_texture.take() {
                 unsafe { self.gl.delete_texture(tex) };
             }
-            return;
+            return None;
         };
         self.update_mic_indicator_texture(label);
         let Some((tex, text_w, text_h)) = self
@@ -3965,7 +3965,7 @@ impl<C: CompositorConnection> Compositor<C> {
             .as_ref()
             .map(|&(_, tex, w, h)| (tex, w, h))
         else {
-            return;
+            return None;
         };
 
         let ui = ui_theme::palette();
@@ -4023,6 +4023,7 @@ impl<C: CompositorConnection> Compositor<C> {
             self.gl.bind_vertex_array(None);
             self.gl.use_program(None);
         }
+        Some(chip_h)
     }
 
     fn update_capture_hint_texture(&mut self, text: &str) {
@@ -4072,7 +4073,7 @@ impl<C: CompositorConnection> Compositor<C> {
         }
     }
 
-    fn render_capture_hint(&mut self, proj: &[f32; 16]) {
+    fn render_capture_hint(&mut self, proj: &[f32; 16], bottom_lift: f32) {
         use crate::backend::compositor_common::capture_hint as hint;
 
         let Some(label) = self.capture_hint.clone() else {
@@ -4096,6 +4097,7 @@ impl<C: CompositorConnection> Compositor<C> {
             self.screen_h as f32,
             text_w as f32,
             text_h as f32,
+            bottom_lift,
         );
         let [chip_x, chip_y, chip_w, chip_h] = layout.chip;
 
@@ -7879,8 +7881,12 @@ impl<C: CompositorConnection> Compositor<C> {
         // capture pipeline, but its cue must not leak into a screen
         // recording's frames either.
         let rec_chip_h = self.render_recording_indicator(&proj);
-        self.render_mic_indicator(&proj, rec_chip_h);
-        self.render_capture_hint(&proj);
+        let mic_chip_h = self.render_mic_indicator(&proj, rec_chip_h);
+        let hint_lift = crate::backend::compositor_common::capture_hint::capture_hint_bottom_lift(
+            rec_chip_h,
+            mic_chip_h,
+        );
+        self.render_capture_hint(&proj, hint_lift);
 
         // Preserve the exact final composited image while the default back
         // buffer is still defined. A valid persistent texture follows partial
@@ -8649,7 +8655,7 @@ mod tests {
             "render_recording_indicator"
         ));
         let mic = at(&format!(
-            "self.{}(&proj, rec_chip_h);",
+            "let mic_chip_h = self.{}(&proj, rec_chip_h);",
             "render_mic_indicator"
         ));
         assert!(
