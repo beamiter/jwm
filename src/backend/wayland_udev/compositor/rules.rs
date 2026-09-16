@@ -477,13 +477,16 @@ impl WaylandCompositor {
         }
         let max_quality = self.blur_quality;
 
-        // Status bar: never adapt (matches X11).
+        // Status bar chrome must keep steady-state frost. Adaptive mode may
+        // reduce quality for ordinary clients under GPU load; chrome sitting
+        // over the wallpaper must not flash plain translucent alpha.
         let cfg = crate::config::CONFIG.load();
         let status_bar_name = cfg.status_bar_name();
         if !status_bar_name.is_empty()
             && (class_name == status_bar_name || class_name.contains(status_bar_name))
         {
-            return self.blur_quality;
+            // Match X11: adaptive downgrades must not flash chrome as plain alpha.
+            return BlurQuality::Full;
         }
 
         // Per-monitor override (precedence over GPU load).

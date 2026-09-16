@@ -5289,6 +5289,22 @@ impl<C: CompositorConnection> Compositor<C> {
         // without producing client damage. Ordinary XDamage wakeups are kept
         // out of `explicit_render`, so continuously-rendering clients can use
         // both the blur cache and partial framebuffer repair.
+        let transition_only = self.transition_active()
+            && !waterlily_layer_dirty
+            && !self.overview_active
+            && !self.expose_active
+            && !expose_animating
+            && !snap_animating
+            && !peek_animating
+            && !genie_active
+            && !ripples_active
+            && !focus_highlight_active
+            && !wallpaper_crossfade_active
+            && !wallpaper_just_loaded
+            && !wobbly_active
+            && !motion_trails_active
+            && !tilt_pending
+            && !attention_active;
         let uncached_blur_source_changed = waterlily_layer_dirty
             || self.transition_active()
             || self.overview_active
@@ -5308,8 +5324,16 @@ impl<C: CompositorConnection> Compositor<C> {
         // Scene structure, focus, and per-window animation state are encoded
         // into each consumer's running below-scene hash. A topmost input-method
         // popup therefore cannot invalidate unrelated clients underneath it.
+        //
+        // Tag wipes keep the status-bar strip (`exclude_top`) intact, so chrome
+        // frost under the bar can reuse its cache across the animation. Other
+        // consumers still see the workspace change via below-hash / damage.
         if uncached_blur_source_changed {
-            self.invalidate_window_blur_caches();
+            if transition_only {
+                self.invalidate_window_blur_caches_except_status_bar(frame_status_bar_name);
+            } else {
+                self.invalidate_window_blur_caches();
+            }
         }
 
         // Ensure the selected graphics context is current.
@@ -6089,6 +6113,8 @@ impl<C: CompositorConnection> Compositor<C> {
         // (fcitx5's candidate list, menus, tooltips) fading on every keystroke
         // must not pump every frosted client between Full and Reduced blur —
         // the same rule that keeps IME popups out of the smart-border count.
+        // Status-bar chrome ignores this rewrite in `compute_window_blur_quality`
+        // so tag-switch Minimal never flashes the bar as plain translucent alpha.
         if self.blur_quality_auto {
             self.blur_quality = if self.transition_active() || self.overview_active {
                 BlurQuality::Minimal

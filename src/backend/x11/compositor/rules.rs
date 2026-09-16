@@ -35,6 +35,14 @@ fn temporal_cache_matches(
     valid && cached_hash == below_hash && cached_levels == blur_levels
 }
 
+/// Steady-state frost quality for the status bar while adaptive quality is on.
+///
+/// Tag-switch / overview animations rewrite the compositor-wide quality to
+/// Minimal; chrome in the excluded top strip must not ride that downgrade.
+pub(super) fn status_bar_steady_blur_quality() -> BlurQuality {
+    BlurQuality::Full
+}
+
 fn blur_status_snapshot(
     current_strength: u32,
     temporal_enabled: bool,
@@ -330,12 +338,15 @@ impl<C: CompositorConnection> Compositor<C> {
             && wt.x < self.screen_w as i32
             && wt.y < self.screen_h as i32;
 
-        // Status bar should not have adaptive blur quality changes
+        // Status bar chrome must keep steady-state frost. `render_frame`
+        // overwrites `self.blur_quality` with Minimal for the whole tag-switch
+        // / overview animation when auto is on; returning that rewritten value
+        // made the bar flash plain translucent alpha until Full returned.
         let status_bar_name = cfg.status_bar_name();
-        let is_statusbar =
-            wt.class_name == status_bar_name || wt.class_name.contains(status_bar_name);
+        let is_statusbar = !status_bar_name.is_empty()
+            && (wt.class_name == status_bar_name || wt.class_name.contains(status_bar_name));
         if is_statusbar {
-            return self.blur_quality;
+            return status_bar_steady_blur_quality();
         }
 
         // P5B: Apply per-monitor quality override using real RandR geometry
@@ -488,6 +499,24 @@ impl<C: CompositorConnection> Compositor<C> {
     pub(super) fn invalidate_window_blur_caches(&self) {
         for cache in self.window_blur_caches.values() {
             cache.valid.set(false);
+        }
+    }
+
+    /// Like [`Self::invalidate_window_blur_caches`], but leave status-bar chrome
+    /// caches alone. Used while a tag wipe animates only the workspace below
+    /// `exclude_top`, so the bar can keep Full frost without a translucent flash.
+    pub(super) fn invalidate_window_blur_caches_except_status_bar(&self, status_bar_name: &str) {
+        if status_bar_name.is_empty() {
+            self.invalidate_window_blur_caches();
+            return;
+        }
+        for (&win, cache) in &self.window_blur_caches {
+            let is_statusbar = self.windows.get(&win).is_some_and(|wt| {
+                wt.class_name == status_bar_name || wt.class_name.contains(status_bar_name)
+            });
+            if !is_statusbar {
+                cache.valid.set(false);
+            }
         }
     }
 
@@ -773,6 +802,18 @@ mod tests {
         assert!(!blur_cache_matches(true, 7, 8, 3, 3, false));
         assert!(!blur_cache_matches(true, 7, 7, 2, 3, false));
         assert!(!blur_cache_matches(false, 7, 7, 3, 3, false));
+    }
+
+    #[test]
+    fn status_bar_keeps_full_blur_when_global_quality_is_minimal() {
+        // Contract for `compute_window_blur_quality`: when blur_quality_auto
+        // rewrites the compositor-wide quality to Minimal for a tag wipe, the
+        // status-bar branch must still resolve to Full. Returning the rewritten
+        // global value is what flashed the bar as plain translucent alpha.
+        assert_eq!(
+            super::status_bar_steady_blur_quality(),
+            crate::renderer::types::BlurQuality::Full
+        );
     }
 
     #[test]
