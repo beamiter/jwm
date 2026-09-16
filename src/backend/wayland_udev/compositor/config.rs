@@ -404,6 +404,17 @@ impl WaylandCompositor {
                 ));
             }
         }
+        // A lock card clears the backdrop and paints the whole screen opaque,
+        // so anything captured while locked describes nothing that is still on
+        // screen. The first unlocked frame need not be dirty for any other
+        // reason, so say so explicitly rather than let it frost a panel
+        // against the lock's own fill.
+        let was_locked = self.system_ui.as_deref().is_some_and(|ui| ui.locked);
+        let now_locked = overlay.as_ref().is_some_and(|ui| ui.locked);
+        if was_locked && !now_locked {
+            self.invalidate_glass_backdrop();
+            self.force_full_damage_next = true;
+        }
         self.system_ui = overlay.map(Arc::new);
         self.needs_render = true;
     }

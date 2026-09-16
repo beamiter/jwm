@@ -286,6 +286,15 @@ impl<C: CompositorConnection> Compositor<C> {
                 ));
             }
         }
+        // A lock card clears the backdrop and paints the whole screen opaque,
+        // so anything captured while locked describes nothing that is still on
+        // screen. `needs_render` alone would let the retained copy through
+        // now that the backdrop survives frames, so drop it explicitly.
+        let was_locked = self.system_ui.as_deref().is_some_and(|ui| ui.locked);
+        let now_locked = overlay.as_ref().is_some_and(|ui| ui.locked);
+        if was_locked && !now_locked {
+            self.invalidate_glass_backdrop();
+        }
         self.system_ui = overlay.map(Arc::new);
         self.needs_render = true;
     }
