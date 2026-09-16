@@ -540,6 +540,7 @@ impl<C: CompositorConnection> Compositor<C> {
             || wants_blur_chain != chain_present;
         if blur_changed {
             self.clear_window_blur_caches();
+            self.release_glass_backdrop_cache();
             // Tear down old blur FBOs
             unsafe {
                 for level in self.blur_fbos.drain(..) {

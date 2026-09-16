@@ -533,6 +533,19 @@ impl<C: CompositorConnection> Compositor<C> {
         }
     }
 
+    /// Free the owned frosted-glass backdrop copy. It mirrors `blur_fbos[0]`,
+    /// so whatever replaces the blur chain must drop it rather than leave a
+    /// mismatched size behind.
+    pub(super) fn release_glass_backdrop_cache(&mut self) {
+        self.glass_backdrop = None;
+        if let Some((fbo, texture)) = self.glass_backdrop_cache.take() {
+            unsafe {
+                self.gl.delete_framebuffer(fbo);
+                self.gl.delete_texture(texture);
+            }
+        }
+    }
+
     pub(super) fn window_blur_cache_hit(
         &self,
         win: u32,

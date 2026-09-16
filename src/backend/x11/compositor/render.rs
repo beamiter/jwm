@@ -1598,10 +1598,62 @@ impl<C: CompositorConnection> Compositor<C> {
         if scissor {
             unsafe { self.gl.disable(glow::SCISSOR_TEST) };
         }
-        self.glass_backdrop = self.run_blur_passes_from_fbo(None, levels);
+        let blurred = self.run_blur_passes_from_fbo(None, levels);
+        self.glass_backdrop = blurred.map(|texture| self.store_glass_backdrop(texture));
         if scissor {
             unsafe { self.gl.enable(glow::SCISSOR_TEST) };
         }
+    }
+
+    /// Copy a blurred frame into the owned backdrop cache and return the
+    /// texture the panels should sample.
+    ///
+    /// `blur_fbos[0]` is shared with the per-window backdrop blur, which
+    /// rewrites it on the next frame. The copy is what lets a capture outlive
+    /// the frame it was taken in. Falls back to the source texture when the
+    /// cache could not be allocated — an aliased backdrop for this frame still
+    /// beats no glass.
+    fn store_glass_backdrop(&mut self, blurred: glow::Texture) -> glow::Texture {
+        let Some(level) = self.blur_fbos.first() else {
+            return blurred;
+        };
+        let (source_fbo, width, height) = (level.fbo, level.w, level.h);
+        let cache = match self.glass_backdrop_cache {
+            Some(cache) => cache,
+            None => match unsafe { Self::create_scene_fbo(&self.gl, width, height) } {
+                Ok(cache) => {
+                    self.glass_backdrop_cache = Some(cache);
+                    cache
+                }
+                Err(_) => return blurred,
+            },
+        };
+        unsafe {
+            self.gl
+                .bind_framebuffer(glow::READ_FRAMEBUFFER, Some(source_fbo));
+            self.gl
+                .bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(cache.0));
+            self.gl.blit_framebuffer(
+                0,
+                0,
+                width as i32,
+                height as i32,
+                0,
+                0,
+                width as i32,
+                height as i32,
+                glow::COLOR_BUFFER_BIT,
+                glow::NEAREST,
+            );
+            self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+        }
+        cache.1
+    }
+
+    /// Drop the captured backdrop. The next panel that needs one recaptures;
+    /// the storage itself is kept for reuse.
+    pub(super) fn invalidate_glass_backdrop(&mut self) {
+        self.glass_backdrop = None;
     }
 
     /// Capture the backdrop unless this frame already has one. Panels drawn
@@ -4786,9 +4838,6 @@ impl<C: CompositorConnection> Compositor<C> {
         focused: Option<u32>,
     ) -> bool {
         let bench_frame_start = std::time::Instant::now();
-        // Last frame's frosted-glass backdrop describes a framebuffer that is
-        // about to be overwritten; the first panel that needs one recaptures.
-        self.glass_backdrop = None;
 
         // The WM removes an unmapped client from its live stacking list before
         // the compositor's fade-out finishes. Keep such compositor-owned
@@ -5334,6 +5383,24 @@ impl<C: CompositorConnection> Compositor<C> {
             } else {
                 self.invalidate_window_blur_caches();
             }
+        }
+        // The frosted-glass backdrop is a full-screen blur of the composited
+        // desktop, and a frame that repaints the same desktop produces the
+        // same blur. Dropping it unconditionally at the top of every frame
+        // charged the first panel a fresh capture for an identical picture;
+        // the frames that keep it now are the ones driven purely by a chrome
+        // timer — a toast envelope, an OSD hold — over a still desktop.
+        //
+        // A transition-only frame keeps it for the reason the status-bar
+        // caches above do: the wipe runs below the excluded top strip the
+        // panels dock into.
+        let glass_backdrop_stale = has_dirty
+            || scene_changed
+            || fades_active
+            || explicit_render
+            || (uncached_blur_source_changed && !transition_only);
+        if glass_backdrop_stale {
+            self.invalidate_glass_backdrop();
         }
 
         // Ensure the selected graphics context is current.

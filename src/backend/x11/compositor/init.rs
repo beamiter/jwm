@@ -1033,6 +1033,7 @@ impl<C: CompositorConnection> Compositor<C> {
             glass_program,
             glass_uniforms,
             glass_backdrop: None,
+            glass_backdrop_cache: None,
             hud_program,
             hud_uniforms,
             hud_text_program,

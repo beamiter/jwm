@@ -492,10 +492,18 @@ where
     // --- Frosted-glass surfaces (appearance.ui_theme = "glass") ---
     glass_program: glow::Program,
     glass_uniforms: GlassUniforms,
-    /// Blurred copy of the frame, captured once per frame just before the
-    /// self-drawn panels so each of them can sample what it covers. `None`
-    /// under the Material theme, or when no blur chain is available.
+    /// Blurred copy of the frame the self-drawn panels sample, so each of them
+    /// shows what it covers. Points into [`Self::glass_backdrop_cache`], and
+    /// `None` means "recapture": under the Material theme, with no blur chain,
+    /// or after the desktop underneath changed.
     glass_backdrop: Option<glow::Texture>,
+    /// Owned half-resolution storage behind [`Self::glass_backdrop`].
+    ///
+    /// The backdrop used to alias `blur_fbos[0]`, which the per-window blur
+    /// passes rewrite on the next frame — so a retained capture would have
+    /// shown whichever client was blurred last. The copy is what makes keeping
+    /// a backdrop across frames possible at all.
+    glass_backdrop_cache: Option<(glow::Framebuffer, glow::Texture)>,
 
     // --- Feature 11: Debug HUD ---
     hud_program: glow::Program,
@@ -1264,6 +1272,11 @@ impl<C: CompositorConnection> Drop for Compositor<C> {
             for level in self.blur_fbos.drain(..) {
                 self.gl.delete_framebuffer(level.fbo);
                 self.gl.delete_texture(level.texture);
+            }
+            if let Some((fbo, tex)) = self.glass_backdrop_cache.take() {
+                self.glass_backdrop = None;
+                self.gl.delete_framebuffer(fbo);
+                self.gl.delete_texture(tex);
             }
             if let Some((fbo, tex)) = self.scene_fbo.take() {
                 self.gl.delete_framebuffer(fbo);
