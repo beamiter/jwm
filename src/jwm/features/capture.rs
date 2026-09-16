@@ -504,7 +504,7 @@ impl Jwm {
             return;
         }
         if self.screenshot_toolbar_contains(pointer.0, pointer.1) {
-            self.apply_grab_cursor(backend, StdCursorKind::LeftPtr);
+            self.apply_grab_cursor(backend, StdCursorKind::Hand);
             return;
         }
         let px = pointer.0.round() as i32;

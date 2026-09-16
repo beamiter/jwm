@@ -9,7 +9,7 @@ count. Each loop below should be completable without reading the source tree.
 | --- | --- | --- | --- |
 | Switch default audio output after plugging headphones | Named OSD confirms; Hub or picker shows new default | ≤2 | Prefer Control Center Volume / device picker |
 | Mute mic | OSD + Hub Input state agree | 1 | Middle-click or `m` on Input row |
-| Copy screenshot to clipboard and paste in a client | Native offer (no required `wl-copy`) | 2 | Alt+S → Ctrl+C in editor, or fullscreen path |
+| Copy screenshot to clipboard and paste in a client | Native offer (no required `wl-copy`) | 2 | Alt+S → editor → Ctrl+C, or Space/Enter save |
 | Lock and unlock | Lock covers outputs; password/ PAM path works | 2 | Idle lock also acceptable |
 | Launch an app | App focused on current tags | 2 | Alt+R launcher |
 | Restore after crash/restart | Tags / floating geometry return | 1 | Session restore |
