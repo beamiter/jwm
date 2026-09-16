@@ -5013,7 +5013,16 @@ impl WaylandCompositor {
             self.screen_w,
             self.screen_h,
         );
-        self.run_blur_passes(gl, self.scene_texture, proj, BlurQuality::Full);
+        // Depth comes from the theme, not from the client blur dials: the
+        // panels are blurred far past legibility of what is behind them
+        // because that is what the material is, and a user who turned
+        // `blur_strength` down for cost never asked the chrome to go flat.
+        // X11's `capture_glass_backdrop` has always read the same field.
+        let levels = palette
+            .glass
+            .map_or(1, |glass| glass.blur_levels as usize)
+            .clamp(1, self.blur_fbos.len());
+        self.run_blur_passes_levels(gl, self.scene_texture, proj, levels);
         self.glass_backdrop =
             self.store_glass_backdrop(gl, self.blur_fbos[0].texture, scene_linear);
         // run_blur_passes leaves its last level bound; overlays keep drawing

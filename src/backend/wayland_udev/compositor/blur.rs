@@ -32,6 +32,24 @@ impl WaylandCompositor {
             BlurQuality::Reduced => (base_levels / 2).max(1),
             BlurQuality::Minimal => 1,
         };
+        self.run_blur_passes_levels(gl, source_texture, _projection, levels);
+    }
+
+    /// The Kawase chain itself, at an explicitly chosen depth.
+    ///
+    /// `run_blur_passes` derives its depth from the *client* blur dials; the
+    /// chrome glass instead owns its depth through the theme's
+    /// `GlassParams::blur_levels`, because how far past legibility the panels
+    /// blur their backdrop is a property of the material, not of what the
+    /// windows underneath asked for.
+    pub(crate) fn run_blur_passes_levels(
+        &self,
+        gl: &ffi::Gles2,
+        source_texture: u32,
+        _projection: &[f32; 16],
+        levels: usize,
+    ) {
+        let levels = levels.min(self.blur_fbos.len());
         if levels == 0 {
             return;
         }

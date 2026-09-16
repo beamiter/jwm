@@ -49,6 +49,11 @@ pub(crate) fn status_bar_frost_strength(
 /// still left the bar's frost reading as flat alpha at that quality.
 ///
 /// Taking the deeper of the two never shallows the pass a client asked for.
+///
+/// A floor sits under both. The bar is the one frosted surface that is up all
+/// the time, so a two-level chain on it is the single most visible place the
+/// frost can read as flat alpha instead of glass; four levels is where the
+/// Kawase footprint stops resolving the wallpaper behind it.
 pub(crate) fn frosted_blur_strength(
     blur_strength: u32,
     frosted_glass_strength: u32,
@@ -56,7 +61,7 @@ pub(crate) fn frosted_blur_strength(
     quality: BlurQuality,
 ) -> u32 {
     if status_bar_frosted && matches!(quality, BlurQuality::Full) {
-        return blur_strength.max(frosted_glass_strength);
+        return blur_strength.max(frosted_glass_strength).max(4);
     }
     blur_strength
 }
@@ -519,8 +524,11 @@ impl WaylandCompositor {
         if total_disp == 0 {
             return base;
         }
-        // Linear attenuation: ~16px of aggregate motion fully suppresses history.
-        let atten = (total_disp as f32 / 16.0).min(1.0);
+        // Linear attenuation: ~12px of aggregate motion fully suppresses
+        // history. The deeper chrome frost carries a visibly longer smear than
+        // the old one did, so history has to be dropped sooner than the 16px
+        // this used to hold it for.
+        let atten = (total_disp as f32 / 12.0).min(1.0);
         base * (1.0 - atten)
     }
 
@@ -956,11 +964,15 @@ mod tests {
 
     #[test]
     fn a_frosted_status_bar_lifts_a_shallow_global_blur() {
-        // The bar's own dial wins when it is deeper than the client dial.
-        assert_eq!(frosted_blur_strength(1, 3, true, BlurQuality::Full), 3);
+        // The bar's own dial wins when it is deeper than the client dial...
+        assert_eq!(frosted_blur_strength(1, 5, true, BlurQuality::Full), 5);
         // ...and never shallows a deeper client pass.
-        assert_eq!(frosted_blur_strength(5, 2, true, BlurQuality::Full), 5);
-        // No frosted bar, or a pass already being cut for cost: untouched.
+        assert_eq!(frosted_blur_strength(6, 2, true, BlurQuality::Full), 6);
+        // Both dials shallow: the always-visible bar still gets a chain deep
+        // enough that its frost does not read as flat alpha.
+        assert_eq!(frosted_blur_strength(1, 3, true, BlurQuality::Full), 4);
+        // No frosted bar, or a pass already being cut for cost: untouched,
+        // floor included.
         assert_eq!(frosted_blur_strength(1, 3, false, BlurQuality::Full), 1);
         assert_eq!(frosted_blur_strength(1, 3, true, BlurQuality::Reduced), 1);
         assert_eq!(frosted_blur_strength(1, 3, true, BlurQuality::Minimal), 1);
