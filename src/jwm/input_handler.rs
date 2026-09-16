@@ -827,6 +827,7 @@ impl Jwm {
         }
         self.sync_screenshot_annotation_style(backend);
         self.sync_screenshot_annotation_overlay(backend, true);
+        self.sync_screenshot_editor_cursor(backend);
         self.sync_screenshot_toolbar(backend);
     }
 
@@ -2779,6 +2780,7 @@ impl Jwm {
                     self.sync_screenshot_annotation_overlay(backend, true);
                 }
                 self.sync_screenshot_toolbar(backend);
+                self.sync_screenshot_editor_cursor(backend);
                 return Ok(());
             }
 

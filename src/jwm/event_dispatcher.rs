@@ -778,6 +778,7 @@ impl WMController for Jwm {
             self.sync_screenshot_annotation_overlay(backend, false);
             // The selection is now an editor, so it gets its tools.
             self.sync_screenshot_toolbar(backend);
+            self.sync_screenshot_editor_cursor(backend);
             // Keep the snap preview visible so the user can see the selection
             return;
         }

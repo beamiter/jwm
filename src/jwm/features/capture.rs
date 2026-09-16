@@ -421,6 +421,14 @@ impl Jwm {
         self.apply_grab_cursor(backend, kind);
     }
 
+    /// Tool-aware cursor once the screenshot editor owns a committed region.
+    pub(crate) fn sync_screenshot_editor_cursor(&mut self, backend: &mut dyn Backend) {
+        if !self.features.screenshot.active || !self.features.screenshot.committed {
+            return;
+        }
+        self.apply_grab_cursor(backend, self.features.screenshot.tool.cursor());
+    }
+
     fn commit_screenshot_rect(&mut self, backend: &mut dyn Backend, rect: Rect) -> bool {
         let Some(rect) = self.clamp_capture_rect(rect) else {
             return false;
@@ -445,6 +453,7 @@ impl Jwm {
         // needs its tools too.
         self.sync_screenshot_toolbar(backend);
         self.sync_capture_hint(backend);
+        self.sync_screenshot_editor_cursor(backend);
         true
     }
 

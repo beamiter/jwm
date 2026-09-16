@@ -247,7 +247,8 @@ while `Escape`, right-click, or the recording shortcut again cancels safely.
 
 Once a screenshot region is committed the selection becomes an editor, and a
 toolbar floats just outside it — below the selection, or above when there is no
-room below. Every tool has both a button and a key, so neither the mouse nor
+room below. The grab cursor follows the active tool (I-beam for text, crosshair
+for drawing). Every tool has both a button and a key, so neither the mouse nor
 the keyboard is required:
 
 | Tool | Key | Draws |

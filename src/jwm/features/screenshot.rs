@@ -219,6 +219,17 @@ impl ScreenshotTool {
         Self::Pixelate,
         Self::Invert,
     ];
+
+    /// Cursor that advertises the active annotation tool under the grab.
+    #[must_use]
+    pub fn cursor(self) -> crate::backend::common_define::StdCursorKind {
+        use crate::backend::common_define::StdCursorKind;
+        match self {
+            Self::Text => StdCursorKind::XTerm,
+            Self::Select => StdCursorKind::LeftPtr,
+            _ => StdCursorKind::Crosshair,
+        }
+    }
 }
 
 /// What clicking a toolbar button does.
@@ -2883,6 +2894,16 @@ mod tests {
 
         state.set_tool(ScreenshotTool::Pencil);
         assert_eq!(state.stroke_width(), state.line_width);
+    }
+
+    #[test]
+    fn annotation_tools_advertise_distinct_cursors() {
+        use crate::backend::common_define::StdCursorKind;
+
+        assert_eq!(ScreenshotTool::Text.cursor(), StdCursorKind::XTerm);
+        assert_eq!(ScreenshotTool::Select.cursor(), StdCursorKind::LeftPtr);
+        assert_eq!(ScreenshotTool::Pencil.cursor(), StdCursorKind::Crosshair);
+        assert_eq!(ScreenshotTool::Arrow.cursor(), StdCursorKind::Crosshair);
     }
 
     #[test]
