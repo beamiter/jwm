@@ -5011,7 +5011,8 @@ impl WaylandCompositor {
             self.screen_h,
         );
         self.run_blur_passes(gl, self.scene_texture, proj, BlurQuality::Full);
-        self.glass_backdrop = self.store_glass_backdrop(gl, self.blur_fbos[0].texture, scene_linear);
+        self.glass_backdrop =
+            self.store_glass_backdrop(gl, self.blur_fbos[0].texture, scene_linear);
         // run_blur_passes leaves its last level bound; overlays keep drawing
         // into the same target they sampled.
         unsafe {
@@ -7589,5 +7590,64 @@ impl WaylandCompositor {
             gl.LineWidth(1.0);
             gl.UseProgram(0);
         }
+    }
+}
+
+#[cfg(test)]
+mod glass_backdrop_contract_tests {
+    /// The compact source of one `fn` item, without whitespace — the same
+    /// narrowing the contract tests in `mod.rs` use, so a needle cannot match
+    /// a mention in another function.
+    fn compact_item(source: &str, needle: &str) -> String {
+        let start = source.find(needle).expect("source item missing");
+        let open = start
+            + source[start..]
+                .find('{')
+                .expect("source item has no opening brace");
+        let mut depth = 0usize;
+        for (offset, byte) in source[open..].bytes().enumerate() {
+            match byte {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return source[start..open + offset + 1]
+                            .chars()
+                            .filter(|character| !character.is_whitespace())
+                            .collect();
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("source item has no closing brace");
+    }
+
+    /// The frame start must ask whether the desktop changed instead of
+    /// dropping the backdrop outright: an unconditional clear charges a
+    /// full-screen Kawase to every frame that repaints an identical desktop.
+    #[test]
+    fn the_frame_start_invalidates_the_backdrop_conditionally() {
+        let source = include_str!("render.rs");
+        let body = compact_item(source, "pub(crate) fn render_frame(");
+        assert!(body.contains("glass_backdrop_needs_invalidate("));
+        assert!(
+            !body.contains("self.glass_backdrop=None"),
+            "the frame start must go through invalidate_glass_backdrop"
+        );
+    }
+
+    /// Both captures own their copy. Pointing `glass_backdrop` straight at the
+    /// blur chain would let the next capture — or the client blur pass —
+    /// overwrite a backdrop the panels are still sampling.
+    #[test]
+    fn every_capture_stores_an_owned_copy() {
+        let source = include_str!("render.rs");
+        let capture = compact_item(source, "fn capture_glass_backdrop(");
+        assert!(capture.contains("self.store_glass_backdrop(gl,self.blur_fbos[0].texture,"));
+        assert!(!capture.contains("self.glass_backdrop=Some(self.blur_fbos[0].texture)"));
+
+        let frame = compact_item(source, "pub(crate) fn render_frame(");
+        assert!(frame.contains("self.store_glass_backdrop(gl,tex,false)"));
     }
 }

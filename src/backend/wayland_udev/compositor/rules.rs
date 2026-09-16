@@ -182,8 +182,7 @@ impl WaylandCompositor {
         let bar_name = cfg.status_bar_name();
         !bar_name.is_empty()
             && self.windows.values().any(|win| {
-                win.is_frosted
-                    && (win.class_name == bar_name || win.class_name.contains(bar_name))
+                win.is_frosted && (win.class_name == bar_name || win.class_name.contains(bar_name))
             })
     }
 

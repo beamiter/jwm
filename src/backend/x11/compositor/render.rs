@@ -8836,3 +8836,57 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod glass_backdrop_contract_tests {
+    /// The compact source of one `fn` item, without whitespace, so a needle
+    /// cannot match a mention in another function.
+    fn compact_item(source: &str, needle: &str) -> String {
+        let start = source.find(needle).expect("source item missing");
+        let open = start
+            + source[start..]
+                .find('{')
+                .expect("source item has no opening brace");
+        let mut depth = 0usize;
+        for (offset, byte) in source[open..].bytes().enumerate() {
+            match byte {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return source[start..open + offset + 1]
+                            .chars()
+                            .filter(|character| !character.is_whitespace())
+                            .collect();
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("source item has no closing brace");
+    }
+
+    /// The backdrop is dropped from the same signals the per-window blur
+    /// caches use, transition carve-out included — never unconditionally at
+    /// the top of the frame.
+    #[test]
+    fn the_frame_invalidates_the_backdrop_conditionally() {
+        let source = include_str!("render.rs");
+        let body = compact_item(source, "pub(crate) fn render_frame(");
+        assert!(body.contains("ifglass_backdrop_stale{self.invalidate_glass_backdrop();}"));
+        assert!(body.contains("uncached_blur_source_changed&&!transition_only"));
+        assert!(
+            !body.contains("self.glass_backdrop=None"),
+            "the frame must go through invalidate_glass_backdrop"
+        );
+    }
+
+    /// A retained capture must be a copy: `blur_fbos[0]` is shared with the
+    /// per-window backdrop blur, which rewrites it on the next frame.
+    #[test]
+    fn the_capture_stores_an_owned_copy() {
+        let source = include_str!("render.rs");
+        let capture = compact_item(source, "fn capture_glass_backdrop(");
+        assert!(capture.contains("self.store_glass_backdrop(texture)"));
+    }
+}
