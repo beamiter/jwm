@@ -2249,9 +2249,20 @@ impl WaylandCompositor {
         self.settle_pending_minimized_visuals();
         self.capture_pending_minimized_snapshots(gl);
         self.start_pending_genie_restores(scene);
-        // Last frame's frosted-glass backdrop describes a framebuffer that is
-        // about to be overwritten; the first panel that needs one recaptures.
-        self.invalidate_glass_backdrop();
+        // Last frame's frosted-glass backdrop is reusable exactly as long as
+        // the desktop under the panels is unchanged. Dropping it every frame
+        // charged a full-screen Kawase to frames that redraw an identical
+        // desktop for an unrelated reason — a hovered toast, a blinking
+        // caret — which is what made the frost shimmer while nothing moved.
+        if super::damage::glass_backdrop_needs_invalidate(
+            !self.content_dirty_ids.is_empty(),
+            self.transition_active,
+            self.overview_active,
+            self.wallpaper_transition_start.is_some(),
+            self.has_active_animations(),
+        ) {
+            self.invalidate_glass_backdrop();
+        }
         // A calm desktop must be cheap even when the backend asks us to check
         // for a frame.  Do this before profiler/fence/hot-reload bookkeeping:
         // those are useful only when a frame can actually be produced.  The

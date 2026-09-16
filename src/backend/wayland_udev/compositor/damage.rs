@@ -14,6 +14,31 @@ fn attention_requires_composition(enabled: bool, has_urgent_window: bool) -> boo
     attention_signal_active(enabled, has_urgent_window)
 }
 
+/// Whether this frame must throw away the cached frosted-glass backdrops.
+///
+/// The backdrop is a blurred picture of the desktop the chrome panels sit on.
+/// Recapturing it costs a full-screen Kawase, and a frame that redraws the
+/// same desktop produces the same blur — so a calm desktop being repainted
+/// for an unrelated reason (a cursor move, a toast envelope tick) keeps last
+/// frame's copy instead of paying for an identical one.
+///
+/// It must be dropped whenever the pixels underneath actually change:
+/// client content damage, the workspace wipe, the overview, a wallpaper
+/// crossfade, or any running window animation.
+pub(crate) fn glass_backdrop_needs_invalidate(
+    content_dirty: bool,
+    transition_active: bool,
+    overview_active: bool,
+    wallpaper_crossfading: bool,
+    animations_active: bool,
+) -> bool {
+    content_dirty
+        || transition_active
+        || overview_active
+        || wallpaper_crossfading
+        || animations_active
+}
+
 fn rect_animation_pending(current: [f32; 4], target: [f32; 4]) -> bool {
     current.into_iter().zip(target).any(|(current, target)| {
         !current.is_finite() || !target.is_finite() || (target - current).abs() > f32::EPSILON
@@ -418,10 +443,31 @@ fn minimized_dock_requires_composition(
 mod tests {
     use super::{
         CompositorRect, attention_requires_composition, border_requires_composition,
-        expose_animation_pending, inactive_window_styling_requires_composition,
-        minimized_dock_requires_composition, overview_animation_pending, peek_animation_pending,
-        rect_animation_pending,
+        expose_animation_pending, glass_backdrop_needs_invalidate,
+        inactive_window_styling_requires_composition, minimized_dock_requires_composition,
+        overview_animation_pending, peek_animation_pending, rect_animation_pending,
     };
+
+    #[test]
+    fn a_calm_desktop_keeps_its_captured_glass_backdrop() {
+        assert!(!glass_backdrop_needs_invalidate(
+            false, false, false, false, false
+        ));
+    }
+
+    #[test]
+    fn anything_that_repaints_the_desktop_drops_the_glass_backdrop() {
+        for moving in 0..5 {
+            let mut inputs = [false; 5];
+            inputs[moving] = true;
+            assert!(
+                glass_backdrop_needs_invalidate(
+                    inputs[0], inputs[1], inputs[2], inputs[3], inputs[4]
+                ),
+                "input {moving} must invalidate the glass backdrop"
+            );
+        }
+    }
 
     #[test]
     fn inactive_window_styling_blocks_composition_bypass() {
