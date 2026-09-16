@@ -3155,6 +3155,8 @@ impl WaylandCompositor {
             self.dispatch_scene_linear_decode_pass(gl, &projection, -1, 1.0, None);
         }
         self.frame_profiler.zone_start("windows");
+        let ui_palette = crate::backend::compositor_common::ui_theme::palette();
+        let status_bar_name = crate::config::CONFIG.load().status_bar_name().to_string();
         unsafe {
             gl.UseProgram(self.program);
             if scene_linear_active {
@@ -3251,41 +3253,87 @@ impl WaylandCompositor {
                 // --- UV rect: use content_uv (accounts for CSD geometry offset) ---
                 let [uv_x, uv_y, uv_w, uv_h] = oriented_content_uv(wt.content_uv, wt.y_inverted);
 
-                // --- Draw blur behind frosted window ---
+                // --- Draw frost behind translucent / frosted windows ---
+                // The status bar is always-on chrome: under a glass theme it
+                // gets the solid-glass sheet (thickness, Fresnel rim, specular)
+                // instead of a flat blurred quad. The bar pixmap still carries
+                // the veil, so the tint coverage here stays light.
                 if self.blur_enabled
                     && let Some(blur_tex) = blur_result_tex
                     && let Some(frosted_strength) = self.window_backdrop_blur_strength(wt, w, h)
                 {
-                    gl.ActiveTexture(ffi::TEXTURE0);
-                    gl.BindTexture(ffi::TEXTURE_2D, blur_tex);
+                    let is_status_bar = !status_bar_name.is_empty()
+                        && (wt.class_name == status_bar_name
+                            || wt.class_name.contains(&status_bar_name));
+                    if is_status_bar
+                        && self.glass_backdrop.is_some()
+                        && let Some(params) = ui_palette.glass.as_ref()
+                    {
+                        let tint = [
+                            ui_palette.toast[0],
+                            ui_palette.toast[1],
+                            ui_palette.toast[2],
+                            0.10,
+                        ];
+                        self.glass_fill_rounded(
+                            gl,
+                            &projection,
+                            draw_x,
+                            draw_y,
+                            draw_w,
+                            draw_h,
+                            radius,
+                            radius,
+                            tint,
+                            fade,
+                            params,
+                            scene_linear_active,
+                        );
+                        // glass_fill_rounded binds its own program; restore the
+                        // window path before the bar texture / trail draws.
+                        gl.UseProgram(self.program);
+                        self.set_projection_uniform(
+                            gl,
+                            self.win_uniforms.projection,
+                            &projection,
+                        );
+                        gl.Uniform1i(self.win_uniforms.texture, 0);
+                        gl.Uniform1i(self.win_uniforms.color_managed, 0);
+                        gl.Uniform1i(
+                            self.win_uniforms.scene_linear,
+                            if scene_linear_active { 1 } else { 0 },
+                        );
+                        gl.BindVertexArray(self.quad_vao);
+                        gl.Uniform4f(self.win_uniforms.uv_rect, uv_x, uv_y, uv_w, uv_h);
+                    } else {
+                        gl.ActiveTexture(ffi::TEXTURE0);
+                        gl.BindTexture(ffi::TEXTURE_2D, blur_tex);
 
-                    // UV coordinates for the window's screen region
-                    let uv_sx = draw_x / self.screen_w as f32;
-                    let uv_sy = draw_y / self.screen_h as f32;
-                    let uv_sw = draw_w / self.screen_w as f32;
-                    let uv_sh = draw_h / self.screen_h as f32;
+                        let uv_sx = draw_x / self.screen_w as f32;
+                        let uv_sy = draw_y / self.screen_h as f32;
+                        let uv_sw = draw_w / self.screen_w as f32;
+                        let uv_sh = draw_h / self.screen_h as f32;
 
-                    // Per-window frosted strength modulates blur opacity
-                    let blur_opacity = fade * frosted_strength.max(0.1);
+                        let blur_opacity = fade * frosted_strength.max(0.1);
 
-                    gl.Uniform4f(self.win_uniforms.uv_rect, uv_sx, uv_sy, uv_sw, uv_sh);
-                    gl.Uniform1f(self.win_uniforms.opacity, blur_opacity);
-                    gl.Uniform1f(self.win_uniforms.dim, 1.0);
-                    gl.Uniform1f(self.win_uniforms.desat, 0.0);
-                    gl.Uniform1f(self.win_uniforms.radius, radius);
-                    gl.Uniform2f(self.win_uniforms.size, draw_w, draw_h);
-                    self.set_rect_uniform(
-                        gl,
-                        self.win_uniforms.rect,
-                        draw_x,
-                        draw_y,
-                        draw_w,
-                        draw_h,
-                    );
-                    gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+                        gl.Uniform4f(self.win_uniforms.uv_rect, uv_sx, uv_sy, uv_sw, uv_sh);
+                        gl.Uniform1f(self.win_uniforms.opacity, blur_opacity);
+                        gl.Uniform1f(self.win_uniforms.dim, 1.0);
+                        gl.Uniform1f(self.win_uniforms.desat, 0.0);
+                        gl.Uniform1f(self.win_uniforms.radius, radius);
+                        gl.Uniform2f(self.win_uniforms.size, draw_w, draw_h);
+                        self.set_rect_uniform(
+                            gl,
+                            self.win_uniforms.rect,
+                            draw_x,
+                            draw_y,
+                            draw_w,
+                            draw_h,
+                        );
+                        gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
 
-                    // Restore UV for the actual window texture
-                    gl.Uniform4f(self.win_uniforms.uv_rect, uv_x, uv_y, uv_w, uv_h);
+                        gl.Uniform4f(self.win_uniforms.uv_rect, uv_x, uv_y, uv_w, uv_h);
+                    }
                 }
 
                 // --- Motion trail ghost copies (Phase 3.1, mirrors X11) ---

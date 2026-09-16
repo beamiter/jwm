@@ -6563,41 +6563,81 @@ impl<C: CompositorConnection> Compositor<C> {
                             }
 
                             if let Some(blur_tex) = blur_tex {
-                                self.gl.active_texture(glow::TEXTURE0);
-                                self.gl.bind_texture(glow::TEXTURE_2D, Some(blur_tex));
-                                let uv_x = (bx / self.screen_w as f32).clamp(0.0, 1.0);
-                                let uv_w = (bw / self.screen_w as f32).clamp(0.0, 1.0);
-                                let uv_y_top = (by / self.screen_h as f32).clamp(0.0, 1.0);
-                                let uv_h = (bh / self.screen_h as f32).clamp(0.0, 1.0);
-                                self.gl.uniform_4_f32(
-                                    self.win_uniforms.uv_rect.as_ref(),
-                                    uv_x,
-                                    uv_y_top,
-                                    uv_w,
-                                    uv_h,
-                                );
-                                self.gl
-                                    .uniform_1_f32(self.win_uniforms.opacity.as_ref(), fade);
-                                self.gl.uniform_1_f32(self.win_uniforms.dim.as_ref(), 1.0);
-                                self.gl.uniform_1_f32(self.win_uniforms.desat.as_ref(), 0.0);
-                                self.gl
-                                    .uniform_2_f32(self.win_uniforms.size.as_ref(), bw, bh);
-                                self.gl.uniform_4_f32(
-                                    self.win_uniforms.rect.as_ref(),
-                                    bx,
-                                    by,
-                                    bw,
-                                    bh,
-                                );
-                                self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
-                                // Restore default UV for regular window textures.
-                                self.gl.uniform_4_f32(
-                                    self.win_uniforms.uv_rect.as_ref(),
-                                    0.0,
-                                    0.0,
-                                    1.0,
-                                    1.0,
-                                );
+                                let ui_palette =
+                                    crate::backend::compositor_common::ui_theme::palette();
+                                if is_statusbar
+                                    && let Some(params) = ui_palette.glass.as_ref()
+                                {
+                                    // Point the chrome glass sampler at this
+                                    // window's frost, draw the solid sheet, then
+                                    // put the window program back for the pixmap.
+                                    let previous_backdrop = self.glass_backdrop;
+                                    self.glass_backdrop = Some(blur_tex);
+                                    let tint = [
+                                        ui_palette.toast[0],
+                                        ui_palette.toast[1],
+                                        ui_palette.toast[2],
+                                        0.10,
+                                    ];
+                                    self.glass_fill_rounded(
+                                        &proj, bx, by, bw, bh, radius, radius, tint, fade, params,
+                                    );
+                                    self.glass_backdrop = previous_backdrop;
+                                    self.gl_state_tracker
+                                        .use_program(&self.gl, Some(self.program));
+                                    self.gl.uniform_matrix_4_f32_slice(
+                                        self.win_uniforms.projection.as_ref(),
+                                        false,
+                                        &proj,
+                                    );
+                                    self.gl.uniform_1_i32(self.win_uniforms.texture.as_ref(), 0);
+                                    self.gl_state_tracker
+                                        .bind_vertex_array(&self.gl, Some(self.quad_vao));
+                                    self.gl
+                                        .uniform_1_f32(self.win_uniforms.radius.as_ref(), radius);
+                                    self.gl.uniform_4_f32(
+                                        self.win_uniforms.uv_rect.as_ref(),
+                                        0.0,
+                                        0.0,
+                                        1.0,
+                                        1.0,
+                                    );
+                                } else {
+                                    self.gl.active_texture(glow::TEXTURE0);
+                                    self.gl.bind_texture(glow::TEXTURE_2D, Some(blur_tex));
+                                    let uv_x = (bx / self.screen_w as f32).clamp(0.0, 1.0);
+                                    let uv_w = (bw / self.screen_w as f32).clamp(0.0, 1.0);
+                                    let uv_y_top = (by / self.screen_h as f32).clamp(0.0, 1.0);
+                                    let uv_h = (bh / self.screen_h as f32).clamp(0.0, 1.0);
+                                    self.gl.uniform_4_f32(
+                                        self.win_uniforms.uv_rect.as_ref(),
+                                        uv_x,
+                                        uv_y_top,
+                                        uv_w,
+                                        uv_h,
+                                    );
+                                    self.gl
+                                        .uniform_1_f32(self.win_uniforms.opacity.as_ref(), fade);
+                                    self.gl.uniform_1_f32(self.win_uniforms.dim.as_ref(), 1.0);
+                                    self.gl.uniform_1_f32(self.win_uniforms.desat.as_ref(), 0.0);
+                                    self.gl
+                                        .uniform_2_f32(self.win_uniforms.size.as_ref(), bw, bh);
+                                    self.gl.uniform_4_f32(
+                                        self.win_uniforms.rect.as_ref(),
+                                        bx,
+                                        by,
+                                        bw,
+                                        bh,
+                                    );
+                                    self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                                    self.gl.uniform_4_f32(
+                                        self.win_uniforms.uv_rect.as_ref(),
+                                        0.0,
+                                        0.0,
+                                        1.0,
+                                        1.0,
+                                    );
+                                }
                             }
                         }
                     }
