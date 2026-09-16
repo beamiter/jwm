@@ -231,8 +231,8 @@ bindable and scriptable over IPC like the three defaults.
 
 During interactive screenshot or recording selection, hover highlights the
 window under the pointer with an outside-dim veil (same blue language as the
-screenshot editor); a left click picks that window. A bottom-center hint chip
-lists the mode and primary actions. Press `G`, `W`, `M`, or `D` to choose a
+screenshot editor); a left click picks that window. A bottom-center hint chip lists the mode and primary actions (and the hovered
+window title while soft-probing). Press `G`, `W`, `M`, or `D` to choose a
 dragged region, window mode, the monitor under the pointer, or the entire
 desktop. `Tab` and `Shift+Tab` cycle the same choices; middle-click is the
 pointer twin of `Tab`. Dragging still draws a free region; a near-zero click

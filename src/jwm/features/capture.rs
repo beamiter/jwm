@@ -325,25 +325,47 @@ impl Jwm {
     pub(crate) fn sync_capture_hint(&mut self, backend: &mut dyn Backend) {
         use crate::backend::compositor_common::capture_hint::capture_hint_label;
 
+        let probe = self.probed_capture_hint_title(self.last_mouse_root);
+        let probe = probe.as_deref();
+
         if self.features.screenshot.active && !self.features.screenshot.committed {
             let label = capture_hint_label(
                 true,
                 self.features.capture.screenshot.label(),
                 false,
+                probe,
             );
             backend.compositor_set_capture_hint(Some(label));
             return;
         }
         if self.features.recording.selecting_region {
+            let armed = self.features.recording.region.is_some();
             let label = capture_hint_label(
                 false,
                 self.features.capture.recording.label(),
-                self.features.recording.region.is_some(),
+                armed,
+                if armed { None } else { probe },
             );
             backend.compositor_set_capture_hint(Some(label));
             return;
         }
         backend.compositor_set_capture_hint(None);
+    }
+
+    /// Soft-probed window title (or class) for the selection hint chip.
+    fn probed_capture_hint_title(&self, pointer: (f64, f64)) -> Option<String> {
+        let client_key = self.capture_client_at_pointer(pointer)?;
+        let client = self.state.clients.get(client_key)?;
+        let name = client.name.trim();
+        if !name.is_empty() {
+            return Some(name.to_string());
+        }
+        let class = client.class.trim();
+        if class.is_empty() {
+            None
+        } else {
+            Some(class.to_string())
+        }
     }
 
     /// Apply a cursor through both the soft set_cursor path and the active
@@ -557,6 +579,7 @@ impl Jwm {
         };
         backend.compositor_set_snap_preview(preview);
         backend.compositor_force_full_redraw();
+        self.sync_capture_hint(backend);
     }
 
     fn apply_recording_rect(&mut self, backend: &mut dyn Backend, rect: Rect) -> bool {
@@ -689,6 +712,7 @@ impl Jwm {
         backend.compositor_set_recording_region_overlay(preview);
         backend.compositor_set_recording_region_interactive(false);
         backend.compositor_force_full_redraw();
+        self.sync_capture_hint(backend);
     }
 
     pub(crate) fn nudge_recording_capture_region(
