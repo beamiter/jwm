@@ -49,7 +49,7 @@ pub(crate) fn capture_hint_label(
             format!("Screenshot · {target} · click window · drag region · Esc")
         }
     } else if armed {
-        format!("Recording · {target} · Enter to start · drag handles · Esc")
+        format!("Recording · {target} · Enter / double-click to start · Esc")
     } else if let Some(title) = probe.as_deref() {
         format!("Recording · {title} · click to pick · Enter · Esc")
     } else {
@@ -115,7 +115,8 @@ mod tests {
         assert!(rec.contains("Enter"));
 
         let armed = capture_hint_label(false, "window", true, None);
-        assert!(armed.contains("Enter to start"));
+        assert!(armed.contains("Enter"));
+        assert!(armed.contains("double-click"));
 
         let probed = capture_hint_label(true, "window", false, Some("Firefox"));
         assert!(probed.contains("Firefox"));

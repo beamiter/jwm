@@ -65,7 +65,13 @@ pub struct CaptureInteractionState {
     pub screenshot: CaptureTarget,
     pub recording: CaptureTarget,
     swallow_button_release: bool,
+    /// Last left-press used to detect a double-click confirm on an armed
+    /// recording region (X11/Wayland button `time` is milliseconds).
+    recording_press: Option<(u32, i32, i32)>,
 }
+
+const RECORDING_DOUBLE_CLICK_MS: u32 = 400;
+const RECORDING_DOUBLE_CLICK_SLOP: i32 = 8;
 
 impl CaptureInteractionState {
     pub(crate) fn swallow_next_button_release(&mut self) {
@@ -74,6 +80,26 @@ impl CaptureInteractionState {
 
     pub(crate) fn take_swallowed_button_release(&mut self) -> bool {
         std::mem::take(&mut self.swallow_button_release)
+    }
+
+    /// Record a left press and return true when it completes a double-click
+    /// near the previous press (used to start an armed recording region).
+    pub(crate) fn note_recording_double_click(&mut self, time: u32, x: i32, y: i32) -> bool {
+        let hit = self.recording_press.is_some_and(|(prev_t, prev_x, prev_y)| {
+            time.wrapping_sub(prev_t) <= RECORDING_DOUBLE_CLICK_MS
+                && (x - prev_x).abs() <= RECORDING_DOUBLE_CLICK_SLOP
+                && (y - prev_y).abs() <= RECORDING_DOUBLE_CLICK_SLOP
+        });
+        self.recording_press = if hit {
+            None
+        } else {
+            Some((time, x, y))
+        };
+        hit
+    }
+
+    pub(crate) fn clear_recording_double_click(&mut self) {
+        self.recording_press = None;
     }
 }
 
@@ -783,6 +809,16 @@ mod tests {
         state.swallow_next_button_release();
         assert!(state.take_swallowed_button_release());
         assert!(!state.take_swallowed_button_release());
+    }
+
+    #[test]
+    fn recording_double_click_requires_near_repeat() {
+        let mut state = CaptureInteractionState::default();
+        assert!(!state.note_recording_double_click(1000, 10, 10));
+        assert!(state.note_recording_double_click(1200, 12, 11));
+        assert!(!state.note_recording_double_click(1300, 12, 11));
+        assert!(!state.note_recording_double_click(2000, 12, 11));
+        assert!(!state.note_recording_double_click(2100, 40, 40));
     }
 
     #[test]

@@ -3111,11 +3111,28 @@ impl Jwm {
         if self.features.recording.selecting_region {
             let button = MouseButton::from_u8(detail_btn);
             if button == MouseButton::Left {
+                let (x, y) = self.last_mouse_root;
+                let xi = x.round() as i32;
+                let yi = y.round() as i32;
+                let double_click = self
+                    .features
+                    .capture
+                    .note_recording_double_click(time, xi, yi);
+                // Double-click inside an armed region starts recording (same
+                // as Enter), so a picked window does not need a keyboard.
+                if double_click
+                    && self.features.recording.region.is_some()
+                    && matches!(
+                        self.features.recording.pointer_intent(xi, yi),
+                        crate::jwm::features::recording::RecordingPointerIntent::Move
+                    )
+                {
+                    self.features.capture.swallow_next_button_release();
+                    self.finish_recording_region_interaction(backend)?;
+                    return Ok(());
+                }
                 if self.features.capture.recording == CaptureTarget::Region {
-                    let (x, y) = self.last_mouse_root;
-                    self.features
-                        .recording
-                        .begin_region_drag(x.round() as i32, y.round() as i32);
+                    self.features.recording.begin_region_drag(xi, yi);
                 } else {
                     self.commit_recording_capture_target(backend, target);
                 }

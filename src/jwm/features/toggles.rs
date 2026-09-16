@@ -3132,6 +3132,7 @@ impl Jwm {
             .recording
             .begin_initial_region_selection(output_path.clone());
         self.features.capture.recording = CaptureTarget::Region;
+        self.features.capture.clear_recording_double_click();
         if let Err(error) = self.grab_recording_region_input(backend) {
             self.features.recording.cancel_region_selection();
             return Err(error);
@@ -3188,6 +3189,7 @@ impl Jwm {
         let adjusting = self.features.recording.adjusting_region;
         let pending_path = self.features.recording.pending_output_path.clone();
         self.features.recording.finish_region_selection();
+        self.features.capture.clear_recording_double_click();
         self.release_recording_region_input(backend);
         backend.compositor_set_capture_selection_active(false);
         backend.compositor_set_recording_region_overlay(None);
@@ -3217,6 +3219,7 @@ impl Jwm {
     pub(crate) fn cancel_recording_region_interaction(&mut self, backend: &mut dyn Backend) {
         let was_adjusting = self.features.recording.adjusting_region;
         let restored = self.features.recording.cancel_region_selection();
+        self.features.capture.clear_recording_double_click();
         self.release_recording_region_input(backend);
         backend.compositor_set_capture_selection_active(false);
         backend.compositor_set_recording_region_overlay(None);
