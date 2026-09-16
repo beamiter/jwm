@@ -23,8 +23,8 @@ fn attention_requires_composition(enabled: bool, has_urgent_window: bool) -> boo
 /// frame's copy instead of paying for an identical one.
 ///
 /// It must be dropped whenever the pixels underneath actually change:
-/// client content damage, the workspace wipe, the overview, a wallpaper
-/// crossfade, or any running window animation.
+/// client content damage, the overview, a wallpaper crossfade, or any
+/// running window animation.
 pub(crate) fn glass_backdrop_needs_invalidate(
     content_dirty: bool,
     transition_active: bool,
@@ -32,11 +32,18 @@ pub(crate) fn glass_backdrop_needs_invalidate(
     wallpaper_crossfading: bool,
     animations_active: bool,
 ) -> bool {
-    content_dirty
-        || transition_active
-        || overview_active
-        || wallpaper_crossfading
-        || animations_active
+    let desktop_repainted =
+        content_dirty || overview_active || wallpaper_crossfading || animations_active;
+    if transition_active && !desktop_repainted {
+        // A frame whose only motion is the workspace wipe redraws the area
+        // below the excluded top strip. The chrome docked in that strip still
+        // sits over the desktop its backdrop was captured from, so recapturing
+        // per wipe frame buys nothing and strobes the panels for the length of
+        // the tag switch. X11 preserves its status-bar blur caches on the same
+        // transition-only frames for the same reason.
+        return false;
+    }
+    desktop_repainted
 }
 
 fn rect_animation_pending(current: [f32; 4], target: [f32; 4]) -> bool {
@@ -457,7 +464,9 @@ mod tests {
 
     #[test]
     fn anything_that_repaints_the_desktop_drops_the_glass_backdrop() {
-        for moving in 0..5 {
+        // Every input except `transition_active` (index 1), which a
+        // transition-only frame deliberately rides out.
+        for moving in [0, 2, 3, 4] {
             let mut inputs = [false; 5];
             inputs[moving] = true;
             assert!(
@@ -467,6 +476,21 @@ mod tests {
                 "input {moving} must invalidate the glass backdrop"
             );
         }
+    }
+
+    #[test]
+    fn a_transition_only_frame_keeps_the_docked_chrome_backdrop() {
+        assert!(!glass_backdrop_needs_invalidate(
+            false, true, false, false, false
+        ));
+        // The wipe is not a licence to keep a stale backdrop once the desktop
+        // under the panels is genuinely being repainted.
+        assert!(glass_backdrop_needs_invalidate(
+            true, true, false, false, false
+        ));
+        assert!(glass_backdrop_needs_invalidate(
+            false, true, false, false, true
+        ));
     }
 
     #[test]
