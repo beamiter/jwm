@@ -122,7 +122,9 @@ pub(crate) const TAB_HOVER_ALPHA_SCALE: f32 = 0.5;
 pub(crate) struct GlassParams {
     /// Kawase levels to run for the backdrop. Apple's material is blurred far
     /// past legibility of the content behind it, so this runs deeper than the
-    /// per-window frost.
+    /// per-window frost. Both compositors build a six-level chain and clamp to
+    /// it; this is the chrome's own dial, independent of the client blur
+    /// strength a user may have turned down for cost.
     pub(crate) blur_levels: u32,
     /// Chroma multiplier on the blurred backdrop: glass keeps the color of what
     /// it covers, slightly enriched, instead of graying it out.
@@ -142,7 +144,8 @@ pub(crate) struct GlassParams {
     /// How far, in pixels, the bevel drags the backdrop outward. This is the
     /// refraction of a thick edge: content just outside the panel is squeezed
     /// into the rim, so the glass reads as having depth rather than being a
-    /// decal.
+    /// decal. The shader also spends a fraction of it on the sheet's interior,
+    /// as the parallax of looking through a slab rather than a film.
     pub(crate) refraction: f32,
     /// Width in pixels of the specular hairline at the very edge.
     pub(crate) rim_width: f32,
@@ -151,7 +154,11 @@ pub(crate) struct GlassParams {
     /// Color of the rim. A faint cyan reads as glass; pure white reads as a
     /// plain stroke.
     pub(crate) rim_tint: [f32; 3],
-    /// Broad diagonal sheen across the face, brightest at the top-left.
+    /// Strength of the light the face reflects: a real specular glint where the
+    /// bevel's normal sweeps through the mirror angle, plus the broad soft lift
+    /// toward the top-left that is the diffuse half of the same illumination.
+    /// (It replaced a flat diagonal wash, so it runs roughly twice as high as
+    /// the value that wash wanted.)
     pub(crate) sheen: f32,
     /// Strength of the contact shade along the bottom edge.
     pub(crate) edge_shade: f32,
@@ -316,18 +323,18 @@ pub(crate) const MATERIAL: UiPalette = UiPalette {
 /// a window manager, where the content behind it is whatever the user opened.
 pub(crate) const GLASS: UiPalette = UiPalette {
     glass: Some(GlassParams {
-        blur_levels: 4,
+        blur_levels: 5,
         saturation: 1.20,
         // Above 1: the sheet is a light source, not a filter.
         luminance: 1.06,
         corner_exponent: 4.2,
-        bevel_width: 16.0,
-        refraction: 9.0,
-        rim_width: 1.8,
-        rim_intensity: 0.55,
+        bevel_width: 18.0,
+        refraction: 11.5,
+        rim_width: 2.2,
+        rim_intensity: 0.62,
         rim_tint: [0.86, 0.95, 1.0],
-        sheen: 0.05,
-        edge_shade: 0.05,
+        sheen: 0.11,
+        edge_shade: 0.08,
         grain: 0.014,
     }),
 
@@ -388,18 +395,18 @@ pub(crate) const GLASS: UiPalette = UiPalette {
 /// the veil, the inks and the rim's warmth differ.
 pub(crate) const GLASS_DARK: UiPalette = UiPalette {
     glass: Some(GlassParams {
-        blur_levels: 4,
+        blur_levels: 5,
         saturation: 1.30,
         // Below 1: a dark sheet absorbs before it tints.
         luminance: 0.90,
         corner_exponent: 4.2,
-        bevel_width: 16.0,
-        refraction: 9.0,
-        rim_width: 1.6,
+        bevel_width: 18.0,
+        refraction: 11.5,
+        rim_width: 2.0,
         // A dark pane catches a brighter, cooler-white rim.
-        rim_intensity: 0.42,
+        rim_intensity: 0.50,
         rim_tint: [0.92, 0.97, 1.0],
-        sheen: 0.035,
+        sheen: 0.09,
         edge_shade: 0.10,
         grain: 0.016,
     }),
@@ -450,17 +457,17 @@ pub(crate) const GLASS_DARK: UiPalette = UiPalette {
 /// a violet cast instead of pure black.
 pub(crate) const AURORA: UiPalette = UiPalette {
     glass: Some(GlassParams {
-        blur_levels: 4,
+        blur_levels: 5,
         saturation: 1.45,
         luminance: 0.94,
         corner_exponent: 4.2,
-        bevel_width: 16.0,
-        refraction: 9.0,
-        rim_width: 1.6,
-        rim_intensity: 0.48,
+        bevel_width: 18.0,
+        refraction: 11.5,
+        rim_width: 2.0,
+        rim_intensity: 0.55,
         // Aurora teal, not neutral white: the rim is where the tint shows.
         rim_tint: [0.62, 0.95, 0.90],
-        sheen: 0.045,
+        sheen: 0.10,
         edge_shade: 0.10,
         grain: 0.016,
     }),
@@ -826,6 +833,15 @@ mod tests {
                 "{theme:?}: the bevel must be wider than the hairline it ends in"
             );
             assert!(params.rim_intensity > 0.0);
+            // Solid glass, not a thin film: the frost has to run the deep end
+            // of the compositors' six-level chain, or the backdrop stays
+            // legible through the sheet and no amount of rim or specular
+            // makes it read as a pane.
+            assert!(
+                (5..=6).contains(&params.blur_levels),
+                "{theme:?}: {} Kawase levels is a window frost, not a material",
+                params.blur_levels
+            );
         }
         // The light sheet lifts what is behind it; the dark ones absorb first.
         assert!(GLASS.glass.unwrap().luminance > 1.0);

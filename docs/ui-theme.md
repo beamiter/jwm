@@ -37,9 +37,11 @@ a **thick pane of glass**, not a translucent rectangle:
 | Cue | Why |
 | --- | --- |
 | **Continuous corners** | The mask is a superellipse (exponent ≈ 4.2), not a circular rounded rect, so curvature eases into the straight edges. This is the most recognizable difference in silhouette between an Apple panel and a CSS `border-radius` |
-| **Edge refraction** | A beveled band drags the backdrop outward along the surface normal, squeezing what lies just beyond the panel into its rim — the panel gains depth instead of reading as a decal |
-| **Rim hairline + inner glow** | The bevel glows softly and ends in a specular line running the whole perimeter, brightest on the two edges aligned with the light. No accent ring is drawn: a circular ring would not follow the squircle |
-| **Chroma lift and sheen** | A blur averages color toward gray, so saturation is pushed back up, and a broad diagonal sheen lights the face from the top-left |
+| **Edge refraction** | A beveled band drags the backdrop outward along the surface normal, squeezing what lies just beyond the panel into its rim — the panel gains depth instead of reading as a decal. Two taps straddle the bent sample point, which keeps the half-resolution blur chain from shimmering under it |
+| **Interior thickness** | The body of the sheet displaces its backdrop too, by a much smaller constant amount: the parallax of looking *through* a slab rather than at a film stuck over the desktop |
+| **Fresnel-weighted rim + inner glow** | Reflectance is reconstructed from the bevel's own surface, so the hairline and the glow behind it brighten where the glass is grazing and fade out over the flat face. The line runs the whole perimeter, brightest on the two edges aligned with the light. No accent ring is drawn: a circular ring would not follow the squircle |
+| **Real specular** | The bevel's normal rotates through the mirror angle in the corner nearest the light, so the glint lands where a pane actually catches one, instead of a flat diagonal wash across the whole face. A broad, soft lift toward the light is the diffuse half of the same illumination |
+| **Chroma lift** | A blur averages color toward gray, so saturation is pushed back up |
 | **White veil (≈0.5 alpha)** | Heavy enough that even over a *black* desktop the surface lands near mid-gray, keeping the dark inks above 4.5:1. That floor is what makes a light material safe on a window manager, where the content behind it is whatever the user opened |
 
 Corner radii are larger, paddings roomier, and the shadow is wide but nearly
@@ -119,6 +121,13 @@ The glass themes need the compositor's blur FBO chain. JWM keeps that chain aliv
 whenever the theme asks for it, so `behavior.blur_enabled` does **not** have to
 be on — turning it on additionally frosts individual client windows, which is a
 separate feature.
+
+How deep the chrome blurs is the theme's own decision, not the client dial's:
+both compositors run the palette's `blur_levels` (five of the chain's six) for
+the panels, so turning `behavior.blur_strength` down for cost thins the frost on
+*windows* without flattening the launcher, toasts and OSD. A status bar frosted
+through `behavior.blur_status_bar` gets a depth floor for the same reason — it
+is the one frosted surface that is up all the time.
 
 If the chain cannot be created at all (a driver that refuses the FBOs, or no
 GL memory for them), the panels fall back to flat translucent fills in the
