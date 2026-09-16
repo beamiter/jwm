@@ -2254,8 +2254,11 @@ impl WaylandCompositor {
         // charged a full-screen Kawase to frames that redraw an identical
         // desktop for an unrelated reason — a hovered toast, a blinking
         // caret — which is what made the frost shimmer while nothing moved.
+        // `prev_scene` is still last frame's layout here; it is refreshed with
+        // the damage bookkeeping further down.
         if super::damage::glass_backdrop_needs_invalidate(
             !self.content_dirty_ids.is_empty(),
+            self.prev_scene.as_slice() != scene,
             self.transition_active,
             self.overview_active,
             self.wallpaper_transition_start.is_some(),
