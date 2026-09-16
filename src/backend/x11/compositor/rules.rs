@@ -35,12 +35,23 @@ fn temporal_cache_matches(
     valid && cached_hash == below_hash && cached_levels == blur_levels
 }
 
-/// Steady-state frost quality for the status bar while adaptive quality is on.
+/// Steady-state frost quality for a frosted window while adaptive quality is
+/// on.
 ///
 /// Tag-switch / overview animations rewrite the compositor-wide quality to
-/// Minimal; chrome in the excluded top strip must not ride that downgrade.
-pub(super) fn status_bar_steady_blur_quality() -> BlurQuality {
+/// Minimal. For an ordinary client that is a cheaper backdrop nobody reads;
+/// for a frosted one the pane *is* the effect, and the downgrade shows up as
+/// the window flashing plain translucent alpha for the whole animation.
+pub(super) fn frosted_steady_blur_quality() -> BlurQuality {
     BlurQuality::Full
+}
+
+/// Steady-state frost quality for the status bar while adaptive quality is on.
+///
+/// The bar reaches the backdrop path through `blur_status_bar` rather than a
+/// frosted-glass rule, so it needs the same guarantee without `is_frosted`.
+pub(super) fn status_bar_steady_blur_quality() -> BlurQuality {
+    frosted_steady_blur_quality()
 }
 
 fn blur_status_snapshot(
@@ -338,10 +349,14 @@ impl<C: CompositorConnection> Compositor<C> {
             && wt.x < self.screen_w as i32
             && wt.y < self.screen_h as i32;
 
-        // Status bar chrome must keep steady-state frost. `render_frame`
+        // Frosted chrome must keep steady-state frost. `render_frame`
         // overwrites `self.blur_quality` with Minimal for the whole tag-switch
         // / overview animation when auto is on; returning that rewritten value
-        // made the bar flash plain translucent alpha until Full returned.
+        // made every frosted client flash plain translucent alpha until Full
+        // returned, the bar included.
+        if wt.is_frosted {
+            return frosted_steady_blur_quality();
+        }
         let status_bar_name = cfg.status_bar_name();
         let is_statusbar = !status_bar_name.is_empty()
             && (wt.class_name == status_bar_name || wt.class_name.contains(status_bar_name));
@@ -815,6 +830,17 @@ mod tests {
         assert!(!blur_cache_matches(true, 7, 8, 3, 3, false));
         assert!(!blur_cache_matches(true, 7, 7, 2, 3, false));
         assert!(!blur_cache_matches(false, 7, 7, 3, 3, false));
+    }
+
+    #[test]
+    fn every_frosted_window_keeps_full_blur_when_global_quality_is_minimal() {
+        // Contract for `compute_window_blur_quality`: the `is_frosted` branch
+        // resolves ahead of the rewritten global value, so a tag wipe cannot
+        // drop a frosted client to plain alpha for the length of the wipe.
+        assert_eq!(
+            super::frosted_steady_blur_quality(),
+            crate::renderer::types::BlurQuality::Full
+        );
     }
 
     #[test]
