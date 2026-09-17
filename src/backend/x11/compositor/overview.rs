@@ -7,7 +7,7 @@ use super::prism::{
     build_prism_pieces, mirror_matrix,
 };
 use super::{SnapshotDrawCoordinates, SnapshotTextureStorage, snapshot_texture_uv_rect};
-use crate::backend::compositor_common::ui_theme::{self, UiPalette};
+use crate::backend::compositor_common::ui_theme;
 use crate::backend::compositor_font;
 use glow::HasContext;
 
@@ -325,7 +325,11 @@ impl<C: CompositorConnection> Compositor<C> {
     /// a light pool, the prism mirrored into that floor, the prism itself (lit
     /// faces with beveled edges plus polygon caps), and finally the flat title
     /// labels. Rendering is confined to the monitor that owns the overview.
-    pub(super) fn render_overview(&self, proj: &[f32; 16], _focused: Option<u32>) {
+    ///
+    /// Takes `&mut self` for those title labels alone: under a glass theme the
+    /// pill behind a label frosts, and the only backdrop that describes what it
+    /// covers is one taken after the prism has been drawn.
+    pub(super) fn render_overview(&mut self, proj: &[f32; 16], _focused: Option<u32>) {
         if self.overview_windows.is_empty() {
             return;
         }
@@ -503,7 +507,27 @@ impl<C: CompositorConnection> Compositor<C> {
             if !labels.is_empty() {
                 let ui = ui_theme::palette();
 
-                // The card-toned pill the tab strip carries its cells on.
+                // The pill is chrome JWM draws itself, so under a glass theme it
+                // is glass — but it can only frost against a capture that has
+                // the prism in it, and the one the rest of the frame shares was
+                // taken before pass 5d ran (or not at all). So take a fresh one
+                // here, the way the modal panel does after its scrim: a stale
+                // backdrop would show the desktop the cube is covering.
+                //
+                // The cost is one half-res Kawase chain per overview frame, and
+                // only under a glass theme: `capture_glass_backdrop` returns
+                // immediately when the palette carries no optics. Beside a
+                // skydome plus two full prism passes that is noise, and it buys
+                // the one surface here that is not part of the 3D scene.
+                //
+                // Everything else the overview draws stays as it is. The
+                // thumbnails are client content, the skydome is a background,
+                // and frosting either would be frosting the scene against
+                // itself.
+                if ui.glass.is_some() {
+                    self.capture_glass_backdrop(ui);
+                    self.gl.bind_vertex_array(Some(self.quad_vao));
+                }
                 self.gl.use_program(Some(self.border_program));
                 self.gl.uniform_matrix_4_f32_slice(
                     self.border_uniforms.projection.as_ref(),
@@ -515,13 +539,10 @@ impl<C: CompositorConnection> Compositor<C> {
                     let chip_h = th + TITLE_PAD_Y * 2.0;
                     let chip_x = bcx - chip_w * 0.5;
                     let chip_y = bcy + 10.0 - TITLE_PAD_Y;
-                    self.sysui_fill_rounded(
-                        chip_x,
-                        chip_y,
-                        chip_w,
-                        chip_h,
-                        chip_h * 0.5,
-                        UiPalette::faded(ui.card, alpha),
+                    let radius = chip_h * 0.5;
+                    // Leaves the border program bound for the next pill.
+                    self.ui_fill_island(
+                        proj, ui, chip_x, chip_y, chip_w, chip_h, radius, radius, ui.card, alpha,
                     );
                 }
 

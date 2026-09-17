@@ -1580,7 +1580,7 @@ impl<C: CompositorConnection> Compositor<C> {
     /// sees it. A missing blur chain (no GL memory, or a driver that refused
     /// the FBOs) leaves the backdrop unset and the panels fall back to flat
     /// translucent fills.
-    fn capture_glass_backdrop(&mut self, palette: &UiPalette) {
+    pub(super) fn capture_glass_backdrop(&mut self, palette: &UiPalette) {
         let Some(glass) = palette.glass else {
             self.glass_backdrop = None;
             return;

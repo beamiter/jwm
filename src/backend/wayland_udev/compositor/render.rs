@@ -5044,7 +5044,7 @@ impl WaylandCompositor {
     /// desktop in the same domain the panel will write into. No blur chain (a
     /// driver that refused the FBOs) leaves the backdrop unset and the panels
     /// fall back to flat translucent fills.
-    fn capture_glass_backdrop(
+    pub(super) fn capture_glass_backdrop(
         &mut self,
         gl: &ffi::Gles2,
         palette: &UiPalette,

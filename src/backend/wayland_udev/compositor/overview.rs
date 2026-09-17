@@ -6,7 +6,7 @@ use crate::backend::compositor_common::prism::{
     MAX_PRISM_SIDES, MIN_PRISM_SIDES, PrismCamera, PrismKind, PrismPiece, build_prism_pieces,
     mirror_matrix,
 };
-use crate::backend::compositor_common::ui_theme::{self, UiPalette};
+use crate::backend::compositor_common::ui_theme;
 use crate::backend::compositor_font;
 use crate::backend::wayland_udev::color_pipeline::ColorTransform;
 use smithay::backend::renderer::gles::ffi;
@@ -898,6 +898,28 @@ impl WaylandCompositor {
                     let label_y = chip_y + TITLE_PAD_Y;
 
                     let ui = ui_theme::palette();
+                    // The pill is chrome JWM draws itself, so under a glass
+                    // theme it is glass — but it can only frost against a
+                    // capture that has the prism in it, and the one the rest of
+                    // the frame shares was taken before the overview ran (or not
+                    // at all). So take a fresh one here, the way the modal panel
+                    // does after its scrim: a stale backdrop would show the
+                    // desktop the cube is covering.
+                    //
+                    // The cost is one half-res Kawase chain per overview frame,
+                    // and only under a glass theme: `capture_glass_backdrop`
+                    // returns immediately when the palette carries no optics.
+                    // Beside a skydome plus two full prism passes that is noise,
+                    // and it buys the one surface here that is not part of the 3D
+                    // scene.
+                    //
+                    // Everything else the overview draws stays as it is. The
+                    // faces are client content, the skydome is a background, and
+                    // frosting either would be frosting the scene against
+                    // itself.
+                    if ui.glass.is_some() {
+                        self.capture_glass_backdrop(gl, ui, projection, scene_linear_output);
+                    }
                     gl.BindVertexArray(self.quad_vao);
                     gl.UseProgram(self.border_program);
                     gl.Uniform1i(
@@ -910,14 +932,21 @@ impl WaylandCompositor {
                         ffi::FALSE as u8,
                         projection.as_ptr(),
                     );
-                    self.draw_overview_strip_rect(
+                    // Leaves the border program bound, as
+                    // `draw_overview_strip_rect` needed it to be.
+                    self.ui_fill_island(
                         gl,
+                        projection,
+                        ui,
                         chip_x,
                         chip_y,
                         chip_w,
                         chip_h,
                         chip_h * 0.5,
-                        UiPalette::faded(ui.card, self.overview_opacity.clamp(0.0, 1.0)),
+                        chip_h * 0.5,
+                        ui.card,
+                        self.overview_opacity.clamp(0.0, 1.0),
+                        scene_linear_output,
                     );
 
                     gl.UseProgram(self.program);
