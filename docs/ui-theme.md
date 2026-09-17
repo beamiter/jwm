@@ -65,6 +65,25 @@ enrich the desktop it shows — and the shadow carries a violet cast.
 The lock card is the one exception in all three glass themes. It hides the
 desktop on purpose, so it draws solid.
 
+### The status bar's own optics
+
+A bar frosted through `behavior.blur_status_bar` draws on the same sheet with
+different numbers, because it is ~28–40px tall and never dismissed rather than
+a card the user summoned: `GlassParams::for_status_bar` shortens the bevel and
+its refraction so two of them cannot meet in the middle and turn the strip into
+one long lens, and raises the rim and specular, which on something this thin
+are nearly all the material there is to see. Its corners come from the theme
+too, not from `behavior.corner_radius` — on a bar that thin that is a stadium,
+and the squircle needs a flat edge to ease its curvature out into. The tint is
+lighter for a different reason: the bar is the one frosted surface whose
+*client* also paints a veil (every bar in `bars/` washes 0.55 of its theme
+colour over what the compositor put behind it, which is what holds its text at
+contrast over an arbitrary wallpaper), so the compositor contributes only the
+sheet's hue, at the shared `STATUS_BAR_GLASS_TINT_ALPHA` of 0.08. The theme's
+identity — saturation, luminance, corner exponent, rim tint, grain — passes
+through untouched, so an `aurora` bar still catches the same teal rim as its
+panels.
+
 ## The flat themes
 
 None of these need the blur chain; they draw opaque fills, cast a drop
@@ -127,7 +146,10 @@ both compositors run the palette's `blur_levels` (five of the chain's six) for
 the panels, so turning `behavior.blur_strength` down for cost thins the frost on
 *windows* without flattening the launcher, toasts and OSD. A status bar frosted
 through `behavior.blur_status_bar` gets a depth floor for the same reason — it
-is the one frosted surface that is up all the time.
+is the one frosted surface that is up all the time. That depth is also why it
+holds less of the previous frame's blur than a client's frost does: a deeper
+chain smears further, so a video wallpaper or a player parked under the bar
+would otherwise leave a dozen frames of itself ghosted across it.
 
 If the chain cannot be created at all (a driver that refuses the FBOs, or no
 GL memory for them), the panels fall back to flat translucent fills in the
