@@ -7698,6 +7698,60 @@ mod glass_backdrop_contract_tests {
         panic!("source item has no closing brace");
     }
 
+    /// Every pass that draws one of JWM's own cards has to ask for a backdrop
+    /// before it fills.
+    ///
+    /// The fill itself is safe by construction: `ui_fill_island` is the one
+    /// door, it tries the glass sheet first, and the flat fill behind it is
+    /// module-private so no other file can reach past it. What is *not* safe is
+    /// the first line. A pass that never asks for a capture silently takes that
+    /// flat fallback and its card lands opaque under a glass theme — a bug that
+    /// looks like a theme that did not apply. So the passes are listed here
+    /// rather than trusted, and a new one has to join the list.
+    #[test]
+    fn every_chrome_card_pass_takes_a_backdrop_before_it_fills() {
+        const RENDER: &str = include_str!("render.rs");
+        const EXPOSE: &str = include_str!("expose.rs");
+        const OVERVIEW: &str = include_str!("overview.rs");
+        const TOOLBAR: &str = include_str!("screenshot_toolbar.rs");
+        for (source, pass) in [
+            (RENDER, "fn render_debug_hud_card("),
+            (RENDER, "fn render_layout_filmstrip("),
+            (RENDER, "fn render_tags_grid("),
+            (RENDER, "fn render_system_ui_panel("),
+            (RENDER, "fn render_toasts("),
+            (RENDER, "fn render_osd("),
+            // The tab strip's pass covers the dwell tooltip's chip too: the
+            // chip is drawn from inside it, on the capture it took.
+            (EXPOSE, "fn render_tab_bar("),
+            (OVERVIEW, "fn render_overview("),
+            (TOOLBAR, "fn render_screenshot_toolbar("),
+        ] {
+            let body = compact_item(source, pass);
+            assert!(
+                body.contains("self.ui_fill_island(") || body.contains("self.ui_fill_surface("),
+                "{pass} stopped filling its card through the glass door"
+            );
+            assert!(
+                body.contains("self.ensure_glass_backdrop(")
+                    || body.contains("self.capture_glass_backdrop("),
+                "{pass} fills a card without asking for a backdrop, so it draws flat"
+            );
+        }
+    }
+
+    /// The exposé grid is a scrim, live window thumbnails, a hover ring and
+    /// labels — no card anywhere. It must stay out of the glass path entirely:
+    /// frosting a thumbnail would blur the one thing the user opened the grid
+    /// to pick out.
+    #[test]
+    fn the_expose_grid_frosts_nothing() {
+        let body = compact_item(include_str!("expose.rs"), "fn render_expose(");
+        assert!(!body.contains("self.ui_fill_island("));
+        assert!(!body.contains("self.ui_fill_surface("));
+        assert!(!body.contains("glass_backdrop"));
+    }
+
     /// The frame start must ask whether the desktop changed instead of
     /// dropping the backdrop outright: an unconditional clear charges a
     /// full-screen Kawase to every frame that repaints an identical desktop.
