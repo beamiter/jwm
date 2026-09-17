@@ -243,6 +243,66 @@ pub(crate) fn parse_blur_quality_by_monitor(config_str: &str) -> HashMap<u32, Bl
     result
 }
 
+/// Aggregate per-window displacement, in pixels since the previous frame, at
+/// which the temporal blur drops its history entirely.
+pub(crate) const TEMPORAL_MIX_MOTION_SPAN_PX: f32 = 12.0;
+
+/// The same span while a frosted status bar is on screen. The bar's frost runs
+/// the chrome's deep Kawase chain, whose smear lasts visibly longer than a
+/// window frost's, so its history has to go sooner.
+pub(crate) const TEMPORAL_MIX_MOTION_SPAN_PX_FROSTED_BAR: f32 = 8.0;
+
+/// Ceiling on the mix while a frosted status bar's backdrop changed *in place*.
+///
+/// In-place change is the case window displacement cannot see: a video or
+/// animated wallpaper, or a media client repainting under the bar, moves every
+/// pixel of the backdrop while every window stays exactly where it was. The
+/// frame is a cache miss either way, so the blur is refiltered — but mixing
+/// four fifths of the previous blur back into it turns the bar into a smear of
+/// the last dozen video frames. A ceiling low enough that history decays within
+/// a couple of frames keeps the shimmer suppression without the ghost.
+pub(crate) const TEMPORAL_MIX_CONTENT_CEILING_FROSTED_BAR: f32 = 0.3;
+
+/// How much of the previous frame's blur to mix into this frame's.
+///
+/// `base` is the configured `behavior.blur_temporal_mix_ratio`, which is what a
+/// still desktop gets: with nothing moving and nothing repainting, history and
+/// present are the same picture, and mixing them is pure shimmer suppression at
+/// no cost in fidelity. Everything below only ever takes ratio *away*, so a
+/// static desktop is never charged for the motion cases.
+///
+/// `total_displacement_px` is the aggregate distance every window in the scene
+/// moved since the previous frame; it attenuates the mix linearly to zero over
+/// one of the spans above. X11 passes zero: its per-consumer below-scene hash
+/// already refuses the mix outright on any geometry change, so displacement
+/// never reaches this decision there.
+///
+/// `backdrop_content_dirty` is the in-place case
+/// ([`TEMPORAL_MIX_CONTENT_CEILING_FROSTED_BAR`]).
+pub(crate) fn temporal_mix_ratio(
+    base: f32,
+    total_displacement_px: u64,
+    status_bar_frosted: bool,
+    backdrop_content_dirty: bool,
+) -> f32 {
+    let base = if base.is_finite() {
+        base.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let span = if status_bar_frosted {
+        TEMPORAL_MIX_MOTION_SPAN_PX_FROSTED_BAR
+    } else {
+        TEMPORAL_MIX_MOTION_SPAN_PX
+    };
+    let attenuation = (total_displacement_px as f32 / span).min(1.0);
+    let mut ratio = base * (1.0 - attenuation);
+    if status_bar_frosted && backdrop_content_dirty {
+        ratio = ratio.min(TEMPORAL_MIX_CONTENT_CEILING_FROSTED_BAR);
+    }
+    ratio.clamp(0.0, 1.0)
+}
+
 pub(crate) fn monitor_id_by_overlap(
     monitors: &[(u32, i32, i32, u32, u32)],
     x: i32,
@@ -284,7 +344,72 @@ pub(crate) fn monitor_id_by_overlap(
 
 #[cfg(test)]
 mod tests {
-    use super::monitor_id_by_overlap;
+    use super::{
+        TEMPORAL_MIX_CONTENT_CEILING_FROSTED_BAR, TEMPORAL_MIX_MOTION_SPAN_PX,
+        TEMPORAL_MIX_MOTION_SPAN_PX_FROSTED_BAR, monitor_id_by_overlap, temporal_mix_ratio,
+    };
+
+    /// The whole point of the temporal mix is a motionless desktop, so nothing
+    /// the frosted-bar tightening adds may cost that case any stabilization.
+    #[test]
+    fn a_still_desktop_keeps_the_configured_mix_whatever_is_frosted() {
+        for &frosted in &[false, true] {
+            assert!((temporal_mix_ratio(0.8, 0, frosted, false) - 0.8).abs() < 1e-6);
+        }
+    }
+
+    /// A frosted bar's frost runs the deep chrome chain, so its history has to
+    /// be dropped over a shorter run of motion than a window frost's.
+    #[test]
+    fn a_frosted_bar_drops_its_history_sooner_than_a_window_frost() {
+        assert!(TEMPORAL_MIX_MOTION_SPAN_PX_FROSTED_BAR < TEMPORAL_MIX_MOTION_SPAN_PX);
+        let bar = temporal_mix_ratio(0.8, 6, true, false);
+        let window = temporal_mix_ratio(0.8, 6, false, false);
+        assert!(
+            bar < window,
+            "6px of motion left the bar at {bar} and a window at {window}"
+        );
+        // Both still reach zero, and neither goes negative past its span.
+        assert_eq!(
+            temporal_mix_ratio(
+                0.8,
+                TEMPORAL_MIX_MOTION_SPAN_PX_FROSTED_BAR as u64,
+                true,
+                false
+            ),
+            0.0
+        );
+        assert_eq!(temporal_mix_ratio(0.8, 4_000, true, false), 0.0);
+        assert_eq!(temporal_mix_ratio(0.8, 4_000, false, false), 0.0);
+    }
+
+    /// A video wallpaper moves every pixel of the backdrop with every window
+    /// standing still, so displacement sees nothing. The bar's frost has to
+    /// stop holding a dozen frames of it anyway.
+    #[test]
+    fn in_place_backdrop_change_caps_a_frosted_bars_history() {
+        let ghosting = temporal_mix_ratio(0.8, 0, true, true);
+        assert!(
+            ghosting <= TEMPORAL_MIX_CONTENT_CEILING_FROSTED_BAR,
+            "a repainting backdrop left the bar mixing {ghosting} of its history"
+        );
+        assert!(TEMPORAL_MIX_CONTENT_CEILING_FROSTED_BAR < 0.8);
+        // Only the bar's frost is tightened: a client's own backdrop blur keeps
+        // the configured ratio, which is what it was tuned against.
+        assert!((temporal_mix_ratio(0.8, 0, false, true) - 0.8).abs() < 1e-6);
+        // The ceiling is a ceiling, not a floor: motion still wins.
+        assert_eq!(temporal_mix_ratio(0.8, 100, true, true), 0.0);
+        // And a configured ratio already under it passes through.
+        assert!((temporal_mix_ratio(0.1, 0, true, true) - 0.1).abs() < 1e-6);
+    }
+
+    /// The ratio is a shader uniform, so a nonsense config must not reach it.
+    #[test]
+    fn the_mix_ratio_stays_a_ratio() {
+        assert_eq!(temporal_mix_ratio(4.0, 0, false, false), 1.0);
+        assert_eq!(temporal_mix_ratio(-1.0, 0, false, false), 0.0);
+        assert_eq!(temporal_mix_ratio(f32::NAN, 0, true, true), 0.0);
+    }
 
     #[test]
     fn monitor_overlap_prefers_the_largest_area_and_keeps_ties_stable() {

@@ -3077,7 +3077,11 @@ impl WaylandCompositor {
                 // ghosting. The displayed result is fed back as the new history
                 // (exponential moving average).
                 let display_tex = if self.temporal_blur_enabled {
-                    let ratio = self.temporal_mix_ratio_for_motion(visible_scene);
+                    // In-place content damage is the motion the displacement
+                    // sum cannot see — a video wallpaper, a player under the
+                    // bar — and it is what a frosted bar ghosts on.
+                    let content_dirty = !self.content_dirty_ids.is_empty();
+                    let ratio = self.temporal_mix_ratio_for_motion(visible_scene, content_dirty);
                     let mixed = match self.prev_blur_fbo {
                         Some((_, prev_tex)) if ratio > 0.001 => unsafe {
                             self.run_temporal_mix(gl, result, prev_tex, ratio)
@@ -7741,6 +7745,20 @@ mod glass_backdrop_contract_tests {
         assert!(
             body.contains("ui_palette.status_bar_sheet_radius(radius,draw_h)"),
             "the sheet must round through the shared bar radius, not the window's"
+        );
+    }
+
+    /// Window displacement cannot see a backdrop that repainted where it stood,
+    /// which is the case a frosted bar ghosts on, so the frame has to report it
+    /// to the ratio policy separately.
+    #[test]
+    fn the_frame_reports_in_place_damage_to_the_mix_ratio() {
+        let source = include_str!("render.rs");
+        let body = compact_item(source, "pub(crate) fn render_frame(");
+        assert!(body.contains("letcontent_dirty=!self.content_dirty_ids.is_empty();"));
+        assert!(
+            body.contains("temporal_mix_ratio_for_motion(visible_scene,content_dirty)"),
+            "the mix ratio must be told the backdrop repainted"
         );
     }
 }

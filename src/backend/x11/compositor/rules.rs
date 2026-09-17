@@ -3,6 +3,7 @@
 use super::math::ortho;
 #[allow(unused_imports)]
 use super::*;
+use crate::backend::compositor_common::rules as common_rules;
 #[allow(unused_imports)]
 use glow::HasContext;
 #[allow(unused_imports)]
@@ -612,6 +613,14 @@ impl<C: CompositorConnection> Compositor<C> {
     /// mixing it with that same consumer's temporal history. The shared scratch
     /// target keeps the history texture read-only for the whole shader pass.
     ///
+    /// `frosted_bar` marks the one consumer whose history is tightened: the
+    /// status bar under a glass theme, which draws the chrome's own deep frost
+    /// and is on screen all the time. `backdrop_dirty` is why it needs to be.
+    /// The below-scene hash gate below already refuses the mix on any geometry
+    /// change, so the only way in is a backdrop that repainted where it stood —
+    /// a video wallpaper, a player under the bar — and holding four fifths of
+    /// the previous blur through that is what smears the bar.
+    ///
     /// This method intentionally takes `&self` because it runs while the
     /// window loop holds an immutable borrow of a `WindowTexture`.
     pub(super) fn update_window_blur_cache(
@@ -620,6 +629,8 @@ impl<C: CompositorConnection> Compositor<C> {
         current_blur_tex: glow::Texture,
         below_hash: u64,
         blur_levels: usize,
+        frosted_bar: bool,
+        backdrop_dirty: bool,
     ) -> (glow::Texture, bool) {
         // Leave a deterministic raw draw state for the tracked restore in
         // render_frame, including all early-return paths below.
@@ -640,7 +651,20 @@ impl<C: CompositorConnection> Compositor<C> {
             Some(level) => level,
             None => return (current_blur_tex, false),
         };
+        // Displacement is always zero here: `temporal_cache_matches` below has
+        // already refused the mix if anything under this consumer moved, so the
+        // shared helper's motion span never comes into play on X11.
+        let mix_ratio = common_rules::temporal_mix_ratio(
+            self.temporal_blur_mix_ratio,
+            0,
+            frosted_bar,
+            backdrop_dirty,
+        );
+        // A ratio the helper attenuated to nothing means the fresh blur *is*
+        // the answer: skip the pass rather than pay a full-level draw to
+        // reproduce it, and report the frame as the miss it is.
         let reuse_previous = self.temporal_blur_enabled
+            && mix_ratio > 0.001
             && temporal_cache_matches(
                 cache.valid.get(),
                 cache.below_hash.get(),
@@ -731,7 +755,7 @@ impl<C: CompositorConnection> Compositor<C> {
                 self.gl
                     .get_uniform_location(self.temporal_blur_mix_program, "u_temporal_mix")
                     .as_ref(),
-                self.temporal_blur_mix_ratio,
+                mix_ratio,
             );
 
             // Set projection and screen rect
@@ -885,6 +909,23 @@ mod tests {
         assert!(!temporal_cache_matches(true, 41, 42, 3, 3));
         assert!(!temporal_cache_matches(true, 41, 41, 2, 3));
         assert!(!temporal_cache_matches(false, 41, 41, 3, 3));
+    }
+
+    /// The mix uniform must come from the shared ratio policy rather than
+    /// straight from the config field: the frosted bar's tightening lives in
+    /// that helper, and both backends have to agree on it.
+    #[test]
+    fn the_mix_uniform_comes_from_the_shared_ratio_policy() {
+        const SOURCE: &str = include_str!("rules.rs");
+        let compact: String = SOURCE.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(compact.contains("common_rules::temporal_mix_ratio("));
+        assert!(
+            compact.contains(r#""u_temporal_mix").as_ref(),mix_ratio,"#),
+            "the shader must be fed the attenuated ratio"
+        );
+        // And a ratio attenuated to nothing must skip the pass instead of
+        // drawing a full level to reproduce the fresh blur.
+        assert!(compact.contains("&&mix_ratio>0.001"));
     }
 
     #[test]

@@ -6511,11 +6511,19 @@ impl<C: CompositorConnection> Compositor<C> {
                             // same window's previous result.
                             if let Some(blurred) = blur_tex {
                                 let final_blur = if !cache_hit {
+                                    // Reaching here at all means this consumer
+                                    // takes the backdrop-blur path, so a bar is
+                                    // a frosted bar: the one frost up all the
+                                    // time, and where a history held across a
+                                    // repainting backdrop shows first.
+                                    let bar_frost = is_statusbar;
                                     let (cached, temporal_reused) = self.update_window_blur_cache(
                                         win,
                                         blurred,
                                         blur_below_hash,
                                         blur_levels,
+                                        bar_frost,
+                                        backdrop_dirty,
                                     );
                                     if self.temporal_blur_enabled {
                                         self.temporal_blur_total_count += 1;
@@ -8996,6 +9004,20 @@ mod glass_backdrop_contract_tests {
         assert!(
             body.contains("ui_palette.status_bar_sheet_radius(radius,bh)"),
             "the sheet must round through the shared bar radius, not the window's"
+        );
+    }
+
+    /// The temporal blur has to know which consumer is the frosted bar and
+    /// whether its backdrop repainted in place, or the shared ratio policy
+    /// cannot tell a video wallpaper from a still one.
+    #[test]
+    fn the_frame_tells_the_blur_cache_when_the_bar_is_the_consumer() {
+        let source = include_str!("render.rs");
+        let body = compact_item(source, "pub(crate) fn render_frame(");
+        assert!(body.contains("letbar_frost=is_statusbar;"));
+        assert!(
+            body.contains("blur_levels,bar_frost,backdrop_dirty,"),
+            "the cache update must carry the bar flag and the in-place damage"
         );
     }
 }

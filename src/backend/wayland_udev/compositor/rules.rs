@@ -498,10 +498,16 @@ impl WaylandCompositor {
     /// motion means the displayed blur is essentially the fresh current frame,
     /// which avoids ghosting/smearing while windows move.
     ///
+    /// A frosted status bar tightens both halves of that policy — see
+    /// [`common_rules::temporal_mix_ratio`], which both backends share. It is
+    /// the one always-on frosted surface and the one running the chrome's deep
+    /// Kawase chain, so it is where a held history shows first.
+    ///
     /// Side effect: records the current positions for next frame's comparison.
     pub(crate) fn temporal_mix_ratio_for_motion(
         &mut self,
         scene: &[(u64, i32, i32, u32, u32)],
+        backdrop_content_dirty: bool,
     ) -> f32 {
         let mut total_disp: u64 = 0;
         for &(id, x, y, _, _) in scene {
@@ -520,16 +526,12 @@ impl WaylandCompositor {
         self.prev_motion_positions
             .extend(scene.iter().map(|&(id, x, y, _, _)| (id, x, y)));
 
-        let base = self.temporal_blur_mix_ratio;
-        if total_disp == 0 {
-            return base;
-        }
-        // Linear attenuation: ~12px of aggregate motion fully suppresses
-        // history. The deeper chrome frost carries a visibly longer smear than
-        // the old one did, so history has to be dropped sooner than the 16px
-        // this used to hold it for.
-        let atten = (total_disp as f32 / 12.0).min(1.0);
-        base * (1.0 - atten)
+        common_rules::temporal_mix_ratio(
+            self.temporal_blur_mix_ratio,
+            total_disp,
+            self.status_bar_frosted(),
+            backdrop_content_dirty,
+        )
     }
 
     /// Blend the current blur result with the cached previous blur into
