@@ -6566,21 +6566,32 @@ impl<C: CompositorConnection> Compositor<C> {
                                 let ui_palette =
                                     crate::backend::compositor_common::ui_theme::palette();
                                 if is_statusbar
-                                    && let Some(params) = ui_palette.glass.as_ref()
+                                    && let Some(params) = ui_palette.glass
                                 {
                                     // Point the chrome glass sampler at this
                                     // window's frost, draw the solid sheet, then
                                     // put the window program back for the pixmap.
+                                    // The bar pixmap that follows carries its
+                                    // own veil by design — that is what holds
+                                    // the bar's text at contrast over an
+                                    // arbitrary wallpaper — so the sheet only
+                                    // contributes a hue, at
+                                    // `STATUS_BAR_GLASS_TINT_ALPHA`.
                                     let previous_backdrop = self.glass_backdrop;
                                     self.glass_backdrop = Some(blur_tex);
+                                    // Bar optics, not panel optics: a shallower
+                                    // bevel and a brighter rim, so a strip this
+                                    // thin reads as a sheet with edges rather
+                                    // than as one long lens.
+                                    let params = params.for_status_bar();
                                     let tint = [
                                         ui_palette.toast[0],
                                         ui_palette.toast[1],
                                         ui_palette.toast[2],
-                                        0.10,
+                                        ui_theme::STATUS_BAR_GLASS_TINT_ALPHA,
                                     ];
                                     self.glass_fill_rounded(
-                                        &proj, bx, by, bw, bh, radius, radius, tint, fade, params,
+                                        &proj, bx, by, bw, bh, radius, radius, tint, fade, &params,
                                     );
                                     self.glass_backdrop = previous_backdrop;
                                     self.gl_state_tracker
@@ -8928,5 +8939,23 @@ mod glass_backdrop_contract_tests {
         let source = include_str!("render.rs");
         let capture = compact_item(source, "fn capture_glass_backdrop(");
         assert!(capture.contains("self.store_glass_backdrop(texture)"));
+    }
+
+    /// The bar takes the bar tuning, not the panels': it is ~30px tall and
+    /// always on screen, and the panel bevel would turn the whole strip into
+    /// edge. Its tint stays the shared constant, so the two backends' bars
+    /// cannot drift apart.
+    #[test]
+    fn the_status_bar_draws_through_the_bar_optics() {
+        let source = include_str!("render.rs");
+        let body = compact_item(source, "pub(crate) fn render_frame(");
+        assert!(
+            body.contains("params.for_status_bar()"),
+            "the bar must retune the theme's optics for its own thickness"
+        );
+        assert!(
+            body.contains("ui_theme::STATUS_BAR_GLASS_TINT_ALPHA"),
+            "the bar tint must come from the shared constant"
+        );
     }
 }

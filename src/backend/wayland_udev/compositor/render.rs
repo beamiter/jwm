@@ -3257,7 +3257,10 @@ impl WaylandCompositor {
                 // The status bar is always-on chrome: under a glass theme it
                 // gets the solid-glass sheet (thickness, Fresnel rim, specular)
                 // instead of a flat blurred quad. The bar pixmap still carries
-                // the veil, so the tint coverage here stays light.
+                // its own veil by design — that is what holds the bar's text at
+                // contrast over an arbitrary wallpaper — so the sheet only
+                // contributes a hue here, at
+                // `ui_theme::STATUS_BAR_GLASS_TINT_ALPHA`.
                 if self.blur_enabled
                     && let Some(blur_tex) = blur_result_tex
                     && let Some(frosted_strength) = self.window_backdrop_blur_strength(wt, w, h)
@@ -3267,13 +3270,17 @@ impl WaylandCompositor {
                             || wt.class_name.contains(&status_bar_name));
                     if is_status_bar
                         && self.glass_backdrop.is_some()
-                        && let Some(params) = ui_palette.glass.as_ref()
+                        && let Some(params) = ui_palette.glass
                     {
+                        // Bar optics, not panel optics: a shallower bevel and a
+                        // brighter rim, so a strip this thin reads as a sheet
+                        // with edges rather than as one long lens.
+                        let params = params.for_status_bar();
                         let tint = [
                             ui_palette.toast[0],
                             ui_palette.toast[1],
                             ui_palette.toast[2],
-                            0.10,
+                            ui_theme::STATUS_BAR_GLASS_TINT_ALPHA,
                         ];
                         self.glass_fill_rounded(
                             gl,
@@ -3286,7 +3293,7 @@ impl WaylandCompositor {
                             radius,
                             tint,
                             fade,
-                            params,
+                            &params,
                             scene_linear_active,
                         );
                         // glass_fill_rounded binds its own program; restore the
@@ -7709,5 +7716,23 @@ mod glass_backdrop_contract_tests {
 
         let frame = compact_item(source, "pub(crate) fn render_frame(");
         assert!(frame.contains("self.store_glass_backdrop(gl,tex,false)"));
+    }
+
+    /// The bar takes the bar tuning, not the panels': it is ~30px tall and
+    /// always on screen, and the panel bevel would turn the whole strip into
+    /// edge. Its tint stays the shared constant, so the two backends' bars
+    /// cannot drift apart.
+    #[test]
+    fn the_status_bar_draws_through_the_bar_optics() {
+        let source = include_str!("render.rs");
+        let body = compact_item(source, "pub(crate) fn render_frame(");
+        assert!(
+            body.contains("params.for_status_bar()"),
+            "the bar must retune the theme's optics for its own thickness"
+        );
+        assert!(
+            body.contains("ui_theme::STATUS_BAR_GLASS_TINT_ALPHA"),
+            "the bar tint must come from the shared constant"
+        );
     }
 }

@@ -31,6 +31,11 @@
 //! The glass themes carry a [`GlassParams`] block; the flat themes' is `None`,
 //! which is also how a renderer decides whether it needs a backdrop capture at
 //! all.
+//!
+//! One surface does not take those params as written: the status bar, which is
+//! thin and always on screen rather than a summoned card, draws through
+//! [`GlassParams::for_status_bar`] and tints at
+//! [`STATUS_BAR_GLASS_TINT_ALPHA`].
 
 /// Which design language the compositor's own surfaces follow.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -108,6 +113,21 @@ pub(crate) fn palette() -> &'static UiPalette {
 /// compositors' bars pixel-identical.
 pub(crate) const TAB_HOVER_ALPHA_SCALE: f32 = 0.5;
 
+/// How much of the bar's tint covers the solid-glass sheet drawn under the
+/// status bar.
+///
+/// The bar is the one surface JWM frosts that it does not also paint: the
+/// client owns its own background, and every bar in `bars/` washes
+/// `xbar_core::glass::DEFAULT_BACKGROUND_OPACITY` (0.55) of its theme colour
+/// over whatever the compositor put behind it. That veil is deliberate — it is
+/// what holds the bar's own text at contrast on an arbitrary wallpaper — so the
+/// compositor's tint is only the *hue* of the sheet, not its opacity. Stacking
+/// the panels' coverage (0.46–0.62) under a 0.55 client wash would land near
+/// 0.8 total and the sheet would read as a muddy stripe rather than glass.
+///
+/// Both backends read this, so the two compositors' bars stay identical.
+pub(crate) const STATUS_BAR_GLASS_TINT_ALPHA: f32 = 0.08;
+
 /// Extra knobs the frosted-glass surface shader needs. All of them are uniform
 /// inputs; a renderer that cannot supply a backdrop texture falls back to the
 /// plain [`UiPalette`] fills.
@@ -165,6 +185,41 @@ pub(crate) struct GlassParams {
     /// Amplitude of the dither grain that keeps wide blurred gradients from
     /// banding on 8-bit outputs.
     pub(crate) grain: f32,
+}
+
+impl GlassParams {
+    /// The same material, retuned for the status bar.
+    ///
+    /// Every other surface these params describe is a card the user summoned:
+    /// tall enough that an 18px bevel is a band along its edge, and gone again
+    /// in a second. The bar is neither. It is ~28–40px tall and always on
+    /// screen, so the panel tuning fails it in both directions:
+    ///
+    /// * The bevel and its refraction are sized for a panel's depth. On a bar
+    ///   two bevels nearly meet in the middle, and the whole strip becomes edge
+    ///   — a smeared lens instead of a sheet with a rim. So the band narrows and
+    ///   the refraction it drags in shortens with it, roughly in proportion to
+    ///   the height.
+    /// * The rim and the specular are what read as *glass* rather than as a
+    ///   translucent stripe, and on something this thin they are nearly all the
+    ///   user sees. A floating pill bar in particular is mostly edge, so its
+    ///   edges have to earn it: the hairline widens and brightens a little, and
+    ///   the sheen comes up with it.
+    ///
+    /// Saturation, luminance, corner exponent, tint, contact shade and grain are
+    /// the theme's identity rather than a function of the surface's size, so
+    /// they pass through untouched — a bar under [`AURORA`] still catches the
+    /// same teal rim as its panels.
+    pub(crate) fn for_status_bar(self) -> Self {
+        Self {
+            bevel_width: self.bevel_width * 0.70,
+            refraction: self.refraction * 0.75,
+            rim_width: self.rim_width + 0.2,
+            rim_intensity: self.rim_intensity * 1.1,
+            sheen: self.sheen * 1.15,
+            ..self
+        }
+    }
 }
 
 /// Every tone and metric the self-drawn surfaces use, in one switchable set.
@@ -866,6 +921,69 @@ mod tests {
             contrast >= 4.5,
             "paper would leave body text at {contrast:.1}:1"
         );
+    }
+
+    /// The bar tuning is a *scale* of the theme's own optics, not a second
+    /// material: the numbers move in the directions the doc comment claims and
+    /// nothing else moves at all.
+    #[test]
+    fn the_status_bar_tuning_scales_the_theme_it_came_from() {
+        for theme in [UiTheme::Glass, UiTheme::GlassDark, UiTheme::Aurora] {
+            let panel = theme.palette().glass.expect("a glass theme has optics");
+            let bar = panel.for_status_bar();
+
+            // Thinner surface, shallower edge: the bevel and the refraction it
+            // drags in both shorten, so two bevels cannot meet in the middle of
+            // a 30px strip.
+            assert!(
+                (bar.bevel_width - panel.bevel_width * 0.70).abs() < 1e-6,
+                "{theme:?}: bevel {} is not 70% of {}",
+                bar.bevel_width,
+                panel.bevel_width
+            );
+            assert!((bar.refraction - panel.refraction * 0.75).abs() < 1e-6);
+            assert!(bar.bevel_width < panel.bevel_width);
+            assert!(bar.refraction < panel.refraction);
+
+            // Louder edges: on a bar the rim and the specular are most of what
+            // the user sees of the material.
+            assert!((bar.rim_width - (panel.rim_width + 0.2)).abs() < 1e-6);
+            assert!((bar.rim_intensity - panel.rim_intensity * 1.1).abs() < 1e-6);
+            assert!((bar.sheen - panel.sheen * 1.15).abs() < 1e-6);
+
+            // The theme's identity passes through untouched.
+            assert_eq!(bar.blur_levels, panel.blur_levels);
+            assert!((bar.saturation - panel.saturation).abs() < 1e-6);
+            assert!((bar.luminance - panel.luminance).abs() < 1e-6);
+            assert!((bar.corner_exponent - panel.corner_exponent).abs() < 1e-6);
+            assert_eq!(bar.rim_tint, panel.rim_tint);
+            assert!((bar.edge_shade - panel.edge_shade).abs() < 1e-6);
+            assert!((bar.grain - panel.grain).abs() < 1e-6);
+
+            // And the bevel still ends in a hairline rather than the reverse,
+            // which is the same invariant the panels are held to.
+            assert!(
+                bar.bevel_width > bar.rim_width,
+                "{theme:?}: a {}px bevel cannot end in a {}px hairline",
+                bar.bevel_width,
+                bar.rim_width
+            );
+        }
+    }
+
+    /// The bar is the one frosted surface whose own client also paints a veil,
+    /// so the compositor's tint has to stay far below the panels' coverage or
+    /// the two stack into a muddy stripe.
+    #[test]
+    fn the_status_bar_tint_stays_under_the_client_veil() {
+        assert!(STATUS_BAR_GLASS_TINT_ALPHA > 0.0);
+        for theme in [UiTheme::Glass, UiTheme::GlassDark, UiTheme::Aurora] {
+            let palette = theme.palette();
+            assert!(
+                STATUS_BAR_GLASS_TINT_ALPHA < palette.toast[3] * 0.5,
+                "{theme:?}: a bar tint of {STATUS_BAR_GLASS_TINT_ALPHA} is panel coverage, not a hue"
+            );
+        }
     }
 
     #[test]
