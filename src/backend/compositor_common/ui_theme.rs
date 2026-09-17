@@ -34,8 +34,9 @@
 //!
 //! One surface does not take those params as written: the status bar, which is
 //! thin and always on screen rather than a summoned card, draws through
-//! [`GlassParams::for_status_bar`] and tints at
-//! [`STATUS_BAR_GLASS_TINT_ALPHA`].
+//! [`GlassParams::for_status_bar`], tints at [`STATUS_BAR_GLASS_TINT_ALPHA`]
+//! and rounds its sheet through [`UiPalette::status_bar_sheet_radius`] rather
+//! than with the window radius its pixmap uses.
 
 /// Which design language the compositor's own surfaces follow.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -127,6 +128,12 @@ pub(crate) const TAB_HOVER_ALPHA_SCALE: f32 = 0.5;
 ///
 /// Both backends read this, so the two compositors' bars stay identical.
 pub(crate) const STATUS_BAR_GLASS_TINT_ALPHA: f32 = 0.08;
+
+/// Most of the bar's height the solid-glass sheet's corner radius may spend.
+///
+/// Below one half the corners cannot meet, which is the whole point: see
+/// [`UiPalette::status_bar_sheet_radius`].
+pub(crate) const STATUS_BAR_SHEET_RADIUS_HEIGHT_FRACTION: f32 = 0.45;
 
 /// Extra knobs the frosted-glass surface shader needs. All of them are uniform
 /// inputs; a renderer that cannot supply a backdrop texture falls back to the
@@ -310,6 +317,43 @@ impl UiPalette {
     /// The card tint with its alpha scaled by a fade envelope.
     pub(crate) fn faded(color: [f32; 4], alpha: f32) -> [f32; 4] {
         [color[0], color[1], color[2], color[3] * alpha]
+    }
+
+    /// Corner radius for the solid-glass sheet drawn under a status bar
+    /// `bar_h` pixels tall, given the `window_radius` the bar's own pixmap is
+    /// rounded with.
+    ///
+    /// The sheet cannot simply take that radius. `window_radius` is the user's
+    /// `behavior.corner_radius`, chosen for windows hundreds of pixels tall,
+    /// and on a 28–40px bar it routinely lands at or past `bar_h / 2` — a
+    /// stadium. A stadium is the one silhouette the squircle mask cannot
+    /// express: the corner term of the superellipse SDF subtracts the radius
+    /// from the half-height, so once the radius reaches it the straight-edge
+    /// term is dead and the sheet has no flat top or bottom left to ease the
+    /// curvature out into. The ends stop reading as continuous corners and
+    /// start reading as the tapered tips of a lens — the more so because the
+    /// bar optics already brighten the rim that traces them.
+    ///
+    /// So the sheet keeps a flat edge by construction
+    /// ([`STATUS_BAR_SHEET_RADIUS_HEIGHT_FRACTION`] of the height), and on a
+    /// bar tall enough for that cap to exceed the theme's own pill radius it
+    /// takes [`Self::toast_radius`] instead, so a floating bar's corners match
+    /// the toasts and OSD pills that float beside it rather than growing with
+    /// the bar.
+    ///
+    /// It is never *rounder* than the pixmap above it: a larger radius would
+    /// cut the sheet inside the bar's own corner and leave the bar's edge
+    /// hanging over bare desktop. A square bar (`window_radius == 0`, which is
+    /// what a shaped or excluded window reports) keeps a square sheet.
+    pub(crate) fn status_bar_sheet_radius(&self, window_radius: f32, bar_h: f32) -> f32 {
+        if !window_radius.is_finite() || window_radius <= 0.0 {
+            return 0.0;
+        }
+        let mut radius = window_radius.min(self.toast_radius);
+        if bar_h.is_finite() && bar_h > 0.0 {
+            radius = radius.min(bar_h * STATUS_BAR_SHEET_RADIUS_HEIGHT_FRACTION);
+        }
+        radius.max(0.0)
     }
 
     /// One of the palette's text colors as a fill color, so a surface drawn
@@ -984,6 +1028,68 @@ mod tests {
                 "{theme:?}: a bar tint of {STATUS_BAR_GLASS_TINT_ALPHA} is panel coverage, not a hue"
             );
         }
+    }
+
+    /// The sheet under the bar must always keep a flat top and bottom edge:
+    /// that is what the superellipse eases its corners out into, and a window
+    /// radius picked for tall windows routinely reaches the bar's half-height.
+    #[test]
+    fn the_status_bar_sheet_always_keeps_a_flat_edge_between_its_corners() {
+        let glass = UiTheme::Glass.palette();
+        for bar_h in [24.0_f32, 28.0, 30.0, 36.0, 40.0, 64.0] {
+            for window_radius in [1.0_f32, 8.0, 14.0, 18.0, bar_h * 0.5, bar_h, 400.0] {
+                let radius = glass.status_bar_sheet_radius(window_radius, bar_h);
+                assert!(
+                    radius < bar_h * 0.5,
+                    "a {radius}px sheet radius on a {bar_h}px bar leaves no straight edge"
+                );
+                // Never rounder than the pixmap above it, or the bar's own
+                // corner overhangs bare desktop.
+                assert!(radius <= window_radius);
+            }
+        }
+    }
+
+    /// A bar tall enough that 45% of its height passes the theme's pill radius
+    /// stops growing with the bar and matches the toasts floating beside it.
+    #[test]
+    fn a_tall_status_bar_takes_the_themes_own_pill_radius() {
+        for theme in [UiTheme::Glass, UiTheme::GlassDark, UiTheme::Aurora] {
+            let palette = theme.palette();
+            let tall = palette.toast_radius / STATUS_BAR_SHEET_RADIUS_HEIGHT_FRACTION + 20.0;
+            assert!(
+                (palette.status_bar_sheet_radius(400.0, tall) - palette.toast_radius).abs() < 1e-6,
+                "{theme:?}: a {tall}px bar must round like its toasts"
+            );
+            // A short bar is capped by its own height instead, well under the
+            // pill radius.
+            let short = palette.status_bar_sheet_radius(400.0, 30.0);
+            assert!((short - 30.0 * STATUS_BAR_SHEET_RADIUS_HEIGHT_FRACTION).abs() < 1e-6);
+            assert!(short < palette.toast_radius);
+        }
+    }
+
+    /// A bar the user already asked to be square, or one whose height the
+    /// renderer cannot vouch for, must not gain corners here.
+    #[test]
+    fn the_status_bar_sheet_radius_degrades_safely() {
+        let glass = UiTheme::Glass.palette();
+        // A shaped or radius-excluded bar reports zero and stays square.
+        assert_eq!(glass.status_bar_sheet_radius(0.0, 30.0), 0.0);
+        assert_eq!(glass.status_bar_sheet_radius(-4.0, 30.0), 0.0);
+        assert_eq!(glass.status_bar_sheet_radius(f32::NAN, 30.0), 0.0);
+        // An unmeasurable height only drops the height cap; the theme's pill
+        // radius still bounds the sheet.
+        assert_eq!(
+            glass.status_bar_sheet_radius(400.0, 0.0),
+            glass.toast_radius
+        );
+        assert_eq!(
+            glass.status_bar_sheet_radius(400.0, f32::NAN),
+            glass.toast_radius
+        );
+        // A radius smaller than every cap passes through untouched.
+        assert!((glass.status_bar_sheet_radius(6.0, 30.0) - 6.0).abs() < 1e-6);
     }
 
     #[test]

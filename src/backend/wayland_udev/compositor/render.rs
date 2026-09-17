@@ -3282,6 +3282,10 @@ impl WaylandCompositor {
                             ui_palette.toast[2],
                             ui_theme::STATUS_BAR_GLASS_TINT_ALPHA,
                         ];
+                        // Not the window radius: on a strip this thin that is a
+                        // stadium, and the squircle needs a flat edge to ease
+                        // its corners out into.
+                        let sheet_radius = ui_palette.status_bar_sheet_radius(radius, draw_h);
                         self.glass_fill_rounded(
                             gl,
                             &projection,
@@ -3289,8 +3293,8 @@ impl WaylandCompositor {
                             draw_y,
                             draw_w,
                             draw_h,
-                            radius,
-                            radius,
+                            sheet_radius,
+                            sheet_radius,
                             tint,
                             fade,
                             &params,
@@ -7733,6 +7737,10 @@ mod glass_backdrop_contract_tests {
         assert!(
             body.contains("ui_theme::STATUS_BAR_GLASS_TINT_ALPHA"),
             "the bar tint must come from the shared constant"
+        );
+        assert!(
+            body.contains("ui_palette.status_bar_sheet_radius(radius,draw_h)"),
+            "the sheet must round through the shared bar radius, not the window's"
         );
     }
 }
