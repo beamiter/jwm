@@ -2904,7 +2904,12 @@ impl<C: CompositorConnection> Compositor<C> {
         // it draws solid even under the glass theme.
         let mut panel_fill = ui.panel;
         if overlay.locked {
-            self.glass_backdrop = None;
+            // Through the invalidation entry point, not the field: the unlock
+            // path (`set_system_ui`) and the frame's stale-scene check both go
+            // through it, and a lock card that dropped only the field would be
+            // the one place the ownership contract is written twice. Wayland's
+            // lock card has always called it.
+            self.invalidate_glass_backdrop();
             panel_fill[3] = 1.0;
         }
         unsafe {
@@ -8939,6 +8944,22 @@ mod glass_backdrop_contract_tests {
         let source = include_str!("render.rs");
         let capture = compact_item(source, "fn capture_glass_backdrop(");
         assert!(capture.contains("self.store_glass_backdrop(texture)"));
+    }
+
+    /// The lock card is the one draw that drops a backdrop mid-frame, and it
+    /// drops it through the same entry point as the unlock path and the frame's
+    /// stale-scene check. Writing the field directly here would put the
+    /// ownership contract in two places, and the second one is the one that
+    /// gets forgotten.
+    #[test]
+    fn the_lock_card_drops_the_backdrop_through_the_entry_point() {
+        let source = include_str!("render.rs");
+        let body = compact_item(source, "fn render_system_ui_panel(");
+        assert!(body.contains("self.invalidate_glass_backdrop();"));
+        assert!(
+            !body.contains("self.glass_backdrop=None"),
+            "the lock card must go through invalidate_glass_backdrop"
+        );
     }
 
     /// The bar takes the bar tuning, not the panels': it is ~30px tall and
