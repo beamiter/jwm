@@ -704,6 +704,27 @@ impl WMMonitor {
             .and_then(|p| p.sel.get(p.clamp_tag(p.cur_tag)).copied().flatten())
     }
 
+    /// Pre-select `client` on the lowest tag of `tag_mask` without touching
+    /// the current view's selection, so that viewing the tag opens on it.
+    /// The all-tags mask addresses the "view everything" slot.
+    pub fn set_selected_client_for_tag_mask(&mut self, tag_mask: u32, client: Option<ClientKey>) {
+        if tag_mask == 0 {
+            return;
+        }
+        let Some(pertag) = self.pertag.as_mut() else {
+            return;
+        };
+        let index = if tag_mask == !0 {
+            0
+        } else {
+            tag_mask.trailing_zeros() as usize + 1
+        };
+        let index = pertag.clamp_tag(index);
+        if let Some(slot) = pertag.sel.get_mut(index) {
+            *slot = client;
+        }
+    }
+
     /// 设置当前 Tag 的选中客户端
     pub fn set_selected_client_for_current_tag(&mut self, client: Option<ClientKey>) {
         if let Some(ref mut pertag) = self.pertag {

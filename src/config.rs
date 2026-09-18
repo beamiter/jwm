@@ -432,9 +432,11 @@ pub struct BehaviorConfig {
     /// regular window records its monitor and tags under its WM_CLASS; the
     /// next window with that identity that JWM did not launch itself (a
     /// keybinding `spawn`, the launcher, a scratchpad, a shell panel) is
-    /// placed there and that tag is shown. Windows opened from a terminal,
-    /// by an agent inside one, or by a running application all qualify.
-    /// `[[rules]]` entries that pin tags or a monitor still win. See
+    /// placed there. Windows opened from a terminal, by an agent inside
+    /// one, or by a running application all qualify. One that lands on
+    /// another monitor or tag than the focused window never takes focus or
+    /// switches the view; its tag is marked urgent instead. `[[rules]]`
+    /// entries that pin tags or a monitor still win. See
     /// docs/window-placement.md.
     #[serde(default = "default_true")]
     pub remember_closed_placement: bool,

@@ -76,11 +76,20 @@ longer connected, the window stays on the selected monitor and only the
 remembered tags apply, because tags are the user's workspaces and travel
 with them across outputs.
 
-A window placed by the memory is then shown: if its tag is not active on
-its monitor, that monitor switches to the tag, with the usual tag-switch
-transition. On another monitor the view switches there as well, and whether
-keyboard focus follows is decided by `behavior.focus_follows_new_window`,
-exactly as for any other new window on another monitor.
+## Focus stays where it is
+
+A window the memory sends to another monitor or tag than the focused
+window never pulls focus or the view along, whatever
+`behavior.focus_follows_new_window` says for windows the user launched
+here. The user was typing somewhere; a window they did not launch at the
+pointer must not take that away. Instead the window is laid out where it
+belongs, pre-selected on its own tag so that viewing the tag opens on it,
+and marked urgent so the status bar highlights the tag and, on a visible
+monitor, its border says where it went. Focusing it clears the cue. Do Not
+Disturb keeps the cue quiet like every other attention request.
+
+A window that comes back into the current view, on the selected monitor and
+an active tag, is focused exactly like any other new window.
 
 ## Diagnostics
 

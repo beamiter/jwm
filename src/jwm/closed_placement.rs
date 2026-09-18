@@ -23,6 +23,11 @@
 //! is blamed on the newest unclaimed JWM spawn only while that spawn is a
 //! few seconds old; D-Bus-activated applications and PID-less Wayland
 //! surfaces have no better evidence. Neither registry touches the disk.
+//!
+//! A window the memory sends somewhere other than the focused window's
+//! monitor and tag never pulls focus or the view along: it is laid out
+//! where it belongs, pre-selected on its own tag, and marked urgent so the
+//! bar and its border say where it went.
 
 use crate::Jwm;
 use crate::backend::api::Backend;
@@ -30,7 +35,6 @@ use crate::config::CONFIG;
 use crate::core::models::ClientKey;
 use crate::jwm::rules::RuleMatcher;
 use crate::jwm::scratchpad_pending::linux_process_start_time;
-use crate::jwm::types::WMArgEnum;
 use log::{debug, info, warn};
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
@@ -393,7 +397,8 @@ impl Jwm {
     /// After rules ran for a freshly managed top-level: mark it as one whose
     /// closing is worth remembering, and, when the memory has an entry for
     /// its identity and JWM did not launch it, move it there. Rule-pinned
-    /// tags or monitor are left alone. Returns whether anything moved.
+    /// tags or monitor are left alone. Returns whether anything moved, so
+    /// the caller knows the window may have left the user's view.
     pub(crate) fn adopt_remembered_placement(
         &mut self,
         backend: &mut dyn Backend,
@@ -474,50 +479,59 @@ impl Jwm {
         moved
     }
 
-    /// Show the tag a memory-placed client landed on, so the window the user
-    /// just launched is on screen. On another monitor the view switches
-    /// there too; whether focus follows is `behavior.focus_follows_new_window`'s
-    /// call, exactly as for any other new window on another monitor.
-    pub(crate) fn reveal_remembered_placement(
+    /// Whether a client sits on the selected monitor and inside its current
+    /// view: where the user is looking right now.
+    pub(crate) fn shares_focused_view(&self, client_key: ClientKey) -> bool {
+        self.state
+            .clients
+            .get(client_key)
+            .is_some_and(|client| client.mon.is_some() && client.mon == self.state.sel_mon)
+            && self.is_client_visible_by_key(client_key)
+    }
+
+    /// A memory-placed client that landed on another monitor or tag than
+    /// the focused window. It is laid out where it belongs and pre-selected
+    /// on its own tag, so viewing that tag opens on it; it is marked urgent
+    /// so the bar and its border say where it went; and focus stays exactly
+    /// where it was, whatever `behavior.focus_follows_new_window` says for
+    /// windows the user launched here. Do Not Disturb keeps the urgent cue
+    /// quiet like every other attention request.
+    pub(crate) fn settle_remembered_placement_elsewhere(
         &mut self,
         backend: &mut dyn Backend,
         client_key: ClientKey,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let Some((mon_key, tags, sticky)) = self
+        let Some((mon_key, tags, win)) = self
             .state
             .clients
             .get(client_key)
-            .and_then(|client| Some((client.mon?, client.state.tags, client.state.is_sticky)))
+            .and_then(|client| Some((client.mon?, client.state.tags, client.win)))
         else {
             return Ok(());
         };
-        if sticky {
-            return Ok(());
+        let previous_selection = self.get_selected_client_key();
+
+        if let Some(monitor) = self.state.monitors.get_mut(mon_key) {
+            monitor.set_selected_client_for_tag_mask(tags, Some(client_key));
         }
-        let Some(monitor) = self.state.monitors.get(mon_key) else {
-            return Ok(());
-        };
-        if tags & monitor.get_active_tags() != 0 {
-            return Ok(());
-        }
-        let wanted = tags & CONFIG.load().tagmask();
-        if wanted == 0 {
-            return Ok(());
+        self.arrange(backend, Some(mon_key));
+        if self.do_not_disturb {
+            debug!(
+                "[closed-placement] {win:?} landed away from the focused view; DND keeps it quiet"
+            );
+        } else if let Err(error) = self.seturgent(backend, client_key, true) {
+            warn!("[closed-placement] could not mark {win:?} urgent: {error}");
         }
 
-        let previous_monitor = self.state.sel_mon;
-        let previous_selection = self.get_selected_client_key();
-        let cross_monitor = previous_monitor != Some(mon_key);
-        if cross_monitor {
-            self.switch_to_monitor(backend, mon_key)?;
-        }
-        self.view(backend, &WMArgEnum::UInt(wanted))?;
-        if cross_monitor && !CONFIG.load().behavior().focus_follows_new_window {
-            if let Some(previous) = previous_monitor {
-                self.switch_to_monitor(backend, previous)?;
-            }
-            self.focus(backend, previous_selection)?;
-        }
+        // Mapping the window must not have moved focus. `focus()` rather
+        // than the bare set-focus step: it also writes the monitor
+        // selection back, which the focus stack shuffle would otherwise
+        // leave pointing at whatever was next.
+        self.focus(backend, previous_selection)?;
+        info!(
+            "[closed-placement] {win:?} placed away from the focused view on monitor {:?} tags {tags:#b}; focus left alone",
+            self.state.monitors.get(mon_key).map(|monitor| monitor.num)
+        );
         Ok(())
     }
 

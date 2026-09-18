@@ -754,12 +754,16 @@ impl Jwm {
                 // fallback remains managed.
                 warn!("[manage] could not iconify adopted client {win:?}: {error}");
             }
+        } else if placed_by_memory
+            && minimized_restore.is_none()
+            && !self.shares_focused_view(client_key)
+        {
+            // The memory sent this window to another monitor or tag than
+            // the focused one. It must not pull focus or the view away.
+            // (A restart snapshot overriding the memory takes the normal
+            // path, as does a window that landed in the current view.)
+            self.settle_remembered_placement_elsewhere(backend, client_key)?;
         } else {
-            // A restart snapshot has just overridden the memory's placement;
-            // only a client the memory actually moved gets its tag shown.
-            if placed_by_memory && minimized_restore.is_none() {
-                self.reveal_remembered_placement(backend, client_key)?;
-            }
             self.handle_new_client_focus(backend, client_key)?;
         }
 
@@ -5295,11 +5299,25 @@ mod unmanage_minimized_tests {
         (jwm, first, second)
     }
 
+    /// A terminal the user is working in: managed on the selected
+    /// monitor's current view and focused. It shares the test process's
+    /// PID, so a window managed afterwards with that PID counts as opened
+    /// from inside it.
+    fn focused_terminal(jwm: &mut Jwm, backend: &mut ClientSpyBackend, raw: u64) -> ClientKey {
+        set_class(backend, "kitty", "kitty");
+        let terminal = manage_window(jwm, backend, raw);
+        assert_eq!(jwm.get_selected_client_key(), Some(terminal));
+        assert!(jwm.is_client_visible_by_key(terminal));
+        set_class(backend, "firefox", "Navigator");
+        terminal
+    }
+
     #[test]
     fn a_window_opened_from_outside_jwm_returns_to_where_its_class_was_closed() {
         let mut backend = ClientSpyBackend::new();
         let (mut jwm, first, second) =
             jwm_that_remembers_a_browser_on_the_second_monitor(&mut backend);
+        let terminal = focused_terminal(&mut jwm, &mut backend, 0x9100);
 
         let again = manage_window(&mut jwm, &mut backend, 0x9102);
 
@@ -5312,20 +5330,57 @@ mod unmanage_minimized_tests {
         assert_eq!(client.state.tags, 0b100, "back on the tag it was closed on");
         assert_eq!(
             active_tags(&jwm, second),
-            0b100,
-            "that monitor switched to show the returned window"
+            0b1,
+            "the other monitor's view is not switched behind the user's back"
         );
         assert_eq!(
             active_tags(&jwm, first),
             0b1,
-            "the user's own monitor kept its tag"
+            "the user's own view kept its tag"
         );
         assert_eq!(
             jwm.state.sel_mon,
             Some(first),
-            "focus_follows_new_window is off: the selected monitor did not move"
+            "the selected monitor did not move"
         );
+        assert_eq!(
+            jwm.get_selected_client_key(),
+            Some(terminal),
+            "the window the user was working in keeps focus"
+        );
+        assert!(!jwm.is_client_visible_by_key(again));
+        assert!(
+            jwm.state.clients[again].state.is_urgent,
+            "the bar's tag highlight says where the window went"
+        );
+        assert_eq!(
+            jwm.state.monitors[second]
+                .pertag
+                .as_ref()
+                .and_then(|pertag| pertag.sel[3]),
+            Some(again),
+            "its own tag opens on it"
+        );
+    }
+
+    #[test]
+    fn viewing_the_remembered_tag_opens_on_the_returned_window() {
+        let mut backend = ClientSpyBackend::new();
+        let (mut jwm, _first, second) =
+            jwm_that_remembers_a_browser_on_the_second_monitor(&mut backend);
+        let _terminal = focused_terminal(&mut jwm, &mut backend, 0x9100);
+        let again = manage_window(&mut jwm, &mut backend, 0x9102);
+
+        jwm.switch_to_monitor(&mut backend, second).unwrap();
+        jwm.view(&mut backend, &crate::jwm::types::WMArgEnum::UInt(0b100))
+            .unwrap();
+
         assert!(jwm.is_client_visible_by_key(again));
+        assert_eq!(jwm.get_selected_client_key(), Some(again));
+        assert!(
+            !jwm.state.clients[again].state.is_urgent,
+            "focusing it clears the cue"
+        );
     }
 
     #[test]
@@ -5372,33 +5427,66 @@ mod unmanage_minimized_tests {
     }
 
     #[test]
-    fn the_memory_switches_the_selected_monitor_to_the_remembered_tag() {
+    fn a_window_returning_to_another_tag_of_the_selected_monitor_leaves_focus_alone() {
         let mut backend = ClientSpyBackend::new();
         let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
         let monitor = jwm.state.monitor_order[0];
-        set_class(&backend, "Alacritty", "Alacritty");
         backend
             .property_ops
             .window_pid
             .store(external_pid(), Ordering::Relaxed);
 
+        set_class(&backend, "Alacritty", "Alacritty");
         jwm.view(&mut backend, &crate::jwm::types::WMArgEnum::UInt(0b1000))
             .unwrap();
-        let first = manage_window(&mut jwm, &mut backend, 0x9201);
-        jwm.unmanage(&mut backend, Some(first), true).unwrap();
+        let closed_on_four = manage_window(&mut jwm, &mut backend, 0x9201);
+        jwm.unmanage(&mut backend, Some(closed_on_four), true)
+            .unwrap();
         jwm.view(&mut backend, &crate::jwm::types::WMArgEnum::UInt(0b1))
             .unwrap();
-        assert_eq!(active_tags(&jwm, monitor), 0b1);
+        let terminal = focused_terminal(&mut jwm, &mut backend, 0x9200);
 
+        set_class(&backend, "Alacritty", "Alacritty");
         let again = manage_window(&mut jwm, &mut backend, 0x9202);
 
         assert_eq!(jwm.state.clients[again].state.tags, 0b1000);
-        assert_eq!(active_tags(&jwm, monitor), 0b1000, "the tag came into view");
+        assert_eq!(
+            active_tags(&jwm, monitor),
+            0b1,
+            "the view stays on the user's tag"
+        );
         assert_eq!(
             jwm.get_selected_client_key(),
-            Some(again),
-            "the returned window is the one focused"
+            Some(terminal),
+            "focus stays in the terminal"
         );
+        assert!(jwm.state.clients[again].state.is_urgent);
+
+        jwm.view(&mut backend, &crate::jwm::types::WMArgEnum::UInt(0b1000))
+            .unwrap();
+        assert_eq!(jwm.get_selected_client_key(), Some(again));
+    }
+
+    #[test]
+    fn a_window_returning_into_the_current_view_takes_focus_as_usual() {
+        let mut backend = ClientSpyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        backend
+            .property_ops
+            .window_pid
+            .store(external_pid(), Ordering::Relaxed);
+
+        set_class(&backend, "Alacritty", "Alacritty");
+        let closed_here = manage_window(&mut jwm, &mut backend, 0x9211);
+        jwm.unmanage(&mut backend, Some(closed_here), true).unwrap();
+        let _terminal = focused_terminal(&mut jwm, &mut backend, 0x9210);
+
+        set_class(&backend, "Alacritty", "Alacritty");
+        let again = manage_window(&mut jwm, &mut backend, 0x9212);
+
+        assert!(jwm.is_client_visible_by_key(again));
+        assert_eq!(jwm.get_selected_client_key(), Some(again));
+        assert!(!jwm.state.clients[again].state.is_urgent);
     }
 
     #[test]
