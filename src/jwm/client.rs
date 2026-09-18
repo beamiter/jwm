@@ -599,7 +599,7 @@ impl Jwm {
             .clients
             .get(client_key)
             .is_some_and(|client| client.state.is_hidden);
-        self.handle_transient_for(backend, client_key)?;
+        let placed_by_memory = self.handle_transient_for(backend, client_key)?;
 
         if let Some(state) = minimized_restore {
             self.apply_minimized_restore_before_adjust(client_key, state);
@@ -755,6 +755,11 @@ impl Jwm {
                 warn!("[manage] could not iconify adopted client {win:?}: {error}");
             }
         } else {
+            // A restart snapshot has just overridden the memory's placement;
+            // only a client the memory actually moved gets its tag shown.
+            if placed_by_memory && minimized_restore.is_none() {
+                self.reveal_remembered_placement(backend, client_key)?;
+            }
             self.handle_new_client_focus(backend, client_key)?;
         }
 
@@ -929,11 +934,16 @@ impl Jwm {
         Ok(())
     }
 
+    /// Give a new client its monitor and tags: a transient follows its
+    /// parent, anything else starts on the selected monitor, takes the
+    /// configured rules, and then the closed-placement memory. Returns
+    /// whether that memory moved the client somewhere other than the
+    /// default, so the caller can reveal the tag it landed on.
     pub(crate) fn handle_transient_for(
         &mut self,
         backend: &mut dyn Backend,
         client_key: ClientKey,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<bool, Box<dyn std::error::Error>> {
         let win = if let Some(client) = self.state.clients.get(client_key) {
             client.win
         } else {
@@ -967,6 +977,7 @@ impl Jwm {
                     }
                     self.applyrules_by_key(backend, client_key);
                 }
+                Ok(false)
             }
             None => {
                 info!("no WM_TRANSIENT_FOR property");
@@ -974,9 +985,9 @@ impl Jwm {
                     client.mon = self.state.sel_mon;
                 }
                 self.applyrules_by_key(backend, client_key);
+                Ok(self.adopt_remembered_placement(backend, client_key))
             }
         }
-        Ok(())
     }
 
     pub(crate) fn update_class_info(&mut self, backend: &mut dyn Backend, client: &mut WMClient) {
@@ -1704,6 +1715,9 @@ impl Jwm {
         destroyed: bool,
     ) -> Result<(), Box<dyn std::error::Error>> {
         self.animations.remove(client_key);
+        // Where this window sat is the best guess for where its application
+        // goes next time; capture it while monitor and tags are still bound.
+        self.remember_closed_placement(client_key, std::time::Instant::now());
         // If this client is swallowing a parent, restore the parent first so
         // it gets remapped before we drop our reference to the swallow link.
         self.try_unswallow(backend, client_key);
@@ -2130,6 +2144,8 @@ mod unmanage_minimized_tests {
         minimized_restore: Mutex<Option<MinimizedRestoreState>>,
         restore_accesses: Mutex<Vec<RestoreAccess>>,
         window_pid: AtomicU32,
+        /// `(instance, class)` reported for every window, as `get_class` does.
+        class: Mutex<(String, String)>,
     }
 
     impl PropertyOps for ClientPropertyOps {
@@ -2138,7 +2154,7 @@ mod unmanage_minimized_tests {
         }
 
         fn get_class(&self, _win: WindowId) -> (String, String) {
-            (String::new(), String::new())
+            self.class.lock().expect("class lock").clone()
         }
 
         fn get_window_types(&self, _win: WindowId) -> Vec<WindowType> {
@@ -5189,5 +5205,288 @@ mod unmanage_minimized_tests {
         assert_initially_minimized_ineligible_does_not_create_ghost(true, false, false);
         assert_initially_minimized_ineligible_does_not_create_ghost(false, true, false);
         assert_initially_minimized_ineligible_does_not_create_ghost(false, false, true);
+    }
+
+    // ---- closed-placement memory ----------------------------------------
+
+    fn second_output() -> crate::backend::api::OutputInfo {
+        crate::backend::api::OutputInfo {
+            id: crate::backend::common_define::OutputId(1),
+            name: "Virtual-2".into(),
+            x: 1920,
+            y: 0,
+            width: 1920,
+            height: 1080,
+            scale: 1.0,
+            refresh_rate: 60_000,
+            hdr_capable: false,
+            hdr_metadata: None,
+            identity: crate::backend::api::OutputIdentity::connector_only("Virtual-2"),
+        }
+    }
+
+    fn set_class(backend: &ClientSpyBackend, class: &str, instance: &str) {
+        *backend.property_ops.class.lock().expect("class lock") =
+            (instance.to_owned(), class.to_owned());
+    }
+
+    /// The test process itself: alive in `/proc`, with an ancestry (cargo,
+    /// a shell, an init) that contains neither a managed client nor a JWM
+    /// spawn, so a window carrying this PID is an external launch.
+    fn external_pid() -> u32 {
+        std::process::id()
+    }
+
+    fn manage_window(jwm: &mut Jwm, backend: &mut ClientSpyBackend, raw: u64) -> ClientKey {
+        let window = WindowId::from_raw(raw);
+        jwm.manage(
+            backend,
+            window,
+            &Geometry {
+                x: 10,
+                y: 20,
+                w: 640,
+                h: 480,
+                border: 0,
+            },
+        )
+        .unwrap();
+        jwm.wintoclient(window).expect("window managed")
+    }
+
+    fn active_tags(jwm: &Jwm, monitor: MonitorKey) -> u32 {
+        jwm.state.monitors[monitor].get_active_tags()
+    }
+
+    /// Two monitors; the browser class was last closed on the second one's
+    /// tag 3, and both monitors have since gone back to tag 1 with the
+    /// first one selected.
+    fn jwm_that_remembers_a_browser_on_the_second_monitor(
+        backend: &mut ClientSpyBackend,
+    ) -> (Jwm, MonitorKey, MonitorKey) {
+        let mut jwm = Jwm::new_with_runtime_backend(backend, "test").unwrap();
+        jwm.add_monitor(second_output());
+        let first = jwm.state.monitor_order[0];
+        let second = jwm.state.monitor_order[1];
+        set_class(backend, "firefox", "Navigator");
+        backend
+            .property_ops
+            .window_pid
+            .store(external_pid(), Ordering::Relaxed);
+
+        jwm.switch_to_monitor(backend, second).unwrap();
+        jwm.view(backend, &crate::jwm::types::WMArgEnum::UInt(0b100))
+            .unwrap();
+        let browser = manage_window(&mut jwm, backend, 0x9101);
+        assert_eq!(jwm.state.clients[browser].mon, Some(second));
+        assert_eq!(jwm.state.clients[browser].state.tags, 0b100);
+        assert!(jwm.state.clients[browser].state.remembers_closed_placement);
+        assert!(jwm.closed_placements.is_empty());
+
+        jwm.unmanage(backend, Some(browser), true).unwrap();
+        assert!(!jwm.closed_placements.is_empty());
+
+        jwm.view(backend, &crate::jwm::types::WMArgEnum::UInt(0b1))
+            .unwrap();
+        jwm.switch_to_monitor(backend, first).unwrap();
+        assert_eq!(jwm.state.sel_mon, Some(first));
+        assert_eq!(active_tags(&jwm, first), 0b1);
+        assert_eq!(active_tags(&jwm, second), 0b1);
+        (jwm, first, second)
+    }
+
+    #[test]
+    fn a_window_opened_from_outside_jwm_returns_to_where_its_class_was_closed() {
+        let mut backend = ClientSpyBackend::new();
+        let (mut jwm, first, second) =
+            jwm_that_remembers_a_browser_on_the_second_monitor(&mut backend);
+
+        let again = manage_window(&mut jwm, &mut backend, 0x9102);
+
+        let client = &jwm.state.clients[again];
+        assert_eq!(
+            client.mon,
+            Some(second),
+            "back on the monitor it was closed on"
+        );
+        assert_eq!(client.state.tags, 0b100, "back on the tag it was closed on");
+        assert_eq!(
+            active_tags(&jwm, second),
+            0b100,
+            "that monitor switched to show the returned window"
+        );
+        assert_eq!(
+            active_tags(&jwm, first),
+            0b1,
+            "the user's own monitor kept its tag"
+        );
+        assert_eq!(
+            jwm.state.sel_mon,
+            Some(first),
+            "focus_follows_new_window is off: the selected monitor did not move"
+        );
+        assert!(jwm.is_client_visible_by_key(again));
+    }
+
+    #[test]
+    fn a_window_jwm_launched_itself_keeps_the_pointer_placement() {
+        let mut backend = ClientSpyBackend::new();
+        let (mut jwm, first, second) =
+            jwm_that_remembers_a_browser_on_the_second_monitor(&mut backend);
+        // A keybinding `spawn` of the same browser: its PID is on record.
+        jwm.note_jwm_launch(external_pid(), std::time::Instant::now());
+
+        let again = manage_window(&mut jwm, &mut backend, 0x9103);
+
+        let client = &jwm.state.clients[again];
+        assert_eq!(client.mon, Some(first), "stays on the selected monitor");
+        assert_eq!(client.state.tags, 0b1, "stays on the active tag");
+        assert_eq!(
+            active_tags(&jwm, second),
+            0b1,
+            "nothing was revealed elsewhere"
+        );
+        assert!(
+            client.state.remembers_closed_placement,
+            "its own closing is still worth remembering"
+        );
+    }
+
+    #[test]
+    fn a_window_from_a_managed_process_gets_the_memory_even_if_jwm_spawned_that_process() {
+        let mut backend = ClientSpyBackend::new();
+        let (mut jwm, _first, second) =
+            jwm_that_remembers_a_browser_on_the_second_monitor(&mut backend);
+        // JWM spawned a terminal (this very PID); its window is managed on
+        // the first monitor; something inside it opens the browser.
+        jwm.note_jwm_launch(external_pid(), std::time::Instant::now());
+        set_class(&backend, "kitty", "kitty");
+        let terminal = manage_window(&mut jwm, &mut backend, 0x9104);
+        assert_eq!(jwm.state.clients[terminal].pid, Some(external_pid()));
+
+        set_class(&backend, "firefox", "Navigator");
+        let again = manage_window(&mut jwm, &mut backend, 0x9105);
+
+        assert_eq!(jwm.state.clients[again].mon, Some(second));
+        assert_eq!(jwm.state.clients[again].state.tags, 0b100);
+    }
+
+    #[test]
+    fn the_memory_switches_the_selected_monitor_to_the_remembered_tag() {
+        let mut backend = ClientSpyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let monitor = jwm.state.monitor_order[0];
+        set_class(&backend, "Alacritty", "Alacritty");
+        backend
+            .property_ops
+            .window_pid
+            .store(external_pid(), Ordering::Relaxed);
+
+        jwm.view(&mut backend, &crate::jwm::types::WMArgEnum::UInt(0b1000))
+            .unwrap();
+        let first = manage_window(&mut jwm, &mut backend, 0x9201);
+        jwm.unmanage(&mut backend, Some(first), true).unwrap();
+        jwm.view(&mut backend, &crate::jwm::types::WMArgEnum::UInt(0b1))
+            .unwrap();
+        assert_eq!(active_tags(&jwm, monitor), 0b1);
+
+        let again = manage_window(&mut jwm, &mut backend, 0x9202);
+
+        assert_eq!(jwm.state.clients[again].state.tags, 0b1000);
+        assert_eq!(active_tags(&jwm, monitor), 0b1000, "the tag came into view");
+        assert_eq!(
+            jwm.get_selected_client_key(),
+            Some(again),
+            "the returned window is the one focused"
+        );
+    }
+
+    #[test]
+    fn a_newer_close_replaces_the_remembered_placement() {
+        let mut backend = ClientSpyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        set_class(&backend, "Alacritty", "Alacritty");
+        backend
+            .property_ops
+            .window_pid
+            .store(external_pid(), Ordering::Relaxed);
+
+        jwm.view(&mut backend, &crate::jwm::types::WMArgEnum::UInt(0b1000))
+            .unwrap();
+        let on_four = manage_window(&mut jwm, &mut backend, 0x9301);
+        jwm.unmanage(&mut backend, Some(on_four), true).unwrap();
+        jwm.view(&mut backend, &crate::jwm::types::WMArgEnum::UInt(0b10))
+            .unwrap();
+        // Comes back on tag 4, is closed there? No: the user moves on and
+        // closes the next one on tag 2, which is the newest word.
+        let on_two = manage_window(&mut jwm, &mut backend, 0x9302);
+        jwm.state.clients[on_two].state.tags = 0b10;
+        jwm.unmanage(&mut backend, Some(on_two), true).unwrap();
+        jwm.view(&mut backend, &crate::jwm::types::WMArgEnum::UInt(0b1))
+            .unwrap();
+
+        let again = manage_window(&mut jwm, &mut backend, 0x9303);
+        assert_eq!(jwm.state.clients[again].state.tags, 0b10);
+    }
+
+    #[test]
+    fn a_dock_window_is_never_remembered() {
+        let mut backend = ClientSpyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        set_class(&backend, "Polybar", "polybar");
+        backend
+            .property_ops
+            .dock_type
+            .store(true, Ordering::Relaxed);
+        backend
+            .property_ops
+            .window_pid
+            .store(external_pid(), Ordering::Relaxed);
+
+        let dock = manage_window(&mut jwm, &mut backend, 0x9401);
+        assert!(!jwm.state.clients[dock].state.remembers_closed_placement);
+        jwm.unmanage(&mut backend, Some(dock), true).unwrap();
+        assert!(jwm.closed_placements.is_empty());
+    }
+
+    #[test]
+    fn an_anonymous_window_is_never_remembered() {
+        let mut backend = ClientSpyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        backend
+            .property_ops
+            .window_pid
+            .store(external_pid(), Ordering::Relaxed);
+
+        let anonymous = manage_window(&mut jwm, &mut backend, 0x9501);
+        assert!(
+            !jwm.state.clients[anonymous]
+                .state
+                .remembers_closed_placement
+        );
+        jwm.unmanage(&mut backend, Some(anonymous), true).unwrap();
+        assert!(jwm.closed_placements.is_empty());
+    }
+
+    #[test]
+    fn switching_the_feature_off_forgets_what_was_learned() {
+        let mut backend = ClientSpyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        set_class(&backend, "Alacritty", "Alacritty");
+        backend
+            .property_ops
+            .window_pid
+            .store(external_pid(), Ordering::Relaxed);
+        let window = manage_window(&mut jwm, &mut backend, 0x9601);
+        jwm.unmanage(&mut backend, Some(window), true).unwrap();
+        assert!(!jwm.closed_placements.is_empty());
+
+        jwm.reconcile_closed_placement_config(true);
+        assert!(
+            !jwm.closed_placements.is_empty(),
+            "still on: nothing forgotten"
+        );
+        jwm.reconcile_closed_placement_config(false);
+        assert!(jwm.closed_placements.is_empty());
     }
 }

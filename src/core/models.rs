@@ -378,6 +378,11 @@ pub struct ClientState {
     pub no_decorations: bool,
     pub sync_counter: Option<u32>,
     pub sync_value: u64,
+    /// True for a regular, non-transient, non-popup top-level: the kind of
+    /// window whose monitor and tags are worth remembering when it closes,
+    /// so the next window of the same application can return there. See
+    /// `jwm::closed_placement`.
+    pub remembers_closed_placement: bool,
 
     pub dock_layer_info: Option<LayerSurfaceInfo>,
 }

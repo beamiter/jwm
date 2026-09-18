@@ -365,6 +365,10 @@ the Compiz-style lit prism documented in [cube effects](docs/cube-effects.md).
 [tags overview](docs/tags-overview.md), and a
 monitor with two or more tiled windows shows a
 [window tab strip](docs/window-tabs.md) across the top of its tiling area.
+A window that comes back without JWM launching it, opened from a terminal,
+by an agent inside one, or by a running application, returns to the monitor
+and tag where that application was last closed; see
+[window placement](docs/window-placement.md).
 Alt+Space cycles layouts over a film strip of live thumbnails; see
 [the layout picker](docs/layout-picker.md).
 Minimized windows fold into the bar, expose a magnifying Dock shelf and show a

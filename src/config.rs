@@ -428,6 +428,16 @@ impl ClientMoveResize {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BehaviorConfig {
     pub focus_follows_new_window: bool,
+    /// Put a window back where its application was last closed. Closing a
+    /// regular window records its monitor and tags under its WM_CLASS; the
+    /// next window with that identity that JWM did not launch itself (a
+    /// keybinding `spawn`, the launcher, a scratchpad, a shell panel) is
+    /// placed there and that tag is shown. Windows opened from a terminal,
+    /// by an agent inside one, or by a running application all qualify.
+    /// `[[rules]]` entries that pin tags or a monitor still win. See
+    /// docs/window-placement.md.
+    #[serde(default = "default_true")]
+    pub remember_closed_placement: bool,
     /// Where a newly-managed window lands in its monitor's client list, which
     /// is what decides its slot in tiling layouts:
     /// - "master" (default): head of the list, i.e. the master area (dwm-like);
@@ -1820,6 +1830,7 @@ impl Default for Config {
                 },
                 behavior: BehaviorConfig {
                     focus_follows_new_window: false,
+                    remember_closed_placement: true,
                     new_client_position: default_new_client_position(),
                     drag_threshold_px: default_drag_threshold_px(),
                     client_moveresize: default_client_moveresize(),
@@ -4162,6 +4173,9 @@ impl Config {
             }
             "behavior.wallpaper_dir" => self.inner.behavior.wallpaper_dir = as_string()?,
             "behavior.wallpaper_colors" => self.inner.behavior.wallpaper_colors = as_bool()?,
+            "behavior.remember_closed_placement" => {
+                self.inner.behavior.remember_closed_placement = as_bool()?
+            }
             "behavior.idle_dim_secs" => self.inner.behavior.idle_dim_secs = u64::from(as_u32()?),
             "behavior.idle_dim_level" => {
                 let level = as_f32()?;

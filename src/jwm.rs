@@ -1,5 +1,6 @@
 pub mod client;
 pub mod client_stack;
+pub(crate) mod closed_placement;
 pub mod constraints;
 pub mod event_dispatcher;
 pub mod features;
@@ -201,6 +202,13 @@ pub struct Jwm {
 
     pub scratchpads: HashMap<String, ClientKey>,
     pub(crate) scratchpad_pending: scratchpad_pending::ScratchpadPendingRegistry,
+    /// Where each WM_CLASS identity was last closed, so a window that comes
+    /// back without JWM launching it lands there. See
+    /// [`closed_placement`].
+    pub(crate) closed_placements: closed_placement::ClosedPlacementMemory,
+    /// Every child JWM spawned itself, for telling a keybinding/launcher
+    /// window apart from one opened from a terminal or by an application.
+    pub(crate) jwm_launches: closed_placement::JwmLaunchRegistry,
 
     pub animations: AnimationManager,
     pub(crate) hidden_client_park_retries: monitor::HiddenClientParkRetries,
@@ -1144,6 +1152,8 @@ impl Jwm {
             last_stacking: SecondaryMap::new(),
             scratchpads: HashMap::new(),
             scratchpad_pending: scratchpad_pending::ScratchpadPendingRegistry::default(),
+            closed_placements: closed_placement::ClosedPlacementMemory::default(),
+            jwm_launches: closed_placement::JwmLaunchRegistry::default(),
             animations: AnimationManager::new(),
             hidden_client_park_retries: monitor::HiddenClientParkRetries::default(),
             key_bindings: CONFIG.load().get_keys(),

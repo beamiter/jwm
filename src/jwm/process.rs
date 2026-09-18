@@ -541,6 +541,10 @@ impl Jwm {
 
     /// Register a JWM-owned fire-and-forget child for backend-neutral reaping.
     pub(crate) fn supervise_transient_child(&mut self, child: Child) {
+        // Every window this child (or its descendants) maps is the user's
+        // explicit doing at the pointer's monitor/tag, not a candidate for
+        // the closed-placement memory.
+        self.note_jwm_launch(child.id(), Instant::now());
         self.transient_children.supervise(child);
     }
 }

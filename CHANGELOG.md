@@ -7,6 +7,15 @@ monorepo use independent Semantic Versions.
 
 ### Added
 
+- Closed-placement memory: a regular window's monitor and tags are
+  remembered under its `WM_CLASS` when it closes, and the next window with
+  that identity that JWM did not launch itself (opened from a terminal, by an
+  agent inside one, or by a running application) returns there and has its
+  tag shown. Keybinding, launcher, scratchpad and shell-panel launches keep
+  the pointer's monitor and tag; `[[rules]]` still win. New
+  `behavior.remember_closed_placement` (default `true`). See
+  [docs/window-placement.md](docs/window-placement.md).
+
 - Tab bar frosted glass is common-linear-aware: backdrop capture follows the
   bound target domain and tint/rim decode via `u_scene_linear`, so tab-only
   frames no longer force the exact-sRGB HDR fallback.
