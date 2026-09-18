@@ -414,6 +414,8 @@ where
     shadow_exclude: Vec<String>,
     opacity_rules: Vec<OpacityRule>,
     blur_exclude: Vec<String>,
+    /// Classes that never play open/close effects (`behavior.fade_exclude`).
+    fade_exclude: Vec<String>,
     /// Whether the status bar takes part in backdrop blur like any other
     /// translucent window.
     blur_status_bar: bool,

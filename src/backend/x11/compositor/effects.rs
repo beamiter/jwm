@@ -2141,10 +2141,11 @@ mod tests {
 
     #[test]
     fn ime_popup_fades_do_not_count_as_client_fades() {
-        // fcitx5's candidate list fading on every keystroke keeps the render
-        // loop pacing frames (`any`) but must not feed the adaptive blur
-        // downgrade (`on_clients`), or a lone frosted client pumps between
-        // Full and Reduced blur the whole time a user types Chinese.
+        // An override-redirect popup fading (a menu, a tooltip, or an input
+        // method's candidate list when `behavior.fade_exclude` was emptied)
+        // keeps the render loop pacing frames (`any`) but must not feed the
+        // adaptive blur downgrade (`on_clients`), or a lone frosted client
+        // pumps between Full and Reduced blur the whole time a user types.
         let mut tick = FadeTick::default();
         assert!(!tick.any && !tick.on_clients);
 

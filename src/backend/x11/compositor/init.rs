@@ -961,6 +961,7 @@ impl<C: CompositorConnection> Compositor<C> {
             shadow_exclude: behavior.shadow_exclude.clone(),
             opacity_rules,
             blur_exclude: behavior.blur_exclude.clone(),
+            fade_exclude: behavior.fade_exclude.clone(),
             blur_status_bar: behavior.blur_status_bar,
             rounded_corners_exclude: behavior.rounded_corners_exclude.clone(),
             detect_client_opacity: behavior.detect_client_opacity,

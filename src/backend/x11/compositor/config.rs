@@ -596,6 +596,7 @@ impl<C: CompositorConnection> Compositor<C> {
         // --- Per-window rules (re-parse from strings) ---
         self.shadow_exclude.clone_from(&behavior.shadow_exclude);
         self.blur_exclude.clone_from(&behavior.blur_exclude);
+        self.fade_exclude.clone_from(&behavior.fade_exclude);
         // Toggling this adds or removes the bar from the blur set, and a cache
         // built while it was outside holds no backdrop for it.
         if self.blur_status_bar != behavior.blur_status_bar {

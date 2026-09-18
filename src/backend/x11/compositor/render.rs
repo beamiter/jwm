@@ -6622,6 +6622,13 @@ impl<C: CompositorConnection> Compositor<C> {
                                         &params,
                                     );
                                     self.glass_backdrop = previous_backdrop;
+                                    // `glass_fill_rounded` binds the glass program
+                                    // behind the tracker's back. Forget what the
+                                    // tracker believes is bound, or its dedupe
+                                    // skips the restore and the bar pixmap below
+                                    // is drawn through the glass shader: a sheet
+                                    // with no bar on it.
+                                    self.gl_state_tracker.reset_draw_bindings();
                                     self.gl_state_tracker
                                         .use_program(&self.gl, Some(self.program));
                                     self.gl.uniform_matrix_4_f32_slice(
@@ -9058,6 +9065,27 @@ mod glass_backdrop_contract_tests {
         assert!(
             body.contains("ui_palette.status_bar_sheet_radius(radius,bh)"),
             "the sheet must round through the shared bar radius, not the window's"
+        );
+        // The sheet is drawn behind the state tracker's back; the restore
+        // of the window program must go through a reset first, or the
+        // tracker's dedupe leaves the glass program bound for the bar pixmap.
+        let sheet_at = body
+            .find("ui_palette.status_bar_sheet_radius(radius,bh)")
+            .expect("sheet");
+        let pixmap_at = body[sheet_at..]
+            .find("bind_texture(glow::TEXTURE_2D,Some(wt.gl_texture))")
+            .map(|at| sheet_at + at)
+            .expect("bar pixmap draw after the sheet");
+        let between = &body[sheet_at..pixmap_at];
+        let reset_at = between.find("gl_state_tracker.reset_draw_bindings();").expect(
+            "the bar sheet must be followed by a tracker reset before the window program is restored",
+        );
+        let restore_at = between
+            .find("gl_state_tracker.use_program(&self.gl,Some(self.program));")
+            .expect("window program restored after the sheet");
+        assert!(
+            reset_at < restore_at,
+            "reset the tracker before restoring the window program"
         );
     }
 

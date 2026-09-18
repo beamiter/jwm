@@ -285,6 +285,21 @@ monorepo use independent Semantic Versions.
 
 ### Fixed
 
+- X11: the status bar's content is back under a glass theme. The bar's
+  solid-glass sheet binds its shader behind the GL state tracker's back, and
+  the tracker's dedupe then skipped restoring the window shader, so the bar
+  pixmap was drawn through the glass program: a frosted sheet with no tags,
+  title or clock on it. The tracker is now reset before the restore.
+
+- X11: input-method candidate windows no longer flicker while typing. fcitx
+  and ibus unmap and remap their popup on every keystroke, and each cycle
+  started a closing fade and resumed an opening one, so the panel pulsed
+  between opacities for as long as the user typed. Classes listed in the new
+  `behavior.fade_exclude` skip every open/close effect (fade, scale, open
+  ripple, close particles); the default covers `fcitx`, `fcitx5`,
+  `fcitx-qimpanel`, `sogou-qimpanel` and `ibus-ui-gtk3`. Set it to `[]` to
+  animate everything again.
+
 - Pending OSD no longer drops a confirmed audio-device name card when a
   volume/mic correction races the same flush: dual slots prefer the named
   device card; the next volume key re-raises the level OSD. See

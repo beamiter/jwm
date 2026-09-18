@@ -17,6 +17,14 @@ fn retirement_uses_genie(reason: WindowRetirement, genie_enabled: bool) -> bool 
     genie_enabled && reason == WindowRetirement::ExplicitlyMinimized
 }
 
+/// Whether windows of `class_name` skip every open/close effect: fade,
+/// scale animation, open ripple, close particles. `behavior.fade_exclude`
+/// holds the classes; the default is the input-method popups, which fcitx
+/// and ibus unmap and remap on every keystroke.
+fn skips_open_close_effects(class_name: &str, fade_exclude: &[String]) -> bool {
+    crate::backend::compositor_common::rules::class_matches_exclude(class_name, fade_exclude)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AddWindowMinimizeDisposition {
     TrackNormally,
@@ -643,6 +651,20 @@ impl<C: CompositorConnection> Compositor<C> {
             return;
         }
 
+        // An effect-excluded class (input-method popups by default) leaves
+        // at once: no particles, no fade, no shrink. fcitx unmaps its
+        // candidate window on every keystroke, and a closing effect there is
+        // a flicker, not a goodbye.
+        if reason == WindowRetirement::Closed
+            && self
+                .windows
+                .get(&x11_win)
+                .is_some_and(|wt| skips_open_close_effects(&wt.class_name, &self.fade_exclude))
+        {
+            self.remove_window_immediate(x11_win);
+            return;
+        }
+
         // Particles describe a close/destruction. Explicit minimization has
         // its own visual language and must not look like the client exploded.
         if reason == WindowRetirement::Closed && self.particle_effects {
@@ -1015,10 +1037,28 @@ impl<C: CompositorConnection> Compositor<C> {
         let scale = self.lookup_scale_rule(class_name);
         let is_frosted = self.lookup_frosted_glass_rule(class_name);
 
+        let skips_effects = skips_open_close_effects(class_name, &self.fade_exclude);
+
         // Auto-detect known video players for audio sync
         let is_video_player = self.is_known_video_player(class_name);
         // Detect games for VRR
         let is_game = self.detect_game_window(class_name);
+
+        // The class arrives right after `add_window`, in the same event
+        // batch and before any frame, so an excluded class can still undo
+        // the open effects `add_window` armed without knowing who it was
+        // adding: the window shows up whole, at once.
+        if skips_effects {
+            if let Some(wt) = self.windows.get_mut(&x11_win)
+                && !wt.fading_out
+            {
+                wt.fade_opacity = 1.0;
+                wt.anim_scale = 1.0;
+                wt.anim_scale_target = 1.0;
+            }
+            self.ripple_active
+                .retain(|ripple| ripple.x11_win != x11_win);
+        }
 
         let mut changed = false;
         if let Some(wt) = self.windows.get_mut(&x11_win)
@@ -1132,6 +1172,60 @@ impl<C: CompositorConnection> Compositor<C> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn input_method_popups_skip_open_close_effects_by_default() {
+        let defaults = crate::config::Config::default()
+            .behavior()
+            .fade_exclude
+            .clone();
+        for class in ["fcitx", "Fcitx5", "sogou-qimpanel", "ibus-ui-gtk3"] {
+            assert!(
+                super::skips_open_close_effects(class, &defaults),
+                "{class} remaps per keystroke and must never animate"
+            );
+        }
+        assert!(!super::skips_open_close_effects("firefox", &defaults));
+        assert!(!super::skips_open_close_effects("", &defaults));
+        assert!(!super::skips_open_close_effects("fcitx", &[]));
+    }
+
+    /// The exclusion has to bite at both ends of a popup's life: the class
+    /// setter undoes the open effects `add_window` armed blind, and
+    /// retirement leaves before particles or a closing fade can start.
+    #[test]
+    fn effect_excluded_classes_are_settled_on_classify_and_on_retire() {
+        let source: String = include_str!("tfp.rs")
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        let classify = source
+            .split_once("pub(crate)fnset_window_class(")
+            .expect("set_window_class")
+            .1;
+        let classify = &classify[..classify.find("pub(crate)fn").unwrap_or(classify.len())];
+        assert!(classify.contains("skips_open_close_effects(class_name,&self.fade_exclude)"));
+        assert!(classify.contains("wt.fade_opacity=1.0;"));
+        assert!(classify.contains("wt.anim_scale=1.0;"));
+        assert!(classify.contains("self.ripple_active.retain("));
+
+        let retire = source
+            .split_once("fnretire_window(")
+            .expect("retire_window")
+            .1;
+        let excluded_at = retire
+            .find("skips_open_close_effects(&wt.class_name,&self.fade_exclude)")
+            .expect("retirement consults the exclusion");
+        let particles_at = retire
+            .find("self.spawn_particles_for_window(")
+            .expect("close particles");
+        let fade_at = retire.find("wt.fading_out=true;").expect("closing fade");
+        assert!(excluded_at < particles_at, "leave before particles spawn");
+        assert!(
+            excluded_at < fade_at,
+            "leave before the closing fade starts"
+        );
+    }
+
     use super::{
         AddWindowMinimizeDisposition, WindowRetirement, add_window_minimize_disposition,
         prepare_window_restore_collections, refreshed_window_settles_pending_minimize,

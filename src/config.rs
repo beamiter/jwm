@@ -529,6 +529,15 @@ pub struct BehaviorConfig {
     /// Window classes to exclude from blur.
     #[serde(default)]
     pub blur_exclude: Vec<String>,
+    /// Window classes that never play open/close effects: no fade, no scale
+    /// animation, no open ripple, no close particles. Input-method candidate
+    /// windows are why this exists. fcitx and ibus unmap and remap their
+    /// popup on every keystroke, so any per-map effect turns typing into a
+    /// flicker. The default covers the common input methods; set it to `[]`
+    /// to animate everything again. Matched case-insensitively against the
+    /// WM_CLASS class. X11 compositor only.
+    #[serde(default = "default_fade_exclude")]
+    pub fade_exclude: Vec<String>,
     /// Blur behind the status bar like any other translucent window.
     ///
     /// The bar is the one window that always sits directly over the wallpaper,
@@ -1375,6 +1384,19 @@ fn default_compositor_api() -> String {
 fn default_vsync_method() -> String {
     "global".to_string()
 }
+/// Input-method popups: remapped per keystroke, so they must never animate.
+fn default_fade_exclude() -> Vec<String> {
+    [
+        "fcitx",
+        "fcitx5",
+        "fcitx-qimpanel",
+        "sogou-qimpanel",
+        "ibus-ui-gtk3",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect()
+}
 fn default_new_client_position() -> String {
     "master".to_string()
 }
@@ -1861,6 +1883,7 @@ impl Default for Config {
                     shadow_exclude: Vec::new(),
                     opacity_rules: Vec::new(),
                     blur_exclude: Vec::new(),
+                    fade_exclude: default_fade_exclude(),
                     blur_status_bar: default_true(),
                     rounded_corners_exclude: Vec::new(),
                     detect_client_opacity: true,
