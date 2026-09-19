@@ -121,6 +121,9 @@ unsafe fn upload_toast_texture(
 /// `anim`: the animated window rect (centre-scaled by `anim.scale`, shifted
 /// down by `anim.dy` — exactly the rect the window quad draws) moved by the
 /// configured `offset` and expanded by the blur `spread` on every side.
+/// `bottom_extra` (X11's heavier-bottom shadow) drops the quad by that many
+/// pixels and stretches it by the same amount, so the penumbra reads deeper
+/// below the window than above it — the same geometry the X11 pass draws.
 /// Returns the quad `[x, y, w, h]` and the unexpanded window size the SDF
 /// shader measures its penumbra against.
 fn shadow_quad(
@@ -128,7 +131,9 @@ fn shadow_quad(
     anim: WindowAnimationFrame,
     offset: [f32; 2],
     spread: f32,
+    bottom_extra: f32,
 ) -> ([f32; 4], [f32; 2]) {
+    let bottom_extra = bottom_extra.max(0.0);
     let (x, y, w, h) = rect;
     let draw_w = w as f32 * anim.scale;
     let draw_h = h as f32 * anim.scale;
@@ -137,9 +142,9 @@ fn shadow_quad(
     (
         [
             draw_x + offset[0] - spread,
-            draw_y + offset[1] - spread,
+            draw_y + offset[1] + bottom_extra - spread,
             draw_w + 2.0 * spread,
-            draw_h + 2.0 * spread,
+            draw_h + 2.0 * spread + bottom_extra,
         ],
         [draw_w, draw_h],
     )
@@ -589,7 +594,7 @@ mod tests {
         // A settled window keeps the historical quad: rect + offset, grown by
         // the spread on every side, measured against its unscaled size.
         assert_eq!(
-            shadow_quad(rect, WindowAnimationFrame::REST, offset, spread),
+            shadow_quad(rect, WindowAnimationFrame::REST, offset, spread, 0.0),
             ([97.0, 199.0, 50.0, 30.0], [40.0, 20.0])
         );
 
@@ -600,7 +605,7 @@ mod tests {
             alpha: 0.0,
             dy: 24.0,
         };
-        let ([sx, sy, sw, sh], size) = shadow_quad(rect, slide, offset, spread);
+        let ([sx, sy, sw, sh], size) = shadow_quad(rect, slide, offset, spread, 0.0);
         assert_eq!(
             ([sx, sy, sw, sh], size),
             ([97.0, 223.0, 50.0, 30.0], [40.0, 20.0])
@@ -613,10 +618,21 @@ mod tests {
             alpha: 1.0,
             dy: 0.0,
         };
-        let ([zx, zy, zw, zh], zsize) = shadow_quad(rect, zoom, offset, spread);
+        let ([zx, zy, zw, zh], zsize) = shadow_quad(rect, zoom, offset, spread, 0.0);
         assert_eq!(
             ([zx, zy, zw, zh], zsize),
             ([107.0, 204.0, 30.0, 20.0], [20.0, 10.0])
+        );
+
+        // Heavier bottom: dropped and stretched by the extra, measured
+        // against the same window size; a negative extra is ignored.
+        assert_eq!(
+            shadow_quad(rect, WindowAnimationFrame::REST, offset, spread, 4.0),
+            ([97.0, 203.0, 50.0, 34.0], [40.0, 20.0])
+        );
+        assert_eq!(
+            shadow_quad(rect, WindowAnimationFrame::REST, offset, spread, -3.0),
+            shadow_quad(rect, WindowAnimationFrame::REST, offset, spread, 0.0)
         );
     }
 
@@ -2041,6 +2057,7 @@ impl WaylandCompositor {
                 self.shadow_spread
                     + self.shadow_radius
                     + self.shadow_offset[0].abs().max(self.shadow_offset[1].abs())
+                    + 2.0 * self.shadow_bottom_extra.max(0.0)
             } else {
                 0.0
             };
@@ -2929,7 +2946,7 @@ impl WaylandCompositor {
                     // its rest position while the body slides or zooms.
                     let anim = self.window_animation_frame_for(wt);
                     let ([sx, sy, sw, sh], [size_w, size_h]) =
-                        shadow_quad((x, y, w, h), anim, [ox, oy], spread);
+                        shadow_quad((x, y, w, h), anim, [ox, oy], spread, self.shadow_bottom_extra);
 
                     self.set_rect_uniform(gl, self.shadow_uniforms.rect, sx, sy, sw, sh);
                     gl.Uniform2f(self.shadow_uniforms.size, size_w, size_h);
