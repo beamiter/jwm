@@ -8296,3 +8296,69 @@ fn wayland_benchmark_samples_rendered_frames_to_completion() {
         ));
     }
 }
+
+/// The debug HUD reports the HDR route, so being up must not change it: the
+/// frame stays on the deferred region route and the card is delivered.
+#[test]
+fn wayland_debug_hud_rides_the_deferred_linear_route() {
+    let Some(_headless) = HeadlessGl::new(GlApi::Gles3) else {
+        eprintln!("headless GL unavailable - skipping deferred HUD test");
+        return;
+    };
+    let gl = smithay::backend::renderer::gles::ffi::Gles2::load_with(|symbol| {
+        egl::get_proc_address(symbol) as *const c_void
+    });
+
+    const W: i32 = 640;
+    const H: i32 = 480;
+    unsafe {
+        let mut compositor = super::WaylandCompositor::new(&gl, W as u32, H as u32, false)
+            .expect("headless Wayland compositor must initialize");
+        compositor.scene_linear_requested = true;
+        compositor.sync_scene_linear_target(&gl);
+        let region = crate::backend::wayland_udev::color_pipeline::OutputColorRegion {
+            rect: [0, 0, W, H],
+            output_tf: crate::backend::wayland_udev::color_pipeline::TransferKind::Srgb,
+            working_to_output_row_major: crate::backend::wayland_udev::color_pipeline::IDENTITY_CTM,
+            tone_map: crate::backend::wayland_udev::color_pipeline::OutputToneMapPlan::IDENTITY,
+        };
+        let render = |compositor: &mut super::WaylandCompositor| {
+            compositor.force_full_redraw();
+            assert!(compositor.render_frame(
+                &gl,
+                &[],
+                None,
+                compositor.linear_tail_status().linear_tail_safe(),
+                false,
+                false,
+                Some(std::slice::from_ref(&region)),
+                false,
+            ));
+            read_fbo_frame(&gl, compositor.output_fbo, W, H)
+        };
+        let empty = render(&mut compositor);
+
+        compositor.debug_hud_enabled = true;
+        let status = compositor.linear_tail_status();
+        assert!(
+            status.linear_tail_safe(),
+            "the debug HUD must not block the linear tail: {:?}",
+            status.overlay_blockers
+        );
+        let with_hud = render(&mut compositor);
+        let card_pixels = empty
+            .chunks_exact(4)
+            .zip(with_hud.chunks_exact(4))
+            .filter(|(a, b)| a != b)
+            .count();
+        assert!(
+            card_pixels > 1000,
+            "the HUD card never reached the delivered output ({card_pixels} px)"
+        );
+
+        assert!(compositor.release_gpu_resources(
+            &gl,
+            super::CompositorOutputTextureOwnership::RawCompositor,
+        ));
+    }
+}

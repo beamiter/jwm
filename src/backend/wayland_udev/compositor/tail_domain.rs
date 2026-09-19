@@ -40,8 +40,8 @@ pub(crate) enum TailOverlayStage {
     /// common-linear-aware only requires its shaders to honor the bound
     /// target's domain.
     LinearTarget,
-    /// Drawn into the encoded output target after the delivery point (debug
-    /// HUD, annotation, screenshot toolbar, system UI, recording
+    /// Drawn into the encoded output target after the delivery point
+    /// (annotation, screenshot toolbar, system UI, recording
     /// crop outline and its REC/MIC chips). Migrating such a class additionally
     /// requires moving its draw ahead of the delivery point, so these stay
     /// encoded-only for now.
@@ -89,7 +89,8 @@ pub(crate) enum TailOverlayClass {
     /// Full-frame postprocess filter chain. The filters run on an encoded
     /// sRGB copy; on a linear target the result is decoded back.
     Postprocess,
-    /// Debug HUD card.
+    /// Debug HUD card (section 18a, under the toasts; it reports the HDR
+    /// route, so being up must not change it).
     DebugHud,
     /// Screenshot annotations (shapes, strokes, labels).
     Annotation,
@@ -139,10 +140,10 @@ impl TailOverlayClass {
             | Self::EdgeGlow
             | Self::Particles
             | Self::Postprocess
+            | Self::DebugHud
             | Self::Toast
             | Self::Osd => TailOverlayDomain::CommonLinearAware,
-            Self::DebugHud
-            | Self::Annotation
+            Self::Annotation
             | Self::ScreenshotToolbar
             | Self::SystemUi
             | Self::RecordingRegionOverlay => TailOverlayDomain::EncodedOnly,
@@ -164,9 +165,9 @@ impl TailOverlayClass {
             | Self::EdgeGlow
             | Self::Particles
             | Self::Postprocess
+            | Self::DebugHud
             | Self::Toast
             | Self::Osd => None,
-            Self::DebugHud => Some("debug_hud_overlay"),
             Self::Annotation => Some("annotation_overlay"),
             Self::ScreenshotToolbar => Some("screenshot_toolbar_overlay"),
             Self::SystemUi => Some("system_ui_overlay"),
@@ -185,10 +186,10 @@ impl TailOverlayClass {
             | Self::Particles
             | Self::EdgeGlow
             | Self::Postprocess
+            | Self::DebugHud
             | Self::Toast
             | Self::Osd => TailOverlayStage::LinearTarget,
-            Self::DebugHud
-            | Self::Annotation
+            Self::Annotation
             | Self::ScreenshotToolbar
             | Self::SystemUi
             | Self::RecordingRegionOverlay => TailOverlayStage::PostDelivery,

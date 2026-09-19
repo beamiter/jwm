@@ -4273,7 +4273,7 @@ impl WaylandCompositor {
         }
 
         // =================================================================
-        // 18a. Toasts and OSD (common-linear-aware)
+        // 18a. Debug HUD, toasts and OSD (common-linear-aware)
         // =================================================================
         // Toast cards sit above clients and the postprocess filters but under
         // the cursor and the modal system UI (its scrim dims them; the lock
@@ -4295,6 +4295,17 @@ impl WaylandCompositor {
             self.output_fbo
         };
         unsafe {
+            // Debug HUD — `debug_hud_extended` only adds sections to the
+            // card, so the basic HUD draws on its own like it does on X11.
+            // It reports the HDR route, so it must not change it by being up.
+            debug_assert_eq!(
+                tail_domain::TailOverlayClass::DebugHud.domain(),
+                tail_domain::TailOverlayDomain::CommonLinearAware
+            );
+            if self.debug_hud_enabled {
+                gl.BindFramebuffer(ffi::FRAMEBUFFER, chrome_target);
+                self.render_debug_hud(gl, &projection, tail_draws_linear);
+            }
             gl.BindFramebuffer(ffi::FRAMEBUFFER, chrome_target);
             self.render_toasts(gl, &projection, tail_draws_linear);
             gl.BindFramebuffer(ffi::FRAMEBUFFER, chrome_target);
@@ -4400,17 +4411,6 @@ impl WaylandCompositor {
             self.bind_post_delivery_overlay_target(gl, tail_domain::TailOverlayClass::SystemUi);
             unsafe {
                 self.render_system_ui(gl, &projection);
-            }
-        }
-
-        // =================================================================
-        // 19b. Debug HUD — `debug_hud_extended` only adds sections to the
-        // card, so the basic HUD must draw on its own like it does on X11.
-        // =================================================================
-        if self.debug_hud_enabled {
-            self.bind_post_delivery_overlay_target(gl, tail_domain::TailOverlayClass::DebugHud);
-            unsafe {
-                self.render_debug_hud(gl, &projection);
             }
         }
 
@@ -4788,7 +4788,12 @@ impl WaylandCompositor {
         }
     }
 
-    unsafe fn render_debug_hud(&mut self, gl: &ffi::Gles2, projection: &[f32; 16]) {
+    unsafe fn render_debug_hud(
+        &mut self,
+        gl: &ffi::Gles2,
+        projection: &[f32; 16],
+        scene_linear: bool,
+    ) {
         self.sys_stats.maybe_sample();
 
         let uptime = self.compositor_start_time.elapsed().as_secs();
@@ -4854,7 +4859,7 @@ impl WaylandCompositor {
             .max()
             .unwrap_or(60) as f32;
         let (meter, tone) = hud::fps_meter(self.fps, target);
-        unsafe { self.render_debug_hud_card(gl, projection, meter, tone) };
+        unsafe { self.render_debug_hud_card(gl, projection, meter, tone, scene_linear) };
     }
 
     /// Rasterize the four HUD text sections — title, state chip, stat labels,
@@ -4941,9 +4946,10 @@ impl WaylandCompositor {
         projection: &[f32; 16],
         meter: f32,
         tone: [f32; 4],
+        scene_linear: bool,
     ) {
         let ui = ui_theme::palette();
-        self.ensure_glass_backdrop(gl, ui, projection, false);
+        self.ensure_glass_backdrop(gl, ui, projection, scene_linear);
         let dims = |slot: usize| -> (f32, f32) {
             self.hud_textures[slot]
                 .map(|(_, w, h)| (w as f32, h as f32))
@@ -4975,7 +4981,7 @@ impl WaylandCompositor {
         // rounded-fill mode. The overlay draws onto the display-encoded
         // output, so scene-linear conversion stays off.
         self.ui_fill_island(
-            gl, projection, ui, cx, cy, cw, ch, radius, radius_top, ui.card, 1.0, false,
+            gl, projection, ui, cx, cy, cw, ch, radius, radius_top, ui.card, 1.0, scene_linear,
         );
         if layout.chip_pill.2 > 0.0 {
             let (px, py, pw, ph) = layout.chip_pill;
@@ -4992,7 +4998,10 @@ impl WaylandCompositor {
             // Hairline accent ring, matching the focused window's gradient.
             gl.UseProgram(self.gradient_border_program);
             self.set_projection_uniform(gl, self.gradient_border_uniforms.projection, projection);
-            gl.Uniform1i(self.gradient_border_uniforms.scene_linear, 0);
+            gl.Uniform1i(
+                self.gradient_border_uniforms.scene_linear,
+                i32::from(scene_linear),
+            );
             let ring = ui.ring_width;
             let [ar, ag, ab, aa] = self.border_gradient_color_a;
             let [br, bg, bb, ba] = self.border_gradient_color_b;
@@ -5045,7 +5054,7 @@ impl WaylandCompositor {
         let text_proj = super::get_uniform_loc(gl, self.sysui_text_program, "u_projection");
         let text_tex = super::get_uniform_loc(gl, self.sysui_text_program, "u_texture");
         let text_opacity = super::get_uniform_loc(gl, self.sysui_text_program, "u_opacity");
-        self.use_sysui_text_program(gl, false);
+        self.use_sysui_text_program(gl, scene_linear);
         gl.UniformMatrix4fv(text_proj, 1, ffi::FALSE as u8, projection.as_ptr());
         gl.Uniform1i(text_tex, 0);
         gl.Uniform1f(text_opacity, 1.0);
