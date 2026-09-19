@@ -848,6 +848,22 @@ impl RecordingState {
         self.frame_count
     }
 
+    /// What the recording in progress is actually achieving, as X11 reports
+    /// it: encoded size, frames read back, frames the writer thread dropped
+    /// because the encoder was behind, and wall time since start.
+    pub(crate) fn stats(&self) -> Option<crate::backend::api::RecordingStats> {
+        if !self.active {
+            return None;
+        }
+        let started = self.start_time?;
+        Some(crate::backend::api::RecordingStats {
+            output_size: (self.width, self.height),
+            captured: self.frame_count,
+            dropped: self.sink.as_ref().map_or(0, |sink| sink.dropped_frames()),
+            elapsed_secs: started.elapsed().as_secs_f64(),
+        })
+    }
+
     pub(crate) fn elapsed(&self) -> Option<Duration> {
         self.start_time.map(|t| t.elapsed())
     }
@@ -873,6 +889,27 @@ impl RecordingState {
 #[cfg(test)]
 mod tests {
     use super::{Duration, Instant, RecordingState};
+
+    #[test]
+    fn stats_describe_only_a_recording_in_progress() {
+        let mut state = RecordingState::new();
+        assert!(state.stats().is_none(), "no recording, no stats");
+
+        state.active = true;
+        state.width = 1280;
+        state.height = 720;
+        state.frame_count = 48;
+        state.start_time = Instant::now().checked_sub(Duration::from_secs(2));
+        let stats = state.stats().expect("an active recording reports stats");
+        assert_eq!(stats.output_size, (1280, 720));
+        assert_eq!(stats.captured, 48);
+        assert_eq!(stats.dropped, 0, "no sink, nothing dropped");
+        assert!(stats.elapsed_secs >= 2.0);
+
+        // A broken encoder pipe clears `active`; the numbers go with it.
+        state.active = false;
+        assert!(state.stats().is_none());
+    }
 
     #[test]
     fn an_idle_recorder_asks_the_event_loop_for_nothing() {

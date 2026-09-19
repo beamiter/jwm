@@ -4190,6 +4190,10 @@ impl CompositorMedia for UdevBackend {
         self.request_render();
     }
 
+    fn compositor_recording_stats(&self) -> Option<crate::backend::api::RecordingStats> {
+        self.compositor.as_ref()?.recording_stats()
+    }
+
     fn compositor_notify_audio_timing(
         &mut self,
         window: WindowId,

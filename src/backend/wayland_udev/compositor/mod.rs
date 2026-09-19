@@ -4535,6 +4535,10 @@ impl WaylandCompositor {
         self.pending_recording_stop = true;
     }
 
+    pub(crate) fn recording_stats(&self) -> Option<crate::backend::api::RecordingStats> {
+        self.recording.stats()
+    }
+
     /// Notify audio timing for a window (feeds AudioSyncManager).
     pub(crate) fn notify_audio_timing(&mut self, window_id: u64, fps: f32, buffer_latency_ms: u32) {
         self.audio_sync_mgr
