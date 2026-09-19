@@ -1518,8 +1518,19 @@ uniform int   u_colorblind_mode;   // 0=none, 1=deuteranopia, 2=protanopia, 3=tr
 uniform int   u_hdr_enabled;           // 0=off, 1=on
 uniform float u_hdr_peak_nits;         // Target display peak luminance (400-1000 nits)
 uniform int   u_tone_mapping_method;   // 0=none, 1=Reinhard, 2=ACES
+// 1 = write into the common linear target. The source is always an encoded
+// sRGB copy (the filters are authored on encoded values); only the result is
+// decoded back to linear light.
+uniform int   u_scene_linear;
 in vec2 v_uv;
 out vec4 frag_color;
+
+vec3 srgb_inverse(vec3 c) {
+    c = clamp(c, 0.0, 1.0);
+    vec3 lo = c / 12.92;
+    vec3 hi = pow(max((c + 0.055) / 1.055, 0.0), vec3(2.4));
+    return mix(lo, hi, step(0.04045, c));
+}
 
 void main() {
     // FBO textures have Y=0 at bottom, but scene was rendered with top-left-origin
@@ -1636,6 +1647,9 @@ void main() {
         c.rgb = mix(c.rgb, vec3(0.8, 0.8, 0.8), ring_alpha * 0.8);
     }
 
+    if (u_scene_linear != 0) {
+        c.rgb = srgb_inverse(c.rgb);
+    }
     frag_color = c;
 }
 "#;

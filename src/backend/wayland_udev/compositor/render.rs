@@ -215,11 +215,12 @@ const fn frame_output_route(
 ///   and draw the elements at the delivery point (section 18b), so the single
 ///   per-output matrix + OETF applies to them exactly once;
 /// - the early-sRGB fallback route encodes at the section 11/12 boundary,
-///   *before* snap preview, overview, expose and peek; drawing the elements
+///   *before* the workspace transition, snap preview, overview, expose, peek,
+///   tab bar, particles, edge glow and postprocess; drawing the elements
 ///   ahead of that encode would bury the cursor under those overlays, so the
 ///   route blits the (already encoded) textures after the last linear-aware
-///   class instead (section 15b/15c boundary — every later class is
-///   encoded-only and therefore absent whenever elements were staged);
+///   class instead (the 18/18b boundary, the same point the deferred routes
+///   use — every later class is post-delivery);
 /// - the legacy route never stages elements.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ExternalElementPass {
@@ -517,10 +518,10 @@ mod tests {
     fn staged_external_elements_land_above_every_linear_aware_overlay() {
         // The deferred routes hold the linear target open through snap
         // preview, overview, expose and peek, so the elements go in at the
-        // delivery point. The early-sRGB fallback encodes *before* those four
+        // delivery point. The early-sRGB fallback encodes *before* those
         // classes, so drawing there would bury the cursor under them: that
         // route blits the already-encoded textures after the last of them
-        // instead. The legacy route never receives staged elements.
+        // (postprocess) instead. The legacy route never receives staged elements.
         assert_eq!(
             external_element_pass(FrameOutputRoute::LegacyEncoded),
             ExternalElementPass::Skipped
@@ -555,6 +556,8 @@ mod tests {
             "self.render_{}(gl, &projection, focused, scene",
             "peek_mode"
         );
+        let postprocess = format!("// 18. {}", "Post-processing");
+        let delivery = format!("// 18b. {} delivery", "Output");
         let blit = format!(
             "self.render_external_elements_{}(gl, &projection)",
             "encoded"
@@ -565,8 +568,12 @@ mod tests {
                 .unwrap_or_else(|| panic!("the frame body must contain `{needle}`"))
         };
         assert!(
-            at(&encode) < at(&peek) && at(&peek) < at(&blit),
-            "the cursor blit must follow the encode and every linear-aware overlay"
+            at(&encode) < at(&peek)
+                && at(&peek) < at(&postprocess)
+                && at(&postprocess) < at(&delivery)
+                && at(&delivery) < at(&blit),
+            "the cursor blit must follow the encode and every linear-aware overlay, \
+             including the postprocess filter"
         );
     }
 
@@ -1783,6 +1790,9 @@ impl WaylandCompositor {
             gl.Uniform1i(self.postprocess_uniforms.magnifier_enabled, 0);
             gl.Uniform1i(self.postprocess_uniforms.colorblind_mode, 0);
             gl.Uniform1i(self.postprocess_uniforms.hdr_enabled, 0);
+            // The program is shared with the postprocess pass, which sets this
+            // on linear frames; idle dim keeps its encoded-domain multiply.
+            gl.Uniform1i(self.postprocess_uniforms.scene_linear, 0);
             gl.ActiveTexture(ffi::TEXTURE0);
             gl.BindTexture(ffi::TEXTURE_2D, self.postprocess_texture);
             gl.BindVertexArray(self.quad_vao);
@@ -4029,16 +4039,6 @@ impl WaylandCompositor {
             self.render_peek_mode(gl, &projection, focused, scene, tail_draws_linear);
         }
 
-        // Early-sRGB fallback: the staged external elements go above the
-        // linear-aware overlays drawn so far (expose/peek) into the encoded
-        // output. Tab bar / particles / edge glow that follow are also
-        // common-linear-aware but keep this historical draw order; on the
-        // early-fallback route `tail_draws_linear` is false so they write
-        // encoded pixels after the staged elements.
-        if external_elements_pass == ExternalElementPass::EncodedAfterLinearAwareOverlays {
-            self.render_external_elements_encoded(gl, &projection);
-        }
-
         // =================================================================
         // 15c. Tab bar for window groups (common-linear-aware)
         // =================================================================
@@ -4104,19 +4104,44 @@ impl WaylandCompositor {
         // =================================================================
         // 18. Post-processing
         // =================================================================
+        // Common-linear-aware: the filters are authored on encoded sRGB, so
+        // the source copy is always encoded. On deferred routes the linear
+        // target is encoded into the (8-bit) postprocess copy — a float to
+        // fixed-point blit is illegal in GLES3 — and the result is decoded
+        // back into the linear target, which stays bound for later passes.
         if self.postprocess_active {
-            // Copy output_fbo to postprocess_fbo
-            self.blit_fbo(
-                gl,
-                self.output_fbo,
-                self.postprocess_fbo,
-                self.screen_w,
-                self.screen_h,
+            debug_assert_eq!(
+                tail_domain::TailOverlayClass::Postprocess.domain(),
+                tail_domain::TailOverlayDomain::CommonLinearAware
             );
+            let postprocess_target = if tail_draws_linear {
+                use crate::backend::wayland_udev::color_pipeline::{IDENTITY_CTM, TransferKind};
+                let srgb = TransferKind::Srgb;
+                self.dispatch_scene_linear_encode_pass(
+                    gl,
+                    &projection,
+                    self.postprocess_fbo,
+                    srgb.shader_id(),
+                    srgb.gamma_for_shader(),
+                    IDENTITY_CTM,
+                    crate::backend::wayland_udev::color_pipeline::OutputToneMapPlan::IDENTITY,
+                    None,
+                );
+                self.linear_fbo
+            } else {
+                self.blit_fbo(
+                    gl,
+                    self.output_fbo,
+                    self.postprocess_fbo,
+                    self.screen_w,
+                    self.screen_h,
+                );
+                self.output_fbo
+            };
 
             unsafe {
-                // Bind output FBO for final post-processed result
-                gl.BindFramebuffer(ffi::FRAMEBUFFER, self.output_fbo);
+                // Bind the frame's current target for the post-processed result
+                gl.BindFramebuffer(ffi::FRAMEBUFFER, postprocess_target);
                 gl.Viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
                 gl.Clear(ffi::COLOR_BUFFER_BIT);
 
@@ -4174,6 +4199,10 @@ impl WaylandCompositor {
                     self.postprocess_uniforms.tone_mapping_method,
                     self.tone_mapping_method,
                 );
+                gl.Uniform1i(
+                    self.postprocess_uniforms.scene_linear,
+                    i32::from(tail_draws_linear),
+                );
 
                 gl.ActiveTexture(ffi::TEXTURE0);
                 gl.BindTexture(ffi::TEXTURE_2D, self.postprocess_texture);
@@ -4191,11 +4220,20 @@ impl WaylandCompositor {
         // 18b. Output delivery
         // =================================================================
         // Internalized KMS external elements are the top-most content of the
-        // common-linear scene (cursor above drag icon above overlay above
-        // top-layer). Draw them at the end of the linear passes so the final
-        // per-output matrix + OETF below applies to them exactly once.
-        if external_elements_pass == ExternalElementPass::LinearAtDelivery {
-            self.render_external_elements_into_linear(gl, &projection);
+        // scene (cursor above drag icon above overlay above top-layer), above
+        // every linear-aware class including the postprocess filter, on both
+        // routes that stage them. Deferred routes draw them at the end of the
+        // linear passes so the final per-output matrix + OETF below applies
+        // to them exactly once; the early-sRGB fallback has already encoded
+        // and blits the (encoded) textures into the output target instead.
+        match external_elements_pass {
+            ExternalElementPass::LinearAtDelivery => {
+                self.render_external_elements_into_linear(gl, &projection);
+            }
+            ExternalElementPass::EncodedAfterLinearAwareOverlays => {
+                self.render_external_elements_encoded(gl, &projection);
+            }
+            ExternalElementPass::Skipped => {}
         }
         // Linear-tail-safe frames remain in the common FP16 target through
         // every compatible late overlay. Convert only now, immediately before

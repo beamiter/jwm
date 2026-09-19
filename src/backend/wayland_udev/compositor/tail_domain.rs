@@ -86,7 +86,8 @@ pub(crate) enum TailOverlayClass {
     /// Edge glow (dedicated time-varying shader; common-linear-aware via
     /// `u_scene_linear` color ingress).
     EdgeGlow,
-    /// Full-frame postprocess filter chain operating on encoded pixels.
+    /// Full-frame postprocess filter chain. The filters run on an encoded
+    /// sRGB copy; on a linear target the result is decoded back.
     Postprocess,
     /// Debug HUD card.
     DebugHud,
@@ -135,9 +136,9 @@ impl TailOverlayClass {
             | Self::Peek
             | Self::TabBar
             | Self::EdgeGlow
-            | Self::Particles => TailOverlayDomain::CommonLinearAware,
-            Self::Postprocess
-            | Self::DebugHud
+            | Self::Particles
+            | Self::Postprocess => TailOverlayDomain::CommonLinearAware,
+            Self::DebugHud
             | Self::Annotation
             | Self::ScreenshotToolbar
             | Self::Toast
@@ -160,8 +161,8 @@ impl TailOverlayClass {
             | Self::Peek
             | Self::TabBar
             | Self::EdgeGlow
-            | Self::Particles => None,
-            Self::Postprocess => Some("postprocess_filter"),
+            | Self::Particles
+            | Self::Postprocess => None,
             Self::DebugHud => Some("debug_hud_overlay"),
             Self::Annotation => Some("annotation_overlay"),
             Self::ScreenshotToolbar => Some("screenshot_toolbar_overlay"),

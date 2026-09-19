@@ -402,6 +402,7 @@ pub(crate) struct PostprocessUniforms {
     pub hdr_enabled: i32,
     pub hdr_peak_nits: i32,
     pub tone_mapping_method: i32,
+    pub scene_linear: i32,
 }
 
 #[allow(dead_code)]
@@ -2374,6 +2375,7 @@ impl WaylandCompositor {
                     postprocess_program,
                     "u_tone_mapping_method",
                 ),
+                scene_linear: get_uniform_loc(gl, postprocess_program, "u_scene_linear"),
             };
 
             let scene_linear_encode_uniforms = SceneLinearEncodeUniforms {

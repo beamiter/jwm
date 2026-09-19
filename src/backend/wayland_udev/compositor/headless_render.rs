@@ -6853,6 +6853,74 @@ fn postprocess_identity_and_grayscale() {
     unsafe { gl.delete_program(prog) };
 }
 
+/// The live post-process program (the magnifier superset) runs its filters on
+/// an encoded sRGB copy on every route. On a linear target only the result is
+/// decoded, so a filtered pixel is the sRGB decode of the encoded-route pixel.
+#[test]
+fn magnifier_postprocess_decodes_its_result_for_a_linear_target() {
+    use super::shaders as s;
+    let Some(h) = HeadlessGl::new(GlApi::Gles3) else {
+        eprintln!("headless GL unavailable - skipping postprocess linear-target test");
+        return;
+    };
+    let gl = &h.gl;
+    const W: i32 = 16;
+    const H: i32 = 16;
+    let input = [200u8, 100, 50, 255];
+    let prog = link(gl, s::VERTEX_SHADER, s::MAGNIFIER_POSTPROCESS_FRAGMENT_SHADER)
+        .unwrap_or_else(|log| panic!("magnifier postprocess must link:\n{log}"));
+    assert!(
+        unsafe { gl.get_uniform_location(prog, "u_scene_linear") }.is_some(),
+        "postprocess program optimized out u_scene_linear"
+    );
+    let render = |grayscale: i32, scene_linear: i32| {
+        render_quad(gl, prog, input, W, H, |gl| unsafe {
+            let u = |n: &str| gl.get_uniform_location(prog, n);
+            gl.uniform_4_f32(u("u_rect").as_ref(), 0.0, 0.0, W as f32, H as f32);
+            gl.uniform_matrix_4_f32_slice(
+                u("u_projection").as_ref(),
+                false,
+                &ortho(W as f32, H as f32),
+            );
+            gl.uniform_1_i32(u("u_texture").as_ref(), 0);
+            gl.uniform_1_f32(u("u_color_temp").as_ref(), 0.0);
+            gl.uniform_1_f32(u("u_saturation").as_ref(), 1.0);
+            gl.uniform_1_f32(u("u_brightness").as_ref(), 1.0);
+            gl.uniform_1_f32(u("u_contrast").as_ref(), 1.0);
+            gl.uniform_1_i32(u("u_invert").as_ref(), 0);
+            gl.uniform_1_i32(u("u_grayscale").as_ref(), grayscale);
+            gl.uniform_1_i32(u("u_magnifier_enabled").as_ref(), 0);
+            gl.uniform_1_i32(u("u_colorblind_mode").as_ref(), 0);
+            gl.uniform_1_i32(u("u_hdr_enabled").as_ref(), 0);
+            gl.uniform_1_i32(u("u_scene_linear").as_ref(), scene_linear);
+        })
+    };
+    let decode = |byte: u8| {
+        let c = f32::from(byte) / 255.0;
+        let linear = if c <= 0.04045 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        };
+        (linear * 255.0).round() as u8
+    };
+    for grayscale in [0, 1] {
+        let encoded = render(grayscale, 0);
+        if grayscale == 0 {
+            assert_pixel(encoded, input, 2, "postprocess identity, encoded");
+        } else {
+            assert_pixel(encoded, [118, 118, 118, 255], 2, "postprocess grayscale, encoded");
+        }
+        assert_pixel(
+            render(grayscale, 1),
+            [decode(encoded[0]), decode(encoded[1]), decode(encoded[2]), 255],
+            1,
+            "postprocess, linear target",
+        );
+    }
+    unsafe { gl.delete_program(prog) };
+}
+
 /// The shadow shader must produce a gaussian penumbra: full coverage well
 /// inside the window rect, half coverage exactly at the rect edge, a smooth
 /// decay outward, and an exact zero before the expanded quad edge (where the

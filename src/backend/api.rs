@@ -401,7 +401,8 @@ pub const MAX_EXTERNAL_ELEMENT_CLASSES: usize = 16;
 /// unavailable; visible encoded-only frame-tail overlays report under their
 /// own per-class names (the compositor's tail-domain table). Names of classes
 /// since migrated to common-linear-aware (`workspace_transition_overlay`,
-/// `tab_bar_overlay`, `particle_overlay`, `edge_glow_overlay`) stay recognized
+/// `tab_bar_overlay`, `particle_overlay`, `edge_glow_overlay`,
+/// `postprocess_filter`) stay recognized
 /// for recorded payloads but are no longer emitted.
 pub(crate) const LINEAR_TAIL_BLOCKER_NAMES: [&str; 20] = [
     "compositor_encoded_tail",
