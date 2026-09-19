@@ -127,6 +127,10 @@ impl WaylandCompositor {
     ) {
         unsafe {
             gl.UseProgram(self.transition_program);
+            gl.Uniform1i(
+                self.transition_uniforms.scene_linear,
+                i32::from(self.transition_draws_linear),
+            );
             gl.UniformMatrix4fv(
                 self.transition_uniforms.projection,
                 1,
@@ -208,7 +212,10 @@ impl WaylandCompositor {
             gl.Uniform1f(self.cube_uniforms.desat, 0.0);
             gl.Uniform1f(self.cube_uniforms.edge, 0.0);
             gl.Uniform1f(self.cube_uniforms.lit, 0.0);
-            gl.Uniform1i(self.cube_uniforms.scene_linear, 0);
+            gl.Uniform1i(
+                self.cube_uniforms.scene_linear,
+                i32::from(self.transition_draws_linear),
+            );
             gl.Uniform1i(self.cube_uniforms.has_alpha, 1);
             gl.Uniform1i(self.cube_uniforms.filler, 0);
             gl.Uniform1i(self.cube_uniforms.reflection, 0);
@@ -246,7 +253,16 @@ impl WaylandCompositor {
 
     /// Render the workspace transition overlay.
     /// Called from render_frame when transition_active is true.
-    pub(crate) fn render_transition(&mut self, gl: &ffi::Gles2, projection: &[f32; 16]) {
+    /// `draws_linear` names the bound target's domain: the common linear FBO
+    /// on deferred routes, the encoded output FBO otherwise. The snapshot is
+    /// encoded sRGB either way; the shaders decode it for a linear target.
+    pub(crate) fn render_transition(
+        &mut self,
+        gl: &ffi::Gles2,
+        projection: &[f32; 16],
+        draws_linear: bool,
+    ) {
+        self.transition_draws_linear = draws_linear;
         let Some(start) = self.transition_start else {
             self.finish_transition();
             return;
@@ -585,6 +601,10 @@ impl WaylandCompositor {
 
         unsafe {
             gl.UseProgram(self.portal_program);
+            gl.Uniform1i(
+                self.portal_uniforms.scene_linear,
+                i32::from(self.transition_draws_linear),
+            );
             gl.UniformMatrix4fv(
                 self.portal_uniforms.projection,
                 1,

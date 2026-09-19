@@ -2312,40 +2312,167 @@ fn wayland_cube_shader_legacy_mode_is_brightness_only() {
         0.0, 0.0, 0.0, 1.0,
     ];
 
-    let pixel = render_quad(gl, program, [120, 80, 40, 200], 8, 8, |gl| unsafe {
-        let u = |name: &str| gl.get_uniform_location(program, name);
-        gl.uniform_matrix_4_f32_slice(u("u_mvp").as_ref(), false, &identity);
-        gl.uniform_matrix_4_f32_slice(u("u_model").as_ref(), false, &identity);
-        gl.uniform_1_i32(u("u_texture").as_ref(), 0);
-        gl.uniform_4_f32(u("u_uv_rect").as_ref(), 0.0, 0.0, 1.0, 1.0);
-        gl.uniform_1_f32(u("u_aspect").as_ref(), 1.0);
-        gl.uniform_1_f32(u("u_brightness").as_ref(), 0.5);
+    let render = |scene_linear: i32| {
+        render_quad(gl, program, [120, 80, 40, 200], 8, 8, |gl| unsafe {
+            let u = |name: &str| gl.get_uniform_location(program, name);
+            gl.uniform_matrix_4_f32_slice(u("u_mvp").as_ref(), false, &identity);
+            gl.uniform_matrix_4_f32_slice(u("u_model").as_ref(), false, &identity);
+            gl.uniform_1_i32(u("u_texture").as_ref(), 0);
+            gl.uniform_4_f32(u("u_uv_rect").as_ref(), 0.0, 0.0, 1.0, 1.0);
+            gl.uniform_1_f32(u("u_aspect").as_ref(), 1.0);
+            gl.uniform_1_f32(u("u_brightness").as_ref(), 0.5);
 
-        // Hostile lit-material values must be irrelevant while u_lit is zero.
-        gl.uniform_3_f32(u("u_camera").as_ref(), -4.0, 3.0, 0.25);
-        gl.uniform_4_f32(u("u_accent").as_ref(), 1.0, 0.0, 1.0, 1.0);
-        gl.uniform_1_f32(u("u_alpha").as_ref(), 0.1);
-        gl.uniform_1_f32(u("u_desat").as_ref(), 1.0);
-        gl.uniform_1_f32(u("u_edge").as_ref(), 1.0);
-        gl.uniform_1_f32(u("u_lit").as_ref(), 0.0);
-        gl.uniform_1_i32(u("u_scene_linear").as_ref(), 1);
-        gl.uniform_1_i32(u("u_has_alpha").as_ref(), 0);
-        gl.uniform_1_i32(u("u_filler").as_ref(), 1);
-        gl.uniform_1_i32(u("u_reflection").as_ref(), 1);
-        gl.uniform_1_f32(u("u_floor_y").as_ref(), -100.0);
-        gl.uniform_1_i32(u("u_color_managed").as_ref(), 1);
-        gl.uniform_matrix_3_f32_slice(
-            u("u_color_matrix").as_ref(),
-            false,
-            &[0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0],
-        );
-        gl.uniform_1_i32(u("u_decode_tf").as_ref(), 4);
-        gl.uniform_1_f32(u("u_decode_gamma").as_ref(), 7.0);
-        gl.uniform_1_i32(u("u_encode_tf").as_ref(), 5);
-        gl.uniform_1_f32(u("u_encode_gamma").as_ref(), 0.2);
-    });
+            // Hostile lit-material values must be irrelevant while u_lit is zero.
+            gl.uniform_3_f32(u("u_camera").as_ref(), -4.0, 3.0, 0.25);
+            gl.uniform_4_f32(u("u_accent").as_ref(), 1.0, 0.0, 1.0, 1.0);
+            gl.uniform_1_f32(u("u_alpha").as_ref(), 0.1);
+            gl.uniform_1_f32(u("u_desat").as_ref(), 1.0);
+            gl.uniform_1_f32(u("u_edge").as_ref(), 1.0);
+            gl.uniform_1_f32(u("u_lit").as_ref(), 0.0);
+            gl.uniform_1_i32(u("u_scene_linear").as_ref(), scene_linear);
+            gl.uniform_1_i32(u("u_has_alpha").as_ref(), 0);
+            gl.uniform_1_i32(u("u_filler").as_ref(), 1);
+            gl.uniform_1_i32(u("u_reflection").as_ref(), 1);
+            gl.uniform_1_f32(u("u_floor_y").as_ref(), -100.0);
+            gl.uniform_1_i32(u("u_color_managed").as_ref(), 1);
+            gl.uniform_matrix_3_f32_slice(
+                u("u_color_matrix").as_ref(),
+                false,
+                &[0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0],
+            );
+            gl.uniform_1_i32(u("u_decode_tf").as_ref(), 4);
+            gl.uniform_1_f32(u("u_decode_gamma").as_ref(), 7.0);
+            gl.uniform_1_i32(u("u_encode_tf").as_ref(), 5);
+            gl.uniform_1_f32(u("u_encode_gamma").as_ref(), 0.2);
+        })
+    };
+    // Encoded target: exactly the historical brightness-only pixels.
+    assert_pixel(render(0), [60, 40, 20, 100], 1, "cube legacy mode");
+    // Linear target (workspace transition on a deferred route): the same
+    // premultiplied encoded-sRGB snapshot re-expressed as premultiplied linear
+    // light, then dimmed. straight (0.6, 0.4, 0.2) decodes to
+    // (0.319, 0.133, 0.033); x alpha 200/255 x brightness 0.5.
+    assert_pixel(
+        render(1),
+        [32, 13, 3, 100],
+        1,
+        "cube legacy mode, linear target",
+    );
+    unsafe { gl.delete_program(program) };
+}
 
-    assert_pixel(pixel, [60, 40, 20, 100], 1, "cube legacy mode");
+#[test]
+fn wayland_transition_shader_decodes_the_encoded_snapshot_for_a_linear_target() {
+    let Some(h) = HeadlessGl::new(GlApi::Gles3) else {
+        eprintln!("headless GL unavailable - skipping transition domain test");
+        return;
+    };
+    let gl = &h.gl;
+    let program = link(
+        gl,
+        super::shaders::VERTEX_SHADER,
+        super::shaders::TRANSITION_FRAGMENT_SHADER,
+    )
+    .expect("transition shaders must link");
+    assert!(
+        unsafe { gl.get_uniform_location(program, "u_scene_linear") }.is_some(),
+        "transition program optimized out u_scene_linear"
+    );
+    let render = |scene_linear: i32| {
+        render_quad(gl, program, [120, 80, 40, 200], 8, 8, |gl| unsafe {
+            let u = |name: &str| gl.get_uniform_location(program, name);
+            gl.uniform_4_f32(u("u_rect").as_ref(), 0.0, 0.0, 8.0, 8.0);
+            gl.uniform_matrix_4_f32_slice(u("u_projection").as_ref(), false, &ortho(8.0, 8.0));
+            gl.uniform_1_i32(u("u_texture").as_ref(), 0);
+            gl.uniform_4_f32(u("u_uv_rect").as_ref(), 0.0, 0.0, 1.0, 1.0);
+            gl.uniform_1_f32(u("u_opacity").as_ref(), 0.5);
+            gl.uniform_1_i32(u("u_scene_linear").as_ref(), scene_linear);
+        })
+    };
+    assert_pixel(
+        render(0),
+        [60, 40, 20, 100],
+        1,
+        "transition, encoded target",
+    );
+    assert_pixel(render(1), [32, 13, 3, 100], 1, "transition, linear target");
+    unsafe { gl.delete_program(program) };
+}
+
+#[test]
+fn wayland_portal_shader_decodes_snapshot_and_glow_for_a_linear_target() {
+    let Some(h) = HeadlessGl::new(GlApi::Gles3) else {
+        eprintln!("headless GL unavailable - skipping portal domain test");
+        return;
+    };
+    let gl = &h.gl;
+    let program = link(
+        gl,
+        super::shaders::VERTEX_SHADER,
+        super::shaders::PORTAL_FRAGMENT_SHADER,
+    )
+    .expect("portal shaders must link");
+    assert!(
+        unsafe { gl.get_uniform_location(program, "u_scene_linear") }.is_some(),
+        "portal program optimized out u_scene_linear"
+    );
+    // At the centre with progress 0 the iris mask and the glow ring are both
+    // fully on, so the snapshot and the glow can be probed independently.
+    let render = |input: [u8; 4], glow: f32, scene_linear: i32| {
+        render_quad(gl, program, input, 8, 8, |gl| unsafe {
+            let u = |name: &str| gl.get_uniform_location(program, name);
+            gl.uniform_4_f32(u("u_rect").as_ref(), 0.0, 0.0, 8.0, 8.0);
+            gl.uniform_matrix_4_f32_slice(u("u_projection").as_ref(), false, &ortho(8.0, 8.0));
+            gl.uniform_1_i32(u("u_texture").as_ref(), 0);
+            gl.uniform_4_f32(u("u_uv_rect").as_ref(), 0.0, 0.0, 1.0, 1.0);
+            gl.uniform_1_f32(u("u_progress").as_ref(), 0.0);
+            gl.uniform_1_f32(u("u_glow").as_ref(), glow);
+            gl.uniform_2_f32(u("u_center").as_ref(), 0.5, 0.5);
+            gl.uniform_1_i32(u("u_scene_linear").as_ref(), scene_linear);
+        })
+    };
+    let snapshot = [120, 80, 40, 200];
+    assert_pixel(
+        render(snapshot, 0.0, 0),
+        snapshot,
+        1,
+        "portal snapshot, encoded",
+    );
+    assert_pixel(
+        render(snapshot, 0.0, 1),
+        [64, 27, 7, 200],
+        1,
+        "portal snapshot, linear",
+    );
+    // Glow alone over a transparent snapshot. The probe pixel sits just off
+    // the ring's peak, so read the encoded glow and require the linear route
+    // to write exactly its sRGB decode (same hue, not a clipped white).
+    let clear = [0, 0, 0, 0];
+    let encoded = render(clear, 0.25, 0);
+    assert!(
+        encoded[2] > encoded[1] && encoded[1] > encoded[0] && encoded[0] > 0,
+        "portal glow must be a visible blue ramp: {encoded:?}"
+    );
+    let decode = |byte: u8| {
+        let c = f32::from(byte) / 255.0;
+        let linear = if c <= 0.04045 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        };
+        (linear * 255.0).round() as u8
+    };
+    assert_pixel(
+        render(clear, 0.25, 1),
+        [
+            decode(encoded[0]),
+            decode(encoded[1]),
+            decode(encoded[2]),
+            0,
+        ],
+        1,
+        "portal glow, linear",
+    );
     unsafe { gl.delete_program(program) };
 }
 

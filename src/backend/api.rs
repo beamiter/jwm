@@ -399,7 +399,10 @@ pub const MAX_EXTERNAL_ELEMENT_CLASSES: usize = 16;
 /// independent view and never constrains the route. `compositor_encoded_tail`
 /// remains, now emitted only when the common-linear target itself is
 /// unavailable; visible encoded-only frame-tail overlays report under their
-/// own per-class names (the compositor's tail-domain table).
+/// own per-class names (the compositor's tail-domain table). Names of classes
+/// since migrated to common-linear-aware (`workspace_transition_overlay`,
+/// `tab_bar_overlay`, `particle_overlay`, `edge_glow_overlay`) stay recognized
+/// for recorded payloads but are no longer emitted.
 pub(crate) const LINEAR_TAIL_BLOCKER_NAMES: [&str; 20] = [
     "compositor_encoded_tail",
     "capture_readback",

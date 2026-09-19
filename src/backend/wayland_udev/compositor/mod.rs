@@ -439,6 +439,7 @@ pub(crate) struct TransitionUniforms {
     pub projection: i32,
     pub opacity: i32,
     pub uv_rect: i32,
+    pub scene_linear: i32,
 }
 
 #[allow(dead_code)]
@@ -501,6 +502,7 @@ pub(crate) struct PortalUniforms {
     pub glow: i32,
     pub center: i32,
     pub uv_rect: i32,
+    pub scene_linear: i32,
 }
 
 #[allow(dead_code)]
@@ -1752,6 +1754,10 @@ pub(crate) struct WaylandCompositor {
     // --- Transition per-monitor ---
     transition_mon: Option<(i32, i32, u32, u32)>,
     transition_exclude_top: u32,
+    /// Whether this frame's workspace transition draws into the common
+    /// linear target (a deferred route). Latched by `render_transition`
+    /// for the per-mode draw helpers.
+    transition_draws_linear: bool,
 
     // --- Render stats ---
     render_stats: render_stats::RenderStats,
@@ -2395,6 +2401,7 @@ impl WaylandCompositor {
                 projection: get_uniform_loc(gl, transition_program, "u_projection"),
                 opacity: get_uniform_loc(gl, transition_program, "u_opacity"),
                 uv_rect: get_uniform_loc(gl, transition_program, "u_uv_rect"),
+                scene_linear: get_uniform_loc(gl, transition_program, "u_scene_linear"),
             };
 
             let cube_uniforms = CubeUniforms {
@@ -2455,6 +2462,7 @@ impl WaylandCompositor {
                 glow: get_uniform_loc(gl, portal_program, "u_glow"),
                 center: get_uniform_loc(gl, portal_program, "u_center"),
                 uv_rect: get_uniform_loc(gl, portal_program, "u_uv_rect"),
+                scene_linear: get_uniform_loc(gl, portal_program, "u_scene_linear"),
             };
 
             let tilt_uniforms = TiltUniforms {
@@ -3129,6 +3137,7 @@ impl WaylandCompositor {
                 // Transition per-monitor
                 transition_mon: None,
                 transition_exclude_top: 0,
+                transition_draws_linear: false,
 
                 // Render stats & texture pool
                 render_stats: render_stats::RenderStats::new(),

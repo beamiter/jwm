@@ -13,7 +13,7 @@ Ordered by how much each item hurts "open the laptop and work". This queue does
 
 | Priority | Gap | Status | Notes |
 | --- | --- | --- | --- |
-| 1 | HDR / color external elements | **partial** | Cursor/DnD/layer internalization done. **EdgeGlow**, **Particles**, and **TabBar** (frosted glass domain-aware) are `CommonLinearAware`. Remaining encoded chrome: postprocess, toast/OSD/system UI, …. Session lock stays external on purpose. See [hdr](hdr.md). |
+| 1 | HDR / color external elements | **partial** | Cursor/DnD/layer internalization done. **WorkspaceTransition** (encoded snapshot decoded in-shader), **EdgeGlow**, **Particles**, and **TabBar** (frosted glass domain-aware) are `CommonLinearAware`. Remaining encoded chrome: postprocess, toast/OSD/system UI, …. Session lock stays external on purpose. See [hdr](hdr.md). |
 | 2 | Native Wayland clipboard images | **done** | `Backend::set_clipboard_png` / data-device offer is primary; `wl-copy` is last-resort only. |
 | 3 | XWayland interactive move/resize | **done** | `XwmHandler::{move,resize}_request` emit `MoveResizeRequest` into the shared Jwm drag pipeline. |
 | 4 | Idle dim covers JWM overlays + capture | **done** | Final fullscreen brightness after toast/OSD/system UI; dedicated capture view bakes brightness; EncodedOutput screenshots read after the final pass. See [idle](idle.md). |
@@ -22,7 +22,7 @@ Ordered by how much each item hurts "open the laptop and work". This queue does
 
 ## Next coding slices
 
-1. Migrate remaining `EncodedOnly` LinearTarget classes (workspace transition, postprocess) or PostDelivery chrome (toast/OSD/system UI) when useful for HDR latch stability.
+1. Migrate the remaining `EncodedOnly` LinearTarget class (postprocess) or PostDelivery chrome (toast/OSD/system UI) when useful for HDR latch stability.
 2. Upstream or vendor a Smithay path for `PAGE_FLIP_ASYNC` tearing (keep reporting honest until then).
 3. Atomic DRM modeset + GLES resize transaction for envelope changes (multi-session).
 

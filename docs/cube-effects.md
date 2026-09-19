@@ -181,6 +181,15 @@ is zero at both ends — the first and last frame are the flat workspace — and
 the free edge leads but is clamped at the landed position, so the page settles
 tip-first the way paper does.
 
+On the Wayland DRM backend every transition mode is common-linear-aware. The
+outgoing snapshot is always stored as encoded sRGB — a previous frame that rode
+the deferred linear route is normalized before the capture, and an 8-bit
+snapshot in linear light would band in the shadows — and the flat, cube and
+portal programs decode it when the bound target is the FP16 linear FBO. A tag
+switch therefore no longer drops an HDR or per-output-delivery frame onto the
+exact-sRGB fallback for the length of the animation, and the IPC blocker
+inventory no longer reports `workspace_transition_overlay`.
+
 ## Timing
 
 Flat wipes read best when they are quick; a rotating solid needs long enough for

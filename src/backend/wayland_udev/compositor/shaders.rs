@@ -1140,7 +1140,15 @@ void main() {
     // their exact brightness-only output. Keep this branch first so none of the
     // new material controls can alter a legacy draw.
     if (u_lit < 0.5) {
-        frag_color = vec4(texel.rgb * u_brightness, texel.a * u_brightness);
+        // The snapshot is premultiplied encoded sRGB; a linear target gets
+        // the same pixels re-expressed as premultiplied linear light.
+        vec3 rgb = texel.rgb;
+        if (u_scene_linear != 0) {
+            float alpha = clamp(texel.a, 0.0, 1.0);
+            vec3 straight = alpha > 1.0e-6 ? rgb / alpha : vec3(0.0);
+            rgb = srgb_inverse(straight) * alpha;
+        }
+        frag_color = vec4(rgb * u_brightness, texel.a * u_brightness);
         return;
     }
 
@@ -1333,8 +1341,26 @@ uniform float u_glow;        // glow intensity at edge
 uniform vec2 u_center;       // center of portal in UV space (0.5, 0.5)
 uniform vec4 u_uv_rect;
 uniform vec4 u_rect;         // target rectangle in pixels
+uniform int u_scene_linear;  // 1 = the bound target is the common linear FBO
 in vec2 v_uv;
 out vec4 frag_color;
+
+// The snapshot holds premultiplied encoded-sRGB pixels. On a linear target
+// re-express them as premultiplied linear light: unpremultiply, decode,
+// premultiply again (the window program's contract for untagged surfaces).
+vec3 srgb_inverse(vec3 c) {
+    c = clamp(c, 0.0, 1.0);
+    vec3 lo = c / 12.92;
+    vec3 hi = pow(max((c + 0.055) / 1.055, 0.0), vec3(2.4));
+    return mix(lo, hi, step(0.04045, c));
+}
+
+vec3 premultiplied_to_output_domain(vec4 texel) {
+    if (u_scene_linear == 0) return texel.rgb;
+    float alpha = clamp(texel.a, 0.0, 1.0);
+    vec3 straight = alpha > 1.0e-6 ? texel.rgb / alpha : vec3(0.0);
+    return srgb_inverse(straight) * alpha;
+}
 
 void main() {
     vec2 uv = u_uv_rect.xy + v_uv * u_uv_rect.zw;
@@ -1359,8 +1385,14 @@ void main() {
                  smoothstep(radius - edge_width * 2.0, radius - edge_width, dist);
     vec3 glow_color = vec3(0.4, 0.6, 1.0) * u_glow * ring * 2.0;
 
-    // Old scene visible where mask > 0
-    frag_color = vec4(texel.rgb * mask + glow_color, texel.a * mask);
+    // Old scene visible where mask > 0. The glow ring is authored as an
+    // additive encoded color; on a linear target its clipped encoded value is
+    // decoded so it reads the same over a dark desktop on either route.
+    vec3 old_scene = premultiplied_to_output_domain(texel) * mask;
+    vec3 glow = u_scene_linear != 0
+        ? srgb_inverse(clamp(glow_color, 0.0, 1.0))
+        : glow_color;
+    frag_color = vec4(old_scene + glow, texel.a * mask);
 }
 "#;
 
@@ -1370,8 +1402,16 @@ precision highp float;
 uniform sampler2D u_texture;
 uniform float u_opacity; // 1.0 = fully visible old scene, 0.0 = gone
 uniform vec4 u_uv_rect;  // x, y, w, h in texture UV space
+uniform int u_scene_linear; // 1 = the bound target is the common linear FBO
 in vec2 v_uv;
 out vec4 frag_color;
+
+vec3 srgb_inverse(vec3 c) {
+    c = clamp(c, 0.0, 1.0);
+    vec3 lo = c / 12.92;
+    vec3 hi = pow(max((c + 0.055) / 1.055, 0.0), vec3(2.4));
+    return mix(lo, hi, step(0.04045, c));
+}
 
 void main() {
     // Snapshot comes from an FBO texture, whose Y direction is opposite to
@@ -1381,6 +1421,13 @@ void main() {
         u_uv_rect.y + (1.0 - v_uv.y) * u_uv_rect.w
     );
     vec4 texel = texture(u_texture, uv);
+    // The snapshot is always premultiplied encoded sRGB. On a linear target
+    // re-express it as premultiplied linear light before the opacity fade.
+    if (u_scene_linear != 0) {
+        float alpha = clamp(texel.a, 0.0, 1.0);
+        vec3 straight = alpha > 1.0e-6 ? texel.rgb / alpha : vec3(0.0);
+        texel = vec4(srgb_inverse(straight) * alpha, alpha);
+    }
     frag_color = texel * clamp(u_opacity, 0.0, 1.0);
 }
 "#;

@@ -3932,10 +3932,17 @@ impl WaylandCompositor {
         }
 
         // =================================================================
-        // 12. Workspace transitions
+        // 12. Workspace transitions (common-linear-aware)
         // =================================================================
+        // The snapshot is always encoded sRGB (section 0 normalizes a
+        // deferred previous frame before capturing it); the transition
+        // shaders decode it when the bound target is the linear FBO.
         if self.transition_active {
-            self.render_transition(gl, &projection);
+            debug_assert_eq!(
+                tail_domain::TailOverlayClass::WorkspaceTransition.domain(),
+                tail_domain::TailOverlayDomain::CommonLinearAware
+            );
+            self.render_transition(gl, &projection, tail_draws_linear);
         }
 
         // =================================================================

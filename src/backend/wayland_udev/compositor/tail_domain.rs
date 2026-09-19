@@ -63,8 +63,9 @@ pub(crate) enum TailOverlayDomain {
 /// Every compositor-owned frame-tail overlay class, in draw order.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum TailOverlayClass {
-    /// Workspace transition (cube/coverflow/...) sampling two encoded
-    /// workspace snapshots.
+    /// Workspace transition (cube/coverflow/...) sampling the encoded-sRGB
+    /// snapshot of the previous workspace; its three programs (flat, cube,
+    /// portal) decode the snapshot when the bound target is linear.
     WorkspaceTransition,
     /// Snap preview highlight rectangle (border program, domain-aware).
     SnapPreview,
@@ -127,15 +128,15 @@ impl TailOverlayClass {
 
     pub(crate) const fn domain(self) -> TailOverlayDomain {
         match self {
-            Self::SnapPreview
+            Self::WorkspaceTransition
+            | Self::SnapPreview
             | Self::Overview
             | Self::Expose
             | Self::Peek
             | Self::TabBar
             | Self::EdgeGlow
             | Self::Particles => TailOverlayDomain::CommonLinearAware,
-            Self::WorkspaceTransition
-            | Self::Postprocess
+            Self::Postprocess
             | Self::DebugHud
             | Self::Annotation
             | Self::ScreenshotToolbar
@@ -152,14 +153,14 @@ impl TailOverlayClass {
     /// `api::LINEAR_TAIL_BLOCKER_NAMES` (a unit test enforces it).
     pub(crate) const fn blocker_wire_name(self) -> Option<&'static str> {
         match self {
-            Self::SnapPreview
+            Self::WorkspaceTransition
+            | Self::SnapPreview
             | Self::Overview
             | Self::Expose
             | Self::Peek
             | Self::TabBar
             | Self::EdgeGlow
             | Self::Particles => None,
-            Self::WorkspaceTransition => Some("workspace_transition_overlay"),
             Self::Postprocess => Some("postprocess_filter"),
             Self::DebugHud => Some("debug_hud_overlay"),
             Self::Annotation => Some("annotation_overlay"),
@@ -484,11 +485,11 @@ mod tests {
         visibility.recording_region_overlay = true;
 
         let blockers = tail_overlay_blockers(&visibility);
-        // Expose and Peek are common-linear-aware: visible but absent here.
+        // The workspace transition, Expose and Peek are common-linear-aware:
+        // visible but absent here.
         assert_eq!(
             blockers.iter().collect::<Vec<_>>(),
             [
-                TailOverlayClass::WorkspaceTransition,
                 TailOverlayClass::Toast,
                 TailOverlayClass::SystemUi,
                 TailOverlayClass::RecordingRegionOverlay,
