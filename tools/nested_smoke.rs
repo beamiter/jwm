@@ -774,6 +774,37 @@ fn restored_target_converged(
         && geometry_intersects_monitor(geometry, monitors)
 }
 
+/// Every visible (non-minimized) window other than the target, with its
+/// geometry: the rest of the layout the restore must return to.
+fn layout_siblings(windows: &serde_json::Value, target_id: u64) -> Vec<(u64, WindowGeometry)> {
+    let mut siblings: Vec<_> = windows
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|window| window["is_minimized"].as_bool() == Some(false))
+        .filter_map(|window| {
+            let id = window["id"].as_u64()?;
+            (id != target_id).then(|| Some((id, window_geometry(window)?)))?
+        })
+        .collect();
+    siblings.sort_unstable_by_key(|&(id, _)| id);
+    siblings
+}
+
+/// The restore has converged once the target is back *and* the tiling
+/// layout has re-flowed around it: every sibling sits where it sat before
+/// the minimize. Checking the target alone let a sibling still carrying the
+/// minimized-state full-width geometry be snapshotted as settled.
+fn restored_layout_converged(
+    windows: &serde_json::Value,
+    monitors: &serde_json::Value,
+    target: MinimizeTarget,
+    siblings_before: &[(u64, WindowGeometry)],
+) -> bool {
+    restored_target_converged(windows, monitors, target)
+        && layout_siblings(windows, target.id) == siblings_before
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DifferentialStatus {
@@ -2951,7 +2982,7 @@ fn drive_scenario(
                 )?);
             }
             ScenarioStage::MinimizeRestoreFocus => {
-                let target =
+                let (target, siblings_before) =
                     wait_for_stable_minimize_target(socket, convergence_deadline(deadline))?;
 
                 ipc_command(socket, "minimize")?;
@@ -2972,7 +3003,14 @@ fn drive_scenario(
                     socket,
                     convergence_deadline(deadline),
                     &format!("stage {stage_index} restore/focus window {}", target.id),
-                    |state| restored_target_converged(&state.windows, &state.monitors, target),
+                    |state| {
+                        restored_layout_converged(
+                            &state.windows,
+                            &state.monitors,
+                            target,
+                            &siblings_before,
+                        )
+                    },
                 )?);
             }
         }
@@ -2999,17 +3037,22 @@ fn convergence_deadline(overall_deadline: Instant) -> Instant {
     )
 }
 
+/// The minimize target plus the layout around it, both observed identically
+/// twice in a row.
 fn wait_for_stable_minimize_target(
     socket: &Path,
     deadline: Instant,
-) -> Result<MinimizeTarget, String> {
+) -> Result<(MinimizeTarget, Vec<(u64, WindowGeometry)>), String> {
     let mut previous = None;
     loop {
         let state = read_scenario_observation(socket)?;
         let rejection = match select_minimize_target(&state.windows, &state.monitors) {
-            Ok(target) if previous == Some(target) => return Ok(target),
             Ok(target) => {
-                previous = Some(target);
+                let observed = (target, layout_siblings(&state.windows, target.id));
+                if previous.as_ref() == Some(&observed) {
+                    return Ok(observed);
+                }
+                previous = Some(observed);
                 format!("window {} was observed only once", target.id)
             }
             Err(error) => {
@@ -3026,9 +3069,13 @@ fn wait_for_stable_minimize_target(
     }
 }
 
-/// Require both a phase-specific semantic/physical predicate and two
-/// consecutive identical normalized reads. A deadline is an error rather
-/// than permission to compare an unsettled last sample.
+/// Consecutive identical converged reads a snapshot needs. Two let a re-flow
+/// that straddled a single poll interval pass as settled.
+const SETTLED_READS: usize = 3;
+
+/// Require both a phase-specific semantic/physical predicate and
+/// [`SETTLED_READS`] consecutive identical normalized reads. A deadline is an
+/// error rather than permission to compare an unsettled last sample.
 fn settled_snapshot_where(
     socket: &Path,
     deadline: Instant,
@@ -3036,20 +3083,27 @@ fn settled_snapshot_where(
     mut converged: impl FnMut(&ScenarioObservation) -> bool,
 ) -> Result<serde_json::Value, String> {
     let mut previous = None;
+    let mut identical = 0;
     loop {
         let state = read_scenario_observation(socket)?;
         let current = state.normalized();
         if converged(&state) {
             if previous.as_ref() == Some(&current) {
-                return Ok(current);
+                identical += 1;
+            } else {
+                identical = 1;
+                previous = Some(current);
             }
-            previous = Some(current);
+            if identical >= SETTLED_READS {
+                return previous.ok_or_else(|| format!("{phase}: no observation"));
+            }
         } else {
             previous = None;
+            identical = 0;
         }
         if Instant::now() >= deadline {
             return Err(format!(
-                "{phase} did not reach two consecutive converged observations"
+                "{phase} did not reach {SETTLED_READS} consecutive converged observations"
             ));
         }
         std::thread::sleep(POLL_INTERVAL);
@@ -4030,6 +4084,47 @@ xwininfo: Window id: 0x20000c "fixture"
             &wrong_geometry,
             &monitors,
             target
+        ));
+
+        // The layout must re-flow too: a sibling still holding the
+        // minimized-state full-width geometry is not a settled restore.
+        let before = serde_json::json!([
+            {"id": 20, "is_focused": true, "is_minimized": false,
+             "x": -1800, "y": 40, "w": 900, "h": 900},
+            {"id": 10, "is_focused": false, "is_minimized": false,
+             "x": -900, "y": 40, "w": 900, "h": 900},
+        ]);
+        let siblings_before = layout_siblings(&before, target.id);
+        assert_eq!(
+            siblings_before,
+            [(
+                10,
+                WindowGeometry {
+                    x: -900,
+                    y: 40,
+                    w: 900,
+                    h: 900
+                }
+            )]
+        );
+        assert!(restored_layout_converged(
+            &before,
+            &monitors,
+            target,
+            &siblings_before
+        ));
+        let sibling_stale = serde_json::json!([
+            {"id": 20, "is_focused": true, "is_minimized": false,
+             "x": -1800, "y": 40, "w": 900, "h": 900},
+            {"id": 10, "is_focused": false, "is_minimized": false,
+             "x": -1920, "y": 0, "w": 1920, "h": 1080},
+        ]);
+        assert!(restored_target_converged(&sibling_stale, &monitors, target));
+        assert!(!restored_layout_converged(
+            &sibling_stale,
+            &monitors,
+            target,
+            &siblings_before
         ));
     }
 
