@@ -109,6 +109,26 @@ pub(crate) fn seed_pertag_from_config(monitor: &mut WMMonitor, mon_index: i32, c
     monitor.reload_current_tag_context();
 }
 
+/// The entries to write: every live monitor's, plus whatever the file holds
+/// for monitors that are not connected right now and the hand-written
+/// wildcard (`monitor = -1`) entries. Replacing the whole list erased an
+/// unplugged monitor's layouts on the first save after the unplug.
+fn merge_layout_tag_entries(
+    existing: &[LayoutTagConfig],
+    live: Vec<LayoutTagConfig>,
+) -> Vec<LayoutTagConfig> {
+    let live_monitors: std::collections::HashSet<i32> =
+        live.iter().map(|entry| entry.monitor).collect();
+    let mut merged: Vec<LayoutTagConfig> = existing
+        .iter()
+        .filter(|entry| !live_monitors.contains(&entry.monitor))
+        .cloned()
+        .collect();
+    merged.extend(live);
+    merged.sort_by_key(|entry| (entry.monitor, entry.tag));
+    merged
+}
+
 impl Jwm {
     pub(crate) fn layout_persist_next_wakeup(&self, now: Instant) -> Option<Duration> {
         pending_layout_persist_wakeup(
@@ -178,8 +198,8 @@ impl Jwm {
     }
 
     fn save_layout_tags(&mut self) -> Result<(), ConfigError> {
-        let entries = self.layout_tag_entries();
         let config = CONFIG.load_full();
+        let entries = merge_layout_tag_entries(config.layout_tags(), self.layout_tag_entries());
         let revision = config.persist_layout_tags(&entries)?;
 
         // Keep the live config in step with the file, so a later whole-file
@@ -203,7 +223,7 @@ impl Jwm {
         let tags_length = CONFIG.load().tags_length();
         let mut entries = Vec::with_capacity(self.state.monitor_order.len() * (tags_length + 1));
 
-        for (index, &mon_key) in self.state.monitor_order.iter().enumerate() {
+        for &mon_key in &self.state.monitor_order {
             let Some(monitor) = self.state.monitors.get(mon_key) else {
                 continue;
             };
@@ -216,7 +236,9 @@ impl Jwm {
                 };
                 entries.push(LayoutTagConfig {
                     tag,
-                    monitor: index as i32,
+                    // Keyed by monitor number, the identity a monitor keeps
+                    // across hot-plug, which is also what seeding reads.
+                    monitor: monitor.num,
                     layout: layout.0.to_owned(),
                     alt: pertag
                         .prev_lts
@@ -306,6 +328,31 @@ mod tests {
             pending_layout_persist_wakeup(Some(changed_at), true, changed_at + PERSIST_DEBOUNCE,),
             None,
             "the config tracker owns the next wake while a user edit is pending"
+        );
+    }
+
+    #[test]
+    fn saving_keeps_unplugged_monitors_and_wildcard_entries() {
+        let existing = vec![
+            entry(1, -1, "grid"),
+            entry(1, 0, "tile"),
+            entry(1, 1, "monocle"),
+            entry(2, 1, "deck"),
+        ];
+        // Only monitor 0 is connected now.
+        let merged = merge_layout_tag_entries(&existing, vec![entry(1, 0, "fibonacci")]);
+        let summary: Vec<(i32, usize, &str)> = merged
+            .iter()
+            .map(|entry| (entry.monitor, entry.tag, entry.layout.as_str()))
+            .collect();
+        assert_eq!(
+            summary,
+            [
+                (-1, 1, "grid"),
+                (0, 1, "fibonacci"),
+                (1, 1, "monocle"),
+                (1, 2, "deck"),
+            ]
         );
     }
 

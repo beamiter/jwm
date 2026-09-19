@@ -867,7 +867,12 @@ impl Jwm {
 
     pub(crate) fn add_monitor(&mut self, info: crate::backend::api::OutputInfo) {
         info!("[add_monitor] Adding output: {:?}", info);
-        let mut m = self.createmon(CONFIG.load().show_bar());
+        // Monitor numbers are protocol identities (bar shm key, Dock command
+        // source, saved per-tag layouts), not the current slotmap length.
+        // Reusing `len()` after a non-tail hot-unplug can collide with a
+        // surviving monitor.
+        let num = lowest_unused_monitor_num(self.state.monitors.values().map(|monitor| &monitor.num));
+        let mut m = self.createmon_numbered(CONFIG.load().show_bar(), num);
 
         // 设置 Monitor 几何属性
         m.geometry.m_x = info.x;
@@ -879,11 +884,6 @@ impl Jwm {
         m.geometry.w_y = info.y;
         m.geometry.w_w = info.width;
         m.geometry.w_h = info.height;
-        // Monitor numbers are protocol identities (bar shm key, Dock command
-        // source), not the current slotmap length. Reusing `len()` after a
-        // non-tail hot-unplug can collide with a surviving monitor.
-        m.num = lowest_unused_monitor_num(self.state.monitors.values().map(|monitor| &monitor.num));
-
         let key = self.state.monitors.insert(m);
         self.state.monitor_order.push(key);
         self.state.output_map.insert(key, info.id);

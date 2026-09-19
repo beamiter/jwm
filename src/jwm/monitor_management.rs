@@ -174,6 +174,17 @@ impl Jwm {
     }
 
     pub(super) fn createmon(&mut self, show_bar: bool) -> WMMonitor {
+        // The X11 setup paths number monitors by position and append them,
+        // so the next number is the current length.
+        let num = self.state.monitor_order.len() as i32;
+        self.createmon_numbered(show_bar, num)
+    }
+
+    /// A monitor that will answer to `num`: saved per-tag layouts are keyed
+    /// by monitor number, so they are seeded from the number the monitor
+    /// really gets — after a hot-unplug that is the lowest free one, not the
+    /// list length.
+    pub(super) fn createmon_numbered(&mut self, show_bar: bool, num: i32) -> WMMonitor {
         // info!("[createmon]");
         let cfg = CONFIG.load();
         let mut m: WMMonitor = WMMonitor::new();
@@ -200,11 +211,10 @@ impl Jwm {
             ref_pertag.lts[i] = default_lt.clone();
             ref_pertag.prev_lts[i] = default_prev_lt.clone();
         }
-        // Saved per-tag layouts land on top of those defaults. The monitor is
-        // appended by `insert_monitor`, so the index it will answer to is the
-        // current length — which is what the saved entries are keyed by.
-        let mon_index = self.state.monitor_order.len() as i32;
-        crate::jwm::layout::persist::seed_pertag_from_config(&mut m, mon_index, &cfg);
+        // Saved per-tag layouts land on top of those defaults, keyed by the
+        // monitor number.
+        m.num = num;
+        crate::jwm::layout::persist::seed_pertag_from_config(&mut m, num, &cfg);
         info!("[createmon]: {}", m);
         return m;
     }
