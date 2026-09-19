@@ -1278,6 +1278,9 @@ const fn should_release_minimized_offscreen_owner(
 
 pub struct UdevBackend {
     display_handle: DisplayHandle,
+    /// `--benchmark` asked the session to print its report and exit once the
+    /// compositor's harness completes.
+    benchmark_auto_exit: bool,
     event_loop: SendWrapper<EventLoop<'static, JwmWaylandState>>,
     state: Box<JwmWaylandState>,
     #[allow(dead_code)]
@@ -3615,6 +3618,7 @@ impl UdevBackend {
 
         Ok(Self {
             display_handle,
+            benchmark_auto_exit: false,
             event_loop: SendWrapper(event_loop),
             state,
             socket_name,
@@ -3771,7 +3775,31 @@ fn output_at(outputs: &[OutputInfo], x: f64, y: f64) -> Option<OutputId> {
         .map(|o| o.id)
 }
 
-impl CompositorBenchmark for UdevBackend {}
+impl CompositorBenchmark for UdevBackend {
+    fn compositor_benchmark_start(&mut self, frames: u32, warmup: u32) -> bool {
+        self.compositor
+            .as_mut()
+            .is_some_and(|compositor| compositor.benchmark_start(frames, warmup))
+    }
+
+    fn compositor_benchmark_stop(&mut self) -> Option<String> {
+        self.compositor.as_mut()?.benchmark_stop()
+    }
+
+    fn compositor_benchmark_report(&self) -> Option<String> {
+        self.compositor.as_ref()?.benchmark_report()
+    }
+
+    fn compositor_benchmark_is_complete(&self) -> bool {
+        self.compositor
+            .as_ref()
+            .is_some_and(|compositor| compositor.benchmark_is_complete())
+    }
+
+    fn compositor_benchmark_set_auto_exit(&mut self, enabled: bool) {
+        self.benchmark_auto_exit = enabled;
+    }
+}
 
 impl BackendDiagnostics for UdevBackend {
     fn compositor_fps(&self) -> f32 {
@@ -6688,6 +6716,14 @@ impl Backend for UdevBackend {
             self.refresh_output_vrr_metric();
 
             if handler.should_exit() {
+                break;
+            }
+            // `--benchmark`: print the finished report and leave through the
+            // same exit path as a quit.
+            if self.benchmark_auto_exit && self.compositor_benchmark_is_complete() {
+                if let Some(report) = self.compositor_benchmark_report() {
+                    println!("{report}");
+                }
                 break;
             }
 

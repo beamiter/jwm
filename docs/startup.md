@@ -113,8 +113,15 @@ jwm --backend wayland-udev --benchmark 600 --benchmark-warmup 60
 ```
 
 The benchmark starts after JWM setup, excludes the warm-up frames and requests
-automatic exit when the sample is complete. The compatibility environment
-variables `JWM_BENCHMARK` and `JWM_BENCHMARK_WARMUP` remain available.
+automatic exit when the sample is complete; the JSON report goes to stdout. The
+compatibility environment variables `JWM_BENCHMARK` and `JWM_BENCHMARK_WARMUP`
+remain available.
+
+The X11 compositor (`x11rb`, `xcb`) and `wayland-udev` share one harness and
+one report schema. Only rendered frames count, and a calm desktop renders
+nothing, so give the run a steady workload (see
+[performance](performance.md)) or it waits for frames that never come. The
+nested Wayland backends have no compositor harness and refuse the request.
 
 All startup and IPC benchmark requests use the same resource limits: measured
 frames must be in `1..=100000`, and warm-up frames in `0..=10000`. These limits

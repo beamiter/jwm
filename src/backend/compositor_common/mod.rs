@@ -2,6 +2,7 @@
 
 pub mod annotation_overlay;
 pub(crate) mod attention;
+pub mod benchmark;
 pub(crate) mod border_style;
 pub mod capture;
 pub(crate) mod capture_hint;

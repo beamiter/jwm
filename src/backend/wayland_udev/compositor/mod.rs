@@ -1488,6 +1488,12 @@ pub(crate) struct WaylandCompositor {
     predictive_render_mgr: predictive_render::PredictiveRenderManager,
     pixel_buffer_pool: pixel_buffer_pool::PixelBufferPool,
     frame_profiler: profiler::FrameProfiler,
+    /// `--benchmark` / IPC `benchmark` sampling; idle until started.
+    benchmark: crate::backend::compositor_common::benchmark::BenchmarkHarness,
+    /// GL_RENDERER / GL_VERSION captured at construction for the benchmark
+    /// report's system block.
+    gl_renderer: String,
+    gl_version: String,
     perf_metrics: perf_metrics::PerfMetrics,
     cache_warmup_mgr: cache_warmup::CacheWarmupManager,
     direct_scanout_mgr: direct_scanout::DirectScanoutManager,
@@ -2964,6 +2970,9 @@ impl WaylandCompositor {
                 predictive_render_mgr: predictive_render::PredictiveRenderManager::new(),
                 pixel_buffer_pool: pixel_buffer_pool::PixelBufferPool::new(),
                 frame_profiler: profiler::FrameProfiler::new(),
+                benchmark: crate::backend::compositor_common::benchmark::BenchmarkHarness::new(),
+                gl_renderer: gl_string(gl, ffi::RENDERER),
+                gl_version: gl_string(gl, ffi::VERSION),
                 perf_metrics: perf_metrics::PerfMetrics::new(),
                 cache_warmup_mgr: cache_warmup::CacheWarmupManager::new(),
                 direct_scanout_mgr: direct_scanout::DirectScanoutManager::new(screen_w, screen_h),
@@ -4539,6 +4548,43 @@ impl WaylandCompositor {
         self.recording.stats()
     }
 
+    pub(crate) fn benchmark_start(&mut self, frames: u32, warmup: u32) -> bool {
+        use crate::backend::compositor_common::benchmark::{BenchmarkConfig, SystemInfo};
+        if let Err(error) = self.benchmark.try_start(frames, warmup) {
+            log::warn!("benchmark: refused to start: {error}");
+            return false;
+        }
+        self.benchmark.system_info = SystemInfo {
+            gpu: self.gl_renderer.clone(),
+            driver: self.gl_version.clone(),
+            resolution: format!("{}x{}", self.screen_w, self.screen_h),
+        };
+        self.benchmark.bench_config = BenchmarkConfig {
+            blur_enabled: self.blur_enabled,
+            blur_strength: self.blur_strength,
+            window_count: self.windows.len(),
+            hdr_enabled: self.hdr_enabled,
+            vrr_active: self.output_vrr_active,
+        };
+        true
+    }
+
+    pub(crate) fn benchmark_stop(&mut self) -> Option<String> {
+        self.benchmark
+            .stop()
+            .map(|report| serde_json::to_string_pretty(&report).unwrap_or_default())
+    }
+
+    pub(crate) fn benchmark_report(&self) -> Option<String> {
+        self.benchmark.is_complete().then(|| {
+            serde_json::to_string_pretty(&self.benchmark.generate_report()).unwrap_or_default()
+        })
+    }
+
+    pub(crate) fn benchmark_is_complete(&self) -> bool {
+        self.benchmark.is_complete()
+    }
+
     /// Notify audio timing for a window (feeds AudioSyncManager).
     pub(crate) fn notify_audio_timing(&mut self, window_id: u64, fps: f32, buffer_latency_ms: u32) {
         self.audio_sync_mgr
@@ -5015,4 +5061,19 @@ impl WaylandCompositor {
         self.direct_scanout_mgr.update_screen_size(w, h);
         Ok(())
     }
+}
+
+/// A GL identification string (`GL_RENDERER`, `GL_VERSION`), empty when the
+/// driver returns none.
+///
+/// # Safety
+/// Requires a current GL context.
+unsafe fn gl_string(gl: &ffi::Gles2, name: ffi::types::GLenum) -> String {
+    let pointer = unsafe { gl.GetString(name) };
+    if pointer.is_null() {
+        return String::new();
+    }
+    unsafe { std::ffi::CStr::from_ptr(pointer.cast()) }
+        .to_string_lossy()
+        .into_owned()
 }

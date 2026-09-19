@@ -8248,3 +8248,51 @@ fn wayland_smart_borders_ring_focused_and_unfocused_windows() {
         ));
     }
 }
+
+/// `--benchmark` on wayland-udev: the shared harness samples real frames,
+/// completes after warm-up + target frames, and reports this GL context.
+#[test]
+fn wayland_benchmark_samples_rendered_frames_to_completion() {
+    let Some(_headless) = HeadlessGl::new(GlApi::Gles3) else {
+        eprintln!("headless GL unavailable - skipping Wayland benchmark test");
+        return;
+    };
+    let gl = smithay::backend::renderer::gles::ffi::Gles2::load_with(|symbol| {
+        egl::get_proc_address(symbol) as *const c_void
+    });
+
+    unsafe {
+        let mut compositor = super::WaylandCompositor::new(&gl, 64, 48, false)
+            .expect("headless Wayland compositor must initialize");
+        assert!(!compositor.benchmark_start(0, 0), "an empty request is refused");
+        assert!(compositor.benchmark_start(3, 2));
+        assert!(compositor.benchmark_report().is_none(), "not complete yet");
+
+        for _ in 0..5 {
+            assert!(!compositor.benchmark_is_complete());
+            compositor.force_full_redraw();
+            assert!(compositor.render_frame(&gl, &[], None, false, false, false, None, false));
+        }
+        assert!(compositor.benchmark_is_complete());
+
+        let report: serde_json::Value =
+            serde_json::from_str(&compositor.benchmark_report().expect("complete report"))
+                .expect("the report is JSON");
+        assert_eq!(report["frame_time"]["count"], 3);
+        assert!(report["frame_time"]["avg_ms"].as_f64().unwrap() > 0.0);
+        assert_eq!(report["system"]["resolution"], "64x48");
+        assert!(
+            !report["system"]["gpu"].as_str().unwrap().is_empty(),
+            "GL_RENDERER was captured"
+        );
+        assert!(
+            report["zones"].as_object().is_some_and(|zones| !zones.is_empty()),
+            "the profiler fed its zones"
+        );
+
+        assert!(compositor.release_gpu_resources(
+            &gl,
+            super::CompositorOutputTextureOwnership::RawCompositor,
+        ));
+    }
+}

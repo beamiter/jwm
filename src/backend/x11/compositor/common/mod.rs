@@ -3,7 +3,8 @@
 pub mod annotations;
 pub mod async_x11;
 pub mod audio_sync;
-pub mod benchmark;
+// Platform-neutral; the canonical module lives in `compositor_common`.
+pub use crate::backend::compositor_common::benchmark;
 pub mod blur_optimize;
 pub mod buffer_age;
 pub mod cache_warmup;

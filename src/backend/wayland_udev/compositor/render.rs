@@ -2374,6 +2374,13 @@ impl WaylandCompositor {
         // =================================================================
         // 0. Performance infrastructure - frame start
         // =================================================================
+        // The benchmark wants the zone breakdown too, so it turns the
+        // profiler on while it samples; its frame clock is its own, since a
+        // disabled profiler reports zero.
+        if self.benchmark.is_running() && !self.frame_profiler.is_enabled() {
+            self.frame_profiler.set_enabled(true);
+        }
+        let bench_frame_start = self.benchmark.is_running().then(Instant::now);
         self.frame_profiler.begin_frame();
         self.gl_state_tracker.reset();
 
@@ -4598,6 +4605,13 @@ impl WaylandCompositor {
         // 22. Performance infrastructure - frame end
         // =================================================================
         let frame_ms = self.frame_profiler.end_frame();
+        if let Some(start) = bench_frame_start {
+            self.benchmark
+                .record_frame(start.elapsed().as_micros().min(u128::from(u64::MAX)) as u64);
+            for (zone, stats) in self.frame_profiler.all_zone_stats() {
+                self.benchmark.record_zone(zone, stats.avg_ms);
+            }
+        }
         self.perf_metrics
             .record_compositor(std::time::Duration::from_secs_f32(frame_ms / 1000.0));
         self.adaptive_scheduler
