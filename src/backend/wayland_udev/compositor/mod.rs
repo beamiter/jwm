@@ -1762,6 +1762,9 @@ pub(crate) struct WaylandCompositor {
     /// linear target (a deferred route). Latched by `render_transition`
     /// for the per-mode draw helpers.
     transition_draws_linear: bool,
+    /// Whether last frame drew ordinary (smart) borders; the frame that
+    /// flips it repairs in full, since the rings lie outside any damage box.
+    prev_ordinary_borders: bool,
 
     // --- Render stats ---
     render_stats: render_stats::RenderStats,
@@ -3148,6 +3151,7 @@ impl WaylandCompositor {
                 transition_mon: None,
                 transition_exclude_top: 0,
                 transition_draws_linear: false,
+                prev_ordinary_borders: false,
 
                 // Render stats & texture pool
                 render_stats: render_stats::RenderStats::new(),

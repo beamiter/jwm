@@ -8185,3 +8185,66 @@ fn wayland_osd_rides_the_deferred_linear_route() {
         ));
     }
 }
+
+/// Wayland borders follow the shared table and X11's smart-border rule: a
+/// lone client has no ring; with two, the focused and the unfocused window
+/// each get their configured colour.
+#[test]
+fn wayland_smart_borders_ring_focused_and_unfocused_windows() {
+    let Some(_headless) = HeadlessGl::new(GlApi::Gles3) else {
+        eprintln!("headless GL unavailable - skipping smart border test");
+        return;
+    };
+    let gl = smithay::backend::renderer::gles::ffi::Gles2::load_with(|symbol| {
+        egl::get_proc_address(symbol) as *const c_void
+    });
+
+    const W: i32 = 200;
+    const H: i32 = 80;
+    unsafe {
+        let mut compositor = super::WaylandCompositor::new(&gl, W as u32, H as u32, false)
+            .expect("headless Wayland compositor must initialize");
+        compositor.border_enabled = true;
+        compositor.border_width = 4.0;
+        compositor.border_gradient_enabled = false;
+        compositor.shadow_enabled = false;
+        compositor.border_color_focused = [1.0, 0.0, 0.0, 1.0];
+        compositor.border_color_unfocused = [0.0, 0.0, 1.0, 1.0];
+
+        let pixels = [0u8, 255, 0, 255].repeat(40 * 30);
+        let tex = create_element_texture(&gl, 40, 30, &pixels);
+        insert_opaque_test_window(&mut compositor, 1, tex, 40, 30);
+        insert_opaque_test_window(&mut compositor, 2, tex, 40, 30);
+        for id in [1, 2] {
+            compositor.windows.get_mut(&id).unwrap().class_name = format!("term-{id}");
+        }
+
+        let render = |compositor: &mut super::WaylandCompositor,
+                          scene: &[(u64, i32, i32, u32, u32)]| {
+            compositor.force_full_redraw();
+            compositor.render_frame(&gl, scene, Some(1), false, false, false, None, false);
+            read_fbo_frame(&gl, compositor.output_fbo, W, H)
+        };
+        // The ring's middle: two pixels left of each window's left edge.
+        let ring = |frame: &[u8], x: usize| frame_pixel(frame, W as usize, H as usize, x - 2, 35);
+
+        compositor.border_enabled = false;
+        let reference = render(&mut compositor, &[(1, 20, 20, 40, 30)]);
+        compositor.border_enabled = true;
+        let lone = render(&mut compositor, &[(1, 20, 20, 40, 30)]);
+        assert_pixel(ring(&lone, 20), ring(&reference, 20), 1, "a lone client has no ring");
+
+        let pair = render(
+            &mut compositor,
+            &[(1, 20, 20, 40, 30), (2, 120, 20, 40, 30)],
+        );
+        assert_pixel(ring(&pair, 20), [255, 0, 0, 255], 2, "focused ring");
+        assert_pixel(ring(&pair, 120), [0, 0, 255, 255], 2, "unfocused ring");
+
+        gl.DeleteTextures(1, &tex);
+        assert!(compositor.release_gpu_resources(
+            &gl,
+            super::CompositorOutputTextureOwnership::RawCompositor,
+        ));
+    }
+}

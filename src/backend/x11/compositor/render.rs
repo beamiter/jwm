@@ -7,6 +7,9 @@ use super::*;
 use crate::backend::compositor_common::attention::{
     attention_border_style, attention_signal_active,
 };
+use crate::backend::compositor_common::border_style::{
+    WindowBorderInputs, counts_for_smart_borders, window_border_style,
+};
 use crate::backend::compositor_common::debug_hud as hud;
 use crate::backend::compositor_common::dynamic_island::{
     IslandDock, clip_bar_to_viewport, open_envelope,
@@ -87,22 +90,6 @@ fn resolve_and_draw_each<State, Item, Source>(
         };
         draw(state, source);
     }
-}
-
-/// Whether a composited window participates in the smart-border rule (a lone
-/// client draws no border) and may itself receive one.
-///
-/// The status bar is chrome, and override-redirect windows are unmanaged
-/// overlays the WM never tiles: IME candidate lists and the input-method
-/// switcher (fcitx5 creates those with `override_redirect`), menus, tooltips
-/// and drag icons. Counting them would draw a border around the single client
-/// of a tag for as long as the popup is up — e.g. the whole time a user types
-/// Chinese — and drop it again when the popup closes.
-fn counts_for_smart_borders(class_name: &str, status_bar_name: &str, is_or: bool) -> bool {
-    if is_or {
-        return false;
-    }
-    !(class_name == status_bar_name || class_name.contains(status_bar_name))
 }
 
 fn is_status_bar_class(class_name: &str, status_bar_name: &str) -> bool {
@@ -276,41 +263,6 @@ fn wallpaper_blend_plan(
             old_global_opacity: None,
             current_opacity: has_current_global.then_some(1.0),
         }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct FocusHighlightStyle {
-    color: [f32; 4],
-    width: f32,
-}
-
-/// Blend the transient focus indication into the ordinary focused border.
-///
-/// Keeping both endpoints identical to the stable border avoids a transparent
-/// first/last animation frame.  The client texture itself is deliberately not
-/// transformed: scaling terminal content made text and the insertion cursor
-/// appear to flash every time focus changed.
-fn focus_highlight_style(
-    focused_color: [f32; 4],
-    highlight_color: [f32; 4],
-    focused_width: f32,
-    progress: f32,
-) -> FocusHighlightStyle {
-    let progress = progress
-        .is_finite()
-        .then_some(progress)
-        .unwrap_or(1.0)
-        .clamp(0.0, 1.0);
-    let pulse = (progress * std::f32::consts::PI).sin().max(0.0);
-    let mut color = focused_color;
-    for (channel, highlight) in color.iter_mut().zip(highlight_color) {
-        *channel += (highlight - *channel) * pulse;
-    }
-    let highlight_width = (focused_width + 2.0).max(3.0);
-    FocusHighlightStyle {
-        color,
-        width: focused_width + (highlight_width - focused_width) * pulse,
     }
 }
 
@@ -6936,18 +6888,12 @@ impl<C: CompositorConnection> Compositor<C> {
                         && ((effective_border_enabled && base_border_width > 0.0)
                             || has_special_border)
                     {
-                        let focus_style = focus_highlight_active_for_win.then(|| {
+                        let focus_highlight_progress = focus_highlight_active_for_win.then(|| {
                             let elapsed_ms =
                                 self.focus_highlight_start.unwrap().1.elapsed().as_millis() as f32;
-                            let dur = self.focus_highlight_duration_ms as f32;
-                            focus_highlight_style(
-                                self.border_color_focused,
-                                self.focus_highlight_color,
-                                base_border_width,
-                                elapsed_ms / dur,
-                            )
+                            elapsed_ms / self.focus_highlight_duration_ms as f32
                         });
-                        let attention_style = attention_active_for_win.then(|| {
+                        let attention = attention_active_for_win.then(|| {
                             attention_border_style(
                                 self.attention_color,
                                 self.compositor_start_time.elapsed().as_secs_f32(),
@@ -6956,27 +6902,21 @@ impl<C: CompositorConnection> Compositor<C> {
                                 base_border_width,
                             )
                         });
-                        let color = if let Some(style) = focus_style {
-                            style.color
-                        } else if let Some(style) = attention_style {
-                            style.color
-                        } else if wt.is_pip {
-                            self.pip_border_color
-                        } else if is_focused {
-                            self.border_color_focused
-                        } else {
-                            self.border_color_unfocused
-                        };
-
-                        let bw = if let Some(style) = focus_style {
-                            style.width
-                        } else if let Some(style) = attention_style {
-                            style.width
-                        } else if wt.is_pip {
-                            self.pip_border_width
-                        } else {
-                            base_border_width
-                        };
+                        let style = window_border_style(&WindowBorderInputs {
+                            is_focused,
+                            is_pip: wt.is_pip,
+                            focus_highlight_progress,
+                            attention,
+                            ordinary_enabled: effective_border_enabled,
+                            ordinary_width: base_border_width,
+                            focused_color: self.border_color_focused,
+                            unfocused_color: self.border_color_unfocused,
+                            highlight_color: self.focus_highlight_color,
+                            pip_color: self.pip_border_color,
+                            pip_width: self.pip_border_width,
+                        });
+                        let color = style.map_or([0.0; 4], |style| style.color);
+                        let bw = style.map_or(0.0, |style| style.width);
 
                         if bw > 0.0 {
                             let bdr_x = draw_x - bw;
@@ -6994,10 +6934,7 @@ impl<C: CompositorConnection> Compositor<C> {
                             // (focus pulse, attention, PiP) keep their flat
                             // signal colors.
                             let use_gradient = self.border_gradient_enabled
-                                && is_focused
-                                && focus_style.is_none()
-                                && !attention_active_for_win
-                                && !wt.is_pip;
+                                && style.is_some_and(|style| style.ordinary_focused);
 
                             if use_gradient {
                                 let angle = (self.border_gradient_angle
@@ -8223,9 +8160,9 @@ impl<C: CompositorConnection> Compositor<C> {
 mod tests {
     use super::{
         DirtyRect, PresentedSceneCopyPlan, PresentedSceneStatus, TransitionCapturePlan,
-        blur_sampling_margin, counts_for_smart_borders, direct_presentation_owner_changed,
+        blur_sampling_margin, direct_presentation_owner_changed,
         dirty_below_affects_backdrop, dirty_below_requires_full_blur_redraw,
-        edge_effects_require_composition, focus_highlight_style, intersect_gl_scissors,
+        edge_effects_require_composition, intersect_gl_scissors,
         is_opaque_occluder, minimized_dock_requires_composition, presented_scene_copy_plan,
         rect_covers_output, resolve_and_draw_each, screenshot_freeze_change_needed,
         screenshot_freeze_requires_composition, tags_grid_label_key,
@@ -8444,16 +8381,6 @@ mod tests {
     }
 
     #[test]
-    fn ime_popups_do_not_count_toward_smart_borders() {
-        // A lone tiled client is the only window that counts, so the smart
-        // border stays off while an fcitx5 candidate list or the input-method
-        // switcher (both override-redirect) is on screen.
-        assert!(counts_for_smart_borders("Alacritty", "jwm-bar", false));
-        assert!(!counts_for_smart_borders("fcitx", "jwm-bar", true));
-        assert!(!counts_for_smart_borders("jwm-bar", "jwm-bar", false));
-    }
-
-    #[test]
     fn hidden_bar_geometry_does_not_keep_x11_cache_composited() {
         assert!(minimized_dock_requires_composition(true, false, false));
         assert!(minimized_dock_requires_composition(false, true, false));
@@ -8627,28 +8554,6 @@ mod tests {
         assert!(!edge_effects_require_composition(
             true, false, true, true, 2.0, 12.0,
         ));
-    }
-
-    #[test]
-    fn focus_highlight_returns_to_the_stable_border_at_both_ends() {
-        let focused = [0.1, 0.2, 0.3, 0.8];
-        let highlight = [0.4, 0.7, 1.0, 0.9];
-
-        let start = focus_highlight_style(focused, highlight, 1.0, 0.0);
-        let end = focus_highlight_style(focused, highlight, 1.0, 1.0);
-        assert_eq!(start.color, focused);
-        assert_eq!(start.width, 1.0);
-        assert_eq!(end.color, focused);
-        assert_eq!(end.width, 1.0);
-    }
-
-    #[test]
-    fn focus_highlight_smoothly_reaches_the_configured_peak() {
-        let highlight = [0.4, 0.7, 1.0, 0.9];
-        let peak = focus_highlight_style([0.1, 0.2, 0.3, 0.8], highlight, 1.0, 0.5);
-
-        assert_eq!(peak.color, highlight);
-        assert_eq!(peak.width, 3.0);
     }
 
     #[test]

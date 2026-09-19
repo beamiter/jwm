@@ -4,6 +4,9 @@ use super::*;
 use crate::backend::compositor_common::attention::{
     attention_border_style, attention_signal_active,
 };
+use crate::backend::compositor_common::border_style::{
+    WindowBorderInputs, counts_for_smart_borders, window_border_style,
+};
 use crate::backend::compositor_common::capture::clip_region;
 use crate::backend::compositor_common::debug_hud as hud;
 use crate::backend::compositor_common::dynamic_island::{
@@ -2030,7 +2033,10 @@ impl WaylandCompositor {
         use dirty_region::DirtyRect;
 
         // Expand each window rect to cover every compositor decoration.
-        let border_and_shadow_margin = self.border_width
+        // Every ring a calm frame can hold: ordinary, PiP and the attention
+        // pulse's two-pixel floor (the focus pulse animates, so it never
+        // reaches a partial frame).
+        let border_and_shadow_margin = self.border_width.max(self.pip_border_width).max(2.0)
             + if self.shadow_enabled && self.shadow_radius > 0.0 {
                 self.shadow_spread
                     + self.shadow_radius
@@ -2685,8 +2691,28 @@ impl WaylandCompositor {
             && scene
                 .iter()
                 .any(|&(win_id, ..)| self.windows.get(&win_id).map_or(false, |ws| ws.is_frosted));
+        // Smart borders, as on X11: ordinary borders only while more than one
+        // counted client is on screen. A flip changes the ring of windows no
+        // damage box covers, so the frame that flips is never a partial one.
+        let ordinary_borders = {
+            let config = crate::config::CONFIG.load();
+            let status_bar_name = config.status_bar_name();
+            self.border_enabled
+                && scene
+                    .iter()
+                    .filter(|&&(id, ..)| {
+                        self.windows.get(&id).is_some_and(|ws| {
+                            counts_for_smart_borders(&ws.class_name, status_bar_name, false)
+                        })
+                    })
+                    .count()
+                    > 1
+        };
+        let smart_borders_flipped = ordinary_borders != self.prev_ordinary_borders;
+        self.prev_ordinary_borders = ordinary_borders;
         let allow_partial = self.partial_damage_enabled
             && !self.force_full_damage_next
+            && !smart_borders_flipped
             && !any_animating
             && !force_render
             && !self.peek_active
@@ -3716,7 +3742,10 @@ impl WaylandCompositor {
         // 10. Draw borders (focused and urgent windows)
         // =================================================================
         self.frame_profiler.zone_start("borders");
-        if self.border_enabled || attention_active {
+        let any_pip = visible_scene
+            .iter()
+            .any(|&(id, ..)| self.windows.get(&id).is_some_and(|ws| ws.is_pip));
+        if ordinary_borders || attention_active || any_pip {
             unsafe {
                 gl.UseProgram(self.border_program);
                 self.set_projection_uniform(gl, self.border_uniforms.projection, &projection);
@@ -3735,14 +3764,12 @@ impl WaylandCompositor {
                     let is_focused = focused == Some(win_id);
                     let attention_active_for_win =
                         attention_signal_active(self.attention_animation_enabled, wt.is_urgent);
-                    // An attention border is an accessibility/status signal,
-                    // not ordinary decoration. It remains visible when normal
-                    // borders are disabled, without accidentally enabling the
-                    // focused border on unrelated windows.
-                    if !self.border_enabled && !attention_active_for_win {
-                        continue;
-                    }
-                    if !is_focused && !attention_active_for_win {
+                    // The bar is chrome and never takes a ring.
+                    if !counts_for_smart_borders(
+                        &wt.class_name,
+                        frame_config.status_bar_name(),
+                        false,
+                    ) {
                         continue;
                     }
 
@@ -3769,45 +3796,50 @@ impl WaylandCompositor {
                         (x as f32, y as f32 + anim.dy, w as f32, h as f32)
                     };
 
-                    // Focus highlight: temporary pulse + thicker border on the
-                    // window that just became focused. Mirrors the X11 behavior
-                    // (effects.rs::tick_focus_highlight) so the visual is the same
-                    // on both backends.
-                    let highlight_for_win = focus_highlight_active
-                        && self
-                            .focus_highlight_start
-                            .map(|(hw, _)| hw == win_id)
-                            .unwrap_or(false);
-                    let attention_style = attention_active_for_win.then(|| {
+                    // Focus pulse, attention pulse, PiP frame, focused and
+                    // unfocused ring: the shared table both backends draw from.
+                    let focus_highlight_progress = focus_highlight_active
+                        .then_some(self.focus_highlight_start)
+                        .flatten()
+                        .filter(|&(hw, _)| hw == win_id)
+                        .map(|(_, start)| {
+                            start.elapsed().as_millis() as f32
+                                / self.focus_highlight_duration_ms.max(1) as f32
+                        });
+                    // An attention border is an accessibility/status signal,
+                    // not ordinary decoration: it survives ordinary borders
+                    // being off, without enabling them for unrelated windows.
+                    let attention = attention_active_for_win.then(|| {
                         attention_border_style(
                             self.attention_color,
                             self.compositor_start_time.elapsed().as_secs_f32(),
-                            fade,
+                            1.0,
                             self.border_enabled,
                             self.border_width,
                         )
                     });
-
-                    let border_color = if highlight_for_win {
-                        let (_, start) = self.focus_highlight_start.unwrap();
-                        let elapsed_ms = start.elapsed().as_millis() as f32;
-                        let dur = self.focus_highlight_duration_ms.max(1) as f32;
-                        let pulse = ((elapsed_ms / dur * std::f32::consts::PI).sin()).abs();
-                        let [r, g, b, a] = self.focus_highlight_color;
-                        [r, g, b, a * pulse * fade]
-                    } else if let Some(style) = attention_style {
-                        style.color
-                    } else {
-                        let c = self.border_color_focused;
-                        [c[0], c[1], c[2], c[3] * fade]
+                    let Some(style) = window_border_style(&WindowBorderInputs {
+                        is_focused,
+                        is_pip: wt.is_pip,
+                        focus_highlight_progress,
+                        attention,
+                        ordinary_enabled: ordinary_borders,
+                        ordinary_width: self.border_width,
+                        focused_color: self.border_color_focused,
+                        unfocused_color: self.border_color_unfocused,
+                        highlight_color: self.focus_highlight_color,
+                        pip_color: self.pip_border_color,
+                        pip_width: self.pip_border_width,
+                    }) else {
+                        continue;
                     };
-                    let border_width = if highlight_for_win {
-                        (self.border_width + 2.0).max(3.0)
-                    } else if let Some(style) = attention_style {
-                        style.width
-                    } else {
-                        self.border_width
-                    };
+                    let border_color = [
+                        style.color[0],
+                        style.color[1],
+                        style.color[2],
+                        style.color[3] * fade,
+                    ];
+                    let border_width = style.width;
 
                     let bdr_x = draw_x - border_width;
                     let bdr_y = draw_y - border_width;
@@ -3827,9 +3859,7 @@ impl WaylandCompositor {
                     // The focused window's ordinary border upgrades to the
                     // two-color gradient ring. Focus pulse and urgent borders
                     // keep their flat signal colors.
-                    let use_gradient = self.border_gradient_enabled
-                        && !highlight_for_win
-                        && !attention_active_for_win;
+                    let use_gradient = self.border_gradient_enabled && style.ordinary_focused;
 
                     if use_gradient {
                         let angle = (self.border_gradient_angle
