@@ -29,6 +29,37 @@ impl Jwm {
         }
     }
 
+    /// `resizeclient` for a window already in fullscreen (or otherwise
+    /// holding a return rectangle in `old_*`): refit it without overwriting
+    /// the slot it returns to when fullscreen ends. Plain `resizeclient`
+    /// copies the live — monitor-sized — rectangle there, so leaving
+    /// fullscreen after an output change or a monitor move would restore a
+    /// monitor-sized window.
+    pub(super) fn refit_keeping_restore_slot(
+        &mut self,
+        backend: &mut dyn Backend,
+        client_key: ClientKey,
+        rect: Rect,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let saved = self.state.clients.get(client_key).map(|client| {
+            (
+                client.geometry.old_x,
+                client.geometry.old_y,
+                client.geometry.old_w,
+                client.geometry.old_h,
+            )
+        });
+        let result = self.resizeclient(backend, client_key, rect.x, rect.y, rect.w, rect.h);
+        if let (Some((x, y, w, h)), Some(client)) = (saved, self.state.clients.get_mut(client_key))
+        {
+            client.geometry.old_x = x;
+            client.geometry.old_y = y;
+            client.geometry.old_w = w;
+            client.geometry.old_h = h;
+        }
+        result
+    }
+
     pub(super) fn resizeclient(
         &mut self,
         backend: &mut dyn Backend,

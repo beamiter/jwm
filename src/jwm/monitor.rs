@@ -213,6 +213,80 @@ fn legacy_hidden_restore_rect(client: &WMClient, fallback: Rect) -> Rect {
     )
 }
 
+/// Move a *visible* client's geometry to a new output. A fullscreen window
+/// fills the target output; a floating or PiP window keeps its offset within
+/// the work area, clamped to fit; a tiled window is placed by the next
+/// `arrange`. The floating and pre-fullscreen slots follow too, so toggling
+/// floating or leaving fullscreen later does not jump back to the source.
+/// Returns whether the live geometry changed and must be applied.
+fn migrate_visible_geometry(
+    client: &mut WMClient,
+    source_work: Option<Rect>,
+    target_monitor: Rect,
+    target_work: Rect,
+) -> bool {
+    if client.state.is_hidden {
+        return false;
+    }
+    let border_width = client.geometry.border_w;
+    let translate =
+        |rect: Rect| translate_and_clamp_restore_rect(rect, source_work, target_work, border_width);
+
+    let floating = Rect::new(
+        client.geometry.floating_x,
+        client.geometry.floating_y,
+        client.geometry.floating_w,
+        client.geometry.floating_h,
+    );
+    if let Some(floating) = valid_rect(floating) {
+        let floating = translate(floating);
+        client.geometry.floating_x = floating.x;
+        client.geometry.floating_y = floating.y;
+        client.geometry.floating_w = floating.w;
+        client.geometry.floating_h = floating.h;
+    }
+
+    let live = if client.state.is_fullscreen {
+        let old = Rect::new(
+            client.geometry.old_x,
+            client.geometry.old_y,
+            client.geometry.old_w,
+            client.geometry.old_h,
+        );
+        if let Some(old) = valid_rect(old) {
+            let old = translate(old);
+            client.geometry.old_x = old.x;
+            client.geometry.old_y = old.y;
+            client.geometry.old_w = old.w;
+            client.geometry.old_h = old.h;
+        }
+        target_monitor
+    } else if client.state.is_floating || client.state.is_pip {
+        let current = Rect::new(
+            client.geometry.x,
+            client.geometry.y,
+            client.geometry.w,
+            client.geometry.h,
+        );
+        let Some(current) = valid_rect(current) else {
+            return false;
+        };
+        let moved = translate(current);
+        client.geometry.floating_x = moved.x;
+        client.geometry.floating_y = moved.y;
+        client.geometry.floating_w = moved.w;
+        client.geometry.floating_h = moved.h;
+        moved
+    } else {
+        return false;
+    };
+    client.geometry.x = live.x;
+    client.geometry.y = live.y;
+    client.geometry.w = live.w;
+    client.geometry.h = live.h;
+    true
+}
+
 /// Move the *semantic* visible geometry of a minimized client to a new
 /// output. The live window stays parked at `hidden_x`; only `show_client`
 /// consumes the restore slot later.
@@ -624,6 +698,44 @@ impl Jwm {
     /// input window at the new parking coordinate. Cancelling a still-running
     /// Hide animation is essential: its old completion target would otherwise
     /// overwrite the freshly migrated restore state on the next frame.
+    /// Carry a visible fullscreen, floating or PiP client to its new output
+    /// and apply the geometry; see [`migrate_visible_geometry`].
+    pub(super) fn migrate_visible_client(
+        &mut self,
+        backend: &mut dyn Backend,
+        client_key: ClientKey,
+        source_work: Option<Rect>,
+        target_monitor: Rect,
+        target_work: Rect,
+    ) -> bool {
+        let migrated = self.state.clients.get_mut(client_key).is_some_and(|client| {
+            migrate_visible_geometry(client, source_work, target_monitor, target_work)
+        });
+        if !migrated {
+            return false;
+        }
+        let Some((live, fullscreen)) = self.state.clients.get(client_key).map(|client| {
+            (
+                Rect::new(
+                    client.geometry.x,
+                    client.geometry.y,
+                    client.geometry.w,
+                    client.geometry.h,
+                ),
+                client.state.is_fullscreen,
+            )
+        }) else {
+            return false;
+        };
+        let _ = if fullscreen {
+            // The translated pre-fullscreen rectangle is the return slot.
+            self.refit_keeping_restore_slot(backend, client_key, live)
+        } else {
+            self.resizeclient(backend, client_key, live.x, live.y, live.w, live.h)
+        };
+        true
+    }
+
     pub(super) fn migrate_hidden_client_restore(
         &mut self,
         backend: &mut dyn Backend,
@@ -928,15 +1040,15 @@ impl Jwm {
             };
             let new_monitor = Rect::new(info.x, info.y, info.width.max(1), info.height.max(1));
             let new_work = rebase_work_area(old_monitor, old_work, new_monitor);
-            let hidden_clients: Vec<ClientKey> = clients_owned_by_monitor(&self.state, mon_key)
-                .into_iter()
-                .filter(|&client_key| {
-                    self.state
-                        .clients
-                        .get(client_key)
-                        .is_some_and(|client| client.state.is_hidden)
-                })
-                .collect();
+            let (hidden_clients, visible_clients): (Vec<ClientKey>, Vec<ClientKey>) =
+                clients_owned_by_monitor(&self.state, mon_key)
+                    .into_iter()
+                    .partition(|&client_key| {
+                        self.state
+                            .clients
+                            .get(client_key)
+                            .is_some_and(|client| client.state.is_hidden)
+                    });
             // OutputChanged also carries scale changes whose logical rectangle
             // may be unchanged. Every Dock target is in global physical pixels,
             // so withdraw the old coordinate space before mutating geometry and
@@ -966,6 +1078,17 @@ impl Jwm {
                 ) {
                     migrated.push(client_key);
                 }
+            }
+            // Fullscreen windows refit the changed output; floating ones keep
+            // their offset within the rebased work area.
+            for client_key in visible_clients {
+                self.migrate_visible_client(
+                    backend,
+                    client_key,
+                    Some(old_work),
+                    new_monitor,
+                    new_work,
+                );
             }
             self.repark_all_hidden_clients(backend);
             self.arrange(backend, Some(mon_key));
@@ -1280,13 +1403,21 @@ impl Jwm {
         if let Some(target_monitor_key) = target_monitor_key {
             for &client_key in &reassigned {
                 if let Some((target_monitor, target_work)) = target_areas {
-                    self.migrate_hidden_client_restore(
+                    if !self.migrate_hidden_client_restore(
                         backend,
                         client_key,
                         source_work,
                         target_monitor,
                         target_work,
-                    );
+                    ) {
+                        self.migrate_visible_client(
+                            backend,
+                            client_key,
+                            source_work,
+                            target_monitor,
+                            target_work,
+                        );
+                    }
                 }
                 self.reorder_client_in_monitor_groups(client_key);
                 info!(

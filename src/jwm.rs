@@ -1705,15 +1705,29 @@ impl Jwm {
                 Vec::new()
             };
 
+        let target = crate::core::types::Rect::new(
+            monitor_geometry.0,
+            monitor_geometry.1,
+            monitor_geometry.2,
+            monitor_geometry.3,
+        );
         for client_key in fullscreen_clients {
-            let _ = self.resizeclient(
-                backend,
-                client_key,
-                monitor_geometry.0,
-                monitor_geometry.1,
-                monitor_geometry.2,
-                monitor_geometry.3,
-            );
+            if self.is_client_visible_on_monitor(client_key, mon_key) {
+                let _ = self.refit_keeping_restore_slot(backend, client_key, target);
+            } else if let Some(client) = self.state.clients.get_mut(client_key) {
+                // Off-screen fullscreen windows take the new size without
+                // being moved on screen first (the next arrange hides them
+                // again, but not before they flash). A minimized one keeps
+                // its parking coordinate and updates its restore target.
+                if client.state.is_hidden {
+                    client.geometry.hidden_restore_rect = Some(target);
+                } else {
+                    client.geometry.x = target.x;
+                    client.geometry.y = target.y;
+                    client.geometry.w = target.w;
+                    client.geometry.h = target.h;
+                }
+            }
         }
         Ok(())
     }

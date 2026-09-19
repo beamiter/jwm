@@ -513,6 +513,32 @@ impl Pertag {
         }
     }
 
+    /// Whether `mask` selects every tag this monitor has — "view all". The
+    /// `view` command masks its `!0` argument down to the configured tags
+    /// first, so testing for `!0` alone never matched and "view all" kept
+    /// (and overwrote) the previous tag's layout slot. A single-tag setup
+    /// has no separate "all" view.
+    pub fn is_all_tags(&self, mask: u32) -> bool {
+        let tags = self.sel.len().saturating_sub(1);
+        if mask == !0 {
+            return true;
+        }
+        if tags < 2 {
+            return false;
+        }
+        let all = if tags >= 32 { u32::MAX } else { (1u32 << tags) - 1 };
+        mask & all == all
+    }
+
+    /// The slot a tag mask addresses: 0 for "view all", else its lowest tag.
+    pub fn slot_for_mask(&self, mask: u32) -> usize {
+        if self.is_all_tags(mask) {
+            0
+        } else {
+            self.clamp_tag(mask.trailing_zeros() as usize + 1)
+        }
+    }
+
     /// Slot 0 is "view all"; 1..=tags_length are the numbered tags.
     pub fn clamp_tag(&self, idx: usize) -> usize {
         match self.sel.len() {
@@ -622,7 +648,7 @@ impl WMMonitor {
         self.tag_set[self.sel_tags] = tag_mask;
 
         // 计算新的 cur_tag 索引 (用于 Pertag)
-        let new_cur_tag = if tag_mask == !0 {
+        let new_cur_tag = if self.pertag.as_ref().is_some_and(|p| p.is_all_tags(tag_mask)) {
             // 查看所有标签
             0
         } else {
@@ -714,12 +740,7 @@ impl WMMonitor {
         let Some(pertag) = self.pertag.as_mut() else {
             return;
         };
-        let index = if tag_mask == !0 {
-            0
-        } else {
-            tag_mask.trailing_zeros() as usize + 1
-        };
-        let index = pertag.clamp_tag(index);
+        let index = pertag.slot_for_mask(tag_mask);
         if let Some(slot) = pertag.sel.get_mut(index) {
             *slot = client;
         }
@@ -1138,6 +1159,35 @@ mod tests {
         assert_eq!(p.sel.len(), 10);
         assert_eq!(p.cur_tag, 9);
         assert_eq!(p.prev_tag, 9);
+    }
+
+    #[test]
+    fn viewing_every_configured_tag_uses_the_view_all_slot() {
+        let mut m = WMMonitor::new();
+        m.pertag = Some(Pertag::new(true, 9));
+        if let Some(pertag) = m.pertag.as_mut() {
+            pertag.cur_tag = 1;
+            pertag.n_masters[0] = 3;
+            pertag.n_masters[1] = 1;
+        }
+        m.tag_set[0] = 1;
+        // `view` hands over `!0 & tagmask`, never `!0` itself.
+        assert_eq!(m.view_tag(0x1ff, false), 0, "view all takes slot 0");
+        assert_eq!(m.layout.n_master, 3, "and slot 0's settings");
+        assert_eq!(m.view_tag(1, false), 1);
+        assert_eq!(m.layout.n_master, 1, "tag 1 kept its own settings");
+        // A partial multi-tag view keeps a numbered slot.
+        assert_eq!(m.view_tag(0b11, false), 1);
+
+        let pertag = m.pertag.as_ref().unwrap();
+        assert_eq!(pertag.slot_for_mask(0x1ff), 0);
+        assert_eq!(pertag.slot_for_mask(!0), 0);
+        assert_eq!(pertag.slot_for_mask(0b100), 3);
+
+        // With a single tag there is no separate "all" view.
+        let single = Pertag::new(true, 1);
+        assert!(!single.is_all_tags(1));
+        assert_eq!(single.slot_for_mask(1), 1);
     }
 
     #[test]

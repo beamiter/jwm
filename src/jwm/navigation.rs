@@ -951,18 +951,14 @@ impl Jwm {
         let cur_tag = if target_tag > 0 {
             sel_mon_mut.tag_set[new_sel_tags] = target_tag;
 
-            let new_cur_tag = if ui == !0 {
+            if let Some(pertag) = sel_mon_mut.pertag.as_mut() {
+                pertag.prev_tag = pertag.cur_tag;
+                pertag.cur_tag = pertag.slot_for_mask(ui);
+                pertag.cur_tag
+            } else if ui == !0 {
                 0 // 显示所有标签
             } else {
                 ui.trailing_zeros() as usize + 1
-            };
-
-            if let Some(pertag) = sel_mon_mut.pertag.as_mut() {
-                pertag.prev_tag = pertag.cur_tag;
-                pertag.cur_tag = pertag.clamp_tag(new_cur_tag);
-                pertag.cur_tag
-            } else {
-                new_cur_tag
             }
         } else {
             if let Some(pertag) = sel_mon_mut.pertag.as_mut() {

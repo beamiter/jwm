@@ -136,6 +136,10 @@ impl Jwm {
     }
 
     /// 退出当前 monitor 上所有全屏窗口的全屏状态
+    ///
+    /// Only windows the layout change can affect: a fullscreen video on
+    /// another tag, or a minimized one, keeps its state (and is not briefly
+    /// resized on screen before `arrange` hides it again).
     fn exit_fullscreen_on_monitor(&mut self, backend: &mut dyn Backend, mon_key: MonitorKey) {
         let fs_clients: Vec<ClientKey> = self
             .state
@@ -150,6 +154,7 @@ impl Jwm {
                             .get(ck)
                             .map(|c| c.state.is_fullscreen)
                             .unwrap_or(false)
+                            && self.is_client_visible_on_monitor(ck, mon_key)
                     })
                     .collect()
             })

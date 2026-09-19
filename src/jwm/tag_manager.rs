@@ -179,6 +179,17 @@ impl Jwm {
                 target_monitor_rect,
                 target_work_area,
             );
+        } else {
+            // A floating window keeps its place relative to the work area and
+            // a fullscreen one fills the target output, instead of staying
+            // (mostly) on the monitor it just left.
+            self.migrate_visible_client(
+                backend,
+                client_key,
+                source_work_area,
+                target_monitor_rect,
+                target_work_area,
+            );
         }
 
         self.attach_back(client_key);
@@ -662,6 +673,142 @@ mod tests {
 
         assert_eq!(jwm.state.clients[client_key].mon, Some(target));
         assert_eq!(backend.dock_targets, vec![(window, None)]);
+    }
+
+    /// A second output to the right of the primary one.
+    fn add_right_monitor(jwm: &mut Jwm, source: MonitorKey) -> MonitorKey {
+        let (source_monitor, _) = jwm.monitor_migration_areas(source).unwrap();
+        jwm.add_monitor(OutputInfo {
+            id: OutputId(2),
+            name: "Right".into(),
+            x: source_monitor.x + source_monitor.w,
+            y: source_monitor.y,
+            width: 1280,
+            height: 720,
+            scale: 1.0,
+            refresh_rate: 60_000,
+            hdr_capable: false,
+            hdr_metadata: None,
+            identity: OutputIdentity::connector_only("Right"),
+        });
+        jwm.state.monitor_order[1]
+    }
+
+    fn visible_client(jwm: &mut Jwm, mon: MonitorKey, raw: u64, rect: Rect) -> ClientKey {
+        let mut client = WMClient::new(WindowId::from_raw(raw));
+        client.mon = Some(mon);
+        client.state.tags = 1;
+        client.geometry.x = rect.x;
+        client.geometry.y = rect.y;
+        client.geometry.w = rect.w;
+        client.geometry.h = rect.h;
+        let key = jwm.insert_client(client);
+        jwm.attach_to_monitor(key, mon);
+        key
+    }
+
+    #[test]
+    fn visible_floating_sendmon_keeps_its_place_on_the_target_work_area() {
+        let mut backend = DockSpyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let source = jwm.state.monitor_order[0];
+        let target = add_right_monitor(&mut jwm, source);
+        let (_, source_work) = jwm.monitor_migration_areas(source).unwrap();
+        let (_, target_work) = jwm.monitor_migration_areas(target).unwrap();
+
+        let key = visible_client(
+            &mut jwm,
+            source,
+            0x401,
+            Rect::new(source_work.x + 100, source_work.y + 80, 500, 300),
+        );
+        jwm.state.clients[key].state.is_floating = true;
+
+        jwm.sendmon(&mut backend, Some(key), Some(target));
+
+        let client = &jwm.state.clients[key];
+        assert_eq!(client.mon, Some(target));
+        assert_eq!(
+            (client.geometry.x, client.geometry.y, client.geometry.w, client.geometry.h),
+            (target_work.x + 100, target_work.y + 80, 500, 300),
+            "the window lands on the target, not a pixel inside its edge"
+        );
+        assert_eq!(
+            (client.geometry.floating_x, client.geometry.floating_y),
+            (client.geometry.x, client.geometry.y),
+            "toggling floating later keeps the new place"
+        );
+    }
+
+    #[test]
+    fn visible_fullscreen_sendmon_fills_the_target_and_returns_to_it() {
+        let mut backend = DockSpyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let source = jwm.state.monitor_order[0];
+        let target = add_right_monitor(&mut jwm, source);
+        let (_, source_work) = jwm.monitor_migration_areas(source).unwrap();
+        let (target_monitor, target_work) = jwm.monitor_migration_areas(target).unwrap();
+
+        let key = visible_client(
+            &mut jwm,
+            source,
+            0x402,
+            Rect::new(source_work.x + 60, source_work.y + 40, 400, 250),
+        );
+        // Floating, so leaving fullscreen returns to a rectangle rather than
+        // to a tile the layout recomputes.
+        jwm.state.clients[key].state.is_floating = true;
+        jwm.setfullscreen(&mut backend, key, true).unwrap();
+
+        jwm.sendmon(&mut backend, Some(key), Some(target));
+        {
+            let client = &jwm.state.clients[key];
+            assert!(client.state.is_fullscreen);
+            assert_eq!(
+                (client.geometry.x, client.geometry.y, client.geometry.w, client.geometry.h),
+                (target_monitor.x, target_monitor.y, target_monitor.w, target_monitor.h),
+                "fullscreen fills the output it moved to"
+            );
+        }
+
+        jwm.setfullscreen(&mut backend, key, false).unwrap();
+        let client = &jwm.state.clients[key];
+        assert_eq!(
+            (client.geometry.x, client.geometry.y, client.geometry.w, client.geometry.h),
+            (target_work.x + 60, target_work.y + 40, 400, 250),
+            "leaving fullscreen returns to the translated pre-fullscreen rect, \
+             not a monitor-sized window on the old output"
+        );
+    }
+
+    #[test]
+    fn a_layout_change_leaves_fullscreen_windows_on_other_tags_alone() {
+        use crate::core::layout::LayoutEnum;
+        use crate::jwm::WMArgEnum;
+        use std::rc::Rc;
+
+        let mut backend = DockSpyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let mon = jwm.state.monitor_order[0];
+        let (_, work) = jwm.monitor_migration_areas(mon).unwrap();
+        let here = visible_client(&mut jwm, mon, 0x403, Rect::new(work.x, work.y, 300, 200));
+        let away = visible_client(&mut jwm, mon, 0x404, Rect::new(work.x, work.y, 300, 200));
+        jwm.setfullscreen(&mut backend, here, true).unwrap();
+        jwm.setfullscreen(&mut backend, away, true).unwrap();
+        // The second video lives on tag 2, which is not being viewed.
+        jwm.state.clients[away].state.tags = 0b10;
+
+        jwm.setlayout(&mut backend, &WMArgEnum::Layout(Rc::new(LayoutEnum::MONOCLE)))
+            .unwrap();
+
+        assert!(
+            !jwm.state.clients[here].state.is_fullscreen,
+            "the visible fullscreen window still yields to the new layout"
+        );
+        assert!(
+            jwm.state.clients[away].state.is_fullscreen,
+            "a fullscreen window on another tag keeps its state"
+        );
     }
 
     #[test]
