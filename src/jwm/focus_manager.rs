@@ -226,7 +226,15 @@ impl Jwm {
         _arg: &WMArgEnum,
     ) -> Result<(), Box<dyn std::error::Error>> {
         info!("[focus_none]");
-        self.focus(backend, None)
+        // `focus(None)` means "pick the best client", which just re-focused
+        // the current window. Drop focus to the root instead, the way
+        // `refocus` does before focusing back.
+        if let Some(client_key) = self.get_selected_client_key() {
+            self.unfocus_client(backend, client_key, true)?;
+        }
+        self.set_root_focus(backend)?;
+        self.update_monitor_selection_by_key(None);
+        Ok(())
     }
 
     /// IPC: focus_window — 按窗口 ID 聚焦指定窗口

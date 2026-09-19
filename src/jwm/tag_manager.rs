@@ -812,6 +812,121 @@ mod tests {
     }
 
     #[test]
+    fn togglefloating_leaves_fullscreen_and_pip_windows_as_they_are() {
+        use crate::jwm::WMArgEnum;
+
+        let mut backend = DockSpyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let mon = jwm.state.monitor_order[0];
+        let (_, work) = jwm.monitor_migration_areas(mon).unwrap();
+        let key = visible_client(&mut jwm, mon, 0x405, Rect::new(work.x, work.y, 300, 200));
+        jwm.setfullscreen(&mut backend, key, true).unwrap();
+        jwm.focus(&mut backend, Some(key)).unwrap();
+        let before = jwm.state.clients[key].geometry.clone();
+
+        jwm.togglefloating(&mut backend, &WMArgEnum::Int(0)).unwrap();
+
+        let client = &jwm.state.clients[key];
+        assert!(client.state.is_fullscreen);
+        assert!(client.state.is_floating, "fullscreen keeps owning is_floating");
+        assert_eq!(client.geometry.floating_w, before.floating_w);
+        assert_eq!(client.geometry.floating_h, before.floating_h);
+    }
+
+    #[test]
+    fn focus_none_drops_focus_to_the_root() {
+        use crate::jwm::WMArgEnum;
+
+        let mut backend = DockSpyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let mon = jwm.state.monitor_order[0];
+        let (_, work) = jwm.monitor_migration_areas(mon).unwrap();
+        let key = visible_client(&mut jwm, mon, 0x406, Rect::new(work.x, work.y, 300, 200));
+        jwm.focus(&mut backend, Some(key)).unwrap();
+        assert_eq!(jwm.get_selected_client_key(), Some(key));
+
+        jwm.focus_none(&mut backend, &WMArgEnum::Int(0)).unwrap();
+
+        assert_eq!(jwm.get_selected_client_key(), None);
+    }
+
+    #[test]
+    fn loopview_switches_tags_through_the_view_path() {
+        use crate::jwm::WMArgEnum;
+
+        let mut backend = DockSpyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let mon = jwm.state.monitor_order[0];
+        {
+            let monitor = &mut jwm.state.monitors[mon];
+            monitor.view_tag(1, false);
+            let pertag = monitor.pertag.as_mut().unwrap();
+            pertag.gaps[1] = 5;
+            pertag.gaps[2] = 40;
+            monitor.layout.gap = 5;
+        }
+
+        jwm.loopview(&mut backend, &WMArgEnum::Int(1)).unwrap();
+
+        let monitor = &jwm.state.monitors[mon];
+        assert_eq!(monitor.get_active_tags(), 0b10);
+        assert_eq!(monitor.pertag.as_ref().unwrap().cur_tag, 2);
+        assert_eq!(monitor.layout.gap, 40, "tag 2's own gap, not tag 1's");
+
+        jwm.loopview(&mut backend, &WMArgEnum::Int(-1)).unwrap();
+        assert_eq!(jwm.state.monitors[mon].layout.gap, 5);
+    }
+
+    #[test]
+    fn togglesticky_adopts_the_current_tags_and_publishes_them() {
+        use crate::jwm::WMArgEnum;
+
+        let mut backend = DockSpyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let mon = jwm.state.monitor_order[0];
+        let (_, work) = jwm.monitor_migration_areas(mon).unwrap();
+        jwm.state.monitors[mon].view_tag(0b100, false);
+        let key = visible_client(&mut jwm, mon, 0x407, Rect::new(work.x, work.y, 300, 200));
+        jwm.state.clients[key].state.tags = 0b100;
+        jwm.focus(&mut backend, Some(key)).unwrap();
+        backend.property_ops.client_info.lock().unwrap().clear();
+
+        jwm.togglesticky(&mut backend, &WMArgEnum::Int(0)).unwrap();
+
+        let client = &jwm.state.clients[key];
+        assert!(client.state.is_sticky);
+        assert_eq!(client.state.tags, 0b100);
+        assert!(
+            backend
+                .property_ops
+                .client_info
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|&(win, tags, _)| win == client.win && tags == 0b100),
+            "the desktop property follows the sticky toggle"
+        );
+
+        jwm.togglesticky(&mut backend, &WMArgEnum::Int(0)).unwrap();
+        assert!(!jwm.state.clients[key].state.is_sticky);
+    }
+
+    #[test]
+    fn a_transient_of_an_unmanaged_parent_still_floats_after_the_rules() {
+        let mut backend = DockSpyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let mon = jwm.state.monitor_order[0];
+        let (_, work) = jwm.monitor_migration_areas(mon).unwrap();
+        let key = visible_client(&mut jwm, mon, 0x408, Rect::new(work.x, work.y, 300, 200));
+        // A parent the WM does not manage (override-redirect, not mapped yet).
+        *backend.property_ops.transient_parent.lock().unwrap() = Some(WindowId::from_raw(0x9ff));
+
+        jwm.handle_transient_for(&mut backend, key).unwrap();
+
+        assert!(jwm.state.clients[key].state.is_floating);
+    }
+
+    #[test]
     fn hidden_floating_sendmon_translates_negative_origin_restore_and_persists_it() {
         let mut backend = DockSpyBackend::new();
         let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();

@@ -977,9 +977,15 @@ impl Jwm {
                     info!("[handle_transient_for] parent client is None, still mark floating");
                     if let Some(client) = self.state.clients.get_mut(client_key) {
                         client.mon = self.state.sel_mon;
-                        client.state.is_floating = true;
                     }
                     self.applyrules_by_key(backend, client_key);
+                    // After the rules, which start every window tiled: a
+                    // transient floats (docs/window-placement.md, step 1)
+                    // even when its parent is not managed, e.g. a dialog of
+                    // an override-redirect or not-yet-mapped window.
+                    if let Some(client) = self.state.clients.get_mut(client_key) {
+                        client.state.is_floating = true;
+                    }
                 }
                 Ok(false)
             }

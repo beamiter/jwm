@@ -489,81 +489,28 @@ impl Jwm {
         Ok(())
     }
 
+    /// Alt+PageUp/PageDown: step to the neighbouring tag. The step is an
+    /// ordinary `view` of that tag — per-tag layout, gaps and selection,
+    /// the compositor transition, EWMH desktop and the `tag/view` IPC event
+    /// all come from the one path, rather than a private copy that had
+    /// drifted (it restored no per-tag gap, left `_NET_CURRENT_DESKTOP`
+    /// stale and never told IPC subscribers).
     pub fn loopview(
         &mut self,
         backend: &mut dyn Backend,
         arg: &WMArgEnum,
     ) -> Result<(), Box<dyn std::error::Error>> {
         info!("[loopview]");
-
         let direction = match arg {
             WMArgEnum::Int(val) => *val,
             _ => return Ok(()),
         };
-
         if direction == 0 {
             return Ok(());
         }
-
         let next_tag = self.calculate_next_tag(direction);
-
-        if self.is_same_tag(next_tag) {
-            return Ok(());
-        }
-
-        let (sel_mon_key, old_tag_mask) = match self.state.sel_mon {
-            Some(k) => {
-                let old = self
-                    .state
-                    .monitors
-                    .get(k)
-                    .map(|m| m.get_active_tags())
-                    .unwrap_or(next_tag);
-                (k, old)
-            }
-            None => return Ok(()),
-        };
-
-        // Trigger compositor transition for loopview shortcuts (Alt+PageUp/PageDown).
-        let mut transitioning = false;
-        if backend.has_compositor() {
-            let cfg = CONFIG.load();
-            if cfg.animation_enabled()
-                && self.should_animate_tag_switch(sel_mon_key, old_tag_mask, next_tag)
-            {
-                let dir = Self::tag_switch_direction(old_tag_mask, next_tag, cfg.tags_length());
-                let mon_rect = self.monitor_rect(sel_mon_key);
-                backend.compositor_notify_tag_switch(
-                    cfg.animation_duration(),
-                    dir,
-                    self.tag_transition_exclude_top(sel_mon_key),
-                    mon_rect,
-                );
-                transitioning = true;
-            }
-        }
-
-        info!(
-            "[loopview] next_tag: {}, direction: {}",
-            next_tag, direction
-        );
-
-        let cur_tag = self.switch_to_tag(next_tag, next_tag)?;
-        if let Some(sel_mon_key) = self.state.sel_mon {
-            self.update_sticky_tags(sel_mon_key);
-        }
-
-        let sel_opt = self.apply_pertag_settings(cur_tag)?;
-
-        self.focus(backend, sel_opt)?;
-        // Suppress layout animations during tag transition so target windows
-        // appear instantly (the compositor overlay handles the visual effect).
-        self.suppress_layout_animation = transitioning;
-        self.arrange(backend, self.state.sel_mon.clone());
-        self.suppress_layout_animation = false;
-        self.refresh_compositor_monitors(backend);
-
-        Ok(())
+        info!("[loopview] next_tag: {next_tag}, direction: {direction}");
+        self.view(backend, &WMArgEnum::UInt(next_tag))
     }
 
     /// Alt+Tab, the classic hold-and-tap switcher: open the MRU list with the
@@ -915,137 +862,6 @@ impl Jwm {
         );
 
         Ok(())
-    }
-
-    pub(crate) fn is_same_tag(&self, target_tag: u32) -> bool {
-        if let Some(sel_mon_key) = self.state.sel_mon {
-            if let Some(monitor) = self.state.monitors.get(sel_mon_key) {
-                return target_tag == monitor.get_active_tags();
-            }
-        }
-        false
-    }
-
-    pub(crate) fn switch_to_tag(
-        &mut self,
-        target_tag: u32,
-        ui: u32,
-    ) -> Result<usize, Box<dyn std::error::Error>> {
-        let sel_mon_key = match self.state.sel_mon {
-            Some(k) => k,
-            None => return Ok(0),
-        };
-        let sel_mon_mut = if let Some(sel_mon) = self.state.monitors.get_mut(sel_mon_key) {
-            sel_mon
-        } else {
-            return Ok(0);
-        };
-
-        info!("[switch_to_tag] tag_set: {:?}", sel_mon_mut.tag_set);
-        info!("[switch_to_tag] old sel_tags: {}", sel_mon_mut.sel_tags);
-
-        sel_mon_mut.sel_tags ^= 1;
-        let new_sel_tags = sel_mon_mut.sel_tags;
-        info!("[switch_to_tag] new sel_tags: {}", new_sel_tags);
-
-        let cur_tag = if target_tag > 0 {
-            sel_mon_mut.tag_set[new_sel_tags] = target_tag;
-
-            if let Some(pertag) = sel_mon_mut.pertag.as_mut() {
-                pertag.prev_tag = pertag.cur_tag;
-                pertag.cur_tag = pertag.slot_for_mask(ui);
-                pertag.cur_tag
-            } else if ui == !0 {
-                0 // 显示所有标签
-            } else {
-                ui.trailing_zeros() as usize + 1
-            }
-        } else {
-            if let Some(pertag) = sel_mon_mut.pertag.as_mut() {
-                std::mem::swap(&mut pertag.prev_tag, &mut pertag.cur_tag);
-                pertag.cur_tag
-            } else {
-                return Err("No pertag information available".into());
-            }
-        };
-
-        info!(
-            "[switch_to_tag] prev_tag: {}, cur_tag: {}",
-            sel_mon_mut.pertag.as_ref().map(|p| p.prev_tag).unwrap_or(0),
-            cur_tag
-        );
-
-        Ok(cur_tag)
-    }
-
-    pub(crate) fn apply_pertag_settings(
-        &mut self,
-        cur_tag: usize,
-    ) -> Result<Option<ClientKey>, Box<dyn std::error::Error>> {
-        let sel_mon_key = self.state.sel_mon.ok_or("No monitor selected")?;
-
-        let (n_master, m_fact, layout, prev_layout, sel_client_key) = {
-            let monitor = self
-                .state
-                .monitors
-                .get(sel_mon_key)
-                .ok_or("Selected monitor not found")?;
-
-            let pertag = monitor
-                .pertag
-                .as_ref()
-                .ok_or("No pertag information available")?;
-
-            let idx = pertag.clamp_tag(cur_tag);
-            (
-                pertag
-                    .n_masters
-                    .get(idx)
-                    .copied()
-                    .unwrap_or(monitor.layout.n_master),
-                pertag
-                    .m_facts
-                    .get(idx)
-                    .copied()
-                    .unwrap_or(monitor.layout.m_fact),
-                pertag
-                    .lts
-                    .get(idx)
-                    .cloned()
-                    .unwrap_or_else(|| monitor.lt.clone()),
-                pertag
-                    .prev_lts
-                    .get(idx)
-                    .cloned()
-                    .unwrap_or_else(|| monitor.prev_lt.clone()),
-                pertag.sel.get(idx).copied().flatten(),
-            )
-        };
-
-        if let Some(monitor) = self.state.monitors.get_mut(sel_mon_key) {
-            monitor.layout.n_master = n_master;
-            monitor.layout.m_fact = m_fact;
-            monitor.lt = layout;
-            monitor.prev_lt = prev_layout;
-        } else {
-            return Err("Monitor disappeared during operation".into());
-        }
-
-        if let Some(client_key) = sel_client_key {
-            if let Some(client) = self.state.clients.get(client_key) {
-                info!(
-                    "[apply_pertag_settings] selected client: {} (key: {:?})",
-                    client.name, client_key
-                );
-            } else {
-                warn!(
-                    "[apply_pertag_settings] selected client key {:?} not found",
-                    client_key
-                );
-            }
-        }
-
-        Ok(sel_client_key)
     }
 
     pub fn toggleview(

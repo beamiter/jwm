@@ -2482,6 +2482,18 @@ impl Jwm {
         let Some(sel_client_key) = self.state.monitors.get(sel_mon_key).and_then(|m| m.sel) else {
             return Ok(());
         };
+        // Fullscreen and PiP own `is_floating` (and stash the state to return
+        // to); flipping it underneath them tiled a window still flagged
+        // fullscreen, border-less, and saved the monitor rect as its float
+        // geometry. dwm refuses here too.
+        if self
+            .state
+            .clients
+            .get(sel_client_key)
+            .is_some_and(|client| client.state.is_fullscreen || client.state.is_pip)
+        {
+            return Ok(());
+        }
         let geom = if let Some(client) = self.state.clients.get_mut(sel_client_key) {
             client.state.is_floating = !client.state.is_floating;
             // Explicit toggling wins over the drag origin: the float stays until
@@ -2533,20 +2545,51 @@ impl Jwm {
         let Some(sel_client_key) = self.state.monitors.get(sel_mon_key).and_then(|m| m.sel) else {
             return Ok(());
         };
-        if let Some(client) = self.state.clients.get_mut(sel_client_key) {
-            client.state.is_sticky = !client.state.is_sticky;
-            if client.state.is_sticky {
-                // Ensure sticky client has current monitor tags
-                if let Some(monitor) = self.state.monitors.get(sel_mon_key) {
-                    let current_tags = monitor.get_active_tags();
-                    if let Some(client) = self.state.clients.get_mut(sel_client_key) {
-                        client.state.tags = current_tags;
-                    }
-                }
+        let Some(sticky) = self
+            .state
+            .clients
+            .get(sel_client_key)
+            .map(|client| client.state.is_sticky)
+        else {
+            return Ok(());
+        };
+        self.set_client_sticky(backend, sel_client_key, !sticky);
+        Ok(())
+    }
+
+    /// The one place a client becomes (un)sticky, for the key binding and
+    /// for `_NET_WM_STATE_STICKY` requests alike: a sticky client adopts its
+    /// monitor's current tags (and follows every tag switch from then on),
+    /// the EWMH state and desktop property are mirrored for pagers and bars,
+    /// and the monitor re-arranges so the change is visible at once.
+    pub(crate) fn set_client_sticky(
+        &mut self,
+        backend: &mut dyn Backend,
+        client_key: ClientKey,
+        sticky: bool,
+    ) {
+        let Some((win, mon)) = self
+            .state
+            .clients
+            .get(client_key)
+            .map(|client| (client.win, client.mon))
+        else {
+            return;
+        };
+        let current_tags = mon
+            .and_then(|mon_key| self.state.monitors.get(mon_key))
+            .map(|monitor| monitor.get_active_tags());
+        if let Some(client) = self.state.clients.get_mut(client_key) {
+            client.state.is_sticky = sticky;
+            if sticky && let Some(tags) = current_tags {
+                client.state.tags = tags;
             }
         }
-        self.arrange(backend, Some(sel_mon_key));
-        Ok(())
+        let _ = backend
+            .property_ops()
+            .set_net_wm_state_flag(win, crate::backend::api::NetWmState::Sticky, sticky);
+        let _ = self.setclienttagprop(backend, client_key);
+        self.arrange(backend, mon);
     }
 
     /// Close compositor-owned modal work before the X11 tree becomes native.

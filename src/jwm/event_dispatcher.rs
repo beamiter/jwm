@@ -1466,18 +1466,13 @@ impl WMController for Jwm {
                     }
                 }
                 NetWmState::Sticky => {
-                    if let Some(c) = self.state.clients.get_mut(ck) {
+                    if let Some(sticky) = self.state.clients.get(ck).map(|c| c.state.is_sticky) {
                         let on = match action {
                             NetWmAction::Add => true,
                             NetWmAction::Remove => false,
-                            NetWmAction::Toggle => !c.state.is_sticky,
+                            NetWmAction::Toggle => !sticky,
                         };
-                        c.state.is_sticky = on;
-                        let _ = backend.property_ops().set_net_wm_state_flag(
-                            win,
-                            NetWmState::Sticky,
-                            on,
-                        );
+                        self.set_client_sticky(backend, ck, on);
                     }
                 }
                 NetWmState::SkipTaskbar => {
