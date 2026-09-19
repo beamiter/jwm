@@ -1625,8 +1625,10 @@ void main() {
         c.rgb = clamp(c.rgb, 0.0, 1.0);
     }
 
-    // HDR tone mapping (SDR→HDR expansion)
-    if (u_hdr_enabled == 1) {
+    // HDR tone mapping (SDR→HDR expansion). On the linear route the output
+    // stage owns the real per-output tone map; expanding here as well would
+    // apply it twice.
+    if (u_hdr_enabled == 1 && u_scene_linear == 0) {
         // Expand SDR content (assumed 0-80 nits) to HDR range (0-peak_nits)
         float sdr_white_nits = 80.0;
         float scale = u_hdr_peak_nits / sdr_white_nits;

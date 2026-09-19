@@ -1774,6 +1774,10 @@ pub(crate) struct WaylandCompositor {
     /// Whether last frame drew ordinary (smart) borders; the frame that
     /// flips it repairs in full, since the rings lie outside any damage box.
     prev_ordinary_borders: bool,
+    /// XWayland override-redirect windows (menus, tooltips, IME lists) in the
+    /// scene. Like the synthetic xdg/IME popup ids they are unmanaged
+    /// overlays: no smart-border count, no ring.
+    override_redirect_windows: std::collections::HashSet<u64>,
 
     // --- Render stats ---
     render_stats: render_stats::RenderStats,
@@ -3165,6 +3169,7 @@ impl WaylandCompositor {
                 transition_exclude_top: 0,
                 transition_draws_linear: false,
                 prev_ordinary_borders: false,
+                override_redirect_windows: std::collections::HashSet::new(),
 
                 // Render stats & texture pool
                 render_stats: render_stats::RenderStats::new(),
@@ -4546,6 +4551,20 @@ impl WaylandCompositor {
     /// Request recording stop — deferred until next render_frame when GL is active.
     pub(crate) fn stop_recording(&mut self) {
         self.pending_recording_stop = true;
+    }
+
+    pub(crate) fn set_window_override_redirect(&mut self, window_id: u64, override_redirect: bool) {
+        if override_redirect {
+            self.override_redirect_windows.insert(window_id);
+        } else {
+            self.override_redirect_windows.remove(&window_id);
+        }
+    }
+
+    /// Popups, IME candidate lists and override-redirect windows: overlays
+    /// the WM never manages, which take no part in smart borders.
+    pub(crate) fn is_unmanaged_overlay(&self, window_id: u64) -> bool {
+        is_auxiliary_window_id(window_id) || self.override_redirect_windows.contains(&window_id)
     }
 
     pub(crate) fn recording_stats(&self) -> Option<crate::backend::api::RecordingStats> {

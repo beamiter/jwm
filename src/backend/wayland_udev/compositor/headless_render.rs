@@ -8241,6 +8241,42 @@ fn wayland_smart_borders_ring_focused_and_unfocused_windows() {
         assert_pixel(ring(&pair, 20), [255, 0, 0, 255], 2, "focused ring");
         assert_pixel(ring(&pair, 120), [0, 0, 255, 255], 2, "unfocused ring");
 
+        // An override-redirect menu (or an xdg/IME popup) is an unmanaged
+        // overlay: it neither turns smart borders on nor takes a ring.
+        insert_opaque_test_window(&mut compositor, 3, tex, 40, 30);
+        compositor.windows.get_mut(&3).unwrap().class_name = "menu".into();
+        compositor.set_window_override_redirect(3, true);
+        let with_menu = render(
+            &mut compositor,
+            &[(1, 20, 20, 40, 30), (3, 120, 20, 40, 30)],
+        );
+        assert_pixel(
+            ring(&with_menu, 20),
+            ring(&reference, 20),
+            1,
+            "a popup does not give the lone client a ring",
+        );
+        assert_pixel(
+            ring(&with_menu, 120),
+            ring(&reference, 120),
+            1,
+            "the popup itself takes no ring",
+        );
+
+        // Stacking: window 2 floats over window 1's left edge, so window 1's
+        // ring there must be covered by window 2's content, not drawn on it.
+        let stacked = render(
+            &mut compositor,
+            &[(1, 20, 20, 40, 30), (2, 10, 25, 40, 30)],
+        );
+        // Window 2's (unfocused, so slightly dimmed) green content, not
+        // window 1's red ring.
+        let covered = ring(&stacked, 20);
+        assert!(
+            covered[1] > 200 && covered[0] < 80,
+            "a window stacked above covers the ring below it: {covered:?}"
+        );
+
         gl.DeleteTextures(1, &tex);
         assert!(compositor.release_gpu_resources(
             &gl,

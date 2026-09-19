@@ -1038,6 +1038,11 @@ impl WaylandCompositor {
 
     pub(crate) fn set_window_pip(&mut self, window: u64, pip: bool) {
         if let Some(win) = self.windows.get_mut(&window) {
+            // The PiP ring lies outside the window rect, which is all a
+            // partial frame would repair: a flip redraws everything.
+            if win.is_pip != pip {
+                self.force_full_damage_next = true;
+            }
             win.is_pip = pip;
             self.needs_render = true;
         }
@@ -2093,6 +2098,7 @@ impl WaylandCompositor {
     /// may use the close fade but never targets the Dock with a genie effect.
     pub(crate) fn remove_window(&mut self, window_id: u64) {
         self.pending_window_urgency.discard(window_id);
+        self.override_redirect_windows.remove(&window_id);
         self.minimized_window_metadata.remove(&window_id);
         self.discard_minimized_visual(window_id);
         if let Some(win) = self.windows.get_mut(&window_id) {

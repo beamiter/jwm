@@ -2731,7 +2731,11 @@ impl WaylandCompositor {
                     .iter()
                     .filter(|&&(id, ..)| {
                         self.windows.get(&id).is_some_and(|ws| {
-                            counts_for_smart_borders(&ws.class_name, status_bar_name, false)
+                            counts_for_smart_borders(
+                                &ws.class_name,
+                                status_bar_name,
+                                self.is_unmanaged_overlay(id),
+                            )
                         })
                     })
                     .count()
@@ -3212,6 +3216,12 @@ impl WaylandCompositor {
             }
         }
 
+        // Border rings draw per window inside the scene pass below.
+        let any_pip = visible_scene
+            .iter()
+            .any(|&(id, ..)| self.windows.get(&id).is_some_and(|ws| ws.is_pip));
+        let draw_rings = ordinary_borders || attention_active || any_pip;
+
         // =================================================================
         // 9. Draw windows (back-to-front)
         // =================================================================
@@ -3628,6 +3638,19 @@ impl WaylandCompositor {
                         gl.Uniform1f(self.win_uniforms.ripple_amplitude, 0.0);
                     }
                 }
+
+                if draw_rings {
+                    self.draw_window_ring(
+                        gl,
+                        &projection,
+                        (win_id, x, y, w, h),
+                        focused,
+                        ordinary_borders,
+                        focus_highlight_active,
+                        scene_linear_active,
+                        &status_bar_name,
+                    );
+                }
             }
 
             // The per-window dim/desat writes above must not outlive the
@@ -3767,196 +3790,6 @@ impl WaylandCompositor {
         self.render_minimized_dock_items(gl, &projection, overlay_scene_linear);
         self.render_dock_preview(gl, &projection, overlay_scene_linear);
 
-        // =================================================================
-        // 10. Draw borders (focused and urgent windows)
-        // =================================================================
-        self.frame_profiler.zone_start("borders");
-        let any_pip = visible_scene
-            .iter()
-            .any(|&(id, ..)| self.windows.get(&id).is_some_and(|ws| ws.is_pip));
-        if ordinary_borders || attention_active || any_pip {
-            unsafe {
-                gl.UseProgram(self.border_program);
-                self.set_projection_uniform(gl, self.border_uniforms.projection, &projection);
-                gl.Uniform1i(
-                    self.border_uniforms.scene_linear,
-                    i32::from(overlay_scene_linear),
-                );
-                gl.BindVertexArray(self.quad_vao);
-
-                for &(win_id, x, y, w, h) in visible_scene {
-                    let wt = match self.windows.get(&win_id) {
-                        Some(wt) => wt,
-                        None => continue,
-                    };
-
-                    let is_focused = focused == Some(win_id);
-                    let attention_active_for_win =
-                        attention_signal_active(self.attention_animation_enabled, wt.is_urgent);
-                    // The bar is chrome and never takes a ring.
-                    if !counts_for_smart_borders(
-                        &wt.class_name,
-                        frame_config.status_bar_name(),
-                        false,
-                    ) {
-                        continue;
-                    }
-
-                    let fade = wt.fade_opacity;
-                    if fade <= 0.0 {
-                        continue;
-                    }
-
-                    let radius = if wt.is_shaped || wt.is_fullscreen {
-                        0.0
-                    } else {
-                        wt.corner_radius_override.unwrap_or(self.corner_radius)
-                    };
-
-                    let anim = self.window_animation_frame_for(wt);
-                    let scale = anim.scale;
-                    let (draw_x, draw_y, draw_w, draw_h) = if (scale - 1.0).abs() > f32::EPSILON {
-                        let cw = w as f32 * scale;
-                        let ch = h as f32 * scale;
-                        let cx = x as f32 + (w as f32 - cw) * 0.5;
-                        let cy = y as f32 + (h as f32 - ch) * 0.5 + anim.dy;
-                        (cx, cy, cw, ch)
-                    } else {
-                        (x as f32, y as f32 + anim.dy, w as f32, h as f32)
-                    };
-
-                    // Focus pulse, attention pulse, PiP frame, focused and
-                    // unfocused ring: the shared table both backends draw from.
-                    let focus_highlight_progress = focus_highlight_active
-                        .then_some(self.focus_highlight_start)
-                        .flatten()
-                        .filter(|&(hw, _)| hw == win_id)
-                        .map(|(_, start)| {
-                            start.elapsed().as_millis() as f32
-                                / self.focus_highlight_duration_ms.max(1) as f32
-                        });
-                    // An attention border is an accessibility/status signal,
-                    // not ordinary decoration: it survives ordinary borders
-                    // being off, without enabling them for unrelated windows.
-                    let attention = attention_active_for_win.then(|| {
-                        attention_border_style(
-                            self.attention_color,
-                            self.compositor_start_time.elapsed().as_secs_f32(),
-                            1.0,
-                            self.border_enabled,
-                            self.border_width,
-                        )
-                    });
-                    let Some(style) = window_border_style(&WindowBorderInputs {
-                        is_focused,
-                        is_pip: wt.is_pip,
-                        focus_highlight_progress,
-                        attention,
-                        ordinary_enabled: ordinary_borders,
-                        ordinary_width: self.border_width,
-                        focused_color: self.border_color_focused,
-                        unfocused_color: self.border_color_unfocused,
-                        highlight_color: self.focus_highlight_color,
-                        pip_color: self.pip_border_color,
-                        pip_width: self.pip_border_width,
-                    }) else {
-                        continue;
-                    };
-                    let border_color = [
-                        style.color[0],
-                        style.color[1],
-                        style.color[2],
-                        style.color[3] * fade,
-                    ];
-                    let border_width = style.width;
-
-                    let bdr_x = draw_x - border_width;
-                    let bdr_y = draw_y - border_width;
-                    let bdr_w = draw_w + 2.0 * border_width;
-                    let bdr_h = draw_h + 2.0 * border_width;
-
-                    // Concentric corners: the ring's inner edge sits border_width
-                    // inside the outer rect, so the outer radius must be
-                    // radius + border_width for the inner curve to match the
-                    // window's radius (no wedge gap at corners).
-                    let outer_radius = if radius > 0.0 {
-                        radius + border_width
-                    } else {
-                        0.0
-                    };
-
-                    // The focused window's ordinary border upgrades to the
-                    // two-color gradient ring. Focus pulse and urgent borders
-                    // keep their flat signal colors.
-                    let use_gradient = self.border_gradient_enabled && style.ordinary_focused;
-
-                    if use_gradient {
-                        let angle = (self.border_gradient_angle
-                            + self.border_gradient_speed
-                                * self.compositor_start_time.elapsed().as_secs_f32())
-                        .to_radians();
-                        let [ar, ag, ab, aa] = self.border_gradient_color_a;
-                        let [br, bg, bb, ba] = self.border_gradient_color_b;
-                        gl.UseProgram(self.gradient_border_program);
-                        self.set_projection_uniform(
-                            gl,
-                            self.gradient_border_uniforms.projection,
-                            &projection,
-                        );
-                        gl.Uniform1i(
-                            self.gradient_border_uniforms.scene_linear,
-                            i32::from(overlay_scene_linear),
-                        );
-                        gl.Uniform4f(self.gradient_border_uniforms.color_a, ar, ag, ab, aa * fade);
-                        gl.Uniform4f(self.gradient_border_uniforms.color_b, br, bg, bb, ba * fade);
-                        gl.Uniform1f(self.gradient_border_uniforms.gradient_angle, angle);
-                        gl.Uniform1f(self.gradient_border_uniforms.border_width, border_width);
-                        gl.Uniform1f(self.gradient_border_uniforms.radius, outer_radius);
-                        gl.Uniform1f(self.gradient_border_uniforms.radius_top, outer_radius);
-                        gl.Uniform2f(self.gradient_border_uniforms.size, bdr_w, bdr_h);
-                        self.set_rect_uniform(
-                            gl,
-                            self.gradient_border_uniforms.rect,
-                            bdr_x,
-                            bdr_y,
-                            bdr_w,
-                            bdr_h,
-                        );
-                        gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
-                        // Restore the flat border program; its projection and
-                        // scene_linear uniforms are per-program state and stay
-                        // valid from the pre-loop setup.
-                        gl.UseProgram(self.border_program);
-                    } else {
-                        gl.Uniform4f(
-                            self.border_uniforms.border_color,
-                            border_color[0],
-                            border_color[1],
-                            border_color[2],
-                            border_color[3],
-                        );
-                        gl.Uniform1f(self.border_uniforms.border_width, border_width);
-                        gl.Uniform1f(self.border_uniforms.radius, outer_radius);
-                        gl.Uniform1f(self.border_uniforms.radius_top, outer_radius);
-                        gl.Uniform2f(self.border_uniforms.size, bdr_w, bdr_h);
-                        self.set_rect_uniform(
-                            gl,
-                            self.border_uniforms.rect,
-                            bdr_x,
-                            bdr_y,
-                            bdr_w,
-                            bdr_h,
-                        );
-
-                        gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
-                    }
-                }
-
-                gl.BindVertexArray(0);
-                gl.UseProgram(0);
-            }
-        } // border_enabled
-        self.frame_profiler.zone_end();
 
         // End of scissored output_fbo passes. Effect overlays below always run
         // full-screen, and allow_partial already excludes every one of them, so
@@ -5511,6 +5344,222 @@ impl WaylandCompositor {
             gl.Uniform1i(self.border_uniforms.scene_linear, i32::from(scene_linear));
             if !drew_glass {
                 self.sysui_fill_island(gl, x, y, w, h, r, r_top, UiPalette::faded(surface, alpha));
+            }
+        }
+    }
+
+    /// One window's border ring, drawn right after the window itself in the
+    /// back-to-front scene pass so a window stacked above covers it (X11's
+    /// order). Leaves the window program bound for the next window.
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn draw_window_ring(
+        &self,
+        gl: &ffi::Gles2,
+        projection: &[f32; 16],
+        (win_id, x, y, w, h): (u64, i32, i32, u32, u32),
+        focused: Option<u64>,
+        ordinary_borders: bool,
+        focus_highlight_active: bool,
+        scene_linear: bool,
+        status_bar_name: &str,
+    ) {
+        let Some(wt) = self.windows.get(&win_id) else {
+            return;
+        };
+        unsafe {
+            gl.UseProgram(self.border_program);
+            self.set_projection_uniform(gl, self.border_uniforms.projection, projection);
+            gl.Uniform1i(self.border_uniforms.scene_linear, i32::from(scene_linear));
+            gl.BindVertexArray(self.quad_vao);
+            self.draw_window_ring_inner(
+                gl,
+                projection,
+                wt,
+                (win_id, x, y, w, h),
+                focused,
+                ordinary_borders,
+                focus_highlight_active,
+                scene_linear,
+                status_bar_name,
+            );
+            gl.UseProgram(self.program);
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn draw_window_ring_inner(
+        &self,
+        gl: &ffi::Gles2,
+        projection: &[f32; 16],
+        wt: &WindowState,
+        (win_id, x, y, w, h): (u64, i32, i32, u32, u32),
+        focused: Option<u64>,
+        ordinary_borders: bool,
+        focus_highlight_active: bool,
+        scene_linear: bool,
+        status_bar_name: &str,
+    ) {
+        unsafe {
+
+            let is_focused = focused == Some(win_id);
+            let attention_active_for_win =
+                attention_signal_active(self.attention_animation_enabled, wt.is_urgent);
+            // The bar is chrome and popups are unmanaged overlays: no ring.
+            if !counts_for_smart_borders(
+                &wt.class_name,
+                status_bar_name,
+                self.is_unmanaged_overlay(win_id),
+            ) {
+                return;
+            }
+
+            let fade = wt.fade_opacity;
+            if fade <= 0.0 {
+                return;
+            }
+
+            let radius = if wt.is_shaped || wt.is_fullscreen {
+                0.0
+            } else {
+                wt.corner_radius_override.unwrap_or(self.corner_radius)
+            };
+
+            let anim = self.window_animation_frame_for(wt);
+            let scale = anim.scale;
+            let (draw_x, draw_y, draw_w, draw_h) = if (scale - 1.0).abs() > f32::EPSILON {
+                let cw = w as f32 * scale;
+                let ch = h as f32 * scale;
+                let cx = x as f32 + (w as f32 - cw) * 0.5;
+                let cy = y as f32 + (h as f32 - ch) * 0.5 + anim.dy;
+                (cx, cy, cw, ch)
+            } else {
+                (x as f32, y as f32 + anim.dy, w as f32, h as f32)
+            };
+
+            // Focus pulse, attention pulse, PiP frame, focused and
+            // unfocused ring: the shared table both backends draw from.
+            let focus_highlight_progress = focus_highlight_active
+                .then_some(self.focus_highlight_start)
+                .flatten()
+                .filter(|&(hw, _)| hw == win_id)
+                .map(|(_, start)| {
+                    start.elapsed().as_millis() as f32
+                        / self.focus_highlight_duration_ms.max(1) as f32
+                });
+            // An attention border is an accessibility/status signal,
+            // not ordinary decoration: it survives ordinary borders
+            // being off, without enabling them for unrelated windows.
+            let attention = attention_active_for_win.then(|| {
+                attention_border_style(
+                    self.attention_color,
+                    self.compositor_start_time.elapsed().as_secs_f32(),
+                    1.0,
+                    self.border_enabled,
+                    self.border_width,
+                )
+            });
+            let Some(style) = window_border_style(&WindowBorderInputs {
+                is_focused,
+                is_pip: wt.is_pip,
+                focus_highlight_progress,
+                attention,
+                ordinary_enabled: ordinary_borders,
+                ordinary_width: self.border_width,
+                focused_color: self.border_color_focused,
+                unfocused_color: self.border_color_unfocused,
+                highlight_color: self.focus_highlight_color,
+                pip_color: self.pip_border_color,
+                pip_width: self.pip_border_width,
+            }) else {
+                return;
+            };
+            let border_color = [
+                style.color[0],
+                style.color[1],
+                style.color[2],
+                style.color[3] * fade,
+            ];
+            let border_width = style.width;
+
+            let bdr_x = draw_x - border_width;
+            let bdr_y = draw_y - border_width;
+            let bdr_w = draw_w + 2.0 * border_width;
+            let bdr_h = draw_h + 2.0 * border_width;
+
+            // Concentric corners: the ring's inner edge sits border_width
+            // inside the outer rect, so the outer radius must be
+            // radius + border_width for the inner curve to match the
+            // window's radius (no wedge gap at corners).
+            let outer_radius = if radius > 0.0 {
+                radius + border_width
+            } else {
+                0.0
+            };
+
+            // The focused window's ordinary border upgrades to the
+            // two-color gradient ring. Focus pulse and urgent borders
+            // keep their flat signal colors.
+            let use_gradient = self.border_gradient_enabled && style.ordinary_focused;
+
+            if use_gradient {
+                let angle = (self.border_gradient_angle
+                    + self.border_gradient_speed
+                        * self.compositor_start_time.elapsed().as_secs_f32())
+                .to_radians();
+                let [ar, ag, ab, aa] = self.border_gradient_color_a;
+                let [br, bg, bb, ba] = self.border_gradient_color_b;
+                gl.UseProgram(self.gradient_border_program);
+                self.set_projection_uniform(
+                    gl,
+                    self.gradient_border_uniforms.projection,
+                    projection,
+                );
+                gl.Uniform1i(
+                    self.gradient_border_uniforms.scene_linear,
+                    i32::from(scene_linear),
+                );
+                gl.Uniform4f(self.gradient_border_uniforms.color_a, ar, ag, ab, aa * fade);
+                gl.Uniform4f(self.gradient_border_uniforms.color_b, br, bg, bb, ba * fade);
+                gl.Uniform1f(self.gradient_border_uniforms.gradient_angle, angle);
+                gl.Uniform1f(self.gradient_border_uniforms.border_width, border_width);
+                gl.Uniform1f(self.gradient_border_uniforms.radius, outer_radius);
+                gl.Uniform1f(self.gradient_border_uniforms.radius_top, outer_radius);
+                gl.Uniform2f(self.gradient_border_uniforms.size, bdr_w, bdr_h);
+                self.set_rect_uniform(
+                    gl,
+                    self.gradient_border_uniforms.rect,
+                    bdr_x,
+                    bdr_y,
+                    bdr_w,
+                    bdr_h,
+                );
+                gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+                // Restore the flat border program; its projection and
+                // scene_linear uniforms are per-program state and stay
+                // valid from the pre-loop setup.
+                gl.UseProgram(self.border_program);
+            } else {
+                gl.Uniform4f(
+                    self.border_uniforms.border_color,
+                    border_color[0],
+                    border_color[1],
+                    border_color[2],
+                    border_color[3],
+                );
+                gl.Uniform1f(self.border_uniforms.border_width, border_width);
+                gl.Uniform1f(self.border_uniforms.radius, outer_radius);
+                gl.Uniform1f(self.border_uniforms.radius_top, outer_radius);
+                gl.Uniform2f(self.border_uniforms.size, bdr_w, bdr_h);
+                self.set_rect_uniform(
+                    gl,
+                    self.border_uniforms.rect,
+                    bdr_x,
+                    bdr_y,
+                    bdr_w,
+                    bdr_h,
+                );
+
+                gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
             }
         }
     }

@@ -20,6 +20,13 @@ Ordered by how much each item hurts "open the laptop and work". This queue does
 | 5 | Async tearing (`PAGE_FLIP_ASYNC`) | **blocked** | Honest report via `submission_cannot_request_async_flip`; needs Smithay `queue_frame` support. Do not fake success. See [compatibility](compatibility.md). |
 | 6 | Runtime framebuffer envelope change | **documented** | Grow/shrink of the global FB bbox is refused by design until DRM+GLES are one transaction. Workarounds and sites: [output-layout](output-layout.md). |
 
+Known limits of the linear tail (not regressions against the old
+exact-sRGB fallback, which clipped the same way): the postprocess filters
+round-trip through an 8-bit encoded copy, so while a filter is on the frame
+keeps no headroom above SDR white; the glass backdrop cache for the linear
+domain is 8-bit unless `hdr_enabled`, which can band under dark wallpapers.
+An FP16 postprocess copy and glass cache would lift both.
+
 ## Next coding slices
 
 1. Every LinearTarget class, toasts and the OSD are common-linear-aware. Next: system UI (launcher, prompts, tags grid, control center — many programs; the lock shield must stay ahead of the capture view).

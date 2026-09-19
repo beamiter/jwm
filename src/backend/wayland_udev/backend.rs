@@ -5904,6 +5904,13 @@ impl Backend for UdevBackend {
                     if let Some(&fullscreen) = self.state.window_is_fullscreen.get(&wid) {
                         compositor.set_window_fullscreen(win_id, fullscreen);
                     }
+                    compositor.set_window_override_redirect(
+                        win_id,
+                        self.state
+                            .x11_surfaces
+                            .get(&wid)
+                            .is_some_and(|surface| surface.is_override_redirect()),
+                    );
                 }
                 // Resolve a hot scene-linear toggle before building this frame's
                 // surface plans. Requested intent alone is insufficient: FP16
