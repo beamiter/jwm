@@ -8290,6 +8290,30 @@ fn wayland_benchmark_samples_rendered_frames_to_completion() {
             "the profiler fed its zones"
         );
 
+        // The run is over: the profiler the benchmark switched on goes off.
+        compositor.force_full_redraw();
+        compositor.render_frame(&gl, &[], None, false, false, false, None, false);
+        assert!(!compositor.frame_profiler.is_enabled());
+
+        // A rebuilt compositor (KMS reinit) adopts the run in progress.
+        assert!(compositor.benchmark_start(4, 0));
+        compositor.force_full_redraw();
+        compositor.render_frame(&gl, &[], None, false, false, false, None, false);
+        let carried = compositor.take_benchmark();
+        let mut rebuilt = super::WaylandCompositor::new(&gl, 64, 48, false)
+            .expect("second headless Wayland compositor must initialize");
+        rebuilt.adopt_benchmark(carried);
+        for _ in 0..3 {
+            assert!(!rebuilt.benchmark_is_complete());
+            rebuilt.force_full_redraw();
+            rebuilt.render_frame(&gl, &[], None, false, false, false, None, false);
+        }
+        assert!(rebuilt.benchmark_is_complete(), "samples carried across the rebuild");
+        assert!(rebuilt.release_gpu_resources(
+            &gl,
+            super::CompositorOutputTextureOwnership::RawCompositor,
+        ));
+
         assert!(compositor.release_gpu_resources(
             &gl,
             super::CompositorOutputTextureOwnership::RawCompositor,

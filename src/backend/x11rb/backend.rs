@@ -1626,6 +1626,8 @@ impl Backend for X11rbBackend {
                     if let Some(report) = loop_data.backend.compositor_benchmark_report() {
                         println!("{}", report);
                     }
+                    // Once: a resumed run loop must not print it and leave again.
+                    loop_data.backend.benchmark_auto_exit = false;
                     loop_data.should_exit = true;
                 }
             }

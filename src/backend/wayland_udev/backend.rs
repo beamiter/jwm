@@ -1786,11 +1786,11 @@ impl UdevBackend {
         self.scratch_tex_updates.clear();
         self.offscreen_window_textures.clear();
         self.minimized_capture_attempts.clear();
-        if self.compositor.is_none() {
+        let Some(mut old_compositor) = self.compositor.take() else {
             return;
-        }
-
-        self.compositor = None;
+        };
+        let benchmark = old_compositor.take_benchmark();
+        drop(old_compositor);
         self.publish_toast_hit_rects();
         let recreated = if let Some(kms) = &self.kms {
             let mut kms_ref = kms.borrow_mut();
@@ -1811,7 +1811,8 @@ impl UdevBackend {
         } else {
             None
         };
-        if let Some(compositor) = recreated {
+        if let Some(mut compositor) = recreated {
+            compositor.adopt_benchmark(benchmark);
             self.install_compositor(compositor);
         }
     }
@@ -6724,7 +6725,15 @@ impl Backend for UdevBackend {
                 if let Some(report) = self.compositor_benchmark_report() {
                     println!("{report}");
                 }
+                // Once: a resumed run loop must not print it and leave again.
+                self.benchmark_auto_exit = false;
                 break;
+            }
+            if self.benchmark_auto_exit && self.compositor.is_none() {
+                log::error!(
+                    "benchmark: the compositor was disabled mid-run; abandoning --benchmark"
+                );
+                self.benchmark_auto_exit = false;
             }
 
             // Determine the nearest calloop wakeup:

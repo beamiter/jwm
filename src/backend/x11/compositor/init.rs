@@ -1436,6 +1436,7 @@ impl<C: CompositorConnection> Compositor<C> {
 
             // Benchmark harness
             benchmark: benchmark::BenchmarkHarness::new(),
+            benchmark_enabled_profiler: false,
 
             // HDR output control
             eotf_mode: 0,

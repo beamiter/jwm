@@ -1138,6 +1138,9 @@ where
 
     // --- Benchmark harness ---
     benchmark: benchmark::BenchmarkHarness,
+    /// The benchmark switched the frame profiler on; switch it back off
+    /// once the run is over.
+    benchmark_enabled_profiler: bool,
 
     // --- HDR output control ---
     eotf_mode: i32,         // 0=sRGB gamma, 1=PQ (ST2084), 2=HLG

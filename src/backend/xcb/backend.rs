@@ -2788,6 +2788,8 @@ impl Backend for XcbBackend {
                     println!("{report}");
                 }
                 data.should_exit = true;
+                // Once: a resumed run loop must not print it and leave again.
+                data.backend.benchmark_auto_exit = false;
             }
             if !data.should_exit {
                 let now = std::time::Instant::now();

@@ -2379,6 +2379,11 @@ impl WaylandCompositor {
         // disabled profiler reports zero.
         if self.benchmark.is_running() && !self.frame_profiler.is_enabled() {
             self.frame_profiler.set_enabled(true);
+            self.benchmark_enabled_profiler = true;
+        } else if self.benchmark_enabled_profiler && !self.benchmark.is_running() {
+            // Finished or stopped: profiling overhead goes with the run.
+            self.frame_profiler.set_enabled(false);
+            self.benchmark_enabled_profiler = false;
         }
         let bench_frame_start = self.benchmark.is_running().then(Instant::now);
         self.frame_profiler.begin_frame();

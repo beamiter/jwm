@@ -1490,6 +1490,9 @@ pub(crate) struct WaylandCompositor {
     frame_profiler: profiler::FrameProfiler,
     /// `--benchmark` / IPC `benchmark` sampling; idle until started.
     benchmark: crate::backend::compositor_common::benchmark::BenchmarkHarness,
+    /// The benchmark switched the frame profiler on; switch it back off
+    /// once the run is over.
+    benchmark_enabled_profiler: bool,
     /// GL_RENDERER / GL_VERSION captured at construction for the benchmark
     /// report's system block.
     gl_renderer: String,
@@ -2971,6 +2974,7 @@ impl WaylandCompositor {
                 pixel_buffer_pool: pixel_buffer_pool::PixelBufferPool::new(),
                 frame_profiler: profiler::FrameProfiler::new(),
                 benchmark: crate::backend::compositor_common::benchmark::BenchmarkHarness::new(),
+                benchmark_enabled_profiler: false,
                 gl_renderer: gl_string(gl, ffi::RENDERER),
                 gl_version: gl_string(gl, ffi::VERSION),
                 perf_metrics: perf_metrics::PerfMetrics::new(),
@@ -4583,6 +4587,22 @@ impl WaylandCompositor {
 
     pub(crate) fn benchmark_is_complete(&self) -> bool {
         self.benchmark.is_complete()
+    }
+
+    /// Hand the benchmark over to a rebuilt compositor (KMS reinit after a
+    /// hotplug or VT switch): a run in progress keeps its samples instead of
+    /// restarting idle and leaving `--benchmark` waiting forever.
+    pub(crate) fn take_benchmark(
+        &mut self,
+    ) -> crate::backend::compositor_common::benchmark::BenchmarkHarness {
+        std::mem::take(&mut self.benchmark)
+    }
+
+    pub(crate) fn adopt_benchmark(
+        &mut self,
+        harness: crate::backend::compositor_common::benchmark::BenchmarkHarness,
+    ) {
+        self.benchmark = harness;
     }
 
     /// Notify audio timing for a window (feeds AudioSyncManager).
