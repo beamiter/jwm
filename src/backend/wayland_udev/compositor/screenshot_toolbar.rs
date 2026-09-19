@@ -82,7 +82,7 @@ impl WaylandCompositor {
             }
 
             if !self.annotation_label_textures.is_empty() {
-                gl.UseProgram(self.sysui_text_program);
+                self.use_sysui_text_program(gl, false);
                 self.set_projection_uniform(gl, text_proj, projection);
                 gl.Uniform1i(text_tex, 0);
                 gl.Uniform1f(text_opacity, 1.0);
@@ -289,7 +289,7 @@ impl WaylandCompositor {
                 );
             }
 
-            gl.UseProgram(self.sysui_text_program);
+            self.use_sysui_text_program(gl, false);
             self.set_projection_uniform(gl, text_proj, projection);
             gl.Uniform1i(text_tex, 0);
             gl.ActiveTexture(ffi::TEXTURE0);

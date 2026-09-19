@@ -1094,6 +1094,9 @@ pub(crate) struct WaylandCompositor {
     glass_program: u32,
     hud_program: u32,
     sysui_text_program: u32,
+    /// `u_scene_linear` of `sysui_text_program`; set on every bind through
+    /// `use_sysui_text_program` so no draw inherits another's domain.
+    sysui_text_scene_linear: i32,
     temporal_blur_mix_program: u32,
 
     /// Blurred copy of the frame the self-drawn panels sample, so each of them
@@ -2693,6 +2696,11 @@ impl WaylandCompositor {
                 glass_program,
                 hud_program,
                 sysui_text_program,
+                sysui_text_scene_linear: get_uniform_loc(
+                    gl,
+                    sysui_text_program,
+                    "u_scene_linear",
+                ),
                 temporal_blur_mix_program,
                 glass_backdrop: None,
                 glass_backdrop_linear: false,

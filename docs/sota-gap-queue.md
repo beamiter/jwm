@@ -13,7 +13,7 @@ Ordered by how much each item hurts "open the laptop and work". This queue does
 
 | Priority | Gap | Status | Notes |
 | --- | --- | --- | --- |
-| 1 | HDR / color external elements | **partial** | Cursor/DnD/layer internalization done. **WorkspaceTransition** (encoded snapshot decoded in-shader), **Postprocess** (filters run on an encoded copy, result decoded; cursor stays above it on every route), **EdgeGlow**, **Particles**, and **TabBar** (frosted glass domain-aware) are `CommonLinearAware`. Remaining encoded chrome (all post-delivery): debug HUD, annotation, screenshot toolbar, toast/OSD/system UI, recording overlay. Session lock stays external on purpose. See [hdr](hdr.md). |
+| 1 | HDR / color external elements | **partial** | Cursor/DnD/layer internalization done. **WorkspaceTransition** (encoded snapshot decoded in-shader), **Postprocess** (filters run on an encoded copy, result decoded; cursor stays above it on every route), **Toast** and **OSD** (drawn at section 18a ahead of delivery; glass, fills and UI text honor the bound domain), **EdgeGlow**, **Particles**, and **TabBar** (frosted glass domain-aware) are `CommonLinearAware`. Remaining encoded chrome (all post-delivery): system UI, debug HUD, annotation, screenshot toolbar, recording overlay. Session lock stays external on purpose. See [hdr](hdr.md). |
 | 2 | Native Wayland clipboard images | **done** | `Backend::set_clipboard_png` / data-device offer is primary; `wl-copy` is last-resort only. |
 | 3 | XWayland interactive move/resize | **done** | `XwmHandler::{move,resize}_request` emit `MoveResizeRequest` into the shared Jwm drag pipeline. |
 | 4 | Idle dim covers JWM overlays + capture | **done** | Final fullscreen brightness after toast/OSD/system UI; dedicated capture view bakes brightness; EncodedOutput screenshots read after the final pass. See [idle](idle.md). |
@@ -22,7 +22,7 @@ Ordered by how much each item hurts "open the laptop and work". This queue does
 
 ## Next coding slices
 
-1. Every LinearTarget class is now common-linear-aware. Next: move PostDelivery chrome (toast/OSD/system UI) ahead of the delivery point when useful for HDR latch stability.
+1. Every LinearTarget class, toasts and the OSD are common-linear-aware. Next: system UI (launcher, prompts, tags grid, control center — many programs; the lock shield must stay ahead of the capture view), then debug HUD.
 2. Upstream or vendor a Smithay path for `PAGE_FLIP_ASYNC` tearing (keep reporting honest until then).
 3. Atomic DRM modeset + GLES resize transaction for envelope changes (multi-session).
 

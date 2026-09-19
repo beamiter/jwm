@@ -2676,7 +2676,7 @@ impl WaylandCompositor {
         }
 
         // =================================================================
-        // 2b. Partial-damage decision (experimental, default off)
+        // 2b. Partial-damage decision
         // =================================================================
         // Only scissor on provably "calm" frames: no animation, no blur, no
         // effect overlays, no tilt. Everything excluded here either redraws the
@@ -2706,6 +2706,10 @@ impl WaylandCompositor {
             && self.expose_entries.is_empty()
             && (!self.window_tabs_enabled || self.window_groups.is_empty())
             && !self.annotation_active
+            // Toasts, OSD, system UI, HUD, REC/MIC chips, ...: every tail
+            // class redraws over its own retained pixels, so a settled card
+            // would thicken with each partial frame.
+            && !self.tail_overlay_visibility().any()
             && self.tilt_x.abs() <= 0.001
             && self.tilt_y.abs() <= 0.001
             && !blur_would_run;
@@ -4214,6 +4218,35 @@ impl WaylandCompositor {
             }
         }
 
+        // =================================================================
+        // 18a. Toasts and OSD (common-linear-aware)
+        // =================================================================
+        // Toast cards sit above clients and the postprocess filters but under
+        // the cursor and the modal system UI (its scrim dims them; the lock
+        // screen hides them). They draw into the frame's current target, so a
+        // volume key or a notification no longer drops an HDR frame onto the
+        // exact-sRGB fallback. `render_toasts` also prunes expired cards
+        // every frame, so it runs unconditionally.
+        debug_assert_eq!(
+            tail_domain::TailOverlayClass::Toast.domain(),
+            tail_domain::TailOverlayDomain::CommonLinearAware
+        );
+        debug_assert_eq!(
+            tail_domain::TailOverlayClass::Osd.domain(),
+            tail_domain::TailOverlayDomain::CommonLinearAware
+        );
+        let chrome_target = if tail_draws_linear {
+            self.linear_fbo
+        } else {
+            self.output_fbo
+        };
+        unsafe {
+            gl.BindFramebuffer(ffi::FRAMEBUFFER, chrome_target);
+            self.render_toasts(gl, &projection, tail_draws_linear);
+            gl.BindFramebuffer(ffi::FRAMEBUFFER, chrome_target);
+            self.render_osd(gl, &projection, tail_draws_linear);
+        }
+
         self.frame_profiler.zone_end();
 
         // =================================================================
@@ -4350,18 +4383,6 @@ impl WaylandCompositor {
             );
             self.refresh_screenshot_toolbar(gl);
             self.render_screenshot_toolbar(gl, &projection);
-        }
-
-        // Toast cards sit above clients but under the modal system UI (its
-        // scrim dims them; the lock screen hides them). `render_toasts` also
-        // prunes expired cards every frame, so it runs unconditionally.
-        self.bind_post_delivery_overlay_target(gl, tail_domain::TailOverlayClass::Toast);
-        unsafe {
-            self.render_toasts(gl, &projection);
-        }
-        self.bind_post_delivery_overlay_target(gl, tail_domain::TailOverlayClass::Osd);
-        unsafe {
-            self.render_osd(gl, &projection);
         }
 
         if self.system_ui.is_some() {
@@ -4963,7 +4984,7 @@ impl WaylandCompositor {
         let text_proj = super::get_uniform_loc(gl, self.sysui_text_program, "u_projection");
         let text_tex = super::get_uniform_loc(gl, self.sysui_text_program, "u_texture");
         let text_opacity = super::get_uniform_loc(gl, self.sysui_text_program, "u_opacity");
-        gl.UseProgram(self.sysui_text_program);
+        self.use_sysui_text_program(gl, false);
         gl.UniformMatrix4fv(text_proj, 1, ffi::FALSE as u8, projection.as_ptr());
         gl.Uniform1i(text_tex, 0);
         gl.Uniform1f(text_opacity, 1.0);
@@ -5419,6 +5440,16 @@ impl WaylandCompositor {
         }
     }
 
+    /// Bind the shared UI text program for a draw into a target of the given
+    /// domain. Every bind goes through here: the domain uniform is program
+    /// state, so a draw that skipped it would inherit the previous caller's.
+    pub(super) unsafe fn use_sysui_text_program(&self, gl: &ffi::Gles2, scene_linear: bool) {
+        unsafe {
+            gl.UseProgram(self.sysui_text_program);
+            gl.Uniform1i(self.sysui_text_scene_linear, i32::from(scene_linear));
+        }
+    }
+
     pub(super) unsafe fn sysui_fill_rounded(
         &self,
         gl: &ffi::Gles2,
@@ -5740,7 +5771,7 @@ impl WaylandCompositor {
             let text_proj = super::get_uniform_loc(gl, self.sysui_text_program, "u_projection");
             let text_tex = super::get_uniform_loc(gl, self.sysui_text_program, "u_texture");
             let text_opacity = super::get_uniform_loc(gl, self.sysui_text_program, "u_opacity");
-            gl.UseProgram(self.sysui_text_program);
+            self.use_sysui_text_program(gl, false);
             gl.UniformMatrix4fv(text_proj, 1, ffi::FALSE as u8, projection.as_ptr());
             gl.Uniform1i(text_tex, 0);
             gl.Uniform1f(text_opacity, 1.0);
@@ -6011,7 +6042,7 @@ impl WaylandCompositor {
             let text_proj = super::get_uniform_loc(gl, self.sysui_text_program, "u_projection");
             let text_tex = super::get_uniform_loc(gl, self.sysui_text_program, "u_texture");
             let text_opacity = super::get_uniform_loc(gl, self.sysui_text_program, "u_opacity");
-            gl.UseProgram(self.sysui_text_program);
+            self.use_sysui_text_program(gl, false);
             gl.UniformMatrix4fv(text_proj, 1, ffi::FALSE as u8, projection.as_ptr());
             gl.Uniform1i(text_tex, 0);
             gl.Uniform1f(text_opacity, 1.0);
@@ -6751,7 +6782,7 @@ impl WaylandCompositor {
             let text_proj = super::get_uniform_loc(gl, self.sysui_text_program, "u_projection");
             let text_tex = super::get_uniform_loc(gl, self.sysui_text_program, "u_texture");
             let text_opacity = super::get_uniform_loc(gl, self.sysui_text_program, "u_opacity");
-            gl.UseProgram(self.sysui_text_program);
+            self.use_sysui_text_program(gl, false);
             gl.UniformMatrix4fv(text_proj, 1, ffi::FALSE as u8, projection.as_ptr());
             gl.Uniform1i(text_tex, 0);
             gl.Uniform1f(text_opacity, content_a);
@@ -6860,7 +6891,7 @@ impl WaylandCompositor {
     /// card, drop shadow, urgency accent stripe, title over dimmer body, an
     /// optional row of action chips, and a fade in/out envelope shared with
     /// the X11 backend.
-    unsafe fn render_toasts(&mut self, gl: &ffi::Gles2, projection: &[f32; 16]) {
+    unsafe fn render_toasts(&mut self, gl: &ffi::Gles2, projection: &[f32; 16], scene_linear: bool) {
         let now = std::time::Instant::now();
         let mut removed = std::mem::take(&mut self.toast_retired);
         removed.extend(self.toast_stack.prune(now));
@@ -6900,7 +6931,7 @@ impl WaylandCompositor {
         }
 
         let ui = ui_theme::palette();
-        self.ensure_glass_backdrop(gl, ui, projection, false);
+        self.ensure_glass_backdrop(gl, ui, projection, scene_linear);
         let motion_enabled = crate::config::CONFIG.load().motion_enabled();
         let button_hover = self.toast_button_hover;
         let pad = 18.0;
@@ -6991,7 +7022,7 @@ impl WaylandCompositor {
                 // shadow spreading up over it is the seam this removes.
                 self.ui_fill_island(
                     gl, projection, ui, x, y, card_w, card_h, radius, radius_top, ui.toast, a,
-                    false,
+                    scene_linear,
                 );
                 self.sysui_fill_rounded(
                     gl,
@@ -7032,7 +7063,7 @@ impl WaylandCompositor {
                     );
                 }
 
-                gl.UseProgram(self.sysui_text_program);
+                self.use_sysui_text_program(gl, scene_linear);
                 gl.UniformMatrix4fv(text_proj, 1, ffi::FALSE as u8, projection.as_ptr());
                 gl.Uniform1i(text_tex, 0);
                 gl.Uniform1f(text_opacity, content_a);
@@ -7136,7 +7167,7 @@ impl WaylandCompositor {
     /// Volume/brightness OSD: one replace-in-place pill card at the bottom
     /// center — icon+percent label on the left, progress bar on the right —
     /// with the hold+fade envelope shared with the X11 backend.
-    unsafe fn render_osd(&mut self, gl: &ffi::Gles2, projection: &[f32; 16]) {
+    unsafe fn render_osd(&mut self, gl: &ffi::Gles2, projection: &[f32; 16], scene_linear: bool) {
         let now = std::time::Instant::now();
         if self.osd_slot.prune(now) {
             if let Some((_, tex, _, _)) = self.osd_texture.take() {
@@ -7159,7 +7190,7 @@ impl WaylandCompositor {
         };
 
         let ui = ui_theme::palette();
-        self.ensure_glass_backdrop(gl, ui, projection, false);
+        self.ensure_glass_backdrop(gl, ui, projection, scene_linear);
         let target_h = crate::backend::compositor_common::osd::OSD_CARD_HEIGHT;
         let pad = 24.0;
         // Fixed label zone so the bar does not shift as digits change.
@@ -7186,7 +7217,7 @@ impl WaylandCompositor {
             // spreading up over it is exactly the seam the effect removes.
             self.ui_fill_island(
                 gl, projection, ui, x, y, card_w, card_h, radius, radius_top, ui.osd, a,
-                false,
+                scene_linear,
             );
 
             // Progress bar: dim track + accent fill. Label-only kinds (media)
@@ -7220,7 +7251,7 @@ impl WaylandCompositor {
                 }
             }
 
-            gl.UseProgram(self.sysui_text_program);
+            self.use_sysui_text_program(gl, scene_linear);
             let text_rect = super::get_uniform_loc(gl, self.sysui_text_program, "u_rect");
             let text_proj = super::get_uniform_loc(gl, self.sysui_text_program, "u_projection");
             let text_tex = super::get_uniform_loc(gl, self.sysui_text_program, "u_texture");
@@ -7351,7 +7382,7 @@ impl WaylandCompositor {
                 indicator::DOT_COLOR,
             );
 
-            gl.UseProgram(self.sysui_text_program);
+            self.use_sysui_text_program(gl, false);
             let text_rect = super::get_uniform_loc(gl, self.sysui_text_program, "u_rect");
             let text_proj = super::get_uniform_loc(gl, self.sysui_text_program, "u_projection");
             let text_tex = super::get_uniform_loc(gl, self.sysui_text_program, "u_texture");
@@ -7491,7 +7522,7 @@ impl WaylandCompositor {
                 indicator::DOT_COLOR,
             );
 
-            gl.UseProgram(self.sysui_text_program);
+            self.use_sysui_text_program(gl, false);
             let text_rect = super::get_uniform_loc(gl, self.sysui_text_program, "u_rect");
             let text_proj = super::get_uniform_loc(gl, self.sysui_text_program, "u_projection");
             let text_tex = super::get_uniform_loc(gl, self.sysui_text_program, "u_texture");
@@ -7604,7 +7635,7 @@ impl WaylandCompositor {
             gl.Uniform1i(self.border_uniforms.scene_linear, 0);
             self.sysui_fill_rounded(gl, chip_x, chip_y, chip_w, chip_h, chip_h / 2.0, ui.osd);
 
-            gl.UseProgram(self.sysui_text_program);
+            self.use_sysui_text_program(gl, false);
             let text_rect = super::get_uniform_loc(gl, self.sysui_text_program, "u_rect");
             let text_proj = super::get_uniform_loc(gl, self.sysui_text_program, "u_projection");
             let text_tex = super::get_uniform_loc(gl, self.sysui_text_program, "u_texture");

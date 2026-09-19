@@ -964,14 +964,25 @@ precision highp float;
 
 uniform sampler2D u_texture;
 uniform float u_opacity; // layer opacity for fading text (set 1.0 for static)
+uniform int u_scene_linear; // 1 = the bound target is the common linear FBO
 in vec2 v_uv;
 out vec4 frag_color;
+
+vec3 srgb_inverse(vec3 c) {
+    c = clamp(c, 0.0, 1.0);
+    vec3 lo = c / 12.92;
+    vec3 hi = pow(max((c + 0.055) / 1.055, 0.0), vec3(2.4));
+    return mix(lo, hi, step(0.04045, c));
+}
 
 void main() {
     vec4 texel = texture(u_texture, v_uv);
     float a = texel.a * clamp(u_opacity, 0.0, 1.0);
+    // The rasterized ink is straight encoded sRGB; a linear target gets it
+    // decoded before the premultiply.
+    vec3 ink = u_scene_linear != 0 ? srgb_inverse(texel.rgb) : texel.rgb;
     // Output premultiplied alpha for GL_ONE, GL_ONE_MINUS_SRC_ALPHA blending
-    frag_color = vec4(texel.rgb * a, a);
+    frag_color = vec4(ink * a, a);
 }
 "#;
 

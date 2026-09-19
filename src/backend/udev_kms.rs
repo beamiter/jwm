@@ -10750,13 +10750,15 @@ mod compositor_texture_ownership_tests {
         assert!(linear_tail_blocker_names(&tail_status(true, &clear), &safe_plan).is_empty());
 
         // Common-linear-aware overlays (expose/peek/snap preview/overview/
-        // workspace transition) are visible but contribute no blocker after their migration.
+        // workspace transition/toast/OSD) are visible but contribute no blocker after their migration.
         let mut migrated = TailOverlayVisibility::default();
         migrated.expose = true;
         migrated.peek = true;
         migrated.snap_preview = true;
         migrated.overview = true;
         migrated.workspace_transition = true;
+        migrated.toast = true;
+        migrated.osd = true;
         assert!(
             linear_tail_blocker_names(&tail_status(true, &migrated), &safe_plan).is_empty(),
             "migrated common-linear-aware overlays must not appear in the inventory"
@@ -10766,12 +10768,12 @@ mod compositor_texture_ownership_tests {
         let mut encoded = TailOverlayVisibility::default();
         encoded.recording_region_overlay = true;
         encoded.debug_hud = true;
-        encoded.toast = true;
+        encoded.system_ui = true;
         assert_eq!(
             linear_tail_blocker_names(&tail_status(true, &encoded), &safe_plan),
             [
                 "debug_hud_overlay",
-                "toast_overlay",
+                "system_ui_overlay",
                 "recording_region_overlay"
             ]
         );
@@ -10796,7 +10798,7 @@ mod compositor_texture_ownership_tests {
             linear_tail_blocker_names(&tail_status(true, &encoded), &blocked_plan),
             [
                 "debug_hud_overlay",
-                "toast_overlay",
+                "system_ui_overlay",
                 "recording_region_overlay",
                 "cursor"
             ]

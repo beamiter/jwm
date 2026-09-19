@@ -7998,3 +7998,190 @@ fn wayland_recording_cursor_draws_the_expected_arrow() {
     // Nothing is painted away from the arrow: the shader discards there.
     assert_eq!(at(W - 2, 1), [128, 128, 128]);
 }
+
+/// A settled OSD card must not re-blend over its own retained pixels when a
+/// calm frame is repaired partially: chrome drawn after the scissored scene
+/// passes covers the whole card every frame, so a partial frame would
+/// thicken its antialiased corners and text edges a little more each time.
+#[test]
+fn wayland_settled_osd_survives_partial_damage_frames_unchanged() {
+    let Some(_headless) = HeadlessGl::new(GlApi::Gles3) else {
+        eprintln!("headless GL unavailable - skipping OSD partial-damage test");
+        return;
+    };
+    let gl = smithay::backend::renderer::gles::ffi::Gles2::load_with(|symbol| {
+        egl::get_proc_address(symbol) as *const c_void
+    });
+
+    const W: i32 = 640;
+    const H: i32 = 240;
+    unsafe {
+        let mut compositor = super::WaylandCompositor::new(&gl, W as u32, H as u32, false)
+            .expect("headless Wayland compositor must initialize");
+        compositor.set_partial_damage(true);
+        compositor.show_osd(crate::backend::api::OsdKind::Volume, 40);
+
+        let render = |compositor: &mut super::WaylandCompositor| {
+            compositor.render_frame(&gl, &[], None, false, false, false, None, false);
+            read_fbo_frame(&gl, compositor.output_fbo, W, H)
+        };
+        // Let the open spring and the fade-in settle inside the 1.4 s hold.
+        let start = std::time::Instant::now();
+        while compositor.has_active_animations() {
+            assert!(
+                start.elapsed() < std::time::Duration::from_millis(1000),
+                "the OSD never settled"
+            );
+            compositor.force_full_redraw();
+            render(&mut compositor);
+            std::thread::sleep(std::time::Duration::from_millis(8));
+        }
+        compositor.force_full_redraw();
+        let settled = render(&mut compositor);
+        let card_pixels = settled
+            .chunks_exact(4)
+            .filter(|px| *px != &settled[..4])
+            .count();
+        assert!(card_pixels > 1000, "the OSD card did not draw ({card_pixels} px)");
+
+        // Calm frames with damage far from the card (bottom-left corner).
+        for _ in 0..6 {
+            compositor
+                .dirty_region_tracker
+                .mark_dirty(super::dirty_region::DirtyRect::new(0.0, 200.0, 16.0, 16.0));
+            compositor.force_full_redraw();
+            render(&mut compositor);
+        }
+        let repaired = render(&mut compositor);
+        let drifted = settled
+            .chunks_exact(4)
+            .zip(repaired.chunks_exact(4))
+            .filter(|(a, b)| a.iter().zip(b.iter()).any(|(x, y)| (*x as i32 - *y as i32).abs() > 2))
+            .count();
+        assert_eq!(drifted, 0, "{drifted} OSD pixels drifted across partial frames");
+
+        assert!(compositor.release_gpu_resources(
+            &gl,
+            super::CompositorOutputTextureOwnership::RawCompositor,
+        ));
+    }
+}
+
+/// The shared UI text program writes straight encoded-sRGB ink; on a linear
+/// target it must decode the ink before premultiplying, or grey text would
+/// read darker than on the encoded routes.
+#[test]
+fn wayland_sysui_text_decodes_ink_for_a_linear_target() {
+    use super::shaders as s;
+    let Some(h) = HeadlessGl::new(GlApi::Gles3) else {
+        eprintln!("headless GL unavailable - skipping UI text domain test");
+        return;
+    };
+    let gl = &h.gl;
+    let prog = link(gl, s::VERTEX_SHADER, s::HUD_TEXT_FRAGMENT_SHADER)
+        .unwrap_or_else(|log| panic!("UI text program must link:\n{log}"));
+    let render = |scene_linear: i32| {
+        render_quad(gl, prog, [128, 64, 200, 255], 8, 8, |gl| unsafe {
+            let u = |n: &str| gl.get_uniform_location(prog, n);
+            gl.uniform_4_f32(u("u_rect").as_ref(), 0.0, 0.0, 8.0, 8.0);
+            gl.uniform_matrix_4_f32_slice(u("u_projection").as_ref(), false, &ortho(8.0, 8.0));
+            gl.uniform_1_i32(u("u_texture").as_ref(), 0);
+            gl.uniform_1_f32(u("u_opacity").as_ref(), 0.5);
+            gl.uniform_1_i32(u("u_scene_linear").as_ref(), scene_linear);
+        })
+    };
+    // Encoded: premultiplied by alpha 0.5.
+    assert_pixel(render(0), [64, 32, 100, 128], 1, "UI text, encoded");
+    // Linear: decode (0.502, 0.251, 0.784) -> (0.216, 0.0513, 0.578), then
+    // premultiply by 0.5.
+    assert_pixel(render(1), [28, 7, 74, 128], 1, "UI text, linear");
+    unsafe { gl.delete_program(prog) };
+}
+
+/// A visible OSD no longer blocks the linear tail: the frame stays on the
+/// deferred region route and the card reaches the delivered output.
+#[test]
+fn wayland_osd_rides_the_deferred_linear_route() {
+    let Some(_headless) = HeadlessGl::new(GlApi::Gles3) else {
+        eprintln!("headless GL unavailable - skipping deferred OSD test");
+        return;
+    };
+    let gl = smithay::backend::renderer::gles::ffi::Gles2::load_with(|symbol| {
+        egl::get_proc_address(symbol) as *const c_void
+    });
+
+    const W: i32 = 640;
+    const H: i32 = 240;
+    unsafe {
+        let mut compositor = super::WaylandCompositor::new(&gl, W as u32, H as u32, false)
+            .expect("headless Wayland compositor must initialize");
+        compositor.scene_linear_requested = true;
+        compositor.sync_scene_linear_target(&gl);
+        assert_ne!(compositor.linear_fbo, 0);
+        let region = crate::backend::wayland_udev::color_pipeline::OutputColorRegion {
+            rect: [0, 0, W, H],
+            output_tf: crate::backend::wayland_udev::color_pipeline::TransferKind::Srgb,
+            working_to_output_row_major: crate::backend::wayland_udev::color_pipeline::IDENTITY_CTM,
+            tone_map: crate::backend::wayland_udev::color_pipeline::OutputToneMapPlan::IDENTITY,
+        };
+
+        compositor.force_full_redraw();
+        assert!(compositor.render_frame(
+            &gl,
+            &[],
+            None,
+            true,
+            false,
+            false,
+            Some(std::slice::from_ref(&region)),
+            false,
+        ));
+        let empty = read_fbo_frame(&gl, compositor.output_fbo, W, H);
+
+        compositor.show_osd(crate::backend::api::OsdKind::Volume, 40);
+        let status = compositor.linear_tail_status();
+        assert!(
+            status.linear_tail_safe(),
+            "a visible OSD must not block the linear tail: {:?}",
+            status.overlay_blockers
+        );
+        // Ride the open spring and fade-in to the settled hold.
+        let start = std::time::Instant::now();
+        loop {
+            compositor.force_full_redraw();
+            assert!(compositor.render_frame(
+                &gl,
+                &[],
+                None,
+                compositor.linear_tail_status().linear_tail_safe(),
+                false,
+                false,
+                Some(std::slice::from_ref(&region)),
+                false,
+            ));
+            if !compositor.has_active_animations() {
+                break;
+            }
+            assert!(
+                start.elapsed() < std::time::Duration::from_millis(1000),
+                "the OSD never settled"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(8));
+        }
+        let with_osd = read_fbo_frame(&gl, compositor.output_fbo, W, H);
+        let card_pixels = empty
+            .chunks_exact(4)
+            .zip(with_osd.chunks_exact(4))
+            .filter(|(a, b)| a != b)
+            .count();
+        assert!(
+            card_pixels > 1000,
+            "the OSD card never reached the delivered output ({card_pixels} px)"
+        );
+
+        assert!(compositor.release_gpu_resources(
+            &gl,
+            super::CompositorOutputTextureOwnership::RawCompositor,
+        ));
+    }
+}

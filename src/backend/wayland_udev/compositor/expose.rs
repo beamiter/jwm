@@ -279,7 +279,14 @@ impl WaylandCompositor {
             // Title labels come last, under one text-program bind for the
             // whole grid: a label must never end up under a neighbour's
             // thumbnail or hover ring while cells are still flying in.
-            self.render_expose_titles(gl, projection, opacity, hover_scale, hover_p);
+            self.render_expose_titles(
+                gl,
+                projection,
+                opacity,
+                hover_scale,
+                hover_p,
+                tail_scene_linear,
+            );
         }
     }
 
@@ -306,6 +313,7 @@ impl WaylandCompositor {
         opacity: f32,
         hover_scale: f32,
         hover_p: f32,
+        scene_linear: bool,
     ) {
         if self.expose_title_textures.is_empty() {
             return;
@@ -320,7 +328,7 @@ impl WaylandCompositor {
         };
 
         unsafe {
-            gl.UseProgram(self.sysui_text_program);
+            self.use_sysui_text_program(gl, scene_linear);
             self.set_projection_uniform(gl, text_proj, projection);
             gl.Uniform1i(text_tex, 0);
             gl.Uniform1f(text_opacity, opacity);
@@ -1264,7 +1272,7 @@ impl WaylandCompositor {
                 let Some(titles) = self.tab_title_textures.get(group_index) else {
                     continue;
                 };
-                gl.UseProgram(self.sysui_text_program);
+                self.use_sysui_text_program(gl, scene_linear);
                 self.set_projection_uniform(gl, text_proj, projection);
                 gl.Uniform1i(text_tex, 0);
                 gl.ActiveTexture(ffi::TEXTURE0);
@@ -1388,7 +1396,7 @@ impl WaylandCompositor {
                 scene_linear,
             );
 
-            gl.UseProgram(self.sysui_text_program);
+            self.use_sysui_text_program(gl, scene_linear);
             let text_rect = super::get_uniform_loc(gl, self.sysui_text_program, "u_rect");
             let text_proj = super::get_uniform_loc(gl, self.sysui_text_program, "u_projection");
             let text_tex = super::get_uniform_loc(gl, self.sysui_text_program, "u_texture");
