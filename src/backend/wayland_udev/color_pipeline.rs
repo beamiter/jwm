@@ -230,7 +230,7 @@ fn srgb_forward(l: f32) -> f32 {
 }
 
 /// IEC 61966-2-1 sRGB EOTF (encoded → linear), piecewise.
-fn srgb_inverse(e: f32) -> f32 {
+pub(crate) fn srgb_inverse(e: f32) -> f32 {
     if e <= 0.040_45 {
         e / 12.92
     } else {

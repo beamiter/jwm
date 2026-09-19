@@ -41,7 +41,7 @@ pub(crate) enum TailOverlayStage {
     /// target's domain.
     LinearTarget,
     /// Drawn into the encoded output target after the delivery point
-    /// (annotation, screenshot toolbar, system UI, recording
+    /// (annotation, screenshot toolbar, recording
     /// crop outline and its REC/MIC chips). Migrating such a class additionally
     /// requires moving its draw ahead of the delivery point, so these stay
     /// encoded-only for now.
@@ -101,7 +101,9 @@ pub(crate) enum TailOverlayClass {
     Toast,
     /// Volume/brightness OSD (drawn with the toasts, same domain rule).
     Osd,
-    /// Modal system UI (launcher, lock shield, prompts, ...).
+    /// Modal system UI (launcher, lock shield, prompts, ...), section 18a
+    /// over the toasts; drawn ahead of the capture view so a locked
+    /// session's captures show the shield.
     SystemUi,
     /// Recording crop outline and the REC/MIC chips, deliberately kept out of
     /// the encoded stream.
@@ -142,10 +144,10 @@ impl TailOverlayClass {
             | Self::Postprocess
             | Self::DebugHud
             | Self::Toast
-            | Self::Osd => TailOverlayDomain::CommonLinearAware,
+            | Self::Osd
+            | Self::SystemUi => TailOverlayDomain::CommonLinearAware,
             Self::Annotation
             | Self::ScreenshotToolbar
-            | Self::SystemUi
             | Self::RecordingRegionOverlay => TailOverlayDomain::EncodedOnly,
         }
     }
@@ -167,10 +169,10 @@ impl TailOverlayClass {
             | Self::Postprocess
             | Self::DebugHud
             | Self::Toast
-            | Self::Osd => None,
+            | Self::Osd
+            | Self::SystemUi => None,
             Self::Annotation => Some("annotation_overlay"),
             Self::ScreenshotToolbar => Some("screenshot_toolbar_overlay"),
-            Self::SystemUi => Some("system_ui_overlay"),
             Self::RecordingRegionOverlay => Some("recording_region_overlay"),
         }
     }
@@ -188,10 +190,10 @@ impl TailOverlayClass {
             | Self::Postprocess
             | Self::DebugHud
             | Self::Toast
-            | Self::Osd => TailOverlayStage::LinearTarget,
+            | Self::Osd
+            | Self::SystemUi => TailOverlayStage::LinearTarget,
             Self::Annotation
             | Self::ScreenshotToolbar
-            | Self::SystemUi
             | Self::RecordingRegionOverlay => TailOverlayStage::PostDelivery,
         }
     }
@@ -500,13 +502,11 @@ mod tests {
         visibility.recording_region_overlay = true;
 
         let blockers = tail_overlay_blockers(&visibility);
-        // The workspace transition, Expose, Peek and the toast are
-        // common-linear-aware: visible but absent here.
+        // The workspace transition, Expose, Peek, the toast and the system
+        // UI are common-linear-aware: visible but absent here.
         assert_eq!(
             blockers.iter().collect::<Vec<_>>(),
-            [
-                TailOverlayClass::SystemUi,
-                TailOverlayClass::RecordingRegionOverlay,
+            [TailOverlayClass::RecordingRegionOverlay,
             ]
         );
 
@@ -553,7 +553,9 @@ mod tests {
         assert!(!status.linear_tail_safe());
         let status = LinearTailStatus {
             linear_target_ready: true,
-            overlay_blockers: tail_overlay_blockers(&visibility_with(TailOverlayClass::SystemUi)),
+            overlay_blockers: tail_overlay_blockers(&visibility_with(
+                TailOverlayClass::ScreenshotToolbar,
+            )),
         };
         assert!(!status.linear_tail_safe());
         let status = LinearTailStatus {

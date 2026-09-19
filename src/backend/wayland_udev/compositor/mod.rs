@@ -1093,6 +1093,9 @@ pub(crate) struct WaylandCompositor {
     overview_skydome_program: u32,
     glass_program: u32,
     hud_program: u32,
+    /// `u_scene_linear` of `hud_program` (the system-UI scrims); set on every
+    /// bind through `use_hud_program`.
+    hud_scene_linear: i32,
     sysui_text_program: u32,
     /// `u_scene_linear` of `sysui_text_program`; set on every bind through
     /// `use_sysui_text_program` so no draw inherits another's domain.
@@ -2711,6 +2714,7 @@ impl WaylandCompositor {
                 overview_skydome_program,
                 glass_program,
                 hud_program,
+                hud_scene_linear: get_uniform_loc(gl, hud_program, "u_scene_linear"),
                 sysui_text_program,
                 sysui_text_scene_linear: get_uniform_loc(
                     gl,

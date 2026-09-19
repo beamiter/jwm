@@ -8422,3 +8422,97 @@ fn wayland_debug_hud_rides_the_deferred_linear_route() {
         ));
     }
 }
+
+/// A locked session on the linear route: the system UI no longer forces the
+/// exact-sRGB fallback, so the shield must land ahead of the capture view.
+/// Neither the scanout nor a screenshot/recording may show the client, and
+/// the shield keeps its themed colour on the linear target.
+#[test]
+fn wayland_lock_shield_hides_the_scene_from_capture_on_the_linear_route() {
+    let Some(_headless) = HeadlessGl::new(GlApi::Gles3) else {
+        eprintln!("headless GL unavailable - skipping lock capture test");
+        return;
+    };
+    let gl = smithay::backend::renderer::gles::ffi::Gles2::load_with(|symbol| {
+        egl::get_proc_address(symbol) as *const c_void
+    });
+
+    const W: i32 = 320;
+    const H: i32 = 200;
+    unsafe {
+        let mut compositor = super::WaylandCompositor::new(&gl, W as u32, H as u32, false)
+            .expect("headless Wayland compositor must initialize");
+        compositor.scene_linear_requested = true;
+        compositor.sync_scene_linear_target(&gl);
+        let region = crate::backend::wayland_udev::color_pipeline::OutputColorRegion {
+            rect: [0, 0, W, H],
+            output_tf: crate::backend::wayland_udev::color_pipeline::TransferKind::Srgb,
+            working_to_output_row_major: crate::backend::wayland_udev::color_pipeline::IDENTITY_CTM,
+            tone_map: crate::backend::wayland_udev::color_pipeline::OutputToneMapPlan::IDENTITY,
+        };
+        let pixels = [0u8, 255, 0, 255].repeat((W * H) as usize);
+        let tex = create_element_texture(&gl, W, H, &pixels);
+        insert_opaque_test_window(&mut compositor, 1, tex, W as u32, H as u32);
+        let scene = [(1u64, 0, 0, W as u32, H as u32)];
+
+        compositor.set_system_ui(Some(crate::backend::api::SystemUiOverlay {
+            title: "Locked".into(),
+            locked: true,
+            ..Default::default()
+        }));
+        let status = compositor.linear_tail_status();
+        assert!(
+            status.linear_tail_safe(),
+            "the system UI must not block the linear tail: {:?}",
+            status.overlay_blockers
+        );
+        compositor.force_full_redraw();
+        assert!(compositor.render_frame(
+            &gl,
+            &scene,
+            Some(1),
+            true,
+            false,
+            false,
+            Some(std::slice::from_ref(&region)),
+            true,
+        ));
+        assert!(matches!(
+            compositor.capture_view(),
+            super::CompositorCaptureView::Dedicated { .. }
+        ));
+
+        let backdrop = crate::backend::compositor_common::ui_theme::palette().lock_backdrop;
+        let expected = [
+            (backdrop[0] * 255.0).round() as u8,
+            (backdrop[1] * 255.0).round() as u8,
+            (backdrop[2] * 255.0).round() as u8,
+            255,
+        ];
+        for (label, fbo) in [
+            ("scanout", compositor.output_fbo),
+            ("capture view", compositor.capture_view_fbo),
+        ] {
+            let frame = read_fbo_frame(&gl, fbo, W, H);
+            let leaked = frame
+                .chunks_exact(4)
+                .filter(|px| px[1] > 200 && px[0] < 60 && px[2] < 60)
+                .count();
+            assert_eq!(leaked, 0, "{label}: {leaked} client pixels show through the lock");
+            // A corner, away from the lock card: the themed backdrop, decoded
+            // on the way in and re-encoded on the way out.
+            assert_pixel(
+                frame_pixel(&frame, W as usize, H as usize, 2, 2),
+                expected,
+                2,
+                label,
+            );
+        }
+
+        gl.DeleteTextures(1, &tex);
+        assert!(compositor.release_gpu_resources(
+            &gl,
+            super::CompositorOutputTextureOwnership::RawCompositor,
+        ));
+    }
+}

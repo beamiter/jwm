@@ -932,10 +932,7 @@ mod tests {
         // Needles are assembled at runtime so this cannot match its own text.
         // Avoid `body_of(render_frame)`: the signature's type path contains `{`.
         let source = include_str!("render.rs");
-        let system_ui = format!(
-            "TailOverlayClass::{});\n            unsafe {{\n                self.{}(gl, &projection);",
-            "SystemUi", "render_system_ui"
-        );
+        let system_ui = format!("self.{}(gl, &projection, tail_draws_linear);", "render_system_ui");
         let final_brightness = format!("self.{}(gl, &projection);", "apply_final_brightness");
         let screenshot = format!("// 19. {} capture", "Screenshot");
         let recording = format!("// 21. {} capture", "Recording");
@@ -4002,9 +3999,10 @@ impl WaylandCompositor {
         // =================================================================
         // Common-linear-aware: the filters are authored on encoded sRGB, so
         // the source copy is always encoded. On deferred routes the linear
-        // target is encoded into the (8-bit) postprocess copy — a float to
-        // fixed-point blit is illegal in GLES3 — and the result is decoded
-        // back into the linear target, which stays bound for later passes.
+        // target is encoded into the (8-bit) postprocess copy — a raw blit
+        // would store linear light in 8 bits, which bands in the shadows —
+        // and the result is decoded back into the linear target, which stays
+        // bound for later passes.
         if self.postprocess_active {
             debug_assert_eq!(
                 tail_domain::TailOverlayClass::Postprocess.domain(),
@@ -4111,7 +4109,7 @@ impl WaylandCompositor {
         }
 
         // =================================================================
-        // 18a. Debug HUD, toasts and OSD (common-linear-aware)
+        // 18a. Debug HUD, toasts, OSD and system UI (common-linear-aware)
         // =================================================================
         // Toast cards sit above clients and the postprocess filters but under
         // the cursor and the modal system UI (its scrim dims them; the lock
@@ -4148,6 +4146,26 @@ impl WaylandCompositor {
             self.render_toasts(gl, &projection, tail_draws_linear);
             gl.BindFramebuffer(ffi::FRAMEBUFFER, chrome_target);
             self.render_osd(gl, &projection, tail_draws_linear);
+
+            // Modal system UI (launcher, prompts, tags grid, control center,
+            // lock shield) over the toasts — its scrim dims them — and under
+            // the cursor. Drawn before the capture view is derived, so a
+            // locked session's screenshots and recordings show the shield.
+            debug_assert_eq!(
+                tail_domain::TailOverlayClass::SystemUi.domain(),
+                tail_domain::TailOverlayDomain::CommonLinearAware
+            );
+            if self.system_ui.is_some() {
+                gl.BindFramebuffer(ffi::FRAMEBUFFER, chrome_target);
+                self.render_system_ui(gl, &projection, tail_draws_linear);
+            } else {
+                // The overlay is gone: `set_system_ui(None)` runs without a GL
+                // context, so the labels it baked are freed on the first
+                // frame that has one. The wallpaper picker's side-preview
+                // texture follows the same rule.
+                self.clear_tags_grid_labels(gl);
+                self.clear_system_ui_preview(gl);
+            }
         }
 
         self.frame_profiler.zone_end();
@@ -4239,18 +4257,12 @@ impl WaylandCompositor {
             CompositorCaptureView::Unavailable
         };
 
-        // A locked compositor must never expose the client scene through an
-        // IPC or protocol screenshot. Draw the opaque shield before readback.
-        if self
+        // The lock shield (section 18a) is the top of the scene while locked:
+        // nothing the screenshot editor draws may land on it.
+        let locked = self
             .system_ui
             .as_ref()
-            .is_some_and(|overlay| overlay.locked)
-        {
-            self.bind_post_delivery_overlay_target(gl, tail_domain::TailOverlayClass::SystemUi);
-            unsafe {
-                self.render_system_ui(gl, &projection);
-            }
-        }
+            .is_some_and(|overlay| overlay.locked);
 
         // =================================================================
         // 19c. Annotations overlay
@@ -4258,7 +4270,7 @@ impl WaylandCompositor {
         // Shapes first, then strokes over them: a redaction bar must not land
         // on top of the arrow that points at it. The screenshot toolbar comes
         // last of all, since it floats above everything it edits.
-        if self.annotation_active {
+        if self.annotation_active && !locked {
             self.bind_post_delivery_overlay_target(gl, tail_domain::TailOverlayClass::Annotation);
             self.refresh_annotation_labels(gl);
             self.render_annotation_shapes(gl, &projection);
@@ -4268,27 +4280,13 @@ impl WaylandCompositor {
                 }
             }
         }
-        if self.screenshot_toolbar.is_some() {
+        if self.screenshot_toolbar.is_some() && !locked {
             self.bind_post_delivery_overlay_target(
                 gl,
                 tail_domain::TailOverlayClass::ScreenshotToolbar,
             );
             self.refresh_screenshot_toolbar(gl);
             self.render_screenshot_toolbar(gl, &projection);
-        }
-
-        if self.system_ui.is_some() {
-            self.bind_post_delivery_overlay_target(gl, tail_domain::TailOverlayClass::SystemUi);
-            unsafe {
-                self.render_system_ui(gl, &projection);
-            }
-        } else {
-            // The overlay is gone: `set_system_ui(None)` runs without a GL
-            // context, so the labels it baked are freed on the first frame
-            // that has one. The wallpaper picker's side-preview texture
-            // follows the same rule.
-            unsafe { self.clear_tags_grid_labels(gl) };
-            unsafe { self.clear_system_ui_preview(gl) };
         }
 
         // Final brightness multiply after toast/OSD/system UI so idle dim
@@ -5564,6 +5562,15 @@ impl WaylandCompositor {
         }
     }
 
+    /// Bind the system-UI scrim program for a draw into a target of the given
+    /// domain (program state, so every bind sets it).
+    unsafe fn use_hud_program(&self, gl: &ffi::Gles2, scene_linear: bool) {
+        unsafe {
+            gl.UseProgram(self.hud_program);
+            gl.Uniform1i(self.hud_scene_linear, i32::from(scene_linear));
+        }
+    }
+
     /// Bind the shared UI text program for a draw into a target of the given
     /// domain. Every bind goes through here: the domain uniform is program
     /// state, so a draw that skipped it would inherit the previous caller's.
@@ -5698,6 +5705,7 @@ impl WaylandCompositor {
         projection: &[f32; 16],
         strip: &crate::backend::api::LayoutFilmstrip,
         viewport: [f32; 4],
+        scene_linear: bool,
     ) {
         use crate::backend::compositor_common::layout_strip as film;
 
@@ -5718,7 +5726,7 @@ impl WaylandCompositor {
             let bg = super::get_uniform_loc(gl, self.hud_program, "u_bg_color");
             let size = super::get_uniform_loc(gl, self.hud_program, "u_size");
             let scrim = UiPalette::faded(ui.scrim, scrim_a);
-            gl.UseProgram(self.hud_program);
+            self.use_hud_program(gl, scene_linear);
             gl.UniformMatrix4fv(proj, 1, ffi::FALSE as u8, projection.as_ptr());
             gl.Uniform4f(bg, scrim[0], scrim[1], scrim[2], scrim[3]);
             gl.Uniform2f(size, viewport_w, viewport_h);
@@ -5726,7 +5734,7 @@ impl WaylandCompositor {
             gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
         }
 
-        self.capture_glass_backdrop(gl, ui, projection, false);
+        self.capture_glass_backdrop(gl, ui, projection, scene_linear);
 
         unsafe {
             // Drop shadow, then the card.
@@ -5765,7 +5773,7 @@ impl WaylandCompositor {
                 film::PANEL_RADIUS,
                 ui.panel,
                 1.0,
-                false,
+                scene_linear,
             );
 
             // The film base: the palette's recessed tone, which reads darker
@@ -5895,7 +5903,7 @@ impl WaylandCompositor {
             let text_proj = super::get_uniform_loc(gl, self.sysui_text_program, "u_projection");
             let text_tex = super::get_uniform_loc(gl, self.sysui_text_program, "u_texture");
             let text_opacity = super::get_uniform_loc(gl, self.sysui_text_program, "u_opacity");
-            self.use_sysui_text_program(gl, false);
+            self.use_sysui_text_program(gl, scene_linear);
             gl.UniformMatrix4fv(text_proj, 1, ffi::FALSE as u8, projection.as_ptr());
             gl.Uniform1i(text_tex, 0);
             gl.Uniform1f(text_opacity, 1.0);
@@ -5935,6 +5943,7 @@ impl WaylandCompositor {
         projection: &[f32; 16],
         grid: &crate::backend::api::TagsGrid,
         viewport: [f32; 4],
+        scene_linear: bool,
     ) {
         use crate::backend::compositor_common::layout_strip as film;
         use crate::backend::compositor_common::tags_grid as grid_layout;
@@ -6001,7 +6010,7 @@ impl WaylandCompositor {
             let bg = super::get_uniform_loc(gl, self.hud_program, "u_bg_color");
             let size = super::get_uniform_loc(gl, self.hud_program, "u_size");
             let scrim = UiPalette::faded(ui.scrim, scrim_a);
-            gl.UseProgram(self.hud_program);
+            self.use_hud_program(gl, scene_linear);
             gl.UniformMatrix4fv(proj, 1, ffi::FALSE as u8, projection.as_ptr());
             gl.Uniform4f(bg, scrim[0], scrim[1], scrim[2], scrim[3]);
             gl.Uniform2f(size, viewport_w, viewport_h);
@@ -6009,7 +6018,7 @@ impl WaylandCompositor {
             gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
         }
 
-        self.capture_glass_backdrop(gl, ui, projection, false);
+        self.capture_glass_backdrop(gl, ui, projection, scene_linear);
 
         unsafe {
             // Drop shadow, then the card.
@@ -6048,7 +6057,7 @@ impl WaylandCompositor {
                 film::PANEL_RADIUS,
                 ui.panel,
                 1.0,
-                false,
+                scene_linear,
             );
 
             let line = UiPalette::ink(ui.item_ink, 0.72);
@@ -6085,7 +6094,7 @@ impl WaylandCompositor {
                 if let Some(live) = live {
                     // The on-screen tag's cell swaps its wireframes for the
                     // windows' own textures, scaled into the same rectangles.
-                    self.render_tags_grid_live_cell(gl, projection, frame, live, ink, scale);
+                    self.render_tags_grid_live_cell(gl, projection, frame, live, ink, scale, scene_linear);
                 }
                 // The frame's border sits above the cell's content, so a live
                 // thumbnail ends exactly at the frame edge.
@@ -6166,7 +6175,7 @@ impl WaylandCompositor {
             let text_proj = super::get_uniform_loc(gl, self.sysui_text_program, "u_projection");
             let text_tex = super::get_uniform_loc(gl, self.sysui_text_program, "u_texture");
             let text_opacity = super::get_uniform_loc(gl, self.sysui_text_program, "u_opacity");
-            self.use_sysui_text_program(gl, false);
+            self.use_sysui_text_program(gl, scene_linear);
             gl.UniformMatrix4fv(text_proj, 1, ffi::FALSE as u8, projection.as_ptr());
             gl.Uniform1i(text_tex, 0);
             gl.Uniform1f(text_opacity, 1.0);
@@ -6330,6 +6339,7 @@ impl WaylandCompositor {
         live: &crate::backend::api::LiveTagsCell,
         ink: [f32; 4],
         scale: f32,
+        scene_linear: bool,
     ) {
         use crate::backend::compositor_common::layout_strip as film;
 
@@ -6372,14 +6382,17 @@ impl WaylandCompositor {
                 gl.Uniform1f(self.win_uniforms.ripple_progress, -1.0);
                 gl.Uniform1f(self.win_uniforms.ripple_amplitude, 0.0);
 
+                // Same rule as Expose: a linear target takes the transform
+                // as is; an encoded one on an active scene-linear pipeline
+                // needs the sRGB re-encode override.
                 let color_transform = win.color_transform.map(|transform| {
-                    if self.scene_linear_color_path_active() {
-                        transform_for_encoded_srgb(transform)
-                    } else {
+                    if scene_linear || !self.scene_linear_color_path_active() {
                         transform
+                    } else {
+                        transform_for_encoded_srgb(transform)
                     }
                 });
-                self.upload_window_color_transform(gl, color_transform, false);
+                self.upload_window_color_transform(gl, color_transform, scene_linear);
 
                 gl.ActiveTexture(ffi::TEXTURE0);
                 self.bind_window_texture(gl, tex);
@@ -6393,6 +6406,7 @@ impl WaylandCompositor {
             // then the fail-safe outlines.
             gl.UseProgram(self.border_program);
             self.set_projection_uniform(gl, self.border_uniforms.projection, projection);
+            gl.Uniform1i(self.border_uniforms.scene_linear, i32::from(scene_linear));
             for rect in outlines {
                 self.sysui_stroke_rounded(
                     gl,
@@ -6426,6 +6440,7 @@ impl WaylandCompositor {
         card: [f32; 4],
         content_a: f32,
         ui: &UiPalette,
+        scene_linear: bool,
     ) -> Option<panel::Rect> {
         let (tex, img_w, img_h) = match (&self.system_ui_preview, &overlay.side_preview) {
             (Some((path, tex, w, h)), Some(want)) if path == want => (*tex, *w, *h),
@@ -6448,7 +6463,7 @@ impl WaylandCompositor {
                 panel::PREVIEW_RADIUS,
                 ui.panel,
                 content_a,
-                false,
+                scene_linear,
             );
             // The image through the ordinary window program, whose radius
             // uniform rounds it like any other drawn texture. Its uniforms
@@ -6468,7 +6483,7 @@ impl WaylandCompositor {
             // A decoded sRGB image on the display-encoded overlay target: no
             // color transform, no scene-linear decode — the state the card's
             // own overlay passes use.
-            self.upload_window_color_transform(gl, None, false);
+            self.upload_window_color_transform(gl, None, scene_linear);
             gl.ActiveTexture(ffi::TEXTURE0);
             self.bind_window_texture(gl, tex);
             gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
@@ -6483,7 +6498,12 @@ impl WaylandCompositor {
     /// Modal system UI drawn as a material-style card: dimmed scrim, drop
     /// shadow, rounded panel with a gradient accent ring, a search-field bar,
     /// and a selection pill under the highlighted list row.
-    unsafe fn render_system_ui(&mut self, gl: &ffi::Gles2, projection: &[f32; 16]) {
+    unsafe fn render_system_ui(
+        &mut self,
+        gl: &ffi::Gles2,
+        projection: &[f32; 16],
+        scene_linear: bool,
+    ) {
         // The frame below mutates renderer state all over, so the overlay
         // cannot be borrowed out of `self` — and deep-cloning its strings on
         // every rendered frame is the one cost worth avoiding. Take it out,
@@ -6509,12 +6529,12 @@ impl WaylandCompositor {
             // Any other panel means the baked tag-number labels have no next
             // frame to be reused by: free them while a context is current.
             unsafe { self.clear_tags_grid_labels(gl) };
-            unsafe { self.render_layout_filmstrip(gl, projection, strip, viewport) };
+            unsafe { self.render_layout_filmstrip(gl, projection, strip, viewport, scene_linear) };
         } else if let Some(grid) = &overlay.tags_grid {
-            unsafe { self.render_tags_grid(gl, projection, grid, viewport) };
+            unsafe { self.render_tags_grid(gl, projection, grid, viewport, scene_linear) };
         } else {
             unsafe { self.clear_tags_grid_labels(gl) };
-            unsafe { self.render_system_ui_panel(gl, projection, &overlay, viewport) };
+            unsafe { self.render_system_ui_panel(gl, projection, &overlay, viewport, scene_linear) };
         }
         self.system_ui = Some(overlay);
     }
@@ -6529,6 +6549,7 @@ impl WaylandCompositor {
         projection: &[f32; 16],
         overlay: &crate::backend::api::SystemUiOverlay,
         viewport: [f32; 4],
+        scene_linear: bool,
     ) {
         let dims = |slot: usize| -> (f32, f32) {
             self.sysui_textures[slot]
@@ -6616,12 +6637,16 @@ impl WaylandCompositor {
             gl.BindVertexArray(self.quad_vao);
 
             if overlay.locked {
-                gl.ClearColor(
-                    ui.lock_backdrop[0],
-                    ui.lock_backdrop[1],
-                    ui.lock_backdrop[2],
-                    ui.lock_backdrop[3],
-                );
+                // The theme colour is encoded sRGB; a linear target stores it
+                // decoded, or the shield would come out darker than themed.
+                let [r, g, b, a] = ui.lock_backdrop;
+                let [r, g, b] = if scene_linear {
+                    use crate::backend::wayland_udev::color_pipeline::srgb_inverse;
+                    [srgb_inverse(r), srgb_inverse(g), srgb_inverse(b)]
+                } else {
+                    [r, g, b]
+                };
+                gl.ClearColor(r, g, b, a);
                 gl.Clear(ffi::COLOR_BUFFER_BIT);
             } else {
                 // Scrim: dim the desktop behind the panel. The dim rides the
@@ -6638,7 +6663,7 @@ impl WaylandCompositor {
                 let bg = super::get_uniform_loc(gl, self.hud_program, "u_bg_color");
                 let size = super::get_uniform_loc(gl, self.hud_program, "u_size");
                 let scrim = UiPalette::faded(ui.scrim, content_a);
-                gl.UseProgram(self.hud_program);
+                self.use_hud_program(gl, scene_linear);
                 gl.UniformMatrix4fv(proj, 1, ffi::FALSE as u8, projection.as_ptr());
                 gl.Uniform4f(bg, scrim[0], scrim[1], scrim[2], scrim[3]);
                 gl.Uniform2f(size, viewport_w, viewport_h);
@@ -6651,7 +6676,7 @@ impl WaylandCompositor {
         // after it — otherwise the glass would show an undimmed desktop inside
         // a dimmed one. Forced rather than lazy for the same reason.
         if !overlay.locked {
-            self.capture_glass_backdrop(gl, ui, projection, false);
+            self.capture_glass_backdrop(gl, ui, projection, scene_linear);
         }
 
         unsafe {
@@ -6689,7 +6714,7 @@ impl WaylandCompositor {
             // display-encoded output, so scene-linear conversion stays off.
             self.ui_fill_island(
                 gl, projection, ui, x, y, panel_w, panel_h, radius, radius_top, panel_fill, 1.0,
-                false,
+                scene_linear,
             );
 
             let layout = panel::contents(
@@ -6728,6 +6753,7 @@ impl WaylandCompositor {
                 [x, y, panel_w, panel_h],
                 content_a,
                 ui,
+                scene_linear,
             );
             self.system_ui_hit_geometry = Some(
                 panel::HitGeometry::new([x, y, panel_w, panel_h], &layout, overlay.items.len())
@@ -6855,7 +6881,10 @@ impl WaylandCompositor {
                     self.gradient_border_uniforms.projection,
                     projection,
                 );
-                gl.Uniform1i(self.gradient_border_uniforms.scene_linear, 0);
+                gl.Uniform1i(
+                    self.gradient_border_uniforms.scene_linear,
+                    i32::from(scene_linear),
+                );
                 let ring = 1.5 * ui.ring_width;
                 let [ar, ag, ab, aa] = self.border_gradient_color_a;
                 let [br, bg, bb, ba] = self.border_gradient_color_b;
@@ -6906,7 +6935,7 @@ impl WaylandCompositor {
             let text_proj = super::get_uniform_loc(gl, self.sysui_text_program, "u_projection");
             let text_tex = super::get_uniform_loc(gl, self.sysui_text_program, "u_texture");
             let text_opacity = super::get_uniform_loc(gl, self.sysui_text_program, "u_opacity");
-            self.use_sysui_text_program(gl, false);
+            self.use_sysui_text_program(gl, scene_linear);
             gl.UniformMatrix4fv(text_proj, 1, ffi::FALSE as u8, projection.as_ptr());
             gl.Uniform1i(text_tex, 0);
             gl.Uniform1f(text_opacity, content_a);

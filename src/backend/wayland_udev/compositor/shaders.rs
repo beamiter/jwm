@@ -936,14 +936,23 @@ void main() {
 pub const HUD_FRAGMENT_SHADER: &str = r#"#version 300 es
 precision highp float;
 
-uniform vec4  u_bg_color; // background color for HUD panel
+uniform vec4  u_bg_color; // background color for HUD panel (encoded sRGB)
 uniform vec2  u_size;     // panel size in pixels
+uniform int   u_scene_linear; // 1 = the bound target is the common linear FBO
 in vec2 v_uv;
 out vec4 frag_color;
+
+vec3 srgb_inverse(vec3 c) {
+    c = clamp(c, 0.0, 1.0);
+    vec3 lo = c / 12.92;
+    vec3 hi = pow(max((c + 0.055) / 1.055, 0.0), vec3(2.4));
+    return mix(lo, hi, step(0.04045, c));
+}
 
 void main() {
     // Simple semi-transparent background panel
     float alpha = u_bg_color.a;
+    vec3 color = u_scene_linear != 0 ? srgb_inverse(u_bg_color.rgb) : u_bg_color.rgb;
     // Slight rounded corners for the panel
     vec2 pixel_pos = v_uv * u_size;
     vec2 center = u_size * 0.5;
@@ -951,7 +960,7 @@ void main() {
     float dist = length(max(d, 0.0)) + min(max(d.x, d.y), 0.0) - 4.0;
     float mask = 1.0 - smoothstep(-1.0, 1.0, dist);
     float final_alpha = alpha * mask;
-    frag_color = vec4(u_bg_color.rgb * final_alpha, final_alpha);
+    frag_color = vec4(color * final_alpha, final_alpha);
 }
 "#;
 
