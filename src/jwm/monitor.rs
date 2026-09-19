@@ -213,20 +213,44 @@ fn legacy_hidden_restore_rect(client: &WMClient, fallback: Rect) -> Rect {
     )
 }
 
-/// Move a *visible* client's geometry to a new output. A fullscreen window
-/// fills the target output; a floating or PiP window keeps its offset within
-/// the work area, clamped to fit; a tiled window is placed by the next
-/// `arrange`. The floating and pre-fullscreen slots follow too, so toggling
-/// floating or leaving fullscreen later does not jump back to the source.
-/// Returns whether the live geometry changed and must be applied.
+/// What [`migrate_visible_geometry`] did to a client.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VisibleMigration {
+    /// Nothing to carry: minimized (the hidden path owns it), the bar (its
+    /// own placement owns it), a tiled window (the next `arrange` places
+    /// it), or a window already on the target output — a drag released
+    /// there, whose position is exactly what the user chose.
+    Unchanged,
+    /// Parked off-screen because its tag is not shown: only the rectangle it
+    /// comes back to moved; the real window stays where it is.
+    Parked,
+    /// On screen: the live rectangle moved and must be applied.
+    Live,
+}
+
+/// Move a non-minimized client's geometry to a new output. A fullscreen
+/// window fills the target output; a floating or PiP window keeps its offset
+/// within the work area, clamped to fit. The floating and pre-fullscreen
+/// slots follow too, so toggling floating or leaving fullscreen later does
+/// not jump back to the source.
 fn migrate_visible_geometry(
     client: &mut WMClient,
     source_work: Option<Rect>,
     target_monitor: Rect,
     target_work: Rect,
-) -> bool {
-    if client.state.is_hidden {
-        return false;
+) -> VisibleMigration {
+    if client.state.is_hidden || client.state.is_dock {
+        return VisibleMigration::Unchanged;
+    }
+    let parked = client.geometry.hidden_x.is_some();
+    let live = Rect::new(
+        client.geometry.x,
+        client.geometry.y,
+        client.geometry.w,
+        client.geometry.h,
+    );
+    if !parked && rect_center_inside(live, target_monitor) {
+        return VisibleMigration::Unchanged;
     }
     let border_width = client.geometry.border_w;
     let translate =
@@ -246,7 +270,13 @@ fn migrate_visible_geometry(
         client.geometry.floating_h = floating.h;
     }
 
-    let live = if client.state.is_fullscreen {
+    // Where the window is (or, parked, comes back to) on the target.
+    let current = if parked {
+        client.geometry.hidden_restore_rect.and_then(valid_rect)
+    } else {
+        valid_rect(live)
+    };
+    let moved = if client.state.is_fullscreen {
         let old = Rect::new(
             client.geometry.old_x,
             client.geometry.old_y,
@@ -262,14 +292,8 @@ fn migrate_visible_geometry(
         }
         target_monitor
     } else if client.state.is_floating || client.state.is_pip {
-        let current = Rect::new(
-            client.geometry.x,
-            client.geometry.y,
-            client.geometry.w,
-            client.geometry.h,
-        );
-        let Some(current) = valid_rect(current) else {
-            return false;
+        let Some(current) = current else {
+            return VisibleMigration::Unchanged;
         };
         let moved = translate(current);
         client.geometry.floating_x = moved.x;
@@ -278,13 +302,27 @@ fn migrate_visible_geometry(
         client.geometry.floating_h = moved.h;
         moved
     } else {
-        return false;
+        return VisibleMigration::Unchanged;
     };
-    client.geometry.x = live.x;
-    client.geometry.y = live.y;
-    client.geometry.w = live.w;
-    client.geometry.h = live.h;
-    true
+
+    if parked {
+        client.geometry.hidden_restore_rect = Some(moved);
+        return VisibleMigration::Parked;
+    }
+    client.geometry.x = moved.x;
+    client.geometry.y = moved.y;
+    client.geometry.w = moved.w;
+    client.geometry.h = moved.h;
+    VisibleMigration::Live
+}
+
+fn rect_center_inside(rect: Rect, area: Rect) -> bool {
+    let cx = i64::from(rect.x) + i64::from(rect.w.max(0)) / 2;
+    let cy = i64::from(rect.y) + i64::from(rect.h.max(0)) / 2;
+    cx >= i64::from(area.x)
+        && cy >= i64::from(area.y)
+        && cx < i64::from(area.x) + i64::from(area.w)
+        && cy < i64::from(area.y) + i64::from(area.h)
 }
 
 /// Move the *semantic* visible geometry of a minimized client to a new
@@ -708,11 +746,13 @@ impl Jwm {
         target_monitor: Rect,
         target_work: Rect,
     ) -> bool {
-        let migrated = self.state.clients.get_mut(client_key).is_some_and(|client| {
+        let outcome = self.state.clients.get_mut(client_key).map(|client| {
             migrate_visible_geometry(client, source_work, target_monitor, target_work)
         });
-        if !migrated {
-            return false;
+        match outcome {
+            Some(VisibleMigration::Live) => {}
+            Some(VisibleMigration::Parked) => return true,
+            Some(VisibleMigration::Unchanged) | None => return false,
         }
         let Some((live, fullscreen)) = self.state.clients.get(client_key).map(|client| {
             (

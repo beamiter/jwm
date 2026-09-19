@@ -229,11 +229,20 @@ impl Jwm {
         // `focus(None)` means "pick the best client", which just re-focused
         // the current window. Drop focus to the root instead, the way
         // `refocus` does before focusing back.
+        let monitor_num = self
+            .state
+            .sel_mon
+            .and_then(|mon_key| self.state.monitors.get(mon_key))
+            .map(|monitor| monitor.num);
         if let Some(client_key) = self.get_selected_client_key() {
             self.unfocus_client(backend, client_key, true)?;
         }
         self.set_root_focus(backend)?;
         self.update_monitor_selection_by_key(None);
+        // Bars publish only monitors marked pending; without this the bar
+        // kept showing the window that no longer has focus.
+        self.mark_bar_update_needed_if_visible(monitor_num);
+        self.flush_pending_bar_updates();
         Ok(())
     }
 

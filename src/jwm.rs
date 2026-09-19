@@ -1719,7 +1719,10 @@ impl Jwm {
                 // being moved on screen first (the next arrange hides them
                 // again, but not before they flash). A minimized one keeps
                 // its parking coordinate and updates its restore target.
-                if client.state.is_hidden {
+                // Minimized and tag-parked windows both come back through
+                // `hidden_restore_rect`; a write to the live geometry would
+                // be thrown away by `show_client`.
+                if client.state.is_hidden || client.geometry.hidden_x.is_some() {
                     client.geometry.hidden_restore_rect = Some(target);
                 } else {
                     client.geometry.x = target.x;

@@ -4280,7 +4280,10 @@ impl WaylandCompositor {
                 }
             }
         }
-        if self.screenshot_toolbar.is_some() && !locked {
+        // A modal panel (drawn at 18a, before this) covers the editor's
+        // toolbar too: a panel opened over IPC while the editor is armed must
+        // not have the toolbar painted across its card.
+        if self.screenshot_toolbar.is_some() && !locked && self.system_ui.is_none() {
             self.bind_post_delivery_overlay_target(
                 gl,
                 tail_domain::TailOverlayClass::ScreenshotToolbar,

@@ -741,6 +741,86 @@ mod tests {
     }
 
     #[test]
+    fn a_floating_window_dropped_on_another_monitor_stays_where_it_was_dropped() {
+        let mut backend = DockSpyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let source = jwm.state.monitor_order[0];
+        let target = add_right_monitor(&mut jwm, source);
+        let (target_monitor, _) = jwm.monitor_migration_areas(target).unwrap();
+
+        // A drag already moved it onto the target; the release hands it over.
+        let dropped = Rect::new(target_monitor.x + 100, target_monitor.y + 120, 400, 300);
+        let key = visible_client(&mut jwm, source, 0x409, dropped);
+        jwm.state.clients[key].state.is_floating = true;
+
+        jwm.sendmon(&mut backend, Some(key), Some(target));
+
+        let client = &jwm.state.clients[key];
+        assert_eq!(
+            (client.geometry.x, client.geometry.y, client.geometry.w, client.geometry.h),
+            (dropped.x, dropped.y, dropped.w, dropped.h),
+            "a drop is not shifted by the distance between the work areas again"
+        );
+    }
+
+    #[test]
+    fn unplugging_leaves_parked_windows_off_screen_and_the_bar_alone() {
+        let mut backend = DockSpyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let primary = jwm.state.monitor_order[0];
+        let right = add_right_monitor(&mut jwm, primary);
+        let (right_monitor, _) = jwm.monitor_migration_areas(right).unwrap();
+        let bar_key = visible_client(
+            &mut jwm,
+            right,
+            0x40b,
+            Rect::new(right_monitor.x, right_monitor.y, 1280, 30),
+        );
+        {
+            let bar = &mut jwm.state.clients[bar_key];
+            bar.state.is_dock = true;
+            bar.state.is_floating = true;
+        }
+        // Work areas as the migration sees them, with the bar in place.
+        let (_, right_work) = jwm.monitor_migration_areas(right).unwrap();
+        let (_, primary_work) = jwm.monitor_migration_areas(primary).unwrap();
+
+        // Floating, on tag 2 while tag 1 is shown: parked off-screen.
+        let restore = Rect::new(right_work.x + 50, right_work.y + 60, 300, 200);
+        let parked = visible_client(&mut jwm, right, 0x40a, restore);
+        {
+            let client = &mut jwm.state.clients[parked];
+            client.state.tags = 0b10;
+            client.state.is_floating = true;
+            client.geometry.hidden_restore_rect = Some(restore);
+            client.geometry.hidden_x = Some(-5000);
+            client.geometry.x = -5000;
+        }
+        backend.window_ops.configurations.lock().unwrap().clear();
+
+        jwm.handle_output_removed(&mut backend, OutputId(2)).unwrap();
+
+        let client = &jwm.state.clients[parked];
+        let moved = client.geometry.hidden_restore_rect.expect("still parked");
+        assert_eq!(
+            (moved.x, moved.y),
+            (primary_work.x + 50, primary_work.y + 60),
+            "its return rectangle follows it to the surviving output"
+        );
+        assert!(
+            backend
+                .window_ops
+                .configurations
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(win, ..)| *win == client.win)
+                .all(|&(_, x, ..)| x < primary_work.x),
+            "a parked window is never configured on screen by the migration"
+        );
+    }
+
+    #[test]
     fn visible_fullscreen_sendmon_fills_the_target_and_returns_to_it() {
         let mut backend = DockSpyBackend::new();
         let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
