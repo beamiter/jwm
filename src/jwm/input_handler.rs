@@ -229,16 +229,47 @@ fn direct_command_from_launcher(
     })
 }
 
+/// What Escape does on the lock card that is on screen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LockEscape {
+    /// Wipe the password field and any error; the card stays. What the
+    /// footer advertises, and all the session lock ever does.
+    Clear,
+    /// Hand the keyboard back to the rest of the desktop, leaving the shade
+    /// up. Nothing is unlocked by it.
+    Close,
+}
+
+/// Escape closes only a monitor's unlock prompt, and only an idle one.
+///
+/// The session lock has nowhere to hand the keyboard back to, so it always
+/// clears. A monitor's prompt does — the other outputs are in use — but not
+/// while something is typed (backing out then would say how much was typed)
+/// or while a PAM worker holds a password (backing out would drop the answer
+/// it is about to bring back). Those both clear first; the next Escape backs
+/// out.
+fn lock_escape(monitor_scoped: bool, idle: bool) -> LockEscape {
+    if monitor_scoped && idle {
+        LockEscape::Close
+    } else {
+        LockEscape::Clear
+    }
+}
+
+/// `panel_monitor` is the output the panel belongs to: the selected monitor
+/// for an ordinary panel, the locked one for a monitor's unlock prompt. Only
+/// the session lock ignores it — it owns every output, and that boundary is
+/// decided here rather than anywhere a rectangle could be wrong.
 fn choose_system_ui_viewport(
-    locked: bool,
-    selected_monitor: Option<(i32, i32, i32, i32)>,
+    session_lock: bool,
+    panel_monitor: Option<(i32, i32, i32, i32)>,
     screen: (i32, i32),
 ) -> SystemUiViewport {
     let fullscreen = SystemUiViewport::fullscreen(screen.0, screen.1);
-    if locked {
+    if session_lock {
         return fullscreen;
     }
-    selected_monitor
+    panel_monitor
         .and_then(|(x, y, width, height)| SystemUiViewport::new(x, y, width, height))
         .unwrap_or(fullscreen)
 }
@@ -341,6 +372,7 @@ impl Jwm {
                 hint: parts.hint,
                 scroll: parts.scroll,
                 locked: self.features.system_ui.is_locked(),
+                monitor_lock: self.features.system_ui.monitor_lock_target().is_some(),
                 viewport,
                 filmstrip: self.features.system_ui.layout_picker().map(|picker| {
                     let now = std::time::Instant::now();
@@ -387,19 +419,27 @@ impl Jwm {
         backend.compositor_force_full_redraw();
     }
 
-    /// Global output rectangle for ordinary system UI. The lock screen is a
+    /// Global output rectangle for ordinary system UI. The session lock is a
     /// separate security surface and always returns the full virtual desktop;
     /// missing or invalid selected-monitor state safely falls back there too.
+    ///
+    /// A monitor's unlock prompt is the one lock card with a rectangle of its
+    /// own: it belongs to the output whose shade it would lift, which is
+    /// never the selected one — the selection was moved off that monitor when
+    /// it was locked.
     pub(crate) fn system_ui_viewport(&self) -> SystemUiViewport {
-        let selected_monitor = self.state.sel_mon.and_then(|key| {
-            self.state.monitors.get(key).map(|monitor| {
-                let geometry = &monitor.geometry;
-                (geometry.m_x, geometry.m_y, geometry.m_w, geometry.m_h)
-            })
-        });
+        let monitor = match self.features.system_ui.monitor_lock_target() {
+            Some(num) => self.locked_monitor_rect(num),
+            None => self.state.sel_mon.and_then(|key| {
+                self.state.monitors.get(key).map(|monitor| {
+                    let geometry = &monitor.geometry;
+                    (geometry.m_x, geometry.m_y, geometry.m_w, geometry.m_h)
+                })
+            }),
+        };
         choose_system_ui_viewport(
-            self.features.system_ui.is_locked(),
-            selected_monitor,
+            self.features.system_ui.is_session_lock(),
+            monitor,
             (self.s_w, self.s_h),
         )
     }
@@ -486,7 +526,16 @@ impl Jwm {
         use crate::jwm::features::system_ui::AuthPoll;
         match self.features.system_ui.poll_authentication() {
             AuthPoll::Pending => {}
-            AuthPoll::Completed(true) => self.close_system_ui(backend),
+            AuthPoll::Completed(true) => {
+                // Read before the close: the scope lives inside the lock
+                // state, so closing the card forgets which monitor the
+                // password was for.
+                let monitor = self.features.system_ui.monitor_lock_target();
+                self.close_system_ui(backend);
+                if let Some(num) = monitor {
+                    self.lift_monitor_lock(backend, num);
+                }
+            }
             AuthPoll::Completed(false) => {
                 self.features.system_ui.authentication_failed();
                 self.sync_system_ui(backend);
@@ -1174,6 +1223,38 @@ impl Jwm {
                             crate::jwm::features::SystemUiState::session_menu();
                         self.sync_system_ui(backend);
                         return;
+                    }
+                }
+                ControlKind::LockMonitor => {
+                    if activate {
+                        self.features.system_ui_return_to_hub = false;
+                        // No hand-over here: this panel is drawn on the
+                        // monitor going dark, so it would end up under the
+                        // shade. `lock_monitor` takes it down itself, and
+                        // every way it can refuse happens before that — a
+                        // refusal leaves the panel exactly as it was.
+                        if let Err(error) =
+                            self.lock_monitor(backend, &crate::jwm::types::WMArgEnum::Int(-1))
+                        {
+                            log::warn!("control center: could not lock this monitor: {error}");
+                        }
+                        return;
+                    }
+                }
+                ControlKind::UnlockMonitor => {
+                    if activate {
+                        // A prompt is terminal rather than a child page, like
+                        // the lock row. Swapped in place so the keyboard and
+                        // pointer grabs stay put; the shade it asks about may
+                        // have been lifted since the row was built, in which
+                        // case there is nothing to ask.
+                        if let Some(monitor) = self.features.monitor_lock.latest() {
+                            self.features.system_ui_return_to_hub = false;
+                            self.features.system_ui =
+                                crate::jwm::features::SystemUiState::monitor_lock(monitor);
+                            self.sync_system_ui(backend);
+                            return;
+                        }
                     }
                 }
                 ControlKind::LockScreen => {
@@ -2388,8 +2469,22 @@ impl Jwm {
                 }
             }
             if keysym == keys::KEY_Escape && locked {
-                self.features.system_ui.clear_lock_password();
-                self.sync_system_ui(backend);
+                // A monitor's unlock prompt is not the session lock: the
+                // desktop around it is live, so Escape on an idle card hands
+                // the keyboard back and leaves the shade exactly where it
+                // was. With something typed — or a PAM worker holding it —
+                // Escape still only clears, so backing out can never say how
+                // much was typed or drop an answer in flight.
+                match lock_escape(
+                    self.features.system_ui.monitor_lock_target().is_some(),
+                    self.features.system_ui.lock_is_idle(),
+                ) {
+                    LockEscape::Close => self.close_system_ui(backend),
+                    LockEscape::Clear => {
+                        self.features.system_ui.clear_lock_password();
+                        self.sync_system_ui(backend);
+                    }
+                }
                 return Ok(());
             }
             if keysym == keys::KEY_Escape && !locked {
@@ -3114,6 +3209,23 @@ impl Jwm {
         detail_btn: u8,
         time: u32,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        // Nothing on a locked monitor is clickable. The shade is drawn by the
+        // compositor and carries no input region of its own, so without this
+        // a press over it would be delivered to whichever window happens to
+        // be underneath — invisible, unfocusable, and about to receive a
+        // click the user aimed at a blank screen. Ahead of every other
+        // intercept: a capture or a region drag must not reach behind a shade
+        // either.
+        if !self.features.monitor_lock.is_empty() {
+            let (x, y) = backend
+                .input_ops()
+                .get_pointer_position()
+                .unwrap_or(self.last_mouse_root);
+            if self.point_is_locked(x, y) {
+                return Ok(());
+            }
+        }
+
         // Recording source selection/adjustment intercept.
         if self.features.recording.selecting_region {
             let button = MouseButton::from_u8(detail_btn);
@@ -3851,7 +3963,9 @@ impl Jwm {
 
 #[cfg(test)]
 mod tests {
-    use super::{choose_system_ui_viewport, parse_direct_launcher_command};
+    use super::{
+        LockEscape, choose_system_ui_viewport, lock_escape, parse_direct_launcher_command,
+    };
     use crate::Jwm;
     use crate::backend::api::{
         Backend, BackendDiagnostics, Capabilities, CloseResult, ColorAllocator,
@@ -3888,6 +4002,17 @@ mod tests {
             choose_system_ui_viewport(false, None, (3840, 1440)).rect(),
             [0.0, 0.0, 3840.0, 1440.0]
         );
+    }
+
+    /// The session lock has nowhere to hand the keyboard back to: whatever
+    /// its state, Escape clears the field and the card stays. Only a
+    /// monitor's prompt can be backed out of, and only once it is idle.
+    #[test]
+    fn escape_closes_an_idle_monitor_prompt_and_nothing_else() {
+        assert_eq!(lock_escape(true, true), LockEscape::Close);
+        assert_eq!(lock_escape(true, false), LockEscape::Clear);
+        assert_eq!(lock_escape(false, true), LockEscape::Clear);
+        assert_eq!(lock_escape(false, false), LockEscape::Clear);
     }
 
     /// Every writer of `do_not_disturb` broadcasts `dnd/toggle`, because a

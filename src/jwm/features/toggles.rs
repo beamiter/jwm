@@ -710,6 +710,8 @@ impl Jwm {
                 night_light: self.night_light_active(),
                 do_not_disturb: self.do_not_disturb,
                 idle_inhibited: self.idle_inhibited,
+                can_lock_monitor: self.can_lock_another_monitor(),
+                locked_monitor: self.features.monitor_lock.latest(),
             },
         )
     }
@@ -2065,6 +2067,17 @@ impl Jwm {
         if self.features.system_ui.is_locked() {
             return Err(format!("{label} cannot replace the lock screen").into());
         }
+        // A shade is not a panel and does not go away when one opens, but a
+        // panel drawn on a locked monitor would be: the shade is above it.
+        // The selection is never on a locked monitor, so this only fires for
+        // a caller that reached past it.
+        if self
+            .state
+            .sel_mon
+            .is_some_and(|key| self.monitor_key_is_locked(key))
+        {
+            return Err(format!("{label} cannot open on a locked monitor").into());
+        }
 
         // A drag in flight holds a real pointer grab that carries motion
         // events; the grab a panel takes below silently replaces it and drops
@@ -2192,8 +2205,20 @@ impl Jwm {
         }
     }
 
-    fn release_temporary_system_ui_compositor(&mut self, backend: &mut dyn Backend, label: &str) {
+    pub(crate) fn release_temporary_system_ui_compositor(
+        &mut self,
+        backend: &mut dyn Backend,
+        label: &str,
+    ) {
         if !self.features.system_ui_temporary_compositor {
+            return;
+        }
+        // A lock shade is drawn by the compositor and outlives every panel.
+        // Handing the renderer back here would uncover the monitors it
+        // covers; the lease is kept and released by the unlock that takes the
+        // last shade down.
+        if !self.features.monitor_lock.is_empty() {
+            log::info!("Compositor lease kept after {label}: monitors are locked");
             return;
         }
 
@@ -2431,8 +2456,17 @@ impl Jwm {
     ) -> Result<(), Box<dyn std::error::Error>> {
         // The one UI key that is not a toggle: a lock the lock key could take
         // back off is not a lock. It comes off with the password.
-        if self.features.system_ui.is_locked() {
+        if self.features.system_ui.is_session_lock() {
             return Ok(());
+        }
+        // A monitor's unlock prompt is a lock card, but it is not this lock:
+        // it asks for one output's shade while the seat is still open. The
+        // session lock outranks it and takes the screen — otherwise a prompt
+        // left up would keep the idle timer from ever locking the session,
+        // and `prepare_system_ui` refuses to replace any lock card. The shade
+        // it was asking about stays up underneath.
+        if self.features.system_ui.monitor_lock_target().is_some() {
+            self.close_system_ui(backend);
         }
         // Another panel is in the way. Reported rather than swallowed: a
         // caller that believes it locked the session and did not is how a
@@ -2639,6 +2673,13 @@ impl Jwm {
         _arg: &WMArgEnum,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let enable = !backend.has_compositor();
+        if !enable && !self.features.monitor_lock.is_empty() {
+            // Same reason as the lease above: the shades would come off with
+            // the renderer that draws them, uncovering monitors the user
+            // locked. Refused rather than deferred — nothing here will close
+            // on its own, so there is nothing to honour it later.
+            return Err("monitors are locked; unlock them before disabling the compositor".into());
+        }
         if !enable && self.features.system_ui.is_active() {
             // The system UI is compositor-rendered and modal. Removing its
             // renderer here would leave an invisible keyboard/pointer grab or,
@@ -3735,6 +3776,13 @@ impl Jwm {
         let mut candidates: Vec<expose_plan::ExposeCandidate> = Vec::new();
         if !self.features.expose_active {
             for &mon_key in &self.state.monitor_order.clone() {
+                // A locked monitor's windows are behind a shade. Expose
+                // spreads its thumbnails across the whole desktop, so one of
+                // them would put those windows back on a screen that is not
+                // locked — and clicking it could not focus them anyway.
+                if self.monitor_key_is_locked(mon_key) {
+                    continue;
+                }
                 if let Some(clients) = self.state.monitor_clients.get(mon_key) {
                     for &ck in clients {
                         if !self.is_client_visible_on_monitor(ck, mon_key) {

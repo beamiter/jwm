@@ -7,6 +7,22 @@ monorepo use independent Semantic Versions.
 
 ### Added
 
+- Per-monitor lock: `lock_monitor` (`Alt+Ctrl+Shift+Escape`) puts one output
+  behind an opaque compositor shade — above its clients, its status bar and
+  every overlay, and inside screenshots, recordings and the remote viewer —
+  while the rest of the desktop keeps working. Focus, the pointer, the
+  `Alt+Tab` switcher, the launcher's window search and expose all leave the
+  locked monitor alone; the shade comes off through the same PAM password as
+  the session lock, on a card drawn on that monitor (`unlock_monitor`, or the
+  same key again). At least one monitor always stays unlocked and a
+  compositor is required, so a shade is never invisible. The control center
+  carries **Lock This Monitor** and **Unlock Monitor N…** rows — the second is
+  the only keyboard route back, since focus cannot enter a locked monitor to
+  press its key again — and existing key lists gain the chord through the
+  same back-fill the audio recorder and tags overview use. New `monitor/lock`
+  IPC event and a `locked` flag on `get_monitors`/`get_tree`. See
+  [docs/monitor-lock.md](docs/monitor-lock.md).
+
 - Closed-placement memory: a regular window's monitor and tags are
   remembered under its `WM_CLASS` when it closes, and the next window with
   that identity that JWM did not launch itself (opened from a terminal, by an

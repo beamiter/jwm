@@ -2163,6 +2163,19 @@ impl Config {
                 function: "lock_screen".to_string(),
                 argument: ArgumentConfig::Int(0),
             },
+            // The session lock's per-monitor sibling, one modifier along.
+            // `-1` is "the monitor I am on"; the same key on a monitor that
+            // is already locked asks for the password that lifts it.
+            KeyConfig {
+                modifier: vec![
+                    "Mod1".to_string(),
+                    "Control".to_string(),
+                    "Shift".to_string(),
+                ],
+                key: "Escape".to_string(),
+                function: "lock_monitor".to_string(),
+                argument: ArgumentConfig::Int(-1),
+            },
             // Volume / brightness OSD on the dedicated media keys, plus a
             // DMS/Noctalia-style control center.
             KeyConfig {
@@ -3156,6 +3169,45 @@ impl Config {
                 }
             }
         }
+        // And for the per-monitor lock. A snapshotted key list cannot contain
+        // an action that did not exist when it was written, and this one has
+        // no other keyboard route: the key locks the monitor in use, and the
+        // shade it puts up is what keeps focus off that monitor afterwards —
+        // so a session without the chord can lock a screen from the control
+        // center and nowhere else.
+        if !self
+            .inner
+            .keybindings
+            .keys
+            .iter()
+            .any(|key| key.function == "lock_monitor")
+        {
+            let fallback = KeyConfig {
+                modifier: vec![
+                    "Mod1".to_string(),
+                    "Control".to_string(),
+                    "Shift".to_string(),
+                ],
+                key: "Escape".to_string(),
+                function: "lock_monitor".to_string(),
+                argument: ArgumentConfig::Int(-1),
+            };
+            if let Some(binding) = self.convert_key_config(&fallback) {
+                let occupied = keys
+                    .iter()
+                    .any(|key| key.mask == binding.mask && key.key_sym == binding.key_sym);
+                if occupied {
+                    log::warn!(
+                        "[config] monitor lock has no shortcut: Alt+Ctrl+Shift+Escape is already occupied"
+                    );
+                } else {
+                    log::info!(
+                        "[config] legacy key list detected; enabling monitor lock on Alt+Ctrl+Shift+Escape"
+                    );
+                    keys.push(binding);
+                }
+            }
+        }
         for i in 0..self.tags_length() {
             keys.extend(self.generate_tag_keys(i));
         }
@@ -3279,6 +3331,8 @@ impl Config {
             "app_launcher" => Some(Jwm::app_launcher),
             "monitor_layout" => Some(Jwm::monitor_layout),
             "lock_screen" => Some(Jwm::lock_screen),
+            "lock_monitor" => Some(Jwm::lock_monitor),
+            "unlock_monitor" => Some(Jwm::unlock_monitor),
             "focusstack" => Some(Jwm::focusstack),
             "focusmon" => Some(Jwm::focusmon),
             "take_screenshot" => Some(Jwm::take_screenshot),
@@ -5672,6 +5726,56 @@ ui_theme = \"glass\"
             .get_keys()
             .into_iter()
             .filter(|key| key.key_sym == key_sym && key.mask == Mods::ALT)
+            .count();
+        assert_eq!(matches, 1);
+    }
+
+    /// A key list written before the per-monitor lock existed has no chord
+    /// for it, and the action has no other keyboard route: the key locks the
+    /// monitor in use, and the shade then keeps focus off that monitor, so
+    /// there is no "press it again there" to fall back on.
+    #[test]
+    fn legacy_key_list_gets_non_conflicting_monitor_lock_fallback() {
+        let mut cfg = Config::default();
+        cfg.inner
+            .keybindings
+            .keys
+            .retain(|key| key.function != "lock_monitor");
+
+        let key_sym = cfg.parse_keysym("Escape").unwrap();
+        let chord = Mods::ALT | Mods::CONTROL | Mods::SHIFT;
+        let keys = cfg.get_keys();
+        assert!(
+            keys.iter()
+                .any(|key| { key.key_sym == key_sym && key.mask == chord })
+        );
+        // The session lock keeps its own chord either way.
+        assert!(
+            keys.iter()
+                .any(|key| key.key_sym == key_sym && key.mask == (Mods::ALT | Mods::CONTROL))
+        );
+    }
+
+    #[test]
+    fn legacy_monitor_lock_fallback_does_not_override_occupied_chord() {
+        let mut cfg = Config::default();
+        cfg.inner
+            .keybindings
+            .keys
+            .retain(|key| key.function != "lock_monitor");
+        cfg.inner.keybindings.keys.push(KeyConfig {
+            modifier: vec!["Mod1".into(), "Control".into(), "Shift".into()],
+            key: "Escape".into(),
+            function: "spawn".into(),
+            argument: ArgumentConfig::StringVec(vec!["true".into()]),
+        });
+
+        let key_sym = cfg.parse_keysym("Escape").unwrap();
+        let chord = Mods::ALT | Mods::CONTROL | Mods::SHIFT;
+        let matches = cfg
+            .get_keys()
+            .into_iter()
+            .filter(|key| key.key_sym == key_sym && key.mask == chord)
             .count();
         assert_eq!(matches, 1);
     }

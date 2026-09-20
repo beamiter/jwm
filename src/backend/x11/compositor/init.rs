@@ -1055,6 +1055,7 @@ impl<C: CompositorConnection> Compositor<C> {
             mic_indicator_active: false,
             mic_indicator_texture: None,
             hud_text_cache: String::new(),
+            monitor_shades: Vec::new(),
             system_ui: None,
             system_ui_island: Default::default(),
             system_ui_highlight: Default::default(),

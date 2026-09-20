@@ -4155,6 +4155,15 @@ impl WaylandCompositor {
                 tail_domain::TailOverlayClass::SystemUi.domain(),
                 tail_domain::TailOverlayDomain::CommonLinearAware
             );
+            // Per-monitor lock shades, above the clients and the chrome
+            // drawn so far and under the modal card — which may be the very
+            // prompt asking for the password that lifts one. They draw in
+            // the system UI's slot and share its domain and stage, which is
+            // also how the tail-overlay gate counts them.
+            if !self.monitor_shades.is_empty() {
+                gl.BindFramebuffer(ffi::FRAMEBUFFER, chrome_target);
+                self.render_monitor_shades(gl, &projection, tail_draws_linear);
+            }
             if self.system_ui.is_some() {
                 gl.BindFramebuffer(ffi::FRAMEBUFFER, chrome_target);
                 self.render_system_ui(gl, &projection, tail_draws_linear);
@@ -6501,6 +6510,49 @@ impl WaylandCompositor {
     /// Modal system UI drawn as a material-style card: dimmed scrim, drop
     /// shadow, rounded panel with a gradient accent ring, a search-field bar,
     /// and a selection pill under the highlighted list row.
+    /// The opaque shades over locked monitors.
+    ///
+    /// One flat rectangle per output in the lock theme's backdrop colour —
+    /// the same colour the lock card sits on, so a monitor's unlock prompt
+    /// appears to be drawn on its own shade. Deliberately featureless: a
+    /// locked monitor shows the room nothing, not even which windows are
+    /// behind it.
+    unsafe fn render_monitor_shades(
+        &self,
+        gl: &ffi::Gles2,
+        projection: &[f32; 16],
+        scene_linear: bool,
+    ) {
+        // Square corners, through the border program's fill mode rather than
+        // the HUD panel's: the HUD shader rounds every quad it draws by 4px,
+        // which on a card is the point and on an output's shade would leave
+        // four transparent notches in the corners of a locked screen. Both
+        // programs decode the encoded-sRGB colour themselves on a linear
+        // target.
+        let mut backdrop = ui_theme::palette().lock_backdrop;
+        // Opaque whatever the theme says: a shade that let anything through
+        // would not be a lock.
+        backdrop[3] = 1.0;
+        // Deliberately no backdrop invalidation. A glass card samples the
+        // capture under its own rectangle, and a card is only ever drawn on
+        // the selected monitor — which is never a locked one — so no cached
+        // backdrop can contain a shaded pixel. Dropping the capture here
+        // would charge a full-screen blur to every frame a panel is open
+        // beside a locked monitor, for a sample nothing takes.
+        unsafe {
+            gl.BindVertexArray(self.quad_vao);
+            gl.UseProgram(self.border_program);
+            self.set_projection_uniform(gl, self.border_uniforms.projection, projection);
+            gl.Uniform1i(self.border_uniforms.scene_linear, i32::from(scene_linear));
+            for shade in &self.monitor_shades {
+                let [x, y, w, h] = shade.rect();
+                self.sysui_fill_rounded(gl, x, y, w, h, 0.0, backdrop);
+            }
+            gl.BindVertexArray(0);
+            gl.UseProgram(0);
+        }
+    }
+
     unsafe fn render_system_ui(
         &mut self,
         gl: &ffi::Gles2,
@@ -6639,7 +6691,21 @@ impl WaylandCompositor {
         unsafe {
             gl.BindVertexArray(self.quad_vao);
 
-            if overlay.locked {
+            if overlay.locked && overlay.monitor_lock {
+                // One monitor's unlock prompt: the shade under it already
+                // covers this output, and clearing here would take the rest
+                // of the desktop — which is still in use — with it. The same
+                // colour over the same rectangle, square-cornered like the
+                // shade it is drawn on.
+                let mut backdrop = ui.lock_backdrop;
+                backdrop[3] = 1.0;
+                gl.UseProgram(self.border_program);
+                self.set_projection_uniform(gl, self.border_uniforms.projection, projection);
+                gl.Uniform1i(self.border_uniforms.scene_linear, i32::from(scene_linear));
+                self.sysui_fill_rounded(
+                    gl, viewport_x, viewport_y, viewport_w, viewport_h, 0.0, backdrop,
+                );
+            } else if overlay.locked {
                 // The theme colour is encoded sRGB; a linear target stores it
                 // decoded, or the shield would come out darker than themed.
                 let [r, g, b, a] = ui.lock_backdrop;
@@ -7970,6 +8036,25 @@ mod glass_backdrop_contract_tests {
                 "{pass} fills a card without asking for a backdrop, so it draws flat"
             );
         }
+    }
+
+    /// A locked monitor is sensitive content, so its shade has to be on the
+    /// frame before the capture view is derived — a screenshot, a recording
+    /// or the remote viewer must show the shade, never what it covers. The
+    /// lock shield follows the same rule from the same section.
+    #[test]
+    fn the_lock_shades_are_drawn_before_the_capture_view_is_derived() {
+        let body = compact_item(include_str!("render.rs"), "pub(crate) fn render_frame(");
+        let shades = body
+            .find("self.render_monitor_shades(gl,&projection,tail_draws_linear);")
+            .expect("the shade pass");
+        let capture = body
+            .find("self.encode_capture_view(gl,&projection);")
+            .expect("the capture view");
+        assert!(
+            shades < capture,
+            "a capture derived before the shades would show what they cover"
+        );
     }
 
     /// The exposé grid is a scrim, live window thumbnails, a hover ring and

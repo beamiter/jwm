@@ -25,6 +25,7 @@ pub mod launcher;
 pub mod layout_picker;
 pub mod magnifier;
 pub mod media;
+pub mod monitor_lock;
 pub mod notifications;
 pub mod overview;
 pub mod overview_plan;
@@ -60,6 +61,7 @@ pub use expose_plan::ExposeAction;
 pub use layout_picker::LayoutPickerState;
 pub use magnifier::MagnifierState;
 pub use media::{MediaCommand, MediaState, MediaStatus, PlaybackStatus, PlayerDetail};
+pub use monitor_lock::{LockedMonitor, MonitorLockState};
 pub use notifications::{NotificationCenter, NotificationRecord, NotificationRequest};
 pub use overview::OverviewState;
 pub use overview_plan::CyclePlan;
@@ -72,7 +74,7 @@ pub use screenshot::ScreenshotState;
 pub use session::SessionAction;
 pub use shell_hub::ShellHubRoute;
 pub use system_ui::{
-    ControlCenterInputs, ControlKind, MonitorDirection, MonitorLayoutEntry, PromptKind,
+    ControlCenterInputs, ControlKind, LockScope, MonitorDirection, MonitorLayoutEntry, PromptKind,
     SLIDER_STEP, SystemUiState,
 };
 pub use tags_overview::{TagClientFrame, TagsOverviewState};
@@ -195,6 +197,10 @@ pub struct FeatureStates {
     pub notifications: NotificationCenter,
     /// Built-in lock screen, application launcher, and display layout UI.
     pub system_ui: SystemUiState,
+    /// Which monitors are behind a lock shade. Not a mode and not a panel:
+    /// it outlives every panel, including the unlock prompt that lifts it.
+    /// See [`monitor_lock`].
+    pub monitor_lock: MonitorLockState,
     /// Last complete application catalog. Immutable sharing makes opening the
     /// launcher and cloning its render state independent of catalog size.
     pub launcher_catalog: std::sync::Arc<[system_ui::LaunchEntry]>,
@@ -268,6 +274,10 @@ impl FeatureStates {
         self.expose_active = false;
         self.annotation_active = false;
         self.annotation_drawing = false;
+        // `monitor_lock` is deliberately untouched. Every mode above hides
+        // the desktop *from the user* and an escape hatch has to clear them;
+        // a lock shade hides one monitor *from the room*, and dropping it
+        // here would turn a panic key into "show everything".
     }
 
     /// 切换 Peek 模式

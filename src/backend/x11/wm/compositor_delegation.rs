@@ -616,6 +616,15 @@ macro_rules! delegate_compositor_capabilities {
                 }
             }
 
+            fn compositor_set_monitor_shades(
+                &mut self,
+                shades: &[crate::backend::api::MonitorShade],
+            ) {
+                if let Some(compositor) = self.compositor.as_mut() {
+                    compositor.set_monitor_shades(shades);
+                }
+            }
+
             fn compositor_set_system_ui_hover(&mut self, row: Option<usize>) {
                 if let Some(compositor) = self.compositor.as_mut() {
                     let _ = compositor.set_system_ui_hover(row);

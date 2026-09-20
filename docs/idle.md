@@ -4,6 +4,10 @@ When nobody has touched the machine for a while, JWM dims the screen, and — if
 you ask it to — locks it and powers the displays down. Any input undoes the
 dim; only the password dismisses the lock.
 
+This is the whole seat. To put a single screen behind a shade while the rest
+of the desk keeps working, see [locking one monitor](monitor-lock.md); the
+session lock here outranks it and takes the screen from its prompt.
+
 While locked, `Backspace` removes one character and `Esc` securely clears the
 whole entered password plus any previous authentication error; neither key
 unlocks or closes the surface.

@@ -1099,6 +1099,56 @@ impl SystemUiViewport {
     }
 }
 
+/// One output covered by a per-monitor lock, in global compositor
+/// coordinates.
+///
+/// The shade is the whole feature the compositor can see: an opaque
+/// rectangle drawn above every client, the status bar and the workspace
+/// overlays on that output, and drawn before the frame is captured so a
+/// screenshot or a screen recording shows the shade rather than what is
+/// behind it. Everything else a lock means — where focus may land, what a
+/// click does, who may lift it — stays in JWM.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MonitorShade {
+    /// JWM's monitor number, carried for logs and debugging only.
+    pub num: i32,
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+}
+
+impl MonitorShade {
+    #[must_use]
+    pub fn new(num: i32, x: i32, y: i32, width: i32, height: i32) -> Option<Self> {
+        (width > 0 && height > 0).then_some(Self {
+            num,
+            x,
+            y,
+            width,
+            height,
+        })
+    }
+
+    #[must_use]
+    pub fn rect(self) -> [f32; 4] {
+        [
+            self.x as f32,
+            self.y as f32,
+            self.width as f32,
+            self.height as f32,
+        ]
+    }
+
+    #[must_use]
+    pub fn contains(self, x: f64, y: f64) -> bool {
+        x >= f64::from(self.x)
+            && y >= f64::from(self.y)
+            && x < f64::from(self.x.saturating_add(self.width))
+            && y < f64::from(self.y.saturating_add(self.height))
+    }
+}
+
 /// Backend-neutral compositor UI drawn above every client. Input and policy
 /// live in JWM; backends only present this snapshot as a styled panel:
 /// headline, optional search field, list rows (one optionally highlighted),
@@ -1118,6 +1168,12 @@ pub struct SystemUiOverlay {
     pub scroll: Option<ScrollWindow>,
     /// A lock overlay is opaque; other system UI dims the current desktop.
     pub locked: bool,
+    /// Whether this lock card is one monitor's unlock prompt rather than the
+    /// session lock. Only a session lock owns every output; a per-monitor
+    /// prompt is drawn inside `viewport`, over the shade that output already
+    /// carries. `locked` still decides the styling, so the card looks the
+    /// same either way.
+    pub monitor_lock: bool,
     /// Global rectangle of the output this non-locking panel belongs to.
     /// Invalid/default rectangles safely fall back to the compositor's full
     /// virtual screen. Locked overlays always ignore this field and use the
@@ -1171,7 +1227,8 @@ impl SystemUiOverlay {
     #[must_use]
     pub fn effective_viewport(&self, screen_width: i32, screen_height: i32) -> [f32; 4] {
         let fullscreen = SystemUiViewport::fullscreen(screen_width, screen_height);
-        if self.locked || self.viewport.width <= 0 || self.viewport.height <= 0 {
+        let session_lock = self.locked && !self.monitor_lock;
+        if session_lock || self.viewport.width <= 0 || self.viewport.height <= 0 {
             fullscreen.rect()
         } else {
             self.viewport.rect()
@@ -1228,6 +1285,58 @@ mod system_ui_viewport_tests {
             SystemUiOverlay::default().effective_viewport(3840, 1440),
             [0.0, 0.0, 3840.0, 1440.0]
         );
+    }
+
+    /// One monitor's unlock prompt is the single lock card that keeps its
+    /// viewport: it belongs to the output it is lifting the shade from, and
+    /// the rest of the desktop is still being used. An invalid rectangle
+    /// still falls back to the whole screen — a lock card is never drawn
+    /// nowhere.
+    #[test]
+    fn a_monitor_unlock_prompt_keeps_its_own_output() {
+        let prompt = SystemUiOverlay {
+            locked: true,
+            monitor_lock: true,
+            viewport: SystemUiViewport::new(1920, 0, 1920, 1080).unwrap(),
+            ..SystemUiOverlay::default()
+        };
+        assert_eq!(
+            prompt.effective_viewport(3840, 1440),
+            [1920.0, 0.0, 1920.0, 1080.0]
+        );
+
+        let no_rect = SystemUiOverlay {
+            locked: true,
+            monitor_lock: true,
+            ..SystemUiOverlay::default()
+        };
+        assert_eq!(
+            no_rect.effective_viewport(3840, 1440),
+            [0.0, 0.0, 3840.0, 1440.0]
+        );
+    }
+}
+
+#[cfg(test)]
+mod monitor_shade_tests {
+    use super::MonitorShade;
+
+    #[test]
+    fn an_empty_output_has_no_shade() {
+        assert!(MonitorShade::new(0, 0, 0, 0, 1080).is_none());
+        assert!(MonitorShade::new(0, 0, 0, 1920, 0).is_none());
+    }
+
+    /// Half-open on the far edges, so two adjacent outputs never both claim
+    /// the pixel column between them — a click there belongs to exactly one.
+    #[test]
+    fn the_far_edges_belong_to_the_next_output() {
+        let shade = MonitorShade::new(1, 1920, 0, 1920, 1080).unwrap();
+        assert!(shade.contains(1920.0, 0.0));
+        assert!(shade.contains(3839.5, 1079.5));
+        assert!(!shade.contains(1919.5, 10.0));
+        assert!(!shade.contains(3840.0, 10.0));
+        assert!(!shade.contains(2000.0, 1080.0));
     }
 }
 
@@ -2924,6 +3033,12 @@ pub trait CompositorWorkspaceEffects: Send {
 
     fn compositor_set_overview_monitor(&mut self, _x: i32, _y: i32, _width: u32, _height: u32) {}
     fn compositor_set_monitors(&mut self, _monitors: &[(u32, i32, i32, u32, u32, u32)]) {}
+
+    /// Replace the set of outputs covered by a per-monitor lock shade. An
+    /// empty slice takes every shade down. Backends without a compositor
+    /// draw nothing, which is why JWM refuses to lock a monitor unless one
+    /// is running.
+    fn compositor_set_monitor_shades(&mut self, _shades: &[MonitorShade]) {}
     fn compositor_set_overview_selection(&mut self, _window: WindowId) {}
 
     /// Enable or disable expose mode. Each window carries its sanitized

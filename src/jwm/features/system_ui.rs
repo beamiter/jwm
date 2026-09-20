@@ -151,6 +151,34 @@ enum MonitorAlignment {
     End,
 }
 
+/// What a lock card is locking.
+///
+/// Both scopes draw the same opaque card and both want the password; what
+/// differs is the boundary. A session lock owns every output and the only
+/// way past it is the password. A monitor lock owns one output's shade —
+/// the rest of the desktop is live behind the card — so Escape may back out
+/// of the prompt and leave the shade where it was.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LockScope {
+    #[default]
+    Session,
+    /// The lock shade on this monitor number; see
+    /// [`crate::jwm::features::monitor_lock`].
+    Monitor(i32),
+}
+
+impl LockScope {
+    /// The monitor whose shade this card would lift, if it is not the
+    /// session lock.
+    #[must_use]
+    pub fn monitor(self) -> Option<i32> {
+        match self {
+            Self::Session => None,
+            Self::Monitor(num) => Some(num),
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 pub enum SystemUiState {
     #[default]
@@ -194,6 +222,10 @@ pub enum SystemUiState {
         message: String,
     },
     Locked {
+        /// Whether this card locks the session or one monitor's shade. It
+        /// rides inside the lock state so that dropping the card drops the
+        /// scope with it, the way the auth slot does.
+        scope: LockScope,
         password: String,
         message: String,
         /// The "HH:MM" row, refreshed on the wall-clock minute by the event
@@ -583,6 +615,16 @@ pub enum ControlKind {
     /// Caffeine: hold the session awake, overriding the idle policy.
     Caffeine,
     LockScreen,
+    /// Puts the monitor in use behind a lock shade. Present only while that
+    /// is actually possible — see [`crate::jwm::features::monitor_lock`] for
+    /// what "possible" means (two outputs, one of them staying unlocked, a
+    /// compositor to draw the shade with).
+    LockMonitor,
+    /// Asks for the password that lifts the most recently locked monitor's
+    /// shade. Present only while a monitor is locked — and it is the only
+    /// route there that does not need a key bound to a monitor number,
+    /// because focus cannot enter a locked monitor to press its key again.
+    UnlockMonitor,
     /// Opens the session menu, the way `LockScreen` opens the lock overlay.
     Session,
 }
@@ -641,6 +683,13 @@ pub struct ControlCenterInputs<'a> {
     pub do_not_disturb: bool,
     /// Whether the idle policy is being held off.
     pub idle_inhibited: bool,
+    /// Whether the monitor in use can be put behind a lock shade right now.
+    /// False on a single-output session, on the last unlocked monitor, and
+    /// without a compositor to draw the shade with.
+    pub can_lock_monitor: bool,
+    /// The most recently locked monitor, if any: the one the unlock row
+    /// names and asks for.
+    pub locked_monitor: Option<i32>,
 }
 
 const SHELL_HUB_VISIBLE_LINES: usize = 18;
@@ -697,7 +746,10 @@ fn control_section(kind: ControlKind) -> ControlSection {
         | ControlKind::Memory
         | ControlKind::NetworkThroughput
         | ControlKind::PowerProfile => ControlSection::System,
-        ControlKind::LockScreen | ControlKind::Session => ControlSection::Session,
+        ControlKind::LockScreen
+        | ControlKind::LockMonitor
+        | ControlKind::UnlockMonitor
+        | ControlKind::Session => ControlSection::Session,
     }
 }
 
@@ -1071,6 +1123,7 @@ impl Clone for SystemUiState {
             },
             // Never duplicate credentials into another allocation.
             Self::Locked {
+                scope,
                 message,
                 clock,
                 date,
@@ -1078,6 +1131,7 @@ impl Clone for SystemUiState {
                 now_playing,
                 ..
             } => Self::Locked {
+                scope: *scope,
                 password: String::new(),
                 message: message.clone(),
                 clock: clock.clone(),
@@ -1158,6 +1212,34 @@ impl SystemUiState {
     }
     pub fn is_locked(&self) -> bool {
         matches!(self, Self::Locked { .. })
+    }
+
+    /// What the lock card on screen is locking, if one is on screen.
+    pub fn lock_scope(&self) -> Option<LockScope> {
+        match self {
+            Self::Locked { scope, .. } => Some(*scope),
+            _ => None,
+        }
+    }
+
+    /// The monitor whose shade the card on screen would lift. `None` for the
+    /// session lock and for every other panel — the two cases that must not
+    /// be mistaken for each other, which is why callers ask this rather than
+    /// reading [`Self::is_locked`] and guessing.
+    pub fn monitor_lock_target(&self) -> Option<i32> {
+        self.lock_scope().and_then(LockScope::monitor)
+    }
+
+    /// Whether the card on screen is the session lock — the one no key takes
+    /// back off.
+    pub fn is_session_lock(&self) -> bool {
+        matches!(
+            self,
+            Self::Locked {
+                scope: LockScope::Session,
+                ..
+            }
+        )
     }
 
     pub fn is_monitor_layout(&self) -> bool {
@@ -1309,11 +1391,26 @@ impl SystemUiState {
         Self::locked_at(chrono::Local::now().naive_local())
     }
 
+    /// The unlock prompt for one monitor's lock shade. Same card, same
+    /// password; only the boundary differs (see [`LockScope`]).
+    pub fn monitor_lock(monitor: i32) -> Self {
+        Self::scoped_lock_at(
+            LockScope::Monitor(monitor),
+            chrono::Local::now().naive_local(),
+        )
+    }
+
     /// The lock screen with its clock and date rows captured at `now`, so the
     /// first paint already shows the current minute. Split from [`Self::lock`]
     /// so tests can pin the wall clock.
     pub fn locked_at(now: chrono::NaiveDateTime) -> Self {
+        Self::scoped_lock_at(LockScope::Session, now)
+    }
+
+    /// [`Self::locked_at`] for either scope.
+    pub fn scoped_lock_at(scope: LockScope, now: chrono::NaiveDateTime) -> Self {
         Self::Locked {
+            scope,
             password: String::new(),
             message: String::new(),
             clock: lock_clock_line(&now),
@@ -1347,6 +1444,8 @@ impl SystemUiState {
             night_light,
             do_not_disturb,
             idle_inhibited,
+            can_lock_monitor,
+            locked_monitor,
         } = *inputs;
         let mut entries = Vec::new();
         if shell_hub {
@@ -1508,6 +1607,17 @@ impl SystemUiState {
             idle_inhibited,
         ));
         entries.push(ControlEntry::simple(ControlKind::LockScreen, 0, false));
+        if can_lock_monitor {
+            entries.push(ControlEntry::simple(ControlKind::LockMonitor, 0, false));
+        }
+        if let Some(monitor) = locked_monitor {
+            entries.push(ControlEntry {
+                kind: ControlKind::UnlockMonitor,
+                percent: 0,
+                enabled: false,
+                label: format!("\u{f3c1}  Unlock Monitor {monitor}\u{2026}"),
+            });
+        }
         entries.push(ControlEntry::simple(ControlKind::Session, 0, false));
         if shell_hub {
             // A stable section sort keeps hardware-dependent rows grouped
@@ -2682,6 +2792,10 @@ impl SystemUiState {
                 if entry.enabled { "[ on ]" } else { "[ off ]" }
             ),
             ControlKind::LockScreen => "\u{f023}  Lock Screen".to_string(),
+            ControlKind::LockMonitor => "\u{f108}  Lock This Monitor".to_string(),
+            // The row carries its own text: which monitor it would ask for
+            // is not derivable from the kind.
+            ControlKind::UnlockMonitor => entry.label.clone(),
             ControlKind::Session => "\u{f011}  Session\u{2026}".to_string(),
         }
     }
@@ -3604,6 +3718,19 @@ impl SystemUiState {
         true
     }
 
+    /// Whether the lock card is idle: nothing typed and no PAM worker
+    /// holding a password. Escape on a monitor's unlock prompt asks this to
+    /// tell "clear what I typed" from "back out of this prompt" — backing
+    /// out of a half-typed field would say how much was typed, and backing
+    /// out from under a running worker would drop the answer it is about to
+    /// bring back.
+    pub fn lock_is_idle(&self) -> bool {
+        matches!(
+            self,
+            Self::Locked { password, auth, .. } if password.is_empty() && !auth.is_verifying()
+        )
+    }
+
     pub fn authentication_failed(&mut self) {
         if let Self::Locked {
             password, message, ..
@@ -3786,6 +3913,7 @@ impl SystemUiState {
             // last, it leaves every row above in its pinned place whether or
             // not one is playing.
             Self::Locked {
+                scope,
                 password,
                 message,
                 clock,
@@ -3817,13 +3945,29 @@ impl SystemUiState {
                 if let Some(row) = now_playing {
                     items.push(row.clone());
                 }
+                // A monitor card says which monitor, because the rest of
+                // the desktop is still on screen around it and "locked" on
+                // its own would not say what.
+                let (title, hint) = match scope {
+                    LockScope::Session => (
+                        "\u{f023}  JWM LOCKED".to_string(),
+                        "Enter  unlock    Esc  clear".to_string(),
+                    ),
+                    LockScope::Monitor(num) => (
+                        format!("\u{f023}  MONITOR {num} LOCKED"),
+                        // Escape leaves the shade up and hands the keyboard
+                        // back to the monitors that are not locked, so it is
+                        // "back", not "cancel": nothing is unlocked by it.
+                        "Enter  unlock    Esc  back".to_string(),
+                    ),
+                };
                 OverlayParts {
-                    title: "\u{f023}  JWM LOCKED".into(),
+                    title,
                     query: None,
                     items,
                     icons: None,
                     selected: None,
-                    hint: "Enter  unlock    Esc  clear".into(),
+                    hint,
                     scroll: None,
                 }
             }
@@ -6174,6 +6318,52 @@ mod tests {
         assert_eq!(panel.selected_theme(), Some("tokyo-night"));
     }
 
+    /// Neither monitor-lock row is a permanent fixture: one appears only
+    /// while there is a monitor that could go behind a shade, the other only
+    /// while one is behind one. A session with a single output sees neither.
+    #[test]
+    fn the_monitor_lock_rows_appear_only_when_they_have_something_to_do() {
+        let kinds = |state: &SystemUiState| -> Vec<ControlKind> {
+            let SystemUiState::ControlCenter { entries, .. } = state else {
+                panic!("not a control center");
+            };
+            entries.iter().map(|entry| entry.kind).collect()
+        };
+
+        let single = SystemUiState::control_center(&ControlCenterInputs::default());
+        assert!(!kinds(&single).contains(&ControlKind::LockMonitor));
+        assert!(!kinds(&single).contains(&ControlKind::UnlockMonitor));
+        // The session lock is always there, whatever the outputs do.
+        assert!(kinds(&single).contains(&ControlKind::LockScreen));
+
+        let can_lock = SystemUiState::control_center(&ControlCenterInputs {
+            can_lock_monitor: true,
+            ..Default::default()
+        });
+        assert!(kinds(&can_lock).contains(&ControlKind::LockMonitor));
+        assert!(!kinds(&can_lock).contains(&ControlKind::UnlockMonitor));
+        assert!(
+            can_lock.overlay_text().contains("Lock This Monitor"),
+            "the row has to say what it locks: {}",
+            can_lock.overlay_text()
+        );
+
+        // Every monitor but this one is locked: nothing left to lock, and a
+        // shade to lift. The row names which monitor, because by then the
+        // user is not on it.
+        let locked = SystemUiState::control_center(&ControlCenterInputs {
+            locked_monitor: Some(1),
+            ..Default::default()
+        });
+        assert!(!kinds(&locked).contains(&ControlKind::LockMonitor));
+        assert!(kinds(&locked).contains(&ControlKind::UnlockMonitor));
+        assert!(
+            locked.overlay_text().contains("Unlock Monitor 1"),
+            "the row has to name the monitor: {}",
+            locked.overlay_text()
+        );
+    }
+
     #[test]
     fn switching_bluetooth_off_needs_a_second_enter() {
         let powered = crate::jwm::features::BluetoothState {
@@ -7901,6 +8091,7 @@ mod tests {
     #[test]
     fn clearing_the_lock_password_keeps_the_lock_and_removes_feedback() {
         let mut state = SystemUiState::Locked {
+            scope: LockScope::Session,
             password: "hunter2".into(),
             message: "Authentication failed".into(),
             clock: "15:42".into(),

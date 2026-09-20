@@ -248,7 +248,8 @@ impl Jwm {
 
     pub(super) fn dirtomon(&mut self, dir: &i32) -> Option<MonitorKey> {
         let selected_monitor_key = self.state.sel_mon?;
-        if self.state.monitor_order.is_empty() {
+        let count = self.state.monitor_order.len();
+        if count == 0 {
             return None;
         }
         let current_index = self
@@ -256,17 +257,20 @@ impl Jwm {
             .monitor_order
             .iter()
             .position(|&key| key == selected_monitor_key)?;
-        if *dir > 0 {
-            let next_index = (current_index + 1) % self.state.monitor_order.len();
-            Some(self.state.monitor_order[next_index])
-        } else {
-            let prev_index = if current_index == 0 {
-                self.state.monitor_order.len() - 1
+        // A locked monitor is not somewhere the selection can land, so the
+        // direction keys step over its shade to the next usable screen.
+        // Walking the whole ring means the last candidate is the monitor we
+        // started on, which is unlocked and makes the step a no-op — better
+        // than reporting no monitor at all.
+        (1..=count).find_map(|step| {
+            let index = if *dir > 0 {
+                (current_index + step) % count
             } else {
-                current_index - 1
+                (current_index + count * 2 - step) % count
             };
-            Some(self.state.monitor_order[prev_index])
-        }
+            let key = self.state.monitor_order[index];
+            (!self.monitor_key_is_locked(key)).then_some(key)
+        })
     }
 
     pub(super) fn ensure_secondary_bars_running(

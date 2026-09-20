@@ -364,7 +364,10 @@ impl WaylandCompositor {
             screenshot_toolbar: self.screenshot_toolbar.is_some(),
             toast: !self.toast_stack.is_empty(),
             osd: !self.osd_slot.is_empty(),
-            system_ui: self.system_ui.is_some(),
+            // The lock shades draw in this class's slot and share its
+            // domain, stage and (absent) blocker, so they count as it: the
+            // gate stays the conservative superset it promises to be.
+            system_ui: self.system_ui.is_some() || !self.monitor_shades.is_empty(),
             recording_region_overlay: self.recording_region_overlay.is_some()
                 || self.recording.is_active()
                 // The MIC chip draws in the same post-delivery slot, so while

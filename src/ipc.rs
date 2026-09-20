@@ -191,6 +191,7 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "incnmaster",
         "killclient",
         "lastlayout",
+        "lock_monitor",
         "lock_screen",
         "loopview",
         "media_next",
@@ -245,6 +246,7 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "togglesticky",
         "toggletag",
         "toggleview",
+        "unlock_monitor",
         "view",
         "waterlily_case",
         "wallpaper_picker",
@@ -523,6 +525,10 @@ pub struct MonitorInfoIpc {
     pub active_tags: u32,
     pub layout: String,
     pub focused: bool,
+    /// Whether this monitor is behind a lock shade. A status bar has no other
+    /// way to tell a dark monitor from a locked one, and `focused` cannot say
+    /// it: a locked monitor is never the focused one.
+    pub locked: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -559,6 +565,10 @@ pub fn dispatch_command(name: &str, args: &Value) -> Result<(WMFuncType, WMArgEn
         "toggle_bluetooth" => Ok((Jwm::toggle_bluetooth as WMFuncType, WMArgEnum::Int(0))),
         "monitor_layout" => Ok((Jwm::monitor_layout as WMFuncType, WMArgEnum::Int(0))),
         "lock_screen" => Ok((Jwm::lock_screen as WMFuncType, WMArgEnum::Int(0))),
+        // `-1` — the default — is the monitor in use for `lock_monitor`, and
+        // the most recently locked one for `unlock_monitor`.
+        "lock_monitor" => Ok((Jwm::lock_monitor as WMFuncType, parse_int_arg(args, -1)?)),
+        "unlock_monitor" => Ok((Jwm::unlock_monitor as WMFuncType, parse_int_arg(args, -1)?)),
         "killclient" => Ok((Jwm::killclient, parse_int_arg(args, 0)?)),
         "minimize" => Ok((Jwm::minimize, parse_int_arg(args, 0)?)),
         "zoom" => Ok((Jwm::zoom, parse_int_arg(args, 0)?)),

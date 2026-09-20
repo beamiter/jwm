@@ -1161,6 +1161,9 @@ impl Jwm {
 
         // Update compositor with current monitor geometries (for per-monitor wallpaper)
         self.refresh_compositor_monitors(backend);
+        // Outputs just moved, arrived or went away, so the rectangles the
+        // lock shades were cut for may no longer describe anything.
+        self.prune_monitor_locks(backend);
 
         dirty
     }

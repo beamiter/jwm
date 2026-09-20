@@ -277,6 +277,13 @@ impl Jwm {
             let Some(monitor) = self.state.monitors.get(monitor_key) else {
                 continue;
             };
+            // A locked monitor's windows sit behind an opaque shade and
+            // cannot be focused, so a row for one would be a row that does
+            // nothing — after printing its title on a screen that is not
+            // locked. They come back with the shade.
+            if self.monitor_is_locked(monitor.num) {
+                continue;
+            }
             let active_tags = monitor.get_active_tags();
             let Some(stack) = self.state.monitor_stack.get(monitor_key) else {
                 continue;

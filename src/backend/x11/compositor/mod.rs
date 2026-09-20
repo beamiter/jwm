@@ -547,6 +547,10 @@ where
     /// static label rasterizes once per chip appearance, never per frame.
     mic_indicator_texture: Option<(String, glow::Texture, u32, u32)>,
     hud_text_cache: String,
+    /// Outputs covered by a per-monitor lock shade, in global coordinates.
+    /// Drawn above every client and before the frame is captured, so a
+    /// screenshot or a recording shows the shade rather than what it covers.
+    monitor_shades: Vec<crate::backend::api::MonitorShade>,
     /// An Arc makes the render snapshot cheap while input may replace the
     /// owned overlay between frames; cloning the old value copied every row.
     system_ui: Option<Arc<crate::backend::api::SystemUiOverlay>>,

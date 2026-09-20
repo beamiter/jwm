@@ -3329,6 +3329,7 @@ impl Jwm {
                     active_tags: m.get_active_tags(),
                     layout: format!("{:?}", *m.lt),
                     focused: self.state.sel_mon == Some(mk),
+                    locked: self.monitor_is_locked(m.num),
                 })
             })
             .collect()
@@ -3644,6 +3645,7 @@ impl Jwm {
                         active_tags: m.get_active_tags(),
                         layout: format!("{:?}", *m.lt),
                         focused: self.state.sel_mon == Some(mk),
+                        locked: self.monitor_is_locked(m.num),
                     },
                     windows,
                 })

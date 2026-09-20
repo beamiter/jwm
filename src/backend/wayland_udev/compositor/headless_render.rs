@@ -7674,6 +7674,129 @@ fn assert_island_corners_are_asymmetric(
     unsafe { gl.delete_program(prog) };
 }
 
+/// A locked monitor's shade must cover its own output completely — corners
+/// included — and nothing beyond it.
+///
+/// Both are easy to lose. The compositors' other flat fill is the HUD panel
+/// shader, which rounds every quad it draws by 4px: right for a card, and on
+/// an output's shade four transparent notches in the corners of a screen that
+/// is supposed to be showing nothing. And a fill that ignored its rectangle
+/// would take the monitor beside it down with it, which is the whole point of
+/// locking one and not the session.
+#[cfg(test)]
+fn assert_monitor_shade_covers_exactly_its_output(
+    api: GlApi,
+    what: &str,
+    vs: &'static str,
+    fs: &'static str,
+) {
+    const W: i32 = 64;
+    const H: i32 = 32;
+    // The shade covers the left "output" only.
+    const SHADE_W: i32 = W / 2;
+
+    let Some(h) = HeadlessGl::new(api) else {
+        eprintln!("headless GL unavailable - skipping {what}");
+        return;
+    };
+    let gl = &h.gl;
+    let prog = link(gl, vs, fs).unwrap_or_else(|log| panic!("{what}: border must link:\n{log}"));
+
+    // A saturated clear stands in for the desktop under the shade, so a
+    // pixel the shade did not cover is unmistakable.
+    let frame = render_program_frame(
+        gl,
+        prog,
+        [255, 255, 255, 255],
+        W,
+        H,
+        [1.0, 0.0, 0.0, 1.0],
+        |gl| unsafe {
+            let u = |n: &str| gl.get_uniform_location(prog, n);
+            gl.uniform_matrix_4_f32_slice(
+                u("u_projection").as_ref(),
+                false,
+                &ortho(W as f32, H as f32),
+            );
+            gl.uniform_4_f32(u("u_rect").as_ref(), 0.0, 0.0, SHADE_W as f32, H as f32);
+            gl.uniform_2_f32(u("u_size").as_ref(), SHADE_W as f32, H as f32);
+            gl.uniform_4_f32(u("u_border_color").as_ref(), 0.25, 0.5, 1.0, 1.0);
+            // How `sysui_fill_rounded` fills: a border wider than the rect,
+            // and no radius at all for a shade.
+            gl.uniform_1_f32(u("u_border_width").as_ref(), SHADE_W.max(H) as f32);
+            gl.uniform_1_f32(u("u_radius").as_ref(), 0.0);
+            gl.uniform_1_f32(u("u_radius_top").as_ref(), 0.0);
+            gl.uniform_1_i32(u("u_scene_linear").as_ref(), 0);
+        },
+        |gl| unsafe { gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4) },
+    );
+
+    let pixel = |x: i32, y: i32| -> [u8; 4] {
+        let at = ((y * W + x) * 4) as usize;
+        [frame[at], frame[at + 1], frame[at + 2], frame[at + 3]]
+    };
+
+    // The outermost pixel of every corner. A 4px-rounded fill leaves these
+    // all but transparent; a square one keeps them covered (the last pixel
+    // row is antialiased, never cut away).
+    for (x, y) in [(0, 0), (SHADE_W - 1, 0), (0, H - 1), (SHADE_W - 1, H - 1)] {
+        let [_, _, blue, alpha] = pixel(x, y);
+        assert!(
+            alpha > 128 && blue > 128,
+            "{what}: the shade's corner at ({x}, {y}) was rounded off: {:?}",
+            pixel(x, y)
+        );
+    }
+
+    // Opaque in the middle, and within a quantization step of the colour it
+    // was given: the fill is premultiplied by an alpha of exactly 1, so
+    // nothing may dim it.
+    let mid = pixel(SHADE_W / 2, H / 2);
+    assert_eq!(mid[3], 255, "{what}: the shade is not opaque");
+    for (channel, expected) in [(0, 64_i32), (1, 128), (2, 255)] {
+        let got = i32::from(mid[channel]);
+        assert!(
+            (got - expected).abs() <= 1,
+            "{what}: the shade did not keep its colour: channel {channel} was {got}, wanted {expected}"
+        );
+    }
+
+    // And the output beside it is untouched: this is one monitor's lock, not
+    // the session's.
+    for y in [0, H / 2, H - 1] {
+        assert_eq!(
+            pixel(SHADE_W + 1, y),
+            [255, 0, 0, 255],
+            "{what}: the shade reached onto the next output at row {y}"
+        );
+    }
+
+    unsafe { gl.delete_program(prog) };
+}
+
+#[test]
+fn wayland_monitor_shade_covers_exactly_its_output() {
+    use super::shaders as s;
+    assert_monitor_shade_covers_exactly_its_output(
+        GlApi::Gles3,
+        "wayland_monitor_shade_covers_exactly_its_output",
+        s::VERTEX_SHADER,
+        s::BORDER_FRAGMENT_SHADER,
+    );
+}
+
+#[cfg(feature = "x11-backends")]
+#[test]
+fn x11_monitor_shade_covers_exactly_its_output() {
+    use crate::backend::x11::compositor::shaders as s;
+    assert_monitor_shade_covers_exactly_its_output(
+        GlApi::GlCore33,
+        "x11_monitor_shade_covers_exactly_its_output",
+        s::VERTEX_SHADER,
+        s::BORDER_FRAGMENT_SHADER,
+    );
+}
+
 #[test]
 fn wayland_island_corners_are_asymmetric() {
     use super::shaders as s;

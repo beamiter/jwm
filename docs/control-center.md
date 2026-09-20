@@ -120,6 +120,8 @@ PipeWire output and input defaults come from one shared `wpctl status` read.
 | Do Not Disturb | always | `Enter` toggles |
 | Caffeine | always | `Enter` holds the session awake ([idle policy](idle.md)) |
 | Lock Screen | always | `Enter` locks |
+| Lock This Monitor | two outputs or more, one of them staying unlocked | `Enter` shades the monitor in use ([monitor lock](monitor-lock.md)) |
+| Unlock Monitor N… | a monitor is behind a lock shade | `Enter` asks for the password that lifts it |
 | Session… | always | `Enter` opens the [session menu](session-menu.md) |
 
 The Do Not Disturb, Caffeine, and Night Light rows flip through the same

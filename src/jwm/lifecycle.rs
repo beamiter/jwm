@@ -1511,8 +1511,14 @@ impl Jwm {
             // user's persistent compositor; closing the panel must keep it.
             self.features.system_ui_temporary_compositor = false;
         }
-        let defer_compositor_disable =
-            !compositor_wanted && compositor_active && self.features.system_ui.is_active();
+        // A lock shade is compositor-drawn and outlives every panel, so a
+        // reload that switches compositing off is deferred the same way a
+        // modal panel defers it — the alternative is uncovering a monitor the
+        // user locked. The unlock that takes the last shade down applies the
+        // requested OFF state.
+        let defer_compositor_disable = !compositor_wanted
+            && compositor_active
+            && (self.features.system_ui.is_active() || !self.features.monitor_lock.is_empty());
         if defer_compositor_disable {
             // Never tear the renderer out from under a modal launcher or lock
             // screen. The common close path applies the requested OFF state.

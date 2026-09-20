@@ -175,6 +175,11 @@ impl Jwm {
     fn replay_compositor_runtime_state(&mut self, backend: &mut dyn Backend, now: Instant) {
         backend.compositor_apply_config();
         self.refresh_compositor_monitors(backend);
+        // A compositor behind this replay may be a new one that has never
+        // heard of the lock shades. Re-push them before anything else is
+        // drawn: a locked monitor that came back uncovered is the one
+        // failure this feature must not have.
+        self.sync_monitor_shades(backend);
         // The compositor behind this replay may be freshly created with empty
         // groups, so push unconditionally and keep the delivery cache truthful
         // for the change-gated syncs that follow.

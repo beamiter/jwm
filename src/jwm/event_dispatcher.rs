@@ -2062,6 +2062,8 @@ mod tests {
         window_groups_pushes: Vec<Vec<crate::backend::compositor_common::window_tabs::TabGroup>>,
         system_ui_hit: SystemUiHitTarget,
         system_ui_hover_updates: Vec<Option<usize>>,
+        /// Every lock-shade payload pushed, newest last.
+        monitor_shade_pushes: Vec<Vec<crate::backend::api::MonitorShade>>,
         x11_client_list: bool,
     }
 
@@ -2093,6 +2095,7 @@ mod tests {
                 window_groups_pushes: Vec::new(),
                 system_ui_hit: SystemUiHitTarget::Unavailable,
                 system_ui_hover_updates: Vec::new(),
+                monitor_shade_pushes: Vec::new(),
                 x11_client_list: false,
             }
         }
@@ -2113,6 +2116,10 @@ mod tests {
     impl CompositorWorkspaceEffects for RenderSpyBackend {
         fn compositor_set_monitors(&mut self, _monitors: &[(u32, i32, i32, u32, u32, u32)]) {
             self.compositor_monitor_updates += 1;
+        }
+
+        fn compositor_set_monitor_shades(&mut self, shades: &[crate::backend::api::MonitorShade]) {
+            self.monitor_shade_pushes.push(shades.to_vec());
         }
 
         fn compositor_set_system_ui_hover(&mut self, row: Option<usize>) {
@@ -4241,6 +4248,472 @@ mod tests {
         // Still a lock, not a lock-shaped panel: the password buffer survived.
         jwm.features.system_ui.push_char('x');
         assert!(jwm.features.system_ui.overlay_text().contains("JWM LOCKED"));
+    }
+
+    /// Two side-by-side 1920x1080 outputs, numbered 0 and 1, selection on 0.
+    fn jwm_with_two_monitors() -> (Jwm, crate::jwm::MonitorKey, crate::jwm::MonitorKey) {
+        let mut jwm = empty_jwm();
+
+        let mut left = jwm.createmon(true);
+        left.num = 0;
+        left.geometry.m_x = 0;
+        left.geometry.m_w = 1920;
+        left.geometry.m_h = 1080;
+        left.geometry.w_x = 0;
+        left.geometry.w_w = 1920;
+        left.geometry.w_h = 1080;
+        let left = jwm.insert_monitor(left);
+
+        let mut right = jwm.createmon(true);
+        right.num = 1;
+        right.geometry.m_x = 1920;
+        right.geometry.m_w = 1920;
+        right.geometry.m_h = 1080;
+        right.geometry.w_x = 1920;
+        right.geometry.w_w = 1920;
+        right.geometry.w_h = 1080;
+        let right = jwm.insert_monitor(right);
+
+        jwm.state.sel_mon = Some(left);
+        jwm.s_w = 3840;
+        jwm.s_h = 1080;
+        (jwm, left, right)
+    }
+
+    /// The selection cannot be left on a monitor that just went behind an
+    /// opaque shade: the keyboard would be typing into windows nobody can
+    /// see. It moves to an unlocked output, and the direction keys step over
+    /// the shade rather than landing on it.
+    #[test]
+    fn locking_the_monitor_in_use_moves_the_selection_off_it_and_keeps_it_off() {
+        let (mut jwm, left, right) = jwm_with_two_monitors();
+        let mut backend = RenderSpyBackend::new();
+
+        jwm.lock_monitor(&mut backend, &WMArgEnum::Int(-1)).unwrap();
+
+        assert!(jwm.monitor_is_locked(0));
+        assert_eq!(jwm.state.sel_mon, Some(right));
+
+        // Both directions, because the ring is walked either way.
+        for direction in [1, -1] {
+            jwm.focusmon(&mut backend, &WMArgEnum::Int(direction))
+                .unwrap();
+            assert_eq!(
+                jwm.state.sel_mon,
+                Some(right),
+                "focusmon {direction} must step over the shade"
+            );
+        }
+
+        // And the shade itself reached the compositor, with the rectangle of
+        // the output it covers.
+        let shades = backend.monitor_shade_pushes.last().expect("a shade push");
+        assert_eq!(shades.len(), 1);
+        assert_eq!(
+            (
+                shades[0].num,
+                shades[0].x,
+                shades[0].width,
+                shades[0].height
+            ),
+            (0, 0, 1920, 1080)
+        );
+        assert!(jwm.monitor_key_is_locked(left));
+    }
+
+    /// A panel drawn on the monitor going dark would end up under the shade:
+    /// invisible, still holding the keyboard, and dismissible only by a key
+    /// whose target the user cannot see.
+    #[test]
+    fn a_panel_on_the_monitor_being_locked_comes_down_with_it() {
+        let (mut jwm, _left, _right) = jwm_with_two_monitors();
+        let mut backend = RenderSpyBackend::new();
+
+        jwm.control_center(&mut backend, &WMArgEnum::Int(0))
+            .unwrap();
+        assert!(jwm.features.system_ui.is_active());
+
+        jwm.lock_monitor(&mut backend, &WMArgEnum::Int(0)).unwrap();
+        assert!(!jwm.features.system_ui.is_active());
+        assert!(jwm.monitor_is_locked(0));
+    }
+
+    /// A shade over every output is a black session with an unlocked
+    /// keyboard behind it — worse than either thing alone. The last unlocked
+    /// monitor is refused, loudly, and the session lock is named in the
+    /// refusal because it is what the user actually wants there.
+    #[test]
+    fn the_last_unlocked_monitor_is_refused() {
+        let (mut jwm, _left, _right) = jwm_with_two_monitors();
+        let mut backend = RenderSpyBackend::new();
+
+        jwm.lock_monitor(&mut backend, &WMArgEnum::Int(0)).unwrap();
+        let refusal = jwm
+            .lock_monitor(&mut backend, &WMArgEnum::Int(1))
+            .expect_err("the last unlocked monitor must be refused");
+        assert!(refusal.to_string().contains("lock_screen"));
+        assert!(!jwm.monitor_is_locked(1));
+    }
+
+    #[test]
+    fn a_single_output_session_is_refused() {
+        let mut jwm = jwm_with_monitor();
+        let mut backend = RenderSpyBackend::new();
+
+        assert!(jwm.lock_monitor(&mut backend, &WMArgEnum::Int(-1)).is_err());
+        assert!(jwm.features.monitor_lock.is_empty());
+    }
+
+    /// Nothing draws a shade without a compositor, and a lock the user cannot
+    /// see is a monitor they believe is covered and is not.
+    #[test]
+    fn a_monitor_is_never_locked_without_a_compositor_to_draw_the_shade() {
+        let (mut jwm, _left, _right) = jwm_with_two_monitors();
+        let mut backend = RenderSpyBackend::new();
+        backend.compositor_enabled = false;
+
+        assert!(jwm.lock_monitor(&mut backend, &WMArgEnum::Int(0)).is_err());
+        assert!(jwm.features.monitor_lock.is_empty());
+    }
+
+    /// The same key both locks and asks: pressed on a monitor that is already
+    /// locked it opens that monitor's password card, drawn on that monitor
+    /// rather than over the whole desktop.
+    #[test]
+    fn the_lock_key_on_a_locked_monitor_asks_for_the_password_on_that_monitor() {
+        let (mut jwm, _left, _right) = jwm_with_two_monitors();
+        let mut backend = RenderSpyBackend::new();
+
+        jwm.lock_monitor(&mut backend, &WMArgEnum::Int(0)).unwrap();
+        jwm.lock_monitor(&mut backend, &WMArgEnum::Int(0)).unwrap();
+
+        assert_eq!(jwm.features.system_ui.monitor_lock_target(), Some(0));
+        assert!(jwm.features.system_ui.is_locked());
+        // Not the session lock: the desktop around it is still in use, and
+        // the card belongs to the output it would uncover.
+        assert!(!jwm.features.system_ui.is_session_lock());
+        let viewport = jwm.system_ui_viewport();
+        assert_eq!(
+            (viewport.x, viewport.y, viewport.width, viewport.height),
+            (0, 0, 1920, 1080)
+        );
+        assert!(jwm.features.system_ui.overlay_text().contains("MONITOR 0"));
+    }
+
+    /// Backing out of the prompt is not an unlock: the card goes, the shade
+    /// stays, and the keyboard goes back to the monitors that are not locked.
+    /// (Which key does that, and when, is
+    /// `escape_closes_an_idle_monitor_prompt_and_nothing_else`.)
+    #[test]
+    fn closing_a_monitor_prompt_leaves_the_shade_up() {
+        let (mut jwm, _left, _right) = jwm_with_two_monitors();
+        let mut backend = RenderSpyBackend::new();
+
+        jwm.lock_monitor(&mut backend, &WMArgEnum::Int(0)).unwrap();
+        // No argument: the most recently locked monitor.
+        jwm.unlock_monitor(&mut backend, &WMArgEnum::Int(-1))
+            .unwrap();
+        assert_eq!(jwm.features.system_ui.monitor_lock_target(), Some(0));
+        assert!(jwm.features.system_ui.lock_is_idle());
+
+        jwm.close_system_ui(&mut backend);
+        assert!(!jwm.features.system_ui.is_active(), "the card is gone");
+        assert!(jwm.monitor_is_locked(0), "the shade is not");
+        assert_eq!(
+            backend
+                .monitor_shade_pushes
+                .last()
+                .expect("a shade push")
+                .len(),
+            1
+        );
+    }
+
+    /// The session lock outranks a monitor's unlock prompt and takes the
+    /// screen from it — otherwise a prompt left up would keep the idle timer
+    /// from ever locking the session. The shade it was asking about stays.
+    #[test]
+    fn the_session_lock_takes_over_a_monitor_prompt_and_leaves_the_shade() {
+        let (mut jwm, _left, _right) = jwm_with_two_monitors();
+        let mut backend = RenderSpyBackend::new();
+
+        jwm.lock_monitor(&mut backend, &WMArgEnum::Int(0)).unwrap();
+        jwm.unlock_monitor(&mut backend, &WMArgEnum::Int(0))
+            .unwrap();
+
+        jwm.lock_screen(&mut backend, &WMArgEnum::Int(0)).unwrap();
+        assert!(jwm.features.system_ui.is_session_lock());
+        assert_eq!(jwm.features.system_ui.monitor_lock_target(), None);
+        assert!(jwm.monitor_is_locked(0));
+        // The session card owns every output again, shade or no shade.
+        let viewport = jwm.system_ui_viewport();
+        assert_eq!((viewport.width, viewport.height), (3840, 1080));
+    }
+
+    /// The authenticated unlock takes one shade off and leaves the others.
+    #[test]
+    fn lifting_one_lock_leaves_the_others_and_re_pushes_what_is_left() {
+        let mut jwm = empty_jwm();
+        let mut backend = RenderSpyBackend::new();
+        for (num, x) in [(0, 0), (1, 1920), (2, 3840)] {
+            let mut monitor = jwm.createmon(true);
+            monitor.num = num;
+            monitor.geometry.m_x = x;
+            monitor.geometry.m_w = 1920;
+            monitor.geometry.m_h = 1080;
+            let key = jwm.insert_monitor(monitor);
+            if num == 2 {
+                jwm.state.sel_mon = Some(key);
+            }
+        }
+        jwm.s_w = 5760;
+        jwm.s_h = 1080;
+
+        jwm.lock_monitor(&mut backend, &WMArgEnum::Int(0)).unwrap();
+        jwm.lock_monitor(&mut backend, &WMArgEnum::Int(1)).unwrap();
+
+        assert!(jwm.lift_monitor_lock(&mut backend, 0));
+        assert!(!jwm.lift_monitor_lock(&mut backend, 0), "already lifted");
+        assert!(!jwm.monitor_is_locked(0));
+        assert!(jwm.monitor_is_locked(1));
+
+        let shades = backend.monitor_shade_pushes.last().expect("a shade push");
+        assert_eq!(shades.len(), 1);
+        assert_eq!(shades[0].num, 1);
+    }
+
+    /// The shade carries no input region, so without this a press over it
+    /// would be delivered to whichever window is invisible underneath.
+    #[test]
+    fn a_press_over_a_shade_is_swallowed() {
+        let (mut jwm, _left, _right) = jwm_with_two_monitors();
+        let mut backend = RenderSpyBackend::new();
+
+        jwm.lock_monitor(&mut backend, &WMArgEnum::Int(0)).unwrap();
+
+        assert!(jwm.point_is_locked(10.0, 10.0));
+        assert!(!jwm.point_is_locked(1920.0, 10.0));
+
+        jwm.last_mouse_root = (10.0, 10.0);
+        jwm.on_button_press_internal(
+            &mut backend,
+            HitTarget::Background { output: None },
+            0,
+            1,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            jwm.state.sel_mon,
+            Some(_right),
+            "a click behind the shade must not move the selection"
+        );
+    }
+
+    /// Unplugging the one unlocked output would otherwise leave a desktop
+    /// shaded end to end — and nowhere to draw the prompt that would lift any
+    /// of it. The invariant survives the display change: the oldest lock
+    /// gives way, and the selection follows it onto the clear screen.
+    #[test]
+    fn a_display_change_never_leaves_every_monitor_shaded() {
+        let mut jwm = empty_jwm();
+        let mut backend = RenderSpyBackend::new();
+        let mut keys = Vec::new();
+        for (num, x) in [(0, 0), (1, 1920), (2, 3840)] {
+            let mut monitor = jwm.createmon(true);
+            monitor.num = num;
+            monitor.geometry.m_x = x;
+            monitor.geometry.m_w = 1920;
+            monitor.geometry.m_h = 1080;
+            keys.push(jwm.insert_monitor(monitor));
+        }
+        jwm.state.sel_mon = keys.last().copied();
+        jwm.s_w = 5760;
+        jwm.s_h = 1080;
+
+        jwm.lock_monitor(&mut backend, &WMArgEnum::Int(0)).unwrap();
+        jwm.lock_monitor(&mut backend, &WMArgEnum::Int(1)).unwrap();
+
+        // The unlocked output goes away, and the pointer leaves the selection
+        // on one of the shaded ones — what `updategeom` does before it prunes.
+        let gone = keys[2];
+        jwm.state.monitor_order.retain(|&key| key != gone);
+        jwm.state.monitors.remove(gone);
+        jwm.state.sel_mon = Some(keys[1]);
+
+        jwm.prune_monitor_locks(&mut backend);
+
+        assert!(!jwm.monitor_is_locked(0), "the oldest lock gives way");
+        assert!(jwm.monitor_is_locked(1), "the newest one is kept");
+        assert_eq!(
+            jwm.state.sel_mon,
+            Some(keys[0]),
+            "the selection must end up on a monitor that is not shaded"
+        );
+        assert_eq!(
+            backend
+                .monitor_shade_pushes
+                .last()
+                .expect("a shade push")
+                .len(),
+            1
+        );
+    }
+
+    /// The control center is the feature's discoverable route — and the only
+    /// keyboard route back. The key locks the monitor in use, and the shade
+    /// then keeps focus off it, so there is no "press it again over there";
+    /// the panel opens on an unlocked monitor and carries both rows.
+    #[test]
+    fn the_control_center_locks_this_monitor_and_goes_down_with_it() {
+        use crate::backend::common_define::keys;
+        use crate::jwm::features::ControlKind;
+
+        let (mut jwm, _left, right) = jwm_with_two_monitors();
+        let mut backend = RenderSpyBackend::new();
+
+        jwm.control_center(&mut backend, &WMArgEnum::Int(0))
+            .unwrap();
+        assert!(
+            jwm.features
+                .system_ui
+                .overlay_text()
+                .contains("Lock This Monitor")
+        );
+
+        jwm.handle_control_center_key(
+            &mut backend,
+            ControlKind::LockMonitor,
+            keys::KEY_Return,
+            Mods::empty(),
+        );
+
+        assert!(jwm.monitor_is_locked(0));
+        assert_eq!(jwm.state.sel_mon, Some(right));
+        // The panel was drawn on the monitor that just went dark, so it
+        // cannot be left standing under the shade.
+        assert!(!jwm.features.system_ui.is_active());
+    }
+
+    #[test]
+    fn the_control_center_row_is_the_way_back_from_a_locked_monitor() {
+        use crate::backend::common_define::keys;
+        use crate::jwm::features::ControlKind;
+
+        let (mut jwm, _left, _right) = jwm_with_two_monitors();
+        let mut backend = RenderSpyBackend::new();
+
+        jwm.lock_monitor(&mut backend, &WMArgEnum::Int(0)).unwrap();
+        jwm.control_center(&mut backend, &WMArgEnum::Int(0))
+            .unwrap();
+
+        let text = jwm.features.system_ui.overlay_text();
+        assert!(text.contains("Unlock Monitor 0"), "{text}");
+        assert!(
+            !text.contains("Lock This Monitor"),
+            "the other monitor is the last unlocked one: {text}"
+        );
+
+        jwm.handle_control_center_key(
+            &mut backend,
+            ControlKind::UnlockMonitor,
+            keys::KEY_Return,
+            Mods::empty(),
+        );
+
+        assert_eq!(jwm.features.system_ui.monitor_lock_target(), Some(0));
+        assert!(jwm.monitor_is_locked(0), "asking is not unlocking");
+    }
+
+    /// The row's presence and the action's refusal are the same question
+    /// asked twice. A row the action would refuse is a dead row; a refusal
+    /// with no row is a feature the user cannot find.
+    #[test]
+    fn the_control_center_row_agrees_with_what_the_lock_action_allows() {
+        for monitors in 1..=3 {
+            let mut jwm = empty_jwm();
+            let mut backend = RenderSpyBackend::new();
+            for num in 0..monitors {
+                let mut monitor = jwm.createmon(true);
+                monitor.num = num;
+                monitor.geometry.m_x = num * 1920;
+                monitor.geometry.m_w = 1920;
+                monitor.geometry.m_h = 1080;
+                let key = jwm.insert_monitor(monitor);
+                if num == 0 {
+                    jwm.state.sel_mon = Some(key);
+                }
+            }
+            jwm.s_w = monitors * 1920;
+            jwm.s_h = 1080;
+
+            // Lock the monitor in use until the action says no; the row must
+            // have said the same thing every time.
+            loop {
+                let offered = jwm.can_lock_another_monitor();
+                let locked = jwm.lock_monitor(&mut backend, &WMArgEnum::Int(-1)).is_ok();
+                assert_eq!(
+                    offered,
+                    locked,
+                    "with {monitors} monitors and {} locked, the row and the action disagreed",
+                    jwm.features.monitor_lock.len()
+                );
+                if !locked {
+                    break;
+                }
+            }
+        }
+    }
+
+    /// The shade hides a monitor's windows from the room, so the lists that
+    /// could put them back on an unlocked screen drop them too — and they
+    /// would be dead rows regardless, since focus refuses to land there.
+    #[test]
+    fn a_locked_monitors_windows_leave_the_lists_that_would_show_them() {
+        use crate::core::models::WMClient;
+
+        let (mut jwm, left, right) = jwm_with_two_monitors();
+        let mut backend = RenderSpyBackend::new();
+
+        for (raw, monitor) in [(0x401_u64, left), (0x402, right)] {
+            let mut client = WMClient::new(WindowId::from_raw(raw));
+            client.mon = Some(monitor);
+            client.state.tags = 0b01;
+            client.name = format!("window-{raw:x}");
+            let key = jwm.insert_client(client);
+            jwm.attach_to_monitor(key, monitor);
+        }
+
+        assert_eq!(jwm.window_switcher_snapshot().len(), 2);
+        assert_eq!(jwm.launcher_window_snapshot().len(), 2);
+
+        jwm.lock_monitor(&mut backend, &WMArgEnum::Int(0)).unwrap();
+
+        let switcher = jwm.window_switcher_snapshot();
+        assert_eq!(switcher.len(), 1);
+        assert_eq!(switcher[0].monitor, 1);
+        let launcher = jwm.launcher_window_snapshot();
+        assert_eq!(launcher.len(), 1);
+        assert_eq!(launcher[0].monitor, 1);
+
+        // And they come back with the shade.
+        assert!(jwm.lift_monitor_lock(&mut backend, 0));
+        assert_eq!(jwm.window_switcher_snapshot().len(), 2);
+        assert_eq!(jwm.launcher_window_snapshot().len(), 2);
+    }
+
+    /// Handing the compositor back would uncover the monitors it is shading.
+    #[test]
+    fn the_compositor_cannot_be_switched_off_under_a_shade() {
+        let (mut jwm, _left, _right) = jwm_with_two_monitors();
+        let mut backend = RenderSpyBackend::new();
+
+        jwm.lock_monitor(&mut backend, &WMArgEnum::Int(0)).unwrap();
+        assert!(
+            jwm.togglecompositor(&mut backend, &WMArgEnum::Int(0))
+                .is_err()
+        );
+        assert!(backend.compositor_enabled);
     }
 
     #[test]

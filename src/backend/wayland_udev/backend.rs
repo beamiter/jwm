@@ -4288,6 +4288,13 @@ impl CompositorWorkspaceEffects for UdevBackend {
         self.request_render();
     }
 
+    fn compositor_set_monitor_shades(&mut self, shades: &[crate::backend::api::MonitorShade]) {
+        if let Some(compositor) = self.compositor.as_mut() {
+            compositor.set_monitor_shades(shades);
+        }
+        self.request_render();
+    }
+
     fn compositor_set_system_ui_hover(&mut self, row: Option<usize>) {
         if self
             .compositor

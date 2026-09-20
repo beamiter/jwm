@@ -2743,6 +2743,45 @@ impl<C: CompositorConnection> Compositor<C> {
         }
     }
 
+    /// The opaque shades over locked monitors.
+    ///
+    /// One flat rectangle per output in the lock theme's backdrop colour —
+    /// the same colour the lock card sits on, so a monitor's unlock prompt
+    /// appears to be drawn on its own shade. Deliberately featureless: a
+    /// locked monitor shows the room nothing, not even which windows are
+    /// behind it.
+    fn render_monitor_shades(&self, proj: &[f32; 16]) {
+        // Square corners, through the border program's fill mode rather than
+        // the HUD panel's: the HUD shader rounds every quad it draws by 4px,
+        // which on a card is the point and on an output's shade would leave
+        // four transparent notches in the corners of a locked screen.
+        let mut backdrop = ui_theme::palette().lock_backdrop;
+        // Opaque whatever the theme says: a shade that let anything through
+        // would not be a lock.
+        backdrop[3] = 1.0;
+        // Deliberately no backdrop invalidation. A glass card samples the
+        // capture under its own rectangle, and a card is only ever drawn on
+        // the selected monitor — which is never a locked one — so no cached
+        // backdrop can contain a shaded pixel. Dropping the capture here
+        // would charge a full-screen blur to every frame a panel is open
+        // beside a locked monitor, for a sample nothing takes.
+        unsafe {
+            self.gl.bind_vertex_array(Some(self.quad_vao));
+            self.gl.use_program(Some(self.border_program));
+            self.gl.uniform_matrix_4_f32_slice(
+                self.border_uniforms.projection.as_ref(),
+                false,
+                proj,
+            );
+            for shade in &self.monitor_shades {
+                let [x, y, w, h] = shade.rect();
+                self.sysui_fill_rounded(x, y, w, h, 0.0, backdrop);
+            }
+            self.gl.bind_vertex_array(None);
+            self.gl.use_program(None);
+        }
+    }
+
     /// Modal system UI drawn as a material-style card: dimmed scrim, drop
     /// shadow, rounded panel with a gradient accent ring, a search-field bar,
     /// and a selection pill under the highlighted list row.
@@ -2867,7 +2906,24 @@ impl<C: CompositorConnection> Compositor<C> {
         unsafe {
             self.gl.bind_vertex_array(Some(self.quad_vao));
 
-            if overlay.locked {
+            if overlay.locked && overlay.monitor_lock {
+                // One monitor's unlock prompt: the shade under it already
+                // covers this output, and clearing here would take the rest
+                // of the desktop — which is still in use — with it. The same
+                // colour over the same rectangle, square-cornered like the
+                // shade it is drawn on.
+                let mut backdrop = ui.lock_backdrop;
+                backdrop[3] = 1.0;
+                self.gl.use_program(Some(self.border_program));
+                self.gl.uniform_matrix_4_f32_slice(
+                    self.border_uniforms.projection.as_ref(),
+                    false,
+                    proj,
+                );
+                self.sysui_fill_rounded(
+                    viewport_x, viewport_y, viewport_w, viewport_h, 0.0, backdrop,
+                );
+            } else if overlay.locked {
                 self.gl.clear_color(
                     ui.lock_backdrop[0],
                     ui.lock_backdrop[1],
@@ -7534,6 +7590,17 @@ impl<C: CompositorConnection> Compositor<C> {
             self.render_expose(&proj);
         }
 
+        // === Pass 5h: Per-monitor lock shades ===
+        // Above every client, the status bar and the overlays above them, and
+        // ahead of the capture below: a locked monitor is sensitive content,
+        // so a screenshot, a recording or the remote viewer must see the
+        // shade rather than what it covers. The chrome drawn after the
+        // capture — toasts, the OSD — is covered by the second pass at the
+        // end of the frame.
+        if !self.monitor_shades.is_empty() {
+            self.render_monitor_shades(&proj);
+        }
+
         // A lock screen is sensitive content: remote/IPC captures must see the
         // opaque lock UI, never the client scene underneath it.
         if self
@@ -7968,7 +8035,20 @@ impl<C: CompositorConnection> Compositor<C> {
         self.render_toasts(&proj);
         self.render_osd(&proj);
 
-        // System UI is always the final visual layer, above transitions and clients.
+        // The shades again, this time over the late chrome. The toast stack
+        // and the OSD hang off the *virtual* screen's bar, so on a
+        // side-by-side desk they land on whichever output owns that corner —
+        // and a notification card is exactly what the shade is there to keep
+        // off a locked screen. The pass before the capture is the one a
+        // screenshot reads; this one is what the user sees.
+        if !self.monitor_shades.is_empty() {
+            self.render_monitor_shades(&proj);
+        }
+
+        // System UI is always the final visual layer, above transitions and
+        // clients — and above the shade: a monitor's unlock prompt belongs on
+        // top of the shade it is asking to lift, and every other panel is
+        // drawn on an output that is not locked.
         if self.system_ui.is_some() {
             self.render_system_ui(&proj);
         }
@@ -8953,6 +9033,43 @@ mod glass_backdrop_contract_tests {
         assert!(
             !body.contains("self.glass_backdrop=None"),
             "the lock card must go through invalidate_glass_backdrop"
+        );
+    }
+
+    /// A locked monitor is sensitive content, so its shade has to be on the
+    /// frame before the frame is captured — the screenshot path, the
+    /// recorder and the remote viewer all read what the passes above them
+    /// have drawn. This is the same rule the lock card follows two lines
+    /// higher, and the reason both of them sit where they do.
+    #[test]
+    fn the_lock_shades_are_drawn_before_the_frame_is_captured() {
+        let source = include_str!("render.rs");
+        let body = compact_item(source, "pub(crate) fn render_frame(");
+        let shades = body
+            .find("self.render_monitor_shades(&proj);")
+            .expect("the shade pass");
+        let capture = body
+            .find("self.capture_screenshot_freeze();")
+            .expect("the screenshot capture");
+        assert!(
+            shades < capture,
+            "a capture taken before the shades would show what they cover"
+        );
+
+        // And again over the late chrome: the toast stack and the OSD hang
+        // off the virtual screen's bar, so they can land on a locked output.
+        let osd = body.find("self.render_osd(&proj);").expect("the OSD pass");
+        let late = body[osd..]
+            .find("self.render_monitor_shades(&proj);")
+            .map(|at| osd + at)
+            .expect("a shade pass after the OSD");
+        let panel = body[osd..]
+            .find("self.render_system_ui(&proj);")
+            .map(|at| osd + at)
+            .expect("the final system UI pass");
+        assert!(
+            late < panel,
+            "the unlock prompt must draw on top of its own shade"
         );
     }
 

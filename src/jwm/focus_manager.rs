@@ -816,6 +816,16 @@ impl Jwm {
         // is `info`. Keep it out of the session log.
         debug!("[focus]");
 
+        // A client on a locked monitor is behind an opaque shade: focusing it
+        // would send keystrokes to a window nobody can see. Every caller that
+        // can name one — an activation request, a window mapping there, a
+        // click that raced the shade — is answered with the best visible
+        // client on an unlocked monitor instead, which is what the `None`
+        // path below already finds.
+        if client_key_opt.is_some_and(|key| self.client_is_on_locked_monitor(key)) {
+            client_key_opt = None;
+        }
+
         let is_visible = match client_key_opt {
             Some(client_key) => self.is_client_visible_by_key(client_key),
             None => false,

@@ -194,7 +194,10 @@ impl<C: CompositorConnection> Compositor<C> {
         }
         let viewport_changed = matches!(
             (self.system_ui.as_deref(), overlay.as_ref()),
-            (Some(old), Some(new)) if old.viewport != new.viewport || old.locked != new.locked
+            (Some(old), Some(new))
+                if old.viewport != new.viewport
+                    || old.locked != new.locked
+                    || old.monitor_lock != new.monitor_lock
         );
         let text_changed = match (self.system_ui.as_deref(), overlay.as_ref()) {
             (Some(old), Some(new)) => {
@@ -555,6 +558,18 @@ impl<C: CompositorConnection> Compositor<C> {
                 }
             }
         }
+    }
+
+    /// Replace the set of outputs under a lock shade. An empty slice takes
+    /// every shade down. A full redraw rather than a damage hint: the shade
+    /// covers windows that never changed, so nothing under it would report
+    /// damage when it comes off.
+    pub(crate) fn set_monitor_shades(&mut self, shades: &[crate::backend::api::MonitorShade]) {
+        if self.monitor_shades == shades {
+            return;
+        }
+        self.monitor_shades = shades.to_vec();
+        self.force_full_redraw();
     }
 
     pub(crate) fn set_magnifier(&mut self, enabled: bool) {

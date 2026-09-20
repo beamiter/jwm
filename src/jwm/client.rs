@@ -1462,6 +1462,14 @@ impl Jwm {
         backend: &mut dyn Backend,
         new_monitor_key: Option<MonitorKey>,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        // The one door into the monitor selection — the direction keys, a
+        // pointer crossing, an IPC focus. A locked monitor is behind a shade
+        // and has no visible window to select, so the selection stays where
+        // it is rather than disappearing behind one.
+        if new_monitor_key.is_some_and(|key| self.monitor_key_is_locked(key)) {
+            return Ok(());
+        }
+
         let current_sel = self.get_selected_client_key();
         if let Some(sel_key) = current_sel {
             self.unfocus_client(backend, sel_key, true)?;

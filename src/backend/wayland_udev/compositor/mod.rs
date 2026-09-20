@@ -1677,6 +1677,10 @@ pub(crate) struct WaylandCompositor {
     /// on the next frame while a GL context is current.
     toast_retired: Vec<u64>,
     hud_text_cache: String,
+    /// Outputs covered by a per-monitor lock shade, in global coordinates.
+    /// Drawn above every client and before the capture view is derived, so a
+    /// screenshot or a recording shows the shade rather than what it covers.
+    monitor_shades: Vec<crate::backend::api::MonitorShade>,
     /// Cheap render snapshot; cloning the owned overlay used to duplicate
     /// every visible row on each animation frame.
     system_ui: Option<Arc<crate::backend::api::SystemUiOverlay>>,
@@ -3116,6 +3120,7 @@ impl WaylandCompositor {
                 mic_indicator_active: false,
                 mic_indicator_texture: None,
                 hud_text_cache: String::new(),
+                monitor_shades: Vec::new(),
                 system_ui: None,
                 system_ui_island: Default::default(),
                 system_ui_highlight: Default::default(),
