@@ -621,9 +621,9 @@ pub enum ControlKind {
     /// compositor to draw the shade with).
     LockMonitor,
     /// Asks for the password that lifts the most recently locked monitor's
-    /// shade. Present only while a monitor is locked — and it is the only
-    /// route there that does not need a key bound to a monitor number,
-    /// because focus cannot enter a locked monitor to press its key again.
+    /// shade. Present only while a monitor is locked. The lock key asks too,
+    /// once the pointer is over the shade; this row is the route for a
+    /// session being driven without one.
     UnlockMonitor,
     /// Opens the session menu, the way `LockScreen` opens the lock overlay.
     Session,

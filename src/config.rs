@@ -3170,11 +3170,11 @@ impl Config {
             }
         }
         // And for the per-monitor lock. A snapshotted key list cannot contain
-        // an action that did not exist when it was written, and this one has
-        // no other keyboard route: the key locks the monitor in use, and the
-        // shade it puts up is what keeps focus off that monitor afterwards —
-        // so a session without the chord can lock a screen from the control
-        // center and nowhere else.
+        // an action that did not exist when it was written, and this chord is
+        // both directions of the feature: it locks the monitor in use, and
+        // over a shade it asks for the password that lifts it. Without it a
+        // session reaches the feature from the control center and nowhere
+        // else.
         if !self
             .inner
             .keybindings
@@ -5731,9 +5731,9 @@ ui_theme = \"glass\"
     }
 
     /// A key list written before the per-monitor lock existed has no chord
-    /// for it, and the action has no other keyboard route: the key locks the
-    /// monitor in use, and the shade then keeps focus off that monitor, so
-    /// there is no "press it again there" to fall back on.
+    /// for it, and that chord is the whole feature from the keyboard: it
+    /// locks the monitor in use, and over a shade it asks for the password
+    /// that lifts it.
     #[test]
     fn legacy_key_list_gets_non_conflicting_monitor_lock_fallback() {
         let mut cfg = Config::default();

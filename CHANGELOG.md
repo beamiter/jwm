@@ -16,10 +16,13 @@ monorepo use independent Semantic Versions.
   the session lock, on a card drawn on that monitor (`unlock_monitor`, or the
   same key again). At least one monitor always stays unlocked and a
   compositor is required, so a shade is never invisible. The control center
-  carries **Lock This Monitor** and **Unlock Monitor N…** rows — the second is
-  the only keyboard route back, since focus cannot enter a locked monitor to
-  press its key again — and existing key lists gain the chord through the
-  same back-fill the audio recorder and tags overview use. New `monitor/lock`
+  carries **Lock This Monitor** and **Unlock Monitor N…** rows for sessions
+  driven without a pointer, and existing key lists gain the chord through the
+  same back-fill the audio recorder and tags overview use. The key is a
+  toggle: over a shade it means the monitor under the pointer — the one place
+  the pointer and the selection can disagree, because the selection is never
+  on a locked monitor — so pressing it there asks for the password instead of
+  locking something else. New `monitor/lock`
   IPC event and a `locked` flag on `get_monitors`/`get_tree`. See
   [docs/monitor-lock.md](docs/monitor-lock.md).
 

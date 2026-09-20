@@ -183,16 +183,22 @@ impl Jwm {
             .is_some_and(|key| self.monitor_key_is_locked(key))
     }
 
-    /// Whether a point in global coordinates is under a lock shade.
-    pub(crate) fn point_is_locked(&self, x: f64, y: f64) -> bool {
+    /// The locked monitor under this point in global coordinates, if any.
+    pub(crate) fn locked_monitor_at(&self, x: f64, y: f64) -> Option<i32> {
         if self.features.monitor_lock.is_empty() {
-            return false;
+            return None;
         }
         self.features
             .monitor_lock
             .shades()
-            .iter()
-            .any(|shade| shade.contains(x, y))
+            .into_iter()
+            .find(|shade| shade.contains(x, y))
+            .map(|shade| shade.num)
+    }
+
+    /// Whether a point in global coordinates is under a lock shade.
+    pub(crate) fn point_is_locked(&self, x: f64, y: f64) -> bool {
+        self.locked_monitor_at(x, y).is_some()
     }
 
     /// Push the current shades to the compositor. Cheap and idempotent: it is
@@ -220,9 +226,21 @@ impl Jwm {
         })
     }
 
-    /// The monitor an argument names: a number, or the selected monitor for
+    /// The monitor an argument names: a number, or "the one I am on" for
     /// anything negative (what a key binding sends).
-    fn monitor_arg(&self, arg: &WMArgEnum) -> Result<i32, Box<dyn std::error::Error>> {
+    ///
+    /// "The one I am on" is the selected monitor — except over a shade. The
+    /// selection can never be on a locked monitor, which is the whole point
+    /// of one, so that is the single place where the pointer and the
+    /// selection disagree; and it is exactly where the user means the screen
+    /// they are pointing at. Reading the pointer there is what makes the key
+    /// a toggle: move onto the shade, press it, and the card that lifts the
+    /// shade comes up on it.
+    fn monitor_arg(
+        &self,
+        backend: &mut dyn Backend,
+        arg: &WMArgEnum,
+    ) -> Result<i32, Box<dyn std::error::Error>> {
         let requested = match *arg {
             WMArgEnum::Int(num) => num,
             WMArgEnum::UInt(num) => i32::try_from(num).unwrap_or(-1),
@@ -230,6 +248,15 @@ impl Jwm {
         };
         if requested >= 0 {
             return Ok(requested);
+        }
+        if !self.features.monitor_lock.is_empty() {
+            let (x, y) = backend
+                .input_ops()
+                .get_pointer_position()
+                .unwrap_or(self.last_mouse_root);
+            if let Some(num) = self.locked_monitor_at(x, y) {
+                return Ok(num);
+            }
         }
         let selected = self
             .state
@@ -243,8 +270,10 @@ impl Jwm {
     /// pointer and new windows off it until the password lifts it.
     ///
     /// `Int(n)` locks monitor `n`; anything negative — what the key binding
-    /// sends — locks the monitor in use. Locking a monitor that is already
-    /// locked opens its unlock prompt, so one key both locks and asks.
+    /// sends — means the monitor in use, or the one under the pointer while
+    /// that is a shade (see [`Self::monitor_arg`]). Naming a monitor that is
+    /// already locked opens its unlock prompt instead, so the one key both
+    /// locks a screen and asks for the password that lifts it.
     pub fn lock_monitor(
         &mut self,
         backend: &mut dyn Backend,
@@ -255,7 +284,7 @@ impl Jwm {
         if self.features.system_ui.is_session_lock() {
             return Err("the session is locked".into());
         }
-        let target = self.monitor_arg(arg)?;
+        let target = self.monitor_arg(backend, arg)?;
         if self.monitor_is_locked(target) {
             return self.unlock_monitor(backend, &WMArgEnum::Int(target));
         }

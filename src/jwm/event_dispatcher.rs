@@ -4560,10 +4560,72 @@ mod tests {
         );
     }
 
-    /// The control center is the feature's discoverable route — and the only
-    /// keyboard route back. The key locks the monitor in use, and the shade
-    /// then keeps focus off it, so there is no "press it again over there";
-    /// the panel opens on an unlocked monitor and carries both rows.
+    /// One key, both directions. The selection can never be on a locked
+    /// monitor, so "the monitor I am on" follows the pointer once it is over
+    /// a shade — the only place the two can disagree — and the key that put
+    /// the shade up asks for the password that lifts it.
+    #[test]
+    fn the_lock_key_follows_the_pointer_onto_a_shade_and_asks_there() {
+        let (mut jwm, _left, right) = jwm_with_two_monitors();
+        let mut backend = RenderSpyBackend::new();
+
+        // Pointer on the left monitor, which is also the selected one.
+        *backend.input_ops.pointer.lock().unwrap() = (40.0, 40.0);
+        jwm.lock_monitor(&mut backend, &WMArgEnum::Int(-1)).unwrap();
+        assert!(jwm.monitor_is_locked(0));
+        assert_eq!(jwm.state.sel_mon, Some(right), "the selection moved off it");
+
+        // The pointer is still over the shade. The same key now asks for the
+        // password that lifts it, on that monitor.
+        jwm.lock_monitor(&mut backend, &WMArgEnum::Int(-1)).unwrap();
+        assert_eq!(jwm.features.system_ui.monitor_lock_target(), Some(0));
+        assert!(jwm.monitor_is_locked(0), "asking is not unlocking");
+        let viewport = jwm.system_ui_viewport();
+        assert_eq!(
+            (viewport.x, viewport.width),
+            (0, 1920),
+            "the card belongs to the monitor under the pointer"
+        );
+    }
+
+    /// Off the shade the key means what it always meant: lock the monitor in
+    /// use. The pointer only overrides the selection where a shade is.
+    #[test]
+    fn the_lock_key_off_a_shade_still_means_the_monitor_in_use() {
+        let mut jwm = empty_jwm();
+        let mut backend = RenderSpyBackend::new();
+        let mut keys = Vec::new();
+        for num in 0..3 {
+            let mut monitor = jwm.createmon(true);
+            monitor.num = num;
+            monitor.geometry.m_x = num * 1920;
+            monitor.geometry.m_w = 1920;
+            monitor.geometry.m_h = 1080;
+            keys.push(jwm.insert_monitor(monitor));
+        }
+        jwm.state.sel_mon = Some(keys[0]);
+        jwm.s_w = 5760;
+        jwm.s_h = 1080;
+
+        *backend.input_ops.pointer.lock().unwrap() = (40.0, 40.0);
+        jwm.lock_monitor(&mut backend, &WMArgEnum::Int(-1)).unwrap();
+        assert!(jwm.monitor_is_locked(0));
+
+        // Pointer moved onto the middle monitor, which is not shaded: the
+        // key locks that one rather than reaching back for the shade.
+        jwm.state.sel_mon = Some(keys[1]);
+        *backend.input_ops.pointer.lock().unwrap() = (1960.0, 40.0);
+        jwm.lock_monitor(&mut backend, &WMArgEnum::Int(-1)).unwrap();
+        assert!(jwm.monitor_is_locked(1));
+        assert!(
+            !jwm.features.system_ui.is_active(),
+            "locking a second monitor is not a prompt"
+        );
+    }
+
+    /// The control center is the feature's discoverable route, and the one
+    /// that needs no pointer: it opens on an unlocked monitor — the selection
+    /// is never on a shaded one — and carries both directions as rows.
     #[test]
     fn the_control_center_locks_this_monitor_and_goes_down_with_it() {
         use crate::backend::common_define::keys;
@@ -4596,7 +4658,7 @@ mod tests {
     }
 
     #[test]
-    fn the_control_center_row_is_the_way_back_from_a_locked_monitor() {
+    fn the_control_center_row_asks_for_a_locked_monitors_password() {
         use crate::backend::common_define::keys;
         use crate::jwm::features::ControlKind;
 
@@ -4650,6 +4712,19 @@ mod tests {
             // Lock the monitor in use until the action says no; the row must
             // have said the same thing every time.
             loop {
+                // The row is about locking a *new* monitor, so the action has
+                // to be asked the same question: with the pointer on the
+                // monitor in use, never parked on a shade, where a negative
+                // argument means "ask to unlock this one" instead.
+                if let Some(rect) = jwm
+                    .state
+                    .sel_mon
+                    .and_then(|key| jwm.state.monitors.get(key))
+                    .map(|monitor| monitor.geometry.clone())
+                {
+                    *backend.input_ops.pointer.lock().unwrap() =
+                        (f64::from(rect.m_x) + 8.0, f64::from(rect.m_y) + 8.0);
+                }
                 let offered = jwm.can_lock_another_monitor();
                 let locked = jwm.lock_monitor(&mut backend, &WMArgEnum::Int(-1)).is_ok();
                 assert_eq!(
