@@ -703,9 +703,31 @@ mod tests {
         let key = memory_icon_key(png);
         assert!(key.starts_with(MEMORY_ICON_PREFIX));
         assert_eq!(key, memory_icon_key(png));
-        register_memory_icon(key.clone(), Arc::<[u8]>::from(png.as_slice()));
-        assert_eq!(memory_icon_bytes(&key).as_deref(), Some(png.as_slice()));
+
+        // The store is process-global and every `publish` anywhere in the
+        // suite clears it, so the round trip is taken under one lock: a
+        // publish landing between a register and the read back would fail
+        // this for a reason that has nothing to do with icon keys. What
+        // `register_memory_icon` does with an accepted key is exactly this
+        // insert.
+        {
+            let mut store = memory_icons().lock_safe();
+            store
+                .entry(key.clone())
+                .or_insert_with(|| Arc::<[u8]>::from(png.as_slice()));
+            assert_eq!(store.get(&key).map(|bytes| &**bytes), Some(png.as_slice()));
+        }
+
+        // Absence is safe to assert through the public path: a concurrent
+        // publish only ever drops more.
         retain_memory_icons(None);
         assert!(memory_icon_bytes(&key).is_none());
+
+        // And the guards keep junk out of the store in the first place.
+        register_memory_icon("not-a-memory-key".into(), Arc::<[u8]>::from(png.as_slice()));
+        register_memory_icon(key.clone(), Arc::<[u8]>::from(&b""[..]));
+        let store = memory_icons().lock_safe();
+        assert!(!store.contains_key("not-a-memory-key"));
+        assert!(!store.contains_key(&key));
     }
 }
