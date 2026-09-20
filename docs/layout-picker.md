@@ -88,7 +88,7 @@ layout without changing anything:
 modifier = ["Mod1"]
 key = "space"
 function = "layout_picker"
-argument = { Int = 0 }
+argument = 0
 ```
 
 ```

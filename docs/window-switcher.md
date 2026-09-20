@@ -18,13 +18,13 @@ the panel is up commits it immediately.
 > modifier = ["Mod1"]
 > key = "Tab"
 > function = "loopview"
-> argument = { Int = 1 }
+> argument = 1
 >
 > [[keys]]
 > modifier = ["Mod1", "Shift"]
 > key = "Tab"
 > function = "loopview"
-> argument = { Int = -1 }
+> argument = -1
 > ```
 
 ## The list
