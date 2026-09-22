@@ -145,7 +145,7 @@ mod wallpaper;
 
 pub use crate::backend::x11::compositor_common::present::PresentController;
 pub use async_x11::{DeferredOpQueue, EventQueue, InputPriority, PriorityEventQueue};
-pub use blur_optimize::{AdaptiveBlur, BlurCache, BlurCacheStats, GaussianBlurParams};
+pub use blur_optimize::{BlurCache, BlurCacheStats, GaussianBlurParams};
 pub(crate) use buffer_age::BufferAgeDamageHistory;
 pub use cache_warmup::{BlurSizeStats, CacheWarmupManager};
 pub(crate) use damage_tracker::DamageTracker;

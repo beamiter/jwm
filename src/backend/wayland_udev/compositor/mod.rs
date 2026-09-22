@@ -45,8 +45,6 @@ mod recording;
 mod render;
 #[allow(dead_code, unreachable_pub)]
 mod render_batcher;
-#[allow(dead_code, unreachable_pub)]
-mod render_stats;
 mod rules;
 mod screenshot_readback;
 mod screenshot_toolbar;
@@ -1791,8 +1789,7 @@ pub(crate) struct WaylandCompositor {
     /// overlays: no smart-border count, no ring.
     override_redirect_windows: std::collections::HashSet<u64>,
 
-    // --- Render stats ---
-    render_stats: render_stats::RenderStats,
+    // --- Texture pool ---
     texture_pool: texture_pool::TexturePool,
 }
 
@@ -3193,8 +3190,7 @@ impl WaylandCompositor {
                 prev_ordinary_borders: false,
                 override_redirect_windows: std::collections::HashSet::new(),
 
-                // Render stats & texture pool
-                render_stats: render_stats::RenderStats::new(),
+                // Texture pool
                 texture_pool: texture_pool::TexturePool::new(),
             };
 

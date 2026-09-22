@@ -1177,7 +1177,7 @@ impl<C: CompositorConnection> Compositor<C> {
             frame_time_p95_ms,
             frame_time_p99_ms,
             gpu_load_percent: self.last_gpu_load,
-            cpu_load_percent: 0, // No live CPU sampler on this backend yet
+            cpu_load_percent: self.sys_stats.cpu_pct().clamp(0.0, 100.0) as u32,
             draw_calls: self.last_draw_calls,
             texture_memory_bytes,
             blur_cache_hits: self.frame_stats.blur_cache_hits,
@@ -7402,8 +7402,6 @@ impl<C: CompositorConnection> Compositor<C> {
 
         // === Pass 5: Debug HUD (feature 11) ===
         if self.debug_hud {
-            self.sys_stats.maybe_sample();
-
             // Format HUD text
             let avg_dt = if self.frame_stats.frame_times.is_empty() {
                 0.0
@@ -8211,6 +8209,9 @@ impl<C: CompositorConnection> Compositor<C> {
         let frame_time_ms = self.frame_profiler.end_frame();
         self.last_draw_calls = self.frame_draw_calls.get();
         self.frame_stats.draw_calls = self.last_draw_calls;
+        // Sampling is throttled internally and keeps IPC cpu_load useful with
+        // the debug HUD off (same contract as wayland-udev).
+        self.sys_stats.maybe_sample();
 
         // Benchmark: record frame data
         if self.benchmark.is_running() {

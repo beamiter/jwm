@@ -1,81 +1,5 @@
-use crate::renderer::types::BlurQuality;
+/// Blur effect helpers: dual-pass Gaussian parameters and a hit/miss counter.
 use std::sync::Arc;
-/// Blur effect optimizations including adaptive quality and dual-pass Gaussian
-use std::sync::atomic::{AtomicU32, Ordering};
-
-/// Adaptive blur quality based on system load
-pub struct AdaptiveBlur {
-    quality: Arc<std::sync::Mutex<BlurQuality>>,
-    current_load: Arc<AtomicU32>,
-}
-
-impl AdaptiveBlur {
-    pub fn new() -> Self {
-        Self {
-            quality: Arc::new(std::sync::Mutex::new(BlurQuality::Full)),
-            current_load: Arc::new(AtomicU32::new(50)),
-        }
-    }
-
-    /// Update blur quality based on GPU/CPU load
-    /// load: 0-100, higher means busier system
-    pub fn update_load(&self, load: u32) {
-        self.current_load.store(load.min(100), Ordering::Relaxed);
-
-        let quality = if load > 90 {
-            BlurQuality::Minimal
-        } else if load > 80 {
-            BlurQuality::Minimal
-        } else if load > 70 {
-            BlurQuality::Reduced
-        } else {
-            BlurQuality::Full
-        };
-
-        if let Ok(mut q) = self.quality.lock() {
-            if *q != quality {
-                log::info!(
-                    "blur: adaptive quality changed to {}",
-                    match quality {
-                        BlurQuality::Full => "full",
-                        BlurQuality::Reduced => "reduced",
-                        BlurQuality::Minimal => "minimal",
-                    }
-                );
-                *q = quality;
-            }
-        }
-    }
-
-    /// Get current blur quality
-    pub(crate) fn quality(&self) -> BlurQuality {
-        self.quality
-            .lock()
-            .ok()
-            .map(|q| *q)
-            .unwrap_or(BlurQuality::Full)
-    }
-
-    /// Get current system load
-    pub fn current_load(&self) -> u32 {
-        self.current_load.load(Ordering::Relaxed)
-    }
-}
-
-impl Clone for AdaptiveBlur {
-    fn clone(&self) -> Self {
-        Self {
-            quality: self.quality.clone(),
-            current_load: self.current_load.clone(),
-        }
-    }
-}
-
-impl Default for AdaptiveBlur {
-    fn default() -> Self {
-        Self::new()
-    }
-}
 
 /// Parameters for dual-pass Gaussian blur
 #[derive(Clone, Copy, Debug)]
@@ -127,33 +51,32 @@ impl GaussianBlurParams {
     }
 }
 
-/// Tracks blur cache performance
+/// Statistics for blur cache usage
 #[derive(Clone, Default, Debug)]
 pub struct BlurCacheStats {
-    pub hits: u64,
-    pub misses: u64,
-    pub total_blur_time_us: u64,
-    pub cache_memory_bytes: u64,
+    pub hits: usize,
+    pub misses: usize,
+    pub evictions: usize,
 }
 
 impl BlurCacheStats {
     pub fn hit_rate(&self) -> f32 {
-        let total = (self.hits + self.misses) as f32;
-        if total == 0.0 {
+        let total = self.hits + self.misses;
+        if total == 0 {
             0.0
         } else {
-            self.hits as f32 / total
+            self.hits as f32 / total as f32
         }
     }
 
     pub fn reset(&mut self) {
         self.hits = 0;
         self.misses = 0;
-        self.total_blur_time_us = 0;
+        self.evictions = 0;
     }
 }
 
-/// Caches blurred regions to avoid re-blurring identical areas
+/// Tracks blur-cache hit/miss counts for HUD and metrics.
 pub struct BlurCache {
     stats: Arc<std::sync::Mutex<BlurCacheStats>>,
 }
@@ -165,28 +88,24 @@ impl BlurCache {
         }
     }
 
-    /// Record a cache hit
     pub fn record_hit(&self) {
         if let Ok(mut stats) = self.stats.lock() {
             stats.hits += 1;
         }
     }
 
-    /// Record a cache miss
     pub fn record_miss(&self) {
         if let Ok(mut stats) = self.stats.lock() {
             stats.misses += 1;
         }
     }
 
-    /// Record blur processing time
-    pub fn record_blur_time(&self, microseconds: u64) {
+    pub fn record_eviction(&self) {
         if let Ok(mut stats) = self.stats.lock() {
-            stats.total_blur_time_us += microseconds;
+            stats.evictions += 1;
         }
     }
 
-    /// Get cache statistics
     pub fn stats(&self) -> BlurCacheStats {
         self.stats
             .lock()
@@ -195,7 +114,6 @@ impl BlurCache {
             .unwrap_or_default()
     }
 
-    /// Reset statistics
     pub fn reset_stats(&self) {
         if let Ok(mut stats) = self.stats.lock() {
             stats.reset();
@@ -222,20 +140,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_adaptive_blur() {
-        let blur = AdaptiveBlur::new();
-
-        blur.update_load(95);
-        assert_eq!(blur.quality(), BlurQuality::Minimal);
-
-        blur.update_load(85);
-        assert_eq!(blur.quality(), BlurQuality::Minimal);
-
-        blur.update_load(25);
-        assert_eq!(blur.quality(), BlurQuality::Full);
-    }
-
-    #[test]
     fn test_blur_cache_stats() {
         let cache = BlurCache::new();
         cache.record_hit();
@@ -246,5 +150,13 @@ mod tests {
         assert_eq!(stats.hits, 2);
         assert_eq!(stats.misses, 1);
         assert!((stats.hit_rate() - 0.666).abs() < 0.01);
+    }
+
+    #[test]
+    fn gaussian_presets_keep_separable_filtering() {
+        assert!(GaussianBlurParams::fast().use_separable);
+        assert!(GaussianBlurParams::balanced().use_separable);
+        assert!(GaussianBlurParams::high_quality().use_separable);
+        assert!(GaussianBlurParams::high_quality().passes > GaussianBlurParams::fast().passes);
     }
 }
