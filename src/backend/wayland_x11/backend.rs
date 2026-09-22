@@ -267,15 +267,7 @@ impl WindowOps for WaylandWindowOps {
     }
 
     fn raise_window(&self, win: WindowId) -> Result<(), BackendError> {
-        unsafe {
-            self.with_state_mut(|state| {
-                if let Some(pos) = state.window_stack.iter().position(|w| *w == win) {
-                    state.window_stack.remove(pos);
-                    state.window_stack.push(win);
-                }
-                state.needs_redraw = true;
-            });
-        }
+        unsafe { self.with_state_mut(|state| state.raise_window(win))? };
         self.request_flush();
         Ok(())
     }
@@ -481,6 +473,9 @@ impl PropertyOps for WaylandPropertyOps {
         on: bool,
     ) -> Result<(), BackendError> {
         unsafe {
+            self.with_state_mut(|wayland_state| wayland_state.set_x11_net_state(win, state, on))?
+        };
+        unsafe {
             self.with_state_mut(|wayland_state| {
                 wayland_state.update_foreign_toplevel_net_state(win, state, on);
             });
@@ -564,6 +559,10 @@ impl PropertyOps for WaylandPropertyOps {
 
     fn get_wm_state(&self, _win: WindowId) -> Result<i64, BackendError> {
         Ok(1)
+    }
+
+    fn has_net_wm_state_flag(&self, win: WindowId, flag: NetWmState) -> Result<bool, BackendError> {
+        Ok(unsafe { self.with_state_mut(|state| state.has_x11_net_state(win, flag)) })
     }
 
     fn set_wm_state(&self, _win: WindowId, _state: i64) -> Result<(), BackendError> {

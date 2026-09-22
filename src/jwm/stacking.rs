@@ -8,6 +8,116 @@ use crate::core::models::{ClientKey, MonitorKey};
 use crate::jwm::Jwm;
 use log::debug;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct StackingClient {
+    window: WindowId,
+    visible: bool,
+    floating: bool,
+    pip: bool,
+    fullscreen: bool,
+    above: bool,
+    below: bool,
+    selected: bool,
+}
+
+#[derive(Default)]
+struct StackingLayer {
+    tiled: Vec<WindowId>,
+    floating: Vec<WindowId>,
+    selected_tiled: Option<WindowId>,
+    selected_floating: Option<WindowId>,
+}
+
+impl StackingLayer {
+    fn push(&mut self, client: StackingClient) {
+        if client.floating {
+            if client.selected {
+                self.selected_floating = Some(client.window);
+            } else {
+                self.floating.push(client.window);
+            }
+        } else if client.selected {
+            self.selected_tiled = Some(client.window);
+        } else {
+            self.tiled.push(client.window);
+        }
+    }
+
+    fn append_to(self, output: &mut Vec<WindowId>) {
+        output.extend(self.tiled);
+        output.extend(self.floating);
+        // Preserve JWM's existing focus rule inside each EWMH layer: a
+        // selected tiled client rises above floating peers in that same layer.
+        if let Some(window) = self.selected_tiled {
+            output.push(window);
+        }
+        if let Some(window) = self.selected_floating {
+            output.push(window);
+        }
+    }
+}
+
+#[derive(Default)]
+struct PriorityLayer {
+    windows: Vec<WindowId>,
+    selected: Option<WindowId>,
+}
+
+impl PriorityLayer {
+    fn push(&mut self, client: StackingClient) {
+        if client.selected {
+            self.selected = Some(client.window);
+        } else {
+            self.windows.push(client.window);
+        }
+    }
+
+    fn append_to(self, output: &mut Vec<WindowId>) {
+        output.extend(self.windows);
+        if let Some(window) = self.selected {
+            output.push(window);
+        }
+    }
+}
+
+/// Plan managed-client stacking from bottom to top.
+///
+/// EWMH Above/Below form layers around ordinary clients. A visible focused
+/// fullscreen client sits above Above, while PiP retains JWM's topmost policy.
+/// Above wins defensively when a malformed client advertises both flags.
+fn plan_stacking(clients_bottom_to_top: impl IntoIterator<Item = StackingClient>) -> Vec<WindowId> {
+    let mut below = StackingLayer::default();
+    let mut normal = StackingLayer::default();
+    let mut above = StackingLayer::default();
+    let mut focused_fullscreen = PriorityLayer::default();
+    let mut pip = PriorityLayer::default();
+
+    for client in clients_bottom_to_top {
+        if !client.visible {
+            continue;
+        }
+        if client.pip {
+            pip.push(client);
+        } else if client.selected && client.fullscreen {
+            focused_fullscreen.push(client);
+        } else if client.above {
+            above.push(client);
+        } else if client.below {
+            below.push(client);
+        } else {
+            normal.push(client);
+        }
+    }
+
+    let mut output = Vec::new();
+    below.append_to(&mut output);
+    normal.append_to(&mut output);
+    above.append_to(&mut output);
+    focused_fullscreen.append_to(&mut output);
+    pip.append_to(&mut output);
+    output
+}
+
 impl Jwm {
     /// 将窗口提升到堆叠顶部并聚焦
     ///
@@ -32,11 +142,10 @@ impl Jwm {
 
     /// 重新计算并应用窗口堆叠顺序
     ///
-    /// 堆叠规则（从下到上）：
-    /// 1. 平铺窗口（tiled）
-    /// 2. 浮动窗口（floating）
-    /// 3. 选中的平铺窗口（提升到浮动窗口之上，避免被遮挡）
-    /// 4. PiP 窗口（始终在最顶层）
+    /// Managed-client stacking, bottom to top:
+    /// Below, Normal, Above, focused fullscreen, PiP. Inside an EWMH layer,
+    /// tiled clients precede floating clients and selection promotes only a
+    /// visible member of that same layer.
     pub(crate) fn restack(
         &mut self,
         backend: &mut dyn Backend,
@@ -55,70 +164,24 @@ impl Jwm {
             .ok_or("Monitor not found")?;
         let monitor_num = monitor.num;
 
-        let stack = self.get_monitor_stack(mon_key);
-
-        let mut tiled_bottom_to_top: Vec<WindowId> = Vec::new();
-        let mut floating_bottom_to_top: Vec<WindowId> = Vec::new();
-        let mut pip_bottom_to_top: Vec<WindowId> = Vec::new();
-
-        for &ck in stack.iter().rev() {
-            if let Some(c) = self.state.clients.get(ck) {
-                if !self.is_client_visible_on_monitor(ck, mon_key) {
-                    continue;
-                }
-                if c.state.is_pip {
-                    pip_bottom_to_top.push(c.win);
-                } else if c.state.is_floating {
-                    floating_bottom_to_top.push(c.win);
-                } else {
-                    tiled_bottom_to_top.push(c.win);
-                }
-            }
-        }
-
-        // Promote selected window to top of its layer, and if it's tiled,
-        // raise it above floating windows so it's not obscured.
         let sel_win = monitor
             .sel
             .and_then(|ck| self.state.clients.get(ck))
-            .map(|c| (c.win, c.state.is_floating, c.state.is_pip));
-
-        let mut final_bottom_to_top: Vec<WindowId> = Vec::with_capacity(
-            tiled_bottom_to_top.len() + floating_bottom_to_top.len() + pip_bottom_to_top.len(),
-        );
-
-        if let Some((win, is_floating, is_pip)) = sel_win {
-            if is_pip {
-                // PiP: promote within pip layer
-                if let Some(idx) = pip_bottom_to_top.iter().position(|&w| w == win) {
-                    let w = pip_bottom_to_top.remove(idx);
-                    pip_bottom_to_top.push(w);
-                }
-                final_bottom_to_top.extend(tiled_bottom_to_top);
-                final_bottom_to_top.extend(floating_bottom_to_top);
-                final_bottom_to_top.extend(pip_bottom_to_top);
-            } else if is_floating {
-                // Floating: promote to top of floating layer (above other floats, below pip)
-                if let Some(idx) = floating_bottom_to_top.iter().position(|&w| w == win) {
-                    let w = floating_bottom_to_top.remove(idx);
-                    floating_bottom_to_top.push(w);
-                }
-                final_bottom_to_top.extend(tiled_bottom_to_top);
-                final_bottom_to_top.extend(floating_bottom_to_top);
-                final_bottom_to_top.extend(pip_bottom_to_top);
-            } else {
-                // Tiled: raise focused tiled window above all floats so it's not obscured
-                tiled_bottom_to_top.retain(|&w| w != win);
-                final_bottom_to_top.extend(tiled_bottom_to_top);
-                final_bottom_to_top.extend(floating_bottom_to_top);
-                final_bottom_to_top.push(win); // focused tiled above floats
-                final_bottom_to_top.extend(pip_bottom_to_top);
-            }
-        } else {
-            final_bottom_to_top.extend(tiled_bottom_to_top);
-            final_bottom_to_top.extend(floating_bottom_to_top);
-            final_bottom_to_top.extend(pip_bottom_to_top);
-        }
+            .map(|c| c.win);
+        let stack = self.get_monitor_stack(mon_key);
+        let final_bottom_to_top = plan_stacking(stack.iter().rev().filter_map(|&ck| {
+            let client = self.state.clients.get(ck)?;
+            Some(StackingClient {
+                window: client.win,
+                visible: self.is_client_visible_on_monitor(ck, mon_key),
+                floating: client.state.is_floating,
+                pip: client.state.is_pip,
+                fullscreen: client.state.is_fullscreen,
+                above: client.state.is_above,
+                below: client.state.is_below,
+                selected: sel_win == Some(client.win),
+            })
+        }));
 
         let need_restack_windows = match self.last_stacking.get(mon_key) {
             Some(prev) => prev.as_slice() != final_bottom_to_top.as_slice(),
@@ -140,6 +203,103 @@ impl Jwm {
 
 #[cfg(test)]
 mod tests {
+    use super::{StackingClient, plan_stacking};
+    use crate::backend::common_define::WindowId;
+
+    fn client(id: u64) -> StackingClient {
+        StackingClient {
+            window: WindowId::from_raw(id),
+            visible: true,
+            floating: false,
+            pip: false,
+            fullscreen: false,
+            above: false,
+            below: false,
+            selected: false,
+        }
+    }
+
+    fn raw(windows: Vec<WindowId>) -> Vec<u64> {
+        windows.into_iter().map(WindowId::raw).collect()
+    }
+
+    #[test]
+    fn planner_orders_the_five_managed_client_layers() {
+        let mut normal = client(2);
+        normal.floating = true;
+        let mut below = client(1);
+        below.below = true;
+        let mut above = client(3);
+        above.above = true;
+        let mut fullscreen = client(4);
+        fullscreen.fullscreen = true;
+        fullscreen.selected = true;
+        let mut pip = client(5);
+        pip.pip = true;
+
+        assert_eq!(
+            raw(plan_stacking([normal, pip, above, below, fullscreen])),
+            [1, 2, 3, 4, 5]
+        );
+    }
+
+    #[test]
+    fn selected_tiled_client_only_rises_inside_its_ewmh_layer() {
+        let mut normal_selected = client(2);
+        normal_selected.selected = true;
+        let mut normal_float = client(3);
+        normal_float.floating = true;
+        let mut above = client(4);
+        above.above = true;
+        let mut below_float = client(1);
+        below_float.below = true;
+        below_float.floating = true;
+
+        assert_eq!(
+            raw(plan_stacking([
+                normal_selected,
+                above,
+                normal_float,
+                below_float,
+            ])),
+            [1, 3, 2, 4]
+        );
+    }
+
+    #[test]
+    fn invisible_selected_client_is_never_reinserted() {
+        let mut hidden_selected = client(9);
+        hidden_selected.visible = false;
+        hidden_selected.selected = true;
+        hidden_selected.fullscreen = true;
+
+        assert_eq!(raw(plan_stacking([client(1), hidden_selected])), [1]);
+    }
+
+    #[test]
+    fn above_wins_a_malformed_double_state() {
+        let mut double_state = client(3);
+        double_state.above = true;
+        double_state.below = true;
+        let mut normal = client(2);
+        normal.floating = true;
+        let mut below = client(1);
+        below.below = true;
+
+        assert_eq!(raw(plan_stacking([double_state, normal, below])), [1, 2, 3]);
+    }
+
+    #[test]
+    fn unselected_fullscreen_stays_in_its_ewmh_layer() {
+        let mut fullscreen_below = client(1);
+        fullscreen_below.fullscreen = true;
+        fullscreen_below.below = true;
+        let mut above = client(2);
+        above.above = true;
+
+        assert_eq!(raw(plan_stacking([above, fullscreen_below])), [1, 2]);
+    }
+
     #[test]
     fn restack_markers_stay_below_the_default_log_level() {
         // `restack` runs on every arrange, every focus change and every

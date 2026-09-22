@@ -110,6 +110,84 @@ fn apply_external_minimized_request(
     Ok(())
 }
 
+fn publish_stacking_flags(
+    backend: &dyn Backend,
+    win: WindowId,
+    above: bool,
+    below: bool,
+) -> Result<(), BackendError> {
+    // Clear the opposing atom before enabling a layer so clients never
+    // observe an accepted Above+Below combination during the transition.
+    let updates = if above {
+        [(NetWmState::Below, below), (NetWmState::Above, above)]
+    } else {
+        [(NetWmState::Above, above), (NetWmState::Below, below)]
+    };
+    for (flag, on) in updates {
+        backend
+            .property_ops()
+            .set_net_wm_state_flag(win, flag, on)?;
+    }
+    Ok(())
+}
+
+fn apply_external_stacking_request(
+    wm: &mut Jwm,
+    backend: &mut dyn Backend,
+    client_key: ClientKey,
+    action: NetWmAction,
+    flag: NetWmState,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(client) = wm.state.clients.get(client_key) else {
+        return Ok(());
+    };
+    let (win, monitor) = (client.win, client.mon);
+    let previous = (client.state.is_above, client.state.is_below);
+    let current = if flag == NetWmState::Above {
+        previous.0
+    } else {
+        previous.1
+    };
+    let on = match action {
+        NetWmAction::Add => true,
+        NetWmAction::Remove => false,
+        NetWmAction::Toggle => !current,
+    };
+    let next = if flag == NetWmState::Above {
+        (on, !on && previous.1)
+    } else {
+        (!on && previous.0, on)
+    };
+
+    if let Err(error) = publish_stacking_flags(backend, win, next.0, next.1) {
+        if let Err(rollback) = publish_stacking_flags(backend, win, previous.0, previous.1) {
+            log::warn!("could not restore stacking properties for {win:?}: {rollback}");
+        }
+        return Err(error.into());
+    }
+    if let Some(client) = wm.state.clients.get_mut(client_key) {
+        (client.state.is_above, client.state.is_below) = next;
+    }
+    if let Some(monitor) = monitor {
+        if let Err(error) = wm.restack(backend, Some(monitor)) {
+            if let Some(client) = wm.state.clients.get_mut(client_key) {
+                (client.state.is_above, client.state.is_below) = previous;
+            }
+            if let Err(rollback) = publish_stacking_flags(backend, win, previous.0, previous.1) {
+                log::warn!("could not restore stacking properties for {win:?}: {rollback}");
+            }
+            // A failed backend call may have partially raised the windows;
+            // the old cached order is no longer evidence of physical order.
+            wm.last_stacking.remove(monitor);
+            if let Err(rollback) = wm.restack(backend, Some(monitor)) {
+                log::warn!("could not restore stacking order for {win:?}: {rollback}");
+            }
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
 fn requested_attention_state(action: NetWmAction, currently_requested: bool) -> bool {
     match action {
         NetWmAction::Add => true,
@@ -1419,50 +1497,11 @@ impl WMController for Jwm {
                         self.refresh_tags_overview();
                     }
                 }
-                NetWmState::Above => {
-                    if let Some(c) = self.state.clients.get_mut(ck) {
-                        let on = match action {
-                            NetWmAction::Add => true,
-                            NetWmAction::Remove => false,
-                            NetWmAction::Toggle => !c.state.is_above,
-                        };
-                        c.state.is_above = on;
-                        if on {
-                            c.state.is_below = false;
-                            let _ = backend.property_ops().set_net_wm_state_flag(
-                                win,
-                                NetWmState::Below,
-                                false,
-                            );
-                        }
-                        let _ = backend.property_ops().set_net_wm_state_flag(
-                            win,
-                            NetWmState::Above,
-                            on,
-                        );
-                    }
-                }
-                NetWmState::Below => {
-                    if let Some(c) = self.state.clients.get_mut(ck) {
-                        let on = match action {
-                            NetWmAction::Add => true,
-                            NetWmAction::Remove => false,
-                            NetWmAction::Toggle => !c.state.is_below,
-                        };
-                        c.state.is_below = on;
-                        if on {
-                            c.state.is_above = false;
-                            let _ = backend.property_ops().set_net_wm_state_flag(
-                                win,
-                                NetWmState::Above,
-                                false,
-                            );
-                        }
-                        let _ = backend.property_ops().set_net_wm_state_flag(
-                            win,
-                            NetWmState::Below,
-                            on,
-                        );
+                NetWmState::Above | NetWmState::Below => {
+                    if let Err(error) =
+                        apply_external_stacking_request(self, backend, ck, action, state)
+                    {
+                        error!("Could not apply stacking state for {win:?}: {error}");
                     }
                 }
                 NetWmState::Sticky => {
@@ -1702,6 +1741,8 @@ mod tests {
         ewmh_hidden: AtomicBool,
         fullscreen: AtomicBool,
         wm_state: AtomicI64,
+        stacking_flags: Mutex<HashMap<WindowId, (bool, bool)>>,
+        fail_next_above_write: AtomicBool,
     }
 
     impl MapRestorePropertyOps {
@@ -1710,6 +1751,8 @@ mod tests {
                 ewmh_hidden: AtomicBool::new(false),
                 fullscreen: AtomicBool::new(false),
                 wm_state: AtomicI64::new(i64::from(crate::jwm::types::NORMAL_STATE)),
+                stacking_flags: Mutex::new(HashMap::new()),
+                fail_next_above_write: AtomicBool::new(false),
             }
         }
     }
@@ -1790,12 +1833,27 @@ mod tests {
 
         fn set_net_wm_state_flag(
             &self,
-            _win: WindowId,
+            win: WindowId,
             state: NetWmState,
             on: bool,
         ) -> Result<(), BackendError> {
             if state == NetWmState::Hidden {
                 self.ewmh_hidden.store(on, AtomicOrdering::Relaxed);
+            } else if matches!(state, NetWmState::Above | NetWmState::Below) {
+                if state == NetWmState::Above
+                    && self
+                        .fail_next_above_write
+                        .swap(false, AtomicOrdering::Relaxed)
+                {
+                    return Err(BackendError::Message("injected Above write failure".into()));
+                }
+                let mut flags = self.stacking_flags.lock().unwrap();
+                let flags = flags.entry(win).or_default();
+                if state == NetWmState::Above {
+                    flags.0 = on;
+                } else {
+                    flags.1 = on;
+                }
             }
             Ok(())
         }
@@ -1816,6 +1874,8 @@ mod tests {
         fail_configure: AtomicBool,
         fail_decoration_once: AtomicBool,
         compositor_disable_trace: Mutex<Vec<&'static str>>,
+        restacks: Mutex<Vec<Vec<WindowId>>>,
+        fail_next_restack: AtomicBool,
     }
 
     impl MapRestoreWindowOps {
@@ -1833,6 +1893,8 @@ mod tests {
                 fail_configure: AtomicBool::new(false),
                 fail_decoration_once: AtomicBool::new(false),
                 compositor_disable_trace: Mutex::new(Vec::new()),
+                restacks: Mutex::new(Vec::new()),
+                fail_next_restack: AtomicBool::new(false),
             }
         }
     }
@@ -1891,6 +1953,14 @@ mod tests {
         }
 
         fn raise_window(&self, _win: WindowId) -> Result<(), BackendError> {
+            Ok(())
+        }
+
+        fn restack_windows(&self, windows: &[WindowId]) -> Result<(), BackendError> {
+            self.restacks.lock().unwrap().push(windows.to_vec());
+            if self.fail_next_restack.swap(false, AtomicOrdering::Relaxed) {
+                return Err(BackendError::Message("injected restack failure".into()));
+            }
             Ok(())
         }
 
@@ -7339,6 +7409,164 @@ mod tests {
         assert!(!requested_hidden_state(NetWmAction::Remove, false));
         assert!(requested_hidden_state(NetWmAction::Toggle, false));
         assert!(!requested_hidden_state(NetWmAction::Toggle, true));
+    }
+
+    fn jwm_with_stacking_target() -> (Jwm, ClientKey, WindowId, WindowId) {
+        use crate::core::models::WMClient;
+
+        let mut jwm = jwm_with_monitor();
+        let monitor = jwm.state.monitor_order[0];
+        let target = WindowId::from_raw(0x5151);
+        let selected = WindowId::from_raw(0x5252);
+        let mut keys = Vec::new();
+        for window in [target, selected] {
+            let mut client = WMClient::new(window);
+            client.mon = Some(monitor);
+            client.state.tags = 1;
+            let key = jwm.insert_client(client);
+            jwm.attach_to_monitor(key, monitor);
+            jwm.state
+                .monitor_stack
+                .entry(monitor)
+                .expect("monitor stack entry")
+                .or_default()
+                .push(key);
+            keys.push(key);
+        }
+        jwm.state.monitors[monitor].tag_set[0] = 1;
+        jwm.state.monitors[monitor].set_selected_client_for_current_tag(Some(keys[1]));
+        (jwm, keys[0], target, selected)
+    }
+
+    #[test]
+    fn stacking_requests_restack_immediately_and_keep_above_below_exclusive() {
+        let (mut jwm, key, target, selected) = jwm_with_stacking_target();
+        let mut backend = RenderSpyBackend::new();
+        let monitor = jwm.state.clients[key].mon.unwrap();
+        jwm.restack(&mut backend, Some(monitor)).unwrap();
+        assert_eq!(jwm.last_stacking[monitor], [target, selected]);
+
+        for (action, flag, expected, order) in [
+            (
+                NetWmAction::Add,
+                NetWmState::Above,
+                (true, false),
+                [selected, target],
+            ),
+            (
+                NetWmAction::Add,
+                NetWmState::Below,
+                (false, true),
+                [target, selected],
+            ),
+            (
+                NetWmAction::Toggle,
+                NetWmState::Below,
+                (false, false),
+                [target, selected],
+            ),
+        ] {
+            jwm.handle_event(
+                &mut backend,
+                BackendEvent::WindowStateRequest {
+                    window: target,
+                    action,
+                    state: flag,
+                },
+            )
+            .unwrap();
+            let client = &jwm.state.clients[key];
+            assert_eq!((client.state.is_above, client.state.is_below), expected);
+            assert_eq!(
+                backend.property_ops.stacking_flags.lock().unwrap()[&target],
+                expected
+            );
+            assert_eq!(jwm.last_stacking[monitor], order);
+            assert_eq!(
+                backend.window_ops.restacks.lock().unwrap().last().unwrap(),
+                &order
+            );
+        }
+        let calls = backend.window_ops.restacks.lock().unwrap().len();
+        jwm.on_window_state_request(&mut backend, target, NetWmAction::Remove, NetWmState::Below);
+        assert_eq!(backend.window_ops.restacks.lock().unwrap().len(), calls);
+    }
+
+    #[test]
+    fn failed_stacking_property_write_restores_the_previous_atoms_and_state() {
+        let (mut jwm, key, target, _) = jwm_with_stacking_target();
+        let mut backend = RenderSpyBackend::new();
+        jwm.state.clients[key].state.is_below = true;
+        backend
+            .property_ops
+            .stacking_flags
+            .lock()
+            .unwrap()
+            .insert(target, (false, true));
+        backend
+            .property_ops
+            .fail_next_above_write
+            .store(true, AtomicOrdering::Relaxed);
+
+        assert!(
+            apply_external_stacking_request(
+                &mut jwm,
+                &mut backend,
+                key,
+                NetWmAction::Add,
+                NetWmState::Above,
+            )
+            .is_err()
+        );
+        let client = &jwm.state.clients[key];
+        assert_eq!(
+            (client.state.is_above, client.state.is_below),
+            (false, true)
+        );
+        assert_eq!(
+            backend.property_ops.stacking_flags.lock().unwrap()[&target],
+            (false, true)
+        );
+        assert!(backend.window_ops.restacks.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn failed_stacking_order_restores_properties_state_and_physical_order() {
+        let (mut jwm, key, target, selected) = jwm_with_stacking_target();
+        let mut backend = RenderSpyBackend::new();
+        let monitor = jwm.state.clients[key].mon.unwrap();
+        jwm.restack(&mut backend, Some(monitor)).unwrap();
+        backend.window_ops.restacks.lock().unwrap().clear();
+        backend
+            .window_ops
+            .fail_next_restack
+            .store(true, AtomicOrdering::Relaxed);
+
+        assert!(
+            apply_external_stacking_request(
+                &mut jwm,
+                &mut backend,
+                key,
+                NetWmAction::Add,
+                NetWmState::Above,
+            )
+            .is_err()
+        );
+        let client = &jwm.state.clients[key];
+        assert_eq!(
+            (client.state.is_above, client.state.is_below),
+            (false, false)
+        );
+        assert_eq!(
+            backend.property_ops.stacking_flags.lock().unwrap()[&target],
+            (false, false)
+        );
+        assert_eq!(jwm.last_stacking[monitor], [target, selected]);
+        assert_eq!(
+            *backend.window_ops.restacks.lock().unwrap(),
+            vec![vec![selected, target], vec![target, selected]],
+            "a failed partial restack must not suppress the repair using the old cache"
+        );
     }
 
     #[test]

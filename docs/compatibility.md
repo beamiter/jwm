@@ -28,6 +28,11 @@ can reveal another tag or restore a minimized window, and xdg activation keeps
 the existing ten-second token freshness check. Maximize requests and XWayland
 Above/Below requests still need complete policy and protocol write-back support.
 
+Managed-client Above/Below is handled consistently for XWayland and native X11
+policy: conflicting flags resolve to Above, property writes are echoed back,
+and the managed stack uses `Below < Normal < Above < focused fullscreen < PiP`.
+Layer-shell background/top/overlay surfaces remain compositor-owned layers.
+
 The binary-bundle design currently targets **x86_64 Linux built on Ubuntu
 22.04**. The host must provide compatible graphics, input, seat, audio, D-Bus,
 and font libraries. Other distributions/architectures should build the tagged

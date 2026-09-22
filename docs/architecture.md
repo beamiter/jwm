@@ -111,6 +111,11 @@ tools/jwm_remote.rs         separate trusted-LAN X11 helper
   native X11. Protocol callbacks do not pre-confirm fullscreen or keyboard
   focus: the policy owns monitor placement, saved geometry, minimized-window
   restoration and tag visibility before the backend publishes accepted state.
+- Managed-client stacking follows `Below < Normal < Above < focused fullscreen <
+  PiP`; selection promotion stays inside its current layer, and hidden selected
+  clients are never reintroduced into the stack. Above/Below requests are
+  mutually exclusive, adopt existing EWMH flags on manage, and roll back both
+  protocol properties and the cached order when a property or restack fails.
 - Versioned runtime health and capability snapshots expose the actual selected
   backend and supported control surface without changing legacy IPC envelopes.
 - Session snapshots use an atomic private state store, validate schema and

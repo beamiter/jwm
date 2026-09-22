@@ -94,9 +94,30 @@ impl Jwm {
         let initial_ewmh_hidden = backend
             .property_ops()
             .has_net_wm_state_flag(win, NetWmState::Hidden)?;
+        let initial_ewmh_above = backend
+            .property_ops()
+            .has_net_wm_state_flag(win, NetWmState::Above)?;
+        let initial_ewmh_below = backend
+            .property_ops()
+            .has_net_wm_state_flag(win, NetWmState::Below)?;
         let publicly_minimized =
             wm_state_or_ewmh_is_minimized(initial_wm_state, initial_ewmh_hidden);
         client.state.is_hidden = publicly_minimized;
+        // Adopt pre-map EWMH stacking requests before the client enters the
+        // shared stack. Above wins an invalid double state, and the public
+        // property is normalized best-effort without making the window
+        // unmanageable when that cleanup fails.
+        client.state.is_above = initial_ewmh_above;
+        client.state.is_below = initial_ewmh_below && !initial_ewmh_above;
+        if initial_ewmh_above
+            && initial_ewmh_below
+            && let Err(error) =
+                backend
+                    .property_ops()
+                    .set_net_wm_state_flag(win, NetWmState::Below, false)
+        {
+            warn!("[manage] could not clear conflicting EWMH Below state for {win:?}: {error}");
+        }
         let desktop_left = self.desktop_left_edge();
         let server_geometry_fully_left = x11_geometry_fully_left_of_desktop(*geom, desktop_left);
         let restore_candidate = if publicly_minimized || server_geometry_fully_left {
@@ -2122,6 +2143,8 @@ mod unmanage_minimized_tests {
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     enum ProtocolWrite {
         Hidden(bool),
+        Above(bool),
+        Below(bool),
         WmState(i64),
     }
 
@@ -2147,6 +2170,8 @@ mod unmanage_minimized_tests {
     #[derive(Default)]
     struct ClientPropertyOps {
         hidden: AtomicBool,
+        above: AtomicBool,
+        below: AtomicBool,
         wm_state: AtomicI64,
         dock_type: AtomicBool,
         fullscreen: AtomicBool,
@@ -2343,6 +2368,18 @@ mod unmanage_minimized_tests {
                     .lock()
                     .expect("protocol writes lock")
                     .push(ProtocolWrite::Hidden(on));
+            } else if state == NetWmState::Above {
+                self.above.store(on, Ordering::Relaxed);
+                self.writes
+                    .lock()
+                    .expect("protocol writes lock")
+                    .push(ProtocolWrite::Above(on));
+            } else if state == NetWmState::Below {
+                self.below.store(on, Ordering::Relaxed);
+                self.writes
+                    .lock()
+                    .expect("protocol writes lock")
+                    .push(ProtocolWrite::Below(on));
             }
             Ok(())
         }
@@ -2359,7 +2396,12 @@ mod unmanage_minimized_tests {
                     "injected EWMH Hidden read failure".into(),
                 ));
             }
-            Ok(state == NetWmState::Hidden && self.hidden.load(Ordering::Relaxed))
+            Ok(match state {
+                NetWmState::Hidden => self.hidden.load(Ordering::Relaxed),
+                NetWmState::Above => self.above.load(Ordering::Relaxed),
+                NetWmState::Below => self.below.load(Ordering::Relaxed),
+                _ => false,
+            })
         }
 
         fn get_window_pid(&self, _win: WindowId) -> Option<u32> {
@@ -5270,6 +5312,70 @@ mod unmanage_minimized_tests {
         )
         .unwrap();
         jwm.wintoclient(window).expect("window managed")
+    }
+
+    fn manage_with_initial_stacking(
+        raw: u64,
+        above: bool,
+        below: bool,
+    ) -> (
+        (i32, i32, i32, i32, i32),
+        bool,
+        bool,
+        bool,
+        bool,
+        bool,
+        Vec<ProtocolWrite>,
+    ) {
+        let mut backend = ClientSpyBackend::new();
+        backend.property_ops.above.store(above, Ordering::Relaxed);
+        backend.property_ops.below.store(below, Ordering::Relaxed);
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let key = manage_window(&mut jwm, &mut backend, raw);
+        let client = &jwm.state.clients[key];
+        let writes = backend
+            .property_ops
+            .writes
+            .lock()
+            .expect("protocol writes lock")
+            .clone();
+        (
+            (
+                client.geometry.x,
+                client.geometry.y,
+                client.geometry.w,
+                client.geometry.h,
+                client.geometry.border_w,
+            ),
+            client.state.is_floating,
+            client.state.is_hidden,
+            client.state.is_above,
+            client.state.is_below,
+            backend.property_ops.below.load(Ordering::Relaxed),
+            writes,
+        )
+    }
+
+    #[test]
+    fn manage_adopts_initial_above_and_below_without_changing_window_state() {
+        let baseline = manage_with_initial_stacking(0x9700, false, false);
+        let above = manage_with_initial_stacking(0x9701, true, false);
+        let below = manage_with_initial_stacking(0x9702, false, true);
+        let both = manage_with_initial_stacking(0x9703, true, true);
+
+        for adopted in [&above, &below, &both] {
+            assert_eq!(adopted.0, baseline.0, "stacking adoption changed geometry");
+            assert_eq!(adopted.1, baseline.1, "stacking adoption changed floating");
+            assert_eq!(adopted.2, baseline.2, "stacking adoption changed hidden");
+        }
+        assert_eq!((above.3, above.4), (true, false));
+        assert_eq!((below.3, below.4), (false, true));
+        assert_eq!((both.3, both.4), (true, false));
+        assert!(!both.5, "conflicting public Below atom was not cleared");
+        assert!(
+            both.6.contains(&ProtocolWrite::Below(false)),
+            "conflicting Above+Below was not normalized on the client"
+        );
     }
 
     fn active_tags(jwm: &Jwm, monitor: MonitorKey) -> u32 {

@@ -3,15 +3,44 @@ use crate::backend::api::{BackendEvent, Geometry, NetWmAction, NetWmState, Windo
 use crate::backend::common_define::WindowId;
 use smithay::reexports::calloop::{EventLoop, channel};
 use smithay::reexports::wayland_server::Display;
+use smithay::reexports::x11rb::connection::Connection;
+use smithay::reexports::x11rb::protocol::xproto::{
+    Atom, AtomEnum, ClientMessageData, ClientMessageEvent, ConnectionExt, CreateWindowAux,
+    EventMask, WindowClass,
+};
+use smithay::reexports::x11rb::rust_connection::RustConnection;
 use smithay::wayland::xdg_activation::{
     XdgActivationHandler, XdgActivationToken, XdgActivationTokenData,
 };
+use smithay::xwayland::X11Wm;
 use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
+
+fn intern(conn: &RustConnection, name: &[u8]) -> Atom {
+    conn.intern_atom(false, name)
+        .expect("intern atom request")
+        .reply()
+        .expect("intern atom reply")
+        .atom
+}
+
+fn pump_xwm(
+    event_loop: &mut EventLoop<'static, JwmWaylandState>,
+    state: &mut JwmWaylandState,
+    until: impl Fn(&JwmWaylandState) -> bool,
+) {
+    let deadline = Instant::now() + std::time::Duration::from_secs(3);
+    while !until(state) && Instant::now() < deadline {
+        event_loop
+            .dispatch(std::time::Duration::from_millis(10), state)
+            .expect("dispatch XWM events");
+    }
+    assert!(until(state), "timed out waiting for XWM state");
+}
 
 fn headless_state() -> (JwmWaylandState, Arc<Mutex<VecDeque<BackendEvent>>>) {
     let event_loop: EventLoop<'static, JwmWaylandState> =
@@ -297,6 +326,173 @@ fn xdg_toplevel_wire_requests_reach_shared_window_policy() {
         event_count,
         "an expired token must not request activation"
     );
+}
+
+#[test]
+fn xwm_above_below_requests_write_real_properties_and_raise_real_windows() {
+    let xvfb = crate::backend::clipboard_offer::IsolatedXvfb::acquire();
+    let display_number = xvfb.name().trim_start_matches(':');
+    let xwm_socket = UnixStream::connect(format!("/tmp/.X11-unix/X{display_number}"))
+        .expect("connect XWM to isolated Xvfb");
+
+    let mut event_loop: EventLoop<'static, JwmWaylandState> =
+        EventLoop::try_new().expect("create XWM test event loop");
+    let display = Display::<JwmWaylandState>::new().expect("create XWM test Wayland display");
+    let mut display_handle = display.handle();
+    let pending_events = Arc::new(Mutex::new(VecDeque::new()));
+    let (flush_tx, _flush_rx) = channel::channel();
+    let (mut state, socket_name) = JwmWaylandState::init(
+        &display_handle,
+        event_loop.handle(),
+        pending_events.clone(),
+        flush_tx,
+        Arc::new(AtomicBool::new(false)),
+        "xwm-test-seat".to_owned(),
+        false,
+        false,
+    )
+    .expect("initialize XWM test state");
+    assert!(socket_name.is_none());
+
+    let (wl_server, _wl_peer) = UnixStream::pair().expect("create dummy Wayland client");
+    let xwayland_client = display_handle
+        .insert_client(wl_server, Arc::new(JwmClientState::default()))
+        .expect("insert dummy XWayland client");
+    state.x11_wm = Some(
+        X11Wm::start_wm(
+            event_loop.handle(),
+            &display_handle,
+            xwm_socket,
+            xwayland_client,
+        )
+        .expect("start XWM on isolated Xvfb"),
+    );
+
+    let (conn, screen_num) =
+        smithay::reexports::x11rb::connect(Some(xvfb.name())).expect("connect X11 test client");
+    let screen = &conn.setup().roots[screen_num];
+    let root = screen.root;
+    let net_wm_state = intern(&conn, b"_NET_WM_STATE");
+    let above = intern(&conn, b"_NET_WM_STATE_ABOVE");
+    let below = intern(&conn, b"_NET_WM_STATE_BELOW");
+
+    let first = conn.generate_id().expect("allocate first window");
+    let second = conn.generate_id().expect("allocate second window");
+    for (window, x) in [(first, 10), (second, 80)] {
+        conn.create_window(
+            screen.root_depth,
+            window,
+            root,
+            x,
+            10,
+            60,
+            40,
+            0,
+            WindowClass::INPUT_OUTPUT,
+            0,
+            &CreateWindowAux::new().event_mask(EventMask::PROPERTY_CHANGE),
+        )
+        .expect("create X11 test window");
+        conn.map_window(window).expect("map X11 test window");
+    }
+    conn.flush().expect("flush X11 window creation");
+    pump_xwm(&mut event_loop, &mut state, |state| {
+        state.x11_surface_to_window.contains_key(&first)
+            && state.x11_surface_to_window.contains_key(&second)
+    });
+    let first_win = state.x11_surface_to_window[&first];
+    let second_win = state.x11_surface_to_window[&second];
+    pending_events.lock().expect("pending event lock").clear();
+
+    for (action, atom, expected_action, expected_state) in [
+        (1, above, NetWmAction::Add, NetWmState::Above),
+        (0, above, NetWmAction::Remove, NetWmState::Above),
+        (1, below, NetWmAction::Add, NetWmState::Below),
+        (0, below, NetWmAction::Remove, NetWmState::Below),
+    ] {
+        let event = ClientMessageEvent::new(
+            32,
+            first,
+            net_wm_state,
+            ClientMessageData::from([action, atom, 0, 1, 0]),
+        );
+        conn.send_event(
+            false,
+            root,
+            EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY,
+            event,
+        )
+        .expect("send _NET_WM_STATE request");
+        conn.flush().expect("flush _NET_WM_STATE request");
+        pump_xwm(&mut event_loop, &mut state, |_| {
+            !pending_events
+                .lock()
+                .expect("pending event lock")
+                .is_empty()
+        });
+        let actual = pending_events
+            .lock()
+            .expect("pending event lock")
+            .pop_front()
+            .expect("state request event");
+        assert!(matches!(
+            actual,
+            BackendEvent::WindowStateRequest { window, action, state: flag }
+                if window == first_win && action == expected_action && flag == expected_state
+        ));
+    }
+
+    for (flag, atom) in [(NetWmState::Above, above), (NetWmState::Below, below)] {
+        state
+            .set_x11_net_state(first_win, flag, true)
+            .expect("write X11 state property");
+        conn.flush().expect("flush X11 property read connection");
+        assert!(state.has_x11_net_state(first_win, flag));
+        let atoms = conn
+            .get_property(false, first, net_wm_state, AtomEnum::ATOM, 0, u32::MAX)
+            .expect("query _NET_WM_STATE")
+            .reply()
+            .expect("read _NET_WM_STATE")
+            .value32()
+            .expect("32-bit state atoms")
+            .collect::<Vec<_>>();
+        assert!(atoms.contains(&atom));
+
+        state
+            .set_x11_net_state(first_win, flag, false)
+            .expect("remove X11 state property");
+        assert!(!state.has_x11_net_state(first_win, flag));
+    }
+
+    let first_frame = state.x11_surfaces[&first_win]
+        .mapped_window_id()
+        .unwrap_or(first);
+    let second_frame = state.x11_surfaces[&second_win]
+        .mapped_window_id()
+        .unwrap_or(second);
+    state
+        .raise_window(first_win)
+        .expect("raise first X11 window");
+    conn.flush().expect("flush before querying X11 stack");
+    let children = conn
+        .query_tree(root)
+        .expect("query root tree")
+        .reply()
+        .expect("read root tree")
+        .children;
+    let first_pos = children
+        .iter()
+        .position(|window| *window == first_frame)
+        .expect("first frame in root tree");
+    let second_pos = children
+        .iter()
+        .position(|window| *window == second_frame)
+        .expect("second frame in root tree");
+    assert!(
+        first_pos > second_pos,
+        "raised window must be above its peer"
+    );
+    assert_eq!(state.window_stack.last(), Some(&first_win));
 }
 
 #[test]

@@ -796,15 +796,7 @@ impl WindowOps for WaylandWindowOps {
     }
 
     fn raise_window(&self, _win: WindowId) -> Result<(), BackendError> {
-        unsafe {
-            self.with_state_mut(|state| {
-                if let Some(pos) = state.window_stack.iter().position(|w| *w == _win) {
-                    state.window_stack.remove(pos);
-                    state.window_stack.push(_win);
-                }
-                state.needs_redraw = true;
-            });
-        }
+        unsafe { self.with_state_mut(|state| state.raise_window(_win))? };
         self.request_flush();
         Ok(())
     }
@@ -1024,15 +1016,10 @@ impl PropertyOps for WaylandPropertyOps {
         on: bool,
     ) -> Result<(), BackendError> {
         unsafe {
+            self.with_state_mut(|wayland_state| wayland_state.set_x11_net_state(win, state, on))?
+        };
+        unsafe {
             self.with_state_mut(|wayland_state| {
-                // Keep XWayland Motif/ICCCM Hidden in sync so minimize and
-                // Iconic adoption write the same atoms smithay's MapRequest
-                // path already seeds for `WmHintsState::Iconic`.
-                if state == NetWmState::Hidden
-                    && let Some(x11) = wayland_state.x11_surfaces.get(&win)
-                {
-                    let _ = x11.set_hidden(on);
-                }
                 wayland_state.update_foreign_toplevel_net_state(win, state, on);
             });
         }
@@ -1137,20 +1124,7 @@ impl PropertyOps for WaylandPropertyOps {
     }
 
     fn has_net_wm_state_flag(&self, win: WindowId, flag: NetWmState) -> Result<bool, BackendError> {
-        unsafe {
-            self.with_state_mut(|state| {
-                let Some(x11) = state.x11_surfaces.get(&win) else {
-                    return Ok(false);
-                };
-                Ok(match flag {
-                    NetWmState::Hidden => x11.is_hidden(),
-                    NetWmState::Fullscreen => x11.is_fullscreen(),
-                    NetWmState::Above => x11.is_above(),
-                    NetWmState::Below => x11.is_below(),
-                    _ => false,
-                })
-            })
-        }
+        Ok(unsafe { self.with_state_mut(|state| state.has_x11_net_state(win, flag)) })
     }
 
     fn set_wm_state(&self, win: WindowId, state: i64) -> Result<(), BackendError> {

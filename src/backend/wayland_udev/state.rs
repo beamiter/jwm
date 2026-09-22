@@ -2,6 +2,7 @@ use crate::backend::api::{
     BackendEvent, Geometry, LayerSurfaceInfo, NetWmAction, NetWmState, PropertyKind, WindowType,
 };
 use crate::backend::common_define::WindowId;
+use crate::backend::error::BackendError;
 use crate::sync_ext::MutexExt;
 
 use std::collections::{HashMap, HashSet};
@@ -653,6 +654,52 @@ impl JwmWaylandState {
         if let Some(window) = self.x11_surface_to_window.get(&x11_id).copied() {
             self.request_window_activation(window);
         }
+    }
+
+    pub(crate) fn set_x11_net_state(
+        &mut self,
+        win: WindowId,
+        flag: NetWmState,
+        on: bool,
+    ) -> Result<(), BackendError> {
+        let Some(surface) = self.x11_surfaces.get(&win) else {
+            return Ok(());
+        };
+        let result = match flag {
+            NetWmState::Hidden => surface.set_hidden(on),
+            NetWmState::Above => surface.set_above(on),
+            NetWmState::Below => surface.set_below(on),
+            _ => return Ok(()),
+        };
+        result.map_err(|error| BackendError::Other(Box::new(error)))
+    }
+
+    pub(crate) fn has_x11_net_state(&self, win: WindowId, flag: NetWmState) -> bool {
+        self.x11_surfaces
+            .get(&win)
+            .is_some_and(|surface| match flag {
+                NetWmState::Hidden => surface.is_hidden(),
+                NetWmState::Fullscreen => surface.is_fullscreen(),
+                NetWmState::Above => surface.is_above(),
+                NetWmState::Below => surface.is_below(),
+                _ => false,
+            })
+    }
+
+    pub(crate) fn raise_window(&mut self, win: WindowId) -> Result<(), BackendError> {
+        if let Some(surface) = self.x11_surfaces.get(&win).cloned() {
+            let xwm = self.x11_wm.as_mut().ok_or_else(|| {
+                BackendError::Message("XWayland surface has no active X11 window manager".into())
+            })?;
+            xwm.raise_window(&surface)
+                .map_err(|error| BackendError::Other(Box::new(error)))?;
+        }
+        if let Some(pos) = self.window_stack.iter().position(|window| *window == win) {
+            self.window_stack.remove(pos);
+            self.window_stack.push(win);
+        }
+        self.needs_redraw = true;
+        Ok(())
     }
 
     /// Return the latest commit generation observed for a window's surface
@@ -1665,6 +1712,22 @@ impl XwmHandler for JwmWaylandState {
         _currently_active_window: Option<X11Surface>,
     ) {
         self.request_x11_activation(window.window_id());
+    }
+
+    fn above_request(&mut self, _xwm: XwmId, window: X11Surface) {
+        self.request_x11_state(window.window_id(), NetWmState::Above, true);
+    }
+
+    fn unabove_request(&mut self, _xwm: XwmId, window: X11Surface) {
+        self.request_x11_state(window.window_id(), NetWmState::Above, false);
+    }
+
+    fn below_request(&mut self, _xwm: XwmId, window: X11Surface) {
+        self.request_x11_state(window.window_id(), NetWmState::Below, true);
+    }
+
+    fn unbelow_request(&mut self, _xwm: XwmId, window: X11Surface) {
+        self.request_x11_state(window.window_id(), NetWmState::Below, false);
     }
 
     fn allow_selection_access(&mut self, _xwm: XwmId, _selection: SelectionTarget) -> bool {

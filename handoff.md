@@ -4,6 +4,21 @@
 
 ---
 
+## 2026-09-22（三）：Above/Below 协议闭环与 managed stacking 分层
+
+选题 = 用户「继续」。在 `110c6d6` 之后闭合置顶/置底状态链路。
+
+1. **堆叠规划**：managed clients 使用 `Below < Normal < Above < focused fullscreen < PiP` 五层；层内保留 tiled/floating 和选中提升；不可见或隐藏的 selected 不会重新进入栈；非法 Above+Below 防御性按 Above 优先。
+2. **共享策略**：Above/Below 请求现在写回互斥 EWMH 状态、立即 restack；属性写失败或 restack 失败会恢复旧 flags、属性和物理顺序缓存。
+3. **Wayland/XWayland**：XWayland Above/Below callbacks 接入 shared events；udev/winit/x11 nested backend 统一读写真实 X11 state、同步 raise 到 Smithay X11Wm 和 compositor stack；manage 初始状态采纳 Above/Below，冲突时尽力清 Below。
+4. **验证**：新增 stacking planner 五组行为测试、dispatcher 互斥与两类失败回滚测试、真实 Wayland/XWayland lifecycle 回归，以及初始 EWMH adoption 测试。
+
+**验证**：all-targets check、Clippy `-D warnings`、stacking 9 tests、Wayland lifecycle 1 test、初始 adoption 1 test、架构/条目/支持包集成 13 tests 均通过。完整测试本轮未能再次在沙箱外启动：自动审批额度已耗尽；上一轮同环境完整套件为 3,569/0。未做真机 DRM/KMS 验证。
+
+**仍然开着的**：maximize 仍需独立的几何恢复事务和 xdg/XWayland configure 写回；desktop/dock/override-redirect 系统层级继续由各自 compositor 路径管理。
+
+---
+
 ## 2026-09-22（二）：Wayland 请求接入共享策略、IPC 出站缓冲优化
 
 选题 = 用户「commit 就行，不 push，并继续下一轮」。上一轮已本地提交 `aae6a2e`，未推送。
