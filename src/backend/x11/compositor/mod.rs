@@ -1106,26 +1106,8 @@ where
     pbo_uploader: PBOUploader,
 
     // --- P6A: Async X11 communication ---
-    /// Priority-aware event queue (separates event processing from rendering)
-    #[allow(dead_code)]
-    priority_event_queue: PriorityEventQueue,
     /// Deferred X11 operations (NameWindowPixmap, etc.)
     deferred_ops_queue: DeferredOpQueue,
-
-    // --- P7A: Predictive rendering ---
-    /// Predictive render manager for adaptive FPS and power saving
-    #[allow(dead_code)]
-    predictive_render_mgr: PredictiveRenderManager,
-
-    // --- P7C: Smart cache warmup ---
-    /// Cache warmup manager for predictive pre-loading
-    #[allow(dead_code)]
-    cache_warmup_mgr: CacheWarmupManager,
-
-    // --- P7B: Subpixel rendering optimization ---
-    /// Subpixel rendering manager for improved text quality
-    #[allow(dead_code)]
-    subpixel_render_mgr: SubpixelRenderManager,
 
     // --- Phase 2 Optimizations ---
     /// Direct scanout manager for fullscreen bypass

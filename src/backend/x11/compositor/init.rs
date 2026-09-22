@@ -1416,13 +1416,7 @@ impl<C: CompositorConnection> Compositor<C> {
             // P6C: PBO uploader (4MB PBOs, pool of 4)
             pbo_uploader: PBOUploader::new(4 * 1024 * 1024, 4),
             // P6A: Async X11 communication
-            priority_event_queue: PriorityEventQueue::new(),
             deferred_ops_queue: DeferredOpQueue::new(256),
-            // P7A: Predictive rendering
-            predictive_render_mgr: PredictiveRenderManager::new(),
-            // P7C: Smart cache warmup
-            cache_warmup_mgr: CacheWarmupManager::new(),
-            subpixel_render_mgr: SubpixelRenderManager::new(),
 
             // Phase 2 Optimizations
             direct_scanout_mgr: {

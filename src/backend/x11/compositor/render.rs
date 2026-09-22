@@ -1161,6 +1161,12 @@ impl<C: CompositorConnection> Compositor<C> {
         let (_, _, frame_time_p95_ms, frame_time_p99_ms) =
             super::latency::latency_stats(frame_times_vec.iter().copied());
 
+        let texture_memory_bytes = self.windows.values().fold(0u64, |acc, window| {
+            let (w, h) = (window.w as u64, window.h as u64);
+            // RGBA8 estimate for live client textures; matches the Wayland metric.
+            acc.saturating_add(w.saturating_mul(h).saturating_mul(4))
+        });
+
         crate::backend::api::CompositorMetrics {
             renderer_api: self.graphics.api_name().to_string(),
             fps: self.frame_stats.fps,
@@ -1173,7 +1179,7 @@ impl<C: CompositorConnection> Compositor<C> {
             gpu_load_percent: self.last_gpu_load,
             cpu_load_percent: 0, // No live CPU sampler on this backend yet
             draw_calls: self.last_draw_calls,
-            texture_memory_bytes: self.frame_stats.texture_memory_bytes,
+            texture_memory_bytes,
             blur_cache_hits: self.frame_stats.blur_cache_hits,
             blur_cache_misses: self.frame_stats.blur_cache_misses,
             blur_cache_hit_rate: blur_hit_rate,
@@ -7442,7 +7448,10 @@ impl<C: CompositorConnection> Compositor<C> {
             rows.stat("Memory", format!("{:.1} MiB RSS", self.sys_stats.rss_mib()));
             rows.stat("CPU", format!("{:.1} %", self.sys_stats.cpu_pct()));
             if self.debug_hud_extended {
-                let tex_mem_kb = self.frame_stats.texture_memory_bytes / 1024;
+                let tex_mem_kb = self.windows.values().fold(0u64, |acc, window| {
+                    let (w, h) = (window.w as u64, window.h as u64);
+                    acc.saturating_add(w.saturating_mul(h).saturating_mul(4))
+                }) / 1024;
                 let blur_hit_rate =
                     if self.frame_stats.blur_cache_hits + self.frame_stats.blur_cache_misses > 0 {
                         100.0 * self.frame_stats.blur_cache_hits as f32
@@ -7513,7 +7522,10 @@ impl<C: CompositorConnection> Compositor<C> {
             // Log stats periodically
             if self.frame_stats.frame_count % 60 == 0 {
                 if self.debug_hud_extended {
-                    let tex_mem_kb = self.frame_stats.texture_memory_bytes / 1024;
+                    let tex_mem_kb = self.windows.values().fold(0u64, |acc, window| {
+                        let (w, h) = (window.w as u64, window.h as u64);
+                        acc.saturating_add(w.saturating_mul(h).saturating_mul(4))
+                    }) / 1024;
                     log::info!(
                         "[HUD] FPS: {:.1}, frame_time: {:.2}ms, windows: {}, draw_calls: {}, tex_mem: {}KB, blur_hits: {}, blur_misses: {}",
                         self.frame_stats.fps,
