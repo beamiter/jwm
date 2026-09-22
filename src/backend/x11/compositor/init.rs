@@ -1402,6 +1402,7 @@ impl<C: CompositorConnection> Compositor<C> {
             last_gpu_load_update: std::time::Instant::now(),
             frame_draw_calls: Cell::new(0),
             last_draw_calls: 0,
+            last_gl_state_changes_avoided: 0,
             // P4: Per-monitor and temporal blur
             blur_strength_by_hz,
             blur_quality_by_monitor,

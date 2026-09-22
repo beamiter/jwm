@@ -2392,6 +2392,7 @@ impl WaylandCompositor {
         let bench_frame_start = self.benchmark.is_running().then(Instant::now);
         self.frame_profiler.begin_frame();
         self.gl_state_tracker.reset();
+        self.gl_state_tracker.reset_stats();
         self.frame_draw_calls.set(0);
 
         // GPU fence sync: poll pending fences, cleanup old ones
@@ -4518,6 +4519,10 @@ impl WaylandCompositor {
         // Mark frame for rate limiter
         self.frame_rate_limiter.mark_frame();
         self.last_draw_calls = self.frame_draw_calls.get();
+        self.last_gl_state_changes_avoided = self
+            .gl_state_tracker
+            .redundant_changes_avoided()
+            .min(u32::MAX as u64) as u32;
 
         true
     }

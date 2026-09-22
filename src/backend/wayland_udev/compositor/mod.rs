@@ -1602,6 +1602,8 @@ pub(crate) struct WaylandCompositor {
     frame_draw_calls: Cell<u32>,
     /// GLES draws from the last completed `render_frame` (what `get_metrics` reports).
     last_draw_calls: u32,
+    /// Redundant GL state changes skipped on the last completed frame.
+    last_gl_state_changes_avoided: u32,
 
     // --- Window tabs config ---
     window_tabs_enabled: bool,
@@ -3083,6 +3085,7 @@ impl WaylandCompositor {
                 last_gpu_load_update: now,
                 frame_draw_calls: Cell::new(0),
                 last_draw_calls: 0,
+                last_gl_state_changes_avoided: 0,
 
                 // Window tabs
                 window_tabs_enabled: false,
@@ -4897,10 +4900,7 @@ impl WaylandCompositor {
             direct_scanout_active: self.direct_scanout_mgr.is_active(),
             direct_scanout_count: ds_stats.scanout_count,
             direct_scanout_bypass_time_ms: ds_stats.bypass_time_ms,
-            gl_state_changes_avoided: self
-                .gl_state_tracker
-                .redundant_changes_avoided()
-                .min(u32::MAX as u64) as u32,
+            gl_state_changes_avoided: self.last_gl_state_changes_avoided,
             profiling_enabled: self.frame_profiler.is_enabled(),
             dirty_region_merge_count: self.dirty_region_tracker.merge_count() as usize,
         }

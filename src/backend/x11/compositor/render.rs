@@ -1211,7 +1211,7 @@ impl<C: CompositorConnection> Compositor<C> {
             direct_scanout_active: self.direct_scanout_mgr.is_active(),
             direct_scanout_count: self.direct_scanout_mgr.stats().scanout_count,
             direct_scanout_bypass_time_ms: self.direct_scanout_mgr.stats().total_bypass_time_ms,
-            gl_state_changes_avoided: self.gl_state_tracker.redundant_changes_avoided(),
+            gl_state_changes_avoided: self.last_gl_state_changes_avoided,
             profiling_enabled: self.frame_profiler.is_enabled(),
             dirty_region_merge_count: self.dirty_region_tracker.merge_count() as usize,
         }
@@ -4917,6 +4917,7 @@ impl<C: CompositorConnection> Compositor<C> {
         // Phase 2: Begin frame profiling
         self.frame_profiler.begin_frame();
         self.frame_draw_calls.set(0);
+        self.gl_state_tracker.reset_stats();
 
         // Consume the newest completed simulation frame before deciding whether
         // fullscreen may bypass the compositor.
@@ -8209,6 +8210,7 @@ impl<C: CompositorConnection> Compositor<C> {
         let frame_time_ms = self.frame_profiler.end_frame();
         self.last_draw_calls = self.frame_draw_calls.get();
         self.frame_stats.draw_calls = self.last_draw_calls;
+        self.last_gl_state_changes_avoided = self.gl_state_tracker.redundant_changes_avoided();
         // Sampling is throttled internally and keeps IPC cpu_load useful with
         // the debug HUD off (same contract as wayland-udev).
         self.sys_stats.maybe_sample();

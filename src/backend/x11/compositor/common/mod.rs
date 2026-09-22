@@ -31,7 +31,6 @@ pub mod predictive_render;
 pub mod present;
 pub mod profiler;
 pub mod render_batcher;
-pub mod render_stats;
 pub mod rules;
 pub mod shader_cache;
 

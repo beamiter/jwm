@@ -76,9 +76,6 @@ pub mod profiler {
 pub mod render_batcher {
     pub use crate::backend::x11::compositor_common::render_batcher::*;
 }
-pub mod render_stats {
-    pub use crate::backend::x11::compositor_common::render_stats::*;
-}
 pub(crate) mod rules_common {
     pub(crate) use crate::backend::x11::compositor_common::rules::*;
 }
@@ -165,7 +162,6 @@ pub use power_saving::{BatteryStatus, PowerProfile, PowerSavingConfig, PowerSavi
 pub use predictive_render::{PredictiveRenderManager, SceneActivity};
 pub use profiler::{FrameProfiler, ProfileZone, ZoneStats};
 pub use render_batcher::{BatchKey, GLStateTracker, QuadInstance, RenderBatcher};
-pub use render_stats::{GLCallStats, PassStats, RenderStats};
 pub(crate) use rules_common::{
     CornerRadiusRule, OpacityRule, ScaleRule, corner_radius_rule_for_class, opacity_rule_for_class,
     parse_corner_radius_rules, parse_opacity_rules, parse_scale_rules, scale_rule_for_class,
@@ -1078,6 +1074,8 @@ where
     frame_draw_calls: Cell<u32>,
     /// GLES draws from the last completed `render_frame` (what `get_metrics` reports).
     last_draw_calls: u32,
+    /// Redundant GL state changes skipped on the last completed frame.
+    last_gl_state_changes_avoided: u32,
 
     // --- P4: Per-monitor and temporal blur optimization ---
     /// Parsed blur strength mapping: Hz -> strength (e.g., 60->2, 144->4)
