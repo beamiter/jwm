@@ -72,6 +72,8 @@ pub struct DirtyRegionTracker {
     min_rect_area: u64,
     /// Phase 3.2: Merge threshold (merge rects closer than this distance)
     merge_distance_threshold: i32,
+    /// Lifetime count of mark_dirty calls that coalesced into an existing region.
+    merge_count: u64,
 }
 
 impl DirtyRegionTracker {
@@ -84,6 +86,7 @@ impl DirtyRegionTracker {
             max_regions: 16,
             min_rect_area: 100,           // 10x10 pixels minimum
             merge_distance_threshold: 50, // Merge rects within 50px of each other
+            merge_count: 0,
         }
     }
 
@@ -102,6 +105,7 @@ impl DirtyRegionTracker {
             max_regions: 16,
             min_rect_area: min_area,
             merge_distance_threshold: merge_distance,
+            merge_count: 0,
         }
     }
 
@@ -149,6 +153,7 @@ impl DirtyRegionTracker {
         if let Some(idx) = merged_idx {
             if let Some(existing) = self.regions.get_mut(idx) {
                 *existing = existing.union(&clamped);
+                self.merge_count = self.merge_count.saturating_add(1);
             }
         } else {
             self.regions.push_back(clamped);
@@ -240,6 +245,7 @@ impl DirtyRegionTracker {
         while let Some(next) = self.regions.pop_front() {
             if current.intersects(&next) {
                 current = current.union(&next);
+                self.merge_count = self.merge_count.saturating_add(1);
             } else {
                 merged.push(current);
                 current = next;
@@ -260,6 +266,11 @@ impl DirtyRegionTracker {
     /// Get number of tracked regions
     pub fn region_count(&self) -> usize {
         self.regions.len()
+    }
+
+    /// Lifetime count of dirty rectangles that coalesced into an existing region.
+    pub fn merge_count(&self) -> u64 {
+        self.merge_count
     }
 
     /// Check if we should just redraw the entire screen

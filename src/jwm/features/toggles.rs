@@ -1361,7 +1361,7 @@ impl Jwm {
                 backend.set_clipboard_text(text)
             }
             crate::jwm::features::ClipboardEntry::Png { bytes, .. } => {
-                self.offer_clipboard_png(backend, bytes.clone())
+                self.offer_clipboard_png(backend, bytes)
             }
         };
         if offered {

@@ -1265,7 +1265,7 @@ impl Jwm {
                     // already landed (X11). Wayland's first offer is here.
                     // Offer before record so a *true* failed land (never
                     // offered) never enters history under a success toast.
-                    let offer_ok = self.offer_clipboard_png(backend, png.clone());
+                    let offer_ok = self.offer_clipboard_png(backend, &png);
                     if screenshot_clipboard_poll_succeeded(offer_ok, offered) {
                         if !offer_ok {
                             // Worker already served the PNG; soft-fail the

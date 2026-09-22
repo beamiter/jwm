@@ -1161,8 +1161,8 @@ impl<C: CompositorConnection> Compositor<C> {
             min_frame_time_ms: min_frame_time,
             frame_time_p95_ms,
             frame_time_p99_ms,
-            gpu_load_percent: 0, // To be updated from perf_metrics
-            cpu_load_percent: 0, // To be updated from perf_metrics
+            gpu_load_percent: self.last_gpu_load,
+            cpu_load_percent: 0, // No live CPU sampler on this backend yet
             draw_calls: self.frame_stats.draw_calls,
             texture_memory_bytes: self.frame_stats.texture_memory_bytes,
             blur_cache_hits: self.frame_stats.blur_cache_hits,
@@ -1198,7 +1198,7 @@ impl<C: CompositorConnection> Compositor<C> {
             direct_scanout_bypass_time_ms: self.direct_scanout_mgr.stats().total_bypass_time_ms,
             gl_state_changes_avoided: self.gl_state_tracker.redundant_changes_avoided(),
             profiling_enabled: self.frame_profiler.is_enabled(),
-            dirty_region_merge_count: self.dirty_region_tracker.region_count(),
+            dirty_region_merge_count: self.dirty_region_tracker.merge_count() as usize,
         }
     }
 

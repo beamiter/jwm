@@ -387,18 +387,21 @@ impl crate::jwm::Jwm {
     /// Preference: X11 `clipboard_image_sender`, then Wayland
     /// [`Backend::set_clipboard_png`](crate::backend::api::Backend::set_clipboard_png),
     /// then `wl-copy` as a last-resort platform helper.
+    ///
+    /// Takes a borrowed slice so history / screenshot callers can keep their
+    /// buffer for `record_clipboard_png` without cloning before the offer.
     pub(crate) fn offer_clipboard_png(
         &self,
         backend: &mut dyn crate::backend::api::Backend,
-        png: Vec<u8>,
+        png: &[u8],
     ) -> bool {
         if let Some(sender) = backend.clipboard_image_sender() {
-            return sender.send_png(png);
+            return sender.send_png(png.to_vec());
         }
-        if backend.set_clipboard_png(&png) {
+        if backend.set_clipboard_png(png) {
             return true;
         }
-        Self::publish_png_bytes_via_wl_copy(&png)
+        Self::publish_png_bytes_via_wl_copy(png)
     }
 
     /// Drop the whole history.
@@ -999,7 +1002,7 @@ mod tests {
         let mut backend = PngOfferBackend::with_set_png();
         let jwm = crate::Jwm::new_with_runtime_backend(&mut backend, "test").expect("test jwm");
         let png = sample_png(8, 8, 2);
-        assert!(jwm.offer_clipboard_png(&mut backend, png.clone()));
+        assert!(jwm.offer_clipboard_png(&mut backend, &png));
         assert_eq!(backend.set_clipboard_png_calls, 1);
         assert_eq!(backend.offered_png.as_deref(), Some(png.as_slice()));
     }
@@ -1011,7 +1014,7 @@ mod tests {
         let mut backend = PngOfferBackend::with_image_sender(sender);
         let jwm = crate::Jwm::new_with_runtime_backend(&mut backend, "test").expect("test jwm");
         let png = sample_png(4, 4, 1);
-        assert!(jwm.offer_clipboard_png(&mut backend, png.clone()));
+        assert!(jwm.offer_clipboard_png(&mut backend, &png));
         assert_eq!(backend.set_clipboard_png_calls, 0);
         match rx.try_recv() {
             Ok(crate::backend::clipboard_offer::ClipboardOffer::Png(got)) => {
@@ -1026,12 +1029,20 @@ mod tests {
         const TOGGLES: &str = include_str!("toggles.rs");
         const IPC: &str = include_str!("../ipc_handler.rs");
         assert!(
-            TOGGLES.contains("self.offer_clipboard_png(backend, bytes.clone())"),
+            TOGGLES.contains("self.offer_clipboard_png(backend, bytes)"),
             "picker activate must re-offer PNG through offer_clipboard_png"
         );
         assert!(
-            IPC.contains("self.offer_clipboard_png(backend, bytes.clone())"),
+            !TOGGLES.contains("self.offer_clipboard_png(backend, bytes.clone())"),
+            "picker activate must not clone PNG bytes before offering"
+        );
+        assert!(
+            IPC.contains("self.offer_clipboard_png(backend, bytes)"),
             "clipboard_copy IPC must re-offer PNG through offer_clipboard_png"
+        );
+        assert!(
+            !IPC.contains("self.offer_clipboard_png(backend, bytes.clone())"),
+            "clipboard_copy IPC must not clone PNG bytes before offering"
         );
         const OFFER: &str = include_str!("clipboard.rs");
         let offer = OFFER
