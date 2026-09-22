@@ -1700,6 +1700,7 @@ mod tests {
 
     struct MapRestorePropertyOps {
         ewmh_hidden: AtomicBool,
+        fullscreen: AtomicBool,
         wm_state: AtomicI64,
     }
 
@@ -1707,6 +1708,7 @@ mod tests {
         fn new() -> Self {
             Self {
                 ewmh_hidden: AtomicBool::new(false),
+                fullscreen: AtomicBool::new(false),
                 wm_state: AtomicI64::new(i64::from(crate::jwm::types::NORMAL_STATE)),
             }
         }
@@ -1726,10 +1728,11 @@ mod tests {
         }
 
         fn is_fullscreen(&self, _win: WindowId) -> bool {
-            false
+            self.fullscreen.load(AtomicOrdering::Relaxed)
         }
 
-        fn set_fullscreen_state(&self, _win: WindowId, _on: bool) -> Result<(), BackendError> {
+        fn set_fullscreen_state(&self, _win: WindowId, on: bool) -> Result<(), BackendError> {
+            self.fullscreen.store(on, AtomicOrdering::Relaxed);
             Ok(())
         }
 
@@ -7336,6 +7339,85 @@ mod tests {
         assert!(!requested_hidden_state(NetWmAction::Remove, false));
         assert!(requested_hidden_state(NetWmAction::Toggle, false));
         assert!(!requested_hidden_state(NetWmAction::Toggle, true));
+    }
+
+    #[test]
+    fn fullscreen_policy_events_resize_and_restore_a_floating_client_once() {
+        use crate::core::models::WMClient;
+
+        let mut jwm = jwm_with_monitor();
+        let mut backend = RenderSpyBackend::new();
+        let monitor = jwm.state.monitor_order[0];
+        let monitor_geometry = &mut jwm.state.monitors[monitor].geometry;
+        monitor_geometry.m_w = 1920;
+        monitor_geometry.m_h = 1080;
+        monitor_geometry.w_w = 1920;
+        monitor_geometry.w_h = 1080;
+
+        let window = WindowId::from_raw(0x4646);
+        let mut client = WMClient::new(window);
+        client.mon = Some(monitor);
+        client.state.tags = 1;
+        client.state.is_floating = true;
+        client.geometry.x = 80;
+        client.geometry.y = 60;
+        client.geometry.w = 640;
+        client.geometry.h = 480;
+        client.geometry.border_w = 3;
+        let key = jwm.insert_client(client);
+        jwm.attach_to_monitor(key, monitor);
+        jwm.state.monitors[monitor].set_selected_client_for_current_tag(Some(key));
+
+        // Duplicate client requests must not overwrite the return geometry
+        // with the monitor-sized rectangle that the first request applied.
+        for action in [NetWmAction::Add, NetWmAction::Add] {
+            jwm.handle_event(
+                &mut backend,
+                BackendEvent::WindowStateRequest {
+                    window,
+                    action,
+                    state: NetWmState::Fullscreen,
+                },
+            )
+            .unwrap();
+            let client = &jwm.state.clients[key];
+            assert!(client.state.is_fullscreen);
+            assert!(backend.property_ops.is_fullscreen(window));
+            assert_eq!(
+                (
+                    client.geometry.x,
+                    client.geometry.y,
+                    client.geometry.w,
+                    client.geometry.h
+                ),
+                (0, 0, 1920, 1080)
+            );
+            assert_eq!(client.geometry.border_w, 0);
+        }
+
+        jwm.handle_event(
+            &mut backend,
+            BackendEvent::WindowStateRequest {
+                window,
+                action: NetWmAction::Remove,
+                state: NetWmState::Fullscreen,
+            },
+        )
+        .unwrap();
+        let client = &jwm.state.clients[key];
+        assert!(!client.state.is_fullscreen);
+        assert!(client.state.is_floating);
+        assert!(!backend.property_ops.is_fullscreen(window));
+        assert_eq!(
+            (
+                client.geometry.x,
+                client.geometry.y,
+                client.geometry.w,
+                client.geometry.h
+            ),
+            (80, 60, 640, 480)
+        );
+        assert_eq!(client.geometry.border_w, 3);
     }
 
     #[test]

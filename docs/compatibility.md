@@ -21,6 +21,13 @@ rather than half-appearing. Everything that does not need a panel (layouts,
 tags, keybindings, IPC) works there, which is what makes them useful for
 development.
 
+Native xdg fullscreen and minimize requests use the shared window policy, as do
+XWayland fullscreen, minimize and activation requests. Fullscreen uses the
+window's current monitor; the optional xdg output hint is not applied. Activation
+can reveal another tag or restore a minimized window, and xdg activation keeps
+the existing ten-second token freshness check. Maximize requests and XWayland
+Above/Below requests still need complete policy and protocol write-back support.
+
 The binary-bundle design currently targets **x86_64 Linux built on Ubuntu
 22.04**. The host must provide compatible graphics, input, seat, audio, D-Bus,
 and font libraries. Other distributions/architectures should build the tagged

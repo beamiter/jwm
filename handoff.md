@@ -4,6 +4,21 @@
 
 ---
 
+## 2026-09-22（二）：Wayland 请求接入共享策略、IPC 出站缓冲优化
+
+选题 = 用户「commit 就行，不 push，并继续下一轮」。上一轮已本地提交 `aae6a2e`，未推送。
+
+1. **原生 xdg 请求**：fullscreen/unfullscreen/minimize 转发共享 `WindowStateRequest`，保留初始 configure 进展；全屏遵循窗口当前 monitor。xdg activation 保留 token 时效与 app-id 登记，改走共享 reveal/restore/focus，不再提前改后端 active 状态。
+2. **XWayland 请求**：fullscreen/unfullscreen 不再直接写后端缓存与 atom；active-window 回调接入共享激活事件。两个 nested backend 补 X11 fullscreen 写回及原生全屏进入时清 tiled flags。
+3. **IPC 出站游标**：分段写入只推进 `out_start`，积累到 64 KiB 或缓冲一半才压缩；按未发送字节保留 1 MiB 上限与原有 EPOLLOUT 语义。确定性测试实测 1 MiB / 4 KiB 分段写入：256 次 write、20 次压缩（含清空），搬移 **7,925,760 bytes**；旧 eager-drain 对同一序列理论搬移 **133,693,440 bytes**。这是缓冲搬移成本，不是帧率或延迟跑分。
+4. **回归**：真实 Wayland wire 创建 surface/toplevel 并发送模式请求，验证实际回调；真实 surface 验证有效/过期 activation token；共享策略验证重复全屏请求不破坏原几何恢复。IPC 另覆盖真实慢读 socketpair 与快客户端查询不被慢端阻断。
+
+**验证**：root lib **3467 passed**、bins **89 passed**、集成 **13 passed**，共 **3569 passed / 0 failed / 0 ignored**；Clippy `-D warnings`、all-targets check、修改范围格式检查与 diff-check 通过。完整测试使用获准的本地 socket/Xvfb 环境。无 DRM/KMS 真机验证；既有全仓格式差异未混入本轮。
+
+**仍然开着的**：maximize 的几何/xdg configure 与 XWayland Above/Below 写回尚需一并闭合；真机发布门禁、tearing、原子 framebuffer envelope 继续按缺口队列推进。
+
+---
+
 ## 2026-09-22：窗口生命周期、IPC 读取与回归测试可靠性
 
 选题 = 用户「继续全面进化升级优化」。保留工作区原有 Smithay 适配，在其上补齐可复现的生命周期与读取边界。

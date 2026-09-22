@@ -267,6 +267,8 @@ struct IpcClient {
     /// First byte not yet inspected for a newline.
     scan_pos: usize,
     out_buf: Vec<u8>,
+    /// First outbound byte not yet written to the client.
+    out_start: usize,
     subscriptions: Vec<String>,
     read_closed: bool,
     writable_interest: bool,
@@ -281,6 +283,7 @@ impl IpcClient {
             buf_start: 0,
             scan_pos: 0,
             out_buf: Vec::new(),
+            out_start: 0,
             subscriptions: Vec::new(),
             read_closed: false,
             writable_interest: false,
@@ -422,28 +425,25 @@ impl IpcClient {
     }
 
     fn queue(&mut self, mut json: String) {
+        compact_output_buffer(&mut self.out_buf, &mut self.out_start);
         json.push('\n');
         self.out_buf.extend_from_slice(json.as_bytes());
+    }
+
+    fn has_pending_output(&self) -> bool {
+        self.out_start < self.out_buf.len()
+    }
+
+    fn pending_output_len(&self) -> usize {
+        self.out_buf.len().saturating_sub(self.out_start)
     }
 
     /// 尽量把待发字节写出。仅在致命错误(对端关闭/缓冲超限)时返回 Err；
     /// WouldBlock(对端接收缓冲暂满)会把剩余字节留待下次 flush，不视为错误,
     /// 从而不会误删健康但慢速的客户端,也不会因 write_all 半包写入而错乱 JSON 流。
     fn flush_out(&mut self) -> io::Result<()> {
-        while !self.out_buf.is_empty() {
-            match self.stream.write(&self.out_buf) {
-                Ok(0) => {
-                    return Err(io::Error::new(io::ErrorKind::WriteZero, "write returned 0"));
-                }
-                Ok(n) => {
-                    self.out_buf.drain(..n);
-                }
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
-                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-                Err(e) => return Err(e),
-            }
-        }
-        if self.out_buf.len() > MAX_CLIENT_BUF {
+        flush_output_buffer(&mut self.stream, &mut self.out_buf, &mut self.out_start)?;
+        if self.pending_output_len() > MAX_CLIENT_BUF {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "client outbound buffer exceeded limit",
@@ -474,6 +474,45 @@ impl IpcClient {
 
     fn has_buffered_frame(&self) -> bool {
         self.buf[self.scan_pos.max(self.buf_start)..].contains(&b'\n')
+    }
+}
+
+/// Write the pending suffix without shifting it after every partial write.
+fn flush_output_buffer<W: Write>(
+    writer: &mut W,
+    buf: &mut Vec<u8>,
+    start: &mut usize,
+) -> io::Result<()> {
+    while *start < buf.len() {
+        match writer.write(&buf[*start..]) {
+            Ok(0) => return Err(io::Error::new(io::ErrorKind::WriteZero, "write returned 0")),
+            Ok(written) => *start += written,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
+        }
+    }
+    compact_output_buffer(buf, start);
+    Ok(())
+}
+
+/// Reclaim a consumed prefix only after a meaningful fraction or fixed chunk
+/// has accumulated. Partial writes therefore advance a cursor in O(1), while
+/// retained consumed storage stays below one compaction threshold.
+fn compact_output_buffer(buf: &mut Vec<u8>, start: &mut usize) {
+    if *start == 0 {
+        return;
+    }
+    if *start == buf.len() {
+        buf.clear();
+        *start = 0;
+        return;
+    }
+    if *start >= 64 * 1024 || *start >= buf.len() / 2 {
+        let consumed = *start;
+        buf.copy_within(consumed.., 0);
+        buf.truncate(buf.len() - consumed);
+        *start = 0;
     }
 }
 
@@ -559,7 +598,7 @@ impl IpcReadiness {
     }
 
     fn sync_client_interest(&self, id: u64, client: &mut IpcClient) -> io::Result<()> {
-        let writable = !client.out_buf.is_empty();
+        let writable = client.has_pending_output();
         if writable == client.writable_interest {
             return Ok(());
         }
@@ -922,8 +961,8 @@ impl Drop for IpcServer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
-    use std::os::fd::AsFd;
+    use std::io::{Read, Write};
+    use std::os::fd::{AsFd, AsRawFd};
 
     use nix::poll::{PollFd, PollFlags, poll};
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -965,6 +1004,22 @@ mod tests {
             .unwrap();
         server.clients.insert(id, client);
         peer
+    }
+
+    fn constrain_send_buffer(stream: &UnixStream) {
+        let send_buffer_bytes: libc::c_int = 4096;
+        // SAFETY: the pointer references a live integer of the supplied size,
+        // and `stream` owns a valid Unix stream descriptor.
+        let result = unsafe {
+            libc::setsockopt(
+                stream.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_SNDBUF,
+                std::ptr::from_ref(&send_buffer_bytes).cast(),
+                std::mem::size_of_val(&send_buffer_bytes) as libc::socklen_t,
+            )
+        };
+        assert_eq!(result, 0, "failed to constrain the socket send buffer");
     }
 
     fn query_payload(count: usize) -> Vec<u8> {
@@ -1090,6 +1145,132 @@ mod tests {
         let mut delivered = [0; 7];
         std::io::Read::read_exact(&mut peer, &mut delivered).unwrap();
         assert_eq!(&delivered, b"pending");
+    }
+
+    #[derive(Default)]
+    struct OneChunkWriter {
+        delivered: Vec<u8>,
+        wrote_this_round: bool,
+        chunk: usize,
+    }
+
+    impl OneChunkWriter {
+        fn next_round(&mut self) {
+            self.wrote_this_round = false;
+        }
+    }
+
+    impl Write for OneChunkWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            if self.wrote_this_round {
+                return Err(io::Error::from(io::ErrorKind::WouldBlock));
+            }
+            let written = bytes.len().min(self.chunk);
+            self.delivered.extend_from_slice(&bytes[..written]);
+            self.wrote_this_round = true;
+            Ok(written)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn partial_output_writes_compact_by_chunks_not_by_write_count() {
+        let expected: Vec<u8> = (0..MAX_CLIENT_BUF).map(|index| index as u8).collect();
+        let mut buf = expected.clone();
+        let mut start = 0;
+        let mut writer = OneChunkWriter {
+            chunk: 4096,
+            ..OneChunkWriter::default()
+        };
+        let mut writes = 0;
+        let mut compactions = 0;
+        let mut bytes_moved = 0;
+
+        while start < buf.len() {
+            writer.next_round();
+            let len_before = buf.len();
+            flush_output_buffer(&mut writer, &mut buf, &mut start).unwrap();
+            if buf.len() < len_before {
+                compactions += 1;
+                // `copy_within` moves exactly the retained suffix. A final
+                // clear contributes zero copied bytes.
+                bytes_moved += buf.len();
+            }
+            writes += 1;
+        }
+
+        assert_eq!(writer.delivered, expected);
+        assert_eq!(writes, MAX_CLIENT_BUF / writer.chunk);
+        let eager_drain_bytes = writer.chunk * writes * (writes - 1) / 2;
+        assert_eq!(eager_drain_bytes, 133_693_440); // 127.5 MiB
+        eprintln!(
+            "output cursor: writes={writes} compactions={compactions} bytes_moved={bytes_moved} eager_drain_bytes={eager_drain_bytes}"
+        );
+        assert!(
+            compactions <= 32 && bytes_moved < 8 * 1024 * 1024 && bytes_moved < eager_drain_bytes,
+            "{writes} partial writes caused {compactions} compactions and {bytes_moved} copied bytes"
+        );
+        assert!(buf.is_empty());
+        assert_eq!(start, 0);
+    }
+
+    #[test]
+    fn socketpair_slow_reader_receives_the_exact_output_stream() {
+        let (server_stream, mut peer) = UnixStream::pair().unwrap();
+        let mut client = IpcClient::new(server_stream).unwrap();
+        constrain_send_buffer(&client.stream);
+        peer.set_nonblocking(true).unwrap();
+        let expected: Vec<u8> = (0..256 * 1024).map(|index| index as u8).collect();
+        client.out_buf = expected.clone();
+        let mut delivered = Vec::with_capacity(expected.len());
+        let mut chunk = [0; 1024];
+
+        for _ in 0..expected.len() / chunk.len() + 64 {
+            client.flush_out().unwrap();
+            match peer.read(&mut chunk) {
+                Ok(0) => panic!("socketpair closed before the output drained"),
+                Ok(read) => delivered.extend_from_slice(&chunk[..read]),
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+                Err(error) => panic!("slow socketpair read failed: {error}"),
+            }
+            if !client.has_pending_output() && delivered.len() == expected.len() {
+                break;
+            }
+        }
+
+        assert_eq!(delivered, expected);
+        assert!(!client.has_pending_output());
+    }
+
+    #[test]
+    fn slow_output_client_does_not_block_a_fast_clients_query() {
+        let mut server = make_test_server();
+        let _slow_peer = attach_test_client(&mut server, 8);
+        let mut fast_peer = attach_test_client(&mut server, 9);
+        let slow_client = server.clients.get_mut(&8).unwrap();
+        constrain_send_buffer(&slow_client.stream);
+        slow_client.out_buf = vec![b'x'; MAX_CLIENT_BUF];
+
+        fast_peer
+            .write_all(b"{\"query\":\"get_version\"}\n")
+            .unwrap();
+        let incoming = server.poll_clients();
+
+        assert!(incoming.iter().any(|message| matches!(
+            message,
+            IncomingIpc::Query {
+                client_id: 9,
+                name,
+                ..
+            } if name == "get_version"
+        )));
+        assert!(
+            server.clients[&8].has_pending_output(),
+            "the socketpair peer does not read, so this exercises the slow-output path"
+        );
     }
 
     #[test]

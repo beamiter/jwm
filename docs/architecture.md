@@ -103,7 +103,14 @@ tools/jwm_remote.rs         separate trusted-LAN X11 helper
 - The IPC endpoint validates private runtime directories, preserves active
   instances and reclaims only unchanged stale sockets. Per-client buffering,
   connection intake and subscription state are bounded so control traffic
-  cannot monopolize the compositor loop.
+  cannot monopolize the compositor loop. Outbound partial writes advance a
+  cursor and compact in batches, keeping the existing pending-byte limit and
+  writable-readiness behavior without shifting the entire suffix per write.
+- Native xdg fullscreen/minimize and Wayland activation requests, together with
+  XWayland fullscreen/minimize/activation, enter the same policy events as
+  native X11. Protocol callbacks do not pre-confirm fullscreen or keyboard
+  focus: the policy owns monitor placement, saved geometry, minimized-window
+  restoration and tag visibility before the backend publishes accepted state.
 - Versioned runtime health and capability snapshots expose the actual selected
   backend and supported control surface without changing legacy IPC envelopes.
 - Session snapshots use an atomic private state store, validate schema and

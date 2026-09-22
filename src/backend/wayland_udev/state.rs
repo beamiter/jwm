@@ -622,19 +622,36 @@ impl JwmWaylandState {
         self.needs_redraw = true;
     }
 
-    fn request_x11_minimized(&mut self, x11_id: u32, minimized: bool) {
+    fn request_window_state(&mut self, window: WindowId, state: NetWmState, on: bool) {
+        self.push_event(BackendEvent::WindowStateRequest {
+            window,
+            action: if on {
+                NetWmAction::Add
+            } else {
+                NetWmAction::Remove
+            },
+            state,
+        });
+    }
+
+    fn request_x11_state(&mut self, x11_id: u32, state: NetWmState, on: bool) {
         if let Some(window) = self.x11_surface_to_window.get(&x11_id).copied() {
-            // Let the shared policy own animation, Dock entries, and restore
-            // placement, just as it does for native X11 WM_CHANGE_STATE.
-            self.push_event(BackendEvent::WindowStateRequest {
-                window,
-                action: if minimized {
-                    NetWmAction::Add
-                } else {
-                    NetWmAction::Remove
-                },
-                state: NetWmState::Hidden,
-            });
+            self.request_window_state(window, state, on);
+        }
+    }
+
+    fn request_x11_minimized(&mut self, x11_id: u32, minimized: bool) {
+        // Shared policy owns the Dock entry, animation and restore placement.
+        self.request_x11_state(x11_id, NetWmState::Hidden, minimized);
+    }
+
+    fn request_window_activation(&mut self, window: WindowId) {
+        self.push_event(BackendEvent::ActiveWindowMessage { window });
+    }
+
+    fn request_x11_activation(&mut self, x11_id: u32) {
+        if let Some(window) = self.x11_surface_to_window.get(&x11_id).copied() {
+            self.request_window_activation(window);
         }
     }
 
@@ -1236,12 +1253,14 @@ impl XdgActivationHandler for JwmWaylandState {
                     "[xdg_activation] activating window {:?} (app_id={:?})",
                     win_id, token_data.app_id
                 );
-                self.active_toplevel = Some(win_id);
                 if let Some(app_id) = token_data.app_id.as_deref() {
                     self.window_activation_app_id
                         .insert(win_id, app_id.to_string());
                 }
-                self.needs_redraw = true;
+                // Activation is a policy request: revealing another tag,
+                // restoring a minimized window, focus and stacking must take
+                // the same path as `_NET_ACTIVE_WINDOW` and foreign-toplevel.
+                self.request_window_activation(win_id);
             }
         }
     }
@@ -1623,11 +1642,7 @@ impl XwmHandler for JwmWaylandState {
     }
 
     fn fullscreen_request(&mut self, _xwm: XwmId, window: X11Surface) {
-        let x11_id = window.window_id();
-        if let Some(win_id) = self.x11_surface_to_window.get(&x11_id).copied() {
-            self.window_is_fullscreen.insert(win_id, true);
-            let _ = window.set_fullscreen(true);
-        }
+        self.request_x11_state(window.window_id(), NetWmState::Fullscreen, true);
     }
 
     fn minimize_request(&mut self, _xwm: XwmId, window: X11Surface) {
@@ -1639,11 +1654,17 @@ impl XwmHandler for JwmWaylandState {
     }
 
     fn unfullscreen_request(&mut self, _xwm: XwmId, window: X11Surface) {
-        let x11_id = window.window_id();
-        if let Some(win_id) = self.x11_surface_to_window.get(&x11_id).copied() {
-            self.window_is_fullscreen.insert(win_id, false);
-            let _ = window.set_fullscreen(false);
-        }
+        self.request_x11_state(window.window_id(), NetWmState::Fullscreen, false);
+    }
+
+    fn active_window_request(
+        &mut self,
+        _xwm: XwmId,
+        window: X11Surface,
+        _timestamp: u32,
+        _currently_active_window: Option<X11Surface>,
+    ) {
+        self.request_x11_activation(window.window_id());
     }
 
     fn allow_selection_access(&mut self, _xwm: XwmId, _selection: SelectionTarget) -> bool {
@@ -4139,6 +4160,43 @@ impl XdgShellHandler for JwmWaylandState {
         });
         self.unconstrain_popup(&surface);
         surface.send_repositioned(token);
+    }
+
+    fn fullscreen_request(&mut self, surface: ToplevelSurface, _output: Option<WlOutput>) {
+        if let Some(window) = self
+            .surface_to_window
+            .get(&surface.wl_surface().id())
+            .copied()
+        {
+            // JWM's fullscreen policy owns placement and therefore uses the
+            // window's current monitor. The protocol output is only a hint;
+            // honoring it would bypass monitor/tag ownership in shared policy.
+            self.request_window_state(window, NetWmState::Fullscreen, true);
+        }
+        // Preserve Smithay's default protocol progress. In particular, a
+        // request made before JWM handles WindowCreated must still receive an
+        // initial configure rather than waiting solely on the policy queue.
+        surface.send_configure();
+    }
+
+    fn unfullscreen_request(&mut self, surface: ToplevelSurface) {
+        if let Some(window) = self
+            .surface_to_window
+            .get(&surface.wl_surface().id())
+            .copied()
+        {
+            self.request_window_state(window, NetWmState::Fullscreen, false);
+        }
+    }
+
+    fn minimize_request(&mut self, surface: ToplevelSurface) {
+        if let Some(window) = self
+            .surface_to_window
+            .get(&surface.wl_surface().id())
+            .copied()
+        {
+            self.request_window_state(window, NetWmState::Hidden, true);
+        }
     }
 
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {

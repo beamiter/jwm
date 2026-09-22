@@ -498,6 +498,7 @@ impl PropertyOps for WaylandPropertyOps {
                 if let Some(toplevel) = state.try_lookup_toplevel(win) {
                     toplevel.with_pending_state(|s| {
                         if on {
+                            JwmWaylandState::set_toplevel_tiled_state(s, false);
                             s.states.set(xdg_toplevel::State::Fullscreen);
                         } else {
                             s.states.unset(xdg_toplevel::State::Fullscreen);
@@ -505,6 +506,8 @@ impl PropertyOps for WaylandPropertyOps {
                         }
                     });
                     toplevel.send_configure();
+                } else if let Some(x11) = state.x11_surfaces.get(&win) {
+                    let _ = x11.set_fullscreen(on);
                 }
             });
         }
