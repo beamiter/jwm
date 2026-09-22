@@ -224,7 +224,7 @@ chmod +x "$SIDEBAND_ROOT/remote.git/hooks/pre-receive"
 printf 'ahead\n' >>"$SIDEBAND_ROOT/jagent/tracked.txt"
 git -C "$SIDEBAND_ROOT/jagent" add tracked.txt
 git -C "$SIDEBAND_ROOT/jagent" commit -q -m ahead
-/bin/bash "$UPDATER" -N -u -T jagent "$SIDEBAND_ROOT" >"$TEST_ROOT/sideband.out"
+/bin/bash "$UPDATER" -N -T jagent "$SIDEBAND_ROOT" >"$TEST_ROOT/sideband.out"
 if LC_ALL=C grep -q $'\033' "$TEST_ROOT/sideband.out"; then
     fail "remote sideband emitted a raw terminal escape"
 fi
@@ -234,5 +234,29 @@ for unsafe in $'\u2028' $'\u2029' $'\u202E' $'\u2066'; do
         fail "remote sideband emitted a raw Unicode display control"
     fi
 done
+
+# Ahead commits are pushed by default. Diverged histories are rebased onto the
+# fetched upstream first, then pushed as a linear history.
+SYNC_ROOT="$TEST_ROOT/default-sync"
+git init -q --bare "$SYNC_ROOT/remote.git"
+init_repo "$SYNC_ROOT/seed"
+git -C "$SYNC_ROOT/seed" remote add origin "$SYNC_ROOT/remote.git"
+git -C "$SYNC_ROOT/seed" push -q -u origin HEAD
+git clone -q "$SYNC_ROOT/remote.git" "$SYNC_ROOT/jagent"
+git -C "$SYNC_ROOT/jagent" config user.name updater-test
+git -C "$SYNC_ROOT/jagent" config user.email updater-test@example.invalid
+printf 'local\n' >"$SYNC_ROOT/jagent/local.txt"
+git -C "$SYNC_ROOT/jagent" add local.txt
+git -C "$SYNC_ROOT/jagent" commit -q -m local
+printf 'remote\n' >"$SYNC_ROOT/seed/remote.txt"
+git -C "$SYNC_ROOT/seed" add remote.txt
+git -C "$SYNC_ROOT/seed" commit -q -m remote
+git -C "$SYNC_ROOT/seed" push -q
+/bin/bash "$UPDATER" -N -T jagent "$SYNC_ROOT" >"$TEST_ROOT/default-sync.out"
+assert_contains "$TEST_ROOT/default-sync.out" "已推送 1 个提交"
+[ "$(git --git-dir="$SYNC_ROOT/remote.git" rev-list --count HEAD)" -eq 3 ] \
+    || fail "default rebase/push did not publish the local commit"
+[ "$(git -C "$SYNC_ROOT/jagent" rev-list --count --merges HEAD)" -eq 0 ] \
+    || fail "default sync created a merge commit instead of rebasing"
 
 printf 'test-git-update-all: ok\n'

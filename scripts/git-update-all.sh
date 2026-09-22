@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 # 一键更新目录下所有 git 仓库，并按各自的方式重新编译已知项目。
-# 默认行为：fetch --prune 后对当前分支做 fast-forward，只要有任何风险就跳过而不是硬来；
+# 默认行为：fetch --prune 后把当前分支 rebase 到 upstream；本地领先时自动 push；
 # 更新完成后，对本次真的有新提交（或产物缺失）的已知项目跑一次 release 构建。
 set -uo pipefail
 
 ROOT="."
 JOBS=4
-MODE="ff"        # ff | rebase | merge
+MODE="rebase"    # ff | rebase | merge
 PRUNE=1
 STASH=0
 DRY_RUN=0
 QUIET=0
-PUSH=0
+PUSH=1          # 默认把 rebase 后仍领先 upstream 的提交推送上去
 BUILD=1          # 更新后是否编译
 BUILD_ALL=0      # 1 = 已知项目全部编译，不管有没有更新
 BUILD_JOBS=1     # 同时编译几个项目；cargo 内部已经并行，默认串行
@@ -133,12 +133,13 @@ usage() {
 
 更新选项:
   -j N          并发数 (默认 4)
-  -r            用 git pull --rebase 代替 fast-forward
+  -r            用 git pull --rebase（默认行为，保留此选项以兼容旧用法）
+  -f            只允许 fast-forward；分叉时跳过
   -m            用 git pull --no-rebase 代替 fast-forward (允许产生 merge commit)
   -s            工作区有改动时自动 stash，更新后再 stash pop
   -n            dry-run: 只 fetch 和汇报，不改动工作区也不编译
   -P            不加 --prune
-  -u            双向更新：拉取之后，如本地领先则自动 push 到 upstream
+  -u            自动 push 到 upstream（默认行为，保留此选项以兼容旧用法）
   -q            只输出汇总表
 
 构建选项 (只作用于已知项目: jagent jsh jterm_core anvil ember frost forge jwm cplus LifeAI.jl):
@@ -188,10 +189,11 @@ LifeAI.jl 的 Julia 预编译缓存没有稳定的仓库内路径，因此只在
 EOF
 }
 
-while getopts ":j:J:T:rmsnPuqBNh" opt; do
+while getopts ":j:J:T:rfmsnPuqBNh" opt; do
     case "$opt" in
         j) JOBS="$OPTARG" ;;
         r) MODE="rebase" ;;
+        f) MODE="ff" ;;
         m) MODE="merge" ;;
         s) STASH=1 ;;
         n) DRY_RUN=1 ;;
@@ -390,7 +392,9 @@ update_one() {
         report SKIP "本地领先 $ahead 落后 $behind"; return
     fi
 
-    # 只领先、不落后：不需要拉取，直接跳到下面的 push 判断
+    # 只领先、不落后：upstream 已经是 HEAD 的祖先，无需做一次空 rebase，
+    # 直接跳到下面的自动 push。若双方都有提交，默认的 rebase 会先整理
+    # 本地提交，再安全推送线性历史。
     local need_pull=1
     if [ "$behind" -eq 0 ] && [ "$ahead" -gt 0 ]; then
         need_pull=0
@@ -454,7 +458,7 @@ update_one() {
         pull_msg="拉取 ${behind} 个提交${shortstat:+, $shortstat}"
     fi
 
-    # 双向更新：拉取完成后，如本地仍领先 upstream 则 push 上去
+    # 双向更新：拉取/rebase 完成后，如本地仍领先 upstream 则 push 上去。
     if [ "$PUSH" -eq 1 ]; then
         local push_ahead
         push_ahead="$(git -C "$repo" rev-list --count "${upstream}..HEAD" 2>/dev/null || echo 0)"
