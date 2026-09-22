@@ -1025,6 +1025,14 @@ impl PropertyOps for WaylandPropertyOps {
     ) -> Result<(), BackendError> {
         unsafe {
             self.with_state_mut(|wayland_state| {
+                // Keep XWayland Motif/ICCCM Hidden in sync so minimize and
+                // Iconic adoption write the same atoms smithay's MapRequest
+                // path already seeds for `WmHintsState::Iconic`.
+                if state == NetWmState::Hidden
+                    && let Some(x11) = wayland_state.x11_surfaces.get(&win)
+                {
+                    let _ = x11.set_hidden(on);
+                }
                 wayland_state.update_foreign_toplevel_net_state(win, state, on);
             });
         }
@@ -1111,11 +1119,54 @@ impl PropertyOps for WaylandPropertyOps {
         Ok(())
     }
 
-    fn get_wm_state(&self, _win: WindowId) -> Result<i64, BackendError> {
-        Ok(1)
+    fn get_wm_state(&self, win: WindowId) -> Result<i64, BackendError> {
+        use crate::backend::api::{ICCCM_ICONIC_STATE, ICCCM_NORMAL_STATE};
+        unsafe {
+            self.with_state_mut(|state| {
+                if state
+                    .x11_surfaces
+                    .get(&win)
+                    .is_some_and(|surface| surface.is_hidden())
+                {
+                    Ok(i64::from(ICCCM_ICONIC_STATE))
+                } else {
+                    Ok(i64::from(ICCCM_NORMAL_STATE))
+                }
+            })
+        }
     }
 
-    fn set_wm_state(&self, _win: WindowId, _state: i64) -> Result<(), BackendError> {
+    fn has_net_wm_state_flag(&self, win: WindowId, flag: NetWmState) -> Result<bool, BackendError> {
+        unsafe {
+            self.with_state_mut(|state| {
+                let Some(x11) = state.x11_surfaces.get(&win) else {
+                    return Ok(false);
+                };
+                Ok(match flag {
+                    NetWmState::Hidden => x11.is_hidden(),
+                    NetWmState::Fullscreen => x11.is_fullscreen(),
+                    NetWmState::Above => x11.is_above(),
+                    NetWmState::Below => x11.is_below(),
+                    _ => false,
+                })
+            })
+        }
+    }
+
+    fn set_wm_state(&self, win: WindowId, state: i64) -> Result<(), BackendError> {
+        use crate::backend::api::ICCCM_ICONIC_STATE;
+        // Map ICCCM Iconic ↔ Normal onto smithay's `_NET_WM_STATE_HIDDEN` so
+        // XWayland clients see the same lifecycle as native X11 minimize.
+        let iconic = state == i64::from(ICCCM_ICONIC_STATE);
+        unsafe {
+            self.with_state_mut(|wayland_state| {
+                if let Some(x11) = wayland_state.x11_surfaces.get(&win) {
+                    let _ = x11.set_hidden(iconic);
+                }
+                wayland_state.update_foreign_toplevel_net_state(win, NetWmState::Hidden, iconic);
+            });
+        }
+        self.request_flush();
         Ok(())
     }
 
@@ -1126,6 +1177,24 @@ impl PropertyOps for WaylandPropertyOps {
         _monitor_num: u32,
     ) -> Result<(), BackendError> {
         Ok(())
+    }
+
+    fn get_motif_hints(&self, win: WindowId) -> Option<crate::backend::api::MotifWmHints> {
+        unsafe {
+            self.with_state_mut(|state| {
+                state
+                    .x11_surfaces
+                    .get(&win)
+                    .map(|surface| {
+                        JwmWaylandState::motif_wm_hints_from_smithay(&surface.motif_hints())
+                    })
+                    // Only report Motif hints when the decorations flag is set
+                    // (or any flag is set). An all-default `MwmHints` means the
+                    // property was never written — matching X11 backends that
+                    // return `None` when the atom is absent.
+                    .filter(|hints| hints.flags != 0)
+            })
+        }
     }
 }
 

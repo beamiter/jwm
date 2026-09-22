@@ -4,6 +4,22 @@
 
 ---
 
+## 2026-09-22：窗口生命周期、IPC 读取与回归测试可靠性
+
+选题 = 用户「继续全面进化升级优化」。保留工作区原有 Smithay 适配，在其上补齐可复现的生命周期与读取边界。
+
+1. **XWayland 最小化**：初始 Iconic 窗口同步进入 manager-hidden 集合，早到的 buffer commit 不再将其重新显示，真正 Unmap 仍可被确认；`WM_CHANGE_STATE` 的 minimize/unminimize 回调通过 Hidden Add/Remove 进入共享策略。
+2. **Wayland 窗口销毁**：role / wl_surface 销毁复用完整清理，关闭 ext/wlr foreign-toplevel 句柄、移除待配置尺寸等状态；ext 列表同步移除弱引用。identifier 的稳定性说明限定为当前 toplevel 生命周期。
+3. **jwm-tool IPC**：8 KiB 分块读取、线性扫描、保留预读帧及既有 `--raw` 输出语义；单条正文上限 1 MiB（不含协议换行）；普通响应/订阅确认采用 5 秒绝对读取截止，订阅空闲不超时，收到首批字节后限时收齐。新增 6 条真实 socket-pair 回归，含大小边界、粘包、EOF 和超时。
+4. **测试进程清理**：移除全局命令匹配杀进程，限定当前 Cargo 进程组。离线脚本验证成功/失败退出码、中断、残留子进程和无关进程存活，已接 CI。
+5. **消除既有测试不确定性**：麦克风 IPC 测试使用线程局部假控制队列与确定性缓存，避免操作真实音频或依赖宿主配置；snap preview 像素对照固定为稳定显示，避免两帧之间自动淡出。修正文档链接触发的架构检查误报。
+
+**验证**：新增 3 条 headless Wayland 状态回归通过；root lib **3462 passed**，bins **89 passed**，集成测 **13 passed**（架构注释修正后单独复测 5 条）；Clippy `-D warnings`、all-targets check、shell lint、wrapper 回归通过。完整测试需沙箱外本地 socket/Xvfb 权限，已实际执行；无 DRM/KMS 真机验证。全仓 rustfmt 仍有本轮前已存在的 35 个文件差异，未混入批量格式化。
+
+**仍然开着的**：硬件发布门禁、异步 tearing 与原子 framebuffer envelope 等，继续以 `docs/sota-gap-queue.md` 为准。
+
+---
+
 ## 2026-09-15：补缺口 — Particles + TabBar CommonLinear + capture bake + envelope 文档
 
 选题 = 用户「把剩下的缺口补全优化掉」。

@@ -56,6 +56,9 @@ jobs:
       - name: Exercise offline metrics-tool contracts
         run: bash scripts/test-metrics-tools.sh
 
+      - name: Exercise test-wrapper process boundaries
+        run: bash scripts/test-test-wrapper.sh
+
   check-and-test:
     name: Check, Clippy, and test
     runs-on: ubuntu-latest

@@ -10,7 +10,7 @@
 #      fail for environmental reasons and the agent must not "fix" the code);
 #   2. runs cargo in its own process group and SIGKILLs the whole group on
 #      exit, whatever the reason;
-#   3. sweeps for known leaked test children afterwards.
+#   3. never searches for or signals processes outside that process group.
 #
 # Usage: scripts/test.sh [extra cargo test args...]
 #   e.g. scripts/test.sh --lib
@@ -51,14 +51,6 @@ cleanup() {
     # Kill everything in cargo's process group (negative pid), then reap.
     kill -KILL -- "-$cargo_pid" 2>/dev/null
     wait "$cargo_pid" 2>/dev/null
-    # --- 3. sweep known leaked test children --------------------------------
-    local leaked
-    leaked=$(pgrep -f "trap '' TERM" 2>/dev/null || true)
-    if [[ -n "$leaked" ]]; then
-        echo "scripts/test.sh: killing leaked test children: $leaked" >&2
-        # shellcheck disable=SC2086
-        kill -KILL $leaked 2>/dev/null
-    fi
     exit "$status"
 }
 trap 'cleanup' EXIT

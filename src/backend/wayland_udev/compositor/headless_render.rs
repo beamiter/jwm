@@ -4789,6 +4789,10 @@ fn wayland_tail_overlay_snap_preview_matches_legacy_srgb_scanout() {
         assert_ne!(compositor.linear_fbo, 0);
         compositor.snap_preview = Some((8.0, 8.0, 24.0, 16.0));
         compositor.snap_preview_opacity = 1.0;
+        // Compare a steady preview on both routes. Leaving the target hidden
+        // starts a fade between frames and makes the pixel oracle depend on
+        // how long other tests occupy the CPU.
+        compositor.snap_preview_target_visible = true;
         let background = background_texel();
 
         let render_pair = |compositor: &mut super::WaylandCompositor| -> (Vec<u8>, Vec<u8>) {

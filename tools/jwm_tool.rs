@@ -38,6 +38,10 @@ const RESPONSE_LOCK_TIMEOUT: Duration = Duration::from_secs(12);
 /// control command inside that bound lets the nonblocking client use one write
 /// without risking a duplicated partial command on retry.
 const MAX_CONTROL_COMMAND_BYTES: usize = 4096;
+/// Bound each CLI response payload independently of chunking or subscription
+/// length. The terminating newline does not count toward this limit.
+const MAX_IPC_FRAME_BYTES: usize = 1024 * 1024;
+const IPC_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
 
 // --- Runtime directory (XDG_RUNTIME_DIR) ---
 
@@ -2798,25 +2802,24 @@ fn run_ipc_msg(name: &str, args_str: &str, subscribe: Option<&str>, raw: bool) -
     }
 
     let mut stream = UnixStream::connect(&sock_path)?;
-    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
 
     let mut line = serde_json::to_string(&request)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
     line.push('\n');
     stream.write_all(line.as_bytes())?;
+    let mut reader = IpcLineReader::new(stream);
 
     // Handle subscribe mode
     if subscribe.is_some() {
         // Read subscription confirmation
-        let resp = read_ipc_line(&mut stream)?;
+        let resp = reader.read_line_until(Instant::now() + IPC_RESPONSE_TIMEOUT)?;
         ensure_ipc_response_succeeded(&resp)?;
         if !raw {
             eprintln!("Subscribed: {}", resp.trim());
         }
 
-        stream.set_read_timeout(None)?;
         loop {
-            match read_ipc_line(&mut stream) {
+            match reader.read_subscription_line(IPC_RESPONSE_TIMEOUT) {
                 Ok(line) => {
                     if raw {
                         println!("{}", line.trim());
@@ -2839,7 +2842,7 @@ fn run_ipc_msg(name: &str, args_str: &str, subscribe: Option<&str>, raw: bool) -
     }
 
     // Read response
-    let resp = read_ipc_line(&mut stream)?;
+    let resp = reader.read_line_until(Instant::now() + IPC_RESPONSE_TIMEOUT)?;
     if raw {
         print!("{resp}");
     } else {
@@ -2861,23 +2864,25 @@ fn run_ipc_msg(name: &str, args_str: &str, subscribe: Option<&str>, raw: bool) -
 #[allow(clippy::items_after_test_module)]
 mod tests {
     use super::{
-        Cli, Commands, InstallPlanEntry, SmokeTarget, WaylandStatusCompleteness,
-        WaylandStatusCoverage, acquire_daemon_lock_at, acquire_response_lock,
-        aggregated_wayland_status_data, append_log_with_rotation, capabilities_output_lines,
-        daemon_command_response, ensure_ipc_response_succeeded, health_output_lines, ipc_request,
-        jwm_install_plan, legacy_daemon_metadata_matches, mkfifo_safe, parse_boot_id,
-        parse_daemon_pidfile, parse_legacy_daemon_pidfile, parse_linux_proc_stat_identity,
-        parse_msg_args, parse_subscription_topics, parse_v1_daemon_pidfile, process_identity,
-        process_identity_matches, response_data, response_flock_path, response_lock_path,
-        rotated_log_path, should_attempt_wayland_status_fallback, smoke_artifacts_json,
-        smoke_ci_profile_json, smoke_manual_kms_checklist_json, smoke_target_json, split_path_list,
-        successful_query_data, validate_daemon_response, validate_ipc_response,
-        write_fifo_nonblock,
+        Cli, Commands, InstallPlanEntry, IpcLineReader, MAX_IPC_FRAME_BYTES, SmokeTarget,
+        WaylandStatusCompleteness, WaylandStatusCoverage, acquire_daemon_lock_at,
+        acquire_response_lock, aggregated_wayland_status_data, append_log_with_rotation,
+        capabilities_output_lines, daemon_command_response, ensure_ipc_response_succeeded,
+        health_output_lines, ipc_request, jwm_install_plan, legacy_daemon_metadata_matches,
+        mkfifo_safe, parse_boot_id, parse_daemon_pidfile, parse_legacy_daemon_pidfile,
+        parse_linux_proc_stat_identity, parse_msg_args, parse_subscription_topics,
+        parse_v1_daemon_pidfile, process_identity, process_identity_matches, response_data,
+        response_flock_path, response_lock_path, rotated_log_path,
+        should_attempt_wayland_status_fallback, smoke_artifacts_json, smoke_ci_profile_json,
+        smoke_manual_kms_checklist_json, smoke_target_json, split_path_list, successful_query_data,
+        validate_daemon_response, validate_ipc_response, write_fifo_nonblock,
     };
     use clap::Parser;
     use std::collections::HashSet;
     use std::fs;
+    use std::os::unix::net::UnixStream;
     use std::path::{Path, PathBuf};
+    use std::time::{Duration, Instant};
 
     struct TempLogDir(PathBuf);
 
@@ -2894,6 +2899,13 @@ mod tests {
     impl Drop for TempLogDir {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn write_pair(stream: &UnixStream, mut bytes: &[u8]) {
+        while !bytes.is_empty() {
+            let written = nix::unistd::write(stream, bytes).unwrap();
+            bytes = &bytes[written..];
         }
     }
 
@@ -3501,6 +3513,101 @@ mod tests {
 
         std::fs::remove_file(fifo).unwrap();
     }
+
+    #[test]
+    fn ipc_line_reader_preserves_frames_read_in_one_chunk() {
+        let (reader_stream, writer) = UnixStream::pair().unwrap();
+        write_pair(&writer, b"first\nsecond\n");
+        let mut reader = IpcLineReader::new(reader_stream);
+
+        assert_eq!(
+            reader
+                .read_line_until(Instant::now() + Duration::from_secs(1))
+                .unwrap(),
+            "first"
+        );
+        assert_eq!(
+            reader
+                .read_subscription_line(Duration::from_millis(50))
+                .unwrap(),
+            "second"
+        );
+    }
+
+    #[test]
+    fn ipc_line_reader_rejects_an_unbounded_frame() {
+        let (reader_stream, writer) = UnixStream::pair().unwrap();
+        let writer_thread = std::thread::spawn(move || {
+            let payload = vec![b'x'; MAX_IPC_FRAME_BYTES + 1];
+            write_pair(&writer, &payload);
+        });
+        let mut reader = IpcLineReader::new(reader_stream);
+
+        let error = reader
+            .read_line_until(Instant::now() + Duration::from_secs(2))
+            .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        drop(reader);
+        writer_thread.join().unwrap();
+    }
+
+    #[test]
+    fn ipc_line_reader_accepts_the_limit_between_other_frames() {
+        let (reader_stream, writer) = UnixStream::pair().unwrap();
+        let writer_thread = std::thread::spawn(move || {
+            let mut frames = b"short\n".to_vec();
+            frames.resize(frames.len() + MAX_IPC_FRAME_BYTES, b'x');
+            frames.extend_from_slice(b"\ntail\n");
+            write_pair(&writer, &frames);
+        });
+        let mut reader = IpcLineReader::new(reader_stream);
+        let deadline = Instant::now() + Duration::from_secs(5);
+
+        assert_eq!(reader.read_line_until(deadline).unwrap(), "short");
+        let large = reader.read_line_until(deadline).unwrap();
+        assert_eq!(large.len(), MAX_IPC_FRAME_BYTES);
+        assert!(large.as_bytes().iter().all(|byte| *byte == b'x'));
+        assert_eq!(reader.read_line_until(deadline).unwrap(), "tail");
+        writer_thread.join().unwrap();
+    }
+
+    #[test]
+    fn ipc_subscription_bounds_a_partial_frame_after_its_first_byte() {
+        let (reader_stream, writer) = UnixStream::pair().unwrap();
+        write_pair(&writer, b"{");
+        let mut reader = IpcLineReader::new(reader_stream);
+
+        let error = reader
+            .read_subscription_line(Duration::from_millis(40))
+            .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        drop(writer);
+    }
+
+    #[test]
+    fn ipc_query_times_out_when_no_response_bytes_arrive() {
+        let (reader_stream, writer) = UnixStream::pair().unwrap();
+        let mut reader = IpcLineReader::new(reader_stream);
+
+        let error = reader
+            .read_line_until(Instant::now() + Duration::from_millis(40))
+            .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        drop(writer);
+    }
+
+    #[test]
+    fn ipc_line_reader_rejects_eof_before_newline() {
+        let (reader_stream, writer) = UnixStream::pair().unwrap();
+        write_pair(&writer, b"unterminated");
+        drop(writer);
+        let mut reader = IpcLineReader::new(reader_stream);
+
+        let error = reader
+            .read_line_until(Instant::now() + Duration::from_secs(1))
+            .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::UnexpectedEof);
+    }
 }
 
 fn send_ipc_query(name: &str) -> io::Result<serde_json::Value> {
@@ -3513,14 +3620,14 @@ fn send_ipc_query(name: &str) -> io::Result<serde_json::Value> {
     }
 
     let mut stream = UnixStream::connect(&sock_path)?;
-    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
 
     let msg = serde_json::json!({ "query": name, "args": serde_json::Value::Null });
     let mut line = serde_json::to_string(&msg).unwrap();
     line.push('\n');
     stream.write_all(line.as_bytes())?;
 
-    let resp = read_ipc_line(&mut stream)?;
+    let mut reader = IpcLineReader::new(stream);
+    let resp = reader.read_line_until(Instant::now() + IPC_RESPONSE_TIMEOUT)?;
     serde_json::from_str::<serde_json::Value>(resp.trim())
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("{name}: {e}")))
 }
@@ -5091,24 +5198,137 @@ fn run_wayland_status(json_output: bool) -> io::Result<i32> {
     Ok(coverage.completeness.exit_code())
 }
 
-fn read_ipc_line(stream: &mut UnixStream) -> io::Result<String> {
-    let mut buf = Vec::new();
-    let mut byte = [0u8; 1];
-    loop {
-        match io::Read::read(stream, &mut byte) {
-            Ok(0) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    "connection closed",
-                ));
-            }
-            Ok(_) => {
-                if byte[0] == b'\n' {
-                    return Ok(String::from_utf8_lossy(&buf).to_string());
-                }
-                buf.push(byte[0]);
-            }
-            Err(e) => return Err(e),
+struct IpcLineReader {
+    stream: UnixStream,
+    buf: Vec<u8>,
+    start: usize,
+    scan: usize,
+}
+
+impl IpcLineReader {
+    fn new(stream: UnixStream) -> Self {
+        Self {
+            stream,
+            buf: Vec::with_capacity(4096),
+            start: 0,
+            scan: 0,
         }
     }
+
+    /// Read one complete frame before an absolute deadline. A deadline covers
+    /// the whole frame, rather than restarting after every successful read.
+    fn read_line_until(&mut self, deadline: Instant) -> io::Result<String> {
+        self.read_line(Some(deadline), None)
+    }
+
+    /// Wait indefinitely for an idle subscription, then bound completion of a
+    /// frame once its first byte has arrived.
+    fn read_subscription_line(&mut self, frame_timeout: Duration) -> io::Result<String> {
+        self.read_line(None, Some(frame_timeout))
+    }
+
+    fn read_line(
+        &mut self,
+        mut deadline: Option<Instant>,
+        timeout_after_first_byte: Option<Duration>,
+    ) -> io::Result<String> {
+        let mut chunk = [0u8; 8192];
+        'read_frame: loop {
+            let scan_start = self.scan.max(self.start);
+            if let Some(relative_newline) = self.buf[scan_start..]
+                .iter()
+                .position(|byte| *byte == b'\n')
+            {
+                let end = scan_start + relative_newline;
+                if end - self.start > MAX_IPC_FRAME_BYTES {
+                    return Err(frame_too_large());
+                }
+                // Keep the existing CLI contract: consume the delimiter but
+                // omit it from the response returned to single-shot --raw.
+                let line = String::from_utf8_lossy(&self.buf[self.start..end]).into_owned();
+                self.start = end + 1;
+                self.scan = self.start;
+                self.compact();
+                return Ok(line);
+            }
+            self.scan = self.buf.len();
+            if self.buf.len() - self.start > MAX_IPC_FRAME_BYTES {
+                return Err(frame_too_large());
+            }
+
+            if deadline.is_none() && self.buf.len() > self.start {
+                deadline = timeout_after_first_byte.map(|timeout| Instant::now() + timeout);
+            }
+            let poll_timeout = match deadline {
+                Some(deadline) => {
+                    let remaining = deadline
+                        .checked_duration_since(Instant::now())
+                        .filter(|remaining| !remaining.is_zero())
+                        .ok_or_else(frame_timed_out)?;
+                    // poll(2) accepts whole milliseconds. Round up so a
+                    // sub-millisecond remainder does not become a busy poll.
+                    let millis = remaining.as_millis().saturating_add(1);
+                    PollTimeout::try_from(millis).unwrap_or(PollTimeout::MAX)
+                }
+                None => PollTimeout::NONE,
+            };
+            let ready = {
+                let mut descriptors = [PollFd::new(self.stream.as_fd(), PollFlags::POLLIN)];
+                match poll(&mut descriptors, poll_timeout) {
+                    Ok(ready) => ready,
+                    Err(nix::errno::Errno::EINTR) => continue 'read_frame,
+                    Err(error) => return Err(io::Error::from(error)),
+                }
+            };
+            if ready == 0 {
+                return Err(frame_timed_out());
+            }
+
+            match self.stream.read(&mut chunk) {
+                Ok(0) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "connection closed before a complete IPC frame",
+                    ));
+                }
+                Ok(read) => {
+                    let was_empty = self.buf.len() == self.start;
+                    self.buf.extend_from_slice(&chunk[..read]);
+                    if deadline.is_none() && was_empty {
+                        deadline = timeout_after_first_byte.map(|timeout| Instant::now() + timeout);
+                    }
+                }
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    fn compact(&mut self) {
+        if self.start == self.buf.len() {
+            self.buf.clear();
+            self.start = 0;
+            self.scan = 0;
+        } else if self.start >= 64 * 1024 || self.start >= self.buf.len() / 2 {
+            let consumed = self.start;
+            self.buf.copy_within(consumed.., 0);
+            self.buf.truncate(self.buf.len() - consumed);
+            self.start = 0;
+            self.scan = self.scan.saturating_sub(consumed);
+        }
+    }
+}
+
+fn frame_too_large() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("JWM IPC frame exceeds {MAX_IPC_FRAME_BYTES} bytes"),
+    )
+}
+
+fn frame_timed_out() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::TimedOut,
+        "timed out waiting for a complete JWM IPC frame",
+    )
 }

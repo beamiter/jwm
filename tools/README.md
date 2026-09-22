@@ -50,6 +50,19 @@ jwm-tool daemon-check     # 守护进程健康检查/自动重启
 jwm-tool daemon-restart   # 重启守护进程
 ```
 
+### IPC 查询与订阅
+
+```bash
+jwm-tool msg get_windows
+jwm-tool health --json
+jwm-tool msg '' --subscribe 'window,tag,layout' --raw
+```
+
+IPC 使用换行分隔的 JSON。工具按块读取并保留同一批到达的后续消息，
+每条响应的正文上限为 1 MiB。普通响应和订阅确认须在开始读取后 5 秒内
+完整到达；订阅可以长期空闲，但一条事件从收到首批字节起也须在 5 秒内
+收齐。超长、超时或缺少结尾换行的消息会结束读取并报告错误。
+
 ### 构建并重启 JWM
 
 ```bash

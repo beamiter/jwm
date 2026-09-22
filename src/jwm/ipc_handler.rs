@@ -5533,6 +5533,7 @@ mod tests {
     fn set_mic_mute_queues_the_set_and_draws_the_estimate() {
         let mut backend = PairingIpcBackend::new();
         let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let control_queue = crate::jwm::features::system_controls::TestControlQueueGuard::install();
 
         let response = jwm.handle_ipc_command(
             &mut backend,
@@ -5574,6 +5575,14 @@ mod tests {
         assert_eq!(
             backend.osd.as_slice(),
             &[(OsdKind::MicMute(true), 0), (OsdKind::MicMute(false), 0)]
+        );
+        assert_eq!(
+            control_queue.requests(),
+            vec![
+                crate::jwm::features::system_controls::ControlRequest::MicMuteSet(true),
+                crate::jwm::features::system_controls::ControlRequest::MicMuteSet(false),
+            ],
+            "both absolute targets are submitted to the controls queue"
         );
     }
 
@@ -5733,6 +5742,12 @@ mod tests {
     fn get_mic_mute_answers_the_cached_flag() {
         let mut backend = PairingIpcBackend::new();
         let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        // Freeze the cache in a deterministic, freshly-observed unread state.
+        // The query still exercises stale-while-revalidate, but cannot race a
+        // real PipeWire/PulseAudio/ALSA probe on the test host.
+        jwm.features.control_snapshot = None;
+        jwm.features.control_snapshot_job = None;
+        jwm.features.control_snapshot_refreshed_at = Some(std::time::Instant::now());
 
         let unread = jwm.handle_ipc_query("get_mic_mute", &serde_json::json!({}), &backend);
         assert!(unread.success, "{unread:?}");

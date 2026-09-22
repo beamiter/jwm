@@ -39,10 +39,12 @@ cargo test --locked --lib --bins --tests
 
 Prefer `scripts/test.sh` (same arguments as `cargo test`) when running the
 suite from an agent or an interruptible terminal: it runs cargo in its own
-process group, kills that group on exit and sweeps the subprocesses that the
-process-management tests spawn, so an interrupted run cannot leave a runaway
-`sh` burning a core. It also refuses to run inside a sandbox that blocks
+process group and kills that group on exit, including interrupted runs. Cleanup
+never scans unrelated processes by command name. The stubborn-child tests also
+use a parent-death signal and a bounded loop. It refuses to run inside a sandbox that blocks
 `kill()`, where those tests fail for environmental reasons only.
+`scripts/test-test-wrapper.sh` verifies cleanup and exit-status propagation with
+an offline Cargo stand-in, including that an unrelated matching process survives.
 
 The shell gate requires `shellcheck` (CI installs the distribution package)
 and discovers executable Bash helpers automatically. It rejects

@@ -1407,6 +1407,10 @@ pub(crate) fn queue_control_request(
     request: ControlRequest,
     notifier: Option<AsyncUpdateNotifier>,
 ) -> Option<u64> {
+    #[cfg(test)]
+    if let Some(seq) = test_control_queue_push(request.clone()) {
+        return Some(seq);
+    }
     let worker = controls_worker();
     if !worker.started {
         return None;
@@ -1444,7 +1448,63 @@ pub(crate) fn take_control_report() -> Option<ControlReport> {
 /// binding keeps its old error path instead of drawing an estimate the
 /// worker would only have to take back.
 pub(crate) fn volume_tool_known_absent() -> bool {
+    #[cfg(test)]
+    if test_control_queue_is_installed() {
+        return false;
+    }
     matches!(VOLUME_TOOL.get(), Some(None))
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_CONTROL_QUEUE: std::cell::RefCell<Option<Vec<ControlRequest>>> = const {
+        std::cell::RefCell::new(None)
+    };
+}
+
+/// Thread-local control queue used by IPC tests that exercise optimistic
+/// state without probing or mutating the host's real audio session.
+#[cfg(test)]
+pub(crate) struct TestControlQueueGuard;
+
+#[cfg(test)]
+impl TestControlQueueGuard {
+    pub(crate) fn install() -> Self {
+        TEST_CONTROL_QUEUE.with(|slot| {
+            let previous = slot.borrow_mut().replace(Vec::new());
+            assert!(
+                previous.is_none(),
+                "a test control queue is already installed"
+            );
+        });
+        Self
+    }
+
+    pub(crate) fn requests(&self) -> Vec<ControlRequest> {
+        TEST_CONTROL_QUEUE.with(|slot| slot.borrow().as_ref().cloned().unwrap_or_default())
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestControlQueueGuard {
+    fn drop(&mut self) {
+        TEST_CONTROL_QUEUE.with(|slot| *slot.borrow_mut() = None);
+    }
+}
+
+#[cfg(test)]
+fn test_control_queue_is_installed() -> bool {
+    TEST_CONTROL_QUEUE.with(|slot| slot.borrow().is_some())
+}
+
+#[cfg(test)]
+fn test_control_queue_push(request: ControlRequest) -> Option<u64> {
+    TEST_CONTROL_QUEUE.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let requests = slot.as_mut()?;
+        requests.push(request);
+        Some(requests.len() as u64)
+    })
 }
 
 /// The brightness counterpart of [`volume_tool_known_absent`].

@@ -1,5 +1,5 @@
 use crate::backend::api::{
-    BackendEvent, Geometry, LayerSurfaceInfo, NetWmState, PropertyKind, WindowType,
+    BackendEvent, Geometry, LayerSurfaceInfo, NetWmAction, NetWmState, PropertyKind, WindowType,
 };
 use crate::backend::common_define::WindowId;
 use crate::sync_ext::MutexExt;
@@ -590,6 +590,54 @@ impl JwmWaylandState {
         )
     }
 
+    /// Retire a Wayland window after the caller removes its surface mapping.
+    /// Both role destruction and abrupt wl_surface destruction must close the
+    /// same published handles, even when the wl_surface outlives its role.
+    fn remove_wayland_window(&mut self, win: WindowId) {
+        self.forget_surface_commit_epoch(win);
+        self.take_window_mapping(win);
+        self.toplevels.remove(&win);
+        self.layer_surfaces.remove(&win);
+        self.pending_initial_configure.remove(&win);
+        self.pending_size_reconfigure.remove(&win);
+        self.window_geometry.remove(&win);
+        self.window_stack.retain(|w| *w != win);
+        self.window_title.remove(&win);
+        self.window_app_id.remove(&win);
+        self.window_activation_app_id.remove(&win);
+        self.window_is_fullscreen.remove(&win);
+        self.window_type_overrides.remove(&win);
+        self.window_layer_info.remove(&win);
+        self.window_border_color.remove(&win);
+
+        if let Some(handle) = self.foreign_toplevel_handles.remove(&win) {
+            self.foreign_toplevel_list_state.remove_toplevel(&handle);
+        }
+        if let Some(ref ftm) = self.foreign_toplevel_mgmt {
+            ftm.remove_window(win);
+        }
+
+        self.compositor_dead_windows.push(win.raw());
+        self.push_event(BackendEvent::WindowDestroyed(win));
+        self.needs_redraw = true;
+    }
+
+    fn request_x11_minimized(&mut self, x11_id: u32, minimized: bool) {
+        if let Some(window) = self.x11_surface_to_window.get(&x11_id).copied() {
+            // Let the shared policy own animation, Dock entries, and restore
+            // placement, just as it does for native X11 WM_CHANGE_STATE.
+            self.push_event(BackendEvent::WindowStateRequest {
+                window,
+                action: if minimized {
+                    NetWmAction::Add
+                } else {
+                    NetWmAction::Remove
+                },
+                state: NetWmState::Hidden,
+            });
+        }
+    }
+
     /// Return the latest commit generation observed for a window's surface
     /// tree. `None` is possible for legacy XWayland association paths whose
     /// first commit predated the WindowId mapping; callers must retain a
@@ -866,6 +914,10 @@ impl SessionLockHandler for JwmWaylandState {
 
     fn lock(&mut self, confirmation: SessionLocker) {
         info!("[udev/wayland] session lock requested");
+        // Spec: if the previous locker disconnected (`LockStatus::Defunct`),
+        // smithay allows a new client to take over without calling `unlock`.
+        // Drop stale surfaces so the new locker owns every output cleanly.
+        self.lock_surfaces.clear();
         confirmation.lock();
         self.session_locked = true;
         self.session_lock_epoch = self.session_lock_epoch.wrapping_add(1);
@@ -1222,8 +1274,7 @@ impl XWaylandShellHandler for JwmWaylandState {
 }
 
 /// Map Smithay's `XwmResizeEdge` onto the `_NET_WM_MOVERESIZE` direction
-/// codes that [`crate::jwm::event_dispatcher::Jwm::on_moveresize_request`]
-/// already understands (0..=7 resize, 8 move).
+/// codes used by the shared window-manager policy (0..=7 resize, 8 move).
 fn xwm_resize_edge_direction(edge: XwmResizeEdge) -> u32 {
     match edge {
         XwmResizeEdge::TopLeft => 0,
@@ -1264,17 +1315,26 @@ impl XwmHandler for JwmWaylandState {
     }
 
     fn map_window_request(&mut self, _xwm: XwmId, window: X11Surface) {
+        let iconic = window.is_hidden();
         info!(
-            "[xwayland] map_window_request: id={} title={:?} class={:?}",
+            "[xwayland] map_window_request: id={} title={:?} class={:?} iconic={}",
             window.window_id(),
             window.title(),
             window.class(),
+            iconic,
         );
 
-        // Grant the map request.
+        // Grant the map request. Smithay seeds `_NET_WM_STATE_HIDDEN` before
+        // this callback when WmHints initial state is Iconic; `set_mapped`
+        // then writes ICCCM IconicState when that atom is present.
         if let Err(e) = window.set_mapped(true) {
             warn!("[xwayland] set_mapped(true) failed: {e:?}");
             return;
+        }
+        // Re-assert Hidden after map so a client that raced Normal hints
+        // still lands Iconic; harmless when already Hidden.
+        if iconic && let Err(e) = window.set_hidden(true) {
+            warn!("[xwayland] set_hidden(true) for Iconic map failed: {e:?}");
         }
 
         // Send a configure with the requested geometry (or a reasonable default).
@@ -1319,10 +1379,12 @@ impl XwmHandler for JwmWaylandState {
             .insert(win_id, window.is_fullscreen());
         self.window_stack.push(win_id);
 
-        // X11 windows don't go through our Wayland-commit mapping path unless we link the associated
-        // wl_surface. Mark them mapped here so they participate in rendering/hit-testing immediately.
-        self.mapped_windows.insert(win_id);
-        self.needs_redraw = true;
+        // Iconic starts must still be managed (WindowCreated → on_map_request)
+        // so JWM can adopt them as minimized; keep them out of the compositor
+        // draw set until the manager explicitly maps/restores them.
+        // Record the manager's hidden state too: an early buffer commit must
+        // not map an Iconic window before JWM processes the creation event.
+        self.set_manager_window_mapped(win_id, !iconic);
 
         self.push_event(BackendEvent::WindowCreated(win_id));
         self.push_event(BackendEvent::WindowMapped(win_id));
@@ -1546,6 +1608,15 @@ impl XwmHandler for JwmWaylandState {
                         kind: PropertyKind::Class,
                     });
                 }
+                // Smithay now parses `_MOTIF_WM_HINTS`; forward so JWM can drop
+                // SSD borders for Steam/Electron/etc. XWayland clients the same
+                // way the native X11 backends already do.
+                WmWindowProperty::MotifHints => {
+                    self.push_event(BackendEvent::PropertyChanged {
+                        window: win_id,
+                        kind: PropertyKind::MotifHints,
+                    });
+                }
                 _ => {}
             }
         }
@@ -1557,6 +1628,14 @@ impl XwmHandler for JwmWaylandState {
             self.window_is_fullscreen.insert(win_id, true);
             let _ = window.set_fullscreen(true);
         }
+    }
+
+    fn minimize_request(&mut self, _xwm: XwmId, window: X11Surface) {
+        self.request_x11_minimized(window.window_id(), true);
+    }
+
+    fn unminimize_request(&mut self, _xwm: XwmId, window: X11Surface) {
+        self.request_x11_minimized(window.window_id(), false);
     }
 
     fn unfullscreen_request(&mut self, _xwm: XwmId, window: X11Surface) {
@@ -2286,6 +2365,12 @@ impl JwmWaylandState {
                 let rect = Rectangle::<i32, Logical>::new(output.current_location(), logical_size);
                 if rect.to_f64().contains(location) {
                     if let Some(lock_surface) = self.lock_surfaces.get(&output.name()) {
+                        // Crashed locker: surface may still be keyed but dead.
+                        // Keep the session locked (no passthrough to apps) and
+                        // wait for a replacement locker / PAM UI.
+                        if !lock_surface.alive() {
+                            return None;
+                        }
                         let origin: Point<f64, Logical> =
                             (rect.loc.x as f64, rect.loc.y as f64).into();
                         if let Some((surface, surf_loc)) = under_from_surface_tree(
@@ -2701,6 +2786,49 @@ impl JwmWaylandState {
         let id = WindowId::from_raw(self.next_window_raw);
         self.next_window_raw = self.next_window_raw.wrapping_add(1);
         id
+    }
+
+    /// Stable `ext-foreign-toplevel-list` identifier for `win`.
+    ///
+    /// Protocol limit: non-empty, ≤32 printable ASCII. `jwm-` + 16 hex digits
+    /// of the `WindowId` raw value fits (20 chars) and stays unique per window.
+    pub(crate) fn foreign_toplevel_identifier(win: WindowId) -> String {
+        format!("jwm-{:016x}", win.raw())
+    }
+
+    /// Convert smithay's parsed Motif hints into JWM's wire-compatible struct
+    /// so `MotifWmHints::decorations_none` keeps matching the X11 backends.
+    pub(crate) fn motif_wm_hints_from_smithay(
+        hints: &smithay::xwayland::xwm::MwmHints,
+    ) -> crate::backend::api::MotifWmHints {
+        let mut flags = 0u32;
+        let mut functions = 0u32;
+        let mut decorations = 0u32;
+        let mut input_mode = 0i32;
+        let mut status = 0u32;
+        if let Some(f) = hints.functions {
+            flags |= 1 << 0;
+            functions = f.bits();
+        }
+        if let Some(d) = hints.decorations {
+            flags |= 1 << 1;
+            decorations = d.bits();
+        }
+        if let Some(mode) = hints.input_mode {
+            flags |= 1 << 2;
+            input_mode = mode as u32 as i32;
+        }
+        if let Some(s) = hints.status {
+            flags |= 1 << 3;
+            status = s.bits();
+        }
+        crate::backend::api::MotifWmHints {
+            flags,
+            functions,
+            decorations,
+            input_mode,
+            status,
+        }
     }
 
     pub(crate) fn push_event(&mut self, ev: BackendEvent) {
@@ -3227,8 +3355,6 @@ impl CompositorHandler for JwmWaylandState {
         }
 
         if let Some(win) = self.surface_to_window.remove(&surface.id()) {
-            self.forget_surface_commit_epoch(win);
-            self.take_window_mapping(win);
             log::info!(
                 "[udev/wayland] surface_destroyed win={win:?} (client disconnected abruptly)"
             );
@@ -3247,30 +3373,7 @@ impl CompositorHandler for JwmWaylandState {
                 }
             }
 
-            self.toplevels.remove(&win);
-            self.layer_surfaces.remove(&win);
-            self.pending_initial_configure.remove(&win);
-            self.pending_size_reconfigure.remove(&win);
-            self.window_geometry.remove(&win);
-            self.window_stack.retain(|w| *w != win);
-            self.window_title.remove(&win);
-            self.window_app_id.remove(&win);
-            self.window_activation_app_id.remove(&win);
-            self.window_is_fullscreen.remove(&win);
-            self.window_type_overrides.remove(&win);
-            self.window_layer_info.remove(&win);
-            self.window_border_color.remove(&win);
-
-            if let Some(handle) = self.foreign_toplevel_handles.remove(&win) {
-                handle.send_closed();
-            }
-            if let Some(ref ftm) = self.foreign_toplevel_mgmt {
-                ftm.remove_window(win);
-            }
-
-            self.compositor_dead_windows.push(win.raw());
-            self.push_event(BackendEvent::WindowDestroyed(win));
-            self.needs_redraw = true;
+            self.remove_wayland_window(win);
         }
     }
 }
@@ -3939,10 +4042,15 @@ impl XdgShellHandler for JwmWaylandState {
             return;
         }
 
-        // Announce to ext-foreign-toplevel-list clients.
+        // Keep the identifier stable for this toplevel's lifetime. Destroying
+        // and recreating the role allocates a new WindowId and identifier.
         let handle = self
             .foreign_toplevel_list_state
-            .new_toplevel::<JwmWaylandState>("", "");
+            .new_toplevel_with_identifier::<JwmWaylandState>(
+                "",
+                "",
+                Self::foreign_toplevel_identifier(win),
+            );
         self.foreign_toplevel_handles.insert(win, handle);
 
         // Announce to wlr-foreign-toplevel-management clients.
@@ -4035,23 +4143,8 @@ impl XdgShellHandler for JwmWaylandState {
 
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
         if let Some(win) = self.surface_to_window.remove(&surface.wl_surface().id()) {
-            self.forget_surface_commit_epoch(win);
-            self.take_window_mapping(win);
             info!("[udev/wayland] toplevel_destroyed win={win:?}");
-            self.toplevels.remove(&win);
-            self.layer_surfaces.remove(&win);
-            self.pending_initial_configure.remove(&win);
-            self.window_geometry.remove(&win);
-            self.window_stack.retain(|w| *w != win);
-            self.window_title.remove(&win);
-            self.window_app_id.remove(&win);
-            self.window_activation_app_id.remove(&win);
-            self.window_is_fullscreen.remove(&win);
-            self.window_type_overrides.remove(&win);
-            self.window_border_color.remove(&win);
-            self.compositor_dead_windows.push(win.raw());
-            self.push_event(BackendEvent::WindowDestroyed(win));
-            self.needs_redraw = true;
+            self.remove_wayland_window(win);
         }
     }
 
@@ -4359,6 +4452,75 @@ mod xwayland_moveresize_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod smithay_feature_follow_tests {
+    use super::JwmWaylandState;
+    use crate::backend::common_define::WindowId;
+    use smithay::xwayland::xwm::{MwmDecorationsHint, MwmHints};
+
+    #[test]
+    fn foreign_toplevel_identifier_is_stable_ascii_and_protocol_sized() {
+        let win = WindowId::from_raw(0xabcdu64);
+        let id = JwmWaylandState::foreign_toplevel_identifier(win);
+        assert_eq!(id, "jwm-000000000000abcd");
+        assert!(!id.is_empty() && id.len() <= 32 && id.is_ascii());
+        assert_eq!(
+            JwmWaylandState::foreign_toplevel_identifier(win),
+            id,
+            "identifier must be stable for the same WindowId"
+        );
+    }
+
+    #[test]
+    fn motif_conversion_marks_empty_decorations_as_borderless() {
+        let hints = MwmHints {
+            decorations: Some(MwmDecorationsHint::empty()),
+            ..MwmHints::default()
+        };
+        let motif = JwmWaylandState::motif_wm_hints_from_smithay(&hints);
+        assert!(motif.decorations_none());
+        assert_eq!(motif.flags, 1 << 1);
+        assert_eq!(motif.decorations, 0);
+    }
+
+    #[test]
+    fn motif_conversion_without_decorations_flag_is_not_borderless() {
+        let motif = JwmWaylandState::motif_wm_hints_from_smithay(&MwmHints::default());
+        assert!(!motif.decorations_none());
+        assert_eq!(motif.flags, 0);
+    }
+
+    #[test]
+    fn property_notify_forwards_motif_hints() {
+        const SOURCE: &str = include_str!("state.rs");
+        let production = SOURCE.split_once("#[cfg(test)]").unwrap().0;
+        assert!(
+            production.contains("WmWindowProperty::MotifHints")
+                && production.contains("PropertyKind::MotifHints"),
+            "XWayland Motif property changes must reach JWM decoration reconcile"
+        );
+        assert!(
+            production.contains("new_toplevel_with_identifier")
+                && production.contains("foreign_toplevel_identifier"),
+            "ext-foreign-toplevel-list must use a stable WindowId-backed identifier"
+        );
+        assert!(
+            production.contains("let iconic = window.is_hidden()")
+                && production.contains("set_hidden(true)"),
+            "Iconic MapRequest must re-assert Hidden and skip compositor draw set"
+        );
+        assert!(
+            production.contains("lock_surfaces.clear()")
+                && production.contains("session lock requested"),
+            "session lock must clear stale surfaces so a Defunct locker can be replaced"
+        );
+    }
+}
+
+#[cfg(test)]
+#[path = "lifecycle_tests.rs"]
+mod lifecycle_tests;
 
 #[cfg(test)]
 mod xwayland_legacy_assoc_tests {
