@@ -5094,8 +5094,11 @@ impl<C: CompositorConnection> Compositor<C> {
             self.tilt_target_x,
             self.tilt_target_y,
         );
-        let attention_active =
-            self.attention_animation && self.windows.values().any(|wt| wt.is_urgent);
+        let attention_active = self.attention_animation
+            && self
+                .windows
+                .values()
+                .any(|wt| wt.is_urgent && wt.w > 0 && wt.h > 0);
         // A rotating gradient border needs continuous frames while a border
         // can actually be drawn (smart borders require >1 client window).
         let gradient_border_animating = self.border_gradient_enabled
@@ -5322,13 +5325,12 @@ impl<C: CompositorConnection> Compositor<C> {
             // spring is actually moving — or it is owed the frame that prunes
             // it: a settled hold composites nothing. The fade-out's first
             // frame is scheduled through `frame_deadline` (toast / OSD
-            // envelope boundaries, joined with recording), and a composited
-            // session also keeps the 20 ms idle cadence as a safety net
-            // (`scheduling::idle_poll_required`). Toast hover, unhover and
-            // dismiss are pointer events that set `needs_render` themselves,
-            // and every OSD show/refresh — a held volume key's repeats
-            // included — is an input event that arms its own frame. The OSD
-            // has no pointer interaction to pause on.
+            // envelope boundaries and pixmap-refresh retries, joined with
+            // recording). Toast hover, unhover and dismiss are pointer events
+            // that set `needs_render` themselves, and every OSD show/refresh —
+            // a held volume key's repeats included — is an input event that
+            // arms its own frame. The OSD has no pointer interaction to pause
+            // on.
             || self.toast_stack.needs_frames(std::time::Instant::now())
             || self.osd_slot.needs_frames(std::time::Instant::now())
             || self.system_ui.is_some()

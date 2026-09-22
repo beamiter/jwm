@@ -21,11 +21,11 @@ Ordered by how much each item hurts "open the laptop and work". This queue does
 | 6 | Runtime framebuffer envelope change | **documented** | Grow/shrink of the global FB bbox is refused by design until DRM+GLES are one transaction. Workarounds and sites: [output-layout](output-layout.md). |
 
 Known limits of the linear tail (not regressions against the old
-exact-sRGB fallback, which clipped the same way): the postprocess filters
-round-trip through an 8-bit encoded copy, so while a filter is on the frame
-keeps no headroom above SDR white; the glass backdrop cache for the linear
-domain is 8-bit unless `hdr_enabled`, which can band under dark wallpapers.
-An FP16 postprocess copy and glass cache would lift both.
+exact-sRGB fallback, which clipped the same way): while filters run, the
+postprocess and blur chain use FP16 whenever the scene-linear target is live,
+and the linear-domain glass backdrop cache prefers FP16 (falling back to the
+encoded formats only if allocation fails). Encoded-only chrome still withdraws
+HDR signalling for the frame.
 
 ## Next coding slices
 

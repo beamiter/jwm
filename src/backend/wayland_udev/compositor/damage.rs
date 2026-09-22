@@ -243,7 +243,12 @@ impl WaylandCompositor {
         }
         if attention_requires_composition(
             self.attention_animation_enabled,
-            self.windows.values().any(|window| window.is_urgent),
+            self.windows.iter().any(|(id, window)| {
+                window.is_urgent
+                    && window.width > 0
+                    && window.height > 0
+                    && !self.minimized_windows.contains(id)
+            }),
         ) {
             return Some("urgent-window attention requires composition");
         }
@@ -341,13 +346,14 @@ impl WaylandCompositor {
         if self.osd_slot.needs_frames(std::time::Instant::now()) {
             return true;
         }
-        // A rotating gradient border needs continuous frames while any
-        // window that could carry a border is mapped.
+        // A rotating gradient border needs continuous frames while a border
+        // can actually be drawn (smart borders require >1 client window),
+        // matching the X11 compositor's needs_render gate.
         if self.border_gradient_enabled
             && self.border_gradient_speed != 0.0
             && self.border_enabled
             && self.border_width > 0.0
-            && !self.windows.is_empty()
+            && self.windows.len() > 1
         {
             return true;
         }

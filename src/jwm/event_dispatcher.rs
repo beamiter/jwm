@@ -6043,6 +6043,36 @@ mod tests {
         );
     }
 
+    /// Screenshot completion watchers are the same class of slot: dropping
+    /// the composited idle poll is only safe once every watcher can wake the
+    /// loop, so an untracked capture follow-up must restore the safety net.
+    #[test]
+    fn a_parked_screenshot_completion_is_registered_with_the_readiness_hub() {
+        let mut jwm = empty_jwm();
+        assert!(jwm.background_job_readiness_is_complete());
+
+        jwm.features.screenshot_completions.push(
+            crate::jwm::features::connectivity::BackgroundJob::spawn(|| {
+                crate::jwm::features::screenshot::ScreenshotCompletion::Failed("test".into())
+            }),
+        );
+        assert!(
+            !jwm.background_job_readiness_is_complete(),
+            "an untracked screenshot completion must keep the idle poll fallback"
+        );
+
+        jwm.async_update_notifier =
+            Some(crate::backend::update_notifier::AsyncUpdateNotifier::new().unwrap());
+        let job = crate::jwm::features::connectivity::BackgroundJob::spawn(|| {
+            crate::jwm::features::screenshot::ScreenshotCompletion::Failed("test".into())
+        });
+        jwm.features.screenshot_completions = vec![jwm.track_background_job(job)];
+        assert!(
+            jwm.background_job_readiness_is_complete(),
+            "a tracked screenshot completion rides the readiness hub"
+        );
+    }
+
     #[test]
     fn orphan_bar_is_retired_before_a_mapping_bar_blocks_creation() {
         let mut jwm = empty_jwm();
@@ -7516,6 +7546,11 @@ impl Jwm {
                 .launcher_catalog_job
                 .as_ref()
                 .is_none_or(BackgroundJob::readiness_is_covered)
+            && self
+                .features
+                .screenshot_completions
+                .iter()
+                .all(BackgroundJob::readiness_is_covered)
             && self.features.system_ui.auth_readiness_is_covered()
     }
 

@@ -1,11 +1,12 @@
 //! Shared, bounded parsing for compositor power-supply probes.
 
-use std::fs::OpenOptions;
+use std::fs::{self, OpenOptions};
 use std::io::{self, Read};
 use std::os::unix::fs::OpenOptionsExt as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub(crate) const MAX_POWER_SUPPLY_ATTRIBUTE_BYTES: usize = 4 * 1024;
+const MAX_POWER_SUPPLY_ENTRIES: usize = 64;
 
 pub(crate) fn read_attribute(path: &Path) -> io::Result<String> {
     let file = OpenOptions::new()
@@ -47,6 +48,30 @@ pub(crate) fn parse_percentage(text: &str) -> io::Result<u32> {
         ));
     }
     Ok(value)
+}
+
+/// First `/sys/class/power_supply/*` entry whose `type` is `Battery`.
+///
+/// Multi-battery laptops often expose `BAT1` (or only `BAT1`) rather than
+/// `BAT0`; hardcoding a single name silently keeps the compositor on the AC
+/// power profile. Enumeration matches the control-center probe in
+/// `jwm::features::power`.
+pub(crate) fn first_battery_dir(power_supply_root: &Path) -> Option<PathBuf> {
+    let mut entries = fs::read_dir(power_supply_root).ok()?.flatten().collect::<Vec<_>>();
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries.into_iter().take(MAX_POWER_SUPPLY_ENTRIES) {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let Ok(supply_type) = read_attribute(&path.join("type")) else {
+            continue;
+        };
+        if supply_type.trim() == "Battery" {
+            return Some(path);
+        }
+    }
+    None
 }
 
 #[cfg(feature = "x11-backends")]
@@ -121,5 +146,22 @@ mod tests {
                 assert_eq!(parse_nonnegative_finite(invalid), None);
             }
         }
+    }
+
+    #[test]
+    fn first_battery_dir_skips_non_batteries_and_prefers_sorted_name() {
+        let root = test_directory();
+        let ac = root.join("AC");
+        let bat1 = root.join("BAT1");
+        let bat0 = root.join("BAT0");
+        std::fs::create_dir_all(&ac).unwrap();
+        std::fs::create_dir_all(&bat1).unwrap();
+        std::fs::create_dir_all(&bat0).unwrap();
+        std::fs::write(ac.join("type"), "Mains\n").unwrap();
+        std::fs::write(bat1.join("type"), "Battery\n").unwrap();
+        std::fs::write(bat0.join("type"), "Battery\n").unwrap();
+
+        assert_eq!(first_battery_dir(&root).as_deref(), Some(bat0.as_path()));
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

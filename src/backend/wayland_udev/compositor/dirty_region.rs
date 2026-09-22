@@ -64,6 +64,8 @@ pub struct DirtyRegionTracker {
     screen_h: u32,
     merge_distance: f32,
     cached_merged: Option<DirtyRect>,
+    /// Number of mark_dirty calls that coalesced into an existing region.
+    merge_count: u64,
 }
 
 impl DirtyRegionTracker {
@@ -77,6 +79,7 @@ impl DirtyRegionTracker {
             screen_h: h,
             merge_distance: 50.0,
             cached_merged: None,
+            merge_count: 0,
         }
     }
 
@@ -90,6 +93,7 @@ impl DirtyRegionTracker {
         for existing in self.regions.iter_mut() {
             if expanded.intersects(existing) {
                 *existing = existing.union(&rect);
+                self.merge_count = self.merge_count.saturating_add(1);
                 return;
             }
         }
@@ -193,6 +197,11 @@ impl DirtyRegionTracker {
 
     pub fn region_count(&self) -> usize {
         self.regions.len()
+    }
+
+    /// Lifetime count of dirty rectangles that coalesced into an existing region.
+    pub fn merge_count(&self) -> u64 {
+        self.merge_count
     }
 }
 

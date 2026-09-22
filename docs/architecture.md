@@ -133,16 +133,6 @@ tools/jwm_remote.rs         separate trusted-LAN X11 helper
   remain explicitly unmanaged: timestamps are consumed for protocol progress,
   no Smithay barriers are installed, and the compositor does not scan the
   scene for nonexistent barrier state.
-- X11RB/XCB share one calloop pacing policy: continuous handler/compositor work
-  selects a 16 ms adaptive update cadence, X damage renders immediately after
-  dispatch, timer-driven updates suppress a redundant post-dispatch swap, and
-  recording contributes its own deadline. Their update Timer is retained as a
-  mutable calloop Dispatcher: non-update events may only tighten its promise,
-  while a completed handler update may reset it in either direction. JWM's
-  unified maintenance deadline covers child/bar supervision, scratchpad and
-  layout persistence expiry, ping, idle, resources, battery, config and picker
-  work. The 20 ms safety cap remains explicit until clipboard and generic
-  background-job completion are readiness-driven.
 - JWM owns a process-lifetime level-triggered epoll hub registered once by each
   X11 loop. It nests IPC's listener/client epoll and dynamically added per-bar
   command eventfds, so IPC reconnects and monitor hotplug do not mutate calloop
@@ -151,6 +141,17 @@ tools/jwm_remote.rs         separate trusted-LAN X11 helper
   protocol while bridging bar-to-WM commands to eventfd. Source eventfds and
   rings are drained before the aggregate ready list, and bar teardown removes
   its interest before destroying the ring and joining the waiter thread.
+- X11RB/XCB share one calloop pacing policy: continuous handler/compositor work
+  selects a 16 ms adaptive update cadence, X damage renders immediately after
+  dispatch, timer-driven updates suppress a redundant post-dispatch swap, and
+  recording contributes its own deadline. Their update Timer is retained as a
+  mutable calloop Dispatcher: non-update events may only tighten its promise,
+  while a completed handler update may reset it in either direction. JWM's
+  unified maintenance deadline covers child/bar supervision, scratchpad and
+  layout persistence expiry, ping, idle, resources, battery, config and picker
+  work. The 20 ms safety poll is retained only when the readiness hub is missing
+  or unhealthy; an idle composited session sleeps on `compositor_frame_deadline`
+  (toast/OSD envelopes and pixmap-refresh retries) plus maintenance wakeups.
 - Compositor benchmarking is the first capability extracted from the monolithic
   `Backend` trait. Application startup now depends on `CompositorBenchmark`
   rather than the complete platform interface for benchmark configuration.

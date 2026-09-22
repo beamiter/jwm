@@ -2628,9 +2628,15 @@ impl WaylandCompositor {
                 (0, 0)
             };
 
-            // When the output is 10-bit, keep the whole offscreen chain (scene
-            // capture, blur, postprocess, transition) at 10-bit too — an 8-bit
-            // intermediate would reintroduce banding before the final 10-bit blit.
+            // When the scene-linear path is live, blur and postprocess keep FP16
+            // headroom (HDR filters and glass must not round-trip through 8-bit).
+            // Otherwise match the output bit depth so a 10-bit scanout does not
+            // reintroduce banding in the offscreen chain.
+            let working_internal_format = if linear_fbo != 0 {
+                GL_RGBA16F
+            } else {
+                output_internal_format
+            };
             // ----- Create scene FBO + texture -----
             let (scene_fbo, scene_texture) = construction.create_required_fbo_texture(
                 screen_w,
@@ -2653,7 +2659,7 @@ impl WaylandCompositor {
                 let (fbo, texture) = construction.create_required_fbo_texture(
                     bw,
                     bh,
-                    output_internal_format,
+                    working_internal_format,
                     "blur",
                 )?;
                 blur_fbos.push(BlurFboLevel {
@@ -2670,7 +2676,7 @@ impl WaylandCompositor {
             let (postprocess_fbo, postprocess_texture) = construction.create_required_fbo_texture(
                 screen_w,
                 screen_h,
-                output_internal_format,
+                working_internal_format,
                 "postprocess",
             )?;
 
@@ -4844,6 +4850,13 @@ impl WaylandCompositor {
             0.0
         };
         let ds_stats = self.direct_scanout_mgr.stats();
+        let gl_stats = self.render_stats.gl_stats();
+        let texture_memory_bytes = self.windows.values().fold(0u64, |acc, window| {
+            let (w, h) = (window.width as u64, window.height as u64);
+            // RGBA8 estimate for live client textures; FP16/10-bit FBO chain is
+            // reported separately via renderer_api / blur status.
+            acc.saturating_add(w.saturating_mul(h).saturating_mul(4))
+        });
         crate::backend::api::CompositorMetrics {
             renderer_api: "egl/gles".to_string(),
             fps: self.fps,
@@ -4855,8 +4868,10 @@ impl WaylandCompositor {
             frame_time_p99_ms: p99,
             gpu_load_percent: self.perf_metrics.gpu_load(),
             cpu_load_percent: self.perf_metrics.cpu_load(),
-            draw_calls: 0,
-            texture_memory_bytes: 0,
+            draw_calls: gl_stats.draw_calls.min(u32::MAX as u64) as u32,
+            texture_memory_bytes,
+            // Wayland has no per-window blur cache (only temporal reuse, already
+            // reported below). Keep these at zero rather than aliasing.
             blur_cache_hits: 0,
             blur_cache_misses: 0,
             blur_cache_hit_rate: 0.0,
@@ -4869,7 +4884,10 @@ impl WaylandCompositor {
             blur_quality: format!("{:?}", self.blur_quality),
             vrr_enabled: crate::config::CONFIG.load().behavior().vrr_enabled,
             vrr_active: self.output_vrr_active,
-            current_refresh_rate: 0,
+            current_refresh_rate: self.get_vrr_refresh_rate(),
+            // Wayland does not yet accumulate input→present samples the way the
+            // X11 compositor does; leave these at zero rather than inventing a
+            // number from frame time alone.
             input_latency_avg_ms: 0.0,
             input_latency_p50_ms: 0.0,
             input_latency_p95_ms: 0.0,
@@ -4882,7 +4900,7 @@ impl WaylandCompositor {
                 .redundant_changes_avoided()
                 .min(u32::MAX as u64) as u32,
             profiling_enabled: self.frame_profiler.is_enabled(),
-            dirty_region_merge_count: 0,
+            dirty_region_merge_count: self.dirty_region_tracker.merge_count() as usize,
         }
     }
 }
@@ -4957,10 +4975,15 @@ impl WaylandCompositor {
         unsafe { Self::validate_resize_dimensions(gl, w, h)? };
 
         unsafe {
-            // Keep the offscreen chain at the same bit depth as on construction
-            // (see new()): 10-bit when the output is 10-bit, else 8-bit. Without
-            // this the chain silently reverts to 8-bit after any resize.
+            // Keep blur/postprocess at FP16 while the scene-linear target is
+            // live so filters and glass retain headroom; otherwise match the
+            // output bit depth (see new()).
             let output_internal_format = self.output_internal_format;
+            let working_internal_format = if self.scene_linear_requested {
+                GL_RGBA16F
+            } else {
+                output_internal_format
+            };
             let mut allocation = CompositorConstructionGuard::new(gl, construction_probe);
             let (output_fbo, output_texture) = allocation.create_required_fbo_texture(
                 w,
@@ -4989,7 +5012,7 @@ impl WaylandCompositor {
                 let (fbo, texture) = allocation.create_required_fbo_texture(
                     bw,
                     bh,
-                    output_internal_format,
+                    working_internal_format,
                     "blur resize",
                 )?;
                 blur_fbos.push(BlurFboLevel {
@@ -5005,7 +5028,7 @@ impl WaylandCompositor {
             let (postprocess_fbo, postprocess_texture) = allocation.create_required_fbo_texture(
                 w,
                 h,
-                output_internal_format,
+                working_internal_format,
                 "postprocess resize",
             )?;
             let (transition_fbo, transition_texture) = allocation.create_required_fbo_texture(

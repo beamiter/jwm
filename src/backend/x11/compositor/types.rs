@@ -77,6 +77,18 @@ impl PixmapRefreshState {
         self.pending || self.retry_deadline.is_some_and(|deadline| deadline <= now)
     }
 
+    /// Time until a future retry is due, or `None` when idle / already due.
+    ///
+    /// Used by `frame_deadline` so a composited session can drop the 20 ms
+    /// idle poll without stranding a resize that waits on wall-clock backoff.
+    pub(super) fn next_refresh_in(self, now: std::time::Instant) -> Option<std::time::Duration> {
+        if self.pending {
+            return Some(std::time::Duration::ZERO);
+        }
+        self.retry_deadline
+            .map(|deadline| deadline.saturating_duration_since(now))
+    }
+
     /// Fold a Damage event into an already-pending refresh when it arrived
     /// before rendering, or schedule one confirmation import when it arrived
     /// after the ConfigureNotify-driven import. During failure backoff, Damage

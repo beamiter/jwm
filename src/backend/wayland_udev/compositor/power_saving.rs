@@ -1,4 +1,4 @@
-use crate::backend::power_supply::{parse_percentage, read_attribute};
+use crate::backend::power_supply::{first_battery_dir, parse_percentage, read_attribute};
 use std::io;
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -19,10 +19,7 @@ pub struct BatteryStatus {
 }
 
 impl BatteryStatus {
-    const CAPACITY_PATH: &'static str = "/sys/class/power_supply/BAT0/capacity";
-    const STATUS_PATH: &'static str = "/sys/class/power_supply/BAT0/status";
-
-    /// Read battery status from sysfs. Defaults to AC/100% if paths don't exist.
+    /// Read battery status from sysfs. Defaults to AC/100% if no battery exists.
     pub fn read() -> Self {
         Self::try_read().unwrap_or(Self {
             capacity: 100,
@@ -31,7 +28,13 @@ impl BatteryStatus {
     }
 
     fn try_read() -> io::Result<Self> {
-        Self::try_read_from(Path::new(Self::CAPACITY_PATH), Path::new(Self::STATUS_PATH))
+        let Some(dir) = first_battery_dir(Path::new("/sys/class/power_supply")) else {
+            return Ok(Self {
+                capacity: 100,
+                source: PowerSource::AC,
+            });
+        };
+        Self::try_read_from(&dir.join("capacity"), &dir.join("status"))
     }
 
     fn try_read_from(capacity_path: &Path, status_path: &Path) -> io::Result<Self> {

@@ -21,18 +21,20 @@ pub(crate) const fn update_interval(
     }
 }
 
-/// Only a native, fully readiness-driven session may drop the safety poll.
+/// Only a fully readiness-driven session may drop the safety poll.
 ///
-/// Composited sessions intentionally retain their existing idle cadence.
-/// Registration failure and a notifier whose write/drain path failed both
-/// restore the old 20 ms timer immediately on the next scheduling decision.
+/// Compositor frame demand is carried by `compositor_needs_render` (active
+/// work) and `compositor_frame_deadline` (toast/OSD/pixmap-refresh clocks),
+/// so an idle composited session no longer forces the 20 ms timer. Registration
+/// failure and a notifier whose write/drain path failed both restore the old
+/// 20 ms timer immediately on the next scheduling decision.
 #[must_use]
 pub(crate) const fn idle_poll_required(
-    compositor_active: bool,
+    _compositor_active: bool,
     handler_readiness_registered: bool,
     async_update_readiness_healthy: bool,
 ) -> bool {
-    compositor_active || !handler_readiness_registered || !async_update_readiness_healthy
+    !handler_readiness_registered || !async_update_readiness_healthy
 }
 
 /// Keep the update clock anchored to its previous deadline.
@@ -195,8 +197,10 @@ mod tests {
     }
 
     #[test]
-    fn fully_ready_native_idle_uses_the_real_maintenance_deadline() {
+    fn fully_ready_idle_uses_the_real_maintenance_deadline() {
         let now = Instant::now();
+        // Compositor presence alone no longer forces the safety poll.
+        assert!(!idle_poll_required(true, true, true));
         assert!(!idle_poll_required(false, true, true));
         assert_eq!(update_interval(false, false), None);
         assert_eq!(
@@ -216,11 +220,13 @@ mod tests {
     }
 
     #[test]
-    fn compositor_or_readiness_failure_restores_the_idle_safety_poll() {
+    fn readiness_failure_restores_the_idle_safety_poll() {
+        assert!(!idle_poll_required(true, true, true));
         for required in [
-            idle_poll_required(true, true, true),
             idle_poll_required(false, false, true),
             idle_poll_required(false, true, false),
+            idle_poll_required(true, false, true),
+            idle_poll_required(true, true, false),
         ] {
             assert!(required);
         }

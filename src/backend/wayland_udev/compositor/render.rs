@@ -2318,7 +2318,12 @@ impl WaylandCompositor {
         );
         let attention_active = attention_requires_continuous_frames(
             self.attention_animation_enabled,
-            self.windows.values().any(|window| window.is_urgent),
+            self.windows.iter().any(|(id, window)| {
+                window.is_urgent
+                    && window.width > 0
+                    && window.height > 0
+                    && !self.minimized_windows.contains(id)
+            }),
         );
         if !self.needs_render
             && !self.screenshot_requests.has_pending()
@@ -2659,6 +2664,12 @@ impl WaylandCompositor {
         if !self.needs_render && !force_render && !has_dirty {
             return false;
         }
+
+        // One ArcSwap load for the whole frame; helpers below borrow this guard.
+        let frame_config = crate::config::CONFIG.load();
+        let frame_status_bar_name = frame_config.status_bar_name();
+        let frame_behavior = frame_config.behavior();
+
         // If animations are still running, keep the flag set so the next
         // tick_animations call re-invokes compositor_render_frame automatically.
         // Recording deliberately does not re-arm the flag: `next_wakeup` carries
@@ -2721,8 +2732,6 @@ impl WaylandCompositor {
         // counted client is on screen. A flip changes the ring of windows no
         // damage box covers, so the frame that flips is never a partial one.
         let ordinary_borders = {
-            let config = crate::config::CONFIG.load();
-            let status_bar_name = config.status_bar_name();
             self.border_enabled
                 && scene
                     .iter()
@@ -2730,7 +2739,7 @@ impl WaylandCompositor {
                         self.windows.get(&id).is_some_and(|ws| {
                             counts_for_smart_borders(
                                 &ws.class_name,
-                                status_bar_name,
+                                frame_status_bar_name,
                                 self.is_unmanaged_overlay(id),
                             )
                         })
@@ -2896,8 +2905,7 @@ impl WaylandCompositor {
         }
 
         let visible_scene = &scene[first_visible..];
-        let frame_config = crate::config::CONFIG.load();
-        let glow_settings = WindowGlowSettings::from_behavior(frame_config.behavior());
+        let glow_settings = WindowGlowSettings::from_behavior(frame_behavior);
 
         // =================================================================
         // 7. Draw shadows
@@ -3236,7 +3244,7 @@ impl WaylandCompositor {
         }
         self.frame_profiler.zone_start("windows");
         let ui_palette = crate::backend::compositor_common::ui_theme::palette();
-        let status_bar_name = crate::config::CONFIG.load().status_bar_name().to_string();
+        let status_bar_name = frame_status_bar_name;
         unsafe {
             gl.UseProgram(self.program);
             if scene_linear_active {
@@ -4348,17 +4356,15 @@ impl WaylandCompositor {
         // =================================================================
         if let Some((path, region)) = self.pending_recording_start.take() {
             unsafe {
-                let config = crate::config::CONFIG.load();
-                let recording = config.behavior();
                 if let Err(e) = self.recording.start(
                     gl,
                     self.screen_w,
                     self.screen_h,
                     &path,
-                    recording.recording_fps.clamp(1, 240),
-                    &recording.recording_bitrate,
-                    recording.recording_quality,
-                    &recording.recording_encoder,
+                    frame_behavior.recording_fps.clamp(1, 240),
+                    &frame_behavior.recording_bitrate,
+                    frame_behavior.recording_quality,
+                    &frame_behavior.recording_encoder,
                     region,
                 ) {
                     log::error!("[compositor] Failed to start recording: {}", e);
@@ -5104,7 +5110,24 @@ impl WaylandCompositor {
             let (fbo, texture) = match self.glass_backdrop_caches[index].target {
                 Some(target) => target,
                 None => {
-                    let target = if self.hdr_enabled {
+                    let target = if scene_linear {
+                        // Linear-domain glass must keep headroom above SDR white;
+                        // fall back to the encoded formats only if FP16 fails.
+                        match super::create_fbo_texture_fp16(gl, bw, bh) {
+                            Ok(target) => target,
+                            Err(status) => {
+                                log::warn!(
+                                    "[udev/compositor] FP16 glass backdrop unavailable \
+                                     (status=0x{status:x}); using encoded-domain storage"
+                                );
+                                if self.hdr_enabled {
+                                    super::create_fbo_texture_10bit(gl, bw, bh)
+                                } else {
+                                    super::create_fbo_texture(gl, bw, bh)
+                                }
+                            }
+                        }
+                    } else if self.hdr_enabled {
                         super::create_fbo_texture_10bit(gl, bw, bh)
                     } else {
                         super::create_fbo_texture(gl, bw, bh)

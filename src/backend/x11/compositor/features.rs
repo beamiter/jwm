@@ -2103,11 +2103,12 @@ impl<C: CompositorConnection> Compositor<C> {
     }
 
     /// Time until the compositor itself needs a frame on an otherwise idle
-    /// desktop: the next recording capture, or a toast / OSD envelope
-    /// boundary (fade-out start / prune). Matches Wayland's `next_wakeup`
-    /// overlay terms so a settled card's first fade frame is scheduled
-    /// exactly, rather than waiting up to one idle tick. `None` when none
-    /// of those clocks are armed.
+    /// desktop: the next recording capture, a toast / OSD envelope boundary
+    /// (fade-out start / prune), or a pixmap-refresh retry deadline. Matches
+    /// Wayland's `next_wakeup` overlay terms so a settled card's first fade
+    /// frame is scheduled exactly, and so a composited session can drop the
+    /// 20 ms idle poll without stranding resize recovery. `None` when none of
+    /// those clocks are armed.
     pub(crate) fn frame_deadline(&self) -> Option<std::time::Duration> {
         let now = std::time::Instant::now();
         let recording = self.recording_frame_deadline();
@@ -2119,7 +2120,15 @@ impl<C: CompositorConnection> Compositor<C> {
             .osd_slot
             .next_envelope_change_at(now)
             .map(|at| at.saturating_duration_since(now));
-        [recording, toast_boundary, osd_boundary]
+        let pixmap_refresh = if self.unredirected_window.is_none() {
+            self.windows
+                .values()
+                .filter_map(|wt| wt.pixmap_refresh.next_refresh_in(now))
+                .min()
+        } else {
+            None
+        };
+        [recording, toast_boundary, osd_boundary, pixmap_refresh]
             .into_iter()
             .flatten()
             .min()

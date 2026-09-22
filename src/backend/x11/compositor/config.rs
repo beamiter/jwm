@@ -175,28 +175,30 @@ impl<C: CompositorConnection> Compositor<C> {
         {
             return true;
         }
-        // Need render if attention animation is active for any window
+        // Need render if attention animation is active for any drawn window.
+        // Minimized / zero-size textures are not painted, so they must not
+        // pin the loop at frame cadence on an otherwise calm desktop.
         if self.attention_animation {
             for wt in self.windows.values() {
-                if wt.is_urgent {
+                if wt.is_urgent && wt.w > 0 && wt.h > 0 {
                     return true;
                 }
             }
         }
         // Need render while a toast card's fade envelope or open spring is
         // moving, or a card reached its end and is owed the frame that prunes
-        // it. A settled hold arms nothing: the 20 ms idle cadence every
-        // composited session keeps (`scheduling::idle_poll_required`) wakes
-        // the loop for the fade-out's first frame, and hover/dismiss arrive
-        // as pointer events that set `needs_render` themselves.
+        // it. A settled hold arms nothing: `frame_deadline` carries the
+        // envelope boundary so the fade-out's first frame is scheduled
+        // exactly, and hover/dismiss arrive as pointer events that set
+        // `needs_render` themselves.
         if self.toast_stack.needs_frames(std::time::Instant::now()) {
             return true;
         }
         // Same for the volume/brightness OSD card: its envelope moves for
         // 120 ms into and 250 ms out of a 1400 ms hold, so a settled hold
-        // arms nothing either. Its fade-out boundary rides the same idle
-        // cadence, and every show/refresh — a held volume key's repeats
-        // included — is an input event that arms its own frame.
+        // arms nothing either. Its fade-out boundary rides `frame_deadline`,
+        // and every show/refresh — a held volume key's repeats included —
+        // is an input event that arms its own frame.
         if self.osd_slot.needs_frames(std::time::Instant::now()) {
             return true;
         }
@@ -1402,9 +1404,9 @@ mod tests {
     fn compositor_frame_deadline_joins_overlay_envelope_boundaries() {
         // Like Wayland `next_wakeup`, X11's compositor deadline carries toast
         // and OSD envelope boundaries so a settled card's fade-out first
-        // frame is scheduled exactly. The composited idle cadence remains a
-        // separate safety net (`idle_poll_required`) — this pin is the
-        // overlay terms themselves.
+        // frame is scheduled exactly. Pixmap-refresh retries join the same
+        // clock so a readiness-driven composited session can drop the 20 ms
+        // idle poll without stranding resize recovery.
         const FEATURES: &str = include_str!("features.rs");
         let body = FEATURES
             .split_once(&format!("pub(crate) fn {}(", "frame_deadline"))
@@ -1424,6 +1426,10 @@ mod tests {
         assert!(
             body.contains("osd_slot") && body.contains("next_envelope_change_at"),
             "frame_deadline must join OSD envelope boundaries"
+        );
+        assert!(
+            body.contains("pixmap_refresh") && body.contains("next_refresh_in"),
+            "frame_deadline must join pixmap-refresh retry deadlines"
         );
 
         for backend in [
@@ -1449,24 +1455,30 @@ mod tests {
     }
 
     #[test]
-    fn the_composited_idle_cadence_remains_a_safety_net() {
-        // Overlay boundaries ride `frame_deadline`; the 20 ms idle poll is
-        // still retained for every composited session so other maintenance
-        // (pixmap refresh, readiness gaps) keeps a floor.
+    fn a_readiness_driven_composited_session_may_drop_the_idle_poll() {
+        // Overlay boundaries and pixmap-refresh retries ride `frame_deadline`;
+        // with the readiness hub healthy, compositor presence alone must not
+        // force the 20 ms safety poll.
         use crate::backend::x11::scheduling::{
             IDLE_UPDATE_INTERVAL, idle_poll_required, update_interval,
         };
         assert_eq!(IDLE_UPDATE_INTERVAL, std::time::Duration::from_millis(20));
-        for readiness in [(true, true), (true, false), (false, true), (false, false)] {
-            assert!(
-                idle_poll_required(true, readiness.0, readiness.1),
-                "a composited session must keep the idle cadence: {readiness:?}"
-            );
-        }
+        assert!(
+            !idle_poll_required(true, true, true),
+            "a healthy composited session must be able to idle without the 20 ms poll"
+        );
+        assert!(
+            idle_poll_required(true, false, true),
+            "a missing readiness registration still restores the idle cadence"
+        );
+        assert!(
+            idle_poll_required(true, true, false),
+            "an unhealthy readiness path still restores the idle cadence"
+        );
         assert_eq!(
-            update_interval(false, true),
-            Some(IDLE_UPDATE_INTERVAL),
-            "an idle composited loop still wakes on the idle cadence"
+            update_interval(false, false),
+            None,
+            "an idle readiness-driven loop sleeps on real deadlines only"
         );
     }
 

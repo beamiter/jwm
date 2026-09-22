@@ -1,4 +1,6 @@
-use crate::backend::power_supply::{parse_nonnegative_finite, parse_percentage, read_attribute};
+use crate::backend::power_supply::{
+    first_battery_dir, parse_nonnegative_finite, parse_percentage, read_attribute,
+};
 use std::io;
 use std::path::Path;
 /// Power Saving Mode (P7D)
@@ -48,7 +50,6 @@ impl BatteryStatus {
 
     /// Update battery status from system
     pub fn update(&mut self) {
-        // Try to read from /sys/class/power_supply/BAT0/
         if let Ok(status) = Self::read_battery_status() {
             self.percentage = status.percentage;
             self.source = status.source;
@@ -59,7 +60,15 @@ impl BatteryStatus {
 
     /// Read battery status from sysfs
     fn read_battery_status() -> io::Result<BatteryStatus> {
-        Self::read_battery_status_from(Path::new("/sys/class/power_supply/BAT0"))
+        match first_battery_dir(Path::new("/sys/class/power_supply")) {
+            Some(path) => Self::read_battery_status_from(&path),
+            None => Ok(BatteryStatus {
+                percentage: 100,
+                source: PowerSource::AC,
+                time_remaining: None,
+                last_update: Instant::now(),
+            }),
+        }
     }
 
     fn read_battery_status_from(base_path: &Path) -> io::Result<BatteryStatus> {
