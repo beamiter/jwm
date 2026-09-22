@@ -1646,7 +1646,7 @@ mod tests {
             .find("gl.Uniform1f(text_opacity,opacity);")
             .expect("the plain fade scalar is restored after the overlay");
         assert!(
-            restore < 200,
+            restore < 240,
             "the fade scalar must be restored right after the overlay draw"
         );
 

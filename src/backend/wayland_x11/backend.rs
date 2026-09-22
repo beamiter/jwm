@@ -25,7 +25,7 @@ use smithay::backend::allocator::dmabuf::DmabufAllocator;
 use smithay::backend::allocator::gbm::{GbmAllocator, GbmBufferFlags};
 use smithay::backend::egl::{EGLContext, EGLDisplay};
 use smithay::backend::input::{
-    AbsolutePositionEvent, Axis, Event as InputEventExt, InputBackend, InputEvent,
+    AbsolutePositionEvent, Axis, InputTime, Event as InputEventExt, InputBackend, InputEvent,
     KeyboardKeyEvent, PointerAxisEvent, PointerButtonEvent, PointerMotionEvent,
 };
 use smithay::backend::renderer::damage::OutputDamageTracker;
@@ -1400,7 +1400,7 @@ Fallback: run the winit backend instead: `JWM_BACKEND=wayland-winit` (same binar
                                             key,
                                             smithay::backend::input::KeyState::Released,
                                             serial,
-                                            0,
+                                            InputTime::from_millis(0),
                                             |_, _, _| FilterResult::<()>::Forward,
                                         );
                                     }
@@ -1596,7 +1596,7 @@ fn process_input_event_windowed<B: InputBackend>(
     match event {
         InputEvent::PointerMotion { event, .. } => {
             let delta = event.delta();
-            let time = event.time_msec();
+            let time = event.time();
             let (x, y, output) = {
                 let mut s = shared.lock_safe();
                 s.pointer_x += delta.x;
@@ -1662,12 +1662,12 @@ fn process_input_event_windowed<B: InputBackend>(
                     target: hit.unwrap_or(HitTarget::Background { output }),
                     root_x: x,
                     root_y: y,
-                    time,
+                    time: time.millis(),
                 });
         }
 
         InputEvent::PointerMotionAbsolute { event, .. } => {
-            let time = event.time_msec();
+            let time = event.time();
             let (x, y, output) = {
                 let mut s = shared.lock_safe();
                 let (w, h, origin_x, origin_y, output) = if let Some(first) = s.outputs.first() {
@@ -1732,12 +1732,12 @@ fn process_input_event_windowed<B: InputBackend>(
                     target: hit.unwrap_or(HitTarget::Background { output }),
                     root_x: x,
                     root_y: y,
-                    time,
+                    time: time.millis(),
                 });
         }
 
         InputEvent::PointerButton { event, .. } => {
-            let time = event.time_msec();
+            let time = event.time();
             let button_code = event.button_code();
             let pressed = matches!(event.state(), smithay::backend::input::ButtonState::Pressed);
 
@@ -1856,7 +1856,7 @@ fn process_input_event_windowed<B: InputBackend>(
                         target: hit.unwrap_or(HitTarget::Background { output }),
                         state: mods_state,
                         detail: detail_btn,
-                        time,
+                        time: time.millis(),
                         root_x: x,
                         root_y: y,
                     });
@@ -1866,13 +1866,13 @@ fn process_input_event_windowed<B: InputBackend>(
                     .unwrap()
                     .push_back(BackendEvent::ButtonRelease {
                         target: hit.unwrap_or(HitTarget::Background { output }),
-                        time,
+                        time: time.millis(),
                     });
             }
         }
 
         InputEvent::Keyboard { event, .. } => {
-            let time = InputEventExt::time_msec(&event);
+            let time = InputEventExt::time(&event);
             let keycode = event.key_code();
             let state_key = event.state();
             let serial = SCOUNTER.next_serial();
@@ -2013,7 +2013,7 @@ fn process_input_event_windowed<B: InputBackend>(
                         .push_back(BackendEvent::KeyPress {
                             keycode: keycode_u8,
                             state: mods_state,
-                            time,
+                            time: time.millis(),
                         });
                 }
 
@@ -2032,14 +2032,14 @@ fn process_input_event_windowed<B: InputBackend>(
                         .push_back(BackendEvent::KeyRelease {
                             keycode: keycode_u8,
                             state: mods_state,
-                            time,
+                            time: time.millis(),
                         });
                 }
             }
         }
 
         InputEvent::PointerAxis { event, .. } => {
-            let time = InputEventExt::time_msec(&event);
+            let time = InputEventExt::time(&event);
             // smithay's X11 backend turns the host's wheel buttons (4-7)
             // into PointerAxis and drops the paired releases, so without
             // this arm the wheel reached neither the clients nor the WM.
@@ -2088,13 +2088,13 @@ fn process_input_event_windowed<B: InputBackend>(
                         target: HitTarget::Background { output },
                         state: mods_state,
                         detail,
-                        time,
+                        time: time.millis(),
                         root_x: x,
                         root_y: y,
                     });
                     pending.push_back(BackendEvent::ButtonRelease {
                         target: HitTarget::Background { output },
-                        time,
+                        time: time.millis(),
                     });
                 }
             } else if let Some(pointer) = state.seat.get_pointer() {

@@ -778,8 +778,9 @@ impl JwmWaylandState {
         match DmabufFeedbackBuilder::new(main_device, render_fmts.iter().copied())
             .add_preference_tranche(
                 main_device,
-                Some(TrancheFlags::Scanout),
+                TrancheFlags::Scanout,
                 scanout_fmts.iter().copied(),
+                4u32..=6,
             )
             .build()
         {
@@ -830,7 +831,13 @@ impl PointerConstraintsHandler for JwmWaylandState {
         }
     }
 
-    fn remove_constraint(&mut self, _surface: &WlSurface, _pointer: &PointerHandle<Self>) {}
+    fn remove_constraint(
+        &mut self,
+        _surface: &WlSurface,
+        _pointer: &PointerHandle<Self>,
+        _constraint_remove: smithay::wayland::pointer_constraints::ConstraintRemove,
+    ) {
+    }
 
     fn cursor_position_hint(
         &mut self,
@@ -994,7 +1001,9 @@ impl smithay::wayland::keyboard_shortcuts_inhibit::KeyboardShortcutsInhibitHandl
 // ---------------------------------------------------------------------------
 // Tablet Seat Handler – drawing tablet support
 // ---------------------------------------------------------------------------
-impl smithay::wayland::tablet_manager::TabletSeatHandler for JwmWaylandState {
+impl smithay::input::tablet::TabletSeatHandler for JwmWaylandState {
+    type ToolFocus = WlSurface;
+
     fn tablet_tool_image(
         &mut self,
         _tool: &smithay::backend::input::TabletToolDescriptor,

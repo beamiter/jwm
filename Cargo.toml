@@ -174,7 +174,7 @@ rand = "0.10.2"
 sha2 = { version = "0.10", optional = true }
 xkbcommon = "0.9.0"
 bitflags = "2.13.1"
-smithay = { git = "https://github.com/Smithay/smithay.git", rev = "e76f1af1418e9cdf012da9020c2f1ecc0fe020fa", default-features = false, optional = true, features = [
+smithay = { git = "https://github.com/Smithay/smithay.git", rev = "d33a9c98fbd4d0ddd85315f93d436747bf3393a6", default-features = false, optional = true, features = [
 "use_system_lib",
 "wayland-backend",
 "wayland_frontend",

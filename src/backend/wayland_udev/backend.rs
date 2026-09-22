@@ -2403,7 +2403,7 @@ impl UdevBackend {
                     match event {
                         InputEvent::PointerMotion { event, .. } => {
                             let delta = event.delta();
-                            let time = event.time_msec();
+                            let time = event.time();
                             let (mut x, mut y, mut output, in_screenshot) = {
                                 let mut s = shared.lock_safe();
                                 s.pointer_x += delta.x;
@@ -2476,7 +2476,7 @@ impl UdevBackend {
                                     &RelativeMotionEvent {
                                         delta,
                                         delta_unaccel: event.delta_unaccel(),
-                                        utime: (time as u64) * 1000,
+                                        time,
                                     },
                                 );
                                 pointer.motion(
@@ -2495,11 +2495,11 @@ impl UdevBackend {
                                 target: hit.unwrap_or(HitTarget::Background { output }),
                                 root_x: x,
                                 root_y: y,
-                                time,
+                                time: time.millis(),
                             });
                         }
                         InputEvent::PointerMotionAbsolute { event, .. } => {
-                            let time = event.time_msec();
+                            let time = event.time();
                             let (mut x, mut y, mut output, in_screenshot) = {
                                 let mut s = shared.lock_safe();
                                 let (w, h, origin_x, origin_y) = output_bounds(&s.outputs);
@@ -2571,11 +2571,11 @@ impl UdevBackend {
                                 target: hit.unwrap_or(HitTarget::Background { output }),
                                 root_x: x,
                                 root_y: y,
-                                time,
+                                time: time.millis(),
                             });
                         }
                         InputEvent::PointerButton { event, .. } => {
-                            let time = event.time_msec();
+                            let time = event.time();
                             let button_code = event.button_code();
                             let pressed = matches!(event.state(), smithay::backend::input::ButtonState::Pressed);
 
@@ -2756,19 +2756,19 @@ impl UdevBackend {
                                     target: hit.unwrap_or(HitTarget::Background { output }),
                                     state: mods_state,
                                     detail: detail_btn,
-                                    time,
+                                    time: time.millis(),
                                     root_x: x,
                                     root_y: y,
                                 });
                             } else {
                                 pending_events.lock_safe().push_back(BackendEvent::ButtonRelease {
                                     target: hit.unwrap_or(HitTarget::Background { output }),
-                                    time,
+                                    time: time.millis(),
                                 });
                             }
                         }
                         InputEvent::Keyboard { event, .. } => {
-                            let time = InputEventExt::time_msec(&event);
+                            let time = InputEventExt::time(&event);
                             let keycode = event.key_code();
                             let state_key = event.state();
                             let serial = SCOUNTER.next_serial();
@@ -2805,7 +2805,7 @@ impl UdevBackend {
                                         xkb_keycode_u8,
                                         evdev_keycode,
                                         kbd.current_focus().is_some(),
-                                        time
+                                        time.millis()
                                     );
                                 }
 
@@ -3056,7 +3056,7 @@ impl UdevBackend {
                                 pending_events.lock_safe().push_back(BackendEvent::KeyPress {
                                     keycode: keycode_u8,
                                     state: mods_state,
-                                    time,
+                                    time: time.millis(),
                                 });
 
                                 // Start (or reset) key repeat for bound shortcuts.
@@ -3090,7 +3090,7 @@ impl UdevBackend {
                                             keycode: keycode_u8,
                                             mods_raw: mods_state,
                                             required_mods: clean_mods,
-                                            press_time: time,
+                                            press_time: time.millis(),
                                             pressed_at: Instant::now(),
                                             timer_token: None,
                                         });
@@ -3136,7 +3136,7 @@ impl UdevBackend {
                                         "[udev:key->wm] keycode={} mods_state=0x{:x} time={}",
                                         keycode_u8,
                                         mods_state,
-                                        time
+                                        time.millis()
                                     );
                                 }
                             }
@@ -3172,14 +3172,14 @@ impl UdevBackend {
                                         BackendEvent::KeyRelease {
                                             keycode: keycode_u8,
                                             state: mods_state,
-                                            time,
+                                            time: time.millis(),
                                         },
                                     );
                                 }
                             }
                         }
                         InputEvent::PointerAxis { event, .. } => {
-                            let time = InputEventExt::time_msec(&event);
+                            let time = InputEventExt::time(&event);
                             // While a system-UI or screenshot grab owns the
                             // pointer the way an X11 grab would, the wheel
                             // belongs to the window manager, not to the
@@ -3232,13 +3232,13 @@ impl UdevBackend {
                                         target: HitTarget::Background { output },
                                         state: mods_state,
                                         detail,
-                                        time,
+                                        time: time.millis(),
                                         root_x: x,
                                         root_y: y,
                                     });
                                     pending.push_back(BackendEvent::ButtonRelease {
                                         target: HitTarget::Background { output },
-                                        time,
+                                        time: time.millis(),
                                     });
                                 }
                             } else if let Some(pointer) = state.seat.get_pointer() {
@@ -3260,7 +3260,7 @@ impl UdevBackend {
                             }
                         }
                         InputEvent::TouchDown { event, .. } => {
-                            let time = event.time_msec();
+                            let time = event.time();
                             let slot = event.slot();
                             let (w, h, origin_x, origin_y) = {
                                 let s = shared.lock_safe();
@@ -3284,7 +3284,7 @@ impl UdevBackend {
                             }
                         }
                         InputEvent::TouchMotion { event, .. } => {
-                            let time = event.time_msec();
+                            let time = event.time();
                             let slot = event.slot();
                             let (w, h, origin_x, origin_y) = {
                                 let s = shared.lock_safe();
@@ -3307,7 +3307,7 @@ impl UdevBackend {
                             }
                         }
                         InputEvent::TouchUp { event, .. } => {
-                            let time = event.time_msec();
+                            let time = event.time();
                             let slot = event.slot();
                             if let Some(touch) = state.seat.get_touch() {
                                 touch.up(
@@ -3344,7 +3344,7 @@ impl UdevBackend {
                                     state,
                                     &smithay::input::pointer::GestureSwipeBeginEvent {
                                         serial: SCOUNTER.next_serial(),
-                                        time: event.time_msec(),
+                                        time: event.time(),
                                         fingers,
                                     },
                                 );
@@ -3359,7 +3359,7 @@ impl UdevBackend {
                                 pointer.gesture_swipe_update(
                                     state,
                                     &smithay::input::pointer::GestureSwipeUpdateEvent {
-                                        time: event.time_msec(),
+                                        time: event.time(),
                                         delta: event.delta(),
                                     },
                                 );
@@ -3398,7 +3398,7 @@ impl UdevBackend {
                                     state,
                                     &smithay::input::pointer::GestureSwipeEndEvent {
                                         serial: SCOUNTER.next_serial(),
-                                        time: event.time_msec(),
+                                        time: event.time(),
                                         cancelled: event.cancelled(),
                                     },
                                 );
@@ -3410,7 +3410,7 @@ impl UdevBackend {
                                     state,
                                     &smithay::input::pointer::GesturePinchBeginEvent {
                                         serial: SCOUNTER.next_serial(),
-                                        time: event.time_msec(),
+                                        time: event.time(),
                                         fingers: event.fingers(),
                                     },
                                 );
@@ -3421,7 +3421,7 @@ impl UdevBackend {
                                 pointer.gesture_pinch_update(
                                     state,
                                     &smithay::input::pointer::GesturePinchUpdateEvent {
-                                        time: event.time_msec(),
+                                        time: event.time(),
                                         delta: event.delta(),
                                         scale: event.scale(),
                                         rotation: event.rotation(),
@@ -3435,7 +3435,7 @@ impl UdevBackend {
                                     state,
                                     &smithay::input::pointer::GesturePinchEndEvent {
                                         serial: SCOUNTER.next_serial(),
-                                        time: event.time_msec(),
+                                        time: event.time(),
                                         cancelled: event.cancelled(),
                                     },
                                 );
@@ -3447,7 +3447,7 @@ impl UdevBackend {
                                     state,
                                     &smithay::input::pointer::GestureHoldBeginEvent {
                                         serial: SCOUNTER.next_serial(),
-                                        time: event.time_msec(),
+                                        time: event.time(),
                                         fingers: event.fingers(),
                                     },
                                 );
@@ -3459,7 +3459,7 @@ impl UdevBackend {
                                     state,
                                     &smithay::input::pointer::GestureHoldEndEvent {
                                         serial: SCOUNTER.next_serial(),
-                                        time: event.time_msec(),
+                                        time: event.time(),
                                         cancelled: event.cancelled(),
                                     },
                                 );
