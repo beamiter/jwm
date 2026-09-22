@@ -774,7 +774,7 @@ impl<C: CompositorConnection> Compositor<C> {
 
             // Draw mix quad
             self.gl.bind_vertex_array(Some(self.quad_vao));
-            self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            self.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
             self.gl.bind_vertex_array(None);
             self.gl.use_program(None);
 

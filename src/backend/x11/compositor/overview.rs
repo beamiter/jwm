@@ -567,7 +567,7 @@ impl<C: CompositorConnection> Compositor<C> {
                     self.gl
                         .uniform_1_f32(self.hud_text_uniforms.opacity.as_ref(), alpha);
                     self.gl.bind_texture(glow::TEXTURE_2D, Some(tex));
-                    self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                    self.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
                 }
             }
 

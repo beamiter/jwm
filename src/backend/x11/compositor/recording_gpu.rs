@@ -212,7 +212,7 @@ impl<C: CompositorConnection> Compositor<C> {
             // The XFixes image is premultiplied.
             self.gl.blend_func(glow::ONE, glow::ONE_MINUS_SRC_ALPHA);
             self.gl.bind_vertex_array(Some(self.quad_vao));
-            self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            self.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
             self.gl.disable(glow::BLEND);
             self.gl.bind_texture(glow::TEXTURE_2D, None);
         }
@@ -297,7 +297,7 @@ impl<C: CompositorConnection> Compositor<C> {
             self.gl.active_texture(glow::TEXTURE0);
             self.gl.bind_texture(glow::TEXTURE_2D, Some(source_texture));
             self.gl.bind_vertex_array(Some(self.quad_vao));
-            self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            self.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
             self.gl.bind_texture(glow::TEXTURE_2D, None);
         }
         true

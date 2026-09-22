@@ -553,7 +553,7 @@ impl WaylandCompositor {
                         gl.Uniform2f(self.win_uniforms.size, orw, orh);
                         gl.Uniform1f(self.win_uniforms.opacity, 1.0);
                         gl.BindTexture(ffi::TEXTURE_2D, old_tex);
-                        gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+                        self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
                     }
                 }
 
@@ -562,7 +562,7 @@ impl WaylandCompositor {
                 gl.Uniform2f(self.win_uniforms.size, rw, rh);
                 gl.Uniform1f(self.win_uniforms.opacity, current_opacity);
                 gl.BindTexture(ffi::TEXTURE_2D, tex);
-                gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+                self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
             }
 
             // If no per-monitor wallpapers were drawn, draw the global wallpaper
@@ -598,7 +598,7 @@ impl WaylandCompositor {
                                 gl.Uniform2f(self.win_uniforms.size, orw, orh);
                                 gl.Uniform1f(self.win_uniforms.opacity, 1.0);
                                 gl.BindTexture(ffi::TEXTURE_2D, old_tex);
-                                gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+                                self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
                             }
                         }
 
@@ -606,7 +606,7 @@ impl WaylandCompositor {
                         gl.Uniform2f(self.win_uniforms.size, rw, rh);
                         gl.Uniform1f(self.win_uniforms.opacity, current_opacity);
                         gl.BindTexture(ffi::TEXTURE_2D, tex);
-                        gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+                        self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
                     }
                 }
             }

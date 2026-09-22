@@ -8,6 +8,8 @@ use crate::backend::x11::compositor_common::BootstrapState;
 #[allow(unused_imports)]
 use glow::HasContext;
 #[allow(unused_imports)]
+use std::cell::Cell;
+#[allow(unused_imports)]
 use std::collections::{HashMap, HashSet};
 #[allow(unused_imports)]
 use std::ffi::CString;
@@ -1398,6 +1400,8 @@ impl<C: CompositorConnection> Compositor<C> {
             vrr_last_check: std::time::Instant::now(),
             last_gpu_load: 0,
             last_gpu_load_update: std::time::Instant::now(),
+            frame_draw_calls: Cell::new(0),
+            last_draw_calls: 0,
             // P4: Per-monitor and temporal blur
             blur_strength_by_hz,
             blur_quality_by_monitor,
@@ -1418,8 +1422,6 @@ impl<C: CompositorConnection> Compositor<C> {
             predictive_render_mgr: PredictiveRenderManager::new(),
             // P7C: Smart cache warmup
             cache_warmup_mgr: CacheWarmupManager::new(),
-            // P7D: Power saving mode
-            power_saving_mgr: PowerSavingManager::new(PowerSavingConfig::new()),
             subpixel_render_mgr: SubpixelRenderManager::new(),
 
             // Phase 2 Optimizations

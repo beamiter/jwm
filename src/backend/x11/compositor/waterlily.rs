@@ -921,7 +921,7 @@ impl<C: CompositorConnection> Compositor<C> {
             self.gl.bind_texture(glow::TEXTURE_2D, Some(texture));
             self.gl_state_tracker
                 .bind_vertex_array(&self.gl, Some(self.quad_vao));
-            self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            self.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
             self.gl_state_tracker.bind_vertex_array(&self.gl, None);
             self.gl_state_tracker.use_program(&self.gl, None);
             self.gl.active_texture(glow::TEXTURE1);
@@ -1047,7 +1047,7 @@ impl<C: CompositorConnection> Compositor<C> {
             }
             self.gl_state_tracker
                 .bind_vertex_array(&self.gl, Some(self.quad_vao));
-            self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            self.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
             if dither_was_enabled {
                 self.gl.enable(glow::DITHER);
             }

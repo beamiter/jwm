@@ -6407,7 +6407,7 @@ mod parity_tests {
                 "capture_window_thumbnail",
                 X11_COMPOSITOR_POSTPROCESS_SRC,
                 "pub(crate) fn capture_window_thumbnail",
-                "self.gl.draw_arrays(",
+                "self.draw_arrays(",
             ),
             (
                 "render_tags_grid_live_cell",

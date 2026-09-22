@@ -130,7 +130,7 @@ impl WaylandCompositor {
             }
 
             gl.BindVertexArray(self.quad_vao);
-            gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+            self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
 
             // Draw each expose window at its current animated position
             gl.UseProgram(self.program);
@@ -193,7 +193,7 @@ impl WaylandCompositor {
                 gl.Uniform2f(self.shadow_uniforms.size, w, h);
                 gl.Uniform1f(self.shadow_uniforms.radius, 6.0);
                 gl.Uniform1f(self.shadow_uniforms.spread, spread);
-                gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+                self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
 
                 // Draw window content
                 gl.UseProgram(self.program);
@@ -238,7 +238,7 @@ impl WaylandCompositor {
                 self.bind_window_texture(gl, tex);
                 gl.Uniform1i(self.win_uniforms.texture, 0);
 
-                gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+                self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
                 self.reset_window_color_transform(gl);
 
                 // Highlight border while hovered (blue, 3px), fading in with
@@ -263,7 +263,7 @@ impl WaylandCompositor {
                     gl.Uniform1f(self.border_uniforms.radius_top, 6.0);
                     gl.Uniform2f(self.border_uniforms.size, w, h);
                     gl.Uniform4f(self.border_uniforms.rect, x, y, w, h);
-                    gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+                    self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
 
                     // Restore window program for next iteration
                     gl.UseProgram(self.program);
@@ -348,7 +348,7 @@ impl WaylandCompositor {
                 };
                 self.set_rect_uniform(gl, text_rect, lx.round(), ly.round(), tw as f32, th as f32);
                 gl.BindTexture(ffi::TEXTURE_2D, texture);
-                gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+                self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
 
                 // The hovered cell re-draws its label from the brightened
                 // copy, faded in with the hover envelope over the normal
@@ -370,7 +370,7 @@ impl WaylandCompositor {
                         bh as f32,
                     );
                     gl.BindTexture(ffi::TEXTURE_2D, bright);
-                    gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+                    self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
                     gl.Uniform1f(text_opacity, opacity);
                 }
             }
@@ -662,7 +662,7 @@ impl WaylandCompositor {
             gl.Uniform1f(self.border_uniforms.radius_top, 8.0);
             // Use a very large border_width to fill the entire rect
             gl.Uniform1f(self.border_uniforms.border_width, w.max(h));
-            gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+            self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
 
             // Draw border outline (2px solid)
             gl.Uniform4f(
@@ -673,7 +673,7 @@ impl WaylandCompositor {
                 outline_color[3],
             );
             gl.Uniform1f(self.border_uniforms.border_width, 2.0);
-            gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+            self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
         }
     }
 
@@ -732,7 +732,7 @@ impl WaylandCompositor {
                     sb,
                     scrim_a,
                 );
-                gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+                self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
             }
 
             gl.Uniform1f(self.border_uniforms.radius, 8.0);
@@ -747,7 +747,7 @@ impl WaylandCompositor {
                 wb,
                 wash_a,
             );
-            gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+            self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
 
             gl.Uniform4f(
                 self.border_uniforms.border_color,
@@ -757,7 +757,7 @@ impl WaylandCompositor {
                 outline_color[3],
             );
             gl.Uniform1f(self.border_uniforms.border_width, 2.5);
-            gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+            self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
 
             if interactive {
                 let handle_size = 10.0;
@@ -780,7 +780,7 @@ impl WaylandCompositor {
                         handle_size,
                     );
                     gl.Uniform1f(self.border_uniforms.border_width, handle_size);
-                    gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+                    self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
                 }
             }
         }
@@ -864,7 +864,7 @@ impl WaylandCompositor {
             if scene_linear_loc >= 0 {
                 gl.Uniform1i(scene_linear_loc, i32::from(tail_scene_linear));
             }
-            gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+            self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
 
             // Redraw the focused window plus any peek-excluded windows (e.g. the
             // status bar) on top at full opacity, mirroring the X11 backend where
@@ -929,7 +929,7 @@ impl WaylandCompositor {
                 self.bind_window_texture(gl, tex);
                 gl.Uniform1i(self.win_uniforms.texture, 0);
 
-                gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+                self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
                 self.reset_window_color_transform(gl);
             }
         }
@@ -1300,7 +1300,7 @@ impl WaylandCompositor {
                         th,
                     );
                     gl.BindTexture(ffi::TEXTURE_2D, *texture);
-                    gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+                    self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
                 }
             }
         }
@@ -1414,7 +1414,7 @@ impl WaylandCompositor {
                 th as f32,
             );
             gl.BindTexture(ffi::TEXTURE_2D, texture);
-            gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+            self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
             gl.BindTexture(ffi::TEXTURE_2D, 0);
         }
     }

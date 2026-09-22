@@ -316,7 +316,7 @@ impl<C: CompositorConnection> Compositor<C> {
 
                 self.gl.active_texture(glow::TEXTURE0);
                 self.gl.bind_texture(glow::TEXTURE_2D, Some(src_tex));
-                self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                self.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
 
                 src_tex = level.texture;
                 src_w = level.w;
@@ -364,7 +364,7 @@ impl<C: CompositorConnection> Compositor<C> {
 
                 self.gl.active_texture(glow::TEXTURE0);
                 self.gl.bind_texture(glow::TEXTURE_2D, Some(source_tex));
-                self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                self.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
             }
 
             // Bind back to default framebuffer

@@ -614,7 +614,7 @@ impl WaylandCompositor {
             gl.ActiveTexture(ffi::TEXTURE0);
             gl.BindTexture(ffi::TEXTURE_2D, source.texture);
             gl.BindVertexArray(self.quad_vao);
-            gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+            self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
 
             let mut rgba = vec![0u8; width as usize * height as usize * 4];
             gl.ReadPixels(

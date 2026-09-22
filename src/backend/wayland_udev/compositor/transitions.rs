@@ -176,7 +176,7 @@ impl WaylandCompositor {
                 uv_rect[3],
             );
             gl.Uniform1f(self.transition_uniforms.opacity, opacity.clamp(0.0, 1.0));
-            gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+            self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
         }
     }
 
@@ -247,7 +247,7 @@ impl WaylandCompositor {
             gl.BindTexture(ffi::TEXTURE_2D, self.transition_texture);
             gl.Uniform1i(self.cube_uniforms.texture, 0);
             gl.BindVertexArray(self.quad_vao);
-            gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+            self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
         }
     }
 
@@ -632,7 +632,7 @@ impl WaylandCompositor {
             gl.BindTexture(ffi::TEXTURE_2D, self.transition_texture);
             gl.Uniform1i(self.portal_uniforms.texture, 0);
             gl.BindVertexArray(self.quad_vao);
-            gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+            self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
         }
     }
 

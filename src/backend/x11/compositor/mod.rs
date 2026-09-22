@@ -192,6 +192,7 @@ use crate::backend::x11::compositor_common::{
     X11TextureSourceOps, X11WindowResourceOps,
 };
 use glow::HasContext;
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::mpsc;
@@ -1073,6 +1074,10 @@ where
     // --- Adaptive Blur: Hysteresis to prevent flicker ---
     last_gpu_load: u32,
     last_gpu_load_update: std::time::Instant,
+    /// GLES draws issued during the in-progress frame (`&self` helpers count here).
+    frame_draw_calls: Cell<u32>,
+    /// GLES draws from the last completed `render_frame` (what `get_metrics` reports).
+    last_draw_calls: u32,
 
     // --- P4: Per-monitor and temporal blur optimization ---
     /// Parsed blur strength mapping: Hz -> strength (e.g., 60->2, 144->4)
@@ -1116,11 +1121,6 @@ where
     /// Cache warmup manager for predictive pre-loading
     #[allow(dead_code)]
     cache_warmup_mgr: CacheWarmupManager,
-
-    // --- P7D: Power saving mode ---
-    /// Power saving manager for battery-aware optimization
-    #[allow(dead_code)]
-    power_saving_mgr: PowerSavingManager,
 
     // --- P7B: Subpixel rendering optimization ---
     /// Subpixel rendering manager for improved text quality

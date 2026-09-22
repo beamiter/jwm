@@ -64,6 +64,7 @@ mod transitions;
 mod wallpaper;
 
 use smithay::backend::renderer::gles::{GlesTexture, ffi};
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::ffi::CString;
@@ -1599,6 +1600,10 @@ pub(crate) struct WaylandCompositor {
     monitor_refresh_rates: HashMap<u32, u32>,
     last_gpu_load: u32,
     last_gpu_load_update: Instant,
+    /// GLES draws issued during the in-progress frame (Cell so `&self` helpers can count).
+    frame_draw_calls: Cell<u32>,
+    /// GLES draws from the last completed `render_frame` (what `get_metrics` reports).
+    last_draw_calls: u32,
 
     // --- Window tabs config ---
     window_tabs_enabled: bool,
@@ -3079,6 +3084,8 @@ impl WaylandCompositor {
                 monitor_refresh_rates: HashMap::new(),
                 last_gpu_load: 0,
                 last_gpu_load_update: now,
+                frame_draw_calls: Cell::new(0),
+                last_draw_calls: 0,
 
                 // Window tabs
                 window_tabs_enabled: false,
@@ -4765,7 +4772,7 @@ impl WaylandCompositor {
             gl.ActiveTexture(ffi::TEXTURE0);
             gl.BindTexture(ffi::TEXTURE_2D, tex);
             gl.BindVertexArray(self.quad_vao);
-            gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+            self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
 
             let buffer_size = (tw * th * 4) as usize;
             let mut pixels = vec![0u8; buffer_size];
@@ -4850,7 +4857,6 @@ impl WaylandCompositor {
             0.0
         };
         let ds_stats = self.direct_scanout_mgr.stats();
-        let gl_stats = self.render_stats.gl_stats();
         let texture_memory_bytes = self.windows.values().fold(0u64, |acc, window| {
             let (w, h) = (window.width as u64, window.height as u64);
             // RGBA8 estimate for live client textures; FP16/10-bit FBO chain is
@@ -4868,7 +4874,7 @@ impl WaylandCompositor {
             frame_time_p99_ms: p99,
             gpu_load_percent: self.perf_metrics.gpu_load(),
             cpu_load_percent: self.perf_metrics.cpu_load(),
-            draw_calls: gl_stats.draw_calls.min(u32::MAX as u64) as u32,
+            draw_calls: self.last_draw_calls,
             texture_memory_bytes,
             // Wayland has no per-window blur cache (only temporal reuse, already
             // reported below). Keep these at zero rather than aliasing.

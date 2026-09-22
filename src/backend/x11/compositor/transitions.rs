@@ -158,7 +158,7 @@ impl<C: CompositorConnection> Compositor<C> {
                 uv_rect[2],
                 uv_rect[3],
             );
-            self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            self.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
         }
     }
 
@@ -234,7 +234,7 @@ impl<C: CompositorConnection> Compositor<C> {
             self.gl
                 .uniform_2_f32(self.win_uniforms.size.as_ref(), rw, rh);
             self.gl.bind_texture(glow::TEXTURE_2D, Some(tex));
-            self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            self.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
 
             self.gl.bind_texture(glow::TEXTURE_2D, None);
             self.gl.bind_vertex_array(None);
@@ -758,7 +758,7 @@ impl<C: CompositorConnection> Compositor<C> {
             self.gl.active_texture(glow::TEXTURE0);
             self.gl.bind_texture(glow::TEXTURE_2D, Some(texture));
             self.gl.bind_vertex_array(Some(self.quad_vao));
-            self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            self.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
 
             self.gl.bind_texture(glow::TEXTURE_2D, None);
             self.gl.bind_vertex_array(None);

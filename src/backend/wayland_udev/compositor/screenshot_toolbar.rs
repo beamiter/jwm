@@ -99,7 +99,7 @@ impl WaylandCompositor {
                     let (x, y) = label.origin(w, h);
                     self.set_rect_uniform(gl, text_rect, x, y, w, h);
                     gl.BindTexture(ffi::TEXTURE_2D, *texture);
-                    gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+                    self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
                 }
             }
             gl.BindVertexArray(0);
@@ -320,7 +320,7 @@ impl WaylandCompositor {
                     gh,
                 );
                 gl.BindTexture(ffi::TEXTURE_2D, *texture);
-                gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+                self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
             }
 
             gl.BindVertexArray(0);

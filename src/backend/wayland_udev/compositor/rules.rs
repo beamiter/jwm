@@ -596,7 +596,7 @@ impl WaylandCompositor {
             gl.Uniform1i(self.temporal_blur_mix_uniforms.previous, 1);
 
             gl.BindVertexArray(self.quad_vao);
-            gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+            self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
 
             // Restore default texture unit to avoid leaking unit 1 state.
             gl.ActiveTexture(ffi::TEXTURE0);

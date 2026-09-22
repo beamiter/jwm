@@ -271,7 +271,7 @@ impl<C: CompositorConnection> Compositor<C> {
                     gh,
                 );
                 self.gl.bind_texture(glow::TEXTURE_2D, Some(*texture));
-                self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                self.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
             }
 
             self.gl.bind_vertex_array(None);

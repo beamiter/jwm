@@ -92,7 +92,7 @@ impl WaylandCompositor {
                 gl.Uniform1i(self.blur_uniforms.texture, 0);
 
                 gl.BindVertexArray(self.quad_vao);
-                gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+                self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
 
                 prev_tex = level.texture;
             }
@@ -131,7 +131,7 @@ impl WaylandCompositor {
                 gl.Uniform1i(self.blur_uniforms.texture, 0);
 
                 gl.BindVertexArray(self.quad_vao);
-                gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+                self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
 
                 prev_tex = level.texture;
             }

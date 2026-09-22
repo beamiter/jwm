@@ -449,7 +449,7 @@ impl<C: CompositorConnection> Compositor<C> {
             self.gl.active_texture(glow::TEXTURE0);
             self.gl.bind_texture(glow::TEXTURE_2D, Some(pp_tex));
             self.gl.bind_vertex_array(Some(self.quad_vao));
-            self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            self.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
             self.gl.bind_vertex_array(None);
             self.gl.use_program(None);
         }
@@ -681,7 +681,7 @@ impl<C: CompositorConnection> Compositor<C> {
             self.gl.bind_vertex_array(Some(self.quad_vao));
             self.gl.active_texture(glow::TEXTURE0);
             self.gl.bind_texture(glow::TEXTURE_2D, Some(wt.gl_texture));
-            self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            self.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
 
             // Read pixels
             let mut pixels = vec![0u8; (tw * th * 4) as usize];
@@ -812,7 +812,7 @@ impl<C: CompositorConnection> Compositor<C> {
             self.gl.bind_vertex_array(Some(self.quad_vao));
             self.gl.active_texture(glow::TEXTURE0);
             self.gl.bind_texture(glow::TEXTURE_2D, Some(source_texture));
-            self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            self.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
 
             let mut rgba = vec![0; width as usize * height as usize * 4];
             self.gl.read_pixels(

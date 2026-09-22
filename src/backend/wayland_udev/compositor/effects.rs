@@ -1035,7 +1035,7 @@ impl WaylandCompositor {
             gl.VertexAttribPointer(2, 1, ffi::FLOAT, ffi::FALSE as u8, 28, (6 * 4) as *const _);
 
             let count = self.scratch_particle_data.len() / 7;
-            gl.DrawArrays(ffi::POINTS, 0, count as i32);
+            self.draw_arrays(gl, ffi::POINTS, 0, count as i32);
 
             gl.DisableVertexAttribArray(0);
             gl.DisableVertexAttribArray(1);

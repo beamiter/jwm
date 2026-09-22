@@ -111,7 +111,7 @@ impl WaylandCompositor {
             }
 
             gl.BindVertexArray(self.quad_vao);
-            gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+            self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
         }
     }
 
@@ -300,7 +300,7 @@ impl WaylandCompositor {
             gl.Uniform1i(self.win_uniforms.texture, 0);
 
             gl.BindVertexArray(self.quad_vao);
-            gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+            self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
 
             // Read pixels
             let mut pixels = vec![0u8; (thumb_w * thumb_h * 4) as usize];

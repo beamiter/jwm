@@ -186,7 +186,7 @@ impl<C: CompositorConnection> Compositor<C> {
                 glow::TEXTURE_MAG_FILTER,
                 glow::LINEAR as i32,
             );
-            self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            self.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
             self.gl.tex_parameter_i32(
                 glow::TEXTURE_2D,
                 glow::TEXTURE_MIN_FILTER,
@@ -294,7 +294,7 @@ impl<C: CompositorConnection> Compositor<C> {
                         // Fan: center vertex plus one rim vertex per side, with
                         // the first rim vertex repeated to close the polygon.
                         let vertices = i32::try_from(camera.sides).unwrap_or(6) + 2;
-                        self.gl.draw_arrays(glow::TRIANGLE_FAN, 0, vertices);
+                        self.draw_arrays(glow::TRIANGLE_FAN, 0, vertices);
                     }
                 }
             }
@@ -345,7 +345,7 @@ impl<C: CompositorConnection> Compositor<C> {
                 PRISM_ACCENT[2],
             );
             self.gl.bind_vertex_array(Some(self.quad_vao));
-            self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            self.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
         }
     }
 }

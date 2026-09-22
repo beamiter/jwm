@@ -492,6 +492,15 @@ fn toast_input_shape(
 }
 
 impl<C: CompositorConnection> Compositor<C> {
+    /// Issue one GLES draw and count it for the last-frame `draw_calls` metric.
+    pub(crate) fn draw_arrays(&self, mode: u32, first: i32, count: i32) {
+        unsafe {
+            self.gl.draw_arrays(mode, first, count);
+        }
+        self.frame_draw_calls
+            .set(self.frame_draw_calls.get().saturating_add(1));
+    }
+
     /// Arm or disarm the interactive screenshot scene freeze. The actual copy
     /// is deferred until the next completed scene, so the selection overlay
     /// can never become part of the frozen image.
@@ -640,7 +649,7 @@ impl<C: CompositorConnection> Compositor<C> {
             self.gl.active_texture(glow::TEXTURE0);
             self.gl.bind_texture(glow::TEXTURE_2D, Some(texture));
             self.gl.bind_vertex_array(Some(self.quad_vao));
-            self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            self.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
             self.gl.bind_vertex_array(None);
             self.gl.bind_texture(glow::TEXTURE_2D, None);
             self.gl.use_program(None);
@@ -1163,7 +1172,7 @@ impl<C: CompositorConnection> Compositor<C> {
             frame_time_p99_ms,
             gpu_load_percent: self.last_gpu_load,
             cpu_load_percent: 0, // No live CPU sampler on this backend yet
-            draw_calls: self.frame_stats.draw_calls,
+            draw_calls: self.last_draw_calls,
             texture_memory_bytes: self.frame_stats.texture_memory_bytes,
             blur_cache_hits: self.frame_stats.blur_cache_hits,
             blur_cache_misses: self.frame_stats.blur_cache_misses,
@@ -1385,7 +1394,7 @@ impl<C: CompositorConnection> Compositor<C> {
                     cw + 2.0 * ring,
                     ch + 2.0 * ring,
                 );
-                self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                self.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
             }
 
             // Text sections.
@@ -1413,7 +1422,7 @@ impl<C: CompositorConnection> Compositor<C> {
                     h as f32,
                 );
                 self.gl.bind_texture(glow::TEXTURE_2D, Some(tex));
-                self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                self.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
             }
 
             self.gl.bind_vertex_array(None);
@@ -1687,7 +1696,7 @@ impl<C: CompositorConnection> Compositor<C> {
             self.gl
                 .uniform_1_f32(u.alpha.as_ref(), alpha.clamp(0.0, 1.0));
             self.gl.uniform_4_f32(u.rect.as_ref(), x, y, w, h);
-            self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            self.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
         }
     }
 
@@ -1849,7 +1858,7 @@ impl<C: CompositorConnection> Compositor<C> {
                 .uniform_2_f32(self.border_uniforms.size.as_ref(), w, h);
             self.gl
                 .uniform_4_f32(self.border_uniforms.rect.as_ref(), x, y, w, h);
-            self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            self.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
         }
     }
 
@@ -1882,7 +1891,7 @@ impl<C: CompositorConnection> Compositor<C> {
                 .uniform_2_f32(self.border_uniforms.size.as_ref(), w, h);
             self.gl
                 .uniform_4_f32(self.border_uniforms.rect.as_ref(), x, y, w, h);
-            self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            self.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
         }
     }
 
@@ -1968,7 +1977,7 @@ impl<C: CompositorConnection> Compositor<C> {
                 viewport_w,
                 viewport_h,
             );
-            self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            self.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
         }
 
         self.capture_glass_backdrop(ui);
@@ -2002,7 +2011,7 @@ impl<C: CompositorConnection> Compositor<C> {
                 panel_w + 2.0 * spread,
                 panel_h + 2.0 * spread,
             );
-            self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            self.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
 
             self.ui_fill_surface(
                 proj,
@@ -2161,7 +2170,7 @@ impl<C: CompositorConnection> Compositor<C> {
                     h as f32,
                 );
                 self.gl.bind_texture(glow::TEXTURE_2D, Some(tex));
-                self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                self.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
             }
             self.gl.bind_vertex_array(None);
             self.gl.use_program(None);
@@ -2220,7 +2229,7 @@ impl<C: CompositorConnection> Compositor<C> {
                 viewport_w,
                 viewport_h,
             );
-            self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            self.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
         }
 
         self.capture_glass_backdrop(ui);
@@ -2254,7 +2263,7 @@ impl<C: CompositorConnection> Compositor<C> {
                 panel_w + 2.0 * spread,
                 panel_h + 2.0 * spread,
             );
-            self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            self.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
 
             self.ui_fill_surface(
                 proj,
@@ -2407,7 +2416,7 @@ impl<C: CompositorConnection> Compositor<C> {
                     h as f32,
                 );
                 self.gl.bind_texture(glow::TEXTURE_2D, Some(tex));
-                self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                self.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
             }
 
             // Title, the highlighted tag's name centred under the grid, and
@@ -2433,7 +2442,7 @@ impl<C: CompositorConnection> Compositor<C> {
                     h as f32,
                 );
                 self.gl.bind_texture(glow::TEXTURE_2D, Some(tex));
-                self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                self.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
             }
             self.gl.bind_vertex_array(None);
             self.gl.use_program(None);
@@ -2644,7 +2653,7 @@ impl<C: CompositorConnection> Compositor<C> {
                 .uniform_4_f32(self.win_uniforms.rect.as_ref(), ix, iy, iw, ih);
             self.gl.active_texture(glow::TEXTURE0);
             self.gl.bind_texture(glow::TEXTURE_2D, Some(tex));
-            self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            self.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
             // Back to the border program the card's fills draw with.
             self.gl.use_program(Some(self.border_program));
             self.gl.uniform_matrix_4_f32_slice(
@@ -2720,7 +2729,7 @@ impl<C: CompositorConnection> Compositor<C> {
                     rect[3],
                 );
                 self.gl.bind_texture(glow::TEXTURE_2D, Some(texture));
-                self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                self.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
             }
 
             // Back to the border program the cell loop's strokes draw with,
@@ -2966,7 +2975,7 @@ impl<C: CompositorConnection> Compositor<C> {
                     viewport_w,
                     viewport_h,
                 );
-                self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                self.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
             }
         }
 
@@ -3010,7 +3019,7 @@ impl<C: CompositorConnection> Compositor<C> {
                     panel_w + 2.0 * spread,
                     panel_h + 2.0 * spread,
                 );
-                self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                self.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
             }
 
             // Card surface, then the query-field bar and selection pill on the
@@ -3218,7 +3227,7 @@ impl<C: CompositorConnection> Compositor<C> {
                     panel_w + 2.0 * ring,
                     panel_h + 2.0 * ring,
                 );
-                self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                self.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
             }
 
             // Text sections.
@@ -3251,7 +3260,7 @@ impl<C: CompositorConnection> Compositor<C> {
                     h as f32,
                 );
                 self.gl.bind_texture(glow::TEXTURE_2D, Some(tex));
-                self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                self.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
             }
             // Row icons of the launcher and the switcher, in the same pass:
             // same program, same content alpha as the text. A row drawn here
@@ -3279,7 +3288,7 @@ impl<C: CompositorConnection> Compositor<C> {
                     self.gl
                         .uniform_4_f32(self.hud_text_uniforms.rect.as_ref(), ix, iy, iw, ih);
                     self.gl.bind_texture(glow::TEXTURE_2D, Some(tex));
-                    self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                    self.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
                 }
             }
             self.gl.bind_vertex_array(None);
@@ -3581,7 +3590,7 @@ impl<C: CompositorConnection> Compositor<C> {
                         h as f32,
                     );
                     self.gl.bind_texture(glow::TEXTURE_2D, Some(tex));
-                    self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                    self.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
                 }
                 if let Some((tex, w, h)) = slots[1] {
                     self.gl.uniform_4_f32(
@@ -3592,7 +3601,7 @@ impl<C: CompositorConnection> Compositor<C> {
                         h as f32,
                     );
                     self.gl.bind_texture(glow::TEXTURE_2D, Some(tex));
-                    self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                    self.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
                 }
                 for (index, rect) in button_rects.iter().enumerate() {
                     if let Some((tex, w, h)) =
@@ -3607,7 +3616,7 @@ impl<C: CompositorConnection> Compositor<C> {
                             h as f32,
                         );
                         self.gl.bind_texture(glow::TEXTURE_2D, Some(tex));
-                        self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                        self.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
                     }
                 }
 
@@ -3818,7 +3827,7 @@ impl<C: CompositorConnection> Compositor<C> {
                 text_h as f32,
             );
             self.gl.bind_texture(glow::TEXTURE_2D, Some(tex));
-            self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            self.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
 
             self.gl.bind_vertex_array(None);
             self.gl.use_program(None);
@@ -3952,7 +3961,7 @@ impl<C: CompositorConnection> Compositor<C> {
                 layout.text[3],
             );
             self.gl.bind_texture(glow::TEXTURE_2D, Some(tex));
-            self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            self.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
 
             self.gl.bind_vertex_array(None);
             self.gl.use_program(None);
@@ -4085,7 +4094,7 @@ impl<C: CompositorConnection> Compositor<C> {
                 layout.text[3],
             );
             self.gl.bind_texture(glow::TEXTURE_2D, Some(tex));
-            self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            self.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
 
             self.gl.bind_vertex_array(None);
             self.gl.use_program(None);
@@ -4197,7 +4206,7 @@ impl<C: CompositorConnection> Compositor<C> {
                 layout.text[3],
             );
             self.gl.bind_texture(glow::TEXTURE_2D, Some(tex));
-            self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            self.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
 
             self.gl.bind_vertex_array(None);
             self.gl.use_program(None);
@@ -4679,7 +4688,7 @@ impl<C: CompositorConnection> Compositor<C> {
             self.gl
                 .uniform_2_f32(self.shadow_uniforms.size.as_ref(), w, h);
             self.gl.bind_vertex_array(Some(self.quad_vao));
-            self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            self.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
 
             self.gl.use_program(Some(self.program));
             self.gl.uniform_matrix_4_f32_slice(
@@ -4716,7 +4725,7 @@ impl<C: CompositorConnection> Compositor<C> {
                 .uniform_1_f32(self.win_uniforms.ripple_amplitude.as_ref(), 0.0);
             self.gl.active_texture(glow::TEXTURE0);
             self.gl.bind_texture(glow::TEXTURE_2D, Some(source.texture));
-            self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            self.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
             self.gl.bind_texture(glow::TEXTURE_2D, None);
             self.gl.bind_vertex_array(None);
             self.gl.use_program(None);
@@ -4838,7 +4847,7 @@ impl<C: CompositorConnection> Compositor<C> {
             self.gl
                 .uniform_2_f32(self.win_uniforms.size.as_ref(), rw, rh);
             self.gl.bind_texture(glow::TEXTURE_2D, Some(texture));
-            self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            self.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
         }
     }
 
@@ -4901,6 +4910,7 @@ impl<C: CompositorConnection> Compositor<C> {
 
         // Phase 2: Begin frame profiling
         self.frame_profiler.begin_frame();
+        self.frame_draw_calls.set(0);
 
         // Consume the newest completed simulation frame before deciding whether
         // fullscreen may bypass the compositor.
@@ -6097,7 +6107,7 @@ impl<C: CompositorConnection> Compositor<C> {
                         .uniform_4_f32(self.shadow_uniforms.rect.as_ref(), sx, sy, sw, sh);
                     self.gl
                         .uniform_2_f32(self.shadow_uniforms.size.as_ref(), win_w, win_h);
-                    self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                    self.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
                 }
 
                 self.gl_state_tracker.bind_vertex_array(&self.gl, None);
@@ -6185,7 +6195,7 @@ impl<C: CompositorConnection> Compositor<C> {
                         draw_w + 2.0 * style.radius,
                         draw_h + 2.0 * style.radius,
                     );
-                    self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                    self.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
                 }
 
                 // Avoid leaking the negative glow-mode sentinel into later
@@ -6692,7 +6702,7 @@ impl<C: CompositorConnection> Compositor<C> {
                                         bw,
                                         bh,
                                     );
-                                    self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                                    self.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
                                     self.gl.uniform_4_f32(
                                         self.win_uniforms.uv_rect.as_ref(),
                                         0.0,
@@ -6739,7 +6749,7 @@ impl<C: CompositorConnection> Compositor<C> {
                                 ghost.width,
                                 ghost.height,
                             );
-                            self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                            self.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
                         }
                     }
 
@@ -6808,7 +6818,7 @@ impl<C: CompositorConnection> Compositor<C> {
                             .uniform_1_i32(self.wobbly_uniforms.grid_n.as_ref(), grid_n);
                         // Grid: (grid_n-1)^2 quads, 6 verts each
                         let quads = grid_n - 1;
-                        self.gl.draw_arrays(glow::TRIANGLES, 0, quads * quads * 6);
+                        self.draw_arrays(glow::TRIANGLES, 0, quads * quads * 6);
 
                         // Restore standard window program
                         self.gl.use_program(Some(self.program));
@@ -6884,7 +6894,7 @@ impl<C: CompositorConnection> Compositor<C> {
                         self.gl
                             .uniform_2_f32(self.tilt_uniforms.light_dir.as_ref(), 0.0, -1.0);
                         // Grid: grid^2 quads, 6 verts each
-                        self.gl.draw_arrays(glow::TRIANGLES, 0, grid * grid * 6);
+                        self.draw_arrays(glow::TRIANGLES, 0, grid * grid * 6);
 
                         // Restore standard window program
                         self.gl.use_program(Some(self.program));
@@ -6934,7 +6944,7 @@ impl<C: CompositorConnection> Compositor<C> {
                                 .uniform_1_f32(self.win_uniforms.ripple_amplitude.as_ref(), 0.0);
                         }
 
-                        self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                        self.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
 
                         // Reset ripple for next window
                         if ripple_prog.is_some() {
@@ -7079,7 +7089,7 @@ impl<C: CompositorConnection> Compositor<C> {
                                     bdr_h,
                                 );
                             }
-                            self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                            self.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
 
                             self.gl.use_program(Some(self.program));
                             self.gl.uniform_matrix_4_f32_slice(
@@ -7202,7 +7212,7 @@ impl<C: CompositorConnection> Compositor<C> {
                     self.gl.uniform_1_f32(self.genie_uniforms.dim.as_ref(), 1.0);
                     self.gl.active_texture(glow::TEXTURE0);
                     self.gl.bind_texture(glow::TEXTURE_2D, Some(ga.gl_texture));
-                    self.gl.draw_arrays(glow::TRIANGLES, 0, grid * grid * 6);
+                    self.draw_arrays(glow::TRIANGLES, 0, grid * grid * 6);
                 }
 
                 self.gl.bind_vertex_array(None);
@@ -7334,7 +7344,7 @@ impl<C: CompositorConnection> Compositor<C> {
                 self.gl.active_texture(glow::TEXTURE0);
                 self.gl.bind_texture(glow::TEXTURE_2D, Some(pp_tex));
                 self.gl.bind_vertex_array(Some(self.quad_vao));
-                self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                self.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
 
                 self.gl.bind_vertex_array(None);
                 self.gl.use_program(None);
@@ -7572,7 +7582,7 @@ impl<C: CompositorConnection> Compositor<C> {
                     self.compositor_start_time.elapsed().as_secs_f32(),
                 );
                 self.gl.bind_vertex_array(Some(self.quad_vao));
-                self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                self.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
                 self.gl.bind_vertex_array(None);
                 self.gl.use_program(None);
             }
@@ -7747,7 +7757,7 @@ impl<C: CompositorConnection> Compositor<C> {
                                 );
                                 self.gl.bind_texture(glow::TEXTURE_2D, Some(snap_tex));
                                 self.gl.bind_vertex_array(Some(self.quad_vao));
-                                self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                                self.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
 
                                 self.gl.bind_vertex_array(None);
                                 self.gl.use_program(None);
@@ -7808,7 +7818,7 @@ impl<C: CompositorConnection> Compositor<C> {
                                 );
                                 self.gl.bind_texture(glow::TEXTURE_2D, Some(snap_tex));
                                 self.gl.bind_vertex_array(Some(self.quad_vao));
-                                self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                                self.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
                                 self.gl.bind_vertex_array(None);
                                 self.gl.use_program(None);
                                 self.gl.blend_func(glow::ONE, glow::ONE_MINUS_SRC_ALPHA);
@@ -7873,7 +7883,7 @@ impl<C: CompositorConnection> Compositor<C> {
                                 );
                                 self.gl.bind_texture(glow::TEXTURE_2D, Some(snap_tex));
                                 self.gl.bind_vertex_array(Some(self.quad_vao));
-                                self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                                self.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
                                 self.gl.bind_vertex_array(None);
                                 self.gl.use_program(None);
                                 self.gl.blend_func(glow::ONE, glow::ONE_MINUS_SRC_ALPHA);
@@ -7941,7 +7951,7 @@ impl<C: CompositorConnection> Compositor<C> {
                                 );
                                 self.gl.bind_texture(glow::TEXTURE_2D, Some(snap_tex));
                                 self.gl.bind_vertex_array(Some(self.quad_vao));
-                                self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                                self.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
 
                                 // Draw new scene sliding in from the transition direction
                                 // New scene is already rendered in the back-buffer; we blit
@@ -7981,7 +7991,7 @@ impl<C: CompositorConnection> Compositor<C> {
                                         uv[3],
                                     );
                                     self.gl.bind_texture(glow::TEXTURE_2D, Some(new_tex));
-                                    self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                                    self.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
                                 }
 
                                 self.gl.bind_vertex_array(None);
@@ -8187,6 +8197,8 @@ impl<C: CompositorConnection> Compositor<C> {
 
         // Phase 2: End frame profiling
         let frame_time_ms = self.frame_profiler.end_frame();
+        self.last_draw_calls = self.frame_draw_calls.get();
+        self.frame_stats.draw_calls = self.last_draw_calls;
 
         // Benchmark: record frame data
         if self.benchmark.is_running() {

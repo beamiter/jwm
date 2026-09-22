@@ -128,7 +128,7 @@ impl<C: CompositorConnection> Compositor<C> {
                     self.gl
                         .uniform_4_f32(self.hud_text_uniforms.rect.as_ref(), x, y, w, h);
                     self.gl.bind_texture(glow::TEXTURE_2D, Some(*texture));
-                    self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                    self.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
                 }
             }
 
@@ -283,7 +283,7 @@ impl<C: CompositorConnection> Compositor<C> {
                 );
 
                 let num_verts = (stroke.points.len() - 1) * 2;
-                self.gl.draw_arrays(glow::LINES, 0, num_verts as i32);
+                self.draw_arrays(glow::LINES, 0, num_verts as i32);
 
                 self.gl.bind_vertex_array(None);
                 self.gl.delete_vertex_array(vao);

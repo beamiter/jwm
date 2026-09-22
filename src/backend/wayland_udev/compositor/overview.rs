@@ -395,7 +395,7 @@ impl WaylandCompositor {
             gl.Uniform1f(self.border_uniforms.radius, radius);
             gl.Uniform1f(self.border_uniforms.radius_top, radius);
             gl.Uniform1f(self.border_uniforms.border_width, w.max(h));
-            gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+            self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
         }
     }
 
@@ -603,7 +603,7 @@ impl WaylandCompositor {
                             }
                         }
 
-                        gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+                        self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
                     }
                     PrismKind::Cap { top } => {
                         if piece.facing <= 0.02 {
@@ -630,7 +630,7 @@ impl WaylandCompositor {
                         };
                         gl.Uniform4f(self.overview_cap_uniforms.color, r, g, b, 0.90 * anim_scale);
                         let vertices = i32::try_from(camera.sides).unwrap_or(6) + 2;
-                        gl.DrawArrays(ffi::TRIANGLE_FAN, 0, vertices);
+                        self.draw_arrays(gl, ffi::TRIANGLE_FAN, 0, vertices);
                         stats.caps += 1;
                     }
                 }
@@ -769,7 +769,7 @@ impl WaylandCompositor {
                 i32::from(scene_linear_output),
             );
             gl.BindVertexArray(self.quad_vao);
-            gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+            self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
 
             // ------------------------------------------------------------------
             // 3. Mirrored prism, then the solid; each pass owns painter order
@@ -980,7 +980,7 @@ impl WaylandCompositor {
                     gl.BindTexture(ffi::TEXTURE_2D, title_tex);
                     gl.Uniform1i(self.win_uniforms.texture, 0);
 
-                    gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+                    self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
                 }
             }
 

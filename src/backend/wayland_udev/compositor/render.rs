@@ -1275,11 +1275,13 @@ impl WaylandCompositor {
         }
     }
 
-    #[allow(dead_code)]
-    fn draw_quad(&self, gl: &ffi::Gles2) {
+    /// Issue one GLES draw and count it for the last-frame `draw_calls` metric.
+    pub(crate) unsafe fn draw_arrays(&self, gl: &ffi::Gles2, mode: u32, first: i32, count: i32) {
         unsafe {
-            gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+            gl.DrawArrays(mode, first, count);
         }
+        self.frame_draw_calls
+            .set(self.frame_draw_calls.get().saturating_add(1));
     }
 
     unsafe fn reset_external_gl_state(&self, gl: &ffi::Gles2) {
@@ -1430,7 +1432,7 @@ impl WaylandCompositor {
                 self.upload_retained_color_plan(gl, color_plan);
                 gl.ActiveTexture(ffi::TEXTURE0);
                 self.bind_window_texture(gl, texture_owner.tex_id());
-                gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+                self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
                 self.reset_retained_color_plan(gl, color_plan);
             }
 
@@ -1515,7 +1517,7 @@ impl WaylandCompositor {
                 gl.Uniform1f(self.win_uniforms.opacity, -1.0);
                 gl.Uniform4f(self.win_uniforms.uv_rect, 0.0, 0.0, 1.0, 1.0);
                 self.bind_window_texture(gl, element.texture);
-                gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+                self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
             }
 
             gl.BindVertexArray(0);
@@ -1608,7 +1610,7 @@ impl WaylandCompositor {
                 );
                 self.upload_retained_color_plan(gl, color_plan);
                 self.bind_window_texture(gl, source.texture);
-                gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+                self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
                 self.reset_retained_color_plan(gl, color_plan);
             }
 
@@ -1678,7 +1680,7 @@ impl WaylandCompositor {
                 rect.height + spread * 2.0,
             );
             gl.BindVertexArray(self.quad_vao);
-            gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+            self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
 
             gl.UseProgram(self.program);
             self.set_projection_uniform(gl, self.win_uniforms.projection, projection);
@@ -1720,7 +1722,7 @@ impl WaylandCompositor {
             gl.Uniform1f(self.win_uniforms.ripple_amplitude, 0.0);
             gl.ActiveTexture(ffi::TEXTURE0);
             self.bind_window_texture(gl, source.texture);
-            gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+            self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
             self.reset_retained_color_plan(gl, color_plan);
             gl.BindVertexArray(0);
             gl.UseProgram(0);
@@ -1812,7 +1814,7 @@ impl WaylandCompositor {
             gl.ActiveTexture(ffi::TEXTURE0);
             gl.BindTexture(ffi::TEXTURE_2D, self.postprocess_texture);
             gl.BindVertexArray(self.quad_vao);
-            gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+            self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
             gl.BindVertexArray(0);
             gl.UseProgram(0);
         }
@@ -1859,7 +1861,7 @@ impl WaylandCompositor {
             gl.ActiveTexture(ffi::TEXTURE0);
             gl.BindTexture(ffi::TEXTURE_2D, self.output_texture);
             gl.BindVertexArray(self.quad_vao);
-            gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+            self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
             gl.BindVertexArray(0);
             gl.UseProgram(0);
             gl.Enable(ffi::BLEND);
@@ -1937,7 +1939,7 @@ impl WaylandCompositor {
             gl.ActiveTexture(ffi::TEXTURE0);
             gl.BindTexture(ffi::TEXTURE_2D, self.linear_texture);
             gl.BindVertexArray(self.quad_vao);
-            gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+            self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
             gl.BindVertexArray(0);
             gl.UseProgram(0);
             gl.Enable(ffi::BLEND);
@@ -2390,6 +2392,7 @@ impl WaylandCompositor {
         let bench_frame_start = self.benchmark.is_running().then(Instant::now);
         self.frame_profiler.begin_frame();
         self.gl_state_tracker.reset();
+        self.frame_draw_calls.set(0);
 
         // GPU fence sync: poll pending fences, cleanup old ones
         unsafe {
@@ -2972,7 +2975,7 @@ impl WaylandCompositor {
                     self.set_rect_uniform(gl, self.shadow_uniforms.rect, sx, sy, sw, sh);
                     gl.Uniform2f(self.shadow_uniforms.size, size_w, size_h);
 
-                    gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+                    self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
                 }
 
                 gl.BindVertexArray(0);
@@ -3054,7 +3057,7 @@ impl WaylandCompositor {
                         draw_w + 2.0 * style.radius,
                         draw_h + 2.0 * style.radius,
                     );
-                    gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+                    self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
                 }
 
                 // Avoid leaking the negative glow-mode sentinel into later
@@ -3429,7 +3432,7 @@ impl WaylandCompositor {
                             draw_w,
                             draw_h,
                         );
-                        gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+                        self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
 
                         gl.Uniform4f(self.win_uniforms.uv_rect, uv_x, uv_y, uv_w, uv_h);
                     }
@@ -3476,7 +3479,7 @@ impl WaylandCompositor {
                             ghost.width,
                             ghost.height,
                         );
-                        gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+                        self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
                     }
                     self.reset_window_color_transform(gl);
                     // Restore main-pass uniforms; opacity/dim are written below
@@ -3530,7 +3533,7 @@ impl WaylandCompositor {
                     self.bind_window_texture(gl, texture);
                     // Grid: (grid_n-1)^2 quads, 6 verts each
                     let quads = grid_n - 1;
-                    gl.DrawArrays(ffi::TRIANGLES, 0, quads * quads * 6);
+                    self.draw_arrays(gl, ffi::TRIANGLES, 0, quads * quads * 6);
 
                     // Restore standard program
                     gl.UseProgram(self.program);
@@ -3573,7 +3576,7 @@ impl WaylandCompositor {
                     gl.ActiveTexture(ffi::TEXTURE0);
                     self.bind_window_texture(gl, texture);
                     // Grid: grid^2 quads, 6 verts each
-                    gl.DrawArrays(ffi::TRIANGLES, 0, grid * grid * 6);
+                    self.draw_arrays(gl, ffi::TRIANGLES, 0, grid * grid * 6);
 
                     // Restore standard program
                     gl.UseProgram(self.program);
@@ -3630,7 +3633,7 @@ impl WaylandCompositor {
 
                     gl.ActiveTexture(ffi::TEXTURE0);
                     self.bind_window_texture(gl, texture);
-                    gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+                    self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
 
                     // Reset to default off so the next iteration's blur/ghost
                     // draws don't inherit this window's transform.
@@ -3782,7 +3785,7 @@ impl WaylandCompositor {
                     gl.Uniform1f(self.genie_uniforms.dim, 1.0);
                     gl.ActiveTexture(ffi::TEXTURE0);
                     self.bind_window_texture(gl, ga.texture_owner.tex_id());
-                    gl.DrawArrays(ffi::TRIANGLES, 0, grid * grid * 6);
+                    self.draw_arrays(gl, ffi::TRIANGLES, 0, grid * grid * 6);
                     self.reset_retained_color_plan(gl, color_plan);
                 }
 
@@ -3996,7 +3999,7 @@ impl WaylandCompositor {
                     i32::from(tail_draws_linear),
                 );
                 gl.BindVertexArray(self.quad_vao);
-                gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+                self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
                 gl.BindVertexArray(0);
                 gl.UseProgram(0);
             }
@@ -4109,7 +4112,7 @@ impl WaylandCompositor {
                 gl.ActiveTexture(ffi::TEXTURE0);
                 gl.BindTexture(ffi::TEXTURE_2D, self.postprocess_texture);
                 gl.BindVertexArray(self.quad_vao);
-                gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+                self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
 
                 gl.BindVertexArray(0);
                 gl.UseProgram(0);
@@ -4514,6 +4517,7 @@ impl WaylandCompositor {
 
         // Mark frame for rate limiter
         self.frame_rate_limiter.mark_frame();
+        self.last_draw_calls = self.frame_draw_calls.get();
 
         true
     }
@@ -4900,7 +4904,7 @@ impl WaylandCompositor {
                 cw + 2.0 * ring,
                 ch + 2.0 * ring,
             );
-            gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+            self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
         }
 
         // Text sections.
@@ -4920,7 +4924,7 @@ impl WaylandCompositor {
             };
             gl.Uniform4f(text_rect, px, py, w as f32, h as f32);
             gl.BindTexture(ffi::TEXTURE_2D, tex);
-            gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+            self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
         }
 
         gl.BindVertexArray(0);
@@ -5291,7 +5295,7 @@ impl WaylandCompositor {
             gl.Uniform1f(u.alpha, alpha.clamp(0.0, 1.0));
             gl.Uniform1i(u.scene_linear, i32::from(scene_linear));
             self.set_rect_uniform(gl, u.rect, x, y, w, h);
-            gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+            self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
         }
     }
 
@@ -5566,7 +5570,7 @@ impl WaylandCompositor {
                     bdr_w,
                     bdr_h,
                 );
-                gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+                self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
                 // Restore the flat border program; its projection and
                 // scene_linear uniforms are per-program state and stay
                 // valid from the pre-loop setup.
@@ -5592,7 +5596,7 @@ impl WaylandCompositor {
                     bdr_h,
                 );
 
-                gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+                self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
             }
         }
     }
@@ -5656,7 +5660,7 @@ impl WaylandCompositor {
             gl.Uniform1f(self.border_uniforms.radius_top, r_top);
             gl.Uniform2f(self.border_uniforms.size, w, h);
             self.set_rect_uniform(gl, self.border_uniforms.rect, x, y, w, h);
-            gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+            self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
         }
     }
 
@@ -5688,7 +5692,7 @@ impl WaylandCompositor {
             gl.Uniform1f(self.border_uniforms.radius_top, r);
             gl.Uniform2f(self.border_uniforms.size, w, h);
             self.set_rect_uniform(gl, self.border_uniforms.rect, x, y, w, h);
-            gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+            self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
         }
     }
 
@@ -5766,7 +5770,7 @@ impl WaylandCompositor {
             gl.Uniform4f(bg, scrim[0], scrim[1], scrim[2], scrim[3]);
             gl.Uniform2f(size, viewport_w, viewport_h);
             gl.Uniform4f(rect, viewport_x, viewport_y, viewport_w, viewport_h);
-            gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+            self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
         }
 
         self.capture_glass_backdrop(gl, ui, projection, scene_linear);
@@ -5795,7 +5799,7 @@ impl WaylandCompositor {
                 panel_w + 2.0 * spread,
                 panel_h + 2.0 * spread,
             );
-            gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+            self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
 
             self.ui_fill_surface(
                 gl,
@@ -5960,7 +5964,7 @@ impl WaylandCompositor {
                 };
                 gl.Uniform4f(text_rect, tx, ty, w as f32, h as f32);
                 gl.BindTexture(ffi::TEXTURE_2D, tex);
-                gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+                self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
             }
             gl.BindVertexArray(0);
             gl.UseProgram(0);
@@ -6050,7 +6054,7 @@ impl WaylandCompositor {
             gl.Uniform4f(bg, scrim[0], scrim[1], scrim[2], scrim[3]);
             gl.Uniform2f(size, viewport_w, viewport_h);
             gl.Uniform4f(rect, viewport_x, viewport_y, viewport_w, viewport_h);
-            gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+            self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
         }
 
         self.capture_glass_backdrop(gl, ui, projection, scene_linear);
@@ -6079,7 +6083,7 @@ impl WaylandCompositor {
                 panel_w + 2.0 * spread,
                 panel_h + 2.0 * spread,
             );
-            gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+            self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
 
             self.ui_fill_surface(
                 gl,
@@ -6229,7 +6233,7 @@ impl WaylandCompositor {
                 let [tx, ty] = grid_layout::label_origin(cell, cell_rect, scale);
                 gl.Uniform4f(text_rect, tx, ty, *w as f32, *h as f32);
                 gl.BindTexture(ffi::TEXTURE_2D, *tex);
-                gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+                self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
             }
 
             // Title, the highlighted tag's name centred under the grid, and
@@ -6251,7 +6255,7 @@ impl WaylandCompositor {
                 };
                 gl.Uniform4f(text_rect, tx, ty, w as f32, h as f32);
                 gl.BindTexture(ffi::TEXTURE_2D, tex);
-                gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+                self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
             }
             gl.BindVertexArray(0);
             gl.UseProgram(0);
@@ -6433,7 +6437,7 @@ impl WaylandCompositor {
                 self.bind_window_texture(gl, tex);
                 gl.Uniform1i(self.win_uniforms.texture, 0);
 
-                gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+                self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
                 self.reset_window_color_transform(gl);
             }
 
@@ -6521,7 +6525,7 @@ impl WaylandCompositor {
             self.upload_window_color_transform(gl, None, scene_linear);
             gl.ActiveTexture(ffi::TEXTURE0);
             self.bind_window_texture(gl, tex);
-            gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+            self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
             self.reset_window_color_transform(gl);
             // Back to the border program the card's fills draw with.
             gl.UseProgram(self.border_program);
@@ -6760,7 +6764,7 @@ impl WaylandCompositor {
                 gl.Uniform4f(bg, scrim[0], scrim[1], scrim[2], scrim[3]);
                 gl.Uniform2f(size, viewport_w, viewport_h);
                 gl.Uniform4f(rect, viewport_x, viewport_y, viewport_w, viewport_h);
-                gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+                self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
             }
         }
 
@@ -6798,7 +6802,7 @@ impl WaylandCompositor {
                     panel_w + 2.0 * spread,
                     panel_h + 2.0 * spread,
                 );
-                gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+                self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
             }
 
             // Card surface, then the query-field bar and selection pill on the
@@ -7019,7 +7023,7 @@ impl WaylandCompositor {
                     panel_w + 2.0 * ring,
                     panel_h + 2.0 * ring,
                 );
-                gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+                self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
             }
 
             // Text sections.
@@ -7044,7 +7048,7 @@ impl WaylandCompositor {
                 };
                 gl.Uniform4f(text_rect, tx, ty, w as f32, h as f32);
                 gl.BindTexture(ffi::TEXTURE_2D, tex);
-                gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+                self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
             }
             // Row icons of the launcher and the switcher, in the same pass:
             // same program, same content alpha as the text. A row drawn here
@@ -7071,7 +7075,7 @@ impl WaylandCompositor {
                     };
                     gl.Uniform4f(text_rect, ix, iy, iw, ih);
                     gl.BindTexture(ffi::TEXTURE_2D, tex);
-                    gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+                    self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
                 }
             }
             gl.BindVertexArray(0);
@@ -7316,7 +7320,7 @@ impl WaylandCompositor {
                 if let Some((tex, w, h)) = slots[0] {
                     gl.Uniform4f(text_rect, x + pad_left, y + pad, w as f32, h as f32);
                     gl.BindTexture(ffi::TEXTURE_2D, tex);
-                    gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+                    self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
                 }
                 if let Some((tex, w, h)) = slots[1] {
                     gl.Uniform4f(
@@ -7327,7 +7331,7 @@ impl WaylandCompositor {
                         h as f32,
                     );
                     gl.BindTexture(ffi::TEXTURE_2D, tex);
-                    gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+                    self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
                 }
                 for (index, rect) in button_rects.iter().enumerate() {
                     if let Some((tex, w, h)) = button_slots.get(index).copied().flatten() {
@@ -7340,7 +7344,7 @@ impl WaylandCompositor {
                             h as f32,
                         );
                         gl.BindTexture(ffi::TEXTURE_2D, tex);
-                        gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+                        self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
                     }
                 }
 
@@ -7513,7 +7517,7 @@ impl WaylandCompositor {
                 text_h as f32,
             );
             gl.BindTexture(ffi::TEXTURE_2D, tex);
-            gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+            self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
 
             gl.BindVertexArray(0);
             gl.UseProgram(0);
@@ -7644,7 +7648,7 @@ impl WaylandCompositor {
                 layout.text[3],
             );
             gl.BindTexture(ffi::TEXTURE_2D, tex);
-            gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+            self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
 
             gl.BindVertexArray(0);
             gl.UseProgram(0);
@@ -7784,7 +7788,7 @@ impl WaylandCompositor {
                 layout.text[3],
             );
             gl.BindTexture(ffi::TEXTURE_2D, tex);
-            gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+            self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
 
             gl.BindVertexArray(0);
             gl.UseProgram(0);
@@ -7897,7 +7901,7 @@ impl WaylandCompositor {
                 layout.text[3],
             );
             gl.BindTexture(ffi::TEXTURE_2D, tex);
-            gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+            self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
 
             gl.BindVertexArray(0);
             gl.UseProgram(0);
@@ -7974,7 +7978,7 @@ impl WaylandCompositor {
                 gl.VertexAttribPointer(0, 2, ffi::FLOAT, ffi::FALSE as u8, 8, std::ptr::null());
 
                 let num_verts = ((stroke.points.len() - 1) * 2) as i32;
-                gl.DrawArrays(ffi::LINES, 0, num_verts);
+                self.draw_arrays(gl, ffi::LINES, 0, num_verts);
 
                 gl.DisableVertexAttribArray(0);
                 gl.BindBuffer(ffi::ARRAY_BUFFER, 0);

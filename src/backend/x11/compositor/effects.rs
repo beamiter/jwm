@@ -788,7 +788,7 @@ impl<C: CompositorConnection> Compositor<C> {
             );
             self.gl
                 .buffer_data_u8_slice(glow::ARRAY_BUFFER, byte_data, glow::STREAM_DRAW);
-            self.gl.draw_arrays(glow::POINTS, 0, count as i32);
+            self.draw_arrays(glow::POINTS, 0, count as i32);
 
             self.gl.disable(glow::PROGRAM_POINT_SIZE);
             self.gl.bind_buffer(glow::ARRAY_BUFFER, None);
