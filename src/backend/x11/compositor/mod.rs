@@ -115,9 +115,6 @@ pub mod integration_helpers {
 pub(crate) mod latency {
     pub(crate) use crate::backend::x11::compositor_common::latency::*;
 }
-pub mod optimization_manager {
-    pub use crate::backend::x11::compositor_common::optimization_manager::*;
-}
 pub mod oml_sync_common {
     pub use crate::backend::x11::compositor_common::oml_sync::*;
 }
@@ -159,7 +156,6 @@ pub(crate) use frame_stats::FrameStats;
 pub use gpu_fence_sync::GPUFenceSyncManager;
 pub(crate) use latency::latency_stats;
 pub use oml_sync_control::OmlSyncControl;
-pub use optimization_manager::{OptimizationManager, OptimizationStatus};
 pub use pbo_uploader::PBOUploader;
 pub use per_monitor::{MonitorRenderRegion, PerMonitorRenderer};
 pub use perf_metrics::PerfMetrics;

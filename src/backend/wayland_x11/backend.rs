@@ -2158,8 +2158,8 @@ impl Backend for WaylandX11Backend {
         self.state.offer_clipboard_text(text)
     }
 
-    fn set_clipboard_png(&mut self, png: Vec<u8>) -> bool {
-        self.state.offer_clipboard_png(png)
+    fn set_clipboard_png(&mut self, png: &[u8]) -> bool {
+        self.state.offer_clipboard_png(png.to_vec())
     }
 
     fn drain_clipboard(&mut self) -> Vec<crate::backend::clipboard_offer::CapturedClipboard> {

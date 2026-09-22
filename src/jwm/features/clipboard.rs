@@ -395,7 +395,7 @@ impl crate::jwm::Jwm {
         if let Some(sender) = backend.clipboard_image_sender() {
             return sender.send_png(png);
         }
-        if backend.set_clipboard_png(png.clone()) {
+        if backend.set_clipboard_png(&png) {
             return true;
         }
         Self::publish_png_bytes_via_wl_copy(&png)
@@ -926,9 +926,9 @@ mod tests {
     impl crate::backend::api::RenderScheduler for PngOfferBackend {}
 
     impl crate::backend::api::Backend for PngOfferBackend {
-        fn set_clipboard_png(&mut self, png: Vec<u8>) -> bool {
+        fn set_clipboard_png(&mut self, png: &[u8]) -> bool {
             self.set_clipboard_png_calls += 1;
-            self.offered_png = Some(png);
+            self.offered_png = Some(png.to_vec());
             true
         }
 

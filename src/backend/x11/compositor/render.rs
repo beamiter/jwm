@@ -1149,6 +1149,8 @@ impl<C: CompositorConnection> Compositor<C> {
         let dirty_fraction = self.damage_tracker.dirty_fraction();
 
         let latency_stats = self.compute_latency_stats();
+        let (_, _, frame_time_p95_ms, frame_time_p99_ms) =
+            super::latency::latency_stats(frame_times_vec.iter().copied());
 
         crate::backend::api::CompositorMetrics {
             renderer_api: self.graphics.api_name().to_string(),
@@ -1157,8 +1159,8 @@ impl<C: CompositorConnection> Compositor<C> {
             avg_frame_time_ms: avg_frame_time,
             max_frame_time_ms: max_frame_time,
             min_frame_time_ms: min_frame_time,
-            frame_time_p95_ms: 0.0,
-            frame_time_p99_ms: 0.0,
+            frame_time_p95_ms,
+            frame_time_p99_ms,
             gpu_load_percent: 0, // To be updated from perf_metrics
             cpu_load_percent: 0, // To be updated from perf_metrics
             draw_calls: self.frame_stats.draw_calls,

@@ -22,7 +22,6 @@ pub mod integration_helpers;
 pub mod latency;
 pub mod math;
 pub mod oml_sync;
-pub mod optimization_manager;
 pub mod pbo_uploader;
 pub mod per_monitor;
 pub mod perf_metrics;

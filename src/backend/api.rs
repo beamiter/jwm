@@ -3342,7 +3342,10 @@ pub trait Backend:
     /// X11 backends leave this as `false` and serve images through
     /// [`clipboard_image_sender`] instead (selection ownership lives on a
     /// dedicated worker thread).
-    fn set_clipboard_png(&mut self, _png: Vec<u8>) -> bool {
+    ///
+    /// Takes a borrowed slice so callers can fall through to `wl-copy` without
+    /// cloning a multi-megabyte capture up front.
+    fn set_clipboard_png(&mut self, _png: &[u8]) -> bool {
         false
     }
 

@@ -60,23 +60,6 @@ impl AdaptiveBlur {
     pub fn current_load(&self) -> u32 {
         self.current_load.load(Ordering::Relaxed)
     }
-
-    /// Force a specific quality level
-    pub(crate) fn set_quality(&self, quality: BlurQuality) {
-        if let Ok(mut q) = self.quality.lock() {
-            if *q != quality {
-                log::info!(
-                    "blur: quality manually set to {}",
-                    match quality {
-                        BlurQuality::Full => "full",
-                        BlurQuality::Reduced => "reduced",
-                        BlurQuality::Minimal => "minimal",
-                    }
-                );
-                *q = quality;
-            }
-        }
-    }
 }
 
 impl Clone for AdaptiveBlur {
