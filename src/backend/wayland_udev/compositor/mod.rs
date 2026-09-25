@@ -381,6 +381,9 @@ pub(crate) struct GlassUniforms {
     pub grain: i32,
     pub alpha: i32,
     pub scene_linear: i32,
+    /// `u_backdrop_encoded`: the bound backdrop holds encoded sRGB, which a
+    /// sheet drawn into the linear target decodes before using it.
+    pub backdrop_encoded: i32,
 }
 
 pub(crate) struct PostprocessUniforms {
@@ -865,6 +868,14 @@ pub(crate) struct ExternalElementVisual {
     /// Global physical-pixel destination `[x, y, w, h]`, top-left origin —
     /// the same coordinate space as the compositor's screen FBO.
     pub rect: [i32; 4],
+    /// Content identity of the staged pixels. Two stagings with equal keys
+    /// at an equal `rect` draw identical pixels, so a partial frame leaves
+    /// the element's retained footprint alone and scissors its redraw to the
+    /// damage box; a changed key damages the footprint like a move does. The
+    /// backend derives it from what the element shows (the surface tree's
+    /// commits and placement, or the cursor image), never from `texture`:
+    /// every staging allocates a fresh texture.
+    pub content_key: u64,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1369,13 +1380,16 @@ pub(crate) struct WaylandCompositor {
 
     // KMS external elements (cursor, drag icon, top/overlay layer trees)
     // staged by the backend for the common-linear target this frame, in
-    // back-to-front draw order. `external_elements_prev_rects` tracks the
-    // rectangles of the set actually drawn into the persistent FBO chain, so a
-    // moved/removed element damages both its old and new footprint even under
-    // partial-damage repair. `external_elements_drawn` records whether the
-    // current output texture carries them, which also blocks direct scanout.
+    // back-to-front draw order. `external_elements_prev_rects` and
+    // `external_elements_prev_keys` track the rectangles and content keys of
+    // the set actually drawn into the persistent FBO chain, so a moved,
+    // removed or repainted element damages both its old and new footprint
+    // even under partial-damage repair, while an unchanged one stays out of
+    // the damage box. `external_elements_drawn` records whether the current
+    // output texture carries them, which also blocks direct scanout.
     external_elements: Vec<ExternalElementVisual>,
     external_elements_prev_rects: Vec<[i32; 4]>,
+    external_elements_prev_keys: Vec<u64>,
     external_elements_drawn: bool,
     /// The staged set includes the pointer cursor class, so a frame that draws
     /// it (`external_elements_drawn`) already carries the real cursor image in
@@ -1517,7 +1531,13 @@ pub(crate) struct WaylandCompositor {
 
     // --- Wallpaper ---
     wallpaper_texture: Option<u32>,
+    /// Layout mode of the image currently in `wallpaper_texture`.
     wallpaper_mode: WallpaperMode,
+    /// Layout mode of the newest `set_wallpaper` request. `wallpaper_mode`
+    /// only catches up once that request's image is on screen, so config
+    /// reloads compare against this one; comparing against the displayed
+    /// mode would restart a decode that is already in flight.
+    wallpaper_requested_mode: WallpaperMode,
     wallpaper_path: String,
     wallpaper_img_w: u32,
     wallpaper_img_h: u32,
@@ -2381,6 +2401,7 @@ impl WaylandCompositor {
                 grain: get_uniform_loc(gl, glass_program, "u_grain"),
                 alpha: get_uniform_loc(gl, glass_program, "u_alpha"),
                 scene_linear: get_uniform_loc(gl, glass_program, "u_scene_linear"),
+                backdrop_encoded: get_uniform_loc(gl, glass_program, "u_backdrop_encoded"),
             };
 
             let postprocess_uniforms = PostprocessUniforms {
@@ -2926,6 +2947,7 @@ impl WaylandCompositor {
                 prev_scene: Vec::new(),
                 external_elements: Vec::new(),
                 external_elements_prev_rects: Vec::new(),
+                external_elements_prev_keys: Vec::new(),
                 external_elements_drawn: false,
                 external_elements_include_cursor: false,
                 scratch_curr_ids: HashSet::new(),
@@ -3018,6 +3040,7 @@ impl WaylandCompositor {
                 // Wallpaper
                 wallpaper_texture: None,
                 wallpaper_mode: WallpaperMode::Fill,
+                wallpaper_requested_mode: WallpaperMode::Fill,
                 wallpaper_path: String::new(),
                 wallpaper_img_w: 0,
                 wallpaper_img_h: 0,
@@ -3309,6 +3332,7 @@ impl WaylandCompositor {
             // texture owners through the renderer's normal teardown channel.
             self.external_elements.clear();
             self.external_elements_prev_rects.clear();
+            self.external_elements_prev_keys.clear();
             self.external_elements_drawn = false;
             self.external_elements_include_cursor = false;
 

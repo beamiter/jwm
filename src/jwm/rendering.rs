@@ -433,6 +433,12 @@ impl Jwm {
         // the sampler because a rate divides by the gap actually observed.
         self.poll_resources();
 
+        // The microphone recorder finishes its file off the event thread
+        // after a key stop, and can die on its own (a USB microphone pulled
+        // mid-recording); report either here so the MIC chip and the toast
+        // never wait for the next keypress.
+        self.poll_audio_recording(backend);
+
         // Clipboard capture runs on its own thread and connection; adopt what
         // it copied here.
         for payload in backend.drain_clipboard() {
@@ -451,6 +457,10 @@ impl Jwm {
         // an open launcher keeps its query and is redrawn by the single flush
         // at the end of this tick.
         self.poll_launcher_catalog_job();
+
+        // The wallpaper picker lists its directory on a worker; fill an open
+        // picker in the same way.
+        self.poll_wallpaper_listing_job();
 
         // The Shell Hub's slow controls are sampled off-thread. Always adopt
         // a completed value so a panel closed mid-read still warms the next
@@ -702,6 +712,10 @@ impl Jwm {
             None => return,
         };
         let win = match self.state.clients.get(sel_key) {
+            // Maximize owns a realized client's live rect, and its floating_*
+            // is the restore slot: a server rect read back here must not
+            // overwrite either.
+            Some(c) if c.state.is_maximize_realized() => return,
             Some(c) if c.state.is_floating => c.win,
             _ => return,
         };

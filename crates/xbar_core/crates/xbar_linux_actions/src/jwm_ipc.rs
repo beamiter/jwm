@@ -14,8 +14,13 @@
 //! than freeze the panel: request and response bytes are capped, post-connect
 //! transport shares one sub-second deadline, and a missing socket is reported
 //! as "jwm is not running" rather than retried.
+//!
+//! A socket path derived from `XDG_RUNTIME_DIR` or the `/tmp/jwm-<uid>`
+//! fallback is also checked before every connect, the way the compositor checks
+//! the directory it serves from; see [`validate_runtime_endpoint`].
 
 use std::io::{Read, Write};
+use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::thread;
@@ -94,10 +99,26 @@ impl std::error::Error for JwmIpcError {
     }
 }
 
+/// Where a [`JwmIpc`] socket path came from, which decides whether it is
+/// validated before a connect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SocketSource {
+    /// `JWM_SOCKET` or [`JwmIpc::at`]: the endpoint was named explicitly, so it
+    /// is used as given.
+    Explicit,
+    /// Derived from `XDG_RUNTIME_DIR` or the `/tmp/jwm-<uid>` fallback. The
+    /// compositor refuses to serve from such a directory unless it is private
+    /// to this user, so the client holds it to the same standard: otherwise a
+    /// directory another local user pre-created in world-writable `/tmp` would
+    /// receive the bar's requests and answer them.
+    RuntimeDirectory,
+}
+
 /// A handle to one jwm control socket.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JwmIpc {
     socket: PathBuf,
+    source: SocketSource,
 }
 
 impl Default for JwmIpc {
@@ -110,17 +131,18 @@ impl JwmIpc {
     /// Resolve the socket the way the running compositor does.
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            socket: socket_path(),
-        }
+        let (socket, source) = socket_path();
+        Self { socket, source }
     }
 
     /// Point at a specific socket — used by nested test sessions, and by any
-    /// host that runs more than one compositor.
+    /// host that runs more than one compositor. An explicit path is used as
+    /// given, without the runtime-directory checks.
     #[must_use]
     pub fn at(socket: impl Into<PathBuf>) -> Self {
         Self {
             socket: socket.into(),
+            source: SocketSource::Explicit,
         }
     }
 
@@ -139,11 +161,18 @@ impl JwmIpc {
         let request = encode_request(name, &args).map_err(|()| JwmIpcError::RequestTooLarge {
             limit: MAX_IPC_REQUEST_BYTES,
         })?;
-        let mut stream =
-            UnixStream::connect(&self.socket).map_err(|source| JwmIpcError::Unreachable {
-                socket: self.socket.clone(),
-                source,
-            })?;
+        let unreachable = |source| JwmIpcError::Unreachable {
+            socket: self.socket.clone(),
+            source,
+        };
+        // Validate on every call, not once at construction: a bar outlives
+        // compositor restarts, and a directory that was missing when it started
+        // may have been claimed by someone else since. A refused endpoint is
+        // one no genuine jwm serves from, so it reads as "not reachable".
+        if self.source == SocketSource::RuntimeDirectory {
+            validate_runtime_endpoint(&self.socket, effective_uid()).map_err(unreachable)?;
+        }
+        let mut stream = UnixStream::connect(&self.socket).map_err(unreachable)?;
         let transport = |source| JwmIpcError::Transport {
             socket: self.socket.clone(),
             source,
@@ -325,16 +354,22 @@ pub const TAKE_SCREENSHOT: &str = "take_screenshot";
 /// …and for the immediate whole-screen one.
 pub const TAKE_SCREENSHOT_FULLSCREEN: &str = "take_screenshot_fullscreen";
 
+fn effective_uid() -> u32 {
+    // SAFETY: geteuid has no preconditions and cannot fail. Filesystem
+    // ownership checks use the process's effective credentials, as the
+    // compositor's do.
+    unsafe { libc::geteuid() }
+}
+
 /// Mirror of `jwm::ipc_server::socket_location`: an absolute `XDG_RUNTIME_DIR`
 /// wins, otherwise the compositor falls back to a per-uid directory in `/tmp`.
 /// `JWM_SOCKET` overrides both, which is how a nested session points a bar at a
 /// private compositor.
-fn socket_path() -> PathBuf {
+fn socket_path() -> (PathBuf, SocketSource) {
     resolve_socket_path(
         std::env::var_os("JWM_SOCKET"),
         std::env::var_os("XDG_RUNTIME_DIR"),
-        // SAFETY: geteuid has no preconditions and cannot fail.
-        unsafe { libc::geteuid() },
+        effective_uid(),
     )
 }
 
@@ -344,18 +379,88 @@ fn resolve_socket_path(
     explicit: Option<std::ffi::OsString>,
     runtime_dir: Option<std::ffi::OsString>,
     uid: u32,
-) -> PathBuf {
+) -> (PathBuf, SocketSource) {
     if let Some(explicit) = explicit.filter(|value| !value.is_empty()) {
-        return PathBuf::from(explicit);
+        return (PathBuf::from(explicit), SocketSource::Explicit);
     }
     let runtime = runtime_dir
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .filter(|path| path.is_absolute());
-    match runtime {
+    let socket = match runtime {
         Some(runtime) => runtime.join("jwm-ipc.sock"),
         None => PathBuf::from(format!("/tmp/jwm-{uid}")).join("jwm-ipc.sock"),
+    };
+    (socket, SocketSource::RuntimeDirectory)
+}
+
+fn endpoint_error(kind: std::io::ErrorKind, path: &Path, message: &str) -> std::io::Error {
+    std::io::Error::new(kind, format!("{}: {message}", path.display()))
+}
+
+/// Client half of `jwm::ipc_server::validate_private_directory`, the same
+/// policy as the notification bridge's: the runtime directory must be a real
+/// directory owned by `uid` with no group or other access, and the endpoint
+/// inside it must be a socket owned by `uid`.
+///
+/// The compositor never serves from a directory that fails these checks, so
+/// refusing it cannot lock a bar out of a genuine jwm; it only stops the bar
+/// from sending its requests to a listener another user planted. The client
+/// never creates or chmods the directory: that belongs to the compositor. Once
+/// the directory is private to `uid`, no other user can swap entries in it
+/// between this check and the connect. A missing directory or socket stays
+/// `NotFound`, so "jwm is not running" reads the same as before.
+fn validate_runtime_endpoint(socket: &Path, uid: u32) -> std::io::Result<()> {
+    let directory = socket
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .ok_or_else(|| {
+            endpoint_error(
+                std::io::ErrorKind::InvalidInput,
+                socket,
+                "jwm IPC socket path has no runtime directory",
+            )
+        })?;
+
+    let metadata = std::fs::symlink_metadata(directory)?;
+    if !metadata.file_type().is_dir() {
+        return Err(endpoint_error(
+            std::io::ErrorKind::InvalidInput,
+            directory,
+            "jwm IPC runtime path must be a real directory (not a symlink)",
+        ));
     }
+    if metadata.uid() != uid {
+        return Err(endpoint_error(
+            std::io::ErrorKind::PermissionDenied,
+            directory,
+            "jwm IPC runtime directory is not owned by the current user",
+        ));
+    }
+    if metadata.mode() & 0o077 != 0 {
+        return Err(endpoint_error(
+            std::io::ErrorKind::PermissionDenied,
+            directory,
+            "jwm IPC runtime directory must not be accessible by group or other users",
+        ));
+    }
+
+    let metadata = std::fs::symlink_metadata(socket)?;
+    if !metadata.file_type().is_socket() {
+        return Err(endpoint_error(
+            std::io::ErrorKind::InvalidInput,
+            socket,
+            "jwm IPC endpoint exists but is not a Unix socket",
+        ));
+    }
+    if metadata.uid() != uid {
+        return Err(endpoint_error(
+            std::io::ErrorKind::PermissionDenied,
+            socket,
+            "jwm IPC socket is not owned by the current user",
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -372,7 +477,10 @@ mod tests {
                 Some(OsString::from("/run/user/1000")),
                 1000
             ),
-            PathBuf::from("/run/nested/jwm.sock")
+            (
+                PathBuf::from("/run/nested/jwm.sock"),
+                SocketSource::Explicit
+            )
         );
     }
 
@@ -380,7 +488,10 @@ mod tests {
     fn an_absolute_runtime_dir_wins_over_the_uid_fallback() {
         assert_eq!(
             resolve_socket_path(None, Some(OsString::from("/run/user/1000")), 1000),
-            PathBuf::from("/run/user/1000/jwm-ipc.sock")
+            (
+                PathBuf::from("/run/user/1000/jwm-ipc.sock"),
+                SocketSource::RuntimeDirectory
+            )
         );
     }
 
@@ -396,7 +507,10 @@ mod tests {
         ] {
             assert_eq!(
                 resolve_socket_path(Some(OsString::from("")), runtime, 4242),
-                PathBuf::from("/tmp/jwm-4242/jwm-ipc.sock")
+                (
+                    PathBuf::from("/tmp/jwm-4242/jwm-ipc.sock"),
+                    SocketSource::RuntimeDirectory
+                )
             );
         }
     }
@@ -411,8 +525,21 @@ mod tests {
     /// Stand up a one-shot server that answers with `reply` and hands back what
     /// the client actually wrote.
     fn serve_once(path: &Path, reply: impl Into<String>) -> std::thread::JoinHandle<String> {
+        serve_once_on(
+            UnixListener::bind(path).expect("bind scratch socket"),
+            reply,
+        )
+    }
+
+    /// [`serve_once`] on a listener that is already bound.
+    fn serve_once_on(
+        listener: UnixListener,
+        reply: impl Into<String>,
+    ) -> std::thread::JoinHandle<String> {
         let reply = reply.into();
-        let listener = UnixListener::bind(path).expect("bind scratch socket");
+        listener
+            .set_nonblocking(false)
+            .expect("blocking accept for the one-shot server");
         std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("accept");
             let mut request = String::new();
@@ -522,6 +649,139 @@ mod tests {
         assert!(started.elapsed() < Duration::from_millis(200));
         drop(client);
         writer.join().unwrap();
+    }
+
+    /// A per-test runtime directory under the temp dir, never the session's.
+    struct ScratchDir(PathBuf);
+
+    impl ScratchDir {
+        fn new(mode: u32) -> ScratchDir {
+            use std::os::unix::fs::PermissionsExt;
+            use std::sync::atomic::{AtomicUsize, Ordering};
+
+            static NEXT: AtomicUsize = AtomicUsize::new(0);
+            let path = std::env::temp_dir().join(format!(
+                "xbar-jwm-ipc-dir-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            let _ = std::fs::remove_dir_all(&path);
+            std::fs::create_dir(&path).expect("create scratch runtime dir");
+            // Set the mode explicitly: create_dir is filtered by the umask.
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode))
+                .expect("set scratch runtime dir mode");
+            ScratchDir(path)
+        }
+
+        fn socket(&self) -> PathBuf {
+            self.0.join("jwm-ipc.sock")
+        }
+
+        /// A client resolved exactly as [`JwmIpc::new`] resolves one from
+        /// `XDG_RUNTIME_DIR`, so every call runs the runtime checks.
+        fn runtime_client(&self) -> JwmIpc {
+            let (socket, source) =
+                resolve_socket_path(None, Some(self.0.clone().into_os_string()), effective_uid());
+            assert_eq!(source, SocketSource::RuntimeDirectory);
+            assert_eq!(socket, self.socket());
+            JwmIpc { socket, source }
+        }
+    }
+
+    impl Drop for ScratchDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn a_runtime_socket_in_a_shared_directory_is_refused_before_connecting() {
+        let dir = ScratchDir::new(0o755);
+        let listener = UnixListener::bind(dir.socket()).expect("bind planted socket");
+        listener
+            .set_nonblocking(true)
+            .expect("non-blocking listener");
+
+        let error = dir.runtime_client().take_screenshot().unwrap_err();
+        match &error {
+            JwmIpcError::Unreachable { source, .. } => {
+                assert_eq!(source.kind(), std::io::ErrorKind::PermissionDenied);
+            }
+            other => panic!("expected the endpoint to be refused, got {other:?}"),
+        }
+        assert!(
+            matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock),
+            "the planted listener must never see a connection"
+        );
+
+        // An explicitly named socket is still used as given, which is how
+        // nested sessions point a bar at a private compositor.
+        let server = serve_once_on(listener, "{\"success\":true}\n");
+        JwmIpc::at(dir.socket())
+            .take_screenshot()
+            .expect("explicit socket accepted");
+        server.join().expect("server thread");
+    }
+
+    #[test]
+    fn a_private_runtime_directory_is_served() {
+        let dir = ScratchDir::new(0o700);
+        let server = serve_once(&dir.socket(), "{\"success\":true}\n");
+        dir.runtime_client()
+            .take_screenshot()
+            .expect("a private runtime directory is trusted");
+        let request = server.join().expect("server thread");
+        assert!(request.contains("take_screenshot"), "{request}");
+    }
+
+    #[test]
+    fn a_runtime_directory_owned_by_another_user_is_refused() {
+        let dir = ScratchDir::new(0o700);
+        let _listener = UnixListener::bind(dir.socket()).expect("bind scratch socket");
+
+        validate_runtime_endpoint(&dir.socket(), effective_uid()).expect("own directory");
+        let error =
+            validate_runtime_endpoint(&dir.socket(), effective_uid().wrapping_add(1)).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+    }
+
+    #[test]
+    fn a_symlinked_runtime_directory_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = ScratchDir::new(0o700);
+        let real = dir.0.join("real");
+        std::fs::create_dir(&real).expect("create real dir");
+        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o700))
+            .expect("set real dir mode");
+        let _listener = UnixListener::bind(real.join("jwm-ipc.sock")).expect("bind real socket");
+        let link = dir.0.join("link");
+        std::os::unix::fs::symlink(&real, &link).expect("symlink runtime dir");
+
+        let error =
+            validate_runtime_endpoint(&link.join("jwm-ipc.sock"), effective_uid()).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn a_runtime_endpoint_that_is_not_a_socket_is_refused() {
+        let dir = ScratchDir::new(0o700);
+        std::fs::write(dir.socket(), b"not a socket").expect("write plain file");
+
+        let error = validate_runtime_endpoint(&dir.socket(), effective_uid()).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn a_missing_runtime_socket_still_reads_as_not_running() {
+        let dir = ScratchDir::new(0o700);
+        let error = dir.runtime_client().take_screenshot().unwrap_err();
+        match &error {
+            JwmIpcError::Unreachable { source, .. } => {
+                assert_eq!(source.kind(), std::io::ErrorKind::NotFound);
+            }
+            other => panic!("expected jwm to read as not running, got {other:?}"),
+        }
     }
 
     #[test]

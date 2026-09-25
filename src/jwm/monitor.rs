@@ -3,7 +3,8 @@
 use crate::Jwm;
 use crate::backend::api::Backend;
 use crate::backend::common_define::OutputId;
-use crate::config::CONFIG;
+use crate::config::{BackendFamily, CONFIG, get_backend_family};
+use crate::core::maximize::maximize_target;
 use crate::core::models::{ClientKey, MonitorKey, WMClient, WMMonitor};
 use crate::core::state::WMState;
 use crate::core::types::Rect;
@@ -219,7 +220,8 @@ enum VisibleMigration {
     /// Nothing to carry: minimized (the hidden path owns it), the bar (its
     /// own placement owns it), a tiled window (the next `arrange` places
     /// it), or a window already on the target output — a drag released
-    /// there, whose position is exactly what the user chose.
+    /// there, whose position is exactly what the user chose, or a fullscreen
+    /// window that already fills it.
     Unchanged,
     /// Parked off-screen because its tag is not shown: only the rectangle it
     /// comes back to moved; the real window stays where it is.
@@ -229,10 +231,11 @@ enum VisibleMigration {
 }
 
 /// Move a non-minimized client's geometry to a new output. A fullscreen
-/// window fills the target output; a floating or PiP window keeps its offset
-/// within the work area, clamped to fit. The floating and pre-fullscreen
-/// slots follow too, so toggling floating or leaving fullscreen later does
-/// not jump back to the source.
+/// window fills the target output; a maximized window fills the target work
+/// area on its maximized axes; a floating or PiP window keeps its offset
+/// within the work area, clamped to fit. The floating, pre-fullscreen and
+/// pre-maximize slots follow too, so toggling floating, leaving fullscreen or
+/// unmaximizing later does not jump back to the source.
 fn migrate_visible_geometry(
     client: &mut WMClient,
     source_work: Option<Rect>,
@@ -249,12 +252,35 @@ fn migrate_visible_geometry(
         client.geometry.w,
         client.geometry.h,
     );
-    if !parked && rect_center_inside(live, target_monitor) {
-        return VisibleMigration::Unchanged;
-    }
     let border_width = client.geometry.border_w;
     let translate =
         |rect: Rect| translate_and_clamp_restore_rect(rect, source_work, target_work, border_width);
+
+    // The pre-maximize rectangle is relative to the work area, not to the
+    // live window: it is rebased even when the window itself stays put (a
+    // same-output resize, or a drop already on the target), so unmaximizing
+    // lands inside the new work area.
+    let axes = client.state.maximized_axes();
+    let maximize_restore = if axes.any() {
+        client.geometry.maximize_restore_rect.map(translate)
+    } else {
+        client.geometry.maximize_restore_rect
+    };
+    client.geometry.maximize_restore_rect = maximize_restore;
+
+    // A window already on the target stays where it is. A fullscreen window
+    // is not "somewhere on" its output but the whole of it, so it stays only
+    // when it already fills the target exactly: after a same-output mode or
+    // scale change the old rectangle's centre is still inside, and the window
+    // must be refit rather than left at the old size.
+    let already_placed = if client.state.is_fullscreen {
+        live == target_monitor
+    } else {
+        rect_center_inside(live, target_monitor)
+    };
+    if !parked && already_placed {
+        return VisibleMigration::Unchanged;
+    }
 
     let floating = Rect::new(
         client.geometry.floating_x,
@@ -291,15 +317,36 @@ fn migrate_visible_geometry(
             client.geometry.old_h = old.h;
         }
         target_monitor
+    } else if client.state.is_maximize_realized() {
+        // Maximize owns the geometry: refill the target work area on the
+        // maximized axes, keeping the free axes from the translated restore.
+        let Some(restore) = maximize_restore.or_else(|| current.map(translate)) else {
+            return VisibleMigration::Unchanged;
+        };
+        client.geometry.maximize_restore_rect = Some(restore);
+        // M4: a non-promoted client's floating slot is the restore rect. A
+        // promoted client's floating slot is its independent pre-promotion
+        // rect, already translated above.
+        if !client.state.maximize_restore_tiled {
+            client.geometry.floating_x = restore.x;
+            client.geometry.floating_y = restore.y;
+            client.geometry.floating_w = restore.w;
+            client.geometry.floating_h = restore.h;
+        }
+        maximize_target(restore, target_work, axes, border_width)
     } else if client.state.is_floating || client.state.is_pip {
         let Some(current) = current else {
             return VisibleMigration::Unchanged;
         };
         let moved = translate(current);
-        client.geometry.floating_x = moved.x;
-        client.geometry.floating_y = moved.y;
-        client.geometry.floating_w = moved.w;
-        client.geometry.floating_h = moved.h;
+        // PiP owns `floating_*` as its return slot (the pre-PiP rect),
+        // already translated above; the corner rect must not replace it.
+        if !client.state.is_pip {
+            client.geometry.floating_x = moved.x;
+            client.geometry.floating_y = moved.y;
+            client.geometry.floating_w = moved.w;
+            client.geometry.floating_h = moved.h;
+        }
         moved
     } else {
         return VisibleMigration::Unchanged;
@@ -347,8 +394,23 @@ fn migrate_hidden_restore_geometry(
         .and_then(valid_rect)
         .unwrap_or_else(|| legacy_hidden_restore_rect(client, fallback_area));
 
+    // The pre-maximize rectangle follows the work area first; a realized
+    // maximized window comes back filling the target work area around it.
+    let axes = client.state.maximized_axes();
+    let maximize_restore = if axes.any() {
+        client.geometry.maximize_restore_rect.map(|rect| {
+            translate_and_clamp_restore_rect(rect, source_work, target_work, border_width)
+        })
+    } else {
+        client.geometry.maximize_restore_rect
+    };
+    client.geometry.maximize_restore_rect = maximize_restore;
+    let realized_restore = maximize_restore.filter(|_| client.state.is_maximize_realized());
+
     let visible = if client.state.is_fullscreen {
         target_monitor
+    } else if let Some(restore) = realized_restore {
+        maximize_target(restore, target_work, axes, border_width)
     } else {
         translate_and_clamp_restore_rect(previous_visible, source_work, target_work, border_width)
     };
@@ -391,11 +453,35 @@ fn migrate_hidden_restore_geometry(
     } else if client.state.is_floating || client.state.is_pip {
         // A minimized floating client has one user-visible position. Keeping
         // the floating slot identical prevents toggle-float after restore
-        // from resurrecting coordinates from the source output.
-        client.geometry.floating_x = visible.x;
-        client.geometry.floating_y = visible.y;
-        client.geometry.floating_w = visible.w;
-        client.geometry.floating_h = visible.h;
+        // from resurrecting coordinates from the source output. A maximized
+        // one keeps the pre-maximize rect there instead (M4), and a window
+        // maximize promoted out of the tiling keeps its own pre-promotion
+        // floating rect, translated like the visible path does. So does a
+        // PiP window: its floating slot is the pre-PiP rect it returns to,
+        // not the corner rect it is minimized from.
+        let own_slot = || {
+            valid_rect(Rect::new(
+                client.geometry.floating_x,
+                client.geometry.floating_y,
+                client.geometry.floating_w,
+                client.geometry.floating_h,
+            ))
+            .map(|rect| {
+                translate_and_clamp_restore_rect(rect, source_work, target_work, border_width)
+            })
+        };
+        let floating = match realized_restore {
+            Some(restore) if !client.state.maximize_restore_tiled => Some(restore),
+            Some(_) => own_slot(),
+            None if client.state.is_pip => own_slot(),
+            None => Some(visible),
+        };
+        if let Some(floating) = floating {
+            client.geometry.floating_x = floating.x;
+            client.geometry.floating_y = floating.y;
+            client.geometry.floating_w = floating.w;
+            client.geometry.floating_h = floating.h;
+        }
     }
 
     let total_width = visible
@@ -425,6 +511,115 @@ fn lowest_unused_monitor_num<'a>(monitor_nums: impl Iterator<Item = &'a i32>) ->
         }
     }
     candidate
+}
+
+/// The output rectangles for `setup_multiple_monitors`, reordered so that
+/// position `i` (the monitor at `monitor_order[i]`, or a monitor about to be
+/// created there) receives the output that monitor already stands for.
+///
+/// `setup_multiple_monitors` hands rectangles out by position. On Wayland a
+/// non-tail unplug and re-plug leaves `monitor_order` in a different order
+/// than `enumerate_outputs`, and handing out by position then swaps geometry
+/// between two monitors that both still have their output. Here a surviving
+/// position (one below the output count; `remove_excess_monitors` drops the
+/// tail) whose mapped output is still enumerated keeps it; every other
+/// position takes the next unclaimed output in enumeration order, which is
+/// exactly the positional result when nothing moved. The result has one
+/// rectangle per output.
+fn plan_monitor_rects_by_output(
+    monitor_outputs: &[Option<OutputId>],
+    outputs: &[(OutputId, Rect)],
+) -> Vec<Rect> {
+    let survivors = monitor_outputs.len().min(outputs.len());
+    let mut claimed = vec![false; outputs.len()];
+    let mut slots: Vec<Option<usize>> = vec![None; outputs.len()];
+    for (position, mapped) in monitor_outputs.iter().take(survivors).enumerate() {
+        let Some(mapped) = mapped else {
+            continue;
+        };
+        if let Some(index) = outputs.iter().position(|(id, _)| id == mapped)
+            && !claimed[index]
+        {
+            claimed[index] = true;
+            slots[position] = Some(index);
+        }
+    }
+    // Exactly as many open slots as unclaimed outputs: each claim filled one
+    // of each.
+    let mut unclaimed = (0..outputs.len()).filter(|&index| !claimed[index]);
+    slots
+        .into_iter()
+        .filter_map(|slot| slot.or_else(|| unclaimed.next()))
+        .map(|index| outputs[index].1)
+        .collect()
+}
+
+/// Which output each monitor stands for after a display refresh, as
+/// `(monitor, output)` pairs in `monitors` order.
+///
+/// X11 reports every display change as "the layout changed": `updategeom`
+/// hands the enumerated rectangles to the monitors by position and creates or
+/// drops monitors at the tail, so the output id a monitor was created with no
+/// longer says which output it covers, and a monitor created there has none.
+/// Pointer lookups (`recttomon`) resolve through these ids, and a monitor
+/// without the right one can never be selected by the pointer.
+///
+/// A monitor keeps its id while that output still has the monitor's
+/// rectangle. Otherwise it takes an output with its rectangle, preferring the
+/// one at its own position (clones share a rectangle), and failing that the
+/// output at its position, which is where its geometry came from. Each output
+/// is claimed once; a monitor left without one gets no entry.
+fn plan_output_map(
+    monitors: &[(MonitorKey, Rect, Option<OutputId>)],
+    outputs: &[(OutputId, Rect)],
+) -> Vec<(MonitorKey, OutputId)> {
+    let mut claimed: HashSet<OutputId> = HashSet::new();
+    let mut assigned: Vec<Option<OutputId>> = vec![None; monitors.len()];
+
+    for (slot, &(_, rect, current)) in assigned.iter_mut().zip(monitors) {
+        if let Some(id) = current
+            && outputs
+                .iter()
+                .any(|&(output, output_rect)| output == id && output_rect == rect)
+            && claimed.insert(id)
+        {
+            *slot = Some(id);
+        }
+    }
+
+    // An output with the monitor's rectangle, the one at its position first.
+    for (index, (slot, &(_, rect, _))) in assigned.iter_mut().zip(monitors).enumerate() {
+        if slot.is_some() {
+            continue;
+        }
+        let fits = |&&(output, output_rect): &&(OutputId, Rect)| {
+            output_rect == rect && !claimed.contains(&output)
+        };
+        let matched = outputs
+            .get(index)
+            .filter(fits)
+            .or_else(|| outputs.iter().find(fits));
+        if let Some(&(output, _)) = matched {
+            claimed.insert(output);
+            *slot = Some(output);
+        }
+    }
+
+    // The output at the monitor's position, which its geometry came from.
+    for (index, slot) in assigned.iter_mut().enumerate() {
+        if slot.is_none()
+            && let Some(&(output, _)) = outputs.get(index)
+            && claimed.insert(output)
+        {
+            *slot = Some(output);
+        }
+    }
+
+    monitors
+        .iter()
+        .zip(assigned)
+        .filter_map(|(&(monitor, _, _), id)| id.map(|id| (monitor, id)))
+        .collect()
 }
 
 /// Return every live client whose authoritative monitor pointer still names
@@ -957,6 +1152,10 @@ impl Jwm {
         self.attach_unassigned_clients_to_selected_monitor(backend);
 
         self.arrange(backend, None);
+        // Every display change re-validates the monitor locks, as
+        // `updategeom` does for X11: a shade must never outlive the output
+        // rectangle it was cut for.
+        self.prune_monitor_locks(backend);
         Ok(())
     }
 
@@ -997,14 +1196,21 @@ impl Jwm {
         let target_areas = self.monitor_migration_areas(mon_key);
 
         for &client_key in &attached {
-            if let Some((target_monitor, target_work)) = target_areas {
-                self.migrate_hidden_client_restore(
+            // An orphan the last output left on screen still carries that
+            // output's coordinates: a fullscreen one refills this output and
+            // a floating one is pulled onto it, as the unplug would have done
+            // had a monitor survived. A window mapped before any output
+            // existed is already here and stays where it is.
+            if let Some((target_monitor, target_work)) = target_areas
+                && !self.migrate_hidden_client_restore(
                     backend,
                     client_key,
                     None,
                     target_monitor,
                     target_work,
-                );
+                )
+            {
+                self.migrate_visible_client(backend, client_key, None, target_monitor, target_work);
             }
             self.reorder_client_in_monitor_groups(client_key);
         }
@@ -1045,6 +1251,12 @@ impl Jwm {
             self.last_stacking.remove(mon_key);
             let dropped_scrolling_states = self.drop_scrolling_states_for_monitor(mon_key);
             self.repark_all_hidden_clients(backend);
+            // Before any focus decision: the lock on a vanished output comes
+            // off (its number may be handed to the next output plugged in),
+            // the last unlocked output going away lifts the oldest lock, and
+            // a selection that fell back onto a shaded monitor moves off it,
+            // so focus never lands on a window nobody can see.
+            self.prune_monitor_locks(backend);
 
             // 如果删除了当前选中的 Monitor，重置选中
             if removed_was_selected {
@@ -1080,15 +1292,7 @@ impl Jwm {
             };
             let new_monitor = Rect::new(info.x, info.y, info.width.max(1), info.height.max(1));
             let new_work = rebase_work_area(old_monitor, old_work, new_monitor);
-            let (hidden_clients, visible_clients): (Vec<ClientKey>, Vec<ClientKey>) =
-                clients_owned_by_monitor(&self.state, mon_key)
-                    .into_iter()
-                    .partition(|&client_key| {
-                        self.state
-                            .clients
-                            .get(client_key)
-                            .is_some_and(|client| client.state.is_hidden)
-                    });
+            let owned_clients = clients_owned_by_monitor(&self.state, mon_key);
             // OutputChanged also carries scale changes whose logical rectangle
             // may be unchanged. Every Dock target is in global physical pixels,
             // so withdraw the old coordinate space before mutating geometry and
@@ -1107,21 +1311,53 @@ impl Jwm {
                 m.geometry.w_w = info.width;
                 m.geometry.w_h = info.height;
             }
-            let mut migrated = Vec::with_capacity(hidden_clients.len());
-            for client_key in hidden_clients {
-                if self.migrate_hidden_client_restore(
-                    backend,
-                    client_key,
-                    Some(old_work),
-                    new_monitor,
-                    new_work,
-                ) {
-                    migrated.push(client_key);
-                }
-            }
-            // Fullscreen windows refit the changed output; floating ones keep
-            // their offset within the rebased work area.
-            for client_key in visible_clients {
+            let migrated = self.migrate_monitor_clients(
+                backend,
+                owned_clients,
+                old_work,
+                new_monitor,
+                new_work,
+            );
+            self.repark_all_hidden_clients(backend);
+            self.arrange(backend, Some(mon_key));
+            self.refresh_migrated_client_properties(backend, &migrated);
+            self.mark_bar_update_needed_if_visible(monitor_num);
+            // A mode or scale change resizes the output under its shade.
+            self.prune_monitor_locks(backend);
+        }
+        Ok(())
+    }
+
+    /// Carry every client a monitor owns across a change of that monitor's
+    /// rectangle, from `old_work` to `new_work`. Minimized clients get their
+    /// restore slot rebased; visible fullscreen windows refit the changed
+    /// output, and floating or PiP ones keep their offset within the rebased
+    /// work area; tiled ones are left to the next `arrange`. Returns the
+    /// minimized clients that moved, whose published restore state must be
+    /// refreshed once the monitor's geometry is final.
+    ///
+    /// The one migration for Wayland's `OutputChanged` and X11's positional
+    /// refresh alike: a floating window left at its old absolute coordinates
+    /// ends up drawn on a neighbouring output while its monitor still owns it.
+    fn migrate_monitor_clients(
+        &mut self,
+        backend: &mut dyn Backend,
+        clients: Vec<ClientKey>,
+        old_work: Rect,
+        new_monitor: Rect,
+        new_work: Rect,
+    ) -> Vec<ClientKey> {
+        let mut migrated = Vec::new();
+        for client_key in clients {
+            if self.migrate_hidden_client_restore(
+                backend,
+                client_key,
+                Some(old_work),
+                new_monitor,
+                new_work,
+            ) {
+                migrated.push(client_key);
+            } else {
                 self.migrate_visible_client(
                     backend,
                     client_key,
@@ -1130,26 +1366,51 @@ impl Jwm {
                     new_work,
                 );
             }
-            self.repark_all_hidden_clients(backend);
-            self.arrange(backend, Some(mon_key));
-            self.refresh_migrated_client_properties(backend, &migrated);
-            self.mark_bar_update_needed_if_visible(monitor_num);
         }
-        Ok(())
+        migrated
     }
+
     pub(crate) fn updategeom(&mut self, backend: &mut dyn Backend) -> bool {
         info!("[updategeom]");
         let outputs = backend.output_ops().enumerate_outputs();
 
         let dirty = if outputs.len() <= 1 {
-            self.setup_single_monitor(backend)
+            let output = outputs
+                .first()
+                .map(|output| Rect::new(output.x, output.y, output.width, output.height));
+            self.setup_single_monitor(backend, output)
         } else {
-            let mons: Vec<(i32, i32, i32, i32)> = outputs
-                .iter()
-                .map(|o| (o.x, o.y, o.width, o.height))
-                .collect();
+            let mons: Vec<(i32, i32, i32, i32)> = if get_backend_family() == BackendFamily::Wayland
+            {
+                // Wayland outputs carry stable ids that `output_map` tracks
+                // through hotplug, so each monitor keeps its own output. X11
+                // keeps the positional hand-out: RandR's order is what the
+                // monitors are numbered by.
+                let monitor_outputs: Vec<Option<OutputId>> = self
+                    .state
+                    .monitor_order
+                    .iter()
+                    .map(|key| self.state.output_map.get(*key).copied())
+                    .collect();
+                let outputs: Vec<(OutputId, Rect)> = outputs
+                    .iter()
+                    .map(|o| (o.id, Rect::new(o.x, o.y, o.width, o.height)))
+                    .collect();
+                plan_monitor_rects_by_output(&monitor_outputs, &outputs)
+                    .into_iter()
+                    .map(|rect| (rect.x, rect.y, rect.w, rect.h))
+                    .collect()
+            } else {
+                outputs
+                    .iter()
+                    .map(|o| (o.x, o.y, o.width, o.height))
+                    .collect()
+            };
             self.setup_multiple_monitors(backend, mons)
         };
+        // Before anything resolves a point to a monitor, the selection
+        // re-pick below included.
+        self.reconcile_output_map(&outputs);
 
         if dirty {
             let root_window = backend.root_window();
@@ -1166,6 +1427,44 @@ impl Jwm {
         self.prune_monitor_locks(backend);
 
         dirty
+    }
+
+    /// Re-point `output_map` at the outputs the monitors now cover; see
+    /// [`plan_output_map`]. An empty enumeration says nothing about which
+    /// output is where, so it leaves the map alone.
+    fn reconcile_output_map(&mut self, outputs: &[crate::backend::api::OutputInfo]) {
+        if outputs.is_empty() {
+            return;
+        }
+        let monitors: Vec<(MonitorKey, Rect, Option<OutputId>)> = self
+            .state
+            .monitor_order
+            .iter()
+            .filter_map(|&key| {
+                let monitor = self.state.monitors.get(key)?;
+                let rect = Rect::new(
+                    monitor.geometry.m_x,
+                    monitor.geometry.m_y,
+                    monitor.geometry.m_w,
+                    monitor.geometry.m_h,
+                );
+                Some((key, rect, self.state.output_map.get(key).copied()))
+            })
+            .collect();
+        let outputs: Vec<(OutputId, Rect)> = outputs
+            .iter()
+            .map(|output| {
+                (
+                    output.id,
+                    Rect::new(output.x, output.y, output.width, output.height),
+                )
+            })
+            .collect();
+        let planned = plan_output_map(&monitors, &outputs);
+        self.state.output_map.clear();
+        for (monitor, output) in planned {
+            self.state.output_map.insert(monitor, output);
+        }
     }
 
     /// Push the current monitor list (geometry + active tag mask) down to the
@@ -1193,8 +1492,21 @@ impl Jwm {
         backend.compositor_set_monitors(&mon_list);
     }
 
-    pub(crate) fn setup_single_monitor(&mut self, backend: &mut dyn Backend) -> bool {
+    /// Converge on one monitor covering `output`, the single enumerated
+    /// output's rectangle, or the whole screen (`s_w` x `s_h`) when the
+    /// backend enumerated none.
+    ///
+    /// The output's own rectangle, not the screen size: `s_w`/`s_h` change
+    /// only at startup and on an X11 root ConfigureNotify, so on Wayland a
+    /// mode or scale change (or a nested host resize) that `OutputChanged`
+    /// already applied would be reverted here to the startup size.
+    pub(crate) fn setup_single_monitor(
+        &mut self,
+        backend: &mut dyn Backend,
+        output: Option<Rect>,
+    ) -> bool {
         let mut dirty = false;
+        let target = output.unwrap_or_else(|| Rect::new(0, 0, self.s_w, self.s_h));
 
         if self.state.monitor_order.is_empty() {
             let new_monitor = self.createmon(CONFIG.load().show_bar());
@@ -1205,22 +1517,14 @@ impl Jwm {
 
         if let Some(&mon_key) = self.state.monitor_order.first() {
             let geometry_changed = self.state.monitors.get(mon_key).is_some_and(|monitor| {
-                monitor.geometry.m_x != 0
-                    || monitor.geometry.m_y != 0
-                    || monitor.geometry.m_w != self.s_w
-                    || monitor.geometry.m_h != self.s_h
+                monitor.geometry.m_x != target.x
+                    || monitor.geometry.m_y != target.y
+                    || monitor.geometry.m_w != target.w
+                    || monitor.geometry.m_h != target.h
             });
             if geometry_changed {
                 let old_areas = self.monitor_migration_areas(mon_key);
-                let hidden_clients: Vec<ClientKey> = clients_owned_by_monitor(&self.state, mon_key)
-                    .into_iter()
-                    .filter(|&client_key| {
-                        self.state
-                            .clients
-                            .get(client_key)
-                            .is_some_and(|client| client.state.is_hidden)
-                    })
-                    .collect();
+                let owned_clients = clients_owned_by_monitor(&self.state, mon_key);
                 if let Some(monitor_num) =
                     self.state.monitors.get(mon_key).map(|monitor| monitor.num)
                 {
@@ -1228,31 +1532,29 @@ impl Jwm {
                 }
                 if let Some(monitor) = self.state.monitors.get_mut(mon_key) {
                     monitor.num = 0;
-                    monitor.geometry.m_x = 0;
-                    monitor.geometry.w_x = 0;
-                    monitor.geometry.m_y = 0;
-                    monitor.geometry.w_y = 0;
-                    monitor.geometry.m_w = self.s_w;
-                    monitor.geometry.w_w = self.s_w;
-                    monitor.geometry.m_h = self.s_h;
-                    monitor.geometry.w_h = self.s_h;
+                    monitor.geometry.m_x = target.x;
+                    monitor.geometry.w_x = target.x;
+                    monitor.geometry.m_y = target.y;
+                    monitor.geometry.w_y = target.y;
+                    monitor.geometry.m_w = target.w;
+                    monitor.geometry.w_w = target.w;
+                    monitor.geometry.m_h = target.h;
+                    monitor.geometry.w_h = target.h;
                 }
-                let new_monitor = Rect::new(0, 0, self.s_w.max(1), self.s_h.max(1));
-                let mut migrated = Vec::with_capacity(hidden_clients.len());
-                if let Some((old_monitor, old_work)) = old_areas {
-                    let new_work = rebase_work_area(old_monitor, old_work, new_monitor);
-                    for client_key in hidden_clients {
-                        if self.migrate_hidden_client_restore(
+                let new_monitor = Rect::new(target.x, target.y, target.w.max(1), target.h.max(1));
+                let migrated = match old_areas {
+                    Some((old_monitor, old_work)) => {
+                        let new_work = rebase_work_area(old_monitor, old_work, new_monitor);
+                        self.migrate_monitor_clients(
                             backend,
-                            client_key,
-                            Some(old_work),
+                            owned_clients,
+                            old_work,
                             new_monitor,
                             new_work,
-                        ) {
-                            migrated.push(client_key);
-                        }
+                        )
                     }
-                }
+                    None => Vec::new(),
+                };
                 self.refresh_migrated_client_properties(backend, &migrated);
                 let monitor_num = self.state.monitors.get(mon_key).map(|monitor| monitor.num);
                 self.mark_bar_update_needed_if_visible(monitor_num);
@@ -1303,16 +1605,7 @@ impl Jwm {
                 });
                 if geometry_changed {
                     let old_areas = self.monitor_migration_areas(mon_key);
-                    let hidden_clients: Vec<ClientKey> =
-                        clients_owned_by_monitor(&self.state, mon_key)
-                            .into_iter()
-                            .filter(|&client_key| {
-                                self.state
-                                    .clients
-                                    .get(client_key)
-                                    .is_some_and(|client| client.state.is_hidden)
-                            })
-                            .collect();
+                    let owned_clients = clients_owned_by_monitor(&self.state, mon_key);
                     if let Some(monitor_num) =
                         self.state.monitors.get(mon_key).map(|monitor| monitor.num)
                     {
@@ -1330,21 +1623,19 @@ impl Jwm {
                         monitor.geometry.w_h = h;
                     }
                     let new_monitor = Rect::new(x, y, w.max(1), h.max(1));
-                    let mut migrated = Vec::with_capacity(hidden_clients.len());
-                    if let Some((old_monitor, old_work)) = old_areas {
-                        let new_work = rebase_work_area(old_monitor, old_work, new_monitor);
-                        for client_key in hidden_clients {
-                            if self.migrate_hidden_client_restore(
+                    let migrated = match old_areas {
+                        Some((old_monitor, old_work)) => {
+                            let new_work = rebase_work_area(old_monitor, old_work, new_monitor);
+                            self.migrate_monitor_clients(
                                 backend,
-                                client_key,
-                                Some(old_work),
+                                owned_clients,
+                                old_work,
                                 new_monitor,
                                 new_work,
-                            ) {
-                                migrated.push(client_key);
-                            }
+                            )
                         }
-                    }
+                        None => Vec::new(),
+                    };
                     self.refresh_migrated_client_properties(backend, &migrated);
                     let monitor_num = self.state.monitors.get(mon_key).map(|monitor| monitor.num);
                     self.mark_bar_update_needed_if_visible(monitor_num);
@@ -1411,12 +1702,20 @@ impl Jwm {
         // 必须排除即将被移除的 from_monitor_key，否则当它恰好是 monitor_order[0]
         // 时 target==from，client 会被 detach 后又 attach 回这个随即删除的 monitor，
         // 导致 client.mon 指向已删 key 且不在任何列表中——永久孤立。
-        let target_monitor_key = self
-            .state
-            .monitor_order
-            .iter()
-            .copied()
-            .find(|&key| key != from_monitor_key);
+        //
+        // A shaded survivor would hide the windows behind its lock shade, so
+        // the first unlocked one takes them; only when every survivor is
+        // locked do they go to a shaded one (and stay unfocusable there).
+        let survivors = || {
+            self.state
+                .monitor_order
+                .iter()
+                .copied()
+                .filter(|&key| key != from_monitor_key)
+        };
+        let target_monitor_key = survivors()
+            .find(|&key| !self.monitor_key_is_locked(key))
+            .or_else(|| survivors().next());
         let source_work = self
             .monitor_migration_areas(from_monitor_key)
             .map(|(_, work)| work);
@@ -1481,16 +1780,203 @@ impl Jwm {
     }
 }
 
+/// A backend for display-change tests, here and in the session restore's:
+/// dummy ops, a running compositor, outputs a test rearranges between calls
+/// the way RandR or a DRM hotplug would, and the lock shades pushed.
 #[cfg(test)]
-mod tests {
-    use super::{
-        attach_clients_to_monitor, attachable_unassigned_clients, lowest_unused_monitor_num,
-        migrate_hidden_restore_geometry, rebase_work_area, remove_monitor_state,
-        transfer_or_orphan_monitor_clients, translate_and_clamp_restore_rect,
+pub(crate) mod test_support {
+    use crate::backend::api::{
+        Backend, BackendDiagnostics, Capabilities, ColorAllocator, CompositorAnnotation,
+        CompositorBenchmark, CompositorControl, CompositorMedia, CompositorWindowEffects,
+        CompositorWorkspaceEffects, CursorProvider, DisplayControl, EventHandler, InputOps, KeyOps,
+        MonitorShade, OutputIdentity, OutputInfo, OutputOps, PropertyOps, RenderScheduler,
+        ScreenInfo, WindowOps,
     };
     use crate::backend::common_define::{OutputId, WindowId};
+    use crate::backend::error::BackendError;
+    use crate::backend::wayland_dummy_ops::{
+        DummyColorAllocator, DummyCursorProvider, DummyInputOps, DummyKeyOps, DummyPropertyOps,
+        DummyWindowOps,
+    };
+
+    /// An output of `width` x `height` at (`x`, `y`).
+    pub(crate) fn output(id: u64, x: i32, y: i32, width: i32, height: i32) -> OutputInfo {
+        let name = format!("Spy-{id}");
+        OutputInfo {
+            id: OutputId(id),
+            name: name.clone(),
+            x,
+            y,
+            width,
+            height,
+            scale: 1.0,
+            refresh_rate: 60_000,
+            hdr_capable: false,
+            hdr_metadata: None,
+            identity: OutputIdentity::connector_only(name),
+        }
+    }
+
+    /// The outputs the backend reports; a test replaces them to change the
+    /// display layout.
+    pub(crate) struct SpyOutputOps {
+        pub(crate) outputs: Vec<OutputInfo>,
+    }
+
+    impl OutputOps for SpyOutputOps {
+        fn enumerate_outputs(&self) -> Vec<OutputInfo> {
+            self.outputs.clone()
+        }
+
+        fn screen_info(&self) -> ScreenInfo {
+            let right = self
+                .outputs
+                .iter()
+                .map(|output| output.x.saturating_add(output.width))
+                .max()
+                .unwrap_or(1);
+            let bottom = self
+                .outputs
+                .iter()
+                .map(|output| output.y.saturating_add(output.height))
+                .max()
+                .unwrap_or(1);
+            ScreenInfo {
+                width: right.max(1),
+                height: bottom.max(1),
+            }
+        }
+
+        fn output_at(&self, x: i32, y: i32) -> Option<OutputId> {
+            self.outputs
+                .iter()
+                .find(|output| {
+                    x >= output.x
+                        && y >= output.y
+                        && x < output.x.saturating_add(output.width)
+                        && y < output.y.saturating_add(output.height)
+                })
+                .map(|output| output.id)
+        }
+    }
+
+    pub(crate) struct DisplaySpyBackend {
+        window_ops: DummyWindowOps,
+        input_ops: DummyInputOps,
+        property_ops: DummyPropertyOps,
+        pub(crate) output_ops: SpyOutputOps,
+        key_ops: DummyKeyOps,
+        cursor_provider: DummyCursorProvider,
+        color_allocator: DummyColorAllocator,
+        /// Every lock-shade payload pushed, newest last.
+        pub(crate) shade_pushes: Vec<Vec<MonitorShade>>,
+    }
+
+    impl DisplaySpyBackend {
+        pub(crate) fn new(outputs: Vec<OutputInfo>) -> Self {
+            Self {
+                window_ops: DummyWindowOps,
+                input_ops: DummyInputOps,
+                property_ops: DummyPropertyOps,
+                output_ops: SpyOutputOps { outputs },
+                key_ops: DummyKeyOps,
+                cursor_provider: DummyCursorProvider,
+                color_allocator: DummyColorAllocator,
+                shade_pushes: Vec::new(),
+            }
+        }
+    }
+
+    impl CompositorBenchmark for DisplaySpyBackend {}
+    impl BackendDiagnostics for DisplaySpyBackend {}
+    impl CompositorControl for DisplaySpyBackend {}
+    impl CompositorMedia for DisplaySpyBackend {}
+    impl CompositorWorkspaceEffects for DisplaySpyBackend {
+        fn compositor_set_monitor_shades(&mut self, shades: &[MonitorShade]) {
+            self.shade_pushes.push(shades.to_vec());
+        }
+    }
+    impl CompositorWindowEffects for DisplaySpyBackend {}
+    impl CompositorAnnotation for DisplaySpyBackend {}
+    impl DisplayControl for DisplaySpyBackend {}
+    impl RenderScheduler for DisplaySpyBackend {
+        fn has_compositor(&self) -> bool {
+            true
+        }
+    }
+
+    impl Backend for DisplaySpyBackend {
+        fn capabilities(&self) -> Capabilities {
+            Capabilities::default()
+        }
+
+        fn root_window(&self) -> Option<WindowId> {
+            Some(WindowId::from_raw(0))
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+
+        fn check_existing_wm(&self) -> Result<(), BackendError> {
+            Ok(())
+        }
+
+        fn window_ops(&self) -> &dyn WindowOps {
+            &self.window_ops
+        }
+
+        fn input_ops(&self) -> &dyn InputOps {
+            &self.input_ops
+        }
+
+        fn property_ops(&self) -> &dyn PropertyOps {
+            &self.property_ops
+        }
+
+        fn output_ops(&self) -> &dyn OutputOps {
+            &self.output_ops
+        }
+
+        fn key_ops(&self) -> &dyn KeyOps {
+            &self.key_ops
+        }
+
+        fn key_ops_mut(&mut self) -> &mut dyn KeyOps {
+            &mut self.key_ops
+        }
+
+        fn cursor_provider(&mut self) -> &mut dyn CursorProvider {
+            &mut self.cursor_provider
+        }
+
+        fn color_allocator(&mut self) -> &mut dyn ColorAllocator {
+            &mut self.color_allocator
+        }
+
+        fn run(&mut self, _handler: &mut dyn EventHandler) -> Result<(), BackendError> {
+            Ok(())
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_support::{DisplaySpyBackend, output};
+    use super::{
+        VisibleMigration, attach_clients_to_monitor, attachable_unassigned_clients,
+        lowest_unused_monitor_num, migrate_hidden_restore_geometry, migrate_visible_geometry,
+        monitor_rect, plan_monitor_rects_by_output, plan_output_map, rebase_work_area,
+        remove_monitor_state, transfer_or_orphan_monitor_clients, translate_and_clamp_restore_rect,
+    };
+    use crate::backend::api::MaximizeAxes;
+    use crate::backend::common_define::{OutputId, WindowId};
+    use crate::core::maximize::maximize_target;
     use crate::core::models::{ClientKey, MonitorKey, WMClient, WMMonitor};
     use crate::core::state::WMState;
+    use crate::core::types::Rect;
+    use crate::jwm::Jwm;
+    use crate::jwm::types::WMArgEnum;
     use std::collections::HashSet;
 
     fn insert_monitor(state: &mut WMState, output: OutputId, tags: u32) -> MonitorKey {
@@ -1781,5 +2267,803 @@ mod tests {
         assert_eq!(state.clients[scratchpad].state.tags, 0);
         assert_eq!(state.clients[ordinary_untagged].mon, Some(target));
         assert_eq!(state.clients[ordinary_untagged].state.tags, 0b0100);
+    }
+
+    // Output-migration geometry of maximized clients. The source output is
+    // a 1080p primary with a 32 px bar; the target sits to its right with a
+    // 30 px bar.
+    const MAXIMIZE_SOURCE_WORK: Rect = Rect {
+        x: 0,
+        y: 32,
+        w: 1920,
+        h: 1048,
+    };
+    const MAXIMIZE_TARGET_MONITOR: Rect = Rect {
+        x: 1920,
+        y: 0,
+        w: 1280,
+        h: 720,
+    };
+    const MAXIMIZE_TARGET_WORK: Rect = Rect {
+        x: 1920,
+        y: 30,
+        w: 1280,
+        h: 690,
+    };
+
+    /// A floating client maximized on both axes over the source work area,
+    /// whose pre-maximize rect is `restore`.
+    fn maximized_floating_client(restore: Rect, border_w: i32) -> WMClient {
+        let mut client = WMClient::new(WindowId::from_raw(0x3a0));
+        client.state.is_floating = true;
+        client.state.set_maximized_axes(MaximizeAxes::BOTH);
+        client.geometry.border_w = border_w;
+        client.geometry.maximize_restore_rect = Some(restore);
+        let live = maximize_target(restore, MAXIMIZE_SOURCE_WORK, MaximizeAxes::BOTH, border_w);
+        set_live(&mut client, live);
+        set_floating(&mut client, restore);
+        client
+    }
+
+    fn set_live(client: &mut WMClient, rect: Rect) {
+        client.geometry.x = rect.x;
+        client.geometry.y = rect.y;
+        client.geometry.w = rect.w;
+        client.geometry.h = rect.h;
+    }
+
+    fn set_floating(client: &mut WMClient, rect: Rect) {
+        client.geometry.floating_x = rect.x;
+        client.geometry.floating_y = rect.y;
+        client.geometry.floating_w = rect.w;
+        client.geometry.floating_h = rect.h;
+    }
+
+    fn live_of(client: &WMClient) -> Rect {
+        Rect::new(
+            client.geometry.x,
+            client.geometry.y,
+            client.geometry.w,
+            client.geometry.h,
+        )
+    }
+
+    fn floating_of(client: &WMClient) -> Rect {
+        Rect::new(
+            client.geometry.floating_x,
+            client.geometry.floating_y,
+            client.geometry.floating_w,
+            client.geometry.floating_h,
+        )
+    }
+
+    fn inside(outer: Rect, inner: Rect) -> bool {
+        inner.x >= outer.x
+            && inner.y >= outer.y
+            && inner.x + inner.w <= outer.x + outer.w
+            && inner.y + inner.h <= outer.y + outer.h
+    }
+
+    #[test]
+    fn maximized_floating_migration_refits_the_target_work_area_and_translates_the_restore_rect() {
+        let restore = Rect::new(200, 132, 600, 400);
+        let mut client = maximized_floating_client(restore, 2);
+
+        let outcome = migrate_visible_geometry(
+            &mut client,
+            Some(MAXIMIZE_SOURCE_WORK),
+            MAXIMIZE_TARGET_MONITOR,
+            MAXIMIZE_TARGET_WORK,
+        );
+
+        assert_eq!(outcome, VisibleMigration::Live);
+        let translated = Rect::new(2120, 130, 600, 400);
+        assert_eq!(
+            translated,
+            translate_and_clamp_restore_rect(
+                restore,
+                Some(MAXIMIZE_SOURCE_WORK),
+                MAXIMIZE_TARGET_WORK,
+                2
+            )
+        );
+        assert_eq!(
+            live_of(&client),
+            maximize_target(translated, MAXIMIZE_TARGET_WORK, MaximizeAxes::BOTH, 2)
+        );
+        assert_eq!(live_of(&client), Rect::new(1920, 30, 1276, 686));
+        assert_eq!(client.geometry.maximize_restore_rect, Some(translated));
+        assert_eq!(floating_of(&client), translated);
+    }
+
+    #[test]
+    fn promoted_maximized_migration_keeps_the_independent_floating_slot() {
+        let restore = Rect::new(200, 132, 600, 400);
+        let pre_promotion = Rect::new(300, 232, 500, 300);
+        let mut client = maximized_floating_client(restore, 2);
+        client.state.maximize_restore_tiled = true;
+        set_floating(&mut client, pre_promotion);
+
+        let outcome = migrate_visible_geometry(
+            &mut client,
+            Some(MAXIMIZE_SOURCE_WORK),
+            MAXIMIZE_TARGET_MONITOR,
+            MAXIMIZE_TARGET_WORK,
+        );
+
+        assert_eq!(outcome, VisibleMigration::Live);
+        assert_eq!(
+            floating_of(&client),
+            translate_and_clamp_restore_rect(
+                pre_promotion,
+                Some(MAXIMIZE_SOURCE_WORK),
+                MAXIMIZE_TARGET_WORK,
+                2
+            ),
+            "the pre-promotion floating rect follows on its own"
+        );
+        assert_eq!(floating_of(&client), Rect::new(2220, 230, 500, 300));
+        let translated = Rect::new(2120, 130, 600, 400);
+        assert_eq!(client.geometry.maximize_restore_rect, Some(translated));
+        assert_eq!(
+            live_of(&client),
+            maximize_target(translated, MAXIMIZE_TARGET_WORK, MaximizeAxes::BOTH, 2)
+        );
+    }
+
+    #[test]
+    fn same_output_resize_translates_the_restore_rect_despite_the_early_return() {
+        let restore = Rect::new(200, 132, 600, 400);
+        let mut client = maximized_floating_client(restore, 2);
+        let live = live_of(&client);
+        let grown_monitor = Rect::new(0, 0, 2560, 1440);
+        let grown_work = Rect::new(0, 40, 2560, 1400);
+
+        let outcome = migrate_visible_geometry(
+            &mut client,
+            Some(MAXIMIZE_SOURCE_WORK),
+            grown_monitor,
+            grown_work,
+        );
+
+        assert_eq!(
+            outcome,
+            VisibleMigration::Unchanged,
+            "the window is still on its output; the next arrange refits it"
+        );
+        assert_eq!(live_of(&client), live);
+        assert_eq!(
+            client.geometry.maximize_restore_rect,
+            Some(Rect::new(200, 140, 600, 400)),
+            "the restore rect is rebased onto the new work area anyway"
+        );
+    }
+
+    #[test]
+    fn hidden_maximized_migration_restages_the_target_and_keeps_the_restore() {
+        let restore = Rect::new(200, 132, 600, 400);
+        let mut client = maximized_floating_client(restore, 2);
+        let visible = live_of(&client);
+        client.state.is_hidden = true;
+        client.geometry.hidden_restore_rect = Some(visible);
+        client.geometry.hidden_x = Some(-5000);
+        client.geometry.x = -5000;
+
+        assert!(migrate_hidden_restore_geometry(
+            &mut client,
+            Some(MAXIMIZE_SOURCE_WORK),
+            MAXIMIZE_TARGET_MONITOR,
+            MAXIMIZE_TARGET_WORK,
+            0,
+        ));
+
+        let translated = Rect::new(2120, 130, 600, 400);
+        assert_eq!(
+            client.geometry.hidden_restore_rect,
+            Some(maximize_target(
+                translated,
+                MAXIMIZE_TARGET_WORK,
+                MaximizeAxes::BOTH,
+                2
+            )),
+            "it comes back filling the target work area"
+        );
+        assert_eq!(floating_of(&client), translated);
+        assert_eq!(client.geometry.maximize_restore_rect, Some(translated));
+        assert_eq!(client.geometry.hidden_x, Some(client.geometry.x));
+        assert!(client.geometry.x.saturating_add(client.total_width()) <= 0);
+    }
+
+    /// A floating window shrunk into PiP in the source output's corner,
+    /// returning to `pre_pip` (its floating slot) when it leaves PiP.
+    fn pip_client(pre_pip: Rect) -> WMClient {
+        let mut client = WMClient::new(WindowId::from_raw(0x3a1));
+        client.state.is_floating = true;
+        client.state.is_pip = true;
+        client.state.old_state = true;
+        client.geometry.border_w = 0;
+        set_live(&mut client, Rect::new(1430, 800, 480, 270));
+        set_floating(&mut client, pre_pip);
+        client
+    }
+
+    /// Regression: the floating/PiP arm copied the translated PiP corner
+    /// rect into `floating_*`, so leaving PiP after a monitor move brought
+    /// the window back at PiP size.
+    #[test]
+    fn pip_migration_carries_the_pre_pip_return_slot_not_the_corner_rect() {
+        let pre_pip = Rect::new(100, 132, 800, 600);
+        let mut client = pip_client(pre_pip);
+        let pip = live_of(&client);
+
+        let outcome = migrate_visible_geometry(
+            &mut client,
+            Some(MAXIMIZE_SOURCE_WORK),
+            MAXIMIZE_TARGET_MONITOR,
+            MAXIMIZE_TARGET_WORK,
+        );
+
+        assert_eq!(outcome, VisibleMigration::Live);
+        assert_eq!(
+            live_of(&client),
+            translate_and_clamp_restore_rect(
+                pip,
+                Some(MAXIMIZE_SOURCE_WORK),
+                MAXIMIZE_TARGET_WORK,
+                0
+            ),
+            "the PiP window itself moves"
+        );
+        let slot = floating_of(&client);
+        assert_eq!(
+            slot,
+            translate_and_clamp_restore_rect(
+                pre_pip,
+                Some(MAXIMIZE_SOURCE_WORK),
+                MAXIMIZE_TARGET_WORK,
+                0
+            ),
+            "the return slot follows the window at its pre-PiP size"
+        );
+        assert_eq!((slot.w, slot.h), (800, 600));
+        assert!(inside(MAXIMIZE_TARGET_WORK, slot), "{slot:?}");
+    }
+
+    /// The minimized twin of the test above: the hidden path copied the
+    /// staged PiP rect into the return slot.
+    #[test]
+    fn hidden_pip_migration_carries_the_pre_pip_return_slot_not_the_corner_rect() {
+        let pre_pip = Rect::new(100, 132, 800, 600);
+        let mut client = pip_client(pre_pip);
+        let pip = live_of(&client);
+        client.state.is_hidden = true;
+        client.geometry.hidden_restore_rect = Some(pip);
+        client.geometry.hidden_x = Some(-5000);
+        client.geometry.x = -5000;
+
+        assert!(migrate_hidden_restore_geometry(
+            &mut client,
+            Some(MAXIMIZE_SOURCE_WORK),
+            MAXIMIZE_TARGET_MONITOR,
+            MAXIMIZE_TARGET_WORK,
+            0,
+        ));
+
+        assert_eq!(
+            client.geometry.hidden_restore_rect,
+            Some(translate_and_clamp_restore_rect(
+                pip,
+                Some(MAXIMIZE_SOURCE_WORK),
+                MAXIMIZE_TARGET_WORK,
+                0
+            )),
+            "it comes back as PiP on the target"
+        );
+        let slot = floating_of(&client);
+        assert_eq!(
+            slot,
+            translate_and_clamp_restore_rect(
+                pre_pip,
+                Some(MAXIMIZE_SOURCE_WORK),
+                MAXIMIZE_TARGET_WORK,
+                0
+            )
+        );
+        assert_eq!((slot.w, slot.h), (800, 600));
+        assert!(inside(MAXIMIZE_TARGET_WORK, slot), "{slot:?}");
+    }
+
+    #[test]
+    fn fullscreen_migration_also_translates_the_maximize_restore_rect() {
+        let restore = Rect::new(200, 132, 600, 400);
+        let mut client = maximized_floating_client(restore, 2);
+        let maximized = live_of(&client);
+        client.state.is_fullscreen = true;
+        client.state.old_state = true;
+        client.geometry.old_border_w = 2;
+        client.geometry.border_w = 0;
+        client.geometry.old_x = maximized.x;
+        client.geometry.old_y = maximized.y;
+        client.geometry.old_w = maximized.w;
+        client.geometry.old_h = maximized.h;
+        set_live(&mut client, Rect::new(0, 0, 1920, 1080));
+
+        let outcome = migrate_visible_geometry(
+            &mut client,
+            Some(MAXIMIZE_SOURCE_WORK),
+            MAXIMIZE_TARGET_MONITOR,
+            MAXIMIZE_TARGET_WORK,
+        );
+
+        assert_eq!(outcome, VisibleMigration::Live);
+        assert_eq!(live_of(&client), MAXIMIZE_TARGET_MONITOR);
+        let old = Rect::new(
+            client.geometry.old_x,
+            client.geometry.old_y,
+            client.geometry.old_w,
+            client.geometry.old_h,
+        );
+        assert!(inside(MAXIMIZE_TARGET_WORK, old), "{old:?}");
+        let moved_restore = client.geometry.maximize_restore_rect.unwrap();
+        assert!(
+            inside(MAXIMIZE_TARGET_WORK, moved_restore),
+            "{moved_restore:?}"
+        );
+        assert_eq!(client.state.maximized_axes(), MaximizeAxes::BOTH);
+    }
+
+    // Display changes on a whole JWM, driven through the handlers the
+    // backends' output events reach.
+
+    fn jwm_on(backend: &mut DisplaySpyBackend) -> Jwm {
+        Jwm::new_with_runtime_backend(backend, "test").expect("a spy backend builds a JWM")
+    }
+
+    /// A shown floating window on `monitor` at `rect`.
+    fn floating_client_on(jwm: &mut Jwm, raw: u64, monitor: MonitorKey, rect: Rect) -> ClientKey {
+        let mut client = WMClient::new(WindowId::from_raw(raw));
+        client.mon = Some(monitor);
+        client.state.tags = jwm.state.monitors[monitor].get_active_tags();
+        client.state.is_floating = true;
+        client.geometry.border_w = 0;
+        set_live(&mut client, rect);
+        set_floating(&mut client, rect);
+        let key = jwm.insert_client(client);
+        jwm.attach_to_monitor(key, monitor);
+        key
+    }
+
+    /// A shown fullscreen window on `monitor`, filling `output` and returning
+    /// to `restore` when it leaves fullscreen.
+    fn fullscreen_client_on(
+        jwm: &mut Jwm,
+        raw: u64,
+        monitor: MonitorKey,
+        output: Rect,
+        restore: Rect,
+    ) -> ClientKey {
+        let key = floating_client_on(jwm, raw, monitor, output);
+        let client = &mut jwm.state.clients[key];
+        client.state.is_fullscreen = true;
+        client.state.old_state = true;
+        set_floating(client, restore);
+        client.geometry.old_x = restore.x;
+        client.geometry.old_y = restore.y;
+        client.geometry.old_w = restore.w;
+        client.geometry.old_h = restore.h;
+        key
+    }
+
+    fn work_of(jwm: &Jwm, monitor: MonitorKey) -> Rect {
+        jwm.monitor_migration_areas(monitor)
+            .expect("a live monitor has migration areas")
+            .1
+    }
+
+    #[test]
+    fn a_fullscreen_window_refits_a_resized_output_its_centre_is_still_on() {
+        let old_output = Rect::new(0, 0, 1920, 1080);
+        let new_output = Rect::new(0, 0, 2560, 1440);
+        let mut client = WMClient::new(WindowId::from_raw(0x3b0));
+        client.state.is_fullscreen = true;
+        client.state.is_floating = true;
+        set_live(&mut client, old_output);
+
+        let outcome =
+            migrate_visible_geometry(&mut client, Some(old_output), new_output, new_output);
+
+        assert_eq!(outcome, VisibleMigration::Live);
+        assert_eq!(live_of(&client), new_output);
+
+        // One that already fills the target has nothing to carry.
+        assert_eq!(
+            migrate_visible_geometry(&mut client, Some(new_output), new_output, new_output),
+            VisibleMigration::Unchanged
+        );
+    }
+
+    #[test]
+    fn output_change_refits_a_fullscreen_window_to_the_new_mode() {
+        let mut backend = DisplaySpyBackend::new(vec![output(1, 0, 0, 1920, 1080)]);
+        let mut jwm = jwm_on(&mut backend);
+        let monitor = jwm.state.monitor_order[0];
+        let restore = Rect::new(300, 200, 800, 500);
+        let player = fullscreen_client_on(
+            &mut jwm,
+            0x3b1,
+            monitor,
+            Rect::new(0, 0, 1920, 1080),
+            restore,
+        );
+
+        jwm.handle_output_changed(&mut backend, output(1, 0, 0, 2560, 1440))
+            .expect("the output changes");
+
+        let client = &jwm.state.clients[player];
+        assert_eq!(live_of(client), Rect::new(0, 0, 2560, 1440));
+        assert_eq!(
+            Rect::new(
+                client.geometry.old_x,
+                client.geometry.old_y,
+                client.geometry.old_w,
+                client.geometry.old_h,
+            ),
+            restore,
+            "leaving fullscreen still returns to the same place"
+        );
+    }
+
+    #[test]
+    fn a_replacement_output_takes_in_orphans_the_last_one_left_on_screen() {
+        let mut backend = DisplaySpyBackend::new(vec![output(1, 0, 0, 2560, 1440)]);
+        let mut jwm = jwm_on(&mut backend);
+        let external = jwm.state.monitor_order[0];
+        let floating =
+            floating_client_on(&mut jwm, 0x3c0, external, Rect::new(1800, 1000, 600, 300));
+        let player = fullscreen_client_on(
+            &mut jwm,
+            0x3c1,
+            external,
+            Rect::new(0, 0, 2560, 1440),
+            Rect::new(400, 300, 900, 600),
+        );
+
+        jwm.handle_output_removed(&mut backend, OutputId(1))
+            .expect("the external output goes away");
+        assert_eq!(jwm.state.clients[floating].mon, None);
+        assert_eq!(jwm.state.clients[player].mon, None);
+
+        backend.output_ops.outputs = vec![output(2, 0, 0, 1920, 1080)];
+        jwm.handle_output_added(&mut backend, output(2, 0, 0, 1920, 1080))
+            .expect("the panel comes up");
+
+        let panel = jwm.state.monitor_order[0];
+        let work = work_of(&jwm, panel);
+        let floating = &jwm.state.clients[floating];
+        assert_eq!(floating.mon, Some(panel));
+        assert!(inside(work, live_of(floating)), "{:?}", live_of(floating));
+        assert!(
+            inside(work, floating_of(floating)),
+            "{:?}",
+            floating_of(floating)
+        );
+        let player = &jwm.state.clients[player];
+        assert_eq!(player.mon, Some(panel));
+        assert_eq!(live_of(player), Rect::new(0, 0, 1920, 1080));
+    }
+
+    #[test]
+    fn an_x11_layout_change_carries_shown_floating_windows_with_their_monitor() {
+        let mut backend = DisplaySpyBackend::new(vec![
+            output(1, 0, 0, 1920, 1080),
+            output(2, 1920, 0, 1920, 1080),
+        ]);
+        let mut jwm = jwm_on(&mut backend);
+        let right = jwm.state.monitor_order[1];
+        let window = floating_client_on(&mut jwm, 0x3d0, right, Rect::new(2000, 100, 800, 600));
+        let old_work = work_of(&jwm, right);
+
+        // The left output grows, pushing the right one along.
+        backend.output_ops.outputs =
+            vec![output(1, 0, 0, 2560, 1440), output(2, 2560, 0, 1920, 1080)];
+        assert!(jwm.updategeom(&mut backend));
+
+        let new_work = work_of(&jwm, right);
+        let expected = Rect::new(
+            new_work.x + (2000 - old_work.x),
+            new_work.y + (100 - old_work.y),
+            800,
+            600,
+        );
+        assert!(expected.x >= 2560, "{expected:?} is on the right output");
+        let client = &jwm.state.clients[window];
+        assert_eq!(client.mon, Some(right));
+        assert_eq!(live_of(client), expected);
+        assert_eq!(floating_of(client), expected);
+    }
+
+    #[test]
+    fn x11_display_changes_keep_output_ids_on_the_monitors_that_cover_them() {
+        let mut backend = DisplaySpyBackend::new(vec![output(1, 0, 0, 1920, 1080)]);
+        let mut jwm = jwm_on(&mut backend);
+        let left = jwm.state.monitor_order[0];
+
+        // Hotplug: the monitor RandR's refresh creates answers the pointer.
+        backend.output_ops.outputs =
+            vec![output(1, 0, 0, 1920, 1080), output(2, 1920, 0, 1920, 1080)];
+        assert!(jwm.updategeom(&mut backend));
+        let right = jwm.state.monitor_order[1];
+        assert_eq!(jwm.state.output_map.get(right), Some(&OutputId(2)));
+        assert_eq!(jwm.recttomon(&mut backend, 2500, 500), Some(right));
+
+        // The outputs trade places: each id follows its rectangle, not the
+        // monitor it used to be.
+        backend.output_ops.outputs =
+            vec![output(2, 0, 0, 1920, 1080), output(1, 1920, 0, 1920, 1080)];
+        jwm.updategeom(&mut backend);
+        assert_eq!(jwm.state.output_map.get(left), Some(&OutputId(2)));
+        assert_eq!(jwm.state.output_map.get(right), Some(&OutputId(1)));
+        assert_eq!(jwm.recttomon(&mut backend, 2500, 500), Some(right));
+
+        // Unplugging one leaves the survivor mapped to the output that is
+        // still there, not to the one that went away.
+        backend.output_ops.outputs = vec![output(1, 1920, 0, 1920, 1080)];
+        assert!(jwm.updategeom(&mut backend));
+        assert_eq!(jwm.state.monitor_order, vec![left]);
+        assert_eq!(jwm.state.output_map.get(left), Some(&OutputId(1)));
+        assert_eq!(jwm.state.output_map.len(), 1);
+    }
+
+    #[test]
+    fn output_ids_are_planned_by_rectangle_and_claimed_once() {
+        let mut state = WMState::new();
+        let first = insert_monitor(&mut state, OutputId(1), 1);
+        let second = insert_monitor(&mut state, OutputId(2), 1);
+        let third = insert_monitor(&mut state, OutputId(9), 1);
+        let left = Rect::new(0, 0, 1920, 1080);
+        let right = Rect::new(1920, 0, 1920, 1080);
+
+        // Clones share a rectangle: each monitor keeps the id it had.
+        assert_eq!(
+            plan_output_map(
+                &[
+                    (first, left, Some(OutputId(2))),
+                    (second, left, Some(OutputId(1)))
+                ],
+                &[(OutputId(1), left), (OutputId(2), left)],
+            ),
+            vec![(first, OutputId(2)), (second, OutputId(1))]
+        );
+
+        // A new monitor takes the output with its rectangle; a stale id
+        // gives way to the output at its position; one monitor more than
+        // there are outputs gets nothing.
+        assert_eq!(
+            plan_output_map(
+                &[
+                    (first, left, Some(OutputId(7))),
+                    (second, right, None),
+                    (third, Rect::new(0, 0, 1, 1), Some(OutputId(9))),
+                ],
+                &[
+                    (OutputId(3), Rect::new(0, 0, 1280, 720)),
+                    (OutputId(4), right)
+                ],
+            ),
+            vec![(first, OutputId(3)), (second, OutputId(4))]
+        );
+    }
+
+    /// Three side-by-side 1920x1080 outputs with ids 1..=3, numbered 0..=2,
+    /// the selection on the first.
+    fn jwm_on_three_outputs(backend: &mut DisplaySpyBackend) -> Jwm {
+        backend.output_ops.outputs = vec![
+            output(1, 0, 0, 1920, 1080),
+            output(2, 1920, 0, 1920, 1080),
+            output(3, 3840, 0, 1920, 1080),
+        ];
+        let jwm = jwm_on(backend);
+        assert_eq!(jwm.state.monitor_order.len(), 3);
+        jwm
+    }
+
+    #[test]
+    fn unplugging_the_selected_output_never_selects_a_shaded_monitor() {
+        let mut backend = DisplaySpyBackend::new(Vec::new());
+        let mut jwm = jwm_on_three_outputs(&mut backend);
+        let shaded = jwm.state.monitor_order[1];
+        let clear = jwm.state.monitor_order[2];
+        jwm.lock_monitor(&mut backend, &WMArgEnum::Int(1))
+            .expect("monitor 1 locks");
+        let behind_shade =
+            floating_client_on(&mut jwm, 0x3e0, shaded, Rect::new(2100, 100, 600, 400));
+        let on_show = floating_client_on(&mut jwm, 0x3e1, clear, Rect::new(4000, 100, 600, 400));
+
+        backend.output_ops.outputs.remove(0);
+        jwm.handle_output_removed(&mut backend, OutputId(1))
+            .expect("the selected output goes away");
+
+        assert!(jwm.monitor_is_locked(1), "the shaded output is still there");
+        assert_eq!(jwm.state.sel_mon, Some(clear));
+        let focused = jwm.get_selected_client_key();
+        assert_ne!(focused, Some(behind_shade), "no focus behind the shade");
+        assert_eq!(focused, Some(on_show));
+    }
+
+    #[test]
+    fn unplugging_the_last_unlocked_output_lifts_the_lock() {
+        let mut backend = DisplaySpyBackend::new(vec![
+            output(1, 0, 0, 1920, 1080),
+            output(2, 1920, 0, 1920, 1080),
+        ]);
+        let mut jwm = jwm_on(&mut backend);
+        let shaded = jwm.state.monitor_order[1];
+        jwm.lock_monitor(&mut backend, &WMArgEnum::Int(1))
+            .expect("monitor 1 locks");
+
+        backend.output_ops.outputs.remove(0);
+        jwm.handle_output_removed(&mut backend, OutputId(1))
+            .expect("the unlocked output goes away");
+
+        assert!(!jwm.monitor_is_locked(1));
+        assert_eq!(jwm.state.sel_mon, Some(shaded));
+        assert_eq!(backend.shade_pushes.last(), Some(&Vec::new()));
+    }
+
+    #[test]
+    fn a_shade_never_outlives_the_output_it_was_cut_for() {
+        let mut backend = DisplaySpyBackend::new(Vec::new());
+        let mut jwm = jwm_on_three_outputs(&mut backend);
+        jwm.lock_monitor(&mut backend, &WMArgEnum::Int(1))
+            .expect("monitor 1 locks");
+
+        // A mode change grows the locked output past its shade.
+        backend.output_ops.outputs[1] = output(2, 1920, 0, 2560, 1440);
+        jwm.handle_output_changed(&mut backend, output(2, 1920, 0, 2560, 1440))
+            .expect("the output changes");
+        assert!(!jwm.monitor_is_locked(1));
+        assert_eq!(backend.shade_pushes.last(), Some(&Vec::new()));
+
+        // A locked output unplugged: the next one plugged in reuses its
+        // number, and must not come up behind the old shade.
+        jwm.lock_monitor(&mut backend, &WMArgEnum::Int(1))
+            .expect("monitor 1 locks again");
+        backend.output_ops.outputs.remove(1);
+        jwm.handle_output_removed(&mut backend, OutputId(2))
+            .expect("the locked output goes away");
+        assert!(!jwm.monitor_is_locked(1));
+
+        let replacement = output(4, 1920, 0, 1920, 1080);
+        backend.output_ops.outputs.push(replacement.clone());
+        jwm.handle_output_added(&mut backend, replacement)
+            .expect("another output comes up");
+        let added = *jwm.state.monitor_order.last().expect("the new monitor");
+        assert_eq!(jwm.state.monitors[added].num, 1);
+        assert!(!jwm.monitor_key_is_locked(added));
+        assert_eq!(backend.shade_pushes.last(), Some(&Vec::new()));
+    }
+
+    /// Regression: `s_w`/`s_h` are refreshed only at startup and by an X11
+    /// root ConfigureNotify. A single-output Wayland mode change arrives as
+    /// `OutputChanged` then `ScreenLayoutChanged`, and the layout refresh
+    /// used to reset the monitor to the stale startup size, undoing the new
+    /// mode (and the fullscreen refit that went with it).
+    #[test]
+    fn a_single_output_layout_refresh_keeps_the_new_mode() {
+        let mut backend = DisplaySpyBackend::new(vec![output(1, 0, 0, 1920, 1080)]);
+        let mut jwm = jwm_on(&mut backend);
+        let monitor = jwm.state.monitor_order[0];
+        let player = fullscreen_client_on(
+            &mut jwm,
+            0x3f0,
+            monitor,
+            Rect::new(0, 0, 1920, 1080),
+            Rect::new(300, 200, 800, 500),
+        );
+        assert_eq!((jwm.s_w, jwm.s_h), (1920, 1080));
+
+        backend.output_ops.outputs = vec![output(1, 0, 0, 2560, 1440)];
+        jwm.handle_output_changed(&mut backend, output(1, 0, 0, 2560, 1440))
+            .expect("the output changes");
+        jwm.updategeom(&mut backend);
+
+        assert_eq!(
+            monitor_rect(&jwm.state.monitors[monitor]),
+            Rect::new(0, 0, 2560, 1440)
+        );
+        assert_eq!(
+            live_of(&jwm.state.clients[player]),
+            Rect::new(0, 0, 2560, 1440)
+        );
+
+        // The single output's own origin, too, not the screen's.
+        backend.output_ops.outputs = vec![output(1, 1920, 0, 1280, 1024)];
+        assert!(jwm.updategeom(&mut backend));
+        assert_eq!(
+            monitor_rect(&jwm.state.monitors[monitor]),
+            Rect::new(1920, 0, 1280, 1024)
+        );
+
+        // With nothing enumerated, the screen size is all there is.
+        backend.output_ops.outputs.clear();
+        assert!(jwm.updategeom(&mut backend));
+        assert_eq!(
+            monitor_rect(&jwm.state.monitors[monitor]),
+            Rect::new(0, 0, jwm.s_w, jwm.s_h)
+        );
+    }
+
+    #[test]
+    fn monitor_rects_follow_output_ids_and_fall_back_to_position() {
+        let a = Rect::new(0, 0, 1920, 1080);
+        let b = Rect::new(1920, 0, 2560, 1440);
+        let c = Rect::new(4480, 0, 1280, 1024);
+        let outputs = [(OutputId(1), a), (OutputId(2), b), (OutputId(3), c)];
+
+        // Nothing moved: the positional hand-out.
+        assert_eq!(
+            plan_monitor_rects_by_output(
+                &[Some(OutputId(1)), Some(OutputId(2)), Some(OutputId(3))],
+                &outputs
+            ),
+            vec![a, b, c]
+        );
+        // A non-tail re-plug left the monitors in another order than the
+        // outputs: each keeps its own instead of trading geometry.
+        assert_eq!(
+            plan_monitor_rects_by_output(
+                &[Some(OutputId(1)), Some(OutputId(3)), Some(OutputId(2))],
+                &outputs
+            ),
+            vec![a, c, b]
+        );
+        // A monitor without an id (or with a vanished one) and a monitor
+        // still to be created take what is left, in enumeration order.
+        assert_eq!(
+            plan_monitor_rects_by_output(&[Some(OutputId(9)), Some(OutputId(3))], &outputs),
+            vec![a, c, b]
+        );
+        assert_eq!(
+            plan_monitor_rects_by_output(&[None, Some(OutputId(2))], &outputs),
+            vec![a, b, c]
+        );
+        // A monitor past the output count is removed from the tail; it does
+        // not claim its output away from a surviving position.
+        assert_eq!(
+            plan_monitor_rects_by_output(
+                &[Some(OutputId(7)), Some(OutputId(1))],
+                &[(OutputId(2), b)]
+            ),
+            vec![b]
+        );
+        // Two monitors naming the same output: the first keeps it.
+        assert_eq!(
+            plan_monitor_rects_by_output(
+                &[Some(OutputId(2)), Some(OutputId(2))],
+                &[(OutputId(1), a), (OutputId(2), b)]
+            ),
+            vec![b, a]
+        );
+    }
+
+    #[test]
+    fn windows_of_an_unplugged_output_skip_a_shaded_survivor() {
+        let mut backend = DisplaySpyBackend::new(Vec::new());
+        let mut jwm = jwm_on_three_outputs(&mut backend);
+        let unplugged = jwm.state.monitor_order[0];
+        let shaded = jwm.state.monitor_order[1];
+        let clear = jwm.state.monitor_order[2];
+        jwm.lock_monitor(&mut backend, &WMArgEnum::Int(1))
+            .expect("monitor 1 locks");
+        let orphan = floating_client_on(&mut jwm, 0x3f1, unplugged, Rect::new(100, 100, 600, 400));
+
+        backend.output_ops.outputs.remove(0);
+        jwm.handle_output_removed(&mut backend, OutputId(1))
+            .expect("the first output goes away");
+
+        assert!(jwm.monitor_key_is_locked(shaded));
+        assert_eq!(jwm.state.clients[orphan].mon, Some(clear));
+        assert!(!jwm.state.monitor_clients[shaded].contains(&orphan));
+        assert!(jwm.state.monitor_clients[clear].contains(&orphan));
     }
 }

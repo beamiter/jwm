@@ -195,6 +195,11 @@ looks unavailable rather than swallowing clicks when JWM is not running.
 cached for the session. With NetworkManager the row names the active
 connection and its signal strength; with only `rfkill` it can honestly report
 just the radio switch, so it says on/off without claiming to know the network.
+Detection does not depend on the session's language: the radio is queried
+with `nmcli -t radio wifi`, whose terse output keeps the untranslated
+`enabled`/`disabled` keywords, and `rfkill` runs under `LC_ALL=C`, because
+util-linux translates the very lines JWM reads. A localized session therefore
+keeps nmcli support instead of reading every radio as absent.
 
 A wired link is reported when there is no wireless one, and keeps its own icon
 even while the Wi-Fi radio is off — an Ethernet cable is still the connection.
@@ -281,6 +286,11 @@ several seconds; joining a network takes seconds more. Both run on worker
 threads, and the frame tick adopts the result when it lands, so the panel
 shows `Scanning…` and stays responsive rather than freezing the session.
 
+Whether a network already has a saved profile — the choice between joining
+directly and prompting for a passphrase — is read by the scan worker together
+with the list, and refreshed after every join and every forget. `Enter`
+decides from that inventory, so it never waits on NetworkManager either.
+
 ### Passphrases
 
 A network NetworkManager already has a profile for is brought up directly —
@@ -289,6 +299,13 @@ prompts, and the prompt names the network it is asking about. What is typed
 is masked, is never written to disk by JWM, and is wiped from the panel when
 the prompt is cancelled, when the picker closes, and once it has been handed
 to the worker thread.
+
+The passphrase reaches nmcli on its standard input
+(`nmcli --ask device wifi connect <ssid>`), never on its command line, where
+`ps` and `/proc/<pid>/cmdline` would show it to every local user. nmcli reads
+that answer through readline, which treats control characters as editing
+keys, so a passphrase containing one (or an empty or oversized one) is
+refused with the reason on the status line instead of being sent mangled.
 
 A failed join leaves the picker open with nmcli's reason on one line, so a
 mistyped passphrase can be retried without rescanning.
@@ -302,7 +319,7 @@ connects the selected device, or disconnects it if it is already connected;
 on a device that was never bonded, `Enter` starts pairing (below). `s` runs a
 bounded discovery scan and merges what it hears into the list; `r` re-reads
 the list; `d` or a middle click removes a bonded device (below); `Esc` — or
-`Alt+Ctrl+F12` again — closes. Leaning on `s` does not
+`Ctrl+Alt+Shift+B` again — closes. Leaning on `s` does not
 stack scans: while one is running the key just says `Scanning…` again.
 
 ### Where the list comes from
@@ -552,29 +569,39 @@ Charging clears the memory, so unplugging later warns afresh.
 the session. `Left`/`Right` cycle through the driver's own profile list and
 wrap; `Enter` / left-click advances one notch (same as `Right`); the wheel
 over the row uses the same signed step as Volume/Brightness and follows
-selection like those sliders. A successful switch raises the labeled Power
-Profile OSD with the active name (same card `set_power_profile` shows), and
-the row re-reads afterwards so it shows what actually took effect rather
-than what was requested.
+selection like those sliders. The switch never runs `powerprofilesctl` on
+the compositor thread — the Python client can take a noticeable moment — so
+it is queued on the controls worker like the volume keys: the row and the
+labeled Power Profile OSD (same card `set_power_profile` shows) draw the
+requested profile at once, and the worker's re-read afterwards confirms it,
+corrects the card in place when a different profile took effect, or takes
+the row back when the tool refused.
 
 ## IPC
 
 ```sh
-jwm-msg '{"query": "get_power_status"}'
-jwm-msg '{"command": "set_power_profile", "args": {"profile": "power-saver"}}'
-jwm-msg '{"query": "get_connectivity"}'
-jwm-msg '{"command": "toggle_wifi"}'
-jwm-msg '{"query": "get_audio_devices"}'
-jwm-msg '{"command": "set_audio_device", "args": {"direction": "output", "id": "49"}}'
-jwm-msg '{"command": "set_mic_mute", "args": {"muted": true}}'
+jwm-tool msg get_power_status
+jwm-tool msg set_power_profile --args '{"profile": "power-saver"}'
+jwm-tool msg get_connectivity
+jwm-tool msg toggle_wifi
+jwm-tool msg get_audio_devices
+jwm-tool msg set_audio_device --args '{"direction": "output", "id": "49"}'
+jwm-tool msg set_mic_mute --args '{"muted": true}'
 ```
 
 `get_power_status` reports the battery and the available/active profiles.
-`set_power_profile` rejects a name the driver does not offer, listing what it
-does. A successful switch raises the same labeled Power Profile OSD the Hub
-`Left`/`Right` cycle does. The `power` subscription topic carries
-`power/battery` (only when the reading actually changed) and `power/profile`;
-the `network` topic carries `network/status`, likewise only on a real change.
+`set_power_profile` checks the name against that same cached profile list
+and rejects one the driver does not offer, listing what it does; before the
+list has been read at all it answers with an honest "not read yet" error and
+starts the read, so a retry a moment later succeeds. An accepted switch is
+queued like `set_mic_mute` and `set_audio_device`: the ack means the switch
+was submitted, not that it took. The same labeled Power Profile OSD the Hub
+`Left`/`Right` cycle raises draws the requested profile at once, and the
+controls worker's read-back confirms or corrects it; `power/profile` then
+carries the profile that is actually active. The `power` subscription topic
+carries `power/battery` (only when the reading actually changed) and
+`power/profile`; the `network` topic carries `network/status`, likewise only
+on a real change.
 
 `get_audio_devices` lists both ends with the device in use marked; the `id` it
 reports is what `set_audio_device` takes — a wpctl node id or a PulseAudio

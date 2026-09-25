@@ -9,10 +9,82 @@ use crate::backend::compositor_common::window_tabs;
 use crate::backend::compositor_font;
 use smithay::backend::renderer::gles::ffi;
 
+/// The snap preview's fill and its brighter outline, as straight RGBA.
+///
+/// The outline is derived by boosting the configured colour, so every boosted
+/// channel is clamped to 1.0: the border shader neither clamps its input nor
+/// the premultiplied result, and on the FP16 linear target an alpha above 1
+/// turns the `ONE_MINUS_SRC_ALPHA` destination term negative while an RGB
+/// above 1 decodes far past white. X11 clamps the same boost.
 fn snap_preview_colors(color: [f32; 4], opacity: f32) -> ([f32; 4], [f32; 4]) {
     let [r, g, b, a] = color;
     let alpha = a * opacity.clamp(0.0, 1.0);
-    ([r, g, b, alpha], [r * 1.5, g * 1.5, b * 1.5, alpha * 2.0])
+    (
+        [r, g, b, alpha],
+        [
+            (r * 1.5).min(1.0),
+            (g * 1.5).min(1.0),
+            (b * 1.5).min(1.0),
+            (alpha * 2.0).min(1.0),
+        ],
+    )
+}
+
+/// The `u_opacity` the shared window shader needs for a client texture.
+///
+/// A positive value marks an RGB surface and forces its alpha to 1; only a
+/// negative value makes the shader honour the texture's alpha. A client that
+/// declared alpha must therefore be drawn with the negated opacity, exactly
+/// as the main scene does, or its transparent (premultiplied zero) pixels —
+/// rounded CSD corners, a translucent terminal background — come out opaque
+/// black. Every thumbnail path shares it: the expose grid, the peek
+/// spotlight and the tags-grid live cells (`render_tags_grid_live_cell`).
+pub(super) fn window_shader_opacity(has_alpha: bool, opacity: f32) -> f32 {
+    if has_alpha { -opacity } else { opacity }
+}
+
+/// A frame scene entry: window id, x, y, width, height.
+type SceneEntry = (u64, i32, i32, u32, u32);
+
+/// Whether two scene entries share any pixel; touching edges do not count.
+fn scene_entries_overlap(a: SceneEntry, b: SceneEntry) -> bool {
+    let span = |(_, x, y, w, h): SceneEntry| {
+        let (x, y) = (i64::from(x), i64::from(y));
+        (x, y, x + i64::from(w), y + i64::from(h))
+    };
+    let (ax0, ay0, ax1, ay1) = span(a);
+    let (bx0, by0, bx1, by1) = span(b);
+    ax0 < bx1 && bx0 < ax1 && ay0 < by1 && by0 < ay1
+}
+
+/// The scene indices peek redraws above its scrim, in stacking order.
+///
+/// The spotlight is the focused window plus the `peek_exclude` windows
+/// (`is_spotlit`). An unmanaged overlay — an xdg or IME popup, an
+/// override-redirect menu — has no focus or class of its own, so it joins the
+/// spotlight when it is stacked above a spotlit entry and overlaps it:
+/// otherwise the focused window, redrawn over the scrim, would paint over its
+/// own menu or candidate list and leave the rest of it dimmed. Joining through
+/// an already-spotlit overlay lets a cascading submenu follow its parent menu,
+/// while a popup that only covers dimmed windows stays dimmed with them.
+fn peek_spotlight_indices(
+    scene: &[SceneEntry],
+    is_spotlit: impl Fn(u64) -> bool,
+    is_unmanaged_overlay: impl Fn(u64) -> bool,
+) -> Vec<usize> {
+    let mut spotlight: Vec<usize> = Vec::new();
+    for (index, &entry) in scene.iter().enumerate() {
+        let id = entry.0;
+        let joins = is_spotlit(id)
+            || (is_unmanaged_overlay(id)
+                && spotlight
+                    .iter()
+                    .any(|&below| scene_entries_overlap(scene[below], entry)));
+        if joins {
+            spotlight.push(index);
+        }
+    }
+    spotlight
 }
 
 /// Scale a fully-arrived hover gives an expose cell's thumbnail.
@@ -205,7 +277,10 @@ impl WaylandCompositor {
                 );
                 gl.Uniform4f(self.win_uniforms.rect, x, y, w, h);
 
-                gl.Uniform1f(self.win_uniforms.opacity, opacity);
+                gl.Uniform1f(
+                    self.win_uniforms.opacity,
+                    window_shader_opacity(win.has_alpha, opacity),
+                );
                 gl.Uniform1f(self.win_uniforms.radius, 6.0);
                 gl.Uniform2f(self.win_uniforms.size, w, h);
                 gl.Uniform1f(self.win_uniforms.dim, 1.0);
@@ -788,10 +863,22 @@ impl WaylandCompositor {
 
     /// Render the interactive recording crop cue after the recorder has copied
     /// the frame, keeping this overlay out of the encoded stream.
+    ///
+    /// The draw owns its GL state instead of inheriting it: on a frame the
+    /// recorder captured, `capture_frame` leaves blending *disabled*, and an
+    /// unblended scrim writes its near-black premultiplied colour straight
+    /// over the local screen. The target is the post-delivery encoded output,
+    /// so the border program's domain is pinned to encoded too — a
+    /// scene-linear frame leaves it set for the linear target.
     pub(crate) fn render_recording_region_overlay(&self, gl: &ffi::Gles2, projection: &[f32; 16]) {
         let Some((x, y, width, height)) = self.recording_region_overlay else {
             return;
         };
+        unsafe {
+            self.enable_premultiplied_blend(gl);
+            gl.UseProgram(self.border_program);
+            gl.Uniform1i(self.border_uniforms.scene_linear, 0);
+        }
         self.render_capture_veil(
             gl,
             projection,
@@ -877,18 +964,24 @@ impl WaylandCompositor {
                 projection.as_ptr(),
             );
 
-            for &(id, x, y, w, h) in scene {
+            // Popups and IME candidates stacked over the spotlight ride with
+            // it (see `peek_spotlight_indices`).
+            let spotlight = peek_spotlight_indices(
+                scene,
+                |id| {
+                    focused == Some(id)
+                        || self.windows.get(&id).is_some_and(|win| {
+                            !win.class_name.is_empty()
+                                && Self::class_matches_exclude(&win.class_name, &self.peek_exclude)
+                        })
+                },
+                |id| self.is_unmanaged_overlay(id),
+            );
+            for &(id, x, y, w, h) in spotlight.iter().filter_map(|&index| scene.get(index)) {
                 let win = match self.windows.get(&id) {
                     Some(w) => w,
                     None => continue,
                 };
-
-                let is_focused = focused == Some(id);
-                let is_excluded = !win.class_name.is_empty()
-                    && Self::class_matches_exclude(&win.class_name, &self.peek_exclude);
-                if !is_focused && !is_excluded {
-                    continue;
-                }
 
                 let tex = match win.gl_texture {
                     Some(t) => t,
@@ -897,7 +990,10 @@ impl WaylandCompositor {
 
                 let (wx, wy, ww, wh) = (x as f32, y as f32, w as f32, h as f32);
                 gl.Uniform4f(self.win_uniforms.rect, wx, wy, ww, wh);
-                gl.Uniform1f(self.win_uniforms.opacity, 1.0);
+                gl.Uniform1f(
+                    self.win_uniforms.opacity,
+                    window_shader_opacity(win.has_alpha, 1.0),
+                );
                 gl.Uniform1f(self.win_uniforms.radius, 6.0);
                 gl.Uniform2f(self.win_uniforms.size, ww, wh);
                 gl.Uniform1f(self.win_uniforms.dim, 1.0);
@@ -1542,7 +1638,183 @@ impl WaylandCompositor {
 
 #[cfg(test)]
 mod tests {
-    use super::snap_preview_colors;
+    use super::{
+        IME_POPUP_WINDOW_ID_PREFIX, SceneEntry, XDG_POPUP_WINDOW_ID_PREFIX, is_auxiliary_window_id,
+        peek_spotlight_indices, snap_preview_colors, window_shader_opacity,
+    };
+
+    /// The whitespace-free body of the first item whose header matches
+    /// `needle`, by brace walk, so a needle cannot match another function.
+    fn compact_body(source: &str, needle: &str) -> String {
+        let start = source
+            .find(needle)
+            .unwrap_or_else(|| panic!("missing `{needle}`"));
+        let body_start = source[start..]
+            .find('{')
+            .map(|offset| start + offset + 1)
+            .unwrap_or_else(|| panic!("missing body for `{needle}`"));
+        let mut depth = 1usize;
+        for (offset, ch) in source[body_start..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return source[body_start..body_start + offset]
+                            .chars()
+                            .filter(|character| !character.is_whitespace())
+                            .collect();
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("unterminated body for `{needle}`");
+    }
+
+    #[test]
+    fn snap_preview_outline_stays_in_range_for_bright_or_opaque_colours() {
+        // A 0.7 alpha doubles past 1 and a full blue channel boosts past 1;
+        // unclamped, the FP16 linear target would blend a negative
+        // destination term and decode the blue far past white.
+        let (fill, outline) = snap_preview_colors([0.3, 0.6, 1.0, 0.7], 1.0);
+        assert_eq!(fill, [0.3, 0.6, 1.0, 0.7]);
+        assert!(
+            outline.iter().all(|channel| (0.0..=1.0).contains(channel)),
+            "outline out of range: {outline:?}"
+        );
+        assert_eq!(outline[2], 1.0);
+        assert_eq!(outline[3], 1.0);
+
+        // The shipped default colour already has a full blue channel.
+        let (_, default_outline) = snap_preview_colors([0.3, 0.5, 1.0, 0.3], 1.0);
+        assert_eq!(default_outline[2], 1.0);
+        assert_eq!(default_outline[3], 0.6);
+    }
+
+    #[test]
+    fn alpha_windows_are_drawn_with_the_texture_alpha_opacity() {
+        // Negative honours the texture's alpha; positive forces RGB opaque.
+        assert_eq!(window_shader_opacity(true, 0.9), -0.9);
+        assert_eq!(window_shader_opacity(false, 0.9), 0.9);
+        assert_eq!(window_shader_opacity(true, 1.0), -1.0);
+        assert_eq!(window_shader_opacity(false, 1.0), 1.0);
+
+        // Every thumbnail draw must sign the opacity by the client's alpha
+        // the way the main scene does, or rounded CSD corners and translucent
+        // backgrounds turn opaque black in expose, under the peek scrim and
+        // in the tags-grid live cells.
+        let expose = include_str!("expose.rs");
+        let render = include_str!("render.rs");
+        for (source, item, opacity) in [
+            (expose, "pub(crate) fn render_expose", "opacity"),
+            (expose, "pub(crate) fn render_peek_mode", "1.0"),
+            (render, "unsafe fn render_tags_grid_live_cell", "1.0"),
+        ] {
+            let body = compact_body(source, &format!("{item}("));
+            let signed = format!(
+                "gl.Uniform1f(self.win_uniforms.opacity,{}(win.has_alpha,{opacity})",
+                "window_shader_opacity"
+            );
+            assert!(
+                body.contains(&signed),
+                "{item} must sign its window opacity by has_alpha"
+            );
+            let unsigned = format!("gl.Uniform1f(self.win_uniforms.opacity,{opacity});");
+            assert!(
+                !body.contains(&unsigned),
+                "{item} still forces alpha windows opaque"
+            );
+        }
+    }
+
+    fn entry(id: u64, x: i32, y: i32, w: u32, h: u32) -> SceneEntry {
+        (id, x, y, w, h)
+    }
+
+    #[test]
+    fn peek_spotlight_keeps_the_focused_windows_popups_above_it() {
+        let focused = 1;
+        let dimmed = 2;
+        let menu = XDG_POPUP_WINDOW_ID_PREFIX | 7;
+        let submenu = XDG_POPUP_WINDOW_ID_PREFIX | 8;
+        let candidates = IME_POPUP_WINDOW_ID_PREFIX | 9;
+        let foreign_menu = XDG_POPUP_WINDOW_ID_PREFIX | 10;
+        let scene = [
+            entry(focused, 0, 0, 800, 600),
+            entry(dimmed, 1000, 0, 400, 400),
+            // A menu opened inside the focused window...
+            entry(menu, 700, 100, 200, 300),
+            // ...its submenu, which overlaps the menu but not the window...
+            entry(submenu, 880, 120, 100, 80),
+            // ...an IME candidate list straddling the window's bottom edge...
+            entry(candidates, 100, 580, 300, 40),
+            // ...and a popup of the dimmed window, clear of the spotlight.
+            entry(foreign_menu, 1100, 100, 100, 100),
+        ];
+        let spotlight = peek_spotlight_indices(&scene, |id| id == focused, is_auxiliary_window_id);
+        let ids: Vec<u64> = spotlight.iter().map(|&index| scene[index].0).collect();
+        assert_eq!(ids, vec![focused, menu, submenu, candidates]);
+    }
+
+    #[test]
+    fn peek_spotlight_only_lifts_overlays_stacked_above_it() {
+        let focused = 1;
+        let excluded_bar = 3;
+        let popup_below = XDG_POPUP_WINDOW_ID_PREFIX | 5;
+        let bar_tooltip = XDG_POPUP_WINDOW_ID_PREFIX | 6;
+        let touching = XDG_POPUP_WINDOW_ID_PREFIX | 7;
+        let scene = [
+            // An overlay stacked under the focused window stays dimmed: the
+            // window covered it before peek, so it keeps covering it.
+            entry(popup_below, 10, 10, 50, 50),
+            entry(focused, 0, 0, 400, 300),
+            entry(excluded_bar, 0, 1000, 1920, 30),
+            // An excluded window's own popup rides with it too.
+            entry(bar_tooltip, 20, 980, 100, 30),
+            // Sharing an edge is not an overlap.
+            entry(touching, 400, 0, 50, 50),
+        ];
+        let spotlight = peek_spotlight_indices(
+            &scene,
+            |id| id == focused || id == excluded_bar,
+            is_auxiliary_window_id,
+        );
+        let ids: Vec<u64> = spotlight.iter().map(|&index| scene[index].0).collect();
+        assert_eq!(ids, vec![focused, excluded_bar, bar_tooltip]);
+
+        // No focus and nothing excluded: the scrim covers everything.
+        assert!(peek_spotlight_indices(&scene, |_| false, is_auxiliary_window_id).is_empty());
+    }
+
+    #[test]
+    fn the_recording_crop_veil_owns_its_blend_and_domain_state() {
+        // On a frame the recorder captured, `capture_frame` leaves blending
+        // disabled and the post-delivery target is the encoded output; the
+        // crop cue must restore premultiplied blending and pin the border
+        // program to the encoded domain before the veil draws, or its scrim
+        // replaces the local screen with near-black.
+        let body = compact_body(
+            include_str!("expose.rs"),
+            &format!("pub(crate) fn {}(", "render_recording_region_overlay"),
+        );
+        let veil = body
+            .find(&format!("self.{}(", "render_capture_veil"))
+            .expect("the crop cue draws the veil");
+        let blend = body
+            .find(&format!("self.{}(gl);", "enable_premultiplied_blend"))
+            .expect("the crop cue must re-enable premultiplied blending");
+        let domain = body
+            .find(&format!(
+                "gl.Uniform1i(self.border_uniforms.{},0);",
+                "scene_linear"
+            ))
+            .expect("the crop cue must pin the border program to the encoded domain");
+        let program = body
+            .find(&format!("gl.UseProgram(self.{});", "border_program"))
+            .expect("the domain uniform needs the border program bound");
+        assert!(blend < veil && program < domain && domain < veil);
+    }
 
     #[test]
     fn snap_preview_uses_configured_rgba_and_derives_a_brighter_outline() {

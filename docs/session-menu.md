@@ -66,6 +66,6 @@ The override is in-memory: a restart returns to the configured schedule.
 `notification_center` are all dispatchable over IPC as well as bindable:
 
 ```sh
-jwm-msg '{"command": "session_menu"}'
-jwm-msg '{"command": "toggle_night_light"}'
+jwm-tool msg session_menu
+jwm-tool msg toggle_night_light
 ```

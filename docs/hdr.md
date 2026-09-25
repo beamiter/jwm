@@ -14,8 +14,8 @@ withdrawn the instant the frame stops qualifying.
 ## Asking for it
 
 ```sh
-jwm-msg '{"command": "set_hdr_metadata", "args": {"output": "HDMI-A-1", "enabled": true}}'
-jwm-msg '{"command": "set_hdr_metadata", "args": {"output": "HDMI-A-1", "enabled": false}}'
+jwm-tool msg set_hdr_metadata --args '{"output": "HDMI-A-1", "enabled": true}'
+jwm-tool msg set_hdr_metadata --args '{"output": "HDMI-A-1", "enabled": false}'
 ```
 
 `enabled: true` latches *intent* on that output. It does not commit anything
@@ -143,13 +143,14 @@ leave a dark panel signalled either.
 
 A latched request also survives a rebuild of the KMS state. A VT switch back
 and every connector hotplug construct fresh outputs; the request and any
-explicit `set_vrr_enabled` override are carried across by output name, and a
-name that is gone says so in the log rather than vanishing.
+latched VRR override (backend-internal; no IPC command sets it yet) are
+carried across by output name, and a name that is gone says so in the log
+rather than vanishing.
 
 ## What the reports mean
 
 ```sh
-jwm-msg '{"query": "get_hdr_status"}'
+jwm-tool msg get_hdr_status
 jwm-tool wayland-status --json | jq '.color_delivery, .render_decisions.hdr'
 ```
 

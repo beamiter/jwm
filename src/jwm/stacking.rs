@@ -131,8 +131,7 @@ impl Jwm {
             return;
         };
 
-        self.detach(client_key);
-        self.attach_front(client_key);
+        self.move_to_front(client_key);
 
         let _ = self.focus(backend, Some(client_key));
         if let Some(mon_key) = mon_key {

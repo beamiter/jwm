@@ -42,6 +42,12 @@ impl GlobalDispatch<ZwlrOutputPowerManagerV1, OutputPowerManagerData> for JwmWay
         state.record_protocol_bind("zwlr_output_power_manager_v1");
         data_init.init(resource, OutputPowerManagerData);
     }
+
+    /// Output power is privileged: a sandboxed (wp_security_context) client
+    /// must not blank the displays.
+    fn can_view(client: Client, _global_data: &OutputPowerManagerData) -> bool {
+        !crate::backend::wayland::state::client_is_sandboxed(&client)
+    }
 }
 
 // --- Dispatch for the manager ---

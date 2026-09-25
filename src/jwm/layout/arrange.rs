@@ -64,6 +64,12 @@ impl Jwm {
 
         for &mon_key in &monitors_to_process {
             self.arrangemon(backend, mon_key);
+            // Every work-area change (strut, dock, layer shell, bar toggle,
+            // tab bar, output resize) and every fullscreen/PiP exit ends in
+            // an arrange, so this is where realized maximized windows are
+            // re-fitted to the current work area. Idempotent: a window
+            // already at its target is not touched.
+            self.refit_maximized_clients(backend, mon_key);
             let _ = self.restack(backend, Some(mon_key));
         }
         let _ = backend.window_ops().flush();

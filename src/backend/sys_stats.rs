@@ -154,11 +154,22 @@ pub(crate) fn parse_self_stat_jiffies(stat: &str) -> Option<u64> {
     utime.checked_add(stime)
 }
 
-/// Sum the first jiffy-bucket line of `/proc/stat` (the aggregate `cpu` line).
+/// Number of leading `/proc/stat` cpu columns that partition elapsed time:
+/// user, nice, system, idle, iowait, irq, softirq and steal.
+const PROC_STAT_TIME_BUCKETS: usize = 8;
+
+/// Sum the jiffy buckets of the aggregate `cpu` line of `/proc/stat`.
+///
+/// Only the first [`PROC_STAT_TIME_BUCKETS`] columns are summed. The kernel
+/// already accounts guest time in `user` and guest_nice time in `nice`, then
+/// reports both again as columns 9 and 10; summing those would count VM time
+/// twice, inflate the elapsed-time denominator and under-report our CPU%
+/// whenever the host runs guests. Older kernels with fewer columns still sum
+/// whatever they report.
 pub(crate) fn parse_proc_stat_cpu_total(stat: &str) -> Option<u64> {
     let line = stat.lines().find(|l| l.starts_with("cpu "))?;
     let mut total: u64 = 0;
-    for tok in line.split_whitespace().skip(1) {
+    for tok in line.split_whitespace().skip(1).take(PROC_STAT_TIME_BUCKETS) {
         total = total.saturating_add(tok.parse::<u64>().ok()?);
     }
     if total == 0 { None } else { Some(total) }
@@ -245,6 +256,25 @@ intr 99999
 ";
         // 100+20+30+5000+10+0+5 = 5165
         assert_eq!(parse_proc_stat_cpu_total(sample), Some(5165));
+    }
+
+    #[test]
+    fn proc_stat_cpu_total_excludes_guest_columns_already_counted_in_user_and_nice() {
+        // guest=7 and guest_nice=3 are already part of user/nice, so the total
+        // must stay 5165 rather than 5175.
+        assert_eq!(
+            parse_proc_stat_cpu_total("cpu  100 20 30 5000 10 0 5 0 7 3\n"),
+            Some(5165)
+        );
+
+        // One of 8 cores ran a guest for 100 jiffies while the others idled
+        // for 700: 800 jiffies really elapsed between the two samples.
+        let before = parse_proc_stat_cpu_total("cpu  1000 0 0 7000 0 0 0 0 0 0\n").unwrap();
+        let after = parse_proc_stat_cpu_total("cpu  1100 0 0 7700 0 0 0 0 100 0\n").unwrap();
+        assert_eq!(after - before, 800);
+
+        // Kernels that predate steal/guest columns still sum what they report.
+        assert_eq!(parse_proc_stat_cpu_total("cpu  1 2 3 4\n"), Some(10));
     }
 
     #[test]

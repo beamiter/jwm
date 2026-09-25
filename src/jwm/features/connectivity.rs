@@ -95,7 +95,8 @@ pub fn split_nmcli_fields(line: &str) -> Vec<String> {
     fields
 }
 
-/// `nmcli radio wifi` → `enabled` / `disabled`.
+/// `nmcli -t radio wifi` → `enabled` / `disabled`. Only terse mode prints
+/// these keywords untranslated; see `NMCLI_RADIO_QUERY`.
 #[must_use]
 pub fn parse_radio(output: &str) -> Option<bool> {
     match output.trim() {
@@ -264,15 +265,46 @@ fn run(cmd: &str, args: &[&str]) -> Option<String> {
     Some(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
+/// `nmcli radio wifi`, asked in terse mode.
+///
+/// Pretty mode runs the answer through gettext — a German session reads
+/// `aktiviert` — while terse mode prints the untranslated keyword
+/// [`parse_radio`] matches. The detection that parses this is cached for the
+/// whole session, so one translated answer used to cost the session nmcli
+/// (the picker, the SSID, joining) until logout.
+const NMCLI_RADIO_QUERY: [&str; 3] = ["-t", "radio", "wifi"];
+
+/// [`run`] under the C locale, for a helper whose output is matched against
+/// English text.
+///
+/// util-linux translates the very lines [`parse_rfkill_blocked`] looks for
+/// (`Soft blocked: yes`, the `Wireless LAN` device type), so a localized
+/// session read every radio as absent. The bounded helper passes no
+/// environment of its own, hence `env`. Kept to rfkill on purpose: its output
+/// is ASCII, whereas nmcli's carries UTF-8 SSIDs — the join key — that a C
+/// locale would mangle; nmcli asks for terse output instead.
+fn run_untranslated(cmd: &str, args: &[&str]) -> Option<String> {
+    let mut argv = Vec::with_capacity(args.len() + 2);
+    argv.push("LC_ALL=C");
+    argv.push(cmd);
+    argv.extend_from_slice(args);
+    run("env", &argv)
+}
+
+/// `rfkill list <kind>`, readable whatever the session's language.
+fn rfkill_list(kind: &str) -> Option<String> {
+    run_untranslated("rfkill", &["list", kind])
+}
+
 fn wifi_tool() -> Option<WifiTool> {
     *WIFI_TOOL.get_or_init(|| {
-        if run("nmcli", &["radio", "wifi"])
+        if run("nmcli", &NMCLI_RADIO_QUERY)
             .and_then(|o| parse_radio(&o))
             .is_some()
         {
             return Some(WifiTool::Nmcli);
         }
-        run("rfkill", &["list", "wifi"])
+        rfkill_list("wifi")
             .and_then(|o| parse_rfkill_blocked(&o))
             .map(|_| WifiTool::Rfkill)
     })
@@ -286,7 +318,7 @@ fn bluetooth_tool() -> Option<BluetoothTool> {
         {
             return Some(BluetoothTool::Bluetoothctl);
         }
-        run("rfkill", &["list", "bluetooth"])
+        rfkill_list("bluetooth")
             .and_then(|o| parse_rfkill_blocked(&o))
             .map(|_| BluetoothTool::Rfkill)
     })
@@ -339,7 +371,7 @@ fn peek_bluetooth_tool_absent() -> Option<bool> {
 pub fn network_state() -> Option<NetworkState> {
     match wifi_tool()? {
         WifiTool::Nmcli => {
-            let wifi_enabled = run("nmcli", &["radio", "wifi"]).and_then(|o| parse_radio(&o))?;
+            let wifi_enabled = run("nmcli", &NMCLI_RADIO_QUERY).and_then(|o| parse_radio(&o))?;
             let active = run(
                 "nmcli",
                 &[
@@ -370,8 +402,7 @@ pub fn network_state() -> Option<NetworkState> {
         // Without NetworkManager only the radio switch is visible; the row
         // then reports on/off without claiming to know the network.
         WifiTool::Rfkill => {
-            let blocked =
-                run("rfkill", &["list", "wifi"]).and_then(|o| parse_rfkill_blocked(&o))?;
+            let blocked = rfkill_list("wifi").and_then(|o| parse_rfkill_blocked(&o))?;
             Some(NetworkState {
                 wifi_enabled: !blocked,
                 connection: None,
@@ -395,7 +426,7 @@ pub fn bluetooth_state() -> BluetoothState {
             }
         }
         Some(BluetoothTool::Rfkill) => {
-            let blocked = run("rfkill", &["list", "bluetooth"])
+            let blocked = rfkill_list("bluetooth")
                 .and_then(|o| parse_rfkill_blocked(&o))
                 .unwrap_or(true);
             BluetoothState {
@@ -623,9 +654,12 @@ impl<T> BackgroundJob<T> {
 
     /// A handle whose thread the OS refused, for tests that pin how the
     /// guards behave around one. There is no other way to build it: a real
-    /// spawn failure needs the process to be out of threads.
+    /// spawn failure needs the process to be out of threads. Crate-visible
+    /// so sibling feature tests can drive a real refused handle through
+    /// their `Jwm` paths — or park one in a coalesced slot so the path under
+    /// test cannot start a real read of the host's tools.
     #[cfg(test)]
-    fn refused() -> Self {
+    pub(crate) fn refused() -> Self {
         Self {
             slot: std::sync::Arc::new(std::sync::Mutex::new(BackgroundJobState {
                 result: None,
@@ -1487,17 +1521,87 @@ pub fn plan_bluetooth_row(powered: bool, activate: bool, adjust: bool) -> Blueto
     }
 }
 
-/// Whether `NetworkManager` already stores a profile named `ssid`.
+/// Whether `NetworkManager` stores a profile named `ssid`, as the picker's
+/// workers last saw it.
+///
+/// Called on the frame thread — Enter in the picker decides between joining
+/// and asking for a passphrase — so this never runs nmcli: asking there froze
+/// the compositor for as long as `NetworkManager` took to answer, which is
+/// seconds while it is mid-scan, and the picker has just started a scan. The
+/// answer comes from the inventory `refresh_saved_profiles` keeps. The scan
+/// that produced the rows refreshes it before the rows exist, and every join
+/// and forget — the picker's own ways of changing it — refresh it again, so
+/// it is never older than the row Enter was pressed on.
 #[must_use]
 pub fn has_saved_profile(ssid: &str) -> bool {
-    let Some(output) = run("nmcli", &["-t", "-f", "NAME", "connection", "show"]) else {
-        return false;
-    };
-    output.lines().any(|line| {
-        split_nmcli_fields(line)
-            .first()
-            .is_some_and(|name| name == ssid)
-    })
+    SAVED_WIFI_PROFILES.contains(ssid)
+}
+
+/// Saved-profile names, as the last worker to ask `NetworkManager` saw them.
+/// See [`has_saved_profile`].
+static SAVED_WIFI_PROFILES: SavedProfileNames = SavedProfileNames::new();
+
+/// A profile inventory the frame thread can read without waiting on nmcli.
+/// Writers swap a finished reading in; the lock is never held across a
+/// command.
+#[derive(Debug)]
+struct SavedProfileNames {
+    names: std::sync::Mutex<Vec<String>>,
+}
+
+impl SavedProfileNames {
+    const fn new() -> Self {
+        Self {
+            names: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    fn replace(&self, names: Vec<String>) {
+        *self
+            .names
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = names;
+    }
+
+    /// The exact-name test the inline nmcli lookup used to make: a profile
+    /// named after a prefix of the SSID is another network's.
+    fn contains(&self, ssid: &str) -> bool {
+        self.names
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .any(|name| name == ssid)
+    }
+}
+
+/// How many `connection show` lines the inventory reads. Far beyond any real
+/// profile list; the bound only keeps malformed output from growing it.
+const MAX_SAVED_PROFILE_LINES: usize = 4096;
+
+/// The profile names in `nmcli -t -f NAME connection show` that could be an
+/// SSID — the one thing the inventory is ever asked about — so a name longer
+/// than an SSID can be is not kept.
+#[must_use]
+pub fn parse_profile_names(output: &str) -> Vec<String> {
+    output
+        .lines()
+        .take(MAX_SAVED_PROFILE_LINES)
+        .filter_map(|line| {
+            let name = split_nmcli_fields(line).into_iter().next()?;
+            (!name.is_empty() && name.len() <= MAX_WIFI_SSID_BYTES).then_some(name)
+        })
+        .collect()
+}
+
+/// Re-read the saved-profile inventory [`has_saved_profile`] answers from.
+/// Runs nmcli, so worker threads only. An unreadable inventory is stored as
+/// empty: the inline lookup answered "not saved" then too, and a secured
+/// network still joins through the passphrase prompt.
+fn refresh_saved_profiles() {
+    let names = run("nmcli", &["-t", "-f", "NAME", "connection", "show"])
+        .map(|output| parse_profile_names(&output))
+        .unwrap_or_default();
+    SAVED_WIFI_PROFILES.replace(names);
 }
 
 /// The UUID of the profile `nmcli -t -f NAME,UUID connection show` lists
@@ -1538,23 +1642,27 @@ fn saved_profile_uuid(name: &str) -> Option<String> {
 pub fn start_forget_profile(ssid: &str) -> BackgroundJob<Result<String, String>> {
     let ssid = ssid.to_string();
     BackgroundJob::spawn(move || {
-        let Some(uuid) = saved_profile_uuid(&ssid) else {
+        let result = match saved_profile_uuid(&ssid) {
             // The SSID is an access point's chosen bytes; the status line is
             // a place they are *read*, so the display form is what shows.
-            return Err(format!("no saved profile for {}", display_ssid(&ssid)));
+            None => Err(format!("no saved profile for {}", display_ssid(&ssid))),
+            Some(uuid) => match connectivity_output(
+                "nmcli",
+                &["connection", "delete", "uuid", &uuid],
+                CONNECTIVITY_ACTION_TIMEOUT,
+                MAX_CONNECTIVITY_OUTPUT_BYTES,
+            ) {
+                Ok(output) if output.status.success() => Ok(ssid),
+                Ok(output) => Err(summarize_nmcli_error(&String::from_utf8_lossy(
+                    &output.stderr,
+                ))),
+                Err(error) => Err(format!("could not run nmcli: {error}")),
+            },
         };
-        match connectivity_output(
-            "nmcli",
-            &["connection", "delete", "uuid", &uuid],
-            CONNECTIVITY_ACTION_TIMEOUT,
-            MAX_CONNECTIVITY_OUTPUT_BYTES,
-        ) {
-            Ok(output) if output.status.success() => Ok(ssid),
-            Ok(output) => Err(summarize_nmcli_error(&String::from_utf8_lossy(
-                &output.stderr,
-            ))),
-            Err(error) => Err(format!("could not run nmcli: {error}")),
-        }
+        // Whatever came of it, Enter on this row next must see the profile
+        // list as it now is: a forgotten network asks for its passphrase.
+        refresh_saved_profiles();
+        result
     })
 }
 
@@ -1578,7 +1686,7 @@ pub fn start_scan() -> Option<BackgroundJob<Vec<WifiNetwork>>> {
         if wifi_tool() != Some(WifiTool::Nmcli) {
             return Vec::new();
         }
-        run(
+        let networks = run(
             "nmcli",
             &[
                 "-t",
@@ -1590,14 +1698,20 @@ pub fn start_scan() -> Option<BackgroundJob<Vec<WifiNetwork>>> {
             ],
         )
         .map(|output| parse_networks(&output))
-        .unwrap_or_default()
+        .unwrap_or_default();
+        // These rows are what Enter acts on, and whether Enter prompts turns
+        // on the profile list: read it here, off the frame thread, before the
+        // rows exist.
+        refresh_saved_profiles();
+        networks
     }))
 }
 
 /// Join a network on a worker thread, reporting what happened.
 ///
-/// The passphrase is moved into the thread and dropped there; it is never
-/// stored in the panel once this is called.
+/// The passphrase is moved into the thread, reaches nmcli on its stdin rather
+/// than its argv (see `connect_args`), and is wiped there; it is never stored
+/// in the panel once this is called.
 #[must_use]
 pub fn start_connect(
     ssid: &str,
@@ -1607,50 +1721,146 @@ pub fn start_connect(
     let ssid = ssid.to_string();
     let plan = plan.clone();
     BackgroundJob::spawn(move || {
-        let output = match plan {
-            ConnectPlan::UseSaved => connectivity_output(
-                "nmcli",
-                &["connection", "up", "id", &ssid],
-                CONNECTIVITY_ACTION_TIMEOUT,
-                MAX_CONNECTIVITY_OUTPUT_BYTES,
-            ),
-            ConnectPlan::Open | ConnectPlan::NeedsPassphrase => connectivity_output(
-                "nmcli",
-                &["device", "wifi", "connect", &ssid],
-                CONNECTIVITY_ACTION_TIMEOUT,
-                MAX_CONNECTIVITY_OUTPUT_BYTES,
-            ),
-            ConnectPlan::WithPassphrase => connectivity_output(
-                "nmcli",
-                &[
-                    "device",
-                    "wifi",
-                    "connect",
-                    &ssid,
-                    "password",
-                    passphrase.as_deref().unwrap_or(""),
-                ],
-                CONNECTIVITY_ACTION_TIMEOUT,
-                MAX_CONNECTIVITY_OUTPUT_BYTES,
-            ),
-        };
-        match output {
-            Ok(output) if output.status.success() => Ok(ssid),
-            Ok(output) => Err(summarize_nmcli_error(&String::from_utf8_lossy(
-                &output.stderr,
-            ))),
-            Err(error) => Err(format!("could not run nmcli: {error}")),
-        }
+        let secret = passphrase.unwrap_or_default();
+        let result = join_network(NMCLI, &ssid, &plan, &secret).map(|()| ssid);
+        wipe_secret(secret);
+        // A join can create a profile (a first connect saves one) and a
+        // failed one can leave one behind; the next Enter must see which.
+        refresh_saved_profiles();
+        result
     })
 }
 
+/// The command [`start_connect`] joins with.
+const NMCLI: &[&str] = &["nmcli"];
+
+/// The nmcli arguments that join `ssid` under `plan`.
+///
+/// The passphrase is deliberately not a parameter. Arguments are readable by
+/// every local user through `/proc/<pid>/cmdline` and `ps` for as long as
+/// nmcli is associating — up to [`CONNECTIVITY_ACTION_TIMEOUT`] — so
+/// `WithPassphrase` asks nmcli to prompt for it instead (`--ask`, the form
+/// `nmcli-examples(7)` gives for exactly this join) and the secret goes to
+/// its stdin: see [`output_with_secret_line`]. Every other plan is unchanged.
+fn connect_args<'a>(ssid: &'a str, plan: &ConnectPlan) -> Vec<&'a str> {
+    match plan {
+        ConnectPlan::UseSaved => vec!["connection", "up", "id", ssid],
+        ConnectPlan::Open | ConnectPlan::NeedsPassphrase => {
+            vec!["device", "wifi", "connect", ssid]
+        }
+        ConnectPlan::WithPassphrase => vec!["--ask", "device", "wifi", "connect", ssid],
+    }
+}
+
+/// Longest passphrase handed to nmcli. WPA caps one at 63 characters (64 hex
+/// digits for a raw key); the bound is what lets [`output_with_secret_line`]
+/// write the whole line before nmcli starts, well inside the smallest pipe
+/// buffer the kernel hands out (one page).
+const MAX_WIFI_PASSPHRASE_BYTES: usize = 1024;
+
+/// Whether `passphrase` can be typed into nmcli's prompt as it stands.
+///
+/// nmcli reads the answer through readline, which treats a control character
+/// as an editing key — a newline ends the answer early, Tab completes, DEL
+/// erases — rather than as text. No Wi-Fi passphrase contains one (WPA's are
+/// printable ASCII), so such input is refused with a reason rather than
+/// handed over altered.
+fn check_passphrase(passphrase: &str) -> Result<(), String> {
+    if passphrase.is_empty() {
+        return Err("no passphrase was entered".to_string());
+    }
+    if passphrase.len() > MAX_WIFI_PASSPHRASE_BYTES {
+        return Err("the passphrase is too long".to_string());
+    }
+    if passphrase.chars().any(char::is_control) {
+        return Err("the passphrase contains a control character".to_string());
+    }
+    Ok(())
+}
+
+/// Run one join attempt and condense a failure to the line the picker shows.
+///
+/// `command` is nmcli and any arguments ahead of the join's own — [`NMCLI`]
+/// outside tests, which stand a shell script in for nmcli to see exactly what
+/// it would be handed.
+fn join_network(
+    command: &[&str],
+    ssid: &str,
+    plan: &ConnectPlan,
+    secret: &str,
+) -> Result<(), String> {
+    let Some((program, leading)) = command.split_first() else {
+        return Err("no command to join with".to_string());
+    };
+    let mut args = leading.to_vec();
+    args.extend(connect_args(ssid, plan));
+    let output = if *plan == ConnectPlan::WithPassphrase {
+        check_passphrase(secret)?;
+        output_with_secret_line(program, &args, secret)
+    } else {
+        connectivity_output(
+            program,
+            &args,
+            CONNECTIVITY_ACTION_TIMEOUT,
+            MAX_CONNECTIVITY_OUTPUT_BYTES,
+        )
+    };
+    match output {
+        Ok(output) if output.status.success() => Ok(()),
+        Ok(output) => Err(summarize_nmcli_error(&String::from_utf8_lossy(
+            &output.stderr,
+        ))),
+        Err(error) => Err(format!("could not run nmcli: {error}")),
+    }
+}
+
+/// Run `cmd` with `secret` and a newline as its entire stdin, under the same
+/// deadline and stderr bound as every other join.
+///
+/// The line is written in full before the child starts — [`check_passphrase`]
+/// keeps it far below a pipe buffer, so this never waits on a reader — and
+/// the write end is closed at once, so a prompt that asks again reads end of
+/// file instead of hanging until the deadline. The runner is the synchronous
+/// one: nothing nmcli might fork outlives the join.
+fn output_with_secret_line(
+    cmd: &str,
+    args: &[&str],
+    secret: &str,
+) -> std::io::Result<std::process::Output> {
+    use std::io::Write as _;
+    let (reader, mut writer) = std::io::pipe()?;
+    writer.write_all(secret.as_bytes())?;
+    writer.write_all(b"\n")?;
+    drop(writer);
+    crate::external_command::output_with_input_and_limits(
+        cmd,
+        args,
+        std::process::Stdio::from(reader),
+        CONNECTIVITY_ACTION_TIMEOUT,
+        MAX_CONNECTIVITY_OUTPUT_BYTES,
+    )
+}
+
+/// Overwrite a secret before its allocation is freed.
+fn wipe_secret(secret: String) {
+    let mut bytes = secret.into_bytes();
+    bytes.fill(0);
+    // Keep the overwrite from being dropped as a dead store ahead of the free.
+    std::hint::black_box(&bytes);
+}
+
 /// Condense nmcli's stderr into one line the panel can show.
+///
+/// The `Error:` line wins when there is one: a join that asks nmcli to
+/// prompt (`--ask`) also has it register a polkit agent, and a session it
+/// cannot register one for gets a `Warning:` line ahead of the real reason.
 #[must_use]
 pub fn summarize_nmcli_error(stderr: &str) -> String {
     let line = stderr
         .lines()
         .map(str::trim)
-        .find(|line| !line.is_empty())
+        .find(|line| line.starts_with("Error:"))
+        .or_else(|| stderr.lines().map(str::trim).find(|line| !line.is_empty()))
         .unwrap_or("connection failed");
     let line = line.strip_prefix("Error:").map_or(line, str::trim);
     line.chars()
@@ -1934,6 +2144,48 @@ mod tests {
         assert_eq!(
             parse_bluetooth_show("No default controller available\n"),
             None
+        );
+    }
+
+    /// `nmcli radio wifi` in pretty mode is translated (`aktiviert`), and the
+    /// detection that reads it is cached for the session, so one translated
+    /// answer cost a localized session nmcli until logout. Every radio query
+    /// asks for the untranslated terse keyword instead. The needle is
+    /// assembled at runtime so this cannot match its own source.
+    #[test]
+    fn the_radio_query_asks_for_the_untranslated_keyword() {
+        assert_eq!(NMCLI_RADIO_QUERY, ["-t", "radio", "wifi"]);
+        assert_eq!(parse_radio("enabled\n"), Some(true));
+        assert_eq!(parse_radio("disabled\n"), Some(false));
+        assert_eq!(
+            parse_radio("aktiviert\n"),
+            None,
+            "a translated answer is unreadable, which is what -t is for"
+        );
+        const SOURCE: &str = include_str!("connectivity.rs");
+        let pretty = format!("&[{:?}, {:?}]", "radio", "wifi");
+        assert!(
+            !SOURCE.contains(&pretty),
+            "a pretty-mode radio query is back ({pretty})"
+        );
+    }
+
+    /// rfkill's `Soft blocked: yes` and `Wireless LAN` lines are translated
+    /// too, and nothing but English is parsed; its queries run under the C
+    /// locale. Checked on the wrapper itself — a shell stands in for rfkill
+    /// and reports the locale it was given — and by pinning that no rfkill
+    /// listing bypasses it.
+    #[test]
+    fn rfkill_is_read_under_the_c_locale() {
+        assert_eq!(
+            run_untranslated("sh", &["-c", "printf '%s' \"$LC_ALL\""]).as_deref(),
+            Some("C")
+        );
+        const SOURCE: &str = include_str!("connectivity.rs");
+        let direct = format!("run({:?}, &[{:?}", "rfkill", "list");
+        assert!(
+            !SOURCE.contains(&direct),
+            "an rfkill listing skips the C locale ({direct})"
         );
     }
 
@@ -2233,6 +2485,145 @@ mod tests {
         assert!(
             guard_at < submit_at,
             "request_radio_set must test for a running flip before starting another"
+        );
+    }
+
+    /// Enter in the picker asks `has_saved_profile` on the frame thread, so
+    /// it must never run nmcli there: `NetworkManager` can take seconds to
+    /// answer mid-scan, and the picker has just started one. It answers from
+    /// the inventory the workers keep, and each worker that shows or changes
+    /// what Enter acts on — the scan, the join, the forget — refreshes it.
+    /// Needles are assembled at runtime; each haystack is one function body.
+    #[test]
+    fn the_saved_profile_check_never_runs_nmcli_on_the_frame_thread() {
+        const SOURCE: &str = include_str!("connectivity.rs");
+        let body = |start: &str, end: &str| -> &'static str {
+            SOURCE
+                .split_once(&format!("fn {start}("))
+                .unwrap_or_else(|| panic!("{start} not found"))
+                .1
+                .split_once(end)
+                .unwrap_or_else(|| panic!("{start} is no longer followed by {end}"))
+                .0
+        };
+        let lookup = body("has_saved_profile", "static SAVED_WIFI_PROFILES");
+        for needle in [
+            format!("{}(", "run"),
+            format!("{}(", "connectivity_output"),
+            format!("{:?}", "nmcli"),
+        ] {
+            assert!(
+                !lookup.contains(&needle),
+                "has_saved_profile runs a command on the frame thread ({needle})"
+            );
+        }
+        let refresh = format!("{}()", "refresh_saved_profiles");
+        for (starter, next) in [
+            ("start_scan", "fn start_connect"),
+            ("start_connect", "fn connect_args"),
+            ("start_forget_profile", "fn start_scan"),
+        ] {
+            let (_, worker) = body(starter, next)
+                .split_once("BackgroundJob::spawn")
+                .unwrap_or_else(|| panic!("{starter} has no worker"));
+            assert!(
+                worker.contains(&refresh),
+                "{starter}'s worker leaves the saved-profile inventory stale"
+            );
+        }
+    }
+
+    #[test]
+    fn the_saved_profile_inventory_matches_names_exactly() {
+        let output = "Home:x\nHome 5G\nWired connection 1\nnet\\:work\n\n";
+        let names = parse_profile_names(output);
+        assert_eq!(names, ["Home", "Home 5G", "Wired connection 1", "net:work"]);
+
+        let inventory = SavedProfileNames::new();
+        assert!(!inventory.contains("Home"), "empty until a worker reads it");
+        inventory.replace(names);
+        assert!(inventory.contains("Home"));
+        assert!(inventory.contains("net:work"));
+        // A prefix is another network's profile.
+        assert!(!inventory.contains("Hom"));
+        assert!(!inventory.contains("Home 5"));
+        inventory.replace(Vec::new());
+        assert!(!inventory.contains("Home"), "a forget is seen at once");
+
+        // A name longer than any SSID can never be asked about, so it is not
+        // kept.
+        let long = "x".repeat(MAX_WIFI_SSID_BYTES + 1);
+        assert!(parse_profile_names(&long).is_empty());
+    }
+
+    /// argv is world-readable (`/proc/<pid>/cmdline`, `ps`) for as long as
+    /// nmcli is associating, so the passphrase must never be in it. A shell
+    /// script stands in for nmcli: it fails if the secret reaches its
+    /// arguments, and succeeds only if the secret arrives as its stdin line.
+    #[test]
+    fn the_passphrase_reaches_nmcli_on_stdin_and_never_in_argv() {
+        const FAKE_NMCLI: &str = r#"
+            for arg in "$@"; do
+                [ "$arg" = hunter22 ] && { echo "Error: the passphrase is in argv" >&2; exit 3; }
+            done
+            [ "$1" = --ask ] || { echo "Error: nmcli was not asked to prompt" >&2; exit 4; }
+            IFS= read -r line || { echo "Error: no passphrase on stdin" >&2; exit 5; }
+            [ "$line" = hunter22 ] || { echo "Error: stdin carried something else" >&2; exit 6; }
+            if IFS= read -r extra; then echo "Error: more than one line" >&2; exit 7; fi
+            exit 0
+        "#;
+        let fake = ["sh", "-c", FAKE_NMCLI, "nmcli"];
+
+        assert_eq!(
+            join_network(&fake, "Home", &ConnectPlan::WithPassphrase, "hunter22"),
+            Ok(())
+        );
+        // The same script catches what the join used to run.
+        let mut leaked = fake[1..].to_vec();
+        leaked.extend(["device", "wifi", "connect", "Home", "password", "hunter22"]);
+        let output = connectivity_output(
+            "sh",
+            &leaked,
+            CONNECTIVITY_ACTION_TIMEOUT,
+            MAX_CONNECTIVITY_OUTPUT_BYTES,
+        )
+        .expect("the fake nmcli runs");
+        assert!(
+            !output.status.success(),
+            "the stand-in detects an argv leak"
+        );
+
+        for plan in [
+            ConnectPlan::UseSaved,
+            ConnectPlan::Open,
+            ConnectPlan::NeedsPassphrase,
+            ConnectPlan::WithPassphrase,
+        ] {
+            let args = connect_args("Home", &plan);
+            assert!(
+                !args.contains(&"password"),
+                "{plan:?} hands nmcli a password argument"
+            );
+            assert_eq!(args.last(), Some(&"Home"), "{plan:?} names the network");
+        }
+    }
+
+    /// nmcli reads the passphrase through readline, where a control character
+    /// is an editing key: a newline would end the answer early and feed the
+    /// rest to whatever nmcli asks next. Such input is refused with a reason,
+    /// before anything runs.
+    #[test]
+    fn a_passphrase_readline_would_rewrite_is_refused() {
+        assert_eq!(check_passphrase("correct horse"), Ok(()));
+        assert!(check_passphrase("").is_err());
+        assert!(check_passphrase("line\nbreak").is_err());
+        assert!(check_passphrase("tab\there").is_err());
+        assert!(check_passphrase(&"x".repeat(MAX_WIFI_PASSPHRASE_BYTES + 1)).is_err());
+        // Nothing is run for a refused passphrase: `false` would fail the join
+        // with nmcli's reason rather than this one.
+        assert_eq!(
+            join_network(&["false"], "Home", &ConnectPlan::WithPassphrase, "a\nb"),
+            Err("the passphrase contains a control character".to_string())
         );
     }
 
@@ -3024,6 +3415,17 @@ mod tests {
         assert!(message.chars().count() <= 72);
 
         assert_eq!(summarize_nmcli_error(""), "connection failed");
+
+        // `--ask` registers a polkit agent; where that fails, nmcli warns
+        // first. The reason the join failed is still the line shown.
+        let stderr = "Warning: polkit agent initialization failed: no session\n\
+                      Error: Connection activation failed: (7) Secrets were required.\n";
+        assert!(summarize_nmcli_error(stderr).starts_with("Connection activation failed"));
+        // With no Error line at all, the first line is still better than none.
+        assert_eq!(
+            summarize_nmcli_error("Warning: something odd\n"),
+            "Warning: something odd"
+        );
     }
 
     #[test]

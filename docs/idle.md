@@ -105,13 +105,20 @@ desktop:
   that somebody is at the keyboard, so the lock stage does not re-arm for 60
   seconds afterwards. Dimming and the screen-off stage are unaffected.
 
+An open shell panel does not hold the lock off. The launcher, the Hub, the
+pickers or the notification center are replaced by the lock card the moment
+it fires, and the panel's own teardown runs (a pending Bluetooth pairing is
+cancelled, the layout picker puts back the layout you started on, a typed
+Wi-Fi passphrase is wiped) rather than being waited out. A screenshot or
+recording-region selector that is up is cancelled the same way, so the lock
+never inherits its grabs.
+
 If a lock cannot be shown, what happens next depends on why, because an
 unattended session that stops asking stays unlocked until somebody touches
 the keyboard:
 
-- **Something that passes on its own** — another panel open, something else
-  holding the pointer grab — is retried every 5 seconds for as long as the
-  session stays idle.
+- **Something that passes on its own** — something else holding the pointer
+  grab — is retried every 5 seconds for as long as the session stays idle.
 - **A refusal the backend could not explain** — it tried to start the
   compositor the lock card draws on and the attempt returned an error, which
   covers a VT switch, DRM master briefly held elsewhere and a momentary
@@ -211,6 +218,11 @@ An `idle/state` event carrying the same payload is broadcast on the `idle`
 topic whenever anything changes, so a status bar can show a caffeine indicator
 without polling.
 
+`locked` means the session lock and nothing else. A monitor that is
+[locked on its own](monitor-lock.md), even one showing its unlock prompt,
+reports `false`, and that prompt does not hold the idle lock off: when the
+lock stage fires, the session lock replaces the prompt.
+
 The three timeouts are the ones the policy will act on, not the numbers in the
 file, so a bar counting down to the lock counts down to the lock that actually
 happens: `lock_secs` reports the 60-second floor when `behavior.idle_lock_secs`
@@ -234,7 +246,16 @@ brightness multiply** after toast / OSD / system UI on both X11 and Wayland.
 Mid-frame postprocess keeps night light / saturation / contrast with
 `u_brightness = 1.0`, so glass backdrops are not double-dimmed.
 
-Wayland screenshots and recording match the dimmed session: dedicated capture
-views bake brightness at encode time, and EncodedOutput screenshot readback
-runs after the final multiply. REC/MIC chips stay local-only (drawn after
+Wayland screenshots and recording match the dimmed session, and are dimmed
+exactly once. On the encoded-sRGB routes the multiply runs on the encoded
+output and screenshot readback happens after it. On the deferred
+scene-linear routes the dim is applied to the linear target before delivery:
+the target is encoded to sRGB, multiplied exactly as on the encoded routes,
+and decoded back, so every output transfer and the capture view derived from
+that target carry the same dim. REC/MIC chips stay local-only (drawn after
 capture).
+
+One consequence on the deferred scene-linear routes: while the screen is
+dimmed, HDR highlights above SDR white are clamped by that encoded round
+trip, just as they are while a postprocess filter (night light, saturation,
+contrast) is active. They come back as soon as the dim lifts.

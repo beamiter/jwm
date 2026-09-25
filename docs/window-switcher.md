@@ -43,6 +43,12 @@ marker on the other heads.
 A window earns a row only when the gesture could actually land on it:
 
 - not [swallowed](../README.md) by its terminal;
+- not shell chrome: a managed dock or panel (`_NET_WM_WINDOW_TYPE_DOCK`,
+  such as polybar or tint2) or a desktop icon layer
+  (`_NET_WM_WINDOW_TYPE_DESKTOP`) never gets a row, just as it gets no tile in
+  the tags overview and no slot in the minimized Dock. Such a window sits on
+  every tag at the tail of the MRU order, which is exactly where
+  `Alt+Shift+Tab` starts, so committing would otherwise focus the bar;
 - sticky, or on one of its monitor's active tags — a scratchpad parked on
   no tag drops out.
 

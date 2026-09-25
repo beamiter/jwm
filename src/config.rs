@@ -242,6 +242,75 @@ fn toml_string_literal(value: &str) -> String {
     out
 }
 
+/// True when `line` is the TOML table header for the dotted table `name`:
+/// `[a.b]`, or `[[a.b]]` when `array` is set.
+///
+/// The surgical config writers find their tables by header, and TOML spells
+/// one header more ways than the literal `[appearance]`: a trailing comment
+/// (`[appearance] # fonts`), whitespace inside the brackets or around the
+/// dots (`[ layout . tags ]`), and quoted keys (`["appearance"]`). Comparing
+/// the literal text missed all of them, and a missed `[appearance]` made the
+/// theme writer append a second table, which TOML rejects. A line that is
+/// not a well-formed header, such as `[1, 2],` inside a multi-line array,
+/// matches nothing.
+fn is_toml_table_header(line: &str, array: bool, name: &[&str]) -> bool {
+    let trimmed = line.trim();
+    let (is_array, body) = match trimmed.strip_prefix("[[") {
+        Some(body) => (true, body),
+        None => match trimmed.strip_prefix('[') {
+            Some(body) => (false, body),
+            None => return false,
+        },
+    };
+    if is_array != array {
+        return false;
+    }
+
+    let mut segments: Vec<String> = Vec::with_capacity(name.len());
+    let mut segment = String::new();
+    let mut chars = body.chars();
+    loop {
+        match chars.next() {
+            None => return false,
+            Some(']') => break,
+            Some('.') => segments.push(std::mem::take(&mut segment)),
+            Some(quote @ ('"' | '\'')) => loop {
+                match chars.next() {
+                    None => return false,
+                    Some(ch) if ch == quote => break,
+                    // An escaped character never closes a basic string. The
+                    // escape is kept undecoded: the names matched here are
+                    // plain identifiers, which nobody spells with escapes.
+                    Some('\\') if quote == '"' => {
+                        segment.push('\\');
+                        match chars.next() {
+                            Some(ch) => segment.push(ch),
+                            None => return false,
+                        }
+                    }
+                    Some(ch) => segment.push(ch),
+                }
+            },
+            // Whitespace is only legal around the key parts, never in a bare
+            // key, so dropping it outside quotes normalizes the spacing.
+            Some(ch) if ch.is_whitespace() => {}
+            Some(ch) => segment.push(ch),
+        }
+    }
+    segments.push(segment);
+
+    let mut rest = chars.as_str();
+    if array {
+        match rest.strip_prefix(']') {
+            Some(after) => rest = after,
+            None => return false,
+        }
+    }
+    let rest = rest.trim_start();
+    (rest.is_empty() || rest.starts_with('#'))
+        && segments.iter().map(String::as_str).eq(name.iter().copied())
+}
+
 fn atomic_write(path: &Path, contents: &[u8]) -> std::io::Result<()> {
     // Preserve symlink-based dotfile setups. Renaming over `path` itself would
     // replace the link; resolving the complete chain lets us atomically
@@ -595,8 +664,9 @@ pub struct BehaviorConfig {
     /// an output, on connectors where VRR can change without a modeset. It is
     /// not asserted on a desktop with no fullscreen window: VRR on a static
     /// screen makes some panels flicker. A cursor over the window does not
-    /// change it — only the content does. `set_vrr_enabled` over IPC latches
-    /// an override that wins over this flag in both directions.
+    /// change it — only the content does. The backend keeps a per-output
+    /// override that would win over this flag in both directions, but no IPC
+    /// command exposes it yet.
     ///
     /// On X11 the X server owns DRM master, so no per-output toggle is
     /// reachable: this flag only feeds the HUD/metrics "VRR active" state there,
@@ -2691,6 +2761,9 @@ impl Config {
             },
             // Floating-window edge snapping: the keyboard form of dropping a
             // dragged window on a monitor edge (left/right halves, maximize).
+            // Up is a real maximize: it fills the work area, publishes the
+            // maximized state, and pressing it again restores the previous
+            // rect. Tiled windows use the bindable `togglemaximize` instead.
             // The corner quarters (top-left, top-right, bottom-left,
             // bottom-right) are bindable but deliberately ship without
             // defaults: corners do not map honestly onto arrow keys.
@@ -3370,6 +3443,7 @@ impl Config {
             "togglesticky" => Some(Jwm::togglesticky),
             "togglescratchpad" => Some(Jwm::togglescratchpad),
             "togglepip" => Some(Jwm::togglepip),
+            "togglemaximize" => Some(Jwm::togglemaximize),
             "togglecompositor" => Some(Jwm::togglecompositor),
             "togglepartialdamage" => Some(Jwm::togglepartialdamage),
             "toggle_debug_hud" => Some(Jwm::toggle_debug_hud),
@@ -3729,8 +3803,51 @@ impl Config {
         };
 
         let text = Self::surgical_set_ui_theme(&existing, normalized);
+        Self::verify_surgical_ui_theme_edit(path, &existing, &text, normalized)?;
         atomic_write(&path, text.as_bytes())?;
         Ok(fs::metadata(&path)?.modified()?)
+    }
+
+    /// Refuse a surgical theme edit that would break a file TOML accepts
+    /// today, or that would not actually set the theme.
+    ///
+    /// The edit works on lines, so a shape it does not model (an inline
+    /// `appearance = { ... }` table, dotted `appearance.*` keys at the top
+    /// level) makes it add a second `appearance` table, which TOML rejects.
+    /// Written out, that file would be marked as JWM's own write and go
+    /// unnoticed until the next reload, restart or login failed to load it,
+    /// so the file is left alone and the caller told instead. A file that is
+    /// already invalid TOML is not made any worse and is written as before.
+    fn verify_surgical_ui_theme_edit(
+        path: &Path,
+        existing: &str,
+        edited: &str,
+        theme: &str,
+    ) -> Result<(), ConfigError> {
+        if toml::from_str::<toml::Table>(existing).is_err() {
+            return Ok(());
+        }
+        let problem = match toml::from_str::<toml::Table>(edited) {
+            Err(error) => error.message().to_owned(),
+            Ok(table) => {
+                let written = table
+                    .get("appearance")
+                    .and_then(|appearance| appearance.get("ui_theme"))
+                    .and_then(toml::Value::as_str);
+                if written == Some(theme) {
+                    return Ok(());
+                }
+                "the key would not land under [appearance]".to_owned()
+            }
+        };
+        Err(ConfigError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "appearance.ui_theme cannot be edited into {} without breaking it \
+                 ({problem}); the file was left unchanged, set the key by hand",
+                path.display()
+            ),
+        )))
     }
 
     /// Replace or insert `ui_theme = "..."` under `[appearance]` in raw TOML
@@ -3755,7 +3872,7 @@ impl Config {
                 }
                 out.push_str(&held_blanks);
                 held_blanks.clear();
-                in_appearance = trimmed == "[appearance]";
+                in_appearance = is_toml_table_header(trimmed, false, &["appearance"]);
                 if in_appearance {
                     appearance_seen = true;
                 }
@@ -3853,8 +3970,45 @@ impl Config {
             text.push('\n');
             text.push_str(&block);
         }
+        Self::verify_surgical_layout_tags_edit(path, &existing, &text)?;
         atomic_write(&path, text.as_bytes())?;
         Ok(fs::metadata(&path)?.modified()?)
+    }
+
+    /// Refuse a per-tag layout edit that would break a file TOML accepts
+    /// today.
+    ///
+    /// The edit cuts and appends `[[layout.tags]]` tables as text, so a
+    /// shape it does not model breaks the document: an inline
+    /// `tags = [{ ... }]` array under `[layout]` plus an appended
+    /// `[[layout.tags]]` table defines the same key twice. Written out, that
+    /// file would be marked as JWM's own write and go unnoticed until the
+    /// next reload, restart or login failed to load it, so the file is left
+    /// alone and the caller told instead (`InvalidData`, which layout
+    /// persistence treats as "do not retry until the layout changes again").
+    /// A file that is already invalid TOML is not made any worse and is
+    /// written as before.
+    fn verify_surgical_layout_tags_edit(
+        path: &Path,
+        existing: &str,
+        edited: &str,
+    ) -> Result<(), ConfigError> {
+        if toml::from_str::<toml::Table>(existing).is_err() {
+            return Ok(());
+        }
+        let Err(error) = toml::from_str::<toml::Table>(edited) else {
+            return Ok(());
+        };
+        Err(ConfigError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "per-tag layouts cannot be saved into {} without breaking it ({}); \
+                 the file was left unchanged, move [layout] tags into \
+                 [[layout.tags]] tables to let JWM save them",
+                path.display(),
+                error.message()
+            ),
+        )))
     }
 
     /// Remove every `[[layout.tags]]` table from a config file's text, along
@@ -3872,7 +4026,7 @@ impl Config {
             if Self::LAYOUT_TAGS_HEADER.contains(&trimmed) {
                 continue;
             }
-            if trimmed == "[[layout.tags]]" {
+            if is_toml_table_header(trimmed, true, &["layout", "tags"]) {
                 in_block = true;
                 continue;
             }
@@ -4506,7 +4660,7 @@ mod tests {
         ConfigDiagnosticLevel, ConfigError, GestureSwipeConfig, KeyConfig, LayoutTagConfig,
         MAX_CONFIG_FILE_BYTES, MAX_CURSOR_SIZE, MAX_N_MASTER, Mods, NewClientPosition, Ordering,
         STATUS_BAR_NAME, TomlConfig, WallpaperMonitorConfig, WallpaperTagConfig,
-        configured_scratchpad_terminal, configured_terminal_execution_prefix,
+        configured_scratchpad_terminal, configured_terminal_execution_prefix, is_toml_table_header,
         key_function_is_repeatable, migrate_legacy_terminal_argument, parse_terminal_override,
         resolve_cursor_size, scene_linear_render_path_requested, x11_compositor_override,
     };
@@ -4835,6 +4989,26 @@ mod tests {
             key.arg,
             crate::jwm::WMArgEnum::StringVec(vec!["top-left".to_string()])
         );
+    }
+
+    #[test]
+    fn togglemaximize_is_bindable() {
+        let config = Config::default();
+        assert!(config.parse_function("togglemaximize").is_some());
+
+        let key = config
+            .convert_key_config(&KeyConfig {
+                modifier: vec!["Mod1".into()],
+                key: "x".into(),
+                function: "togglemaximize".into(),
+                argument: ArgumentConfig::Int(0),
+            })
+            .expect("togglemaximize binding should convert");
+        assert_eq!(key.mask, Mods::ALT);
+        assert!(key.func_opt.is_some_and(|func| std::ptr::fn_addr_eq(
+            func,
+            super::Jwm::togglemaximize as super::WMFuncType
+        )));
     }
 
     #[test]
@@ -5295,6 +5469,53 @@ border_px = 3
         std::fs::remove_file(path).unwrap();
     }
 
+    /// An inline `tags = [...]` array under `[layout]` is a shape the text
+    /// edit does not model: appending `[[layout.tags]]` would define the key
+    /// twice and leave a config that no longer loads. The file must be left
+    /// byte for byte alone and the refusal reported as `InvalidData`.
+    #[test]
+    fn a_layout_edit_that_would_break_the_file_is_refused() {
+        let path = temporary_config_path("layout-tags-inline");
+        let handwritten = "\
+[layout]
+m_fact = 0.55
+tags = [{ tag = 4, monitor = -1, layout = \"grid\" }]
+";
+        std::fs::write(&path, handwritten).unwrap();
+        assert!(toml::from_str::<toml::Table>(handwritten).is_ok());
+
+        let error = Config::default()
+            .persist_layout_tags_to(&path, &[layout_tag(1, 0, "deck")])
+            .expect_err("the edit would break a valid file");
+        match &error {
+            ConfigError::Io(io) => {
+                assert_eq!(io.kind(), std::io::ErrorKind::InvalidData, "{error}");
+            }
+            other => panic!("expected an InvalidData refusal, got {other}"),
+        }
+        assert!(error.to_string().contains("left unchanged"), "{error}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), handwritten);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    /// A file that is already broken is not made any worse by the edit, so
+    /// the refusal does not apply: the save goes through as before.
+    #[test]
+    fn an_already_invalid_file_still_gets_its_layout_block() {
+        let path = temporary_config_path("layout-tags-invalid");
+        let broken = "[layout]\nm_fact = \n";
+        std::fs::write(&path, broken).unwrap();
+        assert!(toml::from_str::<toml::Table>(broken).is_err());
+
+        Config::default()
+            .persist_layout_tags_to(&path, &[layout_tag(1, 0, "deck")])
+            .unwrap();
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(written.starts_with(broken), "{written}");
+        assert!(written.contains("[[layout.tags]]"), "{written}");
+        std::fs::remove_file(path).unwrap();
+    }
+
     #[test]
     fn a_missing_config_file_is_written_whole() {
         let path = temporary_config_path("layout-tags-missing");
@@ -5429,6 +5650,200 @@ ui_theme = \"glass\"
             .unwrap();
 
         assert_eq!(Config::load_from_file(&path).unwrap().ui_theme(), "paper");
+        std::fs::remove_file(path).unwrap();
+    }
+
+    /// A header is found by its table name, not by its exact spelling.
+    #[test]
+    fn toml_table_headers_match_by_name_not_spelling() {
+        for header in [
+            "[appearance]",
+            "  [appearance]  ",
+            "[appearance] # fonts and theme",
+            "[appearance]#tight",
+            "[ appearance ]",
+            "[\"appearance\"]",
+            "['appearance'] # literal key",
+        ] {
+            assert!(
+                is_toml_table_header(header, false, &["appearance"]),
+                "{header}"
+            );
+        }
+        for not_it in [
+            "[appearance.fonts]",
+            "[[appearance]]",
+            "[appearance] trailing",
+            "[appearance",
+            "[\"appearance]",
+            "[1, 2],",
+            "# [appearance]",
+            "appearance = { border_px = 3 }",
+        ] {
+            assert!(
+                !is_toml_table_header(not_it, false, &["appearance"]),
+                "{not_it}"
+            );
+        }
+
+        for header in [
+            "[[layout.tags]]",
+            "[[layout.tags]] # saved by hand",
+            "[[ layout . tags ]]",
+            "[[layout.\"tags\"]]",
+        ] {
+            assert!(
+                is_toml_table_header(header, true, &["layout", "tags"]),
+                "{header}"
+            );
+        }
+        for not_it in ["[layout.tags]", "[[layout.tags]", "[[layout.tags.extra]]"] {
+            assert!(
+                !is_toml_table_header(not_it, true, &["layout", "tags"]),
+                "{not_it}"
+            );
+        }
+    }
+
+    /// Regression: `[appearance] # comment` is a valid header the theme
+    /// writer used to miss, appending a second `[appearance]` table that TOML
+    /// rejects, so the next restart or login could not load the config.
+    #[test]
+    fn persisting_ui_theme_under_a_commented_appearance_header_keeps_the_config_loadable() {
+        let path = temporary_config_path("ui-theme-commented-header");
+        Config::default().save_to_file(&path).unwrap();
+        let generated = std::fs::read_to_string(&path).unwrap();
+        let mut replaced = 0;
+        let mut commented = String::with_capacity(generated.len() + 32);
+        for line in generated.lines() {
+            if line == "[appearance]" {
+                commented.push_str("[appearance] # fonts and theme");
+                replaced += 1;
+            } else {
+                commented.push_str(line);
+            }
+            commented.push('\n');
+        }
+        assert_eq!(replaced, 1, "{generated}");
+        std::fs::write(&path, &commented).unwrap();
+
+        Config::default()
+            .persist_ui_theme_to(&path, "nord")
+            .unwrap();
+        let written = std::fs::read_to_string(&path).unwrap();
+
+        assert!(
+            written.contains("[appearance] # fonts and theme\n"),
+            "{written}"
+        );
+        assert!(!written.contains("\n[appearance]\n"), "{written}");
+        assert_eq!(written.matches("ui_theme = ").count(), 1, "{written}");
+        let loaded = Config::load_from_file(&path).expect("config still loads");
+        assert_eq!(loaded.ui_theme(), "nord");
+        std::fs::remove_file(path).unwrap();
+    }
+
+    /// Spaced and quoted spellings of the header are the same table too.
+    #[test]
+    fn persisting_ui_theme_under_spaced_or_quoted_headers_edits_in_place() {
+        for header in ["[ appearance ]", "[\"appearance\"]"] {
+            let path = temporary_config_path("ui-theme-spelled-header");
+            std::fs::write(
+                &path,
+                format!(
+                    "{header}\nborder_px = 3\nui_theme = \"paper\"\n\n[behavior]\nwallpaper_mode = \"fill\"\n"
+                ),
+            )
+            .unwrap();
+
+            Config::default()
+                .persist_ui_theme_to(&path, "nord")
+                .unwrap();
+            let written = std::fs::read_to_string(&path).unwrap();
+
+            assert_eq!(
+                written,
+                format!(
+                    "{header}\nborder_px = 3\nui_theme = \"nord\"\n\n[behavior]\nwallpaper_mode = \"fill\"\n"
+                ),
+                "{header}"
+            );
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+
+    /// An inline `appearance = { ... }` table is a shape the line editor
+    /// cannot extend; adding a `[appearance]` table beside it would make the
+    /// file unloadable, so the write is refused and the file left alone.
+    #[test]
+    fn a_theme_edit_that_would_break_the_file_is_refused() {
+        let path = temporary_config_path("ui-theme-inline-table");
+        let handwritten = "\
+appearance = { border_px = 3 }
+
+[behavior]
+wallpaper_mode = \"fill\"
+";
+        std::fs::write(&path, handwritten).unwrap();
+
+        let error = Config::default()
+            .persist_ui_theme_to(&path, "nord")
+            .expect_err("an edit that breaks the file must be refused");
+        assert!(error.to_string().contains("left unchanged"), "{error}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), handwritten);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    /// A file that is already invalid TOML is not made worse by the edit, so
+    /// the refusal above must not stop it from being written.
+    #[test]
+    fn a_theme_edit_to_an_already_invalid_file_still_writes() {
+        let path = temporary_config_path("ui-theme-already-invalid");
+        std::fs::write(&path, "[appearance]\nborder_px = \n").unwrap();
+
+        Config::default()
+            .persist_ui_theme_to(&path, "nord")
+            .unwrap();
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            written.contains("[appearance]\nborder_px = \nui_theme = \"nord\"\n"),
+            "{written}"
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+
+    /// Regression: a commented `[[layout.tags]]` header was not recognized,
+    /// so the block it opened survived every save and its entries were
+    /// duplicated by the freshly written block.
+    #[test]
+    fn a_commented_layout_tags_header_is_replaced_not_duplicated() {
+        let path = temporary_config_path("layout-tags-commented-header");
+        std::fs::write(
+            &path,
+            "\
+[layout]
+n_master = 1
+
+[[layout.tags]] # tuned by hand
+tag = 4
+monitor = -1
+layout = \"grid\"
+
+[appearance]
+border_px = 3
+",
+        )
+        .unwrap();
+
+        Config::default()
+            .persist_layout_tags_to(&path, &[layout_tag(1, 0, "deck")])
+            .unwrap();
+        let written = std::fs::read_to_string(&path).unwrap();
+
+        assert!(!written.contains("tag = 4"), "{written}");
+        assert!(!written.contains("# tuned by hand"), "{written}");
+        assert!(written.contains("[appearance]\nborder_px = 3"), "{written}");
+        assert_eq!(written.matches("[[layout.tags]]").count(), 1, "{written}");
         std::fs::remove_file(path).unwrap();
     }
 

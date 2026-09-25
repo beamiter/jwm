@@ -466,7 +466,9 @@ impl Jwm {
         }
     }
 
-    /// Apply common child-process isolation: `setsid()` + restore `SIGCHLD` default.
+    /// Apply common child-process isolation: `setsid()`, restore the
+    /// `SIGCHLD` default disposition and unblock `SIGCHLD`
+    /// ([`crate::external_command::unblock_sigchld_in_child`]).
     pub(super) fn apply_child_pre_exec(command: &mut Command) {
         use std::os::unix::process::CommandExt;
         unsafe {
@@ -480,6 +482,8 @@ impl Jwm {
                 Ok(())
             });
         }
+        // Registered after the hook above, so it runs after it.
+        crate::external_command::unblock_sigchld_in_child(command);
     }
 
     pub(crate) fn spawn(
@@ -616,7 +620,65 @@ impl Jwm {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::external_command::test_support::{
+        SigchldBlockedOnThisThread, status_blocks_sigchld,
+    };
     use std::process::Stdio;
+
+    /// `cat <path>` prepared by `prepare` and spawned from a thread that
+    /// blocks SIGCHLD the way the event loop does; its stdout. `cat` is
+    /// exec'd straight from the pre-exec child, so `/proc/self` is it.
+    fn cat_from_a_sigchld_blocking_thread(path: &str, prepare: fn(&mut Command)) -> String {
+        let _blocked = SigchldBlockedOnThisThread::new();
+
+        let mut command = Command::new("cat");
+        command.arg(path).stdin(Stdio::null());
+        prepare(&mut command);
+        let output = command.output().expect("run cat");
+        assert!(output.status.success());
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    }
+
+    /// Regression: std inherits the forking thread's signal mask into the
+    /// child, and the event loop runs with SIGCHLD blocked, so every app JWM
+    /// launched started with SIGCHLD blocked. The shared pre-exec unblocks
+    /// it.
+    #[test]
+    fn launched_children_start_with_sigchld_unblocked() {
+        let status =
+            cat_from_a_sigchld_blocking_thread("/proc/self/status", Jwm::apply_child_pre_exec);
+        assert!(
+            !status_blocks_sigchld(&status),
+            "the launched child still blocks SIGCHLD:\n{status}"
+        );
+    }
+
+    /// The mask-only hook the status bar, session, idle and helper spawns
+    /// share: SIGCHLD unblocked, but the child stays in JWM's session (no
+    /// `setsid`), which those spawns rely on.
+    #[test]
+    fn sigchld_unblock_alone_keeps_the_session() {
+        let status = cat_from_a_sigchld_blocking_thread(
+            "/proc/self/status",
+            crate::external_command::unblock_sigchld_in_child,
+        );
+        assert!(
+            !status_blocks_sigchld(&status),
+            "the child still blocks SIGCHLD:\n{status}"
+        );
+
+        // `/proc/<pid>/stat`: "pid (comm) state ppid pgrp session ...".
+        let stat = cat_from_a_sigchld_blocking_thread(
+            "/proc/self/stat",
+            crate::external_command::unblock_sigchld_in_child,
+        );
+        let child_session: i32 = stat
+            .rsplit_once(')')
+            .and_then(|(_, fields)| fields.split_whitespace().nth(3))
+            .and_then(|field| field.parse().ok())
+            .expect("a session field");
+        assert_eq!(child_session, unsafe { libc::getsid(0) });
+    }
 
     #[test]
     fn child_stderr_log_never_blocks_on_a_fifo_or_follows_a_symlink() {

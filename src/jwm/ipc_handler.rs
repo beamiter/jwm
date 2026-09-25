@@ -13,6 +13,7 @@ use crate::ipc::{
     RuntimeFeatureStates, RuntimeHealth, RuntimeStatusV1, TreeNode, WindowInfo, WorkspaceInfo,
 };
 use crate::ipc_server::IncomingIpc;
+use crate::jwm::features::recording::RecordingFileIdentity;
 
 fn runtime_health(
     config_status: &serde_json::Value,
@@ -111,14 +112,67 @@ fn client_window_info(client: &WMClient, monitor: i32, is_focused: bool) -> Wind
         is_urgent: client.state.is_urgent,
         is_sticky: client.state.is_sticky,
         is_pip: client.state.is_pip,
+        is_maximized: client.state.is_maximized_vert && client.state.is_maximized_horz,
+        is_maximized_vert: client.state.is_maximized_vert,
+        is_maximized_horz: client.state.is_maximized_horz,
         is_minimized: client.state.is_hidden,
         is_focused,
     }
 }
 
-fn recording_file_is_valid(path: &str) -> bool {
-    std::fs::metadata(path).is_ok_and(|metadata| metadata.len() > 0)
-        && crate::jwm::features::external_command::status_with_timeout(
+/// Whether the finished recording at `path` is playable, as `probe` judges it.
+///
+/// The probe blocks the event thread, and only success is cached in
+/// `RecordingState::finalized`. A file it rejected is therefore remembered in
+/// `rejected` (`RecordingState::rejected_probe`) and not probed again until
+/// its identity changes: a recorder killed mid-write leaves an MP4 with no
+/// moov atom that would otherwise fork ffprobe on every status poll until the
+/// next recording starts. The finalization worker's flush, `+faststart`
+/// rewrite or move still changes the identity, and that earns a fresh probe.
+///
+/// `probe` answers `Some(verdict)` when the prober judged the file and `None`
+/// when it never finished (it timed out, or could not be started for a
+/// transient reason). Only a verdict is remembered: once finalized, the file
+/// never changes again, so caching a probe that merely ran out of time would
+/// keep `finalized` false for good.
+fn recording_output_is_valid(
+    path: &str,
+    rejected: &mut Option<RecordingFileIdentity>,
+    probe: impl FnOnce(&str) -> Option<bool>,
+) -> bool {
+    let Some(before) = RecordingFileIdentity::of(path) else {
+        return false;
+    };
+    if rejected.as_ref() == Some(&before) {
+        return false;
+    }
+    let verdict = probe(path);
+    // Remember a rejection only for bytes that held still across the probe:
+    // a file still being written may have failed on a half-written tail. And
+    // without an mtime, an in-place rewrite of the same length is invisible.
+    *rejected = (verdict == Some(false)
+        && before.has_modified_time()
+        && RecordingFileIdentity::of(path).as_ref() == Some(&before))
+    .then_some(before);
+    verdict == Some(true)
+}
+
+/// The verdict of one ffprobe run: `Some` when ffprobe judged the file, or
+/// when it is not installed (a missing binary would only fail the same way on
+/// every poll, and the next recording clears the rejection anyway); `None`
+/// when it timed out or failed to start for any other reason, so the next
+/// poll asks again.
+fn ffprobe_verdict(result: std::io::Result<std::process::ExitStatus>) -> Option<bool> {
+    match result {
+        Ok(status) => Some(status.success()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(false),
+        Err(_) => None,
+    }
+}
+
+fn recording_file_is_valid(path: &str, rejected: &mut Option<RecordingFileIdentity>) -> bool {
+    recording_output_is_valid(path, rejected, |path| {
+        let result = crate::jwm::features::external_command::status_with_timeout(
             "ffprobe",
             &[
                 "-v",
@@ -132,8 +186,9 @@ fn recording_file_is_valid(path: &str) -> bool {
                 path,
             ],
             std::time::Duration::from_secs(5),
-        )
-        .is_ok_and(|status| status.success())
+        );
+        ffprobe_verdict(result)
+    })
 }
 
 fn env_flag(name: &str) -> bool {
@@ -1484,6 +1539,82 @@ fn recommended_scrolling_swipes(
         .collect()
 }
 
+/// Whether the cached control-center list fully answers `set_power_profile`
+/// for `profile`, or a fresh read of the driver's list is worth starting.
+///
+/// That read is `powerprofilesctl list` on most hosts: a Python D-Bus client,
+/// so it only ever runs on the control-center worker. A cached list that
+/// offers the name answers even when stale, because a driver's profile set
+/// does not change at runtime and the worker's re-read after the switch
+/// confirms what took. A fresh list answers a rejection too. A stale one that
+/// lacks the name — or no list at all — starts a worker read, so the retry
+/// the rejection asks for names what the driver offers now.
+fn cached_power_profiles_answer(
+    cached: Option<&[String]>,
+    cached_is_fresh: bool,
+    profile: &str,
+) -> bool {
+    cached.is_some_and(|available| cached_is_fresh || available.iter().any(|name| name == profile))
+}
+
+/// The subscribe acknowledgement: the topics no event can match, what the
+/// server stored, and what its bounds dropped and why. The ack used to carry
+/// no data (`data: null`); every field here (`unknown_topics`, `subscribed`,
+/// `dropped`, `dropped_total`) is new and additive, so a client that ignored
+/// `data` is unaffected.
+fn subscribe_ack(
+    unknown: &[String],
+    outcome: &crate::ipc_server::SubscriptionOutcome,
+) -> serde_json::Value {
+    let dropped: Vec<serde_json::Value> = outcome
+        .dropped
+        .iter()
+        .map(|dropped| {
+            serde_json::json!({
+                "topic": dropped.topic,
+                "reason": dropped.reason.as_str(),
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "unknown_topics": unknown,
+        "subscribed": outcome.subscribed,
+        "dropped": dropped,
+        "dropped_total": outcome.dropped_total,
+    })
+}
+
+/// The most unknown topics one subscribe acknowledgement names. A typo
+/// report needs only a few; the cap keeps a request carrying thousands of
+/// junk topics from being echoed back in full.
+const MAX_REPORTED_UNKNOWN_TOPICS: usize = 16;
+
+/// The subscription topics that no registered event family can ever match.
+///
+/// A subscription matches `*`, an exact event name, or any event under
+/// `topic/`, and every event is named `<family>/...` after one of
+/// `IPC_REGISTRY.subscription_topics`. So a topic whose first `/` segment is
+/// not a registered family (`windows` rather than `window`) never delivers
+/// anything. Topics are trimmed the way the server stores them; empty ones
+/// are skipped because the server drops them and there is nothing to name.
+fn unknown_subscription_topics(topics: &[String]) -> Vec<String> {
+    let families = ipc::IPC_REGISTRY.subscription_topics;
+    let mut unknown: Vec<String> = Vec::new();
+    for topic in topics {
+        let topic = topic.trim();
+        let family = topic.split('/').next().unwrap_or(topic);
+        let known = topic == "*" || (family != "*" && families.contains(&family));
+        if topic.is_empty() || known || unknown.iter().any(|seen| seen == topic) {
+            continue;
+        }
+        unknown.push(topic.to_string());
+        if unknown.len() == MAX_REPORTED_UNKNOWN_TOPICS {
+            break;
+        }
+    }
+    unknown
+}
+
 impl Jwm {
     pub(crate) fn process_ipc(&mut self, backend: &mut dyn Backend) {
         let ipc = match self.ipc_server.as_mut() {
@@ -1518,8 +1649,29 @@ impl Jwm {
                 }
                 IncomingIpc::Subscribe { client_id, topics } => {
                     if let Some(ipc) = self.ipc_server.as_mut() {
-                        ipc.subscribe(client_id, topics);
-                        ipc.respond(client_id, &IpcResponse::ok(None));
+                        // The subscription is stored as asked, within the
+                        // server's bounds; the ack names the topics no event
+                        // can ever match, so a typo such as `windows` is not
+                        // a silent success that never delivers anything, and
+                        // what the bounds dropped, so truncation is not
+                        // silent either.
+                        let unknown = unknown_subscription_topics(&topics);
+                        if !unknown.is_empty() {
+                            log::warn!(
+                                "[ipc] client {client_id} subscribed to unknown topics {unknown:?}"
+                            );
+                        }
+                        let outcome = ipc.subscribe(client_id, topics);
+                        if outcome.dropped_total > 0 {
+                            log::warn!(
+                                "[ipc] client {client_id}: {} subscription topic(s) not stored",
+                                outcome.dropped_total
+                            );
+                        }
+                        ipc.respond(
+                            client_id,
+                            &IpcResponse::ok(Some(subscribe_ack(&unknown, &outcome))),
+                        );
                     }
                 }
             }
@@ -1860,10 +2012,20 @@ impl Jwm {
         // Special command: clipboard_copy — put a history entry back on the
         // clipboard by index, the same thing the picker's Enter does.
         if name == "clipboard_copy" {
-            let index = args
-                .get("index")
-                .and_then(|value| value.as_u64())
-                .unwrap_or(0) as usize;
+            // Only an absent index means the newest entry. A string, negative
+            // or fractional index is a caller mistake that would otherwise put
+            // the newest entry back on the clipboard and report success.
+            let index = match args.get("index") {
+                None => 0,
+                Some(value) => match value.as_u64().and_then(|index| usize::try_from(index).ok()) {
+                    Some(index) => index,
+                    None => {
+                        return IpcResponse::err(
+                            "clipboard_copy: 'index' must be a non-negative integer",
+                        );
+                    }
+                },
+            };
             let Some(entry) = self.features.clipboard.get(index).cloned() else {
                 return IpcResponse::err(format!("clipboard_copy: no entry at index {index}"));
             };
@@ -1982,6 +2144,15 @@ impl Jwm {
         }
 
         // Special command: set_power_profile — switch the platform profile.
+        //
+        // Reply semantics: queued, like `set_mic_mute` and `set_audio_device`.
+        // The name is validated against the cached list only — reading the
+        // driver's list, the set and its verifying re-read are each a
+        // `powerprofilesctl` run, and those run on the controls worker, never
+        // on the event thread this reply is built on. The ack comes with the
+        // optimistic row and card; the worker's re-read then publishes
+        // `power/profile` with the profile really in effect and corrects a
+        // live card whose switch did not take.
         if name == "set_power_profile" {
             let Some(profile) = args.get("profile").and_then(|value| value.as_str()) else {
                 return IpcResponse::err("set_power_profile: expected string field 'profile'");
@@ -1992,17 +2163,30 @@ impl Jwm {
                     self.features.control_snapshot_refreshed_at,
                     now,
                 );
-            let profiles = cached_is_fresh
-                .then(|| {
-                    self.features
-                        .control_snapshot
-                        .as_ref()
-                        .and_then(|snapshot| snapshot.power_profiles.clone())
-                })
-                .flatten()
-                .or_else(crate::jwm::features::power::profiles);
-            let Some((available, _)) = profiles else {
-                return IpcResponse::err("this machine has no power profile control");
+            let cached = self
+                .features
+                .control_snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.power_profiles.clone());
+            let cache_answers = cached_power_profiles_answer(
+                cached.as_ref().map(|(available, _)| available.as_slice()),
+                cached_is_fresh,
+                profile,
+            );
+            if !cache_answers {
+                // What a synchronous read used to answer here, a worker read
+                // answers for the retry: at most one runs, coalesced with the
+                // control center's own.
+                self.ensure_control_snapshot_refresh(now);
+            }
+            let Some((available, _)) = cached else {
+                if self.features.control_snapshot_refreshed_at.is_some() {
+                    return IpcResponse::err("this machine has no power profile control");
+                }
+                return IpcResponse::err(
+                    "set_power_profile: the power profiles have not been read yet; \
+                     they are being read now, try again shortly",
+                );
             };
             if !available.iter().any(|name| name == profile) {
                 return IpcResponse::err(format!(
@@ -2010,25 +2194,18 @@ impl Jwm {
                     available.join(", ")
                 ));
             }
-            if !crate::jwm::features::power::set_profile(profile) {
-                return IpcResponse::err(format!("could not switch to power profile {profile:?}"));
-            }
-            let (available, active) = crate::jwm::features::power::profiles()
-                .unwrap_or_else(|| (available, profile.to_string()));
-            self.cache_control_power_profiles(available, active.clone());
-            self.refresh_open_control_center();
-            self.broadcast_ipc_event("power/profile", serde_json::json!({ "active": active }));
-            if active != profile {
+            if self
+                .queue_power_profile_request(available, profile.to_string())
+                .is_none()
+            {
                 return IpcResponse::err(format!(
-                    "power profile stayed on {active:?} after requesting {profile:?}"
+                    "could not switch to power profile {profile:?}: the controls worker is not running"
                 ));
             }
+            self.refresh_open_control_center();
             // Same labeled card the Hub Left/Right path raises, so a bar or
-            // script that flips the profile gets the same confirmation.
-            backend.compositor_show_osd(
-                crate::backend::api::OsdKind::PowerProfile(active),
-                0,
-            );
+            // script that flips the profile gets the same acknowledgement.
+            self.show_power_profile_osd(backend, profile.to_string());
             return IpcResponse::ok(None);
         }
 
@@ -2228,8 +2405,15 @@ impl Jwm {
             };
         }
 
+        // Reply semantics: confirmed. Unlike the key toggle, this stop waits
+        // for the recorder to finalize its file (the direct recorder's header
+        // rewrite, or ffmpeg's bounded stop grace), so a successful reply
+        // means the file is complete. A recording the key already stopped
+        // and that is still finalizing counts as active here: this call is
+        // the one that collects it.
         if name == "stop_audio_recording" {
-            let was_active = self.features.audio_recording.active;
+            let was_active = self.features.audio_recording.active
+                || self.features.audio_recording.is_finalizing();
             let output_path = self.features.audio_recording.output_path.clone();
             return match self.stop_audio_recording(backend) {
                 Ok(()) => IpcResponse::ok(Some(serde_json::json!({
@@ -2368,10 +2552,16 @@ impl Jwm {
                 // deadline), and `stop` deliberately keeps `output_path` so the
                 // bar can still report where the recording went. Probe only
                 // while the answer can still change: never during recording,
-                // and never again once the file has passed.
+                // never again once the file has passed, and not again for a
+                // rejected file until it changes on disk.
                 let finalized = !active
                     && (self.features.recording.finalized
-                        || output_path.as_deref().is_some_and(recording_file_is_valid));
+                        || output_path.as_deref().is_some_and(|path| {
+                            recording_file_is_valid(
+                                path,
+                                &mut self.features.recording.rejected_probe,
+                            )
+                        }));
                 self.features.recording.finalized = finalized;
                 let should_broadcast = finalized && !self.features.recording.finalization_reported;
                 if should_broadcast {
@@ -2432,6 +2622,9 @@ impl Jwm {
                 });
                 IpcResponse::ok(Some(serde_json::json!({
                     "active": recording.active,
+                    // A key-stopped recording still writing its file: the
+                    // microphone is released, the output is not complete yet.
+                    "finalizing": recording.is_finalizing(),
                     "output_path": recording.output_path,
                     "output_exists": output_exists,
                     "elapsed_ms": u64::try_from(recording.elapsed().as_millis()).unwrap_or(u64::MAX),
@@ -2972,10 +3165,21 @@ impl Jwm {
                 return IpcResponse::err("set_hdr_metadata: missing 'output' string".to_string());
             }
         };
-        let enabled = args
-            .get("enabled")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true);
+        // Only an absent field means "turn it on". A present value that is
+        // not a JSON boolean ("false", 0, null) is a caller mistake; reading
+        // it as `true` would latch HDR signalling, the opposite of what a
+        // script that wrote `"false"` asked for, and report success.
+        let enabled = match args.get("enabled") {
+            None => true,
+            Some(value) => match value.as_bool() {
+                Some(enabled) => enabled,
+                None => {
+                    return IpcResponse::err(
+                        "set_hdr_metadata: 'enabled' must be a boolean".to_string(),
+                    );
+                }
+            },
+        };
         let output_id = match backend
             .output_ops()
             .enumerate_outputs()
@@ -3618,12 +3822,16 @@ impl Jwm {
     }
 
     pub(crate) fn query_tree(&self) -> Vec<TreeNode> {
+        // `is_focused` means the one window with input focus, exactly as
+        // `get_windows` reports it. Each monitor's own selection would mark
+        // one window per monitor, and a script looking for "the focused
+        // window" in the tree would pick the wrong one.
+        let sel_client = self.get_selected_client_key();
         self.state
             .monitor_order
             .iter()
             .filter_map(|&mk| {
                 let m = self.state.monitors.get(mk)?;
-                let sel_client = m.sel;
                 let windows: Vec<WindowInfo> = self
                     .state
                     .monitor_clients
@@ -3670,13 +3878,15 @@ impl Jwm {
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_COMMAND_BATCH_ENTRIES, MAX_CONFIG_BATCH_CHANGES, client_window_info,
-        color_managed_surface_json, color_session_policy_json, color_surface_summary_json,
+        MAX_COMMAND_BATCH_ENTRIES, MAX_CONFIG_BATCH_CHANGES, MAX_REPORTED_UNKNOWN_TOPICS,
+        cached_power_profiles_answer, client_window_info, color_managed_surface_json,
+        color_session_policy_json, color_surface_summary_json, ffprobe_verdict,
         fullscreen_screenshot_submission_response, optional_protocol_enabled_from_flags,
         output_color_policy_json, parse_benchmark_request, parse_command_batch_entries,
         parse_config_batch_changes, parse_optional_u32_ipc_arg, parse_required_i32_ipc_arg,
-        presented_with_hdr, render_decisions_json, resolved_client_monitor_num, runtime_health,
-        tagged_client_count, workspace_layout_state,
+        presented_with_hdr, recording_output_is_valid, render_decisions_json,
+        resolved_client_monitor_num, runtime_health, tagged_client_count,
+        unknown_subscription_topics, workspace_layout_state,
     };
 
     /// A backend with no HDR signalling gate of its own reports no per-output
@@ -5333,6 +5543,14 @@ mod tests {
         color_allocator: DummyColorAllocator,
         /// Every OSD card the WM asked for, in order.
         osd: Vec<(OsdKind, u8)>,
+        /// Every text the WM put on the clipboard, in order.
+        clipboard: Vec<String>,
+        /// Every HDR metadata request, in order.
+        hdr: Vec<(OutputId, bool)>,
+        /// Every MIC chip push, in order.
+        mic_indicator: Vec<bool>,
+        /// Every toast the WM pushed, in order.
+        toasts: Vec<crate::backend::api::ToastNotification>,
     }
 
     impl PairingIpcBackend {
@@ -5346,22 +5564,50 @@ mod tests {
                 cursor_provider: DummyCursorProvider,
                 color_allocator: DummyColorAllocator,
                 osd: Vec::new(),
+                clipboard: Vec::new(),
+                hdr: Vec::new(),
+                mic_indicator: Vec::new(),
+                toasts: Vec::new(),
             }
+        }
+
+        fn toast_titles(&self) -> Vec<&str> {
+            self.toasts
+                .iter()
+                .map(|toast| toast.title.as_str())
+                .collect()
         }
     }
 
     impl CompositorBenchmark for PairingIpcBackend {}
     impl BackendDiagnostics for PairingIpcBackend {}
     impl CompositorControl for PairingIpcBackend {}
-    impl CompositorMedia for PairingIpcBackend {}
+    impl CompositorMedia for PairingIpcBackend {
+        fn compositor_set_mic_indicator(&mut self, active: bool) {
+            self.mic_indicator.push(active);
+        }
+    }
     impl CompositorWorkspaceEffects for PairingIpcBackend {
         fn compositor_show_osd(&mut self, kind: OsdKind, percent: u8) {
             self.osd.push((kind, percent));
         }
+
+        fn compositor_push_toast(&mut self, toast: crate::backend::api::ToastNotification) {
+            self.toasts.push(toast);
+        }
     }
     impl CompositorWindowEffects for PairingIpcBackend {}
     impl CompositorAnnotation for PairingIpcBackend {}
-    impl DisplayControl for PairingIpcBackend {}
+    impl DisplayControl for PairingIpcBackend {
+        fn set_hdr_metadata(
+            &mut self,
+            output: OutputId,
+            enabled: bool,
+        ) -> Result<(), BackendError> {
+            self.hdr.push((output, enabled));
+            Ok(())
+        }
+    }
     impl RenderScheduler for PairingIpcBackend {}
 
     impl Backend for PairingIpcBackend {
@@ -5415,6 +5661,11 @@ mod tests {
 
         fn run(&mut self, _handler: &mut dyn EventHandler) -> Result<(), BackendError> {
             Ok(())
+        }
+
+        fn set_clipboard_text(&mut self, text: &str) -> bool {
+            self.clipboard.push(text.to_string());
+            true
         }
     }
 
@@ -5663,8 +5914,11 @@ mod tests {
 
     /// A successful `set_power_profile` must raise the same labeled OSD the
     /// Hub Left/Right cycle does — a silent IPC switch left the card for
-    /// keybindings only. Failure paths stay quiet; the haystack is the arm
-    /// alone so this pin cannot match its own source.
+    /// keybindings only. The switch is queued on the controls worker like
+    /// `set_mic_mute`: `powerprofilesctl` (a Python D-Bus client) must never
+    /// run on the event thread an IPC call is answered on, and the card is
+    /// the queued acknowledgement the worker's re-read later corrects. The
+    /// haystack is the arm alone so this pin cannot match its own source.
     #[test]
     fn set_power_profile_raises_the_osd_on_success() {
         const SOURCE: &str = include_str!("ipc_handler.rs");
@@ -5675,25 +5929,27 @@ mod tests {
             .split_once(&format!("if name == \"{}\"", "media_control"))
             .expect("the command handled after set_power_profile")
             .0;
-        assert!(
-            arm.contains("OsdKind::PowerProfile"),
-            "set_power_profile no longer raises a Power Profile OSD"
-        );
-        assert!(
-            arm.contains(&format!("{}(", "compositor_show_osd")),
-            "set_power_profile no longer calls compositor_show_osd"
-        );
-        // The card is the success acknowledgement — it must sit after the
-        // post-switch identity check, not before a rejected flip.
+        for blocking in ["set_profile", "profiles"] {
+            let needle = format!("power::{blocking}(");
+            assert!(
+                !arm.contains(&needle),
+                "set_power_profile regained a blocking tool call: {needle}"
+            );
+        }
+        let queue = arm
+            .find(&format!(".{}(", "queue_power_profile_request"))
+            .expect("set_power_profile no longer queues on the controls worker");
         let show = arm
-            .find("OsdKind::PowerProfile")
-            .expect("PowerProfile OSD construction");
+            .find(&format!("self.{}(", "show_power_profile_osd"))
+            .expect("set_power_profile no longer raises a Power Profile OSD");
+        // The card is the acknowledgement of a queued switch — it must sit
+        // after the name check and the queueing, never before a rejection.
         let reject = arm
-            .find("power profile stayed on")
-            .expect("the post-switch reject");
+            .find("unknown power profile")
+            .expect("the unknown-name rejection");
         assert!(
-            show > reject,
-            "the OSD must not fire when the profile stayed put"
+            reject < queue && queue < show,
+            "the OSD must only follow a validated, queued switch"
         );
     }
 
@@ -5799,6 +6055,710 @@ mod tests {
         assert!(
             poll.contains("snapshot.mic_muted = None"),
             "revert-to-unread must clear without inventing an audio/mic bool"
+        );
+    }
+
+    /// Only an absent `enabled` means "on". A value that is present but not
+    /// a JSON boolean used to read as `true`, so a script that sent
+    /// `"false"` or `0` to turn HDR off latched it on and got a success.
+    #[test]
+    fn set_hdr_metadata_rejects_a_non_boolean_enabled() {
+        let mut backend = PairingIpcBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+
+        for enabled in [
+            serde_json::json!("false"),
+            serde_json::json!(0),
+            serde_json::Value::Null,
+        ] {
+            let args = serde_json::json!({"output": "Virtual-1", "enabled": enabled});
+            let response = jwm.handle_ipc_command(&mut backend, "set_hdr_metadata", &args);
+            assert!(!response.success, "accepted {args}");
+            assert_eq!(
+                response.error.as_deref(),
+                Some("set_hdr_metadata: 'enabled' must be a boolean"),
+                "{args}"
+            );
+        }
+        assert!(
+            backend.hdr.is_empty(),
+            "a malformed frame reached the backend"
+        );
+
+        for (args, expected) in [
+            (serde_json::json!({"output": "Virtual-1"}), true),
+            (
+                serde_json::json!({"output": "Virtual-1", "enabled": false}),
+                false,
+            ),
+        ] {
+            let response = jwm.handle_ipc_command(&mut backend, "set_hdr_metadata", &args);
+            assert!(response.success, "{args}: {response:?}");
+            assert_eq!(
+                response.data.as_ref().and_then(|data| data.get("enabled")),
+                Some(&serde_json::Value::Bool(expected)),
+                "{args}"
+            );
+        }
+        assert_eq!(
+            backend.hdr,
+            vec![(OutputId(0), true), (OutputId(0), false)],
+            "an absent field still means on, and a real false turns it off"
+        );
+    }
+
+    /// Only an absent `index` means the newest entry. A string, negative or
+    /// fractional index used to fall back to entry 0, put the newest entry
+    /// back on the clipboard and report success.
+    #[test]
+    fn clipboard_copy_rejects_a_malformed_index() {
+        let mut backend = PairingIpcBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        for (captured_unix_ms, text) in [(1, "oldest"), (2, "middle"), (3, "newest")] {
+            assert!(jwm.features.clipboard.record(text, captured_unix_ms));
+        }
+
+        for index in [
+            serde_json::json!("1"),
+            serde_json::json!(-1),
+            serde_json::json!(1.5),
+            serde_json::Value::Null,
+        ] {
+            let args = serde_json::json!({ "index": index });
+            let response = jwm.handle_ipc_command(&mut backend, "clipboard_copy", &args);
+            assert!(!response.success, "accepted {args}");
+            assert_eq!(
+                response.error.as_deref(),
+                Some("clipboard_copy: 'index' must be a non-negative integer"),
+                "{args}"
+            );
+        }
+        assert!(
+            backend.clipboard.is_empty(),
+            "a malformed index put an entry on the clipboard"
+        );
+
+        // No index first: re-recording the newest entry keeps the order, so
+        // the real index that follows still names the entry it did before.
+        let response =
+            jwm.handle_ipc_command(&mut backend, "clipboard_copy", &serde_json::json!({}));
+        assert!(response.success, "{response:?}");
+        let response = jwm.handle_ipc_command(
+            &mut backend,
+            "clipboard_copy",
+            &serde_json::json!({"index": 2}),
+        );
+        assert!(response.success, "{response:?}");
+        assert_eq!(
+            backend.clipboard,
+            vec!["newest".to_string(), "oldest".to_string()],
+            "no index copies the newest entry, and a real index copies that entry"
+        );
+    }
+
+    /// `get_tree` and `get_windows` fill the same `is_focused` field, so they
+    /// must agree: one focused window, the selected monitor's selection. Each
+    /// monitor's own selection used to count, marking one window per monitor.
+    #[test]
+    fn get_tree_marks_only_the_focused_window_like_get_windows() {
+        let mut backend = PairingIpcBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        jwm.state = WMState::new();
+        let mut monitors = Vec::new();
+        let mut clients = Vec::new();
+        for (num, raw_window) in [(0, 0x10), (1, 0x20)] {
+            let mut monitor = WMMonitor::new();
+            monitor.num = num;
+            let monitor_key = jwm.state.monitors.insert(monitor);
+            let mut client = WMClient::new(WindowId::from_raw(raw_window));
+            client.mon = Some(monitor_key);
+            let client_key = jwm.state.clients.insert(client);
+            // Every monitor keeps a selection of its own; only one of them
+            // is where input goes.
+            if let Some(monitor) = jwm.state.monitors.get_mut(monitor_key) {
+                monitor.sel = Some(client_key);
+            }
+            jwm.state.monitor_order.push(monitor_key);
+            jwm.state.client_order.push(client_key);
+            jwm.state
+                .monitor_clients
+                .insert(monitor_key, vec![client_key]);
+            monitors.push(monitor_key);
+            clients.push(client_key);
+        }
+        jwm.state.sel_mon = Some(monitors[1]);
+
+        let focused_in_tree: Vec<u64> = jwm
+            .query_tree()
+            .iter()
+            .flat_map(|node| node.windows.iter())
+            .filter(|window| window.is_focused)
+            .map(|window| window.id)
+            .collect();
+        let focused_in_windows: Vec<u64> = jwm
+            .query_windows()
+            .iter()
+            .filter(|window| window.is_focused)
+            .map(|window| window.id)
+            .collect();
+
+        assert_eq!(
+            focused_in_tree,
+            vec![0x20],
+            "one focused window in the tree"
+        );
+        assert_eq!(focused_in_tree, focused_in_windows);
+    }
+
+    /// A per-test scratch directory, so parallel tests never share a path.
+    fn scratch_dir(name: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "jwm-ipc-handler-{name}-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&path).unwrap();
+        path
+    }
+
+    /// The probe blocks the event thread, and only success used to be
+    /// cached, so a recording left without its moov atom forked ffprobe on
+    /// every status poll until the next recording. A rejected file is probed
+    /// again only once it changes on disk.
+    #[test]
+    fn a_rejected_recording_is_not_probed_again_until_it_changes() {
+        let scratch = scratch_dir("recording-probe");
+        let path = scratch.join("broken.mp4");
+        let path_text = path.to_str().unwrap();
+        let probes = std::cell::Cell::new(0_u32);
+        let reject = |_: &str| {
+            probes.set(probes.get() + 1);
+            Some(false)
+        };
+        let accept = |_: &str| {
+            probes.set(probes.get() + 1);
+            Some(true)
+        };
+        // The slot lives on the recorder state (`rejected_probe`), which a
+        // new recording clears.
+        let mut rejected = None;
+
+        assert!(
+            !recording_output_is_valid(path_text, &mut rejected, reject),
+            "missing file"
+        );
+        std::fs::write(&path, b"").unwrap();
+        assert!(
+            !recording_output_is_valid(path_text, &mut rejected, reject),
+            "empty file"
+        );
+        assert_eq!(probes.get(), 0, "a missing or empty file is never probed");
+
+        std::fs::write(&path, [0_u8; 16]).unwrap();
+        assert!(!recording_output_is_valid(path_text, &mut rejected, reject));
+        assert!(!recording_output_is_valid(path_text, &mut rejected, reject));
+        assert!(!recording_output_is_valid(path_text, &mut rejected, accept));
+        assert_eq!(
+            probes.get(),
+            1,
+            "an unchanged rejected file was probed again"
+        );
+
+        // The finalization worker's flush grows the file: that earns a probe.
+        let mut grown = std::fs::read(&path).unwrap();
+        grown.extend_from_slice(b"moov");
+        std::fs::write(&path, grown).unwrap();
+        assert!(recording_output_is_valid(path_text, &mut rejected, accept));
+        assert_eq!(probes.get(), 2, "a changed file was not probed again");
+        assert!(rejected.is_none(), "a passing file clears the rejection");
+
+        std::fs::remove_dir_all(&scratch).unwrap();
+    }
+
+    /// A probe that never finished (ffprobe timed out under heavy I/O, or
+    /// fork failed) judged nothing, yet it used to be cached as a rejection.
+    /// A finalized file never changes again, so that recording stayed
+    /// `finalized: false` and `recording/finalized` never fired. Only a real
+    /// verdict is remembered now; the next poll probes again.
+    #[test]
+    fn an_unfinished_recording_probe_is_retried_on_the_next_poll() {
+        let scratch = scratch_dir("recording-probe-timeout");
+        let path = scratch.join("finished.mp4");
+        let path_text = path.to_str().unwrap();
+        std::fs::write(&path, [0_u8; 16]).unwrap();
+        let probes = std::cell::Cell::new(0_u32);
+        let timed_out = |_: &str| {
+            probes.set(probes.get() + 1);
+            None
+        };
+        let accept = |_: &str| {
+            probes.set(probes.get() + 1);
+            Some(true)
+        };
+        let mut rejected = None;
+
+        assert!(!recording_output_is_valid(
+            path_text,
+            &mut rejected,
+            timed_out
+        ));
+        assert!(rejected.is_none(), "an unfinished probe was cached");
+        assert!(recording_output_is_valid(path_text, &mut rejected, accept));
+        assert_eq!(probes.get(), 2, "the unchanged file was not probed again");
+
+        std::fs::remove_dir_all(&scratch).unwrap();
+    }
+
+    /// ffprobe's own answer is a verdict, and so is a missing binary (it
+    /// would fail the same way on every poll). A timeout or any other start
+    /// failure judged nothing.
+    #[test]
+    fn ffprobe_verdict_separates_a_verdict_from_a_probe_that_never_finished() {
+        use std::os::unix::process::ExitStatusExt;
+
+        assert_eq!(
+            ffprobe_verdict(Ok(std::process::ExitStatus::from_raw(0))),
+            Some(true)
+        );
+        assert_eq!(
+            ffprobe_verdict(Ok(std::process::ExitStatus::from_raw(1 << 8))),
+            Some(false)
+        );
+        assert_eq!(
+            ffprobe_verdict(Err(std::io::ErrorKind::NotFound.into())),
+            Some(false)
+        );
+        assert_eq!(
+            ffprobe_verdict(Err(std::io::ErrorKind::TimedOut.into())),
+            None
+        );
+        assert_eq!(
+            ffprobe_verdict(Err(std::io::ErrorKind::WouldBlock.into())),
+            None
+        );
+    }
+
+    /// A topic whose first segment is no registered event family never
+    /// delivers anything, yet the ack used to be a bare success. The ack now
+    /// names those topics; registered families, full event names and `*`
+    /// are never reported.
+    #[test]
+    fn unknown_subscription_topics_names_only_topics_no_event_can_match() {
+        let topics = |names: &[&str]| {
+            names
+                .iter()
+                .map(|name| name.to_string())
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            unknown_subscription_topics(&topics(&[
+                "window",
+                " tag ",
+                "*",
+                "bluetooth/pairing_response",
+                "media/status",
+                "",
+            ])),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            unknown_subscription_topics(&topics(&[
+                "windows",
+                "tag",
+                "tags",
+                " windows ",
+                "*/window",
+                "Window",
+            ])),
+            topics(&["windows", "tags", "*/window", "Window"]),
+            "typos are named once each, trimmed like the stored topic"
+        );
+
+        let junk: Vec<String> = (0..MAX_REPORTED_UNKNOWN_TOPICS * 4)
+            .map(|index| format!("junk-{index}"))
+            .collect();
+        assert_eq!(
+            unknown_subscription_topics(&junk).len(),
+            MAX_REPORTED_UNKNOWN_TOPICS,
+            "the report is bounded"
+        );
+    }
+
+    /// A key stop no longer joins the recorder on the event thread: the MIC
+    /// chip clears at once, and the stopped toast waits for the frame tick
+    /// to see the file finalized.
+    #[test]
+    fn a_key_stopped_recording_is_reported_once_its_file_is_finalized() {
+        use std::sync::atomic::Ordering;
+
+        let mut backend = PairingIpcBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let (release, finalize) = std::sync::mpsc::channel::<()>();
+        jwm.features.audio_recording =
+            crate::jwm::features::audio_recording::AudioRecordingState::recording_for_test(
+                "/tmp/jwm-key-stop.wav",
+                move |stop| {
+                    // Stands in for the header rewrite still running after the
+                    // stop; the bound only keeps a regression from hanging.
+                    let _ = finalize.recv_timeout(std::time::Duration::from_secs(30));
+                    if stop.load(Ordering::Acquire) {
+                        Ok(())
+                    } else {
+                        Err("finalized without being asked to stop".into())
+                    }
+                },
+            );
+
+        jwm.toggle_audio_recording(&mut backend, &crate::jwm::types::WMArgEnum::Int(0))
+            .expect("the key stop");
+
+        assert!(!jwm.features.audio_recording.active);
+        assert!(jwm.features.audio_recording.is_finalizing());
+        assert_eq!(
+            backend.mic_indicator,
+            vec![false],
+            "the chip clears at once"
+        );
+        assert!(
+            backend.toasts.is_empty(),
+            "nothing to report before the file is done"
+        );
+        jwm.poll_audio_recording(&mut backend);
+        assert!(
+            backend.toasts.is_empty(),
+            "the tick never waits on the recorder"
+        );
+
+        release.send(()).unwrap();
+        while jwm.features.audio_recording.is_finalizing() {
+            jwm.poll_audio_recording(&mut backend);
+            std::thread::yield_now();
+        }
+        assert_eq!(
+            backend.toast_titles(),
+            vec!["\u{f130}  Audio recording stopped"]
+        );
+        assert_eq!(backend.toasts[0].body, "/tmp/jwm-key-stop.wav");
+    }
+
+    /// A recorder that ended on its own (a USB microphone unplugged) used to
+    /// leave the MIC chip up and idle inhibited until the next keypress; the
+    /// frame tick stops it and says why.
+    #[test]
+    fn the_tick_stops_a_recorder_that_died_on_its_own() {
+        let mut backend = PairingIpcBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        jwm.features.audio_recording =
+            crate::jwm::features::audio_recording::AudioRecordingState::recording_for_test(
+                "/tmp/jwm-died.wav",
+                |_stop| Err("audio capture failed: No such device".into()),
+            );
+
+        while jwm.features.audio_recording.active {
+            jwm.poll_audio_recording(&mut backend);
+            std::thread::yield_now();
+        }
+
+        assert_eq!(backend.mic_indicator, vec![false]);
+        assert_eq!(
+            backend.toast_titles(),
+            vec!["\u{f130}  Audio recording failed"]
+        );
+        assert_eq!(backend.toasts[0].urgency, 2, "through do-not-disturb");
+        assert_eq!(
+            backend.toasts[0].body,
+            "audio capture failed: No such device"
+        );
+        jwm.poll_audio_recording(&mut backend);
+        assert_eq!(backend.toasts.len(), 1, "reported once");
+    }
+
+    /// IPC `stop_audio_recording` still confirms finalization, including for
+    /// a recording the key stopped a moment earlier.
+    #[test]
+    fn the_ipc_stop_collects_a_recording_the_key_left_finalizing() {
+        let mut backend = PairingIpcBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        jwm.features.audio_recording =
+            crate::jwm::features::audio_recording::AudioRecordingState::recording_for_test(
+                "/tmp/jwm-ipc-stop.wav",
+                |_stop| Ok(()),
+            );
+        jwm.begin_stopping_audio_recording(&mut backend)
+            .expect("the key stop");
+
+        let response =
+            jwm.handle_ipc_command(&mut backend, "stop_audio_recording", &serde_json::json!({}));
+
+        assert!(response.success, "{response:?}");
+        assert_eq!(
+            response
+                .data
+                .as_ref()
+                .and_then(|data| data.get("was_active")),
+            Some(&serde_json::Value::Bool(true))
+        );
+        assert!(!jwm.features.audio_recording.is_finalizing());
+        assert_eq!(
+            backend.toast_titles(),
+            vec!["\u{f130}  Audio recording stopped"]
+        );
+    }
+
+    /// The subscribe ack, which used to carry no data, names the unknown
+    /// topics, what the server stored, and what its bounds dropped, with the
+    /// reason — a truncated subscription used to be invisible to the client.
+    #[test]
+    fn the_subscribe_ack_names_what_was_stored_and_what_was_dropped() {
+        use crate::ipc_server::{DroppedTopic, DroppedTopicReason, SubscriptionOutcome};
+
+        let outcome = SubscriptionOutcome {
+            subscribed: vec!["window".into(), "windows".into()],
+            dropped: vec![DroppedTopic {
+                topic: "window".into(),
+                reason: DroppedTopicReason::Duplicate,
+            }],
+            dropped_total: 1,
+        };
+
+        let ack = super::subscribe_ack(&["windows".to_string()], &outcome);
+
+        assert_eq!(
+            ack,
+            serde_json::json!({
+                "unknown_topics": ["windows"],
+                "subscribed": ["window", "windows"],
+                "dropped": [{"topic": "window", "reason": "duplicate"}],
+                "dropped_total": 1,
+            })
+        );
+    }
+
+    /// `set_power_profile` used to read the driver's list whenever the
+    /// control snapshot was older than its two-second window, which is almost
+    /// every scripted call: one more `powerprofilesctl` start-up on the event
+    /// thread before the set. A cached list that offers the name now answers
+    /// even when stale; only a fresh list may reject a name.
+    #[test]
+    fn cached_power_profiles_answer_a_listed_name_even_when_stale() {
+        let listed = ["power-saver".to_string(), "balanced".to_string()];
+
+        assert!(cached_power_profiles_answer(
+            Some(&listed),
+            false,
+            "balanced"
+        ));
+        assert!(cached_power_profiles_answer(
+            Some(&listed),
+            true,
+            "balanced"
+        ));
+        assert!(
+            cached_power_profiles_answer(Some(&listed), true, "performance"),
+            "a fresh list rejects without another read"
+        );
+        assert!(
+            !cached_power_profiles_answer(Some(&listed), false, "performance"),
+            "a stale list that lacks the name is read again before rejecting"
+        );
+        assert!(!cached_power_profiles_answer(None, true, "balanced"));
+        assert!(!cached_power_profiles_answer(None, false, "balanced"));
+
+        // The arm consults the cache, and what the cache cannot answer is
+        // read by the control-center worker for the retry — never inline.
+        const SOURCE: &str = include_str!("ipc_handler.rs");
+        let arm = SOURCE
+            .split_once(&format!("if name == \"{}\"", "set_power_profile"))
+            .expect("set_power_profile handler")
+            .1
+            .split_once(&format!("if name == \"{}\"", "media_control"))
+            .expect("the command handled after set_power_profile")
+            .0;
+        let consult = arm
+            .find(&format!("{}(", "cached_power_profiles_answer"))
+            .expect("set_power_profile no longer consults the cached list");
+        let read = arm
+            .find(&format!("self.{}(", "ensure_control_snapshot_refresh"))
+            .expect("the worker read of the driver's list");
+        assert!(
+            consult < read,
+            "the worker read is started before the cache"
+        );
+        assert!(
+            !arm.contains(&format!("power::{}()", "profiles")),
+            "set_power_profile reads the driver's list on the event thread again"
+        );
+    }
+
+    fn power_profile_test_jwm(
+        backend: &mut PairingIpcBackend,
+        profiles: Option<(&str, &[&str])>,
+    ) -> Jwm {
+        let mut jwm = Jwm::new_with_runtime_backend(backend, "test").unwrap();
+        // A freshly read snapshot: nothing in these tests may start a real
+        // `powerprofilesctl` or audio-tool read on the test host.
+        jwm.features.control_snapshot_job = None;
+        jwm.features.control_snapshot_refreshed_at = Some(std::time::Instant::now());
+        jwm.features.control_snapshot = profiles.map(|(active, available)| {
+            crate::jwm::features::system_controls::ControlCenterSnapshot {
+                power_profiles: Some((
+                    available.iter().map(|name| name.to_string()).collect(),
+                    active.to_string(),
+                )),
+                ..Default::default()
+            }
+        });
+        jwm
+    }
+
+    fn cached_power_profile(jwm: &Jwm) -> Option<String> {
+        jwm.features
+            .control_snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.power_profiles.as_ref())
+            .map(|(_, active)| active.clone())
+    }
+
+    const TEST_PROFILES: &[&str] = &["power-saver", "balanced", "performance"];
+
+    #[test]
+    fn set_power_profile_queues_the_switch_and_draws_it() {
+        use crate::jwm::features::system_controls::{ControlRequest, TestControlQueueGuard};
+
+        let mut backend = PairingIpcBackend::new();
+        let mut jwm = power_profile_test_jwm(&mut backend, Some(("balanced", TEST_PROFILES)));
+        let control_queue = TestControlQueueGuard::install();
+
+        let response = jwm.handle_ipc_command(
+            &mut backend,
+            "set_power_profile",
+            &serde_json::json!({"profile": "performance"}),
+        );
+
+        assert!(response.success, "{response:?}");
+        assert_eq!(
+            control_queue.requests(),
+            vec![ControlRequest::PowerProfileSet("performance".into())],
+            "the set runs on the controls worker, not on this thread"
+        );
+        assert_eq!(cached_power_profile(&jwm).as_deref(), Some("performance"));
+        assert_eq!(
+            backend.osd.as_slice(),
+            &[(OsdKind::PowerProfile("performance".into()), 0)]
+        );
+
+        // A name the driver does not offer is still refused with the list,
+        // and nothing is queued or drawn for it.
+        let response = jwm.handle_ipc_command(
+            &mut backend,
+            "set_power_profile",
+            &serde_json::json!({"profile": "turbo"}),
+        );
+        assert!(!response.success);
+        let error = response.error.unwrap_or_default();
+        assert!(
+            error.contains("unknown power profile") && error.contains("balanced"),
+            "{error}"
+        );
+        assert_eq!(control_queue.requests().len(), 1);
+        assert_eq!(backend.osd.len(), 1);
+    }
+
+    #[test]
+    fn set_power_profile_answers_honestly_before_the_first_read() {
+        use crate::jwm::features::system_controls::TestControlQueueGuard;
+
+        let mut backend = PairingIpcBackend::new();
+        let mut jwm = power_profile_test_jwm(&mut backend, None);
+        jwm.features.control_snapshot_refreshed_at = None;
+        // A read "in flight" that never lands keeps the arm's refresh from
+        // starting a real one on the test host.
+        jwm.features.control_snapshot_job =
+            Some(crate::jwm::features::connectivity::BackgroundJob::refused());
+        let control_queue = TestControlQueueGuard::install();
+
+        let response = jwm.handle_ipc_command(
+            &mut backend,
+            "set_power_profile",
+            &serde_json::json!({"profile": "balanced"}),
+        );
+        assert!(!response.success);
+        let error = response.error.unwrap_or_default();
+        assert!(error.contains("not been read yet"), "{error}");
+
+        // Once a read has landed and found no profile control, that is the
+        // answer, as before.
+        jwm.features.control_snapshot_refreshed_at = Some(std::time::Instant::now());
+        let response = jwm.handle_ipc_command(
+            &mut backend,
+            "set_power_profile",
+            &serde_json::json!({"profile": "balanced"}),
+        );
+        assert!(!response.success);
+        assert_eq!(
+            response.error.as_deref(),
+            Some("this machine has no power profile control")
+        );
+        assert!(control_queue.requests().is_empty());
+        assert!(backend.osd.is_empty());
+    }
+
+    #[test]
+    fn the_worker_readback_decides_what_the_power_profile_row_and_card_show() {
+        use crate::jwm::features::system_controls::{PowerProfileReport, TestControlQueueGuard};
+
+        let mut backend = PairingIpcBackend::new();
+        let mut jwm = power_profile_test_jwm(&mut backend, Some(("balanced", TEST_PROFILES)));
+        let _control_queue = TestControlQueueGuard::install();
+        for profile in ["performance", "power-saver"] {
+            let response = jwm.handle_ipc_command(
+                &mut backend,
+                "set_power_profile",
+                &serde_json::json!({ "profile": profile }),
+            );
+            assert!(response.success, "{response:?}");
+        }
+        let list = || {
+            TEST_PROFILES
+                .iter()
+                .map(|name| name.to_string())
+                .collect::<Vec<_>>()
+        };
+
+        // The first switch's answer arrives while the second is queued: it
+        // must not roll the row back from the newer pick.
+        jwm.adopt_power_profile_report(
+            &PowerProfileReport {
+                seq: 1,
+                asked: "performance".into(),
+                asked_ok: true,
+                profiles: Some((list(), "performance".into())),
+            },
+            std::time::Instant::now(),
+        );
+        assert_eq!(cached_power_profile(&jwm).as_deref(), Some("power-saver"));
+
+        // The covering answer says the driver kept `balanced`: the row and
+        // the still-live card follow the re-read, not the request.
+        jwm.adopt_power_profile_report(
+            &PowerProfileReport {
+                seq: 2,
+                asked: "power-saver".into(),
+                asked_ok: true,
+                profiles: Some((list(), "balanced".into())),
+            },
+            std::time::Instant::now(),
+        );
+        assert_eq!(cached_power_profile(&jwm).as_deref(), Some("balanced"));
+        jwm.flush_system_ui(&mut backend);
+        assert_eq!(
+            backend.osd.last(),
+            Some(&(OsdKind::PowerProfile("balanced".into()), 0)),
+            "the card is refreshed with the profile really in effect"
         );
     }
 }

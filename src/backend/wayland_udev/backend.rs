@@ -14,9 +14,9 @@ use crate::backend::api::{
     Backend, BackendDiagnostics, BackendEvent, Capabilities, ColorAllocator, CompositorAnnotation,
     CompositorBenchmark, CompositorControl, CompositorMedia, CompositorRect,
     CompositorWindowEffects, CompositorWorkspaceEffects, CursorProvider, DisplayControl,
-    EventHandler, ExposeNavDirection, HitTarget, InputOps, KeyOps, NetWmState, OutputInfo,
-    OutputOps, PropertyOps, RenderScheduler, ResizeEdge, ScreenInfo, SystemUiOverlay, WindowOps,
-    WindowType,
+    EventHandler, ExposeNavDirection, HitTarget, InputOps, KeyOps, MaximizeAxes, NetWmState,
+    OutputInfo, OutputOps, PropertyOps, RenderScheduler, ResizeEdge, ScreenInfo, SystemUiOverlay,
+    WindowOps, WindowType,
 };
 use crate::backend::common_define::{KeySym, Mods, OutputId, StdCursorKind, WindowId};
 use crate::backend::error::{BackendContextExt, BackendError, ErrorBoundary};
@@ -397,7 +397,12 @@ struct SharedState {
 
     repeat: Option<RepeatState>,
     repeat_generation: u64,
+    /// Every connected head, with the geometry KMS scans it out at.
     outputs: Vec<OutputInfo>,
+    /// Names in `outputs` soft-disabled through wlr-output-management, as
+    /// last published to policy. They stay in `outputs` (their identity and
+    /// position seed the next KMS rebuild) but are not a monitor to policy.
+    disabled_outputs: HashSet<String>,
     output_key_to_id: HashMap<u64, OutputId>,
     next_output_raw: u64,
     device_paths: HashMap<u64, PathBuf>,
@@ -439,6 +444,7 @@ impl Default for SharedState {
             repeat: None,
             repeat_generation: 0,
             outputs: Vec::new(),
+            disabled_outputs: HashSet::new(),
             output_key_to_id: HashMap::new(),
             next_output_raw: 0,
             device_paths: HashMap::new(),
@@ -582,16 +588,25 @@ struct UdevOutputOps {
     shared: Arc<Mutex<SharedState>>,
 }
 
+impl SharedState {
+    /// The outputs policy manages: every head except the soft-disabled ones.
+    fn enabled_outputs(&self) -> impl Iterator<Item = &OutputInfo> {
+        self.outputs
+            .iter()
+            .filter(|output| !self.disabled_outputs.contains(&output.name))
+    }
+}
+
 impl OutputOps for UdevOutputOps {
     fn enumerate_outputs(&self) -> Vec<OutputInfo> {
-        self.shared.lock_safe().outputs.clone()
+        self.shared.lock_safe().enabled_outputs().cloned().collect()
     }
 
     fn screen_info(&self) -> ScreenInfo {
         let shared = self.shared.lock_safe();
         let mut w = 0i32;
         let mut h = 0i32;
-        for o in &shared.outputs {
+        for o in shared.enabled_outputs() {
             w = w.max(o.x + o.width);
             h = h.max(o.y + o.height);
         }
@@ -610,8 +625,7 @@ impl OutputOps for UdevOutputOps {
     fn output_at(&self, x: i32, y: i32) -> Option<OutputId> {
         let shared = self.shared.lock_safe();
         shared
-            .outputs
-            .iter()
+            .enabled_outputs()
             .find(|o| x >= o.x && y >= o.y && x < (o.x + o.width) && y < (o.y + o.height))
             .map(|o| o.id)
     }
@@ -752,12 +766,11 @@ impl WindowOps for WaylandWindowOps {
                             JwmWaylandState::set_toplevel_tiled_state(s, true);
                         }
                     });
-                    if toplevel.is_initial_configure_sent() {
-                        toplevel.send_pending_configure();
-                    } else {
-                        toplevel.send_configure();
-                    }
                 }
+                // Sends only real changes once the initial configure is out,
+                // but always pays a set/unset_maximized reply owed to the
+                // client, together with any state policy staged for it.
+                state.send_toplevel_configure(win, false);
                 if let Some(x11) = state.x11_surfaces.get(&win) {
                     let bw = border as i32;
                     let _ = x11.configure(Some(smithay::utils::Rectangle::new(
@@ -1016,13 +1029,16 @@ impl PropertyOps for WaylandPropertyOps {
         on: bool,
     ) -> Result<(), BackendError> {
         unsafe {
-            self.with_state_mut(|wayland_state| wayland_state.set_x11_net_state(win, state, on))?
+            self.with_state_mut(|wayland_state| wayland_state.set_window_net_state(win, state, on))?
         };
-        unsafe {
-            self.with_state_mut(|wayland_state| {
-                wayland_state.update_foreign_toplevel_net_state(win, state, on);
-            });
-        }
+        self.request_flush();
+        Ok(())
+    }
+
+    fn set_maximized_state(&self, win: WindowId, axes: MaximizeAxes) -> Result<(), BackendError> {
+        // Stages xdg state without sending; the configure policy issues next
+        // delivers it together with the maximized size.
+        unsafe { self.with_state_mut(|s| s.set_window_maximized(win, axes))? };
         self.request_flush();
         Ok(())
     }
@@ -1124,7 +1140,7 @@ impl PropertyOps for WaylandPropertyOps {
     }
 
     fn has_net_wm_state_flag(&self, win: WindowId, flag: NetWmState) -> Result<bool, BackendError> {
-        Ok(unsafe { self.with_state_mut(|state| state.has_x11_net_state(win, flag)) })
+        Ok(unsafe { self.with_state_mut(|state| state.has_window_net_state(win, flag)) })
     }
 
     fn set_wm_state(&self, win: WindowId, state: i64) -> Result<(), BackendError> {
@@ -1356,6 +1372,14 @@ pub struct UdevBackend {
     last_inactive_session_log: Option<Instant>,
     output_management_tx_seq: u64,
     last_output_management_tx: Option<crate::backend::api::OutputManagementTransactionStatus>,
+    /// Backoff for a KMS rebuild that failed, and the timer re-queueing it.
+    kms_reinit_retry: KmsReinitRetry,
+    kms_reinit_retry_timer: Option<smithay::reexports::calloop::RegistrationToken>,
+    /// Device fds of replaced KMS states. The session opened them, and only
+    /// `Session::close` returns them to libseat (seatd's reference, logind's
+    /// taken device); that needs sole ownership, so each waits here until its
+    /// last DRM/GBM/EGL user is gone.
+    retired_kms_devices: Vec<smithay::utils::DeviceFd>,
 
     // Reusable per-frame scratch buffers (cleared+refilled each frame) to avoid
     // heap allocations in compositor_render_frame.
@@ -1691,18 +1715,66 @@ impl UdevBackend {
             if let Some(token) = old.borrow_mut().registration_token.take() {
                 let _ = self.event_loop.handle().remove(token);
             }
+            let device = old.borrow().drm_device_fd.device_fd();
+            self.retired_kms_devices.push(device);
+        }
+    }
+
+    /// Return every replaced KMS device nobody holds any more to the seat.
+    fn release_retired_kms_devices(&mut self) {
+        if self.retired_kms_devices.is_empty() {
+            return;
+        }
+        let session = &mut self.session;
+        let released = release_unshared_device_fds(&mut self.retired_kms_devices, |fd| {
+            if let Err(error) = session.close(fd) {
+                log::warn!("[udev] failed to return a replaced DRM device to the seat: {error}");
+            }
+        });
+        if released > 0 {
+            log::debug!("[udev] returned {released} replaced DRM device(s) to the seat");
+        }
+    }
+
+    fn schedule_kms_reinit_retry(&mut self, delay: Duration) {
+        let shared = self.shared.clone();
+        match self.event_loop.handle().insert_source(
+            Timer::from_duration(delay),
+            move |_, _, _state| {
+                queue_kms_reinit(&shared);
+                TimeoutAction::Drop
+            },
+        ) {
+            Ok(token) => self.kms_reinit_retry_timer = Some(token),
+            Err(error) => {
+                log::warn!("[udev] failed to arm the KMS re-init retry: {error}");
+            }
         }
     }
 
     fn sync_wayland_state_from_kms(&mut self, resize_compositor: bool) {
+        let previous_outputs = std::mem::take(&mut self.state.outputs);
         let Some(kms) = self.kms.as_ref() else {
-            self.state.outputs.clear();
             self.state.gamma_sizes.clear();
+            self.state.refresh_output_dependent_state();
+            if stop_capture_sessions_of_departed_outputs(&previous_outputs, &self.state.outputs) {
+                self.request_flush();
+            }
             return;
         };
 
         self.state.outputs = kms.borrow().outputs();
         self.state.gamma_sizes = kms.borrow_mut().gamma_sizes().into_iter().collect();
+        // Gamma controls of a replaced or resized output learn it now, lock
+        // surfaces follow a changed output size, and a pending session lock
+        // stops waiting on an unplugged output.
+        self.state.refresh_output_dependent_state();
+        // Screencasts of an unplugged or rebuilt-away output end now, not on
+        // the client's next frame request: an idle stream would otherwise
+        // wait for frames of an output nothing renders again.
+        if stop_capture_sessions_of_departed_outputs(&previous_outputs, &self.state.outputs) {
+            self.request_flush();
+        }
         attach_edid_caps_to_outputs(
             &self.state.outputs,
             &self.shared.lock_safe().outputs,
@@ -1771,6 +1843,41 @@ impl UdevBackend {
         }
         kms.borrow_mut()
             .set_capture_counters(self.state.capture_counters.clone());
+    }
+
+    /// Publish the layout KMS now scans out to the WM-facing output list and
+    /// queue the per-output events policy needs for it. Returns whether
+    /// anything policy sees changed; the caller then owes a
+    /// `ScreenLayoutChanged`.
+    fn publish_kms_output_layout(&mut self) -> bool {
+        let heads: Vec<KmsOutputGeometry> = self
+            .state
+            .outputs
+            .iter()
+            .filter_map(KmsOutputGeometry::of)
+            .collect();
+        let events = {
+            let mut shared = self.shared.lock_safe();
+            let shared = &mut *shared;
+            let disabled_after = self.state.soft_disabled_outputs.clone();
+            let events = write_back_kms_output_geometry(
+                &mut shared.outputs,
+                &heads,
+                &shared.disabled_outputs,
+                &disabled_after,
+            );
+            shared.disabled_outputs = disabled_after;
+            events
+        };
+        if events.is_empty() {
+            return false;
+        }
+        self.pending_events.lock_safe().extend(events);
+        sync_output_rects(&mut self.state, &self.shared);
+        if let Some(grab_win) = self.state.popup_grab_toplevel {
+            self.state.reconstrain_popups_for_toplevel(grab_win);
+        }
+        true
     }
 
     /// Hand the input dispatcher the toast card geometry of the frame just
@@ -1861,6 +1968,7 @@ impl UdevBackend {
     }
 
     fn maybe_reinit_kms(&mut self) {
+        self.release_retired_kms_devices();
         if !self.shared.lock_safe().session_active {
             return;
         }
@@ -1877,11 +1985,22 @@ impl UdevBackend {
         if !should {
             return;
         }
+        // This attempt supersedes a pending retry of an earlier failure.
+        if let Some(token) = self.kms_reinit_retry_timer.take() {
+            self.event_loop.handle().remove(token);
+        }
 
         let selected = selected_kms_device(&self.shared);
 
         let Some((dev_id, dev_path)) = selected else {
+            self.kms_reinit_retry.reset();
             self.drop_kms();
+            // The last DRM device is gone (unplugged dock or eGPU). Its
+            // outputs leave `state.outputs` with it: screencasts of them are
+            // stopped instead of waiting for frames nothing renders, gamma
+            // controls fail, and taskbars drop their workspace groups.
+            self.sync_wayland_state_from_kms(false);
+            self.release_retired_kms_devices();
             return;
         };
 
@@ -1912,6 +2031,7 @@ impl UdevBackend {
             self.event_loop.handle(),
         ) {
             Ok(new_kms) => {
+                self.kms_reinit_retry.reset();
                 // Remove old notifier after new one is registered.
                 self.drop_kms();
 
@@ -1919,6 +2039,12 @@ impl UdevBackend {
                 if let Some(kms) = self.kms.as_ref() {
                     kms.borrow_mut().restore_latched_intents(&latched_intents);
                 }
+                // A rebuilt KmsState powers every connector: DPMS is not among
+                // the latched intents it replays. Soft-disabled bookkeeping
+                // that outlived it would hide a lit head from policy. Cleared
+                // before the sync below, which re-sends output-management
+                // heads with their enabled state.
+                self.state.soft_disabled_outputs.clear();
                 self.state.needs_redraw = true;
                 // The rebuilt KMS state owns a fresh EGL context. Never use it
                 // to resize/delete raw names from the old compositor; the next
@@ -1930,11 +2056,31 @@ impl UdevBackend {
                 // textures, FBOs) is now dangling.
                 self.recreate_compositor_for_current_kms();
 
+                // The rebuild replays positions and scales applied through
+                // wlr-output-management, which the DRM rescan just reset in
+                // the shared list.
+                if self.publish_kms_output_layout() {
+                    self.pending_events
+                        .lock_safe()
+                        .push_back(BackendEvent::ScreenLayoutChanged);
+                }
+
+                // Usually free now that the old compositor is gone; a device
+                // something still holds is retried on later turns.
+                self.release_retired_kms_devices();
                 self.request_flush();
             }
-            Err(err) => {
-                log::warn!("KMS re-init failed (keeping previous state): {err}");
-            }
+            Err(err) => match self.kms_reinit_retry.on_failure() {
+                Some(delay) => {
+                    log::warn!(
+                        "KMS re-init failed (keeping previous state, retrying in {delay:?}): {err}"
+                    );
+                    self.schedule_kms_reinit_retry(delay);
+                }
+                None => log::warn!(
+                    "KMS re-init failed (keeping previous state; no retry until the next hotplug or session activation): {err}"
+                ),
+            },
         }
     }
 
@@ -3697,6 +3843,9 @@ impl UdevBackend {
             last_inactive_session_log: None,
             output_management_tx_seq: 0,
             last_output_management_tx: None,
+            kms_reinit_retry: KmsReinitRetry::default(),
+            kms_reinit_retry_timer: None,
+            retired_kms_devices: Vec::new(),
             scratch_tex_updates: Vec::new(),
             scratch_texture_scene: Vec::new(),
             scratch_full_scene: Vec::new(),
@@ -3753,6 +3902,82 @@ fn output_bounds(outputs: &[OutputInfo]) -> (i32, i32, i32, i32) {
         .unwrap_or(min_y + 1080);
 
     ((max_x - min_x).max(1), (max_y - min_y).max(1), min_x, min_y)
+}
+
+/// One KMS head as it is scanned out, in the WM's global physical space.
+#[derive(Clone, Debug, PartialEq)]
+struct KmsOutputGeometry {
+    name: String,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    /// Exact mode refresh in mHz.
+    refresh_mhz: i32,
+    scale: f64,
+}
+
+impl KmsOutputGeometry {
+    fn of(output: &smithay::output::Output) -> Option<Self> {
+        let mode = output.current_mode()?;
+        let location = output.current_location();
+        Some(Self {
+            name: output.name(),
+            x: location.x,
+            y: location.y,
+            width: mode.size.w,
+            height: mode.size.h,
+            refresh_mhz: mode.refresh,
+            scale: output.current_scale().fractional_scale(),
+        })
+    }
+}
+
+/// Rewrite `outputs` (matched by name) with the geometry KMS actually scans
+/// out, and plan the events that bring policy's monitors in line with it.
+///
+/// wlr-output-management and a KMS rebuild's configuration replay both move,
+/// re-mode and re-scale heads inside KMS only; policy reads the shared list.
+/// A head leaving the enabled set is removed from policy and one rejoining it
+/// is added, so its tag's clients move to a visible monitor instead of being
+/// arranged on a dark one.
+fn write_back_kms_output_geometry(
+    outputs: &mut [OutputInfo],
+    heads: &[KmsOutputGeometry],
+    disabled_before: &HashSet<String>,
+    disabled_after: &HashSet<String>,
+) -> Vec<BackendEvent> {
+    let mut removed = Vec::new();
+    let mut changed = Vec::new();
+    let mut added = Vec::new();
+    for info in outputs.iter_mut() {
+        let before = info.clone();
+        if let Some(head) = heads.iter().find(|head| head.name == info.name) {
+            info.x = head.x;
+            info.y = head.y;
+            info.width = head.width;
+            info.height = head.height;
+            info.scale = head.scale as f32;
+            // The DRM scan reports whole hertz; rounding the exact mHz the
+            // same way keeps an untouched mode from reading as a change.
+            if head.refresh_mhz > 0 {
+                info.refresh_rate = (head.refresh_mhz.unsigned_abs() + 500) / 1000 * 1000;
+            }
+        }
+        let was_enabled = !disabled_before.contains(&info.name);
+        let is_enabled = !disabled_after.contains(&info.name);
+        match (was_enabled, is_enabled) {
+            (true, true) if !output_info_equivalent(&before, info) => {
+                changed.push(BackendEvent::OutputChanged(info.clone()));
+            }
+            (true, false) => removed.push(BackendEvent::OutputRemoved(info.id)),
+            (false, true) => added.push(BackendEvent::OutputAdded(info.clone())),
+            _ => {}
+        }
+    }
+    removed.extend(changed);
+    removed.extend(added);
+    removed
 }
 
 fn output_management_snapshot(
@@ -4450,6 +4675,8 @@ impl CompositorWorkspaceEffects for UdevBackend {
     }
 
     fn compositor_set_monitors(&mut self, monitors: &[(u32, i32, i32, u32, u32, u32)]) {
+        // Taskbars follow the same monitor and tag changes, compositor or not.
+        self.state.sync_workspace_monitors(monitors);
         self.compositor_desired.monitors.clear();
         self.compositor_desired.monitors.extend_from_slice(monitors);
         let refresh_rates = self.desired_monitor_refresh_rates();
@@ -6661,8 +6888,10 @@ impl Backend for UdevBackend {
                                 rollback_reason
                             );
                         }
-                        // Refresh advertised outputs and trigger a relayout.
+                        // Refresh advertised outputs, publish the resulting
+                        // layout to policy and trigger a relayout.
                         self.sync_wayland_state_from_kms(true);
+                        self.publish_kms_output_layout();
                         let outputs_after = output_management_snapshot(
                             &self.shared.lock_safe().outputs,
                             &self.state.soft_disabled_outputs,
@@ -6701,8 +6930,21 @@ impl Backend for UdevBackend {
                 }
             }
 
+            // Policy has now seen every queued set/unset_maximized; answer the
+            // ones it dropped so no xdg client waits on a missing configure.
+            if self.state.flush_owed_xdg_state_replies() {
+                self.request_flush();
+            }
+
             self.reconcile_session_active();
             self.maybe_reinit_kms();
+
+            // Last, once policy placed this turn's windows and any KMS
+            // rebuild replaced the outputs: taskbar handles follow each
+            // window to the outputs it ended up on.
+            if self.state.sync_foreign_toplevel_outputs() {
+                self.request_flush();
+            }
 
             // Make cursor changes visible even if nothing else requests a redraw.
             // Read cursor_kind in the same lock scope so the render path below
@@ -6769,7 +7011,25 @@ impl Backend for UdevBackend {
                         cursor_kind,
                         self.compositor.as_ref(),
                     );
+                    // A locked frame with nothing to queue is already on
+                    // screen; flipped ones are reported by the vblank.
+                    let presented = kms.borrow_mut().take_presented_locked_frames();
+                    for (output_name, epoch) in presented {
+                        self.state.note_locked_frame_presented(&output_name, epoch);
+                    }
                 }
+            }
+            if self.state.session_lock_confirmation_pending() {
+                // A powered-off output, or every output while another session
+                // owns the display, shows nothing unlocked and will not flip
+                // a locked frame to confirm with.
+                let kms = self.kms.as_ref().map(|kms| kms.borrow());
+                self.state.release_session_lock_outputs(|output_name| {
+                    session_active
+                        && kms
+                            .as_ref()
+                            .is_some_and(|kms| kms.output_is_lit(output_name))
+                });
             }
             self.refresh_output_vrr_metric();
 
@@ -7012,6 +7272,78 @@ fn sync_output_rects(state: &mut JwmWaylandState, shared: &Arc<Mutex<SharedState
 fn queue_kms_reinit(shared: &Arc<Mutex<SharedState>>) {
     shared.lock_safe().kms_needs_reinit = true;
 }
+
+/// Bounded exponential backoff for a failed KMS rebuild. Without it one
+/// failure (EBUSY during a VT handoff, a racing hotplug) dropped the request,
+/// and a hot-plugged monitor stayed dark until an unrelated event queued
+/// another rebuild.
+#[derive(Debug, Default)]
+struct KmsReinitRetry {
+    failures: u32,
+}
+
+impl KmsReinitRetry {
+    const MAX_RETRIES: u32 = 6;
+    const FIRST_DELAY: Duration = Duration::from_millis(250);
+
+    /// Record a failed attempt and return the delay before the next one, or
+    /// `None` once the budget is spent. The count then starts over, so the
+    /// next hotplug or session activation gets a full budget again.
+    fn on_failure(&mut self) -> Option<Duration> {
+        self.failures += 1;
+        if self.failures > Self::MAX_RETRIES {
+            self.failures = 0;
+            return None;
+        }
+        Some(Self::FIRST_DELAY * 2u32.pow(self.failures - 1))
+    }
+
+    fn reset(&mut self) {
+        self.failures = 0;
+    }
+}
+
+/// Hand every retired device fd that nobody else holds to `close`, with sole
+/// ownership. Fds still shared stay queued for a later call. Returns how
+/// many were handed over.
+fn release_unshared_device_fds(
+    retired: &mut Vec<smithay::utils::DeviceFd>,
+    mut close: impl FnMut(std::os::fd::OwnedFd),
+) -> usize {
+    let mut released = 0;
+    for device in std::mem::take(retired) {
+        match TryInto::<std::os::fd::OwnedFd>::try_into(device) {
+            Ok(fd) => {
+                close(fd);
+                released += 1;
+            }
+            Err(still_shared) => retired.push(still_shared),
+        }
+    }
+    released
+}
+
+/// Send `stopped` to the ext-image-copy-capture sessions of every output in
+/// `previous` that `current` no longer holds. Outputs compare by identity: a
+/// KMS rebuild publishes new `Output`s under the old connector names, and
+/// the old ones are never rendered again. Returns whether any event was
+/// sent, so the caller can flush clients.
+fn stop_capture_sessions_of_departed_outputs(
+    previous: &[smithay::output::Output],
+    current: &[smithay::output::Output],
+) -> bool {
+    let mut stopped = false;
+    for output in previous.iter().filter(|output| !current.contains(output)) {
+        stopped |=
+            crate::backend::wayland_udev::image_copy_capture::stop_output_capture_sessions(output);
+    }
+    stopped
+}
+
+// For the headless GL suite, which drives the KMS staging composite under the
+// lock that serializes every GL context in the test process.
+#[cfg(test)]
+pub(super) use self::kms::composite_scaled_buffer_for_tests;
 
 #[cfg(test)]
 mod udev_backend_selection_tests {
@@ -7786,6 +8118,332 @@ mod udev_backend_selection_tests {
         let ids = current_output_device_ids(&s);
         assert!(!ids.contains(&1));
         assert!(ids.contains(&2));
+    }
+
+    fn kms_head(name: &str, x: i32, refresh_mhz: i32, scale: f64) -> KmsOutputGeometry {
+        KmsOutputGeometry {
+            name: name.to_string(),
+            x,
+            y: 0,
+            width: 1920,
+            height: 1080,
+            refresh_mhz,
+            scale,
+        }
+    }
+
+    fn two_head_shared() -> Arc<Mutex<SharedState>> {
+        let shared = Arc::new(Mutex::new(SharedState::default()));
+        {
+            let mut s = shared.lock_safe();
+            s.outputs.push(test_output(OutputId(1), "DP-1"));
+            let mut right = test_output(OutputId(2), "DP-2");
+            right.x = 1920;
+            s.outputs.push(right);
+        }
+        shared
+    }
+
+    fn write_back(
+        shared: &Arc<Mutex<SharedState>>,
+        heads: &[KmsOutputGeometry],
+        disabled_after: &[&str],
+    ) -> Vec<BackendEvent> {
+        let disabled_after: HashSet<String> =
+            disabled_after.iter().map(|n| n.to_string()).collect();
+        let mut s = shared.lock_safe();
+        let s = &mut *s;
+        let events = write_back_kms_output_geometry(
+            &mut s.outputs,
+            heads,
+            &s.disabled_outputs,
+            &disabled_after,
+        );
+        s.disabled_outputs = disabled_after;
+        events
+    }
+
+    #[test]
+    fn kms_write_back_moves_policy_outputs_to_the_scanned_out_layout() {
+        let shared = two_head_shared();
+        let ops = UdevOutputOps {
+            shared: shared.clone(),
+        };
+        assert_eq!(ops.output_at(10, 10), Some(OutputId(1)));
+
+        // An untouched layout, at the exact mHz KMS reports, changes nothing.
+        let untouched = [
+            kms_head("DP-1", 0, 59_951, 1.0),
+            kms_head("DP-2", 1920, 60_000, 1.0),
+        ];
+        assert!(write_back(&shared, &untouched, &[]).is_empty());
+
+        // `wlr-randr --output DP-1 --pos 1920,0 --output DP-2 --pos 0,0`
+        // keeps the framebuffer envelope, so KMS swaps the origins.
+        let swapped = [
+            kms_head("DP-1", 1920, 60_000, 1.0),
+            kms_head("DP-2", 0, 60_000, 1.5),
+        ];
+        let events = write_back(&shared, &swapped, &[]);
+        assert_eq!(events.len(), 2);
+        assert!(matches!(
+            &events[0],
+            BackendEvent::OutputChanged(info) if info.id == OutputId(1) && info.x == 1920
+        ));
+        assert!(matches!(
+            &events[1],
+            BackendEvent::OutputChanged(info)
+                if info.id == OutputId(2) && info.x == 0 && info.scale == 1.5
+        ));
+        assert_eq!(ops.output_at(10, 10), Some(OutputId(2)));
+        assert_eq!(ops.output_at(1930, 10), Some(OutputId(1)));
+        assert_eq!(ops.enumerate_outputs().len(), 2);
+
+        // Popup constraints and the next KMS rebuild are seeded from it too.
+        let s = shared.lock_safe();
+        assert_eq!(s.outputs[0].x, 1920);
+        assert_eq!(s.outputs[1].x, 0);
+    }
+
+    #[test]
+    fn soft_disabled_heads_leave_policy_and_rejoin_it() {
+        let shared = two_head_shared();
+        let ops = UdevOutputOps {
+            shared: shared.clone(),
+        };
+        let heads = [
+            kms_head("DP-1", 0, 60_000, 1.0),
+            kms_head("DP-2", 1920, 60_000, 1.0),
+        ];
+
+        let events = write_back(&shared, &heads, &["DP-1"]);
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            events[0],
+            BackendEvent::OutputRemoved(OutputId(1))
+        ));
+        let enumerated: Vec<OutputId> = ops.enumerate_outputs().iter().map(|o| o.id).collect();
+        assert_eq!(enumerated, vec![OutputId(2)]);
+        assert_eq!(ops.output_at(10, 10), None);
+        let screen = ops.screen_info();
+        assert_eq!((screen.width, screen.height), (3840, 1080));
+        // The head keeps its identity and position for the next KMS rebuild.
+        assert_eq!(shared.lock_safe().outputs.len(), 2);
+
+        // Staying disabled is not news; re-enabling brings the monitor back.
+        assert!(write_back(&shared, &heads, &["DP-1"]).is_empty());
+        let events = write_back(&shared, &heads, &[]);
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            &events[0],
+            BackendEvent::OutputAdded(info) if info.id == OutputId(1) && info.x == 0
+        ));
+        assert_eq!(ops.output_at(10, 10), Some(OutputId(1)));
+    }
+
+    #[test]
+    fn failed_kms_rebuild_retries_with_bounded_backoff() {
+        let mut retry = KmsReinitRetry::default();
+        let delays: Vec<Option<Duration>> = (0..8).map(|_| retry.on_failure()).collect();
+        assert_eq!(
+            delays,
+            vec![
+                Some(Duration::from_millis(250)),
+                Some(Duration::from_millis(500)),
+                Some(Duration::from_secs(1)),
+                Some(Duration::from_secs(2)),
+                Some(Duration::from_secs(4)),
+                Some(Duration::from_secs(8)),
+                None,
+                // A later hotplug or activation starts a fresh budget.
+                Some(Duration::from_millis(250)),
+            ]
+        );
+        retry.reset();
+        assert_eq!(retry.on_failure(), Some(Duration::from_millis(250)));
+    }
+
+    #[test]
+    fn replaced_kms_device_returns_to_the_seat_once_unshared() {
+        use std::os::fd::{AsRawFd, OwnedFd};
+        let (reader, writer) = std::io::pipe().expect("create pipe");
+        let lone = smithay::utils::DeviceFd::from(OwnedFd::from(reader));
+        let shared = smithay::utils::DeviceFd::from(OwnedFd::from(writer));
+        // A GBM buffer or EGL display outliving the replaced KmsState.
+        let late_user = shared.clone();
+        let (lone_raw, shared_raw) = (lone.as_raw_fd(), shared.as_raw_fd());
+
+        let mut retired = vec![lone, shared];
+        let mut closed = Vec::new();
+        let released = release_unshared_device_fds(&mut retired, |fd| closed.push(fd.as_raw_fd()));
+        assert_eq!(released, 1);
+        assert_eq!(closed, vec![lone_raw]);
+        assert_eq!(retired.len(), 1, "a still-shared fd waits");
+
+        drop(late_user);
+        let released = release_unshared_device_fds(&mut retired, |fd| closed.push(fd.as_raw_fd()));
+        assert_eq!(released, 1);
+        assert_eq!(closed, vec![lone_raw, shared_raw]);
+        assert!(retired.is_empty());
+    }
+
+    #[test]
+    fn kms_layout_and_rebuild_recovery_are_wired_into_the_backend() {
+        let source = include_str!("backend.rs");
+        let body_of = |signature: &str| {
+            let rest = source
+                .split_once(signature)
+                .unwrap_or_else(|| panic!("{signature}"))
+                .1;
+            rest.split_once("\n    fn ").map_or(rest, |(body, _)| body)
+        };
+
+        let reinit = body_of("fn maybe_reinit_kms(&mut self)");
+        let (success, failure) = reinit
+            .split_once("Err(err) =>")
+            .expect("rebuild failure arm");
+        assert!(failure.contains("kms_reinit_retry.on_failure()"));
+        assert!(failure.contains("schedule_kms_reinit_retry(delay)"));
+        assert!(success.contains("publish_kms_output_layout()"));
+        assert!(reinit.contains("release_retired_kms_devices()"));
+        assert!(body_of("fn drop_kms(&mut self)").contains("retired_kms_devices.push(device)"));
+
+        let configure = source
+            .split_once("Some(BackendEvent::OutputConfigure { changes }) =>")
+            .expect("OutputConfigure arm")
+            .1;
+        let publish_at = configure
+            .find("self.publish_kms_output_layout();")
+            .expect("OutputConfigure publishes the KMS layout");
+        let snapshot_at = configure
+            .find("let outputs_after = output_management_snapshot(")
+            .expect("transaction status snapshot");
+        assert!(
+            publish_at < snapshot_at,
+            "outputs_after reports the published layout"
+        );
+    }
+
+    #[test]
+    fn a_kms_sync_stops_the_capture_sessions_of_departed_outputs() {
+        use crate::backend::wayland_udev::image_copy_capture::init_image_copy_capture;
+        use crate::backend::wayland_udev::image_copy_capture::wire_test_client::{
+            Client, Server, test_output as wire_output,
+        };
+        use smithay::output::Output;
+
+        // ext_image_copy_capture_session_v1 events.
+        const SESSION_DONE: u16 = 4;
+        const SESSION_STOPPED: u16 = 5;
+
+        fn session_opcodes(client: &mut Client, session: u32) -> Vec<u16> {
+            client
+                .events()
+                .into_iter()
+                .filter(|event| event.sender == session)
+                .map(|event| event.opcode)
+                .collect()
+        }
+
+        /// Start a capture session on `output` from a new client.
+        fn output_session(server: &mut Server, output: &Output) -> (Client, u32) {
+            output.create_global::<JwmWaylandState>(&server.display.handle());
+            server.state.outputs.push(output.clone());
+            let mut client = server.connect();
+            let wl_output = client.bind("wl_output", 4);
+            let sources = client.bind("ext_output_image_capture_source_manager_v1", 1);
+            let capture = client.bind("ext_image_copy_capture_manager_v1", 1);
+            let source = client.new_id();
+            client.request(sources, 0, &[source, wl_output]);
+            let session = client.new_id();
+            client.request(capture, 0, &[session, source, 0]);
+            server.roundtrip();
+            assert_eq!(
+                session_opcodes(&mut client, session).last(),
+                Some(&SESSION_DONE),
+                "a live output's session is ready"
+            );
+            (client, session)
+        }
+
+        let mut server = Server::new();
+        server.state.image_capture_pending =
+            Some(init_image_copy_capture(&server.display.handle()));
+        let kept = wire_output("DP-1");
+        let unplugged = wire_output("HDMI-A-1");
+        let rebuilt = wire_output("DP-2");
+        let (mut kept_client, kept_session) = output_session(&mut server, &kept);
+        let (mut unplugged_client, unplugged_session) = output_session(&mut server, &unplugged);
+        let (mut rebuilt_client, rebuilt_session) = output_session(&mut server, &rebuilt);
+
+        // HDMI-A-1 was unplugged, and a KMS rebuild published a new DP-2
+        // under the old connector name; only DP-1 is the same output.
+        let previous = std::mem::take(&mut server.state.outputs);
+        let current = vec![kept.clone(), wire_output("DP-2")];
+        assert!(stop_capture_sessions_of_departed_outputs(
+            &previous, &current
+        ));
+        assert!(
+            !stop_capture_sessions_of_departed_outputs(&previous, &current),
+            "a stopped session is not stopped twice"
+        );
+        server.roundtrip();
+        assert_eq!(
+            session_opcodes(&mut unplugged_client, unplugged_session),
+            [SESSION_STOPPED]
+        );
+        assert_eq!(
+            session_opcodes(&mut rebuilt_client, rebuilt_session),
+            [SESSION_STOPPED]
+        );
+        assert!(session_opcodes(&mut kept_client, kept_session).is_empty());
+
+        // Both ways the backend replaces its outputs stop the departed ones.
+        let source = include_str!("backend.rs");
+        let sync = source
+            .split_once("fn sync_wayland_state_from_kms(&mut self, resize_compositor: bool)")
+            .expect("the KMS sync exists")
+            .1
+            .split_once("\n    fn ")
+            .expect("the KMS sync ends")
+            .0;
+        assert!(sync.starts_with(
+            " {\n        let previous_outputs = std::mem::take(&mut self.state.outputs);"
+        ));
+        let (without_kms, with_kms) = sync
+            .split_once("self.state.outputs = kms.borrow().outputs();")
+            .expect("the KMS sync publishes the KMS outputs");
+        let stop = "if stop_capture_sessions_of_departed_outputs(&previous_outputs, &self.state.outputs) {\n";
+        assert!(without_kms.contains(stop));
+        assert!(with_kms.contains(stop));
+
+        // Both ways a re-init drops the old KMS state run that sync: the
+        // rebuild publishes the new outputs, and losing the last DRM device
+        // publishes none.
+        let reinit = source
+            .split_once("fn maybe_reinit_kms(&mut self)")
+            .expect("the KMS re-init exists")
+            .1
+            .split_once("\n    fn ")
+            .expect("the KMS re-init ends")
+            .0;
+        let (before, no_device) = reinit
+            .split_once("let Some((dev_id, dev_path)) = selected else {")
+            .expect("the re-init handles a missing DRM device");
+        let (no_device, rebuild) = no_device
+            .split_once("\n        };")
+            .expect("the missing-device arm ends");
+        assert!(!before.contains("self.drop_kms();"));
+        let sync = format!("self.{}(false);", "sync_wayland_state_from_kms");
+        for (arm, body) in [("no device", no_device), ("rebuild", rebuild)] {
+            let drop_at = body
+                .find("self.drop_kms();")
+                .unwrap_or_else(|| panic!("{arm}: the old KMS state is dropped"));
+            let sync_at = body
+                .find(&sync)
+                .unwrap_or_else(|| panic!("{arm}: the outputs are republished"));
+            assert!(drop_at < sync_at, "{arm}: the sync follows the drop");
+        }
     }
 
     #[test]

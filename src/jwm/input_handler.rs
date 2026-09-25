@@ -11,6 +11,9 @@ use crate::backend::compositor_common::screenshot_toolbar::{
     self, ScreenshotToolbar, ToolbarButton,
 };
 use crate::config::CONFIG;
+use crate::core::maximize::{
+    has_configure_geometry_bits, mirror_free_axes, strip_maximized_configure_bits,
+};
 use crate::core::models::ClientKey;
 use crate::core::types::Rect;
 use crate::jwm::features::expose_plan;
@@ -21,6 +24,9 @@ use crate::jwm::features::tags_overview::live_cell;
 use crate::jwm::features::{CaptureTarget, MonitorDirection};
 use crate::jwm::rules::RuleMatcher;
 use crate::jwm::types::{WMArgEnum, WMClickType, WMFuncType};
+use crate::jwm::visibility::{
+    HiddenRestore, hidden_x_left_of_desktop, plan_hidden_restore, restore_hidden_geometry,
+};
 use log::{error, info};
 
 const MAX_X11_CONFIGURE_VALUE: u32 = u16::MAX as u32;
@@ -313,6 +319,11 @@ impl Jwm {
                         name,
                     }
                 }),
+                // A profile switch whose re-read contradicted the live card:
+                // the card is refreshed with the profile really in effect.
+                ControlDomain::PowerProfile => correction
+                    .name
+                    .map(crate::backend::api::OsdKind::PowerProfile),
             };
             if let Some(kind) = kind {
                 backend.compositor_show_osd(kind, correction.percent);
@@ -1153,6 +1164,13 @@ impl Jwm {
                         .control_snapshot
                         .as_ref()
                         .and_then(|snapshot| snapshot.power_profiles.clone());
+                    // The switch runs on the controls worker: powerprofilesctl
+                    // is a Python D-Bus client, and one run per keypress or
+                    // wheel notch used to stall the event thread for hundreds
+                    // of milliseconds (up to the helper timeout behind a
+                    // wedged daemon). The next pick is cycled from the row's
+                    // drawn profile, so a quick run of presses follows its own
+                    // display and the worker folds it into one switch.
                     if let Some(delta) = delta
                         && let Some((available, active)) = profiles
                         && let Some(next) = crate::jwm::features::power::cycle_profile(
@@ -1160,20 +1178,17 @@ impl Jwm {
                             &active,
                             delta.signum() as isize,
                         )
-                        && crate::jwm::features::power::set_profile(&next)
+                        && self
+                            .queue_power_profile_request(available, next.clone())
+                            .is_some()
                     {
-                        // The mutation is authoritative until the next worker
-                        // verifies it; its epoch prevents an older read from
-                        // rolling the row back.
-                        self.cache_control_power_profiles(available, next.clone());
                         self.refresh_open_control_center();
                         // Same labeled acknowledgement the other Hub toggles
                         // raise — volume/brightness already had a bar card;
-                        // Night Light / radios joined in round 21.
-                        backend.compositor_show_osd(
-                            crate::backend::api::OsdKind::PowerProfile(next),
-                            0,
-                        );
+                        // Night Light / radios joined in round 21. The
+                        // worker's re-read corrects a live card whose profile
+                        // did not take.
+                        self.show_power_profile_osd(backend, next);
                     }
                 }
                 ControlKind::NightLight => {
@@ -1358,28 +1373,6 @@ impl Jwm {
             self.sync_system_ui(backend);
         }
         Ok(())
-    }
-
-    /// The expose grid's windows in entry order — the same collection
-    /// `toggle_expose` entered with, recomputed live. A close only ever
-    /// removes entries, so the rebuilt grid keeps every survivor exactly
-    /// where the list had it.
-    fn expose_candidates(&self) -> Vec<expose_plan::ExposeCandidate> {
-        let mut candidates: Vec<expose_plan::ExposeCandidate> = Vec::new();
-        for &mon_key in &self.state.monitor_order {
-            if let Some(clients) = self.state.monitor_clients.get(mon_key) {
-                for &ck in clients {
-                    if !self.is_client_visible_on_monitor(ck, mon_key) {
-                        continue;
-                    }
-                    if let Some(client) = self.state.clients.get(ck) {
-                        let g = &client.geometry;
-                        candidates.push((client.win, g.x, g.y, g.w, g.h, client.name.clone()));
-                    }
-                }
-            }
-        }
-        candidates
     }
 
     /// Delete or BackSpace with expose up: close the highlighted thumbnail's
@@ -3655,6 +3648,31 @@ impl Jwm {
             return self.configure_client(backend, client_key);
         }
 
+        // A realized maximize owns the maximized axes the same way: the
+        // client may still move or resize along a free axis, but the bits of
+        // the maximized axes are dropped. A request left with no geometry at
+        // all (including a border-only one, which would change the maximized
+        // outer size) is refused with the authoritative reply before any
+        // border, live or old_* field changes.
+        let realized_axes = self
+            .state
+            .clients
+            .get(client_key)
+            .filter(|client| client.state.is_maximize_realized())
+            .map(|client| client.state.maximized_axes());
+        let mask_bits = match realized_axes {
+            Some(axes) => {
+                let mask_bits = strip_maximized_configure_bits(mask_bits, axes);
+                if !has_configure_geometry_bits(mask_bits) {
+                    return self.configure_client(backend, client_key);
+                }
+                mask_bits
+            }
+            None => mask_bits,
+        };
+        // The work-area clamps below leave these coordinates alone.
+        let (keep_x, keep_y) = realized_axes.map_or((false, false), |axes| (axes.horz, axes.vert));
+
         let mask = ConfigWindowBits::from_bits_truncate(mask_bits);
 
         let (win, is_dock, no_decorations) = self
@@ -3733,6 +3751,15 @@ impl Jwm {
             } else {
                 return Err("Client has no monitor assigned".into());
             };
+
+            // A floating client on an unviewed tag or in the Dock is parked
+            // off-screen but stays mapped. Apply the request to the rectangle
+            // it will be restored to instead of its parking coordinate, then
+            // park it again at both exits below: neither the clamp nor a real
+            // configure may bring a window the policy calls hidden back on
+            // screen, where it would cover the viewed tag and take input.
+            // Nothing between here and those exits returns early.
+            let parked_old = self.unpark_for_configure(client_key);
 
             let mut popup_apply: Option<WindowId> = None;
             let mut popup_clamp_request: Option<(i32, i32, i32, i32)> = None;
@@ -3843,9 +3870,23 @@ impl Jwm {
                     let clamped_y = clamp_configure_axis(y, total_h, clamp.y, clamp.h);
 
                     if let Some(client) = self.state.clients.get_mut(client_key) {
-                        client.geometry.x = clamped_x;
-                        client.geometry.y = clamped_y;
+                        // A maximized axis already fills the work area, and
+                        // its request bits were dropped above. A transient
+                        // parent shorter (or narrower) than that is a clamp
+                        // it cannot fit, which answers with the parent's
+                        // origin — moving the filled axis off the work area
+                        // while its extent stays full.
+                        if !keep_x {
+                            client.geometry.x = clamped_x;
+                        }
+                        if !keep_y {
+                            client.geometry.y = clamped_y;
+                        }
                     }
+                }
+                self.sync_maximize_restore_after_configure(client_key);
+                if let Some(old) = parked_old {
+                    return self.repark_after_configure(backend, client_key, old);
                 }
 
                 if let Some(client) = self.state.clients.get(client_key) {
@@ -3880,10 +3921,21 @@ impl Jwm {
 
                 if let Some(client) = self.state.clients.get_mut(client_key) {
                     if client.state.is_floating && !client.state.is_fullscreen {
-                        client.geometry.x = clamped_x;
-                        client.geometry.y = clamped_y;
+                        // As in the popup clamp: a maximized axis is
+                        // WM-owned. Here it already spans exactly the work
+                        // area, so this only keeps the two clamps alike.
+                        if !keep_x {
+                            client.geometry.x = clamped_x;
+                        }
+                        if !keep_y {
+                            client.geometry.y = clamped_y;
+                        }
                     }
                 }
+            }
+            self.sync_maximize_restore_after_configure(client_key);
+            if let Some(old) = parked_old {
+                return self.repark_after_configure(backend, client_key, old);
             }
 
             if mask.contains(ConfigWindowBits::X | ConfigWindowBits::Y)
@@ -3917,6 +3969,111 @@ impl Jwm {
         }
 
         Ok(())
+    }
+
+    /// Swap a parked floating client's live geometry for the visible
+    /// rectangle `show_client` would restore, so a ConfigureRequest is
+    /// applied to and clamped as that rectangle rather than the off-screen
+    /// parking coordinate. Returns the `old_*` rectangle to hand back to
+    /// [`Self::repark_after_configure`], which must follow before the
+    /// request is answered.
+    ///
+    /// `None` when the client is visible or was never parked. An unmapped
+    /// swallowed parent keeps its visible geometry, so configuring it as
+    /// before cannot expose anything.
+    fn unpark_for_configure(&mut self, client_key: ClientKey) -> Option<Rect> {
+        if self.is_client_visible_by_key(client_key) {
+            return None;
+        }
+        let desktop_left = self.desktop_left_edge();
+        let (monitor, plan) = self.state.clients.get(client_key).map(|client| {
+            (
+                client.mon,
+                plan_hidden_restore(&client.geometry, desktop_left),
+            )
+        })?;
+        // Same fallback as `show_client`, so the rectangle the request edits
+        // is exactly the one a later reveal would have used.
+        let legacy_fallback_x = match plan? {
+            HiddenRestore::LegacyFallback => monitor
+                .and_then(|monitor| self.monitor_work_area(monitor))
+                .map_or(desktop_left, |area| area.x),
+            HiddenRestore::Slot(_) | HiddenRestore::OldX => desktop_left,
+        };
+        let client = self.state.clients.get_mut(client_key)?;
+        let old = Rect::new(
+            client.geometry.old_x,
+            client.geometry.old_y,
+            client.geometry.old_w,
+            client.geometry.old_h,
+        );
+        restore_hidden_geometry(&mut client.geometry, desktop_left, legacy_fallback_x)?;
+        Some(old)
+    }
+
+    /// Park a client again after [`Self::unpark_for_configure`]. The
+    /// configured rectangle becomes the restore slot, the live x goes back
+    /// off-screen (recomputed, since the request may have widened the
+    /// window), `old_*` gets its previous value back rather than the parking
+    /// coordinate, and the client is answered with its parked geometry.
+    fn repark_after_configure(
+        &mut self,
+        backend: &mut dyn Backend,
+        client_key: ClientKey,
+        old: Rect,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let desktop_left = self.desktop_left_edge();
+        if let Some(client) = self.state.clients.get_mut(client_key) {
+            let restore = Rect::new(
+                client.geometry.x,
+                client.geometry.y,
+                client.geometry.w,
+                client.geometry.h,
+            );
+            let hidden_x = hidden_x_left_of_desktop(desktop_left, client.total_width());
+            client.geometry.hidden_restore_rect = Some(restore);
+            client.geometry.hidden_x = Some(hidden_x);
+            client.geometry.x = hidden_x;
+            client.geometry.old_x = old.x;
+            client.geometry.old_y = old.y;
+            client.geometry.old_w = old.w;
+            client.geometry.old_h = old.h;
+        }
+        self.configure_client(backend, client_key)
+    }
+
+    /// After a ConfigureRequest moved or resized a realized maximized client
+    /// along its free axes (the maximized axes were stripped from the mask),
+    /// carry the accepted free-axis position and size into the restore rect,
+    /// and into the resting `floating_*` slot unless maximize promoted the
+    /// client out of the layout. Unmaximizing later then keeps what the
+    /// client asked for on those axes.
+    fn sync_maximize_restore_after_configure(&mut self, client_key: ClientKey) {
+        let Some(client) = self.state.clients.get_mut(client_key) else {
+            return;
+        };
+        if !client.state.is_maximize_realized() {
+            return;
+        }
+        let axes = client.state.maximized_axes();
+        let live = Rect::new(
+            client.geometry.x,
+            client.geometry.y,
+            client.geometry.w,
+            client.geometry.h,
+        );
+        let restore = mirror_free_axes(
+            client.geometry.maximize_restore_rect.unwrap_or(live),
+            live,
+            axes,
+        );
+        client.geometry.maximize_restore_rect = Some(restore);
+        if !client.state.maximize_restore_tiled {
+            client.geometry.floating_x = restore.x;
+            client.geometry.floating_y = restore.y;
+            client.geometry.floating_w = restore.w;
+            client.geometry.floating_h = restore.h;
+        }
     }
 
     pub(crate) fn handle_unmanaged_configure_request_params(
@@ -4099,9 +4256,11 @@ mod tests {
     }
 
     /// Power Profile Left/Right used to mutate silently while every other
-    /// Hub toggle raised a labeled card. The successful cycle must show the
-    /// same acknowledgement — and Enter / left-click must share that path
-    /// (one notch forward) rather than staying a dead row.
+    /// Hub toggle raised a labeled card. The cycle must show the same
+    /// acknowledgement — and Enter / left-click must share that path (one
+    /// notch forward) rather than staying a dead row. The switch itself is
+    /// queued on the controls worker: `powerprofilesctl` must never run on
+    /// the event thread a keypress or wheel notch arrives on.
     #[test]
     fn the_power_profile_row_raises_the_osd_after_a_successful_cycle() {
         const SOURCE: &str = include_str!("input_handler.rs");
@@ -4116,16 +4275,35 @@ mod tests {
             .expect("the arm that follows it")
             .0;
         assert!(
-            arm.contains("OsdKind::PowerProfile"),
+            arm.contains(&format!("self.{}(", "show_power_profile_osd")),
             "the Power Profile row no longer raises an OSD"
         );
+        let queue = format!("{}(", "queue_power_profile_request");
         assert!(
-            arm.contains(&format!("{}(", "compositor_show_osd")),
-            "the Power Profile row no longer calls compositor_show_osd"
+            arm.contains(&queue),
+            "the Power Profile row no longer queues the switch ({queue})"
         );
+        for blocking in ["set_profile", "profiles"] {
+            let needle = format!("power::{blocking}(");
+            assert!(
+                !arm.contains(&needle),
+                "the Power Profile row regained a blocking tool call: {needle}"
+            );
+        }
+        // The card helper raises the same labeled OSD the row used to raise
+        // inline.
+        const TOGGLES: &str = include_str!("features/toggles.rs");
+        let helper = TOGGLES
+            .split_once(&format!("pub(crate) fn {}(", "show_power_profile_osd"))
+            .expect("show_power_profile_osd")
+            .1
+            .split_once("\n    }\n")
+            .expect("the end of show_power_profile_osd")
+            .0;
         assert!(
-            arm.contains(&format!("{}(", "set_profile")),
-            "the Power Profile row no longer switches the profile"
+            helper.contains("OsdKind::PowerProfile")
+                && helper.contains(&format!("{}(", "compositor_show_osd")),
+            "show_power_profile_osd no longer raises the Power Profile card"
         );
         // Enter / space (and therefore left-click) must feed the same cycle
         // as Right — assembled so this pin cannot match its own prose.
@@ -4596,10 +4774,102 @@ mod tests {
         }
     }
 
+    /// [`DummyPropertyOps`], except that it can report the window as an
+    /// EWMH dialog so tests reach the popup branch of the ConfigureRequest
+    /// handler, and one window as transient for another (child, parent).
+    #[derive(Default)]
+    struct ConfigureReplyPropertyOps {
+        dialog: bool,
+        transient: Option<(WindowId, WindowId)>,
+    }
+
+    impl crate::backend::api::PropertyOps for ConfigureReplyPropertyOps {
+        fn get_title(&self, win: WindowId) -> String {
+            DummyPropertyOps.get_title(win)
+        }
+
+        fn get_class(&self, win: WindowId) -> (String, String) {
+            DummyPropertyOps.get_class(win)
+        }
+
+        fn get_window_types(&self, win: WindowId) -> Vec<crate::backend::api::WindowType> {
+            if self.dialog {
+                vec![crate::backend::api::WindowType::Dialog]
+            } else {
+                DummyPropertyOps.get_window_types(win)
+            }
+        }
+
+        fn is_fullscreen(&self, win: WindowId) -> bool {
+            DummyPropertyOps.is_fullscreen(win)
+        }
+
+        fn set_fullscreen_state(&self, win: WindowId, on: bool) -> Result<(), BackendError> {
+            DummyPropertyOps.set_fullscreen_state(win, on)
+        }
+
+        fn transient_for(&self, win: WindowId) -> Option<WindowId> {
+            match self.transient {
+                Some((child, parent)) if child == win => Some(parent),
+                _ => DummyPropertyOps.transient_for(win),
+            }
+        }
+
+        fn get_wm_hints(&self, win: WindowId) -> Option<crate::backend::api::WmHints> {
+            DummyPropertyOps.get_wm_hints(win)
+        }
+
+        fn set_urgent_hint(&self, win: WindowId, urgent: bool) -> Result<(), BackendError> {
+            DummyPropertyOps.set_urgent_hint(win, urgent)
+        }
+
+        fn fetch_normal_hints(
+            &self,
+            win: WindowId,
+        ) -> Result<Option<crate::backend::api::NormalHints>, BackendError> {
+            DummyPropertyOps.fetch_normal_hints(win)
+        }
+
+        fn set_window_strut_top(
+            &self,
+            win: WindowId,
+            top: u32,
+            start_x: u32,
+            end_x: u32,
+        ) -> Result<(), BackendError> {
+            DummyPropertyOps.set_window_strut_top(win, top, start_x, end_x)
+        }
+
+        fn set_window_type_dock(&self, win: WindowId) -> Result<(), BackendError> {
+            DummyPropertyOps.set_window_type_dock(win)
+        }
+
+        fn clear_window_strut(&self, win: WindowId) -> Result<(), BackendError> {
+            DummyPropertyOps.clear_window_strut(win)
+        }
+
+        fn get_wm_state(&self, win: WindowId) -> Result<i64, BackendError> {
+            DummyPropertyOps.get_wm_state(win)
+        }
+
+        fn set_wm_state(&self, win: WindowId, state: i64) -> Result<(), BackendError> {
+            DummyPropertyOps.set_wm_state(win, state)
+        }
+
+        fn set_client_info_props(
+            &self,
+            win: WindowId,
+            tags: u32,
+            monitor_num: u32,
+        ) -> Result<(), BackendError> {
+            DummyPropertyOps.set_client_info_props(win, tags, monitor_num)
+        }
+    }
+
     struct ConfigureReplyBackend {
         window_ops: ConfigureReplyWindowOps,
         input_ops: DummyInputOps,
-        property_ops: DummyPropertyOps,
+        property_ops: ConfigureReplyPropertyOps,
         output_ops: DummyOutputOps,
         key_ops: DummyKeyOps,
         cursor_provider: DummyCursorProvider,
@@ -4621,7 +4891,7 @@ mod tests {
             Self {
                 window_ops: ConfigureReplyWindowOps::default(),
                 input_ops: DummyInputOps,
-                property_ops: DummyPropertyOps,
+                property_ops: ConfigureReplyPropertyOps::default(),
                 output_ops: DummyOutputOps,
                 key_ops: DummyKeyOps,
                 cursor_provider: DummyCursorProvider,
@@ -4849,6 +5119,252 @@ mod tests {
         assert_fullscreen_configure_request_is_rejected(true);
     }
 
+    /// A floating client resting at `restore` on a tag the monitor is not
+    /// viewing, parked off-screen by the real `hide_client` path. The
+    /// configure replies recorded while parking it are dropped.
+    fn add_unviewed_tag_configure_client(
+        jwm: &mut Jwm,
+        backend: &mut ConfigureReplyBackend,
+        window: WindowId,
+        restore: Rect,
+    ) -> crate::core::models::ClientKey {
+        let monitor = jwm.state.monitor_order[0];
+        let unviewed =
+            crate::config::CONFIG.load().tagmask() & !jwm.state.monitors[monitor].get_active_tags();
+        let client_key = add_floating_configure_client(jwm, window, monitor, 2, false);
+        {
+            let client = &mut jwm.state.clients[client_key];
+            client.state.tags = unviewed & unviewed.wrapping_neg();
+            client.geometry.x = restore.x;
+            client.geometry.y = restore.y;
+            client.geometry.w = restore.w;
+            client.geometry.h = restore.h;
+            client.geometry.old_x = 11;
+            client.geometry.old_y = 22;
+            client.geometry.old_w = 33;
+            client.geometry.old_h = 44;
+        }
+        assert_ne!(jwm.state.clients[client_key].state.tags, 0);
+        assert!(!jwm.is_client_visible_by_key(client_key));
+        jwm.hide_client(backend, client_key);
+        assert_eq!(
+            jwm.state.clients[client_key].geometry.hidden_restore_rect,
+            Some(restore)
+        );
+        backend
+            .window_ops
+            .replies
+            .lock()
+            .expect("configure reply lock")
+            .clear();
+        client_key
+    }
+
+    /// The configure traffic `window` received stayed off-screen: every
+    /// reply is at `parked_x`, and nothing was committed through
+    /// `apply_window_changes`.
+    fn assert_configure_stayed_parked(
+        backend: &ConfigureReplyBackend,
+        window: WindowId,
+        parked_x: i32,
+    ) {
+        let replies = backend
+            .window_ops
+            .replies
+            .lock()
+            .expect("configure reply lock");
+        assert!(
+            replies.iter().any(|reply| reply.window == window),
+            "the client must still be answered"
+        );
+        assert!(
+            replies
+                .iter()
+                .filter(|reply| reply.window == window)
+                .all(|reply| reply.x == parked_x),
+            "a parked client was configured on screen: {replies:?}"
+        );
+        assert!(
+            backend
+                .window_ops
+                .applied
+                .lock()
+                .expect("applied changes lock")
+                .iter()
+                .all(|(candidate, _)| *candidate != window),
+            "a parked client was committed on screen"
+        );
+    }
+
+    #[test]
+    fn move_only_configure_on_an_unviewed_tag_moves_the_restore_slot_not_the_window() {
+        let mut backend = ConfigureReplyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let monitor = jwm.state.monitor_order[0];
+        let work = jwm.monitor_work_area(monitor).unwrap();
+        let window = WindowId::from_raw(0x7f50);
+        let restore = Rect::new(work.x + 200, work.y + 100, 640, 480);
+        let client_key = add_unviewed_tag_configure_client(&mut jwm, &mut backend, window, restore);
+        let parked_x = jwm.state.clients[client_key].geometry.x;
+        assert!(parked_x + jwm.state.clients[client_key].total_width() <= work.x);
+
+        jwm.handle_regular_configure_request_params(
+            &mut backend,
+            client_key,
+            (ConfigWindowBits::X | ConfigWindowBits::Y).bits(),
+            WindowChanges {
+                x: Some(work.x + 300),
+                y: Some(work.y + 200),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let requested = Rect::new(work.x + 300, work.y + 200, 640, 480);
+        let client = &jwm.state.clients[client_key];
+        assert_eq!(client.geometry.x, parked_x);
+        assert_eq!(client.geometry.hidden_x, Some(parked_x));
+        assert_eq!(client.geometry.hidden_restore_rect, Some(requested));
+        assert_eq!(
+            (
+                client.geometry.old_x,
+                client.geometry.old_y,
+                client.geometry.old_w,
+                client.geometry.old_h
+            ),
+            (11, 22, 33, 44),
+            "the parking coordinate must not leak into old_*"
+        );
+        assert_configure_stayed_parked(&backend, window, parked_x);
+
+        // Viewing its tag restores the position the client asked for.
+        let active = jwm.state.monitors[monitor].get_active_tags();
+        jwm.state.clients[client_key].state.tags = active;
+        jwm.show_client(&mut backend, client_key);
+        let client = &jwm.state.clients[client_key];
+        assert_eq!(
+            (client.geometry.x, client.geometry.y),
+            (requested.x, requested.y)
+        );
+    }
+
+    #[test]
+    fn configure_of_a_minimized_client_resizes_its_restore_slot_and_stays_parked() {
+        let mut backend = ConfigureReplyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let monitor = jwm.state.monitor_order[0];
+        let work = jwm.monitor_work_area(monitor).unwrap();
+        let window = WindowId::from_raw(0x7f51);
+        let border_w = 2;
+        let restore = Rect::new(work.x + 200, work.y + 100, 640, 480);
+        let client_key = add_floating_configure_client(&mut jwm, window, monitor, border_w, false);
+        let desktop_left = jwm.desktop_left_edge();
+        let parked_x = crate::jwm::visibility::hidden_x_left_of_desktop(
+            desktop_left,
+            restore.w + 2 * border_w,
+        );
+        {
+            let client = &mut jwm.state.clients[client_key];
+            client.state.is_hidden = true;
+            client.state.minimized_order = 7;
+            client.geometry.x = parked_x;
+            client.geometry.y = restore.y;
+            client.geometry.w = restore.w;
+            client.geometry.h = restore.h;
+            client.geometry.hidden_x = Some(parked_x);
+            client.geometry.hidden_restore_rect = Some(restore);
+            client.geometry.old_x = 11;
+            client.geometry.old_y = 22;
+            client.geometry.old_w = 33;
+            client.geometry.old_h = 44;
+        }
+
+        jwm.handle_regular_configure_request_params(
+            &mut backend,
+            client_key,
+            (ConfigWindowBits::X
+                | ConfigWindowBits::Y
+                | ConfigWindowBits::WIDTH
+                | ConfigWindowBits::HEIGHT)
+                .bits(),
+            WindowChanges {
+                x: Some(work.x + 50),
+                y: Some(work.y + 60),
+                width: Some(900),
+                height: Some(500),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let requested = Rect::new(work.x + 50, work.y + 60, 900, 500);
+        // The wider window needs a parking x further left to stay off-screen.
+        let reparked_x = crate::jwm::visibility::hidden_x_left_of_desktop(
+            desktop_left,
+            requested.w + 2 * border_w,
+        );
+        let client = &jwm.state.clients[client_key];
+        assert!(client.state.is_hidden);
+        assert_eq!(client.state.minimized_order, 7);
+        assert_eq!(client.geometry.hidden_restore_rect, Some(requested));
+        assert_eq!(
+            (
+                client.geometry.x,
+                client.geometry.y,
+                client.geometry.w,
+                client.geometry.h
+            ),
+            (reparked_x, requested.y, requested.w, requested.h)
+        );
+        assert_eq!(client.geometry.hidden_x, Some(reparked_x));
+        assert_eq!(
+            (
+                client.geometry.old_x,
+                client.geometry.old_y,
+                client.geometry.old_w,
+                client.geometry.old_h
+            ),
+            (11, 22, 33, 44)
+        );
+        assert_configure_stayed_parked(&backend, window, reparked_x);
+    }
+
+    #[test]
+    fn move_of_a_dialog_on_an_unviewed_tag_is_clamped_into_its_restore_slot() {
+        let mut backend = ConfigureReplyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        backend.property_ops.dialog = true;
+        let monitor = jwm.state.monitor_order[0];
+        let work = jwm.monitor_work_area(monitor).unwrap();
+        let window = WindowId::from_raw(0x7f52);
+        let restore = Rect::new(work.x + 200, work.y + 100, 400, 300);
+        let client_key = add_unviewed_tag_configure_client(&mut jwm, &mut backend, window, restore);
+        let parked_x = jwm.state.clients[client_key].geometry.x;
+
+        // Past the right edge of the work area: the dialog clamp still
+        // applies, to the restore slot.
+        jwm.handle_regular_configure_request_params(
+            &mut backend,
+            client_key,
+            (ConfigWindowBits::X | ConfigWindowBits::Y).bits(),
+            WindowChanges {
+                x: Some(work.x + work.w),
+                y: Some(work.y + 40),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let total_w = jwm.state.clients[client_key].total_width();
+        let client = &jwm.state.clients[client_key];
+        assert_eq!(client.geometry.x, parked_x);
+        assert_eq!(
+            client.geometry.hidden_restore_rect,
+            Some(Rect::new(work.x + work.w - total_w, work.y + 40, 400, 300))
+        );
+        assert_configure_stayed_parked(&backend, window, parked_x);
+    }
+
     #[test]
     fn floating_configure_coordinates_stay_root_relative_on_a_secondary_monitor() {
         let mut backend = ConfigureReplyBackend::new();
@@ -4974,6 +5490,276 @@ mod tests {
         assert_eq!(changes.width, Some(u16::MAX as u32));
         assert_eq!(changes.height, Some(u16::MAX as u32));
         assert_eq!(changes.border_width, Some(u16::MAX as u32));
+    }
+
+    /// A floating client realized maximized on `axes` inside the monitor's
+    /// work area, resting at `restore` (restore rect and `floating_*`).
+    fn add_realized_maximized_configure_client(
+        jwm: &mut Jwm,
+        window: WindowId,
+        axes: crate::backend::api::MaximizeAxes,
+        restore: Rect,
+        border_w: i32,
+    ) -> crate::core::models::ClientKey {
+        let monitor = jwm.state.monitor_order[0];
+        let work = jwm.monitor_work_area(monitor).unwrap();
+        let live = crate::core::maximize::maximize_target(restore, work, axes, border_w);
+        let mut client = WMClient::new(window);
+        client.mon = Some(monitor);
+        client.state.tags = jwm.state.monitors[monitor].get_active_tags();
+        client.state.is_floating = true;
+        client.state.set_maximized_axes(axes);
+        client.geometry.x = live.x;
+        client.geometry.y = live.y;
+        client.geometry.w = live.w;
+        client.geometry.h = live.h;
+        client.geometry.old_x = 11;
+        client.geometry.old_y = 22;
+        client.geometry.old_w = 33;
+        client.geometry.old_h = 44;
+        client.geometry.border_w = border_w;
+        client.geometry.maximize_restore_rect = Some(restore);
+        client.geometry.floating_x = restore.x;
+        client.geometry.floating_y = restore.y;
+        client.geometry.floating_w = restore.w;
+        client.geometry.floating_h = restore.h;
+        assert!(client.state.is_maximize_realized());
+        let client_key = jwm.insert_client(client);
+        jwm.attach_to_monitor(client_key, monitor);
+        client_key
+    }
+
+    #[test]
+    fn maximized_client_rejects_configure_request_on_its_axes_with_authoritative_geometry() {
+        use crate::backend::api::MaximizeAxes;
+
+        let mut backend = ConfigureReplyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let monitor = jwm.state.monitor_order[0];
+        let work = jwm.monitor_work_area(monitor).unwrap();
+        let restore = Rect::new(work.x + 200, work.y + 150, 640, 480);
+        let window = WindowId::from_raw(0x7f40);
+        let client_key = add_realized_maximized_configure_client(
+            &mut jwm,
+            window,
+            MaximizeAxes::BOTH,
+            restore,
+            0,
+        );
+        let before = jwm.state.clients[client_key].geometry.clone();
+        let full_request = (ConfigWindowBits::X
+            | ConfigWindowBits::Y
+            | ConfigWindowBits::WIDTH
+            | ConfigWindowBits::HEIGHT
+            | ConfigWindowBits::BORDER_WIDTH)
+            .bits();
+        let changes = WindowChanges {
+            x: Some(work.x + 333),
+            y: Some(work.y + 222),
+            width: Some(500),
+            height: Some(400),
+            border_width: Some(19),
+            ..Default::default()
+        };
+
+        jwm.handle_regular_configure_request_params(
+            &mut backend,
+            client_key,
+            full_request,
+            changes.clone(),
+        )
+        .unwrap();
+
+        let after = &jwm.state.clients[client_key];
+        assert_eq!(
+            after.geometry, before,
+            "live, old_*, border, restore rect and floating_* must all survive"
+        );
+        assert_eq!(after.state.maximized_axes(), MaximizeAxes::BOTH);
+        assert_eq!(
+            backend
+                .window_ops
+                .replies
+                .lock()
+                .expect("configure reply lock")
+                .as_slice(),
+            &[ConfigureReply {
+                window,
+                x: before.x,
+                y: before.y,
+                width: before.w as u32,
+                height: before.h as u32,
+                border: 0,
+            }]
+        );
+        assert!(
+            backend
+                .window_ops
+                .applied
+                .lock()
+                .expect("applied changes lock")
+                .is_empty()
+        );
+
+        // Control: the same request on an ordinary floating client applies.
+        let control_window = WindowId::from_raw(0x7f41);
+        let control = add_floating_configure_client(&mut jwm, control_window, monitor, 0, false);
+        jwm.handle_regular_configure_request_params(&mut backend, control, full_request, changes)
+            .unwrap();
+        let control = &jwm.state.clients[control];
+        assert_eq!(
+            (
+                control.geometry.x,
+                control.geometry.y,
+                control.geometry.w,
+                control.geometry.h,
+                control.geometry.border_w
+            ),
+            (work.x + 333, work.y + 222, 500, 400, 19)
+        );
+    }
+
+    #[test]
+    fn configure_request_on_the_free_axis_updates_live_and_restore_rect() {
+        use crate::backend::api::MaximizeAxes;
+
+        let mut backend = ConfigureReplyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let monitor = jwm.state.monitor_order[0];
+        let work = jwm.monitor_work_area(monitor).unwrap();
+        let border_w = 2;
+        let restore = Rect::new(work.x + 200, work.y + 150, 640, 480);
+        let window = WindowId::from_raw(0x7f42);
+        let client_key = add_realized_maximized_configure_client(
+            &mut jwm,
+            window,
+            MaximizeAxes::VERT,
+            restore,
+            border_w,
+        );
+        let filled_y = jwm.state.clients[client_key].geometry.y;
+        let filled_h = jwm.state.clients[client_key].geometry.h;
+        assert_eq!((filled_y, filled_h), (work.y, work.h - 2 * border_w));
+
+        jwm.handle_regular_configure_request_params(
+            &mut backend,
+            client_key,
+            (ConfigWindowBits::X | ConfigWindowBits::WIDTH).bits(),
+            WindowChanges {
+                x: Some(work.x + 100),
+                width: Some(800),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let client = &jwm.state.clients[client_key];
+        assert_eq!(client.state.maximized_axes(), MaximizeAxes::VERT);
+        assert_eq!(
+            (
+                client.geometry.x,
+                client.geometry.y,
+                client.geometry.w,
+                client.geometry.h
+            ),
+            (work.x + 100, filled_y, 800, filled_h),
+            "the free axis moves, the maximized axis stays filled"
+        );
+        let expected_restore = Rect::new(work.x + 100, restore.y, 800, restore.h);
+        assert_eq!(
+            client.geometry.maximize_restore_rect,
+            Some(expected_restore)
+        );
+        assert_eq!(
+            (
+                client.geometry.floating_x,
+                client.geometry.floating_y,
+                client.geometry.floating_w,
+                client.geometry.floating_h
+            ),
+            (
+                expected_restore.x,
+                expected_restore.y,
+                expected_restore.w,
+                expected_restore.h
+            )
+        );
+    }
+
+    /// A transient dialog maximized on one axis whose parent is shorter than
+    /// the work area: the parent clamp cannot fit the filled height inside
+    /// the parent and answered with the parent's top, so a move along the
+    /// free axis pushed the dialog half off the screen.
+    #[test]
+    fn a_dialog_clamped_to_a_short_parent_keeps_its_maximized_axis() {
+        use crate::backend::api::MaximizeAxes;
+
+        let mut backend = ConfigureReplyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        backend.property_ops.dialog = true;
+        let monitor = jwm.state.monitor_order[0];
+        let work = jwm.monitor_work_area(monitor).unwrap();
+        let border_w = 2;
+
+        // The parent sits in the lower half of the work area, as a bstack
+        // cell would.
+        let parent_window = WindowId::from_raw(0x7f60);
+        let parent = add_floating_configure_client(&mut jwm, parent_window, monitor, 0, false);
+        {
+            let geometry = &mut jwm.state.clients[parent].geometry;
+            geometry.x = work.x;
+            geometry.y = work.y + work.h / 2;
+            geometry.w = work.w / 2;
+            geometry.h = work.h / 2;
+        }
+        let window = WindowId::from_raw(0x7f61);
+        backend.property_ops.transient = Some((window, parent_window));
+        let restore = Rect::new(work.x + 40, work.y + work.h / 2 + 40, 400, 200);
+        let client_key = add_realized_maximized_configure_client(
+            &mut jwm,
+            window,
+            MaximizeAxes::VERT,
+            restore,
+            border_w,
+        );
+        let (filled_y, filled_h) = (
+            jwm.state.clients[client_key].geometry.y,
+            jwm.state.clients[client_key].geometry.h,
+        );
+        assert_eq!((filled_y, filled_h), (work.y, work.h - 2 * border_w));
+
+        jwm.handle_regular_configure_request_params(
+            &mut backend,
+            client_key,
+            ConfigWindowBits::X.bits(),
+            WindowChanges {
+                x: Some(work.x + 100),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let client = &jwm.state.clients[client_key];
+        assert_eq!(client.state.maximized_axes(), MaximizeAxes::VERT);
+        assert_eq!(
+            (client.geometry.x, client.geometry.y, client.geometry.h),
+            (work.x + 100, filled_y, filled_h),
+            "the free axis moves inside the parent, the filled one stays put"
+        );
+        let applied = backend
+            .window_ops
+            .applied
+            .lock()
+            .expect("applied changes lock");
+        let (_, changes) = applied
+            .iter()
+            .rev()
+            .find(|(win, _)| *win == window)
+            .expect("the dialog is configured");
+        assert_eq!(
+            (changes.x, changes.y, changes.height),
+            (Some(work.x + 100), Some(filled_y), Some(filled_h as u32))
+        );
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use crate::backend::compositor_common::recording_nv12::{
     NV12_PACK_FRAGMENT_BODY, nv12_frame_bytes, nv12_packed_target_size, nv12_target_fits,
-    recording_output_size,
+    recording_canvas_rect, recording_output_size,
 };
 use crate::backend::compositor_common::recording_sink::RecordingSink;
 use smithay::backend::renderer::gles::ffi;
@@ -118,6 +118,58 @@ unsafe fn uniform_2f(gl: &ffi::Gles2, program: u32, name: &[u8], x: f32, y: f32)
     }
 }
 
+/// Name of the recorder's ffmpeg diagnostics log inside the per-user runtime
+/// directory.
+const RECORDING_FFMPEG_LOG_NAME: &str = "jwm-wayland-recording-ffmpeg.log";
+
+/// Where the recorder keeps ffmpeg's diagnostics.
+///
+/// ffmpeg runs at `-loglevel warning`, so this log is the only place a missing
+/// encoder or a VAAPI failure is explained. `$XDG_RUNTIME_DIR` is private to
+/// the user, so the stable name there cannot collide with anyone else's.
+/// Without one (or with a relative value, which would follow the compositor's
+/// working directory) the log falls back to the shared temporary directory
+/// under a per-user name: the single fixed name it used to have there belonged
+/// to whichever user recorded first, and every other user's recording then
+/// failed to start.
+fn recording_ffmpeg_log_path(
+    runtime_dir: Option<&std::ffi::OsStr>,
+    temp_dir: &std::path::Path,
+    euid: u32,
+) -> std::path::PathBuf {
+    match runtime_dir.map(std::path::Path::new) {
+        Some(dir) if dir.is_absolute() => dir.join(RECORDING_FFMPEG_LOG_NAME),
+        _ => temp_dir.join(format!("jwm-wayland-recording-ffmpeg-{euid}.log")),
+    }
+}
+
+/// Open the recorder's ffmpeg log, emptied for this recording.
+///
+/// The fallback directory is world-writable, so the open never follows a
+/// symlink and never blocks on a planted FIFO, and the file is accepted only as
+/// a regular file owned by this user. It is truncated and made private only
+/// after that check, so a file belonging to someone else is never clobbered.
+fn open_recording_ffmpeg_log(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.uid() != unsafe { libc::geteuid() } {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "not a regular file owned by this user",
+        ));
+    }
+    file.set_len(0)?;
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    Ok(file)
+}
+
 pub(crate) struct RecordingState {
     active: bool,
     sink: Option<RecordingSink>,
@@ -128,6 +180,10 @@ pub(crate) struct RecordingState {
     source_width: u32,
     source_height: u32,
     region: (i32, i32, u32, u32),
+    /// Size of the region the recording started with, which the encode size
+    /// was derived from. Later regions are fitted to the canvas relative to
+    /// it; see [`recording_canvas_rect`].
+    start_region_size: (u32, u32),
     capture_fbo: u32,
     capture_texture: u32,
     frame_count: u64,
@@ -159,6 +215,7 @@ impl RecordingState {
             source_width: 0,
             source_height: 0,
             region: (0, 0, 0, 0),
+            start_region_size: (0, 0),
             capture_fbo: 0,
             capture_texture: 0,
             frame_count: 0,
@@ -190,15 +247,37 @@ impl RecordingState {
             return Err("Recording already active".to_string());
         }
 
-        // Open the diagnostic sink before allocating any GL objects. An early
-        // filesystem error must not leave an inactive RecordingState holding
-        // FBO/PBO names which `stop` would historically skip.
-        let stderr = std::fs::File::create("/tmp/jwm-wayland-recording-ffmpeg.log")
-            .map_err(|e| format!("create ffmpeg log: {e}"))?;
+        // Open the diagnostic sink before allocating any GL objects, so no
+        // filesystem trouble can interleave with them. A log that cannot be
+        // opened safely costs the encoder's diagnostics, never the recording:
+        // the log's directory may be shared, and another user's file at its
+        // path must not be able to block recording.
+        let stderr_log_path = recording_ffmpeg_log_path(
+            std::env::var_os("XDG_RUNTIME_DIR").as_deref(),
+            &std::env::temp_dir(),
+            unsafe { libc::geteuid() },
+        );
+        let stderr = match open_recording_ffmpeg_log(&stderr_log_path) {
+            Ok(file) => {
+                log::info!(
+                    "wayland recording: encoder diagnostics go to {}",
+                    stderr_log_path.display()
+                );
+                Stdio::from(file)
+            }
+            Err(error) => {
+                log::warn!(
+                    "wayland recording: cannot open ffmpeg log {}: {error}; encoder diagnostics will be discarded",
+                    stderr_log_path.display()
+                );
+                Stdio::null()
+            }
+        };
 
         self.source_width = width;
         self.source_height = height;
         self.region = region;
+        self.start_region_size = (region.2, region.3);
         let max_height = crate::config::CONFIG.load().behavior().recording_max_height;
         let (encoded_w, encoded_h) = recording_output_size(region.2, region.3, max_height);
         if encoded_w == 0 || encoded_h == 0 {
@@ -442,7 +521,7 @@ impl RecordingState {
             .args(&args)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
-            .stderr(Stdio::from(stderr));
+            .stderr(stderr);
         deprioritize_encoder(&mut command);
         let child = match command.spawn() {
             Ok(child) => child,
@@ -491,15 +570,27 @@ impl RecordingState {
             gl.BindFramebuffer(ffi::DRAW_FRAMEBUFFER, self.capture_fbo);
             let (x, y, region_width, region_height) = self.region;
             let source_bottom = self.source_height as i32 - (y + region_height as i32);
+            let (dest_x, dest_y, dest_width, dest_height) = self.canvas_rect();
+            if (dest_width, dest_height) != (self.width, self.height) {
+                // The blit leaves the bars untouched, and they would otherwise
+                // keep whatever an earlier region of another shape put there.
+                // The clear honours the scissor box, so that goes first.
+                gl.Disable(ffi::SCISSOR_TEST);
+                gl.ClearColor(0.0, 0.0, 0.0, 1.0);
+                gl.Clear(ffi::COLOR_BUFFER_BIT);
+            }
+            // The canvas rect is top-down; the framebuffer counts rows from the
+            // bottom.
+            let dest_bottom = self.height.saturating_sub(dest_y + dest_height) as i32;
             gl.BlitFramebuffer(
                 x,
                 source_bottom,
                 x + region_width as i32,
                 source_bottom + region_height as i32,
-                0,
-                0,
-                self.width as i32,
-                self.height as i32,
+                dest_x as i32,
+                dest_bottom,
+                (dest_x + dest_width) as i32,
+                dest_bottom + dest_height as i32,
                 ffi::COLOR_BUFFER_BIT,
                 ffi::LINEAR,
             );
@@ -712,6 +803,59 @@ impl RecordingState {
         self.active
     }
 
+    /// Where the current region lands on the encode canvas this frame.
+    fn canvas_rect(&self) -> (u32, u32, u32, u32) {
+        recording_canvas_rect(
+            self.start_region_size,
+            (self.region.2, self.region.3),
+            (self.width, self.height),
+        )
+    }
+
+    /// Top-down canvas position of the synthesised pointer and how many canvas
+    /// pixels one cursor unit spans on each axis, or `None` without a region.
+    ///
+    /// Follows the scene's own mapping onto the canvas, bars included, so the
+    /// arrow keeps pointing at the pixel under the real pointer and keeps the
+    /// scene's proportions when the region changes shape mid-recording.
+    fn cursor_placement(&self, pointer: (f32, f32)) -> Option<([f32; 2], [f32; 2])> {
+        let (region_x, region_y, region_w, region_h) = self.region;
+        if region_w == 0 || region_h == 0 {
+            return None;
+        }
+        let (dest_x, dest_y, dest_w, dest_h) = self.canvas_rect();
+        let scale = [
+            dest_w as f32 / region_w as f32,
+            dest_h as f32 / region_h as f32,
+        ];
+        let origin = [
+            dest_x as f32 + (pointer.0.round() - region_x as f32) * scale[0],
+            dest_y as f32 + (pointer.1.round() - region_y as f32) * scale[1],
+        ];
+        Some((origin, scale))
+    }
+
+    /// The canvas rect in framebuffer coordinates (rows counted from the
+    /// bottom), which the synthesised pointer is clipped to.
+    ///
+    /// The cursor pass covers the whole capture target, so without the clip a
+    /// pointer outside a letterboxed region was painted into the bars: the
+    /// video showed an arrow tracking pointer activity outside the recorded
+    /// area. Clipping at the canvas edge, rather than skipping the arrow once
+    /// the pointer leaves the region, keeps the part of an arrow just outside
+    /// that reaches into the region, as the target edge clips it without bars
+    /// and as the region blit crops an internalized cursor.
+    fn cursor_clip_rect(&self) -> (i32, i32, i32, i32) {
+        let (dest_x, dest_y, dest_width, dest_height) = self.canvas_rect();
+        let bottom = self.height.saturating_sub(dest_y + dest_height);
+        (
+            dest_x as i32,
+            bottom as i32,
+            dest_width as i32,
+            dest_height as i32,
+        )
+    }
+
     /// Draw the synthesised pointer into the capture target.
     ///
     /// # Safety
@@ -720,20 +864,22 @@ impl RecordingState {
         if self.cursor_program == 0 {
             return;
         }
-        let (region_x, region_y, region_w, region_h) = self.region;
-        if region_w == 0 || region_h == 0 {
+        let Some((origin, scale)) = self.cursor_placement(pointer) else {
             return;
-        }
-        let scale_x = self.width as f32 / region_w as f32;
-        let scale_y = self.height as f32 / region_h as f32;
-        let origin = [
-            (pointer.0.round() - region_x as f32) * scale_x,
-            (pointer.1.round() - region_y as f32) * scale_y,
-        ];
+        };
+        let (clip_x, clip_y, clip_width, clip_height) = self.cursor_clip_rect();
         unsafe {
+            // The scene's scissor state is put back afterwards, so the rest
+            // of the frame keeps the state it had.
+            let scissor_was_enabled = gl.IsEnabled(ffi::SCISSOR_TEST) != ffi::FALSE;
+            let mut scissor_box = [0; 4];
+            gl.GetIntegerv(ffi::SCISSOR_BOX, scissor_box.as_mut_ptr());
+            gl.Enable(ffi::SCISSOR_TEST);
+            gl.Scissor(clip_x, clip_y, clip_width, clip_height);
+
             gl.UseProgram(self.cursor_program);
             uniform_2f(gl, self.cursor_program, b"u_origin\0", origin[0], origin[1]);
-            uniform_2f(gl, self.cursor_program, b"u_scale\0", scale_x, scale_y);
+            uniform_2f(gl, self.cursor_program, b"u_scale\0", scale[0], scale[1]);
             uniform_2f(
                 gl,
                 self.cursor_program,
@@ -747,6 +893,16 @@ impl RecordingState {
             gl.BlendFunc(ffi::SRC_ALPHA, ffi::ONE_MINUS_SRC_ALPHA);
             gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
             gl.Disable(ffi::BLEND);
+
+            gl.Scissor(
+                scissor_box[0],
+                scissor_box[1],
+                scissor_box[2],
+                scissor_box[3],
+            );
+            if !scissor_was_enabled {
+                gl.Disable(ffi::SCISSOR_TEST);
+            }
         }
     }
 
@@ -884,11 +1040,216 @@ impl RecordingState {
     pub(crate) const fn gpu_resources_for_tests(&self) -> ([u32; 2], u32, u32) {
         (self.pbo, self.capture_fbo, self.capture_texture)
     }
+
+    /// An inactive recorder whose `canvas` was sized for a region of
+    /// `start_region_size` and which now shows `region`, drawing its pointer
+    /// with `cursor_program`, for the headless GL tests. It owns no GL
+    /// resources; the caller keeps the program.
+    #[cfg(test)]
+    pub(crate) fn letterboxed_for_tests(
+        canvas: (u32, u32),
+        start_region_size: (u32, u32),
+        region: (i32, i32, u32, u32),
+        cursor_program: u32,
+    ) -> Self {
+        let mut state = Self::new();
+        (state.width, state.height) = canvas;
+        state.start_region_size = start_region_size;
+        state.region = region;
+        state.cursor_program = cursor_program;
+        state
+    }
+
+    /// [`Self::draw_cursor`] for the headless GL tests.
+    ///
+    /// # Safety
+    /// Requires the capture framebuffer bound and a current GL context.
+    #[cfg(test)]
+    pub(crate) unsafe fn draw_cursor_for_tests(&self, gl: &ffi::Gles2, pointer: (f32, f32)) {
+        unsafe { self.draw_cursor(gl, pointer) }
+    }
+}
+
+#[cfg(test)]
+mod ffmpeg_log_tests {
+    use super::{open_recording_ffmpeg_log, recording_ffmpeg_log_path};
+    use std::ffi::OsStr;
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::{Path, PathBuf};
+
+    /// A directory only this test uses, removed again on drop.
+    struct ScratchDir(PathBuf);
+
+    impl ScratchDir {
+        fn new(tag: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "jwm-wayland-recording-log-{tag}-{}-{:016x}",
+                std::process::id(),
+                rand::random::<u64>()
+            ));
+            std::fs::create_dir(&path).expect("create a private scratch directory");
+            Self(path)
+        }
+    }
+
+    impl Drop for ScratchDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn the_log_lives_in_the_private_runtime_dir_or_under_a_per_user_temp_name() {
+        let temp = Path::new("/tmp");
+        assert_eq!(
+            recording_ffmpeg_log_path(Some(OsStr::new("/run/user/1000")), temp, 1000),
+            Path::new("/run/user/1000/jwm-wayland-recording-ffmpeg.log")
+        );
+        // No runtime directory: a shared directory needs a per-user name, or
+        // the first user to record owns the path for everybody.
+        assert_eq!(
+            recording_ffmpeg_log_path(None, temp, 1000),
+            Path::new("/tmp/jwm-wayland-recording-ffmpeg-1000.log")
+        );
+        assert_ne!(
+            recording_ffmpeg_log_path(None, temp, 1000),
+            recording_ffmpeg_log_path(None, temp, 1001)
+        );
+        // A relative runtime directory would follow the working directory.
+        assert_eq!(
+            recording_ffmpeg_log_path(Some(OsStr::new("run/user/1000")), temp, 1000),
+            Path::new("/tmp/jwm-wayland-recording-ffmpeg-1000.log")
+        );
+    }
+
+    #[test]
+    fn opening_the_log_empties_this_users_file_and_keeps_it_private() {
+        let dir = ScratchDir::new("reuse");
+        let path = dir.0.join("jwm-wayland-recording-ffmpeg.log");
+        std::fs::write(&path, b"errors from the previous recording").expect("seed old log");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+            .expect("loosen seeded log");
+
+        let mut file = open_recording_ffmpeg_log(&path).expect("reopen own log");
+        file.write_all(b"fresh")
+            .expect("write through the handed-out file");
+        drop(file);
+
+        assert_eq!(std::fs::read(&path).expect("read log back"), b"fresh");
+        let mode = std::fs::metadata(&path)
+            .expect("stat log")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[test]
+    fn a_planted_symlink_or_non_regular_file_is_refused() {
+        let dir = ScratchDir::new("planted");
+        let target = dir.0.join("victim");
+        std::fs::write(&target, b"keep me").expect("seed symlink target");
+        let link = dir.0.join("jwm-wayland-recording-ffmpeg.log");
+        std::os::unix::fs::symlink(&target, &link).expect("plant symlink");
+        // The recorder logs this error and records without diagnostics,
+        // instead of writing through the link.
+        assert!(open_recording_ffmpeg_log(&link).is_err());
+        assert_eq!(std::fs::read(&target).expect("read target"), b"keep me");
+
+        let planted_dir = dir.0.join("planted-dir.log");
+        std::fs::create_dir(&planted_dir).expect("plant a directory at the log path");
+        assert!(open_recording_ffmpeg_log(&planted_dir).is_err());
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Duration, Instant, RecordingState};
+    use super::{Duration, Instant, RecordingState, recording_output_size};
+
+    /// A recorder mid-recording, without GL: encode size from the start region
+    /// the way `start` derives it, then the region moved to `region`.
+    fn recording_from(
+        start: (i32, i32, u32, u32),
+        max_height: u32,
+        region: (i32, i32, u32, u32),
+    ) -> RecordingState {
+        let mut state = RecordingState::new();
+        let (width, height) = recording_output_size(start.2, start.3, max_height);
+        state.active = true;
+        state.width = width;
+        state.height = height;
+        state.start_region_size = (start.2, start.3);
+        state.set_region(region);
+        state
+    }
+
+    #[test]
+    fn a_region_reshaped_mid_recording_is_letterboxed_rather_than_stretched() {
+        // Record 1600x900, then drag the right edge in to 800x900. The encoder
+        // keeps its 1600x900 canvas; the new region must keep its shape inside
+        // it instead of being stretched twice as wide.
+        let state = recording_from((0, 0, 1600, 900), 0, (0, 0, 800, 900));
+        assert_eq!(state.canvas_rect(), (400, 0, 800, 900));
+
+        // The synthesised arrow follows the scene: one-to-one, offset by the bar.
+        let (origin, scale) = state
+            .cursor_placement((100.0, 50.0))
+            .expect("a region places the cursor");
+        assert_eq!(scale, [1.0, 1.0], "the cursor must not stretch either");
+        assert_eq!(origin, [500.0, 50.0]);
+        // The arrow is clipped to the canvas, so a pointer left of the region
+        // (operating another app) stays out of the bar it maps into.
+        let clip = state.cursor_clip_rect();
+        assert_eq!(clip, (400, 0, 800, 900));
+        let (origin, _) = state
+            .cursor_placement((-100.0, 50.0))
+            .expect("a region places the cursor");
+        assert_eq!(origin, [300.0, 50.0]);
+        assert!(origin[0] < clip.0 as f32, "the arrow's tip lies in the bar");
+
+        // A capped 4K recording resized to a wide strip gets bars above and
+        // below, at the canvas's own half scale, and the cursor with it.
+        let state = recording_from((0, 0, 3840, 2160), 1080, (0, 540, 3840, 1080));
+        assert_eq!((state.width, state.height), (1920, 1080));
+        assert_eq!(state.canvas_rect(), (0, 270, 1920, 540));
+        let (origin, scale) = state
+            .cursor_placement((100.0, 640.0))
+            .expect("a region places the cursor");
+        assert_eq!(scale, [0.5, 0.5]);
+        assert_eq!(origin, [50.0, 320.0]);
+        assert_eq!(state.cursor_clip_rect(), (0, 270, 1920, 540));
+        // The clip counts rows from the bottom, as the framebuffer does: an
+        // odd leftover row puts the one-row bar at the bottom.
+        let state = recording_from((0, 0, 1600, 900), 0, (0, 0, 1600, 899));
+        assert_eq!(state.canvas_rect(), (0, 0, 1600, 899));
+        assert_eq!(state.cursor_clip_rect(), (0, 1, 1600, 899));
+    }
+
+    #[test]
+    fn the_start_region_and_its_moves_fill_the_whole_canvas() {
+        // The NV12 snap makes 1603x901 encode at 1600x900, a canvas slightly
+        // off the region's aspect ratio. That must still be a full-canvas blit
+        // with no sliver of bar, for the start region and for a pure move.
+        for (start, max_height) in [
+            ((0, 0, 1603, 901), 0),
+            ((0, 0, 1600, 901), 0),
+            ((0, 0, 3846, 2160), 1080),
+            ((0, 0, 7, 1000), 0),
+        ] {
+            let state = recording_from(start, max_height, start);
+            let canvas = (0, 0, state.width, state.height);
+            assert_eq!(state.canvas_rect(), canvas, "start region {start:?}");
+            // Without bars the cursor clip is the capture target itself.
+            assert_eq!(
+                state.cursor_clip_rect(),
+                (0, 0, state.width as i32, state.height as i32),
+                "start region {start:?}"
+            );
+            let moved = (start.0 + 17, start.1 + 9, start.2, start.3);
+            let state = recording_from(start, max_height, moved);
+            assert_eq!(state.canvas_rect(), canvas, "moved region {moved:?}");
+        }
+    }
 
     #[test]
     fn stats_describe_only_a_recording_in_progress() {

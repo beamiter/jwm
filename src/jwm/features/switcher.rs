@@ -48,18 +48,28 @@ pub(crate) fn modifier_of_keysym(keysym: u32) -> Option<Mods> {
     }
 }
 
-/// Whether a client earns a row: not swallowed, and on one of its monitor's
-/// active tags — or sticky, which shows everywhere. Minimized clients keep
-/// their tags, so they stay eligible and interleave with the visible ones
-/// in MRU order; committing such a row restores the window. A scratchpad
-/// parked on no tag has `tags == 0` and drops out here.
+/// Whether a client earns a row: not shell chrome, not swallowed, and on one
+/// of its monitor's active tags — or sticky, which shows everywhere.
+/// Minimized clients keep their tags, so they stay eligible and interleave
+/// with the visible ones in MRU order; committing such a row restores the
+/// window. A scratchpad parked on no tag has `tags == 0` and drops out here.
+///
+/// A managed `_NET_WM_WINDOW_TYPE_DOCK` client (polybar, tint2, ...) is
+/// shell chrome, not workspace content — the tags overview and the
+/// minimized Dock leave it out for the same reason. It carries every tag
+/// bit, so without the `dock` check it would get a row on every tag, and
+/// committing that row would make the panel the selected client: the next
+/// kill/zoom/float binding would act on the bar. A `_NET_WM_WINDOW_TYPE_DESKTOP`
+/// client (a desktop icon layer) is floated onto every tag the same way, so
+/// callers pass it as `dock` too.
 pub(crate) fn switcher_eligible(
+    dock: bool,
     swallowed: bool,
     sticky: bool,
     tags: u32,
     active_tags: u32,
 ) -> bool {
-    !swallowed && (sticky || tags & active_tags != 0)
+    !dock && !swallowed && (sticky || tags & active_tags != 0)
 }
 
 /// Where the highlight starts. Forward opens on the *previous* window — one
@@ -257,8 +267,8 @@ impl SystemUiState {
 impl Jwm {
     /// The most-recently-used windows, selected monitor first — the same
     /// ordering the launcher's window list uses, minus only the windows the
-    /// switcher cannot jump to (swallowed, or on an inactive tag). Minimized
-    /// windows keep their MRU place and are restored on commit.
+    /// switcher cannot jump to (docks, swallowed, or on an inactive tag).
+    /// Minimized windows keep their MRU place and are restored on commit.
     pub(crate) fn window_switcher_snapshot(&self) -> Vec<SwitcherEntry> {
         let mut ordered: Vec<MonitorKey> = Vec::new();
         // The monitor in front of the user first, so its windows rank ahead
@@ -293,6 +303,7 @@ impl Jwm {
                     continue;
                 };
                 if !switcher_eligible(
+                    client.state.is_dock || client.state.is_desktop,
                     client.state.is_swallowed,
                     client.state.is_sticky,
                     client.state.tags,
@@ -348,15 +359,18 @@ mod tests {
     #[test]
     fn eligibility_excludes_swallowed_and_off_tag_windows() {
         // Visible on an active tag.
-        assert!(switcher_eligible(false, false, 0b001, 0b001));
+        assert!(switcher_eligible(false, false, false, 0b001, 0b001));
         // Sticky shows regardless of the tag mask.
-        assert!(switcher_eligible(false, true, 0, 0b001));
+        assert!(switcher_eligible(false, false, true, 0, 0b001));
         // On another tag only.
-        assert!(!switcher_eligible(false, false, 0b010, 0b001));
+        assert!(!switcher_eligible(false, false, false, 0b010, 0b001));
         // Swallowed by its terminal.
-        assert!(!switcher_eligible(true, false, 0b001, 0b001));
+        assert!(!switcher_eligible(false, true, false, 0b001, 0b001));
         // Scratchpad parked on no tag.
-        assert!(!switcher_eligible(false, false, 0, 0b001));
+        assert!(!switcher_eligible(false, false, false, 0, 0b001));
+        // A managed dock carries every tag bit and is still no target.
+        assert!(!switcher_eligible(true, false, false, u32::MAX, 0b001));
+        assert!(!switcher_eligible(true, false, true, u32::MAX, 0b001));
         // Minimized state is deliberately not an input: a minimized client
         // keeps its tags, so it passes the same rule and commit restores it.
     }
@@ -621,5 +635,189 @@ mod tests {
         // Shift is never armed: releasing it first must not end Alt+Shift+Tab.
         assert_eq!(modifier_of_keysym(keys::KEY_Shift_L), None);
         assert!(!release_commit_mods().contains(Mods::SHIFT));
+    }
+
+    /// A backend built from the shared dummy ops: the snapshot reads only
+    /// policy state, so nothing here needs to record anything.
+    struct SnapshotBackend {
+        window_ops: crate::backend::wayland_dummy_ops::DummyWindowOps,
+        input_ops: crate::backend::wayland_dummy_ops::DummyInputOps,
+        property_ops: crate::backend::wayland_dummy_ops::DummyPropertyOps,
+        output_ops: crate::backend::wayland_dummy_ops::DummyOutputOps,
+        key_ops: crate::backend::wayland_dummy_ops::DummyKeyOps,
+        cursor_provider: crate::backend::wayland_dummy_ops::DummyCursorProvider,
+        color_allocator: crate::backend::wayland_dummy_ops::DummyColorAllocator,
+    }
+
+    impl SnapshotBackend {
+        fn new() -> Self {
+            Self {
+                window_ops: crate::backend::wayland_dummy_ops::DummyWindowOps,
+                input_ops: crate::backend::wayland_dummy_ops::DummyInputOps,
+                property_ops: crate::backend::wayland_dummy_ops::DummyPropertyOps,
+                output_ops: crate::backend::wayland_dummy_ops::DummyOutputOps,
+                key_ops: crate::backend::wayland_dummy_ops::DummyKeyOps,
+                cursor_provider: crate::backend::wayland_dummy_ops::DummyCursorProvider,
+                color_allocator: crate::backend::wayland_dummy_ops::DummyColorAllocator,
+            }
+        }
+    }
+
+    impl crate::backend::api::CompositorBenchmark for SnapshotBackend {}
+    impl crate::backend::api::BackendDiagnostics for SnapshotBackend {}
+    impl crate::backend::api::CompositorControl for SnapshotBackend {}
+    impl crate::backend::api::CompositorMedia for SnapshotBackend {}
+    impl crate::backend::api::CompositorWorkspaceEffects for SnapshotBackend {}
+    impl crate::backend::api::CompositorWindowEffects for SnapshotBackend {}
+    impl crate::backend::api::CompositorAnnotation for SnapshotBackend {}
+    impl crate::backend::api::DisplayControl for SnapshotBackend {}
+    impl crate::backend::api::RenderScheduler for SnapshotBackend {}
+
+    impl crate::backend::api::Backend for SnapshotBackend {
+        fn capabilities(&self) -> crate::backend::api::Capabilities {
+            crate::backend::api::Capabilities::default()
+        }
+
+        fn root_window(&self) -> Option<crate::backend::common_define::WindowId> {
+            Some(crate::backend::common_define::WindowId::from_raw(0))
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+
+        fn check_existing_wm(&self) -> Result<(), crate::backend::error::BackendError> {
+            Ok(())
+        }
+
+        fn window_ops(&self) -> &dyn crate::backend::api::WindowOps {
+            &self.window_ops
+        }
+
+        fn input_ops(&self) -> &dyn crate::backend::api::InputOps {
+            &self.input_ops
+        }
+
+        fn property_ops(&self) -> &dyn crate::backend::api::PropertyOps {
+            &self.property_ops
+        }
+
+        fn output_ops(&self) -> &dyn crate::backend::api::OutputOps {
+            &self.output_ops
+        }
+
+        fn key_ops(&self) -> &dyn crate::backend::api::KeyOps {
+            &self.key_ops
+        }
+
+        fn key_ops_mut(&mut self) -> &mut dyn crate::backend::api::KeyOps {
+            &mut self.key_ops
+        }
+
+        fn cursor_provider(&mut self) -> &mut dyn crate::backend::api::CursorProvider {
+            &mut self.cursor_provider
+        }
+
+        fn color_allocator(&mut self) -> &mut dyn crate::backend::api::ColorAllocator {
+            &mut self.color_allocator
+        }
+
+        fn run(
+            &mut self,
+            _handler: &mut dyn crate::backend::api::EventHandler,
+        ) -> Result<(), crate::backend::error::BackendError> {
+            Ok(())
+        }
+    }
+
+    /// A managed external bar (polybar, tint2) carries every tag bit and sits
+    /// at the MRU tail because it never takes focus — exactly where
+    /// Alt+Shift+Tab opens. It must not get a row, or releasing Alt would
+    /// make the panel the selected client.
+    #[test]
+    fn a_managed_dock_gets_no_row_even_though_it_is_on_every_tag() {
+        use crate::backend::common_define::WindowId;
+        use crate::core::models::WMClient;
+
+        let mut backend = SnapshotBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").expect("test jwm");
+        let mut monitor = jwm.createmon(true);
+        monitor.num = 7;
+        let monitor = jwm.insert_monitor(monitor);
+        jwm.state.sel_mon = Some(monitor);
+
+        let dock_window = 0x5d0c_u64;
+        // Attach order is reverse MRU: the dock mapped first, so it ends up
+        // at the tail, behind the two terminals that took focus since.
+        for (raw, dock) in [(dock_window, true), (0x5d01, false), (0x5d02, false)] {
+            let mut client = WMClient::new(WindowId::from_raw(raw));
+            client.mon = Some(monitor);
+            client.name = format!("window-{raw:x}");
+            if dock {
+                // What updatewindowtype leaves on a non-transient DOCK.
+                client.state.is_dock = true;
+                client.state.is_floating = true;
+                client.state.never_focus = true;
+                client.state.tags = u32::MAX;
+            } else {
+                client.state.tags = 0b1;
+            }
+            let key = jwm.insert_client(client);
+            jwm.attach_to_monitor(key, monitor);
+        }
+
+        let entries: Vec<u64> = jwm
+            .window_switcher_snapshot()
+            .into_iter()
+            .filter(|entry| entry.monitor == 7)
+            .map(|entry| entry.window)
+            .collect();
+        assert_eq!(entries, vec![0x5d02, 0x5d01], "MRU order, no bar row");
+        // The backward gesture opens on the oldest row: a real window now.
+        let oldest = initial_selection(entries.len(), -1, true).map(|index| entries[index]);
+        assert_eq!(oldest, Some(0x5d01));
+        assert!(!entries.contains(&dock_window));
+    }
+
+    /// A desktop-type window (icon layer, wallpaper client) is shell chrome
+    /// like a dock: it sits on every tag and never takes focus, so it gets
+    /// no Alt+Tab row either.
+    #[test]
+    fn a_managed_desktop_window_gets_no_row() {
+        use crate::backend::common_define::WindowId;
+        use crate::core::models::WMClient;
+
+        let mut backend = SnapshotBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").expect("test jwm");
+        let mut monitor = jwm.createmon(true);
+        monitor.num = 8;
+        let monitor = jwm.insert_monitor(monitor);
+        jwm.state.sel_mon = Some(monitor);
+
+        let desktop_window = 0x5e0d_u64;
+        for (raw, desktop) in [(desktop_window, true), (0x5e01, false)] {
+            let mut client = WMClient::new(WindowId::from_raw(raw));
+            client.mon = Some(monitor);
+            client.name = format!("window-{raw:x}");
+            if desktop {
+                // What updatewindowtype leaves on a non-transient DESKTOP.
+                client.state.is_desktop = true;
+                client.state.is_floating = true;
+                client.state.never_focus = true;
+                client.state.tags = u32::MAX;
+            } else {
+                client.state.tags = 0b1;
+            }
+            let key = jwm.insert_client(client);
+            jwm.attach_to_monitor(key, monitor);
+        }
+
+        let entries: Vec<u64> = jwm
+            .window_switcher_snapshot()
+            .into_iter()
+            .filter(|entry| entry.monitor == 8)
+            .map(|entry| entry.window)
+            .collect();
+        assert_eq!(entries, vec![0x5e01]);
     }
 }

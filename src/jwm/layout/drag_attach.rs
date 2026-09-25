@@ -8,15 +8,16 @@
 // resulting rect contains the pointer. Fibonacci's bottom-right spiral cell,
 // grid cells, bstack columns … all fall out of the same mechanism.
 
-use crate::backend::api::Backend;
+use crate::backend::api::{Backend, MaximizeAxes, NetWmAction};
 use crate::config::CONFIG;
 use crate::core::layout::{
     self as core_layout, LayoutClient, LayoutEnum, LayoutParams, LayoutResult,
 };
+use crate::core::maximize::{MaximizeOrigin, requested_axes};
 use crate::core::models::{ClientKey, MonitorKey};
 use crate::core::types::Rect;
 use crate::jwm::{Jwm, WMArgEnum};
-use log::info;
+use log::{error, info};
 
 /// Edge-snap targets shared by the mouse drop below and the bindable
 /// `snap_window` command: left/right halves, top-edge maximize, and the four
@@ -86,10 +87,15 @@ impl SnapDirection {
 }
 
 /// The snap geometry of the classic mouse float snap, extracted so the
-/// keyboard command produces the same rect: left/right halves of the monitor,
-/// the four corner quarters, and the full monitor for a top-edge maximize.
-/// Quarters reuse the halves' integer rule — both dimensions floor, so an odd
-/// width or height leaves the last column/row uncovered.
+/// keyboard command produces the same rect: left/right halves of the monitor
+/// and the four corner quarters. Quarters reuse the halves' integer rule —
+/// both dimensions floor, so an odd width or height leaves the last
+/// column/row uncovered.
+///
+/// `Maximize` still maps to the full monitor rect for its unit tests, but no
+/// caller snaps to it any more: the top-edge drop and `snap_window maximize`
+/// are real maximize requests that fill the work area (bar, docks and tab bar
+/// excluded) through `Jwm::set_client_maximized`.
 pub(crate) fn snap_rect(monitor: Rect, direction: SnapDirection) -> Rect {
     match direction {
         SnapDirection::Left => Rect::new(monitor.x, monitor.y, monitor.w / 2, monitor.h),
@@ -159,6 +165,10 @@ pub(crate) enum DragSnapPlan {
     /// Keep the window floating and give it this rect (float layout, or a
     /// window that was floating before the drag started).
     Float { rect: Rect },
+    /// Top-edge float drop: a real maximize (BOTH, MaximizeOrigin::User) of the
+    /// dragged client on `mon_key`; `rect` is that monitor's outer work area,
+    /// used only as the preview.
+    Maximize { mon_key: MonitorKey, rect: Rect },
     /// Re-tile the window into the monitor's layout at this position in the
     /// tiled client order.
     Attach {
@@ -178,8 +188,19 @@ impl DragSnapPlan {
     pub(crate) fn preview_rect(&self) -> Rect {
         match self {
             DragSnapPlan::Float { rect }
+            | DragSnapPlan::Maximize { rect, .. }
             | DragSnapPlan::Attach { rect, .. }
             | DragSnapPlan::AttachScrolling { rect, .. } => *rect,
+        }
+    }
+
+    /// The monitor a `Maximize` plan maximizes on. This module is private to
+    /// `layout`, so policy tests elsewhere cannot name the variant.
+    #[cfg(test)]
+    pub(crate) fn maximize_monitor(&self) -> Option<MonitorKey> {
+        match self {
+            DragSnapPlan::Maximize { mon_key, .. } => Some(*mon_key),
+            _ => None,
         }
     }
 }
@@ -225,16 +246,42 @@ fn layout_calc_fn(
 }
 
 impl Jwm {
-    /// Plan what releasing the drag at root position (px, py) on `mon_key`
-    /// should do. Returns None when the pointer is outside every snap zone,
-    /// i.e. the window simply stays floating where the user dropped it.
+    /// Plan what releasing the selected client's drag at root position
+    /// (px, py) on `mon_key` should do. See [`Self::plan_drag_snap_for`].
     pub(crate) fn plan_drag_snap(
         &self,
         mon_key: MonitorKey,
         px: i32,
         py: i32,
     ) -> Option<DragSnapPlan> {
-        let drag_key = self.get_selected_client_key()?;
+        self.plan_drag_snap_for(self.get_selected_client_key()?, mon_key, px, py)
+    }
+
+    /// Plan what releasing `drag_key`'s drag at root position (px, py) on
+    /// `mon_key` should do. Returns None when the pointer is outside every
+    /// snap zone, i.e. the window simply stays floating where the user
+    /// dropped it, when the client no longer exists, or when `mon_key` is
+    /// behind a lock shade.
+    ///
+    /// Keyed by the dragged client rather than the selection: the keyboard
+    /// stays free during a drag, and a mapped window or an activation can
+    /// take focus from the window the user is still holding. The drop must
+    /// still snap the held window, not the newly selected one.
+    pub(crate) fn plan_drag_snap_for(
+        &self,
+        drag_key: ClientKey,
+        mon_key: MonitorKey,
+        px: i32,
+        py: i32,
+    ) -> Option<DragSnapPlan> {
+        self.state.clients.get(drag_key)?;
+        // A drag begun on an unlocked output can be released over a shade.
+        // Every snap moves the window onto that monitor, and maximize and
+        // attach also select it there: focus would land on a window nobody
+        // can see. No zone, and no preview, over a locked monitor.
+        if self.monitor_key_is_locked(mon_key) {
+            return None;
+        }
         let snap_dist = CONFIG.load().snap() as i32;
 
         let (mx, my, mw, mh) = self.monitor_rect(mon_key);
@@ -280,6 +327,28 @@ impl Jwm {
         // corner drop (near one horizontal and one vertical edge) plans that
         // corner's quarter. The bottom edge alone has no zone.
         let direction = float_snap_direction(near_left, near_right, near_top, near_bottom)?;
+        if direction == SnapDirection::Maximize {
+            // Only a window a user maximize can take gets the zone, so the
+            // preview never promises what the drop will not do: a fixed-size
+            // window or a dock refuses the maximize, and a PiP window would
+            // stay small with the maximized state published on it (and its
+            // PiP return slot retargeted to the work area). Those drops
+            // leave the window where it was released.
+            let maximizable = self.state.clients.get(drag_key).is_some_and(|c| {
+                !c.state.is_pip && !c.state.is_fixed && !c.state.is_dock && !c.state.is_fullscreen
+            });
+            if !maximizable {
+                return None;
+            }
+            // A real maximize, so the window fills the work area (not the
+            // bar's pixels), carries the EWMH/xdg maximized state, and a
+            // later unmaximize returns it to the pre-drop rect. The preview
+            // is the outer work area the maximized window will cover.
+            return Some(DragSnapPlan::Maximize {
+                mon_key,
+                rect: self.maximize_work_area(mon_key)?,
+            });
+        }
         let rect = snap_rect(Rect::new(mx, my, mw, mh), direction);
         Some(DragSnapPlan::Float { rect })
     }
@@ -287,7 +356,8 @@ impl Jwm {
     /// Plan a reorder drop for a window that stayed tiled through its drag:
     /// the whole monitor is a drop zone and the plan is always an attach at
     /// the layout slot under the pointer. Returns None when the monitor's
-    /// layout is not a tiling one or the client cannot be re-slotted.
+    /// layout is not a tiling one, the client cannot be re-slotted, or the
+    /// monitor is behind a lock shade (see [`Self::plan_drag_snap_for`]).
     pub(crate) fn plan_drag_reorder(
         &self,
         drag_key: ClientKey,
@@ -295,6 +365,9 @@ impl Jwm {
         px: i32,
         py: i32,
     ) -> Option<DragSnapPlan> {
+        if self.monitor_key_is_locked(mon_key) {
+            return None;
+        }
         let eligible = self
             .state
             .clients
@@ -471,15 +544,64 @@ impl Jwm {
         drag_key: ClientKey,
         plan: DragSnapPlan,
     ) {
+        // The planners refuse a locked monitor, but a plan made before a lock
+        // landed must not select a monitor behind the shade either: skip it,
+        // as if the drop had been outside every zone.
+        if let DragSnapPlan::Maximize { mon_key, .. }
+        | DragSnapPlan::Attach { mon_key, .. }
+        | DragSnapPlan::AttachScrolling { mon_key, .. } = &plan
+            && self.monitor_key_is_locked(*mon_key)
+        {
+            info!(
+                "[apply_drag_snap] monitor {:?} is locked; dropped client {:?} stays put",
+                mon_key, drag_key
+            );
+            return;
+        }
         match plan {
             DragSnapPlan::Float { rect } => {
+                self.unmaximize_dropped_client(backend, drag_key);
                 self.apply_float_snap_rect(backend, drag_key, rect);
+            }
+            DragSnapPlan::Maximize { mon_key, .. } => {
+                // PiP windows ignore maximize, as in `snap_window`. The
+                // planner offers them no zone, but a plan made before the
+                // window entered PiP can still arrive here.
+                if self
+                    .state
+                    .clients
+                    .get(drag_key)
+                    .is_none_or(|c| c.state.is_pip)
+                {
+                    return;
+                }
+                let source_mon = self.state.clients.get(drag_key).and_then(|c| c.mon);
+                if source_mon != Some(mon_key) {
+                    self.sendmon(backend, Some(drag_key), Some(mon_key));
+                    // sendmon refocuses the source monitor; the dropped
+                    // window is the one the user is holding, so keep it
+                    // selected on its new monitor, as attach does.
+                    self.state.sel_mon = Some(mon_key);
+                    let _ = self.focus(backend, Some(drag_key));
+                }
+                if let Err(e) = self.set_client_maximized(
+                    backend,
+                    drag_key,
+                    MaximizeAxes::BOTH,
+                    MaximizeOrigin::User,
+                ) {
+                    error!(
+                        "[apply_drag_snap] could not maximize dropped client {:?}: {}",
+                        drag_key, e
+                    );
+                }
             }
             DragSnapPlan::Attach {
                 mon_key,
                 tiled_index,
                 ..
             } => {
+                self.unmaximize_dropped_client(backend, drag_key);
                 self.attach_dragged_client(backend, drag_key, mon_key, |jwm| {
                     // Anchor before mutating: the monitor_clients position of
                     // the tiled client currently holding the target index.
@@ -497,6 +619,7 @@ impl Jwm {
                 column_index,
                 ..
             } => {
+                self.unmaximize_dropped_client(backend, drag_key);
                 let width_factor = self
                     .scrolling_default_column_width_for_client(drag_key)
                     .unwrap_or(1.0);
@@ -515,6 +638,23 @@ impl Jwm {
                     self.arrange(backend, Some(mon_key));
                 }
             }
+        }
+    }
+
+    /// Defensive: drag activation already unmaximizes in place, but a drop
+    /// that moves or re-tiles a window must never leave maximize owning its
+    /// geometry, or the next arrange would refit it back to the work area.
+    fn unmaximize_dropped_client(&mut self, backend: &mut dyn Backend, drag_key: ClientKey) {
+        let realized = self
+            .state
+            .clients
+            .get(drag_key)
+            .is_some_and(|c| c.state.is_maximize_realized());
+        if realized && let Err(e) = self.unmaximize_in_place(backend, drag_key) {
+            error!(
+                "[apply_drag_snap] could not unmaximize dropped client {:?}: {}",
+                drag_key, e
+            );
         }
     }
 
@@ -544,9 +684,16 @@ impl Jwm {
     }
 
     /// `snap_window` command: the keyboard/IPC form of dropping a dragged
-    /// window on a monitor edge — snap the focused window to a half, a corner
-    /// quarter, or the full monitor rect, using the same geometry as the
-    /// mouse float snap.
+    /// window on a monitor edge — snap the focused window to a half or a
+    /// corner quarter, using the same geometry as the mouse float snap, or
+    /// toggle a real maximize with `maximize`.
+    ///
+    /// `maximize` requests `requested_axes(current, Toggle, BOTH)` with
+    /// origin `User`: a restored window fills its monitor's work area and
+    /// publishes the maximized state; a maximized one returns to its
+    /// pre-maximize rect. PiP windows ignore it, like `togglemaximize`.
+    /// Any other direction on a maximized window first drops maximize in
+    /// place, so the snapped rect is not refitted away by the next arrange.
     ///
     /// Snapping is a floating-geometry operation: a focused *tiled* window is
     /// a deliberate no-op (tile it to floating first with `togglefloating`),
@@ -571,6 +718,27 @@ impl Jwm {
         let Some(mon_key) = client.mon.or(self.state.sel_mon) else {
             return Ok(());
         };
+
+        if direction == SnapDirection::Maximize {
+            if client.state.is_pip {
+                return Ok(());
+            }
+            let next = requested_axes(
+                client.state.maximized_axes(),
+                NetWmAction::Toggle,
+                MaximizeAxes::BOTH,
+            );
+            info!(
+                "[snap_window] maximize toggle on client {:?} -> {:?}",
+                client_key, next
+            );
+            self.set_client_maximized(backend, client_key, next, MaximizeOrigin::User)?;
+            return Ok(());
+        }
+
+        if client.state.is_maximize_realized() {
+            self.unmaximize_in_place(backend, client_key)?;
+        }
 
         let (mx, my, mw, mh) = self.monitor_rect(mon_key);
         let rect = snap_rect(Rect::new(mx, my, mw as i32, mh as i32), direction);
@@ -1084,5 +1252,165 @@ mod tests {
                 "accepted invalid snap_window argument: {arg:?}"
             );
         }
+    }
+
+    /// A shown window on `monitor` at `rect`, floating unless `tiled`.
+    fn shown_window(
+        jwm: &mut Jwm,
+        raw: u64,
+        monitor: MonitorKey,
+        rect: Rect,
+        tiled: bool,
+    ) -> ClientKey {
+        use crate::backend::common_define::WindowId;
+        use crate::core::models::WMClient;
+
+        let mut client = WMClient::new(WindowId::from_raw(raw));
+        client.mon = Some(monitor);
+        client.state.tags = jwm.state.monitors[monitor].get_active_tags();
+        client.state.is_floating = !tiled;
+        client.geometry.border_w = 0;
+        (client.geometry.x, client.geometry.y) = (rect.x, rect.y);
+        (client.geometry.w, client.geometry.h) = (rect.w, rect.h);
+        (client.geometry.floating_x, client.geometry.floating_y) = (rect.x, rect.y);
+        (client.geometry.floating_w, client.geometry.floating_h) = (rect.w, rect.h);
+        let key = jwm.insert_client(client);
+        jwm.attach_to_monitor(key, monitor);
+        key
+    }
+
+    /// A drag begun on an unlocked output can be released over a shade. The
+    /// top-edge maximize used to move the window behind it, select that
+    /// monitor and focus the window there; the attach drop did the same. No
+    /// zone is planned over a locked monitor now, and a plan made before the
+    /// lock landed is not applied.
+    #[test]
+    fn a_drop_over_a_locked_monitor_neither_moves_nor_selects_anything_there() {
+        use crate::jwm::monitor::test_support::{DisplaySpyBackend, output};
+
+        let mut backend = DisplaySpyBackend::new(vec![
+            output(1, 0, 0, 1920, 1080),
+            output(2, 1920, 0, 1920, 1080),
+        ]);
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").expect("test jwm");
+        let (shown, shaded) = (jwm.state.monitor_order[0], jwm.state.monitor_order[1]);
+        assert_eq!(jwm.state.monitors[shaded].num, 1);
+        let floating = shown_window(
+            &mut jwm,
+            0x5d01,
+            shown,
+            Rect::new(200, 150, 600, 400),
+            false,
+        );
+        let tiled = shown_window(&mut jwm, 0x5d02, shown, Rect::new(0, 0, 900, 1000), true);
+        jwm.focus(&mut backend, Some(floating)).expect("focus");
+
+        let (mx, my, mw, mh) = jwm.monitor_rect(shaded);
+        let top = (mx + mw as i32 / 2, my + 1);
+        let left = (mx + 1, my + mh as i32 / 2);
+        let stale_maximize = jwm
+            .plan_drag_snap_for(floating, shaded, top.0, top.1)
+            .expect("an unlocked top edge is a maximize zone");
+        assert_eq!(stale_maximize.maximize_monitor(), Some(shaded));
+        let stale_attach = jwm
+            .plan_drag_reorder(tiled, shaded, top.0, my + mh as i32 / 2)
+            .expect("an unlocked tiling monitor is a reorder zone");
+
+        jwm.lock_monitor(&mut backend, &WMArgEnum::Int(1))
+            .expect("monitor 1 locks");
+
+        for (px, py) in [top, left] {
+            assert!(
+                jwm.plan_drag_snap_for(floating, shaded, px, py).is_none(),
+                "a snap zone was planned over the shade at ({px}, {py})"
+            );
+        }
+        assert!(
+            jwm.plan_drag_reorder(tiled, shaded, top.0, my + mh as i32 / 2)
+                .is_none()
+        );
+
+        jwm.apply_drag_snap(&mut backend, floating, stale_maximize);
+        jwm.apply_drag_snap(&mut backend, tiled, stale_attach);
+
+        assert_eq!(jwm.state.sel_mon, Some(shown), "the shade was selected");
+        let floating_client = &jwm.state.clients[floating];
+        assert_eq!(floating_client.mon, Some(shown));
+        assert_eq!(floating_client.state.maximized_axes(), MaximizeAxes::NONE);
+        assert_eq!(jwm.state.clients[tiled].mon, Some(shown));
+        let selected = jwm.get_selected_client_key();
+        assert!(
+            selected.is_none_or(|key| !jwm.client_is_on_locked_monitor(key)),
+            "focus landed behind the shade"
+        );
+    }
+
+    /// The top-edge zone previewed the work area for every float, but a
+    /// fixed-size window or a dock refuses the maximize, and a PiP window
+    /// took it while staying small: the maximized state was published on it
+    /// and it came back maximized when PiP ended. Those windows get no zone
+    /// now, and a maximize plan handed in for a PiP window is ignored, as
+    /// `snap_window maximize` ignores it.
+    #[test]
+    fn the_top_edge_zone_skips_windows_a_user_maximize_would_not_take() {
+        use crate::jwm::monitor::test_support::{DisplaySpyBackend, output};
+
+        let mut backend = DisplaySpyBackend::new(vec![output(1, 0, 0, 1920, 1080)]);
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").expect("test jwm");
+        let mon = jwm.state.monitor_order[0];
+        let dropped = Rect::new(300, 200, 480, 270);
+        let key = shown_window(&mut jwm, 0x5d03, mon, dropped, false);
+        jwm.focus(&mut backend, Some(key)).expect("focus");
+        let (mx, my, mw, _) = jwm.monitor_rect(mon);
+        let (px, py) = (mx + mw as i32 / 2, my + 1);
+        assert_eq!(
+            jwm.plan_drag_snap_for(key, mon, px, py)
+                .and_then(|plan| plan.maximize_monitor()),
+            Some(mon),
+            "an ordinary float gets the zone"
+        );
+
+        let set_flag = |jwm: &mut Jwm, name: &str, on: bool| {
+            let state = &mut jwm.state.clients[key].state;
+            match name {
+                "pip" => state.is_pip = on,
+                "fixed" => state.is_fixed = on,
+                _ => state.is_dock = on,
+            }
+        };
+        for name in ["pip", "fixed", "dock"] {
+            set_flag(&mut jwm, name, true);
+            assert!(
+                jwm.plan_drag_snap_for(key, mon, px, py).is_none(),
+                "a {name} window got the maximize zone"
+            );
+            set_flag(&mut jwm, name, false);
+        }
+
+        // A PiP window that was floating before PiP: the maximize would be
+        // admitted and land on its PiP return slot.
+        let client = &mut jwm.state.clients[key];
+        client.state.is_pip = true;
+        client.state.old_state = true;
+        let rect = jwm.maximize_work_area(mon).expect("a work area");
+        jwm.apply_drag_snap(
+            &mut backend,
+            key,
+            DragSnapPlan::Maximize { mon_key: mon, rect },
+        );
+
+        let client = &jwm.state.clients[key];
+        assert_eq!(client.state.maximized_axes(), MaximizeAxes::NONE);
+        assert_eq!(client.geometry.maximize_restore_rect, None);
+        assert_eq!(
+            Rect::new(
+                client.geometry.floating_x,
+                client.geometry.floating_y,
+                client.geometry.floating_w,
+                client.geometry.floating_h,
+            ),
+            dropped,
+            "the PiP return slot was retargeted"
+        );
     }
 }

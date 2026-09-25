@@ -22,15 +22,18 @@ use jwm::doctor::{DoctorReport, DoctorStatus, diagnose};
     long_about = "JWM window manager and compositor. Startup options can also be supplied through the existing JWM_* environment variables."
 )]
 struct Cli {
-    /// Select the platform backend.
+    /// Select the platform backend (default: wayland-udev when compiled in,
+    /// otherwise the first compiled backend).
+    // No clap `default_value`: a fixed string would name wayland-udev even in
+    // slim `--no-default-features` builds that lack it. An absent flag and env
+    // var resolve through `BackendChoice::default()` in `Cli::backend`.
     #[arg(
         long,
         env = "JWM_BACKEND",
-        default_value = "wayland-udev",
         value_parser = parse_backend,
         value_name = "BACKEND"
     )]
-    backend: BackendChoice,
+    backend: Option<BackendChoice>,
 
     /// Generate fresh X11 and Wayland configuration templates, backing up existing files.
     #[arg(
@@ -94,6 +97,14 @@ struct Cli {
     log_filter: Option<String>,
 }
 
+impl Cli {
+    /// Backend requested through `--backend`/`JWM_BACKEND`, or the build's
+    /// compiled-in default when neither is given.
+    fn backend(&self) -> BackendChoice {
+        self.backend.unwrap_or_default()
+    }
+}
+
 fn parse_backend(value: &str) -> Result<BackendChoice, String> {
     value.parse()
 }
@@ -149,9 +160,10 @@ fn print_doctor_report(report: &DoctorReport) {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
+    let backend = cli.backend();
 
     if cli.doctor {
-        let report = diagnose(cli.backend);
+        let report = diagnose(backend);
         if cli.json {
             println!("{}", serde_json::to_string_pretty(&report)?);
         } else {
@@ -166,12 +178,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if cli.print_config_path {
-        println!("{}", config_path(cli.backend).display());
+        println!("{}", config_path(backend).display());
         return Ok(());
     }
 
     if cli.check_config {
-        let check = validate_config(cli.backend)?;
+        let check = validate_config(backend)?;
         if check.diagnostics.has_errors() {
             return Err(Box::new(jwm::config::ConfigError::Validation(
                 check.diagnostics,
@@ -199,23 +211,68 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     configure_logging(cli.log_filter.as_deref());
+    // The logger starts background threads that live as long as the process;
+    // they must not be able to take SIGCHLD. See `SigchldBlockedForEarlyThreads`.
+    let sigchld_blocked = SigchldBlockedForEarlyThreads::new();
     initialize_logging("jwm", "/dev/shm/jwm_bar_global")?;
     install_panic_hook();
     info!("[main] begin");
+    if let Err(error) = &sigchld_blocked {
+        warn!("[main] could not block SIGCHLD for early helper threads: {error}");
+    }
 
     setup_locale();
     ensure_dbus_session();
+    // Hand `run_with_options` the mask this thread started with.
+    drop(sigchld_blocked);
 
     let benchmark = cli
         .benchmark
         .map(|frames| BenchmarkRequest::new(frames, cli.benchmark_warmup.unwrap_or(60)))
         .transpose()
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
-    run_with_options(ApplicationOptions {
-        backend: cli.backend,
-        benchmark,
-    })?;
+    run_with_options(ApplicationOptions { backend, benchmark })?;
     Ok(())
+}
+
+/// Keeps `SIGCHLD` blocked on the main thread while `main` starts the
+/// logger's background threads and bootstraps the D-Bus session, then
+/// restores the thread's previous mask.
+///
+/// The X11 backends read `SIGCHLD` through a calloop signalfd created in
+/// `run`, which only sees the signal while every other thread keeps it
+/// blocked. Threads inherit their spawner's mask, and the threads started
+/// here outlive startup; one of them left with `SIGCHLD` unblocked is an
+/// eligible target for the process-directed signal, which the default
+/// disposition then discards, so child reaping falls back to the one-second
+/// insurance poll. `application` guards the later startup spawns the same
+/// way. Children inherit this mask (std's `Command` does not reset it), so
+/// anything spawned while the guard is held must unblock `SIGCHLD` in the
+/// child itself. dbus-launch does this through
+/// `external_command::daemon_launcher_output_with_limits`, which applies
+/// `unblock_sigchld_in_child`.
+struct SigchldBlockedForEarlyThreads {
+    previous: nix::sys::signal::SigSet,
+}
+
+impl SigchldBlockedForEarlyThreads {
+    /// Blocks `SIGCHLD` on the calling thread. Logging may not be set up
+    /// yet, so a failure is returned for the caller to report.
+    fn new() -> nix::Result<Self> {
+        let mut sigchld = nix::sys::signal::SigSet::empty();
+        sigchld.add(nix::sys::signal::Signal::SIGCHLD);
+        sigchld
+            .thread_swap_mask(nix::sys::signal::SigmaskHow::SIG_BLOCK)
+            .map(|previous| Self { previous })
+    }
+}
+
+impl Drop for SigchldBlockedForEarlyThreads {
+    fn drop(&mut self) {
+        if let Err(error) = self.previous.thread_set_mask() {
+            warn!("[main] could not restore the signal mask after early startup: {error}");
+        }
+    }
 }
 
 fn configure_logging(log_filter: Option<&str>) {
@@ -401,18 +458,47 @@ fn ensure_dbus_session() {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cli, parse_dbus_launch_output};
-    use clap::Parser;
+    use super::{Cli, SigchldBlockedForEarlyThreads, parse_dbus_launch_output};
+    use clap::{CommandFactory, FromArgMatches, Parser};
+    use jwm::application::BackendChoice;
+    use nix::sys::signal::{SigSet, Signal};
+
+    /// Parses `args` with the `JWM_BACKEND` env binding removed, so the
+    /// result does not depend on the ambient process environment.
+    fn parse_without_backend_env(args: &[&str]) -> Cli {
+        let matches = Cli::command()
+            .mut_arg("backend", |arg| arg.env(None))
+            .try_get_matches_from(args)
+            .unwrap();
+        Cli::from_arg_matches(&matches).unwrap()
+    }
 
     #[test]
-    fn cli_default_value_names_wayland_udev_production_backend() {
-        // clap still reads `JWM_BACKEND` under `try_parse_from`, so assert the
-        // declared default rather than ambient process environment.
-        const SOURCE: &str = include_str!("main.rs");
-        assert!(
-            SOURCE.contains("default_value = \"wayland-udev\""),
-            "bare `jwm` must default to the Wayland DRM production backend"
-        );
+    fn cli_backend_has_no_hardcoded_clap_default() {
+        // A fixed clap default bypasses `BackendChoice::default()` and names
+        // wayland-udev even in builds that do not compile it in.
+        let command = Cli::command();
+        let backend = command
+            .get_arguments()
+            .find(|arg| arg.get_id() == "backend")
+            .unwrap();
+        assert!(backend.get_default_values().is_empty());
+    }
+
+    #[test]
+    fn bare_cli_resolves_backend_through_compiled_in_default() {
+        let cli = parse_without_backend_env(&["jwm"]);
+        assert_eq!(cli.backend, None);
+        assert_eq!(cli.backend(), BackendChoice::default());
+        assert!(cli.backend().is_compiled());
+        #[cfg(feature = "backend-wayland-udev")]
+        assert_eq!(cli.backend(), BackendChoice::WaylandUdev);
+    }
+
+    #[test]
+    fn explicit_backend_flag_overrides_compiled_in_default() {
+        let cli = parse_without_backend_env(&["jwm", "--backend", "xcb"]);
+        assert_eq!(cli.backend(), BackendChoice::Xcb);
     }
 
     #[test]
@@ -428,7 +514,7 @@ mod tests {
         ])
         .unwrap();
 
-        assert_eq!(cli.backend.as_str(), "wayland-udev");
+        assert_eq!(cli.backend().as_str(), "wayland-udev");
         assert_eq!(cli.benchmark, Some(120));
         assert_eq!(cli.benchmark_warmup, Some(30));
     }
@@ -467,7 +553,7 @@ mod tests {
         let cli = Cli::try_parse_from(["jwm", "--backend", "winit", "--doctor", "--json"]).unwrap();
         assert!(cli.doctor);
         assert!(cli.json);
-        assert_eq!(cli.backend.as_str(), "wayland-winit");
+        assert_eq!(cli.backend().as_str(), "wayland-winit");
 
         assert!(Cli::try_parse_from(["jwm", "--json"]).is_err());
         assert!(Cli::try_parse_from(["jwm", "--doctor", "--check-config"]).is_err());
@@ -490,6 +576,47 @@ mod tests {
                 ("DBUS_SESSION_BUS_PID".to_string(), "4242".to_string()),
             ]
         );
+    }
+
+    fn sigchld_blocked_on_this_thread() -> bool {
+        SigSet::thread_get_mask().unwrap().contains(Signal::SIGCHLD)
+    }
+
+    /// A thread started under the guard, like the logger's, inherits a
+    /// blocked SIGCHLD and so cannot swallow the signal the X11 run loop's
+    /// signalfd waits for; the main thread's own mask comes back afterwards.
+    #[test]
+    fn early_thread_guard_blocks_sigchld_for_spawned_threads_and_restores_the_mask() {
+        let blocked_before = sigchld_blocked_on_this_thread();
+        let spawned_blocks = {
+            let _guard = SigchldBlockedForEarlyThreads::new().unwrap();
+            std::thread::spawn(sigchld_blocked_on_this_thread)
+                .join()
+                .unwrap()
+        };
+        assert!(
+            spawned_blocks,
+            "a thread spawned under the guard must not be able to take SIGCHLD"
+        );
+        assert_eq!(sigchld_blocked_on_this_thread(), blocked_before);
+    }
+
+    #[test]
+    fn main_blocks_sigchld_from_logging_through_dbus_bootstrap() {
+        const SOURCE: &str = include_str!("main.rs");
+        let main_start = SOURCE.find("fn main()").unwrap();
+        let main_len = SOURCE[main_start..].find("\n}\n").unwrap();
+        let main_body = &SOURCE[main_start..main_start + main_len];
+        let position = |needle: &str| {
+            main_body
+                .find(needle)
+                .unwrap_or_else(|| panic!("main no longer contains `{needle}`"))
+        };
+        let guard = position("SigchldBlockedForEarlyThreads::new()");
+        assert!(guard < position("initialize_logging("));
+        let restored = position("drop(sigchld_blocked)");
+        assert!(position("ensure_dbus_session();") < restored);
+        assert!(restored < position("run_with_options("));
     }
 
     #[test]

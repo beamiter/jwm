@@ -32,7 +32,7 @@ jwm --backend wayland-udev --doctor          # offline gate
 jwm-tool health --json                       # live snapshot
 jwm-tool capabilities --json                 # discover IPC safely
 jwm-support --backend wayland-udev --output bundle.json
-jwm-tool perf record --output baseline.json  # labeled only
+jwm-tool perf record --out baseline.json     # labeled only
 ```
 
 A build that cannot explain what it supports is not daily-drive ready.

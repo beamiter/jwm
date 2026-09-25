@@ -1,6 +1,6 @@
 // src/core/models.rs
 
-use crate::backend::api::LayerSurfaceInfo;
+use crate::backend::api::{LayerSurfaceInfo, MaximizeAxes};
 use crate::backend::common_define::WindowId;
 use crate::core::layout::LayoutEnum;
 use crate::core::types::Rect;
@@ -312,6 +312,14 @@ pub struct ClientGeometry {
     /// minimized before leaving fullscreen.
     pub hidden_restore_rect: Option<Rect>,
 
+    /// Pre-maximize content rectangle (same convention as x/y/w/h). `Some`
+    /// exactly while a maximize axis is set. Owned by `Jwm::set_client_maximized`
+    /// and its helpers; output migration translates it and the arrange refit
+    /// re-syncs its free axes. Never shares storage with `old_*`
+    /// (resizeclient/fullscreen), `floating_*` (floating/PiP) or
+    /// `hidden_restore_rect` (parking).
+    pub maximize_restore_rect: Option<Rect>,
+
     pub floating_x: i32,
     pub floating_y: i32,
     pub floating_w: i32,
@@ -360,8 +368,26 @@ pub struct ClientState {
     /// so afterwards.
     pub pip_restore_sticky: bool,
     pub is_dock: bool,
+    /// True for a managed `_NET_WM_WINDOW_TYPE_DESKTOP` window (a desktop
+    /// icon layer or wallpaper client). Like a dock it carries every tag bit
+    /// and never takes focus, so window lists treat it as shell chrome rather
+    /// than workspace content.
+    pub is_desktop: bool,
     pub is_maximized_vert: bool,
     pub is_maximized_horz: bool,
+    /// Maximize pulled this client out of the layout (togglemaximize on a tiled
+    /// window, or an admitted maximize under the FLOAT layout). Clearing the
+    /// last axis re-tiles it. Implies at least one maximize axis.
+    pub maximize_restore_tiled: bool,
+    /// The client this one preceded in its monitor's tiled order when
+    /// maximize promoted it: the next tile, or a window promoted from between
+    /// the two that is still out of the layout (None: nothing followed it).
+    /// Re-tiling puts it back in front of that client's slot while that
+    /// client is still in the same list. Meaningful only while
+    /// `maximize_restore_tiled` is set; an in-place unmaximize keeps it so a
+    /// cancelled drag, which reinstates the promotion, re-tiles into the
+    /// same slot.
+    pub maximize_restore_anchor: Option<ClientKey>,
     pub is_hidden: bool,
     /// Session-local insertion order in the minimized-window Dock. Zero means
     /// the client is not currently represented there.
@@ -385,6 +411,24 @@ pub struct ClientState {
     pub remembers_closed_placement: bool,
 
     pub dock_layer_info: Option<LayerSurfaceInfo>,
+}
+
+impl ClientState {
+    /// `(is_maximized_vert, is_maximized_horz)`.
+    pub fn maximized_axes(&self) -> MaximizeAxes {
+        MaximizeAxes::new(self.is_maximized_vert, self.is_maximized_horz)
+    }
+
+    /// Write both maximize axes at once.
+    pub fn set_maximized_axes(&mut self, axes: MaximizeAxes) {
+        self.is_maximized_vert = axes.vert;
+        self.is_maximized_horz = axes.horz;
+    }
+
+    /// A maximize axis is set and maximize currently owns the live geometry.
+    pub fn is_maximize_realized(&self) -> bool {
+        self.maximized_axes().any() && self.is_floating && !self.is_fullscreen && !self.is_pip
+    }
 }
 
 impl WMClient {
@@ -1405,5 +1449,41 @@ mod tests {
         assert!(geometry[2].focused_column);
         assert!((geometry[3].x_ratio - 0.75).abs() < 0.0001);
         assert_eq!(geometry[3].column_index, 2);
+    }
+
+    #[test]
+    fn maximized_axes_round_trip_and_realization_requires_a_plain_floating_client() {
+        let mut state = ClientState::default();
+        assert_eq!(state.maximized_axes(), MaximizeAxes::NONE);
+        for axes in [
+            MaximizeAxes::VERT,
+            MaximizeAxes::HORZ,
+            MaximizeAxes::BOTH,
+            MaximizeAxes::NONE,
+        ] {
+            state.set_maximized_axes(axes);
+            assert_eq!(state.maximized_axes(), axes);
+            assert_eq!(state.is_maximized_vert, axes.vert);
+            assert_eq!(state.is_maximized_horz, axes.horz);
+        }
+
+        state.set_maximized_axes(MaximizeAxes::VERT);
+        assert!(
+            !state.is_maximize_realized(),
+            "a tiled client is never realized"
+        );
+        state.is_floating = true;
+        assert!(state.is_maximize_realized());
+        state.is_fullscreen = true;
+        assert!(
+            !state.is_maximize_realized(),
+            "fullscreen owns the geometry"
+        );
+        state.is_fullscreen = false;
+        state.is_pip = true;
+        assert!(!state.is_maximize_realized(), "PiP owns the geometry");
+        state.is_pip = false;
+        state.set_maximized_axes(MaximizeAxes::NONE);
+        assert!(!state.is_maximize_realized());
     }
 }

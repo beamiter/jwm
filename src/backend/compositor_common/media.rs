@@ -5,6 +5,9 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 const ENCODER_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+/// Output bound for the ffmpeg ALSA-demuxer probe, the only capability
+/// probe that exists (and only when audio capture is compiled in).
+#[cfg(feature = "media-audio")]
 const MAX_CAPABILITY_PROBE_OUTPUT_BYTES: usize = 1024 * 1024;
 
 /// Return whether both the local ALSA device and ffmpeg's ALSA input are
@@ -246,12 +249,21 @@ pub fn append_software_encoder_pacing(args: &mut Vec<String>) {
 }
 
 /// Start ffmpeg one nice level below the desktop so the kernel prefers the
-/// compositor whenever both are runnable. `pre_exec` runs in the forked child
-/// before `execvp`, so it only ever changes the encoder's priority.
+/// compositor whenever both are runnable, with `SIGCHLD` unblocked.
+///
+/// Both `pre_exec` hooks run in the forked child before `execvp`, in the
+/// order they are registered, so they only ever change the encoder's
+/// priority and signal mask. std hands the child the spawning thread's
+/// signal mask, and the X11 compositor starts ffmpeg from the event thread,
+/// which keeps `SIGCHLD` blocked for the run loop's signalfd; the shared
+/// hook [`crate::external_command::unblock_sigchld_in_child`] unblocks it,
+/// so ffmpeg and anything it forks can take the signal. The Wayland
+/// compositor's spawning thread already has `SIGCHLD` unblocked, so there
+/// the hook changes nothing.
 ///
 /// # Safety
-/// `libc::nice` is async-signal-safe and touches no allocator state, which is
-/// the requirement `pre_exec` imposes on its closure.
+/// `libc::nice` is async-signal-safe and touches no allocator state, which
+/// is the requirement `pre_exec` imposes on its closure.
 pub fn deprioritize_encoder(command: &mut Command) {
     use std::os::unix::process::CommandExt;
     unsafe {
@@ -261,11 +273,63 @@ pub fn deprioritize_encoder(command: &mut Command) {
             Ok(())
         });
     }
+    // The nice hook already takes std off posix_spawn, so this second hook
+    // adds no fork of its own.
+    crate::external_command::unblock_sigchld_in_child(command);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::external_command::test_support::{
+        SigchldBlockedOnThisThread, status_blocks_sigchld,
+    };
+    use std::process::Stdio;
+
+    /// Regression: the X11 compositor starts ffmpeg from a thread that
+    /// blocks SIGCHLD, and std inherits that mask into the child. Spawned
+    /// from such a thread, `cat` (exec'd straight from the encoder pre-exec)
+    /// must report SIGCHLD unblocked, like every app JWM launches.
+    #[test]
+    fn deprioritized_encoders_start_with_sigchld_unblocked() {
+        let _blocked = SigchldBlockedOnThisThread::new();
+
+        let mut command = Command::new("cat");
+        command.arg("/proc/self/status").stdin(Stdio::null());
+        deprioritize_encoder(&mut command);
+        let output = command.output().expect("run cat");
+        assert!(output.status.success());
+        let status = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            !status_blocks_sigchld(&status),
+            "the encoder child still blocks SIGCHLD:\n{status}"
+        );
+    }
+
+    /// The SIGCHLD hook is registered beside the nice hook, not in place of
+    /// it: the encoder still runs ten nice levels below a plain child of the
+    /// same thread (clamped at the kernel's 19).
+    #[test]
+    fn deprioritized_encoders_keep_their_lower_priority() {
+        fn child_nice(prepare: fn(&mut Command)) -> i32 {
+            let mut command = Command::new("cat");
+            command.arg("/proc/self/stat").stdin(Stdio::null());
+            prepare(&mut command);
+            let output = command.output().expect("run cat");
+            assert!(output.status.success());
+            // `/proc/<pid>/stat`: "pid (comm) state ... priority nice ...";
+            // nice is field 19, the 17th after the command name.
+            String::from_utf8_lossy(&output.stdout)
+                .rsplit_once(')')
+                .and_then(|(_, fields)| fields.split_whitespace().nth(16))
+                .and_then(|field| field.parse().ok())
+                .expect("a nice field")
+        }
+
+        let plain = child_nice(|_| {});
+        let encoder = child_nice(deprioritize_encoder);
+        assert_eq!(encoder, (plain + 10).min(19));
+    }
 
     #[test]
     fn log_args_silence_the_per_frame_progress_line() {

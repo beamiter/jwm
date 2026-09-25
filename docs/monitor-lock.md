@@ -27,6 +27,12 @@ behind an opaque shade; the rest of the desktop carries on exactly as it was.
   launcher's window search (`/`) and the expose grid while the shade is up, so
   nothing reprints their titles — or a thumbnail of them — on a screen that is
   not locked. They come back with the shade.
+- **No overview left showing it.** Expose and the overview plan their windows
+  once, on entry, so a lock taken while one of them is up takes it down:
+  expose always exits, because its grid spans the whole desktop and would keep
+  showing the newly covered windows on the other screens, and the overview
+  (`Alt+Ctrl+Tab`) closes when the windows it is cycling are on the monitor
+  being locked. An overview of another monitor stays up.
 
 The windows themselves keep running: a video behind the shade keeps playing,
 and everything is where you left it when the shade comes off.
@@ -85,7 +91,11 @@ Two consequences follow from that, and both are deliberate:
   the user cannot see is a monitor they believe is covered and is not. Locking
   is refused when compositing is off; while any monitor is locked
   `togglecompositor` refuses to switch compositing off, and a config reload
-  that asks for it defers until the last shade comes down.
+  that asks for it defers until the last shade comes down. When compositing
+  was off and a shell panel switched it on for itself, a monitor locked while
+  that panel was open keeps the compositor on after the panel closes; the
+  compositor is handed back when the last shade comes down, by an unlock or
+  by a display change (below).
 
 ## Display changes
 
@@ -101,6 +111,12 @@ you were working on is the one that goes away, the oldest lock gives way
 (`"reason": "last_unlocked_output"`) rather than leaving a desktop shaded end
 to end with nowhere to draw the prompt that would lift any of it, and the
 selection moves to the screen that is now clear.
+
+A display change that drops the last lock ends the lock's hold on a compositor
+a panel switched on, exactly as unlocking does, so compositing does not stay
+on with no shade left to draw. If a panel is still open at that moment it may
+be drawing on that same compositor, so it keeps it, and the panel's own close
+hands it back.
 
 ## Control
 

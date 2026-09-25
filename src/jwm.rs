@@ -11,6 +11,7 @@ pub mod input_handler;
 pub mod ipc_handler;
 pub mod layout;
 pub mod lifecycle;
+pub mod maximize;
 pub mod monitor;
 pub mod mouse_handler;
 pub mod navigation;
@@ -684,6 +685,199 @@ mod initial_window_adoption_tests {
     }
 }
 
+/// Where a newly constructed [`Jwm`] gets its IPC control socket from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ControlSocketSource {
+    /// Bind the per-user session endpoint (`$XDG_RUNTIME_DIR/jwm-ipc.sock`)
+    /// that bars, `jwm-tool msg` and the bridge connect to.
+    Session,
+    /// Run without a control socket, exactly like a JWM whose bind failed.
+    Detached,
+}
+
+impl ControlSocketSource {
+    /// The source for this build.
+    ///
+    /// Unit tests build well over a hundred `Jwm`s through the production
+    /// constructor, in parallel. Were they to bind the session endpoint, a
+    /// test instance could hold it at the moment a real JWM starts (a
+    /// rebuild, a restart, a login): the real one would get `AddrInUse`,
+    /// never retry, and spend its whole session without IPC while
+    /// reconnecting bars talked to the test. Whether a test had a socket
+    /// would also depend on whether the host happened to run a JWM. The IPC
+    /// server's own tests bind private per-test paths instead.
+    const fn for_build() -> Self {
+        if cfg!(test) {
+            Self::Detached
+        } else {
+            Self::Session
+        }
+    }
+
+    /// Open the control socket, or log why this run has none.
+    fn open(self, runtime_backend: &str) -> Option<IpcServer> {
+        match self {
+            Self::Detached => None,
+            // A failed bind must not block startup, but the log carries the
+            // backend and boundary so support can tell which session came up
+            // without IPC.
+            Self::Session => match IpcServer::new() {
+                Ok(server) => Some(server),
+                Err(e) => {
+                    let error = crate::backend::error::BackendError::from(e).with_context(
+                        crate::backend::error::BackendErrorContext::new(
+                            runtime_backend.to_owned(),
+                            crate::backend::error::ErrorBoundary::Ipc,
+                            "bind control socket",
+                        ),
+                    );
+                    warn!("failed to start IPC server: {error}");
+                    None
+                }
+            },
+        }
+    }
+}
+
+#[cfg(test)]
+mod control_socket_tests {
+    use super::{ControlSocketSource, Jwm};
+    use crate::backend::api::{
+        Backend, BackendDiagnostics, Capabilities, ColorAllocator, CompositorAnnotation,
+        CompositorBenchmark, CompositorControl, CompositorMedia, CompositorWindowEffects,
+        CompositorWorkspaceEffects, CursorProvider, DisplayControl, EventHandler, InputOps, KeyOps,
+        OutputOps, PropertyOps, RenderScheduler, WindowOps,
+    };
+    use crate::backend::common_define::WindowId;
+    use crate::backend::error::BackendError;
+    use crate::backend::wayland_dummy_ops::{
+        DummyColorAllocator, DummyCursorProvider, DummyInputOps, DummyKeyOps, DummyOutputOps,
+        DummyPropertyOps, DummyWindowOps,
+    };
+
+    /// The smallest backend `Jwm::new_with_runtime_backend` accepts: one
+    /// dummy output and inert operations.
+    struct InertBackend {
+        window_ops: DummyWindowOps,
+        input_ops: DummyInputOps,
+        property_ops: DummyPropertyOps,
+        output_ops: DummyOutputOps,
+        key_ops: DummyKeyOps,
+        cursor_provider: DummyCursorProvider,
+        color_allocator: DummyColorAllocator,
+    }
+
+    impl InertBackend {
+        fn new() -> Self {
+            Self {
+                window_ops: DummyWindowOps,
+                input_ops: DummyInputOps,
+                property_ops: DummyPropertyOps,
+                output_ops: DummyOutputOps,
+                key_ops: DummyKeyOps,
+                cursor_provider: DummyCursorProvider,
+                color_allocator: DummyColorAllocator,
+            }
+        }
+    }
+
+    impl CompositorBenchmark for InertBackend {}
+    impl BackendDiagnostics for InertBackend {}
+    impl CompositorControl for InertBackend {}
+    impl CompositorMedia for InertBackend {}
+    impl CompositorWorkspaceEffects for InertBackend {}
+    impl CompositorWindowEffects for InertBackend {}
+    impl CompositorAnnotation for InertBackend {}
+    impl DisplayControl for InertBackend {}
+    impl RenderScheduler for InertBackend {}
+
+    impl Backend for InertBackend {
+        fn capabilities(&self) -> Capabilities {
+            Capabilities::default()
+        }
+
+        fn root_window(&self) -> Option<WindowId> {
+            Some(WindowId::from_raw(0))
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+
+        fn check_existing_wm(&self) -> Result<(), BackendError> {
+            Ok(())
+        }
+
+        fn window_ops(&self) -> &dyn WindowOps {
+            &self.window_ops
+        }
+
+        fn input_ops(&self) -> &dyn InputOps {
+            &self.input_ops
+        }
+
+        fn property_ops(&self) -> &dyn PropertyOps {
+            &self.property_ops
+        }
+
+        fn output_ops(&self) -> &dyn OutputOps {
+            &self.output_ops
+        }
+
+        fn key_ops(&self) -> &dyn KeyOps {
+            &self.key_ops
+        }
+
+        fn key_ops_mut(&mut self) -> &mut dyn KeyOps {
+            &mut self.key_ops
+        }
+
+        fn cursor_provider(&mut self) -> &mut dyn CursorProvider {
+            &mut self.cursor_provider
+        }
+
+        fn color_allocator(&mut self) -> &mut dyn ColorAllocator {
+            &mut self.color_allocator
+        }
+
+        fn run(&mut self, _handler: &mut dyn EventHandler) -> Result<(), BackendError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn unit_test_builds_never_bind_the_session_control_socket() {
+        // Production builds bind the session endpoint; this build must not.
+        assert_eq!(
+            ControlSocketSource::for_build(),
+            ControlSocketSource::Detached
+        );
+        // A detached source opens nothing and touches no path.
+        assert!(ControlSocketSource::Detached.open("test").is_none());
+    }
+
+    #[test]
+    fn a_test_jwm_comes_up_without_a_control_socket() {
+        // Regression: the constructor used to call `IpcServer::new()`
+        // unconditionally, so a test `Jwm` bound the developer's real
+        // `$XDG_RUNTIME_DIR/jwm-ipc.sock` whenever no JWM held it. Two
+        // instances alive at once must both stay detached, whatever the host
+        // runs.
+        let mut first_backend = InertBackend::new();
+        let mut second_backend = InertBackend::new();
+        let first = Jwm::new_with_runtime_backend(&mut first_backend, "test")
+            .expect("an inert backend builds a JWM");
+        let second = Jwm::new_with_runtime_backend(&mut second_backend, "test")
+            .expect("an inert backend builds a JWM");
+
+        assert!(first.ipc_server.is_none());
+        assert!(second.ipc_server.is_none());
+        // The rest of startup still ran: the dummy output became a monitor.
+        assert_eq!(first.state.monitor_order.len(), 1);
+        assert!(first.state.sel_mon.is_some());
+    }
+}
+
 impl Jwm {
     pub(crate) fn scrolling_state_key(&self, mon_key: MonitorKey) -> Option<(MonitorKey, u32)> {
         self.state
@@ -1067,21 +1261,7 @@ impl Jwm {
         let outputs = backend.output_ops().enumerate_outputs();
         let config_revision = crate::config::Config::get_config_modified_time().ok();
         let runtime_backend: String = runtime_backend.into();
-        // IPC 失败不阻止启动，但日志必须带上后端 / 边界标记以便支持诊断。
-        let ipc_server = match IpcServer::new() {
-            Ok(s) => Some(s),
-            Err(e) => {
-                let error = crate::backend::error::BackendError::from(e).with_context(
-                    crate::backend::error::BackendErrorContext::new(
-                        runtime_backend.clone(),
-                        crate::backend::error::ErrorBoundary::Ipc,
-                        "bind control socket",
-                    ),
-                );
-                warn!("failed to start IPC server: {error}");
-                None
-            }
-        };
+        let ipc_server = ControlSocketSource::for_build().open(&runtime_backend);
         let update_readiness = match UpdateReadinessHub::new() {
             Ok(hub) => Some(hub),
             Err(error) => {

@@ -157,6 +157,22 @@ const fn should_request_static_minimized_capture(
         && !static_capture_pending
 }
 
+/// Whether a config reload asks for a different global wallpaper than the
+/// newest `set_wallpaper` request.
+///
+/// The comparison is against the requested mode, not the displayed one: a
+/// new image keeps the old image's mode on screen until its decode lands, so
+/// a reload arriving mid-decode would otherwise see a mode change and restart
+/// the very decode it is waiting for.
+fn wallpaper_config_requests_change(
+    current_path: &str,
+    requested_mode: WallpaperMode,
+    new_path: &str,
+    new_mode: WallpaperMode,
+) -> bool {
+    current_path != new_path || requested_mode != new_mode
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum WindowRetirement {
     Closed,
@@ -396,11 +412,13 @@ impl WaylandCompositor {
             self.system_ui_row_icon_cache.sync(icons);
         }
         // The wallpaper picker's side preview follows the payload's path.
-        // Latest wins: a new highlight drops the in-flight decode (the
-        // superseded worker's send then lands nowhere) and starts over, so
-        // held-down arrow keys never queue a backlog. There is no GL context
-        // here, so the texture itself — tagged with the path it decodes — is
-        // deleted on the next rendered frame once it no longer matches.
+        // Latest wins: a new highlight supersedes the in-flight decode (a
+        // superseded worker still waiting for a decode permit leaves at once,
+        // one mid-decode skips its resize, and any send lands nowhere) and
+        // starts over, so held-down arrow keys never queue a backlog. There
+        // is no GL context here, so the texture itself — tagged with the path
+        // it decodes — is deleted on the next rendered frame once it no
+        // longer matches.
         let preview_path = overlay.as_ref().and_then(|ui| ui.side_preview.as_deref());
         match crate::backend::compositor_common::wallpaper::preview_request(
             &self.system_ui_preview_path,
@@ -759,9 +777,12 @@ impl WaylandCompositor {
         // --- Wallpaper ---
         self.wallpaper_crossfade = b.wallpaper_crossfade;
         self.wallpaper_crossfade_duration_ms = b.wallpaper_crossfade_duration_ms.clamp(1, 30_000);
-        if b.wallpaper != self.wallpaper_path
-            || parse_wallpaper_mode(&b.wallpaper_mode) != self.wallpaper_mode
-        {
+        if wallpaper_config_requests_change(
+            &self.wallpaper_path,
+            self.wallpaper_requested_mode,
+            &b.wallpaper,
+            parse_wallpaper_mode(&b.wallpaper_mode),
+        ) {
             self.set_wallpaper(&b.wallpaper.clone(), &b.wallpaper_mode.clone());
         }
 
@@ -2189,6 +2210,10 @@ impl WaylandCompositor {
                 self.pending_minimized_visuals.remove(&window_id);
             }
             self.predictive_render_mgr.remove_window(window_id);
+            // Registrations come from class changes and live re-adoption; a
+            // closed window would otherwise stay until the manager's cap
+            // evicts it.
+            self.subpixel_mgr.remove_window(window_id);
             self.is_game_window.remove(&window_id);
             return;
         }
@@ -2301,6 +2326,9 @@ impl WaylandCompositor {
             }
         }
         self.predictive_render_mgr.remove_window(window_id);
+        // A minimized window re-registers from its preserved metadata when it
+        // is adopted again, so dropping it here is safe on both paths.
+        self.subpixel_mgr.remove_window(window_id);
         self.is_game_window.remove(&window_id);
         self.needs_render = true;
     }
@@ -3401,6 +3429,57 @@ mod tests {
             tab_hover_for_pointer(&groups, Some((0.0, 0.0))),
             Some((0, 0))
         );
+    }
+
+    #[test]
+    fn a_reload_during_a_new_image_decode_does_not_restart_it() {
+        use super::wallpaper_config_requests_change as requests_change;
+        use crate::backend::compositor_common::wallpaper::WallpaperMode;
+        // `set_wallpaper("/w/new.jpg", "center")` is decoding while the old
+        // image stays up in Fill: the same config arriving again is not a
+        // change, although the displayed mode still differs.
+        assert!(!requests_change(
+            "/w/new.jpg",
+            WallpaperMode::Center,
+            "/w/new.jpg",
+            WallpaperMode::Center,
+        ));
+        // A different mode or path is.
+        assert!(requests_change(
+            "/w/new.jpg",
+            WallpaperMode::Center,
+            "/w/new.jpg",
+            WallpaperMode::Fit,
+        ));
+        assert!(requests_change(
+            "/w/new.jpg",
+            WallpaperMode::Center,
+            "/w/other.jpg",
+            WallpaperMode::Center,
+        ));
+        assert!(requests_change(
+            "/w/new.jpg",
+            WallpaperMode::Center,
+            "",
+            WallpaperMode::Center,
+        ));
+
+        // The reload compares against the request, and `set_wallpaper` is
+        // what records it.
+        let compact = |text: &str| -> String { text.split_whitespace().collect() };
+        let reload = compact(item_body(
+            include_str!("config.rs"),
+            &format!("pub(crate) fn {}(", "apply_config"),
+        ));
+        assert!(reload.contains(&format!(
+            "{}(&self.wallpaper_path,self.{},",
+            "wallpaper_config_requests_change", "wallpaper_requested_mode"
+        )));
+        let set = compact(item_body(
+            include_str!("wallpaper.rs"),
+            &format!("pub(crate) fn {}(", "set_wallpaper"),
+        ));
+        assert!(set.contains(&format!("self.{}=wp_mode;", "wallpaper_requested_mode")));
     }
 
     #[test]

@@ -39,21 +39,6 @@ impl Jwm {
             .map_or(EMPTY_STACK, Vec::as_slice)
     }
 
-    pub fn attach_front(&mut self, client_key: ClientKey) {
-        let Some(mon_key) = self
-            .state
-            .clients
-            .get(client_key)
-            .and_then(|client| client.mon)
-        else {
-            return;
-        };
-        let Some(client_list) = self.state.monitor_clients.get_mut(mon_key) else {
-            return;
-        };
-        client_list.insert(0, client_key);
-    }
-
     pub fn attach_back(&mut self, client_key: ClientKey) {
         if let Some(mon_key) = self
             .state
@@ -128,19 +113,37 @@ impl Jwm {
             .is_some_and(|client| client.state.is_floating)
     }
 
+    /// Take a client out of its monitor's client list. Promoted windows
+    /// that re-tile in front of it are re-pointed first, so they keep their
+    /// slot whether it closed or moved to another monitor (see
+    /// [`Self::splice_restore_anchors`]). A client that stays listed and
+    /// only moves to the front goes through [`Self::move_to_front`] instead.
     pub fn detach(&mut self, client_key: ClientKey) {
-        if let Some(mon_key) = self
+        let Some(mon_key) = self
             .state
             .clients
             .get(client_key)
             .and_then(|client| client.mon)
-            && let Some(client_list) = self.state.monitor_clients.get_mut(mon_key)
+        else {
+            return;
+        };
+        self.splice_restore_anchors(mon_key, client_key);
+        if let Some(client_list) = self.state.monitor_clients.get_mut(mon_key)
             && let Some(pos) = client_list.iter().position(|&key| key == client_key)
         {
             client_list.remove(pos);
         }
     }
 
+    /// Move an attached client into its group of the monitor client list:
+    /// tiled clients first, floating ones last. Call it after flipping
+    /// `is_floating`.
+    ///
+    /// It only regroups and never attaches: a client not yet in the list
+    /// (manage floats a window by type, size hints, fullscreen or an adopted
+    /// maximize before `attach_new_client` runs) is left alone, since the
+    /// attach that follows would otherwise list it a second time. That
+    /// attach already places it in the right group.
     pub fn reorder_client_in_monitor_groups(&mut self, client_key: ClientKey) {
         let (Some(mon_key), Some(is_floating)) = (
             self.state.clients.get(client_key).and_then(|c| c.mon),
@@ -156,9 +159,10 @@ impl Jwm {
             return;
         };
 
-        if let Some(pos) = client_list.iter().position(|&k| k == client_key) {
-            client_list.remove(pos);
-        }
+        let Some(pos) = client_list.iter().position(|&k| k == client_key) else {
+            return;
+        };
+        client_list.remove(pos);
 
         if is_floating {
             client_list.push(client_key);
@@ -194,7 +198,11 @@ impl Jwm {
         }
     }
 
+    /// Drop a client from `mon_key`'s client list and focus stack,
+    /// whichever monitor it names. Like [`Self::detach`], it re-points the
+    /// anchors of promoted windows there first.
     pub fn detach_from_monitor(&mut self, client_key: ClientKey, mon_key: MonitorKey) {
+        self.splice_restore_anchors(mon_key, client_key);
         if let Some(client_list) = self.state.monitor_clients.get_mut(mon_key) {
             client_list.retain(|&k| k != client_key);
         }
@@ -244,6 +252,10 @@ impl Jwm {
 #[cfg(test)]
 mod tests {
     use super::{NewClientPosition, new_client_insert_index};
+    use crate::backend::common_define::WindowId;
+    use crate::core::models::{ClientKey, MonitorKey, WMClient};
+    use crate::jwm::Jwm;
+    use crate::jwm::monitor::test_support::{DisplaySpyBackend, output};
 
     // List of 5: three tiled, then two floating.
     const LEN: usize = 5;
@@ -344,5 +356,79 @@ mod tests {
             new_client_insert_index(NewClientPosition::Master, 3, 0, true, None),
             0
         );
+    }
+
+    fn jwm_with_one_monitor() -> (Jwm, MonitorKey) {
+        let mut backend = DisplaySpyBackend::new(vec![output(1, 0, 0, 1920, 1080)]);
+        let jwm = Jwm::new_with_runtime_backend(&mut backend, "test")
+            .expect("a spy backend builds a JWM");
+        let monitor = jwm.state.monitor_order[0];
+        (jwm, monitor)
+    }
+
+    /// A client on `monitor` that no list holds yet, as manage has it
+    /// before `attach_new_client`.
+    fn unattached_client(
+        jwm: &mut Jwm,
+        monitor: MonitorKey,
+        raw: u64,
+        floating: bool,
+    ) -> ClientKey {
+        let mut client = WMClient::new(WindowId::from_raw(raw));
+        client.mon = Some(monitor);
+        client.state.tags = jwm.state.monitors[monitor].get_active_tags();
+        client.state.is_floating = floating;
+        jwm.insert_client(client)
+    }
+
+    fn set_floating(jwm: &mut Jwm, key: ClientKey, floating: bool) {
+        jwm.state.clients[key].state.is_floating = floating;
+    }
+
+    /// Regression: manage floats a window (Dialog type, fixed size,
+    /// fullscreen, an adopted maximize) before `attach_new_client`, and the
+    /// regroup pushed the key it did not find. The attach then listed the
+    /// window a second time: focus cycling visited it twice and its
+    /// unmanage left a stale key behind.
+    #[test]
+    fn regrouping_never_attaches_an_unattached_client() {
+        let (mut jwm, monitor) = jwm_with_one_monitor();
+        let before = jwm.state.monitor_clients[monitor].clone();
+        let tiled = unattached_client(&mut jwm, monitor, 0x7c10, false);
+        let floating = unattached_client(&mut jwm, monitor, 0x7c11, true);
+
+        jwm.reorder_client_in_monitor_groups(tiled);
+        jwm.reorder_client_in_monitor_groups(floating);
+        assert_eq!(jwm.state.monitor_clients[monitor], before);
+
+        jwm.attach_new_client(floating);
+        let listed = jwm.state.monitor_clients[monitor]
+            .iter()
+            .filter(|&&key| key == floating)
+            .count();
+        assert_eq!(listed, 1, "the attach lists the window exactly once");
+    }
+
+    #[test]
+    fn regrouping_moves_an_attached_client_across_the_tiled_floating_border() {
+        let (mut jwm, monitor) = jwm_with_one_monitor();
+        jwm.state.monitor_clients[monitor].clear();
+        let first = unattached_client(&mut jwm, monitor, 0x7c20, false);
+        let second = unattached_client(&mut jwm, monitor, 0x7c21, false);
+        let float = unattached_client(&mut jwm, monitor, 0x7c22, true);
+        for key in [first, second, float] {
+            jwm.attach_to_monitor(key, monitor);
+        }
+        assert_eq!(jwm.state.monitor_clients[monitor], [first, second, float]);
+
+        // Floating joins the tail of the floating group…
+        set_floating(&mut jwm, first, true);
+        jwm.reorder_client_in_monitor_groups(first);
+        assert_eq!(jwm.state.monitor_clients[monitor], [second, float, first]);
+
+        // …and tiling again lands at the end of the tiled group.
+        set_floating(&mut jwm, first, false);
+        jwm.reorder_client_in_monitor_groups(first);
+        assert_eq!(jwm.state.monitor_clients[monitor], [second, first, float]);
     }
 }

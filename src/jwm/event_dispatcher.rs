@@ -4,8 +4,8 @@
 //! 负责分发所有来自 Backend 的事件到对应的处理函数
 
 use crate::backend::api::{
-    Backend, BackendEvent, EventHandler, HitTarget, InteractionAction, NetWmAction, NetWmState,
-    PropertyKind, ResizeEdge, WindowChanges,
+    Backend, BackendEvent, EventHandler, HitTarget, InteractionAction, MaximizeAxes, NetWmAction,
+    NetWmState, PropertyKind, ResizeEdge, WindowChanges,
 };
 use crate::backend::common_define::{KeySym, Mods, OutputId, WindowId};
 use crate::backend::error::BackendError;
@@ -196,8 +196,35 @@ fn requested_attention_state(action: NetWmAction, currently_requested: bool) -> 
     }
 }
 
+/// The `_NET_WM_STATE_DEMANDS_ATTENTION` flag a request leaves behind: what
+/// the client asked for, except that a window that already has the user's
+/// attention (it is focused) or asks under Do Not Disturb gets none. That is
+/// the suppression `updatewmhints` applies to the ICCCM urgency hint, and
+/// EWMH has the WM clear the state once the window got attention.
+fn attention_request_outcome(
+    action: NetWmAction,
+    currently_requested: bool,
+    is_focused: bool,
+    do_not_disturb: bool,
+) -> bool {
+    requested_attention_state(action, currently_requested) && !is_focused && !do_not_disturb
+}
+
+/// Whether policy, not the client, owns a window's rectangle: fullscreen
+/// fills its output, PiP sits in its corner with the return rectangle in
+/// `floating_*`, and a minimized or tag-hidden window is parked off screen
+/// with its visible rectangle in a restore slot. A client-chosen rectangle
+/// reported for such a window must not be adopted into the model.
+fn configured_geometry_is_policy_owned(client: &crate::core::models::WMClient) -> bool {
+    client.state.is_fullscreen
+        || client.state.is_pip
+        || client.state.is_hidden
+        || client.geometry.hidden_x.is_some()
+}
+
 fn sync_configured_client_geometry(
     wm: &mut Jwm,
+    backend: &mut dyn Backend,
     win: WindowId,
     x: i32,
     y: i32,
@@ -211,10 +238,20 @@ fn sync_configured_client_geometry(
     let width_i = i32::try_from(width).unwrap_or(i32::MAX);
     let height_i = i32::try_from(height).unwrap_or(i32::MAX);
 
-    {
-        let Some(client) = wm.state.clients.get_mut(client_key) else {
+    let refused = {
+        let Some(client) = wm.state.clients.get(client_key) else {
             return;
         };
+
+        // A realized maximize owns both the live rectangle and the restore
+        // slot. A late commit that still carries the pre-maximize buffer size
+        // must neither pull the window out of its work-area fill nor
+        // overwrite floating_* (the restore rectangle) with that stale size.
+        // The backend already answers such a request with JWM's rectangle,
+        // so there is nothing to push back here.
+        if client.state.is_maximize_realized() {
+            return;
+        }
 
         if client.geometry.x == x
             && client.geometry.y == y
@@ -223,6 +260,41 @@ fn sync_configured_client_geometry(
         {
             return;
         }
+
+        // These reports are client-initiated (an XWayland ConfigureRequest
+        // the backend granted, a dialog committing its own size). For a
+        // window whose rectangle policy owns, adopting one would shrink a
+        // fullscreen window in the model, overwrite PiP's return rectangle
+        // or pull a parked window on screen. Keep the model and push its
+        // rectangle back, as the X11 path refuses such requests outright.
+        let refused = configured_geometry_is_policy_owned(client);
+        if refused {
+            info!(
+                "[wayland_configure_sync] win={:?} refused {}x{}+{}+{}; keeping {}x{}+{}+{}",
+                win,
+                width,
+                height,
+                x,
+                y,
+                client.geometry.w,
+                client.geometry.h,
+                client.geometry.x,
+                client.geometry.y
+            );
+        }
+        refused
+    };
+    if refused {
+        if let Err(error) = wm.configure_client(backend, client_key) {
+            log::warn!("[wayland_configure_sync] could not reassert {win:?}: {error}");
+        }
+        return;
+    }
+
+    {
+        let Some(client) = wm.state.clients.get_mut(client_key) else {
+            return;
+        };
 
         info!(
             "[wayland_configure_sync] win={:?} {}x{}+{}+{} -> {}x{}+{}+{}",
@@ -347,7 +419,7 @@ impl WMController for Jwm {
         height: u32,
     ) {
         if get_backend_family() == BackendFamily::Wayland {
-            sync_configured_client_geometry(self, win, x, y, width, height);
+            sync_configured_client_geometry(self, backend, win, x, y, width, height);
         }
 
         // A panel can cross outputs without changing its strut property. Do
@@ -399,6 +471,15 @@ impl WMController for Jwm {
         backend.key_ops_mut().clear_cache();
         if let Err(e) = self.grabkeys(backend) {
             error!("Error refreshing keys on MappingNotify: {:?}", e);
+        }
+        // The focused client's ClkClientWin button grabs resolved NumLock to
+        // the modifier bit it had when focus arrived. A mapping change can
+        // move Num_Lock to another bit, and those passive grabs would then
+        // miss every click made with NumLock on until focus moved away and
+        // back. Unfocused clients hold AnyButton/AnyModifier grabs, which do
+        // not depend on NumLock, so only the selected client is regrabbed.
+        if let Some(client_key) = self.get_selected_client_key() {
+            self.grabbuttons(backend, client_key, true);
         }
     }
 
@@ -917,13 +998,18 @@ impl WMController for Jwm {
                                 // the slot under the pointer; design floats and the
                                 // float layout keep the classic floating half-screen
                                 // snap.
+                                //
+                                // Planned for the dragged window itself, not the
+                                // selection: the keyboard stays free during a drag,
+                                // and a mapped window or an activation can take
+                                // focus mid-drag. The held window still snaps where
+                                // it was dropped.
                                 DragMode::MoveFloat => {
-                                    if let Some(mk) = self.recttomon(backend, rx, ry) {
-                                        if let Some(plan) = self.plan_drag_snap(mk, rx, ry) {
-                                            if let Some(ck) = self.get_selected_client_key() {
-                                                self.apply_drag_snap(backend, ck, plan);
-                                            }
-                                        }
+                                    if let Some(mk) = self.recttomon(backend, rx, ry)
+                                        && let Some(plan) =
+                                            self.plan_drag_snap_for(ctl.client, mk, rx, ry)
+                                    {
+                                        self.apply_drag_snap(backend, ctl.client, plan);
                                     }
                                 }
                                 // Reorder: the window stayed tiled the whole drag;
@@ -947,21 +1033,29 @@ impl WMController for Jwm {
                             }
 
                             if !matches!(ctl.mode, DragMode::Reorder) {
-                                // Sync floating window geometry after drag ends
-                                self.sync_focused_floating_geometry(backend);
-
-                                if let Err(e) = self.check_monitor_consistency(backend) {
-                                    error!(
-                                        "Error checking monitor consistency after button release: {:?}",
-                                        e
-                                    );
-                                }
+                                self.settle_released_drag(backend, ctl.client);
                             }
                         }
                         // Legacy path: a backend interaction without a drag
                         // controller (backend without track support, e.g. a
                         // fallback begin_move started elsewhere).
                         None => {
+                            // A backend-driven move or resize of a realized
+                            // maximized window ends its maximize first, the
+                            // way an armed drag does on activation: the snap
+                            // plan and the geometry sync below must treat it
+                            // as an ordinary floating window.
+                            if let Some(ck) = self.get_selected_client_key()
+                                && self
+                                    .state
+                                    .clients
+                                    .get(ck)
+                                    .is_some_and(|client| client.state.is_maximize_realized())
+                                && let Err(e) = self.unmaximize_in_place(backend, ck)
+                            {
+                                error!("Error unmaximizing window after backend drag: {:?}", e);
+                            }
+
                             // Notify compositor of window move end (for wobbly windows effect)
                             if backend.has_compositor() {
                                 if let Some(ck) = self.get_selected_client_key() {
@@ -1225,10 +1319,16 @@ impl WMController for Jwm {
                     let (prev_x, prev_y) = self.last_mouse_root;
                     let dx = (root_x - prev_x) as f32;
                     let dy = (root_y - prev_y) as f32;
-                    if let Some(ck) = self.get_selected_client_key() {
-                        if let Some(client) = self.state.clients.get(ck) {
-                            backend.compositor_notify_window_move_delta(client.win, dx, dy);
-                        }
+                    // The window under the pointer is the dragged one, which
+                    // the selection need not be any more; only a backend drag
+                    // without a controller falls back to the selection.
+                    let moved = self.drag_ctl.as_ref().map(|ctl| ctl.win).or_else(|| {
+                        self.get_selected_client_key()
+                            .and_then(|ck| self.state.clients.get(ck))
+                            .map(|client| client.win)
+                    });
+                    if let Some(win) = moved {
+                        backend.compositor_notify_window_move_delta(win, dx, dy);
                     }
                 }
                 // Sync client geometry so build_compositor_scene uses the live
@@ -1265,11 +1365,20 @@ impl WMController for Jwm {
                                 backend.interaction_action(),
                                 Some(InteractionAction::Resize(_))
                             );
+                            // The release snaps the dragged window even when
+                            // the selection left it mid-drag, so preview that
+                            // window's plan; a backend drag without a
+                            // controller moves the selected window.
+                            let drag_key = match self.drag_ctl.as_ref() {
+                                Some(ctl) => Some(ctl.client),
+                                None => self.get_selected_client_key(),
+                            };
                             if is_resize {
                                 None
                             } else {
-                                self.recttomon(backend, rx, ry)
-                                    .and_then(|mk| self.plan_drag_snap(mk, rx, ry))
+                                drag_key
+                                    .zip(self.recttomon(backend, rx, ry))
+                                    .and_then(|(key, mk)| self.plan_drag_snap_for(key, mk, rx, ry))
                                     .map(|plan| {
                                         let r = plan.preview_rect();
                                         (r.x as f32, r.y as f32, r.w as f32, r.h as f32)
@@ -1463,38 +1572,19 @@ impl WMController for Jwm {
                     }
                 }
                 NetWmState::DemandsAttention => {
-                    let requested = if let Some(c) = self.state.clients.get_mut(ck) {
-                        let on = requested_attention_state(action, c.state.demands_attention);
-                        c.state.demands_attention = on;
-                        c.state.is_urgent = on;
-                        Some((on, c.mon))
-                    } else {
-                        None
-                    };
-                    if let Some((on, monitor)) = requested {
-                        let _ = backend.property_ops().set_net_wm_state_flag(
-                            win,
-                            NetWmState::DemandsAttention,
-                            on,
+                    if let Some(current) = self
+                        .state
+                        .clients
+                        .get(ck)
+                        .map(|c| c.state.demands_attention)
+                    {
+                        let on = attention_request_outcome(
+                            action,
+                            current,
+                            self.is_client_selected(ck),
+                            self.do_not_disturb,
                         );
-                        if backend.has_compositor() {
-                            backend.compositor_set_window_urgent(win, on);
-                        } else {
-                            let focused = self.get_selected_client_key() == Some(ck);
-                            if let Err(error) = self.update_client_decoration(backend, ck, focused)
-                            {
-                                log::warn!(
-                                    "could not update native urgent border for {win:?}: {error}"
-                                );
-                            }
-                        }
-                        let monitor_num = monitor
-                            .and_then(|key| self.state.monitors.get(key))
-                            .map(|monitor| monitor.num);
-                        self.mark_bar_update_needed_if_visible(monitor_num);
-                        // The grid's attention dot follows the same flag as
-                        // the bar's urgent mask, and nothing here arranges.
-                        self.refresh_tags_overview();
+                        self.set_client_demands_attention(backend, ck, on);
                     }
                 }
                 NetWmState::Above | NetWmState::Below => {
@@ -1569,24 +1659,12 @@ impl WMController for Jwm {
                         error!("Could not apply minimized state for {win:?}: {error}");
                     }
                 }
+                // A legacy one-axis request: the shared maximize transaction
+                // resolves it against the current axes, exactly like the
+                // coalesced WindowMaximizeRequest.
                 NetWmState::MaximizedVert | NetWmState::MaximizedHorz => {
-                    if let Some(c) = self.state.clients.get_mut(ck) {
-                        let is_max = match state {
-                            NetWmState::MaximizedVert => c.state.is_maximized_vert,
-                            NetWmState::MaximizedHorz => c.state.is_maximized_horz,
-                            _ => false,
-                        };
-                        let on = match action {
-                            NetWmAction::Add => true,
-                            NetWmAction::Remove => false,
-                            NetWmAction::Toggle => !is_max,
-                        };
-                        match state {
-                            NetWmState::MaximizedVert => c.state.is_maximized_vert = on,
-                            NetWmState::MaximizedHorz => c.state.is_maximized_horz = on,
-                            _ => {}
-                        }
-                        let _ = backend.property_ops().set_net_wm_state_flag(win, state, on);
+                    if let Some(axes) = MaximizeAxes::from_net_wm_state(state) {
+                        self.handle_maximize_request(backend, win, action, axes);
                     }
                 }
             }
@@ -1661,7 +1739,17 @@ impl Jwm {
         // The drag helpers (snap planning, geometry sync) work off the
         // selected client, so make sure the dragged window is it.
         if self.get_selected_client_key() != Some(client_key) {
-            let _ = self.focus(backend, Some(client_key));
+            if let Err(error) = self.focus(backend, Some(client_key)) {
+                log::warn!("Could not focus {win:?} for _NET_WM_MOVERESIZE: {error}");
+            }
+            // focus() answers a window it may not select (on a locked
+            // monitor, on a hidden tag, minimized) with another client. A
+            // drag armed anyway would carry a window the user cannot see
+            // while the drop helpers act on the fallback client.
+            if self.get_selected_client_key() != Some(client_key) {
+                debug!("Ignoring _NET_WM_MOVERESIZE for {win:?}: it could not be selected");
+                return;
+            }
         }
 
         if direction == _NET_WM_MOVERESIZE_MOVE {
@@ -1700,6 +1788,193 @@ impl Jwm {
             }
         }
         // direction 9 (SIZE_KEYBOARD) and 10 (MOVE_KEYBOARD) are ignored
+    }
+
+    /// Commit the geometry of a floating move or resize drag on release.
+    ///
+    /// While the dragged window is still selected this is the classic pair:
+    /// read its server rectangle back into the model, then hand it to the
+    /// monitor under it. The selection can leave the window mid-drag, and
+    /// both of those helpers act on the selection, so in that case the same
+    /// two steps run here on the dragged window itself, without moving the
+    /// selection or the selected monitor.
+    fn settle_released_drag(&mut self, backend: &mut dyn Backend, client_key: ClientKey) {
+        if self.get_selected_client_key() == Some(client_key) {
+            self.sync_focused_floating_geometry(backend);
+            if let Err(e) = self.check_monitor_consistency(backend) {
+                error!(
+                    "Error checking monitor consistency after button release: {:?}",
+                    e
+                );
+            }
+            return;
+        }
+
+        let win = match self.state.clients.get(client_key) {
+            // Maximize owns a realized client's live rectangle, and its
+            // floating_* is the restore slot (as in the selected-client sync).
+            Some(client) if client.state.is_maximize_realized() => return,
+            Some(client) if client.state.is_floating => client.win,
+            _ => return,
+        };
+        let geometry = match backend.window_ops().get_geometry(win) {
+            Ok(geometry) => geometry,
+            Err(error) => {
+                log::warn!("Could not read back dropped window {win:?}: {error}");
+                return;
+            }
+        };
+        let (x, y) = (geometry.x, geometry.y);
+        let (w, h) = (
+            i32::try_from(geometry.w).unwrap_or(i32::MAX),
+            i32::try_from(geometry.h).unwrap_or(i32::MAX),
+        );
+        let Some(client) = self.state.clients.get_mut(client_key) else {
+            return;
+        };
+        (client.geometry.x, client.geometry.y) = (x, y);
+        (client.geometry.w, client.geometry.h) = (w, h);
+        (client.geometry.floating_x, client.geometry.floating_y) = (x, y);
+        (client.geometry.floating_w, client.geometry.floating_h) = (w, h);
+        let current_monitor = client.mon;
+
+        // The output under the window's origin, without recttomon's fallback
+        // to the selected monitor: that monitor holds the selection, not
+        // necessarily this window.
+        let target = backend.output_ops().output_at(x, y).and_then(|output| {
+            self.state
+                .output_map
+                .iter()
+                .find_map(|(monitor, &id)| (id == output).then_some(monitor))
+        });
+        if let Some(target) = target
+            && Some(target) != current_monitor
+        {
+            // Nobody can see a window behind a lock shade, so the drop stays
+            // on its own monitor, pulled back inside it.
+            if self.monitor_key_is_locked(target) {
+                self.pull_back_from_locked_output(backend, client_key);
+                return;
+            }
+            self.sendmon(backend, Some(client_key), Some(target));
+        }
+    }
+}
+
+impl Jwm {
+    /// Close a window on behalf of another client (a pager's
+    /// `_NET_CLOSE_WINDOW`, a taskbar's foreign-toplevel close). Only managed
+    /// clients qualify: on X11 `close_window` falls back to `XKillClient` for
+    /// a window without `WM_DELETE_WINDOW`, so a stale or foreign ID would
+    /// kill whichever connection owns it, JWM's own check window included.
+    fn close_managed_window_on_request(
+        &mut self,
+        backend: &mut dyn Backend,
+        window: WindowId,
+        source: &str,
+    ) {
+        let Some(win) = self
+            .wintoclient(window)
+            .and_then(|key| self.state.clients.get(key))
+            .map(|client| client.win)
+        else {
+            debug!("[{source}] ignoring close request for unmanaged window {window:?}");
+            return;
+        };
+        if let Err(e) = backend.window_ops().close_window(win) {
+            log::warn!("[{source}] close_window failed for {win:?}: {e:?}");
+        }
+    }
+
+    /// Apply a pager's workspace activation: show `tag_mask` on `monitor`,
+    /// a policy monitor index (position in `monitor_order`), or on the
+    /// selected monitor when the request names none.
+    ///
+    /// A named monitor is selected first, so a click in the second output's
+    /// workspace group switches that output rather than the focused one. A
+    /// named monitor that no longer exists (the output went away after the
+    /// state was published) or one behind a lock shade is left alone rather
+    /// than redirected onto another monitor. Both producers bound the tag
+    /// index already, so a mask with no configured tag is a producer bug and
+    /// is dropped instead of handing `view` nothing to show.
+    pub(super) fn activate_workspace(
+        &mut self,
+        backend: &mut dyn Backend,
+        monitor: Option<usize>,
+        tag_mask: u32,
+    ) {
+        if tag_mask & CONFIG.load().tagmask() == 0 {
+            log::warn!("ignoring workspace activation with no configured tag: {tag_mask:#x}");
+            return;
+        }
+        if let Some(index) = monitor {
+            let Some(target) = self.state.monitor_order.get(index).copied() else {
+                debug!("ignoring workspace activation for vanished monitor {index}");
+                return;
+            };
+            if self.monitor_key_is_locked(target) {
+                debug!("ignoring workspace activation for locked monitor {index}");
+                return;
+            }
+            if self.state.sel_mon != Some(target)
+                && let Err(error) = self.switch_to_monitor(backend, target)
+            {
+                log::warn!("could not select monitor {index} for a workspace activation: {error}");
+                return;
+            }
+        }
+        let _ = self.view(backend, &WMArgEnum::UInt(tag_mask));
+    }
+
+    /// Store and publish a client's `_NET_WM_STATE_DEMANDS_ATTENTION` flag,
+    /// the EWMH twin of the ICCCM urgency hint, and refresh everything that
+    /// shows urgency. `is_urgent` stays set while the client's `WM_HINTS`
+    /// still carries urgency, so dropping the EWMH flag does not erase the
+    /// ICCCM one. Focusing a window clears the flag through here as well.
+    pub(super) fn set_client_demands_attention(
+        &mut self,
+        backend: &mut dyn Backend,
+        client_key: ClientKey,
+        on: bool,
+    ) {
+        let Some(win) = self.state.clients.get(client_key).map(|c| c.win) else {
+            return;
+        };
+        let hinted = !on
+            && backend
+                .property_ops()
+                .get_wm_hints(win)
+                .is_some_and(|hints| hints.urgent);
+        let urgent = on || hinted;
+        let Some(monitor) = self.state.clients.get_mut(client_key).map(|c| {
+            c.state.demands_attention = on;
+            c.state.is_urgent = urgent;
+            c.mon
+        }) else {
+            return;
+        };
+        if let Err(error) =
+            backend
+                .property_ops()
+                .set_net_wm_state_flag(win, NetWmState::DemandsAttention, on)
+        {
+            log::warn!("could not publish demands-attention state for {win:?}: {error}");
+        }
+        if backend.has_compositor() {
+            backend.compositor_set_window_urgent(win, urgent);
+        } else {
+            let focused = self.get_selected_client_key() == Some(client_key);
+            if let Err(error) = self.update_client_decoration(backend, client_key, focused) {
+                log::warn!("could not update native urgent border for {win:?}: {error}");
+            }
+        }
+        let monitor_num = monitor
+            .and_then(|key| self.state.monitors.get(key))
+            .map(|monitor| monitor.num);
+        self.mark_bar_update_needed_if_visible(monitor_num);
+        // The grid's attention dot follows the same flag as the bar's urgent
+        // mask, and nothing here arranges.
+        self.refresh_tags_overview();
     }
 }
 
@@ -1743,6 +2018,20 @@ mod tests {
         wm_state: AtomicI64,
         stacking_flags: Mutex<HashMap<WindowId, (bool, bool)>>,
         fail_next_above_write: AtomicBool,
+        /// Published maximize axes per window; only non-NONE entries.
+        maximized: Mutex<HashMap<WindowId, MaximizeAxes>>,
+        /// Every successful `set_maximized_state`, in order. Kept apart from
+        /// the other spies so maximize writes never leak into their vectors.
+        maximized_writes: Mutex<Vec<(WindowId, MaximizeAxes)>>,
+        fail_next_maximized_write: AtomicBool,
+        /// Every `_NET_WM_STATE_DEMANDS_ATTENTION` write, in order.
+        attention_writes: Mutex<Vec<(WindowId, bool)>>,
+        /// What `get_wm_hints` reports for the ICCCM urgency bit.
+        /// `set_urgent_hint` writes through, as the real property does.
+        wm_hints_urgent: AtomicBool,
+        /// Report a `WM_HINTS` property even while the urgency bit is clear
+        /// (a client that dropped its hint rather than never setting one).
+        wm_hints_present: AtomicBool,
     }
 
     impl MapRestorePropertyOps {
@@ -1753,7 +2042,22 @@ mod tests {
                 wm_state: AtomicI64::new(i64::from(crate::jwm::types::NORMAL_STATE)),
                 stacking_flags: Mutex::new(HashMap::new()),
                 fail_next_above_write: AtomicBool::new(false),
+                maximized: Mutex::new(HashMap::new()),
+                maximized_writes: Mutex::new(Vec::new()),
+                fail_next_maximized_write: AtomicBool::new(false),
+                attention_writes: Mutex::new(Vec::new()),
+                wm_hints_urgent: AtomicBool::new(false),
+                wm_hints_present: AtomicBool::new(false),
             }
+        }
+
+        fn published_maximize(&self, win: WindowId) -> MaximizeAxes {
+            self.maximized
+                .lock()
+                .unwrap()
+                .get(&win)
+                .copied()
+                .unwrap_or_default()
         }
     }
 
@@ -1784,10 +2088,15 @@ mod tests {
         }
 
         fn get_wm_hints(&self, _win: WindowId) -> Option<WmHints> {
-            None
+            let urgent = self.wm_hints_urgent.load(AtomicOrdering::Relaxed);
+            (urgent || self.wm_hints_present.load(AtomicOrdering::Relaxed)).then_some(WmHints {
+                urgent,
+                input: None,
+            })
         }
 
-        fn set_urgent_hint(&self, _win: WindowId, _urgent: bool) -> Result<(), BackendError> {
+        fn set_urgent_hint(&self, _win: WindowId, urgent: bool) -> Result<(), BackendError> {
+            self.wm_hints_urgent.store(urgent, AtomicOrdering::Relaxed);
             Ok(())
         }
 
@@ -1839,6 +2148,8 @@ mod tests {
         ) -> Result<(), BackendError> {
             if state == NetWmState::Hidden {
                 self.ewmh_hidden.store(on, AtomicOrdering::Relaxed);
+            } else if state == NetWmState::DemandsAttention {
+                self.attention_writes.lock().unwrap().push((win, on));
             } else if matches!(state, NetWmState::Above | NetWmState::Below) {
                 if state == NetWmState::Above
                     && self
@@ -1860,10 +2171,38 @@ mod tests {
 
         fn has_net_wm_state_flag(
             &self,
-            _win: WindowId,
+            win: WindowId,
             state: NetWmState,
         ) -> Result<bool, BackendError> {
-            Ok(state == NetWmState::Hidden && self.ewmh_hidden.load(AtomicOrdering::Relaxed))
+            Ok(match state {
+                NetWmState::Hidden => self.ewmh_hidden.load(AtomicOrdering::Relaxed),
+                NetWmState::MaximizedVert => self.published_maximize(win).vert,
+                NetWmState::MaximizedHorz => self.published_maximize(win).horz,
+                _ => false,
+            })
+        }
+
+        fn set_maximized_state(
+            &self,
+            win: WindowId,
+            axes: MaximizeAxes,
+        ) -> Result<(), BackendError> {
+            if self
+                .fail_next_maximized_write
+                .swap(false, AtomicOrdering::Relaxed)
+            {
+                return Err(BackendError::Message(
+                    "injected maximize write failure".into(),
+                ));
+            }
+            let mut maximized = self.maximized.lock().unwrap();
+            if axes.any() {
+                maximized.insert(win, axes);
+            } else {
+                maximized.remove(&win);
+            }
+            self.maximized_writes.lock().unwrap().push((win, axes));
+            Ok(())
         }
     }
 
@@ -1876,6 +2215,18 @@ mod tests {
         compositor_disable_trace: Mutex<Vec<&'static str>>,
         restacks: Mutex<Vec<Vec<WindowId>>>,
         fail_next_restack: AtomicBool,
+        /// Every window `close_window` was asked to close, in order.
+        closed: Mutex<Vec<WindowId>>,
+        /// Every passive button grab change, in order.
+        button_grabs: Mutex<Vec<(WindowId, ButtonGrabCall)>>,
+    }
+
+    /// One passive button grab request, as `MapRestoreWindowOps` saw it.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum ButtonGrabCall {
+        UngrabAll,
+        AnyModifier,
+        Grab { mods: Mods },
     }
 
     impl MapRestoreWindowOps {
@@ -1895,6 +2246,8 @@ mod tests {
                 compositor_disable_trace: Mutex::new(Vec::new()),
                 restacks: Mutex::new(Vec::new()),
                 fail_next_restack: AtomicBool::new(false),
+                closed: Mutex::new(Vec::new()),
+                button_grabs: Mutex::new(Vec::new()),
             }
         }
     }
@@ -1972,8 +2325,39 @@ mod tests {
             Ok(())
         }
 
-        fn close_window(&self, _win: WindowId) -> Result<CloseResult, BackendError> {
+        fn close_window(&self, win: WindowId) -> Result<CloseResult, BackendError> {
+            self.closed.lock().unwrap().push(win);
             Ok(CloseResult::Graceful)
+        }
+
+        fn ungrab_all_buttons(&self, win: WindowId) -> Result<(), BackendError> {
+            self.button_grabs
+                .lock()
+                .unwrap()
+                .push((win, ButtonGrabCall::UngrabAll));
+            Ok(())
+        }
+
+        fn grab_button_any_anymod(&self, win: WindowId, _mask: u32) -> Result<(), BackendError> {
+            self.button_grabs
+                .lock()
+                .unwrap()
+                .push((win, ButtonGrabCall::AnyModifier));
+            Ok(())
+        }
+
+        fn grab_button(
+            &self,
+            win: WindowId,
+            _button: u8,
+            _mask: u32,
+            mods: Mods,
+        ) -> Result<(), BackendError> {
+            self.button_grabs
+                .lock()
+                .unwrap()
+                .push((win, ButtonGrabCall::Grab { mods }));
+            Ok(())
         }
 
         fn set_input_focus(&self, _win: WindowId) -> Result<(), BackendError> {
@@ -2138,6 +2522,16 @@ mod tests {
         /// Every lock-shade payload pushed, newest last.
         monitor_shade_pushes: Vec<Vec<crate::backend::api::MonitorShade>>,
         x11_client_list: bool,
+        /// Accept track-only drags and report every motion and release as
+        /// part of one; off, the backend has no drag support at all.
+        track_drags: bool,
+        /// Every wobbly move delta, by window.
+        move_deltas: Vec<WindowId>,
+        /// Every snap-preview push, newest last.
+        snap_previews: Vec<Option<(f32, f32, f32, f32)>>,
+        /// What `interaction_geometry` reports for a tracked drag; `None`
+        /// keeps the motion path from resyncing geometry or previewing.
+        interaction_geometry: Option<(WindowId, i32, i32, u32, u32)>,
     }
 
     impl RenderSpyBackend {
@@ -2170,6 +2564,10 @@ mod tests {
                 system_ui_hover_updates: Vec::new(),
                 monitor_shade_pushes: Vec::new(),
                 x11_client_list: false,
+                track_drags: false,
+                move_deltas: Vec::new(),
+                snap_previews: Vec::new(),
+                interaction_geometry: None,
             }
         }
     }
@@ -2195,6 +2593,10 @@ mod tests {
             self.monitor_shade_pushes.push(shades.to_vec());
         }
 
+        fn compositor_set_snap_preview(&mut self, preview: Option<(f32, f32, f32, f32)>) {
+            self.snap_previews.push(preview);
+        }
+
         fn compositor_set_system_ui_hover(&mut self, row: Option<usize>) {
             self.system_ui_hover_updates.push(row);
         }
@@ -2206,6 +2608,10 @@ mod tests {
     impl CompositorWindowEffects for RenderSpyBackend {
         fn compositor_set_window_urgent(&mut self, window: WindowId, urgent: bool) {
             self.compositor_urgency.push((window, urgent));
+        }
+
+        fn compositor_notify_window_move_delta(&mut self, window: WindowId, _dx: f32, _dy: f32) {
+            self.move_deltas.push(window);
         }
 
         fn compositor_set_window_pip(&mut self, window: WindowId, pip: bool) {
@@ -2314,6 +2720,26 @@ mod tests {
 
         fn run(&mut self, _handler: &mut dyn EventHandler) -> Result<(), BackendError> {
             Ok(())
+        }
+
+        fn begin_track(
+            &mut self,
+            _win: WindowId,
+            _intent: InteractionAction,
+        ) -> Result<bool, BackendError> {
+            Ok(self.track_drags)
+        }
+
+        fn handle_motion(&mut self, _x: f64, _y: f64, _time: u32) -> Result<bool, BackendError> {
+            Ok(self.track_drags)
+        }
+
+        fn interaction_geometry(&self) -> Option<(WindowId, i32, i32, u32, u32)> {
+            self.interaction_geometry
+        }
+
+        fn handle_button_release(&mut self, _time: u32) -> Result<bool, BackendError> {
+            Ok(self.track_drags)
         }
 
         fn compositor_render_frame(
@@ -2516,6 +2942,52 @@ mod tests {
             keys.push(client_key);
         }
         (jwm, monitor_key, keys[0], keys[1])
+    }
+
+    #[test]
+    fn a_keymap_change_regrabs_the_focused_clients_buttons() {
+        let (mut jwm, monitor_key, first, second) = jwm_with_tab_group();
+        jwm.state.monitors[monitor_key].sel = Some(first);
+        let focused = jwm.state.clients[first].win;
+        let unfocused = jwm.state.clients[second].win;
+        let mut backend = RenderSpyBackend::new();
+
+        // Moving Num_Lock to another modifier bit sends MappingNotify. The
+        // focused window's ClkClientWin grabs resolved NumLock when focus
+        // arrived, so they have to be made again against the new bit, or
+        // Super+click stops moving that window while NumLock is on.
+        jwm.handle_event(&mut backend, BackendEvent::MappingNotify)
+            .unwrap();
+
+        let grabs = backend.window_ops.button_grabs.lock().unwrap().clone();
+        assert_eq!(
+            grabs.first(),
+            Some(&(focused, ButtonGrabCall::UngrabAll)),
+            "the stale grabs are dropped before new ones are made"
+        );
+        let numlock_regrabbed = grabs.iter().any(|&(win, call)| match call {
+            ButtonGrabCall::Grab { mods } => win == focused && mods.contains(Mods::NUMLOCK),
+            _ => false,
+        });
+        assert!(
+            numlock_regrabbed,
+            "the NumLock variants are grabbed again: {grabs:?}"
+        );
+        assert!(
+            grabs.iter().all(|&(win, _)| win != unfocused),
+            "unfocused clients hold AnyModifier grabs that NumLock does not affect"
+        );
+    }
+
+    #[test]
+    fn a_keymap_change_with_nothing_focused_grabs_no_buttons() {
+        let (mut jwm, _monitor_key, _first, _second) = jwm_with_tab_group();
+        let mut backend = RenderSpyBackend::new();
+
+        jwm.handle_event(&mut backend, BackendEvent::MappingNotify)
+            .unwrap();
+
+        assert!(backend.window_ops.button_grabs.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -6146,6 +6618,80 @@ mod tests {
         );
     }
 
+    /// The wallpaper picker's directory listing is one more background-job
+    /// slot: a listing that cannot wake the loop must keep the idle poll, or
+    /// an open picker would sit on "scanning" until unrelated input arrived.
+    #[test]
+    fn a_parked_wallpaper_listing_is_registered_with_the_readiness_hub() {
+        let mut jwm = empty_jwm();
+        assert!(jwm.background_job_readiness_is_complete());
+
+        jwm.features.wallpaper_listing =
+            Some(crate::jwm::features::connectivity::BackgroundJob::spawn(
+                || (std::path::PathBuf::new(), Vec::new()),
+            ));
+        assert!(
+            !jwm.background_job_readiness_is_complete(),
+            "an untracked wallpaper listing must keep the idle poll fallback"
+        );
+
+        jwm.async_update_notifier =
+            Some(crate::backend::update_notifier::AsyncUpdateNotifier::new().unwrap());
+        let job = crate::jwm::features::connectivity::BackgroundJob::spawn(|| {
+            (std::path::PathBuf::new(), Vec::new())
+        });
+        jwm.features.wallpaper_listing = Some(jwm.track_background_job(job));
+        assert!(
+            jwm.background_job_readiness_is_complete(),
+            "a tracked wallpaper listing rides the readiness hub"
+        );
+    }
+
+    /// A key-stopped microphone recording finishes its file on a worker that
+    /// cannot wake the loop; the maintenance tick is what adopts its outcome,
+    /// so the loop keeps waking at frame rate until the worker returns.
+    #[test]
+    fn a_finalizing_audio_recording_keeps_the_maintenance_tick_scheduled() {
+        let mut jwm = empty_jwm();
+        let mut backend = RenderSpyBackend::new();
+        backend.compositor_enabled = false;
+        // Taken before the update so every periodic deadline it arms is a
+        // full interval away from here, whatever the machine's speed.
+        let before = std::time::Instant::now();
+        EventHandler::update(&mut jwm, &mut backend).unwrap();
+        assert!(
+            jwm.maintenance_next_wakeup_at(before) > FRAME_INTERVAL,
+            "nothing is due at frame rate before the recording stops"
+        );
+
+        let (release, finalize) = std::sync::mpsc::channel::<()>();
+        jwm.features.audio_recording =
+            crate::jwm::features::audio_recording::AudioRecordingState::recording_for_test(
+                "jwm-finalizing-tick.wav",
+                move |_stop| {
+                    // The bound only keeps a regression from hanging.
+                    let _ = finalize.recv_timeout(std::time::Duration::from_secs(30));
+                    Ok(())
+                },
+            );
+        assert_eq!(jwm.features.audio_recording.begin_stop(), None);
+        assert!(jwm.features.audio_recording.is_finalizing());
+        assert!(
+            jwm.maintenance_next_wakeup_at(before) <= FRAME_INTERVAL,
+            "the tick must come back for the finalizing worker"
+        );
+
+        release.send(()).unwrap();
+        while jwm.features.audio_recording.is_finalizing() {
+            jwm.poll_audio_recording(&mut backend);
+            std::thread::yield_now();
+        }
+        assert!(
+            jwm.maintenance_next_wakeup_at(before) > FRAME_INTERVAL,
+            "a settled recording stops holding the tick at frame rate"
+        );
+    }
+
     #[test]
     fn orphan_bar_is_retired_before_a_mapping_bar_blocks_creation() {
         let mut jwm = empty_jwm();
@@ -7648,6 +8194,593 @@ mod tests {
         assert_eq!(client.geometry.border_w, 3);
     }
 
+    /// One monitor on a 1920x1080 output whose top 30 pixels are reserved:
+    /// `m_*` is the output and `w_*` the 1920x1050 area below the strip.
+    /// JWM's own bar is hidden on the current tag, so `w_*` is the whole
+    /// work area and the maximized rectangles below are exact numbers.
+    fn jwm_with_maximize_monitor() -> (Jwm, crate::jwm::MonitorKey) {
+        let mut jwm = jwm_with_monitor();
+        let monitor = jwm.state.monitor_order[0];
+        // Clients attached here really join the monitor's layout lists.
+        jwm.state.monitor_clients.insert(monitor, Vec::new());
+        jwm.state.monitor_stack.insert(monitor, Vec::new());
+        let monitor_ref = &mut jwm.state.monitors[monitor];
+        monitor_ref.lt = std::rc::Rc::new(crate::core::layout::LayoutEnum::TILE);
+        monitor_ref.tag_set[0] = 1;
+        let pertag = monitor_ref.pertag.as_mut().expect("pertag");
+        let current = pertag.cur_tag;
+        pertag.show_bars[current] = false;
+        let geometry = &mut monitor_ref.geometry;
+        (geometry.m_x, geometry.m_y, geometry.m_w, geometry.m_h) = (0, 0, 1920, 1080);
+        (geometry.w_x, geometry.w_y, geometry.w_w, geometry.w_h) = (0, 30, 1920, 1050);
+        assert_eq!(
+            jwm.maximize_work_area(monitor),
+            Some(crate::core::types::Rect::new(0, 30, 1920, 1050))
+        );
+        (jwm, monitor)
+    }
+
+    /// A selected client at `rect` with a 2-pixel border. A floating one
+    /// also rests there (`floating_*`).
+    fn add_maximize_test_client(
+        jwm: &mut Jwm,
+        monitor: crate::jwm::MonitorKey,
+        window: WindowId,
+        rect: crate::core::types::Rect,
+        floating: bool,
+    ) -> ClientKey {
+        use crate::core::models::WMClient;
+
+        let mut client = WMClient::new(window);
+        client.mon = Some(monitor);
+        client.state.tags = 1;
+        client.state.is_floating = floating;
+        client.geometry.x = rect.x;
+        client.geometry.y = rect.y;
+        client.geometry.w = rect.w;
+        client.geometry.h = rect.h;
+        client.geometry.border_w = 2;
+        if floating {
+            client.geometry.floating_x = rect.x;
+            client.geometry.floating_y = rect.y;
+            client.geometry.floating_w = rect.w;
+            client.geometry.floating_h = rect.h;
+        }
+        let key = jwm.insert_client(client);
+        jwm.attach_to_monitor(key, monitor);
+        jwm.state.monitors[monitor].set_selected_client_for_current_tag(Some(key));
+        key
+    }
+
+    fn live_rect(jwm: &Jwm, key: ClientKey) -> crate::core::types::Rect {
+        let geometry = &jwm.state.clients[key].geometry;
+        crate::core::types::Rect::new(geometry.x, geometry.y, geometry.w, geometry.h)
+    }
+
+    fn floating_slot(jwm: &Jwm, key: ClientKey) -> crate::core::types::Rect {
+        let geometry = &jwm.state.clients[key].geometry;
+        crate::core::types::Rect::new(
+            geometry.floating_x,
+            geometry.floating_y,
+            geometry.floating_w,
+            geometry.floating_h,
+        )
+    }
+
+    fn server_rect(backend: &RenderSpyBackend) -> crate::core::types::Rect {
+        let geometry = *backend.window_ops.geometry.lock().unwrap();
+        crate::core::types::Rect::new(geometry.x, geometry.y, geometry.w as i32, geometry.h as i32)
+    }
+
+    fn send_maximize_request(
+        jwm: &mut Jwm,
+        backend: &mut RenderSpyBackend,
+        window: WindowId,
+        action: NetWmAction,
+        axes: MaximizeAxes,
+    ) {
+        jwm.handle_event(
+            backend,
+            BackendEvent::WindowMaximizeRequest {
+                window,
+                action,
+                axes,
+            },
+        )
+        .unwrap();
+    }
+
+    fn send_axis_state_request(
+        jwm: &mut Jwm,
+        backend: &mut RenderSpyBackend,
+        window: WindowId,
+        action: NetWmAction,
+        state: NetWmState,
+    ) {
+        jwm.handle_event(
+            backend,
+            BackendEvent::WindowStateRequest {
+                window,
+                action,
+                state,
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn window_maximize_request_runs_one_transaction_and_restores_exactly() {
+        use crate::core::types::Rect;
+
+        let (mut jwm, monitor) = jwm_with_maximize_monitor();
+        let mut backend = RenderSpyBackend::new();
+        let window = WindowId::from_raw(0x6d01);
+        let original = Rect::new(300, 200, 640, 480);
+        let key = add_maximize_test_client(&mut jwm, monitor, window, original, true);
+        // The work area minus the 2-pixel border on each side; no gaps.
+        let maximized = Rect::new(0, 30, 1916, 1046);
+
+        send_maximize_request(
+            &mut jwm,
+            &mut backend,
+            window,
+            NetWmAction::Add,
+            MaximizeAxes::BOTH,
+        );
+        let client = &jwm.state.clients[key];
+        assert_eq!(client.state.maximized_axes(), MaximizeAxes::BOTH);
+        assert_eq!(live_rect(&jwm, key), maximized);
+        assert_eq!(client.geometry.maximize_restore_rect, Some(original));
+        assert_eq!(floating_slot(&jwm, key), original);
+        assert_eq!(
+            *backend.property_ops.maximized_writes.lock().unwrap(),
+            vec![(window, MaximizeAxes::BOTH)],
+            "one request is one published state change"
+        );
+        assert_eq!(server_rect(&backend), maximized);
+
+        send_maximize_request(
+            &mut jwm,
+            &mut backend,
+            window,
+            NetWmAction::Remove,
+            MaximizeAxes::BOTH,
+        );
+        let client = &jwm.state.clients[key];
+        assert_eq!(client.state.maximized_axes(), MaximizeAxes::NONE);
+        assert_eq!(live_rect(&jwm, key), original);
+        assert_eq!(client.geometry.maximize_restore_rect, None);
+        assert_eq!(floating_slot(&jwm, key), original);
+        assert_eq!(
+            backend.property_ops.published_maximize(window),
+            MaximizeAxes::NONE
+        );
+        assert_eq!(server_rect(&backend), original);
+    }
+
+    #[test]
+    fn legacy_per_axis_state_requests_route_through_the_same_transaction() {
+        use crate::core::types::Rect;
+
+        let (mut jwm, monitor) = jwm_with_maximize_monitor();
+        let mut backend = RenderSpyBackend::new();
+        let window = WindowId::from_raw(0x6d02);
+        let original = Rect::new(300, 200, 640, 480);
+        let key = add_maximize_test_client(&mut jwm, monitor, window, original, true);
+
+        send_axis_state_request(
+            &mut jwm,
+            &mut backend,
+            window,
+            NetWmAction::Add,
+            NetWmState::MaximizedVert,
+        );
+        assert_eq!(
+            jwm.state.clients[key].state.maximized_axes(),
+            MaximizeAxes::VERT
+        );
+        assert_eq!(live_rect(&jwm, key), Rect::new(300, 30, 640, 1046));
+
+        send_axis_state_request(
+            &mut jwm,
+            &mut backend,
+            window,
+            NetWmAction::Add,
+            NetWmState::MaximizedHorz,
+        );
+        let client = &jwm.state.clients[key];
+        assert_eq!(client.state.maximized_axes(), MaximizeAxes::BOTH);
+        assert_eq!(live_rect(&jwm, key), Rect::new(0, 30, 1916, 1046));
+        assert_eq!(
+            client.geometry.maximize_restore_rect,
+            Some(original),
+            "adding the second axis must keep the first axis' restore rect"
+        );
+
+        send_axis_state_request(
+            &mut jwm,
+            &mut backend,
+            window,
+            NetWmAction::Toggle,
+            NetWmState::MaximizedVert,
+        );
+        assert_eq!(
+            jwm.state.clients[key].state.maximized_axes(),
+            MaximizeAxes::HORZ
+        );
+        assert_eq!(live_rect(&jwm, key), Rect::new(0, 200, 1916, 480));
+
+        send_axis_state_request(
+            &mut jwm,
+            &mut backend,
+            window,
+            NetWmAction::Toggle,
+            NetWmState::MaximizedHorz,
+        );
+        let client = &jwm.state.clients[key];
+        assert_eq!(client.state.maximized_axes(), MaximizeAxes::NONE);
+        assert_eq!(live_rect(&jwm, key), original);
+        assert_eq!(client.geometry.maximize_restore_rect, None);
+        assert_eq!(
+            backend.property_ops.published_maximize(window),
+            MaximizeAxes::NONE
+        );
+    }
+
+    #[test]
+    fn paired_toggle_from_a_half_maximized_window_maximizes_both_axes() {
+        use crate::core::types::Rect;
+
+        let (mut jwm, monitor) = jwm_with_maximize_monitor();
+        let mut backend = RenderSpyBackend::new();
+        let window = WindowId::from_raw(0x6d03);
+        let original = Rect::new(300, 200, 640, 480);
+        let key = add_maximize_test_client(&mut jwm, monitor, window, original, true);
+
+        send_axis_state_request(
+            &mut jwm,
+            &mut backend,
+            window,
+            NetWmAction::Add,
+            NetWmState::MaximizedVert,
+        );
+        assert_eq!(
+            jwm.state.clients[key].state.maximized_axes(),
+            MaximizeAxes::VERT
+        );
+
+        // One `_NET_WM_STATE` toggle naming both atoms: a half-maximized
+        // window becomes fully maximized instead of swapping its axes.
+        send_maximize_request(
+            &mut jwm,
+            &mut backend,
+            window,
+            NetWmAction::Toggle,
+            MaximizeAxes::BOTH,
+        );
+        assert_eq!(
+            jwm.state.clients[key].state.maximized_axes(),
+            MaximizeAxes::BOTH
+        );
+        assert_eq!(live_rect(&jwm, key), Rect::new(0, 30, 1916, 1046));
+        assert_eq!(
+            backend.property_ops.published_maximize(window),
+            MaximizeAxes::BOTH
+        );
+
+        send_maximize_request(
+            &mut jwm,
+            &mut backend,
+            window,
+            NetWmAction::Toggle,
+            MaximizeAxes::BOTH,
+        );
+        let client = &jwm.state.clients[key];
+        assert_eq!(client.state.maximized_axes(), MaximizeAxes::NONE);
+        assert_eq!(live_rect(&jwm, key), original);
+        assert_eq!(client.geometry.maximize_restore_rect, None);
+    }
+
+    #[test]
+    fn tiled_client_maximize_request_is_refused_with_authoritative_reply() {
+        use crate::core::types::Rect;
+
+        let (mut jwm, monitor) = jwm_with_maximize_monitor();
+        let mut backend = RenderSpyBackend::new();
+        let window = WindowId::from_raw(0x6d04);
+        let tile = Rect::new(0, 30, 956, 1046);
+        let key = add_maximize_test_client(&mut jwm, monitor, window, tile, false);
+
+        send_maximize_request(
+            &mut jwm,
+            &mut backend,
+            window,
+            NetWmAction::Add,
+            MaximizeAxes::BOTH,
+        );
+
+        let client = &jwm.state.clients[key];
+        assert_eq!(client.state.maximized_axes(), MaximizeAxes::NONE);
+        assert!(!client.state.is_floating);
+        assert!(!client.state.maximize_restore_tiled);
+        assert_eq!(client.geometry.maximize_restore_rect, None);
+        assert_eq!(live_rect(&jwm, key), tile);
+        assert_eq!(
+            *backend.property_ops.maximized_writes.lock().unwrap(),
+            vec![(window, MaximizeAxes::NONE)],
+            "a refusal republishes the current state"
+        );
+        assert_eq!(
+            server_rect(&backend),
+            tile,
+            "a refusal replies with the authoritative geometry"
+        );
+    }
+
+    #[test]
+    fn float_layout_maximize_promotes_and_unmaximize_retiles() {
+        use crate::core::types::Rect;
+
+        let (mut jwm, monitor) = jwm_with_maximize_monitor();
+        jwm.state.monitors[monitor].lt = std::rc::Rc::new(crate::core::layout::LayoutEnum::FLOAT);
+        let mut backend = RenderSpyBackend::new();
+        let window = WindowId::from_raw(0x6d05);
+        let original = Rect::new(100, 120, 800, 600);
+        let key = add_maximize_test_client(&mut jwm, monitor, window, original, false);
+        // A floating neighbour makes the tiled/floating group split of
+        // monitor_clients observable.
+        let anchor = add_maximize_test_client(
+            &mut jwm,
+            monitor,
+            WindowId::from_raw(0x6d06),
+            Rect::new(1200, 600, 300, 200),
+            true,
+        );
+        jwm.state.monitors[monitor].set_selected_client_for_current_tag(Some(key));
+        assert_eq!(jwm.state.monitor_clients[monitor], vec![key, anchor]);
+        let floating_before = floating_slot(&jwm, key);
+
+        send_maximize_request(
+            &mut jwm,
+            &mut backend,
+            window,
+            NetWmAction::Add,
+            MaximizeAxes::BOTH,
+        );
+        let client = &jwm.state.clients[key];
+        assert!(client.state.is_floating);
+        assert!(client.state.maximize_restore_tiled);
+        assert_eq!(client.state.maximized_axes(), MaximizeAxes::BOTH);
+        assert_eq!(live_rect(&jwm, key), Rect::new(0, 30, 1916, 1046));
+        assert_eq!(
+            floating_slot(&jwm, key),
+            floating_before,
+            "promotion keeps the pre-promotion floating rect"
+        );
+        assert_eq!(jwm.state.monitor_clients[monitor], vec![anchor, key]);
+
+        send_maximize_request(
+            &mut jwm,
+            &mut backend,
+            window,
+            NetWmAction::Remove,
+            MaximizeAxes::BOTH,
+        );
+        let client = &jwm.state.clients[key];
+        assert!(!client.state.is_floating);
+        assert!(!client.state.maximize_restore_tiled);
+        assert_eq!(client.state.maximized_axes(), MaximizeAxes::NONE);
+        assert_eq!(client.geometry.maximize_restore_rect, None);
+        assert_eq!(live_rect(&jwm, key), original);
+        assert_eq!(
+            jwm.state.monitor_clients[monitor],
+            vec![key, anchor],
+            "the re-tiled client is back in the tiled group"
+        );
+    }
+
+    #[test]
+    fn failed_maximize_property_write_restores_client_and_atoms() {
+        use crate::core::types::Rect;
+
+        let (mut jwm, monitor) = jwm_with_maximize_monitor();
+        let mut backend = RenderSpyBackend::new();
+        let window = WindowId::from_raw(0x6d07);
+        let key = add_maximize_test_client(
+            &mut jwm,
+            monitor,
+            window,
+            Rect::new(300, 200, 640, 480),
+            true,
+        );
+        let before = jwm.state.clients[key].clone();
+        let order_before = jwm.state.monitor_clients[monitor].clone();
+        backend
+            .property_ops
+            .fail_next_maximized_write
+            .store(true, AtomicOrdering::Relaxed);
+
+        // The transaction error is logged; the event itself is handled.
+        send_maximize_request(
+            &mut jwm,
+            &mut backend,
+            window,
+            NetWmAction::Add,
+            MaximizeAxes::BOTH,
+        );
+
+        assert_eq!(jwm.state.clients[key], before);
+        assert_eq!(jwm.state.monitor_clients[monitor], order_before);
+        let writes = backend.property_ops.maximized_writes.lock().unwrap();
+        assert_eq!(
+            writes
+                .iter()
+                .rev()
+                .find(|(written, _)| *written == window)
+                .map(|&(_, axes)| axes),
+            Some(MaximizeAxes::NONE),
+            "the rollback republishes the previous atoms"
+        );
+    }
+
+    /// Floating client at `rect`, realized maximized on `axes` with `restore`
+    /// as its restore rect and resting slot (M4).
+    fn add_realized_maximize_client(
+        jwm: &mut Jwm,
+        monitor: crate::jwm::MonitorKey,
+        window: WindowId,
+        rect: crate::core::types::Rect,
+        axes: MaximizeAxes,
+        restore: crate::core::types::Rect,
+    ) -> ClientKey {
+        let key = add_maximize_test_client(jwm, monitor, window, rect, true);
+        let client = &mut jwm.state.clients[key];
+        client.state.set_maximized_axes(axes);
+        client.geometry.maximize_restore_rect = Some(restore);
+        client.geometry.floating_x = restore.x;
+        client.geometry.floating_y = restore.y;
+        client.geometry.floating_w = restore.w;
+        client.geometry.floating_h = restore.h;
+        assert!(client.state.is_maximize_realized());
+        key
+    }
+
+    #[test]
+    fn wayland_configured_sync_leaves_a_maximized_window_alone() {
+        use crate::core::types::Rect;
+
+        let (mut jwm, monitor) = jwm_with_maximize_monitor();
+        let mut backend = RenderSpyBackend::new();
+        let maximized_window = WindowId::from_raw(0x6d08);
+        let maximized = Rect::new(0, 30, 1916, 1046);
+        let restore = Rect::new(300, 200, 640, 480);
+        let maximized_key = add_realized_maximize_client(
+            &mut jwm,
+            monitor,
+            maximized_window,
+            maximized,
+            MaximizeAxes::BOTH,
+            restore,
+        );
+
+        sync_configured_client_geometry(&mut jwm, &mut backend, maximized_window, 5, 5, 300, 200);
+        assert_eq!(live_rect(&jwm, maximized_key), maximized);
+        assert_eq!(floating_slot(&jwm, maximized_key), restore);
+        assert_eq!(
+            jwm.state.clients[maximized_key]
+                .geometry
+                .maximize_restore_rect,
+            Some(restore)
+        );
+
+        // Regression guard: an ordinary floating window still follows its
+        // committed size, in both the live and the floating slot.
+        let floating_window = WindowId::from_raw(0x6d09);
+        let floating_key =
+            add_maximize_test_client(&mut jwm, monitor, floating_window, restore, true);
+        sync_configured_client_geometry(&mut jwm, &mut backend, floating_window, 5, 5, 300, 200);
+        assert_eq!(live_rect(&jwm, floating_key), Rect::new(5, 5, 300, 200));
+        assert_eq!(floating_slot(&jwm, floating_key), Rect::new(5, 5, 300, 200));
+    }
+
+    #[test]
+    fn wayland_configured_sync_refuses_client_geometry_for_policy_owned_windows() {
+        use crate::core::types::Rect;
+
+        let (mut jwm, monitor) = jwm_with_maximize_monitor();
+        let mut backend = RenderSpyBackend::new();
+        let restore = Rect::new(100, 100, 800, 600);
+        let client_chosen = Rect::new(1500, 800, 480, 270);
+
+        // PiP: the corner rectangle is live, floating_* is the way back.
+        let pip_window = WindowId::from_raw(0x6d0b);
+        let pip = add_maximize_test_client(&mut jwm, monitor, pip_window, restore, true);
+        assert!(jwm.set_client_pip(&mut backend, pip, true).unwrap());
+        let pip_rect = live_rect(&jwm, pip);
+        assert_ne!(pip_rect, restore);
+        assert_eq!(floating_slot(&jwm, pip), restore);
+
+        // Fullscreen: the output rectangle.
+        let fullscreen_window = WindowId::from_raw(0x6d0c);
+        let output = Rect::new(0, 0, 1920, 1080);
+        let fullscreen =
+            add_maximize_test_client(&mut jwm, monitor, fullscreen_window, output, true);
+        jwm.state.clients[fullscreen].state.is_fullscreen = true;
+
+        // Parked on a hidden tag: off screen, visible rectangle in its slot.
+        let parked_window = WindowId::from_raw(0x6d0d);
+        let parked_rect = Rect::new(-1000, 100, 640, 480);
+        let parked = add_maximize_test_client(&mut jwm, monitor, parked_window, parked_rect, true);
+        {
+            let geometry = &mut jwm.state.clients[parked].geometry;
+            geometry.hidden_x = Some(parked_rect.x);
+            geometry.hidden_restore_rect = Some(restore);
+        }
+
+        for (window, key, owned, floating) in [
+            (pip_window, pip, pip_rect, restore),
+            (fullscreen_window, fullscreen, output, output),
+            (parked_window, parked, parked_rect, parked_rect),
+        ] {
+            sync_configured_client_geometry(
+                &mut jwm,
+                &mut backend,
+                window,
+                client_chosen.x,
+                client_chosen.y,
+                client_chosen.w as u32,
+                client_chosen.h as u32,
+            );
+            assert_eq!(live_rect(&jwm, key), owned, "{window:?} keeps its rect");
+            assert_eq!(
+                floating_slot(&jwm, key),
+                floating,
+                "{window:?} keeps its floating slot"
+            );
+            // The backend already granted the client's rect; policy pushes
+            // its own back.
+            assert_eq!(server_rect(&backend), owned, "{window:?} is reasserted");
+        }
+        assert_eq!(
+            jwm.state.clients[parked].geometry.hidden_restore_rect,
+            Some(restore)
+        );
+
+        // Leaving PiP after the refused resize returns to the real rect.
+        jwm.set_client_pip(&mut backend, pip, false).unwrap();
+        assert_eq!(live_rect(&jwm, pip), restore);
+    }
+
+    #[test]
+    fn sync_focused_floating_geometry_leaves_a_maximized_window_alone() {
+        use crate::core::types::Rect;
+
+        let (mut jwm, monitor) = jwm_with_maximize_monitor();
+        let mut backend = RenderSpyBackend::new();
+        let window = WindowId::from_raw(0x6d0a);
+        let maximized = Rect::new(0, 30, 1916, 1046);
+        let restore = Rect::new(300, 200, 640, 480);
+        let key = add_realized_maximize_client(
+            &mut jwm,
+            monitor,
+            window,
+            maximized,
+            MaximizeAxes::BOTH,
+            restore,
+        );
+        assert_eq!(jwm.get_selected_client_key(), Some(key));
+        assert_ne!(
+            server_rect(&backend),
+            maximized,
+            "the server must report a different rect for this test to mean anything"
+        );
+
+        jwm.sync_focused_floating_geometry(&mut backend);
+
+        assert_eq!(live_rect(&jwm, key), maximized);
+        assert_eq!(floating_slot(&jwm, key), restore);
+    }
+
     #[test]
     fn attention_state_requests_are_idempotent_and_toggle_current_state() {
         assert!(requested_attention_state(NetWmAction::Add, false));
@@ -7803,6 +8936,643 @@ mod tests {
             vec![(window, true), (window, false)]
         );
     }
+
+    #[test]
+    fn attention_request_outcome_mirrors_the_urgency_hint_suppression() {
+        // Unfocused, outside Do Not Disturb: the request stands.
+        assert!(attention_request_outcome(
+            NetWmAction::Add,
+            false,
+            false,
+            false
+        ));
+        assert!(attention_request_outcome(
+            NetWmAction::Toggle,
+            false,
+            false,
+            false
+        ));
+        // The focused window already has the user's attention.
+        assert!(!attention_request_outcome(
+            NetWmAction::Add,
+            false,
+            true,
+            false
+        ));
+        // Do Not Disturb silences it.
+        assert!(!attention_request_outcome(
+            NetWmAction::Add,
+            false,
+            false,
+            true
+        ));
+        assert!(!attention_request_outcome(
+            NetWmAction::Toggle,
+            false,
+            false,
+            true
+        ));
+        assert!(!attention_request_outcome(
+            NetWmAction::Remove,
+            true,
+            false,
+            false
+        ));
+    }
+
+    #[test]
+    fn attention_requests_honor_dnd_focus_and_a_standing_urgency_hint() {
+        use crate::core::types::Rect;
+
+        let (mut jwm, monitor) = jwm_with_maximize_monitor();
+        let mut backend = RenderSpyBackend::new();
+        let window = WindowId::from_raw(0x6e11);
+        let key = add_maximize_test_client(
+            &mut jwm,
+            monitor,
+            window,
+            Rect::new(100, 100, 400, 300),
+            true,
+        );
+        let focused_window = WindowId::from_raw(0x6e12);
+        let focused = add_maximize_test_client(
+            &mut jwm,
+            monitor,
+            focused_window,
+            Rect::new(600, 100, 400, 300),
+            true,
+        );
+        assert_eq!(jwm.get_selected_client_key(), Some(focused));
+        let request = |jwm: &mut Jwm, backend: &mut RenderSpyBackend, win, action| {
+            jwm.on_window_state_request(backend, win, action, NetWmState::DemandsAttention);
+        };
+        let last_attention_write = |backend: &RenderSpyBackend| {
+            backend
+                .property_ops
+                .attention_writes
+                .lock()
+                .unwrap()
+                .last()
+                .copied()
+        };
+
+        // Do Not Disturb refuses the request and clears the published atom.
+        jwm.do_not_disturb = true;
+        request(&mut jwm, &mut backend, window, NetWmAction::Add);
+        assert!(!jwm.state.clients[key].state.demands_attention);
+        assert!(!jwm.state.clients[key].state.is_urgent);
+        assert_eq!(last_attention_write(&backend), Some((window, false)));
+        assert_eq!(backend.compositor_urgency.last(), Some(&(window, false)));
+        jwm.do_not_disturb = false;
+
+        // The focused window already has the user's attention.
+        request(&mut jwm, &mut backend, focused_window, NetWmAction::Add);
+        assert!(!jwm.state.clients[focused].state.demands_attention);
+        assert!(!jwm.state.clients[focused].state.is_urgent);
+        assert_eq!(
+            last_attention_write(&backend),
+            Some((focused_window, false))
+        );
+
+        // An unfocused window outside Do Not Disturb gets it.
+        request(&mut jwm, &mut backend, window, NetWmAction::Add);
+        assert!(jwm.state.clients[key].state.demands_attention);
+        assert!(jwm.state.clients[key].state.is_urgent);
+        assert_eq!(last_attention_write(&backend), Some((window, true)));
+
+        // Dropping the EWMH flag keeps a standing ICCCM urgency hint.
+        backend
+            .property_ops
+            .wm_hints_urgent
+            .store(true, AtomicOrdering::Relaxed);
+        request(&mut jwm, &mut backend, window, NetWmAction::Remove);
+        assert!(!jwm.state.clients[key].state.demands_attention);
+        assert!(jwm.state.clients[key].state.is_urgent);
+        assert_eq!(last_attention_write(&backend), Some((window, false)));
+        assert_eq!(backend.compositor_urgency.last(), Some(&(window, true)));
+    }
+
+    /// EWMH: the WM clears DEMANDS_ATTENTION once the window has the
+    /// user's attention. Focusing it drops the flag, the published atom and
+    /// the urgency they implied, so the tag highlight and the Dock's urgent
+    /// badge go away and a later Toggle starts from the real state. The
+    /// client also raised its ICCCM hint: focus clears that first, so the
+    /// attention helper's WM_HINTS read-back cannot keep the window urgent.
+    #[test]
+    fn focusing_a_window_clears_its_attention_request() {
+        use crate::core::types::Rect;
+
+        let (mut jwm, monitor) = jwm_with_maximize_monitor();
+        let mut backend = RenderSpyBackend::new();
+        let window = WindowId::from_raw(0x6e31);
+        let key = add_maximize_test_client(
+            &mut jwm,
+            monitor,
+            window,
+            Rect::new(100, 100, 400, 300),
+            true,
+        );
+        let focused = add_maximize_test_client(
+            &mut jwm,
+            monitor,
+            WindowId::from_raw(0x6e32),
+            Rect::new(600, 100, 400, 300),
+            true,
+        );
+        assert_eq!(jwm.get_selected_client_key(), Some(focused));
+
+        jwm.on_window_state_request(
+            &mut backend,
+            window,
+            NetWmAction::Add,
+            NetWmState::DemandsAttention,
+        );
+        backend
+            .property_ops
+            .wm_hints_urgent
+            .store(true, AtomicOrdering::Relaxed);
+        assert!(jwm.state.clients[key].state.demands_attention);
+        assert!(jwm.state.clients[key].state.is_urgent);
+
+        jwm.focus(&mut backend, Some(key)).unwrap();
+
+        assert_eq!(jwm.get_selected_client_key(), Some(key));
+        let state = &jwm.state.clients[key].state;
+        assert!(!state.demands_attention);
+        assert!(!state.is_urgent);
+        assert!(
+            !backend
+                .property_ops
+                .wm_hints_urgent
+                .load(AtomicOrdering::Relaxed)
+        );
+        assert_eq!(
+            backend.property_ops.attention_writes.lock().unwrap().last(),
+            Some(&(window, false))
+        );
+        assert_eq!(backend.compositor_urgency.last(), Some(&(window, false)));
+        // Minimized, it would no longer carry the Dock's urgent badge.
+        let mut minimized = jwm.state.clients[key].clone();
+        minimized.state.is_hidden = true;
+        let mut clients = slotmap::SlotMap::with_key();
+        let minimized_key: ClientKey = clients.insert(minimized);
+        let dock = StatusBarBuilder::get_minimized_windows(&clients, &[minimized_key], 0);
+        assert_eq!(dock.len(), 1);
+        assert_eq!(
+            dock[0].flags & xbar_core::shared_structures::MINIMIZED_WINDOW_FLAG_URGENT,
+            0
+        );
+
+        // Refocusing a window that asked for nothing writes no atom.
+        let writes = backend.property_ops.attention_writes.lock().unwrap().len();
+        jwm.focus(&mut backend, Some(focused)).unwrap();
+        jwm.focus(&mut backend, Some(key)).unwrap();
+        assert_eq!(
+            backend.property_ops.attention_writes.lock().unwrap().len(),
+            writes
+        );
+    }
+
+    /// The mirror of an EWMH Remove that keeps a standing ICCCM hint: a
+    /// client that drops its urgency hint while its DEMANDS_ATTENTION
+    /// request still stands stays urgent until that request goes too.
+    #[test]
+    fn dropping_the_urgency_hint_keeps_a_standing_attention_request_urgent() {
+        use crate::core::types::Rect;
+
+        let (mut jwm, monitor) = jwm_with_maximize_monitor();
+        let mut backend = RenderSpyBackend::new();
+        let window = WindowId::from_raw(0x6e61);
+        let key = add_maximize_test_client(
+            &mut jwm,
+            monitor,
+            window,
+            Rect::new(100, 100, 400, 300),
+            true,
+        );
+        let focused = add_maximize_test_client(
+            &mut jwm,
+            monitor,
+            WindowId::from_raw(0x6e62),
+            Rect::new(600, 100, 400, 300),
+            true,
+        );
+        assert_eq!(jwm.get_selected_client_key(), Some(focused));
+
+        backend
+            .property_ops
+            .wm_hints_present
+            .store(true, AtomicOrdering::Relaxed);
+        backend
+            .property_ops
+            .wm_hints_urgent
+            .store(true, AtomicOrdering::Relaxed);
+        jwm.updatewmhints(&mut backend, key);
+        assert!(jwm.state.clients[key].state.is_urgent);
+        jwm.on_window_state_request(
+            &mut backend,
+            window,
+            NetWmAction::Add,
+            NetWmState::DemandsAttention,
+        );
+        assert!(jwm.state.clients[key].state.demands_attention);
+
+        // The client clears its ICCCM hint; the EWMH request still stands.
+        backend
+            .property_ops
+            .wm_hints_urgent
+            .store(false, AtomicOrdering::Relaxed);
+        jwm.updatewmhints(&mut backend, key);
+        assert!(jwm.state.clients[key].state.demands_attention);
+        assert!(jwm.state.clients[key].state.is_urgent);
+        assert_eq!(backend.compositor_urgency.last(), Some(&(window, true)));
+
+        // Withdrawn as well, nothing keeps it urgent.
+        jwm.on_window_state_request(
+            &mut backend,
+            window,
+            NetWmAction::Remove,
+            NetWmState::DemandsAttention,
+        );
+        jwm.updatewmhints(&mut backend, key);
+        assert!(!jwm.state.clients[key].state.is_urgent);
+        assert_eq!(backend.compositor_urgency.last(), Some(&(window, false)));
+    }
+
+    /// A workspace activation whose mask names no configured tag is a
+    /// producer bug; policy drops it instead of refocusing, re-arranging and
+    /// broadcasting a `tag/view` for tag 0. A real one still switches.
+    #[test]
+    fn workspace_activation_without_a_configured_tag_is_ignored() {
+        use crate::core::types::Rect;
+
+        let (mut jwm, monitor) = jwm_with_maximize_monitor();
+        let mut backend = RenderSpyBackend::new();
+        let first = add_maximize_test_client(
+            &mut jwm,
+            monitor,
+            WindowId::from_raw(0x6e71),
+            Rect::new(100, 100, 400, 300),
+            true,
+        );
+        add_maximize_test_client(
+            &mut jwm,
+            monitor,
+            WindowId::from_raw(0x6e72),
+            Rect::new(600, 100, 400, 300),
+            true,
+        );
+        // Select the client that is not at the top of the stack, so any
+        // refocus would show up as a restack.
+        jwm.state.monitors[monitor].set_selected_client_for_current_tag(Some(first));
+        let stack_before = jwm.state.monitor_stack[monitor].clone();
+        assert_ne!(stack_before.first(), Some(&first));
+        let tags_before = jwm.state.monitors[monitor].tag_set;
+
+        // Bit 31 is past the default nine tags.
+        assert!(CONFIG.load().tagmask() & (1 << 31) == 0);
+        jwm.handle_event(
+            &mut backend,
+            BackendEvent::WorkspaceActivate {
+                monitor: None,
+                tag_mask: 1 << 31,
+            },
+        )
+        .unwrap();
+        assert_eq!(jwm.state.monitors[monitor].tag_set, tags_before);
+        assert_eq!(jwm.state.monitor_stack[monitor], stack_before);
+
+        jwm.handle_event(
+            &mut backend,
+            BackendEvent::WorkspaceActivate {
+                monitor: None,
+                tag_mask: 0b10,
+            },
+        )
+        .unwrap();
+        assert_eq!(jwm.state.monitors[monitor].get_active_tags(), 0b10);
+    }
+
+    /// An ext-workspace activation names its group's monitor: that monitor
+    /// is selected and switches, not the focused one. One naming no monitor
+    /// (the X11 root request) switches the selected monitor; one naming a
+    /// monitor that is gone, or one behind a lock shade, changes nothing.
+    #[test]
+    fn workspace_activation_switches_the_monitor_it_names() {
+        let (mut jwm, left, right) = jwm_with_two_monitors();
+        let mut backend = RenderSpyBackend::new();
+        assert_eq!(jwm.state.monitor_order, vec![left, right]);
+        let tags = |jwm: &Jwm| {
+            (
+                jwm.state.monitors[left].get_active_tags(),
+                jwm.state.monitors[right].get_active_tags(),
+            )
+        };
+        assert_eq!(tags(&jwm), (0b1, 0b1));
+
+        jwm.activate_workspace(&mut backend, Some(1), 0b100);
+        assert_eq!(jwm.state.sel_mon, Some(right));
+        assert_eq!(tags(&jwm), (0b1, 0b100));
+
+        // No monitor named: the selected one.
+        jwm.activate_workspace(&mut backend, None, 0b10);
+        assert_eq!(jwm.state.sel_mon, Some(right));
+        assert_eq!(tags(&jwm), (0b1, 0b10));
+
+        // A vanished monitor index is not redirected elsewhere.
+        jwm.activate_workspace(&mut backend, Some(2), 0b1000);
+        assert_eq!(jwm.state.sel_mon, Some(right));
+        assert_eq!(tags(&jwm), (0b1, 0b10));
+
+        // Nor is a shaded one switched behind its shade.
+        jwm.lock_monitor(&mut backend, &WMArgEnum::Int(0)).unwrap();
+        assert!(jwm.monitor_is_locked(0));
+        jwm.activate_workspace(&mut backend, Some(0), 0b1000);
+        assert_eq!(jwm.state.sel_mon, Some(right));
+        assert_eq!(tags(&jwm), (0b1, 0b10));
+    }
+
+    /// The event carries the monitor the request named, whatever the
+    /// backend family. Regression: the dispatcher trusted `monitor` only on
+    /// the Wayland family and read it as the X11 root request's placeholder
+    /// 0 otherwise, so on any other family (tests run with the default X11
+    /// family) a named monitor was silently replaced by the selected one.
+    #[test]
+    fn workspace_activate_event_passes_the_named_monitor_through() {
+        let (mut jwm, left, right) = jwm_with_two_monitors();
+        let mut backend = RenderSpyBackend::new();
+        let tags = |jwm: &Jwm| {
+            (
+                jwm.state.monitors[left].get_active_tags(),
+                jwm.state.monitors[right].get_active_tags(),
+            )
+        };
+        assert_eq!(jwm.state.sel_mon, Some(left));
+
+        jwm.handle_event(
+            &mut backend,
+            BackendEvent::WorkspaceActivate {
+                monitor: Some(1),
+                tag_mask: 0b100,
+            },
+        )
+        .unwrap();
+        assert_eq!(jwm.state.sel_mon, Some(right));
+        assert_eq!(tags(&jwm), (0b1, 0b100));
+
+        // Naming no monitor switches only the selected one.
+        jwm.handle_event(
+            &mut backend,
+            BackendEvent::WorkspaceActivate {
+                monitor: None,
+                tag_mask: 0b10,
+            },
+        )
+        .unwrap();
+        assert_eq!(jwm.state.sel_mon, Some(right));
+        assert_eq!(tags(&jwm), (0b1, 0b10));
+    }
+
+    #[test]
+    fn close_requests_reach_only_managed_clients() {
+        use crate::core::models::WMClient;
+
+        let mut jwm = empty_jwm();
+        let mut backend = RenderSpyBackend::new();
+        let managed = WindowId::from_raw(0x6e21);
+        jwm.insert_client(WMClient::new(managed));
+        // Not a client: JWM's own _NET_SUPPORTING_WM_CHECK window, a popup,
+        // or a stale ID. X11 close_window would XKillClient its owner.
+        let unmanaged = WindowId::from_raw(0x6e22);
+
+        for window in [unmanaged, managed] {
+            jwm.handle_event(&mut backend, BackendEvent::CloseWindowRequest { window })
+                .unwrap();
+            jwm.handle_event(&mut backend, BackendEvent::ForeignToplevelClose(window))
+                .unwrap();
+        }
+
+        assert_eq!(
+            *backend.window_ops.closed.lock().unwrap(),
+            vec![managed, managed]
+        );
+    }
+
+    #[test]
+    fn foreign_toplevel_fullscreen_runs_the_shared_state_request() {
+        use crate::core::types::Rect;
+
+        let (mut jwm, monitor) = jwm_with_maximize_monitor();
+        let mut backend = RenderSpyBackend::new();
+        let window = WindowId::from_raw(0x6e31);
+        let key = add_maximize_test_client(
+            &mut jwm,
+            monitor,
+            window,
+            Rect::new(100, 100, 400, 300),
+            true,
+        );
+
+        jwm.handle_event(
+            &mut backend,
+            BackendEvent::ForeignToplevelSetFullscreen(window, true),
+        )
+        .unwrap();
+        assert!(jwm.state.clients[key].state.is_fullscreen);
+        assert!(
+            backend
+                .property_ops
+                .fullscreen
+                .load(AtomicOrdering::Relaxed)
+        );
+
+        jwm.handle_event(
+            &mut backend,
+            BackendEvent::ForeignToplevelSetFullscreen(window, false),
+        )
+        .unwrap();
+        assert!(!jwm.state.clients[key].state.is_fullscreen);
+        assert!(
+            !backend
+                .property_ops
+                .fullscreen
+                .load(AtomicOrdering::Relaxed)
+        );
+    }
+
+    /// Two floating windows on the maximize fixture's monitor: `dragged`
+    /// carries an activated MoveFloat drag, and the selection has moved on
+    /// to `other` mid-drag, as Mod+j does with the keyboard left free.
+    fn jwm_with_drag_after_focus_moved() -> (Jwm, RenderSpyBackend, ClientKey, ClientKey) {
+        use crate::core::types::Rect;
+        use crate::jwm::mouse_handler::DragCtl;
+
+        let (mut jwm, monitor) = jwm_with_maximize_monitor();
+        let mut backend = RenderSpyBackend::new();
+        backend.track_drags = true;
+        let dragged_window = WindowId::from_raw(0x6e41);
+        let dragged_rect = Rect::new(300, 200, 640, 480);
+        let dragged =
+            add_maximize_test_client(&mut jwm, monitor, dragged_window, dragged_rect, true);
+        let other = add_maximize_test_client(
+            &mut jwm,
+            monitor,
+            WindowId::from_raw(0x6e42),
+            Rect::new(900, 300, 500, 400),
+            true,
+        );
+        assert_eq!(jwm.get_selected_client_key(), Some(other));
+        jwm.drag_ctl = Some(DragCtl {
+            client: dragged,
+            win: dragged_window,
+            mode: DragMode::MoveFloat,
+            start_root: (320.0, 220.0),
+            activated: true,
+            was_floating: true,
+            orig_geom: (
+                dragged_rect.x,
+                dragged_rect.y,
+                dragged_rect.w,
+                dragged_rect.h,
+            ),
+            orig_index: None,
+            mon: Some(monitor),
+            orig_maximize: jwm.maximize_snapshot(dragged),
+        });
+        (jwm, backend, dragged, other)
+    }
+
+    /// The snap is planned for the window the user holds, not the
+    /// selection: focus moving mid-drag neither snaps the newly selected
+    /// window nor costs the held one its snap. Preview and drop agree.
+    #[test]
+    fn move_float_drop_snaps_the_dragged_window_after_focus_moved() {
+        use crate::core::types::Rect;
+
+        let (mut jwm, mut backend, dragged, other) = jwm_with_drag_after_focus_moved();
+        let other_rect = live_rect(&jwm, other);
+        let dragged_window = jwm.state.clients[dragged].win;
+        let monitor = jwm.state.clients[dragged].mon.expect("dragged monitor");
+        // The classic float snap's left half of the monitor.
+        let (mx, my, mw, mh) = jwm.monitor_rect(monitor);
+        let left_half = Rect::new(mx, my, mw as i32 / 2, mh as i32);
+        // Where the backend moved the dragged window: at the left edge, in
+        // the snap zone of the monitor.
+        let dropped = Rect::new(2, 400, 640, 480);
+        *backend.window_ops.geometry.lock().unwrap() = Geometry {
+            x: dropped.x,
+            y: dropped.y,
+            w: dropped.w as u32,
+            h: dropped.h as u32,
+            border: 0,
+        };
+        backend.interaction_geometry = Some((
+            dragged_window,
+            dropped.x,
+            dropped.y,
+            dropped.w as u32,
+            dropped.h as u32,
+        ));
+
+        jwm.handle_event(
+            &mut backend,
+            BackendEvent::MotionNotify {
+                target: HitTarget::Background { output: None },
+                root_x: 5.0,
+                root_y: 500.0,
+                time: 1,
+            },
+        )
+        .unwrap();
+        // The wobbly delta follows the window under the pointer.
+        assert_eq!(backend.move_deltas, vec![dragged_window]);
+        // The preview shows the held window's left-half snap, not a plan for
+        // the selected window (which would be no snap at all: it sits far
+        // from every edge).
+        assert_eq!(
+            backend.snap_previews.last().copied().flatten(),
+            Some((
+                left_half.x as f32,
+                left_half.y as f32,
+                left_half.w as f32,
+                left_half.h as f32
+            ))
+        );
+
+        jwm.handle_event(
+            &mut backend,
+            BackendEvent::ButtonRelease {
+                target: HitTarget::Background { output: None },
+                time: 2,
+            },
+        )
+        .unwrap();
+
+        assert!(jwm.drag_ctl.is_none());
+        // The newly selected window is neither snapped nor resynced.
+        assert_eq!(jwm.get_selected_client_key(), Some(other));
+        assert_eq!(live_rect(&jwm, other), other_rect);
+        assert_eq!(floating_slot(&jwm, other), other_rect);
+        // The dragged window still floats, snapped into the left half (outer
+        // rect, border included), and its floating slot follows it.
+        let border = jwm.state.clients[dragged].geometry.border_w;
+        let snapped = Rect::new(
+            left_half.x + border,
+            left_half.y + border,
+            left_half.w - 2 * border,
+            left_half.h - 2 * border,
+        );
+        assert!(jwm.state.clients[dragged].state.is_floating);
+        assert_ne!(snapped, dropped);
+        assert_eq!(live_rect(&jwm, dragged), snapped);
+        assert_eq!(floating_slot(&jwm, dragged), snapped);
+    }
+
+    #[test]
+    fn moveresize_request_is_not_armed_for_a_window_focus_cannot_select() {
+        use crate::core::types::Rect;
+        const MOVERESIZE_MOVE: u32 = 8;
+
+        let (mut jwm, monitor) = jwm_with_maximize_monitor();
+        let mut backend = RenderSpyBackend::new();
+        backend.track_drags = true;
+        let hidden_window = WindowId::from_raw(0x6e51);
+        let hidden = add_maximize_test_client(
+            &mut jwm,
+            monitor,
+            hidden_window,
+            Rect::new(100, 100, 400, 300),
+            true,
+        );
+        // On tag 2 while the monitor shows tag 1.
+        jwm.state.clients[hidden].state.tags = 0b10;
+        let other_window = WindowId::from_raw(0x6e52);
+        let other = add_maximize_test_client(
+            &mut jwm,
+            monitor,
+            other_window,
+            Rect::new(600, 100, 400, 300),
+            true,
+        );
+        let selected = add_maximize_test_client(
+            &mut jwm,
+            monitor,
+            WindowId::from_raw(0x6e53),
+            Rect::new(900, 500, 400, 300),
+            true,
+        );
+
+        jwm.on_moveresize_request(&mut backend, hidden_window, MOVERESIZE_MOVE);
+        assert!(jwm.drag_ctl.is_none(), "no drag for a window nobody sees");
+        assert_ne!(jwm.get_selected_client_key(), Some(hidden));
+
+        // Regression guard: a visible, unselected window is selected and
+        // armed as before.
+        assert_eq!(jwm.get_selected_client_key(), Some(selected));
+        jwm.on_moveresize_request(&mut backend, other_window, MOVERESIZE_MOVE);
+        assert_eq!(jwm.get_selected_client_key(), Some(other));
+        assert_eq!(jwm.drag_ctl.map(|ctl| ctl.client), Some(other));
+    }
 }
 
 // =================================================================================
@@ -7858,6 +9628,11 @@ impl Jwm {
                 .is_none_or(BackgroundJob::readiness_is_covered)
             && self
                 .features
+                .wallpaper_listing
+                .as_ref()
+                .is_none_or(BackgroundJob::readiness_is_covered)
+            && self
+                .features
                 .screenshot_completions
                 .iter()
                 .all(BackgroundJob::readiness_is_covered)
@@ -7895,6 +9670,12 @@ impl Jwm {
         }
         next = min_optional_duration(next, self.resources_next_wakeup(now));
         next = min_optional_duration(next, Some(self.battery_next_wakeup(now)));
+        // A key-stopped microphone recording finishes its file on a worker
+        // with no readiness fd; only the tick's `poll_audio_recording` sees
+        // it return, so keep ticking at frame rate until it has.
+        if self.features.audio_recording.is_finalizing() {
+            next = min_optional_duration(next, Some(FRAME_INTERVAL));
+        }
         next.expect("config reload always supplies a maintenance deadline")
     }
 }
@@ -8040,11 +9821,14 @@ impl EventHandler for Jwm {
                 action,
                 state,
             } => self.on_window_state_request(backend, window, action, state),
+            BackendEvent::WindowMaximizeRequest {
+                window,
+                action,
+                axes,
+            } => self.handle_maximize_request(backend, window, action, axes),
             BackendEvent::ActiveWindowMessage { window } => self.on_client_message(backend, window),
             BackendEvent::CloseWindowRequest { window } => {
-                if let Err(e) = backend.window_ops().close_window(window) {
-                    log::warn!("[_NET_CLOSE_WINDOW] close_window failed: {e:?}");
-                }
+                self.close_managed_window_on_request(backend, window, "_NET_CLOSE_WINDOW");
             }
 
             BackendEvent::MoveResizeRequest {
@@ -8061,12 +9845,11 @@ impl EventHandler for Jwm {
             BackendEvent::PresentIdle { .. } => {}
 
             // Workspace protocol: client requests tag switch
-            BackendEvent::WorkspaceActivate {
-                monitor: _,
-                tag_mask,
-            } => {
-                use crate::jwm::types::WMArgEnum;
-                let _ = self.view(backend, &WMArgEnum::UInt(tag_mask));
+            BackendEvent::WorkspaceActivate { monitor, tag_mask } => {
+                // ext-workspace names its group's monitor; the X11
+                // `_NET_CURRENT_DESKTOP` request names none and means the
+                // selected monitor.
+                self.activate_workspace(backend, monitor, tag_mask);
             }
 
             // Output power (DPMS) handled at backend level
@@ -8082,25 +9865,7 @@ impl EventHandler for Jwm {
                 }
             }
             BackendEvent::ForeignToplevelClose(win) => {
-                let _ = backend.window_ops().close_window(win);
-            }
-            BackendEvent::ForeignToplevelSetMaximized(win, maximized) => {
-                if let Some(ck) = self.wintoclient(win) {
-                    if let Some(c) = self.state.clients.get_mut(ck) {
-                        c.state.is_maximized_vert = maximized;
-                        c.state.is_maximized_horz = maximized;
-                    }
-                    let _ = backend.property_ops().set_net_wm_state_flag(
-                        win,
-                        NetWmState::MaximizedVert,
-                        maximized,
-                    );
-                    let _ = backend.property_ops().set_net_wm_state_flag(
-                        win,
-                        NetWmState::MaximizedHorz,
-                        maximized,
-                    );
-                }
+                self.close_managed_window_on_request(backend, win, "foreign-toplevel close");
             }
             BackendEvent::ForeignToplevelSetMinimized(win, minimized) => {
                 if let Some(ck) = self.wintoclient(win) {
@@ -8113,10 +9878,15 @@ impl EventHandler for Jwm {
                     }
                 }
             }
+            // The taskbar's request runs the shared WindowStateRequest
+            // policy, which also reports a failed (rolled back) transition.
             BackendEvent::ForeignToplevelSetFullscreen(win, fullscreen) => {
-                if let Some(ck) = self.wintoclient(win) {
-                    let _ = self.setfullscreen(backend, ck, fullscreen);
-                }
+                let action = if fullscreen {
+                    NetWmAction::Add
+                } else {
+                    NetWmAction::Remove
+                };
+                self.on_window_state_request(backend, win, action, NetWmState::Fullscreen);
             }
 
             BackendEvent::PingResponse { window } => {

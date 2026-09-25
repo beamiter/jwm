@@ -161,19 +161,34 @@ impl GeometryConstraints {
 
     /// 应用宽高比约束
     ///
+    /// The offered `w`×`h` box is a ceiling, not a suggestion: a tiled cell
+    /// or an interactive resize hands over the space the window may use.
+    /// So an out-of-range ratio is corrected by *shrinking* the dimension
+    /// that is too long (as dwm's `applysizehints` and ICCCM 4.1.2.3 do),
+    /// never by growing the other one — growing configured a 16:9 client
+    /// in a 900×1000 stack cell 1778 px wide, over its neighbour and off
+    /// the monitor.
+    ///
     /// # 参数
     /// - `w`, `h`: 原始宽高
-    /// - `hints`: 尺寸提示（包含最小/最大宽高比）
+    /// - `hints`: 尺寸提示（包含最小/最大宽高比）; both aspects are width/height
     ///
     /// # 返回
-    /// 调整后的 (宽度, 高度)
+    /// 调整后的 (宽度, 高度); neither side exceeds its input
     pub fn apply_aspect_ratio_constraints(mut w: i32, mut h: i32, hints: &SizeHints) -> (i32, i32) {
-        if hints.min_aspect > 0.0 && hints.max_aspect > 0.0 {
+        // A non-positive side has no ratio to correct (and `w / h` would
+        // divide by zero); the dimension clamp downstream owns that case.
+        if hints.min_aspect > 0.0 && hints.max_aspect > 0.0 && w > 0 && h > 0 {
             let ratio = w as f32 / h as f32;
             if ratio < hints.min_aspect {
-                w = (h as f32 * hints.min_aspect + 0.5) as i32;
+                // Too tall for the narrowest allowed ratio: keep the width,
+                // cut the height. `w / min_aspect < h` here, so rounding
+                // cannot push the result past the offered height.
+                h = (w as f32 / hints.min_aspect + 0.5) as i32;
             } else if ratio > hints.max_aspect {
-                h = (w as f32 / hints.max_aspect + 0.5) as i32;
+                // Too wide for the widest allowed ratio: keep the height,
+                // cut the width.
+                w = (h as f32 * hints.max_aspect + 0.5) as i32;
             }
         }
         (w, h)
@@ -181,10 +196,15 @@ impl GeometryConstraints {
 
     /// 计算完全约束后的尺寸
     ///
-    /// 按顺序应用：
-    /// 1. 增量约束（inc_w, inc_h）
-    /// 2. 宽高比约束（min/max aspect）
+    /// 按顺序应用 (the same order as dwm's `applysizehints`)：
+    /// 1. 宽高比约束（min/max aspect）, which only shrinks
+    /// 2. 增量约束（inc_w, inc_h）, rounded toward the base, also only shrinking
     /// 3. 最小/最大尺寸约束
+    ///
+    /// Aspect runs before the increments so the side it shortens still
+    /// lands on an increment step (a terminal keeps whole rows); both steps
+    /// only shrink, so the result stays inside the offered box unless the
+    /// client's own minimum asks for more.
     ///
     /// # 参数
     /// - `w`, `h`: 原始宽高
@@ -193,15 +213,15 @@ impl GeometryConstraints {
     /// # 返回
     /// 完全约束后的 (宽度, 高度)
     pub fn calculate_constrained_size(w: i32, h: i32, hints: &SizeHints) -> (i32, i32) {
-        // 应用增量约束（中间量走 i64，见 `increment_aligned_dimension`）
+        // Aspect first. It only shortens the side that is too long, and
+        // `as i32` saturates instead of wrapping, so even an absurd ratio
+        // cannot make the result larger than the input.
+        let (w, h) = Self::apply_aspect_ratio_constraints(w, h, hints);
+
+        // Increments, clamped into the configurable band (intermediates are
+        // i64, see `increment_aligned_dimension`).
         let mut w = increment_aligned_dimension(w, hints.base_w, hints.inc_w);
         let mut h = increment_aligned_dimension(h, hints.base_h, hints.inc_h);
-
-        // 应用宽高比约束。入参已经在区间内且非零，所以 `w/h` 不会除零，
-        // `h * aspect` 也只会在比例本身荒谬时饱和——随后立刻被收回来。
-        (w, h) = Self::apply_aspect_ratio_constraints(w, h, hints);
-        w = clamp_dimension(i64::from(w));
-        h = clamp_dimension(i64::from(h));
 
         // 应用最小尺寸约束。min 也先收进区间：`min_w = i32::MAX` 表达的是
         // 「越大越好」，不是要一个服务器配置不了的窗口。
@@ -342,15 +362,15 @@ mod tests {
             ..Default::default()
         };
 
-        // 比例太小 (100/100 = 1.0 < 1.5)，应该增加宽度
+        // Ratio too small (100/100 = 1.0 < 1.5): keep the width, cut the height.
         let (w, h) = GeometryConstraints::apply_aspect_ratio_constraints(100, 100, &hints);
-        assert_eq!(w, 150); // 100 * 1.5
-        assert_eq!(h, 100);
+        assert_eq!(w, 100);
+        assert_eq!(h, 67); // 100 / 1.5, rounded
 
-        // 比例太大 (200/50 = 4.0 > 2.0)，应该增加高度
+        // Ratio too large (200/50 = 4.0 > 2.0): keep the height, cut the width.
         let (w, h) = GeometryConstraints::apply_aspect_ratio_constraints(200, 50, &hints);
-        assert_eq!(w, 200);
-        assert_eq!(h, 100); // 200 / 2.0
+        assert_eq!(w, 100); // 50 * 2.0
+        assert_eq!(h, 50);
 
         // 比例在范围内，保持不变
         let (w, h) = GeometryConstraints::apply_aspect_ratio_constraints(180, 100, &hints);
@@ -558,6 +578,58 @@ mod tests {
         assert_eq!(square(0.0, 16.0 / 9.0), (400, 400));
         // With both halves present the same minimum does constrain, so this
         // would notice if the gate itself changed.
-        assert_eq!(square(4.0 / 3.0, 16.0 / 9.0), (533, 400));
+        assert_eq!(square(4.0 / 3.0, 16.0 / 9.0), (400, 300));
+    }
+
+    /// Regression: the aspect correction used to *grow* the other side, so
+    /// a 16:9 client (mpv with keepaspect-window) tiled into a 900×1000
+    /// stack cell was configured 1778 px wide — over the neighbouring tile
+    /// and off the monitor. The offered box is a ceiling in both
+    /// directions, whichever side is out of range.
+    #[test]
+    fn aspect_hints_fit_the_window_inside_the_offered_box() {
+        let sixteen_nine = SizeHints {
+            min_aspect: 16.0 / 9.0,
+            max_aspect: 16.0 / 9.0,
+            ..Default::default()
+        };
+        // Too narrow: the width stays, the height is cut to 900 / (16/9).
+        assert_eq!(
+            GeometryConstraints::calculate_constrained_size(900, 1000, &sixteen_nine),
+            (900, 506)
+        );
+        // Too wide: the height stays, the width is cut to 500 * (16/9).
+        assert_eq!(
+            GeometryConstraints::calculate_constrained_size(1920, 500, &sixteen_nine),
+            (889, 500)
+        );
+
+        for (w, h) in [(900, 1000), (1920, 500), (1, 1000), (1000, 1), (640, 480)] {
+            let (cw, ch) = GeometryConstraints::calculate_constrained_size(w, h, &sixteen_nine);
+            assert!(cw <= w && ch <= h, "({w}, {h}) grew to ({cw}, {ch})");
+        }
+    }
+
+    /// Aspect runs before the increments, so the side it shortens is still
+    /// aligned to the client's step (a terminal keeps whole rows), and the
+    /// alignment rounds toward the base, keeping the box a ceiling.
+    #[test]
+    fn aspect_correction_keeps_increment_alignment_inside_the_box() {
+        let hints = SizeHints {
+            base_w: 4,
+            base_h: 6,
+            inc_w: 10,
+            inc_h: 16,
+            min_aspect: 16.0 / 9.0,
+            max_aspect: 16.0 / 9.0,
+            ..Default::default()
+        };
+        let (w, h) = GeometryConstraints::calculate_constrained_size(900, 1000, &hints);
+        assert!(w <= 900 && h <= 1000, "({w}, {h}) left the 900x1000 box");
+        assert_eq!((w - hints.base_w) % hints.inc_w, 0, "width {w} off-step");
+        assert_eq!((h - hints.base_h) % hints.inc_h, 0, "height {h} off-step");
+        // Aspect cuts the height to 506; the steps then take 900 -> 894 and
+        // 506 -> 502.
+        assert_eq!((w, h), (894, 502));
     }
 }

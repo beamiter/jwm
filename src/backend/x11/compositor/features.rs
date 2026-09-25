@@ -5,7 +5,8 @@ use super::prism::{MAX_PRISM_SIDES, MIN_PRISM_SIDES};
 #[allow(unused_imports)]
 use super::*;
 use crate::backend::compositor_common::recording_nv12::{
-    nv12_frame_bytes, nv12_packed_target_size, nv12_target_fits, recording_output_size,
+    nv12_frame_bytes, nv12_packed_target_size, nv12_target_fits, recording_canvas_rect,
+    recording_output_size,
 };
 #[allow(unused_imports)]
 use glow::HasContext;
@@ -185,6 +186,85 @@ fn advance_recording_deadline(
         Some(next) if next + interval > now => next,
         _ => now,
     }
+}
+
+/// Where the recording region lands on the encode canvas this frame, as
+/// top-down `(x, y, width, height)` canvas pixels.
+///
+/// The encoder keeps the canvas it was spawned with, so a region reshaped
+/// mid-recording is fitted uniformly and centred, with black bars, through the
+/// mapping the Wayland recorder uses too ([`recording_canvas_rect`]); blitting
+/// every region onto the whole canvas stretched the scene and the cursor
+/// whenever an adjustment changed the aspect ratio.
+///
+/// That mapping measures the fit against the region the recording started
+/// with. This compositor keeps no copy of that size, so the canvas stands in
+/// for it, except that a region the encoder would have sized to exactly this
+/// canvas — the start region itself and every pure move of it — fills the
+/// canvas outright. Without that exception the NV12 alignment snap, which
+/// leaves the canvas a few pixels off the start region's shape, would give an
+/// unchanged region a sliver of bar on one edge.
+fn recording_capture_rect(
+    region: (u32, u32),
+    canvas: (u32, u32),
+    max_height: u32,
+) -> (u32, u32, u32, u32) {
+    if recording_output_size(region.0, region.1, max_height) == canvas {
+        return (0, 0, canvas.0, canvas.1);
+    }
+    recording_canvas_rect(canvas, region, canvas)
+}
+
+/// Name of the recorder's ffmpeg diagnostics log inside the per-user runtime
+/// directory.
+const RECORDING_FFMPEG_LOG_NAME: &str = "jwm-ffmpeg.log";
+
+/// Where the recorder keeps ffmpeg's diagnostics.
+///
+/// ffmpeg runs at `-loglevel warning`, so this log is the only place a missing
+/// encoder or a VAAPI failure is explained. `$XDG_RUNTIME_DIR` is private to
+/// the user, so the stable name there cannot collide with anyone else's.
+/// Without one (or with a relative value, which would follow the compositor's
+/// working directory) the log falls back to the shared temporary directory
+/// under a per-user name: a single fixed `/tmp/jwm-ffmpeg.log` belonged to
+/// whichever user recorded first, and every other user's encoder errors were
+/// then discarded without a trace.
+fn recording_ffmpeg_log_path(
+    runtime_dir: Option<&std::ffi::OsStr>,
+    temp_dir: &std::path::Path,
+    euid: u32,
+) -> std::path::PathBuf {
+    match runtime_dir.map(std::path::Path::new) {
+        Some(dir) if dir.is_absolute() => dir.join(RECORDING_FFMPEG_LOG_NAME),
+        _ => temp_dir.join(format!("jwm-ffmpeg-{euid}.log")),
+    }
+}
+
+/// Open the recorder's ffmpeg log, emptied for this recording.
+///
+/// The fallback directory is world-writable, so the open never follows a
+/// symlink and never blocks on a planted FIFO, and the file is accepted only as
+/// a regular file owned by this user. It is truncated and made private only
+/// after that check, so a file belonging to someone else is never clobbered.
+fn open_recording_ffmpeg_log(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.uid() != unsafe { libc::geteuid() } {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "not a regular file owned by this user",
+        ));
+    }
+    file.set_len(0)?;
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    Ok(file)
 }
 
 impl<C: CompositorConnection> Compositor<C> {
@@ -1717,8 +1797,27 @@ impl<C: CompositorConnection> Compositor<C> {
             (w as usize) * (h as usize) * 4
         };
 
-        let stderr_file = std::fs::File::create("/tmp/jwm-ffmpeg.log")
-            .unwrap_or_else(|_| std::fs::File::create("/dev/null").unwrap());
+        let stderr_log_path = recording_ffmpeg_log_path(
+            std::env::var_os("XDG_RUNTIME_DIR").as_deref(),
+            &std::env::temp_dir(),
+            unsafe { libc::geteuid() },
+        );
+        let stderr_target = match open_recording_ffmpeg_log(&stderr_log_path) {
+            Ok(file) => {
+                log::info!(
+                    "compositor: recording encoder diagnostics go to {}",
+                    stderr_log_path.display()
+                );
+                std::process::Stdio::from(file)
+            }
+            Err(error) => {
+                log::warn!(
+                    "compositor: cannot open ffmpeg log {}: {error}; encoder diagnostics will be discarded",
+                    stderr_log_path.display()
+                );
+                std::process::Stdio::null()
+            }
+        };
 
         use crate::backend::compositor_common::media::VAAPI_DEVICE;
         use crate::backend::compositor_common::media::{
@@ -1859,7 +1958,7 @@ impl<C: CompositorConnection> Compositor<C> {
             .args(&args)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::null())
-            .stderr(stderr_file);
+            .stderr(stderr_target);
         deprioritize_encoder(&mut command);
         let child = match command.spawn() {
             Ok(child) => child,
@@ -2196,34 +2295,62 @@ impl<C: CompositorConnection> Compositor<C> {
             .and_then(RecordingCursorSampler::latest);
         self.recording_last_cursor = cursor.as_ref().map(RecordingCursor::position);
 
+        let (x, y, region_width, region_height) = region;
+        let (dest_x, dest_y, dest_w, dest_h) = recording_capture_rect(
+            (region_width, region_height),
+            (w, h),
+            self.recording_max_height,
+        );
+        // The canvas rect is top-down; the framebuffer counts rows from the
+        // bottom.
+        let dest_bottom = h.saturating_sub(dest_y + dest_h) as i32;
         unsafe {
-            let (x, y, region_width, region_height) = region;
             let source_bottom = self.screen_h as i32 - (y + region_height as i32);
             self.gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
             self.gl
                 .bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(recording_fbo));
+            // Both the clear and the blit honour the scissor box, so neither
+            // may inherit one from the frame.
+            let scissor_enabled = self.gl.is_enabled(glow::SCISSOR_TEST);
+            if scissor_enabled {
+                self.gl.disable(glow::SCISSOR_TEST);
+            }
+            if (dest_w, dest_h) != (w, h) {
+                // The blit leaves the bars untouched, and they would otherwise
+                // keep whatever an earlier region of another shape put there.
+                self.gl.clear_color(0.0, 0.0, 0.0, 1.0);
+                self.gl.clear(glow::COLOR_BUFFER_BIT);
+            }
             self.gl.blit_framebuffer(
                 x,
                 source_bottom,
                 x + region_width as i32,
                 source_bottom + region_height as i32,
-                0,
-                0,
-                w as i32,
-                h as i32,
+                dest_x as i32,
+                dest_bottom,
+                (dest_x + dest_w) as i32,
+                dest_bottom + dest_h as i32,
                 glow::COLOR_BUFFER_BIT,
                 glow::LINEAR,
             );
+            if scissor_enabled {
+                self.gl.enable(glow::SCISSOR_TEST);
+            }
             self.gl
                 .bind_framebuffer(glow::FRAMEBUFFER, Some(recording_fbo));
-            self.gl.viewport(0, 0, w as i32, h as i32);
+            // The cursor pass maps the region onto its whole target, so with
+            // the region's own rect as the viewport the arrow is offset past
+            // any bar and scaled exactly as the blit placed the scene. The
+            // packing pass sets its own viewport.
+            self.gl
+                .viewport(dest_x as i32, dest_bottom, dest_w as i32, dest_h as i32);
         }
         // The pointer is a server-side sprite that compositing never sees, so
         // it is drawn in here — on the GPU, into the capture target, before the
         // frame is packed. Doing it after the readback is what the CPU path used
         // to do, and that is incompatible with a subsampled pixel format.
         if let Some(cursor) = cursor.as_ref() {
-            self.draw_recording_cursor(cursor, region, (w, h));
+            self.draw_recording_cursor(cursor, region, (dest_w, dest_h));
         }
 
         // Convert to NV12 on the GPU so the readback, the copy out of mapped
@@ -2443,6 +2570,145 @@ mod recording_pacing_tests {
         let last = Instant::now();
         let now = last + Duration::from_millis(500);
         assert_eq!(advance_recording_deadline(Some(last), THIRTY_FPS, now), now);
+    }
+}
+
+#[cfg(test)]
+mod recording_capture_rect_tests {
+    use super::recording_capture_rect;
+    use crate::backend::compositor_common::recording_nv12::recording_output_size;
+
+    /// The rect for `region` on the canvas a recording of `start` encodes at.
+    fn rect(start: (u32, u32), max_height: u32, region: (u32, u32)) -> (u32, u32, u32, u32) {
+        let canvas = recording_output_size(start.0, start.1, max_height);
+        recording_capture_rect(region, canvas, max_height)
+    }
+
+    #[test]
+    fn a_region_reshaped_mid_recording_is_letterboxed_rather_than_stretched() {
+        // Record 1600x900, then drag the right edge in to 800x900: the new
+        // region keeps its shape inside the 1600x900 canvas.
+        assert_eq!(rect((1600, 900), 0, (800, 900)), (400, 0, 800, 900));
+        // A capped 4K recording resized to a wide strip: bars above and below
+        // at the canvas's own half scale.
+        assert_eq!(rect((3840, 2160), 1080, (3840, 1080)), (0, 270, 1920, 540));
+        // Taller than the start region: bars left and right.
+        assert_eq!(rect((3840, 2160), 1080, (1080, 2160)), (690, 0, 540, 1080));
+    }
+
+    #[test]
+    fn the_start_region_and_its_moves_fill_the_whole_canvas() {
+        // The NV12 snap encodes these a few pixels off their own shape; the
+        // start region (and a pure move of it, which has the same size) must
+        // still be a full-canvas blit with no sliver of bar.
+        for (start, max_height) in [
+            ((1603, 901), 0),
+            ((1600, 901), 0),
+            ((3846, 2160), 1080),
+            ((7, 1000), 0),
+        ] {
+            let (w, h) = recording_output_size(start.0, start.1, max_height);
+            assert_eq!(rect(start, max_height, start), (0, 0, w, h), "{start:?}");
+        }
+        // Same shape, smaller: scaled up to fill, as the recorder always has.
+        assert_eq!(rect((3840, 2160), 1080, (1920, 1080)), (0, 0, 1920, 1080));
+    }
+}
+
+#[cfg(test)]
+mod recording_ffmpeg_log_tests {
+    use super::{open_recording_ffmpeg_log, recording_ffmpeg_log_path};
+    use std::ffi::OsStr;
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::{Path, PathBuf};
+
+    /// A directory only this test uses, removed again on drop.
+    struct ScratchDir(PathBuf);
+
+    impl ScratchDir {
+        fn new(tag: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "jwm-x11-recording-log-{tag}-{}-{:016x}",
+                std::process::id(),
+                rand::random::<u64>()
+            ));
+            std::fs::create_dir(&path).expect("create a private scratch directory");
+            Self(path)
+        }
+    }
+
+    impl Drop for ScratchDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn the_log_lives_in_the_private_runtime_dir_or_under_a_per_user_temp_name() {
+        let temp = Path::new("/tmp");
+        assert_eq!(
+            recording_ffmpeg_log_path(Some(OsStr::new("/run/user/1000")), temp, 1000),
+            Path::new("/run/user/1000/jwm-ffmpeg.log")
+        );
+        // No runtime directory: a shared directory needs a per-user name, or
+        // the first user to record owns the path for everybody.
+        assert_eq!(
+            recording_ffmpeg_log_path(None, temp, 1000),
+            Path::new("/tmp/jwm-ffmpeg-1000.log")
+        );
+        assert_ne!(
+            recording_ffmpeg_log_path(None, temp, 1000),
+            recording_ffmpeg_log_path(None, temp, 1001)
+        );
+        // A relative runtime directory would follow the working directory.
+        assert_eq!(
+            recording_ffmpeg_log_path(Some(OsStr::new("run/user/1000")), temp, 1000),
+            Path::new("/tmp/jwm-ffmpeg-1000.log")
+        );
+    }
+
+    #[test]
+    fn opening_the_log_empties_this_users_file_and_keeps_it_private() {
+        let dir = ScratchDir::new("reuse");
+        let path = dir.0.join("jwm-ffmpeg.log");
+        std::fs::write(&path, b"errors from the previous recording").expect("seed old log");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+            .expect("loosen seeded log");
+
+        let mut file = open_recording_ffmpeg_log(&path).expect("reopen own log");
+        file.write_all(b"fresh")
+            .expect("write through the handed-out file");
+        drop(file);
+
+        assert_eq!(std::fs::read(&path).expect("read log back"), b"fresh");
+        let mode = std::fs::metadata(&path)
+            .expect("stat log")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[test]
+    fn a_planted_symlink_is_refused_and_its_target_left_alone() {
+        let dir = ScratchDir::new("symlink");
+        let target = dir.0.join("victim");
+        std::fs::write(&target, b"keep me").expect("seed symlink target");
+        let path = dir.0.join("jwm-ffmpeg.log");
+        std::os::unix::fs::symlink(&target, &path).expect("plant symlink");
+
+        // The caller logs this error and discards diagnostics explicitly,
+        // instead of silently writing through the link or to /dev/null.
+        assert!(open_recording_ffmpeg_log(&path).is_err());
+        assert_eq!(std::fs::read(&target).expect("read target"), b"keep me");
+    }
+
+    #[test]
+    fn a_non_regular_file_is_refused() {
+        let dir = ScratchDir::new("dir");
+        let path = dir.0.join("jwm-ffmpeg.log");
+        std::fs::create_dir(&path).expect("plant a directory at the log path");
+        assert!(open_recording_ffmpeg_log(&path).is_err());
     }
 }
 

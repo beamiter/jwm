@@ -25,10 +25,16 @@ pub(crate) struct SubpixelBlurKernel {
     pub blur_strength: f32,
 }
 
+/// Upper bound on tracked windows. Far above any real number of live windows,
+/// it only bounds the map when windows are registered but never removed.
+const MAX_TRACKED_WINDOWS: usize = 1024;
+
 pub(crate) struct SubpixelRenderManager {
     windows: HashMap<u64, SubpixelWindowState>,
     monitor_dpi: MonitorDPI,
     enabled: bool,
+    /// Registration counter; orders entries for eviction.
+    next_registration: u64,
 }
 
 struct SubpixelWindowState {
@@ -36,6 +42,8 @@ struct SubpixelWindowState {
     class_name: String,
     blur_strength: f32,
     subpixel_mode: SubpixelMode,
+    /// When the window was last (re-)registered.
+    registration: u64,
 }
 
 impl MonitorDPI {
@@ -154,6 +162,7 @@ impl SubpixelRenderManager {
             windows: HashMap::new(),
             monitor_dpi: MonitorDPI::standard(),
             enabled: false,
+            next_registration: 0,
         }
     }
 
@@ -173,6 +182,11 @@ impl SubpixelRenderManager {
     /// Register a window and auto-detect its subpixel mode based on class name.
     /// Terminals and text editors get RGB mode for sharper text rendering.
     /// Video players get None mode since subpixel rendering is not beneficial for video.
+    ///
+    /// The map holds at most [`MAX_TRACKED_WINDOWS`] entries. Registering a
+    /// new window at the cap evicts the least recently registered one, so a
+    /// caller that never calls [`Self::remove_window`] for closed windows
+    /// cannot grow the map for the whole session.
     pub(crate) fn register_window(&mut self, window_id: u64, class_name: &str) {
         let lower = class_name.to_lowercase();
         let subpixel_mode = if lower.contains("term")
@@ -197,6 +211,18 @@ impl SubpixelRenderManager {
             self.monitor_dpi.geometry
         };
 
+        if !self.windows.contains_key(&window_id) && self.windows.len() >= MAX_TRACKED_WINDOWS {
+            let oldest = self
+                .windows
+                .values()
+                .min_by_key(|state| state.registration)
+                .map(|state| state.window_id);
+            if let Some(oldest) = oldest {
+                self.windows.remove(&oldest);
+            }
+        }
+        let registration = self.next_registration;
+        self.next_registration = self.next_registration.wrapping_add(1);
         self.windows.insert(
             window_id,
             SubpixelWindowState {
@@ -204,6 +230,7 @@ impl SubpixelRenderManager {
                 class_name: class_name.to_string(),
                 blur_strength: 1.0,
                 subpixel_mode,
+                registration,
             },
         );
     }
@@ -281,5 +308,48 @@ impl SubpixelRenderManager {
         };
 
         Some(kernel)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn registrations_without_removal_stay_bounded() {
+        let mut manager = SubpixelRenderManager::new();
+        let windows = 3 * MAX_TRACKED_WINDOWS as u64;
+        for window_id in 1..=windows {
+            manager.register_window(window_id, "foot");
+        }
+        assert_eq!(manager.windows.len(), MAX_TRACKED_WINDOWS);
+        // The most recent registrations survive; the oldest were evicted.
+        assert_eq!(manager.get_subpixel_mode(windows), SubpixelMode::RGB);
+        assert_eq!(manager.get_subpixel_mode(1), SubpixelMode::None);
+        assert!(!manager.windows.contains_key(&1));
+    }
+
+    #[test]
+    fn re_registering_at_the_cap_refreshes_instead_of_evicting() {
+        let mut manager = SubpixelRenderManager::new();
+        for window_id in 0..MAX_TRACKED_WINDOWS as u64 {
+            manager.register_window(window_id, "foot");
+        }
+        // A class change re-registers a live window: no eviction, and the
+        // refreshed entry is now the newest.
+        manager.register_window(0, "mpv");
+        assert_eq!(manager.windows.len(), MAX_TRACKED_WINDOWS);
+        assert_eq!(manager.get_subpixel_mode(0), SubpixelMode::None);
+        manager.register_window(MAX_TRACKED_WINDOWS as u64, "kitty");
+        assert!(manager.windows.contains_key(&0));
+        assert!(!manager.windows.contains_key(&1));
+    }
+
+    #[test]
+    fn removed_windows_are_forgotten() {
+        let mut manager = SubpixelRenderManager::new();
+        manager.register_window(7, "alacritty");
+        manager.remove_window(7);
+        assert!(manager.windows.is_empty());
     }
 }

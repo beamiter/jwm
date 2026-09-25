@@ -905,6 +905,12 @@ pub(crate) enum ControlRequest {
         /// wpctl node id or PulseAudio node name, as the picker listed it.
         id: String,
     },
+    /// Switch the platform power profile (the Hub row's Left/Right, IPC
+    /// `set_power_profile`). A value like the sets: two queued switches fold
+    /// to the newest. `powerprofilesctl` is a Python D-Bus client — hundreds
+    /// of milliseconds per run and up to the helper timeout behind a wedged
+    /// daemon — so the set and the re-read that verifies it both run here.
+    PowerProfileSet(String),
 }
 
 /// Which control a request, an estimate, or a report concerns.
@@ -918,6 +924,11 @@ pub(crate) enum ControlDomain {
     /// its feedback is the picker's re-read rows — so the OSD-side matches
     /// turn it away empty-handed.
     AudioDevice,
+    /// The platform power profile. Its card is named rather than a level, so
+    /// its estimate and correction live in their own slots
+    /// ([`ControlFeedback::note_power_profile_estimate`]) and the level
+    /// matches turn it away like [`Self::AudioDevice`].
+    PowerProfile,
 }
 
 impl ControlRequest {
@@ -929,6 +940,7 @@ impl ControlRequest {
             Self::BrightnessAdjust(_) | Self::BrightnessSet(_) => ControlDomain::Brightness,
             Self::MicMuteSet(_) | Self::MicMuteToggle => ControlDomain::MicMute,
             Self::AudioSetDefault { .. } => ControlDomain::AudioDevice,
+            Self::PowerProfileSet(_) => ControlDomain::PowerProfile,
         }
     }
 }
@@ -968,12 +980,13 @@ fn merge_value_requests(pending: &ControlRequest, next: &ControlRequest) -> Cont
         (ControlRequest::BrightnessSet(percent), ControlRequest::BrightnessAdjust(delta)) => {
             ControlRequest::BrightnessSet(adjusted_level(*percent, *delta, 1))
         }
-        // An absolute set — or a device switch — makes whatever was queued
-        // before it moot.
+        // An absolute set — or a device or profile switch — makes whatever
+        // was queued before it moot.
         (_, ControlRequest::VolumeSet(_))
         | (_, ControlRequest::BrightnessSet(_))
         | (_, ControlRequest::MicMuteSet(_))
-        | (_, ControlRequest::AudioSetDefault { .. }) => next.clone(),
+        | (_, ControlRequest::AudioSetDefault { .. })
+        | (_, ControlRequest::PowerProfileSet(_)) => next.clone(),
         // Toggles never reach here and cross-domain pairs are never merged;
         // the folder below guarantees both.
         _ => pending.clone(),
@@ -1054,6 +1067,33 @@ pub(crate) struct ControlReport {
     pub brightness: Option<BrightnessReport>,
     pub audio: Option<AudioReport>,
     pub mic: Option<MicReport>,
+    pub power_profile: Option<PowerProfileReport>,
+}
+
+impl ControlReport {
+    fn is_empty(&self) -> bool {
+        self.volume.is_none()
+            && self.brightness.is_none()
+            && self.audio.is_none()
+            && self.mic.is_none()
+            && self.power_profile.is_none()
+    }
+}
+
+/// What the worker confirmed after a power-profile switch: the set's own
+/// answer and, decisively, the profile list re-read after it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PowerProfileReport {
+    /// Submission this answer covers. A switch queued after it is still on
+    /// screen as an estimate, and this answer must not roll that back.
+    pub seq: u64,
+    /// The profile the user asked for.
+    pub asked: String,
+    /// `power::set_profile`'s own answer: false when the tool refused.
+    pub asked_ok: bool,
+    /// `power::profiles()` after the set — the list and the profile really
+    /// in effect — or `None` when the re-read failed.
+    pub profiles: Option<(Vec<String>, String)>,
 }
 
 /// What the worker confirmed after a device switch: the set's own answer and,
@@ -1191,10 +1231,36 @@ struct ControlsWorker {
 static CONTROLS_WORKER: OnceLock<ControlsWorker> = OnceLock::new();
 
 fn controls_worker() -> &'static ControlsWorker {
-    CONTROLS_WORKER.get_or_init(ControlsWorker::start)
+    // Unit tests never get a real worker. It would run the host's audio,
+    // brightness and power tools (a queued profile switch really runs
+    // `powerprofilesctl set`) and publish read-backs that every other test
+    // thread adopts through `take_control_report`, so one test's queued
+    // request could fill another test's control snapshot. A test that needs
+    // the queue installs `TestControlQueueGuard`; without it, submissions get
+    // the same answer as a worker the OS refused a thread.
+    CONTROLS_WORKER.get_or_init(|| {
+        if cfg!(test) {
+            ControlsWorker::disabled()
+        } else {
+            ControlsWorker::start()
+        }
+    })
 }
 
 impl ControlsWorker {
+    /// A worker with no thread: every submission fails fast and no report
+    /// is ever published.
+    fn disabled() -> Self {
+        let (sender, _receiver) = mpsc::channel();
+        Self {
+            sender,
+            report: Arc::new(Mutex::new(ControlReport::default())),
+            notifier: Arc::new(Mutex::new(None)),
+            next_seq: AtomicU64::new(1),
+            started: false,
+        }
+    }
+
     fn start() -> Self {
         let (sender, receiver) = mpsc::channel();
         let report = Arc::new(Mutex::new(ControlReport::default()));
@@ -1320,6 +1386,19 @@ fn run_control_queue(
                         inventory,
                     });
                 }
+                ControlRequest::PowerProfileSet(name) => {
+                    // Like the device switch, the re-read is the answer,
+                    // not the exit status: a platform driver can accept the
+                    // write and keep a profile of its own choosing.
+                    let asked_ok = super::power::set_profile(&name);
+                    let profiles = super::power::profiles();
+                    outcome.power_profile = Some(PowerProfileReport {
+                        seq: queued.seq,
+                        asked: name,
+                        asked_ok,
+                        profiles,
+                    });
+                }
             }
         }
         // A batch reduced to nothing by a cancelled toggle pair changed no
@@ -1362,11 +1441,7 @@ fn run_control_queue(
                 }
             }
         }
-        if outcome.volume.is_none()
-            && outcome.brightness.is_none()
-            && outcome.audio.is_none()
-            && outcome.mic.is_none()
-        {
+        if outcome.is_empty() {
             continue;
         }
 
@@ -1385,6 +1460,9 @@ fn run_control_queue(
             }
             if outcome.mic.is_some() {
                 guard.mic = outcome.mic;
+            }
+            if outcome.power_profile.is_some() {
+                guard.power_profile = outcome.power_profile;
             }
             // Publish before signalling, mirroring `BackgroundJob`: a handler
             // woken by the eventfd must find the value already visible.
@@ -1436,11 +1514,7 @@ pub(crate) fn take_control_report() -> Option<ControlReport> {
     let worker = CONTROLS_WORKER.get()?;
     let mut guard = worker.report.lock().unwrap_or_else(PoisonError::into_inner);
     let taken = std::mem::take(&mut *guard);
-    (taken.volume.is_some()
-        || taken.brightness.is_some()
-        || taken.audio.is_some()
-        || taken.mic.is_some())
-    .then_some(taken)
+    (!taken.is_empty()).then_some(taken)
 }
 
 /// Whether detection already concluded that no volume tool works — the one
@@ -1544,7 +1618,8 @@ pub(crate) fn optimistic_volume(
         | ControlRequest::BrightnessSet(_)
         | ControlRequest::MicMuteSet(_)
         | ControlRequest::MicMuteToggle
-        | ControlRequest::AudioSetDefault { .. } => None,
+        | ControlRequest::AudioSetDefault { .. }
+        | ControlRequest::PowerProfileSet(_) => None,
     }
 }
 
@@ -1559,7 +1634,8 @@ pub(crate) fn optimistic_brightness(base: Option<u8>, request: &ControlRequest) 
         | ControlRequest::VolumeToggleMute
         | ControlRequest::MicMuteSet(_)
         | ControlRequest::MicMuteToggle
-        | ControlRequest::AudioSetDefault { .. } => None,
+        | ControlRequest::AudioSetDefault { .. }
+        | ControlRequest::PowerProfileSet(_) => None,
     }
 }
 
@@ -1576,7 +1652,8 @@ pub(crate) fn optimistic_mic_mute(base: Option<bool>, request: &ControlRequest) 
         | ControlRequest::VolumeToggleMute
         | ControlRequest::BrightnessAdjust(_)
         | ControlRequest::BrightnessSet(_)
-        | ControlRequest::AudioSetDefault { .. } => None,
+        | ControlRequest::AudioSetDefault { .. }
+        | ControlRequest::PowerProfileSet(_) => None,
     }
 }
 
@@ -1641,7 +1718,8 @@ pub(crate) struct OsdCorrection {
     /// True when `domain` is [`ControlDomain::AudioDevice`] and the switch
     /// was an input (microphone) device.
     pub(crate) input: bool,
-    /// Device description when `domain` is [`ControlDomain::AudioDevice`].
+    /// Device description when `domain` is [`ControlDomain::AudioDevice`];
+    /// the profile name when it is [`ControlDomain::PowerProfile`].
     pub(crate) name: Option<String>,
 }
 
@@ -1669,6 +1747,50 @@ impl OsdCorrection {
             name: Some(name),
         }
     }
+
+    /// A power-profile card whose name the worker's re-read contradicted.
+    pub(crate) fn power_profile(name: String) -> Self {
+        Self {
+            domain: ControlDomain::PowerProfile,
+            percent: 0,
+            muted: false,
+            input: false,
+            name: Some(name),
+        }
+    }
+}
+
+/// A queued power-profile switch drawn ahead of the worker's re-read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProfileEstimate {
+    /// Submission the estimate came from; an older report does not cover it.
+    seq: u64,
+    /// The profile on the row and the card right now.
+    shown: String,
+    /// The last confirmed list and profile — what a switch that failed with
+    /// nothing re-read reverts to. Kept across chained switches, like the
+    /// level estimates' `previous`.
+    previous: Option<(Vec<String>, String)>,
+}
+
+/// What the frame tick does with one power-profile report.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ProfileFeedback {
+    /// A newer switch is still queued; its own report resolves the row.
+    KeepEstimate,
+    /// Show the re-read. `took` says whether the asked profile is the one in
+    /// effect.
+    Adopt {
+        available: Vec<String>,
+        active: String,
+        took: bool,
+    },
+    /// The tool refused and nothing could be re-read: restore the last
+    /// confirmed list and profile, when one was ever confirmed.
+    Revert(Option<(Vec<String>, String)>),
+    /// The tool accepted but the re-read failed: nothing contradicts what is
+    /// on screen, and the next snapshot read confirms it.
+    KeepShown,
 }
 
 /// The card currently on screen, if one is: the OSD is a single
@@ -1706,6 +1828,12 @@ pub struct ControlFeedback {
     /// [`Self::pending_level`] so a concurrent volume/mic resolve cannot
     /// overwrite a named switch confirm before flush.
     pending_device: Option<OsdCorrection>,
+    /// The power profile a queued switch put on screen, until the worker's
+    /// re-read covering it lands.
+    power_profile: Option<ProfileEstimate>,
+    /// Power-profile card correction for the next panel flush — its own slot
+    /// for the same reason as [`Self::pending_device`].
+    pending_profile: Option<OsdCorrection>,
 }
 
 impl ControlFeedback {
@@ -1809,25 +1937,109 @@ impl ControlFeedback {
             ControlDomain::MicMute => self.mic_osd_owed = Some(seq),
             // A device switch does not owe a first card through this path:
             // the named OSD is queued explicitly from `adopt_audio_switch`
-            // only when the re-read says the switch took.
-            ControlDomain::AudioDevice => {}
+            // only when the re-read says the switch took. A profile switch
+            // always draws its card at once (both callers need a cached
+            // list to pick a profile from), so it is never owed one either.
+            ControlDomain::AudioDevice | ControlDomain::PowerProfile => {}
         }
     }
 
     /// The queued OSD refresh, if any. When both a level correction and a
-    /// named device card are pending, the device card wins: an intentional
-    /// switch confirm beats a concurrent volume/mic resolve, and the next
-    /// volume key re-raises the level card. Same-domain writes still
-    /// latest-win inside each slot.
+    /// named card are pending, the named card wins: an intentional switch
+    /// confirm beats a concurrent volume/mic resolve, and the next volume key
+    /// re-raises the level card. A device confirm outranks a profile
+    /// correction the same way. Same-domain writes still latest-win inside
+    /// each slot.
     pub(crate) fn take_pending_osd(&mut self) -> Option<OsdCorrection> {
         if let Some(device) = self.pending_device.take() {
-            // Drop a concurrent level correction rather than defer it: the
-            // device card is the confirm, and a stale level re-show after
-            // it would fight the user's next press.
+            // Drop the other corrections rather than defer them: the card is
+            // single and replaced in place, so a stale re-show after the
+            // confirm would only fight the user's next press.
             self.pending_level = None;
+            self.pending_profile = None;
             return Some(device);
         }
+        if let Some(profile) = self.pending_profile.take() {
+            self.pending_level = None;
+            return Some(profile);
+        }
         self.pending_level.take()
+    }
+
+    /// Record a power-profile switch just drawn on the row and the card. A
+    /// chained switch keeps the original `previous`, so a storm of Left/Right
+    /// that ends in a refusal reverts to the truth, not an intermediate pick.
+    pub(crate) fn note_power_profile_estimate(
+        &mut self,
+        seq: u64,
+        shown: String,
+        confirmed: Option<(Vec<String>, String)>,
+    ) {
+        match &mut self.power_profile {
+            Some(estimate) => {
+                estimate.seq = seq;
+                estimate.shown = shown;
+            }
+            None => {
+                self.power_profile = Some(ProfileEstimate {
+                    seq,
+                    shown,
+                    previous: confirmed,
+                });
+            }
+        }
+    }
+
+    /// Resolve a power-profile report against the switch on screen, clearing
+    /// the estimate when the report covers it and queueing a correction for a
+    /// live card whose name the outcome contradicts. Past the card's envelope
+    /// nothing is re-shown: popping a fresh card for an old keypress would
+    /// read as a new switch.
+    pub(crate) fn resolve_power_profile(
+        &mut self,
+        report: &PowerProfileReport,
+        now: Instant,
+    ) -> ProfileFeedback {
+        if self
+            .power_profile
+            .as_ref()
+            .is_some_and(|estimate| estimate.seq > report.seq)
+        {
+            return ProfileFeedback::KeepEstimate;
+        }
+        let estimate = self.power_profile.take();
+        let shown = estimate.as_ref().map(|estimate| estimate.shown.clone());
+        let feedback = match (&report.profiles, report.asked_ok) {
+            (Some((available, active)), _) => ProfileFeedback::Adopt {
+                available: available.clone(),
+                active: active.clone(),
+                took: *active == report.asked,
+            },
+            (None, false) => {
+                ProfileFeedback::Revert(estimate.and_then(|estimate| estimate.previous))
+            }
+            (None, true) => ProfileFeedback::KeepShown,
+        };
+        let outcome = match &feedback {
+            ProfileFeedback::Adopt { active, .. } => Some(active.as_str()),
+            ProfileFeedback::Revert(previous) => {
+                previous.as_ref().map(|(_, active)| active.as_str())
+            }
+            ProfileFeedback::KeepEstimate | ProfileFeedback::KeepShown => None,
+        };
+        let card_is_live = self.last_osd.is_some_and(|last| {
+            last.domain == ControlDomain::PowerProfile
+                && now.saturating_duration_since(last.shown_at)
+                    <= crate::backend::compositor_common::osd::OSD_VISIBLE_WINDOW
+        });
+        if let (Some(outcome), Some(shown)) = (outcome, shown)
+            && outcome != shown
+            && card_is_live
+        {
+            self.note_osd_shown(ControlDomain::PowerProfile, 0, false, now);
+            self.pending_profile = Some(OsdCorrection::power_profile(outcome.to_string()));
+        }
+        feedback
     }
 
     /// Queue a named audio-device OSD for the next panel flush. Only the
@@ -1917,8 +2129,9 @@ impl ControlFeedback {
             ControlDomain::Brightness => &mut self.brightness_osd_owed,
             ControlDomain::MicMute => &mut self.mic_osd_owed,
             // Never owed: a device switch's feedback is the picker's re-read
-            // rows, and this helper is only ever called for the OSD domains.
-            ControlDomain::AudioDevice => return,
+            // rows, a profile switch resolves through its own slot, and this
+            // helper is only ever called for the level domains.
+            ControlDomain::AudioDevice | ControlDomain::PowerProfile => return,
         };
         if owed.is_some_and(|owed_seq| owed_seq <= seq) {
             *owed = None;
@@ -3327,6 +3540,8 @@ Source #51
             "brightness_set",
             "mic_set_mute",
             "mic_toggle_mute",
+            "set_profile",
+            "profiles",
         ] {
             let needle = format!("{primitive}(");
             // The only allowed call shape inside the queue is on
@@ -3336,5 +3551,267 @@ Source #51
                 "queue_control_request runs {needle} inline instead of queueing"
             );
         }
+    }
+
+    /// Unit tests never reach the host's controls. A test that queued a
+    /// request without a `TestControlQueueGuard` used to start the real
+    /// worker, which ran the host's tools and published read-backs that
+    /// other test threads adopted (the intermittent `get_mic_mute` failure).
+    /// Now such a submission is refused and nothing is ever reported.
+    #[test]
+    fn tests_without_a_control_queue_never_start_the_real_worker() {
+        assert_eq!(
+            queue_control_request(ControlRequest::PowerProfileSet("balanced".into()), None),
+            None
+        );
+        assert!(take_control_report().is_none());
+        assert!(!controls_worker().started);
+    }
+
+    fn profile_switch(seq: u64, name: &str) -> QueuedRequest {
+        queued(seq, ControlRequest::PowerProfileSet(name.to_string()))
+    }
+
+    fn profile_list(active: &str) -> (Vec<String>, String) {
+        (
+            vec![
+                "power-saver".to_string(),
+                "balanced".to_string(),
+                "performance".to_string(),
+            ],
+            active.to_string(),
+        )
+    }
+
+    fn profile_report(
+        seq: u64,
+        asked: &str,
+        asked_ok: bool,
+        active: Option<&str>,
+    ) -> PowerProfileReport {
+        PowerProfileReport {
+            seq,
+            asked: asked.to_string(),
+            asked_ok,
+            profiles: active.map(profile_list),
+        }
+    }
+
+    #[test]
+    fn queued_profile_switches_fold_to_the_newest_and_stay_in_their_domain() {
+        // A Left/Right storm behind a slow powerprofilesctl is one switch:
+        // the profile asked for last, never every intermediate one in turn.
+        let (batch, cancelled) = fold_all([
+            profile_switch(1, "performance"),
+            profile_switch(2, "power-saver"),
+            profile_switch(3, "balanced"),
+        ]);
+        assert_eq!(batch, [profile_switch(3, "balanced")]);
+        assert_eq!(cancelled, CancelledToggles::default());
+
+        // A profile switch and a volume change are different domains: both
+        // run, in the order asked.
+        let (batch, _) = fold_all([
+            profile_switch(1, "performance"),
+            queued(2, ControlRequest::VolumeSet(60)),
+            profile_switch(3, "balanced"),
+        ]);
+        assert_eq!(
+            batch,
+            [
+                profile_switch(3, "balanced"),
+                queued(2, ControlRequest::VolumeSet(60)),
+            ]
+        );
+        assert_eq!(
+            ControlRequest::PowerProfileSet("balanced".into()).domain(),
+            ControlDomain::PowerProfile
+        );
+    }
+
+    #[test]
+    fn a_profile_readback_covering_the_switch_is_adopted_and_a_stale_one_is_not() {
+        let now = Instant::now();
+        let mut feedback = ControlFeedback::default();
+        feedback.note_power_profile_estimate(
+            1,
+            "performance".into(),
+            Some(profile_list("balanced")),
+        );
+        feedback.note_osd_shown(ControlDomain::PowerProfile, 0, false, now);
+        // A second press queued behind the first: the first answer must not
+        // roll the row back from the newer pick.
+        feedback.note_power_profile_estimate(
+            2,
+            "power-saver".into(),
+            Some(profile_list("performance")),
+        );
+        assert_eq!(
+            feedback.resolve_power_profile(
+                &profile_report(1, "performance", true, Some("performance")),
+                now
+            ),
+            ProfileFeedback::KeepEstimate
+        );
+        assert_eq!(feedback.take_pending_osd(), None);
+
+        // The covering answer confirms what is shown: no correction.
+        assert_eq!(
+            feedback.resolve_power_profile(
+                &profile_report(2, "power-saver", true, Some("power-saver")),
+                now
+            ),
+            ProfileFeedback::Adopt {
+                available: profile_list("power-saver").0,
+                active: "power-saver".into(),
+                took: true,
+            }
+        );
+        assert_eq!(feedback.take_pending_osd(), None);
+    }
+
+    #[test]
+    fn a_profile_the_driver_kept_refreshes_the_live_card_with_the_truth() {
+        let now = Instant::now();
+        let mut feedback = ControlFeedback::default();
+        feedback.note_power_profile_estimate(
+            4,
+            "performance".into(),
+            Some(profile_list("balanced")),
+        );
+        feedback.note_osd_shown(ControlDomain::PowerProfile, 0, false, now);
+
+        assert_eq!(
+            feedback.resolve_power_profile(
+                &profile_report(4, "performance", true, Some("balanced")),
+                now
+            ),
+            ProfileFeedback::Adopt {
+                available: profile_list("balanced").0,
+                active: "balanced".into(),
+                took: false,
+            }
+        );
+        assert_eq!(
+            feedback.take_pending_osd(),
+            Some(OsdCorrection::power_profile("balanced".into())),
+            "the card said performance; it must now say what is in effect"
+        );
+
+        // Past the envelope the card is gone: nothing pops up for an old
+        // keypress.
+        feedback.note_power_profile_estimate(
+            5,
+            "performance".into(),
+            Some(profile_list("balanced")),
+        );
+        feedback.note_osd_shown(ControlDomain::PowerProfile, 0, false, now);
+        let late = now + crate::backend::compositor_common::osd::OSD_VISIBLE_WINDOW * 2;
+        assert!(matches!(
+            feedback.resolve_power_profile(
+                &profile_report(5, "performance", true, Some("balanced")),
+                late
+            ),
+            ProfileFeedback::Adopt { took: false, .. }
+        ));
+        assert_eq!(feedback.take_pending_osd(), None);
+    }
+
+    #[test]
+    fn a_refused_profile_switch_with_no_readback_reverts_to_the_confirmed_one() {
+        let now = Instant::now();
+        let mut feedback = ControlFeedback::default();
+        // Two chained presses; the revert target is the confirmed profile
+        // from before the first, not the intermediate pick.
+        feedback.note_power_profile_estimate(
+            1,
+            "performance".into(),
+            Some(profile_list("balanced")),
+        );
+        feedback.note_power_profile_estimate(
+            2,
+            "power-saver".into(),
+            Some(profile_list("performance")),
+        );
+        feedback.note_osd_shown(ControlDomain::PowerProfile, 0, false, now);
+
+        assert_eq!(
+            feedback.resolve_power_profile(&profile_report(2, "power-saver", false, None), now),
+            ProfileFeedback::Revert(Some(profile_list("balanced")))
+        );
+        assert_eq!(
+            feedback.take_pending_osd(),
+            Some(OsdCorrection::power_profile("balanced".into()))
+        );
+
+        // Accepted but unreadable: nothing contradicts the card.
+        feedback.note_power_profile_estimate(
+            3,
+            "performance".into(),
+            Some(profile_list("balanced")),
+        );
+        assert_eq!(
+            feedback.resolve_power_profile(&profile_report(3, "performance", true, None), now),
+            ProfileFeedback::KeepShown
+        );
+        assert_eq!(feedback.take_pending_osd(), None);
+    }
+
+    /// The single card shows one thing: a device confirm outranks a profile
+    /// correction, which outranks a level correction.
+    #[test]
+    fn named_cards_outrank_level_corrections_in_a_fixed_order() {
+        let now = Instant::now();
+        let mut feedback = ControlFeedback::default();
+        feedback.note_power_profile_estimate(
+            1,
+            "performance".into(),
+            Some(profile_list("balanced")),
+        );
+        feedback.note_osd_shown(ControlDomain::PowerProfile, 0, false, now);
+        feedback.resolve_power_profile(
+            &profile_report(1, "performance", true, Some("balanced")),
+            now,
+        );
+        feedback.owe_osd(ControlDomain::Volume, 2);
+        feedback.resolve_volume(
+            VolumeReport::Applied(
+                2,
+                AudioState {
+                    percent: 40,
+                    muted: false,
+                },
+            ),
+            now,
+        );
+        assert_eq!(
+            feedback.take_pending_osd(),
+            Some(OsdCorrection::power_profile("balanced".into()))
+        );
+        assert_eq!(
+            feedback.take_pending_osd(),
+            None,
+            "the level card was dropped"
+        );
+
+        feedback.note_power_profile_estimate(
+            3,
+            "performance".into(),
+            Some(profile_list("balanced")),
+        );
+        feedback.note_osd_shown(ControlDomain::PowerProfile, 0, false, now);
+        feedback.resolve_power_profile(
+            &profile_report(3, "performance", true, Some("balanced")),
+            now,
+        );
+        feedback.queue_audio_device_osd(false, "HDMI Output".into());
+        assert_eq!(
+            feedback.take_pending_osd(),
+            Some(OsdCorrection::audio_device(false, "HDMI Output".into()))
+        );
+        assert_eq!(feedback.take_pending_osd(), None);
+        // A profile switch is never owed a first card through the level path.
+        feedback.owe_osd(ControlDomain::PowerProfile, 9);
+        assert_eq!(feedback.take_pending_osd(), None);
     }
 }

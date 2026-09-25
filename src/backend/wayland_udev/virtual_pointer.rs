@@ -39,6 +39,12 @@ impl GlobalDispatch<ZwlrVirtualPointerManagerV1, VirtualPointerManagerData> for 
         state.record_protocol_bind("zwlr_virtual_pointer_manager_v1");
         data_init.init(resource, VirtualPointerManagerData);
     }
+
+    /// Pointer injection is privileged: a sandboxed (wp_security_context)
+    /// client must not drive other clients' input.
+    fn can_view(client: Client, _global_data: &VirtualPointerManagerData) -> bool {
+        !crate::backend::wayland::state::client_is_sandboxed(&client)
+    }
 }
 
 impl Dispatch<ZwlrVirtualPointerManagerV1, VirtualPointerManagerData> for JwmWaylandState {

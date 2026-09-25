@@ -1494,7 +1494,14 @@ impl<C: CompositorConnection> Compositor<C> {
         // Composite ownership before releasing its live texture.  On a
         // transient protocol failure preserve the marker after release; the
         // render loop can retry the redirect without reviving Dock resources.
-        let retry_redirect = if self.unredirected_window.take() == Some(x11_win) {
+        // A marker naming another window is left alone: that window is still
+        // presented directly, and only the marker lets the render loop restore
+        // its redirection later.
+        let retry_redirect = if self
+            .unredirected_window
+            .take_if(|window| *window == x11_win)
+            .is_some()
+        {
             !self.restore_unredirected_window(
                 x11_win,
                 "hidden window left minimized Dock eligibility",
@@ -2350,6 +2357,33 @@ mod tests {
         );
         assert_eq!(late_minimized_visual_dimensions(0, 720), None);
         assert_eq!(late_minimized_visual_dimensions(1280, 0), None);
+    }
+
+    /// Forgetting one window's hidden visual must not take the direct
+    /// presentation marker of another. That window would stay unredirected
+    /// with nothing left to restore its Composite redirection.
+    #[test]
+    fn forgetting_a_minimized_visual_takes_only_its_own_direct_presentation_marker() {
+        let source: String = include_str!("effects.rs")
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        let forget = source
+            .split_once("pub(crate)fnforget_minimized_window_visual(")
+            .expect("forget_minimized_window_visual")
+            .1;
+        let forget = &forget[..forget.find("pub(").unwrap_or(forget.len())];
+        let taken_at = forget
+            .find(".unredirected_window.take_if(|window|*window==x11_win)")
+            .expect("the marker is taken only when it names the forgotten window");
+        let restored_at = forget
+            .find("self.restore_unredirected_window(x11_win,")
+            .expect("the forgotten window gets its redirection back");
+        assert!(taken_at < restored_at);
+        assert!(
+            !forget.contains(&format!(".unredirected_window.{}()", "take")),
+            "an unconditional take clears another window's marker"
+        );
     }
 
     #[test]

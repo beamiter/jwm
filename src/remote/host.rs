@@ -23,7 +23,7 @@ use signal_hook::consts::{SIGINT, SIGTERM};
 use signal_hook::flag;
 use std::collections::VecDeque;
 use std::io;
-use std::net::{Shutdown, TcpListener, TcpStream};
+use std::net::{IpAddr, Shutdown, TcpListener, TcpStream};
 use std::os::fd::AsFd;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
@@ -1258,6 +1258,21 @@ pub struct HostOptions {
     pub once: bool,
 }
 
+/// Startup notice for a listener reachable beyond loopback.
+///
+/// The operator decides whether to expose the host from this line, so it must
+/// state the transport's real properties: every record is sealed with
+/// ChaCha20-Poly1305 under the pre-shared key (see `protocol`), and the missing
+/// property is forward secrecy. The earlier text still described the v1
+/// transport and claimed the screen and input crossed the LAN in cleartext.
+const TRUSTED_LAN_NOTICE: &str = "jwm-remote: trusted-LAN mode encrypts and authenticates traffic \
+     with the pre-shared key, but without forward secrecy: a leaked key file decrypts recorded sessions";
+
+/// The notice to print for a listener bound to `address`, if any.
+fn listener_security_notice(address: IpAddr) -> Option<&'static str> {
+    (!address.is_loopback()).then_some(TRUSTED_LAN_NOTICE)
+}
+
 pub fn run_host(options: HostOptions) -> RemoteResult<()> {
     JpegQualityController::new_at(
         options.jpeg_quality,
@@ -1282,10 +1297,8 @@ pub fn run_host(options: HostOptions) -> RemoteResult<()> {
     }
 
     eprintln!("jwm-remote: listening on {local_address}");
-    if !local_address.ip().is_loopback() {
-        eprintln!(
-            "jwm-remote: trusted-LAN mode authenticates traffic but does not encrypt the screen or input"
-        );
+    if let Some(notice) = listener_security_notice(local_address.ip()) {
+        eprintln!("{notice}");
     }
     if !options.allow_input {
         eprintln!("jwm-remote: input control is disabled (view-only host)");
@@ -3948,5 +3961,42 @@ mod tests {
         assert!(steady_started.elapsed() < Duration::from_millis(400));
         assert!(!running.load(Ordering::Acquire));
         assert_eq!(first_stop.cause(), StopCause::Input);
+    }
+
+    #[test]
+    fn lan_listener_notice_matches_the_encrypted_transport() {
+        use std::net::{Ipv4Addr, Ipv6Addr};
+
+        // The notice must describe what the wire actually carries: a payload
+        // written through the session writer never appears in cleartext.
+        let secret = b"typed-password-and-screen-pixels";
+        let mut writer = SessionWriter::new(Vec::new(), [0x5a; 32]);
+        writer
+            .write_message(MessageKind::Frame, secret)
+            .expect("seal a small frame record");
+        let wire = writer.into_inner();
+        assert!(!wire.windows(secret.len()).any(|window| window == secret));
+
+        for address in [
+            IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            IpAddr::V4(Ipv4Addr::new(192, 168, 0, 20)),
+            IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+        ] {
+            let notice = listener_security_notice(address)
+                .unwrap_or_else(|| panic!("{address} is reachable beyond loopback"));
+            assert!(notice.contains("encrypts"), "{notice}");
+            assert!(!notice.contains("does not encrypt"), "{notice}");
+            assert!(notice.contains("forward secrecy"), "{notice}");
+            assert!(notice.contains("leaked key file"), "{notice}");
+        }
+
+        assert_eq!(
+            listener_security_notice(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+            None
+        );
+        assert_eq!(
+            listener_security_notice(IpAddr::V6(Ipv6Addr::LOCALHOST)),
+            None
+        );
     }
 }

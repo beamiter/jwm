@@ -4,6 +4,36 @@
 
 ---
 
+## 2026-09-25（四）：maximize 几何恢复事务与全协议写回 + 全仓缺陷扫除（Opus 5.5 工作流）
+
+选题 = 用户「jwm全面进化升级，workflow的subagent使用opus5.5」。闭合 09-22 两条记录遗留的 maximize 待办，并做一次全仓缺陷扫除。全程多智能体：规格 → 实现 → 交接波 → 六轮独立复查，审查者、修复者、复查者始终是不同批次的智能体。
+
+1. **maximize 事务**：`BackendEvent::WindowMaximizeRequest{window, action, axes}` 取代逐轴翻转和 `ForeignToplevelSetMaximized`，原生 X11 的两个原子在共享解码里合并成一个请求。纯规划在 `core::maximize`（`requested_axes` / `admit_maximize` / `plan_maximize` / `maximize_target` 等），事务在 `jwm::maximize::set_client_maximized`：先发布、再提交、按槽位（Live / 隐藏停放 / 全屏返回 / PiP 返回）落几何，失败走 `restore_failed_mode_transition` 回滚。独立恢复槽 `maximize_restore_rect`。平铺窗口只有用户命令（`togglemaximize`、snap、顶边拖放）或 FLOAT 布局能「提升」出布局，客户端或采纳请求一律拒绝，与 sway 一致。提升窗口记 `maximize_restore_anchor`，取消最大化时回到原槽位，master 保持 master；锚点在 detach、sendmon、scratchpad reveal 时会被接续，`move_to_front` 保证浮动窗口不越过平铺边界。arrange 后幂等 refit 工作区，显示器迁移会平移恢复矩形，拖动、snap、togglefloating、scratchpad 会先原地取消最大化，拖动取消时恢复快照。
+2. **协议写回**：X11 两个传输都是一次 checked 读加一次 REPLACE，xcb 读失败不再抹掉整个 `_NET_WM_STATE`，异类型属性与 x11rb 一致按缺失处理。xdg 的 `State::Maximized` 只在双轴时置位，每个请求恰好一次 configure（owed-reply 在三个 run loop 的事件排空后兜底）。XWayland 走 `set_maximized` 写回，最大化期间拦截客户端自改几何。wlr 按轴缓存标志，XWayland 窗口现在也进入 wlr-foreign-toplevel。IPC `WindowInfo` 增加 `is_maximized*`，新增 `togglemaximize` 命令，`_NET_WM_ALLOWED_ACTIONS` 对固定尺寸窗口去掉 Resize/Maximize。
+3. **全仓扫除**：16 个按视角切分的 finder 产出 134 条候选，每条经 trace / intent / repro 三镜头反驳表决，确认 133 条，去重后 129 条，全部落地或转交接。高危包括：initial-configure 兜底的可重入 mutex 死锁；KMS 重建泄漏 `wl_output` global；idle inhibitor 泄漏导致永不自动锁屏；关闭的 toplevel 被当成整块输出截图并可 panic；正常退出的嵌套或测试 JWM 会 `jwm-tool quit` 掉真实会话（新增 `JWM_DAEMON_PID` 父进程校验）；锁屏遮罩不阻止 direct scanout；单显示器解锁提示期间 idle 自动锁永不触发。
+4. **交接波与协议补全**：ext-session-lock 的 `locked` 推迟到锁屏帧真正呈现后发出（udev 与两个嵌套后端都会上报，1 s 定时兜底）。锁屏 surface 跟随输出模式变化重配。wlr-output-management 维护 head 差异和 done serial，且只在 DRM/KMS 注册。ext-workspace 发布 active、跟随热插拔与 `tags_length`（含重载），隐藏于沙箱客户端。`WorkspaceActivate.monitor` 改为 `Option`，X11 的 `_NET_CURRENT_DESKTOP` / `_NET_RESTACK_WINDOW` 真正生效。特权 global 对 security-context 客户端 `can_view` 过滤；过期 gamma control 收到 `failed`；KMS 初始化失败归还 fd。音频停止、电源配置切换、壁纸目录扫描、Wi-Fi 保存配置查询都移出合成器线程；Wi-Fi 口令改走 stdin。SIGCHLD 统一由 `external_command::unblock_sigchld_in_child` 在子进程解除阻塞。场景线性路径下静止的内部化光标或层表面不再撑大局部重绘框（`content_key` + 真 GL 无头测试）。
+5. **文档**：`docs/window-placement.md` 新增 Maximize 节，compatibility、architecture、minimized-dock、performance 等同步；新增 `tests/docs_drift.rs`，防止文档再出现不存在的 `jwm-msg`、`jwm-tool get_*`、错误的 perf 参数等；CHANGELOG `[Unreleased]` 覆盖全部用户可见变化。
+
+6. **收尾时发现并修复的测试隔离缺陷**：单元测试一旦不装 `TestControlQueueGuard` 就排队控制请求，会启动真实的全局 controls worker，在宿主机上跑 `wpctl` / `brightnessctl` / `powerprofilesctl` 等工具（queued 的配置切换真会改宿主电源配置），它发布的回读还会被其他并行测试通过 `take_control_report` 吃进去，这就是 `get_mic_mute_answers_the_cached_flag` 间歇失败的根因。现在测试构建里 worker 以无线程的 disabled 状态创建，提交得到与「OS 拒绝线程」相同的答复；另加回归测试 `tests_without_a_control_queue_never_start_the_real_worker`。
+7. **differential 覆盖 maximize**：`jwm-tool nested-smoke` 的场景增加 `togglemaximize` 往返，共 18 个阶段、19 个快照，x11rb 与 xcb 逐字节一致；roadmap 的描述同步。顺手修掉 all-backends-no-media 画像里既有的 `MAX_CAPABILITY_PROBE_OUTPUT_BYTES` 未使用警告。
+
+复查收敛：六轮独立复查依次确认 43 / 27 / 9 / 4 / 3 / 4 条（最后两轮只剩锚点语义的边界一致性和文档措辞），全部修复。全轮 13 个 workflow、约 536 个 claude-opus-5-5 智能体，0 错误。
+
+**验证**：cargo check --all-targets 0 警告；clippy `-D warnings` 干净；lib **3962 passed / 12 failed**（12 条是已知的 Xvfb 用例，连续 8 次全量一致；基线 3465）；bins jwm 12、jwm-tool 93、jwm-support 10、jwm-remote 2；集成测试 architecture_boundaries 5、bar_monorepo_contracts 5、docs_drift 9（新）、support_bundle_schema 3；xbar_linux_actions 29。feature 画像 x11rb / xcb / wayland-udev / wayland-nested / 空集 / 全后端无 media / alloc-counter 全部零警告。MSRV：本机 `1.89.0` 工具链损坏（Missing manifest），另装了名为 `1.89` 的 minimal 工具链，`cargo +1.89 check --all-targets` 干净。nested smoke 四个后端全部 PASS，x11rb 与 xcb 的 differential 连续两次 19 个快照一致。另在私有 Xephyr 手动核对：最大化后 `_NET_WM_STATE` 同时带 VERT 和 HORZ，再切换后清空；最大化几何填满 bar 下的工作区，平铺窗口低 28 px 是窗口标签条（≥2 个平铺窗口时才预留），不是缺陷。嵌套实例退出后宿主 jwm / daemon / bridge 仍在，`JWM_DAEMON_PID` 修复实测有效。无 DRM/KMS 真机验证。
+
+**仍然开着的**：
+- 真机 DRM/KMS 未验证：KMS 重建的 `wl_output` 回收、延迟锁屏确认、CTM/GAMMA_LUT 单次原子清除、output-management 刷新都只有单元、线协议和无头 GL 覆盖。
+- XWM maximize 往返（真实 `_NET_WM_STATE` 与 configure_request 拦截）只在有 Xvfb 时跑，本机无 Xvfb，仍在那 12 个已知失败里。
+- 同设备 KMS 重建复用 DrmDeviceFd（logind TakeDevice 限制，#50）、重建后复用 `wl_output` global（#44）、重建后保持 soft-disable（#49，牵涉 swayidle DPMS 语义），都需要真机。
+- 策略待定：XWayland keyboard grab 是否视同快捷键抑制（#41）；IPC 订阅者半关闭后是否保活（#1c，当前 EOF 即断开是固定设计）；音频录制异步 START 需要 IPC 回复契约签字。
+- maximize 延后项：可见窗口的提升状态与恢复矩形跨重启持久化；EWMH source indication；xdg `move_request` / `resize_request`（CSD 标题栏拖动最大化 xdg 窗口不会取消最大化）；XWayland 单轴最大化；snap 半屏和四分屏仍用 `m_*` 而非工作区；窗口状态 IPC 事件；hints 变化后刷新 `_NET_WM_ALLOWED_ACTIONS`；xdg `Tiled*` 与 `Maximized` 共存的取舍。
+- 提升窗口在全屏或 PiP 期间被取消最大化会丢锚点，回到平铺尾部（已写进文档）；可选的「仍提升的全屏跟随者」锁定测试未加。
+- portal `ipc::query_windows` 协议已修正但仍无调用方。
+- 嵌套或测试用的 jwm 会尝试用与宿主会话同名的共享内存创建状态栏，因为属主是宿主进程而被拒绝，之后每 30 s 重试一次。无害，但日志噪音大，也说明 bar 的共享内存名没有按运行目录隔离。
+- 本轮全部改动未提交（130 个跟踪文件约 +38.7k / -2.7k，另有 3 个新文件约 3.1k 行）。
+
+---
+
 ## 2026-09-22（三）：Above/Below 协议闭环与 managed stacking 分层
 
 选题 = 用户「继续」。在 `110c6d6` 之后闭合置顶/置底状态链路。

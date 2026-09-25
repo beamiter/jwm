@@ -246,8 +246,8 @@ mod tests {
         BackendDiagnostics, Capabilities, ColorAllocator, CompositorAnnotation,
         CompositorBenchmark, CompositorControl, CompositorMedia, CompositorRect,
         CompositorWindowEffects, CompositorWorkspaceEffects, CursorProvider, DisplayControl,
-        EventHandler, InputOps, KeyOps, MinimizedRestoreState, OutputIdentity, OutputInfo,
-        OutputOps, PropertyOps, RenderScheduler, WindowOps, WindowType,
+        EventHandler, InputOps, KeyOps, MaximizeAxes, MinimizedRestoreState, OutputIdentity,
+        OutputInfo, OutputOps, PropertyOps, RenderScheduler, WindowOps, WindowType,
     };
     use crate::backend::common_define::{OutputId, WindowId};
     use crate::backend::error::BackendError;
@@ -255,15 +255,19 @@ mod tests {
         DummyColorAllocator, DummyCursorProvider, DummyInputOps, DummyKeyOps, DummyOutputOps,
         DummyPropertyOps, DummyWindowOps,
     };
+    use crate::core::maximize::{MaximizeOrigin, maximize_target};
     use crate::core::models::WMClient;
     use crate::core::types::Rect;
     use std::any::Any;
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     #[derive(Default)]
     struct DockSpyWindowOps {
         positions: Mutex<Vec<(WindowId, i32, i32)>>,
         configurations: Mutex<Vec<(WindowId, i32, i32, u32, u32, u32)>>,
+        /// One-shot: the next `configure` fails without being recorded.
+        fail_next_configure: AtomicBool,
     }
 
     impl WindowOps for DockSpyWindowOps {
@@ -281,6 +285,9 @@ mod tests {
             h: u32,
             border: u32,
         ) -> Result<(), BackendError> {
+            if self.fail_next_configure.swap(false, Ordering::SeqCst) {
+                return Err(BackendError::Message("injected configure failure".into()));
+            }
             self.configurations
                 .lock()
                 .unwrap()
@@ -365,6 +372,10 @@ mod tests {
         client_info: Mutex<Vec<(WindowId, u32, u32)>>,
         transient_parent: Mutex<Option<WindowId>>,
         window_types: Mutex<Vec<WindowType>>,
+        /// Every accepted `set_maximized_state` publish, in order.
+        maximized: Mutex<Vec<(WindowId, MaximizeAxes)>>,
+        /// One-shot: the next `set_maximized_state` fails without being recorded.
+        fail_next_maximized_write: AtomicBool,
     }
 
     impl PropertyOps for DockSpyPropertyOps {
@@ -452,6 +463,20 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push((win, tags, monitor_num));
+            Ok(())
+        }
+
+        fn set_maximized_state(
+            &self,
+            win: WindowId,
+            axes: MaximizeAxes,
+        ) -> Result<(), BackendError> {
+            if self.fail_next_maximized_write.swap(false, Ordering::SeqCst) {
+                return Err(BackendError::Message(
+                    "injected maximize write failure".into(),
+                ));
+            }
+            self.maximized.lock().unwrap().push((win, axes));
             Ok(())
         }
     }
@@ -1605,5 +1630,763 @@ mod tests {
         assert!(client.state.is_floating);
         assert!(client.state.never_focus);
         assert_eq!(client.geometry.border_w, 0);
+    }
+
+    // ---- maximize: geometry sites (sendmon, output removal, refit, drag,
+    // snap, drop, togglefloating, scratchpad, rollback) -------------------
+
+    /// A floating window at `rect` whose floating slot is that same rect.
+    fn floating_client(jwm: &mut Jwm, mon: MonitorKey, raw: u64, rect: Rect) -> ClientKey {
+        let key = visible_client(jwm, mon, raw, rect);
+        let client = &mut jwm.state.clients[key];
+        client.state.is_floating = true;
+        client.geometry.floating_x = rect.x;
+        client.geometry.floating_y = rect.y;
+        client.geometry.floating_w = rect.w;
+        client.geometry.floating_h = rect.h;
+        key
+    }
+
+    fn live_rect(client: &WMClient) -> Rect {
+        Rect::new(
+            client.geometry.x,
+            client.geometry.y,
+            client.geometry.w,
+            client.geometry.h,
+        )
+    }
+
+    fn floating_rect(client: &WMClient) -> Rect {
+        Rect::new(
+            client.geometry.floating_x,
+            client.geometry.floating_y,
+            client.geometry.floating_w,
+            client.geometry.floating_h,
+        )
+    }
+
+    /// Every configuration recorded for `win`, as content rects.
+    fn configurations_of(backend: &DockSpyBackend, win: WindowId) -> Vec<Rect> {
+        backend
+            .window_ops
+            .configurations
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(configured, ..)| *configured == win)
+            .map(|&(_, x, y, w, h, _)| Rect::new(x, y, w as i32, h as i32))
+            .collect()
+    }
+
+    /// Every maximize publish recorded for `win`, in order.
+    fn maximize_writes_of(backend: &DockSpyBackend, win: WindowId) -> Vec<MaximizeAxes> {
+        backend
+            .property_ops
+            .maximized
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(written, _)| *written == win)
+            .map(|&(_, axes)| axes)
+            .collect()
+    }
+
+    /// Reserve `pixels` more at the top of the monitor's work area, the way a
+    /// strut or a docked panel would.
+    fn shrink_work_area_top(jwm: &mut Jwm, mon: MonitorKey, pixels: i32) {
+        let geometry = &mut jwm.state.monitors[mon].geometry;
+        geometry.w_y += pixels;
+        geometry.w_h -= pixels;
+    }
+
+    fn contains(outer: Rect, inner: Rect) -> bool {
+        inner.x >= outer.x
+            && inner.y >= outer.y
+            && inner.x + inner.w <= outer.x + outer.w
+            && inner.y + inner.h <= outer.y + outer.h
+    }
+
+    #[test]
+    fn maximized_sendmon_fills_the_target_work_area_and_carries_the_restore_rect() {
+        let mut backend = DockSpyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let source = jwm.state.monitor_order[0];
+        let target = add_right_monitor(&mut jwm, source);
+        let (_, source_work) = jwm.monitor_migration_areas(source).unwrap();
+        let (_, target_work) = jwm.monitor_migration_areas(target).unwrap();
+
+        let restore = Rect::new(source_work.x + 60, source_work.y + 40, 400, 250);
+        let key = floating_client(&mut jwm, source, 0x410, restore);
+        let win = WindowId::from_raw(0x410);
+        jwm.state.clients[key].geometry.border_w = 2;
+        assert!(
+            jwm.set_client_maximized(
+                &mut backend,
+                key,
+                MaximizeAxes::BOTH,
+                MaximizeOrigin::Client
+            )
+            .unwrap()
+        );
+
+        jwm.sendmon(&mut backend, Some(key), Some(target));
+
+        let translated = Rect::new(target_work.x + 60, target_work.y + 40, 400, 250);
+        let client = &jwm.state.clients[key];
+        assert_eq!(client.mon, Some(target));
+        assert_eq!(client.state.maximized_axes(), MaximizeAxes::BOTH);
+        assert_eq!(
+            live_rect(client),
+            maximize_target(translated, target_work, MaximizeAxes::BOTH, 2),
+            "a maximized window fills the work area of the output it moved to"
+        );
+        assert_eq!(client.geometry.maximize_restore_rect, Some(translated));
+        assert_eq!(floating_rect(client), translated);
+        assert_eq!(
+            configurations_of(&backend, win).last().copied(),
+            Some(live_rect(client)),
+            "the real window was told about the target rect"
+        );
+
+        jwm.set_client_maximized(
+            &mut backend,
+            key,
+            MaximizeAxes::NONE,
+            MaximizeOrigin::Client,
+        )
+        .unwrap();
+        let client = &jwm.state.clients[key];
+        assert_eq!(client.state.maximized_axes(), MaximizeAxes::NONE);
+        assert_eq!(
+            live_rect(client),
+            translated,
+            "unmaximizing lands on the translated pre-maximize rect"
+        );
+    }
+
+    #[test]
+    fn output_removal_refits_a_maximized_window_to_the_surviving_monitor() {
+        let mut backend = DockSpyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let primary = jwm.state.monitor_order[0];
+        let right = add_right_monitor(&mut jwm, primary);
+        let (_, right_work) = jwm.monitor_migration_areas(right).unwrap();
+
+        let restore = Rect::new(right_work.x + 50, right_work.y + 60, 300, 200);
+        let key = floating_client(&mut jwm, right, 0x411, restore);
+        jwm.set_client_maximized(
+            &mut backend,
+            key,
+            MaximizeAxes::BOTH,
+            MaximizeOrigin::Client,
+        )
+        .unwrap();
+
+        jwm.handle_output_removed(&mut backend, OutputId(2))
+            .unwrap();
+
+        let (_, primary_work) = jwm.monitor_migration_areas(primary).unwrap();
+        let client = &jwm.state.clients[key];
+        assert_eq!(client.mon, Some(primary));
+        assert_eq!(client.state.maximized_axes(), MaximizeAxes::BOTH);
+        assert_eq!(
+            live_rect(client),
+            maximize_target(
+                client.geometry.maximize_restore_rect.unwrap(),
+                primary_work,
+                MaximizeAxes::BOTH,
+                client.geometry.border_w,
+            ),
+            "the survivor's work area is filled"
+        );
+        let moved_restore = client
+            .geometry
+            .maximize_restore_rect
+            .expect("still maximized");
+        assert!(
+            contains(primary_work, moved_restore),
+            "unmaximizing later lands on the surviving output: {moved_restore:?}"
+        );
+    }
+
+    #[test]
+    fn work_area_change_refits_maximized_windows_on_arrange_without_touching_the_restore_rect() {
+        let mut backend = DockSpyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let mon = jwm.state.monitor_order[0];
+        let (_, work) = jwm.monitor_migration_areas(mon).unwrap();
+
+        let restore = Rect::new(work.x + 100, work.y + 80, 500, 300);
+        let maximized = floating_client(&mut jwm, mon, 0x412, restore);
+        let maximized_win = WindowId::from_raw(0x412);
+        jwm.set_client_maximized(
+            &mut backend,
+            maximized,
+            MaximizeAxes::BOTH,
+            MaximizeOrigin::Client,
+        )
+        .unwrap();
+        let plain_rect = Rect::new(work.x + 700, work.y + 200, 400, 300);
+        let plain = floating_client(&mut jwm, mon, 0x413, plain_rect);
+
+        shrink_work_area_top(&mut jwm, mon, 40);
+        jwm.arrange(&mut backend, Some(mon));
+
+        let new_work = jwm.maximize_work_area(mon).unwrap();
+        assert_ne!(new_work, work, "the strut moved the work area");
+        let target = maximize_target(restore, new_work, MaximizeAxes::BOTH, 0);
+        let client = &jwm.state.clients[maximized];
+        assert_eq!(live_rect(client), target);
+        assert_eq!(client.geometry.maximize_restore_rect, Some(restore));
+        assert_eq!(floating_rect(client), restore);
+        let other = &jwm.state.clients[plain];
+        assert_eq!(live_rect(other), plain_rect);
+        assert_eq!(floating_rect(other), plain_rect);
+
+        // Idempotent: the refit itself writes nothing for a window already at
+        // its target, and a further arrange never moves it (the only
+        // configures left are the in-place ones every visible float gets
+        // from the show pass).
+        backend.window_ops.configurations.lock().unwrap().clear();
+        jwm.refit_maximized_clients(&mut backend, mon);
+        assert!(configurations_of(&backend, maximized_win).is_empty());
+        jwm.arrange(&mut backend, Some(mon));
+        assert!(
+            configurations_of(&backend, maximized_win)
+                .iter()
+                .all(|&rect| rect == target),
+            "a second arrange does not move the maximized window"
+        );
+        assert_eq!(
+            jwm.state.clients[maximized].geometry.maximize_restore_rect,
+            Some(restore)
+        );
+    }
+
+    #[test]
+    fn refit_is_idempotent_and_skips_hidden_fullscreen_and_pip_clients() {
+        let mut backend = DockSpyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let mon = jwm.state.monitor_order[0];
+        let (_, work) = jwm.monitor_migration_areas(mon).unwrap();
+
+        let maximize = |jwm: &mut Jwm, backend: &mut DockSpyBackend, raw: u64| {
+            let rect = Rect::new(work.x + 100, work.y + 80, 500, 300);
+            let key = floating_client(jwm, mon, raw, rect);
+            jwm.set_client_maximized(backend, key, MaximizeAxes::BOTH, MaximizeOrigin::User)
+                .unwrap();
+            key
+        };
+        let hidden = maximize(&mut jwm, &mut backend, 0x414);
+        {
+            let client = &mut jwm.state.clients[hidden];
+            let visible = live_rect(client);
+            client.state.is_hidden = true;
+            client.state.minimized_order = 3;
+            client.geometry.hidden_restore_rect = Some(visible);
+            client.geometry.hidden_x = Some(-5000);
+            client.geometry.x = -5000;
+        }
+        let fullscreen = maximize(&mut jwm, &mut backend, 0x415);
+        jwm.setfullscreen(&mut backend, fullscreen, true).unwrap();
+        let pip = maximize(&mut jwm, &mut backend, 0x416);
+        assert!(jwm.set_client_pip(&mut backend, pip, true).unwrap());
+
+        shrink_work_area_top(&mut jwm, mon, 40);
+        let keys = [hidden, fullscreen, pip];
+        let before: Vec<WMClient> = keys
+            .iter()
+            .map(|&key| jwm.state.clients[key].clone())
+            .collect();
+        backend.window_ops.configurations.lock().unwrap().clear();
+
+        jwm.refit_maximized_clients(&mut backend, mon);
+        for (key, before) in keys.iter().zip(&before) {
+            assert_eq!(&jwm.state.clients[*key], before, "the refit skipped it");
+            assert!(configurations_of(&backend, before.win).is_empty());
+        }
+
+        jwm.arrange(&mut backend, Some(mon));
+        let new_work = jwm.maximize_work_area(mon).unwrap();
+        for (key, before) in keys.iter().zip(&before) {
+            let client = &jwm.state.clients[*key];
+            assert_eq!(client.state.maximized_axes(), MaximizeAxes::BOTH);
+            assert_eq!(
+                client.geometry.maximize_restore_rect,
+                before.geometry.maximize_restore_rect
+            );
+            assert_eq!(floating_rect(client), floating_rect(before));
+            assert_eq!(
+                client.geometry.hidden_restore_rect,
+                before.geometry.hidden_restore_rect
+            );
+            assert_eq!(live_rect(client), live_rect(before));
+            let refit_target = maximize_target(
+                before.geometry.maximize_restore_rect.unwrap(),
+                new_work,
+                MaximizeAxes::BOTH,
+                before.geometry.border_w,
+            );
+            assert!(
+                !configurations_of(&backend, before.win).contains(&refit_target),
+                "{:?} was refitted although maximize does not own it",
+                before.win
+            );
+        }
+        assert!(configurations_of(&backend, before[0].win).is_empty());
+        assert!(configurations_of(&backend, before[1].win).is_empty());
+    }
+
+    #[test]
+    fn pip_exit_on_a_maximized_window_returns_maximized_and_reestablishes_the_floating_slot() {
+        let mut backend = DockSpyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let mon = jwm.state.monitor_order[0];
+        let (_, work) = jwm.monitor_migration_areas(mon).unwrap();
+        let restore = Rect::new(work.x + 120, work.y + 90, 640, 360);
+        let key = floating_client(&mut jwm, mon, 0x417, restore);
+        jwm.set_client_maximized(&mut backend, key, MaximizeAxes::BOTH, MaximizeOrigin::User)
+            .unwrap();
+        let target = live_rect(&jwm.state.clients[key]);
+
+        assert!(jwm.set_client_pip(&mut backend, key, true).unwrap());
+        assert!(jwm.set_client_pip(&mut backend, key, false).unwrap());
+
+        let client = &jwm.state.clients[key];
+        assert!(!client.state.is_pip);
+        assert_eq!(client.state.maximized_axes(), MaximizeAxes::BOTH);
+        assert_eq!(live_rect(client), target);
+        assert_eq!(client.geometry.maximize_restore_rect, Some(restore));
+        assert_eq!(
+            floating_rect(client),
+            restore,
+            "the floating slot is the pre-maximize rect again, not the maximized one"
+        );
+    }
+
+    #[test]
+    fn fullscreen_exit_after_a_work_area_change_refits_the_maximized_rect() {
+        let mut backend = DockSpyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let mon = jwm.state.monitor_order[0];
+        let (_, work) = jwm.monitor_migration_areas(mon).unwrap();
+        let restore = Rect::new(work.x + 120, work.y + 90, 640, 360);
+        let key = floating_client(&mut jwm, mon, 0x418, restore);
+        jwm.state.clients[key].geometry.border_w = 2;
+        jwm.set_client_maximized(&mut backend, key, MaximizeAxes::BOTH, MaximizeOrigin::User)
+            .unwrap();
+
+        jwm.setfullscreen(&mut backend, key, true).unwrap();
+        jwm.state.monitors[mon].geometry.w_h -= 40;
+        jwm.setfullscreen(&mut backend, key, false).unwrap();
+
+        let new_work = jwm.maximize_work_area(mon).unwrap();
+        let client = &jwm.state.clients[key];
+        assert!(!client.state.is_fullscreen);
+        assert_eq!(client.state.maximized_axes(), MaximizeAxes::BOTH);
+        assert_eq!(
+            live_rect(client),
+            maximize_target(restore, new_work, MaximizeAxes::BOTH, 2),
+            "leaving fullscreen lands on the maximized rect of today's work area"
+        );
+        assert_eq!(client.geometry.maximize_restore_rect, Some(restore));
+    }
+
+    #[test]
+    fn togglefloating_unmaximizes_before_tiling_and_keeps_the_restore_as_floating_rect() {
+        use crate::jwm::WMArgEnum;
+
+        let mut backend = DockSpyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let mon = jwm.state.monitor_order[0];
+        let (_, work) = jwm.monitor_migration_areas(mon).unwrap();
+        let restore = Rect::new(work.x + 100, work.y + 80, 500, 300);
+        let key = floating_client(&mut jwm, mon, 0x419, restore);
+        let win = WindowId::from_raw(0x419);
+        jwm.focus(&mut backend, Some(key)).unwrap();
+        jwm.set_client_maximized(&mut backend, key, MaximizeAxes::BOTH, MaximizeOrigin::User)
+            .unwrap();
+
+        jwm.togglefloating(&mut backend, &WMArgEnum::Int(0))
+            .unwrap();
+
+        let client = &jwm.state.clients[key];
+        assert_eq!(client.state.maximized_axes(), MaximizeAxes::NONE);
+        assert_eq!(client.geometry.maximize_restore_rect, None);
+        assert!(!client.state.is_floating);
+        assert_eq!(
+            floating_rect(client),
+            restore,
+            "the pre-maximize rect, not the maximized one, is remembered"
+        );
+        assert_eq!(
+            maximize_writes_of(&backend, win).last(),
+            Some(&MaximizeAxes::NONE)
+        );
+
+        jwm.togglefloating(&mut backend, &WMArgEnum::Int(0))
+            .unwrap();
+        let client = &jwm.state.clients[key];
+        assert!(client.state.is_floating);
+        assert_eq!(client.state.maximized_axes(), MaximizeAxes::NONE);
+        assert_eq!(live_rect(client), restore);
+    }
+
+    #[test]
+    fn togglefloating_on_a_promoted_window_returns_it_to_the_tiling() {
+        use crate::jwm::WMArgEnum;
+
+        let mut backend = DockSpyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let mon = jwm.state.monitor_order[0];
+        let (_, work) = jwm.monitor_migration_areas(mon).unwrap();
+        let key = visible_client(&mut jwm, mon, 0x41a, Rect::new(work.x, work.y, 300, 200));
+        jwm.focus(&mut backend, Some(key)).unwrap();
+
+        jwm.togglemaximize(&mut backend, &WMArgEnum::Int(0))
+            .unwrap();
+        {
+            let client = &jwm.state.clients[key];
+            assert_eq!(client.state.maximized_axes(), MaximizeAxes::BOTH);
+            assert!(client.state.is_floating);
+            assert!(client.state.maximize_restore_tiled);
+        }
+
+        jwm.togglefloating(&mut backend, &WMArgEnum::Int(0))
+            .unwrap();
+
+        let client = &jwm.state.clients[key];
+        assert_eq!(client.state.maximized_axes(), MaximizeAxes::NONE);
+        assert!(!client.state.is_floating, "one call re-tiles it");
+        assert!(!client.state.maximize_restore_tiled);
+    }
+
+    #[test]
+    fn snap_window_maximize_toggles_a_real_maximize_on_the_work_area() {
+        use crate::jwm::WMArgEnum;
+
+        let mut backend = DockSpyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let mon = jwm.state.monitor_order[0];
+        // A reserved top strip, so the work area and the monitor differ.
+        shrink_work_area_top(&mut jwm, mon, 30);
+        let work = jwm.maximize_work_area(mon).unwrap();
+        let monitor_y = jwm.state.monitors[mon].geometry.m_y;
+        assert_ne!(work.y, monitor_y);
+
+        let previous = Rect::new(work.x + 100, work.y + 80, 500, 300);
+        let key = floating_client(&mut jwm, mon, 0x41b, previous);
+        let win = WindowId::from_raw(0x41b);
+        jwm.focus(&mut backend, Some(key)).unwrap();
+        let maximize = WMArgEnum::StringVec(vec!["maximize".into()]);
+
+        jwm.snap_window(&mut backend, &maximize).unwrap();
+        let client = &jwm.state.clients[key];
+        assert_eq!(client.state.maximized_axes(), MaximizeAxes::BOTH);
+        assert_eq!(client.geometry.y, work.y, "the bar strip stays uncovered");
+        assert_eq!(client.geometry.maximize_restore_rect, Some(previous));
+        assert_eq!(maximize_writes_of(&backend, win), vec![MaximizeAxes::BOTH]);
+
+        jwm.snap_window(&mut backend, &maximize).unwrap();
+        let client = &jwm.state.clients[key];
+        assert_eq!(client.state.maximized_axes(), MaximizeAxes::NONE);
+        assert_eq!(client.geometry.maximize_restore_rect, None);
+        assert_eq!(live_rect(client), previous);
+
+        // Snapping stays a floating-geometry operation.
+        let tiled = visible_client(&mut jwm, mon, 0x41c, Rect::new(work.x, work.y, 300, 200));
+        jwm.focus(&mut backend, Some(tiled)).unwrap();
+        jwm.snap_window(&mut backend, &maximize).unwrap();
+        let client = &jwm.state.clients[tiled];
+        assert_eq!(client.state.maximized_axes(), MaximizeAxes::NONE);
+        assert!(!client.state.is_floating);
+        assert!(maximize_writes_of(&backend, WindowId::from_raw(0x41c)).is_empty());
+    }
+
+    #[test]
+    fn snapping_a_maximized_window_to_a_half_drops_maximize_in_place() {
+        use crate::jwm::WMArgEnum;
+
+        let mut backend = DockSpyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let mon = jwm.state.monitor_order[0];
+        let (_, work) = jwm.monitor_migration_areas(mon).unwrap();
+        let key = floating_client(
+            &mut jwm,
+            mon,
+            0x41d,
+            Rect::new(work.x + 100, work.y + 80, 500, 300),
+        );
+        let win = WindowId::from_raw(0x41d);
+        let bw = 2;
+        jwm.state.clients[key].geometry.border_w = bw;
+        jwm.focus(&mut backend, Some(key)).unwrap();
+        jwm.set_client_maximized(&mut backend, key, MaximizeAxes::BOTH, MaximizeOrigin::User)
+            .unwrap();
+
+        jwm.snap_window(&mut backend, &WMArgEnum::StringVec(vec!["left".into()]))
+            .unwrap();
+
+        // The classic left half of the monitor (snap_rect's Left).
+        let (mx, my, mw, mh) = jwm.monitor_rect(mon);
+        let half = Rect::new(mx, my, mw as i32 / 2, mh as i32);
+        let client = &jwm.state.clients[key];
+        assert_eq!(client.state.maximized_axes(), MaximizeAxes::NONE);
+        assert_eq!(client.geometry.maximize_restore_rect, None);
+        assert_eq!(
+            maximize_writes_of(&backend, win).last(),
+            Some(&MaximizeAxes::NONE)
+        );
+        assert_eq!(
+            live_rect(client),
+            Rect::new(half.x + bw, half.y + bw, half.w - 2 * bw, half.h - 2 * bw)
+        );
+        assert_eq!(floating_rect(client), live_rect(client));
+    }
+
+    #[test]
+    fn top_edge_drop_plans_and_applies_a_work_area_maximize() {
+        use crate::core::layout::LayoutEnum;
+        use crate::jwm::WMArgEnum;
+        use std::rc::Rc;
+
+        let mut backend = DockSpyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let mon = jwm.state.monitor_order[0];
+        jwm.setlayout(&mut backend, &WMArgEnum::Layout(Rc::new(LayoutEnum::FLOAT)))
+            .unwrap();
+        let (_, work) = jwm.monitor_migration_areas(mon).unwrap();
+        let before_drop = Rect::new(work.x + 200, work.y + 150, 600, 400);
+        let key = floating_client(&mut jwm, mon, 0x41e, before_drop);
+        jwm.focus(&mut backend, Some(key)).unwrap();
+
+        let (mx, my, mw, _) = jwm.monitor_rect(mon);
+        let plan = jwm
+            .plan_drag_snap(mon, mx + mw as i32 / 2, my + 1)
+            .expect("the top edge is a drop zone");
+        let work_area = jwm.monitor_work_area(mon).unwrap();
+        assert_eq!(plan.maximize_monitor(), Some(mon));
+        assert_eq!(plan.preview_rect(), work_area);
+
+        jwm.apply_drag_snap(&mut backend, key, plan);
+
+        let client = &jwm.state.clients[key];
+        assert_eq!(client.state.maximized_axes(), MaximizeAxes::BOTH);
+        assert_eq!(client.geometry.maximize_restore_rect, Some(before_drop));
+        assert_eq!(
+            live_rect(client),
+            maximize_target(before_drop, work_area, MaximizeAxes::BOTH, 0)
+        );
+    }
+
+    #[test]
+    fn applying_a_layout_does_not_reclaim_a_maximized_drag_float() {
+        use crate::core::layout::LayoutEnum;
+        use crate::jwm::WMArgEnum;
+        use std::rc::Rc;
+
+        let mut backend = DockSpyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let mon = jwm.state.monitor_order[0];
+        // Start on the float layout, which never reclaims, so each tiling
+        // layout applied below is a real change (re-applying the current
+        // layout is a no-op).
+        jwm.setlayout(&mut backend, &WMArgEnum::Layout(Rc::new(LayoutEnum::FLOAT)))
+            .unwrap();
+        let (_, work) = jwm.monitor_migration_areas(mon).unwrap();
+        let key = floating_client(
+            &mut jwm,
+            mon,
+            0x41f,
+            Rect::new(work.x + 100, work.y + 80, 500, 300),
+        );
+        jwm.state.clients[key].state.is_drag_floating = true;
+        jwm.set_client_maximized(&mut backend, key, MaximizeAxes::BOTH, MaximizeOrigin::User)
+            .unwrap();
+
+        jwm.setlayout(&mut backend, &WMArgEnum::Layout(Rc::new(LayoutEnum::TILE)))
+            .unwrap();
+        let client = &jwm.state.clients[key];
+        assert!(client.state.is_floating, "maximize owns it, not the layout");
+        assert_eq!(client.state.maximized_axes(), MaximizeAxes::BOTH);
+
+        jwm.set_client_maximized(&mut backend, key, MaximizeAxes::NONE, MaximizeOrigin::User)
+            .unwrap();
+        assert!(jwm.state.clients[key].state.is_drag_floating);
+        jwm.setlayout(
+            &mut backend,
+            &WMArgEnum::Layout(Rc::new(LayoutEnum::MONOCLE)),
+        )
+        .unwrap();
+        assert!(
+            !jwm.state.clients[key].state.is_floating,
+            "an unmaximized drag float is reclaimed as before"
+        );
+    }
+
+    #[test]
+    fn drag_activation_unmaximizes_in_place_and_cancel_reinstates() {
+        use crate::jwm::mouse_handler::{DragCtl, DragMode};
+
+        let mut backend = DockSpyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let mon = jwm.state.monitor_order[0];
+        let (_, work) = jwm.monitor_migration_areas(mon).unwrap();
+        let restore = Rect::new(work.x + 100, work.y + 80, 500, 300);
+        let key = floating_client(&mut jwm, mon, 0x420, restore);
+        let win = WindowId::from_raw(0x420);
+        jwm.focus(&mut backend, Some(key)).unwrap();
+        jwm.set_client_maximized(&mut backend, key, MaximizeAxes::BOTH, MaximizeOrigin::User)
+            .unwrap();
+        let target = live_rect(&jwm.state.clients[key]);
+
+        jwm.drag_ctl = Some(DragCtl {
+            client: key,
+            win,
+            mode: DragMode::MoveFloat,
+            start_root: (0.0, 0.0),
+            activated: false,
+            was_floating: true,
+            orig_geom: (target.x, target.y, target.w, target.h),
+            orig_index: None,
+            mon: Some(mon),
+            orig_maximize: jwm.maximize_snapshot(key),
+        });
+
+        jwm.activate_pointer_drag(&mut backend).unwrap();
+        {
+            let client = &jwm.state.clients[key];
+            assert_eq!(client.state.maximized_axes(), MaximizeAxes::NONE);
+            assert_eq!(client.geometry.maximize_restore_rect, None);
+            assert_eq!(live_rect(client), target, "unmaximized where it stands");
+            assert_eq!(
+                maximize_writes_of(&backend, win).last(),
+                Some(&MaximizeAxes::NONE)
+            );
+        }
+
+        jwm.cancel_pointer_drag(&mut backend);
+
+        let client = &jwm.state.clients[key];
+        assert_eq!(client.state.maximized_axes(), MaximizeAxes::BOTH);
+        assert_eq!(client.geometry.maximize_restore_rect, Some(restore));
+        assert_eq!(live_rect(client), target);
+        assert_eq!(floating_rect(client), restore);
+        assert_eq!(
+            maximize_writes_of(&backend, win).last(),
+            Some(&MaximizeAxes::BOTH)
+        );
+    }
+
+    #[test]
+    fn scratchpad_reveal_of_a_maximized_window_unmaximizes_first() {
+        let mut backend = DockSpyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let mon = jwm.state.monitor_order[0];
+        let (_, work) = jwm.monitor_migration_areas(mon).unwrap();
+        let restore = Rect::new(work.x + 150, work.y + 100, 600, 400);
+        let maximized = maximize_target(restore, work, MaximizeAxes::BOTH, 0);
+
+        let window = WindowId::from_raw(0x421);
+        let mut scratchpad = WMClient::new(window);
+        scratchpad.name = "scratch-term".into();
+        scratchpad.mon = Some(mon);
+        scratchpad.state.tags = 1;
+        scratchpad.state.is_floating = true;
+        scratchpad.state.is_hidden = true;
+        scratchpad.state.minimized_order = 5;
+        scratchpad.state.set_maximized_axes(MaximizeAxes::BOTH);
+        scratchpad.geometry.maximize_restore_rect = Some(restore);
+        scratchpad.geometry.floating_x = restore.x;
+        scratchpad.geometry.floating_y = restore.y;
+        scratchpad.geometry.floating_w = restore.w;
+        scratchpad.geometry.floating_h = restore.h;
+        scratchpad.geometry.hidden_restore_rect = Some(maximized);
+        scratchpad.geometry.hidden_x = Some(-5000);
+        scratchpad.geometry.x = -5000;
+        scratchpad.geometry.y = maximized.y;
+        scratchpad.geometry.w = maximized.w;
+        scratchpad.geometry.h = maximized.h;
+        let key = jwm.insert_client(scratchpad);
+        jwm.attach_to_monitor(key, mon);
+        jwm.scratchpads.insert("scratch-term".into(), key);
+
+        assert!(jwm.reveal_and_focus(&mut backend, window).unwrap());
+
+        let area = jwm.monitor_work_area(mon).unwrap();
+        let width = area.w * 4 / 5;
+        let height = area.h * 4 / 5;
+        let placement = Rect::new(
+            area.x + (area.w - width) / 2,
+            area.y + (area.h - height) / 2,
+            width,
+            height,
+        );
+        let client = &jwm.state.clients[key];
+        assert!(!client.state.is_hidden);
+        assert_eq!(client.state.maximized_axes(), MaximizeAxes::NONE);
+        assert_eq!(client.geometry.maximize_restore_rect, None);
+        assert_eq!(
+            maximize_writes_of(&backend, window).last(),
+            Some(&MaximizeAxes::NONE)
+        );
+        assert_eq!(live_rect(client), placement);
+        let desktop_left = jwm.desktop_left_edge();
+        assert!(
+            configurations_of(&backend, window)
+                .iter()
+                .all(|&rect| rect == placement || rect.x + rect.w <= desktop_left),
+            "the unmaximize never put the parked window on screen"
+        );
+    }
+
+    #[test]
+    fn failed_maximize_configure_rolls_back_state_atoms_and_geometry() {
+        let mut backend = DockSpyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let mon = jwm.state.monitor_order[0];
+        let (_, work) = jwm.monitor_migration_areas(mon).unwrap();
+        let previous = Rect::new(work.x + 100, work.y + 80, 500, 300);
+        let key = floating_client(&mut jwm, mon, 0x422, previous);
+        let win = WindowId::from_raw(0x422);
+        let before = jwm.state.clients[key].clone();
+
+        backend
+            .window_ops
+            .fail_next_configure
+            .store(true, Ordering::SeqCst);
+        assert!(
+            jwm.set_client_maximized(&mut backend, key, MaximizeAxes::BOTH, MaximizeOrigin::User)
+                .is_err()
+        );
+
+        assert_eq!(
+            maximize_writes_of(&backend, win),
+            vec![MaximizeAxes::BOTH, MaximizeAxes::NONE],
+            "the published state is repaired"
+        );
+        assert_eq!(jwm.state.clients[key], before);
+        assert_eq!(
+            configurations_of(&backend, win).last().copied(),
+            Some(previous)
+        );
+
+        // A publish that fails never lands, and the transaction still ends
+        // on the previous state and geometry.
+        backend.property_ops.maximized.lock().unwrap().clear();
+        backend
+            .property_ops
+            .fail_next_maximized_write
+            .store(true, Ordering::SeqCst);
+        assert!(
+            jwm.set_client_maximized(&mut backend, key, MaximizeAxes::BOTH, MaximizeOrigin::User)
+                .is_err()
+        );
+        assert!(!maximize_writes_of(&backend, win).contains(&MaximizeAxes::BOTH));
+        assert_eq!(jwm.state.clients[key], before);
+        assert_eq!(
+            configurations_of(&backend, win).last().copied(),
+            Some(previous)
+        );
     }
 }

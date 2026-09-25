@@ -42,6 +42,7 @@ use smithay::reexports::calloop::channel::Sender;
 use smithay::reexports::calloop::{LoopHandle, RegistrationToken};
 use smithay::reexports::drm::control::{Device as ControlDevice, ModeTypeFlags, connector, crtc};
 use smithay::reexports::rustix::fs::OFlags;
+use smithay::reexports::wayland_protocols::ext::image_copy_capture::v1::server::ext_image_copy_capture_frame_v1::FailureReason as ImageCaptureFailureReason;
 use smithay::reexports::wayland_server;
 use smithay::reexports::wayland_server::Resource;
 use smithay::reexports::wayland_server::protocol::wl_buffer::WlBuffer;
@@ -104,6 +105,9 @@ struct KmsOutputState {
     drm_mode_uncertain: bool,
 
     output: Output,
+    /// Held only for its `Drop`: withdrawing this output's `wl_output`
+    /// global together with the output state that advertises it.
+    _wl_output_global: OutputGlobal<crate::backend::wayland::state::JwmWaylandState>,
     drm_output: DrmOutput<
         GbmAllocator<DrmDeviceFd>,
         GbmFramebufferExporter<DrmDeviceFd>,
@@ -129,6 +133,11 @@ struct KmsOutputState {
     /// true forever and the output stops rendering. The watchdog in `render` uses
     /// this to force-clear a stale pending flag after several refresh intervals.
     frame_pending_since: Option<std::time::Instant>,
+    /// `session_lock_epoch` of the queued frame when it was rendered while
+    /// the session was locked: the black shield covers everything but the
+    /// lock surface and the cursor. Its page flip is what lets the pending
+    /// ext-session-lock request be confirmed.
+    frame_pending_lock_epoch: Option<u64>,
 
     send_frame_callbacks: bool,
     frame_callback_roots: Vec<WlSurface>,
@@ -189,6 +198,15 @@ struct KmsOutputState {
     /// feeds encoded pixels through the user ramp instead of competing for the
     /// same GAMMA_LUT state.
     legacy_gamma_override: bool,
+    /// The non-identity ramp the gamma-control client last asked for. Kept so
+    /// a `KmsState` rebuild can put it back on the fresh CRTC (the rebuild
+    /// resets GAMMA_LUT, and the client has no reason to send it again), and
+    /// so a takeover whose CRTC-stage teardown failed can still land it.
+    client_gamma: Option<ClientGammaRamp>,
+    /// `client_gamma` has not reached the CRTC yet: the takeover's CTM+LUT
+    /// teardown failed. The override keeps the next frame's decision planning
+    /// CLEAR for this output, and the ramp is written once that clear lands.
+    client_gamma_pending: bool,
     /// `true` while DPMS is off; the LUT install path skips this output.
     dpms_off: bool,
     /// The HDR_OUTPUT_METADATA blob currently committed on this connector.
@@ -233,8 +251,8 @@ struct KmsOutputState {
     /// commits, forever, behind a debug-level log line. The attempt is the
     /// retry guard; `applied` is what the reports read.
     vrr: VrrApplyRecord,
-    /// An explicit `set_vrr_enabled` request. The content policy owns VRR
-    /// otherwise.
+    /// An explicit `Backend::set_vrr_enabled` request (not exposed over IPC
+    /// yet). The content policy owns VRR otherwise.
     vrr_override: Option<bool>,
     /// The user asked for HDR signalling on this output and has not asked for
     /// it back.
@@ -252,6 +270,16 @@ struct KmsOutputState {
     /// route is known.
     last_software_region_planned: bool,
     last_hardware_pair_active: bool,
+}
+
+impl KmsOutputState {
+    /// Re-derive the frame-callback throttle and the refresh interval after
+    /// the CRTC switched to `mode`.
+    fn adopt_mode_timing(&mut self, mode: WlMode) {
+        let (throttle, refresh_interval) = refresh_timing_for_mode(mode);
+        self.frame_callback_throttle = throttle;
+        self.refresh_interval = refresh_interval;
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -305,6 +333,221 @@ fn rollback_mode_requires_restore(
     drm_mode_uncertain: bool,
 ) -> bool {
     drm_mode_uncertain || current != Some(expected)
+}
+
+/// One output's configuration as a `KmsState` holds it, with what identifies
+/// the monitor behind the connector as far as KMS can tell.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct AppliedOutputConfiguration {
+    state: OutputConfigurationState,
+    /// The mode the connector prefers; a rebuild brings the output up at it.
+    preferred_mode: Option<(i32, i32, i32)>,
+    /// The panel size in millimetres the connector reports.
+    physical_size_mm: (i32, i32),
+}
+
+/// The part of an output's pre-rebuild configuration that a rebuilt output
+/// gets back. `None` fields are left as the fresh output came up.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct OutputConfigurationReplay {
+    mode: Option<(i32, i32, i32)>,
+    position: Option<(i32, i32)>,
+    wl_transform: Option<i32>,
+    scale: Option<f64>,
+}
+
+/// Plan what each rebuilt output gets back of the configuration it had
+/// before a `KmsState` rebuild. A rebuild (every VT switch back, every
+/// connector hotplug) always starts from the preferred mode, scale 1, no
+/// transform and the auto layout, which silently undid everything applied
+/// through wlr-output-management.
+///
+/// Nothing carries over to a different monitor on the same connector (another
+/// preferred mode or panel size): the configuration was chosen for the old
+/// one. Scale and transform only change what clients are told, so they carry
+/// over whenever the monitor survives. A mode carries over only at the size
+/// the fresh output came up at (a refresh change): a different size would
+/// move the framebuffer envelope the fresh layout was computed for.
+/// Positions carry over only when every monitor survived at the size it had,
+/// which is exactly when the previous layout is still valid; otherwise the
+/// fresh auto layout stands.
+fn plan_output_configuration_replay<'a>(
+    previous: &[(&str, AppliedOutputConfiguration)],
+    fresh: &[(&'a str, AppliedOutputConfiguration)],
+) -> Vec<(&'a str, OutputConfigurationReplay)> {
+    let surviving = |name: &str, now: &AppliedOutputConfiguration| {
+        previous
+            .iter()
+            .find(|(previous_name, _)| *previous_name == name)
+            .map(|(_, before)| *before)
+            .filter(|before| {
+                before.preferred_mode == now.preferred_mode
+                    && before.physical_size_mm == now.physical_size_mm
+            })
+            .map(|before| before.state)
+    };
+    let same_size = |a: (i32, i32, i32), b: (i32, i32, i32)| a.0 == b.0 && a.1 == b.1;
+    let layout_survives = previous.len() == fresh.len()
+        && fresh.iter().all(|(name, now)| {
+            surviving(name, now).is_some_and(|before| same_size(before.mode, now.state.mode))
+        });
+    fresh
+        .iter()
+        .filter_map(|(name, now)| {
+            let before = surviving(name, now)?;
+            let now = now.state;
+            let replay = OutputConfigurationReplay {
+                mode: (before.mode != now.mode && same_size(before.mode, now.mode))
+                    .then_some(before.mode),
+                position: (layout_survives && before.position != now.position)
+                    .then_some(before.position),
+                wl_transform: (before.wl_transform != now.wl_transform)
+                    .then_some(before.wl_transform),
+                scale: (before.scale != now.scale).then_some(before.scale),
+            };
+            (replay != OutputConfigurationReplay::default()).then_some((*name, replay))
+        })
+        .collect()
+}
+
+/// Frame-callback throttle and presentation refresh interval for one mode.
+///
+/// Smithay's `Mode::refresh` is in mHz (60000 == 60 Hz). A mode without a
+/// refresh rate throttles nothing and paces at the 16 ms fallback. Output
+/// init and every successful modeset derive both values here, so a runtime
+/// refresh change cannot leave wp_presentation feedback, occluded-surface
+/// frame callbacks and the frame watchdog on the rate the output started at.
+fn refresh_timing_for_mode(mode: WlMode) -> (Option<std::time::Duration>, std::time::Duration) {
+    let throttle = (mode.refresh > 0).then(|| {
+        std::time::Duration::from_nanos(
+            1_000_000_000u64.saturating_mul(1000) / (mode.refresh as u64),
+        )
+    });
+    (
+        throttle,
+        throttle.unwrap_or(std::time::Duration::from_millis(16)),
+    )
+}
+
+/// How long a withdrawn `wl_output` global stays bindable before it is
+/// destroyed. A client can have a `wl_registry.bind` for it in flight when
+/// the `global_remove` reaches it: binding a destroyed global is a protocol
+/// error that disconnects the client, while a disabled one still binds.
+const OUTPUT_GLOBAL_REMOVAL_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The `wl_output` global of one KMS output, withdrawn with the output.
+///
+/// Every `KmsState` rebuild (each VT switch back, each connector hotplug)
+/// creates fresh `Output`s and globals. The globals used to be created and
+/// forgotten, so the replaced outputs stayed advertised for good: each
+/// rebuild added another same-named `wl_output` per connector, clients bound
+/// the stale ones, and captures, gamma and layer surfaces aimed at them were
+/// never serviced. Dropping the owner now sends `global_remove` at once and
+/// destroys the global after `removal_grace`.
+struct OutputGlobal<D: 'static> {
+    display: smithay::reexports::wayland_server::DisplayHandle,
+    id: smithay::reexports::wayland_server::backend::GlobalId,
+    event_loop: LoopHandle<'static, D>,
+    removal_grace: std::time::Duration,
+}
+
+impl<D: 'static> Drop for OutputGlobal<D> {
+    fn drop(&mut self) {
+        use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
+
+        self.display.disable_global::<D>(self.id.clone());
+        let display = self.display.clone();
+        let id = self.id.clone();
+        let scheduled = self.event_loop.insert_source(
+            Timer::from_duration(self.removal_grace),
+            move |_, _, _| {
+                display.remove_global::<D>(id.clone());
+                TimeoutAction::Drop
+            },
+        );
+        if let Err(error) = scheduled {
+            // Already withdrawn from every registry; only the server-side
+            // bookkeeping outlives the output now.
+            log::warn!(
+                "{}: {error}",
+                device_ctx("schedule removal of a withdrawn wl_output global")
+            );
+        }
+    }
+}
+
+/// A non-identity zwlr-gamma-control ramp, sized for the CRTC it was set on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ClientGammaRamp {
+    gamma_size: u32,
+    ramp: Vec<u16>,
+}
+
+/// A pending client ramp can be written only once neither CRTC color stage
+/// is installed: the legacy ramp and the compositor's OETF LUT are the same
+/// hardware GAMMA_LUT, and a CTM without its paired OETF must never scan out.
+const fn client_gamma_ready_to_write(
+    pending: bool,
+    gamma_lut_installed: bool,
+    ctm_installed: bool,
+) -> bool {
+    pending && !gamma_lut_installed && !ctm_installed
+}
+
+/// What happens to a capture queued for one output this frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum QueuedCaptureDisposition {
+    /// The output presents this frame; its render pass answers the capture.
+    Fulfill,
+    /// The output exists but is dark (DPMS off or soft-disabled). No frame is
+    /// rendered for it until it wakes, so the capture fails now, retryably,
+    /// the way wlroots fails a copy of a disabled output.
+    FailDark,
+    /// No output of this KMS state is the target: a rebuild replaced it or it
+    /// was unplugged. Nothing will ever render it again.
+    FailGone,
+}
+
+/// Classify a queued capture by its target against the live outputs, each
+/// paired with whether it presents this frame. Captures used to be answered
+/// only inside the per-output render pass, which skips dark outputs and never
+/// visits a replaced one, so such a capture hung its client forever.
+fn queued_capture_disposition<'a>(
+    target: &Output,
+    live_outputs: impl IntoIterator<Item = (&'a Output, bool)>,
+) -> QueuedCaptureDisposition {
+    match live_outputs
+        .into_iter()
+        .find(|(output, _)| *output == target)
+    {
+        Some((_, true)) => QueuedCaptureDisposition::Fulfill,
+        Some((_, false)) => QueuedCaptureDisposition::FailDark,
+        None => QueuedCaptureDisposition::FailGone,
+    }
+}
+
+/// Resolve a queued toplevel capture to the window's surface and size, or to
+/// the reason its frame fails. `size` is the window's `window_geometry`
+/// entry, the liveness key session setup uses too; `None` means the window
+/// closed after the frame was queued.
+///
+/// A closed window is gone for good: its frame fails `stopped`, and the
+/// session's `stopped` follows once the client destroys the frame. `unknown`
+/// told the client to retry, so a window-capture stream of a closed window
+/// looped through capture, a forced render and failure until the client gave
+/// up. A live window without a surface or a size yet may recover, so it fails
+/// retryably.
+fn toplevel_capture_target<S>(
+    surface: Option<S>,
+    size: Option<(i32, i32)>,
+) -> Result<(S, (i32, i32)), ImageCaptureFailureReason> {
+    let Some((width, height)) = size else {
+        return Err(ImageCaptureFailureReason::Stopped);
+    };
+    match surface {
+        Some(surface) if width > 0 && height > 0 => Ok((surface, (width, height))),
+        _ => Err(ImageCaptureFailureReason::Unknown),
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -2268,7 +2511,8 @@ pub(super) struct PresentationEvidence {
     /// tested inline would make the whole chain below it unreachable in the
     /// unit tests as well as in the build.
     pub submission_supports_async_flip: bool,
-    /// A caller has forced VRR on or off through `set_vrr_enabled`. The
+    /// A caller has forced VRR on or off through `Backend::set_vrr_enabled`
+    /// (not exposed over IPC yet). The
     /// content policy owns VRR otherwise; without this the very next frame
     /// would recompute it and undo an explicit request, which is the same
     /// silently-successful call the raw-property write used to produce.
@@ -2405,11 +2649,11 @@ pub(super) const fn vrr_toggle_needed_a_modeset(
     !commit_pending_before && commit_pending_after
 }
 
-/// What `get_outputs.vrr.supported` reports. The CRTC exposing `VRR_ENABLED`
-/// is necessary but not sufficient — every amdgpu/i915 CRTC has it whatever
-/// panel is attached — so the report reads the same probe the
-/// `set_vrr_enabled` gate reads, and cannot invite a command it would then
-/// refuse.
+/// What `get_wayland_status` `outputs[].vrr.supported` reports. The CRTC
+/// exposing `VRR_ENABLED` is necessary but not sufficient — every amdgpu/i915
+/// CRTC has it whatever panel is attached — so the report reads the same
+/// probe the `Backend::set_vrr_enabled` gate reads, and cannot invite a
+/// command it would then refuse.
 pub(super) const fn reported_vrr_supported(
     crtc_has_vrr_property: bool,
     vrr_supported_without_modeset: bool,
@@ -2473,16 +2717,24 @@ pub(super) const fn hdr_gate_linear_tail_safe(
 /// fresh `KmsState`; without this an HDR request or a VRR override was
 /// silently gone afterwards, with the connector reset to SDR by the old
 /// state's teardown and no log line saying so.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(super) struct OutputLatchedIntent {
     pub name: String,
     pub hdr_requested: bool,
     pub vrr_override: Option<bool>,
+    /// Mode, position, scale and transform as applied before the rebuild
+    /// (wlr-output-management changes included). `None` when the old state
+    /// could not describe the output consistently.
+    configuration: Option<AppliedOutputConfiguration>,
+    /// The gamma-control client's ramp. The rebuild resets GAMMA_LUT on the
+    /// fresh CRTC, and a client with a steady ramp (a night-light at its
+    /// target temperature) never sends it again.
+    client_gamma: Option<ClientGammaRamp>,
 }
 
 impl OutputLatchedIntent {
     const fn is_default(&self) -> bool {
-        !self.hdr_requested && self.vrr_override.is_none()
+        !self.hdr_requested && self.vrr_override.is_none() && self.client_gamma.is_none()
     }
 }
 
@@ -2548,6 +2800,10 @@ pub(super) struct KmsState {
     cursor_size: u32,
     cursor_images: HashMap<String, Vec<Image>>,
     cursor_cache: HashMap<(StdCursorKind, u32), CursorBitmap>,
+    /// Bumped whenever `cursor_cache` is cleared for a new theme or size, so
+    /// a staged cursor's content key changes with its image even when the
+    /// kind, scale and rect stay the same.
+    cursor_cache_generation: u64,
 
     cursor_fallback_body_ids: Vec<Id>,
     cursor_fallback_shadow_ids: Vec<Id>,
@@ -2614,6 +2870,9 @@ pub(super) struct KmsState {
     /// A failed/incomplete reinit must not run the Drop reset: the previous
     /// `KmsState` still owns and tracks those live properties.
     owns_scanout_color_state: bool,
+    /// `(output name, session_lock_epoch)` of locked frames that reached the
+    /// screen since the last [`KmsState::take_presented_locked_frames`].
+    presented_locked_frames: Vec<(String, u64)>,
 }
 
 #[derive(Clone)]
@@ -2647,6 +2906,83 @@ const CURSOR_RECTS: &[(i32, i32, i32, i32)] = &[
     // Base
     (2, 18, 5, 2),
 ];
+
+/// Tags keeping the content keys of the three staged element sources apart.
+const CONTENT_KEY_SURFACE_TREE: u8 = 0;
+const CONTENT_KEY_CURSOR_BITMAP: u8 = 1;
+const CONTENT_KEY_PROCEDURAL_CURSOR: u8 = 2;
+
+/// Content key (`ExternalElementVisual::content_key`) of a staged surface
+/// tree: equal keys mean the composite draws identical pixels. It hashes
+/// what Smithay's own damage tracker compares between frames for every
+/// render element: the element id, its commit counter, and its geometry,
+/// source crop, transform and alpha, plus the offscreen size and the scale
+/// the tree is composited at. A commit, a subsurface move, a viewport change
+/// or an output scale change therefore changes the key. The staged texture
+/// name cannot serve: every staging allocates a new one.
+fn surface_tree_content_key(elements: &[KmsRenderElement], size: (i32, i32), scale: f64) -> u64 {
+    use smithay::backend::renderer::element::Element as _;
+    use smithay::backend::renderer::utils::CommitCounter;
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    CONTENT_KEY_SURFACE_TREE.hash(&mut hasher);
+    size.hash(&mut hasher);
+    scale.to_bits().hash(&mut hasher);
+    // The geometry the composite draws: `composite_elements_to_texture` runs
+    // its damage tracker at the scale the tree was built for.
+    let scale = Scale::from(scale);
+    for element in elements {
+        element.id().hash(&mut hasher);
+        // `CommitCounter` exposes its count only as a distance from zero.
+        element
+            .current_commit()
+            .distance(Some(CommitCounter::default()))
+            .hash(&mut hasher);
+        let geometry = element.geometry(scale);
+        (
+            geometry.loc.x,
+            geometry.loc.y,
+            geometry.size.w,
+            geometry.size.h,
+        )
+            .hash(&mut hasher);
+        let src = element.src();
+        for value in [src.loc.x, src.loc.y, src.size.w, src.size.h] {
+            value.to_bits().hash(&mut hasher);
+        }
+        element.transform().hash(&mut hasher);
+        element.alpha().to_bits().hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+/// Content key of a theme cursor bitmap. The cache holds one image per
+/// (kind, scale) until a theme or size reload clears it, which bumps
+/// `cache_generation`, and theme cursors are not animated, so these three
+/// values name the pixels.
+fn cursor_bitmap_content_key(kind: StdCursorKind, scale: u32, cache_generation: u64) -> u64 {
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    CONTENT_KEY_CURSOR_BITMAP.hash(&mut hasher);
+    kind.hash(&mut hasher);
+    scale.hash(&mut hasher);
+    cache_generation.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Content key of the procedural fallback arrow. Its rects and colors are
+/// constants, so every staging draws the same pixels. The key cannot come
+/// from its render elements: the staging mints fresh element ids each time.
+fn procedural_cursor_content_key() -> u64 {
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    CONTENT_KEY_PROCEDURAL_CURSOR.hash(&mut hasher);
+    CURSOR_RECTS.hash(&mut hasher);
+    hasher.finish()
+}
 
 use crate::backend::xcursor_theme::{cursor_candidates, load_cursor_images, pick_nearest_image};
 
@@ -2884,6 +3220,7 @@ impl KmsState {
 
         if changed {
             self.cursor_cache.clear();
+            self.cursor_cache_generation = self.cursor_cache_generation.wrapping_add(1);
             log::info!(
                 "[cursor] reloaded theme={:?} size={}px",
                 self.cursor_theme_name,
@@ -2913,6 +3250,20 @@ impl KmsState {
 
     pub(super) fn any_frame_pending(&self) -> bool {
         self.outputs.iter().any(|o| !o.dpms_off && o.frame_pending)
+    }
+
+    /// Locked frames that reached the screen since the last call, as
+    /// `(output name, session_lock_epoch)`.
+    pub(super) fn take_presented_locked_frames(&mut self) -> Vec<(String, u64)> {
+        std::mem::take(&mut self.presented_locked_frames)
+    }
+
+    /// Whether `output_name` is a KMS output that is powered and can take
+    /// frames. A DPMS-off output shows nothing and presents nothing.
+    pub(super) fn output_is_lit(&self, output_name: &str) -> bool {
+        self.outputs
+            .iter()
+            .any(|output| output.output_name == output_name && !output.dpms_off)
     }
 
     /// Return the nearest deadline at which a queued frame must be retired if
@@ -2967,6 +3318,9 @@ impl KmsState {
             out.frame_pending = false;
             out.frame_pending_since = None;
             out.frame_pending_boundary = None;
+            // Unknown whether it reached the screen: the next locked frame
+            // confirms instead.
+            out.frame_pending_lock_epoch = None;
             out.color_delivery_observation_uncertain = true;
             out.color_delivery_retry_required = true;
             out.color_delivery.invalidate();
@@ -3035,6 +3389,27 @@ impl KmsState {
         }
     }
 
+    /// Count a queued screencopy frame that fails with `disposition`, the
+    /// wlr-screencopy counterpart of `note_image_capture_frame_failed`. An
+    /// output that is gone (unplugged or replaced by a rebuild) ended the
+    /// stream; nothing failed to render, so counting it as a render failure
+    /// showed every unplugged display as a render fault in the IPC capture
+    /// diagnostics. A dark output stays a render failure, as it does for
+    /// image-copy.
+    fn note_screencopy_frame_failed(
+        counters: Option<
+            &std::sync::Arc<std::sync::Mutex<crate::backend::wayland::state::CaptureCounters>>,
+        >,
+        disposition: QueuedCaptureDisposition,
+    ) {
+        if disposition != QueuedCaptureDisposition::FailGone {
+            Self::note_screencopy_render_failed(counters);
+        } else if let Some(counters) = counters {
+            let mut counters = counters.lock_safe();
+            counters.note_screencopy_failed("screencopy capture source gone");
+        }
+    }
+
     fn note_image_capture_fulfilled(
         counters: Option<
             &std::sync::Arc<std::sync::Mutex<crate::backend::wayland::state::CaptureCounters>>,
@@ -3054,6 +3429,27 @@ impl KmsState {
         if let Some(counters) = counters {
             let mut counters = counters.lock_safe();
             counters.note_image_copy_render_failed("image-copy render-drain failure");
+        }
+    }
+
+    /// Count a queued image-copy frame that fails with `reason`. `stopped`
+    /// means its source (a closed window, an unplugged or replaced output) is
+    /// gone and the stream is over. That is an ordinary failure, as the
+    /// dispatch path counts a capture on a gone source; counted as a render
+    /// failure, every captured window that closed showed up as a render fault
+    /// in the IPC capture diagnostics. Any other reason is a frame the
+    /// renderer could not fill.
+    fn note_image_capture_frame_failed(
+        counters: Option<
+            &std::sync::Arc<std::sync::Mutex<crate::backend::wayland::state::CaptureCounters>>,
+        >,
+        reason: ImageCaptureFailureReason,
+    ) {
+        if reason != ImageCaptureFailureReason::Stopped {
+            Self::note_image_capture_render_failed(counters);
+        } else if let Some(counters) = counters {
+            let mut counters = counters.lock_safe();
+            counters.note_image_copy_failed("image-copy capture source gone");
         }
     }
 
@@ -3239,7 +3635,7 @@ impl KmsState {
         let cfg = crate::config::CONFIG.load();
         let b = cfg.behavior();
         Some(crate::backend::api::VrrCapabilities {
-            // The same probe the `set_vrr_enabled` gate reads; the CRTC
+            // The same probe the `Backend::set_vrr_enabled` gate reads; the CRTC
             // property alone is present on every amdgpu/i915 CRTC.
             supported: reported_vrr_supported(crtc_has_vrr_property, vrr_supported_without_modeset),
             current_enabled,
@@ -3481,10 +3877,18 @@ impl KmsState {
     /// preserving premultiplied-alpha, encoded-sRGB content 1:1. `None` means
     /// the import/draw failed and the owning class must stay external this
     /// frame (fail-closed into the exact-sRGB fallback).
+    ///
+    /// `scale` is the output scale the elements were built for, as the scanout
+    /// assembly's damage tracker has it. Smithay sizes a surface element from
+    /// the tracker's scale (`view.dst.to_physical(scale)`), so compositing a
+    /// tree built at scale 2 through a scale-1 tracker drew it at its logical
+    /// size into the top-left quarter of its physical-sized texture. Elements
+    /// that are physical already (cursor bitmaps, solid rects) pass 1.0.
     fn composite_elements_to_texture(
         renderer: &mut GlesRenderer,
         elements: &[KmsRenderElement],
         size: (i32, i32),
+        scale: f64,
     ) -> Option<GlesTexture> {
         if size.0 <= 0 || size.1 <= 0 {
             return None;
@@ -3504,7 +3908,7 @@ impl KmsState {
             })
             .ok()?;
         let phys: Size<i32, Physical> = size.into();
-        let mut tracker = OutputDamageTracker::new(phys, Scale::from(1.0f64), Transform::Normal);
+        let mut tracker = OutputDamageTracker::new(phys, Scale::from(scale), Transform::Normal);
         // age=0 forces a full redraw; the transparent clear keeps uncovered
         // texels see-through so the compositor blends exactly the element.
         tracker
@@ -3602,7 +4006,8 @@ impl KmsState {
             (f64::from(bbox.size.w) * scale).ceil() as i32,
             (f64::from(bbox.size.h) * scale).ceil() as i32,
         );
-        let Some(texture) = Self::composite_elements_to_texture(renderer, &elements, size) else {
+        let Some(texture) = Self::composite_elements_to_texture(renderer, &elements, size, scale)
+        else {
             return false;
         };
         let rect = [
@@ -3616,6 +4021,7 @@ impl KmsState {
             texture: tex_id,
             owner: Some(texture),
             rect,
+            content_key: surface_tree_content_key(&elements, size, scale),
         });
         true
     }
@@ -3669,10 +4075,12 @@ impl KmsState {
                     Ok(element) => element,
                     Err(_) => return false,
                 };
+                // The theme bitmap is rasterised at the physical size already.
                 let Some(texture) = Self::composite_elements_to_texture(
                     &mut self.renderer,
                     &[KmsRenderElement::Memory(element)],
                     size,
+                    1.0,
                 ) else {
                     return false;
                 };
@@ -3686,6 +4094,11 @@ impl KmsState {
                         size.0,
                         size.1,
                     ],
+                    content_key: cursor_bitmap_content_key(
+                        cursor_kind,
+                        cursor_scale,
+                        self.cursor_cache_generation,
+                    ),
                 });
                 true
             }
@@ -3727,10 +4140,12 @@ impl KmsState {
                         Kind::Cursor,
                     )));
                 }
+                // The fallback rects are physical pixels.
                 let Some(texture) = Self::composite_elements_to_texture(
                     &mut self.renderer,
                     &elements,
                     (max_x - min_x, max_y - min_y),
+                    1.0,
                 ) else {
                     return false;
                 };
@@ -3744,6 +4159,7 @@ impl KmsState {
                         max_x - min_x,
                         max_y - min_y,
                     ],
+                    content_key: procedural_cursor_content_key(),
                 });
                 true
             }
@@ -4508,6 +4924,7 @@ impl KmsState {
                 self.outputs[output_idx].frame_pending = false;
                 self.outputs[output_idx].frame_pending_since = None;
                 self.outputs[output_idx].frame_pending_boundary = None;
+                self.outputs[output_idx].frame_pending_lock_epoch = None;
                 self.outputs[output_idx].color_delivery_observation_uncertain = true;
             }
             // Change the connector power state first. If that write fails the
@@ -4573,22 +4990,20 @@ impl KmsState {
         &mut self,
         color_manager: Option<&crate::backend::wayland_udev::color_management::ColorManagerState>,
     ) -> Result<(), String> {
+        // Clear every output's CTM+LUT pair in one atomic request. Two
+        // single-property commits per output scanned out the OETF LUT without
+        // its CTM in between. If the request fails nothing changed: every
+        // tracked handle stays valid, presentation is blocked and the caller
+        // retains the compositor for a retry.
+        let clear: Vec<(usize, OutputScanoutColorGoal)> = (0..self.outputs.len())
+            .map(|index| (index, OutputScanoutColorGoal::CLEAR))
+            .collect();
+        if let Err(error) = self.apply_scanout_color_goals(&clear) {
+            self.color_pipeline_delivery_blocked = true;
+            return Err(error);
+        }
         for index in 0..self.outputs.len() {
-            // Clear the linear-light matrix first. If that fails, leave the
-            // paired OETF and all tracked handles untouched; presentation is
-            // blocked and the caller retains the compositor for a retry.
-            if self.outputs[index].installed_ctm.is_some() {
-                if let Err(error) = self.uninstall_ctm(index) {
-                    self.color_pipeline_delivery_blocked = true;
-                    return Err(error);
-                }
-            }
-            if self.outputs[index].installed_gamma_lut.is_some() {
-                if let Err(error) = self.uninstall_gamma_lut(index) {
-                    self.color_pipeline_delivery_blocked = true;
-                    return Err(error);
-                }
-            }
+            self.write_pending_client_gamma(index);
         }
         for index in 0..self.outputs.len() {
             // Withdraw from every connector that holds the signal, not only
@@ -5448,6 +5863,12 @@ impl KmsState {
                 log::warn!("[kms-cm] neutral clear commit also failed: {clear_error}");
             }
         }
+        // A gamma takeover whose stage teardown failed left its ramp pending
+        // and the override set, so this frame's goals were CLEAR for that
+        // output: that was the retry, and the ramp lands once it took.
+        for i in 0..n {
+            self.write_pending_client_gamma(i);
+        }
 
         // Report what the hardware actually owns now, not what was requested:
         // a failed commit leaves the previous state installed, and the
@@ -5550,36 +5971,112 @@ impl KmsState {
                 expected_len
             ));
         }
-        let crtc = self
+        let output = self
             .outputs
             .get(output_idx)
-            .ok_or("output index out of range")?
-            .crtc;
+            .ok_or("output index out of range")?;
+        let crtc = output.crtc;
+        let stages_installed =
+            output.installed_ctm.is_some() || output.installed_gamma_lut.is_some();
         let identity = gamma_ramp_is_identity(gamma_size, ramp);
+        let client_gamma = (!identity).then(|| ClientGammaRamp {
+            gamma_size,
+            ramp: ramp.to_vec(),
+        });
 
         // zwlr-gamma-control and the compositor output OETF both own the CRTC
         // GAMMA_LUT. Never let them coexist: move gamut/OETF delivery back to
-        // shaders before installing the client ramp. Identity restoration on
+        // shaders before installing the client ramp. The CTM+LUT pair leaves
+        // scanout in one atomic request: clearing it as two single-property
+        // commits scanned out the OETF LUT without its CTM in between, and a
+        // failure between them stranded half the pair while the next frame
+        // re-installed it over the client's request. Identity restoration on
         // resource destruction releases the override for the next frame.
-        if self.outputs[output_idx].installed_ctm.is_some() {
-            self.uninstall_ctm(output_idx)?;
-        }
-        if self.outputs[output_idx].installed_gamma_lut.is_some() {
-            self.uninstall_gamma_lut(output_idx)?;
+        if stages_installed
+            && let Err(error) =
+                self.apply_scanout_color_goals(&[(output_idx, OutputScanoutColorGoal::CLEAR)])
+        {
+            // Nothing changed on the hardware. Hand the CRTC to the client
+            // anyway: with the override set, the next frame's decision plans
+            // CLEAR for this output (retrying the teardown) instead of
+            // re-installing the pair, and the pending ramp is written as soon
+            // as that clear lands.
+            let output = &mut self.outputs[output_idx];
+            output.legacy_gamma_override = client_gamma.is_some();
+            output.client_gamma_pending = client_gamma.is_some();
+            output.client_gamma = client_gamma;
+            self.invalidate_color_delivery_after_hardware_change(output_idx);
+            return Err(error);
         }
 
-        let red = &ramp[..sz];
-        let green = &ramp[sz..2 * sz];
-        let blue = &ramp[2 * sz..3 * sz];
-        let result = {
-            let mgr = self.drm_output_manager.lock();
-            mgr.device()
-                .set_gamma(crtc, red, green, blue)
-                .map_err(|e| format!("DRM set_gamma failed: {e:?}"))
-        };
-        self.outputs[output_idx].legacy_gamma_override = result.is_err() || !identity;
+        let result = self.write_legacy_gamma(crtc, gamma_size, ramp);
+        let output = &mut self.outputs[output_idx];
+        output.legacy_gamma_override = result.is_err() || !identity;
+        output.client_gamma = client_gamma;
+        output.client_gamma_pending = false;
         self.invalidate_color_delivery_after_hardware_change(output_idx);
         result
+    }
+
+    /// Program a legacy gamma ramp (`gamma_size` entries per channel, red
+    /// then green then blue) on a CRTC.
+    fn write_legacy_gamma(
+        &mut self,
+        crtc: crtc::Handle,
+        gamma_size: u32,
+        ramp: &[u16],
+    ) -> Result<(), String> {
+        let sz = gamma_size as usize;
+        let (Some(red), Some(green), Some(blue)) = (
+            ramp.get(..sz),
+            ramp.get(sz..sz.saturating_mul(2)),
+            ramp.get(sz.saturating_mul(2)..sz.saturating_mul(3)),
+        ) else {
+            return Err(format!(
+                "gamma ramp length mismatch: got {} expected {}",
+                ramp.len(),
+                sz.saturating_mul(3)
+            ));
+        };
+        let mgr = self.drm_output_manager.lock();
+        mgr.device()
+            .set_gamma(crtc, red, green, blue)
+            .map_err(|e| format!("DRM set_gamma failed: {e:?}"))
+    }
+
+    /// Write a client ramp left pending by a takeover whose CRTC-stage
+    /// teardown failed, once the stages are gone. One attempt only: a legacy
+    /// write the driver refuses would otherwise be retried every frame, and
+    /// the override keeps the output on the software route either way.
+    fn write_pending_client_gamma(&mut self, output_idx: usize) {
+        let Some(output) = self.outputs.get(output_idx) else {
+            return;
+        };
+        if !client_gamma_ready_to_write(
+            output.client_gamma_pending,
+            output.installed_gamma_lut.is_some(),
+            output.installed_ctm.is_some(),
+        ) {
+            return;
+        }
+        let crtc = output.crtc;
+        let gamma = output.client_gamma.clone();
+        self.outputs[output_idx].client_gamma_pending = false;
+        let Some(gamma) = gamma else {
+            return;
+        };
+        match self.write_legacy_gamma(crtc, gamma.gamma_size, &gamma.ramp) {
+            Ok(()) => log::info!(
+                "[kms-cm] wrote the pending gamma ramp on {} after the CRTC stages cleared",
+                self.outputs[output_idx].output_name
+            ),
+            Err(error) => log::warn!(
+                "{}: {}: {error}",
+                device_ctx("write pending gamma ramp"),
+                self.outputs[output_idx].output_name
+            ),
+        }
+        self.invalidate_color_delivery_after_hardware_change(output_idx);
     }
 
     fn output_configuration_state(
@@ -5616,6 +6113,24 @@ impl KmsState {
             scale: output.output.current_scale().fractional_scale(),
             wl_transform: smithay_transform_to_wl(output.output.current_transform()),
             dpms_on: !output.dpms_off,
+        })
+    }
+
+    /// The output's configuration plus the connector's own description of
+    /// the monitor, as the rebuild snapshot and replay compare them.
+    fn applied_output_configuration(
+        &self,
+        output_idx: usize,
+    ) -> Option<AppliedOutputConfiguration> {
+        let state = self.output_configuration_state(output_idx).ok()?;
+        let output = &self.outputs.get(output_idx)?.output;
+        let physical_size = output.physical_properties().size;
+        Some(AppliedOutputConfiguration {
+            state,
+            preferred_mode: output
+                .preferred_mode()
+                .map(|mode| (mode.size.w, mode.size.h, mode.refresh)),
+            physical_size_mm: (physical_size.w, physical_size.h),
         })
     }
 
@@ -5921,6 +6436,7 @@ impl KmsState {
                     {
                         Ok(()) => {
                             self.outputs[idx].drm_mode_uncertain = false;
+                            self.outputs[idx].adopt_mode_timing(WlMode::from(prev));
                             log::warn!(
                                 "{}: '{name}': modeset failed, rolled back to previous mode ({primary_err})",
                                 device_ctx("apply output mode")
@@ -5950,6 +6466,7 @@ impl KmsState {
             }
             self.outputs[idx].drm_mode_uncertain = false;
             self.outputs[idx].mode_size = (m.size().0 as i32, m.size().1 as i32);
+            self.outputs[idx].adopt_mode_timing(WlMode::from(m));
         }
 
         // Advertise updated state to wl_output clients and update layout origin.
@@ -6285,6 +6802,82 @@ impl KmsState {
             Err(e) => {
                 log::error!("{}: {e:?}", renderer_ctx("capture/dmabuf: render_output"));
                 false
+            }
+        }
+    }
+
+    /// Answer every queued output capture no render pass will reach: its
+    /// output is dark (DPMS off or soft-disabled) or is not one of this
+    /// state's outputs any more (replaced by a rebuild, or unplugged).
+    ///
+    /// Captures are otherwise answered only inside the per-output pass of
+    /// `render_if_needed`, which skips dark outputs and never visits a
+    /// replaced one, so a screencast of a display that went to sleep or a
+    /// `grim -o` of a disabled head waited forever and pinned its buffer.
+    /// Toplevel captures are output-independent and stay queued.
+    fn fail_unservable_output_captures(&self, soft_disabled_outputs: &HashSet<String>) {
+        use crate::backend::wayland_udev::image_copy_capture::CaptureSource;
+        use smithay::reexports::wayland_protocols::ext::image_copy_capture::v1::server::ext_image_copy_capture_frame_v1::FailureReason;
+
+        let disposition = |target: &Output| {
+            queued_capture_disposition(
+                target,
+                self.outputs.iter().map(|output| {
+                    (
+                        &output.output,
+                        !output.dpms_off && !soft_disabled_outputs.contains(&output.output_name),
+                    )
+                }),
+            )
+        };
+        let counters = self.capture_counters.as_ref();
+
+        if let Some(queue) = self.screencopy_pending.as_ref() {
+            let unservable: Vec<_> = queue
+                .lock_safe()
+                .extract_if(.., |frame| {
+                    disposition(&frame.output) != QueuedCaptureDisposition::Fulfill
+                })
+                .collect();
+            for frame in unservable {
+                let frame_disposition = disposition(&frame.output);
+                log::debug!(
+                    "[screencopy] failing a capture of {:?}: {frame_disposition:?}",
+                    frame.output.name()
+                );
+                Self::note_screencopy_frame_failed(counters, frame_disposition);
+                frame.frame.failed();
+            }
+        }
+
+        if let Some(queue) = self.image_capture_pending.as_ref() {
+            let unservable: Vec<_> = queue
+                .lock_safe()
+                .extract_if(.., |frame| match &frame.source {
+                    CaptureSource::Output(output) => {
+                        disposition(output) != QueuedCaptureDisposition::Fulfill
+                    }
+                    CaptureSource::Toplevel(_) => false,
+                })
+                .collect();
+            for frame in unservable {
+                let CaptureSource::Output(output) = &frame.source else {
+                    continue;
+                };
+                let reason = match disposition(output) {
+                    // The session's source is gone for good.
+                    QueuedCaptureDisposition::FailGone => FailureReason::Stopped,
+                    // The client may retry once the display wakes.
+                    QueuedCaptureDisposition::FailDark | QueuedCaptureDisposition::Fulfill => {
+                        FailureReason::Unknown
+                    }
+                };
+                log::debug!(
+                    "[image-copy-capture] failing a capture of {:?}: {reason:?}",
+                    output.name()
+                );
+                Self::note_image_capture_frame_failed(counters, reason);
+                frame.frame.failed(reason);
             }
         }
     }
@@ -6777,22 +7370,19 @@ impl KmsState {
                 continue;
             };
 
-            let Some(surface) = state.surface_for_window(win) else {
-                Self::note_image_capture_render_failed(counters);
-                frame_info.frame.failed(FailureReason::Unknown);
-                continue;
-            };
-            let Some(geo) = state.window_geometry.get(&win).copied() else {
-                Self::note_image_capture_render_failed(counters);
-                frame_info.frame.failed(FailureReason::Unknown);
-                continue;
-            };
-            let (width, height) = (geo.w as i32, geo.h as i32);
-            if width <= 0 || height <= 0 {
-                Self::note_image_capture_render_failed(counters);
-                frame_info.frame.failed(FailureReason::Unknown);
-                continue;
-            }
+            let size = state
+                .window_geometry
+                .get(&win)
+                .map(|geo| (geo.w as i32, geo.h as i32));
+            let (surface, (width, height)) =
+                match toplevel_capture_target(state.surface_for_window(win), size) {
+                    Ok(target) => target,
+                    Err(reason) => {
+                        Self::note_image_capture_frame_failed(counters, reason);
+                        frame_info.frame.failed(reason);
+                        continue;
+                    }
+                };
 
             // Shift the surface buffer origin by -window_geometry.loc so client-side
             // shadow/CSD margins don't push the content off the capture buffer.
@@ -7015,18 +7605,22 @@ impl KmsState {
     pub(super) fn latched_intents(&self) -> Vec<OutputLatchedIntent> {
         self.outputs
             .iter()
-            .map(|output| OutputLatchedIntent {
+            .enumerate()
+            .map(|(index, output)| OutputLatchedIntent {
                 name: output.output_name.clone(),
                 hdr_requested: output.hdr_requested,
                 vrr_override: output.vrr_override,
+                configuration: self.applied_output_configuration(index),
+                client_gamma: output.client_gamma.clone(),
             })
             .collect()
     }
 
     /// Re-apply intents snapshotted from the previous state, by output name.
     /// A carried HDR request is re-asserted by the first reconciliation on
-    /// the fresh connector; an intent whose output is gone is logged, not
-    /// lost silently.
+    /// the fresh connector; the applied output configuration and the gamma
+    /// client's ramp are put back on the fresh outputs; an intent whose
+    /// output is gone is logged, not lost silently.
     pub(super) fn restore_latched_intents(&mut self, intents: &[OutputLatchedIntent]) {
         let names: Vec<&str> = self
             .outputs
@@ -7040,12 +7634,12 @@ impl KmsState {
             .collect();
         for name in dropped {
             log::info!(
-                "[kms] output {name} is gone after the rebuild; its latched HDR request / VRR override is dropped"
+                "[kms] output {name} is gone after the rebuild; its latched HDR request / VRR override / gamma ramp is dropped"
             );
         }
         let mut changed = false;
-        for (index, intent) in carried {
-            let output = &mut self.outputs[index];
+        for (index, intent) in &carried {
+            let output = &mut self.outputs[*index];
             if intent.hdr_requested && !output.hdr_requested {
                 log::info!(
                     "[kms-cm] carrying the HDR request on {} across the rebuild",
@@ -7057,9 +7651,87 @@ impl KmsState {
             output.hdr_requested = intent.hdr_requested;
             output.vrr_override = intent.vrr_override;
         }
+
+        changed |= self.replay_output_configuration(intents);
+
+        let gamma_sizes = self.gamma_sizes();
+        for (index, intent) in &carried {
+            let Some(gamma) = intent.client_gamma.as_ref() else {
+                continue;
+            };
+            let output_name = self.outputs[*index].output_name.clone();
+            let fresh_size = gamma_sizes.get(*index).map(|(_, size)| *size);
+            if fresh_size != Some(gamma.gamma_size) {
+                // The ramp is sized for the old CRTC; resampling it would
+                // invent a curve the client never asked for.
+                log::warn!(
+                    "[kms] gamma ramp on {output_name} not carried across the rebuild: sized for {} entries, the new CRTC has {fresh_size:?}",
+                    gamma.gamma_size
+                );
+                continue;
+            }
+            match self.set_gamma_for_output(*index, gamma.gamma_size, &gamma.ramp) {
+                Ok(()) => {
+                    log::info!("[kms] carried the gamma ramp on {output_name} across the rebuild");
+                }
+                Err(error) => log::warn!(
+                    "{}: {output_name}: {error}",
+                    device_ctx("restore gamma ramp after rebuild")
+                ),
+            }
+            changed = true;
+        }
         if changed {
             self.needs_render = true;
         }
+    }
+
+    /// Put the configuration the outputs had before a rebuild back on the
+    /// fresh ones, as [`plan_output_configuration_replay`] allows. Returns
+    /// whether anything was replayed.
+    fn replay_output_configuration(&mut self, intents: &[OutputLatchedIntent]) -> bool {
+        let previous: Vec<(&str, AppliedOutputConfiguration)> = intents
+            .iter()
+            .filter_map(|intent| {
+                intent
+                    .configuration
+                    .map(|configuration| (intent.name.as_str(), configuration))
+            })
+            .collect();
+        let fresh_states: Vec<(String, AppliedOutputConfiguration)> = (0..self.outputs.len())
+            .filter_map(|index| {
+                self.applied_output_configuration(index)
+                    .map(|state| (self.outputs[index].output_name.clone(), state))
+            })
+            .collect();
+        let fresh: Vec<(&str, AppliedOutputConfiguration)> = fresh_states
+            .iter()
+            .map(|(name, state)| (name.as_str(), *state))
+            .collect();
+        let plan = plan_output_configuration_replay(&previous, &fresh);
+        let replayed = !plan.is_empty();
+        for (name, replay) in plan {
+            // The modeset gate is not consulted: this restores a mode that
+            // already passed it when it was applied, as the transaction
+            // rollback does.
+            match self.configure_output_with_modeset_policy(
+                name,
+                replay.mode,
+                replay.position,
+                replay.wl_transform,
+                replay.scale,
+                true,
+            ) {
+                Ok(()) => log::info!(
+                    "[kms] carried the output configuration of {name} across the rebuild: {replay:?}"
+                ),
+                Err(error) => log::warn!(
+                    "{}: {name}: {error}",
+                    device_ctx("restore output configuration after rebuild")
+                ),
+            }
+        }
+        replayed
     }
 
     pub(super) fn presentation_timing_status(
@@ -7155,8 +7827,38 @@ impl KmsState {
                 OFlags::RDWR | OFlags::CLOEXEC | OFlags::NOCTTY | OFlags::NONBLOCK,
             )
             .map_err(KmsInitError::DeviceOpen)?;
-        let fd = DrmDeviceFd::new(DeviceFd::from(fd));
+        let device = DeviceFd::from(fd);
+        let result = Self::on_device(
+            DrmDeviceFd::new(device.clone()),
+            dev_path,
+            dev_id,
+            output_layout,
+            display_handle,
+            flush_tx,
+            flush_pending,
+            event_loop_handle,
+        );
+        if result.is_err() {
+            // Every object built on the device went down with the error. A
+            // dropped fd would keep the seat's reference: seatd leaks it, and
+            // logind keeps the device taken, so each later rebuild of it
+            // failed too.
+            return_device_to_seat(session, device);
+        }
+        result
+    }
 
+    /// Build the KMS state on an already opened DRM device.
+    fn on_device(
+        fd: DrmDeviceFd,
+        dev_path: &Path,
+        dev_id: u64,
+        output_layout: &std::collections::HashMap<u64, (i32, i32)>,
+        display_handle: &smithay::reexports::wayland_server::DisplayHandle,
+        flush_tx: Sender<()>,
+        flush_pending: Arc<AtomicBool>,
+        event_loop_handle: LoopHandle<'static, crate::backend::wayland::state::JwmWaylandState>,
+    ) -> Result<KmsHandle, KmsInitError> {
         let (drm, notifier) = DrmDevice::new(fd.clone(), true).map_err(KmsInitError::DrmInit)?;
         let gbm = GbmDevice::new(fd.clone()).map_err(KmsInitError::GbmInit)?;
 
@@ -7227,6 +7929,7 @@ impl KmsState {
             mode_size: (i32, i32),
             origin: (i32, i32),
             frame_callback_throttle: Option<std::time::Duration>,
+            refresh_interval: std::time::Duration,
         }
 
         // Create outputs for all connected connectors with a usable (distinct) CRTC.
@@ -7269,14 +7972,7 @@ impl KmsState {
                 };
 
                 let wl_mode = WlMode::from(mode);
-                let frame_callback_throttle = if wl_mode.refresh > 0 {
-                    // Smithay's Mode.refresh is in mHz (e.g. 60000 == 60Hz).
-                    Some(std::time::Duration::from_nanos(
-                        (1_000_000_000u64.saturating_mul(1000)) / (wl_mode.refresh as u64),
-                    ))
-                } else {
-                    None
-                };
+                let (frame_callback_throttle, refresh_interval) = refresh_timing_for_mode(wl_mode);
 
                 let (phys_w, phys_h) = conn.size().unwrap_or((0, 0));
                 let output_name = format!("{:?}-{}", conn.interface(), conn.interface_id());
@@ -7308,6 +8004,7 @@ impl KmsState {
                     mode_size: (mode.size().0 as i32, mode.size().1 as i32),
                     origin: (ox, oy),
                     frame_callback_throttle,
+                    refresh_interval,
                 });
             }
 
@@ -7319,9 +8016,18 @@ impl KmsState {
         let mut outputs: Vec<KmsOutputState> = Vec::new();
 
         for p in pending {
-            let _wl_output_global = p
-                .output
-                .create_global::<crate::backend::wayland::state::JwmWaylandState>(display_handle);
+            // Owned by the output state from here on, so a failed
+            // construction or the replaced state's teardown withdraws it.
+            let wl_output_global = OutputGlobal {
+                display: display_handle.clone(),
+                id: p
+                    .output
+                    .create_global::<crate::backend::wayland::state::JwmWaylandState>(
+                        display_handle,
+                    ),
+                event_loop: event_loop_handle.clone(),
+                removal_grace: OUTPUT_GLOBAL_REMOVAL_GRACE,
+            };
 
             let drm_output = drm_output_manager
                 .lock()
@@ -7425,9 +8131,7 @@ impl KmsState {
                     .collect()
             });
 
-            let refresh_interval = p
-                .frame_callback_throttle
-                .unwrap_or(std::time::Duration::from_millis(16));
+            let refresh_interval = p.refresh_interval;
             let output_name = p.output.name();
             // Probed once: the answer changes only on hotplug, and asking
             // costs two ioctls plus a rebuilt connector info struct.
@@ -7453,6 +8157,7 @@ impl KmsState {
                 origin: p.origin,
                 drm_mode_uncertain: false,
                 output: p.output,
+                _wl_output_global: wl_output_global,
                 drm_output,
                 frame_pending: false,
                 frame_pending_boundary: None,
@@ -7460,6 +8165,7 @@ impl KmsState {
                 color_delivery_retry_required: false,
                 color_delivery: OutputColorDeliveryTracker::default(),
                 frame_pending_since: None,
+                frame_pending_lock_epoch: None,
                 send_frame_callbacks: false,
                 frame_callback_roots: Vec::new(),
                 frame_callback_throttle: p.frame_callback_throttle,
@@ -7478,6 +8184,8 @@ impl KmsState {
                 output_tf,
                 output_ctm,
                 legacy_gamma_override: false,
+                client_gamma: None,
+                client_gamma_pending: false,
                 installed_hdr_metadata_blob: None,
                 hdr_connector_commit_rejected: false,
                 vrr_supported_without_modeset,
@@ -7523,6 +8231,7 @@ impl KmsState {
             cursor_size,
             cursor_images: HashMap::new(),
             cursor_cache: HashMap::new(),
+            cursor_cache_generation: 0,
 
             cursor_fallback_body_ids: (0..CURSOR_RECTS.len()).map(|_| Id::new()).collect(),
             cursor_fallback_shadow_ids: (0..CURSOR_RECTS.len()).map(|_| Id::new()).collect(),
@@ -7550,13 +8259,21 @@ impl KmsState {
             last_color_delivery_policy: None,
             internalized_external_frame: None,
             owns_scanout_color_state: false,
+            presented_locked_frames: Vec::new(),
         }));
 
         let handle_clone = handle.clone();
         let token = event_loop_handle
-            .insert_source(notifier, move |event, metadata, _state| match event {
+            .insert_source(notifier, move |event, metadata, state| match event {
                 DrmEvent::VBlank(crtc) => {
-                    handle_clone.borrow_mut().on_vblank(crtc, metadata);
+                    let presented = {
+                        let mut kms = handle_clone.borrow_mut();
+                        kms.on_vblank(crtc, metadata);
+                        kms.take_presented_locked_frames()
+                    };
+                    for (output_name, epoch) in presented {
+                        state.note_locked_frame_presented(&output_name, epoch);
+                    }
                 }
                 DrmEvent::Error(err) => {
                     log::warn!("{}: {err:?}", renderer_ctx("process DRM event"));
@@ -7623,6 +8340,9 @@ impl KmsState {
         cursor_kind: StdCursorKind,
         compositor: Option<&super::super::compositor::WaylandCompositor>,
     ) {
+        // Ahead of the early return: a capture of a dark or replaced output
+        // must be answered even when nothing on screen needs a frame.
+        self.fail_unservable_output_captures(&state.soft_disabled_outputs);
         if !self.needs_render || self.color_pipeline_delivery_blocked {
             return;
         }
@@ -8740,6 +9460,11 @@ impl KmsState {
                             // after resetting damage/buffer history.
                             out.drm_output.reset_buffers();
                             any_failed = true;
+                        } else if state.session_locked {
+                            // Nothing to queue: the scanout already shows
+                            // exactly this locked scene.
+                            self.presented_locked_frames
+                                .push((out.output_name.clone(), state.session_lock_epoch));
                         }
                         out.send_frame_callbacks = true;
                         out.frame_callback_roots = frame_roots;
@@ -8789,6 +9514,8 @@ impl KmsState {
                         out.frame_pending = true;
                         out.frame_pending_since = Some(std::time::Instant::now());
                         out.frame_pending_boundary = Some(queue_boundary);
+                        out.frame_pending_lock_epoch =
+                            state.session_locked.then_some(state.session_lock_epoch);
                         out.send_frame_callbacks = true;
                         out.frame_callback_roots = frame_roots;
                         out.frame_callback_visible = visible_surfaces;
@@ -8894,6 +9621,10 @@ impl KmsState {
             out.frame_pending = false;
             out.frame_pending_since = None;
             out.frame_pending_boundary = None;
+            if let Some(epoch) = out.frame_pending_lock_epoch.take() {
+                self.presented_locked_frames
+                    .push((out.output_name.clone(), epoch));
+            }
             out.color_delivery_observation_uncertain = false;
             if let Some(vblank_time) = presentation_time {
                 out.last_vblank = Some(vblank_time);
@@ -8969,6 +9700,34 @@ impl Drop for KmsState {
                 log::debug!("[kms-cm] destroy tracked color blob {id} failed: {error:?}");
             }
         }
+    }
+}
+
+/// Hand a device opened through the seat back to it after a failed build.
+/// Only a sole owner can be returned; a device something still holds is
+/// left to that holder.
+fn return_device_to_seat(session: &mut LibSeatSession, device: DeviceFd) {
+    let returned = release_sole_device(device, |fd| {
+        if let Err(error) = session.close(fd) {
+            log::warn!("[kms] failed to return a DRM device to the seat: {error}");
+        }
+    });
+    if !returned {
+        log::warn!(
+            "[kms] a DRM device from a failed KMS build is still referenced; not returned to the seat"
+        );
+    }
+}
+
+/// Pass `device` to `close` when nothing else holds it. Returns whether it
+/// did.
+fn release_sole_device(device: DeviceFd, close: impl FnOnce(std::os::fd::OwnedFd)) -> bool {
+    match TryInto::<std::os::fd::OwnedFd>::try_into(device) {
+        Ok(fd) => {
+            close(fd);
+            true
+        }
+        Err(_) => false,
     }
 }
 
@@ -9091,6 +9850,7 @@ mod compositor_texture_ownership_tests {
         LinearTailStatus, TailOverlayVisibility, tail_overlay_blockers,
     };
     use smithay::backend::drm::compositor::FrameFlags;
+    use smithay::reexports::wayland_server::protocol::wl_output::WlOutput;
     use smithay::utils::Transform;
 
     fn color_region_candidate(
@@ -10037,16 +10797,22 @@ mod compositor_texture_ownership_tests {
                 name: "DP-1".to_string(),
                 hdr_requested: true,
                 vrr_override: Some(true),
+                configuration: None,
+                client_gamma: None,
             },
             OutputLatchedIntent {
                 name: "HDMI-A-1".to_string(),
                 hdr_requested: false,
                 vrr_override: None,
+                configuration: None,
+                client_gamma: None,
             },
             OutputLatchedIntent {
                 name: "DP-2".to_string(),
                 hdr_requested: true,
                 vrr_override: None,
+                configuration: None,
+                client_gamma: None,
             },
         ];
 
@@ -10068,6 +10834,550 @@ mod compositor_texture_ownership_tests {
         assert_eq!(dropped, vec!["DP-2"]);
         let (_, quiet) = carry_latched_intents(&intents[1..2], &[]);
         assert!(quiet.is_empty());
+    }
+
+    #[test]
+    fn a_client_gamma_ramp_is_carried_across_a_rebuild_like_any_latched_intent() {
+        use super::{ClientGammaRamp, OutputLatchedIntent, carry_latched_intents};
+
+        // wlsunset at its night temperature sends the ramp once. The rebuild
+        // resets GAMMA_LUT on the fresh CRTC, so the ramp has to travel with
+        // the output, and losing it with the output is worth a log line.
+        let night_light = OutputLatchedIntent {
+            name: "DP-3".to_string(),
+            hdr_requested: false,
+            vrr_override: None,
+            configuration: None,
+            client_gamma: Some(ClientGammaRamp {
+                gamma_size: 2,
+                ramp: vec![0, 65_535, 0, 52_000, 0, 40_000],
+            }),
+        };
+        let (carried, _) = carry_latched_intents(std::slice::from_ref(&night_light), &["DP-3"]);
+        assert_eq!(carried[0].1.client_gamma, night_light.client_gamma);
+        let (_, dropped) = carry_latched_intents(std::slice::from_ref(&night_light), &[]);
+        assert_eq!(dropped, vec!["DP-3"]);
+
+        // The rebuild snapshot takes both, and the restore replays both.
+        const SOURCE: &str = include_str!("udev_kms.rs");
+        let snapshot = SOURCE
+            .split_once("pub(super) fn latched_intents(")
+            .expect("the rebuild snapshot exists")
+            .1
+            .split_once("pub(super) fn restore_latched_intents(")
+            .expect("the restore follows the snapshot")
+            .0;
+        assert!(snapshot.contains("configuration: self.applied_output_configuration(index)"));
+        assert!(snapshot.contains("client_gamma: output.client_gamma.clone()"));
+        let restore = SOURCE
+            .split_once("pub(super) fn restore_latched_intents(")
+            .expect("the restore exists")
+            .1
+            .split_once("fn replay_output_configuration(")
+            .expect("the configuration replay follows the restore")
+            .0;
+        assert!(restore.contains("self.replay_output_configuration(intents)"));
+        assert!(
+            restore.contains("self.set_gamma_for_output(*index, gamma.gamma_size, &gamma.ramp)")
+        );
+    }
+
+    #[test]
+    fn a_rebuild_gives_back_the_output_configuration_it_can_still_honour() {
+        use super::{
+            AppliedOutputConfiguration, OutputConfigurationReplay, OutputConfigurationState,
+            plan_output_configuration_replay,
+        };
+
+        const DP_PREFERRED: (i32, i32, i32) = (2560, 1440, 59_951);
+        const HDMI_PREFERRED: (i32, i32, i32) = (1920, 1080, 60_000);
+        let applied = |preferred: (i32, i32, i32),
+                       mode: (i32, i32, i32),
+                       position: (i32, i32),
+                       scale: f64,
+                       wl_transform: i32| AppliedOutputConfiguration {
+            state: OutputConfigurationState {
+                mode,
+                position,
+                scale,
+                wl_transform,
+                dpms_on: true,
+            },
+            preferred_mode: Some(preferred),
+            physical_size_mm: (600, 340),
+        };
+        // Applied through wlr-output-management: DP-1 at 144 Hz, scale 2,
+        // rotated, placed right of HDMI-A-1.
+        let previous = [
+            (
+                "DP-1",
+                applied(DP_PREFERRED, (2560, 1440, 143_912), (1920, 0), 2.0, 1),
+            ),
+            (
+                "HDMI-A-1",
+                applied(HDMI_PREFERRED, HDMI_PREFERRED, (0, 0), 1.0, 0),
+            ),
+        ];
+        // A VT switch back rebuilds both at the preferred mode, scale 1, no
+        // transform and the auto layout.
+        let fresh = [
+            ("DP-1", applied(DP_PREFERRED, DP_PREFERRED, (0, 0), 1.0, 0)),
+            (
+                "HDMI-A-1",
+                applied(HDMI_PREFERRED, HDMI_PREFERRED, (2560, 0), 1.0, 0),
+            ),
+        ];
+        assert_eq!(
+            plan_output_configuration_replay(&previous, &fresh),
+            vec![
+                (
+                    "DP-1",
+                    OutputConfigurationReplay {
+                        mode: Some((2560, 1440, 143_912)),
+                        position: Some((1920, 0)),
+                        wl_transform: Some(1),
+                        scale: Some(2.0),
+                    }
+                ),
+                (
+                    "HDMI-A-1",
+                    OutputConfigurationReplay {
+                        position: Some((0, 0)),
+                        ..Default::default()
+                    }
+                ),
+            ]
+        );
+
+        // A hotplug that adds an output keeps the fresh auto layout: the old
+        // positions were valid for a different set of outputs.
+        let with_dock = [
+            fresh[0],
+            fresh[1],
+            (
+                "eDP-1",
+                applied(
+                    (1920, 1200, 60_000),
+                    (1920, 1200, 60_000),
+                    (4480, 0),
+                    1.0,
+                    0,
+                ),
+            ),
+        ];
+        assert_eq!(
+            plan_output_configuration_replay(&previous, &with_dock),
+            vec![(
+                "DP-1",
+                OutputConfigurationReplay {
+                    mode: Some((2560, 1440, 143_912)),
+                    wl_transform: Some(1),
+                    scale: Some(2.0),
+                    ..Default::default()
+                }
+            )]
+        );
+
+        // Another monitor on the same connector, even one of the same size,
+        // gets none of what was chosen for the old one, and the old layout
+        // is not trusted around it either.
+        for other_monitor in [
+            applied((2560, 1440, 165_000), (2560, 1440, 165_000), (0, 0), 1.0, 0),
+            applied((3840, 2160, 60_000), (3840, 2160, 60_000), (0, 0), 1.0, 0),
+        ] {
+            assert!(
+                plan_output_configuration_replay(&previous, &[("DP-1", other_monitor), fresh[1]])
+                    .is_empty()
+            );
+        }
+
+        // Nothing was changed from what a rebuild produces: nothing to do.
+        assert!(plan_output_configuration_replay(&fresh, &fresh).is_empty());
+    }
+
+    /// A stand-in compositor state that can host a `wl_output` global.
+    struct OutputGlobalFixture;
+
+    impl smithay::reexports::wayland_server::GlobalDispatch<WlOutput, ()> for OutputGlobalFixture {
+        fn bind(
+            _state: &mut Self,
+            _handle: &smithay::reexports::wayland_server::DisplayHandle,
+            _client: &smithay::reexports::wayland_server::Client,
+            resource: smithay::reexports::wayland_server::New<WlOutput>,
+            _global_data: &(),
+            data_init: &mut smithay::reexports::wayland_server::DataInit<'_, Self>,
+        ) {
+            data_init.init(resource, ());
+        }
+    }
+
+    impl smithay::reexports::wayland_server::Dispatch<WlOutput, ()> for OutputGlobalFixture {
+        fn request(
+            _state: &mut Self,
+            _client: &smithay::reexports::wayland_server::Client,
+            _resource: &WlOutput,
+            _request: smithay::reexports::wayland_server::protocol::wl_output::Request,
+            _data: &(),
+            _handle: &smithay::reexports::wayland_server::DisplayHandle,
+            _data_init: &mut smithay::reexports::wayland_server::DataInit<'_, Self>,
+        ) {
+        }
+    }
+
+    #[test]
+    fn a_replaced_output_withdraws_its_wl_output_global_then_destroys_it() {
+        use super::OutputGlobal;
+        use smithay::reexports::calloop::EventLoop;
+        use smithay::reexports::wayland_server::Display;
+        use smithay::reexports::wayland_server::backend::GlobalId;
+
+        let mut event_loop: EventLoop<'static, OutputGlobalFixture> =
+            EventLoop::try_new().expect("create test event loop");
+        let display: Display<OutputGlobalFixture> = Display::new().expect("create test display");
+        let handle = display.handle();
+        let id = handle.create_global::<OutputGlobalFixture, WlOutput, ()>(4, ());
+        let global_info = |id: &GlobalId| handle.backend_handle().global_info(id.clone());
+
+        // Every KMS rebuild advertises a fresh generation of output globals,
+        // so the output state that owns one must take it down again.
+        let global = OutputGlobal {
+            display: handle.clone(),
+            id: id.clone(),
+            event_loop: event_loop.handle(),
+            removal_grace: std::time::Duration::ZERO,
+        };
+        assert!(!global_info(&id).expect("a live global").disabled);
+        drop(global);
+
+        // Withdrawn at once (every registry gets `global_remove`) but still
+        // bindable, so a client whose bind raced the removal is not
+        // disconnected with a protocol error.
+        assert!(
+            global_info(&id)
+                .expect("a withdrawn global lingers for in-flight binds")
+                .disabled
+        );
+
+        event_loop
+            .dispatch(Some(std::time::Duration::ZERO), &mut OutputGlobalFixture)
+            .expect("run the removal timer");
+        assert!(
+            global_info(&id).is_err(),
+            "the withdrawn global is destroyed once its grace period ends"
+        );
+
+        // The constructor hands every global it creates to its output state
+        // instead of dropping the id on the floor.
+        const SOURCE: &str = include_str!("udev_kms.rs");
+        let constructor = SOURCE
+            .split_once("pub(super) fn new(\n        session: &mut LibSeatSession,")
+            .expect("the KMS constructor exists")
+            .1
+            .split_once("pub(super) fn render_if_needed(")
+            .expect("the frame loop follows the constructor")
+            .0;
+        assert_eq!(constructor.matches(".create_global::<").count(), 1);
+        assert!(constructor.contains("let wl_output_global = OutputGlobal {"));
+        assert!(constructor.contains("_wl_output_global: wl_output_global,"));
+    }
+
+    #[test]
+    fn a_capture_no_render_pass_will_reach_is_failed_instead_of_left_queued() {
+        use super::{QueuedCaptureDisposition, queued_capture_disposition};
+        use smithay::output::{Output, PhysicalProperties, Subpixel};
+
+        let output = |name: &str| {
+            Output::new(
+                name.to_string(),
+                PhysicalProperties {
+                    size: (0, 0).into(),
+                    subpixel: Subpixel::Unknown,
+                    make: "test".into(),
+                    model: "test".into(),
+                    serial_number: "test".into(),
+                },
+            )
+        };
+        let lit = output("DP-1");
+        let dark = output("HDMI-A-1");
+        // Same connector name, previous KmsState generation: a client still
+        // bound to the withdrawn global resolves to this one.
+        let replaced = output("DP-1");
+        let live = [(&lit, true), (&dark, false)];
+
+        assert_eq!(
+            queued_capture_disposition(&lit, live),
+            QueuedCaptureDisposition::Fulfill
+        );
+        assert_eq!(
+            queued_capture_disposition(&dark, live),
+            QueuedCaptureDisposition::FailDark
+        );
+        assert_eq!(
+            queued_capture_disposition(&replaced, live),
+            QueuedCaptureDisposition::FailGone
+        );
+
+        // The drain runs ahead of the frame loop's early return: a dark
+        // desktop needs no frame, and the capture must be answered anyway.
+        const SOURCE: &str = include_str!("udev_kms.rs");
+        let body = SOURCE
+            .split_once("pub(super) fn render_if_needed(")
+            .expect("the frame loop exists")
+            .1
+            .split_once("pub(super) fn on_vblank(")
+            .expect("the frame loop ends before `on_vblank`")
+            .0;
+        let drain = body
+            .find("self.fail_unservable_output_captures(&state.soft_disabled_outputs);")
+            .expect("the frame loop fails unservable captures");
+        let early_return = body
+            .find("if !self.needs_render || self.color_pipeline_delivery_blocked")
+            .expect("the frame loop's early return");
+        assert!(drain < early_return);
+    }
+
+    #[test]
+    fn a_capture_of_a_closed_window_fails_stopped_instead_of_retryably() {
+        use super::{ImageCaptureFailureReason, toplevel_capture_target};
+
+        // A live, sized window with a surface renders at its geometry size.
+        assert_eq!(
+            toplevel_capture_target(Some("surface"), Some((640, 480))),
+            Ok(("surface", (640, 480)))
+        );
+        // The window closed after the frame was queued: its source is gone
+        // for good, so the client must not be told to retry.
+        assert_eq!(
+            toplevel_capture_target(Some("surface"), None),
+            Err(ImageCaptureFailureReason::Stopped)
+        );
+        assert_eq!(
+            toplevel_capture_target(None::<&str>, None),
+            Err(ImageCaptureFailureReason::Stopped)
+        );
+        // A live window without a surface or a size yet may recover.
+        assert_eq!(
+            toplevel_capture_target(None::<&str>, Some((640, 480))),
+            Err(ImageCaptureFailureReason::Unknown)
+        );
+        assert_eq!(
+            toplevel_capture_target(Some("surface"), Some((0, 480))),
+            Err(ImageCaptureFailureReason::Unknown)
+        );
+
+        // The renderer resolves every queued toplevel frame through it.
+        const SOURCE: &str = include_str!("udev_kms.rs");
+        let fulfill = SOURCE
+            .split_once("fn fulfill_image_capture_toplevel_frames(")
+            .expect("the toplevel capture pass exists")
+            .1
+            .split_once("with_states(&surface")
+            .expect("the pass reads the surface geometry after resolving it")
+            .0;
+        assert!(fulfill.contains("toplevel_capture_target(state.surface_for_window(win), size)"));
+        assert!(fulfill.contains("frame_info.frame.failed(reason);"));
+        // The failure is counted by its reason, not as a render fault.
+        let counted = format!(
+            "Self::{}(counters, reason);",
+            "note_image_capture_frame_failed"
+        );
+        assert!(fulfill.contains(&counted));
+        let drain = SOURCE
+            .split_once("fn fail_unservable_output_captures(")
+            .expect("the unservable-capture drain exists")
+            .1
+            .split_once("\n    fn ")
+            .expect("the drain ends")
+            .0;
+        assert!(drain.contains(&format!(
+            "{counted}\n                frame.frame.failed(reason);"
+        )));
+    }
+
+    #[test]
+    fn a_frame_failed_by_its_gone_source_is_not_counted_as_a_render_failure() {
+        use super::{ImageCaptureFailureReason, KmsState};
+        use crate::backend::wayland::state::CaptureCounters;
+        use std::sync::{Arc, Mutex};
+
+        // A captured window closed (or its output was unplugged) while a frame
+        // was queued: the stream ended, nothing failed to render.
+        let counters = Arc::new(Mutex::new(CaptureCounters::default()));
+        KmsState::note_image_capture_frame_failed(
+            Some(&counters),
+            ImageCaptureFailureReason::Stopped,
+        );
+        {
+            let counters = counters.lock().expect("counters lock");
+            assert_eq!(counters.image_copy_render_failed_total, 0);
+            assert_eq!(counters.image_copy_failed_total, 1);
+            assert_eq!(
+                counters.last_failure_reason.as_deref(),
+                Some("image-copy capture source gone")
+            );
+        }
+
+        // A frame the renderer could not fill is still a render failure.
+        KmsState::note_image_capture_frame_failed(
+            Some(&counters),
+            ImageCaptureFailureReason::Unknown,
+        );
+        let counters = counters.lock().expect("counters lock");
+        assert_eq!(counters.image_copy_render_failed_total, 1);
+        assert_eq!(counters.image_copy_failed_total, 1);
+        assert_eq!(
+            counters.last_failure_reason.as_deref(),
+            Some("image-copy render-drain failure")
+        );
+        drop(counters);
+
+        // Without counters (no capture globals) there is nothing to count.
+        KmsState::note_image_capture_frame_failed(None, ImageCaptureFailureReason::Stopped);
+    }
+
+    #[test]
+    fn a_screencopy_frame_of_a_gone_output_is_not_counted_as_a_render_failure() {
+        use super::{KmsState, QueuedCaptureDisposition};
+        use crate::backend::wayland::state::CaptureCounters;
+        use std::sync::{Arc, Mutex};
+
+        // `grim --watch` on an output that was unplugged while a frame was
+        // queued: the stream ended, nothing failed to render.
+        let counters = Arc::new(Mutex::new(CaptureCounters::default()));
+        KmsState::note_screencopy_frame_failed(Some(&counters), QueuedCaptureDisposition::FailGone);
+        {
+            let counters = counters.lock().expect("counters lock");
+            assert_eq!(counters.screencopy_render_failed_total, 0);
+            assert_eq!(counters.screencopy_failed_total, 1);
+            assert_eq!(
+                counters.last_failure_reason.as_deref(),
+                Some("screencopy capture source gone")
+            );
+        }
+
+        // A dark output stays a render failure, as it does for image-copy.
+        KmsState::note_screencopy_frame_failed(Some(&counters), QueuedCaptureDisposition::FailDark);
+        {
+            let counters = counters.lock().expect("counters lock");
+            assert_eq!(counters.screencopy_render_failed_total, 1);
+            assert_eq!(counters.screencopy_failed_total, 1);
+            assert_eq!(
+                counters.last_failure_reason.as_deref(),
+                Some("screencopy render-drain failure")
+            );
+        }
+
+        // Without counters (no capture globals) there is nothing to count.
+        KmsState::note_screencopy_frame_failed(None, QueuedCaptureDisposition::FailGone);
+
+        // The drain counts each screencopy frame by its disposition.
+        const SOURCE: &str = include_str!("udev_kms.rs");
+        let drain = SOURCE
+            .split_once("fn fail_unservable_output_captures(")
+            .expect("the unservable-capture drain exists")
+            .1
+            .split_once("\n    fn ")
+            .expect("the drain ends")
+            .0;
+        let counted = format!(
+            "Self::{}(counters, frame_disposition);",
+            "note_screencopy_frame_failed"
+        );
+        assert!(drain.contains(&format!("{counted}\n                frame.frame.failed();")));
+        assert!(!drain.contains(&format!("Self::{}(", "note_screencopy_render_failed")));
+    }
+
+    #[test]
+    fn a_modeset_retimes_frame_callbacks_and_presentation_feedback() {
+        use super::refresh_timing_for_mode;
+        use smithay::output::Mode;
+        use std::time::Duration;
+
+        let timing = |refresh| {
+            refresh_timing_for_mode(Mode {
+                size: (2560, 1440).into(),
+                refresh,
+            })
+        };
+        let sixty = Duration::from_nanos(16_666_666);
+        assert_eq!(timing(60_000), (Some(sixty), sixty));
+        let one_forty_four = Duration::from_nanos(6_944_444);
+        assert_eq!(timing(144_000), (Some(one_forty_four), one_forty_four));
+        assert_eq!(timing(0), (None, Duration::from_millis(16)));
+
+        // Both the modeset and its previous-mode rollback re-derive the
+        // timing; wp_presentation reported the boot-time refresh otherwise.
+        const SOURCE: &str = include_str!("udev_kms.rs");
+        let configure = SOURCE
+            .split_once("fn configure_output_with_modeset_policy(")
+            .expect("the modeset path exists")
+            .1
+            .split_once("fn wrap_compositor_texture(")
+            .expect("the modeset path ends before the texture wrapper")
+            .0;
+        assert!(configure.contains(".adopt_mode_timing(WlMode::from(m));"));
+        assert!(configure.contains(".adopt_mode_timing(WlMode::from(prev));"));
+    }
+
+    #[test]
+    fn the_gamma_takeover_clears_the_crtc_pair_in_one_request() {
+        use super::client_gamma_ready_to_write;
+
+        // A pending ramp waits for both stages to leave: GAMMA_LUT is the
+        // same hardware table, and a CTM must never scan out without it.
+        assert!(client_gamma_ready_to_write(true, false, false));
+        assert!(!client_gamma_ready_to_write(true, true, false));
+        assert!(!client_gamma_ready_to_write(true, false, true));
+        assert!(!client_gamma_ready_to_write(false, false, false));
+
+        // Neither the takeover nor the compositor disable clears the pair as
+        // two single-property commits any more.
+        const SOURCE: &str = include_str!("udev_kms.rs");
+        let section = |start: &str, end: &str| {
+            SOURCE
+                .split_once(start)
+                .expect("section start")
+                .1
+                .split_once(end)
+                .expect("section end")
+                .0
+        };
+        let per_property = [
+            format!("self.{}(", "uninstall_ctm"),
+            format!("self.{}(", "uninstall_gamma_lut"),
+        ];
+        for body in [
+            section(
+                "pub(super) fn set_gamma_for_output(",
+                "fn write_legacy_gamma(",
+            ),
+            section(
+                "pub(super) fn disable_color_pipeline(",
+                "fn apply_scanout_color_goals(",
+            ),
+        ] {
+            assert!(body.contains("OutputScanoutColorGoal::CLEAR"));
+            for needle in &per_property {
+                assert!(!body.contains(needle.as_str()), "{needle} splits the pair");
+            }
+        }
+
+        // A failed teardown still hands the CRTC to the client, so the next
+        // frame retries the clear instead of re-installing the pair.
+        let takeover = section(
+            "pub(super) fn set_gamma_for_output(",
+            "fn write_legacy_gamma(",
+        );
+        let failure = takeover
+            .split_once("OutputScanoutColorGoal::CLEAR")
+            .expect("the takeover clears the pair")
+            .1
+            .split_once("return Err(error);")
+            .expect("the failed clear returns its error")
+            .0;
+        assert!(failure.contains("output.legacy_gamma_override = client_gamma.is_some();"));
+        assert!(failure.contains("output.client_gamma_pending = client_gamma.is_some();"));
     }
 
     #[test]
@@ -12028,5 +13338,226 @@ mod compositor_texture_ownership_tests {
             &clear
         ));
         assert!(!scanout_color_goal_matches(None, Some(10), &clear));
+    }
+}
+
+/// Test hook for the headless GL suite (`compositor::headless_render`), whose
+/// lock serializes every GL context in the test process. Stages one opaque red
+/// buffer of `logical_size`, drawn by its client at `buffer_scale`, through
+/// [`KmsState::composite_elements_to_texture`] at output `scale`, into a
+/// texture sized the way `stage_surface_tree` sizes a tree, and reads the
+/// texture back as top-down RGBA rows. A memory buffer stands in for a client
+/// surface: Smithay derives both elements' drawn size from the tracker scale
+/// alike.
+#[cfg(test)]
+pub(in crate::backend::wayland_udev) fn composite_scaled_buffer_for_tests(
+    renderer: &mut GlesRenderer,
+    logical_size: (i32, i32),
+    buffer_scale: i32,
+    scale: f64,
+) -> Option<((i32, i32), Vec<u8>)> {
+    let buffer_size = (logical_size.0 * buffer_scale, logical_size.1 * buffer_scale);
+    let pixels = [255u8, 0, 0, 255].repeat((buffer_size.0 * buffer_size.1) as usize);
+    let buffer = MemoryRenderBuffer::from_slice(
+        &pixels,
+        Fourcc::Abgr8888,
+        buffer_size,
+        buffer_scale,
+        Transform::Normal,
+        None,
+    );
+    let element = MemoryRenderBufferRenderElement::from_buffer(
+        renderer,
+        Point::<f64, Physical>::from((0.0, 0.0)),
+        &buffer,
+        None,
+        None,
+        None,
+        Kind::Unspecified,
+    )
+    .ok()?;
+    let size = (
+        (f64::from(logical_size.0) * scale).ceil() as i32,
+        (f64::from(logical_size.1) * scale).ceil() as i32,
+    );
+    let texture = KmsState::composite_elements_to_texture(
+        renderer,
+        &[KmsRenderElement::Memory(element)],
+        size,
+        scale,
+    )?;
+    let mapping = renderer
+        .copy_texture(
+            &texture,
+            Rectangle::from_size(size.into()),
+            Fourcc::Abgr8888,
+        )
+        .ok()?;
+    let rgba = renderer.map_texture(&mapping).ok()?.to_vec();
+    Some((size, rgba))
+}
+
+#[cfg(test)]
+mod external_element_content_key_tests {
+    use super::{
+        KmsRenderElement, cursor_bitmap_content_key, procedural_cursor_content_key,
+        surface_tree_content_key,
+    };
+    use crate::backend::common_define::StdCursorKind;
+    use smithay::backend::renderer::Color32F;
+    use smithay::backend::renderer::element::solid::SolidColorRenderElement;
+    use smithay::backend::renderer::element::{Id, Kind};
+    use smithay::utils::Rectangle;
+
+    fn element(id: &Id, commit: usize, x: i32) -> KmsRenderElement {
+        KmsRenderElement::Solid(SolidColorRenderElement::new(
+            id.clone(),
+            Rectangle::new((x, 0).into(), (8, 8).into()),
+            commit,
+            Color32F::new(1.0, 0.0, 0.0, 1.0),
+            Kind::Unspecified,
+        ))
+    }
+
+    #[test]
+    fn a_surface_tree_key_follows_what_the_damage_tracker_compares() {
+        let id = Id::new();
+        let key =
+            |elements: &[KmsRenderElement], size| surface_tree_content_key(elements, size, 1.0);
+        let base = key(&[element(&id, 3, 0)], (8, 8));
+
+        // Staging the same tree again, with freshly built elements, keeps
+        // the key: nothing the composite draws has changed.
+        assert_eq!(key(&[element(&id, 3, 0)], (8, 8)), base);
+        // A commit, a subsurface move, another surface, another offscreen
+        // size or an extra surface each change the pixels, so the key.
+        assert_ne!(key(&[element(&id, 4, 0)], (8, 8)), base);
+        assert_ne!(key(&[element(&id, 3, 2)], (8, 8)), base);
+        assert_ne!(key(&[element(&Id::new(), 3, 0)], (8, 8)), base);
+        assert_ne!(key(&[element(&id, 3, 0)], (10, 8)), base);
+        let other = Id::new();
+        assert_ne!(
+            key(&[element(&id, 3, 0), element(&other, 0, 0)], (8, 8)),
+            base
+        );
+        // The same tree composited for another output scale draws its
+        // surfaces at another size.
+        assert_ne!(
+            surface_tree_content_key(&[element(&id, 3, 0)], (8, 8), 2.0),
+            base
+        );
+    }
+
+    #[test]
+    fn a_staged_surface_tree_is_composited_at_the_scale_it_was_built_for() {
+        // Smithay sizes a surface element from its damage tracker's scale.
+        // A tree built at the output scale into a texture of its physical
+        // size must go through a tracker at that scale too, and its content
+        // key must hash the geometry that tracker draws. The headless GL
+        // suite checks the drawn coverage
+        // (`wayland_kms_staged_buffer_covers_its_texture_at_every_scale`).
+        const SOURCE: &str = include_str!("udev_kms.rs");
+        let stage = SOURCE
+            .split_once("fn stage_surface_tree(")
+            .expect("stage_surface_tree exists")
+            .1
+            .split_once("\n    fn ")
+            .expect("stage_surface_tree ends")
+            .0;
+        let compact: String = stage.split_whitespace().collect();
+        for call in [
+            format!(
+                "{}(renderer,&elements,size,scale)",
+                "composite_elements_to_texture"
+            ),
+            format!("{}(&elements,size,scale)", "surface_tree_content_key"),
+        ] {
+            assert!(
+                compact.contains(&call),
+                "stage_surface_tree must call {call}"
+            );
+        }
+        let composite = SOURCE
+            .split_once("fn composite_elements_to_texture(")
+            .expect("composite_elements_to_texture exists")
+            .1
+            .split_once("\n    fn ")
+            .expect("composite_elements_to_texture ends")
+            .0;
+        assert!(composite.contains(&format!(
+            "{}::new(phys, Scale::from(scale), Transform::Normal)",
+            "OutputDamageTracker"
+        )));
+    }
+
+    #[test]
+    fn a_cursor_key_changes_with_its_image_and_only_with_it() {
+        let arrow = cursor_bitmap_content_key(StdCursorKind::LeftPtr, 1, 0);
+        assert_eq!(
+            cursor_bitmap_content_key(StdCursorKind::LeftPtr, 1, 0),
+            arrow
+        );
+        // Another shape, another scale, or a theme/size reload (the cache
+        // generation) each mean another bitmap.
+        assert_ne!(cursor_bitmap_content_key(StdCursorKind::Hand, 1, 0), arrow);
+        assert_ne!(
+            cursor_bitmap_content_key(StdCursorKind::LeftPtr, 2, 0),
+            arrow
+        );
+        assert_ne!(
+            cursor_bitmap_content_key(StdCursorKind::LeftPtr, 1, 1),
+            arrow
+        );
+        // The procedural arrow is constant, and never mistaken for a bitmap.
+        assert_eq!(
+            procedural_cursor_content_key(),
+            procedural_cursor_content_key()
+        );
+        assert_ne!(procedural_cursor_content_key(), arrow);
+    }
+}
+
+#[cfg(test)]
+mod seat_device_release_tests {
+    use super::release_sole_device;
+    use nix::sys::memfd::{MFdFlags, memfd_create};
+    use smithay::utils::DeviceFd;
+
+    #[test]
+    fn a_device_is_returned_to_the_seat_only_once_nothing_holds_it() {
+        let fd = memfd_create("jwm-seat-device-test", MFdFlags::MFD_CLOEXEC)
+            .expect("create a stand-in device fd");
+        let device = DeviceFd::from(fd);
+        let still_held = device.clone();
+        let mut closed = 0;
+        assert!(
+            !release_sole_device(device, |_| closed += 1),
+            "a device something still holds must not be closed under it"
+        );
+        assert_eq!(closed, 0);
+        assert!(release_sole_device(still_held, |_| closed += 1));
+        assert_eq!(closed, 1);
+    }
+
+    #[test]
+    fn a_failed_kms_build_hands_its_device_back_to_the_seat() {
+        let source = include_str!("udev_kms.rs");
+        let production = source
+            .split_once("#[cfg(test)]")
+            .map_or(source, |(code, _)| code);
+        let new = production
+            .split_once("pub(super) fn new(")
+            .expect("KmsState::new")
+            .1;
+        let new = new
+            .split_once("fn on_device(")
+            .expect("KmsState::on_device follows new")
+            .0;
+        let open_at = new.find(".open(").expect("the device is opened");
+        let close_at = new
+            .find("return_device_to_seat(session, device)")
+            .expect("a failed build returns the device");
+        assert!(open_at < close_at);
+        assert!(new.contains("if result.is_err()"));
     }
 }

@@ -324,11 +324,40 @@ pub fn compositor_event_ops(
     ops
 }
 
+/// Seed a newly created compositor's remote-capture state from JWM's root
+/// capture marker.
+///
+/// The compositor starts with remote capture inactive and otherwise learns of
+/// it only from a later change to the marker or the owner's destruction, so a
+/// capture lease already held when the compositor starts, or is re-enabled at
+/// runtime, went unnoticed until jwm-remote republished it. Fullscreen
+/// unredirect could freeze the remote view in the meantime.
+///
+/// `owner` is the window the marker names, `None` when there is no marker. A
+/// marker left behind by an owner that died without clearing it names a window
+/// that no longer exists and must not hold the screen composited, hence the
+/// liveness probe, which is not consulted without an owner. Both X11
+/// transports seed through this one decision so their startup and
+/// runtime-enable paths cannot drift apart.
+#[must_use]
+pub(crate) fn initial_remote_capture_op(
+    owner: Option<u32>,
+    owner_alive: impl FnOnce(u32) -> bool,
+) -> CompositorEventOp {
+    CompositorEventOp::SetRemoteCaptureActive {
+        // X11's `None` is zero; a zeroed marker names no owner.
+        active: owner.filter(|&owner| owner != 0).is_some_and(owner_alive),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{CompositorEventOp, CompositorEventSources, compositor_event_ops};
+    use super::{
+        CompositorEventOp, CompositorEventSources, compositor_event_ops, initial_remote_capture_op,
+    };
     use crate::backend::api::{
-        BackendEvent, HitTarget, ManagedUnmapReason, NetWmAction, NetWmState, PropertyKind,
+        BackendEvent, HitTarget, ManagedUnmapReason, MaximizeAxes, NetWmAction, NetWmState,
+        PropertyKind,
     };
     use crate::backend::common_define::WindowId;
 
@@ -635,6 +664,56 @@ mod tests {
                 fullscreen: false,
             }]
         );
+    }
+
+    #[test]
+    fn an_existing_live_capture_lease_seeds_a_new_compositor_as_active() {
+        assert_eq!(
+            initial_remote_capture_op(Some(0x42), |owner| owner == 0x42),
+            CompositorEventOp::SetRemoteCaptureActive { active: true }
+        );
+    }
+
+    #[test]
+    fn a_missing_or_stale_capture_lease_seeds_a_new_compositor_as_inactive() {
+        // The owner died without clearing the marker.
+        assert_eq!(
+            initial_remote_capture_op(Some(0x42), |_| false),
+            CompositorEventOp::SetRemoteCaptureActive { active: false }
+        );
+        // No marker, or one naming X11's `None`: nothing to probe.
+        for owner in [None, Some(0)] {
+            assert_eq!(
+                initial_remote_capture_op(owner, |owner| panic!("probed {owner:#x}")),
+                CompositorEventOp::SetRemoteCaptureActive { active: false },
+                "{owner:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn maximize_requests_produce_no_compositor_ops() {
+        // Maximize is policy: the compositor learns the new geometry from the
+        // WindowConfigured that follows, never from the request itself.
+        let s = sources(&|w| Some(w.raw() as u32), &|_| String::new(), &|_| false);
+        for event in [
+            BackendEvent::WindowMaximizeRequest {
+                window: win(5),
+                action: NetWmAction::Add,
+                axes: MaximizeAxes::BOTH,
+            },
+            BackendEvent::WindowStateRequest {
+                window: win(5),
+                action: NetWmAction::Toggle,
+                state: NetWmState::MaximizedVert,
+            },
+        ] {
+            assert_eq!(
+                compositor_event_ops(&event, ROOT, OVERLAY, &s),
+                vec![],
+                "{event:?}"
+            );
+        }
     }
 
     #[test]

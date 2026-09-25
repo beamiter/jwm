@@ -34,15 +34,13 @@ pub enum CapturedClipboard {
 /// Keep direct X11 `ChangeProperty` requests comfortably below the core
 /// protocol limit. Larger payloads use ICCCM INCR, irrespective of whether a
 /// particular server happens to expose BIG-REQUESTS.
-#[cfg_attr(
-    not(any(
-        feature = "backend-x11rb",
-        feature = "backend-xcb",
-        feature = "remote-x11",
-        test
-    )),
-    allow(dead_code)
-)]
+// This and the MULTIPLE/INCR bounds below are read only by the X11 clipboard
+// workers, never by a test here, so a build without them compiles them out.
+#[cfg(any(
+    feature = "backend-x11rb",
+    feature = "backend-xcb",
+    feature = "remote-x11"
+))]
 pub(crate) const X11_DIRECT_PROPERTY_BYTES: usize = 64 * 1024;
 
 /// One INCR property payload. 240 KiB plus the 24-byte ChangeProperty header
@@ -63,30 +61,22 @@ pub(crate) const X11_INCR_CHUNK_BYTES: usize = 240 * 1024;
 /// Real toolkit requests are normally one or two pairs; the larger allowance
 /// keeps compatibility without letting one event monopolize the clipboard
 /// worker or manufacture an unbounded set of INCR transfers.
-#[cfg_attr(
-    not(any(
-        feature = "backend-x11rb",
-        feature = "backend-xcb",
-        feature = "remote-x11",
-        test
-    )),
-    allow(dead_code)
-)]
+#[cfg(any(
+    feature = "backend-x11rb",
+    feature = "backend-xcb",
+    feature = "remote-x11"
+))]
 pub(crate) const X11_MAX_MULTIPLE_CONVERSIONS: usize = 64;
 
 /// Total byte references retained by active outgoing INCR transfers. Shared
 /// payloads are deliberately counted once per requestor: that conservative
 /// accounting makes many stalled clients hit a deterministic ceiling even
 /// though their `Arc`s point at the same allocation.
-#[cfg_attr(
-    not(any(
-        feature = "backend-x11rb",
-        feature = "backend-xcb",
-        feature = "remote-x11",
-        test
-    )),
-    allow(dead_code)
-)]
+#[cfg(any(
+    feature = "backend-x11rb",
+    feature = "backend-xcb",
+    feature = "remote-x11"
+))]
 pub(crate) const X11_MAX_ACTIVE_INCR_BYTES: usize = 512 * 1024 * 1024;
 
 /// Largest single payload JWM will offer through X11. This comfortably covers
@@ -94,7 +84,18 @@ pub(crate) const X11_MAX_ACTIVE_INCR_BYTES: usize = 512 * 1024 * 1024;
 /// or accidental producer before any requestor asks for it.
 pub(crate) const X11_MAX_OFFER_BYTES: usize = 512 * 1024 * 1024;
 
-#[cfg(test)]
+// The native clipboard tests (x11rb's, including the remote-x11 split
+// setter, and xcb's) and the Wayland XWM lifecycle test are the only users;
+// a build with none of them compiles no Xvfb helper rather than an unused
+// one. A remote-x11-only build has the X11 clipboard but none of its tests.
+#[cfg(all(
+    test,
+    any(
+        feature = "backend-x11rb",
+        feature = "backend-xcb",
+        feature = "wayland-backends"
+    )
+))]
 pub(crate) static X11_CLIPBOARD_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// One private Xvfb for a native X11 clipboard contract.
@@ -102,14 +103,28 @@ pub(crate) static X11_CLIPBOARD_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mut
 /// Serializes on [`X11_CLIPBOARD_TEST_LOCK`] so concurrent clipboard tests do
 /// not pile up headless servers. Callers pass [`Self::name`] into
 /// `Clipboard::start` / `connect` — the process `$DISPLAY` is left alone.
-#[cfg(test)]
+#[cfg(all(
+    test,
+    any(
+        feature = "backend-x11rb",
+        feature = "backend-xcb",
+        feature = "wayland-backends"
+    )
+))]
 pub(crate) struct IsolatedXvfb {
     _lock: std::sync::MutexGuard<'static, ()>,
     child: std::process::Child,
     display: String,
 }
 
-#[cfg(test)]
+#[cfg(all(
+    test,
+    any(
+        feature = "backend-x11rb",
+        feature = "backend-xcb",
+        feature = "wayland-backends"
+    )
+))]
 impl IsolatedXvfb {
     pub(crate) fn acquire() -> Self {
         let lock = X11_CLIPBOARD_TEST_LOCK
@@ -176,7 +191,14 @@ impl IsolatedXvfb {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(
+    test,
+    any(
+        feature = "backend-x11rb",
+        feature = "backend-xcb",
+        feature = "wayland-backends"
+    )
+))]
 impl Drop for IsolatedXvfb {
     fn drop(&mut self) {
         let _ = self.child.kill();
@@ -232,13 +254,16 @@ pub(crate) fn x11_selection_time_is_valid(request: u32, acquired: Option<u32>) -
 /// transports use their existing private clipboard connection instead of
 /// launching `xclip` for screenshots.
 #[derive(Debug)]
+// Only a backend's clipboard worker offers `Text`; tests, like JWM's own
+// screenshot path, only ever send `Png`. So a test build without a backend
+// has the same unconstructed `Text` a plain build without one has, and must
+// not drop the allowance just because it is a test build.
 #[cfg_attr(
     not(any(
         feature = "backend-x11rb",
         feature = "backend-xcb",
         feature = "remote-x11",
-        feature = "wayland-backends",
-        test
+        feature = "wayland-backends"
     )),
     allow(dead_code)
 )]

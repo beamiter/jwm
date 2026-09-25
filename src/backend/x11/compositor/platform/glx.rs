@@ -512,16 +512,107 @@ fn collect_glx_configs(
             let mut visual = 0;
             x11::glx::glXGetFBConfigAttrib(display, config, x11::glx::GLX_VISUAL_ID, &mut visual);
             if visual != 0 {
-                map.entry(visual as u32).or_insert((config, rgba));
+                // Only an RGBA claim depends on the visual's depth, so the RGB
+                // pass skips the extra lookup.
+                let depth = if rgba {
+                    glx_fbconfig_visual_depth(display, config)
+                } else {
+                    None
+                };
+                record_tfp_visual_config(map, visual as u32, depth, config, rgba);
             }
         }
         x11::xlib::XFree(configs as *mut _);
     }
 }
 
+/// Depth of the X visual an FBConfig is attached to, or `None` when the
+/// driver exposes no visual for it.
+///
+/// # Safety
+///
+/// `display` must be an open Xlib display and `config` an FBConfig it
+/// returned.
+unsafe fn glx_fbconfig_visual_depth(
+    display: *mut x11::xlib::Display,
+    config: x11::glx::GLXFBConfig,
+) -> Option<i32> {
+    let info = unsafe { x11::glx::glXGetVisualFromFBConfig(display, config) };
+    if info.is_null() {
+        return None;
+    }
+    let depth = unsafe { (*info).depth };
+    unsafe {
+        x11::xlib::XFree(info.cast());
+    }
+    Some(depth)
+}
+
+/// Record `config` as the texture-from-pixmap import config for `visual`,
+/// found by the RGBA pass (`pass_rgba`) or the RGB pass that follows it.
+///
+/// The first config recorded for a visual wins, so the RGBA pass may claim
+/// only visuals whose pixels really carry alpha: depth 32, the same rule the
+/// EGL adapter applies. Mesa attaches an 8-bit-alpha FBConfig to the default
+/// depth-24 visual, and letting the RGBA pass claim it imported every
+/// ordinary window as RGBA: the undefined padding byte was sampled as alpha
+/// and the window counted as translucent, which kept fullscreen games from
+/// being unredirected and disabled occlusion culling. Left unclaimed, such a
+/// visual is filled by the RGB pass. `visual_depth` is only consulted for the
+/// RGBA pass; a visual whose depth is unknown is never claimed as RGBA.
+fn record_tfp_visual_config(
+    map: &mut HashMap<u32, (x11::glx::GLXFBConfig, bool)>,
+    visual: u32,
+    visual_depth: Option<i32>,
+    config: x11::glx::GLXFBConfig,
+    pass_rgba: bool,
+) {
+    if pass_rgba && visual_depth != Some(32) {
+        return;
+    }
+    map.entry(visual).or_insert((config, pass_rgba));
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{has_glx_extension, validated_glx_buffer_age};
+    use super::{has_glx_extension, record_tfp_visual_config, validated_glx_buffer_age};
+    use std::collections::HashMap;
+
+    /// Stand-in FBConfig handle: the map only stores it, never dereferences
+    /// it.
+    fn fake_config(tag: usize) -> x11::glx::GLXFBConfig {
+        std::ptr::without_provenance_mut(tag)
+    }
+
+    #[test]
+    fn rgba_pass_claims_only_depth_32_visuals() {
+        let rgba_24 = fake_config(0x10);
+        let rgba_32 = fake_config(0x20);
+        let rgba_unknown = fake_config(0x30);
+        let rgb_24 = fake_config(0x40);
+        let rgb_32 = fake_config(0x50);
+        let rgb_unknown = fake_config(0x60);
+        let (default_visual, argb_visual, odd_visual) = (0x21, 0x5f, 0x77);
+
+        // Same order as enumerate_glx_tfp_configs: every RGBA-bindable
+        // config first, then every RGB-bindable one.
+        let mut map = HashMap::new();
+        record_tfp_visual_config(&mut map, default_visual, Some(24), rgba_24, true);
+        record_tfp_visual_config(&mut map, argb_visual, Some(32), rgba_32, true);
+        record_tfp_visual_config(&mut map, odd_visual, None, rgba_unknown, true);
+        record_tfp_visual_config(&mut map, default_visual, None, rgb_24, false);
+        record_tfp_visual_config(&mut map, argb_visual, None, rgb_32, false);
+        record_tfp_visual_config(&mut map, odd_visual, None, rgb_unknown, false);
+
+        // The depth-24 visual imports as RGB even though the driver attached
+        // an alpha-8 config to it, and the RGB pass supplies its config.
+        assert_eq!(map.get(&default_visual), Some(&(rgb_24, false)));
+        // A real ARGB visual keeps its RGBA config; the RGB pass cannot
+        // downgrade it.
+        assert_eq!(map.get(&argb_visual), Some(&(rgba_32, true)));
+        // Without a known depth there is no evidence of real alpha.
+        assert_eq!(map.get(&odd_visual), Some(&(rgb_unknown, false)));
+    }
 
     #[test]
     fn glx_buffer_age_requires_the_extension_and_preserves_real_age() {

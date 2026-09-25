@@ -1,8 +1,8 @@
 use crate::backend::api::OutputInfo;
 use crate::backend::api::{
-    AllowedAction, BackendEvent, EwmhFeature, HitTarget, IconData, MotifWmHints, NetWmAction,
-    NetWmState, NormalHints, PropertyKind, StackMode, StrutPartial, WindowChanges, WindowType,
-    WmHints,
+    AllowedAction, BackendEvent, EwmhFeature, HitTarget, IconData, MaximizeAxes, MotifWmHints,
+    NetWmAction, NetWmState, NormalHints, PropertyKind, StackMode, StrutPartial, WindowChanges,
+    WindowType, WmHints,
 };
 use crate::backend::common_define::{OutputId, WindowId};
 use std::ops::BitOr;
@@ -162,6 +162,14 @@ pub enum ClientMessageKind {
     Other,
 }
 
+/// The EWMH hints JWM advertises in `_NET_SUPPORTED`.
+///
+/// Pagers read this list to decide which requests to send, so a request
+/// listed here must actually be acted on. `_NET_RESTACK_WINDOW` is left out on
+/// purpose: stacking is owned by policy (above/below state, floating order,
+/// per-monitor restack), which ignores a managed client's sibling/stack-mode
+/// changes, so a pager's restack request would be dropped or overwritten by
+/// the next restack. Advertising it would promise an effect JWM never has.
 pub const SUPPORTED_EWMH_FEATURES: &[EwmhFeature] = &[
     EwmhFeature::ActiveWindow,
     EwmhFeature::Supported,
@@ -191,7 +199,6 @@ pub const SUPPORTED_EWMH_FEATURES: &[EwmhFeature] = &[
     EwmhFeature::WmAllowedActions,
     EwmhFeature::Workarea,
     EwmhFeature::CloseWindow,
-    EwmhFeature::RestackWindow,
     EwmhFeature::WmPing,
     EwmhFeature::WmUserTime,
     EwmhFeature::WmIcon,
@@ -408,6 +415,202 @@ pub fn classify_client_message(
     ClientMessageKind::Other
 }
 
+/// Decode an EWMH `_NET_CURRENT_DESKTOP` ClientMessage into the tag switch it
+/// asks for.
+///
+/// This is the request a pager click, `wmctrl -s N` or `xdotool set_desktop N`
+/// sends to the root window, and EWMH requires pagers to switch desktops with
+/// it. [`classify_client_message`] reports it as [`ClientMessageKind::Other`],
+/// so an X11 transport must run this on that fallback, before forwarding the
+/// generic `ClientMessage`, for the request to reach policy.
+///
+/// JWM publishes `_NET_CURRENT_DESKTOP` as the index of the lowest active tag
+/// of the selected monitor and `_NET_NUMBER_OF_DESKTOPS` as the tag count, so
+/// the inverse of a request for desktop `data[0]` is the single-tag mask
+/// `1 << data[0]`. The result is the same [`BackendEvent::WorkspaceActivate`]
+/// the Wayland workspace protocol produces, and policy applies it to the
+/// selected monitor, the one `_NET_CURRENT_DESKTOP` describes. The request
+/// names no monitor, so `monitor` is `None`.
+///
+/// The index is written by the client. An index at or past
+/// `number_of_desktops`, or one that does not fit in a `u32` mask, returns
+/// `None`: turned into a mask anyway, it would either wrap onto a real tag or
+/// reach policy as an empty view that refocuses and re-arranges for nothing.
+pub fn current_desktop_request(
+    type_: u32,
+    format: u8,
+    data: [u32; 5],
+    net_current_desktop: u32,
+    number_of_desktops: u32,
+) -> Option<BackendEvent> {
+    if type_ != net_current_desktop || format != 32 {
+        return None;
+    }
+    let index = data[0];
+    if index >= number_of_desktops {
+        return None;
+    }
+    let tag_mask = 1u32.checked_shl(index)?;
+    Some(BackendEvent::WorkspaceActivate {
+        monitor: None,
+        tag_mask,
+    })
+}
+
+/// The event for a ClientMessage that [`classify_client_message`] reports as
+/// [`ClientMessageKind::Other`].
+///
+/// A pager's `_NET_CURRENT_DESKTOP` request, which EWMH addresses to the root
+/// window, becomes the tag switch it asks for (see
+/// [`current_desktop_request`]). Anything else, a desktop request that is
+/// malformed, out of range or addressed elsewhere included, reaches policy
+/// unchanged as the generic [`BackendEvent::ClientMessage`] it always was.
+/// Both X11 transports decode through this one function so they cannot
+/// disagree about which messages switch tags.
+pub fn unclassified_client_message_event(
+    window: WindowId,
+    to_root: bool,
+    type_: u32,
+    format: u8,
+    data: [u32; 5],
+    net_current_desktop: u32,
+    number_of_desktops: u32,
+) -> BackendEvent {
+    to_root
+        .then(|| {
+            current_desktop_request(type_, format, data, net_current_desktop, number_of_desktops)
+        })
+        .flatten()
+        .unwrap_or(BackendEvent::ClientMessage {
+            window,
+            type_,
+            data,
+            format,
+        })
+}
+
+/// Whether a `PropertyNotify` reaches the window manager. A new value
+/// always does. A deletion does for the kinds whose consumers read the
+/// property again and act on its absence: a deleted strut must release
+/// its reservation, deleted size hints must drop the cached constraints,
+/// transient-for is re-read by its handler, a withdrawn bypass request
+/// must redirect the window again, the remote-capture marker going away
+/// ends the capture, and a withdrawn Motif or GTK frame hint must restore
+/// the JWM border (the decoration reconcile re-reads both hints). Deletions
+/// of other kinds stay ignored, as they always have been.
+///
+/// Both X11 transports filter through this one list: a private copy per
+/// transport once let a dock's deleted strut release its reservation on one
+/// and keep it on the other.
+pub fn forwards_property_notify(deleted: bool, kind: PropertyKind) -> bool {
+    !deleted
+        || matches!(
+            kind,
+            PropertyKind::Strut
+                | PropertyKind::SizeHints
+                | PropertyKind::TransientFor
+                | PropertyKind::BypassCompositor
+                | PropertyKind::RemoteCapture
+                | PropertyKind::MotifHints
+                | PropertyKind::GtkFrameExtents
+        )
+}
+
+/// The kinds of asynchronous X protocol error [`protocol_error_log_level`]
+/// tells apart, whichever transport decoded the error.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProtocolErrorClass {
+    /// Core `BadWindow`.
+    Window,
+    /// Core `BadDrawable`.
+    Drawable,
+    /// Core `BadPixmap`.
+    Pixmap,
+    /// DAMAGE `BadDamage`.
+    Damage,
+    /// Core `BadMatch`.
+    Match,
+    /// Any other error.
+    Other,
+}
+
+/// Core-protocol major opcode of `ConfigureWindow`.
+pub const CONFIGURE_WINDOW_OPCODE: u8 = 12;
+/// Core-protocol major opcode of `SetInputFocus`.
+pub const SET_INPUT_FOCUS_OPCODE: u8 = 42;
+
+/// The log level for an asynchronous X protocol error, the only report an
+/// unchecked request ever gets. A stale window, drawable, pixmap or damage
+/// id, or `BadMatch` from focusing or configuring a window, is the routine
+/// race with a client that has just unmapped or destroyed it, so it stays at
+/// debug; logging it as an error made closing a window during a layout pass
+/// look like a failure. Anything else means JWM sent a bad request, which
+/// deserves a warning rather than silence. `major_opcode` is the failed
+/// request's; it only matters for `BadMatch`.
+pub fn protocol_error_log_level(class: ProtocolErrorClass, major_opcode: u8) -> log::Level {
+    let window_race = match class {
+        ProtocolErrorClass::Window
+        | ProtocolErrorClass::Drawable
+        | ProtocolErrorClass::Pixmap
+        | ProtocolErrorClass::Damage => true,
+        ProtocolErrorClass::Match => {
+            matches!(
+                major_opcode,
+                SET_INPUT_FOCUS_OPCODE | CONFIGURE_WINDOW_OPCODE
+            )
+        }
+        ProtocolErrorClass::Other => false,
+    };
+    if window_race {
+        log::Level::Debug
+    } else {
+        log::Level::Warn
+    }
+}
+
+/// Keeps `SIGCHLD` blocked in the calling thread while an X11 backend spawns
+/// its worker threads (compositor, clipboard, tray), then restores the
+/// caller's previous mask.
+///
+/// calloop's `Signals` source, created later in `run`, blocks `SIGCHLD`
+/// only in the thread that creates it and reads it through a signalfd. Any
+/// other thread that leaves it unblocked is an eligible target for the
+/// process-directed signal; with the default disposition that thread
+/// discards it, the signalfd never becomes readable, and child reaping
+/// falls back to the one-second insurance poll. Threads inherit the
+/// spawner's mask, so blocking around the spawns is enough. The calling
+/// thread's own mask is restored so processes it launches before `run`
+/// keep the mask they had before.
+pub(crate) struct SigchldBlockedForSpawns {
+    previous: Option<nix::sys::signal::SigSet>,
+}
+
+impl SigchldBlockedForSpawns {
+    pub(crate) fn new() -> Self {
+        let mut sigchld = nix::sys::signal::SigSet::empty();
+        sigchld.add(nix::sys::signal::Signal::SIGCHLD);
+        match sigchld.thread_swap_mask(nix::sys::signal::SigmaskHow::SIG_BLOCK) {
+            Ok(previous) => Self {
+                previous: Some(previous),
+            },
+            Err(error) => {
+                log::warn!("could not block SIGCHLD for backend worker threads: {error}");
+                Self { previous: None }
+            }
+        }
+    }
+}
+
+impl Drop for SigchldBlockedForSpawns {
+    fn drop(&mut self) {
+        if let Some(previous) = self.previous.take()
+            && let Err(error) = previous.thread_set_mask()
+        {
+            log::warn!("could not restore the signal mask after spawning backend threads: {error}");
+        }
+    }
+}
+
 /// Resolve which output a pointer event over the background landed on, and
 /// invalidate the output cache when the screen layout changes.
 ///
@@ -448,6 +651,12 @@ pub fn enrich_background_event<Lookup, Invalidate>(
     }
 }
 
+/// One `_NET_WM_STATE` ClientMessage -> policy events in message order. Decoded
+/// MaximizedVert/MaximizedHorz atoms merge into ONE
+/// `BackendEvent::WindowMaximizeRequest { window, action, axes }` placed where the
+/// first maximize atom appeared; every other decoded atom becomes a
+/// `WindowStateRequest`. Zero, unknown and repeated atoms are skipped. An empty
+/// result keeps the transports' generic ClientMessage fallback.
 pub fn expand_net_wm_state_requests<F>(
     window: WindowId,
     action: NetWmAction,
@@ -458,12 +667,26 @@ pub fn expand_net_wm_state_requests<F>(
 where
     F: FnMut(u32) -> Option<NetWmState>,
 {
-    let mut events = Vec::new();
-    for atom in [first, second] {
-        if atom == 0 {
+    // Pagers and toolkits maximize by naming both axes in one message. Two
+    // per-axis events would run two policy transactions, and a Toggle would
+    // flip each axis on its own (vert on, horz off when only one was set),
+    // so the axes of one message travel together.
+    let mut events = Vec::with_capacity(2);
+    let mut axes = MaximizeAxes::NONE;
+    let mut maximize_index = None;
+    for (index, atom) in [first, second].into_iter().enumerate() {
+        // A repeated atom names the same state twice; acting on it twice
+        // would make a Toggle cancel itself.
+        if atom == 0 || (index == 1 && atom == first) {
             continue;
         }
-        if let Some(state) = decode_state(atom) {
+        let Some(state) = decode_state(atom) else {
+            continue;
+        };
+        if let Some(axis) = MaximizeAxes::from_net_wm_state(state) {
+            axes = axes.union(axis);
+            maximize_index.get_or_insert(events.len());
+        } else {
             events.push(BackendEvent::WindowStateRequest {
                 window,
                 action,
@@ -471,7 +694,49 @@ where
             });
         }
     }
+    if let Some(index) = maximize_index {
+        events.insert(
+            index,
+            BackendEvent::WindowMaximizeRequest {
+                window,
+                action,
+                axes,
+            },
+        );
+    }
     events
+}
+
+/// `current` with only the two maximize atoms rewritten to `axes`. If the list
+/// already has exactly the requested membership and no duplicate maximize atom,
+/// it is returned unchanged (order preserved); otherwise every other atom keeps
+/// its order, all maximize atoms are removed, and `vert` then `horz` are appended
+/// as requested.
+pub fn with_maximize_atoms<A: Copy + PartialEq>(
+    current: &[A],
+    vert: A,
+    horz: A,
+    axes: MaximizeAxes,
+) -> Vec<A> {
+    let count = |wanted: A| current.iter().filter(|&&atom| atom == wanted).count();
+    // Returning the list untouched lets both transports skip the property
+    // write entirely, so a republish of unchanged state sends no
+    // PropertyNotify to the client or to pagers.
+    if count(vert) == usize::from(axes.vert) && count(horz) == usize::from(axes.horz) {
+        return current.to_vec();
+    }
+    let mut next: Vec<A> = current
+        .iter()
+        .copied()
+        .filter(|&atom| atom != vert && atom != horz)
+        .collect();
+    if axes.vert {
+        next.push(vert);
+    }
+    if axes.horz {
+        next.push(horz);
+    }
+    next
 }
 
 pub fn stack_mode_from_index(index: u8) -> Option<StackMode> {
@@ -969,13 +1234,18 @@ fn decode_latin1(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        ClientMessageAtoms, ClientMessageKind, DEFAULT_OUTPUT_REFRESH_MHZ, ICCCM_ICONIC_STATE,
-        classify_client_message, decode_text_property, enrich_background_event, mode_refresh_hz,
-        parse_icon_data, parse_normal_hints, parse_strut, parse_wm_class, primary_refresh,
-        refresh_millihz_to_hz,
+        CONFIGURE_WINDOW_OPCODE, ClientMessageAtoms, ClientMessageKind, DEFAULT_OUTPUT_REFRESH_MHZ,
+        ICCCM_ICONIC_STATE, NetWmStateAtoms, ProtocolErrorClass, SET_INPUT_FOCUS_OPCODE,
+        SUPPORTED_EWMH_FEATURES, classify_client_message, current_desktop_request,
+        decode_text_property, enrich_background_event, expand_net_wm_state_requests,
+        forwards_property_notify, mode_refresh_hz, net_wm_state_from_atom, parse_icon_data,
+        parse_normal_hints, parse_strut, parse_wm_class, primary_refresh, protocol_error_log_level,
+        refresh_millihz_to_hz, unclassified_client_message_event, with_maximize_atoms,
     };
-    use crate::backend::api::{BackendEvent, HitTarget};
-    use crate::backend::common_define::OutputId;
+    use crate::backend::api::{
+        BackendEvent, EwmhFeature, HitTarget, MaximizeAxes, NetWmAction, NetWmState, PropertyKind,
+    };
+    use crate::backend::common_define::{OutputId, WindowId};
     use std::cell::Cell;
 
     const MESSAGE_ATOMS: ClientMessageAtoms<u32> = ClientMessageAtoms {
@@ -1021,6 +1291,339 @@ mod tests {
             MESSAGE_ATOMS,
         );
         assert!(matches!(kind, ClientMessageKind::Other));
+    }
+
+    /// `_NET_CURRENT_DESKTOP`, distinct from every atom in `MESSAGE_ATOMS`.
+    const NET_CURRENT_DESKTOP: u32 = 40;
+
+    /// The tag mask a `_NET_CURRENT_DESKTOP` request switches to, or `None`
+    /// when it is not turned into a tag switch.
+    fn desktop_switch(format: u8, index: u32, number_of_desktops: u32) -> Option<u32> {
+        let event = current_desktop_request(
+            NET_CURRENT_DESKTOP,
+            format,
+            [index, 0, 0, 0, 0],
+            NET_CURRENT_DESKTOP,
+            number_of_desktops,
+        )?;
+        match event {
+            BackendEvent::WorkspaceActivate {
+                monitor: None,
+                tag_mask,
+            } => Some(tag_mask),
+            other => panic!("unexpected event {other:?}"),
+        }
+    }
+
+    #[test]
+    fn net_current_desktop_request_switches_to_that_single_tag() {
+        // `wmctrl -s 2` / a pager click on the third desktop. JWM publishes
+        // `_NET_CURRENT_DESKTOP` as `trailing_zeros(tagset)`, so the request
+        // for desktop N is the single-tag mask `1 << N`.
+        assert_eq!(desktop_switch(32, 0, 9), Some(0b1));
+        assert_eq!(desktop_switch(32, 2, 9), Some(0b100));
+        assert_eq!(desktop_switch(32, 8, 9), Some(1 << 8));
+        assert_eq!(desktop_switch(32, 31, 32), Some(1 << 31));
+    }
+
+    #[test]
+    fn net_current_desktop_request_past_the_last_desktop_is_dropped() {
+        // The index is client-written: one past `_NET_NUMBER_OF_DESKTOPS`
+        // must not become a mask policy reduces to an empty view.
+        assert_eq!(desktop_switch(32, 9, 9), None);
+        assert_eq!(desktop_switch(32, u32::MAX, 9), None);
+        // Even with a count that would allow it, an index past the mask
+        // width must not shift-overflow (panic in debug, wrap in release).
+        assert_eq!(desktop_switch(32, 32, u32::MAX), None);
+        assert_eq!(desktop_switch(32, 0, 0), None);
+    }
+
+    #[test]
+    fn a_root_addressed_net_current_desktop_message_switches_tags_on_either_transport() {
+        let root = WindowId::from_raw(1);
+        let event = unclassified_client_message_event(
+            root,
+            true,
+            NET_CURRENT_DESKTOP,
+            32,
+            [2, 0, 0, 0, 0],
+            NET_CURRENT_DESKTOP,
+            9,
+        );
+        assert!(
+            matches!(
+                event,
+                BackendEvent::WorkspaceActivate {
+                    monitor: None,
+                    tag_mask: 0b100,
+                }
+            ),
+            "{event:?}"
+        );
+        // Anything that is not a valid root-addressed desktop request stays
+        // the generic message it always was: another type (a tray opcode),
+        // an index past the last desktop, or a message not sent to the root.
+        for (to_root, sent_type, index) in [
+            (true, 41, 2),
+            (true, NET_CURRENT_DESKTOP, 9),
+            (false, NET_CURRENT_DESKTOP, 2),
+        ] {
+            let sent_data = [index, 0, 0, 0, 0];
+            let event = unclassified_client_message_event(
+                root,
+                to_root,
+                sent_type,
+                32,
+                sent_data,
+                NET_CURRENT_DESKTOP,
+                9,
+            );
+            assert!(
+                matches!(
+                    event,
+                    BackendEvent::ClientMessage {
+                        window,
+                        type_,
+                        data,
+                        format: 32,
+                    } if window == root && type_ == sent_type && data == sent_data
+                ),
+                "to_root={to_root} type_={sent_type} index={index}: {event:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn only_a_32_bit_net_current_desktop_message_is_a_desktop_switch() {
+        assert_eq!(desktop_switch(8, 2, 9), None);
+        assert_eq!(desktop_switch(16, 2, 9), None);
+        // Any other message type (a tray opcode, a state change, ...) is left
+        // to the generic `ClientMessage` fallback.
+        for type_ in [MESSAGE_ATOMS.net_wm_state, MESSAGE_ATOMS.wm_protocols, 41] {
+            assert!(
+                current_desktop_request(type_, 32, [2, 0, 0, 0, 0], NET_CURRENT_DESKTOP, 9)
+                    .is_none(),
+                "type_={type_}"
+            );
+        }
+    }
+
+    #[test]
+    fn net_current_desktop_reaches_the_client_message_fallback() {
+        // The transports decode `_NET_CURRENT_DESKTOP` on the `Other` arm;
+        // a classifier change that claimed it would bypass that decoder.
+        let kind = classify_client_message(NET_CURRENT_DESKTOP, 32, [2, 0, 0, 0, 0], MESSAGE_ATOMS);
+        assert!(matches!(kind, ClientMessageKind::Other));
+    }
+
+    #[test]
+    fn supported_list_advertises_only_requests_jwm_acts_on() {
+        // Pagers read `_NET_SUPPORTED` to decide which requests to send.
+        // `_NET_CURRENT_DESKTOP` requests are decoded into a tag switch, so it
+        // stays advertised; `_NET_RESTACK_WINDOW` has no policy path (stacking
+        // is policy-owned), so advertising it would promise a no-op.
+        assert!(SUPPORTED_EWMH_FEATURES.contains(&EwmhFeature::CurrentDesktop));
+        assert!(!SUPPORTED_EWMH_FEATURES.contains(&EwmhFeature::RestackWindow));
+    }
+
+    const STATE_ATOMS: NetWmStateAtoms<u32> = NetWmStateAtoms {
+        fullscreen: 1,
+        maximized_vert: 2,
+        maximized_horz: 3,
+        hidden: 4,
+        above: 5,
+        below: 6,
+        demands_attention: 7,
+        sticky: 8,
+        skip_taskbar: 9,
+        skip_pager: 10,
+    };
+    const FULLSCREEN: u32 = STATE_ATOMS.fullscreen;
+    const VERT: u32 = STATE_ATOMS.maximized_vert;
+    const HORZ: u32 = STATE_ATOMS.maximized_horz;
+    const ABOVE: u32 = STATE_ATOMS.above;
+
+    /// `BackendEvent` has no `PartialEq`; the state-request events are
+    /// projected onto this comparable shape so whole vectors can be pinned.
+    #[derive(Debug, PartialEq)]
+    enum Expanded {
+        State(WindowId, NetWmAction, NetWmState),
+        Maximize(WindowId, NetWmAction, MaximizeAxes),
+    }
+
+    fn expand(action: NetWmAction, first: u32, second: u32) -> Vec<Expanded> {
+        expand_net_wm_state_requests(WindowId::from_raw(7), action, first, second, |atom| {
+            net_wm_state_from_atom(atom, STATE_ATOMS)
+        })
+        .into_iter()
+        .map(|event| match event {
+            BackendEvent::WindowStateRequest {
+                window,
+                action,
+                state,
+            } => Expanded::State(window, action, state),
+            BackendEvent::WindowMaximizeRequest {
+                window,
+                action,
+                axes,
+            } => Expanded::Maximize(window, action, axes),
+            other => panic!("unexpected event: {other:?}"),
+        })
+        .collect()
+    }
+
+    #[test]
+    fn property_deletions_reach_policy_only_for_kinds_that_act_on_absence() {
+        for kind in [
+            PropertyKind::Strut,
+            PropertyKind::SizeHints,
+            PropertyKind::TransientFor,
+            PropertyKind::BypassCompositor,
+            PropertyKind::RemoteCapture,
+            // Regression: a client that deleted `_GTK_FRAME_EXTENTS` (CSD
+            // turned off) or its decorations=0 `_MOTIF_WM_HINTS` kept
+            // `no_decorations` and a zero border until it was remanaged.
+            PropertyKind::MotifHints,
+            PropertyKind::GtkFrameExtents,
+        ] {
+            assert!(forwards_property_notify(true, kind), "{kind:?}");
+        }
+        for kind in [
+            PropertyKind::Title,
+            PropertyKind::Class,
+            PropertyKind::Other,
+        ] {
+            assert!(!forwards_property_notify(true, kind), "{kind:?}");
+            assert!(forwards_property_notify(false, kind), "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn window_races_log_at_debug_and_bad_requests_at_warn() {
+        for (class, opcode) in [
+            (ProtocolErrorClass::Window, 18),
+            (ProtocolErrorClass::Drawable, CONFIGURE_WINDOW_OPCODE),
+            (ProtocolErrorClass::Pixmap, 0),
+            (ProtocolErrorClass::Damage, 0),
+            (ProtocolErrorClass::Match, SET_INPUT_FOCUS_OPCODE),
+            (ProtocolErrorClass::Match, CONFIGURE_WINDOW_OPCODE),
+        ] {
+            assert_eq!(
+                protocol_error_log_level(class, opcode),
+                log::Level::Debug,
+                "{class:?} from request {opcode}"
+            );
+        }
+        // BadMatch from ChangeProperty (18), or any other error, is JWM's bug.
+        for (class, opcode) in [
+            (ProtocolErrorClass::Match, 18),
+            (ProtocolErrorClass::Other, SET_INPUT_FOCUS_OPCODE),
+        ] {
+            assert_eq!(
+                protocol_error_log_level(class, opcode),
+                log::Level::Warn,
+                "{class:?} from request {opcode}"
+            );
+        }
+    }
+
+    #[test]
+    fn classify_client_message_decodes_a_maximize_pair() {
+        let kind = classify_client_message(
+            MESSAGE_ATOMS.net_wm_state,
+            32,
+            [2, VERT, HORZ, 1, 0],
+            MESSAGE_ATOMS,
+        );
+        assert!(matches!(
+            kind,
+            ClientMessageKind::WindowState {
+                action: NetWmAction::Toggle,
+                first: VERT,
+                second: HORZ,
+            }
+        ));
+    }
+
+    #[test]
+    fn paired_maximize_atoms_coalesce_into_one_request() {
+        // Either atom order is one request for both axes: a Toggle must not
+        // flip each axis in its own transaction.
+        let win = WindowId::from_raw(7);
+        for (first, second) in [(VERT, HORZ), (HORZ, VERT)] {
+            assert_eq!(
+                expand(NetWmAction::Toggle, first, second),
+                vec![Expanded::Maximize(
+                    win,
+                    NetWmAction::Toggle,
+                    MaximizeAxes::BOTH
+                )],
+                "first={first} second={second}"
+            );
+        }
+    }
+
+    #[test]
+    fn single_maximize_atom_and_other_states_keep_message_order() {
+        let win = WindowId::from_raw(7);
+        for action in [NetWmAction::Add, NetWmAction::Remove, NetWmAction::Toggle] {
+            assert_eq!(
+                expand(action, FULLSCREEN, HORZ),
+                vec![
+                    Expanded::State(win, action, NetWmState::Fullscreen),
+                    Expanded::Maximize(win, action, MaximizeAxes::HORZ),
+                ]
+            );
+            assert_eq!(
+                expand(action, VERT, ABOVE),
+                vec![
+                    Expanded::Maximize(win, action, MaximizeAxes::VERT),
+                    Expanded::State(win, action, NetWmState::Above),
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn zero_unknown_and_repeated_maximize_atoms_are_ignored() {
+        let win = WindowId::from_raw(7);
+        let vert_only = vec![Expanded::Maximize(
+            win,
+            NetWmAction::Add,
+            MaximizeAxes::VERT,
+        )];
+        assert_eq!(expand(NetWmAction::Add, VERT, 0), vert_only);
+        assert_eq!(expand(NetWmAction::Add, VERT, VERT), vert_only);
+        // Nothing decodable leaves the transports' ClientMessage fallback.
+        assert_eq!(expand(NetWmAction::Add, 0, 999), vec![]);
+    }
+
+    #[test]
+    fn with_maximize_atoms_rewrites_only_the_two_axes() {
+        const A: u32 = 100;
+        const B: u32 = 101;
+        assert_eq!(
+            with_maximize_atoms(&[A, VERT, B], VERT, HORZ, MaximizeAxes::HORZ),
+            vec![A, B, HORZ]
+        );
+        assert_eq!(
+            with_maximize_atoms(&[A], VERT, HORZ, MaximizeAxes::BOTH),
+            vec![A, VERT, HORZ]
+        );
+        // Already right: the order is left alone, so callers can skip the write.
+        assert_eq!(
+            with_maximize_atoms(&[A, HORZ, VERT], VERT, HORZ, MaximizeAxes::BOTH),
+            vec![A, HORZ, VERT]
+        );
+        // Duplicate maximize atoms collapse even when membership is right.
+        assert_eq!(
+            with_maximize_atoms(&[VERT, A, VERT], VERT, HORZ, MaximizeAxes::VERT),
+            vec![A, VERT]
+        );
+        assert_eq!(
+            with_maximize_atoms(&[A], VERT, HORZ, MaximizeAxes::NONE),
+            vec![A]
+        );
     }
 
     #[test]

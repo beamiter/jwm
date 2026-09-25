@@ -220,17 +220,65 @@ mod tests {
         profiler.set_enabled(true);
         profiler.begin_frame();
 
+        // The zone guard reads the wall clock, so the only bounds that hold
+        // under any scheduler are the sleep itself (a floor) and a clock that
+        // brackets the whole zone (a ceiling). A fixed ceiling such as 20 ms
+        // failed whenever a loaded test run woke the thread late.
+        let bracket = Instant::now();
         {
             let _zone = profiler.enter("test_zone");
             sleep(Duration::from_millis(10));
         }
+        let bracket_ms = bracket.elapsed().as_secs_f32() * 1000.0;
 
         profiler.end_frame();
 
         let stats = profiler.zone_stats("test_zone");
         assert!(stats.is_some());
         let stats = stats.unwrap();
-        assert!(stats.avg_ms >= 9.0 && stats.avg_ms <= 20.0);
+        assert!(
+            stats.avg_ms >= 9.0,
+            "zone shorter than its sleep: {stats:?}"
+        );
+        assert!(
+            stats.avg_ms <= bracket_ms,
+            "zone {stats:?} outlasted the {bracket_ms} ms bracket around it"
+        );
+    }
+
+    #[test]
+    fn zone_stats_summarize_recorded_durations_exactly() {
+        // Synthetic durations keep the arithmetic independent of the
+        // scheduler: two frames of 10 ms and 20 ms average to exactly 15 ms.
+        let mut profiler = FrameProfiler::new();
+        profiler.set_enabled(true);
+        for millis in [10, 20] {
+            profiler.begin_frame();
+            profiler.record_zone("zone", Duration::from_millis(millis));
+            profiler.end_frame();
+        }
+
+        let stats = profiler
+            .zone_stats("zone")
+            .expect("both frames recorded the zone");
+        assert!((stats.avg_ms - 15.0).abs() < 1e-3, "{stats:?}");
+        assert!((stats.min_ms - 10.0).abs() < 1e-3, "{stats:?}");
+        assert!((stats.max_ms - 20.0).abs() < 1e-3, "{stats:?}");
+    }
+
+    #[test]
+    fn a_zone_entered_twice_in_one_frame_accumulates() {
+        let mut profiler = FrameProfiler::new();
+        profiler.set_enabled(true);
+        profiler.begin_frame();
+        profiler.record_zone("zone", Duration::from_millis(3));
+        profiler.record_zone("zone", Duration::from_millis(4));
+        profiler.end_frame();
+
+        let stats = profiler
+            .zone_stats("zone")
+            .expect("the frame recorded the zone");
+        assert!((stats.avg_ms - 7.0).abs() < 1e-3, "{stats:?}");
     }
 
     #[test]

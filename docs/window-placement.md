@@ -97,3 +97,156 @@ Every decision is logged under the `[closed-placement]` prefix: a close
 that was remembered, a window that was launched by JWM and kept its default
 placement, and a window that returned to its remembered monitor and tags
 together with the origin the chain resolved to.
+
+## Maximize
+
+Maximize is placement too, but a temporary one: a maximized window fills its
+monitor's work area, and unmaximizing returns it to where it was. The work
+area is the monitor minus the status bar, docks and the tab bar. The window's
+border is drawn inside that area and there are no gaps, so a window maximized
+on both axes covers exactly what the monocle layout would give it.
+
+### Who may maximize what
+
+Requests come from three origins. The user asks through `togglemaximize`,
+`snap_window maximize` (`Alt+Shift+Up`), dropping a dragged window at the top
+edge, and `restore_session`. A client or a taskbar asks through EWMH
+`_NET_WM_STATE`, xdg-shell, XWayland or wlr-foreign-toplevel. Adoption is a
+window that already carries maximized state when JWM starts managing it,
+including every window after a seamless restart. The first matching row
+decides:
+
+| Request | Window | Outcome |
+| --- | --- | --- |
+| only removes axes | any | applied |
+| adds an axis | a dock, a fixed-size window, or one without a work area | refused |
+| adds an axis | floating, including underneath fullscreen or PiP | applied |
+| adds an axis | tiled underneath fullscreen or PiP | refused |
+| adds an axis | tiled, float layout, any origin | promoted |
+| adds an axis | tiled, tiling layout, user | promoted |
+| adds an axis | tiled, tiling layout, client or adoption | refused |
+
+A promoted window leaves the layout while it is maximized and goes back into
+the slot it left when its last axis is cleared: in front of the window that
+followed it, while that window is still tiled on the same monitor, so a
+maximized master comes back as the master. Neighbours promoted one after the
+other each go back into their own slot, in whichever order they return.
+If that window closes, moves to another monitor or is moved to the front (by
+zoom, by picking it in the overview, or by leaving the vstack layout with it
+focused), the slot passes to the tiled window that followed it, so the
+promoted window comes back where it would be had it stayed tiled: a maximized
+master is still the master after the window behind it closes. A promoted
+window picked in the overview or focused when leaving the vstack layout stays
+out of the layout: like any floating window it only moves ahead of the other
+floating windows, never in front of a tile, and passes nothing on, so it and
+the neighbours promoted with it still go back into their own slots, in
+whichever order they return. A promoted window goes back at the end of the
+tiled windows instead when no tiled window followed it, while the window that
+followed it floats for another reason (it went fullscreen, into
+picture-in-picture or was floated by hand, and maximize is not holding it out
+of the layout), and when it is unmaximized while it is fullscreen or in
+picture-in-picture itself; it then rejoins the layout when that mode ends. A
+window floating for one of those other reasons passes no slot on when it
+closes or leaves. A neighbour that is still promoted keeps carrying the chain
+even while it is fullscreen or in picture-in-picture, until it is unmaximized:
+the window it followed still goes back into its own slot, and closing it
+passes its slot on like any promoted window. A promoted window stays floating
+and maximized across a switch from the float layout to a tiling one, until
+something unmaximizes it.
+A refused request, like one that changes nothing, leaves the window alone:
+JWM republishes the current state and replies with the current geometry, a
+synthetic `ConfigureNotify` on X11 and a configure on xdg-shell, so the client
+never believes in a maximize that did not happen. Refusing adoption clears the
+window's pre-set maximized atoms. Fixed-size windows (equal minimum and maximum
+size hints) do not advertise Resize or Maximize in `_NET_WM_ALLOWED_ACTIONS`.
+
+### Axes
+
+Native X11 can maximize one axis at a time. Horizontal takes the work area's
+x and width, vertical its y and height, and the other components keep their
+values. A `_NET_WM_STATE` message naming both atoms is one request, not two.
+xdg-shell, XWayland and wlr-foreign-toplevel can only express both axes and
+report the window as maximized only while both are set. Dropping one of two
+axes restores only that axis's position and size; the window stays maximized
+on the other.
+
+On X11 the target goes through the window's size hints: a terminal with
+character-cell increments can leave a partial-cell gap, and a window with a
+maximum size stays at the work area's top-left corner at that size. Wayland
+has no size hints, so xdg-shell windows fill the area exactly.
+
+### The restore rectangle
+
+Maximizing records the window's rectangle in a restore slot of its own. No
+other mode writes to it: fullscreen keeps its return rectangle, PiP and
+`togglefloating` keep the floating rectangle, and minimizing keeps its parking
+record, each in separate storage. Unmaximizing returns to the restore slot. A
+window that already covered at least 90% of the work area in both directions
+would look unchanged when unmaximized, so its restore rectangle becomes a
+centered rectangle two thirds the size of the work area instead.
+
+### Keeping it maximized
+
+Every arrange refits maximized windows to their monitor's current work area.
+A new strut, a dock or layer-shell panel, toggling the bar or the tab bar, and
+an output resize therefore resize maximized windows with it. The refit is
+idempotent: a window already at its target gets no configure. Moving a window
+to another monitor, with `tagmon` or because its output was unplugged,
+translates its restore rectangle into the target work area and maximizes it
+there. A minimized or parked maximized window changes only its restore record
+and is never configured on screen before it is shown again.
+
+A maximized native X11 window's `ConfigureRequest` loses the components on its
+maximized axes: x and width horizontally, y and height vertically. A request
+with no geometry component left, including one that only changes the border
+width, is refused with the current geometry. The free components of an
+accepted request move the restore rectangle along with the window. A maximized
+XWayland window cannot move or resize itself at all.
+
+### Drag and snap
+
+Starting to move or resize a maximized window with the modifier drag
+(`movemouse`/`resizemouse`), or with a native X11 or XWayland title-bar drag
+(`_NET_WM_MOVERESIZE`), unmaximizes it in place. The window keeps its current
+position and size, and the drag continues from there. xdg-shell title-bar and
+edge drags are not honoured at all; see [compatibility](compatibility.md). A
+cancelled drag puts the window back, maximized, with its original restore
+rectangle. Dropping a window at the top edge maximizes it on the monitor it
+was dropped on. `snap_window maximize` toggles: it maximizes a floating
+window, and pressing it again restores the window. Snapping a maximized window
+to a half or a quarter unmaximizes it in place first; halves and quarters still
+cover the whole monitor rather than the work area.
+
+`togglefloating` on a maximized window unmaximizes it first. A promoted
+window then simply returns to the layout; any other window is unmaximized and
+then tiled. Revealing a scratchpad unmaximizes it before placing it at its
+centered position.
+
+### Fullscreen and picture-in-picture
+
+Fullscreen and PiP suspend maximize. The window keeps its maximize state and
+restore rectangle, and leaving fullscreen or PiP returns it maximized and
+refit to the current work area. A maximize request while the window is
+fullscreen or in PiP changes only the rectangle it will return to. A window
+promoted out of a tiling layout and unmaximized while fullscreen or in PiP
+rejoins the layout when that mode ends, at the end of the tiled windows rather
+than in the slot it left. Fullscreen and maximized may be reported together,
+as EWMH and xdg-shell allow.
+`togglemaximize` and `snap_window` leave fullscreen and PiP windows alone.
+
+### Restarts and sessions
+
+Session snapshots do not store maximize: `restore_session` unmaximizes every
+window it matches, then applies the saved placement. Across a seamless X11
+restart the EWMH atoms carry the state, but a visible window's floating state
+is not remembered: it floats again only when `WM_TRANSIENT_FOR`, a matching
+rule or a popup-like window type such as a dialog floats it, as for any new
+window. Such a window is maximized again; its previous restore rectangle is not
+carried over, so it gets the centered fallback when it filled the work area. A
+window floated by hand, or promoted out of a tiling layout, comes back tiled:
+under a tiling layout its maximize is refused and its atoms are cleared, and
+under the float layout it is promoted and maximized again. A minimized window
+keeps its resting floating state through its restore snapshot, and a floating
+one outside PiP also keeps its exact pre-maximize rectangle. A minimized
+promoted window is saved tiled, the state it rests in, so it comes back like a
+visible one.

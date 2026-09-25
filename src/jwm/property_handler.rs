@@ -11,6 +11,37 @@ use crate::jwm::rules::RuleMatcher;
 use crate::jwm::types::STEXT_MAX_LEN;
 use log::debug;
 
+/// `_NET_WM_ALLOWED_ACTIONS` for a managed client. Fixed-size clients omit
+/// Resize, MaximizeHorz and MaximizeVert; everyone else gets the previous
+/// static list in its previous order.
+pub(crate) fn allowed_actions_for(is_fixed: bool) -> Vec<AllowedAction> {
+    const ALL: [AllowedAction; 10] = [
+        AllowedAction::Move,
+        AllowedAction::Resize,
+        AllowedAction::Minimize,
+        AllowedAction::MaximizeHorz,
+        AllowedAction::MaximizeVert,
+        AllowedAction::Fullscreen,
+        AllowedAction::Close,
+        AllowedAction::Stick,
+        AllowedAction::Above,
+        AllowedAction::Below,
+    ];
+    ALL.into_iter()
+        .filter(|action| {
+            // A min == max client cannot change size, and the maximize
+            // policy refuses it, so pagers must not offer either.
+            !is_fixed
+                || !matches!(
+                    action,
+                    AllowedAction::Resize
+                        | AllowedAction::MaximizeHorz
+                        | AllowedAction::MaximizeVert
+                )
+        })
+        .collect()
+}
+
 impl Jwm {
     /// 处理窗口 transient_for 属性变化
     ///
@@ -458,22 +489,12 @@ impl Jwm {
         backend: &mut dyn Backend,
         client_key: ClientKey,
     ) {
-        let win = match self.state.clients.get(client_key) {
-            Some(c) => c.win,
+        // Computed once, at manage, after WM_NORMAL_HINTS decided is_fixed.
+        let (win, is_fixed) = match self.state.clients.get(client_key) {
+            Some(c) => (c.win, c.state.is_fixed),
             None => return,
         };
-        let actions = [
-            AllowedAction::Move,
-            AllowedAction::Resize,
-            AllowedAction::Minimize,
-            AllowedAction::MaximizeHorz,
-            AllowedAction::MaximizeVert,
-            AllowedAction::Fullscreen,
-            AllowedAction::Close,
-            AllowedAction::Stick,
-            AllowedAction::Above,
-            AllowedAction::Below,
-        ];
+        let actions = allowed_actions_for(is_fixed);
         let _ = backend.property_ops().set_allowed_actions(win, &actions);
     }
 
@@ -493,7 +514,40 @@ impl Jwm {
 
 #[cfg(test)]
 mod tests {
+    use super::allowed_actions_for;
     use crate::Jwm;
+    use crate::backend::api::AllowedAction;
+
+    #[test]
+    fn fixed_size_clients_do_not_advertise_maximize_or_resize() {
+        assert_eq!(
+            allowed_actions_for(false),
+            vec![
+                AllowedAction::Move,
+                AllowedAction::Resize,
+                AllowedAction::Minimize,
+                AllowedAction::MaximizeHorz,
+                AllowedAction::MaximizeVert,
+                AllowedAction::Fullscreen,
+                AllowedAction::Close,
+                AllowedAction::Stick,
+                AllowedAction::Above,
+                AllowedAction::Below,
+            ]
+        );
+        assert_eq!(
+            allowed_actions_for(true),
+            vec![
+                AllowedAction::Move,
+                AllowedAction::Minimize,
+                AllowedAction::Fullscreen,
+                AllowedAction::Close,
+                AllowedAction::Stick,
+                AllowedAction::Above,
+                AllowedAction::Below,
+            ]
+        );
+    }
 
     #[test]
     fn truncate_empty_stays_empty() {

@@ -20,8 +20,8 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -542,9 +542,18 @@ impl NotificationCenter {
     /// Also notes the configuration's Do-Not-Disturb value: the runtime
     /// toggle starts on it (`Jwm::new`), and a later configuration apply
     /// must compare against what the toggle started from.
+    ///
+    /// A test build starts from an in-memory center instead: every `Jwm` a
+    /// test builds through the production constructor lands here, and any
+    /// test that posts, closes or clears a notification would otherwise
+    /// write the developer's real `$XDG_DATA_HOME/jwm` history. The
+    /// Do-Not-Disturb seed is kept in both builds.
     #[must_use]
     pub fn load() -> Self {
+        #[cfg(not(test))]
         let mut center = Self::load_from_path(&history_path());
+        #[cfg(test)]
+        let mut center = Self::default();
         let config = crate::config::CONFIG.load();
         center.config_do_not_disturb = Some(config.behavior().do_not_disturb);
         center
@@ -580,7 +589,9 @@ impl NotificationCenter {
     /// only copies the records: the thread folds a burst (a progress
     /// notification updating ten times a second) into one write per
     /// `HISTORY_WRITE_WINDOW`, and [`Self::flush`] lands the last one at
-    /// shutdown. An in-memory center has nowhere to write and does nothing.
+    /// shutdown. At most one unwritten copy is ever held — a newer save
+    /// replaces it — so a stalled disk cannot grow the backlog. An in-memory
+    /// center has nowhere to write and does nothing.
     pub fn save(&mut self) {
         let Some(path) = self.path.clone() else {
             return;
@@ -604,8 +615,9 @@ impl NotificationCenter {
             None => Some(snapshot),
         };
         if let Some(snapshot) = rejected {
-            // The thread only ends when its channel closes, so this is one
-            // that died. Do not lose the change; the next save starts anew.
+            // The slot only closes early when its thread ended, so this is
+            // one that died. Do not lose the change; the next save starts
+            // anew.
             self.writer = None;
             write_history_now(&path, &snapshot);
         }
@@ -866,14 +878,114 @@ struct HistorySnapshot {
     next_id: u32,
 }
 
-/// The thread that owns the history file. It takes snapshots over a channel,
-/// collects whatever else arrives within [`HISTORY_WRITE_WINDOW`] of the
-/// first, and writes only the newest; a closed channel ends the wait early
-/// and the final snapshot lands before the thread exits, which is how
-/// [`NotificationCenter::flush`] — and a plain drop — flush.
+/// What the writer thread has been handed and not yet taken.
+#[derive(Debug, Default)]
+struct HistoryMailbox {
+    /// The newest snapshot not yet written. Only the newest is ever worth
+    /// writing, so a newer one replaces it rather than queueing behind it.
+    pending: Option<HistorySnapshot>,
+    /// No more snapshots will be taken: the owner is flushing, or the thread
+    /// is gone.
+    closed: bool,
+}
+
+/// A latest-only hand-off between the posting path and the writer thread.
+///
+/// This used to be an unbounded channel. The writer only drains while it is
+/// waiting, not while it sits in a write's fsyncs, so on a disk that stalls
+/// (NFS, a busy HDD) every post, close and clear queued another full copy of
+/// the history — up to `MAX_HISTORY` records each — in the compositor's
+/// memory for as long as the stall lasted. One slot holds at most one
+/// snapshot, whatever the disk does.
+#[derive(Debug, Default)]
+struct HistorySlot {
+    mailbox: std::sync::Mutex<HistoryMailbox>,
+    ready: std::sync::Condvar,
+}
+
+impl HistorySlot {
+    fn lock(&self) -> std::sync::MutexGuard<'_, HistoryMailbox> {
+        // The lock is never held across a write, so a poisoned one means a
+        // panic between two field assignments; the mailbox is still usable.
+        self.mailbox
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Hand over `snapshot`, dropping any older one still waiting. It comes
+    /// back when the slot is closed: the thread is gone, or finishing.
+    fn put(&self, snapshot: HistorySnapshot) -> Result<(), HistorySnapshot> {
+        let mut mailbox = self.lock();
+        if mailbox.closed {
+            return Err(snapshot);
+        }
+        mailbox.pending = Some(snapshot);
+        drop(mailbox);
+        self.ready.notify_one();
+        Ok(())
+    }
+
+    /// Take no more snapshots; the one already waiting is still written.
+    fn close(&self) {
+        self.lock().closed = true;
+        self.ready.notify_all();
+    }
+
+    /// How many snapshots wait unwritten — never more than one.
+    #[cfg(test)]
+    fn waiting(&self) -> usize {
+        usize::from(self.lock().pending.is_some())
+    }
+
+    /// Block until a snapshot waits; `None` once the slot is closed and
+    /// drained.
+    fn take_first(&self) -> Option<HistorySnapshot> {
+        let mut mailbox = self.lock();
+        loop {
+            if let Some(snapshot) = mailbox.pending.take() {
+                return Some(snapshot);
+            }
+            if mailbox.closed {
+                return None;
+            }
+            mailbox = self
+                .ready
+                .wait(mailbox)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+    }
+
+    /// Keep taking newer snapshots until `deadline`, or until the slot
+    /// closes; the newest is the one worth writing.
+    fn newest_within(&self, mut latest: HistorySnapshot, deadline: Instant) -> HistorySnapshot {
+        let mut mailbox = self.lock();
+        loop {
+            if let Some(newer) = mailbox.pending.take() {
+                latest = newer;
+            }
+            let now = Instant::now();
+            // Closed ends the wait early: flush must not sit out the window.
+            if mailbox.closed || now >= deadline {
+                return latest;
+            }
+            mailbox = self
+                .ready
+                .wait_timeout(mailbox, deadline - now)
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .0;
+        }
+    }
+}
+
+/// The thread that owns the history file. It takes snapshots through a
+/// [`HistorySlot`], collects whatever else arrives within
+/// [`HISTORY_WRITE_WINDOW`] of the first, and writes only the newest;
+/// closing the slot ends the wait early and the final snapshot lands before
+/// the thread exits, which is how [`NotificationCenter::flush`] — and a
+/// plain drop — flush.
 #[derive(Debug)]
 struct HistoryWriter {
-    sender: Option<mpsc::Sender<HistorySnapshot>>,
+    slot: Arc<HistorySlot>,
     thread: Option<thread::JoinHandle<()>>,
     /// Snapshots that reached the disk.
     writes: Arc<AtomicU64>,
@@ -881,14 +993,22 @@ struct HistoryWriter {
 
 impl HistoryWriter {
     fn spawn(path: PathBuf) -> io::Result<Self> {
-        let (sender, receiver) = mpsc::channel();
+        let slot = Arc::new(HistorySlot::default());
         let writes = Arc::new(AtomicU64::new(0));
+        let thread_slot = Arc::clone(&slot);
         let written = Arc::clone(&writes);
         let thread = thread::Builder::new()
             .name("jwm-notification-history".to_string())
-            .spawn(move || write_history_snapshots(&path, &receiver, &written))?;
+            .spawn(move || {
+                write_history_snapshots(
+                    &thread_slot,
+                    HISTORY_WRITE_WINDOW,
+                    |snapshot| write_history_now(&path, snapshot),
+                    &written,
+                );
+            })?;
         Ok(Self {
-            sender: Some(sender),
+            slot,
             thread: Some(thread),
             writes,
         })
@@ -896,13 +1016,10 @@ impl HistoryWriter {
 
     /// Hand the thread a snapshot. It comes back when the thread is gone.
     fn send(&self, snapshot: HistorySnapshot) -> Result<(), HistorySnapshot> {
-        match &self.sender {
-            Some(sender) => sender.send(snapshot).map_err(|error| error.0),
-            None => Err(snapshot),
-        }
+        self.slot.put(snapshot)
     }
 
-    /// Close the channel, wait for the last snapshot to land, and report how
+    /// Close the slot, wait for the last snapshot to land, and report how
     /// many were written.
     fn finish(mut self) -> u64 {
         self.join();
@@ -910,8 +1027,8 @@ impl HistoryWriter {
     }
 
     fn join(&mut self) {
-        // Dropping the sender is what ends the loop, so it goes first.
-        self.sender = None;
+        // Closing the slot is what ends the loop, so it goes first.
+        self.slot.close();
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
@@ -924,35 +1041,30 @@ impl Drop for HistoryWriter {
     }
 }
 
+/// The writer loop. `write` lands one snapshot and says whether it reached
+/// the disk; `window` is how long a first snapshot waits for newer ones.
 fn write_history_snapshots(
-    path: &Path,
-    receiver: &mpsc::Receiver<HistorySnapshot>,
+    slot: &HistorySlot,
+    window: Duration,
+    mut write: impl FnMut(&HistorySnapshot) -> bool,
     writes: &AtomicU64,
 ) {
-    while let Ok(first) = receiver.recv() {
-        let latest = newest_snapshot_within(first, receiver, Instant::now() + HISTORY_WRITE_WINDOW);
-        if write_history_now(path, &latest) {
-            writes.fetch_add(1, Ordering::Relaxed);
+    /// Closes the slot however the loop ends — a panicking write included —
+    /// so the posting path sees a dead thread as a refused hand-off and
+    /// writes inline instead of parking snapshots nobody will take.
+    struct CloseOnExit<'a>(&'a HistorySlot);
+
+    impl Drop for CloseOnExit<'_> {
+        fn drop(&mut self) {
+            self.0.close();
         }
     }
-}
 
-/// Keep taking snapshots until `deadline`, or until the channel closes; the
-/// newest is the one worth writing.
-fn newest_snapshot_within(
-    mut latest: HistorySnapshot,
-    receiver: &mpsc::Receiver<HistorySnapshot>,
-    deadline: Instant,
-) -> HistorySnapshot {
-    loop {
-        let now = Instant::now();
-        if now >= deadline {
-            return latest;
-        }
-        match receiver.recv_timeout(deadline - now) {
-            Ok(newer) => latest = newer,
-            // Timed out, or the channel closed: either way, write what we have.
-            Err(_) => return latest,
+    let _close = CloseOnExit(slot);
+    while let Some(first) = slot.take_first() {
+        let latest = slot.newest_within(first, Instant::now() + window);
+        if write(&latest) {
+            writes.fetch_add(1, Ordering::Relaxed);
         }
     }
 }
@@ -970,6 +1082,8 @@ fn write_history_now(path: &Path, snapshot: &HistorySnapshot) -> bool {
     }
 }
 
+// Test builds never resolve the real history file; see `NotificationCenter::load`.
+#[cfg(not(test))]
 fn history_path() -> std::path::PathBuf {
     let base = std::env::var_os("XDG_DATA_HOME")
         .map(std::path::PathBuf::from)
@@ -1873,6 +1987,29 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    /// Regression: `load()` read and wrote the user's real history file in
+    /// test builds too, so a test posting through a production-built `Jwm`
+    /// wrote the developer's notification history. A test build's center has
+    /// no path, so `save` is a no-op that starts no writer, while the
+    /// configuration's Do-Not-Disturb seed is still taken.
+    #[test]
+    fn a_test_build_loads_an_in_memory_center_that_keeps_the_dnd_seed() {
+        let mut center = NotificationCenter::load();
+        assert!(center.path.is_none());
+        assert_eq!(
+            center.config_do_not_disturb,
+            Some(crate::config::CONFIG.load().behavior().do_not_disturb)
+        );
+
+        center.push(&request("kept in memory"), 1, false);
+        center.save();
+        assert!(
+            center.writer.is_none(),
+            "an in-memory center spawns no writer"
+        );
+        assert_eq!(center.recent().count(), 1);
+    }
+
     #[test]
     fn saves_are_coalesced_off_the_posting_path_and_flushed_at_the_end() {
         let root = history_temp_root("writer");
@@ -1898,6 +2035,92 @@ mod tests {
         assert_eq!(restored.records, center.records);
         assert_eq!(restored.next_id, center.next_id);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The regression: on an unbounded channel, every save made while the
+    /// writer sat in a stalled fsync queued another full copy of the
+    /// history. The slot keeps one — the newest — and that is all the writer
+    /// writes once the disk comes back.
+    #[test]
+    fn a_stalled_write_holds_one_pending_snapshot_not_a_backlog() {
+        let slot = Arc::new(HistorySlot::default());
+        let writes = Arc::new(AtomicU64::new(0));
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel::<u32>();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let writer = {
+            let slot = Arc::clone(&slot);
+            let writes = Arc::clone(&writes);
+            thread::spawn(move || {
+                write_history_snapshots(
+                    &slot,
+                    Duration::ZERO,
+                    |snapshot| {
+                        let _ = entered_tx.send(snapshot.next_id);
+                        // Every write stalls until the test lets it go, the
+                        // way an fsync on a wedged disk does.
+                        let _ = release_rx.recv();
+                        true
+                    },
+                    &writes,
+                );
+            })
+        };
+        let snapshot = |next_id: u32| HistorySnapshot {
+            records: Vec::new(),
+            next_id,
+        };
+
+        assert!(slot.put(snapshot(0)).is_ok());
+        assert_eq!(entered_rx.recv().ok(), Some(0), "the writer is mid-write");
+        // A notification flood during the stall.
+        for next_id in 1..=1000 {
+            assert!(slot.put(snapshot(next_id)).is_ok());
+            assert_eq!(slot.waiting(), 1, "only the newest snapshot waits");
+        }
+
+        release_tx.send(()).expect("release the stalled write");
+        assert_eq!(
+            entered_rx.recv().ok(),
+            Some(1000),
+            "the next write is the newest snapshot, not the next in a queue"
+        );
+        release_tx.send(()).expect("release the second write");
+        slot.close();
+        writer
+            .join()
+            .expect("the writer exits once closed and drained");
+        assert_eq!(writes.load(Ordering::Relaxed), 2);
+        assert!(entered_rx.try_recv().is_err(), "nothing else was written");
+        assert_eq!(slot.waiting(), 0);
+    }
+
+    /// A writer thread that died must refuse the hand-off, so `save` writes
+    /// inline instead of parking the change where nobody will take it.
+    #[test]
+    fn a_dead_writer_refuses_the_snapshot() {
+        let slot = Arc::new(HistorySlot::default());
+        let writes = AtomicU64::new(0);
+        assert!(
+            slot.put(HistorySnapshot {
+                records: Vec::new(),
+                next_id: 1,
+            })
+            .is_ok()
+        );
+        let died = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            write_history_snapshots(
+                &slot,
+                Duration::ZERO,
+                |_| panic!("the writer died mid-write"),
+                &writes,
+            );
+        }));
+        assert!(died.is_err());
+        let refused = slot.put(HistorySnapshot {
+            records: Vec::new(),
+            next_id: 2,
+        });
+        assert_eq!(refused.err().map(|snapshot| snapshot.next_id), Some(2));
     }
 
     #[test]

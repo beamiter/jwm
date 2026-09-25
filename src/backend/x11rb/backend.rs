@@ -38,13 +38,15 @@ use crate::backend::api::{
 use crate::backend::x11::compositor_common::X11ConnectionOps;
 use crate::backend::x11::scheduling;
 use crate::backend::x11::wm::compositor_delegation::X11CompositorDesiredState;
-use crate::backend::x11::wm::event_bridge::{CompositorEventSources, compositor_event_ops};
+use crate::backend::x11::wm::event_bridge::{
+    CompositorEventSources, compositor_event_ops, initial_remote_capture_op,
+};
 use crate::backend::x11::wm::iconify::IconifyCoordinator;
 use crate::backend::x11::wm::interactive_resize::{
     interactive_move_origin, interactive_resize_geometry,
 };
 use crate::backend::x11::wm::managed_unmap::{ManagedUnmapTracker, SharedManagedUnmaps};
-use crate::backend::x11::wm::{SUPPORTED_EWMH_FEATURES, primary_refresh};
+use crate::backend::x11::wm::{SUPPORTED_EWMH_FEATURES, SigchldBlockedForSpawns, primary_refresh};
 
 use self::{
     color::X11ColorAllocator, cursor::X11CursorProvider, event_source::X11EventSource,
@@ -127,6 +129,23 @@ struct X11Interaction {
     current_h: u32,
 }
 
+/// Whether a `JWM_DEBUG_DRAG` value turns drag tracing on. Tracing is
+/// opt-in, as on the xcb transport: an unset or unrecognised value leaves
+/// it off so a debug-level logger is not flooded on every drag motion.
+fn drag_trace_flag(value: Option<&str>) -> bool {
+    value.is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+}
+
+/// The one drag-trace switch for this transport, shared by the backend's
+/// interaction code and `X11WindowOps`: two private copies once disagreed
+/// about the default. Cached because it is read on every MotionNotify
+/// during a drag, so the env lookup (process-wide env lock + alloc) must
+/// not run per event.
+fn drag_trace_enabled() -> bool {
+    static CACHE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *CACHE.get_or_init(|| drag_trace_flag(env::var("JWM_DEBUG_DRAG").ok().as_deref()))
+}
+
 impl X11rbBackend {
     fn resize_cursor_kind(edge: ResizeEdge) -> StdCursorKind {
         match edge {
@@ -140,14 +159,7 @@ impl X11rbBackend {
     }
 
     fn debug_drag_enabled() -> bool {
-        // Cached: this is read on every MotionNotify during a drag, so the
-        // env lookup (process-wide env lock + alloc) must not run per-event.
-        static CACHE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        *CACHE.get_or_init(|| {
-            env::var("JWM_DEBUG_DRAG")
-                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                .unwrap_or(false)
-        })
+        drag_trace_enabled()
     }
 
     fn apply_compositor_window_metadata(
@@ -184,6 +196,41 @@ impl X11rbBackend {
             .compositor_desired
             .replay_plan(|window| ids.x11(window).ok());
         plan.apply(compositor);
+    }
+
+    /// Raw window named by JWM's root `_JWM_REMOTE_CAPTURE_OWNER` marker, or
+    /// `None` when the marker is missing, names `None`, or cannot be read.
+    fn read_remote_capture_owner(conn: &RustConnection, root: u32, atom: u32) -> Option<u32> {
+        use x11rb::protocol::xproto::{AtomEnum, ConnectionExt as _};
+        let reply = conn
+            .get_property(false, root, atom, AtomEnum::WINDOW, 0, 1)
+            .ok()?
+            .reply()
+            .ok()?;
+        reply
+            .value32()?
+            .next()
+            .filter(|owner| *owner != x11rb::NONE)
+    }
+
+    /// Tell a freshly created compositor about a remote-capture lease that is
+    /// already held. It otherwise hears of one only when the marker changes,
+    /// so a lease taken before startup or before a runtime re-enable let
+    /// fullscreen unredirect freeze the remote view until jwm-remote
+    /// republished it. Runs before the compositor's first frame.
+    fn seed_remote_capture_state(
+        conn: &RustConnection,
+        root: u32,
+        atom: u32,
+        compositor: &mut super::compositor::Compositor<RustConnection>,
+    ) {
+        use x11rb::protocol::xproto::ConnectionExt as _;
+        let owner = Self::read_remote_capture_owner(conn, root, atom);
+        let op = initial_remote_capture_op(owner, |owner| {
+            conn.get_window_attributes(owner)
+                .is_ok_and(|cookie| cookie.reply().is_ok())
+        });
+        compositor.apply_event_op(root, op);
     }
 
     fn register_existing_windows_with_compositor(
@@ -320,6 +367,10 @@ impl X11rbBackend {
         ev
     }
     pub fn new() -> Result<Self, BackendError> {
+        // Before any worker thread exists: the compositor, clipboard and tray
+        // threads started below must inherit a blocked SIGCHLD, or one of them
+        // can swallow the signal `run`'s signalfd is waiting for.
+        let _sigchld_blocked = SigchldBlockedForSpawns::new();
         let (raw_conn, screen_num) = x11rb::rust_connection::RustConnection::connect(None)?;
         let conn = Arc::new(raw_conn);
         use x11rb::connection::Connection;
@@ -412,8 +463,14 @@ impl X11rbBackend {
                 screen.height_in_pixels as u32,
                 refresh.hz,
             ) {
-                Ok(c) => {
+                Ok(mut c) => {
                     log::info!("GPU compositor initialized successfully");
+                    Self::seed_remote_capture_state(
+                        &conn,
+                        root_x11,
+                        atoms._JWM_REMOTE_CAPTURE_OWNER,
+                        &mut c,
+                    );
                     Some(c)
                 }
                 Err(e) => {
@@ -534,19 +591,8 @@ impl X11rbBackend {
         let remote_conn = Arc::clone(&self.conn);
         let remote_root = self.root_x11;
         let remote_atom = self.atoms._JWM_REMOTE_CAPTURE_OWNER;
-        let remote_capture_owner = || {
-            use x11rb::protocol::xproto::{AtomEnum, ConnectionExt as _};
-            let reply = remote_conn
-                .get_property(false, remote_root, remote_atom, AtomEnum::WINDOW, 0, 1)
-                .ok()?
-                .reply()
-                .ok()?;
-            let owner = reply
-                .value32()?
-                .next()
-                .filter(|owner| *owner != x11rb::NONE)?;
-            Some(owner)
-        };
+        let remote_capture_owner =
+            || Self::read_remote_capture_owner(&remote_conn, remote_root, remote_atom);
         let Some(compositor) = self.compositor.as_mut() else {
             return;
         };
@@ -921,6 +967,12 @@ impl Backend for X11rbBackend {
                         compositor.set_waterlily_loop_signal(signal);
                     }
                     self.replay_compositor_desired_state(&mut compositor);
+                    Self::seed_remote_capture_state(
+                        &self.conn,
+                        self.root_x11,
+                        self.atoms._JWM_REMOTE_CAPTURE_OWNER,
+                        &mut compositor,
+                    );
                     self.register_existing_windows_with_compositor(&mut compositor);
 
                     self.event_overlay_x11
@@ -2603,18 +2655,21 @@ mod event_source {
     };
     use x11rb::connection::Connection;
     use x11rb::errors::ConnectionError;
-    use x11rb::protocol::{Event as XEvent, xproto};
+    use x11rb::protocol::{ErrorKind, Event as XEvent, xproto};
     use x11rb::rust_connection::RustConnection;
+    use x11rb::x11_utils::X11Error;
 
     use super::ids::X11IdRegistry;
-    use crate::backend::api::{BackendEvent, NetWmAction, NetWmState, PropertyKind};
+    use crate::backend::api::{BackendEvent, NetWmAction, NetWmState};
     use crate::backend::api::{HitTarget, NotifyMode};
     use crate::backend::error::BackendError;
     use crate::backend::x11::wm::managed_unmap::{ManagedUnmapDisposition, SharedManagedUnmaps};
     use crate::backend::x11::wm::{
-        ClientMessageAtoms, ClientMessageKind, PropertyKindAtoms, classify_client_message,
-        expand_net_wm_state_requests, net_wm_state_from_atom, property_kind_from_atom,
-        stack_mode_from_index, window_changes_from_configure_request_parts,
+        ClientMessageAtoms, ClientMessageKind, PropertyKindAtoms, ProtocolErrorClass,
+        classify_client_message, expand_net_wm_state_requests, forwards_property_notify,
+        net_wm_state_from_atom, property_kind_from_atom, protocol_error_log_level,
+        stack_mode_from_index, unclassified_client_message_event,
+        window_changes_from_configure_request_parts,
     };
     use crate::backend::x11rb::Atoms;
     use crate::sync_ext::MutexExt;
@@ -2663,6 +2718,20 @@ mod event_source {
         }
 
         Ok(X11BoundedPoll::BudgetExhausted)
+    }
+
+    /// The log level for an asynchronous X protocol error, graded by the
+    /// rule the xcb transport shares; see [`protocol_error_log_level`].
+    fn async_protocol_error_level(error: &X11Error) -> log::Level {
+        let class = match error.error_kind {
+            ErrorKind::Window => ProtocolErrorClass::Window,
+            ErrorKind::Drawable => ProtocolErrorClass::Drawable,
+            ErrorKind::Pixmap => ProtocolErrorClass::Pixmap,
+            ErrorKind::DamageBadDamage => ProtocolErrorClass::Damage,
+            ErrorKind::Match => ProtocolErrorClass::Match,
+            _ => ProtocolErrorClass::Other,
+        };
+        protocol_error_log_level(class, error.major_opcode)
     }
 
     pub(super) struct X11EventSource {
@@ -2929,15 +2998,7 @@ mod event_source {
                 }
                 XEvent::PropertyNotify(e) => {
                     let kind = property_kind_from_atom(e.atom, self.property_kind_atoms());
-                    // Most deleted properties have historically been ignored,
-                    // but a bypass request must be reset immediately or a
-                    // client can remain unredirected after withdrawing it.
-                    if e.state == xproto::Property::DELETE.into()
-                        && !matches!(
-                            kind,
-                            PropertyKind::BypassCompositor | PropertyKind::RemoteCapture
-                        )
-                    {
+                    if !forwards_property_notify(e.state == xproto::Property::DELETE.into(), kind) {
                         return None;
                     }
                     Some(BackendEvent::PropertyChanged {
@@ -3022,12 +3083,17 @@ mod event_source {
                             action: NetWmAction::Add,
                             state: NetWmState::Hidden,
                         }),
-                        ClientMessageKind::Other => Some(BackendEvent::ClientMessage {
+                        // A pager's desktop switch arrives here; see
+                        // `unclassified_client_message_event`.
+                        ClientMessageKind::Other => Some(unclassified_client_message_event(
                             window,
-                            type_: e.type_,
+                            e.window == self.root_x11,
+                            e.type_,
+                            e.format,
                             data,
-                            format: e.format,
-                        }),
+                            self.atoms._NET_CURRENT_DESKTOP,
+                            crate::config::CONFIG.load().tags_length() as u32,
+                        )),
                     }
                 }
                 XEvent::MappingNotify(_) => Some(BackendEvent::MappingNotify),
@@ -3052,6 +3118,21 @@ mod event_source {
                     window: self.ids.intern(e.affected_window),
                     shaped: e.shaped,
                 }),
+                // Unchecked requests report failure only here. Log it rather
+                // than drop it, so a bad request leaves a trace to debug.
+                XEvent::Error(error) => {
+                    log::log!(
+                        async_protocol_error_level(&error),
+                        "X11 async protocol error (continuing): {:?} request={} major={} minor={} bad_value=0x{:x} sequence={}",
+                        error.error_kind,
+                        error.request_name.unwrap_or("unknown"),
+                        error.major_opcode,
+                        error.minor_opcode,
+                        error.bad_value,
+                        error.sequence
+                    );
+                    None
+                }
                 XEvent::Unknown(_) => None,
                 _ => None,
             }
@@ -3222,11 +3303,103 @@ mod event_source {
     #[cfg(test)]
     mod tests {
         use super::{
-            X11_EVENT_RAW_POLL_LIMIT, X11BoundedPoll, X11RawPoll, is_background_event_window,
-            poll_mapped_event_with_budget,
+            ErrorKind, X11_EVENT_RAW_POLL_LIMIT, X11BoundedPoll, X11Error, X11RawPoll,
+            async_protocol_error_level, forwards_property_notify, is_background_event_window,
+            poll_mapped_event_with_budget, xproto,
         };
+        use crate::backend::api::PropertyKind;
         use std::collections::VecDeque;
         use std::sync::atomic::{AtomicU32, Ordering};
+
+        #[test]
+        fn property_deletions_reach_policy_for_kinds_that_act_on_absence() {
+            // A dock that deletes `_NET_WM_STRUT_PARTIAL` must release its
+            // reservation, and a client that deletes `WM_NORMAL_HINTS` must
+            // lose its old min == max constraint; both used to be dropped
+            // here, so policy kept the stale values until the window died.
+            for kind in [
+                PropertyKind::Strut,
+                PropertyKind::SizeHints,
+                PropertyKind::TransientFor,
+                PropertyKind::BypassCompositor,
+                PropertyKind::RemoteCapture,
+                // A withdrawn frame hint must give the JWM border back; the
+                // shared filter forwards both since that fix.
+                PropertyKind::MotifHints,
+                PropertyKind::GtkFrameExtents,
+            ] {
+                assert!(
+                    forwards_property_notify(true, kind),
+                    "deleting a {kind:?} property must reach policy"
+                );
+            }
+            for kind in [
+                PropertyKind::Title,
+                PropertyKind::Class,
+                PropertyKind::Urgency,
+                PropertyKind::WindowType,
+                PropertyKind::Protocols,
+                PropertyKind::OpaqueRegion,
+                PropertyKind::NetWmIcon,
+                PropertyKind::UserTime,
+                PropertyKind::Other,
+            ] {
+                assert!(
+                    !forwards_property_notify(true, kind),
+                    "deleting a {kind:?} property stays ignored"
+                );
+                assert!(
+                    forwards_property_notify(false, kind),
+                    "a new {kind:?} value always reaches policy"
+                );
+            }
+        }
+
+        fn protocol_error(error_kind: ErrorKind, major_opcode: u8) -> X11Error {
+            X11Error {
+                error_kind,
+                error_code: 0,
+                sequence: 7,
+                bad_value: 0x40_0001,
+                minor_opcode: 0,
+                major_opcode,
+                extension_name: None,
+                request_name: None,
+            }
+        }
+
+        #[test]
+        fn async_protocol_errors_are_logged_at_a_level_matching_their_cause() {
+            // Racing a client that just destroyed or unmapped its window is
+            // routine and stays at debug.
+            for (kind, opcode) in [
+                (ErrorKind::Window, xproto::CHANGE_PROPERTY_REQUEST),
+                (ErrorKind::Drawable, xproto::CONFIGURE_WINDOW_REQUEST),
+                (ErrorKind::Pixmap, 0),
+                (ErrorKind::DamageBadDamage, 0),
+                (ErrorKind::Match, xproto::SET_INPUT_FOCUS_REQUEST),
+                (ErrorKind::Match, xproto::CONFIGURE_WINDOW_REQUEST),
+            ] {
+                assert_eq!(
+                    async_protocol_error_level(&protocol_error(kind, opcode)),
+                    log::Level::Debug,
+                    "{kind:?} from request {opcode} is a window race"
+                );
+            }
+            // A malformed request is JWM's own bug and must not be silent.
+            for (kind, opcode) in [
+                (ErrorKind::Value, xproto::CHANGE_PROPERTY_REQUEST),
+                (ErrorKind::Match, xproto::CHANGE_PROPERTY_REQUEST),
+                (ErrorKind::Atom, xproto::CHANGE_PROPERTY_REQUEST),
+                (ErrorKind::Length, 0),
+            ] {
+                assert_eq!(
+                    async_protocol_error_level(&protocol_error(kind, opcode)),
+                    log::Level::Warn,
+                    "{kind:?} from request {opcode} is a bad request"
+                );
+            }
+        }
 
         #[test]
         fn event_hit_testing_observes_runtime_overlay_replacement() {
@@ -3945,6 +4118,13 @@ mod key_ops {
         fn clear_cache(&mut self) {
             self.cache.clear();
             self.full_keymap = None;
+            // MappingNotify also covers modifier-map changes (for example
+            // `xmodmap -e 'add mod2 = Num_Lock'`). The NumLock mask is shared
+            // with button grabs and `clean_mods`, and the key grabs that follow
+            // this call read it, so detect it again from the new mapping.
+            if let Err(error) = self.detect_and_store_numlock() {
+                warn!("could not re-detect the NumLock modifier after a mapping change: {error}");
+            }
         }
 
         fn grab_keyboard(&self, root: WindowId) -> Result<(), BackendError> {
@@ -4421,8 +4601,8 @@ mod output_ops {
 mod property_ops {
     use super::ids::X11IdRegistry;
     use crate::backend::api::{
-        AllowedAction, IconData, MinimizedRestoreState, MotifWmHints, NetWmState, NormalHints,
-        PropertyOps as PropertyOpsTrait, StrutPartial, WindowType, WmHints,
+        AllowedAction, IconData, MaximizeAxes, MinimizedRestoreState, MotifWmHints, NetWmState,
+        NormalHints, PropertyOps as PropertyOpsTrait, StrutPartial, WindowType, WmHints,
     };
     use crate::backend::common_define::WindowId;
     use crate::backend::error::BackendError;
@@ -4436,7 +4616,7 @@ mod property_ops {
         net_wm_ping_message, net_wm_sync_request_message, parse_gtk_frame_extents, parse_icon_data,
         parse_motif_hints, parse_normal_hints, parse_opaque_region, parse_strut,
         parse_strut_partial, parse_wm_class, parse_wm_hints, protocol_supported,
-        window_type_from_atom,
+        window_type_from_atom, with_maximize_atoms,
     };
     use crate::backend::x11rb::Atoms;
     use std::sync::Arc;
@@ -4459,6 +4639,37 @@ mod property_ops {
     pub(super) const MAX_OPAQUE_REGION_ITEMS_U32: u32 = 1024 * 1024;
     pub(super) const MAX_TEXT_PROPERTY_BYTES: u32 = 256 * 1024;
     pub(super) const MAX_ATOM_LIST_ITEMS: u32 = 4096;
+
+    /// Decode a `_NET_WM_STATE` reply for a read-modify-write that will
+    /// REPLACE the property.
+    ///
+    /// - Absent, or not an ATOM list: `Some(vec![])`. The WM owns the property
+    ///   once it manages the window, so the next write rewrites a client's
+    ///   wrong-typed value as a well-formed ATOM list; refusing it would make
+    ///   every later maximize/fullscreen/minimize publish for the window fail.
+    /// - A complete ATOM list: `Some(atoms)`.
+    /// - An ATOM list that cannot be read whole (wrong format, a length that
+    ///   does not match the reply, bytes left over, more than
+    ///   `MAX_ATOM_LIST_ITEMS`): `None`, because writing back only the part
+    ///   that was read would drop the client's remaining states.
+    pub(super) fn decode_net_wm_state_list(
+        actual_type: u32,
+        atom_type: u32,
+        format: u8,
+        value_len: u32,
+        bytes_after: u32,
+        values: &[u32],
+    ) -> Option<Vec<u32>> {
+        // A GetProperty for the wrong type (NONE included) answers with the
+        // stored type and no value, so there is nothing of the client's to
+        // keep.
+        if actual_type != atom_type {
+            return Some(Vec::new());
+        }
+        let len = u32::try_from(values.len()).ok()?;
+        (format == 32 && value_len == len && bytes_after == 0 && len <= MAX_ATOM_LIST_ITEMS)
+            .then(|| values.to_vec())
+    }
 
     pub(super) struct X11PropertyOps<C: Connection> {
         conn: Arc<C>,
@@ -4494,7 +4705,10 @@ mod property_ops {
             )
         }
 
-        fn get_net_wm_state_atoms(&self, win: WindowId) -> Result<Vec<u32>, BackendError> {
+        /// Read `_NET_WM_STATE` through [`decode_net_wm_state_list`]: `None`
+        /// for an ATOM list that cannot be read whole. A failed reply is an
+        /// error.
+        fn read_net_wm_state_list(&self, win: WindowId) -> Result<Option<Vec<u32>>, BackendError> {
             let w = self.ids.x11(win)?;
             let reply = self
                 .conn
@@ -4507,10 +4721,23 @@ mod property_ops {
                     MAX_ATOM_LIST_ITEMS,
                 )?
                 .reply()?;
-            if reply.format != 32 {
-                return Ok(Vec::new());
-            }
-            Ok(reply.value32().into_iter().flatten().collect())
+            let values: Vec<u32> = reply.value32().into_iter().flatten().collect();
+            Ok(decode_net_wm_state_list(
+                reply.type_,
+                u32::from(AtomEnum::ATOM),
+                reply.format,
+                reply.value_len,
+                reply.bytes_after,
+                &values,
+            ))
+        }
+
+        /// The state list a read-modify-write replaces. A list that cannot be
+        /// read whole is an error, as on xcb: REPLACE-ing it with the part
+        /// that was read would drop the client's remaining states.
+        fn get_net_wm_state_atoms(&self, win: WindowId) -> Result<Vec<u32>, BackendError> {
+            self.read_net_wm_state_list(win)?
+                .ok_or_else(|| BackendError::Message("malformed _NET_WM_STATE".into()))
         }
 
         fn set_net_wm_state_atoms(&self, win: WindowId, atoms: &[u32]) -> Result<(), BackendError> {
@@ -4668,8 +4895,10 @@ mod property_ops {
         }
 
         fn is_fullscreen(&self, win: WindowId) -> bool {
-            let states = self.get_net_wm_state_atoms(win).unwrap_or_default();
-            states.contains(&self.atoms._NET_WM_STATE_FULLSCREEN)
+            // The flag query, not the rewrite reader, so both transports
+            // decode the list the same way and a failed reply reads as unset.
+            self.has_net_wm_state_flag(win, NetWmState::Fullscreen)
+                .unwrap_or(false)
         }
 
         fn set_fullscreen_state(&self, win: WindowId, on: bool) -> Result<(), BackendError> {
@@ -4997,7 +5226,30 @@ mod property_ops {
             state: NetWmState,
         ) -> Result<bool, BackendError> {
             let atom = self.net_wm_state_to_atom(state);
-            Ok(self.get_net_wm_state_atoms(win)?.contains(&atom))
+            // A query, not a rewrite: a list that cannot be read whole holds
+            // no flag we can vouch for, as on xcb. Failing here instead would
+            // make manage refuse the window.
+            Ok(self
+                .read_net_wm_state_list(win)?
+                .is_some_and(|states| states.contains(&atom)))
+        }
+
+        /// Both axes in one checked read-modify-write: two per-axis writes
+        /// would let a pager observe the half-maximized state in between, and
+        /// a republish of unchanged state sends no PropertyNotify at all.
+        fn set_maximized_state(
+            &self,
+            win: WindowId,
+            axes: MaximizeAxes,
+        ) -> Result<(), BackendError> {
+            let vert = self.net_wm_state_to_atom(NetWmState::MaximizedVert);
+            let horz = self.net_wm_state_to_atom(NetWmState::MaximizedHorz);
+            let current = self.get_net_wm_state_atoms(win)?;
+            let next = with_maximize_atoms(&current, vert, horz, axes);
+            if next != current {
+                self.set_net_wm_state_atoms(win, &next)?;
+            }
+            Ok(())
         }
 
         fn set_frame_extents(
@@ -5261,7 +5513,6 @@ mod window_ops {
     use crate::backend::x11rb::batch::X11RequestBatcher;
     use crate::sync_ext::MutexExt;
     use log::debug;
-    use std::env;
     use std::sync::Arc;
     use std::sync::Mutex;
     use x11rb::connection::Connection;
@@ -5279,16 +5530,6 @@ mod window_ops {
     }
 
     impl<C: Connection> X11WindowOps<C> {
-        fn debug_drag_enabled() -> bool {
-            // Cached: read per MotionNotify during a drag (see X11rbBackend copy).
-            static CACHE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-            *CACHE.get_or_init(|| {
-                env::var("JWM_DEBUG_DRAG")
-                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                    .unwrap_or(true)
-            })
-        }
-
         pub(super) fn new(
             conn: Arc<C>,
             atoms: Atoms,
@@ -5341,7 +5582,7 @@ mod window_ops {
     impl<C: Connection + Send + Sync + 'static> WindowOps for X11WindowOps<C> {
         fn set_position(&self, win: WindowId, x: i32, y: i32) -> Result<(), BackendError> {
             let w = self.ids.x11(win)?;
-            if Self::debug_drag_enabled() {
+            if super::drag_trace_enabled() {
                 debug!("[drag] x11 set_position win={:?} x={} y={}", win, x, y);
             }
             let aux = ConfigureWindowAux::new().x(x).y(y);
@@ -5360,7 +5601,7 @@ mod window_ops {
         ) -> Result<(), BackendError> {
             let wid = self.ids.x11(win)?;
 
-            if Self::debug_drag_enabled() {
+            if super::drag_trace_enabled() {
                 debug!(
                     "[drag] x11 configure win={:?} x={} y={} w={} h={} border={}",
                     win, x, y, w, h, border
@@ -5703,5 +5944,241 @@ mod window_ops {
                 Err(_) => false,
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SigchldBlockedForSpawns, drag_trace_flag};
+    use nix::sys::signal::{SigSet, Signal as NixSignal};
+
+    const SRC: &str = include_str!("backend.rs");
+
+    /// This file without this test module, so a needle written below can
+    /// only be found in production code. The marker is assembled from two
+    /// halves so neither this comment nor the helper is its last occurrence.
+    fn production_source() -> &'static str {
+        let marker = concat!("#[cfg(", "test)]");
+        let start = SRC
+            .rfind(marker)
+            .expect("this test module carries the cfg(test) marker");
+        &SRC[..start]
+    }
+
+    /// The brace-balanced body of the first item whose header contains
+    /// `needle`.
+    fn body_after<'a>(src: &'a str, needle: &str) -> &'a str {
+        let start = src
+            .find(needle)
+            .unwrap_or_else(|| panic!("missing `{needle}`"));
+        let body_start = src[start..]
+            .find('{')
+            .map(|idx| start + idx + 1)
+            .unwrap_or_else(|| panic!("missing body for `{needle}`"));
+        let mut depth = 1usize;
+        for (offset, ch) in src[body_start..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return &src[body_start..body_start + offset];
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("unbalanced body for `{needle}`")
+    }
+
+    #[test]
+    fn keymap_cache_clears_redetect_the_numlock_modifier() {
+        // MappingNotify reaches the key ops as `clear_cache` right before
+        // the key grabs are rebuilt. The NumLock mask those grabs, button
+        // grabs and `clean_mods` share was only ever detected at startup, so
+        // moving Num_Lock to another modifier left every grab without the
+        // NumLock variant and bindings dead while NumLock was on.
+        let key_ops = body_after(
+            production_source(),
+            "impl<C: Connection + Send + Sync + 'static> KeyOps for X11KeyOps<C>",
+        );
+        let clear_cache = body_after(key_ops, "fn clear_cache(&mut self)");
+        assert!(
+            clear_cache.contains("self.detect_and_store_numlock()"),
+            "clearing the keymap cache must detect the NumLock modifier again"
+        );
+    }
+
+    #[test]
+    fn drag_tracing_is_opt_in_behind_one_shared_switch() {
+        assert!(
+            !drag_trace_flag(None),
+            "unset JWM_DEBUG_DRAG must leave tracing off"
+        );
+        for value in ["", "0", "false", "yes", "2"] {
+            assert!(
+                !drag_trace_flag(Some(value)),
+                "`{value}` must not enable tracing"
+            );
+        }
+        for value in ["1", "true", "TRUE", "True"] {
+            assert!(
+                drag_trace_flag(Some(value)),
+                "`{value}` must enable tracing"
+            );
+        }
+
+        // The window ops once kept a private copy of the reader that
+        // defaulted to on; a single reader cannot drift from itself.
+        let reader = format!("env::var(\"{}\")", "JWM_DEBUG_DRAG");
+        assert_eq!(
+            production_source().matches(&reader).count(),
+            1,
+            "JWM_DEBUG_DRAG must be read in exactly one place"
+        );
+    }
+
+    #[test]
+    fn threads_spawned_under_the_sigchld_guard_inherit_the_block() {
+        let caller_blocked = SigSet::thread_get_mask()
+            .expect("read the test thread's signal mask")
+            .contains(NixSignal::SIGCHLD);
+
+        let spawned_blocked = {
+            let _guard = SigchldBlockedForSpawns::new();
+            std::thread::spawn(|| {
+                SigSet::thread_get_mask().map(|mask| mask.contains(NixSignal::SIGCHLD))
+            })
+            .join()
+            .expect("the probe thread does not panic")
+            .expect("read the probe thread's signal mask")
+        };
+        assert!(
+            spawned_blocked,
+            "a thread spawned under the guard must not be able to take SIGCHLD"
+        );
+
+        let restored = SigSet::thread_get_mask()
+            .expect("read the test thread's signal mask")
+            .contains(NixSignal::SIGCHLD);
+        assert_eq!(
+            restored, caller_blocked,
+            "dropping the guard must restore the caller's own mask"
+        );
+    }
+
+    #[test]
+    fn backend_construction_blocks_sigchld_before_spawning_worker_threads() {
+        // calloop's signalfd only sees SIGCHLD while every other thread keeps
+        // it blocked. The compositor, clipboard and tray threads are started
+        // by the constructor, long before `run` creates the signal source.
+        let new = body_after(
+            production_source(),
+            "pub fn new() -> Result<Self, BackendError>",
+        );
+        let position = |needle: &str| {
+            new.find(needle)
+                .unwrap_or_else(|| panic!("the constructor no longer contains `{needle}`"))
+        };
+        let guard = position("SigchldBlockedForSpawns::new()");
+        for spawner in [
+            "super::compositor::Compositor::new(",
+            "clipboard_x11::Clipboard::start(",
+            "super::systray::SystemTray::new(",
+        ] {
+            assert!(
+                guard < position(spawner),
+                "SIGCHLD must be blocked before `{spawner}` can start a thread"
+            );
+        }
+    }
+
+    #[test]
+    fn map_event_forwards_property_deletions_and_logs_protocol_errors() {
+        let source = production_source();
+        let property_arm = body_after(source, "XEvent::PropertyNotify(e) =>");
+        assert!(
+            property_arm.contains("forwards_property_notify("),
+            "PropertyNotify translation must use the shared deletion allow-list"
+        );
+        let error_arm = body_after(source, "XEvent::Error(error) =>");
+        assert!(
+            error_arm.contains("async_protocol_error_level(&error)"),
+            "asynchronous protocol errors must be logged, not dropped"
+        );
+    }
+
+    #[test]
+    fn net_wm_state_rewrite_treats_wrong_typed_lists_as_absent_and_refuses_partial_ones() {
+        use super::property_ops::{MAX_ATOM_LIST_ITEMS, decode_net_wm_state_list};
+        const NONE: u32 = 0;
+        const ATOM: u32 = 4;
+        const CARDINAL: u32 = 6;
+        let values = [0x22, 0x77];
+
+        assert_eq!(
+            decode_net_wm_state_list(NONE, ATOM, 0, 0, 0, &[]),
+            Some(vec![]),
+            "a window without _NET_WM_STATE holds no states"
+        );
+        // Regression: a CARDINAL-typed list (e.g. `xprop -f _NET_WM_STATE
+        // 32c`) answers GetProperty(type=ATOM) with format 32, no value and
+        // the whole list in bytes_after. It is not an EWMH state list, so the
+        // next write replaces it with a well-formed one instead of refusing
+        // every later maximize/fullscreen/minimize for the window.
+        assert_eq!(
+            decode_net_wm_state_list(CARDINAL, ATOM, 32, 0, 8, &[]),
+            Some(vec![])
+        );
+        assert_eq!(
+            decode_net_wm_state_list(ATOM, ATOM, 32, 0, 0, &[]),
+            Some(vec![])
+        );
+        assert_eq!(
+            decode_net_wm_state_list(ATOM, ATOM, 32, 2, 0, &values),
+            Some(values.to_vec())
+        );
+        // Regression: past MAX_ATOM_LIST_ITEMS x11rb kept the first atoms and
+        // REPLACE dropped the rest, where xcb refuses the write.
+        let capped: Vec<u32> = (0..MAX_ATOM_LIST_ITEMS).collect();
+        assert_eq!(
+            decode_net_wm_state_list(ATOM, ATOM, 32, MAX_ATOM_LIST_ITEMS, 4, &capped),
+            None,
+            "a list longer than the read cap must not be written back cut short"
+        );
+        for (format, value_len, bytes_after, label) in [
+            (32, 2, 4, "a truncated list"),
+            (8, 2, 0, "a byte-format list"),
+            (32, 1, 0, "a mismatched reply length"),
+        ] {
+            assert_eq!(
+                decode_net_wm_state_list(ATOM, ATOM, format, value_len, bytes_after, &values),
+                None,
+                "{label} must not be written back as the client's state list"
+            );
+        }
+
+        // The rewrite reads through the decoder and fails on a refused list;
+        // a flag query reads the same list but never fails manage over it.
+        let source = production_source();
+        let reader = body_after(source, "fn read_net_wm_state_list(");
+        assert!(reader.contains("decode_net_wm_state_list("));
+        let rewrite = body_after(source, "fn get_net_wm_state_atoms(");
+        assert!(rewrite.contains("read_net_wm_state_list(") && rewrite.contains("ok_or_else"));
+        let query = body_after(source, "fn has_net_wm_state_flag(");
+        assert!(
+            query.contains("read_net_wm_state_list(") && !query.contains("get_net_wm_state_atoms("),
+            "a malformed list must read as unset, not abort manage"
+        );
+        // Regression: `is_fullscreen` read through the strict rewrite reader,
+        // so a list xcb decoded as fullscreen read as windowed here. It is a
+        // query and goes through the same flag decoder as xcb's.
+        let fullscreen = body_after(source, "fn is_fullscreen(");
+        assert!(
+            fullscreen.contains("has_net_wm_state_flag(")
+                && !fullscreen.contains("get_net_wm_state_atoms(")
+                && !fullscreen.contains("read_net_wm_state_list("),
+            "is_fullscreen must answer through has_net_wm_state_flag"
+        );
     }
 }

@@ -7,6 +7,23 @@ monorepo use independent Semantic Versions.
 
 ### Added
 
+- Maximize is a real window state on every backend. Native X11
+  `_NET_WM_STATE` (per axis; a message naming both atoms is one request),
+  xdg-shell, XWayland and wlr-foreign-toplevel requests go through one shared
+  transaction that fills the monitor's work area (the bar, docks and the tab
+  bar excluded, the border inside it, no gaps), keeps the pre-maximize
+  rectangle in a restore slot of its own, rolls back completely when a
+  property or geometry write fails, and publishes the accepted state back to
+  the client. Maximized windows follow work-area changes (struts, docks, the
+  bar, the tab bar, output resize) and stay maximized when they move to
+  another monitor or lose their output. New bindable and IPC command
+  `togglemaximize`, which also takes a tiled window out of the layout while
+  it is maximized; toggling again puts it back into the slot it left, so the
+  master stays master. `get_windows`/`get_tree` report `is_maximized` (both
+  axes), `is_maximized_vert` and `is_maximized_horz`. See
+  [docs/window-placement.md](docs/window-placement.md#maximize) and
+  [docs/compatibility.md](docs/compatibility.md).
+
 - Per-monitor lock: `lock_monitor` (`Alt+Ctrl+Shift+Escape`) puts one output
   behind an opaque compositor shade — above its clients, its status bar and
   every overlay, and inside screenshots, recordings and the remote viewer —
@@ -277,6 +294,125 @@ monorepo use independent Semantic Versions.
 
 ### Changed
 
+- `snap_window maximize` (`Alt+Shift+Up`) and dropping a dragged window at
+  the top edge now perform a real maximize: they fill the work area instead
+  of the whole monitor, set the EWMH/xdg maximized state, and toggle back to
+  the previous rectangle. Dragging a maximized window, or snapping it to a
+  half or a quarter, unmaximizes it in place first, and a cancelled drag
+  restores it maximized. `togglefloating` on a maximized window unmaximizes
+  it first. A maximize that a client, a taskbar or a pre-set atom asks for is
+  refused for a window the tiling layout manages, as in sway, and pre-set
+  maximized atoms on tiled windows are cleared when JWM manages them; use
+  `togglemaximize` to maximize a tiled window. Fixed-size windows no longer
+  advertise Resize or Maximize in `_NET_WM_ALLOWED_ACTIONS`.
+
+- IPC `view`, `tag`, `toggleview` and `toggletag` reject a missing argument, a
+  zero mask, and a mask with no bit inside the configured `tags_length`, with
+  an error naming the command. They used to report success for a call that did
+  nothing (or, for `view`, switched to an empty tag set). A mask that selects
+  at least one configured tag, the all-tags mask included, behaves as
+  before.
+
+- IPC `set_hdr_metadata` rejects an `enabled` that is present but not a
+  boolean (`"false"`, `0`, `null`) instead of turning HDR on, and
+  `clipboard_copy` rejects an `index` that is present but not a non-negative
+  integer instead of offering the newest entry. Leaving either field out keeps
+  its old default.
+
+- `set_power_profile` and the Hub's Power Profile row no longer run
+  `powerprofilesctl` on the compositor thread: the switch is queued on the
+  controls worker like the volume keys and `set_mic_mute`. The IPC reply
+  acknowledges the submission, the labeled OSD draws the requested profile at
+  once, and the worker's read-back confirms or corrects it; `power/profile`
+  carries the profile that actually took. The synchronous "stayed on" error is
+  gone, and before the profile list has been read the command answers "not
+  read yet" and starts the read. See
+  [docs/control-center.md](docs/control-center.md#ipc).
+
+- `Alt+Ctrl+M` stops the microphone recorder without waiting for the file: the
+  MIC chip clears at once and the stop card follows once the file is written.
+  Meanwhile `get_audio_recording_status` reports `"finalizing": true` (a new
+  field) and a new recording is refused until the file is done. IPC
+  `stop_audio_recording` still waits, so its reply confirms the file is
+  finalized. See [docs/audio-recording.md](docs/audio-recording.md#stopping).
+
+- A subscription is acknowledged with what the server did with it instead of a
+  bare success: `unknown_topics` names the requested topics no event can ever
+  match (a mistyped `windows`, for example), `subscribed` is the normalized
+  list it stored, and `dropped` names the topics it did not store with a
+  reason (`empty`, `too_long`, `duplicate` or `limit`), counted in full by
+  `dropped_total`. Valid topics deliver exactly as before. See
+  [README.md](README.md#control-jwm).
+
+- The session lock and the idle lock replace an open shell panel (launcher,
+  Hub, pickers, notification center) instead of being refused while it is up,
+  and run the panel's own teardown; the idle lock no longer retries every 5
+  seconds behind a panel. Opening any panel, the lock included, cancels an
+  active screenshot or recording-region selector instead of taking over its
+  grabs, and the overview, expose and the annotation layer refuse to open on
+  top of each other, a panel or a capture selector. Likewise IPC
+  `take_screenshot`, `toggle_recording` (when it would start the region
+  selector) and `adjust_recording_region`, which used to reply `ok` there, now
+  fail while a panel, the overview, expose, the annotation layer or the other
+  capture selector is on screen, for example with `screenshot selection cannot
+  start while expose is active`; a screenshot request still waiting for the
+  pointer (a status-bar pill click) is dropped instead of opening over them.
+  Stopping a recording and cancelling an open selector still work. See
+  [docs/idle.md](docs/idle.md).
+
+- `get_idle_status` and the `idle/state` event report `locked` for the session
+  lock only; a monitor showing its own unlock prompt reports `false`, and that
+  prompt no longer holds the idle lock off — the lock stage replaces it. See
+  [docs/idle.md](docs/idle.md#over-ipc).
+
+- Locking a monitor exits expose, and closes the overview when the windows it
+  is cycling are on that monitor, instead of leaving the newly covered windows
+  on show elsewhere. See [docs/monitor-lock.md](docs/monitor-lock.md).
+
+- Alt+Tab, the launcher's window search and expose no longer list managed
+  docks, panels (polybar, tint2) or desktop icon layers: such a window sits on
+  every tag at the tail of the MRU order, exactly where `Alt+Shift+Tab`
+  starts, so committing could focus the bar. See
+  [docs/window-switcher.md](docs/window-switcher.md).
+
+- `jwm-tool perf compare` fails the gate when the candidate lost a measurement
+  the baseline recorded (scenario skipped or absent, metric missing) instead
+  of printing it as not comparable, except for `input_latency` and
+  `allocation_steady`, whose presence depends on the recording conditions.
+  `jwm-tool perf record` records a session without a compositor, or a refused
+  benchmark start, as skipped scenarios and still writes the baseline. It
+  stops a benchmark that overruns its 300-second deadline; the overdue run
+  keeps its system label from the report `benchmark stop` returns, so
+  `compare` against a completed baseline prints `[FAIL]` for it instead of
+  refusing the pair. It checks `get_waterlily_status` before
+  `--waterlily-workload`, skipping with the reason when WaterLily or its
+  worker is unavailable, uses an animation that is already running as is,
+  and switches WaterLily back off only when it switched it on. See
+  [docs/performance.md](docs/performance.md).
+
+- `jwm` and `jwm-support` without `--backend`/`JWM_BACKEND` pick wayland-udev
+  only when it is compiled in, and otherwise the first compiled backend; a
+  slim `--no-default-features` build no longer starts or diagnoses a backend
+  it does not contain.
+
+- Screen recording: a region reshaped mid-recording is scaled uniformly to fit
+  the fixed video canvas and centred with black bars, cursor included, on both
+  X11 and Wayland, instead of being stretched; moving the region, or a region
+  of the original shape, still fills the whole canvas. See
+  [docs/audio-recording.md](docs/audio-recording.md).
+
+- The screen recorder's ffmpeg log is no longer a fixed, world-shared file in
+  `/tmp` (`jwm-ffmpeg.log` on X11, `jwm-wayland-recording-ffmpeg.log` on
+  Wayland): it lives in `$XDG_RUNTIME_DIR` (or under a per-user name in the
+  temp directory), is created mode 0600, and a symlink or someone else's file
+  at that path is refused. The X11 recorder logs the path when a recording
+  starts.
+
+- X11: a pager's `_NET_CURRENT_DESKTOP` request switches the selected monitor
+  to that tag, and `_NET_RESTACK_WINDOW` is no longer advertised in
+  `_NET_SUPPORTED`: JWM never acted on it, so pagers were promised a restack
+  that could not happen.
+
 - The Hub Night Light row toggles through `toggle_night_light`, so Enter
   raises the same labeled OSD the keybinding does. Network and Bluetooth
   row radio flips (and a confirmed Bluetooth power-off) raise the Wi-Fi /
@@ -303,6 +439,327 @@ monorepo use independent Semantic Versions.
   geometry is untouched. See [README.md](README.md#the-screenshot-editor).
 
 ### Fixed
+
+- Wayland: `unset_maximized` from an xdg-shell client always gets a
+  configure, and every set/unset request gets exactly one, a refused one
+  included. XWayland maximize requests are written back to the window, and a
+  maximized XWayland window can no longer move or resize itself out of its
+  maximized geometry.
+
+- XCB: `_NET_WM_STATE` writes no longer replace the whole property with a
+  single atom when reading it fails; the write fails and the transaction
+  that asked for it rolls back instead. A `_NET_WM_STATE` of the wrong type
+  (not an ATOM list) is still replaced like an absent one, as on x11rb, so it
+  cannot make every later maximize, fullscreen or minimize write fail.
+
+- Wayland: a direct-scanout frame can no longer bypass a locked monitor's
+  shade, the MIC chip or the capture hint; each of them now forces
+  composition, so a fullscreen game or video is never scanned out over a
+  shade.
+
+- Wayland: `ext-session-lock`'s `locked` event is sent only once a locked
+  frame (black shield, lock surface on top) has been presented on every output
+  that was showing content, as the protocol requires, so `swaylock -f &&
+  systemctl suspend` can no longer suspend with the desktop still on screen.
+  An output that cannot present confirms the lock after 1 second at most, and
+  lock surfaces follow an output's new mode, scale or transform while locked.
+  A lock request made while another live locker holds the lock, or is waiting
+  for it, is refused with `finished`; before, any client that could bind the
+  session-lock manager could take over a live lock and unlock it without the
+  password. A new locker can take over only after the previous one died or
+  gave up its request.
+
+- X11: a `jwm-remote` capture lease that is already held when the compositor
+  starts, or is re-enabled, keeps the screen composited; fullscreen unredirect
+  could freeze the remote view until the lease was republished.
+
+- Wayland: an ext-image-copy-capture request for a toplevel that has closed,
+  or an output that is gone, gets a stopped session instead of a stream of the
+  first output, and such stale targets no longer abort the compositor. Capture
+  sessions of an output that is unplugged or replaced by a KMS rebuild are
+  stopped too, and so is the session of a window that closes while it is being
+  captured, instead of failing every frame the client asks for.
+
+- Wayland: sandboxed clients (connected through `wp_security_context_v1`, such
+  as Flatpak apps) are no longer offered the privileged globals: layer shell,
+  screencopy, image-copy capture, output management, output power, gamma
+  control, virtual pointer and keyboard, input method, session lock, data
+  control, foreign-toplevel management, the ext-foreign-toplevel list,
+  ext-workspace, or a nested security context. Keyboard-shortcut inhibitors
+  created by sandboxed clients never take effect, so a focused sandboxed
+  window cannot swallow JWM's own bindings. XDG activation tokens are
+  single-use, and unused ones expire after 10 seconds.
+
+- The notification bridge and the status bars' screenshot request refuse an
+  IPC socket whose runtime directory is not a real directory owned by the user
+  with no group or other access, or whose endpoint is not the user's own
+  socket — the checks the compositor applies to the directory it serves from.
+  They used to talk to whatever answered at the `$XDG_RUNTIME_DIR` or
+  `/tmp/jwm-<uid>` path, which another local user could create first. An
+  explicit `JWM_SOCKET` is still used as given.
+
+- A nested, benchmark or test JWM that inherits the session's runtime
+  directory no longer makes the real `jwm-tool daemon` quit — taking the
+  user's session with it — when it exits. Only the JWM the daemon launched
+  (which it now marks with `JWM_DAEMON_PID`) asks the daemon to quit.
+
+- The Wi-Fi passphrase reaches nmcli on its standard input (`nmcli --ask`)
+  instead of its command line, where `ps` showed it to every local user; a
+  passphrase with a control character is refused with a reason. Joining no
+  longer blocks the compositor on the saved-profile lookup, which the scan
+  worker now reads with the list. Localized sessions keep nmcli and rfkill
+  detection (`nmcli -t radio wifi`, `rfkill` under `LC_ALL=C`). See
+  [docs/control-center.md](docs/control-center.md#passphrases).
+
+- `_NET_CLOSE_WINDOW` and foreign-toplevel close requests for a window JWM
+  does not manage are ignored instead of closing it — JWM's own check window
+  included.
+
+- `jwm-remote`'s trusted-LAN notice says what the transport does: it encrypts
+  and authenticates with the pre-shared key, without forward secrecy. It used
+  to claim the screen was not encrypted.
+
+- Monitor lock: unplugging or changing outputs can no longer leave the
+  selection on a shaded monitor, or a shade on an output other than the one
+  that was locked. Activating or restoring a window that sits behind a shade
+  (taskbar, launcher, `focus_window`) is refused instead of switching tags on
+  the unlocked monitor or un-minimizing it behind the shade. A display change
+  that drops the last lock hands back a compositor a panel had switched on,
+  unless a panel is still open. See
+  [docs/monitor-lock.md](docs/monitor-lock.md).
+
+- The overview drops windows that closed under it, so cycling and `Enter` no
+  longer land on a dead entry, and closes when none are left.
+
+- Wayland: session-lock surfaces are sized in logical units on scaled and
+  rotated outputs.
+
+- Wayland: a dialog-like toplevel whose initial configure fell back to the
+  compositor's timer no longer deadlocks the compositor.
+
+- Wayland: two idle inhibitors on one surface no longer cancel each other, and
+  a surface that is destroyed, or a client that crashes, stops inhibiting
+  idle.
+
+- XWayland: an X11 copy retires the clipboard-history entry JWM was offering,
+  X11 applications can paste history entries, and an X11 owner that exits no
+  longer clears a newer offer. Clipboard-history captures are recorded in
+  selection order.
+
+- XWayland: a managed window's ConfigureRequest goes through the same policy
+  as on X11, so an XWayland window can no longer move or resize itself out of
+  its tile, and a Wayland client's own geometry no longer overrides a
+  fullscreen, picture-in-picture or parked window. XWayland clients that ask
+  for a keyboard grab (virtual machines, remote desktops) get it.
+
+- Wayland: a destroyed layer-shell role is fully retired, so a new layer role
+  on the same surface is managed afresh.
+
+- Wayland: wlr-screencopy regions on scaled and rotated outputs are captured
+  from the right pixels (they were taken as buffer pixels and checked against
+  the unrotated mode). The output-management and workspace managers answer
+  `stop` with `finished`, so clients waiting for the handshake no longer hang.
+
+- Wayland: wlr-gamma-control allows one control per output; a second one
+  (gammastep alongside wlsunset, say) fails instead of fighting over the ramp,
+  a control for an output that is gone fails instead of landing on another
+  output, and destroying a control restores the identity ramp only if it had
+  applied one. A control whose output is unplugged, replaced by a KMS rebuild
+  or moved to a LUT of another size is sent `failed` at once, so a night-light
+  client that is not changing its ramp learns to re-create it. The gamma
+  takeover clears the colour pipeline's CTM and LUT in one atomic request.
+
+- Wayland: a replaced output's `wl_output` global is withdrawn from clients
+  and destroyed, instead of lingering after every hotplug and VT switch.
+
+- Wayland/KMS: rebuilding the KMS state (VT switch back, hotplug) keeps each
+  surviving monitor's mode, scale, transform and position, and a client gamma
+  ramp, where they can still be honoured, and the window layout follows the
+  replayed positions. A failed rebuild is retried with backoff (from 250 ms,
+  doubling up to 8 seconds, six retries), and DRM devices that are replaced,
+  or whose build failed after opening them, are returned to the seat. Output
+  captures queued for an output that went dark or away are failed instead of
+  left waiting, and frame callbacks and presentation feedback follow the
+  refresh rate after a modeset.
+
+- Wayland: a change applied through wlr-output-management (wlr-randr, kanshi)
+  reaches the window layout, and a soft-disabled head leaves it, moving its
+  windows to a visible monitor; output-management clients are sent the new
+  heads after a hotplug and after their own apply, and a configuration made
+  against stale heads is cancelled. The nested backends, which cannot apply
+  one, no longer advertise output management. ext-workspace clients (waybar)
+  see each monitor's group, its active workspace and hotplugged outputs, and
+  activating a workspace switches the tag on the monitor it belongs to rather
+  than on the selected one. Workspace groups follow an output rebuilt by a VT
+  switch or re-plug, a `wl_output` bound later still gets `output_enter`, and
+  the workspace count follows the configured `tags_length` instead of always
+  being nine; a config reload that changes it re-sends each workspace group
+  with the new count at once. Foreign-toplevel handles get
+  `output_enter`/`output_leave`, so per-output taskbars list each window on
+  the output it is on, and XWayland windows are listed too.
+
+- Wayland: partial-damage frames no longer leave stale pixels. The first frame
+  after a panel, the launcher, a lock shade, the debug HUD, the tab bar, the
+  screenshot toolbar, idle dim, a postprocess filter or an animation's last
+  frame goes away is redrawn in full; the cursor and layer surfaces are no
+  longer blended over their own retained pixels, and on the scene-linear (HDR
+  and wide-gamut) routes a resting cursor or an unchanged top or overlay layer
+  surface such as a bar is redrawn only inside the damaged area, so it does
+  not widen a partial redraw; and raising or lowering a window without moving
+  it redraws the overlap.
+
+- Wayland: on the scene-linear routes the frosted status bar decodes its
+  sRGB-encoded backdrop instead of mixing it as linear light, the wallpaper is
+  no longer sRGB-decoded twice, and idle dim matches the encoded routes and
+  screenshots exactly (HDR highlights are clamped while dimmed). A wallpaper
+  change that also changes the mode keeps each image in its own mode through
+  the crossfade.
+
+- Wayland: expose and peek draw windows with an alpha channel with their real
+  transparency instead of black; peek keeps the focused window's menus,
+  submenus and input-method popups lit; the recording-region veil no longer
+  blacks out the screen; the overview's selected title is drawn as UI text;
+  the snap-preview outline stays in colour range; and the capture hint forces
+  full frames like the REC and MIC chips. Direct-scanout diagnostics stop
+  rejecting fullscreen windows for decorations that are never drawn on them,
+  and per-window subpixel state no longer grows over a long session.
+
+- X11: a window whose content changes on a hidden tag no longer forces a
+  full-screen composite every frame; a window skipped by the
+  texture-from-pixmap budget is refreshed on a follow-up frame instead of
+  staying stale; a window destroyed while presented directly no longer leaves
+  composition bypassed; the EGL preserved-buffer fallback keeps partial
+  redraw; GLX binds only 32-bit visuals through an RGBA config; and a
+  WaterLily worker that stops reading can no longer block the compositor.
+
+- The wallpaper picker opens at once and lists the folder in the background,
+  without a stat per file and in a stable order, and browsing it quickly no
+  longer queues a decode per entry: a superseded side preview is dropped
+  before it decodes or resizes, on X11 and Wayland alike.
+
+- XCB: output queries use `GetScreenResourcesCurrent`, like x11rb, instead of
+  forcing a RandR hardware probe, and a click delivered to the root over a
+  client that does not select button presses reaches that client instead of
+  counting as a root or tab-strip click.
+
+- X11: removing a window's strut, size hints, `WM_TRANSIENT_FOR`, or a
+  `_MOTIF_WM_HINTS`/`_GTK_FRAME_EXTENTS` hint that dropped its border takes
+  effect (the border comes back); worker threads can no longer swallow the
+  SIGCHLD that reaps launched programs, and the programs JWM starts (launched
+  applications, the status bar, session-menu actions, the idle lock and DPMS
+  commands, the audio recorder, the screen-recording encoders, and long-lived
+  helpers such as the daemon a launcher leaves behind or the Bluetooth
+  pairing agent) no longer inherit a blocked SIGCHLD; and routine
+  asynchronous X errors from destroy races are logged at debug level, the
+  rest as warnings, instead of being dropped (x11rb) or all logged as errors
+  (XCB). On x11rb, key and button grabs follow a NumLock modifier that moved
+  in a keymap change, and drag tracing is off unless `JWM_DEBUG_DRAG` is set.
+
+- Aspect-ratio size hints shrink a window to fit its cell instead of growing
+  it past the cell (a 16:9 client in a 900×1000 tile came out 1778×1000).
+  Tatami's 2- and 4-window patterns and centered-master or three-column with a
+  single stack window fill the work area.
+
+- Dropping a dragged floating window snaps and settles that window, not
+  whichever window the selection moved to during the drag. A move or resize
+  requested by a window on a hidden tag, or a minimized one, updates the place
+  it will come back to instead of showing it.
+  `_NET_WM_STATE_DEMANDS_ATTENTION` honours Do Not Disturb and focus like the
+  urgency hint, is cleared when the window is activated, and clearing it no
+  longer clears a standing ICCCM urgency.
+
+- Multi-monitor: a mode or scale change on an output refits its fullscreen
+  windows; on X11, output ids stay with the monitors whose rectangle they
+  cover when outputs are replugged or swap places, and a layout change carries
+  visible floating windows with their monitor; on Wayland, unplugging and
+  replugging an output no longer swaps geometry between two monitors; a
+  replacement output takes in the windows left without one, preferring a
+  monitor that is not locked; and `focus_tab` addresses a monitor by its
+  number after a replug.
+
+- Saving and restoring a session no longer records hidden scratchpads, and a
+  restore never reveals one.
+
+- Shrinking `tags_length` in a config reload moves windows off the retired
+  tags onto their monitor's view instead of stranding them; a named scratchpad
+  left without tags stays parked. Any change to `tags_length` reaches EWMH
+  pagers (`_NET_NUMBER_OF_DESKTOPS`) and ext-workspace taskbars with the
+  reload instead of at the next tag switch or monitor change.
+
+- Restart is no longer refused forever when the config file cannot be written
+  (for example a home-manager link into the read-only Nix store) while a
+  per-tag layout change is pending: the layout write is logged and skipped,
+  and the periodic retry stops warning every 2 seconds. See
+  [docs/minimized-dock.md](docs/minimized-dock.md).
+
+- Saving the theme from the Hub no longer breaks a config whose `[appearance]`
+  header carries a comment, spaces or quotes; a file shape the line edit
+  cannot handle safely is left untouched with a logged error while the theme
+  still applies, and a per-tag layout save refuses the same way rather than
+  writing a file that would no longer load. A config edit made before JWM's
+  own theme or layout write is reloaded instead of being mistaken for that
+  write. See [docs/ui-theme.md](docs/ui-theme.md).
+
+- Expose and the tags overview never lay out more columns than windows, so a
+  single window is centred; PiP and attention windows keep their own frame
+  during the focus pulse when ordinary borders are off; and a
+  `behavior.wallpaper_tags` entry with a tag index of 32 or more matches no
+  tag instead of panicking.
+
+- A peripheral battery (a wireless mouse or gamepad, `scope=Device`) is no
+  longer taken for the system battery: the control center, the low-battery
+  alert and the compositors' power saving (which throttled the frame rate on
+  such desktops) ignore it.
+
+- A screenshot whose annotations cannot be baked in keeps the original file
+  intact and says so with an urgent "Screenshot saved without annotations"
+  toast; the annotated file replaces the capture atomically. A clipboard
+  capture whose annotations cannot be baked in is copied without them and
+  says so with an urgent "Screenshot copied without annotations" toast
+  instead of the ordinary "Screenshot copied to clipboard" one.
+
+- The notification center keeps the highlight on the notification you picked
+  when a newer one above it is closed, and the notification-history writer
+  holds at most one pending snapshot however fast notifications arrive.
+
+- Audio recording: a recorder that stops on its own (a USB microphone
+  unplugged, ffmpeg killed) is collected moments later, clearing the MIC chip
+  and reporting the failure with an urgent toast and an
+  `audio_recording/error` event, instead of leaving the session looking active
+  until the next toggle silently reopened the microphone. A recorder that has
+  not initialized within 3 seconds is abandoned instead of hanging the
+  compositor, and further starts are refused until the stuck device open
+  returns. See [docs/audio-recording.md](docs/audio-recording.md).
+
+- The wallpaper-derived theme no longer reports `pending: true` forever when
+  its extraction thread could not start, and the next config apply retries it.
+
+- IPC: replies to several requests sent at once arrive in request order even
+  when one of them is malformed JSON; a final request without a trailing
+  newline is answered when the client closes its write side; and a client that
+  half-closes its socket (`socat`, `nc -N`) receives its whole reply instead
+  of a cut-off one.
+
+- IPC: `get_tree` marks only the focused window as focused, as `get_windows`
+  does, instead of each monitor's selection, and `get_recording_status` no
+  longer runs ffprobe on every poll of an unchanged file it already rejected.
+
+- The debug HUD's CPU percentage and `get_metrics`' `cpu_load_percent` no
+  longer read low while virtual machines run: guest time was counted twice.
+
+- `jwm-tool debug` lists the JWM processes again: its grep received the flag
+  and the pattern glued into one argument, and a bare `jwm` process did not
+  match.
+
+- Documentation: IPC examples use `jwm-tool msg` (there is no `jwm-msg`
+  binary, and `jwm-tool get_tearing_hints` is not a subcommand), the Bluetooth
+  picker closes with `Ctrl+Alt+Shift+B`, the VRR notes no longer describe
+  `get_outputs` or a `set_vrr_enabled` IPC command, neither of which exists,
+  and the hardware-validation and daily-drive baseline examples run
+  `jwm-tool perf record --out <file>` and
+  `jwm-tool perf compare <baseline> <candidate>` (there are no `--output`,
+  `--baseline` or `--candidate` flags). A new `docs_drift` test keeps the IPC
+  and `jwm-tool perf` examples and the Control Center chords honest.
 
 - X11: the status bar's content is back under a glass theme. The bar's
   solid-glass sheet binds its shader behind the GL state tracker's back, and
@@ -390,16 +847,17 @@ monorepo use independent Semantic Versions.
 
 - `snap_window <direction>` is a new bindable and IPC command —
   the keyboard/scripting equivalent of dragging a floating window to a
-  screen edge, using the exact mouse-drop geometry (full monitor rect, size
-  hints respected, and the snapped rect becomes what a later
-  `togglefloating` restores). Directions: `left` / `right` /
-  `top-left` / `top-right` / `bottom-left` / `bottom-right` / `maximize`
-  (case-insensitive); tiled and fullscreen windows are deliberate
-  no-ops; an invalid direction is an error. Dropping a dragged window into
-  a screen corner (within `snap_dist` of both edges) now snaps it to that
-  corner's quarter instead of resolving to a half. Default bindings:
-  `Alt+Shift+Left` / `Alt+Shift+Right` / `Alt+Shift+Up` — the quarters have
-  none (corners don't map honestly onto arrows); over IPC:
+  screen edge, using the exact mouse-drop geometry (for halves and quarters:
+  full monitor rect, size hints respected, and the snapped rect becomes what
+  a later `togglefloating` restores; `maximize` is a real, toggleable
+  maximize that fills the work area and restores the previous rect).
+  Directions: `left` / `right` / `top-left` / `top-right` / `bottom-left` /
+  `bottom-right` / `maximize` (case-insensitive); tiled and fullscreen
+  windows are deliberate no-ops; an invalid direction is an error. Dropping
+  a dragged window into a screen corner (within `snap_dist` of both edges)
+  now snaps it to that corner's quarter instead of resolving to a half.
+  Default bindings: `Alt+Shift+Left` / `Alt+Shift+Right` / `Alt+Shift+Up` —
+  the quarters have none (corners don't map honestly onto arrows); over IPC:
   `jwm-tool msg snap_window --args '"top-left"'`.
 
 - The launcher and the window switcher show application icons beside their
@@ -894,12 +1352,14 @@ monorepo use independent Semantic Versions.
 
 - VRR on the Wayland/KMS backend used to be written directly onto the CRTC
   `VRR_ENABLED` property, both unconditionally at output init and through
-  `set_vrr_enabled` over IPC. Neither survived: Smithay re-asserts its own
-  cached VRR value in every atomic request it builds, so the property was
-  reset by the very next page flip while the IPC call reported success.
-  Both paths now go through Smithay's `use_vrr`. `set_vrr_enabled` fails
+  the backend's `set_vrr_enabled`. Neither survived: Smithay re-asserts its
+  own cached VRR value in every atomic request it builds, so the property was
+  reset by the very next page flip while the call reported success. Both
+  paths now go through Smithay's `use_vrr`. `set_vrr_enabled` fails
   explicitly on connectors where VRR would require a modeset, rather than
-  silently taking a path that turns the next frame into a full commit.
+  silently taking a path that turns the next frame into a full commit. (No
+  IPC command exposes `set_vrr_enabled`; an earlier version of this entry
+  said otherwise.)
 
 - Native X11 clipboard workers now block on the X socket plus an internal
   eventfd instead of waking on a 20 ms polling cadence. Their final backend or

@@ -189,6 +189,11 @@ pub struct BudgetRule {
     /// baseline value: a cap for lower-is-better metrics, a floor for
     /// higher-is-better ones.
     pub absolute: Option<f64>,
+    /// Whether a candidate that lacks this metric while the baseline has it
+    /// fails the gate. `false` only for metrics whose presence depends on the
+    /// recording conditions rather than on JWM's behavior; those report such
+    /// a pair as not comparable instead.
+    pub fail_closed: bool,
 }
 
 /// The version-1 regression budgets. Ratios bound drift against the
@@ -197,12 +202,18 @@ pub struct BudgetRule {
 #[must_use]
 pub fn default_budgets() -> Vec<BudgetRule> {
     use Direction::{Exact, HigherIsBetter, LowerIsBetter};
-    let rule = |scenario, metric, direction, ratio, absolute| BudgetRule {
+    let rule = |scenario: &'static str, metric, direction, ratio, absolute| BudgetRule {
         scenario,
         metric,
         direction,
         ratio,
         absolute,
+        // Input latency exists only if someone touched the session before or
+        // during the window, and allocation counts only in a jwm built with
+        // `alloc-counter`; neither is part of the label, so a candidate that
+        // lacks them says nothing about a regression. A stalled benchmark
+        // still fails the gate through `steady_frame`.
+        fail_closed: !matches!(scenario, "input_latency" | "allocation_steady"),
     };
     vec![
         rule("idle", "cpu_percent_avg", LowerIsBetter, 1.50, Some(10.0)),
@@ -294,8 +305,13 @@ pub fn default_budgets() -> Vec<BudgetRule> {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VerdictOutcome {
+    /// Both sides measured the metric and the candidate is within budget.
     Pass,
+    /// The candidate breached a budget, or lost a measurement the baseline
+    /// recorded (skipped scenario or absent metric) under a fail-closed rule.
     Violation,
+    /// One side has no measurement to compare: the baseline, or the
+    /// candidate under a rule that is not fail-closed. Never a failure.
     NotComparable,
 }
 
@@ -406,22 +422,32 @@ fn evaluate(baseline: &PerfBaselineV1, candidate: &PerfBaselineV1, rule: &Budget
             );
         }
     };
+    // The baseline measured this metric, so a candidate without it lost
+    // coverage rather than hit an environment limit both runs share. Fail
+    // closed: a candidate that stalls so badly its benchmark never completes
+    // must not pass the gate by producing no numbers at all. Rules whose
+    // metric depends on the recording conditions opt out; see `fail_closed`.
+    let lost = if rule.fail_closed {
+        VerdictOutcome::Violation
+    } else {
+        VerdictOutcome::NotComparable
+    };
     let cand = match metric_of(candidate, rule.scenario, rule.metric) {
         Ok(Some(value)) => value,
         Ok(None) => {
             return verdict(
-                VerdictOutcome::NotComparable,
+                lost,
                 Some(base),
                 None,
-                "metric absent from candidate".into(),
+                format!("candidate lost a metric the baseline recorded ({base:.3})"),
             );
         }
         Err(reason) => {
             return verdict(
-                VerdictOutcome::NotComparable,
+                lost,
                 Some(base),
                 None,
-                format!("candidate: {reason}"),
+                format!("candidate lost a measurement the baseline recorded ({base:.3}): {reason}"),
             );
         }
     };
@@ -681,6 +707,142 @@ mod tests {
             .find(|verdict| verdict.scenario == "allocation_steady")
             .unwrap();
         assert_eq!(alloc.outcome, VerdictOutcome::NotComparable);
+    }
+
+    #[test]
+    fn a_candidate_that_skipped_a_recorded_scenario_fails_the_gate() {
+        let baseline = snapshot(&[(
+            "steady_frame",
+            recorded(&[("frame_time_p95_ms", 2.0), ("fps_avg", 60.0)]),
+        )]);
+        let stalled = snapshot(&[(
+            "steady_frame",
+            ScenarioResult::skipped("benchmark did not complete within 300s"),
+        )]);
+        let report = compare(&baseline, &stalled, &default_budgets()).unwrap();
+        assert!(!report.passed);
+        let lost = report
+            .verdicts
+            .iter()
+            .find(|verdict| verdict.metric == "frame_time_p95_ms")
+            .unwrap();
+        assert_eq!(lost.outcome, VerdictOutcome::Violation);
+        assert_eq!(lost.baseline, Some(2.0));
+        assert_eq!(lost.candidate, None);
+        assert!(lost.detail.contains("did not complete within 300s"));
+
+        // A scenario missing from the candidate entirely is the same loss.
+        let report = compare(&baseline, &snapshot(&[]), &default_budgets()).unwrap();
+        assert!(!report.passed);
+    }
+
+    #[test]
+    fn a_candidate_missing_a_recorded_metric_fails_the_gate() {
+        let baseline = snapshot(&[(
+            "steady_frame",
+            recorded(&[("frame_time_p95_ms", 2.0), ("fps_avg", 60.0)]),
+        )]);
+        let candidate = snapshot(&[("steady_frame", recorded(&[("fps_avg", 60.0)]))]);
+        let report = compare(&baseline, &candidate, &default_budgets()).unwrap();
+        assert!(!report.passed);
+        let lost = report
+            .verdicts
+            .iter()
+            .find(|verdict| verdict.metric == "frame_time_p95_ms")
+            .unwrap();
+        assert_eq!(lost.outcome, VerdictOutcome::Violation);
+        assert_eq!(lost.candidate, None);
+    }
+
+    #[test]
+    fn a_candidate_gaining_a_scenario_the_baseline_skipped_is_not_a_failure() {
+        let baseline = snapshot(&[(
+            "allocation_steady",
+            ScenarioResult::skipped("allocation counter not compiled in"),
+        )]);
+        let candidate = snapshot(&[("allocation_steady", recorded(&[("allocs_per_frame", 3.0)]))]);
+        let report = compare(&baseline, &candidate, &default_budgets()).unwrap();
+        assert!(report.passed);
+        let alloc = report
+            .verdicts
+            .iter()
+            .find(|verdict| verdict.scenario == "allocation_steady")
+            .unwrap();
+        assert_eq!(alloc.outcome, VerdictOutcome::NotComparable);
+    }
+
+    #[test]
+    fn a_candidate_without_input_timestamps_is_not_comparable_rather_than_failing() {
+        // An interactive baseline session observed input; a scripted
+        // candidate recorded right after a restart saw none. Nothing
+        // regressed, so the gate must not fail on it.
+        let baseline = snapshot(&[
+            (
+                "steady_frame",
+                recorded(&[("frame_time_p95_ms", 2.0), ("fps_avg", 60.0)]),
+            ),
+            (
+                "input_latency",
+                recorded(&[
+                    ("input_latency_p50_ms", 4.0),
+                    ("input_latency_p95_ms", 8.0),
+                    ("input_latency_p99_ms", 12.0),
+                ]),
+            ),
+        ]);
+        let candidate = snapshot(&[
+            (
+                "steady_frame",
+                recorded(&[("frame_time_p95_ms", 2.0), ("fps_avg", 60.0)]),
+            ),
+            (
+                "input_latency",
+                ScenarioResult::skipped(
+                    "no input-to-present timestamps observed during the window",
+                ),
+            ),
+        ]);
+        let report = compare(&baseline, &candidate, &default_budgets()).unwrap();
+        assert!(report.passed);
+        let latency: Vec<_> = report
+            .verdicts
+            .iter()
+            .filter(|verdict| verdict.scenario == "input_latency")
+            .collect();
+        assert_eq!(latency.len(), 3);
+        for verdict in latency {
+            assert_eq!(verdict.outcome, VerdictOutcome::NotComparable);
+            assert!(verdict.detail.contains("no input-to-present timestamps"));
+        }
+    }
+
+    #[test]
+    fn a_candidate_built_without_the_allocation_counter_is_not_comparable() {
+        let baseline = snapshot(&[("allocation_steady", recorded(&[("allocs_per_frame", 3.0)]))]);
+        let candidate = snapshot(&[(
+            "allocation_steady",
+            ScenarioResult::skipped("allocation counter not compiled in"),
+        )]);
+        let report = compare(&baseline, &candidate, &default_budgets()).unwrap();
+        assert!(report.passed);
+        let alloc = report
+            .verdicts
+            .iter()
+            .find(|verdict| verdict.scenario == "allocation_steady")
+            .unwrap();
+        assert_eq!(alloc.outcome, VerdictOutcome::NotComparable);
+    }
+
+    #[test]
+    fn only_condition_dependent_scenarios_opt_out_of_failing_closed() {
+        for rule in default_budgets() {
+            let optional = matches!(rule.scenario, "input_latency" | "allocation_steady");
+            assert_eq!(
+                rule.fail_closed, !optional,
+                "{}/{}",
+                rule.scenario, rule.metric
+            );
+        }
     }
 
     #[test]

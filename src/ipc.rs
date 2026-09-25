@@ -240,6 +240,7 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "togglebar",
         "togglecompositor",
         "togglefloating",
+        "togglemaximize",
         "togglepartialdamage",
         "togglepip",
         "togglescratchpad",
@@ -497,6 +498,10 @@ pub struct WindowInfo {
     pub is_urgent: bool,
     pub is_sticky: bool,
     pub is_pip: bool,
+    /// Both maximize axes are set (what xdg/wlr call maximized).
+    pub is_maximized: bool,
+    pub is_maximized_vert: bool,
+    pub is_maximized_horz: bool,
     /// True only for JWM's semantic minimized state. Windows parked off-screen
     /// because their tag is not selected are not minimized.
     pub is_minimized: bool,
@@ -575,6 +580,7 @@ pub fn dispatch_command(name: &str, args: &Value) -> Result<(WMFuncType, WMArgEn
         "togglefloating" => Ok((Jwm::togglefloating, parse_int_arg(args, 0)?)),
         "togglesticky" => Ok((Jwm::togglesticky, parse_int_arg(args, 0)?)),
         "togglepip" => Ok((Jwm::togglepip, parse_int_arg(args, 0)?)),
+        "togglemaximize" => Ok((Jwm::togglemaximize, parse_int_arg(args, 0)?)),
         "togglescratchpad" => {
             let cmd = if argument_is_omitted(args) {
                 vec!["term".to_string()]
@@ -622,10 +628,16 @@ pub fn dispatch_command(name: &str, args: &Value) -> Result<(WMFuncType, WMArgEn
         "togglebar" => Ok((Jwm::togglebar, parse_int_arg(args, 0)?)),
 
         // --- Tags ---
-        "view" => Ok((Jwm::view, parse_uint_arg(args)?)),
-        "tag" => Ok((Jwm::tag, parse_uint_arg(args)?)),
-        "toggleview" => Ok((Jwm::toggleview, parse_uint_arg(args)?)),
-        "toggletag" => Ok((Jwm::toggletag, parse_uint_arg(args)?)),
+        "view" => Ok((Jwm::view, parse_configured_tag_mask_arg("view", args)?)),
+        "tag" => Ok((Jwm::tag, parse_configured_tag_mask_arg("tag", args)?)),
+        "toggleview" => Ok((
+            Jwm::toggleview,
+            parse_configured_tag_mask_arg("toggleview", args)?,
+        )),
+        "toggletag" => Ok((
+            Jwm::toggletag,
+            parse_configured_tag_mask_arg("toggletag", args)?,
+        )),
         "loopview" => Ok((Jwm::loopview, parse_int_arg(args, 1)?)),
         "window_switcher" => Ok((Jwm::window_switcher, parse_int_arg(args, 1)?)),
 
@@ -782,9 +794,31 @@ fn parse_float_arg(args: &Value, default: f32) -> Result<WMArgEnum, String> {
     Ok(WMArgEnum::Float(parsed as f32))
 }
 
-fn parse_uint_arg(args: &Value) -> Result<WMArgEnum, String> {
+/// Parse the tag mask of `view`/`tag`/`toggleview`/`toggletag` and check it
+/// against the running configuration's `tagmask()`.
+///
+/// The shape checks run first on purpose: `is_known_command` probes every
+/// command with `null`, and config validation calls it while `CONFIG` itself
+/// is still being initialised, so a missing argument must be rejected before
+/// the global is touched.
+fn parse_configured_tag_mask_arg(command: &str, args: &Value) -> Result<WMArgEnum, String> {
+    let mask = parse_tag_mask_value(command, args)?;
+    validate_tag_mask(command, mask, crate::config::CONFIG.load().tagmask())?;
+    Ok(WMArgEnum::UInt(mask))
+}
+
+/// Extract the required, non-zero u32 tag mask of a tag command.
+///
+/// Unlike the optional scalar commands there is no sensible default here:
+/// JWM's `view(0)` does not mean "previous tagset" as it does in dwm, it
+/// changes nothing. Treating an omitted mask as 0 made the call report
+/// success while `view` still announced `tag/view` with tag 0 (no tag
+/// visible) and `tag` silently left the window where it was.
+fn parse_tag_mask_value(command: &str, args: &Value) -> Result<u32, String> {
     let Some(value) = scalar_arg_value(args, &["tag", "value", "v"], "a u32 tag mask")? else {
-        return Ok(WMArgEnum::UInt(0));
+        return Err(format!(
+            "{command} requires a tag mask (bit N selects tag N+1), e.g. {{\"tag\": 1}}"
+        ));
     };
     let Value::Number(number) = value else {
         return Err(format!("expected a u32 tag mask, got {value}"));
@@ -796,7 +830,27 @@ fn parse_uint_arg(args: &Value) -> Result<WMArgEnum, String> {
     };
     let parsed =
         u32::try_from(parsed).map_err(|_| format!("tag mask {value} is outside the u32 range"))?;
-    Ok(WMArgEnum::UInt(parsed))
+    if parsed == 0 {
+        return Err(format!("{command}: tag mask 0 selects no tag"));
+    }
+    Ok(parsed)
+}
+
+/// Reject a mask with no bit inside the configured tags.
+///
+/// Every tag executor intersects its argument with `tagmask()`, so a mask
+/// whose only bits lie above `tags_length` degrades into the same silent
+/// no-op as mask 0. Masks with at least one bit in range stay accepted
+/// unchanged: key bindings pass `!0` for "all tags" and rely on that
+/// intersection.
+fn validate_tag_mask(command: &str, mask: u32, tagmask: u32) -> Result<(), String> {
+    if mask & tagmask == 0 {
+        return Err(format!(
+            "{command}: tag mask {mask:#x} has no bit within the {} configured tags (valid bits: {tagmask:#x})",
+            tagmask.count_ones()
+        ));
+    }
+    Ok(())
 }
 
 fn parse_string_vec_arg(args: &Value) -> Result<Vec<String>, String> {
@@ -985,6 +1039,9 @@ mod tests {
             is_urgent: false,
             is_sticky: false,
             is_pip: false,
+            is_maximized: false,
+            is_maximized_vert: true,
+            is_maximized_horz: false,
             is_minimized: true,
             is_focused: false,
         })
@@ -992,6 +1049,9 @@ mod tests {
 
         assert_eq!(value["is_minimized"], true);
         assert!(value.get("is_hidden").is_none());
+        assert_eq!(value["is_maximized"], false);
+        assert_eq!(value["is_maximized_vert"], true);
+        assert_eq!(value["is_maximized_horz"], false);
     }
 
     #[test]
@@ -1049,6 +1109,18 @@ mod tests {
             Jwm::take_screenshot_fullscreen as WMFuncType
         ));
         assert_eq!(arg, WMArgEnum::Int(0));
+    }
+
+    #[test]
+    fn dispatch_togglemaximize_command() {
+        let (command, arg) = dispatch_command("togglemaximize", &serde_json::Value::Null).unwrap();
+        assert!(std::ptr::fn_addr_eq(
+            command,
+            Jwm::togglemaximize as WMFuncType
+        ));
+        assert_eq!(arg, WMArgEnum::Int(0));
+        assert!(is_known_command("togglemaximize"));
+        assert!(IPC_REGISTRY.dispatch_commands.contains(&"togglemaximize"));
     }
 
     #[test]
@@ -1175,8 +1247,65 @@ mod tests {
 
         let (_, arg) = dispatch_command("view", &serde_json::json!({"tag": u32::MAX})).unwrap();
         assert_eq!(arg, WMArgEnum::UInt(u32::MAX));
-        let (_, arg) = dispatch_command("view", &serde_json::Value::Null).unwrap();
-        assert_eq!(arg, WMArgEnum::UInt(0));
+    }
+
+    #[test]
+    fn tag_commands_require_a_mask_that_selects_a_configured_tag() {
+        // Regression: an omitted, zero or out-of-range mask used to dispatch
+        // as a "successful" no-op, and `view` then broadcast `tag/view` with
+        // tag 0. Bit 31 is outside every valid configuration because
+        // `tags_length` is clamped to 1..=31, so this holds whatever the
+        // global config is.
+        for command in ["view", "tag", "toggleview", "toggletag"] {
+            for args in [
+                serde_json::Value::Null,
+                serde_json::json!({}),
+                serde_json::json!({"tag": null}),
+                serde_json::json!(0),
+                serde_json::json!({"tag": 0}),
+                serde_json::json!({"value": 0}),
+                serde_json::json!(1u32 << 31),
+                serde_json::json!({"tag": 1u32 << 31}),
+            ] {
+                let error = dispatch_command(command, &args)
+                    .err()
+                    .unwrap_or_else(|| panic!("{command} accepted empty tag mask {args}"));
+                assert!(
+                    error.starts_with(command),
+                    "error for {command} {args} should name the command: {error}"
+                );
+            }
+            assert!(
+                is_known_command(command),
+                "a required mask must not make {command} look unknown"
+            );
+
+            // Tag 1 exists in every configuration, and `!0` is what the
+            // default key bindings pass for "all tags".
+            let (_, arg) = dispatch_command(command, &serde_json::json!({"tag": 1})).unwrap();
+            assert_eq!(arg, WMArgEnum::UInt(1));
+            let (_, arg) = dispatch_command(command, &serde_json::json!(u32::MAX)).unwrap();
+            assert_eq!(arg, WMArgEnum::UInt(u32::MAX));
+        }
+    }
+
+    #[test]
+    fn tag_mask_validation_uses_the_configured_tag_range() {
+        let nine_tags = (1u32 << 9) - 1;
+        // Tag 10 when only nine tags exist selects nothing.
+        let error = validate_tag_mask("view", 1 << 9, nine_tags).unwrap_err();
+        assert!(error.contains("0x200"), "unexpected error: {error}");
+        assert!(
+            error.contains("9 configured tags"),
+            "unexpected error: {error}"
+        );
+        // A mask with at least one bit in range stays accepted unchanged;
+        // the executors intersect it with the tag mask themselves.
+        assert!(validate_tag_mask("view", 1 << 8, nine_tags).is_ok());
+        assert!(validate_tag_mask("tag", (1 << 9) | 1, nine_tags).is_ok());
+        assert!(validate_tag_mask("toggleview", u32::MAX, nine_tags).is_ok());
+        assert!(validate_tag_mask("toggletag", 1 << 30, (1u32 << 31) - 1).is_ok());
+        assert!(validate_tag_mask("toggletag", 1 << 1, 1).is_err());
     }
 
     #[test]

@@ -116,6 +116,21 @@ tools/jwm_remote.rs         separate trusted-LAN X11 helper
   clients are never reintroduced into the stack. Above/Below requests are
   mutually exclusive, adopt existing EWMH flags on manage, and roll back both
   protocol properties and the cached order when a property or restack fails.
+- Maximize requests from native X11, xdg-shell, XWayland and
+  wlr-foreign-toplevel enter one `WindowMaximizeRequest` event; the shared X11
+  `_NET_WM_STATE` expander coalesces a message naming both maximize atoms into
+  one request instead of two per-axis transactions. `core::maximize` plans
+  admission and geometry as pure functions, and `jwm::maximize` executes them as
+  a snapshot/rollback transaction around a dedicated restore slot
+  (`maximize_restore_rect`) that never shares storage with the fullscreen,
+  floating/PiP or parking rectangles. Protocol callbacks do not pre-confirm:
+  accepted state is published through `PropertyOps::set_maximized_state`, and a
+  rolled-back transition republishes the previous axes. Every xdg set/unset
+  request is answered with a configure — the request marks the reply as owed,
+  and a backstop after each run loop's pending-event drain answers any request
+  that policy dropped without replying. `arrange` refits maximized windows
+  whenever the work area changes (struts, docks, the bar, the tab bar, output
+  resize).
 - Versioned runtime health and capability snapshots expose the actual selected
   backend and supported control surface without changing legacy IPC envelopes.
 - Session snapshots use an atomic private state store, validate schema and

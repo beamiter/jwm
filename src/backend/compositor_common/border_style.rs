@@ -98,7 +98,11 @@ pub(crate) fn window_border_style(inputs: &WindowBorderInputs) -> Option<BorderS
     if !ordinary && !special {
         return None;
     }
-    let style = if let Some(progress) = inputs.focus_highlight_progress {
+    // The pulse blends into the ordinary focused border, so it only runs
+    // while that border exists. With ordinary borders off it would ramp from
+    // a zero width (no border at all on its first and last frames) and hide
+    // the PiP or attention frame the window keeps otherwise.
+    let style = if let Some(progress) = inputs.focus_highlight_progress.filter(|_| ordinary) {
         focus_highlight_style(
             inputs.focused_color,
             inputs.highlight_color,
@@ -272,5 +276,44 @@ mod tests {
             ..inputs()
         };
         assert_eq!(window_border_style(&zero_width), None);
+    }
+
+    #[test]
+    fn focus_pulse_leaves_signal_frames_alone_while_ordinary_borders_are_off() {
+        let attention = AttentionBorderStyle {
+            color: [1.0, 0.0, 0.0, 0.5],
+            width: 4.0,
+        };
+        // Borders disabled outright, and borders "on" but with a zero width
+        // (smart borders hand a lone client the same zero): both leave the
+        // pulse nothing to blend into.
+        for (ordinary_enabled, ordinary_width) in [(false, 2.0), (true, 0.0)] {
+            for progress in [0.0, 0.25, 0.5, 1.0] {
+                let pip = WindowBorderInputs {
+                    is_focused: true,
+                    is_pip: true,
+                    focus_highlight_progress: Some(progress),
+                    ordinary_enabled,
+                    ordinary_width,
+                    ..inputs()
+                };
+                let style = window_border_style(&pip)
+                    .unwrap_or_else(|| panic!("PiP frame dropped at pulse {progress}"));
+                assert_eq!((style.color, style.width), (PIP, 3.0), "{progress}");
+                assert!(!style.ordinary_focused);
+
+                let urgent = WindowBorderInputs {
+                    attention: Some(attention),
+                    ..pip
+                };
+                let style = window_border_style(&urgent)
+                    .unwrap_or_else(|| panic!("attention frame dropped at pulse {progress}"));
+                assert_eq!(
+                    (style.color, style.width),
+                    (attention.color, attention.width),
+                    "{progress}"
+                );
+            }
+        }
     }
 }

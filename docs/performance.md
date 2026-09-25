@@ -17,8 +17,15 @@ Two principles carry the whole contract:
    curve.
 2. **Skips are recorded, not silent.** A scenario the running session cannot
    measure (no compositor, counter not compiled in, no input timestamps) is
-   written into the baseline as `skipped` with its reason. Comparison reports
-   such pairs as *not comparable* instead of quietly passing them.
+   written into the baseline as `skipped` with its reason. When the baseline
+   has no measurement either, comparison reports the pair as *not
+   comparable* instead of quietly passing it. A skip only in the candidate —
+   the baseline measured the scenario — is a regression, not a
+   not-comparable pair, with two exceptions whose presence depends on how
+   the session was recorded: `input_latency` (the session saw input before
+   or during the window) and `allocation_steady` (a jwm built with
+   `alloc-counter`). A candidate that lacks only those is reported as not
+   comparable.
 
 ## Recording
 
@@ -35,6 +42,35 @@ players and animations, and do not interact with the session during the
 sampling window. The `steady_frame` scenario measures the compositor under
 *ambient* damage by default, which makes its absolute numbers workload
 dependent — compare like against like (see the workload note below).
+
+A session without an active compositor, or one that refuses to start the
+benchmark (another benchmark already running, for example), does not abort
+the recording: the compositor scenarios are written as `skipped` with that
+reason and the baseline, idle measurement included, is still saved.
+
+A benchmark that overruns its 300-second deadline is stopped rather than left
+running. Its partial frame numbers are discarded (`steady_frame` is written as
+`skipped`: the benchmark did not complete), but the report `benchmark stop`
+returns still supplies the label's GPU, driver and resolution. An overdue
+candidate therefore keeps the label of a completed baseline from the same
+system, and `compare` prints its lost frame times as `[FAIL]`. A run that got
+no report at all (no compositor, a refused start) labels the GPU and driver
+from host fallbacks and the resolution from the extent the `get_monitors`
+entries span. The fallbacks are the GPU model and driver version the NVIDIA
+kernel module reports; elsewhere only the driver is known, as the name of
+the DRM driver bound to `card0`. Those host strings are not the
+`GL_RENDERER`/`GL_VERSION` strings a benchmark report carries, so `compare`
+refuses such a run against a compositor baseline, as unlabeled or as a
+different system, rather than printing `[FAIL]`.
+
+On a composited session, `--waterlily-workload` first asks
+`get_waterlily_status`. When WaterLily is unavailable (no Wayland backend has
+it), no WaterLily worker is connected, or `toggle_waterlily` does not take
+effect, the compositor scenarios are written as `skipped` with
+`waterlily workload unavailable: <reason>` instead of measuring ambient
+damage for a paced-workload baseline. An animation that is already running is
+used as is and left running; WaterLily is switched back off only when the
+recording switched it on, whether or not the benchmark then started.
 
 ## Scenarios
 
@@ -58,8 +94,9 @@ label cannot capture this, so the recording protocol must: record baselines
 and candidates under the same conditions, and sanity-check `fps_avg` against
 `refresh_hz` before trusting a frame-time comparison. For a deterministic
 paced workload, `--waterlily-workload` enables the built-in continuous
-animation for the duration of the benchmark window (visible on screen while
-it runs).
+animation for the duration of the benchmark window, or uses the one already
+running (visible on screen either way; see Recording for when it is
+unavailable).
 
 ## Budgets (v1)
 
@@ -79,9 +116,18 @@ it runs).
   a different label anyway.
 
 Violating any budget makes `perf compare` exit non-zero, so it can gate a CI
-job or a release checklist. `NotComparable` entries (skipped scenarios,
-missing metrics) never pass silently as green — they are printed, and the
-overall verdict considers only genuinely evaluated budgets.
+job or a release checklist. A candidate that lost a measurement the baseline
+recorded — the scenario skipped or absent, or the metric missing — is a
+violation too: it is printed as `[FAIL]` with the candidate's skip reason and
+fails the gate, because a regression that stops the benchmark from running
+must not read as green. The exceptions are `input_latency`, which exists only
+when the session saw input, and `allocation_steady`, which exists only in a
+jwm built with `alloc-counter`: a candidate that lacks only those is printed
+as `n/a`, and a stalled benchmark still fails the gate through
+`steady_frame`. Every other scenario fails closed. Otherwise `NotComparable`
+(printed as `n/a`, never failing) is reserved for pairs where the baseline
+itself has no measurement, for example `allocation_steady` skipped on both
+sides, or a scenario the candidate gained.
 
 ## Baselines
 

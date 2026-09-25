@@ -854,8 +854,13 @@ impl crate::jwm::Jwm {
                 };
                 // A swallowed terminal is standing in for its child, and a
                 // scratchpad parked on no tag at all cannot be revealed
-                // without duplicating the scratchpad's own show logic.
-                if client.state.is_swallowed || (client.state.tags == 0 && !client.state.is_sticky)
+                // without duplicating the scratchpad's own show logic. A
+                // managed dock or desktop-type window is shell chrome on
+                // every tag: activating its row would focus the bar.
+                if client.state.is_swallowed
+                    || client.state.is_dock
+                    || client.state.is_desktop
+                    || (client.state.tags == 0 && !client.state.is_sticky)
                 {
                     continue;
                 }
@@ -1424,5 +1429,49 @@ mod tests {
             format_result(evaluate("10/3").expect("value")),
             "3.3333333333"
         );
+    }
+
+    /// A managed bar (DOCK) or desktop icon layer (DESKTOP) carries every
+    /// tag bit, so without the chrome check it got a row that focused the
+    /// panel. Only real windows are listed.
+    #[test]
+    fn window_rows_leave_out_managed_docks_and_desktop_windows() {
+        use crate::backend::common_define::WindowId;
+        use crate::core::models::WMClient;
+        use crate::jwm::monitor::test_support::{DisplaySpyBackend, output};
+
+        let mut backend = DisplaySpyBackend::new(vec![output(1, 0, 0, 1920, 1080)]);
+        let mut jwm = crate::Jwm::new_with_runtime_backend(&mut backend, "test").expect("test jwm");
+        let monitor = jwm
+            .state
+            .sel_mon
+            .expect("the output became the selected monitor");
+        for (raw, dock, desktop) in [
+            (0x6a01_u64, true, false),
+            (0x6a02, false, true),
+            (0x6a03, false, false),
+        ] {
+            let mut client = WMClient::new(WindowId::from_raw(raw));
+            client.mon = Some(monitor);
+            client.name = format!("window-{raw:x}");
+            client.state.is_dock = dock;
+            client.state.is_desktop = desktop;
+            if dock || desktop {
+                client.state.is_floating = true;
+                client.state.never_focus = true;
+                client.state.tags = u32::MAX;
+            } else {
+                client.state.tags = 0b1;
+            }
+            let key = jwm.insert_client(client);
+            jwm.attach_to_monitor(key, monitor);
+        }
+
+        let rows: Vec<u64> = jwm
+            .launcher_window_snapshot()
+            .into_iter()
+            .map(|entry| entry.id)
+            .collect();
+        assert_eq!(rows, vec![0x6a03]);
     }
 }

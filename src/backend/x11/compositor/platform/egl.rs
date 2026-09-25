@@ -390,11 +390,20 @@ impl EglPlatform {
     }
 
     pub(super) fn set_damage_region(&self, damage: &[EglInt]) -> bool {
+        // Without a KHR_partial_update entry point nothing needs announcing:
+        // partial rendering stays safe whenever the pixels outside the repair
+        // scissor are known, either through EXT_buffer_age or because the
+        // surface preserves its back buffer across swaps. The preserved-swap
+        // fallback is only ever enabled when both extensions are missing, and
+        // reporting it unsafe here turned every one of its frames into a full
+        // redraw on top of the driver's preserve copy.
+        let partial_redraw_safe_without_khr =
+            self.ext_buffer_age_supported || self.buffer_preserved;
         let Some(set_damage_region) = self.set_damage_region.get() else {
-            return self.ext_buffer_age_supported;
+            return partial_redraw_safe_without_khr;
         };
         let Some(rect_count) = egl_damage_rect_count(damage) else {
-            return self.ext_buffer_age_supported;
+            return partial_redraw_safe_without_khr;
         };
         if unsafe { set_damage_region(self.display, self.surface, damage.as_ptr(), rect_count) }
             != EGL_FALSE
@@ -838,6 +847,38 @@ mod tests {
             gles_library: ptr::null_mut(),
             output_is_10bit: false,
         }
+    }
+
+    #[test]
+    fn preserved_swap_fallback_keeps_partial_redraw_safe() {
+        // No EXT_buffer_age and no eglSetDamageRegionKHR: the constructor
+        // falls back to EGL_BUFFER_PRESERVED, reports a buffer age of one so
+        // the renderer builds a repair scissor, and the damage-region check
+        // must then let that scissor stand.
+        let preserved = EglPlatform {
+            buffer_preserved: true,
+            ..fake_egl_platform()
+        };
+        assert_eq!(preserved.buffer_age(), 1);
+        assert!(preserved.set_damage_region(&[0, 0, 10, 10]));
+        // A malformed rectangle list still leaves the preserved pixels intact.
+        assert!(preserved.set_damage_region(&[0, 0, 10]));
+    }
+
+    #[test]
+    fn surface_without_reuse_guarantee_forces_full_redraw() {
+        // Neither buffer age nor a preserved back buffer: nothing outside a
+        // scissor is known, so partial rendering must be refused.
+        let plain = fake_egl_platform();
+        assert_eq!(plain.buffer_age(), 0);
+        assert!(!plain.set_damage_region(&[0, 0, 10, 10]));
+
+        // EXT_buffer_age alone is sufficient without KHR_partial_update.
+        let buffer_age_only = EglPlatform {
+            ext_buffer_age_supported: true,
+            ..fake_egl_platform()
+        };
+        assert!(buffer_age_only.set_damage_region(&[0, 0, 10, 10]));
     }
 
     #[test]

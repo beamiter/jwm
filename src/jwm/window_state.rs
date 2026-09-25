@@ -5,6 +5,7 @@ use crate::backend::api::{
 };
 use crate::backend::common_define::{SchemeType, WindowId};
 use crate::config::CONFIG;
+use crate::core::maximize::{maximize_target, mirror_free_axes};
 use crate::core::models::{ClientKey, WMClient};
 use crate::core::types::Rect;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -128,12 +129,26 @@ fn minimized_restore_snapshot(
         client.geometry.h,
     ));
     let visible_rect = persistable_restore_rect(visible.x, visible.y, visible.w, visible.h)?;
-    let floating_rect = persistable_restore_rect(
-        client.geometry.floating_x,
-        client.geometry.floating_y,
-        client.geometry.floating_w,
-        client.geometry.floating_h,
-    );
+    // A maximized floating client's floating slot is its pre-maximize rect
+    // (invariant M4), but read the maximize restore rect explicitly rather
+    // than trusting that: adoption after a seamless exec uses it as the
+    // restore hint. PiP owns `floating_*` as its return slot, and a promoted
+    // client (which never lends that slot to PiP) keeps its pre-promotion
+    // floating rect there, so both keep today's floating rect.
+    let maximize_restore = client.geometry.maximize_restore_rect.filter(|_| {
+        client.state.maximized_axes().any()
+            && !client.state.is_pip
+            && !client.state.maximize_restore_tiled
+    });
+    let floating_rect = match maximize_restore {
+        Some(restore) => persistable_restore_rect(restore.x, restore.y, restore.w, restore.h),
+        None => persistable_restore_rect(
+            client.geometry.floating_x,
+            client.geometry.floating_y,
+            client.geometry.floating_w,
+            client.geometry.floating_h,
+        ),
+    };
     if client.state.is_pip && floating_rect.is_none() {
         return None;
     }
@@ -148,16 +163,36 @@ fn minimized_restore_snapshot(
         None
     };
 
+    // A promoted client rests tiled: its `is_floating` is the promotion's,
+    // and it re-tiles on unmaximize. Persist the resting state, as a visible
+    // promoted window is saved, so a restart refuses the adopted maximize
+    // under a tiling layout (and promotes again under FLOAT) instead of
+    // admitting it as a floating window. Fullscreen and PiP own `is_floating`
+    // while active; the resting state is then their `old_state`.
+    let resting_tiled = client.state.maximized_axes().any() && client.state.maximize_restore_tiled;
+    let suspended = client.state.is_fullscreen || client.state.is_pip;
+    let (is_floating, old_state) = if suspended {
+        (
+            client.state.is_floating,
+            client.state.old_state && !resting_tiled,
+        )
+    } else {
+        (
+            client.state.is_floating && !resting_tiled,
+            client.state.old_state,
+        )
+    };
+
     Some(MinimizedRestoreState {
         tags: client.state.tags,
         monitor_num: monitor_num.unwrap_or(-1),
         visible_rect,
-        is_floating: client.state.is_floating,
+        is_floating,
         is_drag_floating: client.state.is_drag_floating,
         floating_rect,
         is_pip: client.state.is_pip,
         pip_restore_sticky: client.state.pip_restore_sticky,
-        old_state: client.state.old_state,
+        old_state,
         fullscreen_restore_rect,
         minimized_order,
     })
@@ -178,7 +213,7 @@ impl Jwm {
     /// setter: a backend failure may still be active, and recursively trying
     /// the inverse transition would otherwise leave the client in the neutral
     /// state between fullscreen and PiP.
-    fn restore_failed_mode_transition(
+    pub(super) fn restore_failed_mode_transition(
         &mut self,
         backend: &mut dyn Backend,
         client_key: ClientKey,
@@ -213,6 +248,17 @@ impl Jwm {
         self.arrange(backend, monitor);
         install_internal_snapshot(self);
 
+        // Republish maximize before the fullscreen write: on Wayland the
+        // configures that follow then carry the restored Maximized state, and
+        // failed fullscreen/PiP transitions repair the maximize atoms too.
+        if let Err(error) = backend
+            .property_ops()
+            .set_maximized_state(win, previous_client.state.maximized_axes())
+        {
+            log::warn!(
+                "could not restore maximized state after failed transition for {win:?}: {error}"
+            );
+        }
         if let Err(error) = backend
             .property_ops()
             .set_fullscreen_state(win, previous_client.state.is_fullscreen)
@@ -1190,14 +1236,28 @@ impl Jwm {
                 .clients
                 .get(client_key)
                 .ok_or("Client not found")?;
-            valid_restore_rect(
+            let mut rect = Rect::new(
                 client.geometry.floating_x,
                 client.geometry.floating_y,
                 client.geometry.floating_w,
                 client.geometry.floating_h,
-            )
-            .map(|rect| Rect::new(rect.x, rect.y, rect.w, rect.h))
-            .ok_or("PiP client has no valid restore geometry")?
+            );
+            // A promoted maximized client did not lend `floating_*` to PiP
+            // (it holds the pre-promotion floating rect), so it goes back to
+            // its maximized rect on today's work area; the refit in the
+            // arrange below keeps it there.
+            let axes = client.state.maximized_axes();
+            if client.state.maximize_restore_tiled && axes.any() {
+                let restore = client.geometry.maximize_restore_rect.unwrap_or(rect);
+                rect = monitor
+                    .and_then(|monitor| self.maximize_work_area(monitor))
+                    .map_or(restore, |area| {
+                        maximize_target(restore, area, axes, client.geometry.border_w)
+                    });
+            }
+            valid_restore_rect(rect.x, rect.y, rect.w, rect.h)
+                .map(|rect| Rect::new(rect.x, rect.y, rect.w, rect.h))
+                .ok_or("PiP client has no valid restore geometry")?
         };
 
         let previous_client = self
@@ -1227,10 +1287,24 @@ impl Jwm {
                 let visible = pip_source.expect("PiP source was validated");
                 client.state.old_state = client.state.is_floating;
                 client.state.pip_restore_sticky = client.state.is_sticky;
-                client.geometry.floating_x = visible.x;
-                client.geometry.floating_y = visible.y;
-                client.geometry.floating_w = visible.w;
-                client.geometry.floating_h = visible.h;
+                // A promoted maximized client keeps its pre-promotion floating
+                // rect in `floating_*` for when it is floated again after
+                // re-tiling, so PiP must not borrow that slot: leaving PiP
+                // re-derives the maximized rect from the restore rect instead.
+                // Fold the free axes of the visible rect into it, as the refit
+                // would, so a partial maximize comes back where it was.
+                let axes = client.state.maximized_axes();
+                if client.state.maximize_restore_tiled && axes.any() {
+                    if let Some(restore) = client.geometry.maximize_restore_rect {
+                        client.geometry.maximize_restore_rect =
+                            Some(mirror_free_axes(restore, visible, axes));
+                    }
+                } else {
+                    client.geometry.floating_x = visible.x;
+                    client.geometry.floating_y = visible.y;
+                    client.geometry.floating_w = visible.w;
+                    client.geometry.floating_h = visible.h;
+                }
                 client.state.is_pip = true;
                 client.state.is_floating = true;
                 client.state.is_sticky = true;
@@ -1453,6 +1527,10 @@ impl Jwm {
 
         if let Some(c) = self.state.clients.get_mut(client_key) {
             c.state.is_dock = is_dock;
+            // Persisted so window lists (Alt+Tab, launcher) can leave the
+            // desktop layer out: it is floated onto every tag below, exactly
+            // like a dock, and would otherwise get a row on each of them.
+            c.state.is_desktop = is_desktop;
             c.state.dock_layer_info = if is_dock { layer_info } else { None };
 
             if is_popup_like || is_desktop || is_dock {
@@ -1502,7 +1580,17 @@ impl Jwm {
                 // an active policy suppression must clear the source flag.
                 let _ = self.seturgent(backend, client_key, false);
             } else {
-                let _ = self.sync_client_urgent_state(backend, client_key, urgent);
+                // A standing EWMH _NET_WM_STATE_DEMANDS_ATTENTION keeps the
+                // client urgent even after it drops its ICCCM hint: the two
+                // requests are independent, and only focus or an EWMH Remove
+                // withdraws the EWMH one.
+                let demands_attention = self
+                    .state
+                    .clients
+                    .get(client_key)
+                    .is_some_and(|client| client.state.demands_attention);
+                let _ =
+                    self.sync_client_urgent_state(backend, client_key, urgent || demands_attention);
             }
             if let Some(input_ok) = hints.input {
                 if let Some(c) = self.state.clients.get_mut(client_key) {
@@ -1966,6 +2054,91 @@ mod restore_rect_tests {
     }
 
     #[test]
+    fn a_maximized_snapshot_persists_the_restore_rect_except_for_pip_and_promoted_clients() {
+        use crate::backend::api::MaximizeAxes;
+        use crate::core::types::Rect;
+
+        let restore = Rect::new(300, 200, 640, 480);
+        let floating = MinimizedRestoreRect {
+            x: 50,
+            y: 60,
+            w: 700,
+            h: 500,
+        };
+        let maximized = || {
+            let mut client = WMClient::new(WindowId::from_raw(0x4243));
+            client.geometry.x = 0;
+            client.geometry.y = 30;
+            client.geometry.w = 1916;
+            client.geometry.h = 1046;
+            client.geometry.floating_x = floating.x;
+            client.geometry.floating_y = floating.y;
+            client.geometry.floating_w = floating.w;
+            client.geometry.floating_h = floating.h;
+            client.geometry.maximize_restore_rect = Some(restore);
+            client.state.set_maximized_axes(MaximizeAxes::BOTH);
+            client.state.is_floating = true;
+            client
+        };
+
+        // The explicit read wins even when `floating_*` drifted from it.
+        let plain = minimized_restore_snapshot(&maximized(), Some(0), 1).expect("snapshot");
+        assert_eq!(
+            plain.floating_rect,
+            Some(MinimizedRestoreRect {
+                x: restore.x,
+                y: restore.y,
+                w: restore.w,
+                h: restore.h,
+            })
+        );
+        assert!(plain.is_floating);
+
+        // A promoted client is saved in the state it rests in, tiled, like a
+        // visible promoted window, so a restart does not re-admit its
+        // maximize as a floating window's.
+        let mut promoted = maximized();
+        promoted.state.maximize_restore_tiled = true;
+        let promoted = minimized_restore_snapshot(&promoted, Some(0), 1).expect("snapshot");
+        assert_eq!(promoted.floating_rect, Some(floating));
+        assert!(!promoted.is_floating);
+        assert!(!promoted.old_state);
+
+        // Fullscreen and PiP own `is_floating`; the resting state is their
+        // `old_state`, which the promotion had set.
+        for (label, fullscreen, pip) in [("fullscreen", true, false), ("pip", false, true)] {
+            let mut suspended = maximized();
+            suspended.state.maximize_restore_tiled = true;
+            suspended.state.is_fullscreen = fullscreen;
+            suspended.state.is_pip = pip;
+            suspended.state.old_state = true;
+            if fullscreen {
+                suspended.geometry.old_x = 0;
+                suspended.geometry.old_y = 30;
+                suspended.geometry.old_w = 1916;
+                suspended.geometry.old_h = 1046;
+            }
+            let snapshot = minimized_restore_snapshot(&suspended, Some(0), 1).expect(label);
+            assert!(snapshot.is_floating, "{label}");
+            assert!(!snapshot.old_state, "{label}");
+            assert_eq!(snapshot.floating_rect, Some(floating), "{label}");
+        }
+
+        let mut pip = maximized();
+        pip.state.is_pip = true;
+        pip.state.old_state = true;
+        let pip = minimized_restore_snapshot(&pip, Some(0), 1).expect("snapshot");
+        assert_eq!(pip.floating_rect, Some(floating));
+        assert!(pip.is_floating);
+        assert!(pip.old_state, "a plain maximized window rests floating");
+
+        let mut stale = maximized();
+        stale.state.set_maximized_axes(MaximizeAxes::NONE);
+        let stale = minimized_restore_snapshot(&stale, Some(0), 1).expect("snapshot");
+        assert_eq!(stale.floating_rect, Some(floating));
+    }
+
+    #[test]
     fn the_producer_and_the_wire_codec_accept_the_same_rectangles() {
         // The codec lives in the X11 transport, which policy may not import,
         // and the transport may not import policy — so neither side can test
@@ -2080,8 +2253,8 @@ mod tests {
         BackendDiagnostics, Capabilities, CloseResult, ColorAllocator, CompositorAnnotation,
         CompositorBenchmark, CompositorControl, CompositorMedia, CompositorRect,
         CompositorWindowEffects, CompositorWorkspaceEffects, CursorProvider, DisplayControl,
-        EventHandler, InputOps, KeyOps, NetWmState, NormalHints, OutputOps, PropertyOps,
-        RenderScheduler, WindowAttributes, WindowOps, WindowType, WmHints,
+        EventHandler, InputOps, KeyOps, MaximizeAxes, NetWmAction, NetWmState, NormalHints,
+        OutputOps, PropertyOps, RenderScheduler, WindowAttributes, WindowOps, WindowType, WmHints,
     };
     use crate::backend::common_define::Pixel;
     use crate::backend::error::BackendError;
@@ -2089,6 +2262,9 @@ mod tests {
         DummyColorAllocator, DummyCursorProvider, DummyInputOps, DummyKeyOps, DummyOutputOps,
     };
     use crate::core::layout::LayoutEnum;
+    use crate::core::maximize::{
+        MaximizeOrigin, MaximizeSnapshot, initial_restore_rect, maximize_target,
+    };
     use crate::core::models::WMClient;
     use crate::jwm::types::WMArgEnum;
     use std::any::Any;
@@ -2122,6 +2298,14 @@ mod tests {
         minimized_restore: Mutex<Option<MinimizedRestoreState>>,
         minimized_restore_writes: Mutex<Vec<Option<MinimizedRestoreState>>>,
         mode_events: Mutex<Vec<ModeEvent>>,
+        /// Maximize publications, kept apart from `mode_events` so the exact
+        /// fullscreen/PiP event vectors stay what they were.
+        maximized_writes: Mutex<Vec<(WindowId, MaximizeAxes)>>,
+        /// Fail the next `set_maximized_state` (one-shot, so the rollback's
+        /// republish is observable).
+        fail_maximized: AtomicBool,
+        /// What `get_window_types` reports (`_NET_WM_WINDOW_TYPE`).
+        window_types: Mutex<Vec<WindowType>>,
     }
 
     impl PropertyOps for MinimizePropertyOps {
@@ -2134,7 +2318,7 @@ mod tests {
         }
 
         fn get_window_types(&self, _win: WindowId) -> Vec<WindowType> {
-            Vec::new()
+            self.window_types.lock().expect("window types lock").clone()
         }
 
         fn is_fullscreen(&self, _win: WindowId) -> bool {
@@ -2299,6 +2483,21 @@ mod tests {
                 return Err(BackendError::Message("injected EWMH query failure".into()));
             }
             Ok(state == NetWmState::Hidden && self.ewmh_hidden.load(Ordering::Relaxed))
+        }
+
+        fn set_maximized_state(
+            &self,
+            win: WindowId,
+            axes: MaximizeAxes,
+        ) -> Result<(), BackendError> {
+            if self.fail_maximized.swap(false, Ordering::Relaxed) {
+                return Err(BackendError::Message("injected maximize failure".into()));
+            }
+            self.maximized_writes
+                .lock()
+                .expect("maximized writes lock")
+                .push((win, axes));
+            Ok(())
         }
     }
 
@@ -4930,6 +5129,42 @@ mod tests {
         assert!(backend.dock_lifecycle.is_empty());
     }
 
+    /// A `_NET_WM_WINDOW_TYPE_DESKTOP` window is floated onto every tag like
+    /// a dock, and the type is now remembered so window lists can leave it
+    /// out. Retyping it clears the flag again.
+    #[test]
+    fn desktop_window_type_is_persisted_on_the_client() {
+        let mut backend = MinimizeSpyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let monitor = jwm.state.monitor_order[0];
+        let mut client = WMClient::new(WindowId::from_raw(0x5360));
+        client.mon = Some(monitor);
+        client.state.tags = 1;
+        let client_key = jwm.insert_client(client);
+        jwm.attach_to_monitor(client_key, monitor);
+
+        *backend
+            .property_ops
+            .window_types
+            .lock()
+            .expect("window types lock") = vec![WindowType::Desktop];
+        jwm.updatewindowtype(&mut backend, client_key);
+        let state = &jwm.state.clients[client_key].state;
+        assert!(state.is_desktop);
+        assert!(!state.is_dock);
+        assert!(state.is_floating);
+        assert!(state.never_focus);
+        assert_eq!(state.tags, crate::config::CONFIG.load().tagmask());
+
+        *backend
+            .property_ops
+            .window_types
+            .lock()
+            .expect("window types lock") = vec![WindowType::Normal];
+        jwm.updatewindowtype(&mut backend, client_key);
+        assert!(!jwm.state.clients[client_key].state.is_desktop);
+    }
+
     #[test]
     fn hidden_client_changing_to_and_from_dock_type_reuses_reconciliation() {
         let mut backend = MinimizeSpyBackend::new();
@@ -5231,5 +5466,932 @@ mod tests {
             backend.property_ops.wm_state.load(Ordering::Relaxed),
             i64::from(crate::jwm::types::ICONIC_STATE)
         );
+    }
+
+    const MAX_NONE: MaximizeAxes = MaximizeAxes::NONE;
+    const MAX_VERT: MaximizeAxes = MaximizeAxes::VERT;
+    const MAX_HORZ: MaximizeAxes = MaximizeAxes::HORZ;
+    const MAX_BOTH: MaximizeAxes = MaximizeAxes::BOTH;
+
+    fn maximized_writes(backend: &MinimizeSpyBackend) -> Vec<MaximizeAxes> {
+        backend
+            .property_ops
+            .maximized_writes
+            .lock()
+            .expect("maximized writes lock")
+            .iter()
+            .map(|(_, axes)| *axes)
+            .collect()
+    }
+
+    fn window_configures(
+        backend: &MinimizeSpyBackend,
+        window: WindowId,
+    ) -> Vec<(WindowId, i32, i32, u32, u32, u32)> {
+        backend
+            .window_ops
+            .configures
+            .lock()
+            .expect("window configures lock")
+            .iter()
+            .copied()
+            .filter(|configure| configure.0 == window)
+            .collect()
+    }
+
+    fn configure_of(
+        window: WindowId,
+        rect: Rect,
+        border: u32,
+    ) -> (WindowId, i32, i32, u32, u32, u32) {
+        (window, rect.x, rect.y, rect.w as u32, rect.h as u32, border)
+    }
+
+    fn floating_rect_of(jwm: &Jwm, client_key: ClientKey) -> Rect {
+        let client = &jwm.state.clients[client_key];
+        Rect::new(
+            client.geometry.floating_x,
+            client.geometry.floating_y,
+            client.geometry.floating_w,
+            client.geometry.floating_h,
+        )
+    }
+
+    fn old_rect_of(jwm: &Jwm, client_key: ClientKey) -> Rect {
+        let client = &jwm.state.clients[client_key];
+        Rect::new(
+            client.geometry.old_x,
+            client.geometry.old_y,
+            client.geometry.old_w,
+            client.geometry.old_h,
+        )
+    }
+
+    fn restore_rect_of(rect: Rect) -> MinimizedRestoreRect {
+        MinimizedRestoreRect {
+            x: rect.x,
+            y: rect.y,
+            w: rect.w,
+            h: rect.h,
+        }
+    }
+
+    #[test]
+    fn maximize_axes_fill_the_work_area_per_axis_and_restore_exactly() {
+        let mut backend = MinimizeSpyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let monitor = jwm.state.monitor_order[0];
+        let area = jwm.monitor_work_area(monitor).expect("monitor work area");
+        let source = Rect::new(area.x + 91, area.y + 73, 777, 555);
+        let window = WindowId::from_raw(0x5a00);
+        let (_, client_key) = add_mode_client(&mut jwm, window, source, true, false);
+
+        for axes in [MAX_VERT, MAX_BOTH, MAX_HORZ, MAX_NONE] {
+            assert!(
+                jwm.set_client_maximized(&mut backend, client_key, axes, MaximizeOrigin::Client)
+                    .unwrap(),
+                "{axes:?}"
+            );
+            let target = maximize_target(source, area, axes, 2);
+            assert_eq!(client_rect(&jwm, client_key), target, "{axes:?}");
+            let client = &jwm.state.clients[client_key];
+            assert_eq!(client.state.maximized_axes(), axes);
+            assert_eq!(
+                client.geometry.maximize_restore_rect,
+                axes.any().then_some(source),
+                "{axes:?}"
+            );
+            assert!(!client.state.maximize_restore_tiled);
+            assert_eq!(floating_rect_of(&jwm, client_key), source, "{axes:?}");
+            assert_eq!(
+                window_configures(&backend, window).last().copied(),
+                Some(configure_of(window, target, 0)),
+                "{axes:?}"
+            );
+        }
+        assert_eq!(
+            maximized_writes(&backend),
+            vec![MAX_VERT, MAX_BOTH, MAX_HORZ, MAX_NONE]
+        );
+    }
+
+    #[test]
+    fn duplicate_maximize_request_keeps_the_first_restore_rect_and_still_replies() {
+        let mut backend = MinimizeSpyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let monitor = jwm.state.monitor_order[0];
+        let area = jwm.monitor_work_area(monitor).expect("monitor work area");
+        let source = Rect::new(area.x + 60, area.y + 50, 700, 480);
+        let window = WindowId::from_raw(0x5a01);
+        let (_, client_key) = add_mode_client(&mut jwm, window, source, true, false);
+        assert!(
+            jwm.set_client_maximized(&mut backend, client_key, MAX_BOTH, MaximizeOrigin::Client)
+                .unwrap()
+        );
+        let before = jwm.state.clients[client_key].clone();
+        let writes = maximized_writes(&backend).len();
+        let configures = window_configures(&backend, window).len();
+
+        assert!(
+            !jwm.set_client_maximized(&mut backend, client_key, MAX_BOTH, MaximizeOrigin::Client)
+                .unwrap()
+        );
+        assert_eq!(jwm.state.clients[client_key], before);
+        assert_eq!(
+            jwm.state.clients[client_key].geometry.maximize_restore_rect,
+            Some(source)
+        );
+        assert_eq!(maximized_writes(&backend)[writes..], [MAX_BOTH]);
+        assert_eq!(
+            window_configures(&backend, window)[configures..],
+            [configure_of(window, client_rect(&jwm, client_key), 0)]
+        );
+    }
+
+    #[test]
+    fn maximize_failure_matrix_restores_the_exact_original_state() {
+        let mut case = 0_u64;
+        for hidden in [false, true] {
+            for failure in ["property", "configure"] {
+                for (from, to) in [(MAX_NONE, MAX_BOTH), (MAX_BOTH, MAX_NONE)] {
+                    case += 1;
+                    let label = format!("hidden={hidden} {failure} {from:?}->{to:?}");
+                    let mut backend = MinimizeSpyBackend::new();
+                    let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+                    let monitor = jwm.state.monitor_order[0];
+                    let area = jwm.monitor_work_area(monitor).expect("monitor work area");
+                    let source = Rect::new(area.x + 91, area.y + 73, 777, 555);
+                    let window = WindowId::from_raw(0x5a10 + case);
+                    let (_, client_key) = add_mode_client(&mut jwm, window, source, true, false);
+                    if from.any() {
+                        assert!(
+                            jwm.set_client_maximized(
+                                &mut backend,
+                                client_key,
+                                from,
+                                MaximizeOrigin::Client
+                            )
+                            .unwrap()
+                        );
+                    }
+                    if hidden {
+                        assert!(
+                            jwm.set_client_minimized(&mut backend, client_key, true)
+                                .unwrap()
+                        );
+                    }
+                    let before = jwm.state.clients[client_key].clone();
+                    let before_order = jwm.state.monitor_clients[monitor].clone();
+                    let before_v1 = *backend
+                        .property_ops
+                        .minimized_restore
+                        .lock()
+                        .expect("restore snapshot lock");
+                    match failure {
+                        "property" => backend
+                            .property_ops
+                            .fail_maximized
+                            .store(true, Ordering::Relaxed),
+                        "configure" => {
+                            let size = if to.any() {
+                                maximize_target(source, area, to, 2)
+                            } else {
+                                source
+                            };
+                            *backend
+                                .window_ops
+                                .fail_configure_size
+                                .lock()
+                                .expect("configure failure size lock") =
+                                Some((size.w as u32, size.h as u32));
+                        }
+                        _ => unreachable!(),
+                    }
+
+                    assert!(
+                        jwm.set_client_maximized(
+                            &mut backend,
+                            client_key,
+                            to,
+                            MaximizeOrigin::Client
+                        )
+                        .is_err(),
+                        "{label}"
+                    );
+                    assert_eq!(jwm.state.clients[client_key], before, "{label}");
+                    assert_eq!(jwm.state.monitor_clients[monitor], before_order, "{label}");
+                    assert_eq!(
+                        maximized_writes(&backend).last().copied(),
+                        Some(from),
+                        "{label}"
+                    );
+                    if hidden {
+                        assert_eq!(
+                            *backend
+                                .property_ops
+                                .minimized_restore
+                                .lock()
+                                .expect("restore snapshot lock"),
+                            before_v1,
+                            "{label}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn tiled_fullscreen_client_cannot_be_maximized_underneath() {
+        let mut backend = MinimizeSpyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let monitor = jwm.state.monitor_order[0];
+        let area = jwm.monitor_work_area(monitor).expect("monitor work area");
+        let source = Rect::new(area.x + 40, area.y + 30, 640, 480);
+        let window = WindowId::from_raw(0x5a20);
+        let (_, client_key) = add_mode_client(&mut jwm, window, source, false, false);
+        jwm.setfullscreen(&mut backend, client_key, true).unwrap();
+        assert!(!jwm.state.clients[client_key].state.old_state);
+        let old_before = old_rect_of(&jwm, client_key);
+
+        for origin in [MaximizeOrigin::Client, MaximizeOrigin::User] {
+            assert!(
+                !jwm.set_client_maximized(&mut backend, client_key, MAX_BOTH, origin)
+                    .unwrap(),
+                "{origin:?}"
+            );
+            let client = &jwm.state.clients[client_key];
+            assert_eq!(client.state.maximized_axes(), MAX_NONE);
+            assert_eq!(client.geometry.maximize_restore_rect, None);
+            assert!(client.state.is_fullscreen);
+            assert_eq!(old_rect_of(&jwm, client_key), old_before);
+            assert_eq!(maximized_writes(&backend).last().copied(), Some(MAX_NONE));
+        }
+    }
+
+    #[test]
+    fn maximize_request_while_fullscreen_updates_only_the_return_slot() {
+        let mut backend = MinimizeSpyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let monitor = jwm.state.monitor_order[0];
+        let area = jwm.monitor_work_area(monitor).expect("monitor work area");
+        let source = Rect::new(area.x + 120, area.y + 90, 820, 610);
+        let window = WindowId::from_raw(0x5a21);
+        let (_, client_key) = add_mode_client(&mut jwm, window, source, true, false);
+        jwm.setfullscreen(&mut backend, client_key, true).unwrap();
+        let geometry = &jwm.state.monitors[monitor].geometry;
+        let monitor_rect = Rect::new(geometry.m_x, geometry.m_y, geometry.m_w, geometry.m_h);
+        let previous_old = old_rect_of(&jwm, client_key);
+        let old_border_w = jwm.state.clients[client_key].geometry.old_border_w;
+
+        assert!(
+            jwm.set_client_maximized(&mut backend, client_key, MAX_BOTH, MaximizeOrigin::Client)
+                .unwrap()
+        );
+        let target = maximize_target(previous_old, area, MAX_BOTH, old_border_w);
+        let client = &jwm.state.clients[client_key];
+        assert!(client.state.is_fullscreen);
+        assert_eq!(client.state.maximized_axes(), MAX_BOTH);
+        assert_eq!(client.geometry.maximize_restore_rect, Some(previous_old));
+        assert_eq!(client_rect(&jwm, client_key), monitor_rect);
+        assert_eq!(old_rect_of(&jwm, client_key), target);
+        assert_eq!(
+            window_configures(&backend, window).last().copied(),
+            Some(configure_of(window, monitor_rect, 0))
+        );
+
+        jwm.setfullscreen(&mut backend, client_key, false).unwrap();
+        assert_eq!(client_rect(&jwm, client_key), target);
+        assert_eq!(
+            jwm.state.clients[client_key].geometry.maximize_restore_rect,
+            Some(previous_old)
+        );
+    }
+
+    #[test]
+    fn fullscreen_over_maximize_returns_to_the_maximized_rect_and_keeps_restore() {
+        let mut backend = MinimizeSpyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let monitor = jwm.state.monitor_order[0];
+        let area = jwm.monitor_work_area(monitor).expect("monitor work area");
+        let source = Rect::new(area.x + 77, area.y + 66, 690, 470);
+        let window = WindowId::from_raw(0x5a22);
+        let (_, client_key) = add_mode_client(&mut jwm, window, source, true, false);
+        assert!(
+            jwm.set_client_maximized(&mut backend, client_key, MAX_BOTH, MaximizeOrigin::Client)
+                .unwrap()
+        );
+        let target = maximize_target(source, area, MAX_BOTH, 2);
+
+        jwm.setfullscreen(&mut backend, client_key, true).unwrap();
+        jwm.setfullscreen(&mut backend, client_key, false).unwrap();
+        let client = &jwm.state.clients[client_key];
+        assert_eq!(client.state.maximized_axes(), MAX_BOTH);
+        assert_eq!(client.geometry.maximize_restore_rect, Some(source));
+        assert_eq!(client_rect(&jwm, client_key), target);
+
+        assert!(
+            jwm.set_client_maximized(&mut backend, client_key, MAX_NONE, MaximizeOrigin::Client)
+                .unwrap()
+        );
+        assert_eq!(client_rect(&jwm, client_key), source);
+        assert_eq!(floating_rect_of(&jwm, client_key), source);
+    }
+
+    #[test]
+    fn hidden_maximize_stages_parked_geometry_and_persists_the_pre_maximize_floating_rect() {
+        let mut backend = MinimizeSpyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let monitor = jwm.state.monitor_order[0];
+        let area = jwm.monitor_work_area(monitor).expect("monitor work area");
+        let source = Rect::new(area.x + 101, area.y + 83, 720, 500);
+        let window = WindowId::from_raw(0x5a23);
+        let (_, client_key) = add_mode_client(&mut jwm, window, source, true, false);
+        assert!(
+            jwm.set_client_minimized(&mut backend, client_key, true)
+                .unwrap()
+        );
+        let configures = window_configures(&backend, window).len();
+
+        assert!(
+            jwm.set_client_maximized(&mut backend, client_key, MAX_BOTH, MaximizeOrigin::Client)
+                .unwrap()
+        );
+        let target = maximize_target(source, area, MAX_BOTH, 2);
+        let desktop_left = jwm.desktop_left_edge();
+        let after = window_configures(&backend, window)[configures..].to_vec();
+        assert!(
+            !after.is_empty(),
+            "the parked window still gets its new size"
+        );
+        for (_, x, _, w, _, _) in &after {
+            assert!(
+                i64::from(*x) + i64::from(*w) + 4 <= i64::from(desktop_left),
+                "parked configure landed on-screen: {after:?}"
+            );
+        }
+        let client = &jwm.state.clients[client_key];
+        assert!(client.state.is_hidden);
+        assert_eq!(client.geometry.hidden_restore_rect, Some(target));
+        assert_eq!(client.geometry.maximize_restore_rect, Some(source));
+        let snapshot = backend
+            .property_ops
+            .minimized_restore
+            .lock()
+            .expect("restore snapshot lock")
+            .expect("hidden client keeps a V1 snapshot");
+        assert_eq!(snapshot.visible_rect, restore_rect_of(target));
+        assert_eq!(snapshot.floating_rect, Some(restore_rect_of(source)));
+    }
+
+    #[test]
+    fn failed_pip_transition_republishes_the_maximized_state() {
+        let mut backend = MinimizeSpyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let monitor = jwm.state.monitor_order[0];
+        let area = jwm.monitor_work_area(monitor).expect("monitor work area");
+        let source = Rect::new(area.x + 64, area.y + 48, 800, 520);
+        let window = WindowId::from_raw(0x5a24);
+        let (_, client_key) = add_mode_client(&mut jwm, window, source, true, false);
+        assert!(
+            jwm.set_client_maximized(&mut backend, client_key, MAX_BOTH, MaximizeOrigin::Client)
+                .unwrap()
+        );
+        // Cross from fullscreen so the failure runs the shared rollback.
+        jwm.setfullscreen(&mut backend, client_key, true).unwrap();
+        backend
+            .property_ops
+            .maximized_writes
+            .lock()
+            .expect("maximized writes lock")
+            .clear();
+        backend
+            .property_ops
+            .fail_sticky_on
+            .store(true, Ordering::Relaxed);
+        let before = jwm.state.clients[client_key].clone();
+
+        assert!(jwm.set_client_pip(&mut backend, client_key, true).is_err());
+        assert_eq!(jwm.state.clients[client_key], before);
+        assert_eq!(maximized_writes(&backend), vec![MAX_BOTH]);
+    }
+
+    #[test]
+    fn pip_round_trip_returns_maximized_and_the_refit_is_idempotent() {
+        let mut backend = MinimizeSpyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let monitor = jwm.state.monitor_order[0];
+        let area = jwm.monitor_work_area(monitor).expect("monitor work area");
+        let source = Rect::new(area.x + 70, area.y + 60, 710, 490);
+        let window = WindowId::from_raw(0x5a25);
+        let (_, client_key) = add_mode_client(&mut jwm, window, source, true, false);
+        assert!(
+            jwm.set_client_maximized(&mut backend, client_key, MAX_BOTH, MaximizeOrigin::Client)
+                .unwrap()
+        );
+        let target = maximize_target(source, area, MAX_BOTH, 2);
+
+        assert!(jwm.set_client_pip(&mut backend, client_key, true).unwrap());
+        assert!(!jwm.state.clients[client_key].state.is_maximize_realized());
+        assert!(jwm.set_client_pip(&mut backend, client_key, false).unwrap());
+        let client = &jwm.state.clients[client_key];
+        assert_eq!(client.state.maximized_axes(), MAX_BOTH);
+        assert_eq!(client.geometry.maximize_restore_rect, Some(source));
+        assert_eq!(client_rect(&jwm, client_key), target);
+        assert_eq!(
+            floating_rect_of(&jwm, client_key),
+            source,
+            "the refit re-establishes the floating slot PiP borrowed"
+        );
+
+        let configures = window_configures(&backend, window).len();
+        let writes = maximized_writes(&backend).len();
+        jwm.refit_maximized_clients(&mut backend, monitor);
+        assert_eq!(window_configures(&backend, window).len(), configures);
+        assert_eq!(maximized_writes(&backend).len(), writes);
+        assert_eq!(client_rect(&jwm, client_key), target);
+    }
+
+    #[test]
+    fn togglemaximize_promotes_a_tiled_window_and_returns_it_to_its_tile() {
+        let mut backend = MinimizeSpyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let monitor = jwm.state.monitor_order[0];
+        jwm.state.monitors[monitor].lt = Rc::new(LayoutEnum::TILE);
+        let area = jwm.monitor_work_area(monitor).expect("monitor work area");
+        let seed = Rect::new(area.x + 10, area.y + 10, 400, 300);
+        let (_, first) = add_mode_client(&mut jwm, WindowId::from_raw(0x5a30), seed, false, false);
+        let (_, second) = add_mode_client(&mut jwm, WindowId::from_raw(0x5a31), seed, false, false);
+        jwm.arrange(&mut backend, Some(monitor));
+        let tile_slot = client_rect(&jwm, second);
+        let floating_before = floating_rect_of(&jwm, second);
+        // Smart borders own a tiled client's border; the promoted window
+        // keeps the one it had in its tile.
+        let border_w = jwm.state.clients[second].geometry.border_w;
+        assert_eq!(jwm.state.monitors[monitor].sel, Some(second));
+
+        jwm.togglemaximize(&mut backend, &WMArgEnum::Int(0))
+            .unwrap();
+        let client = &jwm.state.clients[second];
+        assert!(client.state.is_floating);
+        assert!(client.state.maximize_restore_tiled);
+        assert_eq!(client.state.maximized_axes(), MAX_BOTH);
+        assert_eq!(
+            client_rect(&jwm, second),
+            maximize_target(tile_slot, area, MAX_BOTH, border_w)
+        );
+        assert_eq!(floating_rect_of(&jwm, second), floating_before);
+        assert_eq!(jwm.state.monitor_clients[monitor], vec![first, second]);
+        assert!(!jwm.state.clients[first].state.is_floating);
+
+        jwm.togglemaximize(&mut backend, &WMArgEnum::Int(0))
+            .unwrap();
+        let client = &jwm.state.clients[second];
+        assert!(!client.state.is_floating);
+        assert!(!client.state.maximize_restore_tiled);
+        assert_eq!(client.state.maximized_axes(), MAX_NONE);
+        assert_eq!(client.geometry.maximize_restore_rect, None);
+        assert_eq!(client_rect(&jwm, second), tile_slot);
+        assert_eq!(maximized_writes(&backend), vec![MAX_BOTH, MAX_NONE]);
+    }
+
+    #[test]
+    fn client_requests_cannot_untile_but_the_float_layout_promotes() {
+        let mut backend = MinimizeSpyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let monitor = jwm.state.monitor_order[0];
+        jwm.state.monitors[monitor].lt = Rc::new(LayoutEnum::TILE);
+        let area = jwm.monitor_work_area(monitor).expect("monitor work area");
+        let source = Rect::new(area.x + 20, area.y + 20, 500, 400);
+        let window = WindowId::from_raw(0x5a40);
+        let (_, client_key) = add_mode_client(&mut jwm, window, source, false, false);
+        jwm.arrange(&mut backend, Some(monitor));
+        let tile_slot = client_rect(&jwm, client_key);
+        let border_w = jwm.state.clients[client_key].geometry.border_w;
+        let configures = window_configures(&backend, window).len();
+
+        jwm.handle_maximize_request(&mut backend, window, NetWmAction::Add, MAX_BOTH);
+        let client = &jwm.state.clients[client_key];
+        assert!(!client.state.is_floating);
+        assert_eq!(client.state.maximized_axes(), MAX_NONE);
+        assert_eq!(client_rect(&jwm, client_key), tile_slot);
+        assert_eq!(maximized_writes(&backend), vec![MAX_NONE]);
+        assert_eq!(
+            window_configures(&backend, window)[configures..],
+            [configure_of(window, tile_slot, 0)],
+            "a refusal still answers with the authoritative geometry"
+        );
+
+        // Unknown windows are ignored without a reply.
+        jwm.handle_maximize_request(
+            &mut backend,
+            WindowId::from_raw(0x5a4f),
+            NetWmAction::Add,
+            MAX_BOTH,
+        );
+        assert_eq!(maximized_writes(&backend), vec![MAX_NONE]);
+
+        jwm.state.monitors[monitor].lt = Rc::new(LayoutEnum::FLOAT);
+        jwm.handle_maximize_request(&mut backend, window, NetWmAction::Toggle, MAX_BOTH);
+        let client = &jwm.state.clients[client_key];
+        assert!(client.state.is_floating);
+        assert!(client.state.maximize_restore_tiled);
+        assert_eq!(client.state.maximized_axes(), MAX_BOTH);
+        assert_eq!(
+            client_rect(&jwm, client_key),
+            maximize_target(tile_slot, area, MAX_BOTH, border_w)
+        );
+        // The lone tile filled the work area, so unmaximize gets a visible
+        // centered rect instead of a same-size "restore".
+        let restore = initial_restore_rect(tile_slot, area, border_w);
+        assert_ne!(restore, tile_slot);
+        assert_eq!(client.geometry.maximize_restore_rect, Some(restore));
+
+        // Under the FLOAT layout the retile restores the pre-maximize rect
+        // directly, since no layout will place the window.
+        jwm.handle_maximize_request(&mut backend, window, NetWmAction::Remove, MAX_BOTH);
+        let client = &jwm.state.clients[client_key];
+        assert!(!client.state.is_floating);
+        assert!(!client.state.maximize_restore_tiled);
+        assert_eq!(client.state.maximized_axes(), MAX_NONE);
+        assert_eq!(client.geometry.maximize_restore_rect, None);
+        assert_eq!(client_rect(&jwm, client_key), restore);
+    }
+
+    #[test]
+    fn adoption_uses_the_restore_hint_and_refuses_layout_managed_windows() {
+        let mut backend = MinimizeSpyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let monitor = jwm.state.monitor_order[0];
+        jwm.state.monitors[monitor].lt = Rc::new(LayoutEnum::TILE);
+        let area = jwm.monitor_work_area(monitor).expect("monitor work area");
+        let full = maximize_target(area, area, MAX_BOTH, 2);
+        let hint = Rect::new(area.x + 200, area.y + 100, 900, 600);
+
+        let floating_window = WindowId::from_raw(0x5a50);
+        let (_, floating) = add_mode_client(&mut jwm, floating_window, full, true, false);
+        assert!(
+            jwm.adopt_client_maximized(&mut backend, floating, MAX_BOTH, Some(hint))
+                .unwrap()
+        );
+        let client = &jwm.state.clients[floating];
+        assert_eq!(client.geometry.maximize_restore_rect, Some(hint));
+        assert_eq!(floating_rect_of(&jwm, floating), hint);
+        assert_eq!(client_rect(&jwm, floating), full);
+
+        let tiled_window = WindowId::from_raw(0x5a51);
+        let (_, tiled) = add_mode_client(&mut jwm, tiled_window, full, false, false);
+        assert!(
+            !jwm.adopt_client_maximized(&mut backend, tiled, MAX_BOTH, Some(hint))
+                .unwrap()
+        );
+        let client = &jwm.state.clients[tiled];
+        assert!(!client.state.is_floating);
+        assert_eq!(client.state.maximized_axes(), MAX_NONE);
+        assert_eq!(
+            maximized_writes(&backend).last().copied(),
+            Some(MAX_NONE),
+            "a refused adoption clears the pre-set atoms"
+        );
+    }
+
+    #[test]
+    fn unmaximize_in_place_keeps_live_geometry_and_reinstate_restores_the_snapshot() {
+        let mut backend = MinimizeSpyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let monitor = jwm.state.monitor_order[0];
+        let area = jwm.monitor_work_area(monitor).expect("monitor work area");
+        let source = Rect::new(area.x + 55, area.y + 44, 660, 440);
+        let window = WindowId::from_raw(0x5a60);
+        let (_, client_key) = add_mode_client(&mut jwm, window, source, true, false);
+        assert!(
+            jwm.set_client_maximized(&mut backend, client_key, MAX_BOTH, MaximizeOrigin::Client)
+                .unwrap()
+        );
+        let target = maximize_target(source, area, MAX_BOTH, 2);
+        let snapshot = jwm.maximize_snapshot(client_key);
+        assert_eq!(
+            snapshot,
+            MaximizeSnapshot {
+                axes: MAX_BOTH,
+                restore_rect: Some(source),
+                restore_tiled: false,
+                // M4: a plain maximized window's floating slot mirrors the
+                // restore rect.
+                floating_rect: source,
+            }
+        );
+
+        assert!(jwm.unmaximize_in_place(&mut backend, client_key).unwrap());
+        let client = &jwm.state.clients[client_key];
+        assert_eq!(client.state.maximized_axes(), MAX_NONE);
+        assert_eq!(client.geometry.maximize_restore_rect, None);
+        assert_eq!(client_rect(&jwm, client_key), target);
+        assert_eq!(floating_rect_of(&jwm, client_key), target);
+        assert_eq!(maximized_writes(&backend).last().copied(), Some(MAX_NONE));
+        assert_eq!(
+            window_configures(&backend, window).last().copied(),
+            Some(configure_of(window, target, 0))
+        );
+        assert!(
+            !jwm.unmaximize_in_place(&mut backend, client_key).unwrap(),
+            "an unmaximized client is left alone"
+        );
+
+        jwm.reinstate_maximize_snapshot(&mut backend, client_key, snapshot)
+            .unwrap();
+        let client = &jwm.state.clients[client_key];
+        assert_eq!(client.state.maximized_axes(), MAX_BOTH);
+        assert_eq!(client.geometry.maximize_restore_rect, Some(source));
+        assert_eq!(floating_rect_of(&jwm, client_key), source);
+        assert_eq!(client_rect(&jwm, client_key), target);
+        assert_eq!(maximized_writes(&backend).last().copied(), Some(MAX_BOTH));
+        assert_eq!(jwm.maximize_snapshot(client_key), snapshot);
+    }
+
+    /// Regression: a promoted maximized window keeps its own pre-promotion
+    /// floating rect in `floating_*`. Activating a drag unmaximizes it in
+    /// place (the slot becomes the maximized rect) and every drag step
+    /// rewrites the slot, so a cancelled drag (Esc,
+    /// `_NET_WM_MOVERESIZE_CANCEL`) has to hand that rect back with the
+    /// maximize. Before, the window re-tiled and floated again at the full
+    /// work-area rect.
+    #[test]
+    fn cancelled_drag_gives_a_promoted_window_back_its_pre_promotion_floating_rect() {
+        use crate::jwm::mouse_handler::{DragCtl, DragMode};
+
+        let mut backend = MinimizeSpyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let monitor = jwm.state.monitor_order[0];
+        jwm.state.monitors[monitor].lt = Rc::new(LayoutEnum::TILE);
+        let area = jwm.monitor_work_area(monitor).expect("monitor work area");
+        let window = WindowId::from_raw(0x5a70);
+        let seed = Rect::new(area.x + 10, area.y + 10, 400, 300);
+        let (_, client_key) = add_mode_client(&mut jwm, window, seed, false, false);
+        // An earlier float left its own rect in the floating slot.
+        let pre_promotion = Rect::new(area.x + 30, area.y + 92, 500, 350);
+        {
+            let geometry = &mut jwm.state.clients[client_key].geometry;
+            geometry.floating_x = pre_promotion.x;
+            geometry.floating_y = pre_promotion.y;
+            geometry.floating_w = pre_promotion.w;
+            geometry.floating_h = pre_promotion.h;
+        }
+        jwm.arrange(&mut backend, Some(monitor));
+
+        jwm.togglemaximize(&mut backend, &WMArgEnum::Int(0))
+            .unwrap();
+        let client = &jwm.state.clients[client_key];
+        assert!(
+            client.state.maximize_restore_tiled,
+            "togglemaximize promoted it"
+        );
+        assert_eq!(client.state.maximized_axes(), MAX_BOTH);
+        let maximized = client_rect(&jwm, client_key);
+        assert_eq!(floating_rect_of(&jwm, client_key), pre_promotion);
+        let snapshot = jwm.maximize_snapshot(client_key);
+        assert_eq!(snapshot.floating_rect, pre_promotion);
+
+        jwm.drag_ctl = Some(DragCtl {
+            client: client_key,
+            win: window,
+            mode: DragMode::MoveFloat,
+            start_root: (0.0, 0.0),
+            activated: false,
+            was_floating: true,
+            orig_geom: (maximized.x, maximized.y, maximized.w, maximized.h),
+            orig_index: None,
+            mon: Some(monitor),
+            orig_maximize: snapshot,
+        });
+        jwm.activate_pointer_drag(&mut backend).unwrap();
+        let client = &jwm.state.clients[client_key];
+        assert_eq!(client.state.maximized_axes(), MAX_NONE);
+        assert!(!client.state.maximize_restore_tiled);
+        assert_eq!(
+            floating_rect_of(&jwm, client_key),
+            maximized,
+            "the drag owns the floating slot"
+        );
+
+        // One drag step: the server moved the window and the focused
+        // floating sync reads it back into the live and floating rects.
+        let moved = Rect::new(maximized.x + 40, maximized.y + 25, maximized.w, maximized.h);
+        backend
+            .window_ops
+            .configure(window, moved.x, moved.y, moved.w as u32, moved.h as u32, 0)
+            .unwrap();
+        jwm.sync_focused_floating_geometry(&mut backend);
+        assert_eq!(floating_rect_of(&jwm, client_key), moved);
+
+        jwm.cancel_pointer_drag(&mut backend);
+        let client = &jwm.state.clients[client_key];
+        assert_eq!(client.state.maximized_axes(), MAX_BOTH);
+        assert!(client.state.maximize_restore_tiled);
+        assert!(client.state.is_floating);
+        assert!(!client.state.is_drag_floating);
+        assert_eq!(client_rect(&jwm, client_key), maximized);
+        assert_eq!(floating_rect_of(&jwm, client_key), pre_promotion);
+
+        // The rect survives the round trip: unmaximize re-tiles the
+        // window, and floating it again lands where it floated before.
+        jwm.togglemaximize(&mut backend, &WMArgEnum::Int(0))
+            .unwrap();
+        assert!(!jwm.state.clients[client_key].state.is_floating);
+        jwm.togglefloating(&mut backend, &WMArgEnum::Int(0))
+            .unwrap();
+        assert!(jwm.state.clients[client_key].state.is_floating);
+        assert_eq!(client_rect(&jwm, client_key), pre_promotion);
+    }
+
+    /// A tiled client promoted by `togglemaximize` whose floating slot holds
+    /// the rect of an earlier float.
+    fn promoted_client_with_floating_rect(
+        jwm: &mut Jwm,
+        backend: &mut MinimizeSpyBackend,
+        window: WindowId,
+    ) -> (ClientKey, Rect) {
+        let monitor = jwm.state.monitor_order[0];
+        jwm.state.monitors[monitor].lt = Rc::new(LayoutEnum::TILE);
+        let area = jwm.monitor_work_area(monitor).expect("monitor work area");
+        let seed = Rect::new(area.x + 10, area.y + 10, 400, 300);
+        let (_, client_key) = add_mode_client(jwm, window, seed, false, false);
+        let pre_promotion = Rect::new(area.x + 30, area.y + 92, 500, 350);
+        {
+            let geometry = &mut jwm.state.clients[client_key].geometry;
+            geometry.floating_x = pre_promotion.x;
+            geometry.floating_y = pre_promotion.y;
+            geometry.floating_w = pre_promotion.w;
+            geometry.floating_h = pre_promotion.h;
+        }
+        jwm.arrange(backend, Some(monitor));
+
+        jwm.togglemaximize(backend, &WMArgEnum::Int(0)).unwrap();
+        let client = &jwm.state.clients[client_key];
+        assert!(
+            client.state.maximize_restore_tiled,
+            "togglemaximize promoted it"
+        );
+        assert_eq!(client.state.maximized_axes(), MAX_BOTH);
+        assert_eq!(floating_rect_of(jwm, client_key), pre_promotion);
+        (client_key, pre_promotion)
+    }
+
+    /// Regression: entering PiP borrowed `floating_*` as its return slot even
+    /// on a promoted maximized window, whose slot holds its pre-promotion
+    /// floating rect. Leaving PiP put the window back at the maximized rect,
+    /// and neither the refit nor the retile rewrites a promoted window's
+    /// floating slot, so floating the window again later filled the whole
+    /// work area.
+    #[test]
+    fn pip_round_trip_keeps_a_promoted_windows_pre_promotion_floating_rect() {
+        let mut backend = MinimizeSpyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let window = WindowId::from_raw(0x5a80);
+        let (client_key, pre_promotion) =
+            promoted_client_with_floating_rect(&mut jwm, &mut backend, window);
+        let maximized = client_rect(&jwm, client_key);
+
+        assert!(jwm.set_client_pip(&mut backend, client_key, true).unwrap());
+        assert_ne!(client_rect(&jwm, client_key), maximized);
+        assert_eq!(
+            floating_rect_of(&jwm, client_key),
+            pre_promotion,
+            "PiP does not borrow a promoted window's floating slot"
+        );
+
+        assert!(jwm.set_client_pip(&mut backend, client_key, false).unwrap());
+        let client = &jwm.state.clients[client_key];
+        assert!(!client.state.is_pip);
+        assert!(client.state.is_floating);
+        assert!(client.state.maximize_restore_tiled);
+        assert_eq!(client.state.maximized_axes(), MAX_BOTH);
+        assert_eq!(client_rect(&jwm, client_key), maximized);
+        assert_eq!(floating_rect_of(&jwm, client_key), pre_promotion);
+        assert_eq!(
+            window_configures(&backend, window).last().copied(),
+            Some(configure_of(window, maximized, 0))
+        );
+
+        // Unmaximize re-tiles the window, and floating it again lands where
+        // it floated before the promotion.
+        jwm.togglemaximize(&mut backend, &WMArgEnum::Int(0))
+            .unwrap();
+        assert!(!jwm.state.clients[client_key].state.is_floating);
+        jwm.togglefloating(&mut backend, &WMArgEnum::Int(0))
+            .unwrap();
+        assert!(jwm.state.clients[client_key].state.is_floating);
+        assert_eq!(client_rect(&jwm, client_key), pre_promotion);
+    }
+
+    /// Regression: the minimized restore snapshot saved a promoted window's
+    /// promotion-forced `is_floating`, so after a seamless restart the
+    /// adopted maximize was admitted as a floating window's and unmaximize
+    /// left it floating instead of re-tiling it. It is now saved tiled, with
+    /// its pre-promotion floating rect, like a visible promoted window.
+    #[test]
+    fn minimizing_a_promoted_window_persists_its_tiled_resting_state() {
+        let mut backend = MinimizeSpyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let window = WindowId::from_raw(0x5a81);
+        let (client_key, pre_promotion) =
+            promoted_client_with_floating_rect(&mut jwm, &mut backend, window);
+        let maximized = client_rect(&jwm, client_key);
+
+        assert!(
+            jwm.set_client_minimized(&mut backend, client_key, true)
+                .unwrap()
+        );
+        let snapshot = backend
+            .property_ops
+            .minimized_restore
+            .lock()
+            .expect("restore snapshot lock")
+            .expect("hidden client keeps a V1 snapshot");
+        assert!(!snapshot.is_floating);
+        assert!(!snapshot.is_pip);
+        assert_eq!(snapshot.visible_rect, restore_rect_of(maximized));
+        assert_eq!(snapshot.floating_rect, Some(restore_rect_of(pre_promotion)));
+        // The live client is unchanged: only the persisted state is resting.
+        let client = &jwm.state.clients[client_key];
+        assert!(client.state.is_floating);
+        assert!(client.state.maximize_restore_tiled);
+    }
+
+    /// Regression: a maximize change on a promoted window in PiP wrote the
+    /// plan's resting rect into `floating_*`, which PiP only uses as its
+    /// return slot for other windows. That overwrote the pre-promotion
+    /// floating rect, so the unmaximize that re-tiles the window when PiP
+    /// ends left it floating again later at its tile's rect.
+    #[test]
+    fn unmaximizing_a_promoted_window_in_pip_keeps_its_pre_promotion_floating_rect() {
+        let mut backend = MinimizeSpyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let window = WindowId::from_raw(0x5a82);
+        let (client_key, pre_promotion) =
+            promoted_client_with_floating_rect(&mut jwm, &mut backend, window);
+
+        assert!(jwm.set_client_pip(&mut backend, client_key, true).unwrap());
+        assert!(
+            jwm.set_client_maximized(&mut backend, client_key, MAX_NONE, MaximizeOrigin::Client)
+                .unwrap()
+        );
+        let client = &jwm.state.clients[client_key];
+        assert!(client.state.is_pip);
+        assert!(!client.state.old_state, "the retile waits for PiP to end");
+        assert_eq!(floating_rect_of(&jwm, client_key), pre_promotion);
+
+        assert!(jwm.set_client_pip(&mut backend, client_key, false).unwrap());
+        assert!(!jwm.state.clients[client_key].state.is_floating);
+        jwm.togglefloating(&mut backend, &WMArgEnum::Int(0))
+            .unwrap();
+        assert!(jwm.state.clients[client_key].state.is_floating);
+        assert_eq!(client_rect(&jwm, client_key), pre_promotion);
+    }
+
+    /// Regression: a maximize change on a promoted window in PiP measured
+    /// the resting rect from `floating_*`, which holds the pre-promotion
+    /// floating rect rather than the rect PiP returns to. A partial maximize
+    /// took its free axes from there and came back from PiP at the old
+    /// floating x and width.
+    #[test]
+    fn a_partial_maximize_change_in_pip_keeps_a_promoted_windows_free_axes() {
+        let mut backend = MinimizeSpyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let monitor = jwm.state.monitor_order[0];
+        jwm.state.monitors[monitor].lt = Rc::new(LayoutEnum::FLOAT);
+        let area = jwm.monitor_work_area(monitor).expect("monitor work area");
+        let window = WindowId::from_raw(0x5a84);
+        let source = Rect::new(area.x + 40, area.y + 50, 600, 400);
+        let (_, client_key) = add_mode_client(&mut jwm, window, source, false, false);
+        let pre_promotion = Rect::new(area.x + 300, area.y + 250, 500, 350);
+        {
+            let geometry = &mut jwm.state.clients[client_key].geometry;
+            geometry.floating_x = pre_promotion.x;
+            geometry.floating_y = pre_promotion.y;
+            geometry.floating_w = pre_promotion.w;
+            geometry.floating_h = pre_promotion.h;
+        }
+
+        jwm.handle_maximize_request(&mut backend, window, NetWmAction::Add, MAX_VERT);
+        let client = &jwm.state.clients[client_key];
+        assert!(
+            client.state.maximize_restore_tiled,
+            "the FLOAT layout promotes"
+        );
+        assert_eq!(client.state.maximized_axes(), MAX_VERT);
+        let maximized = client_rect(&jwm, client_key);
+        assert_ne!(maximized.x, pre_promotion.x);
+
+        assert!(jwm.set_client_pip(&mut backend, client_key, true).unwrap());
+        jwm.handle_maximize_request(&mut backend, window, NetWmAction::Add, MAX_HORZ);
+        jwm.handle_maximize_request(&mut backend, window, NetWmAction::Remove, MAX_HORZ);
+        let client = &jwm.state.clients[client_key];
+        assert!(client.state.is_pip);
+        assert_eq!(client.state.maximized_axes(), MAX_VERT);
+        assert_eq!(floating_rect_of(&jwm, client_key), pre_promotion);
+
+        assert!(jwm.set_client_pip(&mut backend, client_key, false).unwrap());
+        assert_eq!(client_rect(&jwm, client_key), maximized);
     }
 }

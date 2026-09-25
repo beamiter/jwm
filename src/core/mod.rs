@@ -2,6 +2,7 @@
 pub mod animation;
 pub mod controller;
 pub mod layout;
+pub mod maximize;
 pub mod models;
 pub mod state;
 pub mod types;

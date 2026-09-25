@@ -1926,8 +1926,12 @@ impl SystemUiState {
         }
     }
 
-    /// Drop one row after its notification was dismissed, keeping the
-    /// selection on the row that slid into its place.
+    /// Drop one row after its notification was dismissed. The highlight stays
+    /// on the notification it was on: removing a row above the selection (an
+    /// app withdrawing a newer notification over IPC) shifts the index down
+    /// with it, so Return never lands on a row the user did not pick. Only
+    /// when the selected row itself goes does the row that slid into its
+    /// place take the highlight.
     pub fn remove_notification(&mut self, id: u32) {
         let Self::ListPanel {
             kind,
@@ -1952,6 +1956,11 @@ impl SystemUiState {
         // would misalign every row below it.
         if index < row_icons.len() {
             row_icons.remove(index);
+        }
+        // Rows below the removed one moved up a slot; follow the selected
+        // one instead of letting the next-older notification inherit it.
+        if index < *selected {
+            *selected -= 1;
         }
         *selected = (*selected).min(rows.len().saturating_sub(1));
     }
@@ -7927,6 +7936,78 @@ mod tests {
         };
         assert!(row_icons.is_empty());
         assert_eq!(panel.overlay_parts().icons, None);
+    }
+
+    #[test]
+    fn removing_a_row_above_the_selection_keeps_the_highlight_on_its_notification() {
+        use crate::jwm::features::notifications::NotificationAction;
+
+        let row = |id: u32| ListRow {
+            key: id.to_string(),
+            text: format!("notification {id}"),
+            data: RowData::Notification {
+                id,
+                actions: vec![
+                    NotificationAction {
+                        key: "default".into(),
+                        label: "Open".into(),
+                    },
+                    NotificationAction {
+                        key: "later".into(),
+                        label: "Later".into(),
+                    },
+                ],
+                cursor: 0,
+            },
+        };
+        // Newest first: [N3, N2, N1], with N2 highlighted on its "Later" button.
+        let mut panel = SystemUiState::ListPanel {
+            kind: ListKind::Notifications,
+            rows: vec![row(3), row(2), row(1)],
+            row_icons: vec![None, None, None],
+            selected: 1,
+            message: String::new(),
+            prompt: None,
+            query: String::new(),
+            empty: String::new(),
+        };
+        panel.move_notification_action(1);
+        assert_eq!(
+            panel.selected_notification(),
+            Some((2, Some("later".to_string())))
+        );
+
+        // N3's app withdraws it: the rows below slide up, the highlight
+        // follows N2 instead of landing on N1.
+        panel.remove_notification(3);
+        assert_eq!(
+            panel.selected_notification(),
+            Some((2, Some("later".to_string()))),
+            "Return must still act on the notification the user picked"
+        );
+
+        // Removing a row below the selection leaves it alone.
+        panel.remove_notification(1);
+        assert_eq!(
+            panel.selected_notification(),
+            Some((2, Some("later".to_string())))
+        );
+
+        // Removing the selected row itself hands the slot to what is left.
+        panel.remove_notification(2);
+        assert_eq!(panel.selected_notification(), None);
+        let SystemUiState::ListPanel {
+            rows,
+            row_icons,
+            selected,
+            ..
+        } = &panel
+        else {
+            panic!("still the notification center");
+        };
+        assert!(rows.is_empty());
+        assert!(row_icons.is_empty());
+        assert_eq!(*selected, 0);
     }
 
     #[test]

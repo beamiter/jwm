@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use std::ffi::CString;
 #[allow(unused_imports)]
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 #[allow(unused_imports)]
 use std::sync::mpsc;
 use std::sync::{Condvar, Mutex, OnceLock};
@@ -46,44 +47,168 @@ fn wallpaper_upload_format() -> WallpaperUploadFormat {
     }
 }
 
-/// Process-wide gate bounding how many wallpaper images decode concurrently.
+/// Counting gate bounding how many wallpaper images decode concurrently.
 /// Each decode does `image::open` + a Lanczos3 downscale (heavy CPU, transient
 /// full-image allocation); rapid wallpaper changes or per-monitor setup would
-/// otherwise spawn unbounded threads at once. The mutex value is the number of
-/// currently-available decode permits.
-fn decode_gate() -> &'static (Mutex<usize>, Condvar) {
-    static GATE: OnceLock<(Mutex<usize>, Condvar)> = OnceLock::new();
+/// otherwise run unbounded decodes at once.
+struct DecodeGate {
+    /// The number of currently-available decode permits.
+    available: Mutex<usize>,
+    freed: Condvar,
+}
+
+impl DecodeGate {
+    const fn new(permits: usize) -> Self {
+        Self {
+            available: Mutex::new(permits),
+            freed: Condvar::new(),
+        }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, usize> {
+        self.available.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Block until a permit is free.
+    fn acquire(&self) -> DecodePermit<'_> {
+        let mut available = self.lock();
+        while *available == 0 {
+            available = self
+                .freed
+                .wait(available)
+                .unwrap_or_else(|e| e.into_inner());
+        }
+        *available -= 1;
+        DecodePermit { gate: self }
+    }
+
+    /// Block until a permit is free, or give up once `cancelled` reports
+    /// true. The token is re-read on every wake-up; [`Self::wake_all`] is how
+    /// a canceller makes blocked waiters look at it.
+    fn acquire_unless(&self, cancelled: impl Fn() -> bool) -> Option<DecodePermit<'_>> {
+        let mut available = self.lock();
+        loop {
+            if cancelled() {
+                // `notify_one` may have picked this waiter for a freed permit
+                // it no longer wants; hand the wake-up on, or a waiter that
+                // still wants the permit sleeps beside a free one.
+                if *available > 0 {
+                    self.freed.notify_one();
+                }
+                return None;
+            }
+            if *available > 0 {
+                *available -= 1;
+                return Some(DecodePermit { gate: self });
+            }
+            available = self
+                .freed
+                .wait(available)
+                .unwrap_or_else(|e| e.into_inner());
+        }
+    }
+
+    /// Wake every blocked waiter so cancellable ones re-check their token;
+    /// the others find no permit and wait again. Taking the lock orders the
+    /// wake-up after a waiter's check, so none can miss it.
+    fn wake_all(&self) {
+        let _available = self.lock();
+        self.freed.notify_all();
+    }
+}
+
+/// The process-wide decode gate shared by wallpaper loads and side previews.
+fn decode_gate() -> &'static DecodeGate {
+    static GATE: OnceLock<DecodeGate> = OnceLock::new();
     GATE.get_or_init(|| {
         let max = std::thread::available_parallelism()
             .map(|n| n.get().min(4))
             .unwrap_or(2);
-        (Mutex::new(max), Condvar::new())
+        DecodeGate::new(max)
     })
 }
 
-/// RAII permit for the wallpaper decode gate. Blocks until a permit is free,
-/// and returns it on drop (covering early returns and panics).
-struct DecodePermit;
+/// RAII permit for a [`DecodeGate`]; returns the permit on drop (covering
+/// early returns and panics).
+struct DecodePermit<'a> {
+    gate: &'a DecodeGate,
+}
 
-impl DecodePermit {
-    fn acquire() -> Self {
-        let (lock, cvar) = decode_gate();
-        let mut avail = lock.lock().unwrap_or_else(|e| e.into_inner());
-        while *avail == 0 {
-            avail = cvar.wait(avail).unwrap_or_else(|e| e.into_inner());
-        }
-        *avail -= 1;
-        DecodePermit
+impl Drop for DecodePermit<'_> {
+    fn drop(&mut self) {
+        let mut available = self.gate.lock();
+        *available += 1;
+        self.gate.freed.notify_one();
     }
 }
 
-impl Drop for DecodePermit {
-    fn drop(&mut self) {
-        let (lock, cvar) = decode_gate();
-        let mut avail = lock.lock().unwrap_or_else(|e| e.into_inner());
-        *avail += 1;
-        cvar.notify_one();
+/// Latest-wins tickets for the wallpaper picker's side preview.
+///
+/// A held arrow key moves the highlight faster than a full-size image
+/// decodes. Dropping a superseded request's receiver only discards its
+/// result; without a ticket every superseded worker still queued on the
+/// shared gate, decoded its whole image and delayed both the preview the user
+/// is looking at and any real wallpaper change behind it.
+struct PreviewRequests {
+    latest: AtomicU64,
+}
+
+impl PreviewRequests {
+    const fn new() -> Self {
+        Self {
+            latest: AtomicU64::new(0),
+        }
     }
+
+    /// Issue the ticket for a new request, superseding every earlier one, and
+    /// wake the decodes blocked on `gate` so the superseded ones leave now.
+    fn supersede(&self, gate: &DecodeGate) -> u64 {
+        let ticket = self.latest.fetch_add(1, Ordering::AcqRel).wrapping_add(1);
+        gate.wake_all();
+        ticket
+    }
+
+    fn is_current(&self, ticket: u64) -> bool {
+        self.latest.load(Ordering::Acquire) == ticket
+    }
+}
+
+static SIDE_PREVIEW_REQUESTS: PreviewRequests = PreviewRequests::new();
+
+/// Decode one side-preview thumbnail unless a newer request supersedes it
+/// first. The check runs while waiting for a permit and again after `open`,
+/// the long part: a highlight that moved on meanwhile does not need the
+/// resize either.
+fn decode_side_preview(
+    gate: &DecodeGate,
+    requests: &PreviewRequests,
+    ticket: u64,
+    open: impl FnOnce() -> Option<image::DynamicImage>,
+) -> Option<WallpaperImageData> {
+    let stale = || !requests.is_current(ticket);
+    // Bound concurrent decodes; released when this returns.
+    let _permit = gate.acquire_unless(stale)?;
+    let img = open()?;
+    if stale() {
+        return None;
+    }
+    let img = if img.width() > PREVIEW_THUMB_EDGE || img.height() > PREVIEW_THUMB_EDGE {
+        img.resize(
+            PREVIEW_THUMB_EDGE,
+            PREVIEW_THUMB_EDGE,
+            image::imageops::FilterType::Lanczos3,
+        )
+    } else {
+        img
+    };
+    let rgba = img.to_rgba8();
+    let (width, height) = (rgba.width(), rgba.height());
+    Some(WallpaperImageData {
+        rgba: rgba.into_raw(),
+        width,
+        height,
+        mode: WallpaperMode::Fit,
+    })
 }
 
 impl<C: CompositorConnection> Compositor<C> {
@@ -99,7 +224,7 @@ impl<C: CompositorConnection> Compositor<C> {
         let path = path.to_string();
         std::thread::spawn(move || {
             // Bound concurrent decodes; released when this thread exits.
-            let _permit = DecodePermit::acquire();
+            let _permit = decode_gate().acquire();
             let img = match image::open(&path) {
                 Ok(img) => img,
                 Err(e) => {
@@ -223,40 +348,37 @@ impl<C: CompositorConnection> Compositor<C> {
 
     /// Decode a wallpaper picker's side-preview thumbnail on a background
     /// thread. Same worker pattern as [`Self::load_wallpaper_async`] — decode
-    /// gate, Lanczos3 downscale, channel back — but bounded to a thumbnail
-    /// and quiet about it: an unreadable candidate is a no-preview, not a
-    /// warning the user cannot act on.
+    /// gate, Lanczos3 downscale, channel back — but bounded to a thumbnail,
+    /// latest-wins, and quiet about it: an unreadable candidate is a
+    /// no-preview, not a warning the user cannot act on.
     pub(super) fn load_system_ui_preview_async(path: &str) -> mpsc::Receiver<WallpaperImageData> {
         let (tx, rx) = mpsc::channel();
         let path = path.to_string();
-        std::thread::spawn(move || {
-            // Bound concurrent decodes; released when this thread exits.
-            let _permit = DecodePermit::acquire();
-            let img = match image::open(&path) {
-                Ok(img) => img,
-                Err(e) => {
-                    log::debug!("compositor: no side preview for '{}': {}", path, e);
-                    return;
+        let gate = decode_gate();
+        // Issuing this ticket supersedes every earlier preview: a worker still
+        // waiting for a permit leaves at once, and one mid-decode skips its
+        // resize, so a held arrow key costs at most the decodes in flight.
+        let ticket = SIDE_PREVIEW_REQUESTS.supersede(gate);
+        let spawned = std::thread::Builder::new()
+            .name("jwm-preview".to_string())
+            .spawn(move || {
+                let preview = decode_side_preview(gate, &SIDE_PREVIEW_REQUESTS, ticket, || {
+                    image::open(&path)
+                        .map_err(|e| {
+                            log::debug!("compositor: no side preview for '{}': {}", path, e)
+                        })
+                        .ok()
+                });
+                if let Some(data) = preview {
+                    let _ = tx.send(data);
                 }
-            };
-            let img = if img.width() > PREVIEW_THUMB_EDGE || img.height() > PREVIEW_THUMB_EDGE {
-                img.resize(
-                    PREVIEW_THUMB_EDGE,
-                    PREVIEW_THUMB_EDGE,
-                    image::imageops::FilterType::Lanczos3,
-                )
-            } else {
-                img
-            };
-            let rgba = img.to_rgba8();
-            let (w, h) = (rgba.width(), rgba.height());
-            let _ = tx.send(WallpaperImageData {
-                rgba: rgba.into_raw(),
-                width: w,
-                height: h,
-                mode: WallpaperMode::Fit,
             });
-        });
+        if let Err(error) = spawned {
+            // The sender went down with the closure, so the poll sees a
+            // disconnected channel: no preview until the highlight moves,
+            // rather than a panic on the compositor thread.
+            log::warn!("compositor: could not start a side-preview decode: {error}");
+        }
         rx
     }
 
@@ -399,8 +521,94 @@ impl<C: CompositorConnection> Compositor<C> {
 
 #[cfg(test)]
 mod tests {
-    use super::{uses_global_wallpaper_fallback, wallpaper_upload_format};
+    use super::{
+        DecodeGate, PREVIEW_THUMB_EDGE, PreviewRequests, decode_side_preview,
+        uses_global_wallpaper_fallback, wallpaper_upload_format,
+    };
     use crate::backend::compositor_common::wallpaper::WallpaperMode;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn available(gate: &DecodeGate) -> usize {
+        *gate.lock()
+    }
+
+    #[test]
+    fn a_superseded_side_preview_never_decodes() {
+        let gate = DecodeGate::new(1);
+        let requests = PreviewRequests::new();
+        let opened = AtomicUsize::new(0);
+        let open = || {
+            opened.fetch_add(1, Ordering::Relaxed);
+            Some(image::DynamicImage::new_rgba8(960, 10))
+        };
+
+        let first = requests.supersede(&gate);
+        let second = requests.supersede(&gate);
+        assert!(decode_side_preview(&gate, &requests, first, open).is_none());
+        assert_eq!(
+            opened.load(Ordering::Relaxed),
+            0,
+            "a highlight the user already left must not cost a decode"
+        );
+
+        let preview = decode_side_preview(&gate, &requests, second, open)
+            .expect("the latest highlight decodes");
+        assert_eq!(opened.load(Ordering::Relaxed), 1);
+        assert_eq!((preview.width, preview.height), (PREVIEW_THUMB_EDGE, 5));
+        assert_eq!(preview.mode, WallpaperMode::Fit);
+        assert_eq!(available(&gate), 1, "both requests returned the gate");
+    }
+
+    #[test]
+    fn a_side_preview_superseded_mid_decode_skips_the_resize() {
+        let gate = DecodeGate::new(1);
+        let requests = PreviewRequests::new();
+        let ticket = requests.supersede(&gate);
+        let preview = decode_side_preview(&gate, &requests, ticket, || {
+            // The highlight moves while the image is being read.
+            requests.supersede(&gate);
+            Some(image::DynamicImage::new_rgba8(960, 10))
+        });
+        assert!(preview.is_none());
+        assert_eq!(available(&gate), 1);
+    }
+
+    #[test]
+    fn superseding_releases_a_side_preview_blocked_on_the_gate() {
+        let gate = DecodeGate::new(1);
+        let requests = PreviewRequests::new();
+        let opened = AtomicUsize::new(0);
+        // A wallpaper decode holds the only permit.
+        let held = gate.acquire();
+        let ticket = requests.supersede(&gate);
+        std::thread::scope(|scope| {
+            let waiter = scope.spawn(|| {
+                decode_side_preview(&gate, &requests, ticket, || {
+                    opened.fetch_add(1, Ordering::Relaxed);
+                    None
+                })
+                .is_none()
+            });
+            // Whether the waiter already sleeps on the gate or has yet to
+            // reach it, the new ticket sends it away without the permit.
+            requests.supersede(&gate);
+            assert!(matches!(waiter.join(), Ok(true)));
+        });
+        assert_eq!(opened.load(Ordering::Relaxed), 0);
+        drop(held);
+        assert_eq!(available(&gate), 1);
+    }
+
+    #[test]
+    fn a_cancelled_waiter_leaves_a_free_permit_for_the_next_one() {
+        let gate = DecodeGate::new(1);
+        assert!(gate.acquire_unless(|| true).is_none());
+        assert_eq!(available(&gate), 1);
+        let permit = gate.acquire_unless(|| false).expect("the permit is free");
+        assert_eq!(available(&gate), 0);
+        drop(permit);
+        assert_eq!(available(&gate), 1);
+    }
 
     #[test]
     fn rgba8_wallpaper_source_format_is_valid_for_gles_and_hdr_outputs() {

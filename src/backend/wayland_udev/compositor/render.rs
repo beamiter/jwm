@@ -1,4 +1,5 @@
 // render_frame and rendering helpers for the Wayland udev compositor
+use super::expose::window_shader_opacity;
 #[allow(unused_imports)]
 use super::*;
 use crate::backend::compositor_common::attention::{
@@ -436,17 +437,181 @@ fn is_opaque_output_occluder(candidate: OcclusionCandidate) -> bool {
         && i64::from(y) + i64::from(height) >= i64::from(screen_height)
 }
 
+/// One frame's partial-damage verdict, plus what it obliges the next frame
+/// to do.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PartialDamagePlan {
+    /// Scissor this frame's scene passes to the damage box.
+    allow_partial: bool,
+    /// The next frame must rebuild the whole target.
+    force_full_next: bool,
+}
+
+/// `frame_is_calm` collects every section 2b condition that means "this frame
+/// draws nothing the damage box does not describe". A frame that is not calm
+/// draws over pixels that no later damage box covers: frame-tail overlays,
+/// idle dim, postprocess filters, animation frames. The setter that removes
+/// such a layer may only set `needs_render`. So the first calm frame after
+/// one must be full as well. Otherwise every pixel outside its box keeps the
+/// removed layer, for example a closed launcher's scrim or a lifted lock
+/// shade.
+const fn partial_damage_plan(
+    enabled: bool,
+    force_full: bool,
+    frame_is_calm: bool,
+) -> PartialDamagePlan {
+    PartialDamagePlan {
+        allow_partial: enabled && !force_full && frame_is_calm,
+        force_full_next: !frame_is_calm,
+    }
+}
+
+/// The inclusive index span, counted over the current frame's surviving
+/// windows (present in both frames, bottom-to-top), whose relative stacking
+/// changed since the previous frame. `None` when the survivors kept their
+/// order. Windows below the span and above it keep both their position and
+/// their order relative to every other survivor. Only overlaps inside the
+/// span change which window is on top, so damaging the span's rects covers
+/// every overlap a restack changes. The geometry diff cannot see such a
+/// change: a raise moves no window.
+fn restacked_span(
+    previous: &[(u64, i32, i32, u32, u32)],
+    current: &[(u64, i32, i32, u32, u32)],
+    in_previous: impl Fn(u64) -> bool,
+    in_current: impl Fn(u64) -> bool,
+) -> Option<(usize, usize)> {
+    let previous_order = || {
+        previous
+            .iter()
+            .map(|&(id, ..)| id)
+            .filter(|&id| in_current(id))
+    };
+    let current_order = || {
+        current
+            .iter()
+            .map(|&(id, ..)| id)
+            .filter(|&id| in_previous(id))
+    };
+    let first = previous_order()
+        .zip(current_order())
+        .position(|(before, now)| before != now)?;
+    let from_top = previous_order()
+        .rev()
+        .zip(current_order().rev())
+        .position(|(before, now)| before != now)?;
+    let last = current_order().count().checked_sub(from_top + 1)?;
+    Some((first.min(last), first.max(last)))
+}
+
+/// Pass every staged external element footprint whose pixels may differ
+/// from what the previous frame drew to `mark`. The two draw lists are
+/// compared slot by slot: a slot whose rect or content key changed, or that
+/// exists on one side only, yields its old and its new rect. A slot equal on
+/// both sides yields nothing. Its element is redrawn scissored to the damage
+/// box (`render_external_elements_into_linear`), and outside the box the
+/// retained target already holds it composited exactly once, so a resting
+/// cursor or top-layer bar never stretches a partial box. The comparison is
+/// sound even when an element is inserted or removed mid-list: at a pixel
+/// outside every yielded rect, each slot either matches or covers the pixel
+/// on neither side, so the ordered stack of elements over it is unchanged.
+/// Empty rects draw nothing and are skipped. A missing previous key counts
+/// as changed.
+fn for_each_changed_external_element_footprint(
+    previous_rects: &[[i32; 4]],
+    previous_keys: &[u64],
+    current: &[super::ExternalElementVisual],
+    mut mark: impl FnMut([i32; 4]),
+) {
+    for slot in 0..previous_rects.len().max(current.len()) {
+        let before = previous_rects
+            .get(slot)
+            .map(|&rect| (rect, previous_keys.get(slot).copied()));
+        let now = current
+            .get(slot)
+            .map(|element| (element.rect, Some(element.content_key)));
+        if before == now {
+            continue;
+        }
+        for rect in [before, now].into_iter().flatten().map(|(rect, _)| rect) {
+            if rect[2] > 0 && rect[3] > 0 {
+                mark(rect);
+            }
+        }
+    }
+}
+
+/// Whether the status bar may draw its glass sheet over this frame's
+/// backdrop. The client-blur seed is encoded sRGB; drawn into the linear
+/// target, the glass program decodes it (`u_backdrop_encoded`, set by
+/// `glass_fill_rounded`) before the saturation/luminance mix, so an encoded
+/// backdrop suits either target. A linear capture is linear light, which the
+/// program has no way to re-encode for an encoded target: that one mismatch
+/// keeps the flat blurred quad, which draws through the window shader.
+const fn status_bar_glass_backdrop_usable(
+    backdrop_present: bool,
+    backdrop_linear: bool,
+    target_linear: bool,
+) -> bool {
+    backdrop_present && (!backdrop_linear || target_linear)
+}
+
+/// Where a frame applies the idle-dim / user-brightness multiply.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FinalBrightnessStage {
+    /// Multiply the encoded output target after the frame-tail chrome: on
+    /// these routes it holds canonical encoded sRGB.
+    EncodedOutput,
+    /// Multiply the common linear target just before delivery, through an
+    /// encoded-sRGB round trip. The deferred routes leave output_fbo
+    /// output-referred: linear light for a CRTC LUT, or per-output PQ/HLG/gamma
+    /// codes for region delivery. A multiply there would scale a different
+    /// quantity on every route, and none of them would match the encoded dim
+    /// that screenshots show.
+    LinearBeforeDelivery,
+}
+
+const fn final_brightness_stage(output_route: FrameOutputRoute) -> FinalBrightnessStage {
+    match output_route {
+        FrameOutputRoute::LegacyEncoded | FrameOutputRoute::EarlySrgbFallback => {
+            FinalBrightnessStage::EncodedOutput
+        }
+        FrameOutputRoute::DeferredHardware | FrameOutputRoute::DeferredRegions => {
+            FinalBrightnessStage::LinearBeforeDelivery
+        }
+    }
+}
+
+/// The shadow flag and corner radius the scene pass actually draws for a
+/// window. Shaped and fullscreen windows get no drop shadow (section 7) and
+/// no rounded corners (section 9), whatever the configured defaults are. The
+/// direct-scanout diagnostics must report what is drawn. Otherwise every
+/// fullscreen client is rejected for a shadow it never had, even while KMS is
+/// scanning it out.
+fn drawn_window_decorations(
+    shaped_or_fullscreen: bool,
+    shadow_enabled: bool,
+    corner_radius: f32,
+) -> (bool, f32) {
+    if shaped_or_fullscreen {
+        (false, 0.0)
+    } else {
+        (shadow_enabled, corner_radius)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        ExternalElementPass, FrameOutputRoute, OcclusionCandidate, OutputColorFrameState,
-        OverviewRenderRoute, RetainedTexturePass, RetainedTextureProgram, WindowAnimationFrame,
-        attention_requires_continuous_frames, capture_view_needed,
-        edge_glow_requires_continuous_frames, external_element_pass, frame_output_route,
-        intersect_scissors, is_opaque_output_occluder, oriented_content_uv,
-        overview_monitor_scissor, overview_render_route, postprocess_requires_continuous_frames,
-        premultiplied_blend_factors, previous_frame_requires_srgb_transition_snapshot,
-        retained_color_plan, shadow_quad, snap_preview_allows_partial_damage,
+        ExternalElementPass, FinalBrightnessStage, FrameOutputRoute, OcclusionCandidate,
+        OutputColorFrameState, OverviewRenderRoute, PartialDamagePlan, RetainedTexturePass,
+        RetainedTextureProgram, WindowAnimationFrame, attention_requires_continuous_frames,
+        capture_view_needed, drawn_window_decorations, edge_glow_requires_continuous_frames,
+        external_element_pass, final_brightness_stage, for_each_changed_external_element_footprint,
+        frame_output_route, intersect_scissors, is_opaque_output_occluder, oriented_content_uv,
+        overview_monitor_scissor, overview_render_route, partial_damage_plan,
+        postprocess_requires_continuous_frames, premultiplied_blend_factors,
+        previous_frame_requires_srgb_transition_snapshot, restacked_span, retained_color_plan,
+        shadow_quad, snap_preview_allows_partial_damage, status_bar_glass_backdrop_usable,
         transform_for_encoded_srgb,
     };
     use crate::backend::wayland_udev::color_pipeline::{ColorTransform, TransferKind};
@@ -675,6 +840,11 @@ mod tests {
             }
         }
         panic!("unterminated body for `{needle}`");
+    }
+
+    /// `text` without whitespace, so a source needle survives reformatting.
+    fn compact(text: &str) -> String {
+        text.chars().filter(|ch| !ch.is_whitespace()).collect()
     }
 
     #[test]
@@ -957,9 +1127,364 @@ mod tests {
             at(&mid) < final_at,
             "mid-frame brightness=1.0 comment must precede the final multiply"
         );
+    }
+
+    #[test]
+    fn final_brightness_dims_each_route_in_the_encoded_domain_exactly_once() {
+        // The encoded routes dim their canonical encoded output target. The
+        // deferred routes leave that target output-referred (linear light
+        // for a CRTC LUT, PQ/HLG codes per region), so they dim the linear
+        // target before delivery instead.
+        for route in [
+            FrameOutputRoute::LegacyEncoded,
+            FrameOutputRoute::EarlySrgbFallback,
+        ] {
+            assert_eq!(
+                final_brightness_stage(route),
+                FinalBrightnessStage::EncodedOutput
+            );
+        }
+        for route in [
+            FrameOutputRoute::DeferredHardware,
+            FrameOutputRoute::DeferredRegions,
+        ] {
+            assert_eq!(
+                final_brightness_stage(route),
+                FinalBrightnessStage::LinearBeforeDelivery
+            );
+        }
+
+        // Source order: the linear dim follows the cursor staging and
+        // precedes delivery and the capture view, and the capture view does
+        // not dim a second time. Needles are assembled at runtime and the
+        // haystacks are narrowed to production bodies, so this test cannot
+        // match its own text.
+        let source = include_str!("render.rs");
+        let frame = body_of(source, &format!("pub(crate) fn render_{}(", "frame"));
+        let at = |needle: &str| {
+            frame
+                .find(needle)
+                .unwrap_or_else(|| panic!("render_frame must contain `{needle}`"))
+        };
+        let elements = at(&format!(
+            "self.render_external_elements_{}(gl, &projection, damage_scissor)",
+            "into_linear"
+        ));
+        let linear_dim = at(&format!(
+            "self.apply_final_brightness_{}(gl, &projection)",
+            "linear"
+        ));
+        let delivery = at(&format!("{}::DeferredHardware => {{", "FrameOutputRoute"));
+        let capture = at(&format!("self.{}(gl, &projection)", "encode_capture_view"));
         assert!(
-            source.contains("apply_brightness_multiply(gl, projection, self.capture_view_fbo)"),
-            "dedicated capture view must bake idle brightness"
+            elements < linear_dim && linear_dim < delivery && delivery < capture,
+            "the deferred routes must dim the complete linear frame before delivery"
+        );
+        assert!(
+            frame.contains(&format!(
+                "if brightness_stage == {}::EncodedOutput {{",
+                "FinalBrightnessStage"
+            )),
+            "the output-target multiply must be limited to the encoded routes"
+        );
+        let view = body_of(source, &format!("fn encode_{}(", "capture_view"));
+        assert!(
+            !view.contains(&format!("{}(", "apply_brightness_multiply")),
+            "the capture view is derived from the already dimmed linear target"
+        );
+    }
+
+    #[test]
+    fn a_removed_frame_tail_layer_forces_one_full_frame() {
+        // Frame N: the launcher is up, so the frame is not calm. It is drawn
+        // full and obliges the next frame to be full too.
+        let open = partial_damage_plan(true, false, false);
+        assert_eq!(
+            open,
+            PartialDamagePlan {
+                allow_partial: false,
+                force_full_next: true,
+            }
+        );
+        // Frame N+1: Esc closed it, and `set_system_ui(None)` armed nothing
+        // but `needs_render`. A video commit elsewhere makes the frame calm
+        // with a small damage box. It still has to be full, or the scrim
+        // stays everywhere outside that box.
+        let closed = partial_damage_plan(true, open.force_full_next, true);
+        assert!(!closed.allow_partial);
+        assert!(!closed.force_full_next);
+        // Frame N+2: partial repair resumes.
+        let settled = partial_damage_plan(true, closed.force_full_next, true);
+        assert!(settled.allow_partial);
+        assert!(!settled.force_full_next);
+        // A setter's explicit request and the global switch still win.
+        assert!(!partial_damage_plan(true, true, true).allow_partial);
+        assert!(!partial_damage_plan(false, false, true).allow_partial);
+
+        // The frame must carry the obligation over instead of clearing it.
+        let source = include_str!("render.rs");
+        let frame = compact(body_of(
+            source,
+            &format!("pub(crate) fn render_{}(", "frame"),
+        ));
+        assert!(frame.contains(&format!(
+            "self.force_full_damage_next={}.force_full_next;",
+            "partial_plan"
+        )));
+        assert!(!frame.contains(&format!("self.force_full_damage_next={};", "false")));
+    }
+
+    #[test]
+    fn tags_grid_live_cells_keep_the_alpha_of_translucent_clients() {
+        // The live cell draws through the shared window shader, where a
+        // positive opacity forces the texture opaque. Like the expose and
+        // peek thumbnails, it has to negate the opacity for a client that
+        // declared alpha, through the same helper (whose own test in
+        // expose.rs covers all three paths).
+        let source = include_str!("render.rs");
+        let cell = compact(body_of(
+            source,
+            &format!("fn render_tags_grid_{}(", "live_cell"),
+        ));
+        assert!(cell.contains(&format!(
+            "gl.Uniform1f(self.win_uniforms.opacity,{}(win.has_alpha,1.0)",
+            "window_shader_opacity"
+        )));
+        assert!(
+            !cell.contains(&format!(
+                "gl.Uniform1f(self.win_uniforms.opacity,{});",
+                "1.0"
+            )),
+            "the live cell still forces alpha clients opaque"
+        );
+    }
+
+    #[test]
+    fn only_changed_external_elements_damage_their_footprints() {
+        let element = |rect, content_key| super::super::ExternalElementVisual {
+            texture: 0,
+            owner: None,
+            rect,
+            content_key,
+        };
+        fn marked(
+            previous: &[([i32; 4], u64)],
+            current: &[super::super::ExternalElementVisual],
+        ) -> Vec<[i32; 4]> {
+            let rects: Vec<[i32; 4]> = previous.iter().map(|&(rect, _)| rect).collect();
+            let keys: Vec<u64> = previous.iter().map(|&(_, key)| key).collect();
+            let mut marked = Vec::new();
+            for_each_changed_external_element_footprint(&rects, &keys, current, |rect| {
+                marked.push(rect)
+            });
+            marked
+        }
+        let bar = [0, 0, 1920, 30];
+        let cursor = [1800, 1000, 24, 24];
+        let moved = [40, 260, 24, 24];
+
+        // A resting cursor and a still bar damage nothing. Before, both
+        // joined every partial box, which then spanned the screen.
+        assert!(
+            marked(
+                &[(bar, 7), (cursor, 1)],
+                &[element(bar, 7), element(cursor, 1)]
+            )
+            .is_empty()
+        );
+        // A move damages both rects of the moved element, and only those.
+        assert_eq!(
+            marked(
+                &[(bar, 7), (cursor, 1)],
+                &[element(bar, 7), element(moved, 1)]
+            ),
+            [cursor, moved]
+        );
+        // New pixels at the same rect (the bar's clock ticked, the cursor
+        // changed shape) damage the footprint.
+        assert_eq!(
+            marked(
+                &[(bar, 7), (cursor, 1)],
+                &[element(bar, 8), element(cursor, 1)]
+            ),
+            [bar, bar]
+        );
+        // An element that appears or leaves damages its rect and those of
+        // the slots it shifts.
+        assert_eq!(
+            marked(&[(cursor, 1)], &[element(bar, 7), element(cursor, 1)]),
+            [cursor, bar, cursor]
+        );
+        assert_eq!(
+            marked(&[(bar, 7), (cursor, 1)], &[element(cursor, 1)]),
+            [bar, cursor, cursor]
+        );
+        // A missing previous key counts as changed; empty rects draw nothing.
+        let mut unkeyed = Vec::new();
+        for_each_changed_external_element_footprint(
+            &[cursor],
+            &[],
+            &[element(cursor, 1)],
+            |rect| unkeyed.push(rect),
+        );
+        assert_eq!(unkeyed, [cursor, cursor]);
+        assert!(marked(&[([900, 900, 0, 8], 1)], &[element([900, 900, 8, 0], 2)]).is_empty());
+
+        // The damage box takes no footprint of its own any more, and only
+        // the retained linear target scissors the element redraw to it: the
+        // early-sRGB fallback re-encodes the whole output target without
+        // the elements every frame, so its blit must stay unscissored.
+        let source = include_str!("render.rs");
+        let damage = compact(body_of(
+            source,
+            &format!("fn compute_partial_{}(", "damage_box"),
+        ));
+        assert!(damage.contains(&format!("letbbox={};", "acc?")));
+        assert!(!damage.contains(&format!("self.{}", "external_elements")));
+        let linear = compact(body_of(
+            source,
+            &format!("fn render_external_elements_{}(", "into_linear"),
+        ));
+        assert!(linear.contains(&format!("self.linear_fbo,true,{})", "damage_scissor")));
+        let encoded = compact(body_of(
+            source,
+            &format!("fn render_external_elements_{}(", "encoded"),
+        ));
+        assert!(encoded.contains(&format!("self.output_fbo,false,{})", "None")));
+        let into = compact(body_of(
+            source,
+            &format!("fn render_external_elements_{}(", "into"),
+        ));
+        assert!(into.contains(&format!("gl.{}(x,y,w,h);", "Scissor")));
+    }
+
+    #[test]
+    fn a_restack_damages_every_window_whose_order_changed() {
+        let a = (1, 100, 100, 400, 300);
+        let b = (2, 300, 200, 400, 300);
+        let c = (3, 1400, 800, 200, 100);
+        let d = (4, 0, 0, 50, 50);
+        type Entry = (u64, i32, i32, u32, u32);
+        let span = |previous: &[Entry], current: &[Entry]| {
+            restacked_span(
+                previous,
+                current,
+                |id| previous.iter().any(|&(other, ..)| other == id),
+                |id| current.iter().any(|&(other, ..)| other == id),
+            )
+        };
+        // Raising the lower of two overlapping windows without a move.
+        assert_eq!(span(&[a, b, c], &[b, a, c]), Some((0, 1)));
+        // Lowering the top window below everything reorders the whole stack.
+        assert_eq!(span(&[a, b, c], &[c, a, b]), Some((0, 2)));
+        // One window lifted over two others: only that span changed.
+        assert_eq!(span(&[a, b, c, d], &[a, d, b, c]), Some((1, 3)));
+        // Maps and unmaps that keep the survivors' order are geometry damage
+        // already, not a restack.
+        assert_eq!(span(&[a, b, c], &[a, b, c]), None);
+        assert_eq!(span(&[a, b, c], &[a, d, c]), None);
+        assert_eq!(span(&[a, b], &[a, b, d]), None);
+        assert_eq!(span(&[], &[a]), None);
+
+        // The frame marks the span before the previous scene is replaced.
+        let source = include_str!("render.rs");
+        let frame = compact(body_of(
+            source,
+            &format!("pub(crate) fn render_{}(", "frame"),
+        ));
+        let marked = frame
+            .find(&format!("{}(&self.prev_scene,scene,", "restacked_span"))
+            .expect("section 1b must diff the stacking order");
+        let replaced = frame
+            .find(&format!("self.prev_scene.{}();", "clear"))
+            .expect("section 1b replaces the previous scene");
+        assert!(marked < replaced);
+    }
+
+    #[test]
+    fn the_status_bar_glass_needs_a_backdrop_in_the_target_domain() {
+        assert!(status_bar_glass_backdrop_usable(true, false, false));
+        assert!(status_bar_glass_backdrop_usable(true, true, true));
+        // The client-blur seed is encoded: on the linear target the glass
+        // program decodes it, so the bar keeps its sheet on linear frames.
+        assert!(status_bar_glass_backdrop_usable(true, false, true));
+        // Linear light cannot be re-encoded by the program.
+        assert!(!status_bar_glass_backdrop_usable(true, true, false));
+        assert!(!status_bar_glass_backdrop_usable(false, false, false));
+        assert!(!status_bar_glass_backdrop_usable(false, false, true));
+
+        // The decode is keyed on the backdrop's own domain, for every sheet.
+        let fill = compact(body_of(
+            include_str!("render.rs"),
+            &format!("unsafe fn {}(", "glass_fill_rounded"),
+        ));
+        assert!(
+            fill.contains(&format!(
+                "gl.Uniform1i(u.{},i32::from(!self.{}));",
+                "backdrop_encoded", "glass_backdrop_linear"
+            )),
+            "glass_fill_rounded must tell the program when its backdrop is encoded"
+        );
+
+        let source = include_str!("render.rs");
+        let frame = compact(body_of(
+            source,
+            &format!("pub(crate) fn render_{}(", "frame"),
+        ));
+        let gate = format!(
+            "ifis_status_bar&&{}(self.glass_backdrop.is_some(),\
+             self.glass_backdrop_linear,scene_linear_active",
+            "status_bar_glass_backdrop_usable"
+        );
+        assert!(
+            frame.contains(&gate),
+            "the status bar must check the backdrop domain before the glass sheet"
+        );
+    }
+
+    #[test]
+    fn scanout_diagnostics_report_the_decorations_the_scene_actually_draws() {
+        use super::direct_scanout::{DirectScanoutManager, WindowScanoutInfo};
+        // Fullscreen and shaped windows are drawn with no shadow and no
+        // rounding, whatever the defaults say.
+        assert_eq!(drawn_window_decorations(true, true, 8.0), (false, 0.0));
+        assert_eq!(drawn_window_decorations(false, true, 8.0), (true, 8.0));
+        assert_eq!(drawn_window_decorations(false, false, 0.0), (false, 0.0));
+
+        // With the default shadow and corner radius, the lone opaque
+        // fullscreen client KMS scans out is eligible here too.
+        let (has_shadow, corner_radius) = drawn_window_decorations(true, true, 8.0);
+        let mut manager = DirectScanoutManager::new(1920, 1080);
+        let verdict = manager.check_scene(
+            &[(
+                7,
+                WindowScanoutInfo {
+                    x: 0,
+                    y: 0,
+                    width: 1920,
+                    height: 1080,
+                    is_fullscreen: true,
+                    has_alpha: false,
+                    has_blur: false,
+                    has_shadow,
+                    corner_radius,
+                    opacity: 1.0,
+                },
+            )],
+            Some(7),
+        );
+        assert_eq!(verdict, (true, Some(7)));
+        assert_eq!(manager.last_reason(), "eligible");
+
+        let source = include_str!("render.rs");
+        let diagnostics = compact(body_of(
+            source,
+            &format!("fn update_direct_scanout_{}(", "diagnostics"),
+        ));
+        assert!(diagnostics.contains(&format!("{}(", "drawn_window_decorations")));
+        assert!(
+            !diagnostics.contains(&format!("has_shadow:self.{},", "shadow_enabled")),
+            "the configured shadow flag must not reach fullscreen windows"
         );
     }
 
@@ -1097,23 +1622,47 @@ mod tests {
     /// A fullscreen client presented directly to the scanout would bury the
     /// MIC chip for the whole standalone audio recording — the same reason
     /// the REC chip's `recording_requires_composition` blocks direct scanout.
+    /// The diagnostics take the chip from the one predicate the KMS gate
+    /// also consults, ahead of every other arm, instead of keeping an arm
+    /// of their own that could drift from it.
     #[test]
     fn the_mic_indicator_blocks_direct_scanout_while_it_is_up() {
-        let source = include_str!("render.rs");
-        let reason = format!("{} requires composition", "mic indicator");
-        let needle = format!("block_for_composition(\"{reason}\")");
+        let diagnostics = compact(body_of(
+            include_str!("render.rs"),
+            &format!("fn {}(", "update_direct_scanout_diagnostics"),
+        ));
+        let shared = diagnostics
+            .find(&format!("self.{}(", "direct_scanout_block_reason"))
+            .expect("the diagnostics must consult the shared scanout predicate");
+        let first_own_arm = diagnostics
+            .find(&format!("{}(\"", "block_for_composition"))
+            .expect("the diagnostics keep their own system-UI/recording arms");
         assert!(
-            source.contains(&needle),
-            "the direct-scanout path must block for the MIC chip ({needle})"
+            shared < first_own_arm,
+            "the shared predicate (privacy cues first) must run before any other arm"
         );
-        let arm_at = source.find(&needle).expect("the MIC scanout arm");
-        let rec_reason = format!("{} requires composition", "screen recording");
-        let rec_arm_at = source
-            .find(&rec_reason)
-            .expect("the recording scanout arm must remain");
         assert!(
-            rec_arm_at < arm_at,
-            "the MIC arm sits beside the recording arm, after the overlay blockers"
+            !diagnostics.contains(&format!("self.{}", "mic_indicator_active")),
+            "the MIC chip must come from the shared predicate, not a second arm"
+        );
+
+        // And that predicate carries the chip, from live state.
+        let gate = compact(body_of(
+            include_str!("damage.rs"),
+            &format!("pub(crate) fn {}(", "direct_scanout_block_reason"),
+        ));
+        assert!(gate.contains(&format!("self.{},", "mic_indicator_active")));
+        let cues = compact(body_of(
+            include_str!("damage.rs"),
+            &format!("fn {}(", "privacy_cue_block_reason"),
+        ));
+        let mic_reason = compact(&format!(
+            "return Some(\"{} requires composition\");",
+            "mic indicator"
+        ));
+        assert!(
+            cues.contains(&mic_reason),
+            "the privacy cues must name the MIC chip as a composition blocker"
         );
     }
 }
@@ -1452,11 +2001,23 @@ impl WaylandCompositor {
     /// `u_scene_linear = 1`), so no second transfer-function copy exists and
     /// the frame's per-output matrix + OETF applies to them exactly once.
     /// Blending stays the canonical premultiplied state.
-    fn render_external_elements_into_linear(&self, gl: &ffi::Gles2, projection: &[f32; 16]) {
+    ///
+    /// On a partial frame the draw is scissored to `damage_scissor` (GL
+    /// bottom-left origin). The linear target is retained: outside the box it
+    /// already holds every element that did not change composited exactly
+    /// once, and blending it again there would darken its translucent
+    /// pixels frame after frame. Elements that moved or changed had both
+    /// footprints put in the box by section 1c.
+    fn render_external_elements_into_linear(
+        &self,
+        gl: &ffi::Gles2,
+        projection: &[f32; 16],
+        damage_scissor: Option<[i32; 4]>,
+    ) {
         if self.linear_fbo == 0 {
             return;
         }
-        self.render_external_elements_into(gl, projection, self.linear_fbo, true);
+        self.render_external_elements_into(gl, projection, self.linear_fbo, true, damage_scissor);
     }
 
     /// Draw the staged external elements onto the already-encoded output
@@ -1466,9 +2027,12 @@ impl WaylandCompositor {
     /// of before the encode: the cursor stays top-most exactly as it does at
     /// the deferred routes' delivery point. The staged textures are
     /// premultiplied encoded sRGB, so with `u_scene_linear = 0` this is a
-    /// plain blit — no transfer is applied a second time.
+    /// plain blit — no transfer is applied a second time. The blit is never
+    /// scissored: this route re-encodes the whole output target from the
+    /// linear one (which holds no elements) every frame, so each element
+    /// must be drawn in full.
     fn render_external_elements_encoded(&self, gl: &ffi::Gles2, projection: &[f32; 16]) {
-        self.render_external_elements_into(gl, projection, self.output_fbo, false);
+        self.render_external_elements_into(gl, projection, self.output_fbo, false, None);
     }
 
     fn render_external_elements_into(
@@ -1477,6 +2041,7 @@ impl WaylandCompositor {
         projection: &[f32; 16],
         target_fbo: u32,
         scene_linear: bool,
+        scissor: Option<[i32; 4]>,
     ) {
         if self.external_elements.is_empty() {
             return;
@@ -1484,6 +2049,13 @@ impl WaylandCompositor {
         unsafe {
             gl.BindFramebuffer(ffi::FRAMEBUFFER, target_fbo);
             gl.Viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
+            match scissor {
+                Some([x, y, w, h]) => {
+                    gl.Enable(ffi::SCISSOR_TEST);
+                    gl.Scissor(x, y, w, h);
+                }
+                None => gl.Disable(ffi::SCISSOR_TEST),
+            }
             self.enable_premultiplied_blend(gl);
             gl.UseProgram(self.program);
             self.set_projection_uniform(gl, self.win_uniforms.projection, projection);
@@ -1522,6 +2094,7 @@ impl WaylandCompositor {
 
             gl.BindVertexArray(0);
             gl.UseProgram(0);
+            gl.Disable(ffi::SCISSOR_TEST);
         }
     }
 
@@ -1752,7 +2325,9 @@ impl WaylandCompositor {
         }
     }
 
-    /// Fullscreen brightness multiply after toast/OSD/system UI.
+    /// Fullscreen brightness multiply after toast/OSD/system UI, on the
+    /// routes whose output target is canonical encoded sRGB
+    /// (`FinalBrightnessStage::EncodedOutput`).
     ///
     /// Reuses `postprocess_program` with identity filters so idle dim covers
     /// compositor chrome without double-dimming glass (mid-frame brightness
@@ -1761,10 +2336,40 @@ impl WaylandCompositor {
         self.apply_brightness_multiply(gl, projection, self.output_fbo);
     }
 
+    /// The same idle dim on the deferred routes
+    /// (`FinalBrightnessStage::LinearBeforeDelivery`). It runs after the
+    /// frame-tail chrome and the staged external elements and before
+    /// delivery. The linear target is encoded into the postprocess copy,
+    /// multiplied there exactly as the encoded routes multiply, and decoded
+    /// back. Every output transfer then carries the same dim that the capture
+    /// view, derived from this target, shows. Values above SDR white are
+    /// clamped by the round trip, as they are under the postprocess filters.
+    fn apply_final_brightness_linear(&self, gl: &ffi::Gles2, projection: &[f32; 16]) {
+        use crate::backend::wayland_udev::color_pipeline::{IDENTITY_CTM, TransferKind};
+        if !super::config::final_brightness_is_active(self.brightness) {
+            return;
+        }
+        if self.linear_fbo == 0 || self.postprocess_fbo == 0 || self.postprocess_texture == 0 {
+            return;
+        }
+        let srgb = TransferKind::Srgb;
+        self.dispatch_scene_linear_encode_pass(
+            gl,
+            projection,
+            self.postprocess_fbo,
+            srgb.shader_id(),
+            srgb.gamma_for_shader(),
+            IDENTITY_CTM,
+            crate::backend::wayland_udev::color_pipeline::OutputToneMapPlan::IDENTITY,
+            None,
+        );
+        self.draw_brightness_multiply(gl, projection, self.linear_fbo, true);
+    }
+
     /// Multiply `target_fbo`'s contents by `self.brightness` in place.
     ///
-    /// Used for scanout (after overlays) and for baking dim into the dedicated
-    /// capture view so screenshots/recordings match the idle-dimmed session.
+    /// `target_fbo` must hold encoded sRGB (the scanout target on the encoded
+    /// routes).
     fn apply_brightness_multiply(
         &self,
         gl: &ffi::Gles2,
@@ -1784,6 +2389,19 @@ impl WaylandCompositor {
             self.screen_w,
             self.screen_h,
         );
+        self.draw_brightness_multiply(gl, projection, target_fbo, false);
+    }
+
+    /// Draw the encoded-sRGB copy in `postprocess_texture`, multiplied by
+    /// `self.brightness`, over `target_fbo`. With `scene_linear` the result
+    /// is decoded for the common linear target.
+    fn draw_brightness_multiply(
+        &self,
+        gl: &ffi::Gles2,
+        projection: &[f32; 16],
+        target_fbo: u32,
+        scene_linear: bool,
+    ) {
         unsafe {
             gl.Disable(ffi::SCISSOR_TEST);
             gl.BindFramebuffer(ffi::FRAMEBUFFER, target_fbo);
@@ -1808,9 +2426,12 @@ impl WaylandCompositor {
             gl.Uniform1i(self.postprocess_uniforms.magnifier_enabled, 0);
             gl.Uniform1i(self.postprocess_uniforms.colorblind_mode, 0);
             gl.Uniform1i(self.postprocess_uniforms.hdr_enabled, 0);
-            // The program is shared with the postprocess pass, which sets this
-            // on linear frames; idle dim keeps its encoded-domain multiply.
-            gl.Uniform1i(self.postprocess_uniforms.scene_linear, 0);
+            // Idle dim always multiplies encoded values. The flag only
+            // selects whether the result is decoded for a linear target.
+            gl.Uniform1i(
+                self.postprocess_uniforms.scene_linear,
+                i32::from(scene_linear),
+            );
             gl.ActiveTexture(ffi::TEXTURE0);
             gl.BindTexture(ffi::TEXTURE_2D, self.postprocess_texture);
             gl.BindVertexArray(self.quad_vao);
@@ -2112,6 +2733,10 @@ impl WaylandCompositor {
             }
         }
 
+        // Staged external elements that moved or changed are already in the
+        // tracker regions (section 1c). Unchanged ones stay out: their redraw
+        // is scissored to this box, so folding them in would only stretch
+        // the box to a resting cursor or bar.
         let bbox = acc?;
         // Clamp to screen bounds.
         let x0 = bbox.x.max(0.0);
@@ -2194,19 +2819,34 @@ impl WaylandCompositor {
                 .block_for_composition("screen recording requires composition");
             return;
         }
-        // A directly scanned-out client would bury the MIC chip for the whole
-        // standalone audio recording — the same reason the REC chip holds
-        // composition above.
-        if self.mic_indicator_active {
-            self.direct_scanout_mgr
-                .block_for_composition("mic indicator requires composition");
-            return;
-        }
+        // The MIC chip, the monitor lock shade and the capture hint hold
+        // composition through `direct_scanout_block_reason` above, the same
+        // predicate the KMS zero-copy gate consults, so the diagnostics
+        // cannot drift from the real gate on a privacy cue.
 
         let mut scanout_windows = std::mem::take(&mut self.scratch_scanout);
         scanout_windows.clear();
         for &(win_id, x, y, w, h) in scene {
             if let Some(ws) = self.windows.get(&win_id) {
+                // Report what the scene pass draws, not the configured
+                // defaults. The shadow and radius exemptions come from
+                // sections 7 and 9. The opacity is the window pass's rule,
+                // focus and fade product.
+                let (has_shadow, corner_radius) = drawn_window_decorations(
+                    ws.is_shaped || ws.is_fullscreen,
+                    self.shadow_enabled && self.shadow_radius > 0.0,
+                    ws.corner_radius_override.unwrap_or(self.corner_radius),
+                );
+                let base_opacity = if focused == Some(win_id) {
+                    self.active_opacity
+                } else {
+                    self.inactive_opacity
+                };
+                let opacity = ws
+                    .opacity_override
+                    .or_else(|| self.lookup_opacity_rule(&ws.class_name))
+                    .unwrap_or(base_opacity)
+                    * ws.fade_opacity;
                 scanout_windows.push((
                     win_id,
                     direct_scanout::WindowScanoutInfo {
@@ -2217,9 +2857,9 @@ impl WaylandCompositor {
                         is_fullscreen: ws.is_fullscreen,
                         has_alpha: ws.has_alpha,
                         has_blur: ws.is_frosted,
-                        has_shadow: self.shadow_enabled,
-                        corner_radius: ws.corner_radius_override.unwrap_or(self.corner_radius),
-                        opacity: ws.fade_opacity,
+                        has_shadow,
+                        corner_radius,
+                        opacity,
                     },
                 ));
             }
@@ -2489,6 +3129,30 @@ impl WaylandCompositor {
                 }
             }
 
+            // Restacks without moves (an Above/Below request, a raise that
+            // leaves focus alone) change which window wins every overlap
+            // among the reordered windows. The geometry diff above sees
+            // nothing, so damage the reordered span. Otherwise a partial
+            // frame driven by an unrelated commit keeps the old z-order.
+            if let Some((first, last)) = restacked_span(
+                &self.prev_scene,
+                scene,
+                |id| self.scratch_prev_geom.contains_key(&id),
+                |id| self.scratch_curr_ids.contains(&id),
+            ) {
+                for &(_, x, y, w, h) in scene
+                    .iter()
+                    .filter(|&&(id, ..)| self.scratch_prev_geom.contains_key(&id))
+                    .skip(first)
+                    .take(last - first + 1)
+                {
+                    self.dirty_region_tracker
+                        .mark_dirty(dirty_region::DirtyRect::new(
+                            x as f32, y as f32, w as f32, h as f32,
+                        ));
+                }
+            }
+
             self.prev_scene.clear();
             self.prev_scene.extend_from_slice(scene);
         }
@@ -2501,30 +3165,23 @@ impl WaylandCompositor {
         // baked into the persistent output FBO, and the new ones land in the
         // linear FBO this frame, so a partial-damage box computed without
         // them would either strand the old element or skip the new one.
+        // Marking them here also makes element-only motion count as damage.
+        // An element whose pixels changed at the same rect (a new content
+        // key: a bar's clock tick, another cursor shape) is marked the same
+        // way. Unchanged elements stay out of the box: their redraw is
+        // scissored to it instead.
         {
-            let rects_changed = self.external_elements.len()
-                != self.external_elements_prev_rects.len()
-                || self
-                    .external_elements
-                    .iter()
-                    .zip(self.external_elements_prev_rects.iter())
-                    .any(|(element, previous)| element.rect != *previous);
-            if rects_changed {
-                let tracker = &mut self.dirty_region_tracker;
-                for rect in self
-                    .external_elements_prev_rects
-                    .iter()
-                    .copied()
-                    .chain(self.external_elements.iter().map(|element| element.rect))
-                {
+            let tracker = &mut self.dirty_region_tracker;
+            for_each_changed_external_element_footprint(
+                &self.external_elements_prev_rects,
+                &self.external_elements_prev_keys,
+                &self.external_elements,
+                |[x, y, w, h]| {
                     tracker.mark_dirty(dirty_region::DirtyRect::new(
-                        rect[0] as f32,
-                        rect[1] as f32,
-                        rect[2] as f32,
-                        rect[3] as f32,
+                        x as f32, y as f32, w as f32, h as f32,
                     ));
-                }
-            }
+                },
+            );
         }
 
         // Feed dirty regions to per-monitor renderer
@@ -2753,9 +3410,7 @@ impl WaylandCompositor {
         };
         let smart_borders_flipped = ordinary_borders != self.prev_ordinary_borders;
         self.prev_ordinary_borders = ordinary_borders;
-        let allow_partial = self.partial_damage_enabled
-            && !self.force_full_damage_next
-            && !smart_borders_flipped
+        let frame_is_calm = !smart_borders_flipped
             && !any_animating
             && !force_render
             && !self.peek_active
@@ -2782,13 +3437,20 @@ impl WaylandCompositor {
             && self.tilt_x.abs() <= 0.001
             && self.tilt_y.abs() <= 0.001
             && !blur_would_run;
-        let partial_box = if allow_partial {
+        let partial_plan = partial_damage_plan(
+            self.partial_damage_enabled,
+            self.force_full_damage_next,
+            frame_is_calm,
+        );
+        let partial_box = if partial_plan.allow_partial {
             self.compute_partial_damage_box(scene, focused)
         } else {
             None
         };
-        // Consumed for this frame; next frame may go partial again.
-        self.force_full_damage_next = false;
+        // Consumed for this frame. The next frame may go partial again only
+        // if this one drew nothing outside a damage box: a layer removed
+        // after a non-calm frame leaves pixels that no box reports.
+        self.force_full_damage_next = partial_plan.force_full_next;
 
         // =================================================================
         // 3. Setup projection matrix
@@ -3197,7 +3859,11 @@ impl WaylandCompositor {
         // domain can reuse it and skip a second full-screen Kawase. Linear
         // overlays (tab bar when `tail_draws_linear`) still recapture via
         // `ensure_glass_backdrop` when the domain flag mismatches — and taking
-        // an owned copy here is what keeps the seed intact when they do.
+        // an owned copy here is what keeps the seed intact when they do. The
+        // status bar draws mid window pass, where a recapture would read a
+        // half-drawn target, so on a linear frame it samples this encoded
+        // seed and the glass program decodes it (`u_backdrop_encoded`, see
+        // `status_bar_glass_backdrop_usable`).
         if let Some(tex) = blur_result_tex {
             self.glass_backdrop = self.store_glass_backdrop(gl, tex, false);
             self.glass_backdrop_linear = false;
@@ -3352,7 +4018,9 @@ impl WaylandCompositor {
                 // its own veil by design — that is what holds the bar's text at
                 // contrast over an arbitrary wallpaper — so the sheet only
                 // contributes a hue here, at
-                // `ui_theme::STATUS_BAR_GLASS_TINT_ALPHA`.
+                // `ui_theme::STATUS_BAR_GLASS_TINT_ALPHA`. The sheet needs a
+                // backdrop it can bring into the bound target's domain;
+                // without one the bar keeps the flat quad.
                 if self.blur_enabled
                     && let Some(blur_tex) = blur_result_tex
                     && let Some(frosted_strength) = self.window_backdrop_blur_strength(wt, w, h)
@@ -3361,7 +4029,11 @@ impl WaylandCompositor {
                         && (wt.class_name == status_bar_name
                             || wt.class_name.contains(&status_bar_name));
                     if is_status_bar
-                        && self.glass_backdrop.is_some()
+                        && status_bar_glass_backdrop_usable(
+                            self.glass_backdrop.is_some(),
+                            self.glass_backdrop_linear,
+                            scene_linear_active,
+                        )
                         && let Some(params) = ui_palette.glass
                     {
                         // Bar optics, not panel optics: a shallower bevel and a
@@ -4203,12 +4875,19 @@ impl WaylandCompositor {
         // and blits the (encoded) textures into the output target instead.
         match external_elements_pass {
             ExternalElementPass::LinearAtDelivery => {
-                self.render_external_elements_into_linear(gl, &projection);
+                self.render_external_elements_into_linear(gl, &projection, damage_scissor);
             }
             ExternalElementPass::EncodedAfterLinearAwareOverlays => {
                 self.render_external_elements_encoded(gl, &projection);
             }
             ExternalElementPass::Skipped => {}
+        }
+        // Idle dim / user brightness on the deferred routes: after every
+        // linear-target layer, cursor included, and before delivery gives
+        // output_fbo its output-referred domain.
+        let brightness_stage = final_brightness_stage(output_route);
+        if brightness_stage == FinalBrightnessStage::LinearBeforeDelivery {
+            self.apply_final_brightness_linear(gl, &projection);
         }
         // Linear-tail-safe frames remain in the common FP16 target through
         // every compatible late overlay. Convert only now, immediately before
@@ -4315,13 +4994,17 @@ impl WaylandCompositor {
 
         // Final brightness multiply after toast/OSD/system UI so idle dim
         // covers compositor chrome. Mid-frame postprocess keeps u_brightness=1.
-        self.apply_final_brightness(gl, &projection);
+        // The deferred routes dimmed their linear target at 18b instead.
+        if brightness_stage == FinalBrightnessStage::EncodedOutput {
+            self.apply_final_brightness(gl, &projection);
+        }
 
         // =================================================================
         // 19. Screenshot capture (region or full)
         // =================================================================
         // After final brightness so EncodedOutput readbacks match the dimmed
-        // session. Dedicated capture views already baked brightness in 18c.
+        // session. Dedicated capture views are derived (18c) from the linear
+        // target that 18b already dimmed.
         if self.screenshot_requests.has_pending() {
             match self.capture_readback_fbo() {
                 Some(fbo) => unsafe {
@@ -4492,15 +5175,23 @@ impl WaylandCompositor {
         // scanout stays blocked while the output texture carries them. A frame
         // that rendered without drawing the staged set leaves no element
         // pixels behind: with full damage the output FBO was rebuilt from the
-        // clear, and with partial repair section 1c put the previous
-        // rectangles inside the damage box, so they were cleared there. The
-        // previous-rect set therefore always mirrors the positions actually
-        // present in output_fbo — never stale, never perpetually dirty.
+        // clear, and with partial repair section 1c put every previous rect
+        // whose slot is now empty or different inside the damage box, so they
+        // were cleared. (A frame that stops drawing a still-staged set changes
+        // route or target, and both force full damage.) The previous-rect and
+        // key sets therefore always mirror what is actually present in the
+        // retained targets — never stale, never perpetually dirty.
         self.external_elements_drawn = drew_external_elements;
         self.external_elements_prev_rects.clear();
+        self.external_elements_prev_keys.clear();
         if drew_external_elements {
             self.external_elements_prev_rects
                 .extend(self.external_elements.iter().map(|element| element.rect));
+            self.external_elements_prev_keys.extend(
+                self.external_elements
+                    .iter()
+                    .map(|element| element.content_key),
+            );
         }
         unsafe {
             self.reset_external_gl_state(gl);
@@ -4557,10 +5248,10 @@ impl WaylandCompositor {
             crate::backend::wayland_udev::color_pipeline::OutputToneMapPlan::IDENTITY,
             None,
         );
-        // Bake idle/user brightness into the dedicated capture view so
-        // screenshots and recording match the dimmed on-screen session.
-        // Scanout still dims later via `apply_final_brightness` after overlays.
-        self.apply_brightness_multiply(gl, projection, self.capture_view_fbo);
+        // No brightness pass here: this view exists only on the deferred
+        // routes, and they dim the linear target at 18b, before both
+        // delivery and this derivation. Screenshots and recordings therefore
+        // show the same dim as the screen, applied once.
         self.capture_view_fresh = true;
     }
 
@@ -5299,6 +5990,9 @@ impl WaylandCompositor {
             gl.Uniform1f(u.grain, params.grain);
             gl.Uniform1f(u.alpha, alpha.clamp(0.0, 1.0));
             gl.Uniform1i(u.scene_linear, i32::from(scene_linear));
+            // The client-blur seed stays encoded whatever the frame's route;
+            // the program decodes it itself when it lands in a linear target.
+            gl.Uniform1i(u.backdrop_encoded, i32::from(!self.glass_backdrop_linear));
             self.set_rect_uniform(gl, u.rect, x, y, w, h);
             self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
         }
@@ -6409,7 +7103,14 @@ impl WaylandCompositor {
                 };
 
                 gl.Uniform4f(self.win_uniforms.rect, rect[0], rect[1], rect[2], rect[3]);
-                gl.Uniform1f(self.win_uniforms.opacity, 1.0);
+                // Signed by the client's alpha exactly as the expose and peek
+                // thumbnails sign it: a positive opacity forces the texture
+                // opaque, so a translucent terminal or a CSD client's rounded
+                // transparent corners would come out black in its cell.
+                gl.Uniform1f(
+                    self.win_uniforms.opacity,
+                    window_shader_opacity(win.has_alpha, 1.0),
+                );
                 gl.Uniform1f(self.win_uniforms.radius, 6.0);
                 gl.Uniform2f(self.win_uniforms.size, rect[2], rect[3]);
                 gl.Uniform1f(self.win_uniforms.dim, 1.0);

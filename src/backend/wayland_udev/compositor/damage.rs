@@ -14,6 +14,37 @@ fn attention_requires_composition(enabled: bool, has_urgent_window: bool) -> boo
     attention_signal_active(enabled, has_urgent_window)
 }
 
+/// The compositor-drawn privacy and consent cues that exist only in the
+/// composed frame: a per-monitor lock shade, the standalone MIC chip and the
+/// capture hint chip.
+///
+/// None of them is a KMS element and none of them is covered by
+/// `has_system_ui()` or `recording_requires_composition()`, so without this
+/// arm a lone fullscreen client would be scanned out directly and the cue
+/// would never reach the screen — a locked monitor would keep showing the
+/// very window its shade exists to hide.
+///
+/// The shade is deliberately not scoped to the output being decided: shades
+/// carry logical monitor geometry while the gate's output rect is physical,
+/// and a scaling mismatch in a privacy guard is not worth the scanout it
+/// would win back on the unlocked outputs.
+fn privacy_cue_block_reason(
+    monitor_shaded: bool,
+    mic_indicator_active: bool,
+    capture_hint_visible: bool,
+) -> Option<&'static str> {
+    if monitor_shaded {
+        return Some("monitor lock shade requires composition");
+    }
+    if mic_indicator_active {
+        return Some("mic indicator requires composition");
+    }
+    if capture_hint_visible {
+        return Some("capture hint requires composition");
+    }
+    None
+}
+
 /// Whether this frame must throw away the cached frosted-glass backdrops.
 ///
 /// The backdrop is a blurred picture of the desktop the chrome panels sit on.
@@ -108,6 +139,19 @@ impl WaylandCompositor {
         output_rect_global_physical: CompositorRect,
     ) -> Option<&'static str> {
         const EPSILON: f32 = 0.0001;
+
+        // Privacy and consent cues come first: this is the one predicate the
+        // KMS zero-copy gate and the diagnostics share, and a cue that is
+        // missing here is silently buried under a scanned-out client. The
+        // capture hint's texture arm mirrors the post-delivery draw gate so
+        // the frame that frees it is composed as well.
+        if let Some(reason) = privacy_cue_block_reason(
+            !self.monitor_shades.is_empty(),
+            self.mic_indicator_active,
+            self.capture_hint.is_some() || self.capture_hint_texture.is_some(),
+        ) {
+            return Some(reason);
+        }
 
         // A scene-linear frame is not scanout-ready until either the shader
         // has applied its per-output gamut/OETF plan or KMS owns the matching
@@ -465,7 +509,8 @@ mod tests {
         CompositorRect, attention_requires_composition, border_requires_composition,
         expose_animation_pending, glass_backdrop_needs_invalidate,
         inactive_window_styling_requires_composition, minimized_dock_requires_composition,
-        overview_animation_pending, peek_animation_pending, rect_animation_pending,
+        overview_animation_pending, peek_animation_pending, privacy_cue_block_reason,
+        rect_animation_pending,
     };
 
     #[test]
@@ -606,6 +651,66 @@ mod tests {
         assert!(attention_requires_composition(true, true));
         assert!(!attention_requires_composition(false, true));
         assert!(!attention_requires_composition(true, false));
+    }
+
+    #[test]
+    fn each_privacy_cue_blocks_direct_scanout_on_its_own() {
+        assert_eq!(privacy_cue_block_reason(false, false, false), None);
+        assert_eq!(
+            privacy_cue_block_reason(true, false, false),
+            Some("monitor lock shade requires composition")
+        );
+        assert_eq!(
+            privacy_cue_block_reason(false, true, false),
+            Some("mic indicator requires composition")
+        );
+        assert_eq!(
+            privacy_cue_block_reason(false, false, true),
+            Some("capture hint requires composition")
+        );
+        // The shade outranks the chips: it is the cue whose absence leaks
+        // what the user asked to hide.
+        assert_eq!(
+            privacy_cue_block_reason(true, true, true),
+            Some("monitor lock shade requires composition")
+        );
+    }
+
+    #[test]
+    fn the_scanout_gate_feeds_every_privacy_cue_from_live_state() {
+        // `direct_scanout_block_reason` is the only compositor predicate the
+        // KMS zero-copy gate consults besides system UI and recording, so the
+        // shade, the MIC chip and the capture hint must reach it here or a
+        // lone fullscreen client is scanned out straight over them.
+        let compact: String = body_of(
+            include_str!("damage.rs"),
+            &format!("pub(crate) fn {}(", "direct_scanout_block_reason"),
+        )
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect();
+        let call = format!("{}(", "privacy_cue_block_reason");
+        let at = compact
+            .find(&call)
+            .expect("the scanout gate must consult the privacy cues");
+        let end = compact[at..]
+            .find("{returnSome(reason);}")
+            .map(|offset| at + offset)
+            .expect("the privacy cue arm returns the cue's own reason");
+        let args = &compact[at..end];
+        for live in [
+            format!("!self.{}.is_empty()", "monitor_shades"),
+            format!("self.{}", "mic_indicator_active"),
+            format!(
+                "self.{}.is_some()||self.{}.is_some()",
+                "capture_hint", "capture_hint_texture"
+            ),
+        ] {
+            assert!(
+                args.contains(&live),
+                "the privacy cue arm must read `{live}`"
+            );
+        }
     }
 
     #[test]

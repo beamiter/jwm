@@ -38,6 +38,17 @@ use std::time::Duration;
 pub const BACKEND_ENV: &str = "JWM_BACKEND";
 pub const BENCHMARK_ENV: &str = "JWM_BENCHMARK";
 pub const BENCHMARK_WARMUP_ENV: &str = "JWM_BENCHMARK_WARMUP";
+/// Decimal PID of the `jwm-tool daemon` that launched this JWM process.
+///
+/// `jwm-tool quit` finds its daemon through `$XDG_RUNTIME_DIR` alone, so a
+/// nested, benchmark, or test instance that inherits the host session's
+/// runtime directory would otherwise make the host daemon SIGTERM the user's
+/// real session when it exits. JWM therefore only asks a daemon to quit when
+/// this marker names its direct parent. The marker is intentionally left in
+/// the environment: an in-place restart `exec` keeps the same PID and parent
+/// and must still pass the check, while any process that merely inherits the
+/// variable has a different parent and is rejected.
+pub const DAEMON_PID_ENV: &str = "JWM_DAEMON_PID";
 const RESTART_MARKER_ENV: &str = "JWM_RESTARTING";
 const DBUS_LAUNCH_TIMEOUT: Duration = Duration::from_secs(5);
 const DBUS_LAUNCH_OUTPUT_LIMIT: usize = 64 * 1024;
@@ -71,12 +82,49 @@ fn run_daemon_control_command(
     crate::external_command::status_with_timeout(command, args, timeout)
 }
 
+/// Whether the daemon named by a [`DAEMON_PID_ENV`] marker is this process's
+/// direct parent, i.e. whether that daemon launched and manages this JWM.
+///
+/// Missing, non-UTF-8, malformed, or zero markers fail closed: an instance
+/// that cannot prove daemon ownership must never shut a daemon down.
+fn is_daemon_managed_process(marker: Option<&OsStr>, parent_pid: u32) -> bool {
+    marker
+        .and_then(OsStr::to_str)
+        .and_then(|value| value.parse::<u32>().ok())
+        .is_some_and(|daemon_pid| daemon_pid != 0 && daemon_pid == parent_pid)
+}
+
 fn request_daemon_shutdown() {
-    match run_daemon_control_command("jwm-tool", &["quit"], DAEMON_QUIT_TIMEOUT) {
+    request_daemon_shutdown_if_managed(
+        env::var_os(DAEMON_PID_ENV).as_deref(),
+        std::os::unix::process::parent_id(),
+        run_daemon_control_command,
+    );
+}
+
+/// Ask the owning `jwm-tool daemon` to exit after a normal JWM exit.
+///
+/// Only the daemon's own child may do this; see [`DAEMON_PID_ENV`]. An
+/// unmanaged instance needs no request because it has no daemon, and a
+/// managed one whose request is skipped is still covered by the daemon's
+/// child-exit health check. Returns whether the quit command was run.
+fn request_daemon_shutdown_if_managed(
+    marker: Option<&OsStr>,
+    parent_pid: u32,
+    run: impl FnOnce(&str, &[&str], Duration) -> std::io::Result<std::process::ExitStatus>,
+) -> bool {
+    if !is_daemon_managed_process(marker, parent_pid) {
+        info!(
+            "[application] not launched by a jwm-tool daemon ({DAEMON_PID_ENV} does not name parent {parent_pid}); leaving any daemon running"
+        );
+        return false;
+    }
+    match run("jwm-tool", &["quit"], DAEMON_QUIT_TIMEOUT) {
         Ok(status) if status.success() => {}
         Ok(status) => error!("[application] jwm-tool quit exited with {status}"),
         Err(error) => error!("[application] failed to quit jwm daemon: {error}"),
     }
+    true
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -464,6 +512,10 @@ fn bootstrap_jwm_instance(
         "acquire window-manager selection",
     )?;
 
+    // Feature threads started from here to `run` must not be able to take
+    // SIGCHLD; see `SigchldBlockedDuringBootstrap`. Dropped on every return,
+    // so a failed attempt restores the mask too.
+    let sigchld_blocked = SigchldBlockedDuringBootstrap::new();
     let mut jwm = Jwm::new_with_runtime_backend(&mut *backend, options.backend.as_str())?;
     if let Some(handoff) = scratchpad_handoff {
         // Borrow the immutable handoff for every bounded attempt. Ownership is
@@ -474,7 +526,51 @@ fn bootstrap_jwm_instance(
         jwm.install_transient_child_restart_handoff(handoff.clone())?;
     }
     jwm.setup(&mut *backend)?;
+    drop(sigchld_blocked);
     Ok((backend, jwm))
+}
+
+/// Keeps `SIGCHLD` blocked on the startup thread while the `Jwm` instance is
+/// built and set up, then restores the thread's previous mask.
+///
+/// The X11 backends read `SIGCHLD` through a calloop signalfd created in
+/// `run`, which only sees the signal while every other thread keeps it
+/// blocked. Threads inherit their spawner's mask, and `Jwm::new` and `setup`
+/// start feature threads of their own (the notification history writer,
+/// wallpaper decoding, background jobs). One of them left with `SIGCHLD`
+/// unblocked is an eligible target for the process-directed signal; with the
+/// default disposition it discards it, and child reaping falls back to the
+/// one-second insurance poll. The backend constructors guard their own
+/// spawns the same way. Restoring the mask afterwards hands `run` the mask
+/// it would have had without this guard.
+struct SigchldBlockedDuringBootstrap {
+    previous: Option<nix::sys::signal::SigSet>,
+}
+
+impl SigchldBlockedDuringBootstrap {
+    fn new() -> Self {
+        let mut sigchld = nix::sys::signal::SigSet::empty();
+        sigchld.add(nix::sys::signal::Signal::SIGCHLD);
+        match sigchld.thread_swap_mask(nix::sys::signal::SigmaskHow::SIG_BLOCK) {
+            Ok(previous) => Self {
+                previous: Some(previous),
+            },
+            Err(error) => {
+                warn!("[application] could not block SIGCHLD for startup threads: {error}");
+                Self { previous: None }
+            }
+        }
+    }
+}
+
+impl Drop for SigchldBlockedDuringBootstrap {
+    fn drop(&mut self) {
+        if let Some(previous) = self.previous.take()
+            && let Err(error) = previous.thread_set_mask()
+        {
+            warn!("[application] could not restore the signal mask after startup: {error}");
+        }
+    }
 }
 
 fn run_restart_bootstrap_with_retry<T>(
@@ -916,11 +1012,13 @@ fn configure_benchmark<B: CompositorBenchmark + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::{
-        ApplicationOptions, BackendChoice, BenchmarkRequest, RESTART_BOOTSTRAP_BACKOFFS,
-        RESTART_MARKER_ENV, RestartCommand, RestartPreparationStage, config_path,
-        configure_benchmark, decode_restart_handoff, decode_transient_child_restart_handoff,
-        execute_restart_after_cleanup, parse_benchmark, run_daemon_control_command,
-        run_restart_bootstrap_with_retry, run_restart_preparation_steps,
+        ApplicationOptions, BackendChoice, BenchmarkRequest, DAEMON_PID_ENV, DAEMON_QUIT_TIMEOUT,
+        RESTART_BOOTSTRAP_BACKOFFS, RESTART_MARKER_ENV, RestartCommand, RestartPreparationStage,
+        SigchldBlockedDuringBootstrap, config_path, configure_benchmark, decode_restart_handoff,
+        decode_transient_child_restart_handoff, execute_restart_after_cleanup,
+        is_daemon_managed_process, parse_benchmark, request_daemon_shutdown_if_managed,
+        run_daemon_control_command, run_restart_bootstrap_with_retry,
+        run_restart_preparation_steps,
     };
     use crate::backend::api::CompositorBenchmark;
     use crate::config::BackendFamily;
@@ -1010,6 +1108,101 @@ mod tests {
             io::Error::last_os_error().raw_os_error(),
             Some(libc::ECHILD),
             "daemon control child was not reaped through its Child handle"
+        );
+    }
+
+    #[test]
+    fn daemon_shutdown_is_requested_only_by_the_daemons_direct_child() {
+        let daemon_pid = 4242;
+        let invocations = std::cell::RefCell::new(Vec::new());
+        let spy = |command: &str, args: &[&str], timeout: Duration| {
+            invocations.borrow_mut().push((
+                command.to_owned(),
+                args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>(),
+                timeout,
+            ));
+            Ok(<std::process::ExitStatus as std::os::unix::process::ExitStatusExt>::from_raw(0))
+        };
+
+        // A nested, benchmark, or test JWM started from a shell: either no
+        // marker at all, or one inherited from the session JWM while the
+        // parent is the shell. Neither may reach the host daemon.
+        for (marker, parent_pid) in [
+            (None, daemon_pid),
+            (Some(OsStr::new("4242")), 777),
+            (Some(OsStr::new("not-a-pid")), daemon_pid),
+            (Some(OsStr::new("")), daemon_pid),
+            (Some(OsStr::new("0")), 0),
+        ] {
+            assert!(
+                !request_daemon_shutdown_if_managed(marker, parent_pid, spy),
+                "marker {marker:?} with parent {parent_pid} must not quit the daemon"
+            );
+        }
+        assert!(
+            invocations.borrow().is_empty(),
+            "an unmanaged JWM exit must never run `jwm-tool quit`"
+        );
+
+        assert!(request_daemon_shutdown_if_managed(
+            Some(OsStr::new("4242")),
+            daemon_pid,
+            spy
+        ));
+        assert_eq!(
+            *invocations.borrow(),
+            vec![(
+                "jwm-tool".to_owned(),
+                vec!["quit".to_owned()],
+                DAEMON_QUIT_TIMEOUT
+            )]
+        );
+    }
+
+    #[test]
+    fn daemon_ownership_marker_must_name_the_parent_pid_exactly() {
+        assert!(is_daemon_managed_process(Some(OsStr::new("31")), 31));
+        assert!(!is_daemon_managed_process(Some(OsStr::new("31")), 32));
+        assert!(!is_daemon_managed_process(Some(OsStr::new(" 31")), 31));
+        assert!(!is_daemon_managed_process(Some(OsStr::new("-31")), 31));
+        assert!(!is_daemon_managed_process(Some(OsStr::new("0")), 0));
+        assert!(!is_daemon_managed_process(None, 31));
+        assert!(!is_daemon_managed_process(
+            Some(<OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(
+                b"\xff31"
+            )),
+            31
+        ));
+    }
+
+    #[test]
+    fn normal_exit_derives_daemon_ownership_from_the_real_process() {
+        let request = function_body_after(APPLICATION_SRC, "fn request_daemon_shutdown()");
+        assert!(request.contains("request_daemon_shutdown_if_managed("));
+        assert!(request.contains("env::var_os(DAEMON_PID_ENV)"));
+        assert!(request.contains("std::os::unix::process::parent_id()"));
+
+        let application = function_body_after(APPLICATION_SRC, "pub fn run_with_options");
+        assert!(application.contains("request_daemon_shutdown();"));
+        assert!(
+            !application.contains("\"jwm-tool\""),
+            "the exit path must go through the ownership-gated helper"
+        );
+    }
+
+    #[test]
+    fn restart_command_keeps_the_daemon_ownership_marker() {
+        let restart = RestartCommand {
+            executable: OsString::from("jwm"),
+            arguments: Vec::new(),
+        };
+        // `exec` keeps the PID and the daemon parent, so the re-executed
+        // image must inherit the marker unchanged to quit its daemon later.
+        assert!(
+            restart
+                .command(Some("payload"), Some("transient"))
+                .get_envs()
+                .all(|(name, _)| name != OsStr::new(DAEMON_PID_ENV))
         );
     }
 
@@ -1122,6 +1315,50 @@ mod tests {
         let application = function_body_after(APPLICATION_SRC, "pub fn run_with_options");
         assert!(application.contains("bootstrap_jwm_instance("));
         assert!(!application.contains("jwm.setup_initial_windows("));
+    }
+
+    /// A thread started under the bootstrap guard inherits a blocked
+    /// SIGCHLD, so it cannot swallow the signal the X11 run loop's signalfd
+    /// waits for; the startup thread's own mask comes back afterwards.
+    #[test]
+    fn bootstrap_guard_blocks_sigchld_for_spawned_threads_and_restores_the_mask() {
+        use nix::sys::signal::{SigSet, Signal};
+
+        let blocked_before = SigSet::thread_get_mask()
+            .expect("read the thread mask")
+            .contains(Signal::SIGCHLD);
+        let spawned_blocks = {
+            let _guard = SigchldBlockedDuringBootstrap::new();
+            std::thread::spawn(|| {
+                SigSet::thread_get_mask().map(|mask| mask.contains(Signal::SIGCHLD))
+            })
+            .join()
+            .expect("the spawned thread finished")
+            .expect("read the spawned thread's mask")
+        };
+        assert!(
+            spawned_blocks,
+            "a thread spawned under the guard must not be able to take SIGCHLD"
+        );
+        let blocked_after = SigSet::thread_get_mask()
+            .expect("read the thread mask")
+            .contains(Signal::SIGCHLD);
+        assert_eq!(blocked_after, blocked_before);
+    }
+
+    #[test]
+    fn bootstrap_blocks_sigchld_from_jwm_construction_through_setup() {
+        let bootstrap = function_body_after(APPLICATION_SRC, "fn bootstrap_jwm_instance");
+        let position = |needle: &str| {
+            bootstrap
+                .find(needle)
+                .unwrap_or_else(|| panic!("bootstrap no longer contains `{needle}`"))
+        };
+        let guard = position("SigchldBlockedDuringBootstrap::new()");
+        let construct = position("Jwm::new_with_runtime_backend(");
+        let setup = position("jwm.setup(&mut *backend)?;");
+        let restore = position("drop(sigchld_blocked);");
+        assert!(guard < construct && construct < setup && setup < restore);
     }
 
     #[test]

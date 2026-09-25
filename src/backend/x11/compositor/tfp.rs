@@ -17,6 +17,15 @@ fn retirement_uses_genie(reason: WindowRetirement, genie_enabled: bool) -> bool 
     genie_enabled && reason == WindowRetirement::ExplicitlyMinimized
 }
 
+/// Take the direct-presentation marker when it names `retiring`.
+///
+/// Returns the window whose Composite redirection must be restored before its
+/// texture goes. A marker naming another window stays put: that window is
+/// still presented directly and the render loop still owes it a restore.
+fn take_direct_presentation_marker(marker: &mut Option<u32>, retiring: u32) -> Option<u32> {
+    marker.take_if(|window| *window == retiring)
+}
+
 /// Whether windows of `class_name` skip every open/close effect: fade,
 /// scale animation, open ripple, close particles. `behavior.fade_exclude`
 /// holds the classes; the default is the input-method popups, which fcitx
@@ -549,16 +558,24 @@ impl<C: CompositorConnection> Compositor<C> {
     /// redirection first when fullscreen direct presentation was active so a
     /// later unswallow can import the remapped window normally.
     pub(crate) fn discard_window_silently(&mut self, x11_win: u32) {
-        let retry_redirect = if self.unredirected_window.take() == Some(x11_win) {
-            !self.restore_unredirected_window(x11_win, "managed window was silently unmapped")
-        } else {
-            false
-        };
+        let retry_redirect = take_direct_presentation_marker(
+            &mut self.unredirected_window,
+            x11_win,
+        )
+        .is_some_and(|window| {
+            !self.restore_unredirected_window(window, "managed window was silently unmapped")
+        });
+        if retry_redirect {
+            // The failed restore re-armed the marker. Hold it back while the
+            // texture goes so `remove_window_immediate` does not attempt the
+            // same transition a second time.
+            self.unredirected_window = None;
+        }
         self.remove_window_immediate(x11_win);
         if retry_redirect {
-            // `remove_window_immediate` clears the ordinary live marker. Keep
-            // this one solely so the render loop can retry the failed protocol
-            // transition before the window is mapped again.
+            // `remove_window_immediate` drops the marker of a retired window.
+            // Keep this one solely so the render loop can retry the failed
+            // protocol transition before the window is mapped again.
             self.unredirected_window = Some(x11_win);
         }
     }
@@ -740,16 +757,28 @@ impl<C: CompositorConnection> Compositor<C> {
 
     /// Actually remove a window (no fade). Used internally.
     pub(super) fn remove_window_immediate(&mut self, x11_win: u32) {
+        // Unredirecting a directly presented window removed the per-window
+        // redirect the root's RedirectSubwindows gave it, and the server only
+        // re-applies that when a child is created or reparented. A client that
+        // unmaps and remaps the same XID (SDL, Wine and mpv fullscreen toggles)
+        // would come back unredirected: NameWindowPixmap fails on every retry
+        // and the window stays invisible under the overlay. Restore
+        // redirection on the way out, tracked or not, and drop the marker even
+        // when that fails: the window is retired or already destroyed, and a
+        // marker kept for a dead XID would make every later frame retry the
+        // redirect, fail, and bypass composition.
+        if let Some(window) =
+            take_direct_presentation_marker(&mut self.unredirected_window, x11_win)
+            && !self.restore_unredirected_window(window, "window retired while directly presented")
+        {
+            self.unredirected_window = None;
+        }
         self.minimized_window_intents.remove(&x11_win);
         self.minimized_window_metadata.remove(&x11_win);
         let Some(wt) = self.windows.remove(&x11_win) else {
             return;
         };
         self.needs_render = true;
-        // Undo fullscreen unredirect if this was the unredirected window
-        if self.unredirected_window == Some(x11_win) {
-            self.unredirected_window = None;
-        }
 
         self.free_texture_resources(wt.gl_texture, wt.binding, wt.pixmap, wt.damage);
 
@@ -1223,6 +1252,73 @@ mod tests {
         assert!(
             excluded_at < fade_at,
             "leave before the closing fade starts"
+        );
+    }
+
+    #[test]
+    fn only_the_retiring_window_gives_up_the_direct_presentation_marker() {
+        let mut marker = Some(7);
+        assert_eq!(
+            super::take_direct_presentation_marker(&mut marker, 7),
+            Some(7)
+        );
+        assert_eq!(marker, None);
+
+        // Another window is still presented directly; losing its marker would
+        // leave it unredirected with nothing left to restore it.
+        let mut marker = Some(7);
+        assert_eq!(super::take_direct_presentation_marker(&mut marker, 8), None);
+        assert_eq!(marker, Some(7));
+
+        let mut marker = None;
+        assert_eq!(super::take_direct_presentation_marker(&mut marker, 7), None);
+        assert_eq!(marker, None);
+    }
+
+    /// A directly presented window retired without a fade must get its
+    /// Composite redirection back before it goes. Clearing only the marker
+    /// left a remapped XID unredirected, so it was never composited again.
+    #[test]
+    fn immediate_removal_restores_redirection_of_a_directly_presented_window() {
+        let source: String = include_str!("tfp.rs")
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        let remove = source
+            .split_once("pub(super)fnremove_window_immediate(")
+            .expect("remove_window_immediate")
+            .1;
+        let remove = &remove[..remove.find("pub(crate)fn").unwrap_or(remove.len())];
+        let taken_at = remove
+            .find("take_direct_presentation_marker(&mutself.unredirected_window,x11_win")
+            .expect("the marker is taken only for the retiring window");
+        let restored_at = remove
+            .find("self.restore_unredirected_window(window,")
+            .expect("retirement restores redirection");
+        let untracked_return_at = remove
+            .find("self.windows.remove(&x11_win)")
+            .expect("the texture entry is removed");
+        assert!(taken_at < restored_at);
+        assert!(
+            restored_at < untracked_return_at,
+            "restore before the untracked-window early return"
+        );
+        // The failed restore re-arms the marker; a retired window must not
+        // keep it, or every later frame retries, fails and bypasses.
+        assert!(
+            remove[restored_at..untracked_return_at]
+                .contains(&format!("{{self.unredirected_window={};}}", "None"))
+        );
+
+        let discard = source
+            .split_once("pub(crate)fndiscard_window_silently(")
+            .expect("discard_window_silently")
+            .1;
+        let discard = &discard[..discard.find("pub(crate)fn").unwrap_or(discard.len())];
+        assert!(
+            discard
+                .contains("take_direct_presentation_marker(&mutself.unredirected_window,x11_win"),
+            "a silent discard must not take another window's marker"
         );
     }
 

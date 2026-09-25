@@ -2,8 +2,8 @@ use crate::backend::api::{
     Backend, BackendDiagnostics, BackendEvent, Capabilities, ColorAllocator, CompositorAnnotation,
     CompositorBenchmark, CompositorControl, CompositorMedia, CompositorWindowEffects,
     CompositorWorkspaceEffects, CursorProvider, DisplayControl, EventHandler, HitTarget, InputOps,
-    KeyOps, NetWmState, OutputInfo, OutputOps, PropertyOps, RenderScheduler, ScreenInfo,
-    SystemUiOverlay, WindowOps,
+    KeyOps, MaximizeAxes, NetWmState, OutputInfo, OutputOps, PropertyOps, RenderScheduler,
+    ScreenInfo, SystemUiOverlay, WindowOps,
 };
 use crate::backend::common_define::{KeySym, Mods, OutputId, WindowId};
 use crate::backend::error::BackendError;
@@ -244,8 +244,10 @@ impl WindowOps for WaylandWindowOps {
                     toplevel.with_pending_state(|s| {
                         s.size = Some((w as i32, h as i32).into());
                     });
-                    toplevel.send_configure();
                 }
+                // Nested outputs always resend; this also pays a pending
+                // set/unset_maximized reply with the state policy staged.
+                state.send_toplevel_configure(win, true);
                 state.reconstrain_popups_for_toplevel(win);
                 state.needs_redraw = true;
             });
@@ -469,13 +471,16 @@ impl PropertyOps for WaylandPropertyOps {
         on: bool,
     ) -> Result<(), BackendError> {
         unsafe {
-            self.with_state_mut(|wayland_state| wayland_state.set_x11_net_state(win, state, on))?
+            self.with_state_mut(|wayland_state| wayland_state.set_window_net_state(win, state, on))?
         };
-        unsafe {
-            self.with_state_mut(|wayland_state| {
-                wayland_state.update_foreign_toplevel_net_state(win, state, on);
-            });
-        }
+        self.request_flush();
+        Ok(())
+    }
+
+    fn set_maximized_state(&self, win: WindowId, axes: MaximizeAxes) -> Result<(), BackendError> {
+        // Stages xdg state without sending; the configure policy issues next
+        // delivers it together with the maximized size.
+        unsafe { self.with_state_mut(|s| s.set_window_maximized(win, axes))? };
         self.request_flush();
         Ok(())
     }
@@ -558,7 +563,7 @@ impl PropertyOps for WaylandPropertyOps {
     }
 
     fn has_net_wm_state_flag(&self, win: WindowId, flag: NetWmState) -> Result<bool, BackendError> {
-        Ok(unsafe { self.with_state_mut(|state| state.has_x11_net_state(win, flag)) })
+        Ok(unsafe { self.with_state_mut(|state| state.has_window_net_state(win, flag)) })
     }
 
     fn set_wm_state(&self, _win: WindowId, _state: i64) -> Result<(), BackendError> {
@@ -595,6 +600,9 @@ pub struct WaylandWinitBackend {
     surfaces_on_output: HashSet<wayland_server::Weak<WlSurface>>,
 
     cursor_id: Id,
+    /// Stable id of the session-lock shield, so a static locked screen
+    /// stays damage-free between frames.
+    lock_shield_id: Id,
     cursor_size: i32,
 
     needs_render: bool,
@@ -712,6 +720,61 @@ impl WaylandWinitBackend {
                 Kind::Cursor,
             );
             elements.push(WinitRenderElement::Solid(cursor));
+        }
+
+        // Session lock: the lock surface over an opaque shield, in front of
+        // every client, exactly as the DRM path draws it. The shield alone
+        // covers an output the locker has no surface on yet.
+        let locked_epoch = self
+            .state
+            .session_locked
+            .then_some(self.state.session_lock_epoch);
+        if locked_epoch.is_some() {
+            let lock_root = self
+                .state
+                .lock_surfaces
+                .get(&self.output.name())
+                .filter(|lock_surface| lock_surface.alive())
+                .map(|lock_surface| lock_surface.wl_surface().clone());
+            if let Some(surface) = lock_root {
+                frame_roots.push(surface.clone());
+                with_surface_tree_downward(
+                    &surface,
+                    (),
+                    |_, _, _| TraversalAction::DoChildren(()),
+                    |child_surface, child_states, _| {
+                        let data = child_states
+                            .data_map
+                            .get::<smithay::backend::renderer::utils::RendererSurfaceStateUserData>(
+                        );
+                        let Some(data) = data else {
+                            return;
+                        };
+                        if data.lock_safe().view().is_some() {
+                            self.output.enter(child_surface);
+                            visible_surfaces.insert(child_surface.downgrade());
+                        }
+                    },
+                    |_, _, _| true,
+                );
+                let tree = SurfaceTree::from_surface(&surface);
+                let lock_elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
+                    AsRenderElements::<GlesRenderer>::render_elements(
+                        &tree,
+                        self.winit_backend.renderer(),
+                        Point::<i32, Physical>::from((0, 0)),
+                        scale,
+                        1.0,
+                    );
+                elements.extend(lock_elements.into_iter().map(WinitRenderElement::Surface));
+            }
+            elements.push(WinitRenderElement::Solid(SolidColorRenderElement::new(
+                self.lock_shield_id.clone(),
+                Rectangle::<i32, Physical>::from_size((out_w, out_h).into()),
+                0usize,
+                Color32F::new(0.0, 0.0, 0.0, 1.0),
+                Kind::Unspecified,
+            )));
         }
 
         // Layer surfaces above normal windows.
@@ -989,6 +1052,13 @@ impl WaylandWinitBackend {
             log::warn!("[wayland-winit] submit failed: {err:?}");
             self.needs_render = true;
             return Ok(());
+        }
+
+        // The host presents what was just submitted: a locked frame pays the
+        // pending session lock its `locked` confirmation.
+        if let Some(epoch) = locked_epoch {
+            let output_name = self.output.name();
+            self.state.note_locked_frame_presented(&output_name, epoch);
         }
 
         // Send frame callbacks after a successful submit.
@@ -1300,6 +1370,8 @@ impl WaylandWinitBackend {
                                 (mode.size.w, mode.size.h).into(),
                             )];
                             state.needs_redraw = true;
+                            // Lock surfaces take the new window size.
+                            state.refresh_output_dependent_state();
 
                             let id = {
                                 let mut s = shared.lock_safe();
@@ -1375,6 +1447,7 @@ impl WaylandWinitBackend {
             surfaces_on_output: HashSet::new(),
 
             cursor_id: Id::new(),
+            lock_shield_id: Id::new(),
             // Nested backend draws a simple solid-square pointer; honor the
             // configured size so it tracks the [appearance] cursor_size setting.
             cursor_size: crate::config::CONFIG.load().resolved_cursor().1 as i32,
@@ -1977,6 +2050,12 @@ impl CompositorWorkspaceEffects for WaylandWinitBackend {
         }
         shared.system_ui_grab_active = overlay.is_some();
     }
+
+    /// No compositor draws per-monitor effects here, but taskbars bound to
+    /// ext-workspace still follow the monitors and their active tags.
+    fn compositor_set_monitors(&mut self, monitors: &[(u32, i32, i32, u32, u32, u32)]) {
+        self.state.sync_workspace_monitors(monitors);
+    }
 }
 impl CompositorWindowEffects for WaylandWinitBackend {}
 impl CompositorAnnotation for WaylandWinitBackend {}
@@ -2085,6 +2164,15 @@ impl Backend for WaylandWinitBackend {
 
             while let Some(ev) = { self.pending_events.lock_safe().pop_front() } {
                 handler.handle_event(self, ev)?;
+            }
+            // Policy has now seen every queued set/unset_maximized; answer the
+            // ones it dropped so no xdg client waits on a missing configure.
+            if self.state.flush_owed_xdg_state_replies() {
+                self.request_flush();
+            }
+            // Taskbar handles follow each window to the output it is on.
+            if self.state.sync_foreign_toplevel_outputs() {
+                self.request_flush();
             }
 
             handler.update(self)?;

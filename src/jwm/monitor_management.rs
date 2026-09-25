@@ -97,6 +97,58 @@ pub(super) fn terminate_secondary_bar_child(
     }
 }
 
+/// The command that starts monitor `monitor_id`'s status bar on the ring
+/// buffer at `shared_path`: its environment, its stdio and its signal mask.
+fn secondary_bar_command(bar_name: &str, shared_path: &str, monitor_id: i32) -> Command {
+    let mut command = Command::new(bar_name);
+    command.arg(shared_path);
+
+    // Set environment variables
+    if let Ok(v) = std::env::var("WAYLAND_DISPLAY") {
+        command.env("WAYLAND_DISPLAY", v);
+    }
+    if let Ok(v) = std::env::var("XDG_RUNTIME_DIR") {
+        command.env("XDG_RUNTIME_DIR", v);
+    }
+
+    // Tell the bar which monitor it belongs to (for bar's internal use)
+    command.env("JWM_MONITOR_ID", monitor_id.to_string());
+
+    // Set empty to prevent GLib auto-discovery of $XDG_RUNTIME_DIR/bus.
+    // env_remove is NOT sufficient: GIO falls back to the well-known
+    // systemd socket when the var is unset, and on exec-restart the old
+    // bar's GtkApplication name may still be registered — causing the new
+    // instance to hang in single-instance activation.
+    command.env("DBUS_SESSION_BUS_ADDRESS", "");
+    command.env("GTK_IM_MODULE", "none");
+    command.env("QT_IM_MODULE", "none");
+    command.env("XMODIFIERS", "");
+    command.env("GTK_A11Y", "none");
+    command.env("NO_AT_BRIDGE", "1");
+
+    // Disable GPU paths in GDK and GSK.
+    // GSK_RENDERER=cairo prevents GTK4's widget pipeline from using GL.
+    // GDK_DISABLE=gl,vulkan,dmabuf prevents GDK from binding zwp_linux_dmabuf_v1
+    // and sending get_default_feedback() — a path independent of GL that hangs
+    // in unprivileged DRM sessions where the compositor can't provide valid
+    // dmabuf feedback without DRM master.  Forces pure wl_shm buffer allocation.
+    if std::env::var_os("GSK_RENDERER").is_none() {
+        command.env("GSK_RENDERER", "cairo");
+    }
+    command.env("GDK_DISABLE", "gl,vulkan,dmabuf");
+
+    // Spawned from the event thread, whose SIGCHLD stays blocked for the run
+    // loop's signalfd; std would hand the bar that mask. Only the mask is
+    // reset: the bar stays in JWM's session (no `setsid`).
+    crate::external_command::unblock_sigchld_in_child(&mut command);
+
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
+    command
+}
+
 impl Jwm {
     pub(crate) fn secondary_bar_next_wakeup(&self, now: Instant) -> Option<Duration> {
         let monitor_ids: HashSet<i32> = self
@@ -495,56 +547,11 @@ impl Jwm {
             return;
         }
 
-        // Prepare command
         let cfg = CONFIG.load();
-        let bar_name = cfg.status_bar_name();
-        let mut command = {
-            let mut cmd = Command::new(bar_name);
-            cmd.arg(&shared_path);
-            cmd
-        };
-
-        // Set environment variables
-        if let Ok(v) = std::env::var("WAYLAND_DISPLAY") {
-            command.env("WAYLAND_DISPLAY", v);
-        }
-        if let Ok(v) = std::env::var("XDG_RUNTIME_DIR") {
-            command.env("XDG_RUNTIME_DIR", v);
-        }
-
-        // Tell the bar which monitor it belongs to (for bar's internal use)
-        command.env("JWM_MONITOR_ID", monitor_id.to_string());
-
-        // Set empty to prevent GLib auto-discovery of $XDG_RUNTIME_DIR/bus.
-        // env_remove is NOT sufficient: GIO falls back to the well-known
-        // systemd socket when the var is unset, and on exec-restart the old
-        // bar's GtkApplication name may still be registered — causing the new
-        // instance to hang in single-instance activation.
-        command.env("DBUS_SESSION_BUS_ADDRESS", "");
-        command.env("GTK_IM_MODULE", "none");
-        command.env("QT_IM_MODULE", "none");
-        command.env("XMODIFIERS", "");
-        command.env("GTK_A11Y", "none");
-        command.env("NO_AT_BRIDGE", "1");
-
-        // Disable GPU paths in GDK and GSK.
-        // GSK_RENDERER=cairo prevents GTK4's widget pipeline from using GL.
-        // GDK_DISABLE=gl,vulkan,dmabuf prevents GDK from binding zwp_linux_dmabuf_v1
-        // and sending get_default_feedback() — a path independent of GL that hangs
-        // in unprivileged DRM sessions where the compositor can't provide valid
-        // dmabuf feedback without DRM master.  Forces pure wl_shm buffer allocation.
-        if std::env::var_os("GSK_RENDERER").is_none() {
-            command.env("GSK_RENDERER", "cairo");
-        }
-        command.env("GDK_DISABLE", "gl,vulkan,dmabuf");
+        let mut command = secondary_bar_command(cfg.status_bar_name(), &shared_path, monitor_id);
 
         // Spawn the process
-        match command
-            .stdin(Stdio::null())
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
-            .spawn()
-        {
+        match command.spawn() {
             Ok(child) => {
                 let pid = child.id();
                 info!(
@@ -757,6 +764,28 @@ mod secondary_bar_child_tests {
             child.0.try_wait().expect("query cached status"),
             Some(status)
         );
+    }
+
+    /// Regression: the bar is spawned from the event thread, whose SIGCHLD
+    /// stays blocked for the run loop's signalfd, and std hands that mask to
+    /// the child. The bar command unblocks it and changes nothing else: the
+    /// bar stays in JWM's session.
+    #[test]
+    fn the_bar_starts_with_sigchld_unblocked_and_in_jwms_session() {
+        use crate::external_command::test_support::{SigchldBlockedOnThisThread, SigchldProbe};
+
+        let _blocked = SigchldBlockedOnThisThread::new();
+        let probe = SigchldProbe::new("bar");
+        // The bar's one argument is its ring-buffer path; `sh` runs it as a
+        // script instead.
+        let script = probe.script_file();
+        let mut command =
+            secondary_bar_command("/bin/sh", script.to_str().expect("a UTF-8 path"), 7);
+        let mut child = ReapOnDrop(command.spawn().expect("spawn the probe bar"));
+
+        assert!(child.0.wait().expect("reap the probe bar").success());
+        assert!(!probe.child_blocked_sigchld());
+        assert_eq!(probe.child_session(), unsafe { libc::getsid(0) });
     }
 
     #[test]

@@ -330,6 +330,12 @@ impl Jwm {
         // focus refusals in force for the move that follows.
         self.features.monitor_lock.lock(target, rect);
 
+        // Expose and the tag overview draw the windows they were entered
+        // with and never re-plan: the expose grid would keep this monitor's
+        // windows on show across the unlocked outputs, and an overview entered
+        // here would stay on it under the shade, still holding the keyboard.
+        self.leave_modes_showing_locked_windows(backend);
+
         // A panel drawn on the monitor going dark would end up under the
         // shade: invisible, still holding the keyboard and the pointer, and
         // dismissible only by a key the user cannot see the target of. Shell
@@ -433,10 +439,59 @@ impl Jwm {
             serde_json::json!({ "monitor": num, "locked": false }),
         );
         // The prompt may have been the only reason a compositor was leased.
-        if self.features.monitor_lock.is_empty() {
+        self.release_lease_after_last_lock(backend);
+        true
+    }
+
+    /// Hand back a compositor that a panel leased and that was kept only for
+    /// the shades, once the last shade is down.
+    ///
+    /// The lease survives the panel exactly because shades need the renderer
+    /// (`release_temporary_system_ui_compositor` refuses while any monitor is
+    /// locked), so every path that takes the last lock off — the unlock and a
+    /// display change alike — has to return it here or nothing will. Not
+    /// while a panel is on screen: it may be drawing on that same lease, and
+    /// its own close hands it back now that no monitor is locked.
+    fn release_lease_after_last_lock(&mut self, backend: &mut dyn Backend) {
+        if self.features.monitor_lock.is_empty() && !self.features.system_ui.is_active() {
             self.release_temporary_system_ui_compositor(backend, "monitor lock");
         }
-        true
+    }
+
+    /// Take down expose and the tag overview where they would show a locked
+    /// monitor's windows.
+    ///
+    /// Both are entered with the windows of unlocked monitors and neither
+    /// re-plans afterwards — the locked-monitor filter in `toggle_expose`
+    /// runs only on entry. Expose spreads its thumbnails over the whole
+    /// desktop, so any lock while it is up can leave a covered window on
+    /// show elsewhere, and it simply exits. The overview's prism sits on the
+    /// monitor it was entered on; it comes down only when its windows are on
+    /// a locked one, where it would be under the shade and still swallowing
+    /// every key. The same teardown `prepare_system_ui` performs.
+    fn leave_modes_showing_locked_windows(&mut self, backend: &mut dyn Backend) {
+        if self.features.overview.active
+            && self
+                .features
+                .overview
+                .clients
+                .iter()
+                .any(|&client| self.client_is_on_locked_monitor(client))
+        {
+            self.features.overview.deactivate();
+            backend.compositor_set_overview_mode(false, &[]);
+            let _ = backend.key_ops().ungrab_keyboard();
+        }
+        if self.features.expose_active
+            && let Err(error) = self.apply_expose_action(
+                backend,
+                crate::jwm::features::expose_plan::ExposeAction::Exit { focus: None },
+            )
+        {
+            // The lock is already on the books and its shade still goes up;
+            // an exit that could not refocus is not a reason to undo it.
+            log::warn!("Monitor lock: expose did not exit cleanly: {error}");
+        }
     }
 
     /// Whether one more monitor could go behind a shade: two outputs at
@@ -532,12 +587,190 @@ impl Jwm {
             log::warn!("Could not move the selection off a locked monitor: {error}");
         }
         self.sync_monitor_shades(backend);
+        // A lock a display change took off is still a lock coming off for
+        // good; the last one returns the compositor lease as the unlock does.
+        self.release_lease_after_last_lock(backend);
+    }
+}
+
+/// A backend for policy tests around monitor locks, shared with the idle
+/// policy's tests: the dummy ops, a compositor that really switches on and
+/// off, and a record of the mode and shade pushes a lock should cause.
+#[cfg(test)]
+pub(super) mod test_support {
+    use crate::backend::api::{
+        Backend, BackendDiagnostics, Capabilities, ColorAllocator, CompositorAnnotation,
+        CompositorBenchmark, CompositorControl, CompositorMedia, CompositorWindowEffects,
+        CompositorWorkspaceEffects, CursorProvider, DisplayControl, EventHandler, InputOps, KeyOps,
+        MonitorShade, OutputOps, PropertyOps, RenderScheduler, WindowOps,
+    };
+    use crate::backend::common_define::{OutputId, WindowId};
+    use crate::backend::error::BackendError;
+    use crate::backend::wayland_dummy_ops::{
+        DummyColorAllocator, DummyCursorProvider, DummyInputOps, DummyKeyOps, DummyOutputOps,
+        DummyPropertyOps, DummyWindowOps,
+    };
+    use crate::jwm::Jwm;
+
+    pub(crate) struct LockSpyBackend {
+        window_ops: DummyWindowOps,
+        input_ops: DummyInputOps,
+        property_ops: DummyPropertyOps,
+        output_ops: DummyOutputOps,
+        key_ops: DummyKeyOps,
+        cursor_provider: DummyCursorProvider,
+        color_allocator: DummyColorAllocator,
+        /// Whether the compositor is running; flipped by
+        /// `set_compositor_enabled` the way a real backend flips it.
+        pub(crate) compositor_enabled: bool,
+        /// Every overview on/off push, in order.
+        pub(crate) overview_modes: Vec<bool>,
+        /// Every expose on/off push, in order.
+        pub(crate) expose_modes: Vec<bool>,
+        /// Every lock-shade payload pushed, newest last.
+        pub(crate) shade_pushes: Vec<Vec<MonitorShade>>,
+    }
+
+    impl LockSpyBackend {
+        pub(crate) fn new() -> Self {
+            Self {
+                window_ops: DummyWindowOps,
+                input_ops: DummyInputOps,
+                property_ops: DummyPropertyOps,
+                output_ops: DummyOutputOps,
+                key_ops: DummyKeyOps,
+                cursor_provider: DummyCursorProvider,
+                color_allocator: DummyColorAllocator,
+                compositor_enabled: true,
+                overview_modes: Vec::new(),
+                expose_modes: Vec::new(),
+                shade_pushes: Vec::new(),
+            }
+        }
+    }
+
+    impl CompositorBenchmark for LockSpyBackend {}
+    impl BackendDiagnostics for LockSpyBackend {}
+    impl CompositorControl for LockSpyBackend {}
+    impl CompositorMedia for LockSpyBackend {}
+    impl CompositorWorkspaceEffects for LockSpyBackend {
+        fn compositor_set_overview_mode(
+            &mut self,
+            active: bool,
+            _windows: &[(WindowId, f32, f32, f32, f32, bool, String)],
+        ) {
+            self.overview_modes.push(active);
+        }
+
+        fn compositor_set_monitor_shades(&mut self, shades: &[MonitorShade]) {
+            self.shade_pushes.push(shades.to_vec());
+        }
+
+        fn compositor_set_expose_mode(
+            &mut self,
+            active: bool,
+            _windows: Vec<(WindowId, i32, i32, u32, u32, String)>,
+        ) {
+            self.expose_modes.push(active);
+        }
+    }
+    impl CompositorWindowEffects for LockSpyBackend {}
+    impl CompositorAnnotation for LockSpyBackend {}
+    impl DisplayControl for LockSpyBackend {}
+    impl RenderScheduler for LockSpyBackend {
+        fn has_compositor(&self) -> bool {
+            self.compositor_enabled
+        }
+    }
+
+    impl Backend for LockSpyBackend {
+        fn capabilities(&self) -> Capabilities {
+            Capabilities::default()
+        }
+
+        fn root_window(&self) -> Option<WindowId> {
+            Some(WindowId::from_raw(0))
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+
+        fn check_existing_wm(&self) -> Result<(), BackendError> {
+            Ok(())
+        }
+
+        fn window_ops(&self) -> &dyn WindowOps {
+            &self.window_ops
+        }
+
+        fn input_ops(&self) -> &dyn InputOps {
+            &self.input_ops
+        }
+
+        fn property_ops(&self) -> &dyn PropertyOps {
+            &self.property_ops
+        }
+
+        fn output_ops(&self) -> &dyn OutputOps {
+            &self.output_ops
+        }
+
+        fn key_ops(&self) -> &dyn KeyOps {
+            &self.key_ops
+        }
+
+        fn key_ops_mut(&mut self) -> &mut dyn KeyOps {
+            &mut self.key_ops
+        }
+
+        fn cursor_provider(&mut self) -> &mut dyn CursorProvider {
+            &mut self.cursor_provider
+        }
+
+        fn color_allocator(&mut self) -> &mut dyn ColorAllocator {
+            &mut self.color_allocator
+        }
+
+        fn run(&mut self, _handler: &mut dyn EventHandler) -> Result<(), BackendError> {
+            Ok(())
+        }
+
+        fn set_compositor_enabled(&mut self, enabled: bool) -> Result<bool, BackendError> {
+            if self.compositor_enabled == enabled {
+                return Ok(false);
+            }
+            self.compositor_enabled = enabled;
+            Ok(true)
+        }
+    }
+
+    /// A JWM on two side-by-side 1920x1080 outputs, numbered 0 and 1, with
+    /// the selection on 0.
+    pub(crate) fn jwm_on_two_monitors(backend: &mut LockSpyBackend) -> Jwm {
+        let mut jwm = Jwm::new_with_runtime_backend(backend, "test").expect("test jwm");
+        // The dummy output is monitor 0; the second is the same panel beside it.
+        let mut right = backend
+            .output_ops()
+            .enumerate_outputs()
+            .into_iter()
+            .next()
+            .expect("the dummy backend has an output");
+        right.id = OutputId(1);
+        right.x = 1920;
+        jwm.add_monitor(right);
+        assert_eq!(jwm.state.monitor_order.len(), 2);
+        jwm
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::MonitorLockState;
+    use super::test_support::{LockSpyBackend, jwm_on_two_monitors};
+    use crate::backend::common_define::WindowId;
+    use crate::core::models::WMClient;
+    use crate::jwm::types::WMArgEnum;
 
     fn rect(x: i32) -> (i32, i32, i32, i32) {
         (x, 0, 1920, 1080)
@@ -634,5 +867,124 @@ mod tests {
         state.lock(1, rect(1920));
         assert_eq!(state.clear(), vec![0, 1]);
         assert!(state.is_empty());
+    }
+
+    /// A window on `monitor`'s first tag, known to the WM but not mapped by
+    /// any backend: enough for the lock's "which windows are on it" tests.
+    fn client_on(
+        jwm: &mut crate::jwm::Jwm,
+        raw: u64,
+        monitor: usize,
+    ) -> crate::core::models::ClientKey {
+        let mut client = WMClient::new(WindowId::from_raw(raw));
+        client.mon = Some(jwm.state.monitor_order[monitor]);
+        client.state.tags = 1;
+        jwm.insert_client(client)
+    }
+
+    /// Expose was entered while every monitor was unlocked, so its grid holds
+    /// the windows of the monitor now going dark, spread across the desktop
+    /// where the shade does not reach. Locking takes expose down with it.
+    #[test]
+    fn a_lock_takes_expose_down_rather_than_leave_the_windows_on_show() {
+        let mut backend = LockSpyBackend::new();
+        let mut jwm = jwm_on_two_monitors(&mut backend);
+        client_on(&mut jwm, 0x701, 0);
+        jwm.features.expose_active = true;
+
+        jwm.lock_monitor(&mut backend, &WMArgEnum::Int(0))
+            .expect("monitor 0 locks");
+
+        assert!(jwm.monitor_is_locked(0));
+        assert!(!jwm.features.expose_active, "expose is over");
+        assert_eq!(backend.expose_modes, vec![false], "and the grid is gone");
+        assert_eq!(
+            backend.shade_pushes.last().map(Vec::len),
+            Some(1),
+            "the shade still goes up"
+        );
+    }
+
+    /// The overview's prism sits on the monitor it was entered on. Locked
+    /// there, it would be drawn under the shade while still swallowing every
+    /// key; it comes down. An overview on another monitor shows nothing of the
+    /// locked one and is left alone.
+    #[test]
+    fn a_lock_takes_down_an_overview_of_that_monitor_and_only_that_one() {
+        let mut backend = LockSpyBackend::new();
+        let mut jwm = jwm_on_two_monitors(&mut backend);
+        let on_left = client_on(&mut jwm, 0x711, 0);
+        jwm.features.overview.activate(vec![on_left], Some(0));
+
+        jwm.lock_monitor(&mut backend, &WMArgEnum::Int(0))
+            .expect("monitor 0 locks");
+
+        assert!(
+            !jwm.features.overview.active,
+            "the prism is not left under the shade"
+        );
+        assert_eq!(backend.overview_modes, vec![false]);
+
+        let mut backend = LockSpyBackend::new();
+        let mut jwm = jwm_on_two_monitors(&mut backend);
+        let on_right = client_on(&mut jwm, 0x712, 1);
+        jwm.features.overview.activate(vec![on_right], Some(0));
+
+        jwm.lock_monitor(&mut backend, &WMArgEnum::Int(0))
+            .expect("monitor 0 locks");
+
+        assert!(jwm.features.overview.active, "an overview elsewhere stays");
+        assert!(backend.overview_modes.is_empty());
+    }
+
+    /// A panel opened on a session running without a compositor leases one;
+    /// a monitor locked from it keeps the lease past the panel's close,
+    /// because the shade needs the renderer. When a display change then takes
+    /// the last lock off, that lease goes back exactly as the unlock would
+    /// have returned it.
+    #[test]
+    fn a_display_change_that_drops_the_last_lock_returns_the_leased_compositor() {
+        let mut backend = LockSpyBackend::new();
+        let mut jwm = jwm_on_two_monitors(&mut backend);
+        jwm.features.system_ui_temporary_compositor = true;
+        jwm.lock_monitor(&mut backend, &WMArgEnum::Int(1))
+            .expect("monitor 1 locks");
+
+        // Monitor 1 changes mode: its shade no longer fits it.
+        let right = jwm.state.monitor_order[1];
+        jwm.state.monitors[right].geometry.m_w = 1280;
+        jwm.prune_monitor_locks(&mut backend);
+
+        assert!(!jwm.monitor_is_locked(1));
+        assert!(
+            !backend.compositor_enabled,
+            "the leased compositor is off again"
+        );
+        assert!(!jwm.features.system_ui_temporary_compositor);
+    }
+
+    /// The lease is not pulled from under a panel that is still on screen: it
+    /// may be drawing on the very same lease. Its own close returns it, now
+    /// that nothing is locked.
+    #[test]
+    fn a_dropped_last_lock_leaves_the_lease_to_a_panel_still_on_screen() {
+        let mut backend = LockSpyBackend::new();
+        let mut jwm = jwm_on_two_monitors(&mut backend);
+        jwm.features.system_ui_temporary_compositor = true;
+        jwm.lock_monitor(&mut backend, &WMArgEnum::Int(1))
+            .expect("monitor 1 locks");
+        jwm.features.system_ui = crate::jwm::features::SystemUiState::wifi_picker("");
+
+        let right = jwm.state.monitor_order[1];
+        jwm.state.monitors[right].geometry.m_w = 1280;
+        jwm.prune_monitor_locks(&mut backend);
+
+        assert!(!jwm.monitor_is_locked(1));
+        assert!(backend.compositor_enabled, "the panel still draws on it");
+        assert!(jwm.features.system_ui_temporary_compositor);
+
+        jwm.close_system_ui(&mut backend);
+        assert!(!backend.compositor_enabled);
+        assert!(!jwm.features.system_ui_temporary_compositor);
     }
 }

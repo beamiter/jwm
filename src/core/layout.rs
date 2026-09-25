@@ -621,6 +621,8 @@ pub fn calculate_fibonacci<K: Copy>(
 /// 三列骨架：左 Stack | 中 Master | 右 Stack。
 /// centered_master 与 three_col 共用；`shrink_master` 控制 stack 窗口增多时
 /// 是否收窄 master（centered_master 的设计），three_col 保持固定 m_fact。
+/// With exactly one stack window the skeleton degrades to a two-column
+/// master | stack split, because the second side column would stay empty.
 fn centered_columns<K: Copy>(
     params: &LayoutParams,
     clients: &[LayoutClient<K>],
@@ -655,6 +657,28 @@ fn centered_columns<K: Copy>(
     }
 
     let mfact = params.m_fact.clamp(0.25, 0.75);
+    let master_end = (n_master as usize).min(clients.len());
+
+    if n_stack == 1 {
+        // A lone stack window has nothing to balance it on the other side, so
+        // reserving both side columns would leave one of them as bare
+        // wallpaper. Split master | stack across the whole width instead, the
+        // way dwm's centeredmaster and xmonad's ThreeCol handle this case.
+        let mw = ((ww - gap) as f32 * mfact).max(1.0) as i32;
+        let sw = (ww - mw - gap).max(1);
+        push_factor_column(&mut results, &clients[..master_end], wx, wy, mw, wh, gap);
+        push_factor_column(
+            &mut results,
+            &clients[master_end..],
+            wx + mw + gap,
+            wy,
+            sw,
+            wh,
+            gap,
+        );
+        return results;
+    }
+
     let master_bias = if !shrink_master || n_stack <= 2 {
         1.0
     } else {
@@ -669,7 +693,6 @@ fn centered_columns<K: Copy>(
     let right_x = master_x + mw + gap;
 
     // Stack 交替分到左右两列
-    let master_end = (n_master as usize).min(clients.len());
     let stack = &clients[master_end..];
     let left_clients: Vec<_> = stack.iter().step_by(2).copied().collect();
     let right_clients: Vec<_> = stack.iter().skip(1).step_by(2).copied().collect();
@@ -924,13 +947,18 @@ pub fn calculate_tatami<K: Copy>(
                 });
             }
             2 => {
-                let w = (ww - gap) / 2;
-                for (i, c) in clients.iter().enumerate() {
-                    results.push(LayoutResult {
-                        key: c.key,
-                        rect: client_rect(wx + i as i32 * (w + gap), wy, w, wh, c.border_w),
-                    });
-                }
+                // The right window absorbs the division remainder so the pair
+                // reaches the right work-area edge, as in the 3-window pattern.
+                let lw = (ww - gap) / 2;
+                let rw = ww - lw - gap;
+                results.push(LayoutResult {
+                    key: clients[0].key,
+                    rect: client_rect(wx, wy, lw, wh, clients[0].border_w),
+                });
+                results.push(LayoutResult {
+                    key: clients[1].key,
+                    rect: client_rect(wx + lw + gap, wy, rw, wh, clients[1].border_w),
+                });
             }
             3 => {
                 let lw = (ww - gap) / 2;
@@ -958,6 +986,10 @@ pub fn calculate_tatami<K: Copy>(
             4 => {
                 let cw = (ww - gap) / 2;
                 let ch = (wh - gap) / 2;
+                // The right column and bottom row absorb the division
+                // remainder so the 2x2 pattern stays flush with the work area.
+                let last_w = ww - cw - gap;
+                let last_h = wh - ch - gap;
                 for (i, c) in clients.iter().enumerate() {
                     let col = i as i32 % 2;
                     let row = i as i32 / 2;
@@ -966,8 +998,8 @@ pub fn calculate_tatami<K: Copy>(
                         rect: client_rect(
                             wx + col * (cw + gap),
                             wy + row * (ch + gap),
-                            cw,
-                            ch,
+                            if col == 1 { last_w } else { cw },
+                            if row == 1 { last_h } else { ch },
                             c.border_w,
                         ),
                     });
@@ -1723,6 +1755,35 @@ mod tests {
     }
 
     #[test]
+    fn test_tatami_every_pattern_fills_work_area_flush() {
+        // An odd usable width/height minus the gap must not leave a 1px
+        // wallpaper strip: the 2- and 4-window patterns have to hand the
+        // integer-division remainder to their right column / bottom row just
+        // like the 3-window pattern and the 5+ groups do.
+        let p = LayoutParams {
+            screen_area: Rect::new(0, 0, 1601, 999),
+            n_master: 1,
+            m_fact: 0.55,
+            gap: 28,
+        };
+        for n in 1..=10 {
+            let clients: Vec<_> = (0..n)
+                .map(|key| LayoutClient {
+                    key,
+                    factor: 1.0,
+                    border_w: 0,
+                })
+                .collect();
+            let result = calculate_tatami(&p, &clients);
+            assert_eq!(result.len(), n as usize);
+            let right = result.iter().map(|r| r.rect.x + r.rect.w).max().unwrap();
+            let bottom = result.iter().map(|r| r.rect.y + r.rect.h).max().unwrap();
+            assert_eq!(right, 1601 - 28, "n={} right edge should be flush", n);
+            assert_eq!(bottom, 999 - 28, "n={} bottom edge should be flush", n);
+        }
+    }
+
+    #[test]
     fn test_bstack_dense_stack_wraps_to_second_row() {
         let p = LayoutParams {
             screen_area: Rect::new(0, 0, 1600, 1000),
@@ -1824,6 +1885,51 @@ mod tests {
         let by_key = |key| result.iter().find(|res| res.key == key).unwrap().rect;
         assert!(by_key(1).h > by_key(2).h);
         assert!(by_key(3).h > by_key(5).h);
+    }
+
+    #[test]
+    fn test_centered_columns_lone_stack_window_takes_whole_side() {
+        // With exactly one stack window there is nothing to put in the second
+        // side column, so reserving it would leave a band of bare wallpaper.
+        // Both three-column layouts fall back to a master | stack split that
+        // spans the whole usable width without overlap.
+        let p = LayoutParams {
+            screen_area: Rect::new(0, 0, 1920, 1080),
+            n_master: 1,
+            m_fact: 0.55,
+            gap: 8,
+        };
+        let clients: Vec<_> = (0..2)
+            .map(|key| LayoutClient {
+                key,
+                factor: 1.0,
+                border_w: 0,
+            })
+            .collect();
+        for (name, result) in [
+            ("centeredmaster", calculate_centered_master(&p, &clients)),
+            ("threecol", calculate_three_col(&p, &clients)),
+        ] {
+            assert_eq!(result.len(), 2, "{name}");
+            let master = result.iter().find(|r| r.key == 0).unwrap().rect;
+            let stack = result.iter().find(|r| r.key == 1).unwrap().rect;
+            assert_eq!(master.x, 8, "{name}: master starts at the left edge");
+            assert_eq!(
+                stack.x,
+                master.x + master.w + 8,
+                "{name}: stack sits one gap right of the master"
+            );
+            assert_eq!(
+                stack.x + stack.w,
+                1920 - 8,
+                "{name}: stack reaches the right edge"
+            );
+            assert_eq!(master.y, 8, "{name}");
+            assert_eq!(stack.y, 8, "{name}");
+            assert_eq!(master.h, 1080 - 16, "{name}");
+            assert_eq!(stack.h, 1080 - 16, "{name}");
+            assert!(master.w > stack.w, "{name}: m_fact 0.55 favours the master");
+        }
     }
 
     #[test]

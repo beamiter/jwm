@@ -144,6 +144,19 @@ Malformed JSON, invalid argument types, overflow, empty spawn commands, unknown
 commands, and `{ "success": false }` responses produce a non-zero exit status,
 so the tool is safe to use from scripts.
 
+A subscription is acknowledged before the event stream starts with
+`{"success": true, "data": {"unknown_topics": [...], "subscribed": [...],
+"dropped": [...], "dropped_total": N}}`. These fields are additive — the
+acknowledgement used to carry no data — so a client that ignores `data` is
+unaffected. `unknown_topics` lists up to 16 requested topics whose first `/`
+segment is not a registered subscription topic (see `subscription_topics` in
+`get_capabilities`), such as a mistyped `windows`: they are kept, but no event
+can ever match them. `subscribed` is the list the server stored, trimmed and
+deduplicated, in request order. `dropped` names up to 16 topics it did not
+store as `{"topic": ..., "reason": ...}` entries, the reason being `empty`,
+`too_long` (over 128 bytes), `duplicate` or `limit` (past 64 topics), and
+`dropped_total` counts every dropped topic, including those past the first 16.
+
 `health` is a backend-neutral live snapshot of the running JWM instance. Its
 versioned JSON includes the actual selected backend, uptime, configuration
 health, window/monitor/workspace counts, active features, and compositor metrics
@@ -212,13 +225,17 @@ The default modifier is Alt (`Mod1`). Useful built-in bindings include:
 | XF86AudioMicMute | Toggle the default microphone's mute (labeled OSD confirms) |
 | Alt+Shift+C | Close focused client |
 | Alt+Shift+Left / Alt+Shift+Right | Snap the focused floating window to that half of its monitor |
-| Alt+Shift+Up | Maximize the focused floating window |
+| Alt+Shift+Up | Toggle maximize of the focused floating window (fills the work area; press again to restore) |
 
-Mouse users get the same geometry: dragging a floating window to a screen
-edge snaps it to that half (or maximizes at the top), and dropping it into a
-corner quarters it there. The quarters have no default bindings, but
-`snap_window top-left` / `top-right` / `bottom-left` / `bottom-right` are
-bindable and scriptable over IPC like the three defaults.
+Mouse users get the same geometry: dragging a floating window to a side edge
+snaps it to that half, dropping it at the top edge performs the same real
+maximize as `Alt+Shift+Up`, and dropping it into a corner quarters it there.
+The quarters have no default bindings, but `snap_window top-left` /
+`top-right` / `bottom-left` / `bottom-right` are bindable and scriptable over
+IPC like the three defaults. The bindable `togglemaximize` command (no default
+key) toggles the focused window's maximize as well, and also takes a tiled
+window out of the layout while it is maximized; toggling again puts it back.
+See [window placement](docs/window-placement.md#maximize).
 
 | Binding | Action |
 | --- | --- |

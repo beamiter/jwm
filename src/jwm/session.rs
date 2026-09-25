@@ -12,15 +12,18 @@
 //! 显示器的客户端列表再统一 `arrange`，从而保留用户手工调整过的平铺顺序
 //! （master/stack 排列与拖拽换序的结果）。
 
-use crate::backend::api::Backend;
+use crate::backend::api::{Backend, MaximizeAxes};
 use crate::config::CONFIG;
-use crate::core::models::ClientKey;
+use crate::core::maximize::MaximizeOrigin;
+use crate::core::models::{ClientKey, WMClient};
 use crate::core::state::WMState;
 use crate::core::types::Rect;
 use crate::jwm::Jwm;
 use crate::jwm::geometry::GeometryConstraints;
+use crate::jwm::maximize::resting_order;
 use crate::jwm::types::WMArgEnum;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
@@ -549,29 +552,80 @@ fn load_open_session_snapshot(
     Ok(snapshot)
 }
 
+/// The floating rect a floating client is saved with: its resting
+/// `floating_*` slot, or the live rect when that slot was never filled.
+fn captured_floating_rect(c: &WMClient) -> Option<(i32, i32, i32, i32)> {
+    if c.state.is_floating && c.geometry.floating_w > 0 && c.geometry.floating_h > 0 {
+        Some((
+            c.geometry.floating_x,
+            c.geometry.floating_y,
+            c.geometry.floating_w,
+            c.geometry.floating_h,
+        ))
+    } else if c.state.is_floating && c.geometry.w > 0 && c.geometry.h > 0 {
+        Some((c.geometry.x, c.geometry.y, c.geometry.w, c.geometry.h))
+    } else {
+        None
+    }
+}
+
 /// 从窗口状态构建快照，跳过状态栏与 dock。
+///
+/// A window parked on no tag (a hidden scratchpad) is skipped too; see
+/// [`capture_snapshot_excluding`].
 pub fn capture_snapshot(state: &WMState, status_bar_name: &str) -> SessionSnapshot {
+    capture_snapshot_excluding(state, status_bar_name, &HashSet::new())
+}
+
+/// [`capture_snapshot`], also leaving out `excluded` — the scratchpads, when
+/// JWM saves its own session — and any window parked off every tag.
+///
+/// A scratchpad is not a place in the layout: it is summoned and dismissed by
+/// its toggle, and a saved entry for it could only be applied to it (revealing
+/// a hidden one) or claimed by an ordinary window of the same class, which
+/// would take the scratchpad's placement for its own. A window on no tag is a
+/// hidden scratchpad too, the one state a restore could only undo.
+pub fn capture_snapshot_excluding(
+    state: &WMState,
+    status_bar_name: &str,
+    excluded: &HashSet<ClientKey>,
+) -> SessionSnapshot {
+    let skipped = |key: ClientKey, c: &WMClient| {
+        c.state.is_dock
+            || c.is_status_bar(status_bar_name)
+            || c.state.tags == 0
+            || excluded.contains(&key)
+    };
     let mut clients = Vec::new();
     for key in &state.client_order {
         let Some(c) = state.clients.get(*key) else {
             continue;
         };
-        if c.state.is_dock || c.is_status_bar(status_bar_name) {
+        if skipped(*key, c) {
             continue;
         }
-        let floating =
-            if c.state.is_floating && c.geometry.floating_w > 0 && c.geometry.floating_h > 0 {
-                Some((
-                    c.geometry.floating_x,
-                    c.geometry.floating_y,
-                    c.geometry.floating_w,
-                    c.geometry.floating_h,
-                ))
-            } else if c.state.is_floating && c.geometry.w > 0 && c.geometry.h > 0 {
-                Some((c.geometry.x, c.geometry.y, c.geometry.w, c.geometry.h))
+        // Maximize is never persisted: a maximized client is saved in the
+        // state it returns to. A window maximize pulled out of the layout
+        // goes back to tiling; any other one rests floating at its
+        // pre-maximize rect, read from the dedicated restore slot rather
+        // than trusting floating_* to mirror it. That holds while PiP or
+        // fullscreen is layered on top too (the axes survive both): PiP
+        // borrows floating_* for the maximized rect it returns to, and
+        // both force is_floating on a promoted window.
+        let (is_floating, floating) = if c.state.maximized_axes().any() {
+            if c.state.maximize_restore_tiled {
+                (false, None)
             } else {
-                None
-            };
+                let restore = c
+                    .geometry
+                    .maximize_restore_rect
+                    .filter(|rect| rect.w > 0 && rect.h > 0)
+                    .map(|rect| (rect.x, rect.y, rect.w, rect.h));
+                (true, restore.or_else(|| captured_floating_rect(c)))
+            }
+        } else {
+            (c.state.is_floating, captured_floating_rect(c))
+        };
         let monitor_num = c
             .mon
             .and_then(|monitor_key| state.monitors.get(monitor_key))
@@ -582,7 +636,7 @@ pub fn capture_snapshot(state: &WMState, status_bar_name: &str) -> SessionSnapsh
             instance: c.instance.clone(),
             name: c.name.clone(),
             tags: c.state.tags,
-            is_floating: c.state.is_floating,
+            is_floating,
             monitor_num,
             floating,
         });
@@ -593,14 +647,17 @@ pub fn capture_snapshot(state: &WMState, status_bar_name: &str) -> SessionSnapsh
         .filter_map(|&monitor_key| {
             let monitor = state.monitors.get(monitor_key)?;
             let monitor_num = u32::try_from(monitor.num).ok()?;
+            // A window maximize pulled out of the tiles is saved tiled, so it
+            // is saved in its tile slot, not at the floating tail.
             let clients = state
                 .monitor_clients
                 .get(monitor_key)
                 .map(|keys| {
-                    keys.iter()
-                        .filter_map(|&client_key| {
+                    resting_order(state, keys)
+                        .into_iter()
+                        .filter_map(|client_key| {
                             let c = state.clients.get(client_key)?;
-                            if c.state.is_dock || c.is_status_bar(status_bar_name) {
+                            if skipped(client_key, c) {
                                 return None;
                             }
                             Some(SessionWindowIdentity {
@@ -629,6 +686,10 @@ pub fn capture_snapshot(state: &WMState, status_bar_name: &str) -> SessionSnapsh
 /// 匹配规则：class 必须忽略大小写相等；若双方都有 instance，则 instance 也需
 /// 相等。每个保存条目最多匹配一个客户端（已用过的条目不再匹配），从而让同一
 /// 应用的多个实例尽量映射到不同的保存条目。具有精确 instance 匹配的条目优先。
+///
+/// An entry saved on no tag (a hidden scratchpad in a snapshot an older JWM
+/// wrote) never matches: applied to anything, it could only move that window
+/// onto the current view.
 pub fn plan_restore<'a, I>(snapshot: &SessionSnapshot, clients: I) -> Vec<(ClientKey, RestorePlan)>
 where
     I: IntoIterator<Item = (ClientKey, &'a str, &'a str)>,
@@ -654,7 +715,10 @@ where
         let mut exact: Option<usize> = None;
 
         for (i, e) in snapshot.clients.iter().enumerate() {
-            if used[i] || !e.class.eq_ignore_ascii_case(class) {
+            // An entry on no tag is a hidden scratchpad an older JWM saved.
+            // Applied to anything it could only move that window onto the
+            // current view, so it is never a candidate.
+            if used[i] || e.tags == 0 || !e.class.eq_ignore_ascii_case(class) {
                 continue;
             }
             let both_have_instance = !e.instance.is_empty() && !instance.is_empty();
@@ -733,7 +797,8 @@ impl Jwm {
         _arg: &WMArgEnum,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let status_bar_name = CONFIG.load().status_bar_name().to_string();
-        let snapshot = capture_snapshot(&self.state, &status_bar_name);
+        let scratchpads: HashSet<ClientKey> = self.scratchpads.values().copied().collect();
+        let snapshot = capture_snapshot_excluding(&self.state, &status_bar_name, &scratchpads);
         snapshot
             .validate()
             .map_err(|error| format!("cannot save invalid session: {error}"))?;
@@ -770,12 +835,27 @@ impl Jwm {
                 return Err(format!("cannot restore session {}: {error}", path.display()).into());
             }
         };
+        let matched = self.apply_session_snapshot(backend, &snapshot);
+        log::info!("session restored: {matched} clients matched");
+        Ok(())
+    }
 
-        // Build (key, class, instance) view of current clients.
+    /// Apply a loaded snapshot to the current clients and return how many
+    /// matched.
+    fn apply_session_snapshot(
+        &mut self,
+        backend: &mut dyn Backend,
+        snapshot: &SessionSnapshot,
+    ) -> usize {
+        // Build (key, class, instance) view of current clients. Scratchpads
+        // are left out: their visibility belongs to their toggle, and a hidden
+        // one matched to any entry would be retagged onto a shown tag.
+        let scratchpads: HashSet<ClientKey> = self.scratchpads.values().copied().collect();
         let current: Vec<(ClientKey, String, String)> = self
             .state
             .client_order
             .iter()
+            .filter(|k| !scratchpads.contains(k))
             .filter_map(|k| {
                 self.state
                     .clients
@@ -785,7 +865,7 @@ impl Jwm {
             .collect();
 
         let plans = plan_restore_detailed(
-            &snapshot,
+            snapshot,
             current.iter().map(|(k, c, i)| (*k, c.as_str(), i.as_str())),
         );
 
@@ -806,6 +886,27 @@ impl Jwm {
                     != Some(target_monitor)
             {
                 self.sendmon(backend, Some(*key), Some(target_monitor));
+            }
+        }
+
+        // Maximize is never persisted, so the saved placement describes an
+        // unmaximized window. Leave maximize through the shared transaction
+        // first (which also clears the published atoms and re-tiles a
+        // promoted window) so the writes below own the geometry.
+        for (key, _) in &plans {
+            if self
+                .state
+                .clients
+                .get(*key)
+                .is_some_and(|client| client.state.maximized_axes().any())
+                && let Err(error) = self.set_client_maximized(
+                    backend,
+                    *key,
+                    MaximizeAxes::NONE,
+                    MaximizeOrigin::User,
+                )
+            {
+                log::warn!("session restore could not unmaximize a matched client: {error}");
             }
         }
 
@@ -850,15 +951,14 @@ impl Jwm {
         // 全部窗口状态（tag / 浮动 / 所在显示器）恢复完成后，最后按快照
         // 重排每个显示器的平铺顺序，再统一 arrange。v1/v2 快照的
         // monitor_orders 为空，这里自然成为无操作。
-        self.restore_monitor_client_order(&snapshot);
+        self.restore_monitor_client_order(snapshot);
 
         let monitor_keys: Vec<_> = self.state.monitor_order.clone();
         for mk in monitor_keys {
             self.arrange(backend, Some(mk));
         }
 
-        log::info!("session restored: {} clients matched", plans.len());
-        Ok(())
+        plans.len()
     }
 
     /// 按快照中保存的顺序重排每个显示器的 `monitor_clients`。
@@ -867,6 +967,7 @@ impl Jwm {
     /// 相对顺序追加；`monitor_clients` 的「平铺组在前、浮动组在后」不变量
     /// 优先于保存顺序——保存后浮动状态发生变化的窗口回到它当前所属的组。
     fn restore_monitor_client_order(&mut self, snapshot: &SessionSnapshot) {
+        let scratchpads: HashSet<ClientKey> = self.scratchpads.values().copied().collect();
         for saved in &snapshot.monitor_orders {
             let Some(monitor_key) = self
                 .state
@@ -903,7 +1004,14 @@ impl Jwm {
                 // 列表与客户端表不一致时不重排，避免覆盖丢失 key。
                 continue;
             }
-            let planned = plan_order_restore(&saved.clients, &current);
+            // Scratchpads are never saved, so they claim no saved slot: one
+            // matching an ordinary window's identity would push that window
+            // out of its place. They keep their relative order after the rest.
+            let (held_back, current): (Vec<_>, Vec<_>) = current
+                .into_iter()
+                .partition(|(key, _)| scratchpads.contains(key));
+            let mut planned = plan_order_restore(&saved.clients, &current);
+            planned.extend(held_back.into_iter().map(|(key, _)| key));
             let mut tiled: Vec<ClientKey> = Vec::with_capacity(planned.len());
             let mut floating: Vec<ClientKey> = Vec::new();
             for key in planned {
@@ -950,6 +1058,7 @@ mod tests {
     use super::*;
     use crate::backend::common_define::WindowId;
     use crate::core::models::{WMClient, WMMonitor};
+    use crate::jwm::monitor::test_support::{DisplaySpyBackend, output};
     use slotmap::SlotMap;
 
     struct TestDir(PathBuf);
@@ -1469,6 +1578,127 @@ mod tests {
     }
 
     #[test]
+    fn capture_snapshot_records_the_pre_maximize_state() {
+        let mut state = WMState::new();
+        let mut monitor = WMMonitor::new();
+        monitor.num = 0;
+        let monitor_key = state.monitors.insert(monitor);
+        state.monitor_order.push(monitor_key);
+
+        let restore = Rect::new(300, 200, 640, 480);
+        for (raw, class, promoted) in [(1, "Editor", false), (2, "Browser", true)] {
+            let mut client = WMClient::new(WindowId::from_raw(raw));
+            client.class = class.into();
+            client.instance = class.to_lowercase();
+            client.state.tags = 1;
+            client.mon = Some(monitor_key);
+            client.state.is_floating = true;
+            client.state.set_maximized_axes(MaximizeAxes::BOTH);
+            client.state.maximize_restore_tiled = promoted;
+            client.geometry.x = 0;
+            client.geometry.y = 30;
+            client.geometry.w = 1916;
+            client.geometry.h = 1046;
+            client.geometry.maximize_restore_rect = Some(restore);
+            if promoted {
+                // Promotion keeps its own pre-promotion floating rect.
+                client.geometry.floating_x = 50;
+                client.geometry.floating_y = 60;
+                client.geometry.floating_w = 700;
+                client.geometry.floating_h = 500;
+            } else {
+                client.geometry.floating_x = restore.x;
+                client.geometry.floating_y = restore.y;
+                client.geometry.floating_w = restore.w;
+                client.geometry.floating_h = restore.h;
+            }
+            assert!(client.state.is_maximize_realized());
+            let key = state.clients.insert(client);
+            state.client_order.push(key);
+        }
+
+        let snapshot = capture_snapshot(&state, "status-bar");
+        assert_eq!(snapshot.clients.len(), 2);
+        let floating = &snapshot.clients[0];
+        assert!(floating.is_floating);
+        assert_eq!(
+            floating.floating,
+            Some((restore.x, restore.y, restore.w, restore.h)),
+            "a maximized floating window is saved at its pre-maximize rect"
+        );
+        let promoted = &snapshot.clients[1];
+        assert!(
+            !promoted.is_floating,
+            "a window maximize pulled out of the layout is saved tiled"
+        );
+        assert_eq!(promoted.floating, None);
+        assert!(snapshot.validate().is_ok());
+    }
+
+    /// Regression: capture only recognised a *realized* maximize, so a
+    /// maximized window in PiP was saved floating at the maximized rect PiP
+    /// keeps in floating_* (restoring as an unmaximized window covering the
+    /// work area), and a promoted one in PiP or fullscreen came back
+    /// floating instead of tiled.
+    #[test]
+    fn capture_snapshot_sees_maximize_under_pip_and_fullscreen() {
+        let mut state = WMState::new();
+        let mut monitor = WMMonitor::new();
+        monitor.num = 0;
+        let monitor_key = state.monitors.insert(monitor);
+        state.monitor_order.push(monitor_key);
+
+        let restore = Rect::new(300, 200, 640, 480);
+        let maximized = Rect::new(0, 30, 1916, 1046);
+        let cases = [
+            (1, "Pip", false, true, false),
+            (2, "PromotedPip", true, true, false),
+            (3, "PromotedFullscreen", true, false, true),
+        ];
+        for (raw, class, promoted, pip, fullscreen) in cases {
+            let mut client = WMClient::new(WindowId::from_raw(raw));
+            client.class = class.into();
+            client.instance = class.to_lowercase();
+            client.state.tags = 1;
+            client.mon = Some(monitor_key);
+            client.state.is_floating = true;
+            client.state.old_state = true;
+            client.state.is_pip = pip;
+            client.state.is_fullscreen = fullscreen;
+            client.state.set_maximized_axes(MaximizeAxes::BOTH);
+            client.state.maximize_restore_tiled = promoted;
+            client.geometry.maximize_restore_rect = Some(restore);
+            // PiP's return slot: the maximized rect it was entered from.
+            client.geometry.floating_x = maximized.x;
+            client.geometry.floating_y = maximized.y;
+            client.geometry.floating_w = maximized.w;
+            client.geometry.floating_h = maximized.h;
+            assert!(!client.state.is_maximize_realized());
+            let key = state.clients.insert(client);
+            state.client_order.push(key);
+        }
+
+        let snapshot = capture_snapshot(&state, "status-bar");
+        assert_eq!(snapshot.clients.len(), 3);
+        let pip = &snapshot.clients[0];
+        assert!(pip.is_floating);
+        assert_eq!(
+            pip.floating,
+            Some((restore.x, restore.y, restore.w, restore.h)),
+            "a maximized window in PiP is saved at its pre-maximize rect"
+        );
+        for promoted in &snapshot.clients[1..] {
+            assert!(
+                !promoted.is_floating,
+                "{}: a promoted window is saved tiled",
+                promoted.class
+            );
+            assert_eq!(promoted.floating, None, "{}", promoted.class);
+        }
+        assert!(snapshot.validate().is_ok());
+    }
+
+    #[test]
     fn capture_exports_monitor_clients_order_and_skips_bars_and_docks() {
         let mut state = WMState::new();
         let mut monitor = WMMonitor::new();
@@ -1509,6 +1739,166 @@ mod tests {
                 identity("Gimp", "gimp"),
             ]
         );
+    }
+
+    /// The window classes a capture saves as the order of a monitor listing
+    /// `list`. Each class in `promoted` was pulled out of the tiles by
+    /// maximize and anchored on the named window; each in `floating` is a
+    /// plain floating window.
+    fn saved_order(
+        list: &[&str],
+        promoted: &[(&str, Option<&str>)],
+        floating: &[&str],
+    ) -> Vec<String> {
+        let mut state = WMState::new();
+        let mut monitor = WMMonitor::new();
+        monitor.num = 0;
+        let monitor_key = state.monitors.insert(monitor);
+        state.monitor_order.push(monitor_key);
+        let mut keys = Vec::new();
+        for (raw, &class) in (0x40..).zip(list) {
+            let mut client = WMClient::new(WindowId::from_raw(raw));
+            client.class = class.into();
+            client.instance = class.to_lowercase();
+            client.state.tags = 1;
+            client.mon = Some(monitor_key);
+            client.state.is_floating = floating.contains(&class);
+            let key = state.clients.insert(client);
+            state.client_order.push(key);
+            keys.push((class, key));
+        }
+        let key_of = |class: &str| {
+            keys.iter()
+                .find(|(listed, _)| *listed == class)
+                .map(|&(_, key)| key)
+        };
+        for &(class, anchor) in promoted {
+            let Some(key) = key_of(class) else {
+                panic!("{class} is not listed");
+            };
+            let client = &mut state.clients[key];
+            client.state.is_floating = true;
+            client.state.set_maximized_axes(MaximizeAxes::BOTH);
+            client.state.maximize_restore_tiled = true;
+            client.state.maximize_restore_anchor = anchor.and_then(key_of);
+        }
+        state
+            .monitor_clients
+            .insert(monitor_key, keys.iter().map(|&(_, key)| key).collect());
+        capture_snapshot(&state, "status-bar").monitor_orders[0]
+            .clients
+            .iter()
+            .map(|identity| identity.class.clone())
+            .collect()
+    }
+
+    /// Regression: the saved order was the raw client list, where maximize
+    /// had moved a promoted tile to the floating tail. The window is saved
+    /// tiled, so the restore re-tiled it after every other tile: saving with
+    /// the master maximized made the next tile master.
+    #[test]
+    fn capture_saves_a_promoted_tile_in_its_slot() {
+        let cases: [(&[&str], &[(&str, Option<&str>)], &[&str], &[&str]); 8] = [
+            // The master, promoted in front of B.
+            (&["B", "C", "A"], &[("A", Some("B"))], &[], &["A", "B", "C"]),
+            // A middle tile.
+            (&["A", "C", "B"], &[("B", Some("C"))], &[], &["A", "B", "C"]),
+            // Neighbours anchored on each other, promoted in either order.
+            (
+                &["C", "A", "B"],
+                &[("A", Some("B")), ("B", Some("C"))],
+                &[],
+                &["A", "B", "C"],
+            ),
+            (
+                &["C", "B", "A"],
+                &[("A", Some("B")), ("B", Some("C"))],
+                &[],
+                &["A", "B", "C"],
+            ),
+            // Every tile out, the last with no tile after it.
+            (
+                &["C", "B", "A"],
+                &[("A", Some("B")), ("B", Some("C")), ("C", None)],
+                &[],
+                &["A", "B", "C"],
+            ),
+            // The last tile rests at the end of the tiled group, still
+            // ahead of a plain floating window.
+            (
+                &["A", "B", "F", "C"],
+                &[("C", None)],
+                &["F"],
+                &["A", "B", "C", "F"],
+            ),
+            // An anchor floated since (regrouped behind the promoted window)
+            // has no slot to offer.
+            (
+                &["C", "A", "B"],
+                &[("A", Some("B"))],
+                &["B"],
+                &["C", "A", "B"],
+            ),
+            // Anchors naming each other still leave every window saved.
+            (
+                &["C", "A", "B"],
+                &[("A", Some("B")), ("B", Some("A"))],
+                &[],
+                &["C", "A", "B"],
+            ),
+        ];
+        for (list, promoted, floating, expected) in cases {
+            assert_eq!(
+                saved_order(list, promoted, floating),
+                expected,
+                "list {list:?}, promoted {promoted:?}, floating {floating:?}"
+            );
+        }
+    }
+
+    /// The master maximized when the session is saved: the restore, in the
+    /// same session or over windows mapped in another order, makes it master
+    /// again.
+    #[test]
+    fn a_session_saved_with_the_master_maximized_restores_it_as_master() {
+        use crate::core::layout::LayoutEnum;
+        use std::rc::Rc;
+
+        let mut backend = DisplaySpyBackend::new(vec![output(1, 0, 0, 1920, 1080)]);
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").expect("test jwm");
+        let monitor = jwm.state.monitor_order[0];
+        jwm.state.monitors[monitor].lt = Rc::new(LayoutEnum::TILE);
+        let tags = jwm.state.monitors[monitor].get_active_tags();
+        let [a, b, c] = [(0x71, "A"), (0x72, "B"), (0x73, "C")].map(|(raw, class)| {
+            let mut client = WMClient::new(WindowId::from_raw(raw));
+            client.class = class.into();
+            client.instance = class.to_lowercase();
+            client.mon = Some(monitor);
+            client.state.tags = tags;
+            let key = jwm.insert_client(client);
+            jwm.attach_to_monitor(key, monitor);
+            key
+        });
+        jwm.state.monitors[monitor].set_selected_client_for_current_tag(Some(a));
+        jwm.arrange(&mut backend, Some(monitor));
+        jwm.togglemaximize(&mut backend, &WMArgEnum::Int(0))
+            .expect("togglemaximize");
+        assert_eq!(jwm.state.monitor_clients[monitor], vec![b, c, a]);
+
+        let snapshot = capture_snapshot(&jwm.state, "status-bar");
+        assert_eq!(
+            snapshot.monitor_orders[0].clients,
+            vec![identity("A", "a"), identity("B", "b"), identity("C", "c")]
+        );
+
+        assert_eq!(jwm.apply_session_snapshot(&mut backend, &snapshot), 3);
+        assert_eq!(jwm.state.monitor_clients[monitor], vec![a, b, c]);
+        assert!(!jwm.state.clients[a].state.is_floating);
+        assert!(!jwm.state.clients[a].state.maximized_axes().any());
+
+        jwm.state.monitor_clients.insert(monitor, vec![c, b, a]);
+        jwm.apply_session_snapshot(&mut backend, &snapshot);
+        assert_eq!(jwm.state.monitor_clients[monitor], vec![a, b, c]);
     }
 
     #[test]
@@ -1573,5 +1963,82 @@ mod tests {
             (1, identity("Firefox", "Navigator")),
         ];
         assert_eq!(plan_order_restore(&saved, &current), vec![1, 0]);
+    }
+
+    /// A JWM on one output with a hidden "term" scratchpad and an ordinary
+    /// terminal of the same class on tag 4, returning (scratchpad, terminal).
+    fn jwm_with_a_hidden_scratchpad(
+        backend: &mut DisplaySpyBackend,
+    ) -> (Jwm, ClientKey, ClientKey) {
+        let mut jwm = Jwm::new_with_runtime_backend(backend, "test").expect("test jwm");
+        let monitor = jwm.state.monitor_order[0];
+        let mut keys = Vec::new();
+        for (raw, tags) in [(0x61, 0), (0x62, 1 << 3)] {
+            let mut client = WMClient::new(WindowId::from_raw(raw));
+            client.class = "Alacritty".into();
+            client.instance = "Alacritty".into();
+            client.mon = Some(monitor);
+            client.state.tags = tags;
+            client.state.is_floating = tags == 0;
+            client.geometry.x = 400;
+            client.geometry.y = 200;
+            client.geometry.w = 900;
+            client.geometry.h = 500;
+            let key = jwm.insert_client(client);
+            jwm.attach_to_monitor(key, monitor);
+            keys.push(key);
+        }
+        jwm.scratchpads.insert("term".into(), keys[0]);
+        (jwm, keys[0], keys[1])
+    }
+
+    #[test]
+    fn a_saved_session_leaves_scratchpads_out() {
+        let mut backend = DisplaySpyBackend::new(vec![output(1, 0, 0, 1920, 1080)]);
+        let (jwm, _scratchpad, _terminal) = jwm_with_a_hidden_scratchpad(&mut backend);
+        let scratchpads: HashSet<ClientKey> = jwm.scratchpads.values().copied().collect();
+
+        let snapshot = capture_snapshot_excluding(&jwm.state, "status-bar", &scratchpads);
+
+        assert_eq!(snapshot.clients.len(), 1);
+        assert_eq!(snapshot.clients[0].tags, 1 << 3);
+        assert_eq!(
+            snapshot.monitor_orders[0].clients,
+            vec![identity("Alacritty", "Alacritty")]
+        );
+        // Without the scratchpad set, a window parked on no tag is still a
+        // hidden scratchpad and is not saved either.
+        assert_eq!(capture_snapshot(&jwm.state, "status-bar").clients.len(), 1);
+    }
+
+    /// A snapshot an older JWM wrote holds the hidden scratchpad first. The
+    /// restore neither reveals the scratchpad nor hands its entry to the
+    /// ordinary terminal, which keeps its own tag.
+    #[test]
+    fn restoring_a_session_never_reveals_a_hidden_scratchpad() {
+        let mut backend = DisplaySpyBackend::new(vec![output(1, 0, 0, 1920, 1080)]);
+        let (mut jwm, scratchpad, terminal) = jwm_with_a_hidden_scratchpad(&mut backend);
+        let mut parked = entry("Alacritty", "Alacritty", 0);
+        parked.is_floating = true;
+        parked.floating = Some((400, 200, 900, 500));
+        let snapshot = SessionSnapshot {
+            version: SESSION_VERSION,
+            clients: vec![parked, entry("Alacritty", "Alacritty", 1 << 3)],
+            monitor_orders: vec![SessionMonitorOrder {
+                monitor_num: 0,
+                clients: vec![
+                    identity("Alacritty", "Alacritty"),
+                    identity("Alacritty", "Alacritty"),
+                ],
+            }],
+        };
+
+        let matched = jwm.apply_session_snapshot(&mut backend, &snapshot);
+
+        assert_eq!(matched, 1);
+        assert_eq!(jwm.state.clients[scratchpad].state.tags, 0);
+        assert!(!jwm.is_client_visible_by_key(scratchpad));
+        assert_eq!(jwm.state.clients[terminal].state.tags, 1 << 3);
+        assert!(!jwm.state.clients[terminal].state.is_floating);
     }
 }

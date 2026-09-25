@@ -68,20 +68,18 @@ impl Jwm {
             .unwrap_or(false)
     }
 
-    /// Move the currently focused client to the front of the monitor's client
-    /// list so it becomes master in tiling layouts.
+    /// Move the focused client to the front of its group (see
+    /// [`Self::move_to_front`]): a tile becomes master, and a floating
+    /// selection only moves ahead of the other floating windows. A tile
+    /// that is already master is moved too, as the overview confirm does:
+    /// it still leaves its slot, so a promoted window anchored to it
+    /// re-anchors to the tile behind it.
     fn promote_focused_to_master(&mut self, mon_key: MonitorKey) {
         let sel = match self.state.monitors.get(mon_key).and_then(|m| m.sel) {
             Some(k) => k,
             None => return,
         };
-        // Already master?
-        let first_tiled = self.nexttiled(mon_key, None);
-        if first_tiled == Some(sel) {
-            return;
-        }
-        self.detach(sel);
-        self.attach_front(sel);
+        self.move_to_front(sel);
     }
 
     pub(crate) fn setmfact(
@@ -450,7 +448,14 @@ impl Jwm {
 #[cfg(test)]
 mod tests {
     use super::{adjusted_gap, adjusted_n_master};
+    use crate::backend::common_define::WindowId;
     use crate::config::MAX_N_MASTER;
+    use crate::core::layout::LayoutEnum;
+    use crate::core::models::WMClient;
+    use crate::jwm::Jwm;
+    use crate::jwm::monitor::test_support::{DisplaySpyBackend, output};
+    use crate::jwm::types::WMArgEnum;
+    use std::rc::Rc;
 
     #[test]
     fn adjusted_n_master_preserves_normal_adjustments() {
@@ -481,5 +486,51 @@ mod tests {
         assert_eq!(adjusted_gap(i32::MIN, i32::MIN), 0);
         assert_eq!(adjusted_gap(i32::MAX, i32::MIN), 0);
         assert_eq!(adjusted_gap(i32::MIN, i32::MAX), 0);
+    }
+
+    /// Regression: leaving VSTACK returned early when the selection was
+    /// already the first tile, so the promoted master `x` anchored to it
+    /// kept its slot and came back as master. Had `x` stayed tiled, `y`
+    /// would have become master ahead of it; the overview confirm in the
+    /// same state passes the slot on too.
+    #[test]
+    fn leaving_vstack_with_the_first_tile_focused_passes_its_slot_on() {
+        let mut backend = DisplaySpyBackend::new(vec![output(1, 0, 0, 1920, 1080)]);
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test")
+            .expect("a spy backend builds a JWM");
+        let monitor = jwm.state.monitor_order[0];
+        jwm.state.monitors[monitor].lt = Rc::new(LayoutEnum::TILE);
+        let tags = jwm.state.monitors[monitor].get_active_tags();
+        let [x, y, z] = [0x5c10, 0x5c11, 0x5c12].map(|raw| {
+            let mut client = WMClient::new(WindowId::from_raw(raw));
+            client.mon = Some(monitor);
+            client.state.tags = tags;
+            client.geometry.border_w = 2;
+            let key = jwm.insert_client(client);
+            jwm.attach_to_monitor(key, monitor);
+            key
+        });
+        jwm.state.monitors[monitor].set_selected_client_for_current_tag(Some(x));
+        jwm.arrange(&mut backend, Some(monitor));
+        jwm.togglemaximize(&mut backend, &WMArgEnum::Int(0))
+            .expect("maximize");
+        assert_eq!(jwm.state.monitor_clients[monitor], vec![y, z, x]);
+        assert_eq!(jwm.state.clients[x].state.maximize_restore_anchor, Some(y));
+
+        jwm.setlayout(
+            &mut backend,
+            &WMArgEnum::Layout(Rc::new(LayoutEnum::VSTACK)),
+        )
+        .expect("vstack");
+        jwm.state.monitors[monitor].set_selected_client_for_current_tag(Some(y));
+        jwm.setlayout(&mut backend, &WMArgEnum::Layout(Rc::new(LayoutEnum::TILE)))
+            .expect("tile");
+        assert_eq!(jwm.state.monitor_clients[monitor], vec![y, z, x]);
+        assert_eq!(jwm.state.clients[x].state.maximize_restore_anchor, Some(z));
+
+        jwm.state.monitors[monitor].set_selected_client_for_current_tag(Some(x));
+        jwm.togglemaximize(&mut backend, &WMArgEnum::Int(0))
+            .expect("unmaximize");
+        assert_eq!(jwm.state.monitor_clients[monitor], vec![y, x, z]);
     }
 }

@@ -70,6 +70,39 @@ enum RecordingRegionDrag {
     },
 }
 
+/// The on-disk identity a rejected recording probe is remembered by. A write,
+/// a truncate or a replace-by-rename moves at least one of these, so an
+/// unchanged identity means ffprobe would read the same bytes and fail again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RecordingFileIdentity {
+    path: String,
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+    inode: u64,
+}
+
+impl RecordingFileIdentity {
+    /// The identity of a non-empty file at `path`; `None` for a missing or
+    /// empty one, which is never worth a probe.
+    pub(crate) fn of(path: &str) -> Option<Self> {
+        use std::os::unix::fs::MetadataExt;
+
+        let metadata = std::fs::metadata(path).ok()?;
+        (metadata.len() > 0).then(|| Self {
+            path: path.to_owned(),
+            len: metadata.len(),
+            modified: metadata.modified().ok(),
+            inode: metadata.ino(),
+        })
+    }
+
+    /// Without an mtime an in-place rewrite of the same length is invisible,
+    /// so such an identity cannot vouch that the bytes are unchanged.
+    pub(crate) fn has_modified_time(&self) -> bool {
+        self.modified.is_some()
+    }
+}
+
 /// 录制状态
 #[derive(Debug, Default, Clone)]
 pub struct RecordingState {
@@ -85,6 +118,12 @@ pub struct RecordingState {
     pub finalized: bool,
     /// Prevent duplicate `recording/finalized` events while polling status.
     pub finalization_reported: bool,
+    /// The finished file the ffprobe check last rejected. The probe runs on
+    /// the event thread for `get_recording_status`, so a file left without
+    /// its moov atom must not fork it again on every poll; it is probed again
+    /// only once its identity changes. Per recorder state rather than per
+    /// thread, and cleared when a recording starts.
+    pub(crate) rejected_probe: Option<RecordingFileIdentity>,
     /// Current source rectangle in root-compositor coordinates.
     pub region: Option<Rect>,
     /// Fixed encoded video dimensions chosen when recording starts.
@@ -113,6 +152,7 @@ impl RecordingState {
         self.current_segment = None;
         self.finalized = false;
         self.finalization_reported = false;
+        self.rejected_probe = None;
         self.region = None;
         self.output_size = None;
         self.selecting_region = false;
@@ -455,9 +495,19 @@ mod tests {
         let mut state = RecordingState::new();
         state.finalized = true;
         state.finalization_reported = true;
+        state.rejected_probe = Some(RecordingFileIdentity {
+            path: "/tmp/old.mp4".to_string(),
+            len: 16,
+            modified: None,
+            inode: 1,
+        });
         state.start("/tmp/new.mp4".to_string());
         assert!(!state.finalized);
         assert!(!state.finalization_reported);
+        assert!(
+            state.rejected_probe.is_none(),
+            "a new recording forgets the last rejected file"
+        );
     }
 
     #[test]

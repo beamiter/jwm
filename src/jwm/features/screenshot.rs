@@ -28,6 +28,9 @@ const SCREENSHOT_FILE_POLL_INTERVAL: Duration = Duration::from_millis(25);
 /// oldest waiter (its toast is the least useful) rather than piling threads.
 const MAX_SCREENSHOT_WATCHERS: usize = 4;
 
+/// What baking annotations into a published capture reports.
+type BakeResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
+
 /// What one queued capture eventually did, reported by its watcher job and
 /// turned into a toast by the frame tick.
 ///
@@ -37,6 +40,11 @@ const MAX_SCREENSHOT_WATCHERS: usize = 4;
 pub enum ScreenshotCompletion {
     /// The PNG landed (file destination); carries the published path.
     Saved(String),
+    /// The PNG landed (file destination), but the annotations could not be
+    /// baked into it. The unannotated capture is intact at the carried path:
+    /// the bake replaces the file atomically or not at all, so a failed
+    /// re-encode (ENOSPC, EIO) loses the ink, never the screenshot.
+    SavedWithoutAnnotations(String),
     /// Clipboard destination: PNG bytes are ready for the main loop.
     ///
     /// With an X11 `clipboard_image_sender`, the worker already offered
@@ -51,6 +59,11 @@ pub enum ScreenshotCompletion {
         /// clipboard (X11 image sender). False when the main-loop poll must
         /// make the first offer (Wayland / no sender).
         offered: bool,
+        /// The annotations could not be baked in, so `png` is the capture
+        /// without them. It is still a valid capture and is still offered,
+        /// but the toast has to say the ink is gone, as
+        /// [`Self::SavedWithoutAnnotations`] does for a file.
+        annotations_lost: bool,
     },
     /// The capture never produced its file, or the clipboard publish failed.
     /// Carries what the toast body should say.
@@ -98,6 +111,28 @@ pub(crate) fn screenshot_completion_toast(
             body: path.clone(),
             urgency: 1,
             timeout_ms: 5000,
+            ..Default::default()
+        },
+        // Critical like a failure: the user's ink is gone, and a quiet
+        // "saved" card would hide that until they open the file.
+        ScreenshotCompletion::SavedWithoutAnnotations(path) => {
+            crate::backend::api::ToastNotification {
+                title: "\u{f030}  Screenshot saved without annotations".into(),
+                body: path.clone(),
+                urgency: 2,
+                timeout_ms: 8000,
+                ..Default::default()
+            }
+        }
+        // Critical for the same reason as `SavedWithoutAnnotations`: a quiet
+        // "copied" card would hide the lost ink until the user pasted.
+        ScreenshotCompletion::CopiedToClipboard {
+            annotations_lost: true,
+            ..
+        } => crate::backend::api::ToastNotification {
+            title: "\u{f030}  Screenshot copied without annotations".into(),
+            urgency: 2,
+            timeout_ms: 8000,
             ..Default::default()
         },
         ScreenshotCompletion::CopiedToClipboard { .. } => crate::backend::api::ToastNotification {
@@ -1095,6 +1130,15 @@ impl Jwm {
             self.cancel_screenshot_select(backend);
             return Ok(());
         }
+        // The selector takes the keyboard and the pointer, and IPC reaches
+        // this whatever is on screen. Stacked over a panel or another mode,
+        // whichever exits first ungrabs input the other still needs. Refused
+        // before a path is chosen or anything is created on disk; the key
+        // binding closes a panel before it gets here.
+        if let Some(mode) = self.grab_holding_mode_on_screen() {
+            self.features.deferred_grab = None;
+            return Err(format!("screenshot selection cannot start while {mode} is active").into());
+        }
 
         let screenshot_path = Self::prepare_screenshot_path()?
             .to_string_lossy()
@@ -1210,7 +1254,15 @@ impl Jwm {
             return;
         };
         // Something else claimed the screen meanwhile; the request is stale.
-        if self.features.screenshot.active || self.features.system_ui.is_active() {
+        // A parked selector is refused over every grab-holding mode, as
+        // `take_screenshot` refuses it, not just over a panel.
+        let screen_claimed = match parked.action {
+            DeferredGrabAction::Screenshot { .. } => self.grab_holding_mode_on_screen().is_some(),
+            DeferredGrabAction::ShellHub { .. } => {
+                self.features.screenshot.active || self.features.system_ui.is_active()
+            }
+        };
+        if screen_claimed {
             self.features.deferred_grab = None;
             return;
         }
@@ -1260,7 +1312,11 @@ impl Jwm {
         let mut waiting = Vec::new();
         for job in std::mem::take(&mut self.features.screenshot_completions) {
             match job.take() {
-                Some(ScreenshotCompletion::CopiedToClipboard { png, offered }) => {
+                Some(ScreenshotCompletion::CopiedToClipboard {
+                    png,
+                    offered,
+                    annotations_lost,
+                }) => {
                     // Re-offer for reclaim/history gate even when the worker
                     // already landed (X11). Wayland's first offer is here.
                     // Offer before record so a *true* failed land (never
@@ -1284,6 +1340,7 @@ impl Jwm {
                             screenshot_completion_toast(&ScreenshotCompletion::CopiedToClipboard {
                                 png,
                                 offered,
+                                annotations_lost,
                             }),
                         );
                     } else {
@@ -1570,38 +1627,113 @@ impl Jwm {
             return ScreenshotCompletion::Failed(capture_failure_detail(to_clipboard, &save_path));
         }
 
+        let mut annotations_lost = false;
         if !annotations.is_empty() {
-            // The capture is on disk either way: a bake failure loses the
-            // ink, not the screenshot.
+            // The capture is on disk either way: the bake replaces the file
+            // atomically, so a bake failure loses the ink, not the screenshot.
             match Self::bake_annotations_into_png(&save_path, region_origin, &annotations) {
                 Ok(()) => info!("[take_screenshot] annotations baked into {}", save_path),
-                Err(e) => error!("[take_screenshot] failed to bake annotations: {e}"),
+                Err(e) => {
+                    error!("[take_screenshot] failed to bake annotations: {e}");
+                    annotations_lost = true;
+                }
             }
         }
 
         if !to_clipboard {
-            return ScreenshotCompletion::Saved(save_path);
+            return if annotations_lost {
+                ScreenshotCompletion::SavedWithoutAnnotations(save_path)
+            } else {
+                ScreenshotCompletion::Saved(save_path)
+            };
         }
         if let Some((png, offered)) =
             Self::publish_image_path_to_clipboard(&save_path, image_sender)
         {
-            ScreenshotCompletion::CopiedToClipboard { png, offered }
+            ScreenshotCompletion::CopiedToClipboard {
+                png,
+                offered,
+                annotations_lost,
+            }
         } else {
             ScreenshotCompletion::Failed(capture_failure_detail(true, &save_path))
         }
     }
 
+    /// Draw the annotations into the published PNG.
+    ///
+    /// Never rewrites the capture in place: `image.save(path)` truncates the
+    /// published file before re-encoding, so a failed write (ENOSPC, EIO)
+    /// would leave a truncated PNG behind a "saved" toast. The annotated
+    /// image goes to a sibling first and replaces the original only once it
+    /// is complete; see [`Self::replace_file_atomically`].
     fn bake_annotations_into_png(
         png_path: &str,
         region_origin: (i32, i32),
         annotations: &[ScreenshotAnnotation],
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    ) -> BakeResult {
         let mut image = image::open(png_path)?.to_rgba8();
         for annotation in annotations {
             Self::draw_annotation(&mut image, region_origin, annotation);
         }
-        image.save(png_path)?;
-        Ok(())
+        Self::replace_file_atomically(Path::new(png_path), |file| {
+            use std::io::Write as _;
+            let mut writer = io::BufWriter::new(file);
+            image.write_to(&mut writer, image::ImageFormat::Png)?;
+            writer.flush()?;
+            Ok(())
+        })
+    }
+
+    /// The sibling an annotated re-encode is written to before it replaces
+    /// the published capture. Deliberately not the compositor's
+    /// `screenshot_staging_path`: that one may still be being unlinked by the
+    /// compositor when the watcher already sees the published file.
+    fn annotated_staging_path(path: &Path) -> io::Result<PathBuf> {
+        let Some(name) = path.file_name() else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("screenshot path has no file name: {}", path.display()),
+            ));
+        };
+        let mut staging = name.to_os_string();
+        staging.push(".annotated.tmp");
+        Ok(path.with_file_name(staging))
+    }
+
+    /// Replace `path` with what `encode` writes, all or nothing: encode into
+    /// a fresh 0600 sibling (`create_new`, so a planted file or symlink is
+    /// refused rather than followed), fsync it, and rename it over the
+    /// original. Any failure removes the sibling and leaves the original
+    /// untouched. The rename installs a new inode, so the sibling carries
+    /// the same private mode the compositor gave the capture.
+    fn replace_file_atomically(
+        path: &Path,
+        encode: impl FnOnce(&mut std::fs::File) -> BakeResult,
+    ) -> BakeResult {
+        let staging = Self::annotated_staging_path(path)?;
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            // Screenshots can hold credentials and private conversations.
+            options.mode(0o600);
+        }
+        let mut file = options.open(&staging)?;
+        let written = encode(&mut file).and_then(|()| file.sync_all().map_err(Into::into));
+        drop(file);
+        let published = written.and_then(|()| std::fs::rename(&staging, path).map_err(Into::into));
+        if published.is_err()
+            && let Err(error) = std::fs::remove_file(&staging)
+            && error.kind() != io::ErrorKind::NotFound
+        {
+            warn!(
+                "[take_screenshot] could not remove annotation staging file {}: {error}",
+                staging.display()
+            );
+        }
+        published
     }
 
     fn draw_annotation(
@@ -2217,6 +2349,101 @@ mod tests {
         }
     }
 
+    /// Every grab-holding mode `take_screenshot` must not stack a selector
+    /// over, set up by hand on a fresh `Jwm`.
+    fn grab_holding_modes() -> Vec<(&'static str, fn(&mut Jwm))> {
+        vec![
+            ("a system UI panel", |jwm: &mut Jwm| {
+                jwm.features.system_ui = crate::jwm::features::SystemUiState::notification_center(
+                    &jwm.features.notifications,
+                    0,
+                );
+            }),
+            ("the overview", |jwm: &mut Jwm| {
+                jwm.features.overview.active = true;
+            }),
+            ("expose", |jwm: &mut Jwm| {
+                jwm.features.expose_active = true;
+            }),
+            ("screen annotation", |jwm: &mut Jwm| {
+                jwm.features.annotation_active = true;
+            }),
+        ]
+    }
+
+    /// The selector takes the keyboard and the pointer, and IPC reaches
+    /// `take_screenshot` whatever is on screen: over an open panel it armed a
+    /// selector the panel's exit then ungrabbed. It is refused — before a
+    /// path is chosen, so nothing is created on disk — and a request parked
+    /// for the pointer goes with it.
+    #[test]
+    fn take_screenshot_refuses_to_stack_on_a_grab_holding_mode() {
+        use crate::jwm::features::monitor_lock::test_support::{
+            LockSpyBackend, jwm_on_two_monitors,
+        };
+
+        for (mode, enter) in grab_holding_modes() {
+            let mut backend = LockSpyBackend::new();
+            let mut jwm = jwm_on_two_monitors(&mut backend);
+            enter(&mut jwm);
+            jwm.features.deferred_grab = Some(DeferredGrab::new(
+                DeferredGrabAction::Screenshot {
+                    output_path: "/nonexistent/parked.png".into(),
+                },
+                std::time::Instant::now(),
+            ));
+
+            let error = jwm
+                .take_screenshot(&mut backend, &WMArgEnum::Int(0))
+                .expect_err("the selector must not open over another mode");
+
+            assert!(error.to_string().contains(mode), "{mode}: {error}");
+            assert!(!jwm.features.screenshot.active, "{mode}");
+            assert!(jwm.features.deferred_grab.is_none(), "{mode}");
+        }
+    }
+
+    /// A selector parked waiting for the pointer is dropped, not armed, when
+    /// a grab-holding mode came up meanwhile — the same refusal as
+    /// `take_screenshot`'s, for the request that got in before the mode did.
+    #[test]
+    fn a_parked_screenshot_is_dropped_when_a_grab_holding_mode_came_up() {
+        use crate::jwm::features::monitor_lock::test_support::{
+            LockSpyBackend, jwm_on_two_monitors,
+        };
+
+        let park = |jwm: &mut Jwm| {
+            jwm.features.deferred_grab = Some(DeferredGrab::new(
+                DeferredGrabAction::Screenshot {
+                    output_path: "/nonexistent/parked.png".into(),
+                },
+                std::time::Instant::now(),
+            ));
+        };
+
+        // Control: with nothing else on screen the retry arms the selector,
+        // so the refusals below are the check's doing.
+        let mut backend = LockSpyBackend::new();
+        let mut jwm = jwm_on_two_monitors(&mut backend);
+        park(&mut jwm);
+        jwm.tick_deferred_grab(&mut backend, std::time::Instant::now());
+        assert!(jwm.features.screenshot.active);
+        assert!(jwm.features.deferred_grab.is_none());
+        jwm.cancel_screenshot_select(&mut backend);
+
+        for (mode, enter) in grab_holding_modes() {
+            let mut backend = LockSpyBackend::new();
+            let mut jwm = jwm_on_two_monitors(&mut backend);
+            park(&mut jwm);
+            enter(&mut jwm);
+
+            jwm.tick_deferred_grab(&mut backend, std::time::Instant::now());
+
+            assert!(!jwm.features.screenshot.active, "{mode}");
+            assert!(jwm.features.deferred_grab.is_none(), "{mode}");
+        }
+    }
+
     #[test]
     fn the_screenshot_workers_survive_an_os_that_refuses_a_thread() {
         // The completion watcher spawns from the event loop, and a plain
@@ -2261,6 +2488,7 @@ mod tests {
         let copied = screenshot_completion_toast(&ScreenshotCompletion::CopiedToClipboard {
             png: vec![1, 2, 3],
             offered: false,
+            annotations_lost: false,
         });
         assert_eq!(copied.title, "\u{f030}  Screenshot copied to clipboard");
         assert!(copied.body.is_empty());
@@ -2277,6 +2505,179 @@ mod tests {
         assert!(!system_toast_allowed(true, saved.urgency));
         assert!(!system_toast_allowed(true, copied.urgency));
         assert!(system_toast_allowed(false, saved.urgency));
+    }
+
+    #[test]
+    fn a_capture_that_lost_its_ink_says_so_even_under_dnd() {
+        use crate::jwm::features::notifications::system_toast_allowed;
+
+        let toast = screenshot_completion_toast(&ScreenshotCompletion::SavedWithoutAnnotations(
+            "/home/u/Pictures/shot.png".into(),
+        ));
+        assert_eq!(
+            toast.title,
+            "\u{f030}  Screenshot saved without annotations"
+        );
+        assert_eq!(toast.body, "/home/u/Pictures/shot.png");
+        assert_eq!(toast.urgency, 2);
+        assert!(system_toast_allowed(true, toast.urgency));
+    }
+
+    #[test]
+    fn a_copied_capture_that_lost_its_ink_says_so_even_under_dnd() {
+        use crate::jwm::features::notifications::system_toast_allowed;
+
+        let toast = screenshot_completion_toast(&ScreenshotCompletion::CopiedToClipboard {
+            png: vec![1, 2, 3],
+            offered: false,
+            annotations_lost: true,
+        });
+        assert_eq!(
+            toast.title,
+            "\u{f030}  Screenshot copied without annotations"
+        );
+        assert!(
+            toast.body.is_empty(),
+            "the private staging path must not surface"
+        );
+        assert_eq!(toast.urgency, 2);
+        assert!(system_toast_allowed(true, toast.urgency));
+    }
+
+    fn write_capture(path: &Path) -> Vec<u8> {
+        RgbaImage::from_pixel(8, 6, Rgba([10, 20, 30, 255]))
+            .save(path)
+            .expect("write the published capture");
+        std::fs::read(path).expect("read the published capture")
+    }
+
+    /// The regression: the old bake rewrote the published PNG in place, so
+    /// a write that failed partway left a truncated file. The replacement is
+    /// all or nothing — a mid-write failure keeps every original byte.
+    #[test]
+    fn a_rewrite_that_fails_mid_write_leaves_the_published_capture_intact() {
+        use std::io::Write as _;
+
+        let scratch = ScratchDir::new("bake-mid-write");
+        let path = scratch.path().join("shot.png");
+        let original = write_capture(&path);
+
+        let result = Jwm::replace_file_atomically(&path, |file| {
+            file.write_all(&original[..original.len() / 2])?;
+            Err(io::Error::other("no space left on device").into())
+        });
+
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(&path).expect("capture survives"), original);
+        let staging = Jwm::annotated_staging_path(&path).expect("staging name");
+        assert!(!staging.exists(), "the half-written sibling is removed");
+    }
+
+    #[test]
+    fn a_bake_that_cannot_stage_reports_the_lost_ink_and_keeps_the_capture() {
+        let scratch = ScratchDir::new("bake-no-staging");
+        let path = scratch.path().join("shot.png");
+        let original = write_capture(&path);
+        // Something already holds the sibling's name: `create_new` refuses
+        // it, so the bake fails before a byte of the capture is touched.
+        let staging = Jwm::annotated_staging_path(&path).expect("staging name");
+        std::fs::create_dir(&staging).expect("occupy the staging name");
+
+        let completion = Jwm::complete_capture(
+            path.to_string_lossy().into_owned(),
+            (0, 0),
+            vec![ScreenshotAnnotation::FilledRectangle {
+                from: (0.0, 0.0),
+                to: (4.0, 4.0),
+                color: [255, 0, 0, 255],
+            }],
+            false,
+            None,
+        );
+
+        assert_eq!(
+            completion,
+            ScreenshotCompletion::SavedWithoutAnnotations(path.to_string_lossy().into_owned())
+        );
+        assert_eq!(std::fs::read(&path).expect("capture survives"), original);
+        assert!(
+            staging.is_dir(),
+            "a name the bake did not create is not removed"
+        );
+    }
+
+    /// The clipboard twin of the test above: the unannotated capture is
+    /// still published, but the completion carries the lost ink so the
+    /// toast cannot claim a plain "copied".
+    #[test]
+    fn a_clipboard_bake_that_cannot_stage_reports_the_lost_ink() {
+        let scratch = ScratchDir::new("bake-no-staging-clipboard");
+        let path = scratch.path().join("shot.png");
+        let original = write_capture(&path);
+        let staging = Jwm::annotated_staging_path(&path).expect("staging name");
+        std::fs::create_dir(&staging).expect("occupy the staging name");
+
+        let completion = Jwm::complete_capture(
+            path.to_string_lossy().into_owned(),
+            (0, 0),
+            vec![ScreenshotAnnotation::FilledRectangle {
+                from: (0.0, 0.0),
+                to: (4.0, 4.0),
+                color: [255, 0, 0, 255],
+            }],
+            true,
+            None,
+        );
+
+        assert_eq!(
+            completion,
+            ScreenshotCompletion::CopiedToClipboard {
+                png: original,
+                offered: false,
+                annotations_lost: true,
+            }
+        );
+        assert_eq!(screenshot_completion_toast(&completion).urgency, 2);
+        assert!(!path.exists(), "the clipboard staging file is consumed");
+    }
+
+    #[test]
+    fn a_successful_bake_replaces_the_capture_privately() {
+        let scratch = ScratchDir::new("bake-success");
+        let path = scratch.path().join("shot.png");
+        write_capture(&path);
+
+        let completion = Jwm::complete_capture(
+            path.to_string_lossy().into_owned(),
+            (100, 50),
+            vec![ScreenshotAnnotation::FilledRectangle {
+                from: (100.0, 50.0),
+                to: (104.0, 54.0),
+                color: [255, 0, 0, 255],
+            }],
+            false,
+            None,
+        );
+
+        assert_eq!(
+            completion,
+            ScreenshotCompletion::Saved(path.to_string_lossy().into_owned())
+        );
+        let baked = image::open(&path).expect("baked PNG decodes").to_rgba8();
+        assert_eq!(baked.dimensions(), (8, 6));
+        assert_eq!(*baked.get_pixel(1, 1), Rgba([255, 0, 0, 255]));
+        assert_eq!(*baked.get_pixel(6, 5), Rgba([10, 20, 30, 255]));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&path)
+                .expect("metadata")
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600, "the replacement stays private");
+        }
+        let staging = Jwm::annotated_staging_path(&path).expect("staging name");
+        assert!(!staging.exists(), "the sibling became the capture");
     }
 
     #[test]

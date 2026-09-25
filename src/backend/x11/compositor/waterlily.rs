@@ -14,6 +14,11 @@ use std::time::{Duration, Instant};
 const RECEIVE_TIMEOUT: Duration = Duration::from_millis(100);
 const ACCEPT_RETRY: Duration = Duration::from_millis(20);
 const PRODUCER_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+/// Longest a control command may block the compositor thread. A worker that
+/// drains its socket takes a 20-byte line at once; the send buffer only fills
+/// behind a worker that stopped reading (stopped, wedged, or never reading),
+/// and waiting on that one would freeze input and rendering for the session.
+const COMMAND_WRITE_TIMEOUT: Duration = Duration::from_millis(10);
 /// Loop length of the shader's open-water swell.  Prime seconds, so the
 /// surface animation never beats against the 47 s / 31 s camera waves; the
 /// shader receives the phase in `[0, 1)` and uses integer cycle counts, so
@@ -81,9 +86,19 @@ impl WaterlilyIpc {
                             }
                             // Hot-switch commands travel over the same stream
                             // in the other direction; publish a writable clone
-                            // for the compositor thread.
+                            // for the compositor thread. Without a bounded
+                            // write the clone stays unpublished: frames still
+                            // flow, commands report undeliverable.
                             if let Ok(mut slot) = thread_command_stream.lock() {
-                                *slot = stream.try_clone().ok();
+                                *slot = match command_stream_for(&stream) {
+                                    Ok(commands) => Some(commands),
+                                    Err(error) => {
+                                        log::warn!(
+                                            "compositor: WaterLily commands unavailable: {error}"
+                                        );
+                                        None
+                                    }
+                                };
                             }
                             thread_connected.store(true, Ordering::Release);
                             thread_new_connection.store(true, Ordering::Release);
@@ -167,22 +182,11 @@ impl WaterlilyIpc {
     /// Deliver one newline-terminated control command to the connected worker.
     /// Returns false when no worker is connected or the write fails.
     pub(super) fn send_command(&self, command: &str) -> bool {
-        use std::io::Write;
+        let payload = format!("{command}\n");
         let Ok(mut slot) = self.command_stream.lock() else {
             return false;
         };
-        let Some(stream) = slot.as_mut() else {
-            return false;
-        };
-        let payload = format!("{command}\n");
-        match stream.write_all(payload.as_bytes()) {
-            Ok(()) => true,
-            Err(error) => {
-                log::warn!("compositor: WaterLily command delivery failed: {error}");
-                *slot = None;
-                false
-            }
-        }
+        deliver_command(&mut slot, payload.as_bytes())
     }
 
     pub(super) fn has_pending(&self) -> bool {
@@ -211,6 +215,40 @@ impl WaterlilyIpc {
         }
         if self.has_pending() {
             signal.wakeup();
+        }
+    }
+}
+
+/// The compositor thread's writable end of an accepted worker stream.
+///
+/// The clone shares the socket, so its send timeout bounds every command
+/// write while the receiver's reads keep their own timeout. Nonblocking mode
+/// would not do: it belongs to the shared open file and would turn the
+/// receiver's idle-timeout reads into a spin.
+fn command_stream_for(stream: &UnixStream) -> io::Result<UnixStream> {
+    let commands = stream.try_clone()?;
+    commands.set_write_timeout(Some(COMMAND_WRITE_TIMEOUT))?;
+    Ok(commands)
+}
+
+/// Write one framed command, detaching the worker on any failure.
+///
+/// A timed-out `write_all` may have sent part of the line, which would
+/// corrupt the framing of every later command, so the stream is shut down
+/// rather than merely dropped: the receiver thread reads end-of-file and
+/// clears the connection, and the worker can reconnect with a clean stream.
+fn deliver_command(slot: &mut Option<UnixStream>, payload: &[u8]) -> bool {
+    use std::io::Write;
+    let Some(stream) = slot.as_mut() else {
+        return false;
+    };
+    match stream.write_all(payload) {
+        Ok(()) => true,
+        Err(error) => {
+            log::warn!("compositor: WaterLily command delivery failed: {error}");
+            let _ = stream.shutdown(std::net::Shutdown::Both);
+            *slot = None;
+            false
         }
     }
 }
@@ -1809,6 +1847,34 @@ mod tests {
         let mut line = String::new();
         BufReader::new(&worker).read_line(&mut line).unwrap();
         assert_eq!(line, "case dance\n");
+    }
+
+    #[test]
+    fn a_worker_that_stops_reading_commands_is_detached_instead_of_blocking() {
+        use std::io::Read;
+
+        let (compositor_end, mut worker_end) = std::os::unix::net::UnixStream::pair().unwrap();
+        let mut slot = Some(super::command_stream_for(&compositor_end).unwrap());
+        // The worker never reads. A blocking write would stall here forever
+        // once the send buffer fills, with the compositor thread inside it.
+        let line = format!("{}\n", "x".repeat(4095));
+        let mut delivered = 0_usize;
+        while super::deliver_command(&mut slot, line.as_bytes()) {
+            delivered += 1;
+            assert!(delivered < 100_000, "the send buffer never filled");
+        }
+        assert!(delivered > 0, "an empty buffer takes commands at once");
+        assert!(slot.is_none(), "a stalled worker is detached");
+        assert!(!super::deliver_command(&mut slot, line.as_bytes()));
+
+        // The shutdown is what ends the session: the receiver's read end sees
+        // end-of-file, and the worker reads what arrived and then EOF rather
+        // than a truncated line followed by more commands.
+        let mut buf = [0_u8; 16];
+        assert_eq!((&compositor_end).read(&mut buf).unwrap(), 0);
+        let mut received = Vec::new();
+        worker_end.read_to_end(&mut received).unwrap();
+        assert!(received.len() >= delivered * line.len());
     }
 
     #[test]

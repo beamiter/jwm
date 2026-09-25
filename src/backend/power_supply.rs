@@ -50,12 +50,19 @@ pub(crate) fn parse_percentage(text: &str) -> io::Result<u32> {
     Ok(value)
 }
 
-/// First `/sys/class/power_supply/*` entry whose `type` is `Battery`.
+/// First `/sys/class/power_supply/*` entry that is a system battery: its
+/// `type` is `Battery` and its `scope` is not `Device`.
 ///
 /// Multi-battery laptops often expose `BAT1` (or only `BAT1`) rather than
 /// `BAT0`; hardcoding a single name silently keeps the compositor on the AC
-/// power profile. Enumeration matches the control-center probe in
+/// power profile. Enumeration order matches the control-center probe in
 /// `jwm::features::power`.
+///
+/// HID/Bluetooth peripherals (`hidpp_battery_0`, `hid-<addr>-battery`, game
+/// controllers) also report `type=Battery` and `Discharging` while in use,
+/// but with `scope=Device`. Picking one would throttle a mains-powered
+/// desktop whenever the mouse runs low, so device-scoped supplies are
+/// skipped. A missing or unreadable `scope` counts as `System`, like upower.
 pub(crate) fn first_battery_dir(power_supply_root: &Path) -> Option<PathBuf> {
     let mut entries = fs::read_dir(power_supply_root).ok()?.flatten().collect::<Vec<_>>();
     entries.sort_by_key(|entry| entry.file_name());
@@ -67,11 +74,20 @@ pub(crate) fn first_battery_dir(power_supply_root: &Path) -> Option<PathBuf> {
         let Ok(supply_type) = read_attribute(&path.join("type")) else {
             continue;
         };
-        if supply_type.trim() == "Battery" {
+        if supply_type.trim() == "Battery" && !is_device_scoped(&path) {
             return Some(path);
         }
     }
     None
+}
+
+/// Whether a power supply powers a peripheral rather than the system.
+///
+/// Only an explicit `Device` scope excludes the supply: older kernels and
+/// many ACPI batteries omit `scope`, and those are system batteries.
+fn is_device_scoped(supply_dir: &Path) -> bool {
+    read_attribute(&supply_dir.join("scope"))
+        .is_ok_and(|scope| scope.trim().eq_ignore_ascii_case("Device"))
 }
 
 #[cfg(feature = "x11-backends")]
@@ -162,6 +178,36 @@ mod tests {
         std::fs::write(bat0.join("type"), "Battery\n").unwrap();
 
         assert_eq!(first_battery_dir(&root).as_deref(), Some(bat0.as_path()));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn first_battery_dir_skips_device_scoped_peripheral_batteries() {
+        let root = test_directory();
+        // A desktop whose only battery is a wireless mouse must stay on the
+        // AC profile instead of throttling when the mouse runs low.
+        let mouse = root.join("hidpp_battery_0");
+        std::fs::create_dir_all(&mouse).unwrap();
+        std::fs::write(mouse.join("type"), "Battery\n").unwrap();
+        std::fs::write(mouse.join("scope"), "Device\n").unwrap();
+        std::fs::write(mouse.join("status"), "Discharging\n").unwrap();
+        assert_eq!(first_battery_dir(&root), None);
+
+        // A lowercase system battery sorts after a `hid-*` peripheral, so the
+        // name order alone must not decide; the scope does.
+        let headset = root.join("hid-aa:bb:cc:dd:ee:ff-battery");
+        let system = root.join("macsmc-battery");
+        std::fs::create_dir_all(&headset).unwrap();
+        std::fs::create_dir_all(&system).unwrap();
+        std::fs::write(headset.join("type"), "Battery\n").unwrap();
+        std::fs::write(headset.join("scope"), "device\n").unwrap();
+        std::fs::write(system.join("type"), "Battery\n").unwrap();
+        std::fs::write(system.join("scope"), "System\n").unwrap();
+        assert_eq!(first_battery_dir(&root).as_deref(), Some(system.as_path()));
+
+        // Any scope other than `Device` (here `Unknown`) is still a candidate.
+        std::fs::write(system.join("scope"), "Unknown\n").unwrap();
+        assert_eq!(first_battery_dir(&root).as_deref(), Some(system.as_path()));
         std::fs::remove_dir_all(root).unwrap();
     }
 }

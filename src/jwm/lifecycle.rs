@@ -5,12 +5,14 @@ use crate::backend::api::{Backend, Geometry, ManagedUnmapReason, WindowChanges};
 use crate::backend::common_define::{ArgbColor, ColorScheme, EventMaskBits, SchemeType, WindowId};
 use crate::config::CONFIG;
 use crate::core::models::{ClientKey, MonitorKey, WMClient};
+use crate::core::state::WMState;
 use crate::core::types::Rect;
 use crate::ipc::IpcResponse;
 use crate::jwm::statusbar::StatusBarBuilder;
 use crate::jwm::visibility::restore_hidden_geometry;
 use crate::jwm::window_state::x11_geometry_fully_left_of_desktop;
 use log::{info, warn};
+use std::collections::HashSet;
 use std::error::Error;
 use std::fmt;
 use std::sync::atomic::Ordering;
@@ -148,6 +150,43 @@ fn x11_client_cleanup_plan(
             clients
                 .get(client_key)
                 .map(|client| (client.win, client.geometry.old_border_w, client_key))
+        })
+        .collect()
+}
+
+/// New tag masks for clients a shrunken `layout.tags_length` stranded on
+/// retired tags.
+///
+/// Every view, tag and reveal path masks with the new `tagmask`, so a client
+/// whose only bits lie above it could never be shown or focused again. Bits
+/// beyond the mask are dropped. An ordinary client left with none moves to
+/// its monitor's active view (tag 1 without one), the fallback manage and
+/// session restore use. A named scratchpad left with none is parked instead
+/// (`tags == 0`), the state its toggle reveals from, so a reload never pops
+/// it onto the current view. Clients whose tags already fit, parked
+/// scratchpads included, are not touched.
+fn retired_tag_retag_plan(
+    state: &WMState,
+    scratchpads: &HashSet<ClientKey>,
+    tagmask: u32,
+) -> Vec<(ClientKey, u32)> {
+    state
+        .clients
+        .iter()
+        .filter(|(_, client)| client.state.tags & !tagmask != 0)
+        .map(|(client_key, client)| {
+            let kept = client.state.tags & tagmask;
+            let tags = if kept != 0 || scratchpads.contains(&client_key) {
+                kept
+            } else {
+                client
+                    .mon
+                    .and_then(|monitor_key| state.monitors.get(monitor_key))
+                    .map(|monitor| monitor.get_active_tags() & tagmask)
+                    .filter(|tags| *tags != 0)
+                    .unwrap_or(1)
+            };
+            (client_key, tags)
         })
         .collect()
 }
@@ -377,6 +416,28 @@ impl ConfigReloadTracker {
         self.last_observed = Some(revision);
         self.last_attempted = Some(revision);
         self.pending = None;
+    }
+
+    /// Settle a revision JWM wrote itself, so the watcher does not reload
+    /// the config a moment after every layout or theme save.
+    ///
+    /// Returns `false` and leaves the tracker untouched while an observed
+    /// edit is still waiting out its debounce. JWM's writes are surgical
+    /// read-modify-write passes over the file on disk, so the new revision
+    /// already carries that edit; settling it would clear the pending reload
+    /// and the edit would never be applied. Left alone, the watcher sees
+    /// JWM's revision as new and reloads it, which applies the user's edit
+    /// and re-reads JWM's own change harmlessly.
+    ///
+    /// An edit saved after the last observation is invisible here: a writer
+    /// that must not stamp over it calls [`Jwm::observe_config_reload`]
+    /// right before writing, which turns it into a pending edit.
+    fn settle_own_write(&mut self, revision: SystemTime) -> bool {
+        if self.has_pending() {
+            return false;
+        }
+        self.mark_attempted(revision);
+        true
     }
 
     fn has_pending(&self) -> bool {
@@ -957,9 +1018,10 @@ impl Jwm {
         // is exactly the one the next process has to come back to.
         if let Err(error) = self.flush_layout_persistence_on_exit() {
             // Normal-exit cleanup is already beyond its physical handoff
-            // commit point, while restart has validated this write before
-            // entering cleanup. Record a late failure without skipping the
-            // remaining X11/system teardown stages.
+            // commit point, while restart has either completed this write or
+            // given up on an unwritable config before entering cleanup.
+            // Record a late failure without skipping the remaining
+            // X11/system teardown stages.
             warn!("[cleanup] could not flush pending layout persistence: {error}");
         }
         // Same reason for the notification history: its writer thread holds
@@ -1014,7 +1076,9 @@ impl Jwm {
             info!("[cleanup_x11_resources] Recording stopped on shutdown; output is at {target}");
         }
 
-        if self.features.audio_recording.active {
+        // A recording the key stop left finalizing is still writing its file:
+        // `stop` waits for that too, so it is not orphaned half-written.
+        if self.features.audio_recording.active || self.features.audio_recording.is_finalizing() {
             let path = self.features.audio_recording.output_path.clone();
             if let Err(error) = self.features.audio_recording.stop() {
                 warn!("[cleanup_x11_resources] Failed to stop audio recording: {error}");
@@ -1369,13 +1433,41 @@ impl Jwm {
     /// Theme persistence today. Without this the watcher would see the new
     /// mtime as an edit and reload the config a second or two after every
     /// write.
+    ///
+    /// A user edit that is still waiting to be reloaded wins: the revision is
+    /// then left for the watcher, which reloads it (see
+    /// [`ConfigReloadTracker::settle_own_write`]).
     pub(crate) fn note_config_written_by_us(&mut self, revision: SystemTime) {
-        self.config_reload_tracker.mark_attempted(revision);
-        self.config_last_modified = Some(revision);
+        if self.config_reload_tracker.settle_own_write(revision) {
+            self.config_last_modified = Some(revision);
+        } else {
+            info!(
+                "[config] JWM wrote the config while an edit was waiting to be reloaded; reloading both"
+            );
+        }
     }
 
     pub(crate) fn config_reload_next_wakeup(&self, now: Instant) -> Duration {
         self.config_reload_tracker.next_wakeup_in(now)
+    }
+
+    /// Apply [`retired_tag_retag_plan`] and publish each changed client's tag
+    /// property, so bars and a later restart see the tag it now lives on.
+    fn retag_clients_off_retired_tags(&mut self, backend: &mut dyn Backend, tagmask: u32) {
+        let scratchpads: HashSet<ClientKey> = self.scratchpads.values().copied().collect();
+        for (client_key, tags) in retired_tag_retag_plan(&self.state, &scratchpads, tagmask) {
+            let Some(client) = self.state.clients.get_mut(client_key) else {
+                continue;
+            };
+            info!(
+                "[config] {:?} was on retired tags {:#b}; now on {:#b}",
+                client.win, client.state.tags, tags
+            );
+            client.state.tags = tags;
+            if let Err(error) = self.setclienttagprop(backend, client_key) {
+                warn!("[config] could not publish retagged client {client_key:?}: {error}");
+            }
+        }
     }
 
     pub(crate) fn apply_config_changes(&mut self, backend: &mut dyn Backend) {
@@ -1484,10 +1576,25 @@ impl Jwm {
                 monitor.sync_tag_slots(tags_length, tagmask);
             }
         }
+        // Monitors now view live tags only; clients on a retired tag follow,
+        // or no view could ever show them again. Runs after the monitor
+        // sync so the fallback is a view that still exists.
+        self.retag_clients_off_retired_tags(backend, tagmask);
 
         // 4. Re-arrange all monitors (border/gap changes take effect)
         for mk in &mon_keys {
             self.arrange(backend, Some(*mk));
+        }
+        // The tag count may have moved, and the sync above may have moved a
+        // monitor's view with it. The compositor's per-tag state (the
+        // ext-workspace groups taskbars bind, per-tag wallpapers) and the
+        // EWMH desktop list pagers read follow only what policy publishes,
+        // and nothing else publishes until the next tag switch or monitor
+        // change. Every tag switch already does both, so one more here is
+        // cheap; after the retag and arrange, so the masked view goes out.
+        self.refresh_compositor_monitors(backend);
+        if let Err(e) = self.update_ewmh_desktop(backend) {
+            warn!("[config] could not republish desktops: {e}");
         }
 
         // 5. Update decoration on all visible clients
@@ -1602,6 +1709,39 @@ mod config_reload_tests {
         assert!(
             body.contains("sync_tag_slots"),
             "growing tags_length on reload used to leave Pertag short and panic on close/view"
+        );
+    }
+
+    #[test]
+    fn apply_config_changes_retags_clients_between_sync_and_arrange() {
+        const SOURCE: &str = include_str!("lifecycle.rs");
+        let body = SOURCE
+            .split_once("fn apply_config_changes(")
+            .expect("apply_config_changes")
+            .1
+            .split_once("#[cfg(test)]")
+            .expect("the test module")
+            .0;
+        let position = |needle: &str| {
+            body.find(needle)
+                .unwrap_or_else(|| panic!("apply_config_changes lost {needle:?}"))
+        };
+        let sync = position("monitor.sync_tag_slots(");
+        let retag = position("self.retag_clients_off_retired_tags(backend, tagmask)");
+        let arrange = position("self.arrange(backend, Some(*mk))");
+        // After the sync, so the fallback view is one that still exists;
+        // before the arrange, so the moved windows are laid out at once.
+        assert!(
+            sync < retag && retag < arrange,
+            "shrinking tags_length used to strand windows on the retired tags"
+        );
+        // The publish follows the view changes, so it carries the masked
+        // view; `a_config_reload_republishes_monitors_and_desktops` drives it.
+        let publish = position("self.refresh_compositor_monitors(backend)");
+        let desktops = position("self.update_ewmh_desktop(backend)");
+        assert!(
+            arrange < publish && arrange < desktops,
+            "a reload that moved tags_length never reached taskbars or pagers"
         );
     }
 
@@ -1745,6 +1885,130 @@ mod config_reload_tests {
             tracker.take_due_attempt(now + CONFIG_RELOAD_DEBOUNCE * 3),
             Some(fixed)
         );
+    }
+
+    #[test]
+    fn own_write_with_nothing_pending_is_not_reloaded() {
+        let now = Instant::now();
+        let own_write = revision(2);
+        let mut tracker = ConfigReloadTracker::new(Some(revision(1)));
+
+        assert!(tracker.settle_own_write(own_write));
+        assert!(!tracker.observe(own_write, now));
+        assert_eq!(tracker.take_due_attempt(now + CONFIG_RELOAD_DEBOUNCE), None);
+    }
+
+    /// Regression: settling JWM's own write used to clear a user edit that
+    /// was observed but still waiting out its debounce (a Hub theme pick
+    /// right after saving the file). JWM's surgical write keeps the edit on
+    /// disk, so the reload must still happen — of JWM's newer revision.
+    #[test]
+    fn own_write_leaves_an_observed_user_edit_to_be_reloaded() {
+        let now = Instant::now();
+        let user_edit = revision(2);
+        let own_write = revision(3);
+        let mut tracker = ConfigReloadTracker::new(Some(revision(1)));
+
+        assert!(tracker.observe(user_edit, now));
+        assert!(!tracker.settle_own_write(own_write));
+        assert!(tracker.has_pending(), "the user's edit must stay pending");
+
+        // The debounce verification re-stats, finds JWM's revision and
+        // reloads it once it has settled.
+        let verify_at = now + CONFIG_RELOAD_DEBOUNCE;
+        assert!(tracker.observe(own_write, verify_at));
+        assert_eq!(tracker.take_due_attempt(verify_at), None);
+        assert_eq!(
+            tracker.take_due_attempt(verify_at + CONFIG_RELOAD_DEBOUNCE),
+            Some(own_write)
+        );
+    }
+
+    /// A writer that observes right before writing turns an edit saved since
+    /// the last mtime poll into a pending one, which the own-write settle
+    /// then leaves alone. This is the contract the layout and theme writers
+    /// rely on.
+    #[test]
+    fn observing_before_an_own_write_catches_an_unpolled_user_edit() {
+        let now = Instant::now();
+        let user_edit = revision(2);
+        let own_write = revision(3);
+        let mut tracker = ConfigReloadTracker::new(Some(revision(1)));
+        assert!(tracker.should_poll(now));
+
+        // Saved inside the one-second poll gap; only the pre-write check
+        // sees it.
+        let write_at = now + Duration::from_millis(300);
+        assert!(!tracker.should_poll(write_at));
+        assert!(tracker.observe(user_edit, write_at));
+        assert!(!tracker.settle_own_write(own_write));
+
+        assert!(tracker.observe(own_write, now + CONFIG_RELOAD_POLL_INTERVAL));
+        assert_eq!(
+            tracker.take_due_attempt(now + CONFIG_RELOAD_POLL_INTERVAL + CONFIG_RELOAD_DEBOUNCE),
+            Some(own_write)
+        );
+    }
+
+    fn add_client(
+        state: &mut WMState,
+        raw: u64,
+        tags: u32,
+        monitor: Option<MonitorKey>,
+    ) -> ClientKey {
+        let mut client = WMClient::new(WindowId::from_raw(raw));
+        client.state.tags = tags;
+        client.mon = monitor;
+        let client_key = state.clients.insert(client);
+        state.client_order.push(client_key);
+        client_key
+    }
+
+    /// Regression: a reload that lowered `layout.tags_length` masked the
+    /// monitors' views but left client tag masks alone, so a window on a
+    /// removed tag could never be viewed, focused or revealed again.
+    #[test]
+    fn shrinking_tags_length_moves_clients_off_retired_tags() {
+        use crate::core::models::WMMonitor;
+        use std::collections::HashMap;
+
+        // tags_length 9 -> 5.
+        let tagmask = 0b1_1111;
+        let mut state = WMState::new();
+        let mut monitor = WMMonitor::new();
+        monitor.sel_tags = 0;
+        monitor.tag_set[0] = 0b100;
+        let monitor_key = state.monitors.insert(monitor);
+        state.monitor_order.push(monitor_key);
+
+        let stranded = add_client(&mut state, 1, 1 << 7, Some(monitor_key));
+        let straddling = add_client(&mut state, 2, (1 << 7) | 0b10, Some(monitor_key));
+        let fitting = add_client(&mut state, 3, 0b1, Some(monitor_key));
+        let orphaned = add_client(&mut state, 4, 1 << 8, None);
+        let shown_scratchpad = add_client(&mut state, 5, 1 << 6, Some(monitor_key));
+        let parked_scratchpad = add_client(&mut state, 6, 0, None);
+        let scratchpads = HashSet::from([shown_scratchpad, parked_scratchpad]);
+
+        let plan: HashMap<ClientKey, u32> = retired_tag_retag_plan(&state, &scratchpads, tagmask)
+            .into_iter()
+            .collect();
+
+        // Only on a retired tag: the monitor's current view.
+        assert_eq!(plan.get(&stranded), Some(&0b100));
+        // Also on a live tag: keeps just that one.
+        assert_eq!(plan.get(&straddling), Some(&0b10));
+        // No monitor to borrow a view from: tag 1.
+        assert_eq!(plan.get(&orphaned), Some(&1));
+        // A scratchpad is parked, not popped onto the current view.
+        assert_eq!(plan.get(&shown_scratchpad), Some(&0));
+        assert!(!plan.contains_key(&fitting));
+        assert!(!plan.contains_key(&parked_scratchpad));
+        assert_eq!(plan.len(), 4);
+        for (client_key, tags) in &plan {
+            if !scratchpads.contains(client_key) {
+                assert_ne!(tags & tagmask, 0, "{client_key:?} is still unreachable");
+            }
+        }
     }
 }
 
@@ -2138,6 +2402,10 @@ mod normal_exit_transaction_tests {
         cursor_provider: DummyCursorProvider,
         color_allocator: DummyColorAllocator,
         operations: Arc<Mutex<Vec<ExitOperation>>>,
+        /// Every monitor list pushed to the compositor, oldest first.
+        monitor_pushes: Vec<Vec<(u32, i32, i32, u32, u32, u32)>>,
+        /// Every EWMH desktop publish as `(current, total)`, oldest first.
+        desktop_pushes: Vec<(u32, u32)>,
     }
 
     impl ExitBackend {
@@ -2152,6 +2420,8 @@ mod normal_exit_transaction_tests {
                 cursor_provider: DummyCursorProvider,
                 color_allocator: DummyColorAllocator,
                 operations,
+                monitor_pushes: Vec::new(),
+                desktop_pushes: Vec::new(),
             }
         }
     }
@@ -2160,7 +2430,11 @@ mod normal_exit_transaction_tests {
     impl BackendDiagnostics for ExitBackend {}
     impl CompositorControl for ExitBackend {}
     impl CompositorMedia for ExitBackend {}
-    impl CompositorWorkspaceEffects for ExitBackend {}
+    impl CompositorWorkspaceEffects for ExitBackend {
+        fn compositor_set_monitors(&mut self, monitors: &[(u32, i32, i32, u32, u32, u32)]) {
+            self.monitor_pushes.push(monitors.to_vec());
+        }
+    }
     impl CompositorAnnotation for ExitBackend {}
     impl DisplayControl for ExitBackend {}
     impl RenderScheduler for ExitBackend {
@@ -2249,6 +2523,16 @@ mod normal_exit_transaction_tests {
                 .lock()
                 .expect("exit operations lock")
                 .push(ExitOperation::BackendCleanup);
+            Ok(())
+        }
+
+        fn on_desktop_changed(
+            &mut self,
+            current: u32,
+            total: u32,
+            _names: &[&str],
+        ) -> Result<(), BackendError> {
+            self.desktop_pushes.push((current, total));
             Ok(())
         }
 
@@ -2714,6 +2998,102 @@ mod normal_exit_transaction_tests {
         assert!(!backend.window_ops.snapshot(window).viewable);
     }
 
+    /// The reload executor on a live Jwm: a window left on a tag beyond the
+    /// live `layout.tags_length` (the test config has fewer than 13 tags)
+    /// lands on its monitor's view instead of staying managed but
+    /// unreachable, while a parked scratchpad stays parked.
+    /// `apply_config_changes` is not driven whole here because its wallpaper
+    /// refresh would decode the host's real wallpaper; the call site is
+    /// pinned by `apply_config_changes_retags_clients_between_sync_and_arrange`.
+    #[test]
+    fn a_config_reload_brings_a_window_back_from_a_retired_tag() {
+        let mut backend = ExitBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test-x11").unwrap();
+        let tagmask = CONFIG.load().tagmask();
+        let retired = 1u32 << 12;
+        assert_eq!(retired & tagmask, 0, "the test needs tag 13 to be retired");
+        let stranded = add_parked_offtag_client(
+            &mut jwm,
+            &backend,
+            WindowId::from_raw(0x9301),
+            -2600,
+            Rect::new(100, 80, 640, 480),
+        );
+        jwm.state.clients[stranded].state.tags = retired;
+        let scratchpad = add_parked_offtag_client(
+            &mut jwm,
+            &backend,
+            WindowId::from_raw(0x9302),
+            -2700,
+            Rect::new(120, 90, 640, 480),
+        );
+        jwm.state.clients[scratchpad].state.tags = 0;
+        jwm.scratchpads.insert("term".into(), scratchpad);
+
+        jwm.retag_clients_off_retired_tags(&mut backend, tagmask);
+
+        let monitor = jwm.state.monitor_order[0];
+        let active = jwm.state.monitors[monitor].get_active_tags();
+        let tags = jwm.state.clients[stranded].state.tags;
+        assert_ne!(tags & tagmask, 0, "tags {tags:#b} are still unreachable");
+        assert_eq!(tags, active & tagmask);
+        assert_eq!(jwm.state.clients[scratchpad].state.tags, 0);
+    }
+
+    /// Regression: a reload that moved `layout.tags_length` masked the
+    /// monitors' views but published nothing, so ext-workspace taskbars kept
+    /// the old count and a stale active workspace, and X11 pagers the old
+    /// desktop list, until the next tag switch or monitor change. The test
+    /// config's tag count is fixed, so the view is put on a tag beyond it —
+    /// what a shrink leaves behind — and the reload has to publish the view
+    /// it falls back to.
+    #[test]
+    fn a_config_reload_republishes_monitors_and_desktops() {
+        let mut backend = ExitBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test-x11").unwrap();
+        let (tagmask, tags_length, compositor_enabled, wallpaper) = {
+            let cfg = CONFIG.load();
+            (
+                cfg.tagmask(),
+                cfg.tags_length(),
+                cfg.compositor_enabled(),
+                cfg.behavior().wallpaper.clone(),
+            )
+        };
+        let retired = 1u32 << 12;
+        assert_eq!(retired & tagmask, 0, "the test needs tag 13 to be retired");
+        // A compositor toggle would replay the monitors a second time.
+        assert!(compositor_enabled && backend.has_compositor());
+        // The wallpaper-theme refresh skips a wallpaper it already themed
+        // from; otherwise it would decode the host's real wallpaper.
+        jwm.features.themed_wallpaper = wallpaper;
+        let monitor_key = jwm.state.monitor_order[0];
+        let monitor = &mut jwm.state.monitors[monitor_key];
+        let view = monitor.sel_tags & 1;
+        monitor.tag_set[view] = retired;
+        if let Some(pertag) = monitor.pertag.as_mut() {
+            pertag.cur_tag = 13;
+        }
+        backend.monitor_pushes.clear();
+        backend.desktop_pushes.clear();
+
+        jwm.apply_config_changes(&mut backend);
+
+        assert_eq!(jwm.state.monitors[monitor_key].get_active_tags(), 1);
+        assert_eq!(
+            backend.monitor_pushes.len(),
+            1,
+            "{:?}",
+            backend.monitor_pushes
+        );
+        let active: Vec<u32> = backend.monitor_pushes[0]
+            .iter()
+            .map(|monitor| monitor.5)
+            .collect();
+        assert_eq!(active, vec![1], "the masked view goes out, not tag 13");
+        assert_eq!(backend.desktop_pushes, vec![(0, tags_length as u32)]);
+    }
+
     #[test]
     fn an_ipc_close_or_clear_repaints_the_open_notification_center() {
         use crate::jwm::features::notifications::CloseReason;
@@ -2746,5 +3126,31 @@ mod normal_exit_transaction_tests {
         assert_eq!(jwm.clear_notifications(), 1);
         assert!(jwm.system_ui_dirty, "the emptied panel must be pushed too");
         assert!(jwm.features.notifications.get(second).is_none());
+    }
+
+    /// The key stop only asks the recorder to finish, so a restart or exit
+    /// right after it found `active` already false and skipped the stop: the
+    /// recorder thread still writing the file was never waited for. Cleanup
+    /// now collects a finalizing recording as well as an active one.
+    #[test]
+    fn x11_cleanup_waits_for_an_audio_recording_left_finalizing() {
+        use crate::jwm::features::audio_recording::AudioRecordingState;
+
+        let mut backend = ExitBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test-x11").unwrap();
+        jwm.features.audio_recording =
+            AudioRecordingState::recording_for_test("/tmp/jwm-exit-finalizing.wav", |_stop| Ok(()));
+        assert_eq!(jwm.features.audio_recording.begin_stop(), None);
+        assert!(!jwm.features.audio_recording.active);
+        assert!(jwm.features.audio_recording.is_finalizing());
+
+        jwm.cleanup_x11_resources_after_handoff(&mut backend, false)
+            .unwrap();
+
+        assert!(
+            !jwm.features.audio_recording.is_finalizing(),
+            "the finalizing recorder was left behind"
+        );
+        assert!(!jwm.features.audio_recording.active);
     }
 }

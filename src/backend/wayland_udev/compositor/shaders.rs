@@ -537,6 +537,9 @@ uniform float u_edge_shade;        // bottom contact-shade strength
 uniform float u_grain;             // dither amplitude
 uniform float u_alpha;             // fade envelope (toasts/OSD)
 uniform int   u_scene_linear;
+// 1 when u_backdrop holds encoded sRGB (the client-blur seed) rather than the
+// bound target's own domain. Only matters when u_scene_linear == 1.
+uniform int   u_backdrop_encoded;
 in vec2 v_uv;
 out vec4 frag_color;
 
@@ -608,10 +611,21 @@ void main() {
     // sample walks across its texels; averaging the pair settles it for one
     // extra fetch.
     vec2 tap = normal * 0.6 * inv_screen;
-    vec3 backdrop = 0.5 * (texture(u_backdrop, clamp(backdrop_uv + tap, 0.0, 1.0)).rgb
-                         + texture(u_backdrop, clamp(backdrop_uv - tap, 0.0, 1.0)).rgb);
+    vec3 tap_out = texture(u_backdrop, clamp(backdrop_uv + tap, 0.0, 1.0)).rgb;
+    vec3 tap_in = texture(u_backdrop, clamp(backdrop_uv - tap, 0.0, 1.0)).rgb;
+    // The backdrop normally comes from the bound target's domain. The one
+    // exception is the encoded client-blur seed under a sheet drawn into the
+    // common-linear target: stored as it is, its sRGB codes would be read as
+    // linear light and the output OETF would wash the sheet out. Decode each
+    // tap before the pair is averaged, so the average, the saturation and the
+    // luminance all work in linear light, as they do on a linear capture.
+    if (u_scene_linear == 1 && u_backdrop_encoded == 1) {
+        tap_out = srgb_inverse(tap_out);
+        tap_in = srgb_inverse(tap_in);
+    }
+    vec3 backdrop = 0.5 * (tap_out + tap_in);
     float luma = dot(backdrop, vec3(0.2126, 0.7152, 0.0722));
-    // Backdrop is captured from the bound target's domain, so saturation /
+    // From here the backdrop is in the bound target's domain, so saturation /
     // luminance stay in that domain. Authored tint + rim are exact-sRGB and
     // decode when writing into the common-linear target.
     backdrop = clamp(mix(vec3(luma), backdrop, u_saturation) * u_luminance, 0.0, 1.0);

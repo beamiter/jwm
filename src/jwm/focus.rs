@@ -8,6 +8,12 @@ use crate::core::models::ClientKey;
 impl Jwm {
     pub(crate) fn find_visible_client(&self) -> Option<ClientKey> {
         let sel_mon_key = self.state.sel_mon?;
+        // Every window on a locked monitor is behind its shade. The selection
+        // is kept off such a monitor, but a path that selects one directly
+        // and then asks `focus(None)` for a window must not get a hidden one.
+        if self.monitor_key_is_locked(sel_mon_key) {
+            return None;
+        }
 
         if let Some(stack_clients) = self.state.monitor_stack.get(sel_mon_key) {
             for &client_key in stack_clients {
@@ -60,6 +66,19 @@ impl Jwm {
             .is_some_and(|client| client.state.is_urgent)
         {
             let _ = self.seturgent(backend, client_key, false);
+        }
+        // EWMH: the WM clears _NET_WM_STATE_DEMANDS_ATTENTION once the window
+        // has the user's attention. Gated on the EWMH flag itself (not on
+        // is_urgent, which seturgent just cleared), and run after seturgent
+        // so the helper's WM_HINTS read-back already sees the hint cleared
+        // and does not re-derive urgency from it.
+        if self
+            .state
+            .clients
+            .get(client_key)
+            .is_some_and(|client| client.state.demands_attention)
+        {
+            self.set_client_demands_attention(backend, client_key, false);
         }
         self.detachstack(client_key);
         self.attachstack(client_key);
@@ -161,5 +180,42 @@ impl Jwm {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::backend::common_define::WindowId;
+    use crate::core::models::WMClient;
+    use crate::jwm::Jwm;
+    use crate::jwm::monitor::test_support::{DisplaySpyBackend, output};
+
+    /// Regression: `find_visible_client` scanned the selected monitor's
+    /// stack without asking whether a lock shade covers it, so a path that
+    /// selected a locked monitor directly and then called `focus(None)`
+    /// focused a window nobody could see.
+    #[test]
+    fn a_locked_selected_monitor_offers_no_window_to_focus() {
+        let mut backend = DisplaySpyBackend::new(vec![
+            output(1, 0, 0, 1920, 1080),
+            output(2, 1920, 0, 1920, 1080),
+        ]);
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test")
+            .expect("a spy backend builds a JWM");
+        let shaded = jwm.state.monitor_order[1];
+        let mut client = WMClient::new(WindowId::from_raw(0x5e10));
+        client.mon = Some(shaded);
+        client.state.tags = jwm.state.monitors[shaded].get_active_tags();
+        let key = jwm.insert_client(client);
+        jwm.attach_to_monitor(key, shaded);
+        jwm.state.sel_mon = Some(shaded);
+        assert_eq!(jwm.find_visible_client(), Some(key));
+
+        let num = jwm.state.monitors[shaded].num;
+        assert!(jwm.features.monitor_lock.lock(num, (1920, 0, 1920, 1080)));
+        assert!(jwm.monitor_key_is_locked(shaded));
+        assert_eq!(jwm.find_visible_client(), None);
+        jwm.focus(&mut backend, None).expect("focus");
+        assert_eq!(jwm.get_selected_client_key(), None);
     }
 }

@@ -949,36 +949,28 @@ impl WaylandCompositor {
                         scene_linear_output,
                     );
 
-                    gl.UseProgram(self.program);
-                    gl.Uniform1i(self.win_uniforms.color_managed, 0);
-                    gl.Uniform1i(
-                        self.win_uniforms.scene_linear,
-                        i32::from(scene_linear_output),
-                    );
-                    gl.UniformMatrix4fv(
-                        self.win_uniforms.projection,
-                        1,
-                        ffi::FALSE as u8,
-                        projection.as_ptr(),
-                    );
-                    gl.Uniform4f(self.win_uniforms.rect, label_x, label_y, label_w, label_h);
-                    // Title atlases contain transparent background pixels. The
-                    // window shader uses a negative opacity to preserve source
-                    // alpha; a positive value intentionally forces RGB clients
-                    // opaque and would turn the entire label quad black.
-                    gl.Uniform1f(self.win_uniforms.opacity, -self.overview_opacity * 0.95);
-                    // The pill behind the label owns the corner rounding; the
-                    // text quad stays rectangular so no glyph edge is masked.
-                    gl.Uniform1f(self.win_uniforms.radius, 0.0);
-                    gl.Uniform2f(self.win_uniforms.size, label_w, label_h);
-                    gl.Uniform1f(self.win_uniforms.dim, 1.0);
-                    gl.Uniform4f(self.win_uniforms.uv_rect, 0.0, 0.0, 1.0, 1.0);
-                    gl.Uniform1f(self.win_uniforms.ripple_progress, -1.0);
-                    gl.Uniform1f(self.win_uniforms.ripple_amplitude, 0.0);
+                    // The title raster is straight alpha — full ink in RGB,
+                    // glyph coverage in A — which is what the shared UI text
+                    // program expects: it premultiplies the ink by coverage
+                    // and decodes it for a linear target, like every other
+                    // label JWM draws. The window program would read the
+                    // raster as premultiplied and put full ink on every
+                    // antialiased edge, haloing each glyph. The quad stays
+                    // rectangular; the pill behind it owns the rounding.
+                    let text_rect = super::get_uniform_loc(gl, self.sysui_text_program, "u_rect");
+                    let text_proj =
+                        super::get_uniform_loc(gl, self.sysui_text_program, "u_projection");
+                    let text_tex = super::get_uniform_loc(gl, self.sysui_text_program, "u_texture");
+                    let text_opacity =
+                        super::get_uniform_loc(gl, self.sysui_text_program, "u_opacity");
+                    self.use_sysui_text_program(gl, scene_linear_output);
+                    self.set_projection_uniform(gl, text_proj, projection);
+                    self.set_rect_uniform(gl, text_rect, label_x, label_y, label_w, label_h);
+                    gl.Uniform1i(text_tex, 0);
+                    gl.Uniform1f(text_opacity, self.overview_opacity * 0.95);
 
                     gl.ActiveTexture(ffi::TEXTURE0);
                     gl.BindTexture(ffi::TEXTURE_2D, title_tex);
-                    gl.Uniform1i(self.win_uniforms.texture, 0);
 
                     self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
                 }
@@ -1187,6 +1179,67 @@ mod tests {
         assert_eq!(prism_entry_range(10, 0), 0..6);
         assert_eq!(prism_entry_range(10, 7), 4..10);
         assert_eq!(prism_entry_range(10, 99), 4..10);
+    }
+
+    /// The whitespace-free body of the first item whose header matches
+    /// `needle`, by brace walk, so a needle cannot match another function.
+    fn compact_body(source: &str, needle: &str) -> String {
+        let start = source
+            .find(needle)
+            .unwrap_or_else(|| panic!("missing `{needle}`"));
+        let body_start = source[start..]
+            .find('{')
+            .map(|offset| start + offset + 1)
+            .unwrap_or_else(|| panic!("missing body for `{needle}`"));
+        let mut depth = 1usize;
+        for (offset, ch) in source[body_start..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return source[body_start..body_start + offset]
+                            .chars()
+                            .filter(|character| !character.is_whitespace())
+                            .collect();
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("unterminated body for `{needle}`");
+    }
+
+    /// The selected title's raster is straight alpha: full ink in RGB, glyph
+    /// coverage in A. Only the shared UI text program premultiplies that ink
+    /// by coverage; the window program reads its input as premultiplied and
+    /// puts full ink on every antialiased edge, so the label must be bound
+    /// to the text program — never back to the window program — before its
+    /// texture is drawn.
+    #[test]
+    fn the_overview_title_draws_its_straight_alpha_raster_as_ui_text() {
+        let body = compact_body(
+            include_str!("overview.rs"),
+            &format!("pub(crate) fn {}(", "render_overview"),
+        );
+        let title = body
+            .find(&format!("gl.BindTexture(ffi::TEXTURE_2D,{});", "title_tex"))
+            .expect("the title draw");
+        let text_program = body[..title]
+            .rfind(&format!(
+                "self.{}(gl,scene_linear_output);",
+                "use_sysui_text_program"
+            ))
+            .expect("the title must bind the UI text program");
+        let window_program = body[..title].rfind(&format!("gl.UseProgram(self.{});", "program"));
+        assert!(
+            window_program.is_none_or(|at| at < text_program),
+            "the window program must not be rebound for the straight-alpha title"
+        );
+        assert!(
+            !body.contains(&format!("-self.{}*0.95", "overview_opacity")),
+            "the negative-opacity window-shader path must not return"
+        );
     }
 
     #[test]

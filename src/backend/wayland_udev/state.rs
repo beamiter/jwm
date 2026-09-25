@@ -1,5 +1,6 @@
 use crate::backend::api::{
-    BackendEvent, Geometry, LayerSurfaceInfo, NetWmAction, NetWmState, PropertyKind, WindowType,
+    BackendEvent, Geometry, LayerSurfaceInfo, MaximizeAxes, NetWmAction, NetWmState, PropertyKind,
+    WindowType,
 };
 use crate::backend::common_define::WindowId;
 use crate::backend::error::BackendError;
@@ -86,6 +87,7 @@ use smithay::wayland::pointer_constraints::{
 };
 use smithay::wayland::relative_pointer::RelativePointerManagerState;
 use smithay::wayland::session_lock::{SessionLockHandler, SessionLockManagerState, SessionLocker, LockSurface};
+use smithay::reexports::wayland_protocols::ext::session_lock::v1::server::ext_session_lock_v1::ExtSessionLockV1;
 use smithay::wayland::idle_inhibit::{IdleInhibitHandler, IdleInhibitManagerState};
 use smithay::wayland::idle_notify::IdleNotifierState;
 use smithay::wayland::fractional_scale::{with_fractional_scale, FractionalScaleHandler, FractionalScaleManagerState};
@@ -123,6 +125,9 @@ use smithay::input::pointer::PointerHandle;
 
 const INITIAL_CONFIGURE_TIMEOUT: Duration = Duration::from_millis(250);
 
+/// How long an xdg-activation token may still activate a surface.
+const XDG_ACTIVATION_TOKEN_LIFETIME: Duration = Duration::from_secs(10);
+
 #[derive(Debug, Default)]
 pub struct JwmClientState {
     pub compositor_state: CompositorClientState,
@@ -144,6 +149,21 @@ impl std::fmt::Debug for PendingOutputAck {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("PendingOutputAck")
     }
+}
+
+/// Whether `client` connected through a wp_security_context listener
+/// (Flatpak and other sandboxes). Clients with other client data, such as
+/// Xwayland, are never sandboxed.
+pub(crate) fn client_is_sandboxed(client: &Client) -> bool {
+    client
+        .get_data::<JwmClientState>()
+        .is_some_and(|data| data.security_context.is_some())
+}
+
+/// Global filter for privileged protocols: visible to every client except a
+/// sandboxed one.
+fn client_is_unsandboxed(client: &Client) -> bool {
+    !client_is_sandboxed(client)
 }
 
 impl ClientData for JwmClientState {
@@ -263,9 +283,16 @@ impl CaptureCounters {
 pub struct JwmWaylandState {
     pub display_handle: DisplayHandle,
     /// Text copied by clients, waiting to be drained into the history. Filled
-    /// by the reader threads started in `SelectionHandler::new_selection`.
-    pub clipboard_captured:
-        std::sync::Arc<std::sync::Mutex<Vec<crate::backend::clipboard_offer::CapturedClipboard>>>,
+    /// by the reader threads started in `SelectionHandler::new_selection`, in
+    /// the order the reads finish, each tagged with the capture generation
+    /// its read started under.
+    pub clipboard_captured: std::sync::Arc<
+        std::sync::Mutex<Vec<(u64, crate::backend::clipboard_offer::CapturedClipboard)>>,
+    >,
+    /// Generation of the newest selection read started by `capture_clipboard`.
+    clipboard_capture_generation: u64,
+    /// Newest generation already handed out by `drain_clipboard_captured`.
+    clipboard_delivered_generation: u64,
     /// Entry JWM is currently offering as the selection source, if any.
     /// `send_selection` writes this; a client taking the selection clears it.
     pub(crate) clipboard_offered: Option<crate::backend::clipboard_offer::ClipboardOffer>,
@@ -345,7 +372,11 @@ pub struct JwmWaylandState {
     pub ext_data_control_state: ExtDataControlState,
     pub kde_decoration_state: KdeDecorationState,
 
-    pub idle_inhibiting_surfaces: HashSet<ObjectId>,
+    /// Live idle inhibitors per surface. A count, not a set: two inhibitors
+    /// on one surface must not clear each other. Smithay reports only an
+    /// explicit inhibitor destroy, so `CompositorHandler::destroyed` drops a
+    /// dead surface's entry (client crash or surface destroyed first).
+    pub idle_inhibiting_surfaces: HashMap<ObjectId, usize>,
     /// When input last arrived, for the session idle policy. Kept beside the
     /// idle notifier because both are fed from the same libinput callback.
     pub last_input: std::time::Instant,
@@ -358,6 +389,13 @@ pub struct JwmWaylandState {
     /// destruction. Used to know whether the lock client has a presence on a
     /// given output and (later) to render only those surfaces while locked.
     pub lock_surfaces: HashMap<String, LockSurface>,
+    /// A lock request whose `locked` event is owed until every output shows
+    /// locked content. See [`JwmWaylandState::note_locked_frame_presented`].
+    pending_session_lock: Option<PendingSessionLock>,
+    /// The lock object that was sent `locked` and may unlock the session.
+    /// Kept after its client dies (Smithay's `LockStatus::Defunct`), which is
+    /// the only state in which another client may take the lock over.
+    active_session_lock: Option<ExtSessionLockV1>,
     pub foreign_toplevel_handles: HashMap<WindowId, ForeignToplevelHandle>,
 
     /// Touchpad swipe-gesture tracker. When `intercept` is true, the WM is
@@ -454,6 +492,11 @@ pub struct JwmWaylandState {
     pub window_app_id: HashMap<WindowId, String>,
     pub window_activation_app_id: HashMap<WindowId, String>,
     pub window_is_fullscreen: HashMap<WindowId, bool>,
+    /// Maximize state accepted by shared policy; only non-NONE entries.
+    pub(crate) window_maximized: HashMap<WindowId, MaximizeAxes>,
+    /// xdg toplevels whose set_maximized/unset_maximized still owes the configure
+    /// that xdg-shell requires.
+    pub(crate) xdg_state_reply_owed: HashSet<WindowId>,
     pub window_type_overrides: HashMap<WindowId, Vec<WindowType>>,
 
     pub window_layer_info: HashMap<WindowId, LayerSurfaceInfo>,
@@ -475,6 +518,10 @@ pub struct JwmWaylandState {
     /// Pending ext-image-copy-capture frames (drained during render, like screencopy).
     pub image_capture_pending:
         Option<crate::backend::wayland_udev::image_copy_capture::PendingImageCaptureQueue>,
+    /// Live ext-image-copy-capture sessions of each captured window, stopped
+    /// when the window is retired (see `retire_window_geometry`).
+    pub(crate) toplevel_capture_sessions:
+        crate::backend::wayland_udev::image_copy_capture::ToplevelCaptureSessions,
 
     /// Runtime counters for capture protocols. These are protocol-dispatch
     /// counters (queued/rejected), separate from the render-drain queue depth.
@@ -486,6 +533,43 @@ pub struct JwmWaylandState {
 
     /// wp-color-management-v1 state (per-surface image description registry).
     pub color_manager: Option<crate::backend::wayland_udev::color_management::ColorManagerState>,
+
+    /// Bound wlr-output-management managers and the head state they were
+    /// last sent. `None` where the global is not advertised.
+    pub output_management:
+        Option<crate::backend::wayland_udev::output_management::OutputManagementState>,
+
+    /// Which wlr-gamma-control control holds each output. The backend fails
+    /// the controls a layout change made stale through it.
+    pub(crate) gamma_owners: Option<crate::backend::wayland_udev::gamma_control::GammaOwners>,
+
+    /// Wakes the backend's client flush for events queued outside a request
+    /// dispatch or a render (a timer callback, for instance).
+    client_flush_tx: Sender<()>,
+    client_flush_pending: Arc<AtomicBool>,
+}
+
+/// How long a session lock may wait for every output to present a locked
+/// frame before it is confirmed anyway. A presenting output needs a frame or
+/// two (tens of milliseconds, a modeset included); the bound only matters
+/// when an output cannot present at all (a stuck page flip, a device whose
+/// delivery is blocked) and keeps `swaylock -f && systemctl suspend` from
+/// waiting forever.
+pub(crate) const SESSION_LOCK_CONFIRM_DEADLINE: Duration = Duration::from_secs(1);
+
+/// An ext-session-lock request whose `locked` event is still owed.
+///
+/// ext-session-lock-v1 allows `locked` only once no unlocked content is
+/// visible any more, so the confirmation waits for a locked frame (black
+/// shield, lock surface on top) to reach every output that was showing
+/// content when the lock was requested.
+struct PendingSessionLock {
+    locker: SessionLocker,
+    /// `session_lock_epoch` of this request. A frame rendered for an older
+    /// lock does not pay this one.
+    epoch: u64,
+    /// Outputs that still owe a presented locked frame.
+    owed_outputs: HashSet<String>,
 }
 
 /// Placement anchor for an IME candidate popup. Carries the cursor line in
@@ -601,12 +685,14 @@ impl JwmWaylandState {
         self.layer_surfaces.remove(&win);
         self.pending_initial_configure.remove(&win);
         self.pending_size_reconfigure.remove(&win);
-        self.window_geometry.remove(&win);
+        self.retire_window_geometry(win);
         self.window_stack.retain(|w| *w != win);
         self.window_title.remove(&win);
         self.window_app_id.remove(&win);
         self.window_activation_app_id.remove(&win);
         self.window_is_fullscreen.remove(&win);
+        self.window_maximized.remove(&win);
+        self.xdg_state_reply_owed.remove(&win);
         self.window_type_overrides.remove(&win);
         self.window_layer_info.remove(&win);
         self.window_border_color.remove(&win);
@@ -621,6 +707,20 @@ impl JwmWaylandState {
         self.compositor_dead_windows.push(win.raw());
         self.push_event(BackendEvent::WindowDestroyed(win));
         self.needs_redraw = true;
+    }
+
+    /// Drop `win`'s geometry, the liveness key of its capture sessions, and
+    /// stop those sessions with it, so a paused portal or OBS stream hears
+    /// `stopped` now rather than on its next `create_frame`. Every path that
+    /// retires a window (a closed Wayland window, an unmapped or destroyed
+    /// X11 one) goes through here, so a new one cannot forget the sessions.
+    fn retire_window_geometry(&mut self, win: WindowId) {
+        self.window_geometry.remove(&win);
+        if crate::backend::wayland_udev::image_copy_capture::stop_toplevel_capture_sessions(
+            self, win,
+        ) {
+            self.request_client_flush();
+        }
     }
 
     fn request_window_state(&mut self, window: WindowId, state: NetWmState, on: bool) {
@@ -638,6 +738,51 @@ impl JwmWaylandState {
     fn request_x11_state(&mut self, x11_id: u32, state: NetWmState, on: bool) {
         if let Some(window) = self.x11_surface_to_window.get(&x11_id).copied() {
             self.request_window_state(window, state, on);
+        }
+    }
+
+    /// Queue a two-axis maximize request for shared policy. xdg-shell,
+    /// XWayland (Smithay only decodes the MAXIMIZED_HORZ+VERT pair) and
+    /// wlr-foreign-toplevel cannot name a single axis, so every Wayland-side
+    /// entry names `BOTH`. Nothing is confirmed here: policy publishes the
+    /// accepted state through `set_window_maximized`.
+    fn request_window_maximize(&mut self, window: WindowId, on: bool) {
+        self.push_event(BackendEvent::WindowMaximizeRequest {
+            window,
+            action: if on {
+                NetWmAction::Add
+            } else {
+                NetWmAction::Remove
+            },
+            axes: MaximizeAxes::BOTH,
+        });
+    }
+
+    fn request_x11_maximize(&mut self, x11_id: u32, on: bool) {
+        if let Some(window) = self.x11_surface_to_window.get(&x11_id).copied() {
+            self.request_window_maximize(window, on);
+        }
+    }
+
+    /// xdg-shell requires a configure in reply to set_maximized and
+    /// unset_maximized, even when the compositor refuses. The reply is owed
+    /// instead of sent: policy's own configure (carrying the accepted state
+    /// and size together) pays it, and `flush_owed_xdg_state_replies` pays
+    /// whatever policy dropped. Sending here would announce a size the
+    /// client must not adopt before policy has decided.
+    fn xdg_maximize_request(&mut self, surface: &ToplevelSurface, on: bool) {
+        match self
+            .surface_to_window
+            .get(&surface.wl_surface().id())
+            .copied()
+        {
+            Some(window) => {
+                self.xdg_state_reply_owed.insert(window);
+                self.request_window_maximize(window, on);
+            }
+            None => {
+                surface.send_configure();
+            }
         }
     }
 
@@ -682,8 +827,150 @@ impl JwmWaylandState {
                 NetWmState::Fullscreen => surface.is_fullscreen(),
                 NetWmState::Above => surface.is_above(),
                 NetWmState::Below => surface.is_below(),
+                // Smithay tracks only the atom pair, so each axis reads as
+                // the pair; single-axis XWayland state is not expressible.
+                NetWmState::MaximizedVert | NetWmState::MaximizedHorz => surface.is_maximized(),
                 _ => false,
             })
+    }
+
+    /// Publish the maximize state shared policy accepted for `win`.
+    ///
+    /// XWayland gets `_NET_WM_STATE` through `X11Surface::set_maximized`,
+    /// which can only express the two-axis pair, so a single axis is published
+    /// as not maximized. An xdg toplevel only has `State::Maximized` staged:
+    /// nothing is sent here, because the caller's following
+    /// `WindowOps::configure` must deliver the state and the new size in ONE
+    /// configure. `Tiled*` is left alone; xdg-shell allows it to coexist with
+    /// `Maximized`. wlr-foreign-toplevel keeps both axes and reports
+    /// `Maximized` only for the pair; axes turn off before others turn on so
+    /// a taskbar never sees a transient pair while one axis is swapped.
+    pub(crate) fn set_window_maximized(
+        &mut self,
+        win: WindowId,
+        axes: MaximizeAxes,
+    ) -> Result<(), BackendError> {
+        let maximized = axes.both();
+        if let Some(surface) = self.x11_surfaces.get(&win)
+            && surface.is_maximized() != maximized
+        {
+            // Fail before any other write so policy's rollback starts from a
+            // backend that still matches the previous published state.
+            surface
+                .set_maximized(maximized)
+                .map_err(|error| BackendError::Other(Box::new(error)))?;
+        }
+        if let Some(toplevel) = self.toplevels.get(&win) {
+            toplevel.with_pending_state(|s| {
+                if maximized {
+                    s.states.set(xdg_toplevel::State::Maximized);
+                } else {
+                    s.states.unset(xdg_toplevel::State::Maximized);
+                }
+            });
+        }
+        let writes = [
+            (NetWmState::MaximizedVert, axes.vert),
+            (NetWmState::MaximizedHorz, axes.horz),
+        ];
+        for turning_on in [false, true] {
+            for (flag, on) in writes {
+                if on == turning_on {
+                    self.update_foreign_toplevel_net_state(win, flag, on);
+                }
+            }
+        }
+        if axes.any() {
+            self.window_maximized.insert(win, axes);
+        } else {
+            self.window_maximized.remove(&win);
+        }
+        Ok(())
+    }
+
+    /// Per-atom `_NET_WM_STATE` write shared by every Wayland backend's
+    /// `PropertyOps::set_net_wm_state_flag`. A maximize axis is merged with
+    /// the other published axis and goes through `set_window_maximized`, so a
+    /// legacy per-axis caller cannot desynchronise the xdg, XWayland and wlr
+    /// views of one window.
+    pub(crate) fn set_window_net_state(
+        &mut self,
+        win: WindowId,
+        flag: NetWmState,
+        on: bool,
+    ) -> Result<(), BackendError> {
+        if MaximizeAxes::from_net_wm_state(flag).is_some() {
+            let current = self.published_maximize_axes(win);
+            return self.set_window_maximized(win, current.with_net_wm_state(flag, on));
+        }
+        self.set_x11_net_state(win, flag, on)?;
+        self.update_foreign_toplevel_net_state(win, flag, on);
+        Ok(())
+    }
+
+    /// Per-atom `_NET_WM_STATE` read shared by every Wayland backend's
+    /// `PropertyOps::has_net_wm_state_flag`. Maximize axes come from the
+    /// policy cache (xdg has no per-axis state to read back); without an
+    /// entry, XWayland's own atoms answer, so adoption still sees a state the
+    /// client set before it was managed.
+    pub(crate) fn has_window_net_state(&self, win: WindowId, flag: NetWmState) -> bool {
+        let cached = match flag {
+            NetWmState::MaximizedVert => self.window_maximized.get(&win).map(|axes| axes.vert),
+            NetWmState::MaximizedHorz => self.window_maximized.get(&win).map(|axes| axes.horz),
+            _ => None,
+        };
+        cached.unwrap_or_else(|| self.has_x11_net_state(win, flag))
+    }
+
+    /// Axes currently published for `win`: the policy cache, or XWayland's
+    /// own pair for a window policy has not maximized yet.
+    fn published_maximize_axes(&self, win: WindowId) -> MaximizeAxes {
+        MaximizeAxes::new(
+            self.has_window_net_state(win, NetWmState::MaximizedVert),
+            self.has_window_net_state(win, NetWmState::MaximizedHorz),
+        )
+    }
+
+    /// Send the configure for an xdg toplevel whose pending state policy just
+    /// staged. This is the only send path of `WindowOps::configure`, so it is
+    /// also where a set_maximized/unset_maximized reply owed to the client is
+    /// paid: an owed window always gets a full configure, even when the
+    /// pending state equals what was last sent (a refusal or a no-op).
+    /// Otherwise `always` (nested backends) or a missing initial configure
+    /// forces a send, and udev sends only real changes. Returns whether a
+    /// configure went out; `false` for windows that are not xdg toplevels.
+    pub(crate) fn send_toplevel_configure(&mut self, win: WindowId, always: bool) -> bool {
+        // Take the mark before borrowing the toplevel: the reply is paid by
+        // this configure whatever it carries.
+        let owed = self.xdg_state_reply_owed.remove(&win);
+        let Some(toplevel) = self.try_lookup_toplevel(win) else {
+            return false;
+        };
+        if always || owed || !toplevel.is_initial_configure_sent() {
+            toplevel.send_configure();
+            true
+        } else {
+            toplevel.send_pending_configure().is_some()
+        }
+    }
+
+    /// Answer every set_maximized/unset_maximized that shared policy dropped
+    /// without configuring the window (unknown to policy, or a request that
+    /// raced its destruction). Run loops call this right after draining the
+    /// pending events, so policy has already had its chance to reply through
+    /// `send_toplevel_configure`. Returns whether any configure was sent.
+    pub(crate) fn flush_owed_xdg_state_replies(&mut self) -> bool {
+        if self.xdg_state_reply_owed.is_empty() {
+            return false;
+        }
+        let mut sent = false;
+        for win in std::mem::take(&mut self.xdg_state_reply_owed) {
+            if let Some(toplevel) = self.toplevels.get(&win) {
+                toplevel.send_configure();
+                sent = true;
+            }
+        }
+        sent
     }
 
     pub(crate) fn raise_window(&mut self, win: WindowId) -> Result<(), BackendError> {
@@ -978,37 +1265,93 @@ impl SessionLockHandler for JwmWaylandState {
 
     fn lock(&mut self, confirmation: SessionLocker) {
         info!("[udev/wayland] session lock requested");
-        // Spec: if the previous locker disconnected (`LockStatus::Defunct`),
-        // smithay allows a new client to take over without calling `unlock`.
-        // Drop stale surfaces so the new locker owns every output cleanly.
+        // Smithay hands over every request, even while another client holds
+        // the lock. Confirming it would make this client the owner, whose
+        // `unlock_and_destroy` Smithay then accepts: any client could unlock
+        // a live swaylock without its password. Only one live locker exists;
+        // dropping `confirmation` refuses the newcomer with `finished` and
+        // stops Smithay from routing its lock surfaces to `new_surface`.
+        if self.session_lock_owner_alive() {
+            warn!("[udev/wayland] refused a session lock: another locker is alive");
+            return;
+        }
+        // The previous locker died without unlocking (`LockStatus::Defunct`)
+        // or gave its request up: the spec lets a new client take over
+        // without an `unlock`. Drop stale surfaces so the new locker owns
+        // every output cleanly.
+        self.active_session_lock = None;
         self.lock_surfaces.clear();
-        confirmation.lock();
         self.session_locked = true;
         self.session_lock_epoch = self.session_lock_epoch.wrapping_add(1);
         self.pending_events
             .lock_safe()
             .retain(|event| !matches!(event, BackendEvent::KeyPress { .. }));
         self.needs_redraw = true;
+
+        // `locked` is owed only once no unlocked content is visible: the
+        // render loops report each output's first presented locked frame.
+        // A pending request replaced here was abandoned, so its `finished`
+        // reaches no one.
+        let epoch = self.session_lock_epoch;
+        let owed_outputs = self
+            .outputs
+            .iter()
+            .map(Output::name)
+            .filter(|name| !self.soft_disabled_outputs.contains(name))
+            .collect();
+        self.pending_session_lock = Some(PendingSessionLock {
+            locker: confirmation,
+            epoch,
+            owed_outputs,
+        });
+        // An output that never presents must not leave the lock unconfirmed.
+        let deadline = Timer::from_duration(SESSION_LOCK_CONFIRM_DEADLINE);
+        if let Err(error) = self
+            .loop_handle
+            .insert_source(deadline, move |_, _, state| {
+                state.confirm_session_lock_after_deadline(epoch);
+                TimeoutAction::Drop
+            })
+        {
+            warn!("[udev/wayland] could not arm the session lock deadline: {error}");
+            self.confirm_session_lock_after_deadline(epoch);
+            return;
+        }
+        // No output to wait for: nothing unlocked can be on screen.
+        self.settle_pending_session_lock();
     }
 
     fn unlock(&mut self) {
         info!("[udev/wayland] session unlocked");
         self.session_locked = false;
         self.lock_surfaces.clear();
+        self.active_session_lock = None;
+        // A request still waiting for its first locked frame is refused with
+        // `finished`: the session it wanted to lock is gone.
+        self.pending_session_lock = None;
         self.needs_redraw = true;
     }
 
     fn new_surface(&mut self, surface: LockSurface, output: WlOutput) {
         // Find the matching Output to learn its size; default to (0,0) which
-        // tells the client to pick its own size.
+        // tells the client to pick its own size. ext-session-lock configures
+        // in surface-local (logical) units, the same rectangle `surface_under`
+        // hit-tests and the renderer scales, not the physical mode size.
         let output = Output::from_resource(&output);
         let output_name = output
             .as_ref()
             .map(|o| o.name())
             .unwrap_or_else(|| "unknown".to_string());
         let (w, h) = output
-            .and_then(|o| o.current_mode())
-            .map(|m| (m.size.w as u32, m.size.h as u32))
+            .and_then(|o| {
+                let mode = o.current_mode()?;
+                Some(output_logical_size(
+                    mode.size,
+                    o.current_scale().fractional_scale(),
+                    o.current_transform(),
+                ))
+            })
+            .map(|size| (size.w.max(0) as u32, size.h.max(0) as u32))
             .unwrap_or((0, 0));
 
         // Configure the surface to the output size.
@@ -1026,22 +1369,269 @@ impl SessionLockHandler for JwmWaylandState {
     }
 }
 
+impl JwmWaylandState {
+    /// Bring the protocol state that follows the output layout up to date.
+    /// Backends call it after they republished `outputs`, `gamma_sizes` and
+    /// `soft_disabled_outputs` or changed an output's mode, scale or
+    /// transform: output-management heads are re-sent, stale gamma controls
+    /// are failed, lock surfaces take the new output size, and a pending
+    /// session lock stops waiting on outputs that are gone.
+    pub(crate) fn refresh_output_dependent_state(&mut self) {
+        // kanshi and wlr-randr learn about hotplugged heads and about the
+        // outcome of their own Apply (the handler refreshes before the ack).
+        let heads_changed = self.output_management.as_ref().is_some_and(|management| {
+            management.refresh(
+                &self.display_handle,
+                &self.outputs,
+                &self.soft_disabled_outputs,
+            )
+        });
+        if heads_changed {
+            self.request_client_flush();
+        }
+        if crate::backend::wayland_udev::gamma_control::fail_stale_controls(self) > 0 {
+            self.request_client_flush();
+        }
+        self.reconfigure_lock_surfaces();
+        self.settle_pending_session_lock();
+        // A rebuilt output (VT switch back, re-plugged monitor) is a new
+        // `Output` of the same connector. Workspace groups must follow it, or
+        // a taskbar's newly bound wl_output never gets `output_enter`.
+        self.publish_workspace_monitors();
+    }
+
+    /// Publish JWM's monitors and their active tags to ext-workspace
+    /// managers (waybar and other taskbars). `monitors` is the list
+    /// `CompositorWorkspaceEffects::compositor_set_monitors` receives after
+    /// every monitor or tag change.
+    ///
+    /// The workspace count is re-read from the configuration each time: a
+    /// config reload can change `tags_length`, and the groups taskbars hold
+    /// must follow it (the protocol re-sends a group whose count differs)
+    /// instead of keeping the count the global was created with.
+    pub(crate) fn sync_workspace_monitors(&mut self, monitors: &[(u32, i32, i32, u32, u32, u32)]) {
+        let tags_length = crate::config::CONFIG.load().tags_length();
+        let sent = self.workspace_state.as_ref().is_some_and(|workspaces| {
+            workspaces.set_tags_length(tags_length);
+            workspaces.sync_monitors(&self.display_handle, &self.outputs, monitors)
+        });
+        if sent {
+            self.request_client_flush();
+        }
+    }
+
+    /// Re-send the monitors policy last published against the current
+    /// outputs, following each to the output of the same connector name.
+    /// Unchanged groups send nothing, so repeating it is cheap.
+    ///
+    /// Not by origin: the backend moves an output (a wlr-randr or kanshi
+    /// Apply, a rebuild replaying their positions) before policy hears of
+    /// the new layout, so the origins policy last published are stale here.
+    /// Matching them would swap two swapped outputs' groups, or retire a
+    /// moved output's group, until policy publishes again.
+    ///
+    /// The one exception is a policy monitor left without a group: it is
+    /// matched by origin to an output no group follows, so a hotplugged or
+    /// re-plugged connector gets its group on the refresh after the KMS
+    /// rebuild (see `WorkspaceState::rebind_outputs`).
+    fn publish_workspace_monitors(&self) {
+        let tags_length = crate::config::CONFIG.load().tags_length();
+        let sent = self.workspace_state.as_ref().is_some_and(|workspaces| {
+            workspaces.set_tags_length(tags_length);
+            workspaces.rebind_outputs(&self.display_handle, &self.outputs)
+        });
+        if sent {
+            self.request_client_flush();
+        }
+    }
+
+    /// Whether a live client holds the session lock or waits for its
+    /// `locked` event. A lock object is dead once its client disconnected or
+    /// destroyed an unconfirmed request.
+    fn session_lock_owner_alive(&self) -> bool {
+        self.active_session_lock
+            .as_ref()
+            .is_some_and(Resource::is_alive)
+            || self
+                .pending_session_lock
+                .as_ref()
+                .is_some_and(|pending| pending.locker.ext_session_lock().is_alive())
+    }
+
+    /// Whether a session lock request is still waiting for its `locked`
+    /// event.
+    // Only the DRM/KMS loop polls it; the nested hosts show every output.
+    #[cfg(any(test, feature = "backend-wayland-udev"))]
+    pub(crate) fn session_lock_confirmation_pending(&self) -> bool {
+        self.pending_session_lock.is_some()
+    }
+
+    /// A frame rendered while the session was locked (lock generation
+    /// `epoch`) reached the screen of `output_name`. Once every output owed
+    /// one, the pending lock request is confirmed.
+    pub(crate) fn note_locked_frame_presented(&mut self, output_name: &str, epoch: u64) {
+        let Some(pending) = self.pending_session_lock.as_mut() else {
+            return;
+        };
+        if pending.epoch != epoch {
+            return;
+        }
+        pending.owed_outputs.remove(output_name);
+        self.settle_pending_session_lock();
+    }
+
+    /// Stop waiting on owed outputs for which `lit` is false: a backend that
+    /// knows an output is powered off, or that none of its content is on
+    /// screen, reports it here, since such an output shows nothing unlocked
+    /// and will not present a frame to confirm with.
+    #[cfg(any(test, feature = "backend-wayland-udev"))]
+    pub(crate) fn release_session_lock_outputs(&mut self, mut lit: impl FnMut(&str) -> bool) {
+        let Some(pending) = self.pending_session_lock.as_mut() else {
+            return;
+        };
+        pending.owed_outputs.retain(|name| lit(name));
+        self.settle_pending_session_lock();
+    }
+
+    /// Confirm the pending lock once no output owes a locked frame. Owed
+    /// outputs that were unplugged or soft-disabled since are forgiven. A
+    /// request whose client already destroyed it is dropped without a
+    /// confirmation; the session stays locked, as for a locker that dies
+    /// after `locked`, until a new locker takes over.
+    fn settle_pending_session_lock(&mut self) {
+        let Some(pending) = self.pending_session_lock.as_mut() else {
+            return;
+        };
+        if !pending.locker.ext_session_lock().is_alive() {
+            warn!("[udev/wayland] session lock abandoned before it was confirmed");
+            self.pending_session_lock = None;
+            return;
+        }
+        let outputs = &self.outputs;
+        let soft_disabled = &self.soft_disabled_outputs;
+        pending.owed_outputs.retain(|name| {
+            !soft_disabled.contains(name) && outputs.iter().any(|output| output.name() == *name)
+        });
+        if pending.owed_outputs.is_empty() {
+            self.confirm_pending_session_lock();
+        }
+    }
+
+    /// Timer callback for [`SESSION_LOCK_CONFIRM_DEADLINE`]: confirm lock
+    /// generation `epoch` even though some output never presented a locked
+    /// frame. A no-op once that request was confirmed, replaced or unlocked.
+    fn confirm_session_lock_after_deadline(&mut self, epoch: u64) {
+        let Some(pending) = self.pending_session_lock.as_ref() else {
+            return;
+        };
+        if pending.epoch != epoch {
+            return;
+        }
+        if !pending.locker.ext_session_lock().is_alive() {
+            self.settle_pending_session_lock();
+            return;
+        }
+        warn!(
+            "[udev/wayland] confirming the session lock without a locked frame on {:?}",
+            pending.owed_outputs
+        );
+        self.confirm_pending_session_lock();
+    }
+
+    fn confirm_pending_session_lock(&mut self) {
+        let Some(pending) = self.pending_session_lock.take() else {
+            return;
+        };
+        info!("[udev/wayland] session lock confirmed");
+        self.active_session_lock = Some(pending.locker.ext_session_lock().clone());
+        pending.locker.lock();
+        self.request_client_flush();
+    }
+
+    /// Re-send every lock surface the size of its output. Lock surfaces are
+    /// configured once at creation, so a mode, scale or transform change (or
+    /// a rebuilt output) while locked left them sized for the old output.
+    /// Smithay only sends a configure whose size actually changed.
+    pub(crate) fn reconfigure_lock_surfaces(&mut self) {
+        if self.lock_surfaces.is_empty() {
+            return;
+        }
+        let mut sent = false;
+        for output in &self.outputs {
+            let Some(lock_surface) = self.lock_surfaces.get(&output.name()) else {
+                continue;
+            };
+            if !lock_surface.alive() {
+                continue;
+            }
+            let Some(mode) = output.current_mode() else {
+                continue;
+            };
+            let size = output_logical_size(
+                mode.size,
+                output.current_scale().fractional_scale(),
+                output.current_transform(),
+            );
+            let size = (size.w.max(0) as u32, size.h.max(0) as u32);
+            lock_surface.with_pending_state(|state| {
+                state.size = Some(size.into());
+            });
+            lock_surface.send_configure();
+            sent = true;
+        }
+        if sent {
+            self.needs_redraw = true;
+            self.request_client_flush();
+        }
+    }
+
+    /// Ask the backend to flush client connections.
+    fn request_client_flush(&self) {
+        if !self.client_flush_pending.swap(true, Ordering::SeqCst) {
+            let _ = self.client_flush_tx.send(());
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Idle Inhibit Handler – video players prevent idle/screensaver
 // ---------------------------------------------------------------------------
 impl IdleInhibitHandler for JwmWaylandState {
     fn inhibit(&mut self, surface: WlSurface) {
         debug!("[udev/wayland] idle inhibit activated");
-        self.idle_inhibiting_surfaces.insert(surface.id());
+        *self
+            .idle_inhibiting_surfaces
+            .entry(surface.id())
+            .or_default() += 1;
         self.idle_notifier_state.set_is_inhibited(true);
     }
 
     fn uninhibit(&mut self, surface: WlSurface) {
         debug!("[udev/wayland] idle inhibit released");
-        self.idle_inhibiting_surfaces.remove(&surface.id());
-        if self.idle_inhibiting_surfaces.is_empty() {
-            self.idle_notifier_state.set_is_inhibited(false);
+        let id = surface.id();
+        if let Some(count) = self.idle_inhibiting_surfaces.get_mut(&id) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                self.idle_inhibiting_surfaces.remove(&id);
+            }
         }
+        self.sync_idle_inhibited();
+    }
+}
+
+impl JwmWaylandState {
+    /// Drop every inhibitor of a surface that is gone. Smithay never calls
+    /// `uninhibit` for an inhibitor that dies with its client or outlives its
+    /// surface, so without this idle (auto-lock, DPMS) stays off for good.
+    fn forget_idle_inhibiting_surface(&mut self, surface: &ObjectId) {
+        if self.idle_inhibiting_surfaces.remove(surface).is_some() {
+            self.sync_idle_inhibited();
+        }
+    }
+
+    fn sync_idle_inhibited(&mut self) {
+        self.idle_notifier_state
+            .set_is_inhibited(!self.idle_inhibiting_surfaces.is_empty());
     }
 }
 
@@ -1091,6 +1681,18 @@ impl smithay::wayland::idle_notify::IdleNotifierHandler for JwmWaylandState {
 // ---------------------------------------------------------------------------
 // Keyboard Shortcuts Inhibit Handler
 // ---------------------------------------------------------------------------
+
+/// Whether `inhibitor` may ever become active. Smithay has no filter for this
+/// global, so a sandboxed client may create inhibitors, but they never take
+/// effect: an active one would swallow JWM's own bindings, including the
+/// lock and session keys, while the sandboxed window has focus.
+fn may_inhibit_shortcuts(inhibitor: &KeyboardShortcutsInhibitor) -> bool {
+    !inhibitor
+        .wl_surface()
+        .client()
+        .is_some_and(|client| client_is_sandboxed(&client))
+}
+
 impl smithay::wayland::keyboard_shortcuts_inhibit::KeyboardShortcutsInhibitHandler
     for JwmWaylandState
 {
@@ -1099,11 +1701,12 @@ impl smithay::wayland::keyboard_shortcuts_inhibit::KeyboardShortcutsInhibitHandl
     }
 
     fn new_inhibitor(&mut self, inhibitor: KeyboardShortcutsInhibitor) {
-        if self
-            .active_toplevel
-            .and_then(|win| self.surface_for_window(win))
-            .as_ref()
-            .is_some_and(|surface| surface.id() == inhibitor.wl_surface().id())
+        if may_inhibit_shortcuts(&inhibitor)
+            && self
+                .active_toplevel
+                .and_then(|win| self.surface_for_window(win))
+                .as_ref()
+                .is_some_and(|surface| surface.id() == inhibitor.wl_surface().id())
         {
             inhibitor.activate();
         }
@@ -1241,9 +1844,13 @@ impl XWaylandKeyboardGrabHandler for JwmWaylandState {
         &self,
         surface: &WlSurface,
     ) -> Option<<Self as SeatHandler>::KeyboardFocus> {
-        self.surface_to_window
-            .get(&surface.id())
-            .and_then(|win| self.toplevels.get(win).map(|t| t.wl_surface().clone()))
+        // Xwayland asks for its own surfaces, which never enter `toplevels`:
+        // an associated X11 window's surface is itself the focus to grab.
+        let win = self.surface_to_window.get(&surface.id())?;
+        if self.x11_surfaces.contains_key(win) || self.x11_wl_surfaces.contains_key(win) {
+            return Some(surface.clone());
+        }
+        self.toplevels.get(win).map(|t| t.wl_surface().clone())
     }
 }
 
@@ -1286,14 +1893,24 @@ impl XdgActivationHandler for JwmWaylandState {
         &mut self.xdg_activation_state
     }
 
+    fn token_created(&mut self, _token: XdgActivationToken, _data: XdgActivationTokenData) -> bool {
+        // Smithay keeps every token until the compositor removes it. Tokens
+        // that were never used expire here, bounding the pool without a timer.
+        self.xdg_activation_state
+            .retain_tokens(|_, data| data.timestamp.elapsed() < XDG_ACTIVATION_TOKEN_LIFETIME);
+        true
+    }
+
     fn request_activation(
         &mut self,
-        _token: XdgActivationToken,
+        token: XdgActivationToken,
         token_data: XdgActivationTokenData,
         surface: WlSurface,
     ) {
-        // Accept activations from tokens younger than 10 seconds.
-        if token_data.timestamp.elapsed().as_secs() < 10 {
+        // A token activates once: consume it on every path so it can neither
+        // be replayed nor pin its app_id, seat and surface handles.
+        self.xdg_activation_state.remove_token(&token);
+        if token_data.timestamp.elapsed() < XDG_ACTIVATION_TOKEN_LIFETIME {
             // Find the window that corresponds to this surface and activate it.
             if let Some(&win_id) = self.surface_to_window.get(&surface.id()) {
                 debug!(
@@ -1445,6 +2062,19 @@ impl XwmHandler for JwmWaylandState {
             .insert(win_id, window.is_fullscreen());
         self.window_stack.push(win_id);
 
+        // Managed X11 windows (Steam, Wine) belong in taskbars exactly like
+        // xdg toplevels; override-redirect menus and tooltips never do.
+        // Unmap/destroy send `closed` through `remove_window`.
+        if let Some(ref ftm) = self.foreign_toplevel_mgmt {
+            crate::backend::wayland_udev::foreign_toplevel_management::announce_new_toplevel(
+                &self.display_handle,
+                ftm,
+                win_id,
+                &window.title(),
+                &window.class(),
+            );
+        }
+
         // Iconic starts must still be managed (WindowCreated → on_map_request)
         // so JWM can adopt them as minimized; keep them out of the compositor
         // draw set until the manager explicitly maps/restores them.
@@ -1506,12 +2136,18 @@ impl XwmHandler for JwmWaylandState {
             self.x11_wl_surfaces.remove(&win_id);
             let was_managed = self.take_window_mapping(win_id);
             self.surface_to_window.retain(|_, w| *w != win_id);
-            self.window_geometry.remove(&win_id);
+            self.retire_window_geometry(win_id);
             self.window_stack.retain(|w| *w != win_id);
             self.window_title.remove(&win_id);
             self.window_app_id.remove(&win_id);
             self.window_is_fullscreen.remove(&win_id);
+            self.window_maximized.remove(&win_id);
+            self.xdg_state_reply_owed.remove(&win_id);
             self.window_border_color.remove(&win_id);
+            // A remap allocates a new WindowId and announces it afresh.
+            if let Some(ref ftm) = self.foreign_toplevel_mgmt {
+                ftm.remove_window(win_id);
+            }
 
             self.needs_redraw = true;
 
@@ -1535,12 +2171,17 @@ impl XwmHandler for JwmWaylandState {
             self.x11_wl_surfaces.remove(&win_id);
             self.take_window_mapping(win_id);
             self.surface_to_window.retain(|_, w| *w != win_id);
-            self.window_geometry.remove(&win_id);
+            self.retire_window_geometry(win_id);
             self.window_stack.retain(|w| *w != win_id);
             self.window_title.remove(&win_id);
             self.window_app_id.remove(&win_id);
             self.window_is_fullscreen.remove(&win_id);
+            self.window_maximized.remove(&win_id);
+            self.xdg_state_reply_owed.remove(&win_id);
             self.window_border_color.remove(&win_id);
+            if let Some(ref ftm) = self.foreign_toplevel_mgmt {
+                ftm.remove_window(win_id);
+            }
 
             self.needs_redraw = true;
 
@@ -1565,37 +2206,32 @@ impl XwmHandler for JwmWaylandState {
             x11_id, x, y, w, h
         );
 
-        // Apply the requested geometry.
-        let geo = window.geometry();
-        let new_x = x.unwrap_or(geo.loc.x);
-        let new_y = y.unwrap_or(geo.loc.y);
-        let new_w = w.unwrap_or(geo.size.w.max(1) as u32);
-        let new_h = h.unwrap_or(geo.size.h.max(1) as u32);
-
-        let _ = window.configure(Some(smithay::utils::Rectangle::new(
-            (new_x, new_y).into(),
-            (new_w as i32, new_h as i32).into(),
-        )));
-
-        if let Some(win_id) = self.x11_surface_to_window.get(&x11_id).copied() {
-            self.window_geometry.insert(
-                win_id,
-                Geometry {
-                    x: new_x,
-                    y: new_y,
-                    w: new_w,
-                    h: new_h,
-                    border: 0,
-                },
-            );
-            self.push_event(BackendEvent::WindowConfigured {
+        let managed =
+            self.x11_surface_to_window
+                .get(&x11_id)
+                .map(|&win_id| ManagedXwaylandWindow {
+                    window: win_id,
+                    maximized: window.is_maximized(),
+                    configured: self.window_geometry.get(&win_id).copied(),
+                });
+        match route_xwayland_configure_request(managed, window.geometry(), x, y, w, h) {
+            XwaylandConfigureRoute::Policy {
                 window: win_id,
-                x: new_x,
-                y: new_y,
-                width: new_w,
-                height: new_h,
-                border_width: 0,
-            });
+                mask_bits,
+                changes,
+            } => {
+                // Same contract as the X11 backends: policy keeps a tiled or
+                // fullscreen client in its slot and replies through
+                // WindowOps::configure, which reaches `X11Surface::configure`.
+                self.push_event(BackendEvent::ConfigureRequest {
+                    window: win_id,
+                    changes,
+                    mask_bits,
+                });
+            }
+            XwaylandConfigureRoute::Grant(rect) | XwaylandConfigureRoute::Reply(rect) => {
+                let _ = window.configure(Some(rect));
+            }
         }
 
         self.needs_redraw = true;
@@ -1661,14 +2297,22 @@ impl XwmHandler for JwmWaylandState {
         if let Some(win_id) = self.x11_surface_to_window.get(&x11_id).copied() {
             match property {
                 WmWindowProperty::Title => {
-                    self.window_title.insert(win_id, window.title());
+                    let title = window.title();
+                    if let Some(ref ftm) = self.foreign_toplevel_mgmt {
+                        ftm.update_title(win_id, &title);
+                    }
+                    self.window_title.insert(win_id, title);
                     self.push_event(BackendEvent::PropertyChanged {
                         window: win_id,
                         kind: PropertyKind::Title,
                     });
                 }
                 WmWindowProperty::Class => {
-                    self.window_app_id.insert(win_id, window.class());
+                    let class = window.class();
+                    if let Some(ref ftm) = self.foreign_toplevel_mgmt {
+                        ftm.update_app_id(win_id, &class);
+                    }
+                    self.window_app_id.insert(win_id, class);
                     self.push_event(BackendEvent::PropertyChanged {
                         window: win_id,
                         kind: PropertyKind::Class,
@@ -1690,6 +2334,16 @@ impl XwmHandler for JwmWaylandState {
 
     fn fullscreen_request(&mut self, _xwm: XwmId, window: X11Surface) {
         self.request_x11_state(window.window_id(), NetWmState::Fullscreen, true);
+    }
+
+    // Smithay raises these only for a `_NET_WM_STATE` message naming the
+    // MAXIMIZED_HORZ+VERT pair, already gated on `is_maximized()`.
+    fn maximize_request(&mut self, _xwm: XwmId, window: X11Surface) {
+        self.request_x11_maximize(window.window_id(), true);
+    }
+
+    fn unmaximize_request(&mut self, _xwm: XwmId, window: X11Surface) {
+        self.request_x11_maximize(window.window_id(), false);
     }
 
     fn minimize_request(&mut self, _xwm: XwmId, window: X11Surface) {
@@ -1744,8 +2398,39 @@ impl XwmHandler for JwmWaylandState {
         mime_type: String,
         fd: std::os::fd::OwnedFd,
     ) {
+        self.send_selection_to_xwayland(selection, mime_type, fd);
+    }
+
+    fn new_selection(&mut self, _xwm: XwmId, selection: SelectionTarget, mime_types: Vec<String>) {
+        self.adopt_xwayland_selection(selection, mime_types);
+    }
+
+    fn cleared_selection(&mut self, _xwm: XwmId, selection: SelectionTarget) {
+        self.xwayland_selection_cleared(selection);
+    }
+}
+
+// The XwmHandler selection callbacks, kept outside the trait impl because a
+// test cannot construct the `XwmId` the trait methods take.
+impl JwmWaylandState {
+    /// An X11 client asked for the Wayland-side selection.
+    fn send_selection_to_xwayland(
+        &mut self,
+        selection: SelectionTarget,
+        mime_type: String,
+        fd: std::os::fd::OwnedFd,
+    ) {
         match selection {
             SelectionTarget::Clipboard => {
+                // JWM's own offer is a compositor-owned selection, which
+                // `request_data_device_client_selection` refuses; serve it
+                // here the way `SelectionHandler::send_selection` does.
+                if let Some(offer) = self.clipboard_offered.as_ref() {
+                    if let Some(payload) = selection_payload_for_mime(offer, &mime_type) {
+                        write_selection_async(payload.to_vec(), fd);
+                    }
+                    return;
+                }
                 if let Err(err) = request_data_device_client_selection(&self.seat, mime_type, fd) {
                     warn!("Failed to request Wayland clipboard for Xwayland: {err:?}");
                 }
@@ -1758,9 +2443,15 @@ impl XwmHandler for JwmWaylandState {
         }
     }
 
-    fn new_selection(&mut self, _xwm: XwmId, selection: SelectionTarget, mime_types: Vec<String>) {
+    /// An X11 client took the selection.
+    fn adopt_xwayland_selection(&mut self, selection: SelectionTarget, mime_types: Vec<String>) {
         match selection {
             SelectionTarget::Clipboard => {
+                // Smithay's `set_data_device_selection` does not run
+                // `SelectionHandler::new_selection`, so the history entry JWM
+                // was offering must be retired here. Otherwise
+                // `send_selection` keeps serving it to Wayland pastes.
+                self.clipboard_offered = None;
                 set_data_device_selection(&self.display_handle, &self.seat, mime_types, ());
             }
             SelectionTarget::Primary => {
@@ -1769,9 +2460,15 @@ impl XwmHandler for JwmWaylandState {
         }
     }
 
-    fn cleared_selection(&mut self, _xwm: XwmId, selection: SelectionTarget) {
+    /// The X11 client owning the selection went away.
+    fn xwayland_selection_cleared(&mut self, selection: SelectionTarget) {
         match selection {
             SelectionTarget::Clipboard => {
+                // JWM's offer replaced that X11 owner on the seat; clearing
+                // now would drop JWM's live offer, not the X11 selection.
+                if self.clipboard_offered.is_some() {
+                    return;
+                }
                 if current_data_device_selection_userdata(&self.seat).is_some() {
                     clear_data_device_selection(&self.display_handle, &self.seat);
                 }
@@ -1832,7 +2529,7 @@ impl JwmWaylandState {
 
         if let Some(surface) = active_surface {
             if let Some(inhibitor) = self.seat.keyboard_shortcuts_inhibitor_for_surface(&surface) {
-                if !inhibitor.is_active() {
+                if !inhibitor.is_active() && may_inhibit_shortcuts(&inhibitor) {
                     inhibitor.activate();
                 }
             }
@@ -1983,7 +2680,10 @@ impl JwmWaylandState {
 
         let dmabuf_state = DmabufState::new();
 
-        let layer_shell_state = WlrLayerShellState::new::<JwmWaylandState>(dh);
+        // Layer surfaces stack above every window and may take exclusive
+        // keyboard focus, which lets a sandbox fake a password prompt.
+        let layer_shell_state =
+            WlrLayerShellState::new_with_filter::<JwmWaylandState, _>(dh, client_is_unsandboxed);
         let xdg_activation_state = XdgActivationState::new::<JwmWaylandState>(dh);
 
         let xwayland_shell_state = XWaylandShellState::new::<JwmWaylandState>(dh);
@@ -2028,13 +2728,20 @@ impl JwmWaylandState {
             None
         };
 
-        if optional_global_enabled(
-            behavior.wayland_enable_output_management,
-            "JWM_ENABLE_OUTPUT_MANAGEMENT",
-        ) {
+        // Same rule as the capture globals: only the DRM/KMS run loop services
+        // `BackendEvent::OutputConfigure` and pops the ack an Apply queues.
+        // On the nested backends nothing ever answered an Apply, so
+        // wlr-randr/kanshi blocked forever and the ack queue grew per Apply.
+        let output_management = if frame_capture_supported
+            && optional_global_enabled(
+                behavior.wayland_enable_output_management,
+                "JWM_ENABLE_OUTPUT_MANAGEMENT",
+            ) {
             // wlr-output-management-unstable-v1 – output config for kanshi/wlr-randr.
-            crate::backend::wayland_udev::output_management::init_output_management(dh);
-        }
+            Some(crate::backend::wayland_udev::output_management::init_output_management(dh))
+        } else {
+            None
+        };
 
         if optional_global_enabled(
             behavior.wayland_enable_output_power,
@@ -2049,7 +2756,8 @@ impl JwmWaylandState {
                 // ext-workspace-v1 – workspace/tag state for taskbars (Waybar etc.).
                 Some(
                     crate::backend::wayland_udev::workspace_protocol::init_workspace_protocol(
-                        dh, 9,
+                        dh,
+                        cfg.tags_length(),
                     ),
                 )
             } else {
@@ -2067,13 +2775,15 @@ impl JwmWaylandState {
             None
         };
 
-        if optional_global_enabled(
+        let gamma_owners = if optional_global_enabled(
             behavior.wayland_enable_gamma_control,
             "JWM_ENABLE_GAMMA_CONTROL",
         ) {
             // wlr-gamma-control-unstable-v1 – night light (gammastep/wlsunset).
-            crate::backend::wayland_udev::gamma_control::init_gamma_control(dh);
-        }
+            Some(crate::backend::wayland_udev::gamma_control::init_gamma_control(dh))
+        } else {
+            None
+        };
 
         let foreign_toplevel_mgmt = if optional_global_enabled(
             behavior.wayland_enable_foreign_toplevel_management,
@@ -2104,14 +2814,17 @@ impl JwmWaylandState {
 
         // IME / text input support – required for Chinese / Japanese / Korean input.
         TextInputManagerState::new::<JwmWaylandState>(dh);
-        InputMethodManagerState::new::<JwmWaylandState, _>(dh, |_client| true);
-        VirtualKeyboardManagerState::new::<JwmWaylandState, _>(dh, |_client| true);
+        // Privileged globals (input injection, clipboard monitoring, session
+        // lock, minting security contexts) are hidden from sandboxed clients:
+        // advertising wp_security_context promises that isolation.
+        InputMethodManagerState::new::<JwmWaylandState, _>(dh, client_is_unsandboxed);
+        VirtualKeyboardManagerState::new::<JwmWaylandState, _>(dh, client_is_unsandboxed);
 
         // --- SOTA protocols ---
         let pointer_constraints_state = PointerConstraintsState::new::<JwmWaylandState>(dh);
         let relative_pointer_state = RelativePointerManagerState::new::<JwmWaylandState>(dh);
         let session_lock_state =
-            SessionLockManagerState::new::<JwmWaylandState, _>(dh, |_client| true);
+            SessionLockManagerState::new::<JwmWaylandState, _>(dh, client_is_unsandboxed);
         let idle_inhibit_state = IdleInhibitManagerState::new::<JwmWaylandState>(dh);
         let idle_notifier_state = IdleNotifierState::<JwmWaylandState>::new(&dh, handle.clone());
         let fractional_scale_state = FractionalScaleManagerState::new::<JwmWaylandState>(dh);
@@ -2122,7 +2835,10 @@ impl JwmWaylandState {
         let single_pixel_buffer_state = SinglePixelBufferState::new::<JwmWaylandState>(dh);
         let content_type_state = ContentTypeState::new::<JwmWaylandState>(dh);
         let alpha_modifier_state = AlphaModifierState::new::<JwmWaylandState>(dh);
-        let foreign_toplevel_list_state = ForeignToplevelListState::new::<JwmWaylandState>(dh);
+        // Every window's title and app_id, the same stream the
+        // wlr-foreign-toplevel filter keeps from sandboxes.
+        let foreign_toplevel_list_state =
+            ForeignToplevelListState::new_with_filter::<JwmWaylandState>(dh, client_is_unsandboxed);
         let tablet_manager_state = TabletManagerState::new::<JwmWaylandState>(dh);
         // Use unmanaged mode for commit-pacing protocols. Smithay's managed
         // mode installs pre-commit blockers; without deeper transaction
@@ -2131,8 +2847,9 @@ impl JwmWaylandState {
         let fifo_state = FifoManagerState::unmanaged::<JwmWaylandState>(dh);
         let keyboard_shortcuts_inhibit_state =
             KeyboardShortcutsInhibitState::new::<JwmWaylandState>(dh);
+        // A sandboxed client must not mint a nested context of its own.
         let security_context_state =
-            SecurityContextState::new::<JwmWaylandState, _>(dh, |_client| true);
+            SecurityContextState::new::<JwmWaylandState, _>(dh, client_is_unsandboxed);
         let commit_timing_state = CommitTimingManagerState::unmanaged::<JwmWaylandState>(dh);
         let xdg_dialog_state = XdgDialogState::new::<JwmWaylandState>(dh);
         let xdg_foreign_state = XdgForeignState::new::<JwmWaylandState>(dh);
@@ -2144,12 +2861,12 @@ impl JwmWaylandState {
         let data_control_state = DataControlState::new::<JwmWaylandState, _>(
             dh,
             Some(&primary_selection_state),
-            |_client| true,
+            client_is_unsandboxed,
         );
         let ext_data_control_state = ExtDataControlState::new::<JwmWaylandState, _>(
             dh,
             Some(&primary_selection_state),
-            |_client| true,
+            client_is_unsandboxed,
         );
         let kde_decoration_state = KdeDecorationState::new::<JwmWaylandState>(dh, KdeMode::Server);
         // ext-background-effect-v1: advertise the global so clients can request
@@ -2169,6 +2886,8 @@ impl JwmWaylandState {
             Self {
                 display_handle: dh.clone(),
                 clipboard_captured: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+                clipboard_capture_generation: 0,
+                clipboard_delivered_generation: 0,
                 clipboard_offered: None,
                 clipboard_pending: None,
                 loop_handle: handle.clone(),
@@ -2227,11 +2946,13 @@ impl JwmWaylandState {
                 ext_data_control_state,
                 kde_decoration_state,
 
-                idle_inhibiting_surfaces: HashSet::new(),
+                idle_inhibiting_surfaces: HashMap::new(),
                 last_input: std::time::Instant::now(),
                 session_locked: false,
                 session_lock_epoch: 0,
                 lock_surfaces: HashMap::new(),
+                pending_session_lock: None,
+                active_session_lock: None,
                 foreign_toplevel_handles: HashMap::new(),
                 gesture_swipe: GestureSwipeTracker::default(),
 
@@ -2279,6 +3000,8 @@ impl JwmWaylandState {
                 window_app_id: HashMap::new(),
                 window_activation_app_id: HashMap::new(),
                 window_is_fullscreen: HashMap::new(),
+                window_maximized: HashMap::new(),
+                xdg_state_reply_owed: HashSet::new(),
                 window_type_overrides: HashMap::new(),
 
                 window_layer_info: HashMap::new(),
@@ -2291,12 +3014,20 @@ impl JwmWaylandState {
                 workspace_state,
 
                 image_capture_pending,
+                toplevel_capture_sessions: HashMap::new(),
 
                 capture_counters: Arc::new(Mutex::new(CaptureCounters::default())),
 
                 foreign_toplevel_mgmt,
 
                 color_manager,
+
+                output_management,
+
+                gamma_owners,
+
+                client_flush_tx: flush_tx,
+                client_flush_pending: flush_pending,
             },
             socket_name,
         ))
@@ -2321,8 +3052,13 @@ impl JwmWaylandState {
             .get(&win)
             .map(|g| (g.w, g.h))
             .unwrap_or((800, 600));
+        // Decide before `with_pending_state`: it holds this surface's state
+        // mutex for the closure, and `is_dialog_like_toplevel` reads the
+        // parent through the same non-reentrant mutex. WindowOps::configure
+        // hoists the same check for the same reason.
+        let choose_natural_size = self.is_dialog_like_toplevel(win) && w == 800 && h == 600;
         toplevel.with_pending_state(|s| {
-            if self.is_dialog_like_toplevel(win) && w == 800 && h == 600 {
+            if choose_natural_size {
                 s.size = None;
                 Self::set_toplevel_tiled_state(s, false);
             } else {
@@ -2443,9 +3179,11 @@ impl JwmWaylandState {
                 let Some(mode) = output.current_mode() else {
                     continue;
                 };
-                let scale = output.current_scale().fractional_scale();
-                let logical_size = mode.size.to_f64().to_logical(scale).to_i32_round();
-                let logical_size = output.current_transform().transform_size(logical_size);
+                let logical_size = output_logical_size(
+                    mode.size,
+                    output.current_scale().fractional_scale(),
+                    output.current_transform(),
+                );
                 let rect = Rectangle::<i32, Logical>::new(output.current_location(), logical_size);
                 if rect.to_f64().contains(location) {
                     if let Some(lock_surface) = self.lock_surfaces.get(&output.name()) {
@@ -2882,6 +3620,9 @@ impl JwmWaylandState {
 
     /// Convert smithay's parsed Motif hints into JWM's wire-compatible struct
     /// so `MotifWmHints::decorations_none` keeps matching the X11 backends.
+    // Only the DRM/KMS backend runs XWayland; the nested ones have no X11
+    // surfaces to read Motif hints from.
+    #[cfg(any(test, feature = "backend-wayland-udev"))]
     pub(crate) fn motif_wm_hints_from_smithay(
         hints: &smithay::xwayland::xwm::MwmHints,
     ) -> crate::backend::api::MotifWmHints {
@@ -3063,7 +3804,15 @@ impl JwmWaylandState {
     }
 }
 
-impl OutputHandler for JwmWaylandState {}
+impl OutputHandler for JwmWaylandState {
+    /// A workspace group can only enter the wl_outputs its client had bound
+    /// when it was sent. A taskbar that binds one later (the new global of a
+    /// rebuilt output, or its outputs after its workspace manager) is sent
+    /// the missing `output_enter` now, once policy has published monitors.
+    fn output_bound(&mut self, _output: Output, _wl_output: WlOutput) {
+        self.publish_workspace_monitors();
+    }
+}
 
 impl CompositorHandler for JwmWaylandState {
     fn compositor_state(&mut self) -> &mut CompositorState {
@@ -3412,6 +4161,8 @@ impl CompositorHandler for JwmWaylandState {
     }
 
     fn destroyed(&mut self, surface: &WlSurface) {
+        self.forget_idle_inhibiting_surface(&surface.id());
+
         // The wl_surface is gone: no future commit can latch a staged image
         // description. Drop both latch halves and the feedback bookkeeping so
         // the ObjectId cannot linger past the surface's lifetime.
@@ -3799,6 +4550,25 @@ fn read_clipboard_payload(
     Ok(buffer)
 }
 
+/// Put finished clipboard reads back into selection order.
+///
+/// Reads run concurrently, so a slow read of an older selection can finish
+/// after a newer one. Sorting by generation keeps a batch in copy order, and
+/// a read older than one already delivered is dropped: recording it now would
+/// put a superseded copy on top of the history.
+fn order_clipboard_captures<T>(mut finished: Vec<(u64, T)>, delivered: &mut u64) -> Vec<T> {
+    finished.sort_by_key(|(generation, _)| *generation);
+    finished
+        .into_iter()
+        .filter_map(|(generation, payload)| {
+            (generation > *delivered).then(|| {
+                *delivered = generation;
+                payload
+            })
+        })
+        .collect()
+}
+
 /// Hand `payload` to a client on `fd` without blocking the compositor.
 ///
 /// The reader is another process and may be slow or may never read at all. A
@@ -3865,6 +4635,8 @@ impl JwmWaylandState {
             return;
         }
 
+        self.clipboard_capture_generation += 1;
+        let generation = self.clipboard_capture_generation;
         let captured = std::sync::Arc::clone(&self.clipboard_captured);
         let worker = std::thread::Builder::new()
             .name("jwm-clipboard-read".to_string())
@@ -3899,7 +4671,7 @@ impl JwmWaylandState {
                     crate::backend::clipboard_offer::CapturedClipboard::Text(text)
                 };
                 if let Ok(mut captured) = captured.lock() {
-                    captured.push(payload);
+                    captured.push((generation, payload));
                 }
             });
         if let Err(error) = worker {
@@ -3917,10 +4689,12 @@ impl JwmWaylandState {
         if let Some(mime_types) = self.clipboard_pending.take() {
             self.capture_clipboard(&mime_types);
         }
-        self.clipboard_captured
+        let finished = self
+            .clipboard_captured
             .lock()
             .map(|mut captured| std::mem::take(&mut *captured))
-            .unwrap_or_default()
+            .unwrap_or_default();
+        order_clipboard_captures(finished, &mut self.clipboard_delivered_generation)
     }
 
     /// Offer `text` to clients as the clipboard selection.
@@ -3928,31 +4702,29 @@ impl JwmWaylandState {
         self.clipboard_offered = Some(crate::backend::clipboard_offer::ClipboardOffer::Text(
             text.to_string(),
         ));
-        set_data_device_selection(
-            &self.display_handle,
-            &self.seat,
-            CLIPBOARD_OFFER_MIMES
-                .iter()
-                .map(|m| (*m).to_string())
-                .collect(),
-            (),
-        );
+        self.publish_clipboard_offer(&CLIPBOARD_OFFER_MIMES);
         true
     }
 
     /// Offer PNG bytes to clients as the clipboard selection.
     pub fn offer_clipboard_png(&mut self, png: Vec<u8>) -> bool {
         self.clipboard_offered = Some(crate::backend::clipboard_offer::ClipboardOffer::Png(png));
-        set_data_device_selection(
-            &self.display_handle,
-            &self.seat,
-            CLIPBOARD_PNG_OFFER_MIMES
-                .iter()
-                .map(|m| (*m).to_string())
-                .collect(),
-            (),
-        );
+        self.publish_clipboard_offer(&CLIPBOARD_PNG_OFFER_MIMES);
         true
+    }
+
+    /// Make JWM's offer the clipboard for Wayland and X11 clients alike.
+    /// Neither Smithay call below runs `SelectionHandler::new_selection`,
+    /// so Xwayland is told directly; its requests then reach
+    /// `send_selection_to_xwayland`, which serves the offer.
+    fn publish_clipboard_offer(&mut self, mime_types: &[&str]) {
+        let mime_types: Vec<String> = mime_types.iter().map(|m| (*m).to_string()).collect();
+        set_data_device_selection(&self.display_handle, &self.seat, mime_types.clone(), ());
+        if let Some(xwm) = self.x11_wm.as_mut()
+            && let Err(err) = xwm.new_selection(SelectionTarget::Clipboard, Some(mime_types))
+        {
+            warn!("Failed to offer JWM clipboard to Xwayland: {err:?}");
+        }
     }
 }
 
@@ -4252,6 +5024,14 @@ impl XdgShellHandler for JwmWaylandState {
         }
     }
 
+    fn maximize_request(&mut self, surface: ToplevelSurface) {
+        self.xdg_maximize_request(&surface, true);
+    }
+
+    fn unmaximize_request(&mut self, surface: ToplevelSurface) {
+        self.xdg_maximize_request(&surface, false);
+    }
+
     fn minimize_request(&mut self, surface: ToplevelSurface) {
         if let Some(window) = self
             .surface_to_window
@@ -4517,6 +5297,14 @@ impl WlrLayerShellHandler for JwmWaylandState {
                 break;
             }
         }
+
+        // The wl_surface may outlive its layer role and even take a new one,
+        // which allocates a fresh WindowId. Retire this role's window now, as
+        // `toplevel_destroyed` does, so policy drops its strut and entry.
+        if let Some(win) = self.surface_to_window.remove(&surface.wl_surface().id()) {
+            info!("[udev/wayland] layer_destroyed win={win:?}");
+            self.remove_wayland_window(win);
+        }
     }
 }
 
@@ -4534,6 +5322,103 @@ fn match_x11_window_by_surface_id(
         .into_iter()
         .find(|(_, id)| *id == Some(protocol_id))
         .map(|(win, _)| win)
+}
+
+/// The logical size an output covers: its mode scaled down by the output
+/// scale, then rotated by its transform. Session-lock surfaces are
+/// configured with it and hit-tested against it.
+fn output_logical_size(
+    mode_size: smithay::utils::Size<i32, smithay::utils::Physical>,
+    scale: f64,
+    transform: smithay::utils::Transform,
+) -> smithay::utils::Size<i32, Logical> {
+    transform.transform_size(mode_size.to_f64().to_logical(scale).to_i32_round())
+}
+
+/// What JWM knows about the managed window an XWayland ConfigureRequest
+/// names.
+#[derive(Debug, Clone, Copy)]
+struct ManagedXwaylandWindow {
+    window: WindowId,
+    /// The window carries the `_NET_WM_STATE` maximized pair.
+    maximized: bool,
+    /// The geometry JWM last configured the window with, if any.
+    configured: Option<Geometry>,
+}
+
+/// What an XWayland ConfigureRequest turns into.
+#[derive(Debug)]
+enum XwaylandConfigureRoute {
+    /// A mapped window with a WindowId: shared policy decides, exactly as for
+    /// an X11 ConfigureRequest. The mask names only the fields the client
+    /// asked for.
+    Policy {
+        window: WindowId,
+        mask_bits: u16,
+        changes: crate::backend::api::WindowChanges,
+    },
+    /// A window policy has not seen yet (before its map request): nothing
+    /// owns its geometry, so the request is granted over the current one.
+    Grant(Rectangle<i32, Logical>),
+    /// A maximized window asked to move or resize: the geometry JWM last
+    /// configured is repeated without reaching policy.
+    Reply(Rectangle<i32, Logical>),
+}
+
+fn route_xwayland_configure_request(
+    managed: Option<ManagedXwaylandWindow>,
+    current: Rectangle<i32, Logical>,
+    x: Option<i32>,
+    y: Option<i32>,
+    w: Option<u32>,
+    h: Option<u32>,
+) -> XwaylandConfigureRoute {
+    use crate::backend::common_define::ConfigWindowBits;
+
+    let Some(managed) = managed else {
+        return XwaylandConfigureRoute::Grant(Rectangle::new(
+            (x.unwrap_or(current.loc.x), y.unwrap_or(current.loc.y)).into(),
+            (
+                w.map_or(current.size.w.max(1), |w| w as i32),
+                h.map_or(current.size.h.max(1), |h| h as i32),
+            )
+                .into(),
+        ));
+    };
+    // A maximized window's geometry belongs to shared policy (the work
+    // area); a client self-resize would silently un-maximize it behind JWM's
+    // back. A restack-only request, or a window JWM never configured, still
+    // goes to policy like any other.
+    if managed.maximized
+        && (x.is_some() || y.is_some() || w.is_some() || h.is_some())
+        && let Some(g) = managed.configured
+    {
+        return XwaylandConfigureRoute::Reply(Rectangle::new(
+            (g.x, g.y).into(),
+            (g.w as i32, g.h as i32).into(),
+        ));
+    }
+    let window = managed.window;
+    let mut mask = ConfigWindowBits::empty();
+    for (named, bit) in [
+        (x.is_some(), ConfigWindowBits::X),
+        (y.is_some(), ConfigWindowBits::Y),
+        (w.is_some(), ConfigWindowBits::WIDTH),
+        (h.is_some(), ConfigWindowBits::HEIGHT),
+    ] {
+        mask.set(bit, named);
+    }
+    XwaylandConfigureRoute::Policy {
+        window,
+        mask_bits: mask.bits(),
+        changes: crate::backend::api::WindowChanges {
+            x,
+            y,
+            width: w,
+            height: h,
+            ..Default::default()
+        },
+    }
 }
 
 #[cfg(test)]
@@ -5082,5 +5967,1471 @@ mod clipboard_io_tests {
             !handler.contains("clipboard_offered.as_deref()"),
             "send_selection must not treat every offer as bare text"
         );
+    }
+}
+
+#[cfg(test)]
+mod protocol_hardening_tests {
+    use super::{
+        JwmClientState, JwmWaylandState, ManagedXwaylandWindow, XDG_ACTIVATION_TOKEN_LIFETIME,
+        XwaylandConfigureRoute, order_clipboard_captures, output_logical_size,
+        route_xwayland_configure_request,
+    };
+    use crate::backend::api::{BackendEvent, Geometry};
+    use crate::backend::clipboard_offer::CapturedClipboard;
+    use crate::backend::common_define::{ConfigWindowBits, WindowId};
+    use crate::backend::wayland_udev::image_copy_capture::wire_test_client::{Server, test_output};
+    use smithay::reexports::wayland_server::Resource;
+    use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
+    use smithay::utils::{Rectangle, Transform};
+    use smithay::wayland::keyboard_shortcuts_inhibit::KeyboardShortcutsInhibitorSeat;
+    use smithay::wayland::security_context::SecurityContext;
+    use smithay::wayland::selection::SelectionTarget;
+    use smithay::wayland::selection::data_device::current_data_device_selection_userdata;
+    use smithay::wayland::session_lock::SessionLockHandler;
+    use smithay::wayland::xdg_activation::{
+        XdgActivationHandler, XdgActivationToken, XdgActivationTokenData,
+    };
+    use smithay::wayland::xwayland_keyboard_grab::XWaylandKeyboardGrabHandler;
+    use std::io::{ErrorKind, Read, Write};
+    use std::os::unix::net::UnixStream;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    /// A raw client whose client data the test chooses (the shared wire
+    /// client always connects as an ordinary client) and whose server-side
+    /// handle can look up the objects it created.
+    struct RawClient {
+        peer: UnixStream,
+        handle: smithay::reexports::wayland_server::Client,
+        globals: Vec<(u32, String, u32)>,
+        next_id: u32,
+    }
+
+    impl RawClient {
+        fn connect(server: &mut Server, data: JwmClientState) -> Self {
+            let (server_end, peer) = UnixStream::pair().expect("create Wayland socket pair");
+            let handle = server
+                .display
+                .handle()
+                .insert_client(server_end, Arc::new(data))
+                .expect("insert raw Wayland client");
+            peer.set_nonblocking(true)
+                .expect("make the test peer non-blocking");
+            let mut client = Self {
+                peer,
+                handle,
+                globals: Vec::new(),
+                next_id: 2,
+            };
+            // wl_display.get_registry(new_id=2).
+            client.request(1, 1, &[2]);
+            server.roundtrip();
+            client.globals = client
+                .events()
+                .into_iter()
+                .filter(|(sender, opcode, _)| *sender == 2 && *opcode == 0)
+                .map(|(_, _, args)| {
+                    let len = args[1] as usize;
+                    let bytes: Vec<u8> = args[2..].iter().flat_map(|w| w.to_ne_bytes()).collect();
+                    let interface = std::str::from_utf8(&bytes[..len - 1])
+                        .expect("registry interface is UTF-8")
+                        .to_owned();
+                    (args[0], interface, args[2 + len.div_ceil(4)])
+                })
+                .collect();
+            client
+        }
+
+        fn advertises(&self, interface: &str) -> bool {
+            self.globals.iter().any(|(_, name, _)| name == interface)
+        }
+
+        fn new_id(&mut self) -> u32 {
+            self.next_id += 1;
+            self.next_id
+        }
+
+        fn bind(&mut self, interface: &str, version: u32) -> u32 {
+            let name = self
+                .globals
+                .iter()
+                .find(|(_, advertised, _)| advertised == interface)
+                .map(|(name, _, _)| *name)
+                .unwrap_or_else(|| panic!("{interface} is not advertised"));
+            self.bind_global(name, version)
+        }
+
+        /// Bind the global registered as `name`, for interfaces advertised
+        /// more than once (one wl_output per output).
+        fn bind_global(&mut self, name: u32, version: u32) -> u32 {
+            let (interface, advertised) = self
+                .globals
+                .iter()
+                .find(|(advertised, _, _)| *advertised == name)
+                .map(|(_, interface, version)| (interface.clone(), *version))
+                .unwrap_or_else(|| panic!("global {name} is not advertised"));
+            let id = self.new_id();
+            let mut args = vec![name];
+            args.extend(string_words(&interface));
+            args.extend([version.min(advertised), id]);
+            self.request(2, 0, &args);
+            id
+        }
+
+        /// Registry names of every advertised `interface` global, in
+        /// creation order.
+        fn global_names(&self, interface: &str) -> Vec<u32> {
+            self.globals
+                .iter()
+                .filter(|(_, advertised, _)| advertised == interface)
+                .map(|(name, _, _)| *name)
+                .collect()
+        }
+
+        fn request(&mut self, object: u32, opcode: u16, args: &[u32]) {
+            let size = 8 + 4 * args.len() as u32;
+            let mut message = Vec::with_capacity(size as usize);
+            message.extend_from_slice(&object.to_ne_bytes());
+            message.extend_from_slice(&((size << 16) | u32::from(opcode)).to_ne_bytes());
+            for arg in args {
+                message.extend_from_slice(&arg.to_ne_bytes());
+            }
+            self.peer.write_all(&message).expect("send Wayland request");
+        }
+
+        /// Every flushed event as (sender, opcode, 32-bit words).
+        fn events(&mut self) -> Vec<(u32, u16, Vec<u32>)> {
+            let mut bytes = Vec::new();
+            let mut chunk = [0u8; 8192];
+            loop {
+                match self.peer.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(read) => bytes.extend_from_slice(&chunk[..read]),
+                    Err(error) if error.kind() == ErrorKind::WouldBlock => break,
+                    Err(error) => panic!("read Wayland events: {error}"),
+                }
+            }
+            let word = |at: usize| {
+                u32::from_ne_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
+            };
+            let mut events = Vec::new();
+            let mut offset = 0;
+            while offset + 8 <= bytes.len() {
+                let header = word(offset + 4);
+                let size = (header >> 16) as usize;
+                assert!(size >= 8 && offset + size <= bytes.len(), "truncated event");
+                let args = (offset + 8..offset + size).step_by(4).map(word).collect();
+                events.push((word(offset), header as u16, args));
+                offset += size;
+            }
+            events
+        }
+
+        fn surface(&self, server: &Server, id: u32) -> WlSurface {
+            self.handle
+                .object_from_protocol_id(&server.display.handle(), id)
+                .expect("the client created this wl_surface")
+        }
+    }
+
+    /// A Wayland string argument as 32-bit words: length with the NUL, then
+    /// the padded bytes.
+    fn string_words(value: &str) -> Vec<u32> {
+        let mut bytes = value.as_bytes().to_vec();
+        bytes.push(0);
+        let len = bytes.len() as u32;
+        bytes.resize(bytes.len().next_multiple_of(4), 0);
+        std::iter::once(len)
+            .chain(
+                bytes
+                    .chunks_exact(4)
+                    .map(|w| u32::from_ne_bytes([w[0], w[1], w[2], w[3]])),
+            )
+            .collect()
+    }
+
+    /// Client data of a Flatpak app that `creator` connected through a
+    /// security-context listener.
+    fn sandboxed_client_data(creator: &RawClient) -> JwmClientState {
+        JwmClientState {
+            security_context: Some(SecurityContext {
+                sandbox_engine: Some("org.flatpak".to_owned()),
+                app_id: Some("org.example.App".to_owned()),
+                instance_id: None,
+                creator_client_id: creator.handle.id(),
+            }),
+            ..JwmClientState::default()
+        }
+    }
+
+    fn drain_events(server: &Server) -> Vec<BackendEvent> {
+        server
+            .backend_events
+            .lock()
+            .expect("backend event lock")
+            .drain(..)
+            .collect()
+    }
+
+    fn created_window(server: &Server) -> WindowId {
+        drain_events(server)
+            .into_iter()
+            .find_map(|event| match event {
+                BackendEvent::WindowCreated(window) => Some(window),
+                _ => None,
+            })
+            .expect("the role reaches the backend as a window")
+    }
+
+    /// Returns the wl_surface id, the xdg_toplevel id and its window.
+    fn create_toplevel(server: &mut Server, client: &mut RawClient) -> (u32, u32, WindowId) {
+        let compositor = client.bind("wl_compositor", 6);
+        let wm_base = client.bind("xdg_wm_base", 6);
+        let surface = client.new_id();
+        client.request(compositor, 0, &[surface]);
+        let xdg_surface = client.new_id();
+        client.request(wm_base, 2, &[xdg_surface, surface]);
+        let toplevel = client.new_id();
+        client.request(xdg_surface, 1, &[toplevel]);
+        server.roundtrip();
+        (surface, toplevel, created_window(server))
+    }
+
+    #[test]
+    fn initial_configure_fallback_configures_without_relocking_the_surface() {
+        // The old fallback re-entered the surface state mutex and hung the
+        // compositor thread; the channel turns that hang into a failure.
+        let (done, outcome) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut server = Server::new();
+            let mut client = RawClient::connect(&mut server, JwmClientState::default());
+            let (_, toplevel, window) = create_toplevel(&mut server, &mut client);
+            server.state.ensure_initial_configure_fallback(window);
+            server.roundtrip();
+            let configures: Vec<(u32, u32)> = client
+                .events()
+                .into_iter()
+                .filter(|(sender, opcode, _)| *sender == toplevel && *opcode == 0)
+                .map(|(_, _, args)| (args[0], args[1]))
+                .collect();
+            let _ = done.send(configures);
+        });
+        let configures = outcome
+            .recv_timeout(Duration::from_secs(30))
+            .expect("the initial configure fallback deadlocked on the surface state mutex");
+        assert_eq!(configures, vec![(800, 600)]);
+    }
+
+    #[test]
+    fn idle_inhibitors_are_counted_and_die_with_their_surface() {
+        let mut server = Server::new();
+        let mut client = RawClient::connect(&mut server, JwmClientState::default());
+        let compositor = client.bind("wl_compositor", 6);
+        let manager = client.bind("zwp_idle_inhibit_manager_v1", 1);
+        let surface = client.new_id();
+        client.request(compositor, 0, &[surface]);
+        let first = client.new_id();
+        client.request(manager, 1, &[first, surface]);
+        let second = client.new_id();
+        client.request(manager, 1, &[second, surface]);
+        server.roundtrip();
+        assert!(server.state.idle_notifier_state.is_inhibited());
+
+        client.request(first, 0, &[]);
+        server.roundtrip();
+        assert!(
+            server.state.idle_notifier_state.is_inhibited(),
+            "one inhibitor's destroy must not clear another on the same surface"
+        );
+
+        // A player closing its window without destroying its inhibitor:
+        // Smithay never calls `uninhibit` for `second`.
+        client.request(surface, 0, &[]);
+        server.roundtrip();
+        assert!(server.state.idle_inhibiting_surfaces.is_empty());
+        assert!(!server.state.idle_notifier_state.is_inhibited());
+
+        client.request(second, 0, &[]);
+        server.roundtrip();
+        assert!(!server.state.idle_notifier_state.is_inhibited());
+    }
+
+    #[test]
+    fn a_crashed_client_stops_inhibiting_idle() {
+        let mut server = Server::new();
+        let mut client = RawClient::connect(&mut server, JwmClientState::default());
+        let compositor = client.bind("wl_compositor", 6);
+        let manager = client.bind("zwp_idle_inhibit_manager_v1", 1);
+        let surface = client.new_id();
+        client.request(compositor, 0, &[surface]);
+        let inhibitor = client.new_id();
+        client.request(manager, 1, &[inhibitor, surface]);
+        server.roundtrip();
+        assert!(server.state.idle_notifier_state.is_inhibited());
+
+        drop(client);
+        server.roundtrip();
+        assert!(server.state.idle_inhibiting_surfaces.is_empty());
+        assert!(!server.state.idle_notifier_state.is_inhibited());
+    }
+
+    #[test]
+    fn an_x11_copy_retires_the_offered_history_entry() {
+        let mut server = Server::new();
+        let state = &mut server.state;
+        assert!(state.offer_clipboard_text("from history"));
+        state.adopt_xwayland_selection(
+            SelectionTarget::Clipboard,
+            vec!["text/plain;charset=utf-8".to_owned()],
+        );
+        assert!(
+            state.clipboard_offered.is_none(),
+            "Wayland pastes would still be served the stale history entry"
+        );
+        assert!(current_data_device_selection_userdata(&state.seat).is_some());
+    }
+
+    #[test]
+    fn a_departed_x11_owner_only_clears_its_own_selection() {
+        let mut server = Server::new();
+        let state = &mut server.state;
+        let x11_mimes = || vec!["UTF8_STRING".to_owned()];
+
+        // X11 copy, then a JWM history offer, then the X11 owner exits: the
+        // offer is the live selection and must survive.
+        state.adopt_xwayland_selection(SelectionTarget::Clipboard, x11_mimes());
+        assert!(state.offer_clipboard_text("from history"));
+        state.xwayland_selection_cleared(SelectionTarget::Clipboard);
+        assert!(state.clipboard_offered.is_some());
+        assert!(current_data_device_selection_userdata(&state.seat).is_some());
+
+        // A later X11 copy whose owner exits leaves nothing behind.
+        state.adopt_xwayland_selection(SelectionTarget::Clipboard, x11_mimes());
+        state.xwayland_selection_cleared(SelectionTarget::Clipboard);
+        assert!(current_data_device_selection_userdata(&state.seat).is_none());
+    }
+
+    #[test]
+    fn x11_pastes_are_served_the_jwm_offer() {
+        let mut server = Server::new();
+        assert!(server.state.offer_clipboard_text("from history"));
+        let (mut read, write) = std::io::pipe().expect("create selection pipe");
+        server.state.send_selection_to_xwayland(
+            SelectionTarget::Clipboard,
+            "text/plain;charset=utf-8".to_owned(),
+            write.into(),
+        );
+        let mut pasted = String::new();
+        read.read_to_string(&mut pasted)
+            .expect("read the served selection");
+        assert_eq!(pasted, "from history");
+    }
+
+    /// A managed XWayland window that is not maximized and that JWM never
+    /// configured.
+    fn ordinary(window: WindowId) -> Option<ManagedXwaylandWindow> {
+        Some(ManagedXwaylandWindow {
+            window,
+            maximized: false,
+            configured: None,
+        })
+    }
+
+    #[test]
+    fn managed_xwayland_configure_requests_go_to_policy() {
+        let window = WindowId::from_raw(0x71);
+        let current = Rectangle::new((10, 20).into(), (300, 200).into());
+        match route_xwayland_configure_request(
+            ordinary(window),
+            current,
+            None,
+            None,
+            Some(400),
+            None,
+        ) {
+            XwaylandConfigureRoute::Policy {
+                window: routed,
+                mask_bits,
+                changes,
+            } => {
+                assert_eq!(routed, window);
+                assert_eq!(mask_bits, ConfigWindowBits::WIDTH.bits());
+                assert_eq!(
+                    (changes.x, changes.y, changes.width, changes.height),
+                    (None, None, Some(400), None)
+                );
+            }
+            other => panic!("a managed window granted its own geometry: {other:?}"),
+        }
+        match route_xwayland_configure_request(
+            ordinary(window),
+            current,
+            Some(-5),
+            Some(7),
+            Some(640),
+            Some(480),
+        ) {
+            XwaylandConfigureRoute::Policy { mask_bits, .. } => assert_eq!(
+                mask_bits,
+                (ConfigWindowBits::X
+                    | ConfigWindowBits::Y
+                    | ConfigWindowBits::WIDTH
+                    | ConfigWindowBits::HEIGHT)
+                    .bits()
+            ),
+            other => panic!("a managed window granted its own geometry: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unmanaged_xwayland_configure_requests_are_granted_over_the_current_geometry() {
+        let current = Rectangle::new((10, 20).into(), (300, 200).into());
+        match route_xwayland_configure_request(None, current, Some(50), None, None, Some(90)) {
+            XwaylandConfigureRoute::Grant(rect) => {
+                assert_eq!(rect, Rectangle::new((50, 20).into(), (300, 90).into()));
+            }
+            other => panic!("an unmapped window has no policy owner: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn maximized_xwayland_windows_are_answered_with_jwm_geometry() {
+        let window = WindowId::from_raw(0x72);
+        let current = Rectangle::new((10, 20).into(), (300, 200).into());
+        let work_area = Geometry {
+            x: 0,
+            y: 30,
+            w: 1920,
+            h: 1050,
+            border: 0,
+        };
+        let maximized = |configured| {
+            Some(ManagedXwaylandWindow {
+                window,
+                maximized: true,
+                configured,
+            })
+        };
+        let jwm_rect = Rectangle::new((0, 30).into(), (1920, 1050).into());
+
+        // A self-resize or self-move gets JWM's rectangle back: neither the
+        // client's size nor its stale current geometry.
+        for (x, y, w, h) in [
+            (None, None, Some(400), None),
+            (Some(5), Some(5), None, None),
+        ] {
+            match route_xwayland_configure_request(maximized(Some(work_area)), current, x, y, w, h)
+            {
+                XwaylandConfigureRoute::Reply(rect) => assert_eq!(rect, jwm_rect),
+                other => panic!("a maximized window left the work area: {other:?}"),
+            }
+        }
+
+        // A restack-only request names no geometry: policy handles it.
+        match route_xwayland_configure_request(
+            maximized(Some(work_area)),
+            current,
+            None,
+            None,
+            None,
+            None,
+        ) {
+            XwaylandConfigureRoute::Policy { mask_bits, .. } => assert_eq!(mask_bits, 0),
+            other => panic!("a restack must reach policy: {other:?}"),
+        }
+
+        // Without a geometry of JWM's to repeat, policy decides.
+        match route_xwayland_configure_request(
+            maximized(None),
+            current,
+            None,
+            None,
+            Some(400),
+            None,
+        ) {
+            XwaylandConfigureRoute::Policy { mask_bits, .. } => {
+                assert_eq!(mask_bits, ConfigWindowBits::WIDTH.bits());
+            }
+            other => panic!("nothing to answer with: {other:?}"),
+        }
+
+        // The gate never catches an ordinary window JWM configured.
+        let configured = Some(ManagedXwaylandWindow {
+            window,
+            maximized: false,
+            configured: Some(work_area),
+        });
+        match route_xwayland_configure_request(configured, current, None, None, Some(400), None) {
+            XwaylandConfigureRoute::Policy {
+                window: routed,
+                mask_bits,
+                ..
+            } => {
+                assert_eq!(routed, window);
+                assert_eq!(mask_bits, ConfigWindowBits::WIDTH.bits());
+            }
+            other => panic!("an ordinary window must reach policy: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn xwayland_configure_request_no_longer_self_publishes_geometry() {
+        const SOURCE: &str = include_str!("state.rs");
+        let production = SOURCE.split_once("#[cfg(test)]").expect("test split").0;
+        let body = production
+            .split_once("    fn configure_request(\n")
+            .expect("XwmHandler::configure_request")
+            .1
+            .split_once("\n    fn configure_notify(")
+            .expect("configure_notify follows configure_request")
+            .0;
+        let (before_route, routed) = body
+            .split_once("route_xwayland_configure_request(")
+            .expect("configure_request routes through the pure router");
+        assert!(
+            !before_route.contains("window.configure(") && routed.contains("window.configure("),
+            "every reply, the maximized one included, must come from the route"
+        );
+        assert_eq!(body.matches("window.configure(").count(), 1);
+        assert!(
+            !body.contains("BackendEvent::WindowConfigured"),
+            "a client-chosen geometry must not be adopted into the client model"
+        );
+    }
+
+    #[test]
+    fn destroying_a_layer_role_retires_its_window() {
+        let mut server = Server::new();
+        server.state.outputs.push(test_output("LAYER-1"));
+        let mut client = RawClient::connect(&mut server, JwmClientState::default());
+        let compositor = client.bind("wl_compositor", 6);
+        let layer_shell = client.bind("zwlr_layer_shell_v1", 4);
+        let surface = client.new_id();
+        client.request(compositor, 0, &[surface]);
+        let get_layer_surface = |client: &mut RawClient| {
+            let layer = client.new_id();
+            // get_layer_surface(id, surface, output = null, layer = top, namespace)
+            let mut args = vec![layer, surface, 0, 2];
+            args.extend(string_words("bar"));
+            client.request(layer_shell, 0, &args);
+            layer
+        };
+
+        let first_layer = get_layer_surface(&mut client);
+        server.roundtrip();
+        let first = created_window(&server);
+        assert!(server.state.window_layer_info.contains_key(&first));
+
+        // zwlr_layer_surface_v1.destroy; the wl_surface lives on.
+        client.request(first_layer, 7, &[]);
+        server.roundtrip();
+        assert!(
+            drain_events(&server)
+                .iter()
+                .any(|event| matches!(event, BackendEvent::WindowDestroyed(w) if *w == first)),
+            "policy must drop the bar whose role is gone"
+        );
+        assert!(!server.state.window_layer_info.contains_key(&first));
+        assert!(!server.state.layer_surfaces.contains_key(&first));
+
+        // The same wl_surface takes a new layer role: only the new window
+        // remains, and it is retired the same way.
+        let second_layer = get_layer_surface(&mut client);
+        server.roundtrip();
+        let second = created_window(&server);
+        assert_ne!(first, second);
+        client.request(second_layer, 7, &[]);
+        server.roundtrip();
+        assert!(
+            drain_events(&server)
+                .iter()
+                .any(|event| matches!(event, BackendEvent::WindowDestroyed(w) if *w == second))
+        );
+        assert!(server.state.window_layer_info.is_empty());
+    }
+
+    #[test]
+    fn lock_surfaces_are_sized_in_logical_output_units() {
+        assert_eq!(
+            output_logical_size((3840, 2160).into(), 2.0, Transform::Normal),
+            (1920, 1080).into()
+        );
+        assert_eq!(
+            output_logical_size((1920, 1080).into(), 1.0, Transform::_90),
+            (1080, 1920).into()
+        );
+        assert_eq!(
+            output_logical_size((2560, 1440).into(), 1.5, Transform::Normal),
+            (1707, 960).into()
+        );
+    }
+
+    #[test]
+    fn sandboxed_clients_are_not_offered_privileged_globals() {
+        const PRIVILEGED: [&str; 10] = [
+            "wp_security_context_manager_v1",
+            "zwlr_data_control_manager_v1",
+            "ext_data_control_manager_v1",
+            "zwp_input_method_manager_v2",
+            "zwp_virtual_keyboard_manager_v1",
+            "ext_session_lock_manager_v1",
+            "zwlr_gamma_control_manager_v1",
+            // Every window's title and app_id.
+            "ext_foreign_toplevel_list_v1",
+            // Overlay surfaces with exclusive keyboard focus.
+            "zwlr_layer_shell_v1",
+            // Tag activity per named output, and switching any monitor's tag.
+            "ext_workspace_manager_v1",
+        ];
+        let mut server = Server::new();
+        let trusted = RawClient::connect(&mut server, JwmClientState::default());
+        let sandboxed = RawClient::connect(&mut server, sandboxed_client_data(&trusted));
+        for interface in PRIVILEGED {
+            assert!(
+                trusted.advertises(interface),
+                "{interface} must stay available to ordinary clients"
+            );
+            assert!(
+                !sandboxed.advertises(interface),
+                "{interface} was offered to a sandboxed client"
+            );
+        }
+        assert!(sandboxed.advertises("wl_compositor"));
+        assert!(sandboxed.advertises("xdg_wm_base"));
+    }
+
+    #[test]
+    fn sandboxed_surfaces_never_inhibit_compositor_shortcuts() {
+        /// Create a focused toplevel with a shortcuts inhibitor; returns its
+        /// surface and window.
+        fn focused_inhibitor(server: &mut Server, client: &mut RawClient) -> (WlSurface, WindowId) {
+            // zwp_keyboard_shortcuts_inhibit_manager_v1.inhibit_shortcuts
+            const INHIBIT_SHORTCUTS: u16 = 1;
+            let (surface, _, window) = create_toplevel(server, client);
+            let seat = client.bind("wl_seat", 5);
+            let manager = client.bind("zwp_keyboard_shortcuts_inhibit_manager_v1", 1);
+            server.state.active_toplevel = Some(window);
+            let inhibitor = client.new_id();
+            client.request(manager, INHIBIT_SHORTCUTS, &[inhibitor, surface, seat]);
+            server.roundtrip();
+            (client.surface(server, surface), window)
+        }
+        let inhibiting = |server: &Server, surface: &WlSurface| {
+            let inhibitor = server
+                .state
+                .seat
+                .keyboard_shortcuts_inhibitor_for_surface(surface)
+                .expect("the inhibitor request is accepted");
+            inhibitor.is_active()
+        };
+
+        let mut server = Server::new();
+        let mut trusted = RawClient::connect(&mut server, JwmClientState::default());
+        let data = sandboxed_client_data(&trusted);
+        let mut sandboxed = RawClient::connect(&mut server, data);
+
+        let (trusted_surface, trusted_window) = focused_inhibitor(&mut server, &mut trusted);
+        assert!(
+            inhibiting(&server, &trusted_surface),
+            "an ordinary client's focused inhibitor takes effect"
+        );
+        let (sandboxed_surface, sandboxed_window) = focused_inhibitor(&mut server, &mut sandboxed);
+        assert!(
+            !inhibiting(&server, &sandboxed_surface),
+            "a sandbox must not swallow JWM's bindings"
+        );
+
+        // Focus returning to the sandboxed window does not activate it
+        // either, while the ordinary inhibitor still follows focus.
+        server
+            .state
+            .sync_keyboard_shortcuts_inhibitors(Some(trusted_window), Some(sandboxed_window));
+        assert!(!inhibiting(&server, &sandboxed_surface));
+        assert!(!inhibiting(&server, &trusted_surface));
+        server
+            .state
+            .sync_keyboard_shortcuts_inhibitors(Some(sandboxed_window), Some(trusted_window));
+        assert!(inhibiting(&server, &trusted_surface));
+    }
+
+    #[test]
+    fn activation_tokens_are_single_use_and_unused_ones_expire() {
+        let mut server = Server::new();
+        let mut client = RawClient::connect(&mut server, JwmClientState::default());
+        let (surface, _, window) = create_toplevel(&mut server, &mut client);
+        let surface = client.surface(&server, surface);
+
+        let (token, data) = {
+            let (token, data) = server
+                .state
+                .xdg_activation_state
+                .create_external_token(None);
+            (token.clone(), data.clone())
+        };
+        server
+            .state
+            .request_activation(token.clone(), data, surface);
+        assert!(
+            drain_events(&server).iter().any(
+                |event| matches!(event, BackendEvent::ActiveWindowMessage { window: w } if *w == window)
+            ),
+            "a fresh token still activates"
+        );
+        assert!(
+            server
+                .state
+                .xdg_activation_state
+                .data_for_token(&token)
+                .is_none(),
+            "a used token must not be replayable"
+        );
+
+        let stale = XdgActivationTokenData {
+            timestamp: Instant::now()
+                .checked_sub(XDG_ACTIVATION_TOKEN_LIFETIME + Duration::from_secs(1))
+                .expect("the monotonic clock is older than one token lifetime"),
+            ..XdgActivationTokenData::default()
+        };
+        let stale = server
+            .state
+            .xdg_activation_state
+            .create_external_token(stale)
+            .0
+            .clone();
+        let fresh = server
+            .state
+            .xdg_activation_state
+            .create_external_token(None)
+            .0
+            .clone();
+        assert!(server.state.token_created(
+            XdgActivationToken::from("client-token".to_owned()),
+            XdgActivationTokenData::default(),
+        ));
+        let state = &server.state.xdg_activation_state;
+        assert!(
+            state.data_for_token(&stale).is_none(),
+            "unused tokens expire"
+        );
+        assert!(state.data_for_token(&fresh).is_some());
+    }
+
+    #[test]
+    fn xwayland_keyboard_grabs_resolve_x11_surfaces() {
+        let mut server = Server::new();
+        let mut client = RawClient::connect(&mut server, JwmClientState::default());
+        let compositor = client.bind("wl_compositor", 6);
+        let x11_surface = client.new_id();
+        client.request(compositor, 0, &[x11_surface]);
+        let stray_surface = client.new_id();
+        client.request(compositor, 0, &[stray_surface]);
+        server.roundtrip();
+        let x11_surface = client.surface(&server, x11_surface);
+        let stray_surface = client.surface(&server, stray_surface);
+
+        // What `surface_associated` records for a mapped X11 window.
+        let window = WindowId::from_raw(0x5151);
+        server
+            .state
+            .surface_to_window
+            .insert(x11_surface.id(), window);
+        server
+            .state
+            .x11_wl_surfaces
+            .insert(window, x11_surface.clone());
+
+        assert_eq!(
+            server.state.keyboard_focus_for_xsurface(&x11_surface),
+            Some(x11_surface.clone()),
+            "Xwayland's grab must be granted for its own window"
+        );
+        assert_eq!(
+            server.state.keyboard_focus_for_xsurface(&stray_surface),
+            None
+        );
+    }
+
+    #[test]
+    fn clipboard_reads_are_delivered_in_selection_order() {
+        let mut delivered = 0;
+        // Copy 1's read is slow and finishes after copy 2's.
+        assert_eq!(
+            order_clipboard_captures(vec![(2, "second"), (1, "first")], &mut delivered),
+            vec!["first", "second"]
+        );
+        assert_eq!(delivered, 2);
+        assert_eq!(
+            order_clipboard_captures(vec![(4, "fourth")], &mut delivered),
+            vec!["fourth"]
+        );
+        // Copy 3 finishes after copy 4 was already recorded as the newest.
+        assert!(order_clipboard_captures(vec![(3, "third")], &mut delivered).is_empty());
+        assert_eq!(delivered, 4);
+    }
+
+    #[test]
+    fn drained_clipboard_captures_follow_selection_order() {
+        let mut server = Server::new();
+        server
+            .state
+            .clipboard_captured
+            .lock()
+            .expect("capture lock")
+            .extend([
+                (2, CapturedClipboard::Text("newer".to_owned())),
+                (1, CapturedClipboard::Text("older".to_owned())),
+            ]);
+        assert_eq!(
+            server.state.drain_clipboard_captured(),
+            vec![
+                CapturedClipboard::Text("older".to_owned()),
+                CapturedClipboard::Text("newer".to_owned()),
+            ]
+        );
+    }
+
+    // ext_session_lock_manager_v1.lock / ext_session_lock_v1 wire opcodes.
+    const LOCK_REQUEST: u16 = 1;
+    const LOCK_DESTROY: u16 = 0;
+    const GET_LOCK_SURFACE: u16 = 1;
+    const UNLOCK_AND_DESTROY: u16 = 2;
+    const LOCKED_EVENT: u16 = 0;
+    const FINISHED_EVENT: u16 = 1;
+    const LOCK_SURFACE_CONFIGURE_EVENT: u16 = 0;
+
+    /// Send ext_session_lock_manager_v1.lock and dispatch it.
+    fn request_lock(server: &mut Server, client: &mut RawClient, manager: u32) -> u32 {
+        let lock = client.new_id();
+        client.request(manager, LOCK_REQUEST, &[lock]);
+        server.roundtrip();
+        lock
+    }
+
+    /// Flush the server and return the opcodes `object` was sent since the
+    /// last read.
+    fn opcodes_for(server: &mut Server, client: &mut RawClient, object: u32) -> Vec<u16> {
+        server.roundtrip();
+        client
+            .events()
+            .into_iter()
+            .filter(|(sender, _, _)| *sender == object)
+            .map(|(_, opcode, _)| opcode)
+            .collect()
+    }
+
+    fn locked_server(outputs: &[&str]) -> (Server, RawClient, u32) {
+        let mut server = Server::new();
+        server.state.outputs = outputs.iter().map(|name| test_output(name)).collect();
+        let mut client = RawClient::connect(&mut server, JwmClientState::default());
+        let manager = client.bind("ext_session_lock_manager_v1", 1);
+        (server, client, manager)
+    }
+
+    #[test]
+    fn session_lock_is_confirmed_once_every_output_presented_a_locked_frame() {
+        let (mut server, mut client, manager) = locked_server(&["LOCK-1", "LOCK-2"]);
+        let lock = request_lock(&mut server, &mut client, manager);
+        assert!(
+            server.state.session_locked,
+            "locked content is drawn from the request on"
+        );
+        assert!(
+            opcodes_for(&mut server, &mut client, lock).is_empty(),
+            "`locked` is owed until no output shows unlocked content"
+        );
+
+        let epoch = server.state.session_lock_epoch;
+        server.state.note_locked_frame_presented("LOCK-1", epoch);
+        // A frame rendered for an earlier lock does not pay this one.
+        server
+            .state
+            .note_locked_frame_presented("LOCK-2", epoch.wrapping_sub(1));
+        assert!(opcodes_for(&mut server, &mut client, lock).is_empty());
+        assert!(server.state.session_lock_confirmation_pending());
+
+        server.state.note_locked_frame_presented("LOCK-2", epoch);
+        assert_eq!(opcodes_for(&mut server, &mut client, lock), [LOCKED_EVENT]);
+        assert!(!server.state.session_lock_confirmation_pending());
+        server.state.note_locked_frame_presented("LOCK-2", epoch);
+        assert!(
+            opcodes_for(&mut server, &mut client, lock).is_empty(),
+            "a lock is confirmed exactly once"
+        );
+    }
+
+    #[test]
+    fn outputs_that_cannot_present_do_not_hold_a_session_lock_back() {
+        // No output: nothing unlocked can be on screen.
+        let (mut server, mut client, manager) = locked_server(&[]);
+        let lock = request_lock(&mut server, &mut client, manager);
+        assert_eq!(opcodes_for(&mut server, &mut client, lock), [LOCKED_EVENT]);
+
+        let (mut server, mut client, manager) = locked_server(&["LIT-1", "GONE-1", "OFF-1"]);
+        // Soft-disabled at lock time: it owes nothing.
+        server
+            .state
+            .soft_disabled_outputs
+            .insert("OFF-1".to_owned());
+        let lock = request_lock(&mut server, &mut client, manager);
+        server
+            .state
+            .outputs
+            .retain(|output| output.name() != "GONE-1");
+        server.state.refresh_output_dependent_state();
+        assert!(
+            opcodes_for(&mut server, &mut client, lock).is_empty(),
+            "LIT-1 still shows unlocked content"
+        );
+        // The backend reports LIT-1 powered off (DPMS): it shows nothing.
+        server
+            .state
+            .release_session_lock_outputs(|output_name| output_name != "LIT-1");
+        assert_eq!(opcodes_for(&mut server, &mut client, lock), [LOCKED_EVENT]);
+    }
+
+    #[test]
+    fn the_deadline_confirms_a_lock_no_output_presented() {
+        let (mut server, mut client, manager) = locked_server(&["STUCK-1"]);
+        let lock = request_lock(&mut server, &mut client, manager);
+        let epoch = server.state.session_lock_epoch;
+
+        // A deadline armed for an earlier request is a no-op.
+        server
+            .state
+            .confirm_session_lock_after_deadline(epoch.wrapping_sub(1));
+        assert!(opcodes_for(&mut server, &mut client, lock).is_empty());
+
+        server.state.confirm_session_lock_after_deadline(epoch);
+        assert_eq!(opcodes_for(&mut server, &mut client, lock), [LOCKED_EVENT]);
+        // Firing again after the confirmation changes nothing.
+        server.state.confirm_session_lock_after_deadline(epoch);
+        assert!(opcodes_for(&mut server, &mut client, lock).is_empty());
+    }
+
+    #[test]
+    fn a_second_lock_request_is_refused_while_the_first_is_pending() {
+        let (mut server, mut client, manager) = locked_server(&["LOCK-1"]);
+        let first = request_lock(&mut server, &mut client, manager);
+        let epoch = server.state.session_lock_epoch;
+        let second = request_lock(&mut server, &mut client, manager);
+        assert_eq!(
+            opcodes_for(&mut server, &mut client, second),
+            [FINISHED_EVENT],
+            "only one live client locks the session"
+        );
+        assert!(opcodes_for(&mut server, &mut client, first).is_empty());
+        assert_eq!(
+            server.state.session_lock_epoch, epoch,
+            "a refused request changes nothing"
+        );
+
+        // The first request is still the one its locked frame confirms.
+        server.state.note_locked_frame_presented("LOCK-1", epoch);
+        assert_eq!(opcodes_for(&mut server, &mut client, first), [LOCKED_EVENT]);
+    }
+
+    #[test]
+    fn unlocking_finishes_a_pending_lock() {
+        let (mut server, mut client, manager) = locked_server(&["LOCK-1"]);
+        let lock = request_lock(&mut server, &mut client, manager);
+        SessionLockHandler::unlock(&mut server.state);
+        assert!(!server.state.session_locked);
+        assert!(!server.state.session_lock_confirmation_pending());
+        assert_eq!(
+            opcodes_for(&mut server, &mut client, lock),
+            [FINISHED_EVENT],
+            "the session it wanted to lock is gone"
+        );
+    }
+
+    #[test]
+    fn a_live_locker_cannot_be_taken_over() {
+        let mut server = Server::new();
+        let output = test_output("LOCK-1");
+        output.create_global::<JwmWaylandState>(&server.display.handle());
+        server.state.outputs = vec![output];
+        let mut locker = RawClient::connect(&mut server, JwmClientState::default());
+        let compositor = locker.bind("wl_compositor", 6);
+        let wl_output = locker.bind("wl_output", 4);
+        let manager = locker.bind("ext_session_lock_manager_v1", 1);
+        let surface = locker.new_id();
+        locker.request(compositor, 0, &[surface]);
+        let lock = request_lock(&mut server, &mut locker, manager);
+        let lock_surface = locker.new_id();
+        locker.request(lock, GET_LOCK_SURFACE, &[lock_surface, surface, wl_output]);
+        server.roundtrip();
+        let epoch = server.state.session_lock_epoch;
+        server.state.note_locked_frame_presented("LOCK-1", epoch);
+        assert_eq!(opcodes_for(&mut server, &mut locker, lock), [LOCKED_EVENT]);
+
+        // Any other unsandboxed client can bind the manager.
+        let mut intruder = RawClient::connect(&mut server, JwmClientState::default());
+        let intruder_manager = intruder.bind("ext_session_lock_manager_v1", 1);
+        let takeover = request_lock(&mut server, &mut intruder, intruder_manager);
+        assert_eq!(
+            opcodes_for(&mut server, &mut intruder, takeover),
+            [FINISHED_EVENT],
+            "a live locker keeps the session"
+        );
+        assert!(server.state.session_locked);
+        assert_eq!(server.state.session_lock_epoch, epoch);
+        assert!(!server.state.session_lock_confirmation_pending());
+        assert!(
+            server.state.lock_surfaces.contains_key("LOCK-1"),
+            "the password prompt stays on screen"
+        );
+
+        // The refused lock never owned the session: its unlock is a protocol
+        // error, not an unlock.
+        intruder.request(takeover, UNLOCK_AND_DESTROY, &[]);
+        server.roundtrip();
+        assert!(server.state.session_locked);
+
+        locker.request(lock, UNLOCK_AND_DESTROY, &[]);
+        server.roundtrip();
+        assert!(!server.state.session_locked, "the owner still unlocks");
+    }
+
+    #[test]
+    fn an_abandoned_or_dead_locker_can_be_taken_over() {
+        let (mut server, mut first, manager) = locked_server(&["LOCK-1"]);
+        // Legal before `locked`: the request is given up, the session stays
+        // locked with no live locker.
+        let abandoned = request_lock(&mut server, &mut first, manager);
+        let abandoned_epoch = server.state.session_lock_epoch;
+        first.request(abandoned, LOCK_DESTROY, &[]);
+        server.roundtrip();
+
+        let takeover = request_lock(&mut server, &mut first, manager);
+        // The abandoned request's frames and deadline pay nothing.
+        server
+            .state
+            .note_locked_frame_presented("LOCK-1", abandoned_epoch);
+        server
+            .state
+            .confirm_session_lock_after_deadline(abandoned_epoch);
+        assert!(opcodes_for(&mut server, &mut first, takeover).is_empty());
+        let epoch = server.state.session_lock_epoch;
+        server.state.note_locked_frame_presented("LOCK-1", epoch);
+        assert_eq!(
+            opcodes_for(&mut server, &mut first, takeover),
+            [LOCKED_EVENT]
+        );
+
+        // The owner dies without unlocking (Smithay's `Defunct`): the next
+        // locker takes over and can unlock.
+        drop(first);
+        server.roundtrip();
+        assert!(server.state.session_locked);
+        let mut next = RawClient::connect(&mut server, JwmClientState::default());
+        let next_manager = next.bind("ext_session_lock_manager_v1", 1);
+        let next_lock = request_lock(&mut server, &mut next, next_manager);
+        let epoch = server.state.session_lock_epoch;
+        server.state.note_locked_frame_presented("LOCK-1", epoch);
+        assert_eq!(
+            opcodes_for(&mut server, &mut next, next_lock),
+            [LOCKED_EVENT]
+        );
+        next.request(next_lock, UNLOCK_AND_DESTROY, &[]);
+        server.roundtrip();
+        assert!(!server.state.session_locked);
+    }
+
+    #[test]
+    fn a_lock_abandoned_before_confirmation_keeps_the_session_locked() {
+        let (mut server, mut client, manager) = locked_server(&["LOCK-1"]);
+        let lock = request_lock(&mut server, &mut client, manager);
+        let epoch = server.state.session_lock_epoch;
+        // Legal before `locked`: the client gives the request up.
+        client.request(lock, LOCK_DESTROY, &[]);
+        server.roundtrip();
+
+        server.state.note_locked_frame_presented("LOCK-1", epoch);
+        assert!(!server.state.session_lock_confirmation_pending());
+        assert!(
+            server.state.session_locked,
+            "like a locker that dies after `locked`, only a new locker ends it"
+        );
+        server.state.confirm_session_lock_after_deadline(epoch);
+        assert!(opcodes_for(&mut server, &mut client, lock).is_empty());
+    }
+
+    #[test]
+    fn output_and_tag_changes_reach_output_and_workspace_managers() {
+        use crate::backend::wayland_udev::output_management::init_output_management;
+        use crate::backend::wayland_udev::workspace_protocol::init_workspace_protocol;
+        // zwlr_output_manager_v1.head/done, ext_workspace_manager_v1.done.
+        const HEAD_EVENT: u16 = 0;
+        const HEADS_DONE_EVENT: u16 = 1;
+        const WORKSPACES_DONE_EVENT: u16 = 2;
+
+        let mut server = Server::new();
+        let display = server.display.handle();
+        server.state.output_management = Some(init_output_management(&display));
+        server.state.workspace_state = Some(init_workspace_protocol(&display, 9));
+        server.state.outputs = vec![test_output("HEAD-1")];
+        let mut client = RawClient::connect(&mut server, JwmClientState::default());
+        let heads = client.bind("zwlr_output_manager_v1", 4);
+        let workspaces = client.bind("ext_workspace_manager_v1", 1);
+        server.roundtrip();
+        client.events();
+
+        // A hotplugged monitor: kanshi must hear about the new head.
+        server.state.outputs.push(test_output("HEAD-2"));
+        server.state.refresh_output_dependent_state();
+        let opcodes = opcodes_for(&mut server, &mut client, heads);
+        assert!(opcodes.contains(&HEAD_EVENT), "{opcodes:?}");
+        assert_eq!(opcodes.last(), Some(&HEADS_DONE_EVENT));
+
+        // A tag switch: waybar must see the new active workspace.
+        server
+            .state
+            .sync_workspace_monitors(&[(0, 0, 0, 64, 48, 0b10)]);
+        assert_eq!(
+            opcodes_for(&mut server, &mut client, workspaces).last(),
+            Some(&WORKSPACES_DONE_EVENT)
+        );
+    }
+
+    #[test]
+    fn workspace_groups_follow_a_rebuilt_output_and_its_late_wl_output() {
+        use crate::backend::wayland_udev::workspace_protocol::init_workspace_protocol;
+        // ext_workspace_manager_v1.workspace_group/done and
+        // ext_workspace_group_handle_v1.output_enter/removed.
+        const WORKSPACE_GROUP_EVENT: u16 = 0;
+        const WORKSPACES_DONE_EVENT: u16 = 2;
+        const OUTPUT_ENTER_EVENT: u16 = 1;
+        const GROUP_REMOVED_EVENT: u16 = 5;
+
+        let mut server = Server::new();
+        let display = server.display.handle();
+        // The configured count: a publish re-sends groups of any other count.
+        let tags_length = crate::config::CONFIG.load().tags_length();
+        server.state.workspace_state = Some(init_workspace_protocol(&display, tags_length));
+        // A KMS rebuild creates a fresh `Output` for the same connector.
+        let old_output = test_output("WS-1");
+        old_output.create_global::<JwmWaylandState>(&display);
+        let new_output = test_output("WS-1");
+        new_output.create_global::<JwmWaylandState>(&display);
+        server.state.outputs = vec![old_output];
+        let mut client = RawClient::connect(&mut server, JwmClientState::default());
+        let [old_global, new_global] = client.global_names("wl_output")[..] else {
+            panic!("one wl_output global per Output");
+        };
+        let old_wl_output = client.bind_global(old_global, 4);
+        let manager = client.bind("ext_workspace_manager_v1", 1);
+        server.roundtrip();
+        server
+            .state
+            .sync_workspace_monitors(&[(0, 0, 0, 64, 48, 0b1)]);
+        server.roundtrip();
+        let events = client.events();
+        let groups = |events: &[(u32, u16, Vec<u32>)]| -> Vec<u32> {
+            events
+                .iter()
+                .filter(|(sender, opcode, _)| {
+                    *sender == manager && *opcode == WORKSPACE_GROUP_EVENT
+                })
+                .map(|(_, _, args)| args[0])
+                .collect()
+        };
+        let entered = |events: &[(u32, u16, Vec<u32>)], group: u32| -> Vec<u32> {
+            events
+                .iter()
+                .filter(|(sender, opcode, _)| *sender == group && *opcode == OUTPUT_ENTER_EVENT)
+                .map(|(_, _, args)| args[0])
+                .collect()
+        };
+        let [old_group] = groups(&events)[..] else {
+            panic!("one group for the one output: {events:?}");
+        };
+        assert_eq!(entered(&events, old_group), [old_wl_output]);
+
+        // The rebuild keeps the layout, so policy publishes nothing new; the
+        // group must still move to the new output.
+        server.state.outputs = vec![new_output];
+        server.state.refresh_output_dependent_state();
+        server.roundtrip();
+        let events = client.events();
+        assert!(
+            events.contains(&(old_group, GROUP_REMOVED_EVENT, Vec::new())),
+            "the replaced output's group is retired: {events:?}"
+        );
+        let [new_group] = groups(&events)[..] else {
+            panic!("the new output gets a group: {events:?}");
+        };
+        assert!(entered(&events, new_group).is_empty());
+
+        // waybar binds the new wl_output only after the rebuild.
+        let new_wl_output = client.bind_global(new_global, 4);
+        server.roundtrip();
+        let events = client.events();
+        assert_eq!(entered(&events, new_group), [new_wl_output]);
+        assert_eq!(
+            events
+                .iter()
+                .rfind(|(sender, _, _)| *sender == manager)
+                .map(|(_, opcode, _)| *opcode),
+            Some(WORKSPACES_DONE_EVENT)
+        );
+    }
+
+    /// Regression: the refresh after a wlr-randr or kanshi Apply matched
+    /// policy's last published monitors to the outputs by origin, but KMS
+    /// has moved the outputs by then while policy has not published the new
+    /// layout. Swapped outputs were sent each other's active tags.
+    #[test]
+    fn an_output_refresh_keeps_workspace_groups_of_moved_outputs() {
+        use crate::backend::wayland_udev::workspace_protocol::init_workspace_protocol;
+
+        let mut server = Server::new();
+        let display = server.display.handle();
+        let tags_length = crate::config::CONFIG.load().tags_length();
+        server.state.workspace_state = Some(init_workspace_protocol(&display, tags_length));
+        let left = test_output("WS-1");
+        let right = test_output("WS-2");
+        right.change_current_state(None, None, None, Some((64, 0).into()));
+        server.state.outputs = vec![left.clone(), right.clone()];
+        let mut client = RawClient::connect(&mut server, JwmClientState::default());
+        client.bind("ext_workspace_manager_v1", 1);
+        server.roundtrip();
+        server
+            .state
+            .sync_workspace_monitors(&[(0, 0, 0, 64, 48, 0b1), (1, 64, 0, 64, 48, 0b10)]);
+        server.roundtrip();
+        client.events();
+
+        // The Apply swapped the outputs; the KMS sync refreshes before policy
+        // hears of the new layout.
+        left.change_current_state(None, None, None, Some((64, 0).into()));
+        right.change_current_state(None, None, None, Some((0, 0).into()));
+        server.state.refresh_output_dependent_state();
+        server.roundtrip();
+        let events = client.events();
+        assert!(
+            events.is_empty(),
+            "no group may take another output's tags: {events:?}"
+        );
+    }
+
+    /// Regression: a toplevel's capture sessions learned of the window's
+    /// close only on their next `create_frame`, so a paused portal or OBS
+    /// stream kept showing a frozen window as live.
+    #[test]
+    fn closing_a_captured_window_stops_its_idle_capture_session() {
+        use crate::backend::wayland_udev::image_copy_capture::init_image_copy_capture;
+        // ext_image_copy_capture_session_v1.done/stopped.
+        const SESSION_DONE: u16 = 4;
+        const SESSION_STOPPED: u16 = 5;
+        // xdg_toplevel.destroy.
+        const TOPLEVEL_DESTROY: u16 = 0;
+
+        let mut server = Server::new();
+        let display = server.display.handle();
+        server.state.image_capture_pending = Some(init_image_copy_capture(&display));
+        let mut client = RawClient::connect(&mut server, JwmClientState::default());
+        let (_, toplevel, window) = create_toplevel(&mut server, &mut client);
+        let list = client.bind("ext_foreign_toplevel_list_v1", 1);
+        let sources = client.bind("ext_foreign_toplevel_image_capture_source_manager_v1", 1);
+        let capture = client.bind("ext_image_copy_capture_manager_v1", 1);
+        server.roundtrip();
+        let handle = client
+            .events()
+            .into_iter()
+            .find(|(sender, opcode, _)| *sender == list && *opcode == 0)
+            .map(|(_, _, args)| args[0])
+            .expect("the list announces the window");
+        let source = client.new_id();
+        client.request(sources, 0, &[source, handle]);
+        let session = client.new_id();
+        client.request(capture, 0, &[session, source, 0]);
+        assert_eq!(
+            opcodes_for(&mut server, &mut client, session).last(),
+            Some(&SESSION_DONE)
+        );
+        assert!(server.state.toplevel_capture_sessions.contains_key(&window));
+
+        // No frame is in flight when the window closes.
+        client.request(toplevel, TOPLEVEL_DESTROY, &[]);
+        assert_eq!(
+            opcodes_for(&mut server, &mut client, session),
+            [SESSION_STOPPED]
+        );
+        assert!(server.state.toplevel_capture_sessions.is_empty());
+    }
+
+    #[test]
+    fn every_window_retirement_stops_its_capture_sessions() {
+        const SOURCE: &str = include_str!("state.rs");
+        let production = SOURCE.split_once("#[cfg(test)]").expect("test split").0;
+        // The helper is the only place a window's geometry, the liveness key
+        // of its capture sessions, is dropped.
+        assert_eq!(
+            production.matches("window_geometry.remove(").count(),
+            1,
+            "retire a window's geometry through `retire_window_geometry`"
+        );
+        for (name, call) in [
+            ("remove_wayland_window", "self.retire_window_geometry(win)"),
+            ("unmapped_window", "self.retire_window_geometry(win_id)"),
+            ("destroyed_window", "self.retire_window_geometry(win_id)"),
+        ] {
+            let body = production
+                .split_once(&format!("    fn {name}("))
+                .unwrap_or_else(|| panic!("{name} exists"))
+                .1
+                .split_once("\n    fn ")
+                .map_or("", |(body, _)| body);
+            assert!(
+                body.contains(call),
+                "{name} must stop the window's captures"
+            );
+        }
+    }
+
+    #[test]
+    fn workspaces_follow_the_configured_tag_count() {
+        const SOURCE: &str = include_str!("state.rs");
+        let production = SOURCE.split_once("#[cfg(test)]").expect("test split").0;
+        let call = production
+            .split_once("init_workspace_protocol(")
+            .expect("ext-workspace is initialised")
+            .1
+            .split_once(';')
+            .expect("the call ends")
+            .0;
+        assert!(
+            call.contains("cfg.tags_length()"),
+            "taskbars must see the configured tags, not a fixed nine: {call}"
+        );
+    }
+
+    /// Regression: the workspace count was fixed when the global was
+    /// created, so after a config reload that changed `tags_length`
+    /// taskbars kept offering the old number of workspaces (a click past
+    /// the new count activated a tag policy no longer has). The next
+    /// publish now re-sends each group with the configured count.
+    #[test]
+    fn workspace_publish_follows_a_reloaded_tag_count() {
+        use crate::backend::wayland_udev::workspace_protocol::init_workspace_protocol;
+        // ext_workspace_manager_v1.workspace_group/workspace/done and
+        // ext_workspace_group_handle_v1.removed.
+        const WORKSPACE_GROUP_EVENT: u16 = 0;
+        const WORKSPACE_EVENT: u16 = 1;
+        const WORKSPACES_DONE_EVENT: u16 = 2;
+        const GROUP_REMOVED_EVENT: u16 = 5;
+
+        let configured = crate::config::CONFIG.load().tags_length();
+        // The count the global was created with, before the reload.
+        let stale = if configured > 1 { configured - 1 } else { 2 };
+        let mut server = Server::new();
+        let display = server.display.handle();
+        server.state.workspace_state = Some(init_workspace_protocol(&display, stale));
+        server.state.outputs = vec![test_output("WS-1")];
+        let mut client = RawClient::connect(&mut server, JwmClientState::default());
+        let manager = client.bind("ext_workspace_manager_v1", 1);
+        server.roundtrip();
+        let announced = |events: &[(u32, u16, Vec<u32>)], opcode: u16| -> Vec<u32> {
+            events
+                .iter()
+                .filter(|(sender, event, _)| *sender == manager && *event == opcode)
+                .map(|(_, _, args)| args[0])
+                .collect()
+        };
+        let events = client.events();
+        let [old_group] = announced(&events, WORKSPACE_GROUP_EVENT)[..] else {
+            panic!("one group for the one output: {events:?}");
+        };
+        assert_eq!(announced(&events, WORKSPACE_EVENT).len(), stale);
+
+        server
+            .state
+            .sync_workspace_monitors(&[(0, 0, 0, 64, 48, 0b1)]);
+        server.roundtrip();
+        let events = client.events();
+        assert!(
+            events.contains(&(old_group, GROUP_REMOVED_EVENT, Vec::new())),
+            "the group with the old count is retired: {events:?}"
+        );
+        let [new_group] = announced(&events, WORKSPACE_GROUP_EVENT)[..] else {
+            panic!("the output gets one group with the new count: {events:?}");
+        };
+        assert_ne!(new_group, old_group);
+        assert_eq!(announced(&events, WORKSPACE_EVENT).len(), configured);
+        assert_eq!(
+            events
+                .iter()
+                .rfind(|(sender, _, _)| *sender == manager)
+                .map(|(_, opcode, _)| *opcode),
+            Some(WORKSPACES_DONE_EVENT)
+        );
+        assert_eq!(
+            server
+                .state
+                .workspace_state
+                .as_ref()
+                .map(|workspaces| workspaces.tags_length()),
+            Some(configured)
+        );
+
+        // The count now matches: republishing sends nothing.
+        server
+            .state
+            .sync_workspace_monitors(&[(0, 0, 0, 64, 48, 0b1)]);
+        server.roundtrip();
+        let events = client.events();
+        assert!(
+            events.iter().all(|(sender, _, _)| *sender != manager),
+            "{events:?}"
+        );
+    }
+
+    #[test]
+    fn lock_surfaces_follow_an_output_resize_while_locked() {
+        let mut server = Server::new();
+        let output = test_output("LOCK-1");
+        output.create_global::<JwmWaylandState>(&server.display.handle());
+        server.state.outputs = vec![output.clone()];
+        let mut client = RawClient::connect(&mut server, JwmClientState::default());
+        let compositor = client.bind("wl_compositor", 6);
+        let wl_output = client.bind("wl_output", 4);
+        let manager = client.bind("ext_session_lock_manager_v1", 1);
+        let surface = client.new_id();
+        client.request(compositor, 0, &[surface]);
+        let lock = request_lock(&mut server, &mut client, manager);
+        let lock_surface = client.new_id();
+        client.request(lock, GET_LOCK_SURFACE, &[lock_surface, surface, wl_output]);
+        server.roundtrip();
+
+        let configures = |server: &mut Server, client: &mut RawClient| -> Vec<(u32, u32)> {
+            server.roundtrip();
+            client
+                .events()
+                .into_iter()
+                .filter(|(sender, opcode, _)| {
+                    *sender == lock_surface && *opcode == LOCK_SURFACE_CONFIGURE_EVENT
+                })
+                .map(|(_, _, args)| (args[1], args[2]))
+                .collect()
+        };
+        assert_eq!(configures(&mut server, &mut client), [(64, 48)]);
+
+        // Unchanged layout: no redundant configure.
+        server.state.refresh_output_dependent_state();
+        assert!(configures(&mut server, &mut client).is_empty());
+
+        // A modeset and a scale change while locked.
+        output.change_current_state(
+            Some(smithay::output::Mode {
+                size: (256, 192).into(),
+                refresh: 60_000,
+            }),
+            None,
+            Some(smithay::output::Scale::Integer(2)),
+            None,
+        );
+        server.state.refresh_output_dependent_state();
+        assert_eq!(configures(&mut server, &mut client), [(128, 96)]);
     }
 }

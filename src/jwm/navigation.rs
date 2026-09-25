@@ -790,6 +790,13 @@ impl Jwm {
         };
         let cfg = CONFIG.load();
         let target_mask = ui & cfg.tagmask();
+        // No configured tag in the mask: `view_tag` would keep the tagset,
+        // so everything below (refocus, arrange, EWMH, a `tag/view` event
+        // naming tag 0) would run for nothing. IPC and gesture dispatch
+        // already reject such masks; this covers every internal caller.
+        if target_mask == 0 {
+            return Ok(());
+        }
 
         let sel_mon_key = match self.state.sel_mon {
             Some(k) => k,
@@ -875,6 +882,11 @@ impl Jwm {
         };
         let cfg = CONFIG.load();
         let mask = ui & cfg.tagmask();
+        // Toggling no tag changes no tagset; skip the refocus and arrange
+        // an empty mask would otherwise trigger (see `view`).
+        if mask == 0 {
+            return Ok(());
+        }
         let sel_mon_key = self.state.sel_mon.ok_or("No monitor selected")?;
 
         // 1. 状态变更
@@ -1056,6 +1068,7 @@ impl Jwm {
 mod tests {
     use super::{ClientKey, TagSwitchMotion, adjusted_client_factor, tag_switch_motion};
     use crate::Jwm;
+    use crate::config::CONFIG;
     use slotmap::SlotMap;
 
     #[test]
@@ -1074,6 +1087,65 @@ mod tests {
         // slide out is the scrim and the card. It lands at once instead.
         assert_eq!(tag_switch_motion(true, true, true, true), Instant);
         assert_eq!(tag_switch_motion(false, false, true, false), Instant);
+    }
+
+    /// A mask with no configured tag in it names nothing to show. Before
+    /// the guard, `view` still refocused the per-tag selection (restacking
+    /// it), arranged, rewrote the EWMH desktop and broadcast `tag/view` with
+    /// tag 0; `toggleview` refocused the top of the stack. Neither may touch
+    /// the tagset, the focus stack or the selection now.
+    #[test]
+    fn an_empty_view_mask_leaves_tags_focus_and_stack_untouched() {
+        use crate::backend::common_define::WindowId;
+        use crate::core::models::WMClient;
+        use crate::jwm::monitor::test_support::{DisplaySpyBackend, output};
+        use crate::jwm::types::WMArgEnum;
+
+        let mut backend = DisplaySpyBackend::new(vec![output(1, 0, 0, 1920, 1080)]);
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").expect("test jwm");
+        let monitor = jwm
+            .state
+            .sel_mon
+            .expect("the output became the selected monitor");
+        let tags = jwm.state.monitors[monitor].get_active_tags();
+        let mut keys = Vec::new();
+        for raw in [0x7a01_u64, 0x7a02] {
+            let mut client = WMClient::new(WindowId::from_raw(raw));
+            client.mon = Some(monitor);
+            client.state.tags = tags;
+            let key = jwm.insert_client(client);
+            jwm.attach_to_monitor(key, monitor);
+            keys.push(key);
+        }
+        // The second attach heads the stack; the per-tag selection is the
+        // other one, so any refocus shows up as a restack or a new selection.
+        let selected = keys[0];
+        jwm.state.monitors[monitor].set_selected_client_for_current_tag(Some(selected));
+        let stack_before = jwm.state.monitor_stack[monitor].clone();
+        assert_eq!(stack_before.first(), Some(&keys[1]));
+        let tagset_before = jwm.state.monitors[monitor].tag_set;
+        let sel_tags_before = jwm.state.monitors[monitor].sel_tags;
+        let untouched = |jwm: &Jwm| {
+            let monitor_state = &jwm.state.monitors[monitor];
+            assert_eq!(monitor_state.tag_set, tagset_before);
+            assert_eq!(monitor_state.sel_tags, sel_tags_before);
+            assert_eq!(jwm.state.monitor_stack[monitor], stack_before);
+            assert_eq!(
+                monitor_state.get_selected_client_for_current_tag(),
+                Some(selected)
+            );
+        };
+
+        // Bit 31 is past the default nine tags, so it masks to nothing.
+        assert!(CONFIG.load().tagmask() & (1 << 31) == 0);
+        for mask in [0, 1 << 31] {
+            jwm.view(&mut backend, &WMArgEnum::UInt(mask))
+                .expect("an empty view is a no-op");
+            untouched(&jwm);
+            jwm.toggleview(&mut backend, &WMArgEnum::UInt(mask))
+                .expect("an empty toggleview is a no-op");
+            untouched(&jwm);
+        }
     }
 
     #[test]

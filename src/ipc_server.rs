@@ -2,7 +2,7 @@ use log::{debug, info, warn};
 use nix::errno::Errno;
 use nix::sys::epoll::{Epoll, EpollCreateFlags, EpollEvent, EpollFlags};
 use nix::sys::eventfd::{EfdFlags, EventFd};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::ffi::OsStr;
 use std::fs;
 use std::io::{self, Read, Write};
@@ -28,6 +28,10 @@ const MAX_CLIENTS: usize = 128;
 const MAX_ACCEPTS_PER_POLL: usize = 32;
 const MAX_SUBSCRIPTION_TOPICS: usize = 64;
 const MAX_SUBSCRIPTION_TOPIC_LEN: usize = 128;
+/// The most dropped topics one subscribe acknowledgement names. A client
+/// that sent thousands of junk topics learns the count, not the whole list
+/// echoed back.
+const MAX_REPORTED_DROPPED_TOPICS: usize = 16;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RuntimeDirectorySource {
@@ -272,6 +276,16 @@ struct IpcClient {
     subscriptions: Vec<String>,
     read_closed: bool,
     writable_interest: bool,
+    readable_interest: bool,
+    /// Valid frames handed to the caller by `poll_clients`.
+    delivered_frames: u64,
+    /// Replies sent through `IpcServer::respond`, capped at `delivered_frames`.
+    answered_frames: u64,
+    /// Parse errors for frames that followed still-unanswered valid frames.
+    /// The protocol has no correlation id, so clients pair replies with
+    /// requests by order; each entry is held until `answered_frames` reaches
+    /// the recorded value, i.e. until every earlier frame has its reply.
+    deferred_errors: VecDeque<(u64, String)>,
 }
 
 impl IpcClient {
@@ -287,6 +301,10 @@ impl IpcClient {
             subscriptions: Vec::new(),
             read_closed: false,
             writable_interest: false,
+            readable_interest: true,
+            delivered_frames: 0,
+            answered_frames: 0,
+            deferred_errors: VecDeque::new(),
         })
     }
 
@@ -368,6 +386,7 @@ impl IpcClient {
         }
 
         if self.read_closed {
+            self.take_unterminated_final_frame(message_limit, &mut messages);
             let result = if messages.is_empty() {
                 Err(io::Error::new(
                     io::ErrorKind::UnexpectedEof,
@@ -413,6 +432,7 @@ impl IpcClient {
         let remaining_messages = message_limit - messages.len();
         messages.extend(self.take_complete_messages(remaining_messages));
         self.compact_input_buffer();
+        self.take_unterminated_final_frame(message_limit, &mut messages);
         let result = if messages.is_empty() && self.read_closed {
             Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
@@ -422,6 +442,26 @@ impl IpcClient {
             Ok(messages)
         };
         (result, bytes_read)
+    }
+
+    /// After end-of-stream the bytes behind the last newline can never be
+    /// completed, so they are the peer's last frame, like the final line of a
+    /// file without a trailing newline. Delivering it gets the peer a reply
+    /// (a parse error if it was truncated) instead of dropping it silently.
+    fn take_unterminated_final_frame(&mut self, limit: usize, messages: &mut Vec<String>) {
+        if !self.read_closed || messages.len() >= limit || self.buf_start == self.buf.len() {
+            return;
+        }
+        let tail = &self.buf[self.buf_start..];
+        // `take_complete_messages` stops early only at its limit, so with
+        // budget left every complete frame has already been consumed.
+        debug_assert!(!tail.contains(&b'\n'));
+        if !tail.trim_ascii().is_empty() {
+            messages.push(String::from_utf8_lossy(tail).into_owned());
+        }
+        self.buf_start = self.buf.len();
+        self.scan_pos = self.buf.len();
+        self.compact_input_buffer();
     }
 
     fn queue(&mut self, mut json: String) {
@@ -452,9 +492,49 @@ impl IpcClient {
         Ok(())
     }
 
+    /// Send the caller's reply to the oldest unanswered frame, followed by any
+    /// parse errors that were waiting for it.
     fn send_response(&mut self, resp: &IpcResponse) -> io::Result<()> {
+        self.answered_frames = (self.answered_frames + 1).min(self.delivered_frames);
         self.queue(serde_json::to_string(resp).unwrap_or_default());
+        self.queue_due_parse_errors();
         self.flush_out()
+    }
+
+    /// Reply to a frame that never reached the caller. The error goes out at
+    /// once only when no earlier frame still awaits its reply; otherwise it is
+    /// held so the reply stream stays in frame order.
+    fn reject_frame(&mut self, error: String) -> io::Result<()> {
+        if self.answered_frames == self.delivered_frames && self.deferred_errors.is_empty() {
+            self.queue(serde_json::to_string(&IpcResponse::err(error)).unwrap_or_default());
+            return self.flush_out();
+        }
+        self.deferred_errors
+            .push_back((self.delivered_frames, error));
+        Ok(())
+    }
+
+    fn queue_due_parse_errors(&mut self) {
+        while self
+            .deferred_errors
+            .front()
+            .is_some_and(|(due, _)| *due <= self.answered_frames)
+        {
+            if let Some((_, error)) = self.deferred_errors.pop_front() {
+                self.queue(serde_json::to_string(&IpcResponse::err(error)).unwrap_or_default());
+            }
+        }
+    }
+
+    /// `poll_clients` callers answer every returned frame before polling
+    /// again. Frames still unanswered at the next poll were abandoned, so the
+    /// parse errors queued behind them are released rather than held forever.
+    fn release_abandoned_replies(&mut self) {
+        if self.deferred_errors.is_empty() {
+            return;
+        }
+        self.answered_frames = self.delivered_frames;
+        self.queue_due_parse_errors();
     }
 
     fn send_event(&mut self, event: &IpcEvent) -> io::Result<()> {
@@ -473,7 +553,9 @@ impl IpcClient {
     }
 
     fn has_buffered_frame(&self) -> bool {
-        self.buf[self.scan_pos.max(self.buf_start)..].contains(&b'\n')
+        // After end-of-stream an unterminated tail is a final frame as well.
+        (self.read_closed && self.buf_start < self.buf.len())
+            || self.buf[self.scan_pos.max(self.buf_start)..].contains(&b'\n')
     }
 }
 
@@ -516,22 +598,103 @@ fn compact_output_buffer(buf: &mut Vec<u8>, start: &mut usize) {
     }
 }
 
-fn normalize_subscriptions(topics: Vec<String>) -> Vec<String> {
-    let mut normalized = Vec::with_capacity(topics.len().min(MAX_SUBSCRIPTION_TOPICS));
-    for topic in topics {
-        let topic = topic.trim();
-        if topic.is_empty()
-            || topic.len() > MAX_SUBSCRIPTION_TOPIC_LEN
-            || normalized.iter().any(|existing| existing == topic)
-        {
-            continue;
-        }
-        normalized.push(topic.to_string());
-        if normalized.len() == MAX_SUBSCRIPTION_TOPICS {
-            break;
+/// Why a requested subscription topic was not stored.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DroppedTopicReason {
+    /// Nothing but whitespace.
+    Empty,
+    /// Longer than the per-topic bound once trimmed.
+    TooLong,
+    /// The same topic (after trimming) was already stored.
+    Duplicate,
+    /// The client already holds the most topics one subscription may.
+    Limit,
+}
+
+impl DroppedTopicReason {
+    /// The wire name used in the subscribe acknowledgement.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Empty => "empty",
+            Self::TooLong => "too_long",
+            Self::Duplicate => "duplicate",
+            Self::Limit => "limit",
         }
     }
-    normalized
+}
+
+/// A requested topic the server did not store.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DroppedTopic {
+    /// The topic as requested, trimmed — and cut to the per-topic bound, so
+    /// an oversized one is never echoed back in full.
+    pub topic: String,
+    pub reason: DroppedTopicReason,
+}
+
+/// What a subscribe request actually registered.
+///
+/// The bounds on subscriptions are the server's own, so before this a client
+/// whose 65th topic (or 200-byte topic) was dropped had no way to learn it:
+/// the subscription simply never delivered those events.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SubscriptionOutcome {
+    /// The normalized topics stored for the client, in request order.
+    pub subscribed: Vec<String>,
+    /// The first [`MAX_REPORTED_DROPPED_TOPICS`] topics that were not stored.
+    pub dropped: Vec<DroppedTopic>,
+    /// How many requested topics were not stored in all.
+    pub dropped_total: usize,
+}
+
+impl SubscriptionOutcome {
+    fn drop_topic(&mut self, topic: &str, reason: DroppedTopicReason) {
+        self.dropped_total += 1;
+        if self.dropped.len() < MAX_REPORTED_DROPPED_TOPICS {
+            self.dropped.push(DroppedTopic {
+                topic: utf8_prefix(topic, MAX_SUBSCRIPTION_TOPIC_LEN).to_string(),
+                reason,
+            });
+        }
+    }
+}
+
+/// The longest prefix of `text` that fits in `max_bytes` without splitting a
+/// character.
+fn utf8_prefix(text: &str, max_bytes: usize) -> &str {
+    if text.len() <= max_bytes {
+        return text;
+    }
+    let mut end = max_bytes;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
+fn normalize_subscriptions(topics: Vec<String>) -> SubscriptionOutcome {
+    let mut outcome = SubscriptionOutcome {
+        subscribed: Vec::with_capacity(topics.len().min(MAX_SUBSCRIPTION_TOPICS)),
+        ..SubscriptionOutcome::default()
+    };
+    for topic in &topics {
+        let topic = topic.trim();
+        let reason = if topic.is_empty() {
+            DroppedTopicReason::Empty
+        } else if topic.len() > MAX_SUBSCRIPTION_TOPIC_LEN {
+            DroppedTopicReason::TooLong
+        } else if outcome.subscribed.iter().any(|existing| existing == topic) {
+            DroppedTopicReason::Duplicate
+        } else if outcome.subscribed.len() == MAX_SUBSCRIPTION_TOPICS {
+            DroppedTopicReason::Limit
+        } else {
+            outcome.subscribed.push(topic.to_string());
+            continue;
+        };
+        outcome.drop_topic(topic, reason);
+    }
+    outcome
 }
 
 // ---------------------------------------------------------------------------
@@ -577,11 +740,11 @@ impl IpcReadiness {
         self.epoll.0.try_clone()
     }
 
-    fn client_flags(writable: bool) -> EpollFlags {
-        let mut flags = EpollFlags::EPOLLIN
-            | EpollFlags::EPOLLRDHUP
-            | EpollFlags::EPOLLHUP
-            | EpollFlags::EPOLLERR;
+    fn client_flags(readable: bool, writable: bool) -> EpollFlags {
+        let mut flags = EpollFlags::EPOLLHUP | EpollFlags::EPOLLERR;
+        if readable {
+            flags |= EpollFlags::EPOLLIN | EpollFlags::EPOLLRDHUP;
+        }
         if writable {
             flags |= EpollFlags::EPOLLOUT;
         }
@@ -592,21 +755,28 @@ impl IpcReadiness {
         self.epoll
             .add(
                 &client.stream,
-                EpollEvent::new(Self::client_flags(false), id),
+                EpollEvent::new(Self::client_flags(true, false), id),
             )
             .map_err(errno_io)
     }
 
     fn sync_client_interest(&self, id: u64, client: &mut IpcClient) -> io::Result<()> {
         let writable = client.has_pending_output();
-        if writable == client.writable_interest {
+        // A peer that shut down its write side stays read-ready forever. While
+        // its last replies drain, only writability or a hangup can make
+        // progress, so listening for that end-of-file would spin the loop.
+        // Read interest returns once the output is gone, and the next tick
+        // then observes the end-of-file and retires the client.
+        let readable = !(client.read_closed && writable);
+        if writable == client.writable_interest && readable == client.readable_interest {
             return Ok(());
         }
-        let mut event = EpollEvent::new(Self::client_flags(writable), id);
+        let mut event = EpollEvent::new(Self::client_flags(readable, writable), id);
         self.epoll
             .modify(&client.stream, &mut event)
             .map_err(errno_io)?;
         client.writable_interest = writable;
+        client.readable_interest = readable;
         Ok(())
     }
 
@@ -778,6 +948,13 @@ impl IpcServer {
     }
 
     /// Read from all clients and return parsed messages.
+    ///
+    /// Callers answer every returned message with exactly one [`respond`]
+    /// call, in the returned order, before polling again: parse errors for
+    /// later frames of the same client wait for those replies so that each
+    /// client receives its replies in the order it sent its frames.
+    ///
+    /// [`respond`]: Self::respond
     pub fn poll_clients(&mut self) -> Vec<IncomingIpc> {
         self.drain_readiness();
         let mut incoming = Vec::new();
@@ -809,6 +986,7 @@ impl IpcServer {
                 continue;
             };
 
+            client.release_abandoned_replies();
             // 先尝试把上次因 WouldBlock 滞留的出站字节冲刷出去。
             if client.flush_out().is_err() {
                 dead.push(id);
@@ -828,35 +1006,38 @@ impl IpcServer {
                     messages_seen += lines.len();
                     debug_assert!(messages_seen <= MAX_TOTAL_MESSAGES_PER_POLL);
                     for line in lines {
-                        match serde_json::from_str::<IpcMessage>(&line) {
-                            Ok(IpcMessage::Command(cmd)) => {
-                                incoming.push(IncomingIpc::Command {
-                                    client_id: id,
-                                    name: cmd.command,
-                                    args: cmd.args,
-                                });
-                            }
-                            Ok(IpcMessage::Query(q)) => {
-                                incoming.push(IncomingIpc::Query {
-                                    client_id: id,
-                                    name: q.query,
-                                    args: q.args,
-                                });
-                            }
-                            Ok(IpcMessage::Subscribe(sub)) => {
-                                incoming.push(IncomingIpc::Subscribe {
-                                    client_id: id,
-                                    topics: sub.subscribe,
-                                });
-                            }
+                        let message = match serde_json::from_str::<IpcMessage>(&line) {
+                            Ok(IpcMessage::Command(cmd)) => IncomingIpc::Command {
+                                client_id: id,
+                                name: cmd.command,
+                                args: cmd.args,
+                            },
+                            Ok(IpcMessage::Query(q)) => IncomingIpc::Query {
+                                client_id: id,
+                                name: q.query,
+                                args: q.args,
+                            },
+                            Ok(IpcMessage::Subscribe(sub)) => IncomingIpc::Subscribe {
+                                client_id: id,
+                                topics: sub.subscribe,
+                            },
                             Err(e) => {
                                 warn!("[ipc] bad message from client {id}: {e}");
-                                let _ = client
-                                    .send_response(&IpcResponse::err(format!("parse error: {e}")));
+                                let _ = client.reject_frame(format!("parse error: {e}"));
+                                continue;
                             }
-                        }
+                        };
+                        client.delivered_frames += 1;
+                        incoming.push(message);
                     }
                 }
+                // End-of-stream only ends the requests. Replies still queued
+                // for the peer are kept until they drain, a write fails, or
+                // the peer hangs up; only then is the client retired.
+                Err(error)
+                    if error.kind() == io::ErrorKind::UnexpectedEof
+                        && client.read_closed
+                        && client.has_pending_output() => {}
                 Err(_) => dead.push(id),
             }
 
@@ -903,11 +1084,15 @@ impl IpcServer {
         }
     }
 
-    /// Register subscriptions for a client.
-    pub fn subscribe(&mut self, client_id: u64, topics: Vec<String>) {
+    /// Register subscriptions for a client, replacing any it held, and say
+    /// what was stored and what was dropped (and why) so the caller can tell
+    /// the client.
+    pub fn subscribe(&mut self, client_id: u64, topics: Vec<String>) -> SubscriptionOutcome {
+        let outcome = normalize_subscriptions(topics);
         if let Some(client) = self.clients.get_mut(&client_id) {
-            client.subscriptions = normalize_subscriptions(topics);
+            client.subscriptions = outcome.subscribed.clone();
         }
+        outcome
     }
 
     /// Broadcast an event to all subscribed clients.
@@ -1593,7 +1778,8 @@ mod tests {
         ];
         topics.extend((0..MAX_SUBSCRIPTION_TOPICS + 10).map(|index| format!("topic-{index}")));
 
-        let normalized = normalize_subscriptions(topics);
+        let outcome = normalize_subscriptions(topics);
+        let normalized = outcome.subscribed;
 
         assert_eq!(normalized.len(), MAX_SUBSCRIPTION_TOPICS);
         assert_eq!(normalized[0], "window");
@@ -1610,17 +1796,81 @@ mod tests {
     }
 
     #[test]
+    fn dropped_subscription_topics_are_reported_with_their_reason() {
+        let long = format!("{}é", "x".repeat(MAX_SUBSCRIPTION_TOPIC_LEN));
+        let mut topics = vec![
+            " window ".to_string(),
+            "window".to_string(),
+            "   ".to_string(),
+            long.clone(),
+        ];
+        topics.extend((0..MAX_SUBSCRIPTION_TOPICS + 2).map(|index| format!("topic-{index}")));
+
+        let outcome = normalize_subscriptions(topics);
+
+        assert_eq!(outcome.subscribed.len(), MAX_SUBSCRIPTION_TOPICS);
+        let reasons: Vec<(&str, DroppedTopicReason)> = outcome
+            .dropped
+            .iter()
+            .map(|dropped| (dropped.topic.as_str(), dropped.reason))
+            .collect();
+        let limit_first = format!("topic-{}", MAX_SUBSCRIPTION_TOPICS - 1);
+        let limit_second = format!("topic-{MAX_SUBSCRIPTION_TOPICS}");
+        let limit_third = format!("topic-{}", MAX_SUBSCRIPTION_TOPICS + 1);
+        assert_eq!(
+            reasons,
+            vec![
+                ("window", DroppedTopicReason::Duplicate),
+                ("", DroppedTopicReason::Empty),
+                (
+                    "x".repeat(MAX_SUBSCRIPTION_TOPIC_LEN).as_str(),
+                    DroppedTopicReason::TooLong
+                ),
+                (limit_first.as_str(), DroppedTopicReason::Limit),
+                (limit_second.as_str(), DroppedTopicReason::Limit),
+                (limit_third.as_str(), DroppedTopicReason::Limit),
+            ]
+        );
+        assert_eq!(outcome.dropped_total, 6);
+        assert_eq!(DroppedTopicReason::TooLong.as_str(), "too_long");
+        // The echo of an oversized topic is cut on a character boundary.
+        assert!(outcome.dropped[2].topic.len() <= MAX_SUBSCRIPTION_TOPIC_LEN);
+
+        // A flood of junk is counted in full but named only in part.
+        let flood = normalize_subscriptions(vec![String::new(); 1000]);
+        assert!(flood.subscribed.is_empty());
+        assert_eq!(flood.dropped.len(), MAX_REPORTED_DROPPED_TOPICS);
+        assert_eq!(flood.dropped_total, 1000);
+    }
+
+    #[test]
+    fn subscribe_stores_what_it_reports() {
+        let mut server = make_test_server();
+        let _peer = attach_test_client(&mut server, 1);
+
+        let outcome = server.subscribe(1, vec![" window ".into(), "tag".into(), "window".into()]);
+
+        assert_eq!(
+            outcome.subscribed,
+            vec!["window".to_string(), "tag".to_string()]
+        );
+        assert_eq!(outcome.dropped_total, 1);
+        let client = server.clients.get(&1).expect("the test client");
+        assert_eq!(client.subscriptions, outcome.subscribed);
+    }
+
+    #[test]
     fn subscription_prefix_matching_respects_topic_boundaries() {
         let (stream, _peer) = UnixStream::pair().unwrap();
         let mut client = IpcClient::new(stream).unwrap();
-        client.subscriptions = normalize_subscriptions(vec![" window ".into()]);
+        client.subscriptions = normalize_subscriptions(vec![" window ".into()]).subscribed;
 
         assert!(client.is_subscribed("window"));
         assert!(client.is_subscribed("window/new"));
         assert!(!client.is_subscribed("windowing/new"));
         assert!(!client.is_subscribed("monitor/new"));
 
-        client.subscriptions = normalize_subscriptions(vec!["*".into()]);
+        client.subscriptions = normalize_subscriptions(vec!["*".into()]).subscribed;
         assert!(client.is_subscribed("monitor/new"));
     }
 
@@ -1768,5 +2018,166 @@ mod tests {
         // Polling should detect the disconnect
         let _ = server.poll_clients();
         assert_eq!(server.clients.len(), 0);
+    }
+
+    fn client_id_of(message: &IncomingIpc) -> u64 {
+        match message {
+            IncomingIpc::Command { client_id, .. }
+            | IncomingIpc::Query { client_id, .. }
+            | IncomingIpc::Subscribe { client_id, .. } => *client_id,
+        }
+    }
+
+    fn read_reply_lines(peer: &UnixStream, count: usize) -> Vec<String> {
+        peer.set_read_timeout(Some(std::time::Duration::from_secs(1)))
+            .unwrap();
+        let mut reader = std::io::BufReader::new(peer);
+        (0..count)
+            .map(|_| {
+                let mut line = String::new();
+                std::io::BufRead::read_line(&mut reader, &mut line).unwrap();
+                line
+            })
+            .collect()
+    }
+
+    #[test]
+    fn parse_errors_are_answered_in_frame_order_after_earlier_replies() {
+        let mut server = make_test_server();
+        let mut peer = attach_test_client(&mut server, 4);
+        peer.write_all(
+            b"{\"query\":\"get_version\"}\n{bad json\n{\"command\":\"view\",\"args\":2}\n",
+        )
+        .unwrap();
+
+        let incoming = server.poll_clients();
+        assert_eq!(incoming.len(), 2);
+        for (index, message) in incoming.iter().enumerate() {
+            let reply = IpcResponse::ok(Some(serde_json::json!({ "reply": index })));
+            server.respond(client_id_of(message), &reply);
+        }
+
+        // Replies carry no correlation id, so a pipelining client can only
+        // pair them with its frames by order.
+        let lines = read_reply_lines(&peer, 3);
+        assert!(lines[0].contains("\"reply\":0"), "{lines:?}");
+        assert!(
+            lines[1].contains("\"success\":false") && lines[1].contains("parse error"),
+            "{lines:?}"
+        );
+        assert!(lines[2].contains("\"reply\":1"), "{lines:?}");
+    }
+
+    #[test]
+    fn parse_errors_behind_abandoned_frames_are_released_by_the_next_poll() {
+        let mut server = make_test_server();
+        let mut peer = attach_test_client(&mut server, 3);
+        peer.write_all(b"{\"query\":\"get_version\"}\n{bad json\n")
+            .unwrap();
+
+        assert_eq!(server.poll_clients().len(), 1);
+        // The caller never answers the query. Its successor's parse error must
+        // not wait for a reply that will never come.
+        assert!(server.poll_clients().is_empty());
+
+        let lines = read_reply_lines(&peer, 1);
+        assert!(lines[0].contains("parse error"), "{lines:?}");
+    }
+
+    #[test]
+    fn unterminated_final_frame_is_answered_at_end_of_stream() {
+        let mut server = make_test_server();
+        let mut valid_peer = attach_test_client(&mut server, 6);
+        let mut truncated_peer = attach_test_client(&mut server, 7);
+        valid_peer
+            .write_all(b"{\"query\":\"get_version\"}")
+            .unwrap();
+        valid_peer.shutdown(std::net::Shutdown::Write).unwrap();
+        truncated_peer.write_all(b"{\"query\":\"get_ver").unwrap();
+        truncated_peer.shutdown(std::net::Shutdown::Write).unwrap();
+
+        let incoming = server.poll_clients();
+        assert!(
+            matches!(
+                incoming.as_slice(),
+                [IncomingIpc::Query { client_id: 6, name, .. }] if name == "get_version"
+            ),
+            "the frame without a trailing newline must still be dispatched"
+        );
+        server.respond(6, &IpcResponse::ok(None));
+
+        let valid_reply = read_reply_lines(&valid_peer, 1);
+        assert!(
+            valid_reply[0].contains("\"success\":true"),
+            "{valid_reply:?}"
+        );
+        let truncated_reply = read_reply_lines(&truncated_peer, 1);
+        assert!(
+            truncated_reply[0].contains("parse error"),
+            "{truncated_reply:?}"
+        );
+
+        assert!(server.poll_clients().is_empty());
+        assert!(!server.clients.contains_key(&6));
+        assert!(!server.clients.contains_key(&7));
+    }
+
+    #[test]
+    fn half_closed_client_receives_its_whole_reply_before_retirement() {
+        let mut server = make_test_server();
+        let readiness = server.duplicate_readiness_fd().unwrap().unwrap();
+        let mut peer = attach_test_client(&mut server, 5);
+        constrain_send_buffer(&server.clients[&5].stream);
+        peer.write_all(b"{\"query\":\"get_tree\"}\n").unwrap();
+        peer.shutdown(std::net::Shutdown::Write).unwrap();
+
+        let incoming = server.poll_clients();
+        assert!(matches!(
+            incoming.as_slice(),
+            [IncomingIpc::Query { client_id: 5, name, .. }] if name == "get_tree"
+        ));
+        let reply = IpcResponse::ok(Some(serde_json::json!({ "blob": "x".repeat(256 * 1024) })));
+        let mut expected = serde_json::to_vec(&reply).unwrap();
+        expected.push(b'\n');
+        server.respond(5, &reply);
+        assert!(
+            server.clients[&5].has_pending_output(),
+            "the constrained socket must leave part of the reply queued"
+        );
+
+        // The peer's end-of-file stays level-ready. It must neither discard
+        // the queued reply nor keep waking the event loop.
+        assert!(server.poll_clients().is_empty());
+        assert!(
+            server.clients.contains_key(&5),
+            "queued reply bytes must survive the read-side end-of-file"
+        );
+        assert!(
+            !fd_is_readable(&readiness),
+            "a draining half-closed client must wait for writability only"
+        );
+
+        peer.set_nonblocking(true).unwrap();
+        let mut delivered = Vec::with_capacity(expected.len());
+        let mut chunk = [0; 4096];
+        for _ in 0..expected.len() / 1024 + 64 {
+            match peer.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(read) => delivered.extend_from_slice(&chunk[..read]),
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+                Err(error) => panic!("half-closed peer read failed: {error}"),
+            }
+            server.poll_clients();
+            if delivered.len() == expected.len() && !server.clients.contains_key(&5) {
+                break;
+            }
+        }
+
+        assert_eq!(delivered.len(), expected.len());
+        assert!(delivered == expected, "the reply stream was corrupted");
+        assert!(
+            !server.clients.contains_key(&5),
+            "a half-closed client is retired once its replies have drained"
+        );
     }
 }

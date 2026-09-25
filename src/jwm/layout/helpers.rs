@@ -151,6 +151,9 @@ impl Jwm {
     /// drag-induced floats are reclaimed. Floats that come from a rule, a window
     /// type (dialog/dock/desktop), an explicit toggle, PiP, fullscreen or a fixed
     /// size window are left alone — those float by design, not by accident.
+    /// Maximized windows (either axis) are deliberate floats too: maximize owns
+    /// their geometry until they are unmaximized, even when a drag or a
+    /// promotion from the tiling is what made them float.
     ///
     /// Returns the number of clients reclaimed.
     pub(crate) fn reclaim_drag_floating(&mut self, mon_key: MonitorKey) -> usize {
@@ -174,6 +177,7 @@ impl Jwm {
                                     && !c.state.is_dock
                                     && !c.state.is_sticky
                                     && !c.state.is_swallowed
+                                    && !c.state.maximized_axes().any()
                             })
                             .unwrap_or(false)
                             && self.is_client_visible_on_monitor(key, mon_key)

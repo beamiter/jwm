@@ -54,6 +54,36 @@ fn transformed_overlays_require_full_redraw(
     overview_active || overview_closing || expose_active || has_expose_entries
 }
 
+/// Whether damage on a tracked window outside the scene can change the frame.
+///
+/// Damage on a scene window has already marked the frame dirty and recorded
+/// that window's rect for the incremental repair, so an XDamage wakeup only
+/// adds something for a window the scene does not draw — most often a
+/// hidden-tag client that jwm parks offscreen but keeps mapped. It has no
+/// dirty rect, so letting its wakeup through would repaint and swap the whole
+/// output for pixels nobody can see, at the client's damage rate. Only passes
+/// that sample window textures from outside the scene can show that damage:
+/// the overview and exposé, the Dock's live preview, and the system UI (the
+/// tags grid draws live cells).
+fn off_scene_damage_is_visible(
+    transformed_overlay_active: bool,
+    dock_preview_active: bool,
+    system_ui_active: bool,
+) -> bool {
+    transformed_overlay_active || dock_preview_active || system_ui_active
+}
+
+/// Whether a dirty window that the TFP budget skipped needs its own frame.
+///
+/// The skipped window's rect is repainted from its old texture this frame and
+/// its damage was already subtracted, so a client that goes idle sends nothing
+/// that would ever refresh it. Audio-synced windows are exempt: their skips
+/// are the pacing the audio clock asks for, and re-arming for them would
+/// spin the loop between their presentation times.
+fn tfp_budget_skip_needs_followup_frame(dirty: bool, bound: bool, audio_synced: bool) -> bool {
+    dirty && bound && !audio_synced
+}
+
 fn minimized_dock_requires_composition(
     has_targeted_cached_visual: bool,
     has_preview: bool,
@@ -5302,8 +5332,21 @@ impl<C: CompositorConnection> Compositor<C> {
         // XDamage is a reason to enter the frame, but not a request to redraw
         // every pixel. Visible dirty windows populated the precise region
         // above; keeping the wakeup separate from `explicit_render` lets the
-        // buffer-age repair path remain incremental.
-        has_dirty |= damage_wakeup;
+        // buffer-age repair path remain incremental. Damage from a window
+        // outside the scene leaves no region, so it may only wake a frame
+        // whose passes can show it; the window keeps `dirty` and is refreshed
+        // when it re-enters the scene.
+        has_dirty |= damage_wakeup
+            && off_scene_damage_is_visible(
+                transformed_overlays_require_full_redraw(
+                    self.overview_active,
+                    self.overview_closing,
+                    self.expose_active,
+                    !self.expose_entries.is_empty(),
+                ),
+                self.dock_preview.is_some(),
+                self.system_ui.is_some(),
+            );
         let force_render = self.screenshot_requests.has_pending()
             || self.screenshot_freeze_pending
             || self.debug_hud
@@ -5524,6 +5567,7 @@ impl<C: CompositorConnection> Compositor<C> {
         }
 
         let mut tfp_budget_exhausted = false;
+        let mut tfp_budget_deferred = false;
         if needs_native_texture_sync && !pixmaps_native_synced {
             if let Err(error) = self.graphics.sync_x11() {
                 log::warn!(
@@ -5541,6 +5585,13 @@ impl<C: CompositorConnection> Compositor<C> {
             // focused client can exhaust the budget every frame and starve the
             // bar indefinitely, leaving its previous title on screen.
             if tfp_budget_exhausted && !latency_critical {
+                tfp_budget_deferred |= self.windows.get(&win).is_some_and(|wt| {
+                    tfp_budget_skip_needs_followup_frame(
+                        wt.dirty,
+                        wt.binding.is_some(),
+                        wt.audio_sync_target.is_some(),
+                    )
+                });
                 continue;
             }
             if let Some(wt) = self.windows.get_mut(&win) {
@@ -5588,6 +5639,14 @@ impl<C: CompositorConnection> Compositor<C> {
                     }
                 }
             }
+        }
+        // A window the budget skipped keeps `dirty` but is drawn from its old
+        // texture, and nothing else is going to ask for the frame that
+        // refreshes it once its client goes idle. A damage wakeup rather than
+        // `needs_render` keeps that frame incremental: the scan at the top of
+        // the next frame finds the window still dirty and repairs only it.
+        if tfp_budget_deferred {
+            self.damage_render_pending = true;
         }
 
         // --- Occlusion culling ---
@@ -8279,10 +8338,11 @@ mod tests {
         blur_sampling_margin, direct_presentation_owner_changed,
         dirty_below_affects_backdrop, dirty_below_requires_full_blur_redraw,
         edge_effects_require_composition, intersect_gl_scissors,
-        is_opaque_occluder, minimized_dock_requires_composition, presented_scene_copy_plan,
+        is_opaque_occluder, minimized_dock_requires_composition, off_scene_damage_is_visible,
+        presented_scene_copy_plan,
         rect_covers_output, resolve_and_draw_each, screenshot_freeze_change_needed,
         screenshot_freeze_requires_composition, tags_grid_label_key,
-        tfp_refresh_is_latency_critical, toast_input_shape,
+        tfp_budget_skip_needs_followup_frame, tfp_refresh_is_latency_critical, toast_input_shape,
         transformed_overlays_require_full_redraw, transition_capture_plan, wallpaper_blend_plan,
         window_prefers_direct_presentation,
     };
@@ -8689,6 +8749,73 @@ mod tests {
         assert!(transformed_overlays_require_full_redraw(
             false, false, false, true,
         ));
+    }
+
+    /// The whitespace-free body of `render_frame`, so a needle cannot match a
+    /// mention elsewhere in the file (these tests included).
+    fn compact_render_frame() -> String {
+        let source = include_str!("render.rs");
+        let start = source
+            .find("pub(crate) fn render_frame(")
+            .expect("render_frame");
+        let len = source[start..]
+            .find("\n    }\n")
+            .expect("render_frame closes");
+        source[start..start + len]
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect()
+    }
+
+    #[test]
+    fn damage_outside_the_scene_wakes_only_frames_that_can_show_it() {
+        // A hidden-tag client parked offscreen with nothing sampling it: its
+        // damage has no dirty rect, so letting it through would repaint and
+        // swap the whole output for pixels nobody sees.
+        assert!(!off_scene_damage_is_visible(false, false, false));
+        // The passes that draw windows from outside the scene still see it.
+        assert!(off_scene_damage_is_visible(true, false, false));
+        assert!(off_scene_damage_is_visible(false, true, false));
+        assert!(off_scene_damage_is_visible(false, false, true));
+
+        let frame = compact_render_frame();
+        assert!(
+            frame.contains("has_dirty|=damage_wakeup&&off_scene_damage_is_visible("),
+            "the unchanged-frame gate must ask whether off-scene damage is visible"
+        );
+        assert!(
+            !frame.contains(&format!("has_dirty|={};", "damage_wakeup")),
+            "an unconditional damage wakeup turns hidden-tag damage into full redraws"
+        );
+    }
+
+    #[test]
+    fn a_dirty_window_skipped_by_the_tfp_budget_rearms_a_frame() {
+        assert!(tfp_budget_skip_needs_followup_frame(true, true, false));
+        // Clean, or nothing to refresh: skipping it loses nothing.
+        assert!(!tfp_budget_skip_needs_followup_frame(false, true, false));
+        assert!(!tfp_budget_skip_needs_followup_frame(true, false, false));
+        // Audio-synced windows skip on purpose; re-arming would spin.
+        assert!(!tfp_budget_skip_needs_followup_frame(true, true, true));
+
+        let frame = compact_render_frame();
+        let skip = frame
+            .find("iftfp_budget_exhausted&&!latency_critical{")
+            .expect("the budget skip");
+        let skip_end = skip
+            + frame[skip..]
+                .find("continue;")
+                .expect("the budget skip continues");
+        let skip_body = &frame[skip..skip_end];
+        assert!(
+            skip_body.contains("tfp_budget_deferred|=")
+                && skip_body.contains("tfp_budget_skip_needs_followup_frame("),
+            "a skipped window must record whether it was left stale"
+        );
+        let rearm = frame
+            .find("iftfp_budget_deferred{self.damage_render_pending=true;}")
+            .expect("a stale skipped window must re-arm the next frame");
+        assert!(rearm > skip_end, "re-arm after the refresh loop");
     }
 
     #[test]

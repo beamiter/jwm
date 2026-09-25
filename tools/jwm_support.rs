@@ -49,14 +49,15 @@ const OS_RELEASE_KEYS: &[&str] = &[
                   environment variables are deliberately excluded."
 )]
 struct Cli {
-    /// Backend whose configuration and startup prerequisites should be checked.
-    #[arg(
-        long,
-        env = "JWM_BACKEND",
-        default_value = "wayland-udev",
-        value_parser = parse_backend
-    )]
-    backend: BackendChoice,
+    /// Backend whose configuration and startup prerequisites should be checked
+    /// (default: wayland-udev when compiled in, otherwise the first compiled
+    /// backend).
+    // No clap `default_value`: a fixed string would name wayland-udev even in
+    // slim `--no-default-features` builds that lack it, and the bundle would
+    // then diagnose a backend this build cannot run. An absent flag and env
+    // var resolve through `BackendChoice::default()` in `Cli::backend`.
+    #[arg(long, env = "JWM_BACKEND", value_parser = parse_backend)]
+    backend: Option<BackendChoice>,
 
     /// Do not connect to a running JWM instance.
     #[arg(long)]
@@ -190,6 +191,14 @@ struct PrivacySnapshot {
     omitted_categories: &'static [&'static str],
 }
 
+impl Cli {
+    /// Backend requested through `--backend`/`JWM_BACKEND`, or the build's
+    /// compiled-in default when neither is given.
+    fn backend(&self) -> BackendChoice {
+        self.backend.unwrap_or_default()
+    }
+}
+
 fn parse_backend(value: &str) -> Result<BackendChoice, String> {
     value.parse()
 }
@@ -207,7 +216,8 @@ fn main() -> ExitCode {
 }
 
 fn run(cli: &Cli) -> Result<bool, Box<dyn std::error::Error>> {
-    let doctor_report = doctor::diagnose(cli.backend);
+    let backend = cli.backend();
+    let doctor_report = doctor::diagnose(backend);
     let doctor_failed = doctor_report.status == DoctorStatus::Error;
     let doctor = SupportDoctorReport::from(doctor_report);
     let live = (!cli.offline).then(collect_live_snapshot);
@@ -223,7 +233,7 @@ fn run(cli: &Cli) -> Result<bool, Box<dyn std::error::Error>> {
             name: "jwm-support",
             version: env!("CARGO_PKG_VERSION"),
         },
-        requested_backend: cli.backend.as_str().to_string(),
+        requested_backend: backend.as_str().to_string(),
         system: collect_system_snapshot(),
         session_environment: collect_session_environment(),
         doctor,
@@ -568,8 +578,48 @@ fn unique_suffix() -> u128 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::{CommandFactory, FromArgMatches};
     use jwm::doctor::DoctorCheck;
     use std::os::unix::fs::PermissionsExt;
+
+    /// Parse `args` with `JWM_BACKEND` unbound, so the ambient environment
+    /// cannot decide what a bare invocation resolves to.
+    fn parse_without_backend_env(args: &[&str]) -> Cli {
+        let matches = Cli::command()
+            .mut_arg("backend", |arg| arg.env(None))
+            .try_get_matches_from(args)
+            .expect("the support CLI accepts these arguments");
+        Cli::from_arg_matches(&matches).expect("matches convert back into Cli")
+    }
+
+    #[test]
+    fn cli_backend_has_no_hardcoded_clap_default() {
+        // A fixed clap default bypasses `BackendChoice::default()` and names
+        // wayland-udev even in builds that do not compile it in, so a slim
+        // build's bundle would diagnose a backend it cannot run.
+        let command = Cli::command();
+        let backend = command
+            .get_arguments()
+            .find(|arg| arg.get_id() == "backend")
+            .expect("the support CLI has a backend argument");
+        assert!(backend.get_default_values().is_empty());
+    }
+
+    #[test]
+    fn bare_cli_resolves_backend_through_compiled_in_default() {
+        let cli = parse_without_backend_env(&["jwm-support", "--offline"]);
+        assert_eq!(cli.backend, None);
+        assert_eq!(cli.backend(), BackendChoice::default());
+        assert!(cli.backend().is_compiled());
+        #[cfg(feature = "backend-wayland-udev")]
+        assert_eq!(cli.backend(), BackendChoice::WaylandUdev);
+    }
+
+    #[test]
+    fn explicit_backend_flag_overrides_compiled_in_default() {
+        let cli = parse_without_backend_env(&["jwm-support", "--backend", "xcb"]);
+        assert_eq!(cli.backend(), BackendChoice::Xcb);
+    }
 
     #[test]
     fn os_release_parser_keeps_only_the_documented_allowlist() {

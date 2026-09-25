@@ -175,6 +175,12 @@ current one, and applies the selection through the same in-memory
 `set_config` / `apply_config_changes` path Wallpaper uses, then surgically
 persists `appearance.ui_theme` to the live TOML file (comments and other
 keys are preserved; a missing `[appearance]` section or key is inserted).
+The `[appearance]` header is found by name, so a trailing comment, spaces
+inside the brackets or a quoted `["appearance"]` are edited in place. The
+edited text is checked before it is written: if the file uses a shape the
+line edit cannot handle safely — an inline `appearance = { ... }` table or
+dotted `appearance.*` keys — the theme still applies for the session, the
+file is left untouched, and a `Theme: failed to persist` error is logged.
 IPC `set_config` for the same key stays session-only — only the Hub Theme
 page writes the file. There are no live previews and no motion/blur rows on
 that page.

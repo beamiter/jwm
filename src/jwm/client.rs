@@ -2,7 +2,8 @@
 
 use crate::Jwm;
 use crate::backend::api::{
-    Backend, Geometry, MinimizedRestoreState, NetWmState, StackMode, WindowChanges, WindowType,
+    Backend, Geometry, MaximizeAxes, MinimizedRestoreState, NetWmState, PropertyOps, StackMode,
+    WindowChanges, WindowType,
 };
 use crate::backend::common_define::{EventMaskBits, Mods, WindowId};
 use crate::config::{BackendFamily, CONFIG, get_backend_family};
@@ -23,6 +24,17 @@ use crate::jwm::window_state::{
     x11_geometry_fully_left_of_desktop,
 };
 use log::{debug, error, info, warn};
+
+/// One pre-map maximize atom, read best-effort: manage must never abort
+/// because this optional adoption could not be read.
+fn initial_maximize_axis(property_ops: &dyn PropertyOps, win: WindowId, state: NetWmState) -> bool {
+    property_ops
+        .has_net_wm_state_flag(win, state)
+        .unwrap_or_else(|error| {
+            warn!("[manage] could not read initial {state:?} for {win:?}: {error}");
+            false
+        })
+}
 
 impl Jwm {
     pub(crate) fn manage(
@@ -100,6 +112,15 @@ impl Jwm {
         let initial_ewmh_below = backend
             .property_ops()
             .has_net_wm_state_flag(win, NetWmState::Below)?;
+        // Pre-map maximize atoms are adopted through the shared maximize
+        // transaction once the window type (and so floating) is known. The
+        // read is best-effort: an unreadable atom counts as not maximized and
+        // never makes the window unmanageable.
+        let initial_ewmh_max_vert =
+            initial_maximize_axis(backend.property_ops(), win, NetWmState::MaximizedVert);
+        let initial_ewmh_max_horz =
+            initial_maximize_axis(backend.property_ops(), win, NetWmState::MaximizedHorz);
+        let initial_maximize = MaximizeAxes::new(initial_ewmh_max_vert, initial_ewmh_max_horz);
         let publicly_minimized =
             wm_state_or_ewmh_is_minimized(initial_wm_state, initial_ewmh_hidden);
         client.state.is_hidden = publicly_minimized;
@@ -177,7 +198,13 @@ impl Jwm {
         }
 
         let client_key = self.insert_client(client);
-        self.manage_regular_client(backend, client_key, minimized_restore, interrupted_restore)?;
+        self.manage_regular_client(
+            backend,
+            client_key,
+            minimized_restore,
+            interrupted_restore,
+            initial_maximize,
+        )?;
 
         // A pending scratchpad is an exact process identity, not a global
         // "next window" flag. Status bars returned above without consuming
@@ -614,6 +641,7 @@ impl Jwm {
         client_key: ClientKey,
         minimized_restore: Option<MinimizedRestoreState>,
         interrupted_restore: bool,
+        initial_maximize: MaximizeAxes,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let initially_minimized = self
             .state
@@ -648,6 +676,29 @@ impl Jwm {
         self.float_if_fixed_size(client_key);
         if let Some(state) = minimized_restore {
             self.apply_minimized_restore_after_window_type(client_key, state);
+        }
+        if initial_maximize.any() {
+            // Adopt pre-set maximize atoms now that floating, fullscreen, PiP
+            // and the minimized placement are final. A window the policy
+            // refuses (tiled, fixed-size) gets its atoms cleared by the
+            // transaction's republish. The adopted geometry is where the
+            // window starts, not a move, so it must not animate. A restart
+            // snapshot's floating rect is the exact pre-maximize rect of a
+            // floating window; a promoted window is snapshotted tiled (its
+            // floating rect is the pre-promotion slot), so adoption refuses
+            // or re-promotes it like a visible one.
+            let restore_hint = minimized_restore
+                .and_then(|state| state.floating_rect)
+                .map(|rect| Rect::new(rect.x, rect.y, rect.w, rect.h));
+            let suppress_flag = self.suppress_layout_animation;
+            self.suppress_layout_animation = true;
+            let adopted =
+                self.adopt_client_maximized(backend, client_key, initial_maximize, restore_hint);
+            self.suppress_layout_animation = suppress_flag;
+            if let Err(error) = adopted {
+                let win = self.state.clients.get(client_key).map(|client| client.win);
+                warn!("[manage] could not adopt initial maximize state for {win:?}: {error}");
+            }
         }
         if minimized_restore.is_some()
             && let Some(win) = self
@@ -697,6 +748,11 @@ impl Jwm {
         self.set_initial_allowed_actions(backend, client_key);
         self.read_sync_counter(backend, client_key);
 
+        // The first time the window enters the monitor list. Floating it
+        // above (Dialog type, fixed size, fullscreen, a restore snapshot, an
+        // adopted maximize) only flipped `is_floating`: the regroup leaves
+        // an unattached client alone, so this attach lists it once, in its
+        // group.
         self.attach_new_client(client_key);
         self.attachstack(client_key);
 
@@ -855,7 +911,11 @@ impl Jwm {
             } else {
                 false
             };
-            if !client.state.is_fullscreen {
+            // A snapshot taken in fullscreen carries the resting state in
+            // `old_state`; re-entering fullscreen from the atom recorded the
+            // snapshot's fullscreen `is_floating` there instead. A PiP
+            // snapshot that became fullscreen keeps what leaving PiP restored.
+            if !client.state.is_fullscreen || state.fullscreen_restore_rect.is_some() {
                 client.state.old_state = state.old_state;
             }
             if restore_pip {
@@ -1803,6 +1863,8 @@ impl Jwm {
         if let Some(mon_key) = mon_key {
             self.clear_pertag_references(client_key, mon_key);
         }
+        // `detach` re-points the anchors of promoted windows that re-tile in
+        // front of this one, so they keep their slot once it is gone.
         self.detach(client_key);
         self.detachstack(client_key);
         if let Some(win) = win {
@@ -2146,6 +2208,7 @@ mod unmanage_minimized_tests {
         Above(bool),
         Below(bool),
         WmState(i64),
+        Maximized(MaximizeAxes),
     }
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2174,6 +2237,13 @@ mod unmanage_minimized_tests {
         below: AtomicBool,
         wm_state: AtomicI64,
         dock_type: AtomicBool,
+        /// Report `_NET_WM_WINDOW_TYPE_DIALOG` (a floating type) instead of Normal.
+        dialog_type: AtomicBool,
+        /// Pre-map `_NET_WM_STATE_MAXIMIZED_VERT` / `_HORZ` atoms.
+        maximized_vert: AtomicBool,
+        maximized_horz: AtomicBool,
+        /// WM_NORMAL_HINTS; `None` means the property is absent.
+        normal_hints: Mutex<Option<NormalHints>>,
         fullscreen: AtomicBool,
         motif_borderless: AtomicBool,
         gtk_client_frame: AtomicBool,
@@ -2203,6 +2273,8 @@ mod unmanage_minimized_tests {
         fn get_window_types(&self, _win: WindowId) -> Vec<WindowType> {
             if self.dock_type.load(Ordering::Relaxed) {
                 vec![WindowType::Dock]
+            } else if self.dialog_type.load(Ordering::Relaxed) {
+                vec![WindowType::Dialog]
             } else {
                 vec![WindowType::Normal]
             }
@@ -2246,7 +2318,7 @@ mod unmanage_minimized_tests {
         }
 
         fn fetch_normal_hints(&self, _win: WindowId) -> Result<Option<NormalHints>, BackendError> {
-            Ok(None)
+            Ok(*self.normal_hints.lock().expect("normal hints lock"))
         }
 
         fn set_window_strut_top(
@@ -2400,8 +2472,24 @@ mod unmanage_minimized_tests {
                 NetWmState::Hidden => self.hidden.load(Ordering::Relaxed),
                 NetWmState::Above => self.above.load(Ordering::Relaxed),
                 NetWmState::Below => self.below.load(Ordering::Relaxed),
+                NetWmState::MaximizedVert => self.maximized_vert.load(Ordering::Relaxed),
+                NetWmState::MaximizedHorz => self.maximized_horz.load(Ordering::Relaxed),
                 _ => false,
             })
+        }
+
+        fn set_maximized_state(
+            &self,
+            _win: WindowId,
+            axes: MaximizeAxes,
+        ) -> Result<(), BackendError> {
+            self.maximized_vert.store(axes.vert, Ordering::Relaxed);
+            self.maximized_horz.store(axes.horz, Ordering::Relaxed);
+            self.writes
+                .lock()
+                .expect("protocol writes lock")
+                .push(ProtocolWrite::Maximized(axes));
+            Ok(())
         }
 
         fn get_window_pid(&self, _win: WindowId) -> Option<u32> {
@@ -4361,6 +4449,104 @@ mod unmanage_minimized_tests {
         );
     }
 
+    /// Regression: a fullscreen window rests in its `old_state`, and a
+    /// minimized promoted window is snapshotted resting tiled there. Re-entering
+    /// fullscreen from the atom on manage recorded the snapshot's (fullscreen)
+    /// `is_floating` as the resting state and the snapshot's `old_state` was
+    /// skipped, so the adopted maximize was applied as a floating one and the
+    /// window came back floating instead of to its tile.
+    #[test]
+    fn fullscreen_snapshot_adoption_keeps_the_tiled_resting_state() {
+        let mut backend = ClientSpyBackend::new();
+        backend.property_ops.wm_state.store(
+            i64::from(crate::jwm::types::ICONIC_STATE),
+            Ordering::Relaxed,
+        );
+        backend
+            .property_ops
+            .fullscreen
+            .store(true, Ordering::Relaxed);
+        backend
+            .property_ops
+            .maximized_vert
+            .store(true, Ordering::Relaxed);
+        backend
+            .property_ops
+            .maximized_horz
+            .store(true, Ordering::Relaxed);
+        // A named window is layout-managed; an anonymous one floats.
+        set_class(&backend, "FullscreenProbe", "fullscreen-probe");
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let monitor = jwm.state.monitor_order[0];
+        let monitor_num = jwm.state.monitors[monitor].num;
+        let active_tags = jwm.state.monitors[monitor].get_active_tags();
+        let mon = &jwm.state.monitors[monitor];
+        let fullscreen = MinimizedRestoreRect {
+            x: mon.geometry.m_x,
+            y: mon.geometry.m_y,
+            w: mon.geometry.m_w,
+            h: mon.geometry.m_h,
+        };
+        let before_fullscreen = MinimizedRestoreRect {
+            x: mon.geometry.w_x,
+            y: mon.geometry.w_y,
+            w: mon.geometry.w_w / 2,
+            h: mon.geometry.w_h,
+        };
+        // As `minimized_restore_snapshot` writes a promoted fullscreen
+        // window: fullscreen's `is_floating`, the tiled resting state.
+        let snapshot = MinimizedRestoreState {
+            tags: active_tags,
+            monitor_num,
+            visible_rect: fullscreen,
+            is_floating: true,
+            is_drag_floating: false,
+            floating_rect: Some(before_fullscreen),
+            is_pip: false,
+            pip_restore_sticky: false,
+            old_state: false,
+            fullscreen_restore_rect: Some(before_fullscreen),
+            minimized_order: 9_000_000_200,
+        };
+        *backend
+            .property_ops
+            .minimized_restore
+            .lock()
+            .expect("minimized restore lock") = Some(snapshot);
+
+        let desktop_left = jwm.desktop_left_edge();
+        let window = WindowId::from_raw(0x8310);
+        let geometry = Geometry {
+            x: desktop_left.saturating_sub(fullscreen.w.saturating_mul(2)),
+            y: fullscreen.y,
+            w: fullscreen.w as u32,
+            h: fullscreen.h as u32,
+            border: 0,
+        };
+        jwm.manage(&mut backend, window, &geometry).unwrap();
+
+        let client_key = jwm.wintoclient(window).expect("adopted fullscreen client");
+        let client = &jwm.state.clients[client_key];
+        assert!(client.state.is_hidden);
+        assert!(client.state.is_fullscreen);
+        assert!(!client.state.old_state, "the window rests tiled");
+        // A tiled window under fullscreen has no floating slot to maximize
+        // into: the adopted maximize is refused and its atoms cleared.
+        assert!(!client.state.maximized_axes().any());
+        assert!(!client.state.maximize_restore_tiled);
+        assert!(!backend.property_ops.maximized_vert.load(Ordering::Relaxed));
+        assert!(!backend.property_ops.maximized_horz.load(Ordering::Relaxed));
+
+        assert!(
+            jwm.set_client_minimized(&mut backend, client_key, false)
+                .unwrap()
+        );
+        jwm.setfullscreen(&mut backend, client_key, false).unwrap();
+        let client = &jwm.state.clients[client_key];
+        assert!(!client.state.is_fullscreen);
+        assert!(!client.state.is_floating, "it returns to its tile");
+    }
+
     #[test]
     fn normal_state_still_parked_with_a_snapshot_recovers_interrupted_restore() {
         let mut backend = ClientSpyBackend::new();
@@ -5248,7 +5434,7 @@ mod unmanage_minimized_tests {
         client.geometry.h = 480;
         let client_key = jwm.insert_client(client);
 
-        jwm.manage_regular_client(&mut backend, client_key, None, false)
+        jwm.manage_regular_client(&mut backend, client_key, None, false, MaximizeAxes::NONE)
             .unwrap();
 
         assert!(jwm.state.clients[client_key].state.is_hidden);
@@ -5376,6 +5562,262 @@ mod unmanage_minimized_tests {
             both.6.contains(&ProtocolWrite::Below(false)),
             "conflicting Above+Below was not normalized on the client"
         );
+    }
+
+    /// What manage made of one window, for the maximize adoption tests.
+    struct ManagedMaximize {
+        live: Rect,
+        border_w: i32,
+        axes: MaximizeAxes,
+        restore: Option<Rect>,
+        is_floating: bool,
+        /// `maximize_restore_tiled`: admission pulled it out of the layout.
+        promoted: bool,
+        work: Rect,
+        writes: Vec<ProtocolWrite>,
+        /// How often the window's monitor lists it.
+        listed: usize,
+    }
+
+    /// Manage window `raw` in a fresh session. `preset` publishes both
+    /// maximize atoms before the map, `dialog` reports a Dialog type (which
+    /// floats) and `fixed` advertises min == max WM_NORMAL_HINTS.
+    fn manage_with_initial_maximize(
+        raw: u64,
+        preset: bool,
+        dialog: bool,
+        fixed: bool,
+    ) -> ManagedMaximize {
+        manage_with_initial_maximize_in(raw, preset, dialog, fixed, false)
+    }
+
+    /// [`manage_with_initial_maximize`] with the selected monitor showing
+    /// the FLOAT layout when `float_layout`.
+    fn manage_with_initial_maximize_in(
+        raw: u64,
+        preset: bool,
+        dialog: bool,
+        fixed: bool,
+        float_layout: bool,
+    ) -> ManagedMaximize {
+        let mut backend = ClientSpyBackend::new();
+        backend
+            .property_ops
+            .maximized_vert
+            .store(preset, Ordering::Relaxed);
+        backend
+            .property_ops
+            .maximized_horz
+            .store(preset, Ordering::Relaxed);
+        backend
+            .property_ops
+            .dialog_type
+            .store(dialog, Ordering::Relaxed);
+        if fixed {
+            *backend
+                .property_ops
+                .normal_hints
+                .lock()
+                .expect("normal hints lock") = Some(NormalHints {
+                min_w: 400,
+                min_h: 300,
+                max_w: 400,
+                max_h: 300,
+                ..Default::default()
+            });
+        }
+        // A window with no class, instance or title floats automatically;
+        // name it so a Normal window really is layout-managed.
+        set_class(&backend, "MaximizeProbe", "maximize-probe");
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        if float_layout {
+            let monitor = jwm.state.sel_mon.expect("a selected monitor");
+            jwm.state.monitors[monitor].lt =
+                std::rc::Rc::new(crate::core::layout::LayoutEnum::FLOAT);
+        }
+        // `manage_window` unwraps: adoption must never fail the manage.
+        let key = manage_window(&mut jwm, &mut backend, raw);
+        let client = &jwm.state.clients[key];
+        let monitor = client.mon.expect("managed on a monitor");
+        ManagedMaximize {
+            live: Rect::new(
+                client.geometry.x,
+                client.geometry.y,
+                client.geometry.w,
+                client.geometry.h,
+            ),
+            border_w: client.geometry.border_w,
+            axes: client.state.maximized_axes(),
+            restore: client.geometry.maximize_restore_rect,
+            is_floating: client.state.is_floating,
+            promoted: client.state.maximize_restore_tiled,
+            work: jwm.maximize_work_area(monitor).expect("monitor work area"),
+            writes: backend
+                .property_ops
+                .writes
+                .lock()
+                .expect("protocol writes lock")
+                .clone(),
+            listed: jwm.state.monitor_clients[monitor]
+                .iter()
+                .filter(|&&listed| listed == key)
+                .count(),
+        }
+    }
+
+    #[test]
+    fn manage_adopts_pre_mapped_maximize_for_floating_clients_and_clears_it_for_tiled() {
+        use crate::core::maximize::{initial_restore_rect, maximize_target};
+
+        // A floating (Dialog) window adopts the pair: it fills the work area
+        // and restores to where manage would have placed it.
+        let dialog_baseline = manage_with_initial_maximize(0x9a00, false, true, false);
+        let dialog = manage_with_initial_maximize(0x9a01, true, true, false);
+        assert!(dialog_baseline.is_floating);
+        assert!(dialog.is_floating);
+        // Regression: the Dialog type floats the window before manage
+        // attaches it, and the regrouping listed it a second time.
+        assert_eq!((dialog_baseline.listed, dialog.listed), (1, 1));
+        assert_eq!(dialog.axes, MaximizeAxes::BOTH);
+        let placed = dialog_baseline.live;
+        let expected_restore = initial_restore_rect(placed, dialog.work, dialog.border_w);
+        assert_eq!(
+            expected_restore, placed,
+            "a 640x480 placement is not full-size, so it is the restore rect"
+        );
+        assert_eq!(dialog.restore, Some(expected_restore));
+        assert_eq!(
+            dialog.live,
+            maximize_target(
+                expected_restore,
+                dialog.work,
+                MaximizeAxes::BOTH,
+                dialog.border_w
+            )
+        );
+        assert!(
+            dialog
+                .writes
+                .contains(&ProtocolWrite::Maximized(MaximizeAxes::BOTH))
+        );
+
+        // A layout-managed window refuses a client-set maximize: the atoms
+        // are cleared and the window tiles exactly as without them.
+        let tiled_baseline = manage_with_initial_maximize(0x9a02, false, false, false);
+        let tiled = manage_with_initial_maximize(0x9a03, true, false, false);
+        assert!(!tiled_baseline.is_floating);
+        assert!(!tiled.is_floating);
+        assert_eq!(tiled.axes, MaximizeAxes::NONE);
+        assert_eq!(tiled.restore, None);
+        assert!(
+            tiled
+                .writes
+                .contains(&ProtocolWrite::Maximized(MaximizeAxes::NONE))
+        );
+        assert_eq!(tiled.live, tiled_baseline.live);
+    }
+
+    /// Regression: under the FLOAT layout admission promotes a tiled window
+    /// that maps maximized (a restored browser session, a JWM restart), and
+    /// the promotion's regrouping pushed the key before manage attached it.
+    /// The attach then listed the window a second time, so focus cycling
+    /// visited it twice and its close left a stale key in the monitor list.
+    #[test]
+    fn manage_lists_a_window_promoted_by_initial_maximize_under_float_layout_once() {
+        let promoted = manage_with_initial_maximize_in(0x9a07, true, false, false, true);
+        assert_eq!(promoted.axes, MaximizeAxes::BOTH, "FLOAT admits the pair");
+        assert!(promoted.is_floating, "admission promoted the window");
+        assert!(promoted.promoted, "the window remembers it left the layout");
+        assert_eq!(promoted.listed, 1, "the monitor lists the window once");
+        assert_eq!(
+            promoted.live,
+            maximize_target_for(&promoted),
+            "the adopted maximize fills the work area"
+        );
+
+        // The other pre-attach float paths list the window once too.
+        for (raw, dialog, fixed) in [(0x9a08, true, false), (0x9a09, false, true)] {
+            let managed = manage_with_initial_maximize_in(raw, true, dialog, fixed, true);
+            assert!(managed.is_floating);
+            assert_eq!(managed.listed, 1, "{raw:#x} is listed once");
+        }
+    }
+
+    /// The live rect a BOTH maximize from `managed`'s restore rect fills.
+    fn maximize_target_for(managed: &ManagedMaximize) -> Rect {
+        crate::core::maximize::maximize_target(
+            managed
+                .restore
+                .expect("a maximized window keeps a restore rect"),
+            managed.work,
+            MaximizeAxes::BOTH,
+            managed.border_w,
+        )
+    }
+
+    #[test]
+    fn manage_clears_initial_maximized_atoms_on_fixed_size_clients() {
+        let fixed = manage_with_initial_maximize(0x9a04, true, false, true);
+        assert!(fixed.is_floating, "a fixed-size client floats");
+        assert_eq!(
+            fixed.listed, 1,
+            "floating a fixed-size client lists it once"
+        );
+        assert_eq!(fixed.axes, MaximizeAxes::NONE);
+        assert_eq!(fixed.restore, None);
+        assert!(
+            fixed
+                .writes
+                .contains(&ProtocolWrite::Maximized(MaximizeAxes::NONE))
+        );
+        assert!(
+            !fixed
+                .writes
+                .contains(&ProtocolWrite::Maximized(MaximizeAxes::BOTH))
+        );
+    }
+
+    /// Regression: a window that maps with `_NET_WM_STATE_FULLSCREEN` is
+    /// floated by `setfullscreen` inside `updatewindowtype`, before manage
+    /// attaches it. The regroup used to push the unattached key there, and
+    /// the attach then listed the window a second time.
+    #[test]
+    fn manage_lists_a_window_mapped_fullscreen_once() {
+        let mut backend = ClientSpyBackend::new();
+        backend
+            .property_ops
+            .fullscreen
+            .store(true, Ordering::Relaxed);
+        set_class(&backend, "FullscreenProbe", "fullscreen-probe");
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+
+        let key = manage_window(&mut jwm, &mut backend, 0x9a0a);
+        let client = &jwm.state.clients[key];
+        assert!(client.state.is_fullscreen);
+        assert!(client.state.is_floating, "fullscreen floats the window");
+        let monitor = client.mon.expect("managed on a monitor");
+        let listed = jwm.state.monitor_clients[monitor]
+            .iter()
+            .filter(|&&listed| listed == key)
+            .count();
+        assert_eq!(listed, 1, "the monitor lists the window once");
+    }
+
+    #[test]
+    fn manage_without_maximized_atoms_writes_no_maximize_state() {
+        for (raw, dialog) in [(0x9a05, false), (0x9a06, true)] {
+            let managed = manage_with_initial_maximize(raw, false, dialog, false);
+            assert_eq!(managed.axes, MaximizeAxes::NONE);
+            assert_eq!(managed.restore, None);
+            assert!(
+                !managed
+                    .writes
+                    .iter()
+                    .any(|write| matches!(write, ProtocolWrite::Maximized(_))),
+                "manage published maximize state nobody asked for: {:?}",
+                managed.writes
+            );
+        }
     }
 
     fn active_tags(jwm: &Jwm, monitor: MonitorKey) -> u32 {

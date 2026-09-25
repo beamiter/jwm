@@ -38,6 +38,10 @@ pub struct ExposeTickResult {
 /// Column count of the expose grid for `n` entries on a `screen_w`×`screen_h`
 /// output. Shared by [`build_expose_entries`] and keyboard navigation so the
 /// hit geometry and the arrow-key walk can never disagree on the grid shape.
+///
+/// Never more columns than entries: cells fill from the left, so a spare
+/// column would leave an empty strip on the right (one window on a 16:9
+/// output would sit in the left half).
 pub(crate) fn expose_grid_cols(n: usize, screen_w: f32, screen_h: f32) -> u32 {
     let screen_w = if screen_w.is_finite() {
         screen_w.max(1.0)
@@ -50,7 +54,8 @@ pub(crate) fn expose_grid_cols(n: usize, screen_w: f32, screen_h: f32) -> u32 {
         1.0
     };
     let screen_aspect = screen_w / screen_h.max(1.0);
-    (((n as f32 * screen_aspect).sqrt()).ceil() as u32).max(1)
+    let max_cols = u32::try_from(n).unwrap_or(u32::MAX).max(1);
+    (((n as f32 * screen_aspect).sqrt()).ceil() as u32).clamp(1, max_cols)
 }
 
 /// Move the keyboard selection one step through the expose grid laid out by
@@ -558,6 +563,43 @@ mod tests {
                 assert_eq!(entries[0].target_x, entries[down].target_x);
             }
         }
+    }
+
+    #[test]
+    fn expose_grid_never_has_more_columns_than_windows() {
+        // Wide outputs used to ask for spare columns: one window on 16:9 got
+        // two, and three windows across two side-by-side 1080p monitors got
+        // four, leaving an empty strip on the right.
+        for (n, screen_w, screen_h) in [
+            (0usize, 1920.0f32, 1080.0f32),
+            (1, 1920.0, 1080.0),
+            (2, 3840.0, 1080.0),
+            (3, 3840.0, 1080.0),
+            (4, 5760.0, 1080.0),
+        ] {
+            let cols = expose_grid_cols(n, screen_w, screen_h);
+            assert_eq!(cols, (n as u32).max(1), "{n} on {screen_w}x{screen_h}");
+        }
+        // Enough windows still get the aspect-driven shape.
+        assert_eq!(expose_grid_cols(5, 1920.0, 1080.0), 3);
+    }
+
+    #[test]
+    fn expose_single_window_is_centred_on_the_output() {
+        let windows = vec![(1u32, 0, 0, 1920, 1080, String::new())];
+        let entries = build_expose_entries(1920.0, 1080.0, 20.0, windows);
+        let entry = &entries[0];
+        let centre_x = entry.target_x + entry.target_w * 0.5;
+        assert!((centre_x - 960.0).abs() < 1.0, "centre x {centre_x}");
+
+        // A full row spans the output symmetrically on a wide screen too.
+        let windows: Vec<(u32, i32, i32, u32, u32, String)> = (0..3)
+            .map(|i| (i, 0, 0, 1920, 1080, String::new()))
+            .collect();
+        let entries = build_expose_entries(3840.0, 1080.0, 20.0, windows);
+        let left = entries[0].target_x;
+        let right = entries[2].target_x + entries[2].target_w;
+        assert!((left - (3840.0 - right)).abs() < 1.0, "{left} .. {right}");
     }
 
     #[test]

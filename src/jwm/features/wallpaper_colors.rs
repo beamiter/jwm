@@ -209,6 +209,31 @@ pub fn start_extraction(
     super::connectivity::BackgroundJob::spawn(move || palette_from_file(&path))
 }
 
+/// Put an extraction just started for `wallpaper` into the theme slot.
+///
+/// `job` is `None` when the OS refused the worker a thread. Such a handle
+/// never yields a value, so keeping it would report `pending` for the rest of
+/// the session, and claiming the wallpaper would make every later config
+/// apply skip it as already themed. Both are left empty instead — which also
+/// drops any extraction still running for the previous picture, whose colours
+/// no longer belong on screen — so the next config apply tries again.
+fn claim_extraction(
+    features: &mut super::FeatureStates,
+    wallpaper: String,
+    job: Option<super::connectivity::BackgroundJob<Option<Palette>>>,
+) {
+    match job {
+        Some(job) => {
+            features.themed_wallpaper = wallpaper;
+            features.wallpaper_theme = Some(job);
+        }
+        None => {
+            features.themed_wallpaper.clear();
+            features.wallpaper_theme = None;
+        }
+    }
+}
+
 /// Weighted colour sums for one quantised bucket.
 #[derive(Debug, Default, Clone, Copy)]
 struct Bucket {
@@ -383,11 +408,21 @@ impl crate::jwm::Jwm {
         }
         let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/"));
         let path = super::wallpaper::expand_home(&wallpaper, &home);
-        // Claimed before the work starts, so the config apply this extraction
-        // ends in does not start another one for the same picture.
-        self.features.themed_wallpaper = wallpaper;
-        let job = start_extraction(path);
-        self.features.wallpaper_theme = Some(self.track_background_job(job));
+        self.adopt_extraction(wallpaper, start_extraction(path));
+    }
+
+    /// Put an extraction just started for `wallpaper` into the theme slot.
+    ///
+    /// Claimed before the work finishes, so the config apply this extraction
+    /// ends in does not start another one for the same picture. A worker the
+    /// OS refused is not claimed at all; see `claim_extraction`.
+    fn adopt_extraction(
+        &mut self,
+        wallpaper: String,
+        job: super::connectivity::BackgroundJob<Option<Palette>>,
+    ) {
+        let job = job.started().then(|| self.track_background_job(job));
+        claim_extraction(&mut self.features, wallpaper, job);
     }
 
     /// Adopt a finished extraction. Called from the frame tick.
@@ -464,6 +499,8 @@ fn current_colors() -> CurrentColors {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::jwm::features::connectivity::BackgroundJob;
+    use crate::jwm::features::monitor_lock::test_support::LockSpyBackend;
 
     /// Build an RGBA buffer from (count, [r, g, b]) runs.
     fn pixels(runs: &[(usize, [u8; 3])]) -> Vec<u8> {
@@ -597,6 +634,67 @@ mod tests {
                 "{run:?} gave lightness {lightness}"
             );
         }
+    }
+
+    #[test]
+    fn a_started_extraction_claims_its_wallpaper() {
+        let mut features = crate::jwm::features::FeatureStates::default();
+        let job = crate::jwm::features::connectivity::BackgroundJob::spawn(|| None);
+
+        claim_extraction(&mut features, "~/a.png".to_string(), Some(job));
+
+        assert_eq!(features.themed_wallpaper, "~/a.png");
+        assert!(features.wallpaper_theme.is_some());
+    }
+
+    #[test]
+    fn a_refused_extraction_leaves_the_wallpaper_unclaimed_for_a_retry() {
+        // Regression: a worker the OS refused a thread for was stored and its
+        // wallpaper claimed, so `get_wallpaper_colors` said `pending` forever
+        // and no later config apply retried that wallpaper.
+        let mut features = crate::jwm::features::FeatureStates::default();
+        features.themed_wallpaper = "~/before.png".to_string();
+        features.wallpaper_theme = Some(crate::jwm::features::connectivity::BackgroundJob::spawn(
+            || None,
+        ));
+
+        claim_extraction(&mut features, "~/a.png".to_string(), None);
+
+        // Nothing reads as pending, and the `themed_wallpaper == wallpaper`
+        // guard in `refresh_wallpaper_theme` lets the same wallpaper through
+        // on the next config apply.
+        assert!(features.wallpaper_theme.is_none());
+        assert!(features.themed_wallpaper.is_empty());
+    }
+
+    #[test]
+    fn a_refused_worker_never_reaches_the_theme_slot() {
+        // Through the same `Jwm` path `refresh_wallpaper_theme` hands every
+        // extraction to, with a handle whose thread the OS refused.
+        let mut backend = LockSpyBackend::new();
+        let mut jwm =
+            crate::jwm::Jwm::new_with_runtime_backend(&mut backend, "test").expect("test jwm");
+        jwm.features.themed_wallpaper = "~/before.png".to_string();
+        jwm.features.wallpaper_theme = Some(BackgroundJob::spawn(|| None));
+
+        jwm.adopt_extraction("~/a.png".to_string(), BackgroundJob::refused());
+
+        // Nothing reads as pending forever, and the wallpaper is left
+        // unclaimed so the next config apply retries it.
+        assert!(jwm.features.wallpaper_theme.is_none());
+        assert!(jwm.features.themed_wallpaper.is_empty());
+    }
+
+    #[test]
+    fn a_started_worker_claims_its_wallpaper_through_the_jwm_path() {
+        let mut backend = LockSpyBackend::new();
+        let mut jwm =
+            crate::jwm::Jwm::new_with_runtime_backend(&mut backend, "test").expect("test jwm");
+
+        jwm.adopt_extraction("~/a.png".to_string(), BackgroundJob::spawn(|| None));
+
+        assert_eq!(jwm.features.themed_wallpaper, "~/a.png");
+        assert!(jwm.features.wallpaper_theme.is_some());
     }
 
     fn current() -> CurrentColors {

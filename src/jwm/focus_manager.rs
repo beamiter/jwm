@@ -2,11 +2,12 @@
 //!
 //! 这个模块包含所有窗口焦点管理相关的功能
 
-use crate::backend::api::Backend;
+use crate::backend::api::{Backend, MaximizeAxes};
 use crate::backend::common_define::WindowId;
 use crate::config::CONFIG;
 use crate::core::animation::AnimationKind;
 use crate::core::layout::LayoutEnum;
+use crate::core::maximize::MaximizeOrigin;
 use crate::core::models::{ClientKey, MonitorKey, ScrollingState, WMMonitor};
 use crate::core::types::Rect;
 use crate::jwm::Jwm;
@@ -444,6 +445,18 @@ impl Jwm {
         // path that exposes it.
         self.prepare_scratchpad_reveal_placement(backend, client_key)?;
 
+        // A client behind a monitor-lock shade cannot be revealed: the
+        // selection never moves onto a locked monitor, so the monitor switch
+        // below would be refused while `view` still applied this client's tag
+        // to the *selected* (unlocked) monitor, and a minimized client would
+        // be restored behind the shade and leave the Dock. Refuse before any
+        // of that navigation starts. This runs after the scratchpad placement
+        // on purpose: a parked or minimized scratchpad has just been moved to
+        // the selected monitor and stays revealable.
+        if self.client_is_on_locked_monitor(client_key) {
+            return Err(format!("window {win:?} is on a locked monitor").into());
+        }
+
         // Refuse an invalid placement before calling `focus()`, whose normal
         // contract is to substitute another visible client. Scratchpads above
         // have just been assigned a concrete monitor/tag; any remaining
@@ -487,6 +500,14 @@ impl Jwm {
             && Some(monitor_key) != self.state.sel_mon
         {
             self.switch_to_monitor(backend, monitor_key)?;
+            // `switch_to_monitor` may decline without an error. `view` acts on
+            // the selected monitor, so continuing would switch the tag of a
+            // monitor this client is not on.
+            if self.state.sel_mon != Some(monitor_key) {
+                return Err(
+                    format!("window {win:?}: the selection could not move to its monitor").into(),
+                );
+            }
         }
 
         if let Some(target) = self.tags_to_reveal(client_key) {
@@ -565,6 +586,24 @@ impl Jwm {
         };
         if !is_hidden && !parked {
             return Ok(false);
+        }
+        // A scratchpad reveals at its own centered placement, not maximized:
+        // drop maximize through its transaction first so the published atoms
+        // and the restore slot agree with the geometry staged below. The
+        // client is still hidden or parked, so the unmaximize only re-stages
+        // its off-screen rectangle and never configures it on-screen.
+        if self
+            .state
+            .clients
+            .get(client_key)
+            .is_some_and(|client| client.state.maximized_axes().any())
+        {
+            self.set_client_maximized(
+                backend,
+                client_key,
+                MaximizeAxes::NONE,
+                MaximizeOrigin::User,
+            )?;
         }
 
         let target_monitor = self
@@ -707,9 +746,14 @@ impl Jwm {
         (wanted != 0).then_some(wanted)
     }
 
-    /// Focus the tab cell `tab_index` on the monitor at `group_id` in
-    /// `monitor_order`. Pointer clicks go through [`Jwm::click_window_tab`];
-    /// this is the IPC/keybinding twin.
+    /// Focus the tab cell `tab_index` on the monitor whose number is
+    /// `group_id`. Pointer clicks go through [`Jwm::click_window_tab`]; this
+    /// is the IPC/keybinding twin.
+    ///
+    /// `group_id` is the monitor `num` that `get_monitors`, `sendmon` and the
+    /// monitor/focus events use, not a position in `monitor_order`: a
+    /// replugged Wayland output takes the lowest free number but is appended
+    /// to the order, so the two diverge after a hotplug.
     pub fn focus_tab(
         &mut self,
         backend: &mut dyn Backend,
@@ -720,15 +764,12 @@ impl Jwm {
             _ => return Err("focus_tab requires group_id and tab_index".into()),
         };
 
-        let group_id: usize = args[0].parse()?;
+        let group_id: i32 = args[0].parse()?;
         let tab_index: usize = args[1].parse()?;
         info!("[focus_tab] group_id={}, tab_index={}", group_id, tab_index);
 
         let mon_key = self
-            .state
-            .monitor_order
-            .get(group_id)
-            .copied()
+            .get_monitor_by_id(group_id)
             .ok_or_else(|| format!("tab group {group_id}/{tab_index} not found"))?;
         let group = self.tab_group_clients(mon_key);
         let Some(&client_key) = group.get(tab_index) else {
@@ -1251,6 +1292,185 @@ mod scratchpad_reveal_tests {
         assert_eq!(jwm.get_selected_client_key(), Some(first));
     }
 
+    #[test]
+    fn focus_tab_addresses_the_monitor_by_number_after_a_replug() {
+        let mut jwm = empty_jwm();
+        let mut backend = ScratchpadBackend::new();
+        jwm.add_monitor(output(1, 0));
+        jwm.add_monitor(output(2, 1200));
+        let survivor = jwm.state.monitor_order[1];
+        // Unplug the first output and plug it back: it takes the lowest free
+        // number again but is appended to `monitor_order`, so its number (0)
+        // and its position (1) now disagree.
+        jwm.handle_output_removed(&mut backend, OutputId(1))
+            .expect("unplug the first output");
+        jwm.add_monitor(output(1, 0));
+        let replugged = jwm.state.monitor_order[1];
+        assert_eq!(jwm.state.monitor_order[0], survivor);
+        assert_eq!(jwm.state.monitors[survivor].num, 1);
+        assert_eq!(jwm.state.monitors[replugged].num, 0);
+        jwm.state.sel_mon = Some(replugged);
+
+        let mut keys = Vec::new();
+        for raw in [0x921, 0x922] {
+            let mut client = WMClient::new(WindowId::from_raw(raw));
+            client.mon = Some(replugged);
+            client.state.tags = jwm.state.monitors[replugged].get_active_tags();
+            client.geometry.w = 600;
+            client.geometry.h = 400;
+            let client_key = jwm.insert_client(client);
+            jwm.attach_to_monitor(client_key, replugged);
+            keys.push(client_key);
+        }
+        jwm.state.monitors[replugged].set_selected_client_for_current_tag(Some(keys[0]));
+        assert!(jwm.tab_group_clients(survivor).is_empty());
+        assert_eq!(jwm.tab_group_clients(replugged).len(), 2);
+
+        // Monitor 0 is what `get_monitors` reports for the replugged output.
+        jwm.focus_tab(
+            &mut backend,
+            &WMArgEnum::StringVec(vec!["0".into(), "1".into()]),
+        )
+        .expect("monitor 0 names the replugged output's tab group");
+        assert_eq!(jwm.get_selected_client_key(), Some(keys[1]));
+
+        let error = jwm
+            .focus_tab(
+                &mut backend,
+                &WMArgEnum::StringVec(vec!["1".into(), "0".into()]),
+            )
+            .expect_err("monitor 1 has no tab group");
+        assert!(error.to_string().contains("tab group 1/0 not found"));
+        assert_eq!(jwm.get_selected_client_key(), Some(keys[1]));
+    }
+
+    /// Two monitors: `source` selected on tag 0b1 with a focused client, and
+    /// `locked` behind a monitor-lock shade holding `target` on
+    /// `target_tags`, minimized when `hidden`.
+    fn jwm_with_a_client_behind_a_monitor_lock(
+        target_tags: u32,
+        hidden: bool,
+    ) -> (Jwm, MonitorKey, MonitorKey, ClientKey, ClientKey, WindowId) {
+        let mut jwm = empty_jwm();
+        jwm.add_monitor(output(1, 0));
+        jwm.add_monitor(output(2, 1200));
+        let source = jwm.state.monitor_order[0];
+        let locked = jwm.state.monitor_order[1];
+        jwm.state.sel_mon = Some(source);
+        assert_eq!(jwm.state.monitors[source].get_active_tags(), 0b1);
+        assert_eq!(jwm.state.monitors[locked].get_active_tags(), 0b1);
+
+        let mut current = WMClient::new(WindowId::from_raw(0x731));
+        current.mon = Some(source);
+        current.state.tags = 0b1;
+        current.geometry.x = 100;
+        current.geometry.y = 100;
+        current.geometry.w = 600;
+        current.geometry.h = 420;
+        let current = jwm.insert_client(current);
+        jwm.attach_to_monitor(current, source);
+        jwm.state.monitors[source].set_selected_client_for_current_tag(Some(current));
+
+        let target_window = WindowId::from_raw(0x732);
+        let restore_rect = Rect::new(1400, 160, 640, 480);
+        let mut target = WMClient::new(target_window);
+        target.mon = Some(locked);
+        target.state.tags = target_tags;
+        target.state.is_floating = true;
+        target.geometry.x = restore_rect.x;
+        target.geometry.y = restore_rect.y;
+        target.geometry.w = restore_rect.w;
+        target.geometry.h = restore_rect.h;
+        if hidden {
+            target.state.is_hidden = true;
+            target.state.minimized_order = 23;
+            target.geometry.x = -1400;
+            target.geometry.hidden_x = Some(-1400);
+            target.geometry.hidden_restore_rect = Some(restore_rect);
+        }
+        let target = jwm.insert_client(target);
+        jwm.attach_to_monitor(target, locked);
+
+        let locked_num = jwm.state.monitors[locked].num;
+        assert!(
+            jwm.features
+                .monitor_lock
+                .lock(locked_num, (1200, 0, 1200, 900))
+        );
+        (jwm, source, locked, current, target, target_window)
+    }
+
+    #[test]
+    fn activating_a_window_behind_a_monitor_lock_leaves_the_unlocked_monitor_alone() {
+        let (mut jwm, source, locked, current, _target, target_window) =
+            jwm_with_a_client_behind_a_monitor_lock(0b10, false);
+        let locked_state = jwm.state.monitors[locked].clone();
+        let mut backend = ScratchpadBackend::new();
+
+        let result = jwm.reveal_and_focus(&mut backend, target_window);
+
+        assert_eq!(jwm.state.sel_mon, Some(source));
+        assert_eq!(
+            jwm.state.monitors[source].get_active_tags(),
+            0b1,
+            "the target's tag must not be applied to the monitor the user is on"
+        );
+        assert_eq!(jwm.state.monitors[locked], locked_state);
+        assert_eq!(jwm.get_selected_client_key(), Some(current));
+        assert!(!backend.focused.contains(&Some(target_window)));
+        let error = result.expect_err("a window behind a shade cannot be revealed");
+        assert!(error.to_string().contains("locked monitor"));
+    }
+
+    #[test]
+    fn restoring_a_minimized_window_behind_a_monitor_lock_keeps_it_in_the_dock() {
+        let (mut jwm, source, _locked, current, target, target_window) =
+            jwm_with_a_client_behind_a_monitor_lock(0b1, true);
+        let mut backend = ScratchpadBackend::new();
+
+        assert!(jwm.reveal_and_focus(&mut backend, target_window).is_err());
+
+        let client = &jwm.state.clients[target];
+        assert!(client.state.is_hidden, "restored behind the shade");
+        assert_eq!(client.state.minimized_order, 23);
+        assert_eq!(
+            client.geometry.hidden_restore_rect,
+            Some(Rect::new(1400, 160, 640, 480))
+        );
+        assert!(
+            backend
+                .minimized
+                .iter()
+                .all(|&(window, minimized)| window != target_window || minimized),
+            "the Dock item must not be released"
+        );
+        assert_eq!(jwm.state.sel_mon, Some(source));
+        assert_eq!(jwm.get_selected_client_key(), Some(current));
+    }
+
+    #[test]
+    fn a_minimized_scratchpad_on_a_locked_monitor_still_reveals_on_the_selected_one() {
+        // The scratchpad placement moves a parked or minimized scratchpad to
+        // the selected monitor before the lock check, so a lock on the
+        // monitor it was minimized from does not strand it in the Dock.
+        let (mut jwm, scratchpad, window, target) = jwm_with_cross_monitor_scratchpad(true);
+        let source = jwm.state.monitor_order[0];
+        let source_num = jwm.state.monitors[source].num;
+        assert!(
+            jwm.features
+                .monitor_lock
+                .lock(source_num, (0, 0, 1200, 900))
+        );
+        let mut backend = ScratchpadBackend::new();
+
+        assert!(jwm.reveal_and_focus(&mut backend, window).unwrap());
+
+        let client = &jwm.state.clients[scratchpad];
+        assert_eq!(client.mon, Some(target));
+        assert!(!client.state.is_hidden);
+        assert_eq!(jwm.get_selected_client_key(), Some(scratchpad));
+    }
+
     fn jwm_with_cross_monitor_scratchpad(
         minimized: bool,
     ) -> (Jwm, ClientKey, WindowId, crate::core::models::MonitorKey) {
@@ -1311,6 +1531,47 @@ mod scratchpad_reveal_tests {
         assert!(!client.state.is_hidden);
         assert_eq!(jwm.state.monitors[target].sel, Some(scratchpad));
         assert_eq!(backend.focused, vec![Some(window)]);
+    }
+
+    /// Regression: the reveal moved a scratchpad off its monitor's list
+    /// without re-pointing the anchor of the promoted window that re-tiles
+    /// in front of it, so that window lost its slot and returned at the end
+    /// of the tiled group. It now rests in front of the next tile.
+    #[test]
+    fn a_cross_monitor_reveal_repoints_the_anchors_naming_the_scratchpad() {
+        let (mut jwm, scratchpad, window, target) = jwm_with_cross_monitor_scratchpad(true);
+        let source = jwm.state.monitor_order[0];
+        // Minimized while tiled, in the slot a promoted window returns to.
+        jwm.state.clients[scratchpad].state.is_floating = false;
+        jwm.reorder_client_in_monitor_groups(scratchpad);
+        let mut tile = WMClient::new(WindowId::from_raw(0x703));
+        tile.mon = Some(source);
+        tile.state.tags = 1;
+        let tile = jwm.insert_client(tile);
+        jwm.attach_to_monitor(tile, source);
+        let mut promoted = WMClient::new(WindowId::from_raw(0x704));
+        promoted.mon = Some(source);
+        promoted.state.tags = 1;
+        promoted.state.is_floating = true;
+        promoted.state.set_maximized_axes(MaximizeAxes::BOTH);
+        promoted.state.maximize_restore_tiled = true;
+        promoted.state.maximize_restore_anchor = Some(scratchpad);
+        let promoted = jwm.insert_client(promoted);
+        jwm.attach_to_monitor(promoted, source);
+        assert_eq!(
+            jwm.state.monitor_clients[source],
+            vec![scratchpad, tile, promoted]
+        );
+        let mut backend = ScratchpadBackend::new();
+
+        assert!(jwm.reveal_and_focus(&mut backend, window).unwrap());
+
+        assert_eq!(jwm.state.clients[scratchpad].mon, Some(target));
+        assert_eq!(jwm.state.monitor_clients[source], vec![tile, promoted]);
+        assert_eq!(
+            jwm.state.clients[promoted].state.maximize_restore_anchor,
+            Some(tile)
+        );
     }
 
     #[test]

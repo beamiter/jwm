@@ -7,11 +7,12 @@ read-only startup doctor with optional live IPC health and capability queries.
 ## Create a report
 
 ```bash
-# Inspect the default x11rb setup and a running instance.
+# Inspect the default backend and a running instance: JWM_BACKEND when set,
+# otherwise wayland-udev when compiled in, otherwise the first compiled backend.
 jwm-support --output jwm-support.json
 
-# Inspect the direct DRM/KMS Wayland setup.
-jwm-support --backend wayland-udev --output jwm-support.json
+# Inspect the X11 (x11rb) setup instead.
+jwm-support --backend x11rb --output jwm-support.json
 
 # Run only filesystem, configuration, and environment preflight checks.
 jwm-support --backend wayland-udev --offline --output jwm-support.json

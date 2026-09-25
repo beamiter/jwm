@@ -374,7 +374,13 @@ impl WaylandCompositor {
                 // standalone audio recording runs the frame takes the
                 // exact-sRGB fallback too (the round-13 REC-chip extension;
                 // same side effect as a visible toast).
-                || self.mic_indicator_active,
+                || self.mic_indicator_active
+                // The capture-target hint pill shares the slot too. During a
+                // region/window pick with the pointer over the background
+                // it is the only thing there; without this arm a partial
+                // frame re-blends the translucent pill over itself and a
+                // linear route draws it encoded into linear pixels.
+                || self.capture_hint.is_some(),
         }
     }
 
@@ -595,6 +601,36 @@ mod tests {
         assert!(
             predicate.contains(&format!("self.{}", "mic_indicator_active")),
             "the MIC chip must hold the exact-sRGB fallback while it is up"
+        );
+    }
+
+    /// The capture-target hint pill is drawn in the same encoded-only
+    /// post-delivery slot (render.rs gates the slot on `capture_hint`), so it
+    /// must count as that class's visibility: otherwise partial frames stay
+    /// allowed and re-blend the translucent pill over itself, and a linear
+    /// route keeps running while it draws encoded colors. The texture-only
+    /// arm is deliberately absent — it frees a texture and draws nothing.
+    #[test]
+    fn the_capture_hint_extends_the_recording_overlay_blocker_predicate() {
+        const SOURCE: &str = include_str!("tail_domain.rs");
+        let visibility = SOURCE
+            .split_once("fn tail_overlay_visibility(&self)")
+            .expect("tail_overlay_visibility")
+            .1
+            .split_once("fn linear_tail_status(&self)")
+            .expect("linear_tail_status follows tail_overlay_visibility")
+            .0;
+        let predicate = visibility
+            .split_once(&format!("{}: self.", "recording_region_overlay"))
+            .expect("the recording overlay predicate")
+            .1;
+        assert!(
+            predicate.contains(&format!("self.{}.is_some()", "capture_hint")),
+            "the capture hint must hold the exact-sRGB fallback while it is up"
+        );
+        assert!(
+            !predicate.contains(&format!("self.{}", "capture_hint_texture")),
+            "a texture awaiting release draws nothing and must not block"
         );
     }
 }

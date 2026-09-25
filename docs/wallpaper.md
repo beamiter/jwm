@@ -29,9 +29,19 @@ whoever set one almost certainly keeps the rest in the same place — then falls
 back to `~/Pictures/Wallpapers`, then `~/Pictures`. A leading `~` is expanded.
 
 `png`, `jpg`, `jpeg`, `webp`, `bmp`, and `gif` are listed, sorted
-case-insensitively by name, and capped at 200 entries: a pictures directory
-can be enormous, and reading tens of thousands of names would stall the frame
-that opened the panel.
+case-insensitively by name (names that differ only in case keep a fixed
+order), and capped at 200 entries. The directory is read on a worker thread:
+the panel opens at once with a `Scanning…` status line and the rows fill in
+when the listing lands, so an enormous pictures directory or a slow network
+mount never stalls the frame that opened the panel. Choosing the directory
+checks the candidates above on disk, so it runs on the same worker. If no
+worker thread can be started, the status line reads
+`Could not start the wallpaper scan` instead of staying on `Scanning…` for
+good; reopening the panel tries again. A panel closed before its listing
+lands drops the answer, and each opening starts its own scan, so only the
+newest one fills the rows. Only an image whose type the directory entry
+cannot settle (a symlink, a filesystem without entry types) costs a `stat`;
+a symlink to an image is listed, one to a folder or a dangling one is not.
 
 ## How it applies
 
@@ -49,8 +59,8 @@ the file.
 are now settable over IPC too:
 
 ```sh
-jwm-msg '{"command": "set_config", "args": {"key": "behavior.wallpaper", "value": "/srv/walls/alps.jpg"}}'
-jwm-msg '{"command": "set_config", "args": {"key": "behavior.wallpaper_mode", "value": "fit"}}'
+jwm-tool msg set_config --args '{"key": "behavior.wallpaper", "value": "/srv/walls/alps.jpg"}'
+jwm-tool msg set_config --args '{"key": "behavior.wallpaper_mode", "value": "fit"}'
 ```
 
 `wallpaper_mode` accepts `fill`, `fit`, `stretch`, or `center`, and rejects
@@ -118,7 +128,10 @@ Decoding is the expensive part: roughly 90 ms for a 2560×1920 JPEG. It runs on
 a worker thread and the result is adopted on a later frame, exactly like the
 Wi-Fi scan, so the wallpaper appears immediately and the colours follow a
 moment later. The extraction is started once per wallpaper — a config apply
-that changed something else does not decode the same picture again.
+that changed something else does not decode the same picture again. If the
+worker thread cannot be started at all, the wallpaper is not marked as
+extracted: `get_wallpaper_colors` does not report `pending` forever, and the
+next config apply tries again.
 
 ### Over IPC
 

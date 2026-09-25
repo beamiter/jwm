@@ -248,16 +248,19 @@ mock implementing the complete backend surface. (First met by
 - Add differential tests that feed identical policy events to both X11
   transports and compare observable state. Started: the nested smoke
   matrix now boots `x11rb` and `xcb` inside private Xephyr servers and
-  drives both through the same fixed 15-stage IPC scenario, capturing a
-  normalized observable-state snapshot after each stage — window
-  class/tags/floating/geometry and per-workspace layout/occupancy, with
+  drives both through the same fixed 18-stage IPC scenario, capturing a
+  normalized observable-state snapshot after each stage (19 in all; the
+  minimize → restore → focus stage records two) — window
+  class/tags/floating/fullscreen/minimized/maximized/geometry and per-workspace layout/occupancy, with
   transport-relative ids and asynchronous titles excluded by
   construction. The scenario exercises the divergence-prone tiling
   surface: a two-window master/stack split, `setlayout`
   (tile/monocle), `setmfact`, `incnmaster` up and down, `zoom`,
   `focusstack`, `movestack`, `togglebar` (workarea change), a tag
-  round-trip, and `togglefloating` — 14 of 15 stages produce distinct
-  observable state. Both `MapClient` stages spawn the *same* resolved
+  round-trip, a `togglemaximize` round trip (promote a tile to the
+  work area with `_NET_WM_STATE` written through each transport, then
+  back into its slot), and `togglefloating` — 18 of 19 snapshots differ
+  from the one before them. Both `MapClient` stages spawn the *same* resolved
   client (xterm): a single reliable client used twice keeps the managed
   set deterministic, whereas heterogeneous libXt clients (xclock/xeyes)
   race on transient startup windows and leak client-startup timing into
@@ -267,7 +270,7 @@ mock implementing the complete backend surface. (First met by
   comparison rules are pure and unit-tested, and every scenario command
   is checked against the live `jwm::ipc` registry so the matrix cannot
   drift from the compositor. Live runs are stable with x11rb and xcb
-  producing byte-identical state across all 15 snapshots.
+  producing byte-identical state across all 19 snapshots.
 
 Exit criteria: new X11 policy features are implemented once, while protocol and
 renderer differences remain isolated and independently testable.

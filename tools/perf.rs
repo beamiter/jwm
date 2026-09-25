@@ -69,7 +69,8 @@ fn ipc_query(name: &str) -> Result<Value, String> {
     Ok(response.get("data").cloned().unwrap_or(Value::Null))
 }
 
-fn ipc_command(name: &str, args: Value) -> Result<(), String> {
+/// Run a command; `Ok` carries its response data (`Null` when it has none).
+fn ipc_command(name: &str, args: Value) -> Result<Value, String> {
     let response = ipc_call(&serde_json::json!({ "command": name, "args": args }))?;
     if response.get("success").and_then(Value::as_bool) == Some(false) {
         return Err(response
@@ -78,11 +79,82 @@ fn ipc_command(name: &str, args: Value) -> Result<(), String> {
             .unwrap_or("command failed")
             .to_string());
     }
-    Ok(())
+    Ok(response.get("data").cloned().unwrap_or(Value::Null))
 }
 
 fn metric_f64(value: &Value, key: &str) -> Option<f64> {
     value.get(key).and_then(Value::as_f64)
+}
+
+/// A benchmark report as the session sent it; older sessions send the
+/// report as a JSON string payload.
+fn decode_report(value: Value) -> Value {
+    match value {
+        Value::String(text) => serde_json::from_str(&text).unwrap_or(Value::String(text)),
+        other => other,
+    }
+}
+
+/// Pause between benchmark polls.
+const BENCHMARK_POLL_INTERVAL: Duration = Duration::from_secs(1);
+/// How long `record` waits for the benchmark report before giving up.
+const BENCHMARK_DEADLINE: Duration = Duration::from_secs(300);
+
+/// Everything `record` needs from the running session. The live
+/// implementation talks to the IPC socket and `/proc`; tests script it so the
+/// recorder's skip and cleanup paths run without a session or real waits.
+trait RecordSession {
+    fn query(&mut self, name: &str) -> Result<Value, String>;
+    /// Run a command; `Ok` carries its response data (`Null` when it has
+    /// none), which `benchmark stop` uses for the report it ends with.
+    fn command(&mut self, name: &str, args: Value) -> Result<Value, String>;
+    /// Sample the compositor process for `seconds` (the idle scenario).
+    fn sample_idle(&mut self, pid: u32, seconds: u32) -> Result<BTreeMap<String, f64>, String>;
+    /// Wait one benchmark poll interval. Returns false once `deadline` has
+    /// passed, so the caller makes its final poll and gives up.
+    fn wait_poll(&mut self, deadline: Instant) -> bool;
+}
+
+/// The live session behind the IPC socket.
+struct LiveSession;
+
+impl RecordSession for LiveSession {
+    fn query(&mut self, name: &str) -> Result<Value, String> {
+        ipc_query(name)
+    }
+
+    fn command(&mut self, name: &str, args: Value) -> Result<Value, String> {
+        ipc_command(name, args)
+    }
+
+    fn sample_idle(&mut self, pid: u32, seconds: u32) -> Result<BTreeMap<String, f64>, String> {
+        record_idle(pid, seconds)
+    }
+
+    fn wait_poll(&mut self, deadline: Instant) -> bool {
+        std::thread::sleep(BENCHMARK_POLL_INTERVAL);
+        Instant::now() <= deadline
+    }
+}
+
+/// The `get_metrics` payload, only when it really comes from a compositor;
+/// otherwise the skip reason for the compositor-backed scenarios.
+///
+/// `get_metrics` answers even without a compositor (a window/monitor/tag
+/// count fallback), so an ok object proves nothing. The versioned status
+/// reports the renderer state directly; sessions predating that field are
+/// judged by `frame_count`, which only compositor metrics carry.
+fn compositor_metrics(status: &Value, metrics: Result<Value, String>) -> Result<Value, String> {
+    if status.get("compositor_active").and_then(Value::as_bool) == Some(false) {
+        return Err("compositor inactive: get_status reports compositor_active=false".into());
+    }
+    let metrics =
+        metrics.map_err(|error| format!("compositor inactive: get_metrics failed: {error}"))?;
+    if metrics.get("frame_count").is_some_and(Value::is_number) {
+        Ok(metrics)
+    } else {
+        Err("compositor inactive: get_metrics carried no compositor metrics".into())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -108,8 +180,10 @@ fn kernel_release() -> String {
         .unwrap_or_else(|_| "unknown".into())
 }
 
-/// GPU model fallback for sessions whose benchmark report predates GL-string
-/// capture: NVIDIA's procfs first, then the bound DRM driver name.
+/// GPU model fallback for runs without a GL-string report (legacy sessions,
+/// no compositor, a refused or skipped benchmark): the model NVIDIA's procfs
+/// reports; `None` elsewhere, where only `driver_fallback` has anything to
+/// say.
 fn gpu_fallback() -> Option<String> {
     if let Ok(entries) = glob::glob("/proc/driver/nvidia/gpus/*/information") {
         for path in entries.flatten() {
@@ -149,6 +223,21 @@ fn driver_fallback() -> Option<String> {
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned())
         })
+}
+
+/// Resolution label fallback for runs without a benchmark report: the extent
+/// the `get_monitors` entries span, in the report's `{screen_w}x{screen_h}`
+/// form. The report measures the whole screen, not one monitor, so a
+/// multi-monitor machine keeps one label either way.
+fn screen_extent(monitors: &[Value]) -> Option<String> {
+    let mut width = 0_i64;
+    let mut height = 0_i64;
+    for monitor in monitors {
+        let field = |key: &str| monitor.get(key).and_then(Value::as_i64);
+        width = width.max(field("x")?.saturating_add(field("w")?));
+        height = height.max(field("y")?.saturating_add(field("h")?));
+    }
+    (width > 0 && height > 0).then(|| format!("{width}x{height}"))
 }
 
 /// Renderer API from an explicit configuration choice. `auto` resolves at
@@ -282,11 +371,19 @@ fn compositor_pid(status: &Value) -> Result<u32, String> {
 // ---------------------------------------------------------------------------
 
 pub fn run_record(options: &RecordOptions) -> io::Result<()> {
-    record_baseline(options).map_err(|error| io::Error::other(error))
+    record_baseline(&mut LiveSession, options)
+        .and_then(|baseline| write_baseline(options, &baseline))
+        .map_err(io::Error::other)
 }
 
-fn record_baseline(options: &RecordOptions) -> Result<(), String> {
-    let status = ipc_query("get_status")?;
+/// Measure every contract scenario against `session`. Only a session that
+/// cannot report its status fails the run; a scenario the session cannot
+/// measure is recorded as skipped with the reason.
+fn record_baseline(
+    session: &mut dyn RecordSession,
+    options: &RecordOptions,
+) -> Result<PerfBaselineV1, String> {
+    let status = session.query("get_status")?;
     let backend = status
         .get("backend")
         .and_then(Value::as_str)
@@ -309,7 +406,7 @@ fn record_baseline(options: &RecordOptions) -> Result<(), String> {
             eprintln!(
                 "perf record: sampling idle pid {pid} for {seconds}s (leave the session untouched)"
             );
-            match record_idle(pid, seconds) {
+            match session.sample_idle(pid, seconds) {
                 Ok(metrics) => ScenarioResult::recorded(metrics),
                 Err(reason) => ScenarioResult::skipped(reason),
             }
@@ -318,17 +415,30 @@ fn record_baseline(options: &RecordOptions) -> Result<(), String> {
     scenarios.insert("idle".into(), idle_result);
 
     // -- compositor-backed scenarios ---------------------------------------
-    let metrics_before = ipc_query("get_metrics")
-        .ok()
-        .filter(|value| value.is_object());
     let mut gpu = "unknown".to_string();
     let mut driver = "unknown".to_string();
     let mut resolution = "unknown".to_string();
     let mut renderer_api = "unknown".to_string();
 
-    match metrics_before {
-        None => {
-            let reason = "compositor inactive: no get_metrics data".to_string();
+    let measured = match compositor_metrics(&status, session.query("get_metrics")) {
+        Err(reason) => Err(reason),
+        Ok(before) => {
+            renderer_api = before
+                .get("renderer_api")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .unwrap_or("unknown")
+                .to_string();
+            eprintln!(
+                "perf record: benchmarking {} frames (warmup {}) at ambient workload",
+                options.frames, options.warmup
+            );
+            run_benchmark_window(session, options).map(|window| (before, window))
+        }
+    };
+
+    match measured {
+        Err(reason) => {
             for scenario in [
                 "steady_frame",
                 "damage_redraw",
@@ -339,63 +449,54 @@ fn record_baseline(options: &RecordOptions) -> Result<(), String> {
                 scenarios.insert(scenario.into(), ScenarioResult::skipped(reason.clone()));
             }
         }
-        Some(before) => {
-            renderer_api = before
-                .get("renderer_api")
-                .and_then(Value::as_str)
-                .filter(|value| !value.is_empty())
-                .unwrap_or("unknown")
-                .to_string();
+        Ok((before, window)) => {
             let allocations_before = status.get("allocations").and_then(Value::as_u64);
             let frames_before = metric_f64(&before, "frame_count").unwrap_or(0.0);
+            let BenchmarkWindow {
+                report,
+                stopped_report,
+                samples,
+                minutes: window_minutes,
+            } = window;
+            let after = session.query("get_metrics").unwrap_or(Value::Null);
+            let status_after = session.query("get_status").unwrap_or(Value::Null);
 
-            eprintln!(
-                "perf record: benchmarking {} frames (warmup {}) at ambient workload",
-                options.frames, options.warmup
-            );
-            if options.waterlily_workload {
-                eprintln!("perf record: enabling the waterlily animation as a paced workload");
-                ipc_command("toggle_waterlily", serde_json::json!({}))?;
+            let report = report.map(decode_report);
+            let stopped_report = stopped_report.map(decode_report);
+            // The label comes from the completed report, else from the one
+            // `benchmark stop` ended an overdue run with: the same GL strings
+            // and screen size either way, so a stalled candidate keeps the
+            // label of the baseline it must be judged against. The stopped
+            // run's frame stats cover an incomplete window and stay unused.
+            if let Some(system) = report
+                .as_ref()
+                .or(stopped_report.as_ref())
+                .and_then(|report| report.get("system"))
+            {
+                for (field, target) in [
+                    ("gpu", &mut gpu),
+                    ("driver", &mut driver),
+                    ("resolution", &mut resolution),
+                ] {
+                    if let Some(value) = system
+                        .get(field)
+                        .and_then(Value::as_str)
+                        .filter(|v| !v.is_empty())
+                    {
+                        *target = value.to_string();
+                    }
+                }
+                // Sessions predating the metrics renderer_api field: derive
+                // the API family from the GL version string the benchmark
+                // captured (GLES contexts always embed "OpenGL ES").
+                if renderer_api == "unknown" && driver != "unknown" {
+                    renderer_api = if driver.contains("OpenGL ES") {
+                        "egl/gles3".to_string()
+                    } else {
+                        "glx/opengl".to_string()
+                    };
+                }
             }
-            ipc_command(
-                "benchmark",
-                serde_json::json!({
-                    "action": "start",
-                    "frames": options.frames,
-                    "warmup": options.warmup,
-                }),
-            )?;
-
-            let window_start = Instant::now();
-            let deadline = window_start + Duration::from_secs(300);
-            let mut samples: Vec<Value> = Vec::new();
-            let report = loop {
-                std::thread::sleep(Duration::from_secs(1));
-                if let Ok(sample) = ipc_query("get_metrics")
-                    && sample.is_object()
-                {
-                    samples.push(sample);
-                }
-                match ipc_query("benchmark_report") {
-                    Ok(report) if report.is_object() || report.is_string() => break Some(report),
-                    _ => {}
-                }
-                if Instant::now() > deadline {
-                    break None;
-                }
-            };
-            if options.waterlily_workload {
-                let _ = ipc_command("toggle_waterlily", serde_json::json!({}));
-            }
-            let window_minutes = window_start.elapsed().as_secs_f64() / 60.0;
-            let after = ipc_query("get_metrics").unwrap_or(Value::Null);
-            let status_after = ipc_query("get_status").unwrap_or(Value::Null);
-
-            // benchmark_report may arrive as a JSON string payload.
-            let report = report.map(|value| match value {
-                Value::String(text) => serde_json::from_str(&text).unwrap_or(Value::String(text)),
-                other => other,
-            });
 
             match &report {
                 None => {
@@ -411,42 +512,6 @@ fn record_baseline(options: &RecordOptions) -> Result<(), String> {
                     );
                 }
                 Some(report) => {
-                    if let Some(system) = report.get("system") {
-                        for (field, target) in [
-                            ("gpu", &mut gpu),
-                            ("driver", &mut driver),
-                            ("resolution", &mut resolution),
-                        ] {
-                            if let Some(value) = system
-                                .get(field)
-                                .and_then(Value::as_str)
-                                .filter(|v| !v.is_empty())
-                            {
-                                *target = value.to_string();
-                            }
-                        }
-                    }
-                    // Sessions predating the metrics renderer_api field:
-                    // derive the API family from the GL version string the
-                    // benchmark captured (GLES contexts always embed
-                    // "OpenGL ES").
-                    if renderer_api == "unknown" && driver != "unknown" {
-                        renderer_api = if driver.contains("OpenGL ES") {
-                            "egl/gles3".to_string()
-                        } else {
-                            "glx/opengl".to_string()
-                        };
-                    }
-                    if gpu == "unknown"
-                        && let Some(model) = gpu_fallback()
-                    {
-                        gpu = model;
-                    }
-                    if driver == "unknown"
-                        && let Some(name) = driver_fallback()
-                    {
-                        driver = name;
-                    }
                     let mut frame = BTreeMap::new();
                     if let Some(stats) = report.get("frame_time") {
                         for (metric, key) in [
@@ -603,6 +668,19 @@ fn record_baseline(options: &RecordOptions) -> Result<(), String> {
         }
     }
 
+    // Host fallbacks for sessions whose report predates GL-string capture,
+    // and for runs that got no report at all (no compositor, a refused
+    // start), which every comparison would otherwise refuse as unlabeled.
+    if gpu == "unknown"
+        && let Some(model) = gpu_fallback()
+    {
+        gpu = model;
+    }
+    if driver == "unknown"
+        && let Some(name) = driver_fallback()
+    {
+        driver = name;
+    }
     // Explicit configuration choice is an honest last resort for the label;
     // "auto" resolves at runtime and is deliberately not trusted.
     if renderer_api == "unknown"
@@ -613,12 +691,17 @@ fn record_baseline(options: &RecordOptions) -> Result<(), String> {
 
     // -- multi-monitor ------------------------------------------------------
     let mut monitor_metrics = BTreeMap::new();
-    if let Ok(monitors) = ipc_query("get_monitors")
+    if let Ok(monitors) = session.query("get_monitors")
         && let Some(list) = monitors.as_array()
     {
         monitor_metrics.insert("monitor_count".into(), list.len() as f64);
+        if resolution == "unknown"
+            && let Some(extent) = screen_extent(list)
+        {
+            resolution = extent;
+        }
     }
-    if let Ok(metrics) = ipc_query("get_metrics")
+    if let Ok(metrics) = session.query("get_metrics")
         && let Some(value) = metric_f64(&metrics, "current_refresh_rate")
     {
         monitor_metrics.insert("refresh_hz".into(), value);
@@ -643,21 +726,160 @@ fn record_baseline(options: &RecordOptions) -> Result<(), String> {
         config_fingerprint: config_fingerprint(&backend),
     };
 
-    let baseline = PerfBaselineV1 {
+    Ok(PerfBaselineV1 {
         schema_version: perf_contract::SCHEMA_VERSION,
         recorded_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         jwm_version,
         label,
         scenarios,
-    };
+    })
+}
 
+/// Drive one benchmark window: make sure the WaterLily workload runs when it
+/// was requested, start the benchmark, and poll metrics until the report
+/// lands or the deadline passes.
+///
+/// Every exit leaves the session as it was found: WaterLily is switched back
+/// off only when this run switched it on, whether or not the benchmark
+/// started, and a benchmark that outlives the deadline is stopped instead of
+/// being left running. `Err` means nothing was measured; its text is the skip
+/// reason.
+fn run_benchmark_window(
+    session: &mut dyn RecordSession,
+    options: &RecordOptions,
+) -> Result<BenchmarkWindow, String> {
+    // Measuring ambient pacing under a paced-workload request would make the
+    // baseline lie about its conditions, so a missing workload skips instead.
+    let enabled_here = options.waterlily_workload
+        && start_waterlily_workload(session)
+            .map_err(|reason| format!("waterlily workload unavailable: {reason}"))?;
+    let window = poll_benchmark(session, options);
+    if enabled_here && let Err(error) = session.command("toggle_waterlily", serde_json::json!({})) {
+        eprintln!(
+            "perf record: WARNING: could not switch the waterlily workload back off: {error}"
+        );
+    }
+    window
+}
+
+fn waterlily_enabled(status: &Value) -> bool {
+    status.get("enabled").and_then(Value::as_bool) == Some(true)
+}
+
+/// Make sure the WaterLily animation drives the benchmark window. `Ok` says
+/// whether this call switched it on, so the caller must switch it back off;
+/// `Err` is why the workload cannot run.
+///
+/// `toggle_waterlily` cannot answer either question: it flips rather than
+/// sets, and it reports success even on a backend without WaterLily (the
+/// session only logs a warning there). `get_waterlily_status` fails exactly
+/// where WaterLily does not exist, so it is both the availability probe and
+/// the guard that keeps an animation the user already runs from being
+/// switched off for the measurement.
+fn start_waterlily_workload(session: &mut dyn RecordSession) -> Result<bool, String> {
+    let status = session.query("get_waterlily_status")?;
+    // The effect only shows frames a connected worker publishes; without one
+    // it adds no damage, and the window would measure the ambient workload.
+    if status.get("worker_connected").and_then(Value::as_bool) != Some(true) {
+        return Err("no WaterLily worker is connected".into());
+    }
+    if waterlily_enabled(&status) {
+        eprintln!(
+            "perf record: the waterlily animation is already running; using it as the paced workload"
+        );
+        return Ok(false);
+    }
+    eprintln!("perf record: enabling the waterlily animation as a paced workload");
+    session.command("toggle_waterlily", serde_json::json!({}))?;
+    match session.query("get_waterlily_status") {
+        Ok(status) if waterlily_enabled(&status) => Ok(true),
+        Ok(_) => Err("toggle_waterlily did not enable it".into()),
+        // The session lost WaterLily between the calls (the compositor went
+        // away) or stopped answering; a toggle back would be a no-op or fail
+        // the same way, so none is sent.
+        Err(error) => Err(format!("could not confirm it started: {error}")),
+    }
+}
+
+/// What one benchmark window produced.
+struct BenchmarkWindow {
+    /// The benchmark report, or `None` when the deadline passed first.
+    report: Option<Value>,
+    /// The report `benchmark stop` ended an overdue run with. Only its
+    /// `system` block is used: its frame stats cover an incomplete window.
+    stopped_report: Option<Value>,
+    /// `get_metrics` snapshots taken once per poll.
+    samples: Vec<Value>,
+    minutes: f64,
+}
+
+fn poll_benchmark(
+    session: &mut dyn RecordSession,
+    options: &RecordOptions,
+) -> Result<BenchmarkWindow, String> {
+    // A refusal (no compositor, another benchmark already running) leaves
+    // nothing of ours to stop.
+    session
+        .command(
+            "benchmark",
+            serde_json::json!({
+                "action": "start",
+                "frames": options.frames,
+                "warmup": options.warmup,
+            }),
+        )
+        .map_err(|error| format!("benchmark could not start: {error}"))?;
+
+    let window_start = Instant::now();
+    let deadline = window_start + BENCHMARK_DEADLINE;
+    let mut samples: Vec<Value> = Vec::new();
+    let mut stopped_report = None;
+    let report = loop {
+        let in_time = session.wait_poll(deadline);
+        if let Ok(sample) = session.query("get_metrics")
+            && sample.is_object()
+        {
+            samples.push(sample);
+        }
+        match session.query("benchmark_report") {
+            Ok(report) if report.is_object() || report.is_string() => break Some(report),
+            _ => {}
+        }
+        if !in_time {
+            // The benchmark we started is still running; leaving it would
+            // keep the compositor in benchmark mode after `record` exits.
+            // The report it stops with still names the system for the label.
+            match session.command("benchmark", serde_json::json!({ "action": "stop" })) {
+                Ok(report) if report.is_object() || report.is_string() => {
+                    stopped_report = Some(report);
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    eprintln!(
+                        "perf record: WARNING: could not stop the overdue benchmark: {error}"
+                    );
+                }
+            }
+            break None;
+        }
+    };
+    Ok(BenchmarkWindow {
+        report,
+        stopped_report,
+        samples,
+        minutes: window_start.elapsed().as_secs_f64() / 60.0,
+    })
+}
+
+/// Write `baseline` where the options say and print its summary.
+fn write_baseline(options: &RecordOptions, baseline: &PerfBaselineV1) -> Result<(), String> {
     let out = options.out.clone().unwrap_or_else(|| {
         PathBuf::from("perf/baselines").join(format!("{}.json", baseline.label.slug()))
     });
     if let Some(parent) = out.parent() {
         std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
-    let mut encoded = serde_json::to_string_pretty(&baseline).map_err(|error| error.to_string())?;
+    let mut encoded = serde_json::to_string_pretty(baseline).map_err(|error| error.to_string())?;
     encoded.push('\n');
     std::fs::write(&out, encoded).map_err(|error| error.to_string())?;
 
@@ -808,8 +1030,459 @@ pub fn run_budgets(json: bool) -> io::Result<()> {
                 .absolute
                 .map(|value| format!(" (absolute rail {value:.1})"))
                 .unwrap_or_default();
-            println!("  {}/{}: {bound}{absolute}", rule.scenario, rule.metric);
+            let optional = if rule.fail_closed {
+                ""
+            } else {
+                " (n/a when only the candidate lacks it)"
+            };
+            println!(
+                "  {}/{}: {bound}{absolute}{optional}",
+                rule.scenario, rule.metric
+            );
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::perf_contract::ScenarioStatus;
+    use serde_json::json;
+
+    const COMPOSITOR_SCENARIOS: [&str; 5] = [
+        "steady_frame",
+        "damage_redraw",
+        "input_latency",
+        "allocation_steady",
+        "direct_scanout",
+    ];
+
+    /// What `get_metrics` answers when no compositor is running.
+    fn no_compositor_metrics() -> Value {
+        json!({ "window_count": 3, "monitor_count": 1, "tag_count": 9 })
+    }
+
+    /// Scripted WaterLily state behind `get_waterlily_status`.
+    #[derive(Clone, Copy, Debug)]
+    struct FakeWaterlily {
+        enabled: bool,
+        worker_connected: bool,
+        /// `toggle_waterlily` is acknowledged but changes nothing.
+        toggle_ignored: bool,
+    }
+
+    /// Scripted session: answers queries from a table, logs every command,
+    /// and lets the benchmark deadline pass after a fixed number of polls.
+    struct FakeSession {
+        queries: BTreeMap<&'static str, Result<Value, String>>,
+        /// `None` models a backend without WaterLily the way the real
+        /// session answers it: `get_waterlily_status` fails while
+        /// `toggle_waterlily` still reports success.
+        waterlily: Option<FakeWaterlily>,
+        refuse_benchmark_start: Option<String>,
+        /// What `benchmark stop` answers with.
+        stop_report: Value,
+        polls_before_deadline: u32,
+        commands: Vec<String>,
+    }
+
+    impl FakeSession {
+        fn new(status: Value, metrics: Value) -> Self {
+            let mut queries = BTreeMap::new();
+            queries.insert("get_status", Ok(status));
+            queries.insert("get_metrics", Ok(metrics));
+            queries.insert("get_monitors", Ok(json!([{ "id": 0 }])));
+            queries.insert(
+                "benchmark_report",
+                Err("benchmark not complete or not running".to_string()),
+            );
+            Self {
+                queries,
+                waterlily: Some(FakeWaterlily {
+                    enabled: false,
+                    worker_connected: true,
+                    toggle_ignored: false,
+                }),
+                refuse_benchmark_start: None,
+                stop_report: Value::Null,
+                polls_before_deadline: 0,
+                commands: Vec::new(),
+            }
+        }
+
+        fn waterlily_enabled(&self) -> bool {
+            self.waterlily.is_some_and(|waterlily| waterlily.enabled)
+        }
+    }
+
+    impl RecordSession for FakeSession {
+        fn query(&mut self, name: &str) -> Result<Value, String> {
+            if name == "get_waterlily_status" {
+                return self
+                    .waterlily
+                    .map(|waterlily| {
+                        json!({
+                            "enabled": waterlily.enabled,
+                            "active": waterlily.enabled && waterlily.worker_connected,
+                            "worker_connected": waterlily.worker_connected,
+                        })
+                    })
+                    .ok_or_else(|| "compositor not active".to_string());
+            }
+            self.queries
+                .get(name)
+                .cloned()
+                .unwrap_or_else(|| Err(format!("unknown query: {name}")))
+        }
+
+        fn command(&mut self, name: &str, args: Value) -> Result<Value, String> {
+            let action = args.get("action").and_then(Value::as_str);
+            self.commands.push(match action {
+                Some(action) => format!("{name} {action}"),
+                None => name.to_string(),
+            });
+            match (name, action) {
+                ("toggle_waterlily", _) => {
+                    if let Some(waterlily) = self.waterlily.as_mut()
+                        && !waterlily.toggle_ignored
+                    {
+                        waterlily.enabled = !waterlily.enabled;
+                    }
+                    Ok(Value::Null)
+                }
+                ("benchmark", Some("start")) => self
+                    .refuse_benchmark_start
+                    .clone()
+                    .map_or(Ok(Value::Null), Err),
+                ("benchmark", Some("stop")) => Ok(self.stop_report.clone()),
+                _ => Ok(Value::Null),
+            }
+        }
+
+        fn sample_idle(
+            &mut self,
+            _pid: u32,
+            _seconds: u32,
+        ) -> Result<BTreeMap<String, f64>, String> {
+            Err("idle sampling is not scripted".to_string())
+        }
+
+        fn wait_poll(&mut self, _deadline: Instant) -> bool {
+            let in_time = self.polls_before_deadline > 0;
+            self.polls_before_deadline = self.polls_before_deadline.saturating_sub(1);
+            in_time
+        }
+    }
+
+    fn options(waterlily_workload: bool) -> RecordOptions {
+        RecordOptions {
+            out: None,
+            frames: 120,
+            warmup: 10,
+            idle_seconds: 2,
+            waterlily_workload,
+        }
+    }
+
+    /// A status whose backend name matches no configuration, so the label
+    /// never reads the developer's real config file.
+    fn status(compositor_active: bool) -> Value {
+        json!({
+            "backend": "fake",
+            "version": "0.0.0-test",
+            "pid": 1,
+            "compositor_active": compositor_active,
+        })
+    }
+
+    fn assert_compositor_scenarios_skipped(baseline: &PerfBaselineV1, reason_part: &str) {
+        for name in COMPOSITOR_SCENARIOS {
+            let result = &baseline.scenarios[name];
+            assert_eq!(result.status, ScenarioStatus::Skipped, "{name}");
+            let reason = result.reason.as_deref().unwrap_or_default();
+            assert!(reason.contains(reason_part), "{name}: {reason}");
+        }
+    }
+
+    #[test]
+    fn compositor_metrics_ignore_the_no_compositor_fallback() {
+        let compositor = json!({ "frame_count": 42, "renderer_api": "egl/gles3" });
+
+        assert!(compositor_metrics(&status(false), Ok(compositor.clone())).is_err());
+        assert!(compositor_metrics(&status(true), Ok(no_compositor_metrics())).is_err());
+        assert!(compositor_metrics(&status(true), Err("socket closed".into())).is_err());
+        assert_eq!(
+            compositor_metrics(&status(true), Ok(compositor.clone())),
+            Ok(compositor.clone())
+        );
+        // Sessions predating `compositor_active` are judged by the metrics.
+        let legacy = json!({ "backend": "fake" });
+        assert!(compositor_metrics(&legacy, Ok(no_compositor_metrics())).is_err());
+        assert_eq!(
+            compositor_metrics(&legacy, Ok(compositor.clone())),
+            Ok(compositor)
+        );
+    }
+
+    #[test]
+    fn record_writes_skips_instead_of_failing_without_a_compositor() {
+        let mut session = FakeSession::new(status(false), no_compositor_metrics());
+        session.refuse_benchmark_start =
+            Some("benchmark: compositor unavailable or benchmark could not be started".to_string());
+
+        let baseline = record_baseline(&mut session, &options(false))
+            .expect("a session without a compositor still yields a baseline");
+
+        assert_compositor_scenarios_skipped(&baseline, "compositor inactive");
+        assert!(session.commands.is_empty(), "{:?}", session.commands);
+        assert_eq!(
+            baseline.scenarios["multi_monitor"].status,
+            ScenarioStatus::Recorded
+        );
+        assert_eq!(baseline.scenarios["idle"].status, ScenarioStatus::Skipped);
+    }
+
+    #[test]
+    fn refused_benchmark_start_is_skipped_and_restores_waterlily() {
+        let mut session = FakeSession::new(
+            status(true),
+            json!({ "frame_count": 100, "renderer_api": "egl/gles3" }),
+        );
+        session.refuse_benchmark_start = Some("benchmark already running".to_string());
+
+        let baseline = record_baseline(&mut session, &options(true))
+            .expect("a refused benchmark still yields a baseline");
+
+        assert_compositor_scenarios_skipped(&baseline, "benchmark already running");
+        // Enabled, refused, turned back off; the other benchmark is not ours
+        // to stop.
+        assert_eq!(
+            session.commands,
+            ["toggle_waterlily", "benchmark start", "toggle_waterlily"]
+        );
+        assert!(!session.waterlily_enabled());
+        assert_eq!(baseline.label.renderer_api, "egl/gles3");
+    }
+
+    #[test]
+    fn unavailable_waterlily_workload_skips_without_toggling_or_benchmarking() {
+        // The real session acknowledges `toggle_waterlily` even without
+        // WaterLily; only the status query tells, and it must decide.
+        let mut session = FakeSession::new(status(true), json!({ "frame_count": 100 }));
+        session.waterlily = None;
+
+        let baseline = record_baseline(&mut session, &options(true))
+            .expect("a missing workload still yields a baseline");
+
+        assert_compositor_scenarios_skipped(
+            &baseline,
+            "waterlily workload unavailable: compositor not active",
+        );
+        assert!(session.commands.is_empty(), "{:?}", session.commands);
+    }
+
+    #[test]
+    fn waterlily_workload_without_a_worker_skips_without_toggling() {
+        let mut session = FakeSession::new(status(true), json!({ "frame_count": 100 }));
+        session.waterlily = Some(FakeWaterlily {
+            enabled: false,
+            worker_connected: false,
+            toggle_ignored: false,
+        });
+
+        let baseline = record_baseline(&mut session, &options(true))
+            .expect("a missing worker still yields a baseline");
+
+        assert_compositor_scenarios_skipped(&baseline, "no WaterLily worker is connected");
+        assert!(session.commands.is_empty(), "{:?}", session.commands);
+        assert!(!session.waterlily_enabled());
+    }
+
+    #[test]
+    fn waterlily_toggle_that_does_not_take_effect_skips_the_window() {
+        let mut session = FakeSession::new(status(true), json!({ "frame_count": 100 }));
+        session.waterlily = Some(FakeWaterlily {
+            enabled: false,
+            worker_connected: true,
+            toggle_ignored: true,
+        });
+
+        let baseline = record_baseline(&mut session, &options(true))
+            .expect("an unconfirmed workload still yields a baseline");
+
+        assert_compositor_scenarios_skipped(&baseline, "did not enable it");
+        // Nothing changed, so there is nothing to switch back.
+        assert_eq!(session.commands, ["toggle_waterlily"]);
+    }
+
+    #[test]
+    fn running_waterlily_workload_is_used_and_left_running() {
+        let mut session = FakeSession::new(status(true), json!({ "frame_count": 100 }));
+        session.waterlily = Some(FakeWaterlily {
+            enabled: true,
+            worker_connected: true,
+            toggle_ignored: false,
+        });
+        session.queries.insert(
+            "benchmark_report",
+            Ok(json!({ "frame_time": { "avg_ms": 6.9, "count": 120 } })),
+        );
+
+        let baseline = record_baseline(&mut session, &options(true))
+            .expect("a completed benchmark yields a baseline");
+
+        // A blind toggle pair would have measured with WaterLily off and
+        // then switched the user's animation back on.
+        assert_eq!(session.commands, ["benchmark start"]);
+        assert!(session.waterlily_enabled());
+        assert_eq!(
+            baseline.scenarios["steady_frame"].status,
+            ScenarioStatus::Recorded
+        );
+    }
+
+    /// A benchmark report whose `system` block identifies the test GPU.
+    fn report_with_system(frame_time: Value) -> Value {
+        json!({
+            "system": {
+                "gpu": "Test GPU/PCIe",
+                "driver": "4.6.0 Test 555.0",
+                "resolution": "2560x1440",
+            },
+            "frame_time": frame_time,
+        })
+    }
+
+    #[test]
+    fn overdue_benchmark_is_stopped_and_waterlily_restored() {
+        let mut session = FakeSession::new(status(true), json!({ "frame_count": 100 }));
+        session.polls_before_deadline = 2;
+        session.stop_report = report_with_system(json!({ "avg_ms": 40.0, "count": 3 }));
+
+        let baseline = record_baseline(&mut session, &options(true))
+            .expect("an overdue benchmark still yields a baseline");
+
+        assert_eq!(
+            session.commands,
+            [
+                "toggle_waterlily",
+                "benchmark start",
+                "benchmark stop",
+                "toggle_waterlily"
+            ]
+        );
+        assert!(!session.waterlily_enabled());
+        let steady = &baseline.scenarios["steady_frame"];
+        assert_eq!(steady.status, ScenarioStatus::Skipped);
+        assert!(
+            steady
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("did not complete")),
+            "{steady:?}"
+        );
+        // The stopped run still names the system, not its partial numbers.
+        assert_eq!(baseline.label.gpu, "Test GPU/PCIe");
+        assert_eq!(baseline.label.driver, "4.6.0 Test 555.0");
+        assert_eq!(baseline.label.resolution, "2560x1440");
+        assert!(steady.metrics.is_empty());
+    }
+
+    #[test]
+    fn overdue_candidate_fails_the_gate_against_a_completed_baseline() {
+        let record = |session: &mut FakeSession| {
+            let mut baseline = record_baseline(session, &options(false)).unwrap();
+            // CPU, kernel and the config fingerprint come from this host and
+            // its config file, identical for both runs; pin them so the
+            // comparison does not depend on the machine running the test.
+            baseline.label.cpu = "Test CPU".into();
+            baseline.label.kernel = "6.17.0".into();
+            baseline.label.config_fingerprint = "abcd1234".into();
+            baseline
+        };
+        let metrics = json!({ "frame_count": 100, "renderer_api": "glx/opengl" });
+
+        let mut session = FakeSession::new(status(true), metrics.clone());
+        session.queries.insert(
+            "benchmark_report",
+            Ok(report_with_system(json!({
+                "avg_ms": 6.9,
+                "p50_ms": 6.8,
+                "p95_ms": 8.1,
+                "p99_ms": 9.0,
+                "fps_avg": 60.0,
+                "count": 120,
+            }))),
+        );
+        let baseline = record(&mut session);
+
+        let mut session = FakeSession::new(status(true), metrics);
+        session.polls_before_deadline = 1;
+        session.stop_report = report_with_system(json!({ "avg_ms": 40.0, "count": 3 }));
+        let candidate = record(&mut session);
+
+        assert!(candidate.label.differing_fields(&baseline.label).is_empty());
+        let report = perf_contract::compare(&baseline, &candidate, &default_budgets())
+            .expect("an overdue candidate keeps the baseline's label");
+        assert!(!report.passed);
+        let lost = report
+            .verdicts
+            .iter()
+            .find(|verdict| verdict.metric == "frame_time_p95_ms")
+            .unwrap();
+        assert_eq!(lost.outcome, VerdictOutcome::Violation);
+        assert!(lost.detail.contains("did not complete"), "{lost:?}");
+    }
+
+    #[test]
+    fn reportless_runs_take_the_resolution_from_the_monitor_extent() {
+        let mut session = FakeSession::new(status(false), no_compositor_metrics());
+        session.queries.insert(
+            "get_monitors",
+            Ok(json!([
+                { "num": 0, "x": 0, "y": 0, "w": 1920, "h": 1080 },
+                { "num": 1, "x": 1920, "y": 0, "w": 2560, "h": 1440 },
+            ])),
+        );
+
+        let baseline = record_baseline(&mut session, &options(false))
+            .expect("a session without a compositor still yields a baseline");
+
+        assert_eq!(baseline.label.resolution, "4480x1440");
+    }
+
+    #[test]
+    fn screen_extent_spans_every_monitor_and_needs_their_geometry() {
+        let monitors = [
+            json!({ "x": 0, "y": 360, "w": 1920, "h": 1080 }),
+            json!({ "x": 1920, "y": 0, "w": 2560, "h": 1440 }),
+        ];
+        assert_eq!(screen_extent(&monitors).as_deref(), Some("4480x1440"));
+        assert_eq!(screen_extent(&[]), None);
+        assert_eq!(screen_extent(&[json!({ "id": 0 })]), None);
+    }
+
+    #[test]
+    fn completed_benchmark_is_recorded_without_a_stop() {
+        let mut session = FakeSession::new(status(true), json!({ "frame_count": 100 }));
+        session.queries.insert(
+            "benchmark_report",
+            Ok(json!({
+                "frame_time": { "avg_ms": 6.9, "p95_ms": 8.1, "count": 120 },
+            })),
+        );
+
+        let baseline = record_baseline(&mut session, &options(true))
+            .expect("a completed benchmark yields a baseline");
+
+        assert_eq!(
+            session.commands,
+            ["toggle_waterlily", "benchmark start", "toggle_waterlily"]
+        );
+        assert!(!session.waterlily_enabled());
+        let steady = &baseline.scenarios["steady_frame"];
+        assert_eq!(steady.status, ScenarioStatus::Recorded);
+        assert_eq!(steady.metrics.get("frame_time_avg_ms"), Some(&6.9));
+    }
 }

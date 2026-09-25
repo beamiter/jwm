@@ -22,6 +22,7 @@ use smithay::reexports::wayland_server::protocol::wl_shm;
 use smithay::reexports::wayland_server::{
     Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New, Resource,
 };
+use smithay::utils::Transform;
 
 // Use the canonical path that matches Display<JwmWaylandState> in backend.rs.
 // `wayland_udev::state` is now a compatibility re-export of this same module,
@@ -38,7 +39,10 @@ pub struct PendingScreencopyFrame {
     pub buffer: WlBuffer,
     /// The smithay `Output` to capture.
     pub output: Output,
-    /// Optional sub-region (x, y, width, height) in output logical coords.
+    /// Optional sub-region (x, y, width, height) in output buffer pixels:
+    /// the client's logical `capture_output_region` box after the output
+    /// transform was undone and the output scale applied, so it indexes the
+    /// physical mode-sized capture directly.
     pub region: Option<(i32, i32, i32, i32)>,
     /// Whether to composite the cursor onto the frame.
     pub overlay_cursor: bool,
@@ -64,6 +68,8 @@ pub struct ScreencopyFrameData {
     /// `None` when the requested `wl_output` had no matching compositor output;
     /// the frame is initialized only so it can be failed cleanly.
     pub output: Option<Output>,
+    /// Region to copy in output buffer pixels (see
+    /// [`PendingScreencopyFrame::region`]); `None` for a full-output capture.
     pub region: Option<(i32, i32, i32, i32)>,
     pub overlay_cursor: bool,
     pub buffer_info: (u32, u32, u32, wl_shm::Format), // (width, height, stride, format)
@@ -93,6 +99,12 @@ impl GlobalDispatch<ZwlrScreencopyManagerV1, ()> for JwmWaylandState {
     ) {
         state.record_protocol_bind("zwlr_screencopy_manager_v1");
         data_init.init(resource, ());
+    }
+
+    /// Screen capture is privileged: a sandboxed (wp_security_context)
+    /// client must not read other clients' pixels.
+    fn can_view(client: Client, _global_data: &()) -> bool {
+        !crate::backend::wayland::state::client_is_sandboxed(&client)
     }
 }
 
@@ -208,39 +220,52 @@ fn handle_capture(
     };
     let (out_w, out_h) = (mode.size.w as u32, mode.size.h as u32);
 
-    // For region captures, use the region size; otherwise full output. Region
-    // dimensions come from i32 wire fields — without validation, `as u32` on a
-    // negative number wraps to ~2^32 and the resulting stride/buffer-size math
-    // overflows. Reject zero/negative dims and require the region to lie within
-    // the output rectangle.
-    let (cap_w, cap_h) = if let Some((rx, ry, rw, rh)) = region {
-        if !region_is_valid(rx, ry, rw, rh, out_w, out_h) {
-            warn!(
-                "[screencopy] invalid region ({rx},{ry} {rw}x{rh}) for output {} ({out_w}x{out_h})",
-                output.name()
-            );
-            let frame_data = ScreencopyFrameData {
-                output: None,
-                region,
-                overlay_cursor: overlay_cursor != 0,
-                buffer_info: (0, 0, 0, wl_shm::Format::Argb8888),
-                pending_queue: pending_queue.clone(),
-                copy_requested: AtomicBool::new(false),
+    // For region captures, use the region size; otherwise full output. The
+    // protocol gives the region in output-logical coordinates, while the
+    // capture is a physical mode-sized buffer, so it is mapped to buffer
+    // pixels here once; the render drain then copies from the mapped
+    // rectangle as-is. Region dimensions come from i32 wire fields, so the
+    // mapping also rejects empty, negative and out-of-output boxes before any
+    // `as u32` could wrap into huge stride/buffer-size math.
+    let buffer_region = match region {
+        Some(logical) => {
+            let Some(buffer_region) = logical_region_to_buffer(
+                logical,
+                output.current_scale().fractional_scale(),
+                output.current_transform(),
+                (mode.size.w, mode.size.h),
+            ) else {
+                let (rx, ry, rw, rh) = logical;
+                warn!(
+                    "[screencopy] invalid logical region ({rx},{ry} {rw}x{rh}) for output {} ({out_w}x{out_h} buffer)",
+                    output.name()
+                );
+                let frame_data = ScreencopyFrameData {
+                    output: None,
+                    region,
+                    overlay_cursor: overlay_cursor != 0,
+                    buffer_info: (0, 0, 0, wl_shm::Format::Argb8888),
+                    pending_queue: pending_queue.clone(),
+                    copy_requested: AtomicBool::new(false),
+                };
+                let frame = data_init.init(frame_new_id, frame_data);
+                frame.failed();
+                return;
             };
-            let frame = data_init.init(frame_new_id, frame_data);
-            frame.failed();
-            return;
+            Some(buffer_region)
         }
-        (rw as u32, rh as u32)
-    } else {
-        (out_w, out_h)
+        None => None,
+    };
+    let (cap_w, cap_h) = match buffer_region {
+        Some((_, _, width, height)) => (width as u32, height as u32),
+        None => (out_w, out_h),
     };
 
     let stride = cap_w * 4; // ARGB8888 → 4 bytes per pixel
 
     let frame_data = ScreencopyFrameData {
         output: Some(output.clone()),
-        region,
+        region: buffer_region,
         overlay_cursor: overlay_cursor != 0,
         buffer_info: (cap_w, cap_h, stride, wl_shm::Format::Argb8888),
         pending_queue,
@@ -267,11 +292,12 @@ fn handle_capture(
     }
 
     debug!(
-        "[screencopy] capture_output: output={} size={}x{} region={:?}",
+        "[screencopy] capture_output: output={} size={}x{} region={:?} buffer_region={:?}",
         output.name(),
         cap_w,
         cap_h,
         region,
+        buffer_region,
     );
 }
 
@@ -367,6 +393,96 @@ pub(crate) fn region_is_valid(rx: i32, ry: i32, rw: i32, rh: i32, out_w: u32, ou
     right <= out_w && bottom <= out_h
 }
 
+/// Map a `capture_output_region` box to the buffer-pixel rectangle the
+/// capture copies from, or `None` when the box is empty or leaves the output.
+///
+/// The protocol gives the box in output-logical coordinates: the space
+/// xdg-output advertises, i.e. the mode size divided by the output scale and
+/// then rotated by the output transform. The capture itself is a physical
+/// mode-sized buffer. Like wlroots, the box is validated against the
+/// advertised logical size, scaled to physical pixels (rounded outward so a
+/// fractional scale never drops an edge pixel) and then brought back into
+/// buffer orientation by undoing the output transform. Treating the logical
+/// box as raw buffer pixels captured a shrunken, shifted area on any output
+/// whose scale is not 1.
+pub(crate) fn logical_region_to_buffer(
+    region: (i32, i32, i32, i32),
+    scale: f64,
+    transform: Transform,
+    mode_size: (i32, i32),
+) -> Option<(i32, i32, i32, i32)> {
+    let (mode_w, mode_h) = mode_size;
+    if mode_w <= 0 || mode_h <= 0 || !scale.is_finite() || scale <= 0.0 {
+        return None;
+    }
+    // Physical output size in the client's (transformed) orientation.
+    let (area_w, area_h) = if transform_swaps_axes(transform) {
+        (mode_h, mode_w)
+    } else {
+        (mode_w, mode_h)
+    };
+    // Same rounding smithay uses for the advertised xdg-output logical size.
+    let logical_w = (f64::from(area_w) / scale).round();
+    let logical_h = (f64::from(area_h) / scale).round();
+    if logical_w < 1.0 || logical_h < 1.0 {
+        return None;
+    }
+    let (rx, ry, rw, rh) = region;
+    if !region_is_valid(rx, ry, rw, rh, logical_w as u32, logical_h as u32) {
+        return None;
+    }
+
+    // Edges are summed in i64: a scale below 1 makes the logical output
+    // larger than the mode, so `rx + rw` is not bounded by an i32 there.
+    let to_physical = |logical: i64, round: fn(f64) -> f64, limit: i32| -> i32 {
+        (round(logical as f64 * scale) as i64).clamp(0, i64::from(limit)) as i32
+    };
+    let left = to_physical(i64::from(rx), f64::floor, area_w);
+    let top = to_physical(i64::from(ry), f64::floor, area_h);
+    let right = to_physical(i64::from(rx) + i64::from(rw), f64::ceil, area_w);
+    let bottom = to_physical(i64::from(ry) + i64::from(rh), f64::ceil, area_h);
+    if right <= left || bottom <= top {
+        return None;
+    }
+    Some(untransform_box(
+        (left, top, right - left, bottom - top),
+        transform,
+        (area_w, area_h),
+    ))
+}
+
+fn transform_swaps_axes(transform: Transform) -> bool {
+    matches!(
+        transform,
+        Transform::_90 | Transform::_270 | Transform::Flipped90 | Transform::Flipped270
+    )
+}
+
+/// Undo `transform` for a box inside an `(area_w, area_h)` area given in the
+/// transformed orientation. This is wlroots' `wlr_box_transform` applied with
+/// the inverted output transform, because capture clients such as grim
+/// rotate the returned buffer by the advertised `wl_output` transform and so
+/// expect buffer orientation: rotations swap 90 and 270, while every flipped
+/// transform is a reflection and therefore its own inverse. Smithay's
+/// `Transform::invert` maps `Flipped90` to `Flipped270`, which does not match
+/// that convention, so it is not used here.
+fn untransform_box(
+    (x, y, w, h): (i32, i32, i32, i32),
+    transform: Transform,
+    (area_w, area_h): (i32, i32),
+) -> (i32, i32, i32, i32) {
+    match transform {
+        Transform::Normal => (x, y, w, h),
+        Transform::_90 => (y, area_w - x - w, h, w),
+        Transform::_180 => (area_w - x - w, area_h - y - h, w, h),
+        Transform::_270 => (area_h - y - h, x, h, w),
+        Transform::Flipped => (area_w - x - w, y, w, h),
+        Transform::Flipped90 => (y, x, h, w),
+        Transform::Flipped180 => (x, area_h - y - h, w, h),
+        Transform::Flipped270 => (area_h - y - h, area_w - x - w, h, w),
+    }
+}
+
 /// Create the zwlr_screencopy_manager_v1 global and return the shared pending queue.
 pub fn init_screencopy_manager(dh: &DisplayHandle) -> PendingScreencopyQueue {
     let queue = new_pending_screencopy_queue();
@@ -378,7 +494,8 @@ pub fn init_screencopy_manager(dh: &DisplayHandle) -> PendingScreencopyQueue {
 
 #[cfg(test)]
 mod tests {
-    use super::{claim_copy_request, region_is_valid};
+    use super::{claim_copy_request, logical_region_to_buffer, region_is_valid};
+    use smithay::utils::Transform;
     use std::sync::atomic::AtomicBool;
 
     #[test]
@@ -431,5 +548,147 @@ mod tests {
     fn overflow_in_right_edge_rejected() {
         // rx + rw overflows u32 — must be caught, not silently wrapped.
         assert!(!region_is_valid(i32::MAX, 0, i32::MAX, 100, 1920, 1080));
+    }
+
+    const FHD: (i32, i32) = (1920, 1080);
+
+    #[test]
+    fn unscaled_normal_output_maps_regions_one_to_one() {
+        for region in [
+            (0, 0, 1920, 1080),
+            (100, 100, 800, 600),
+            (1820, 980, 100, 100),
+        ] {
+            assert_eq!(
+                logical_region_to_buffer(region, 1.0, Transform::Normal, FHD),
+                Some(region)
+            );
+        }
+    }
+
+    #[test]
+    fn scaled_output_regions_are_logical_not_buffer_pixels() {
+        // Regression: a 1920x1080 panel at scale 2 is a 960x540 logical
+        // output. The lower-right quarter used to be copied from buffer
+        // pixels (480,270)..(960,540) at half size, and the whole output
+        // captured only its top-left quarter.
+        assert_eq!(
+            logical_region_to_buffer((480, 270, 480, 270), 2.0, Transform::Normal, FHD),
+            Some((960, 540, 960, 540))
+        );
+        assert_eq!(
+            logical_region_to_buffer((0, 0, 960, 540), 2.0, Transform::Normal, FHD),
+            Some((0, 0, 1920, 1080))
+        );
+        // Anything past the logical edge is outside the output, even though
+        // it would still fit inside the physical mode.
+        assert_eq!(
+            logical_region_to_buffer((960, 540, 960, 540), 2.0, Transform::Normal, FHD),
+            None
+        );
+    }
+
+    #[test]
+    fn fractional_scale_rounds_the_buffer_region_outward() {
+        assert_eq!(
+            logical_region_to_buffer((1, 1, 3, 3), 1.5, Transform::Normal, FHD),
+            Some((1, 1, 5, 5))
+        );
+        // 1366 / 1.5 = 910.67 is advertised as 911; the full logical output
+        // must still map onto exactly the physical mode.
+        assert_eq!(
+            logical_region_to_buffer((0, 0, 911, 512), 1.5, Transform::Normal, (1366, 768)),
+            Some((0, 0, 1366, 768))
+        );
+    }
+
+    #[test]
+    fn rotated_output_regions_are_mapped_back_into_buffer_orientation() {
+        // Transform 90 advertises a 1080x1920 logical output. This region
+        // used to be rejected because y + h exceeded the 1080 buffer height.
+        assert_eq!(
+            logical_region_to_buffer((0, 1500, 100, 100), 1.0, Transform::_90, FHD),
+            Some((1500, 980, 100, 100))
+        );
+        assert_eq!(
+            logical_region_to_buffer((0, 0, 1080, 1920), 1.0, Transform::_90, FHD),
+            Some((0, 0, 1920, 1080))
+        );
+        assert_eq!(
+            logical_region_to_buffer((0, 0, 100, 50), 1.0, Transform::_270, FHD),
+            Some((1870, 0, 50, 100))
+        );
+        assert_eq!(
+            logical_region_to_buffer((0, 0, 100, 50), 1.0, Transform::_180, FHD),
+            Some((1820, 1030, 100, 50))
+        );
+        assert_eq!(
+            logical_region_to_buffer((10, 20, 30, 40), 2.0, Transform::_90, FHD),
+            Some((40, 1000, 80, 60))
+        );
+    }
+
+    #[test]
+    fn flipped_transforms_are_their_own_inverse() {
+        // Every flipped transform is a reflection: applying the mapping to
+        // the buffer box again (now inside the mode-sized buffer) must give
+        // the logical box back.
+        for transform in [
+            Transform::Flipped,
+            Transform::Flipped90,
+            Transform::Flipped180,
+            Transform::Flipped270,
+        ] {
+            let logical = (10, 20, 30, 40);
+            let buffer = logical_region_to_buffer(logical, 1.0, transform, FHD)
+                .expect("region inside the flipped output");
+            assert!(
+                buffer.0 >= 0
+                    && buffer.1 >= 0
+                    && buffer.0 + buffer.2 <= FHD.0
+                    && buffer.1 + buffer.3 <= FHD.1,
+                "{transform:?} produced {buffer:?}, outside the buffer"
+            );
+            assert_eq!(
+                super::untransform_box(buffer, transform, FHD),
+                logical,
+                "{transform:?} is not its own inverse"
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_regions_and_scales_are_rejected() {
+        for region in [
+            (0, 0, 0, 10),
+            (0, 0, 10, -1),
+            (-1, 0, 10, 10),
+            (i32::MAX, 0, i32::MAX, 10),
+        ] {
+            assert_eq!(
+                logical_region_to_buffer(region, 1.0, Transform::Normal, FHD),
+                None
+            );
+        }
+        for scale in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert_eq!(
+                logical_region_to_buffer((0, 0, 10, 10), scale, Transform::Normal, FHD),
+                None
+            );
+        }
+        assert_eq!(
+            logical_region_to_buffer((0, 0, 10, 10), 1.0, Transform::Normal, (0, 1080)),
+            None
+        );
+        // A scale below 1 enlarges the logical output past i32 edge sums.
+        assert_eq!(
+            logical_region_to_buffer(
+                (i32::MAX - 1, 0, i32::MAX - 1, 1),
+                0.001,
+                Transform::Normal,
+                (i32::MAX, 1080)
+            ),
+            Some((2_147_483, 0, 2_147_485, 1))
+        );
     }
 }

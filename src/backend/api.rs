@@ -1584,6 +1584,91 @@ pub enum NetWmState {
     SkipPager,
 }
 
+/// EWMH maximize axes that a request names or a window holds.
+///
+/// xdg-shell, XWayland (Smithay decodes only the MAXIMIZED_HORZ+VERT pair) and
+/// wlr-foreign-toplevel can only express `BOTH`; native X11 `_NET_WM_STATE`
+/// may name a single axis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct MaximizeAxes {
+    pub vert: bool,
+    pub horz: bool,
+}
+
+impl MaximizeAxes {
+    pub const NONE: Self = Self {
+        vert: false,
+        horz: false,
+    };
+    pub const VERT: Self = Self {
+        vert: true,
+        horz: false,
+    };
+    pub const HORZ: Self = Self {
+        vert: false,
+        horz: true,
+    };
+    pub const BOTH: Self = Self {
+        vert: true,
+        horz: true,
+    };
+
+    pub const fn new(vert: bool, horz: bool) -> Self {
+        Self { vert, horz }
+    }
+
+    pub const fn any(self) -> bool {
+        self.vert || self.horz
+    }
+
+    pub const fn both(self) -> bool {
+        self.vert && self.horz
+    }
+
+    pub const fn union(self, other: Self) -> Self {
+        Self {
+            vert: self.vert || other.vert,
+            horz: self.horz || other.horz,
+        }
+    }
+
+    pub const fn without(self, other: Self) -> Self {
+        Self {
+            vert: self.vert && !other.vert,
+            horz: self.horz && !other.horz,
+        }
+    }
+
+    /// True when `self` sets an axis that `current` does not.
+    pub const fn gains_over(self, current: Self) -> bool {
+        (self.vert && !current.vert) || (self.horz && !current.horz)
+    }
+
+    /// `Some(VERT)` for `MaximizedVert`, `Some(HORZ)` for `MaximizedHorz`, `None` otherwise.
+    pub const fn from_net_wm_state(state: NetWmState) -> Option<Self> {
+        match state {
+            NetWmState::MaximizedVert => Some(Self::VERT),
+            NetWmState::MaximizedHorz => Some(Self::HORZ),
+            _ => None,
+        }
+    }
+
+    /// Replace the axis a per-atom state names; any other state returns `self`.
+    pub const fn with_net_wm_state(self, state: NetWmState, on: bool) -> Self {
+        match state {
+            NetWmState::MaximizedVert => Self {
+                vert: on,
+                horz: self.horz,
+            },
+            NetWmState::MaximizedHorz => Self {
+                vert: self.vert,
+                horz: on,
+            },
+            _ => self,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResizeEdge {
     Top,
@@ -2064,6 +2149,17 @@ pub enum BackendEvent {
         action: NetWmAction,
         state: NetWmState,
     },
+    /// A client, pager or taskbar asked to change maximize state. `axes` names
+    /// the axes the request covers and is never `NONE`. Both X11 transports
+    /// turn one `_NET_WM_STATE` message naming both MAXIMIZED atoms into ONE
+    /// event; xdg-shell, XWayland and wlr-foreign-toplevel always send `BOTH`
+    /// with `Add`/`Remove`. Protocol callbacks never pre-confirm: shared
+    /// policy publishes accepted state via `PropertyOps::set_maximized_state`.
+    WindowMaximizeRequest {
+        window: WindowId,
+        action: NetWmAction,
+        axes: MaximizeAxes,
+    },
     PropertyChanged {
         window: WindowId,
         kind: PropertyKind,
@@ -2115,8 +2211,12 @@ pub enum BackendEvent {
     },
 
     // === Workspace protocol events ===
+    /// Switch a monitor's view to `tag_mask`. `monitor` is the policy monitor
+    /// index the request names (ext-workspace: its group's monitor), or `None`
+    /// when it names none (the X11 `_NET_CURRENT_DESKTOP` root request, which
+    /// EWMH ties to the selected monitor).
     WorkspaceActivate {
-        monitor: usize,
+        monitor: Option<usize>,
         tag_mask: u32,
     },
 
@@ -2136,7 +2236,6 @@ pub enum BackendEvent {
     // === Foreign toplevel management (taskbar window control) ===
     ForeignToplevelActivate(WindowId),
     ForeignToplevelClose(WindowId),
-    ForeignToplevelSetMaximized(WindowId, bool),
     ForeignToplevelSetMinimized(WindowId, bool),
     ForeignToplevelSetFullscreen(WindowId, bool),
 
@@ -2397,6 +2496,29 @@ pub trait PropertyOps: Send {
         _state: NetWmState,
     ) -> Result<bool, BackendError> {
         Ok(false)
+    }
+
+    /// Publish JWM's accepted maximize state for `win` in one step. Policy uses
+    /// this (never per-axis `set_net_wm_state_flag`) for maximize.
+    /// X11 (x11rb/xcb override): one checked `_NET_WM_STATE` read-modify-write.
+    /// Wayland (udev/x11/winit override): xdg stages `xdg_toplevel::State::Maximized`
+    /// (set iff `axes.both()`) WITHOUT sending; the caller's following
+    /// `WindowOps::configure` delivers state and size in one configure.
+    /// XWayland: `X11Surface::set_maximized(axes.both())`. wlr: per-axis flags.
+    /// Default: per-axis writes, axes turning off before axes turning on.
+    fn set_maximized_state(&self, win: WindowId, axes: MaximizeAxes) -> Result<(), BackendError> {
+        let writes = [
+            (NetWmState::MaximizedVert, axes.vert),
+            (NetWmState::MaximizedHorz, axes.horz),
+        ];
+        for turning_on in [false, true] {
+            for (state, on) in writes {
+                if on == turning_on {
+                    self.set_net_wm_state_flag(win, state, on)?;
+                }
+            }
+        }
+        Ok(())
     }
 
     fn set_frame_extents(

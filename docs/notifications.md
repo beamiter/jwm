@@ -228,12 +228,12 @@ cap's close is what bounds that wait.
 Scripts with access to the IPC socket can skip D-Bus entirely:
 
 ```sh
-jwm-msg '{"command": "notify", "args": {
+jwm-tool msg notify --args '{
   "title": "Build finished",
   "body": "jwm 0.2.0 · 0 warnings",
   "urgency": 1,
   "timeout_ms": 4000
-}}'
+}'
 ```
 
 - `title` / `body` — either may be empty, not both. The body keeps at most

@@ -177,13 +177,17 @@ queue.
   while JWM's private, versioned `_JWM_MINIMIZED_RESTORE_V1` property preserves
   the semantic restore state that those standards do not carry: monitor/tag,
   visible and floating rectangles, fullscreen return rectangle, PiP/floating
-  flags, and Dock insertion order. JWM writes it before committing a minimize,
-  refreshes it immediately before a seamless exec, and removes it after a
-  restore, live unmanage, or normal shutdown. Missing or malformed snapshots
-  fall back safely and are normalized after adoption. Because the property is
-  stored on a client-owned X11 window, an implausibly large recovered order is
-  rebased locally instead of being allowed to exhaust the session allocator;
-  the remaining monitor/tag/mode/geometry state is still recovered.
+  flags, and Dock insertion order. For a minimized maximized window the visible
+  rectangle is the maximized one and the floating rectangle carries the
+  pre-maximize restore rectangle, so a replacement JWM that re-adopts it
+  maximized keeps its exact restore geometry. JWM writes it before committing a
+  minimize, refreshes it immediately before a seamless exec, and removes it
+  after a restore, live unmanage, or normal shutdown. Missing or malformed
+  snapshots fall back safely and are normalized after adoption. Because the
+  property is stored on a client-owned X11 window, an implausibly large
+  recovered order is rebased locally instead of being allowed to exhaust the
+  session allocator; the remaining monitor/tag/mode/geometry state is still
+  recovered.
 - A seamless exec intentionally leaves true Iconic clients unmapped. X11
   `QueryTree` still returns those root children, and the replacement JWM adopts
   either a viewable client or one whose `WM_STATE` is Iconic. For an unmapped
@@ -202,7 +206,13 @@ queue.
   Iconic state remains unmapped, while one whose only reliable proof is EWMH
   Hidden is selectively mapped at its verified off-screen coordinate so the
   replacement scan can still find it. Any failure reverses those selective
-  maps and resumes the existing event loop without entering cleanup.
+  maps and resumes the existing event loop without entering cleanup. The one
+  exception is a config file that cannot be written at all (a read-only
+  filesystem such as a link into the Nix store, or a permission error:
+  `EROFS`, `EACCES`, `EPERM`): retrying cannot succeed, so the pending layout
+  write is logged and dropped and the restart goes ahead. Only a layout write
+  that might succeed on a later attempt still cancels the restart and resumes
+  the event loop.
 - Normal shutdown uses a separate global handoff transaction. All true-Iconic
   and parked clients are mapped, restored to their saved visible geometry and
   synchronously verified before JWM releases any event mask, button grab,
@@ -214,7 +224,11 @@ queue.
   Switching between them completes the old mode first; hidden clients remain
   parked throughout, and PiP restores both the pre-PiP floating/tiled choice
   and sticky state. Fullscreen clients reject ConfigureRequest geometry so a
-  client cannot overwrite either a visible or minimized return slot.
+  client cannot overwrite either a visible or minimized return slot. Maximized
+  clients likewise reject the ConfigureRequest components on their maximized
+  axes (x and width horizontally, y and height vertically); a request with no
+  geometry component left, including a border-width-only one, is refused
+  outright.
 - Output moves and hotplug migrate the semantic restore rectangle and the real
   parking coordinate together. A transient Configure/SetPosition failure is
   retained per `ClientKey` and retried from the main loop with a 50 ms--2 s

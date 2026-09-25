@@ -386,6 +386,12 @@ pub const SCENARIO_STAGES: &[ScenarioStage] = &[
     ScenarioStage::Command("setlayout", r#"{"layout":"tile"}"#),
     ScenarioStage::Command("view", r#"{"tag":2}"#),
     ScenarioStage::Command("view", r#"{"tag":1}"#),
+    // Maximize round trip on the tiled layout: the first toggle promotes the
+    // selected tile out of the layout and fills the work area (EWMH state and
+    // geometry written through each transport), the second puts it back into
+    // the slot it left.
+    ScenarioStage::Command("togglemaximize", "null"),
+    ScenarioStage::Command("togglemaximize", "null"),
     ScenarioStage::Command("togglefloating", "null"),
 ];
 
@@ -432,6 +438,7 @@ pub fn normalize_observable_state(
                         "floating": window["is_floating"],
                         "fullscreen": window["is_fullscreen"],
                         "minimized": window["is_minimized"],
+                        "maximized": window["is_maximized"],
                         "focused": window["is_focused"],
                         "monitor": window["monitor"],
                         "x": window["x"],
@@ -3757,7 +3764,7 @@ mod tests {
              "monitor": 0, "x": 640, "y": 52, "w": 636, "h": 745},
             {"id": 3, "name": "other", "class": "xclock", "instance": "xclock",
              "tags": 1, "is_floating": true, "is_fullscreen": false, "is_focused": false,
-             "is_minimized": true,
+             "is_minimized": true, "is_maximized": true,
              "monitor": 0, "x": 0, "y": 52, "w": 640, "h": 745},
         ]);
         let workspaces = serde_json::json!([
@@ -3774,6 +3781,10 @@ mod tests {
         assert!(normalized["windows"][0].get("name").is_none());
         assert_eq!(normalized["windows"][0]["minimized"], true);
         assert_eq!(normalized["windows"][1]["minimized"], false);
+        // Maximize is projected as reported; a server that predates the
+        // field (no `is_maximized` key) projects null rather than a guess.
+        assert_eq!(normalized["windows"][0]["maximized"], true);
+        assert!(normalized["windows"][1]["maximized"].is_null());
         // Workspaces sorted by (monitor, tag_index).
         assert_eq!(normalized["workspaces"][0]["tag_index"], 0);
         assert_eq!(normalized["workspaces"][0]["num_clients"], 2);

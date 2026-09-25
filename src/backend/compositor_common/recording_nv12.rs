@@ -79,6 +79,75 @@ pub fn recording_output_size(region_w: u32, region_h: u32, max_height: u32) -> (
     scaled
 }
 
+/// Where the recording region lands on the fixed encode canvas, as
+/// `(x, y, width, height)` in top-down canvas pixels.
+///
+/// The encoder is spawned once, at a size derived from the region the
+/// recording started with, and that region fills the canvas. A region adjusted
+/// mid-recording keeps that mapping's proportions: it is scaled uniformly until
+/// it fits and centred, and the rest of the canvas is left for black bars.
+/// Stretching every region onto the whole canvas instead distorted the rest of
+/// the recording, cursor included, whenever an adjustment changed the aspect
+/// ratio.
+///
+/// The fit is measured against the start region rather than the canvas's own
+/// aspect ratio because the NV12 alignment snap leaves the canvas a few pixels
+/// off the region it was sized for. Measured against the canvas, the start
+/// region and every pure move of it would gain a sliver of bar on one edge.
+///
+/// Both compositors blit through this one mapping, and their synthesised
+/// cursors follow it, so a reshaped region reads the same in either backend's
+/// recording.
+pub fn recording_canvas_rect(
+    start: (u32, u32),
+    region: (u32, u32),
+    canvas: (u32, u32),
+) -> (u32, u32, u32, u32) {
+    let (start_w, start_h) = start;
+    let (region_w, region_h) = region;
+    let (canvas_w, canvas_h) = canvas;
+    if [start_w, start_h, region_w, region_h, canvas_w, canvas_h].contains(&0) {
+        return (0, 0, canvas_w, canvas_h);
+    }
+    // The uniform scale is min(start_w / region_w, start_h / region_h),
+    // compared exactly in integers: the axis that picks it spans the canvas
+    // and the other shrinks by the ratio of the two.
+    let wide = u64::from(start_w) * u64::from(region_h) <= u64::from(start_h) * u64::from(region_w);
+    let (width, height) = if wide {
+        let height = scale_canvas_extent(
+            canvas_h,
+            u128::from(region_h) * u128::from(start_w),
+            u128::from(start_h) * u128::from(region_w),
+        );
+        (canvas_w, height)
+    } else {
+        let width = scale_canvas_extent(
+            canvas_w,
+            u128::from(region_w) * u128::from(start_h),
+            u128::from(start_w) * u128::from(region_h),
+        );
+        (width, canvas_h)
+    };
+    (
+        (canvas_w - width) / 2,
+        (canvas_h - height) / 2,
+        width,
+        height,
+    )
+}
+
+/// `extent * numerator / denominator`, rounded to nearest and kept within
+/// `1..=extent`, so even a degenerate sliver of a region keeps one row or
+/// column on the canvas. Callers already rule out a zero extent or
+/// denominator; both are guarded again so neither can divide by zero or make
+/// `clamp` panic.
+fn scale_canvas_extent(extent: u32, numerator: u128, denominator: u128) -> u32 {
+    let scaled = (u128::from(extent) * numerator + denominator / 2) / denominator.max(1);
+    u32::try_from(scaled)
+        .unwrap_or(extent)
+        .clamp(1, extent.max(1))
+}
+
 /// Fragment stage of the packing pass, without a version header.
 ///
 /// Rows below `u_luma_rows` hold the Y plane, one texel per four pixels. The
@@ -258,6 +327,45 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn the_canvas_rect_fits_any_region_shape_uniformly_and_centred() {
+        let start = (3840, 2160);
+        let canvas = (1920, 1080);
+        // Taller than the start region: bars left and right.
+        assert_eq!(
+            recording_canvas_rect(start, (1080, 2160), canvas),
+            (690, 0, 540, 1080)
+        );
+        // Same shape, smaller: scaled up to fill, as the recorder always has.
+        assert_eq!(
+            recording_canvas_rect(start, (1920, 1080), canvas),
+            (0, 0, 1920, 1080)
+        );
+        // Degenerate slivers keep at least one row or column on the canvas.
+        assert_eq!(
+            recording_canvas_rect(start, (4_000_000, 1), canvas),
+            (0, 539, 1920, 1)
+        );
+        assert_eq!(
+            recording_canvas_rect(start, (1, u32::MAX), canvas),
+            (959, 0, 1, 1080)
+        );
+        // Without a start region or region to measure, the whole canvas; an
+        // empty canvas stays empty rather than panicking.
+        assert_eq!(
+            recording_canvas_rect((0, 0), (800, 600), canvas),
+            (0, 0, 1920, 1080)
+        );
+        assert_eq!(
+            recording_canvas_rect(start, (0, 600), canvas),
+            (0, 0, 1920, 1080)
+        );
+        assert_eq!(
+            recording_canvas_rect(start, (800, 600), (0, 0)),
+            (0, 0, 0, 0)
+        );
     }
 
     #[test]

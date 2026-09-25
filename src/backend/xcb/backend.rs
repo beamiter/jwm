@@ -11,9 +11,9 @@ use crate::backend::api::{
     AllowMode, AllowedAction, Backend, BackendEvent, Capabilities, CloseResult, ColorAllocator,
     CompositorBenchmark, CursorProvider, DisplayControl, EventHandler, EwmhFacade, EwmhFeature,
     Geometry, HitTarget, IconData, InputOps, KeyOps, LayerSurfaceInfo, ManagedUnmapReason,
-    MinimizedRestoreState, MotifWmHints, NetWmAction, NetWmState, NormalHints, NotifyMode,
-    OutputInfo, OutputOps, PropertyKind, PropertyOps, RenderScheduler, ResizeEdge, ScreenInfo,
-    StackMode, StrutPartial, VrrCapabilities, WindowAttributes, WindowChanges,
+    MaximizeAxes, MinimizedRestoreState, MotifWmHints, NetWmAction, NetWmState, NormalHints,
+    NotifyMode, OutputInfo, OutputOps, PropertyKind, PropertyOps, RenderScheduler, ResizeEdge,
+    ScreenInfo, StackMode, StrutPartial, VrrCapabilities, WindowAttributes, WindowChanges,
     WindowHandoffIdentity, WindowOps, WindowType, WmHints,
 };
 use crate::backend::common_define::{
@@ -24,7 +24,9 @@ use crate::backend::error::{BackendContextExt, BackendError};
 use crate::backend::x11::compositor_common::X11ConnectionOps;
 use crate::backend::x11::scheduling;
 use crate::backend::x11::wm::compositor_delegation::X11CompositorDesiredState;
-use crate::backend::x11::wm::event_bridge::{CompositorEventSources, compositor_event_ops};
+use crate::backend::x11::wm::event_bridge::{
+    CompositorEventSources, compositor_event_ops, initial_remote_capture_op,
+};
 use crate::backend::x11::wm::iconify::IconifyCoordinator;
 use crate::backend::x11::wm::interactive_resize::{
     interactive_move_origin, interactive_resize_geometry,
@@ -34,9 +36,10 @@ use crate::backend::x11::wm::managed_unmap::{
 };
 use crate::backend::x11::wm::{
     AllowedActionAtoms, ClientMessageAtoms, ClientMessageKind, DEFAULT_OUTPUT_REFRESH_MHZ,
-    EwmhFeatureAtoms, NetWmStateAtoms, PropertyKindAtoms, SUPPORTED_EWMH_FEATURES, WindowTypeAtoms,
-    atom_for_allowed_action, atom_for_ewmh_feature, atom_for_net_wm_state, build_output_info,
-    classify_client_message, decode_text_property, expand_net_wm_state_requests, fallback_output,
+    EwmhFeatureAtoms, NetWmStateAtoms, PropertyKindAtoms, ProtocolErrorClass,
+    SUPPORTED_EWMH_FEATURES, SigchldBlockedForSpawns, WindowTypeAtoms, atom_for_allowed_action,
+    atom_for_ewmh_feature, atom_for_net_wm_state, build_output_info, classify_client_message,
+    decode_text_property, expand_net_wm_state_requests, fallback_output, forwards_property_notify,
     lock_modifier_combinations,
     minimized_restore::{
         MINIMIZED_RESTORE_V1_LONG_LENGTH, decode_minimized_restore_v1, encode_minimized_restore_v1,
@@ -44,9 +47,10 @@ use crate::backend::x11::wm::{
     net_wm_ping_message, net_wm_state_from_atom, net_wm_sync_request_message, output_at,
     parse_gtk_frame_extents, parse_icon_data, parse_motif_hints, parse_normal_hints,
     parse_opaque_region, parse_strut, parse_strut_partial, parse_wm_class, parse_wm_hints,
-    primary_refresh, property_kind_from_atom, protocol_supported, restack_window_changes,
-    stack_mode_from_index, stack_mode_to_index, window_changes_from_configure_request_parts,
-    window_type_from_atom, wm_delete_window_message, wm_take_focus_message,
+    primary_refresh, property_kind_from_atom, protocol_error_log_level, protocol_supported,
+    restack_window_changes, stack_mode_from_index, stack_mode_to_index,
+    unclassified_client_message_event, window_changes_from_configure_request_parts,
+    window_type_from_atom, with_maximize_atoms, wm_delete_window_message, wm_take_focus_message,
 };
 use crate::backend::xcb::batch::{
     BatchedAttributesRequest, BatchedGeometryRequest, XcbRequestBatcher,
@@ -889,6 +893,33 @@ struct XcbEventSource {
     wake_token: Option<Token>,
 }
 
+/// The log level for an asynchronous protocol error, graded by the rule the
+/// x11rb transport shares (see `protocol_error_log_level`): the routine race
+/// with a client that just unmapped or destroyed its window stays at debug,
+/// and everything else, a bad request from JWM, is a warning. Closing a window
+/// during a layout pass used to log its `BadWindow` as an error.
+fn xcb_async_protocol_error_level(error: &xcb::ProtocolError) -> log::Level {
+    let (class, major_opcode) = match error {
+        xcb::ProtocolError::X(x::Error::Window(error), _) => {
+            (ProtocolErrorClass::Window, error.major_opcode())
+        }
+        xcb::ProtocolError::X(x::Error::Drawable(error), _) => {
+            (ProtocolErrorClass::Drawable, error.major_opcode())
+        }
+        xcb::ProtocolError::X(x::Error::Pixmap(error), _) => {
+            (ProtocolErrorClass::Pixmap, error.major_opcode())
+        }
+        xcb::ProtocolError::X(x::Error::Match(error), _) => {
+            (ProtocolErrorClass::Match, error.major_opcode())
+        }
+        xcb::ProtocolError::Damage(xcb::damage::Error::BadDamage(_), _) => {
+            (ProtocolErrorClass::Damage, 0)
+        }
+        _ => (ProtocolErrorClass::Other, 0),
+    };
+    protocol_error_log_level(class, major_opcode)
+}
+
 impl XcbEventSource {
     fn new(conn: Arc<xcb::Connection>) -> Self {
         Self {
@@ -913,7 +944,10 @@ impl XcbEventSource {
                 // Preserve the old event loop's handling of asynchronous X11
                 // protocol errors: log the error and continue draining rather
                 // than terminating the window manager.
-                Err(error) => log::error!("queued XCB event error (continuing): {error}"),
+                Err(error) => log::log!(
+                    xcb_async_protocol_error_level(&error),
+                    "queued XCB event error (continuing): {error}"
+                ),
             }
         }
 
@@ -947,7 +981,10 @@ impl EventSource for XcbEventSource {
                 Ok(Some(event)) => XcbBatchPoll::Event(event),
                 Ok(None) => XcbBatchPoll::Empty,
                 Err(xcb::Error::Protocol(error)) => {
-                    log::error!("XCB event error (continuing): {error}");
+                    log::log!(
+                        xcb_async_protocol_error_level(&error),
+                        "XCB event error (continuing): {error}"
+                    );
                     XcbBatchPoll::Skipped
                 }
                 Err(xcb::Error::Connection(error)) => XcbBatchPoll::Fatal(xcb_err(error)),
@@ -1128,6 +1165,10 @@ impl XcbBackend {
     }
 
     pub fn new() -> XcbResult<Self> {
+        // Before any worker thread exists: the compositor, clipboard and tray
+        // threads started below must inherit a blocked SIGCHLD, or one of them
+        // can swallow the signal `run`'s signalfd is waiting for.
+        let _sigchld_blocked = SigchldBlockedForSpawns::new();
         let (conn, screen_num) = xcb::Connection::connect_with_extensions(
             None,
             &[],
@@ -1243,6 +1284,12 @@ impl XcbBackend {
                         log::info!("XCB backend: GPU compositor initialized successfully");
                         let mut c = c;
                         c.set_present_manager(load_xcb_present_manager(conn.clone()));
+                        Self::seed_remote_capture_state(
+                            &conn,
+                            root,
+                            atoms.jwm_remote_capture_owner,
+                            &mut c,
+                        );
                         Some(c)
                     }
                     Err(e) => {
@@ -1445,7 +1492,7 @@ impl XcbBackend {
     fn query_primary_randr_output(&self) -> Option<u32> {
         let cookie = self
             .conn
-            .send_request(&xcb::randr::GetScreenResources { window: self.root });
+            .send_request(&xcb::randr::GetScreenResourcesCurrent { window: self.root });
         let resources = self.conn.wait_for_reply(cookie).ok()?;
 
         let mut info_cookies = Vec::with_capacity(resources.outputs().len());
@@ -1497,6 +1544,38 @@ impl XcbBackend {
             .compositor_desired
             .replay_plan(|window| ids.x11(window).ok());
         plan.apply(compositor);
+    }
+
+    /// Raw window named by JWM's root `_JWM_REMOTE_CAPTURE_OWNER` marker, or
+    /// `None` when the marker is missing, names `None`, or cannot be read.
+    fn read_remote_capture_owner(
+        conn: &xcb::Connection,
+        root: x::Window,
+        atom: x::Atom,
+    ) -> Option<u32> {
+        let owner = *get_u32s(conn, root, atom, x::ATOM_WINDOW).first()?;
+        (owner != x::WINDOW_NONE.resource_id()).then_some(owner)
+    }
+
+    /// Tell a freshly created compositor about a remote-capture lease that is
+    /// already held. It otherwise hears of one only when the marker changes,
+    /// so a lease taken before startup or before a runtime re-enable let
+    /// fullscreen unredirect freeze the remote view until jwm-remote
+    /// republished it. Runs before the compositor's first frame.
+    fn seed_remote_capture_state(
+        conn: &xcb::Connection,
+        root: x::Window,
+        atom: x::Atom,
+        compositor: &mut XcbSharedCompositor,
+    ) {
+        let owner = Self::read_remote_capture_owner(conn, root, atom);
+        let op = initial_remote_capture_op(owner, |owner| {
+            let cookie = conn.send_request(&x::GetWindowAttributes {
+                window: x::Window::new(owner),
+            });
+            conn.wait_for_reply(cookie).is_ok()
+        });
+        compositor.apply_event_op(root.resource_id(), op);
     }
 
     fn register_existing_windows_with_compositor(&self, compositor: &mut XcbSharedCompositor) {
@@ -1614,14 +1693,8 @@ impl XcbBackend {
         let remote_conn = Arc::clone(&self.conn);
         let remote_root = self.root;
         let remote_atom = self.atoms.jwm_remote_capture_owner;
-        let remote_capture_owner = || {
-            let owner =
-                *get_u32s(&remote_conn, remote_root, remote_atom, x::ATOM_WINDOW).first()?;
-            if owner == x::WINDOW_NONE.resource_id() {
-                return None;
-            }
-            Some(owner)
-        };
+        let remote_capture_owner =
+            || Self::read_remote_capture_owner(&remote_conn, remote_root, remote_atom);
         let Some(compositor) = self.compositor.as_mut() else {
             return;
         };
@@ -1739,7 +1812,7 @@ impl XcbBackend {
                 })
             }
             xcb::Event::X(x::Event::ButtonPress(ev)) => Some(BackendEvent::ButtonPress {
-                target: self.hit_target(ev.event()),
+                target: self.hit_target(ev.event(), ev.child()),
                 state: ev.state().bits() as u16,
                 detail: ev.detail(),
                 root_x: ev.root_x() as f64,
@@ -1747,11 +1820,11 @@ impl XcbBackend {
                 time: ev.time(),
             }),
             xcb::Event::X(x::Event::ButtonRelease(ev)) => Some(BackendEvent::ButtonRelease {
-                target: self.hit_target(ev.event()),
+                target: self.hit_target(ev.event(), ev.child()),
                 time: ev.time(),
             }),
             xcb::Event::X(x::Event::MotionNotify(ev)) => Some(BackendEvent::MotionNotify {
-                target: self.hit_target(ev.event()),
+                target: self.hit_target(ev.event(), ev.child()),
                 root_x: ev.root_x() as f64,
                 root_y: ev.root_y() as f64,
                 time: ev.time(),
@@ -1782,14 +1855,10 @@ impl XcbBackend {
             }),
             xcb::Event::X(x::Event::PropertyNotify(ev)) => {
                 let kind = self.property_kind(ev.atom());
-                // A deleted bypass hint means "no preference" and must reach
-                // the compositor so it can leave direct presentation safely.
-                if ev.state() == x::Property::Delete
-                    && !matches!(
-                        kind,
-                        PropertyKind::BypassCompositor | PropertyKind::RemoteCapture
-                    )
-                {
+                // The same deletion allow-list as x11rb: a deleted strut, size
+                // hint or transient-for must reach policy, and a deleted bypass
+                // hint the compositor, or their old values stay in effect.
+                if !forwards_property_notify(ev.state() == x::Property::Delete, kind) {
                     return None;
                 }
                 Some(BackendEvent::PropertyChanged {
@@ -1847,11 +1916,15 @@ impl XcbBackend {
         }
     }
 
-    fn hit_target(&self, window: x::Window) -> HitTarget {
-        if window == self.root || self.is_compositor_overlay(window) {
-            HitTarget::Background { output: None }
-        } else {
-            HitTarget::Surface(self.ids.intern(window))
+    fn hit_target(&self, event: x::Window, child: x::Window) -> HitTarget {
+        match pointer_hit_window(
+            self.root.resource_id(),
+            self.compositor_overlay_raw(),
+            event.resource_id(),
+            child.resource_id(),
+        ) {
+            Some(window) => HitTarget::Surface(self.ids.intern_raw(window)),
+            None => HitTarget::Background { output: None },
         }
     }
 
@@ -1929,12 +2002,17 @@ impl XcbBackend {
                 action: NetWmAction::Add,
                 state: NetWmState::Hidden,
             }),
-            ClientMessageKind::Other => Some(BackendEvent::ClientMessage {
+            // A pager's desktop switch arrives here; see
+            // `unclassified_client_message_event`.
+            ClientMessageKind::Other => Some(unclassified_client_message_event(
                 window,
-                type_: ev.r#type().resource_id(),
+                ev.window() == self.root,
+                ev.r#type().resource_id(),
+                ev.format(),
                 data,
-                format: ev.format(),
-            }),
+                self.atoms.net_current_desktop.resource_id(),
+                crate::config::CONFIG.load().tags_length() as u32,
+            )),
         }
     }
 
@@ -2212,6 +2290,12 @@ impl Backend for XcbBackend {
             compositor.set_waterlily_loop_signal(signal);
         }
         self.replay_compositor_desired_state(&mut compositor);
+        Self::seed_remote_capture_state(
+            &self.conn,
+            self.root,
+            self.atoms.jwm_remote_capture_owner,
+            &mut compositor,
+        );
         self.register_existing_windows_with_compositor(&mut compositor);
         self.compositor = Some(compositor);
         self.service_pending_iconify_admissions();
@@ -3538,22 +3622,35 @@ impl XcbPropertyOps {
         self.get_text_property(win, property).unwrap_or_default()
     }
 
-    fn states(&self, win: WindowId) -> Vec<x::Atom> {
-        self.win(win)
-            .ok()
-            .map(|w| {
-                get_u32s_with_length(
-                    &self.conn,
-                    w,
-                    self.atoms.net_wm_state,
-                    self.atoms.atom,
-                    MAX_ATOM_LIST_ITEMS,
-                )
-                .into_iter()
-                .map(x::Atom::new)
-                .collect()
-            })
-            .unwrap_or_default()
+    /// Read `_NET_WM_STATE` for a read-modify-write. Unlike an unchecked
+    /// read, a failed reply or a malformed/truncated list is an error:
+    /// writing back what an unchecked read returned would REPLACE the
+    /// client's real state list with the one atom being added.
+    fn read_net_wm_state_atoms_checked(&self, window: x::Window) -> XcbResult<Vec<x::Atom>> {
+        let cookie = self.conn.send_request(&x::GetProperty {
+            delete: false,
+            window,
+            property: self.atoms.net_wm_state,
+            r#type: self.atoms.atom,
+            long_offset: 0,
+            long_length: MAX_ATOM_LIST_ITEMS,
+        });
+        let reply = self.conn.wait_for_reply(cookie).map_err(xcb_err)?;
+        let values = if reply.format() == 32 {
+            reply.value::<u32>()
+        } else {
+            &[]
+        };
+        decode_net_wm_state_list(
+            reply.r#type(),
+            self.atoms.atom,
+            reply.format(),
+            reply.length(),
+            reply.bytes_after(),
+            values,
+        )
+        .map(|atoms| atoms.into_iter().map(x::Atom::new).collect())
+        .ok_or_else(|| BackendError::Message("malformed _NET_WM_STATE".into()))
     }
 }
 
@@ -3622,8 +3719,10 @@ impl PropertyOps for XcbPropertyOps {
     }
 
     fn is_fullscreen(&self, win: WindowId) -> bool {
-        self.states(win)
-            .contains(&self.atoms.net_wm_state_fullscreen)
+        // The flag query, not a lenient list read, so both transports
+        // decode the list the same way and a failed reply reads as unset.
+        self.has_net_wm_state_flag(win, NetWmState::Fullscreen)
+            .unwrap_or(false)
     }
 
     fn set_fullscreen_state(&self, win: WindowId, on: bool) -> XcbResult<()> {
@@ -3890,14 +3989,39 @@ impl PropertyOps for XcbPropertyOps {
     fn set_net_wm_state_flag(&self, win: WindowId, state: NetWmState, on: bool) -> XcbResult<()> {
         let w = self.win(win)?;
         let atom = self.atoms.atom_for_state(state);
-        let mut states = get_atoms(&self.conn, w, self.atoms.net_wm_state, self.atoms.atom);
+        let mut states = self.read_net_wm_state_atoms_checked(w)?;
         let has = states.contains(&atom);
         if on && !has {
             states.push(atom);
         } else if !on && has {
             states.retain(|a| *a != atom);
+        } else {
+            // Already as requested; x11rb skips the same write.
+            return Ok(());
         }
         let raw: Vec<u32> = states.iter().map(Xid::resource_id).collect();
+        change_u32s(
+            &self.conn,
+            w,
+            self.atoms.net_wm_state,
+            self.atoms.atom,
+            &raw,
+        )
+    }
+
+    /// Both axes in one checked read-modify-write: two per-axis writes
+    /// would let a pager observe the half-maximized state in between, and
+    /// a republish of unchanged state sends no PropertyNotify at all.
+    fn set_maximized_state(&self, win: WindowId, axes: MaximizeAxes) -> XcbResult<()> {
+        let w = self.win(win)?;
+        let vert = self.atoms.atom_for_state(NetWmState::MaximizedVert);
+        let horz = self.atoms.atom_for_state(NetWmState::MaximizedHorz);
+        let current = self.read_net_wm_state_atoms_checked(w)?;
+        let next = with_maximize_atoms(&current, vert, horz, axes);
+        if next == current {
+            return Ok(());
+        }
+        let raw: Vec<u32> = next.iter().map(Xid::resource_id).collect();
         change_u32s(
             &self.conn,
             w,
@@ -4222,9 +4346,12 @@ impl XcbOutputOps {
                     get_active: true,
                 });
                 if let Ok(reply) = self.conn.wait_for_reply(cookie) {
+                    // The Current variant, as on x11rb: the probing request
+                    // re-reads every connector's EDID over DDC, and this runs
+                    // on the WM thread after every layout-change invalidation.
                     let resources_cookie = self
                         .conn
-                        .send_request(&xcb::randr::GetScreenResources { window: self.root });
+                        .send_request(&xcb::randr::GetScreenResourcesCurrent { window: self.root });
                     let modes = self
                         .conn
                         .wait_for_reply(resources_cookie)
@@ -4319,7 +4446,7 @@ impl XcbOutputOps {
 
         let cookie = self
             .conn
-            .send_request(&xcb::randr::GetScreenResources { window: self.root });
+            .send_request(&xcb::randr::GetScreenResourcesCurrent { window: self.root });
         if let Ok(resources) = self.conn.wait_for_reply(cookie) {
             let modes = resources.modes().to_vec();
             let mut outputs = Vec::new();
@@ -4392,7 +4519,7 @@ impl XcbOutputOps {
     fn output_to_crtc(&self, output_id: u32) -> Option<xcb::randr::Crtc> {
         let cookie = self
             .conn
-            .send_request(&xcb::randr::GetScreenResources { window: self.root });
+            .send_request(&xcb::randr::GetScreenResourcesCurrent { window: self.root });
         let resources = self.conn.wait_for_reply(cookie).ok()?;
         if resources
             .crtcs()
@@ -5411,24 +5538,28 @@ fn stack_mode_from_xcb(mode: x::StackMode) -> StackMode {
     .unwrap_or(StackMode::Above)
 }
 
+/// The window a pointer event hit, as a raw XID, or None for the
+/// background. The root selects ButtonPress, ButtonRelease and
+/// PointerMotion, so a press on a client that does not select ButtonPress
+/// itself propagates to the root with `child` naming the top-level under
+/// the pointer. Reporting that as Background would turn a click on the
+/// client into a root click (tab-strip activation, ClkRootWin bindings).
+/// Mirrors x11rb's `hit_target_from_pointer_event`.
+fn pointer_hit_window(root: u32, overlay: Option<u32>, event: u32, child: u32) -> Option<u32> {
+    let is_overlay = |window: u32| overlay == Some(window);
+    if event != root && !is_overlay(event) {
+        return Some(event);
+    }
+    // A zero child is XCB_WINDOW_NONE: the pointer is over the root itself.
+    (child != 0 && !is_overlay(child)).then_some(child)
+}
+
 fn notify_mode_from_xcb(mode: x::NotifyMode) -> NotifyMode {
     match mode {
         x::NotifyMode::Grab => NotifyMode::Grab,
         x::NotifyMode::Ungrab => NotifyMode::Ungrab,
         _ => NotifyMode::Normal,
     }
-}
-
-fn get_atoms(
-    conn: &xcb::Connection,
-    window: x::Window,
-    property: x::Atom,
-    ty: x::Atom,
-) -> Vec<x::Atom> {
-    get_u32s(conn, window, property, ty)
-        .into_iter()
-        .map(x::Atom::new)
-        .collect()
 }
 
 fn get_windows(
@@ -5519,6 +5650,44 @@ fn decode_net_wm_state_flag(
         MAX_ATOM_LIST_ITEMS,
     )
     .is_some_and(|values| values.contains(&state_atom))
+}
+
+/// Decode a `_NET_WM_STATE` reply for a read-modify-write that will REPLACE
+/// the property, with the same policy as the x11rb transport:
+///
+/// - Absent, or not an ATOM list: `Some(vec![])`.
+/// - A complete ATOM list (`complete_u32_property(.., MAX_ATOM_LIST_ITEMS)`):
+///   `Some(values)`.
+/// - An ATOM list that cannot be read whole: `None`, because writing back
+///   only the part that was read would drop the client's remaining states.
+fn decode_net_wm_state_list(
+    actual_type: x::Atom,
+    expected_type: x::Atom,
+    format: u8,
+    reply_length: u32,
+    bytes_after: u32,
+    values: &[u32],
+) -> Option<Vec<u32>> {
+    // A window that never had a state list (NONE) is the common case at
+    // manage time. A wrong-typed value is not an EWMH state list either, and
+    // a GetProperty for ATOM answers it with no value, so there is nothing
+    // of the client's to keep. The WM owns _NET_WM_STATE once it manages the
+    // window: the next write replaces the value with a well-formed ATOM
+    // list, while refusing it would fail every later maximize, fullscreen
+    // and minimize publish for the window.
+    if actual_type != expected_type {
+        return Some(Vec::new());
+    }
+    complete_u32_property(
+        actual_type,
+        expected_type,
+        format,
+        reply_length,
+        bytes_after,
+        values,
+        MAX_ATOM_LIST_ITEMS,
+    )
+    .map(<[u32]>::to_vec)
 }
 
 fn get_u32s(conn: &xcb::Connection, window: x::Window, property: x::Atom, ty: x::Atom) -> Vec<u32> {
@@ -5665,7 +5834,8 @@ where
 mod parity_tests {
     use super::{
         XCB_EVENT_BATCH_LIMIT, XcbBatchPoll, XcbIdRegistry, collect_xcb_event_batch,
-        decode_net_wm_state_flag, decode_wm_state_property, observe_and_coalesce_configure,
+        decode_net_wm_state_flag, decode_net_wm_state_list, decode_wm_state_property,
+        observe_and_coalesce_configure, pointer_hit_window,
     };
     use crate::backend::api::BackendEvent;
     use crate::backend::common_define::WindowId;
@@ -5950,6 +6120,189 @@ mod parity_tests {
             assert!(
                 replay < register && register < install && install < service,
                 "{label} must replay Dock/minimized intent, import hidden pixmaps, then service Iconic admission"
+            );
+        }
+    }
+
+    #[test]
+    fn both_x11_transports_seed_a_held_remote_capture_lease_on_every_compositor_start() {
+        // A compositor learns of remote capture only from marker changes, so
+        // each place that creates one must read the lease that already exists.
+        let seed = guarded_production_needle(format!("Self::{}(", "seed_remote_capture_state"));
+        for (label, source, constructor) in [
+            (
+                "x11rb",
+                X11RB_BACKEND_SRC,
+                "pub fn new() -> Result<Self, BackendError>",
+            ),
+            ("xcb", XCB_BACKEND_SRC, "pub fn new() -> XcbResult<Self>"),
+        ] {
+            let seeding = impl_body_after(source, "fn seed_remote_capture_state");
+            assert!(
+                seeding.contains("initial_remote_capture_op(owner")
+                    && seeding.contains("compositor.apply_event_op("),
+                "{label} must seed through the shared remote-capture decision"
+            );
+
+            let startup = impl_body_after(source, constructor);
+            assert!(
+                startup.contains(&seed),
+                "{label} startup must seed an already-held remote capture lease"
+            );
+
+            let enable = impl_body_after(source, "fn set_compositor_enabled");
+            let replay = enable
+                .find("self.replay_compositor_desired_state(&mut compositor)")
+                .unwrap_or_else(|| panic!("{label} runtime enable must replay desired state"));
+            let seeded = enable
+                .find(&seed)
+                .unwrap_or_else(|| panic!("{label} runtime enable must seed remote capture"));
+            let install = enable
+                .find("self.compositor = Some(compositor)")
+                .unwrap_or_else(|| panic!("{label} runtime enable must install the compositor"));
+            assert!(
+                replay < seeded && seeded < install,
+                "{label} must seed remote capture before the re-enabled compositor renders"
+            );
+        }
+    }
+
+    #[test]
+    fn both_x11_transports_filter_property_deletions_through_the_shared_list() {
+        // A dock that deletes `_NET_WM_STRUT_PARTIAL` must release its
+        // reservation on either transport; xcb once dropped the deletion.
+        for (label, arm) in [
+            (
+                "x11rb",
+                impl_body_after(X11RB_BACKEND_SRC, "XEvent::PropertyNotify(e) =>"),
+            ),
+            (
+                "xcb",
+                impl_body_after(
+                    XCB_BACKEND_SRC,
+                    "xcb::Event::X(x::Event::PropertyNotify(ev)) =>",
+                ),
+            ),
+        ] {
+            assert!(
+                arm.contains("forwards_property_notify("),
+                "{label} PropertyNotify must use the shared deletion allow-list"
+            );
+        }
+    }
+
+    #[test]
+    fn both_x11_transports_decode_pager_desktop_switches_the_same_way() {
+        // `wmctrl -s N` and pager clicks reach policy only through the shared
+        // decoder; the bare generic fallback dropped them.
+        for (label, decoder) in [
+            (
+                "x11rb",
+                impl_body_after(X11RB_BACKEND_SRC, "XEvent::ClientMessage(e) =>"),
+            ),
+            (
+                "xcb",
+                impl_body_after(XCB_BACKEND_SRC, "fn map_client_message("),
+            ),
+        ] {
+            let fallback = decoder
+                .find("ClientMessageKind::Other =>")
+                .map(|at| &decoder[at..])
+                .unwrap_or_else(|| panic!("{label} must handle unclassified messages"));
+            assert!(
+                fallback.starts_with(
+                    "ClientMessageKind::Other => Some(unclassified_client_message_event("
+                ),
+                "{label} must route unclassified messages through the shared decoder"
+            );
+        }
+    }
+
+    /// A protocol error as libxcb hands it over: a 32-byte wire error, which
+    /// the wrapper frees with `libc::free` when dropped.
+    fn wire_error<E: xcb::Raw<xcb::ffi::xcb_generic_error_t>>(code: u8, major_opcode: u8) -> E {
+        // SAFETY: `calloc` returns a zeroed 32-byte block, the size of every
+        // X error, whose ownership passes to the wrapper; it frees the block
+        // with `libc::free` on drop, matching this allocation.
+        unsafe {
+            let raw = libc::calloc(1, 32).cast::<u8>();
+            assert!(!raw.is_null(), "allocate a wire error");
+            raw.add(1).write(code);
+            raw.add(10).write(major_opcode);
+            E::from_raw(raw.cast())
+        }
+    }
+
+    #[test]
+    fn xcb_grades_async_protocol_errors_like_x11rb() {
+        use super::xcb_async_protocol_error_level as level;
+        use xcb::ProtocolError;
+
+        let core = |error: x::Error| ProtocolError::X(error, None);
+        // Racing a client that just destroyed or unmapped its window is
+        // routine and stays at debug instead of logging an error.
+        for (error, what) in [
+            (core(x::Error::Window(wire_error(3, 18))), "BadWindow"),
+            (core(x::Error::Drawable(wire_error(9, 12))), "BadDrawable"),
+            (core(x::Error::Pixmap(wire_error(4, 0))), "BadPixmap"),
+            (
+                core(x::Error::Match(wire_error(8, 42))),
+                "BadMatch from SetInputFocus",
+            ),
+            (
+                core(x::Error::Match(wire_error(8, 12))),
+                "BadMatch from ConfigureWindow",
+            ),
+            (
+                ProtocolError::Damage(xcb::damage::Error::BadDamage(wire_error(0, 0)), None),
+                "BadDamage",
+            ),
+        ] {
+            assert_eq!(level(&error), log::Level::Debug, "{what}");
+        }
+        // A malformed request is JWM's own bug and must not be silent.
+        for (error, what) in [
+            (
+                core(x::Error::Match(wire_error(8, 18))),
+                "BadMatch from ChangeProperty",
+            ),
+            (core(x::Error::Value(wire_error(2, 18))), "BadValue"),
+            (core(x::Error::Atom(wire_error(5, 18))), "BadAtom"),
+        ] {
+            assert_eq!(level(&error), log::Level::Warn, "{what}");
+        }
+
+        // Both event-loop sites grade through it instead of logging an error.
+        let error_log = guarded_production_needle(format!("log::{}!(\"", "error"));
+        for site in ["fn prefetch_queued_before_sleep(", "fn process_events<F>("] {
+            let body = impl_body_after(XCB_BACKEND_SRC, site);
+            assert!(
+                body.contains("xcb_async_protocol_error_level(&error)")
+                    && !body.contains(&error_log),
+                "{site} must grade asynchronous protocol errors"
+            );
+        }
+    }
+
+    #[test]
+    fn xcb_backend_construction_blocks_sigchld_before_spawning_worker_threads() {
+        // calloop's signalfd only sees SIGCHLD while every other thread keeps
+        // it blocked, and the compositor, clipboard and tray threads start
+        // long before `run` creates the signal source.
+        let new = impl_body_after(XCB_BACKEND_SRC, "pub fn new() -> XcbResult<Self>");
+        let position = |needle: &str| {
+            new.find(needle)
+                .unwrap_or_else(|| panic!("the constructor no longer contains `{needle}`"))
+        };
+        let guard = position("let _sigchld_blocked = SigchldBlockedForSpawns::new();");
+        for spawner in [
+            "XcbSharedCompositor::new(",
+            "super::clipboard::Clipboard::start(",
+            "backend.init_systray(",
+        ] {
+            assert!(
+                guard < position(spawner),
+                "SIGCHLD must be blocked before `{spawner}` can start a thread"
             );
         }
     }
@@ -6706,6 +7059,24 @@ mod parity_tests {
         }
     }
 
+    /// Regression pin: xcb `is_fullscreen` once read `_NET_WM_STATE` through
+    /// a lenient helper that checked only the format, so a truncated ATOM
+    /// list (`bytes_after > 0`) with FULLSCREEN in its first chunk read as
+    /// fullscreen on xcb and as not fullscreen on x11rb. Both transports
+    /// must answer through the validating flag query.
+    #[test]
+    fn xcb_is_fullscreen_answers_through_the_validating_flag_query() {
+        let body = impl_body_after(XCB_BACKEND_SRC, "fn is_fullscreen(");
+        assert!(
+            body.contains("has_net_wm_state_flag(") && body.contains("NetWmState::Fullscreen"),
+            "XCB is_fullscreen must answer through has_net_wm_state_flag"
+        );
+        assert!(
+            !body.contains("states(") && !body.contains("get_u32s"),
+            "XCB is_fullscreen must not read the state list through a lenient helper"
+        );
+    }
+
     #[test]
     fn both_x11_property_backends_acknowledge_iconic_handoff_writes() {
         // A successful handoff mutation must mean that the X server accepted it,
@@ -6749,6 +7120,195 @@ mod parity_tests {
         assert!(
             clear.contains("send_and_check_request(&x::DeleteProperty"),
             "XCB V1 cleanup must keep using checked DeleteProperty"
+        );
+    }
+
+    #[test]
+    fn both_x11_transports_publish_maximize_in_one_checked_write() {
+        // Maximize is published as one read-modify-write of both axes. The
+        // read must be checked: an unchecked helper turns a reply error into
+        // an empty list, and the REPLACE that follows would wipe every other
+        // state the client holds.
+        let set_maximized = guarded_production_needle(format!("fn {}", "set_maximized_state"));
+        let read_checked =
+            guarded_production_needle(format!("{}(", "read_net_wm_state_atoms_checked"));
+        let rewrite = guarded_production_needle(format!("{}(", "with_maximize_atoms"));
+        let unchecked_read = format!("{}(", "get_atoms");
+
+        let x11rb = impl_body_after(X11RB_BACKEND_SRC, &set_maximized);
+        for clause in [
+            format!("{}(", "get_net_wm_state_atoms"),
+            rewrite.clone(),
+            format!("{}(", "set_net_wm_state_atoms"),
+        ] {
+            assert!(
+                x11rb.contains(&clause),
+                "x11rb set_maximized_state must use `{clause}`"
+            );
+        }
+
+        let xcb = impl_body_after(XCB_BACKEND_SRC, &set_maximized);
+        for clause in [
+            read_checked.clone(),
+            rewrite.clone(),
+            format!("{}(", "change_u32s"),
+        ] {
+            assert!(
+                xcb.contains(&clause),
+                "xcb set_maximized_state must use `{clause}`"
+            );
+        }
+        assert!(
+            !xcb.contains(&unchecked_read),
+            "xcb set_maximized_state must not read through the error-swallowing helper"
+        );
+
+        let reader = impl_body_after(
+            XCB_BACKEND_SRC,
+            &format!("fn {}", "read_net_wm_state_atoms_checked"),
+        );
+        for clause in [
+            format!("wait_for_reply(cookie).{}(xcb_err)?", "map_err"),
+            format!("{}(", "decode_net_wm_state_list"),
+        ] {
+            assert!(
+                reader.contains(&clause),
+                "the checked _NET_WM_STATE reader must use `{clause}`"
+            );
+        }
+
+        let flag = impl_body_after(XCB_BACKEND_SRC, &format!("fn {}", "set_net_wm_state_flag"));
+        assert!(
+            flag.contains(&read_checked) && !flag.contains(&unchecked_read),
+            "xcb set_net_wm_state_flag must read the state list it replaces through the checked reader"
+        );
+    }
+
+    #[test]
+    fn xcb_net_wm_state_list_decoder_accepts_absent_and_rejects_malformed_lists() {
+        let expected_type = x::ATOM_ATOM;
+        let values = [0x22, 0x77];
+
+        assert_eq!(
+            decode_net_wm_state_list(x::ATOM_NONE, expected_type, 0, 0, 0, &[]),
+            Some(vec![]),
+            "a window without _NET_WM_STATE holds no states"
+        );
+        // Regression: a CARDINAL-typed _NET_WM_STATE was refused, so on xcb
+        // such a window could never be maximized, fullscreened or hidden.
+        // A GetProperty for ATOM answers it with its real type, its format,
+        // no value and its size in `bytes_after`; x11rb reads it as absent.
+        assert_eq!(
+            decode_net_wm_state_list(x::ATOM_CARDINAL, expected_type, 32, 0, 8, &[]),
+            Some(vec![]),
+            "a wrong-typed value is not a state list to preserve"
+        );
+        assert_eq!(
+            decode_net_wm_state_list(expected_type, expected_type, 32, 0, 0, &[]),
+            Some(vec![])
+        );
+        assert_eq!(
+            decode_net_wm_state_list(expected_type, expected_type, 32, 2, 0, &values),
+            Some(values.to_vec())
+        );
+        for (actual_type, format, reply_length, bytes_after, label) in [
+            (expected_type, 32, 2, 4, "a truncated list"),
+            (expected_type, 8, 2, 0, "a byte-format property"),
+            (expected_type, 32, 1, 0, "a mismatched reply length"),
+        ] {
+            assert_eq!(
+                decode_net_wm_state_list(
+                    actual_type,
+                    expected_type,
+                    format,
+                    reply_length,
+                    bytes_after,
+                    &values,
+                ),
+                None,
+                "{label} must not be written back as the client's state list"
+            );
+        }
+    }
+
+    #[test]
+    fn xcb_pointer_hit_resolves_root_delivered_events_to_the_child_under_the_pointer() {
+        let root = 0x100;
+        let overlay = 0x900;
+        let client = 0x200;
+
+        // A press on a client that does not select ButtonPress reaches the
+        // root with `child` naming the client; it is still a client click.
+        assert_eq!(
+            pointer_hit_window(root, Some(overlay), root, client),
+            Some(client)
+        );
+        assert_eq!(
+            pointer_hit_window(root, Some(overlay), overlay, client),
+            Some(client)
+        );
+        assert_eq!(pointer_hit_window(root, None, root, client), Some(client));
+
+        // Over the root itself, or with the overlay as the child, it is
+        // background.
+        assert_eq!(pointer_hit_window(root, Some(overlay), root, 0), None);
+        assert_eq!(pointer_hit_window(root, Some(overlay), overlay, 0), None);
+        assert_eq!(pointer_hit_window(root, Some(overlay), root, overlay), None);
+
+        // An event delivered to a client names that client, whatever its
+        // own child is.
+        assert_eq!(
+            pointer_hit_window(root, Some(overlay), client, 0x300),
+            Some(client)
+        );
+        // Without a compositor, the old overlay XID is an ordinary window.
+        assert_eq!(pointer_hit_window(root, None, overlay, 0), Some(overlay));
+    }
+
+    #[test]
+    fn xcb_pointer_events_pass_their_child_to_the_hit_test() {
+        // Parity with x11rb's `hit_target_from_pointer_event`: every pointer
+        // event arm hands the event's child to the hit test, or a
+        // root-delivered click on a client is reported as a root click.
+        let hit =
+            guarded_production_needle(format!("self.{}(ev.event(), ev.child())", "hit_target"));
+        for event in ["ButtonPress", "ButtonRelease", "MotionNotify"] {
+            let arm_needle = guarded_production_needle(format!("x::Event::{event}(ev)) =>"));
+            let arm = impl_body_after(XCB_BACKEND_SRC, &arm_needle);
+            assert!(
+                arm.contains(&hit),
+                "the xcb {event} mapping must hit-test with `{hit}`"
+            );
+        }
+    }
+
+    #[test]
+    fn xcb_output_queries_never_send_the_probing_screen_resources_request() {
+        // GetScreenResources makes the server re-probe every connector
+        // (EDID over DDC) and runs synchronously on the WM thread after every
+        // layout-change cache invalidation. x11rb asks for the Current
+        // variant everywhere; xcb must too.
+        let production = &XCB_BACKEND_SRC[..XCB_BACKEND_SRC.len() - own_test_module().len()];
+        let probing = guarded_production_needle(format!("randr::{} {{", "GetScreenResources"));
+        let current =
+            guarded_production_needle(format!("randr::{}Current {{", "GetScreenResources"));
+
+        assert!(
+            production.contains(&current),
+            "xcb must still query RandR screen resources"
+        );
+        for (label, src) in [
+            ("xcb backend", production),
+            ("xcb compositor protocol", XCB_COMPOSITOR_PROTOCOL_SRC),
+        ] {
+            assert!(
+                !src.contains(&probing),
+                "the {label} must send `{current}`, not the probing `{probing}`"
+            );
+        }
+        assert!(
+            !X11RB_BACKEND_SRC.contains(&format!("{}(", "randr_get_screen_resources")),
+            "x11rb must keep asking for the Current screen resources"
         );
     }
 

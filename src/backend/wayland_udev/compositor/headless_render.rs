@@ -169,6 +169,66 @@ impl Drop for HeadlessGl {
     }
 }
 
+/// A Smithay `GlesRenderer` without a display server, for tests that drive
+/// the KMS backend's own Smithay render paths. Like [`HeadlessGl`] it holds
+/// [`HEADLESS_GL_LOCK`] for its whole life and honours
+/// `JWM_REQUIRE_HEADLESS_GL`.
+#[cfg(feature = "backend-wayland-udev")]
+struct HeadlessSmithayGles {
+    renderer: smithay::backend::renderer::gles::GlesRenderer,
+    /// Released only once the renderer above, and with it its context and
+    /// display, is gone. Declared last so it drops last.
+    _serialized: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(feature = "backend-wayland-udev")]
+impl HeadlessSmithayGles {
+    fn new() -> Option<Self> {
+        let result = Self::try_new();
+        if result.is_none()
+            && std::env::var_os("JWM_REQUIRE_HEADLESS_GL").is_some_and(|value| value != "0")
+        {
+            panic!(
+                "headless EGL/GL is required but unavailable; configure a surfaceless Mesa platform"
+            );
+        }
+        result
+    }
+
+    fn try_new() -> Option<Self> {
+        use smithay::backend::egl::native::EGLSurfacelessDisplay;
+        use smithay::backend::egl::{EGLContext, EGLDevice, EGLDisplay};
+        use smithay::backend::renderer::gles::GlesRenderer;
+
+        let serialized = HEADLESS_GL_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let renderer_on = |display: EGLDisplay| {
+            let context = EGLContext::new(&display).ok()?;
+            unsafe { GlesRenderer::new(context) }.ok()
+        };
+        // Mesa's surfaceless platform is what `HeadlessGl` and CI run on.
+        // Without it, any EGL device will do, the software one first: it
+        // needs no GPU node.
+        let renderer = unsafe { EGLDisplay::new(EGLSurfacelessDisplay) }
+            .ok()
+            .and_then(renderer_on)
+            .or_else(|| {
+                let mut devices: Vec<EGLDevice> = EGLDevice::enumerate().ok()?.collect();
+                devices.sort_by_key(|device| !device.is_software());
+                devices.into_iter().find_map(|device| {
+                    unsafe { EGLDisplay::new(device) }
+                        .ok()
+                        .and_then(renderer_on)
+                })
+            })?;
+        Some(Self {
+            renderer,
+            _serialized: serialized,
+        })
+    }
+}
+
 #[derive(Clone, Copy)]
 enum Stage {
     Vertex,
@@ -4018,11 +4078,13 @@ fn wayland_internalized_external_element_matches_legacy_srgb_scanout() {
                     texture: element_a_tex,
                     owner: None,
                     rect: rect_a,
+                    content_key: 1,
                 },
                 super::ExternalElementVisual {
                     texture: element_b_tex,
                     owner: None,
                     rect: rect_b,
+                    content_key: 2,
                 },
             ],
             // Generic staged stand-ins; the flag only matters to recording.
@@ -4250,6 +4312,7 @@ fn wayland_internalized_external_element_moves_without_ghosting_under_partial_da
                 texture: element_tex,
                 owner: None,
                 rect: [8, 8, 4, 4],
+                content_key: 1,
             }],
             false,
         );
@@ -4279,6 +4342,7 @@ fn wayland_internalized_external_element_moves_without_ghosting_under_partial_da
                 texture: element_tex,
                 owner: None,
                 rect: [40, 24, 4, 4],
+                content_key: 1,
             }],
             false,
         );
@@ -5102,14 +5166,18 @@ fn glass_fragment_shader_declares_scene_linear_ingress() {
 /// otherwise diverge silently — nothing links these two files.
 #[test]
 fn both_glass_fragment_shaders_carry_the_solid_glass_optics() {
-    let mut sources: Vec<(&str, &str)> = vec![("wayland", super::shaders::GLASS_FRAGMENT_SHADER)];
+    // Built from cfg-gated arrays rather than a pushed-to Vec, so a profile
+    // without the X11 backends has nothing mutable left over to warn about.
+    let wayland = [("wayland", super::shaders::GLASS_FRAGMENT_SHADER)];
     #[cfg(feature = "x11-backends")]
-    sources.push((
+    let x11 = [(
         "x11",
         crate::backend::x11::compositor::shaders::GLASS_FRAGMENT_SHADER,
-    ));
+    )];
+    #[cfg(not(feature = "x11-backends"))]
+    let x11: [(&str, &str); 0] = [];
 
-    for (backend, src) in sources {
+    for (backend, src) in wayland.into_iter().chain(x11) {
         for token in [
             // Fresnel reflectance, and the normalized weight the rim and the
             // inner glow are gated by.
@@ -7297,6 +7365,91 @@ fn wayland_glass_surface_frosts_its_backdrop() {
     );
 }
 
+/// The status bar's glass sheet samples the encoded client-blur seed even on
+/// a scene-linear frame. The program must decode that backdrop itself when it
+/// writes into the linear target: stored as it is, the encoded codes would be
+/// read as linear light and the output OETF would wash the bar out. A linear
+/// capture, or any backdrop drawn into an encoded target, passes through.
+#[test]
+fn wayland_glass_decodes_an_encoded_backdrop_for_a_linear_target() {
+    use super::shaders as s;
+    use crate::backend::wayland_udev::color_pipeline::TransferKind;
+    const W: i32 = 16;
+    const H: i32 = 16;
+    const SIZE: f32 = 100.0;
+
+    let Some(h) = HeadlessGl::new(GlApi::Gles3) else {
+        eprintln!("headless GL unavailable - skipping glass backdrop decode test");
+        return;
+    };
+    let gl = &h.gl;
+    let prog = link(gl, s::VERTEX_SHADER, s::GLASS_FRAGMENT_SHADER)
+        .unwrap_or_else(|log| panic!("glass must link:\n{log}"));
+    assert!(
+        unsafe { gl.get_uniform_location(prog, "u_backdrop_encoded") }.is_some(),
+        "glass program optimized out u_backdrop_encoded"
+    );
+    let backdrop = [40u8, 120, 200, 255];
+
+    // An untinted, unlit sheet over a flat backdrop, so the center pixel is
+    // the backdrop after the program's domain handling and nothing else.
+    let sample = |scene_linear: i32, backdrop_encoded: i32| -> [u8; 4] {
+        render_quad(gl, prog, backdrop, W, H, |gl| unsafe {
+            let u = |n: &str| gl.get_uniform_location(prog, n);
+            let c = W as f32 / 2.0 + 0.5;
+            gl.uniform_4_f32(u("u_rect").as_ref(), c - 50.0, c - 50.0, SIZE, SIZE);
+            gl.uniform_matrix_4_f32_slice(
+                u("u_projection").as_ref(),
+                false,
+                &ortho(W as f32, H as f32),
+            );
+            gl.uniform_1_i32(u("u_backdrop").as_ref(), 0);
+            gl.uniform_2_f32(u("u_screen_size").as_ref(), W as f32, H as f32);
+            gl.uniform_4_f32(u("u_tint").as_ref(), 0.0, 0.0, 0.0, 0.0);
+            gl.uniform_2_f32(u("u_size").as_ref(), SIZE, SIZE);
+            gl.uniform_1_f32(u("u_radius").as_ref(), 0.0);
+            gl.uniform_1_f32(u("u_radius_top").as_ref(), 0.0);
+            gl.uniform_1_f32(u("u_corner_exp").as_ref(), 2.0);
+            gl.uniform_1_f32(u("u_saturation").as_ref(), 1.0);
+            gl.uniform_1_f32(u("u_luminance").as_ref(), 1.0);
+            gl.uniform_1_f32(u("u_bevel_width").as_ref(), 0.0);
+            gl.uniform_1_f32(u("u_refraction").as_ref(), 0.0);
+            gl.uniform_1_f32(u("u_rim_width").as_ref(), 6.0);
+            gl.uniform_1_f32(u("u_rim_intensity").as_ref(), 0.0);
+            gl.uniform_3_f32(u("u_rim_tint").as_ref(), 1.0, 1.0, 1.0);
+            gl.uniform_1_f32(u("u_sheen").as_ref(), 0.0);
+            gl.uniform_1_f32(u("u_edge_shade").as_ref(), 0.0);
+            gl.uniform_1_f32(u("u_grain").as_ref(), 0.0);
+            gl.uniform_1_f32(u("u_alpha").as_ref(), 1.0);
+            gl.uniform_1_i32(u("u_scene_linear").as_ref(), scene_linear);
+            gl.uniform_1_i32(u("u_backdrop_encoded").as_ref(), backdrop_encoded);
+        })
+    };
+
+    let decode =
+        |code: u8| (TransferKind::Srgb.inverse(f32::from(code) / 255.0) * 255.0).round() as u8;
+    assert_pixel(
+        sample(1, 1),
+        [decode(40), decode(120), decode(200), 255],
+        2,
+        "an encoded backdrop under a linear sheet is decoded to linear light",
+    );
+    assert_pixel(
+        sample(1, 0),
+        backdrop,
+        2,
+        "a linear capture under a linear sheet is already in the target domain",
+    );
+    assert_pixel(
+        sample(0, 1),
+        backdrop,
+        2,
+        "an encoded backdrop under an encoded sheet passes through",
+    );
+
+    unsafe { gl.delete_program(prog) };
+}
+
 #[cfg(feature = "x11-backends")]
 #[test]
 fn x11_glass_surface_frosts_its_backdrop() {
@@ -8641,5 +8794,910 @@ fn wayland_lock_shield_hides_the_scene_from_capture_on_the_linear_route() {
             &gl,
             super::CompositorOutputTextureOwnership::RawCompositor,
         ));
+    }
+}
+
+/// The DRM-free region-recording veil runs right after the recording capture,
+/// which leaves GL_BLEND disabled, and after a scene-linear frame whose last
+/// border draw left the border program at `u_scene_linear = 1`. The veil owns
+/// both states: it must blend over the frame (not replace it with the scrim)
+/// and draw in the encoded domain of output_fbo.
+#[test]
+fn wayland_recording_veil_blends_after_the_capture_disabled_blending() {
+    let Some(_headless) = HeadlessGl::new(GlApi::Gles3) else {
+        eprintln!("headless GL unavailable - skipping recording veil test");
+        return;
+    };
+    use smithay::backend::renderer::gles::ffi;
+    let gl = ffi::Gles2::load_with(|symbol| egl::get_proc_address(symbol) as *const c_void);
+    const W: i32 = 32;
+    const H: i32 = 24;
+    unsafe {
+        let mut compositor = super::WaylandCompositor::new(&gl, W as u32, H as u32, false)
+            .expect("headless Wayland compositor must initialize");
+        compositor.recording_region_overlay = Some((8, 8, 16, 8));
+        // A scene-linear frame's leftover border domain uniform.
+        gl.UseProgram(compositor.border_program);
+        gl.Uniform1i(compositor.border_uniforms.scene_linear, 1);
+        gl.UseProgram(0);
+        gl.BindFramebuffer(ffi::FRAMEBUFFER, compositor.output_fbo);
+        gl.Viewport(0, 0, W, H);
+        gl.ClearColor(1.0, 1.0, 1.0, 1.0);
+        gl.Clear(ffi::COLOR_BUFFER_BIT);
+        // What the recording capture leaves behind.
+        gl.Disable(ffi::BLEND);
+        let projection = super::ortho(0.0, W as f32, H as f32, 0.0);
+        compositor.render_recording_region_overlay(&gl, &projection);
+
+        let frame = read_fbo_frame(&gl, compositor.output_fbo, W, H);
+        let outside = frame_pixel(&frame, W as usize, H as usize, 2, 2);
+        let inside = frame_pixel(&frame, W as usize, H as usize, 16, 12);
+        assert!(
+            outside[0] > 100,
+            "the scrim replaced the frame outside the crop instead of dimming it: {outside:?}"
+        );
+        assert!(
+            inside[0] > 200,
+            "the crop must stay (almost) untouched: {inside:?}"
+        );
+        assert!(compositor.release_gpu_resources(
+            &gl,
+            super::CompositorOutputTextureOwnership::RawCompositor,
+        ));
+    }
+}
+
+/// An exposé thumbnail of a transparent `has_alpha` client must show the
+/// scrim through it. Drawn with a positive (alpha-forcing) opacity, the
+/// window program painted it as an opaque black card.
+#[test]
+fn wayland_expose_thumbnail_of_a_transparent_window_is_not_black() {
+    let Some(_headless) = HeadlessGl::new(GlApi::Gles3) else {
+        eprintln!("headless GL unavailable - skipping expose alpha test");
+        return;
+    };
+    use smithay::backend::renderer::gles::ffi;
+    let gl = ffi::Gles2::load_with(|symbol| egl::get_proc_address(symbol) as *const c_void);
+    const W: i32 = 64;
+    const H: i32 = 48;
+    unsafe {
+        let mut compositor = super::WaylandCompositor::new(&gl, W as u32, H as u32, false)
+            .expect("headless Wayland compositor must initialize");
+        compositor.inactive_dim = 1.0;
+        compositor.inactive_desaturate = 0.0;
+        compositor.border_enabled = false;
+        compositor.shadow_enabled = false;
+
+        let clear_tex = create_element_texture(&gl, 8, 6, &[0u8, 0, 0, 0].repeat(8 * 6));
+        insert_opaque_test_window(&mut compositor, 7, clear_tex, 8, 6);
+        if let Some(window) = compositor.windows.get_mut(&7) {
+            window.has_alpha = true;
+        }
+        let scene = [(7u64, 10i32, 20i32, 8u32, 6u32)];
+        compositor.expose_active = true;
+        compositor.expose_opacity = 1.0;
+        compositor.expose_entries = vec![crate::backend::compositor_common::expose::ExposeEntry {
+            id: 7,
+            title: String::new(),
+            orig_x: 10.0,
+            orig_y: 20.0,
+            orig_w: 8.0,
+            orig_h: 6.0,
+            target_x: 4.0,
+            target_y: 30.0,
+            target_w: 12.0,
+            target_h: 9.0,
+            current_x: 4.0,
+            current_y: 30.0,
+            current_w: 12.0,
+            current_h: 9.0,
+            is_hovered: false,
+        }];
+        compositor.force_full_redraw();
+        assert!(compositor.render_frame(&gl, &scene, None, false, false, false, None, false));
+
+        let frame = read_fbo_frame(&gl, compositor.output_fbo, W, H);
+        let thumb = frame_pixel(&frame, W as usize, H as usize, 8, 34);
+        let (u, v) = (8.5 / W as f32, 34.5 / H as f32);
+        let scrim = expose_scrim_pixel_oracle(u, v, 0.85, background_texel(), false);
+        assert!(
+            thumb[2] > 10 && thumb[2] <= scrim[2],
+            "a transparent thumbnail must show the scrim, not black: {thumb:?} (scrim {scrim:?})"
+        );
+
+        gl.DeleteTextures(1, &clear_tex);
+        assert!(compositor.release_gpu_resources(
+            &gl,
+            super::CompositorOutputTextureOwnership::RawCompositor,
+        ));
+    }
+}
+
+/// Peek spotlights the focused window. An xdg popup (a menu) stacked over it
+/// and overlapping it belongs to that window and must stay lit on top, rather
+/// than being left under the scrim or hidden behind its parent.
+#[test]
+fn wayland_peek_keeps_a_popup_over_the_spotlit_window() {
+    let Some(_headless) = HeadlessGl::new(GlApi::Gles3) else {
+        eprintln!("headless GL unavailable - skipping peek popup test");
+        return;
+    };
+    use smithay::backend::renderer::gles::ffi;
+    let gl = ffi::Gles2::load_with(|symbol| egl::get_proc_address(symbol) as *const c_void);
+    const W: i32 = 64;
+    const H: i32 = 48;
+    unsafe {
+        let mut compositor = super::WaylandCompositor::new(&gl, W as u32, H as u32, false)
+            .expect("headless Wayland compositor must initialize");
+        compositor.inactive_dim = 1.0;
+        compositor.inactive_desaturate = 0.0;
+        compositor.border_enabled = false;
+        compositor.shadow_enabled = false;
+
+        let blue = create_element_texture(&gl, 32, 24, &[40u8, 40, 200, 255].repeat(32 * 24));
+        let red = create_element_texture(&gl, 8, 8, &[200u8, 40, 40, 255].repeat(64));
+        insert_opaque_test_window(&mut compositor, 1, blue, 32, 24);
+        let popup = super::XDG_POPUP_WINDOW_ID_PREFIX | 7;
+        insert_opaque_test_window(&mut compositor, popup, red, 8, 8);
+        compositor.peek_active = true;
+        compositor.peek_opacity = 1.0;
+        let scene = [(1u64, 0i32, 0i32, 32u32, 24u32), (popup, 8, 8, 8, 8)];
+        compositor.force_full_redraw();
+        assert!(compositor.render_frame(&gl, &scene, Some(1), false, false, false, None, false));
+
+        let frame = read_fbo_frame(&gl, compositor.output_fbo, W, H);
+        assert_pixel(
+            frame_pixel(&frame, W as usize, H as usize, 12, 12),
+            [200, 40, 40, 255],
+            2,
+            "the popup rides the spotlight on top of its parent",
+        );
+        assert_pixel(
+            frame_pixel(&frame, W as usize, H as usize, 20, 20),
+            [40, 40, 200, 255],
+            2,
+            "the focused window is spotlit",
+        );
+
+        gl.DeleteTextures(1, &blue);
+        gl.DeleteTextures(1, &red);
+        assert!(compositor.release_gpu_resources(
+            &gl,
+            super::CompositorOutputTextureOwnership::RawCompositor,
+        ));
+    }
+}
+
+/// The monitor lock shade, the MIC chip and the capture hint are compositor
+/// drawn and none of them is a KMS element, so each must keep a lone
+/// fullscreen client off direct scanout, even with borders disabled (the
+/// setting that otherwise leaves nothing else in the way).
+#[test]
+fn wayland_privacy_cues_block_direct_scanout() {
+    let Some(_headless) = HeadlessGl::new(GlApi::Gles3) else {
+        eprintln!("headless GL unavailable - skipping privacy cue scanout test");
+        return;
+    };
+    let gl = smithay::backend::renderer::gles::ffi::Gles2::load_with(|symbol| {
+        egl::get_proc_address(symbol) as *const c_void
+    });
+    unsafe {
+        let mut compositor = super::WaylandCompositor::new(&gl, 32, 24, false)
+            .expect("headless Wayland compositor must initialize");
+        compositor.border_enabled = false;
+        let rect = crate::backend::api::CompositorRect::new(0.0, 0.0, 32.0, 24.0);
+
+        let shade =
+            crate::backend::api::MonitorShade::new(1, 0, 0, 32, 24).expect("a positive-size shade");
+        compositor.set_monitor_shades(&[shade]);
+        assert_eq!(
+            compositor.direct_scanout_block_reason(rect),
+            Some("monitor lock shade requires composition")
+        );
+        compositor.set_monitor_shades(&[]);
+
+        compositor.mic_indicator_active = true;
+        assert_eq!(
+            compositor.direct_scanout_block_reason(rect),
+            Some("mic indicator requires composition")
+        );
+        compositor.mic_indicator_active = false;
+
+        compositor.set_capture_hint(Some("hint".into()));
+        assert_eq!(
+            compositor.direct_scanout_block_reason(rect),
+            Some("capture hint requires composition")
+        );
+
+        assert!(compositor.release_gpu_resources(
+            &gl,
+            super::CompositorOutputTextureOwnership::RawCompositor,
+        ));
+    }
+}
+
+/// Idle dim is a whole-frame layer. The first frame after it is lifted must
+/// repaint everything, even when the only other damage that frame is a small
+/// box far away; a partial frame left the dim baked in outside that box.
+#[test]
+fn wayland_lifting_the_dim_repaints_outside_a_small_damage_box() {
+    let Some(_headless) = HeadlessGl::new(GlApi::Gles3) else {
+        eprintln!("headless GL unavailable - skipping dim removal damage test");
+        return;
+    };
+    let gl = smithay::backend::renderer::gles::ffi::Gles2::load_with(|symbol| {
+        egl::get_proc_address(symbol) as *const c_void
+    });
+    const W: i32 = 96;
+    const H: i32 = 64;
+    unsafe {
+        let mut compositor = super::WaylandCompositor::new(&gl, W as u32, H as u32, false)
+            .expect("headless Wayland compositor must initialize");
+        compositor.set_partial_damage(true);
+        compositor.force_full_redraw();
+        assert!(compositor.render_frame(&gl, &[], None, false, false, false, None, false));
+        let clean = read_fbo_frame(&gl, compositor.output_fbo, W, H);
+        let clean_px = frame_pixel(&clean, W as usize, H as usize, 80, 50);
+
+        compositor.set_brightness(0.5);
+        assert!(compositor.render_frame(&gl, &[], None, false, false, false, None, false));
+        let dimmed = read_fbo_frame(&gl, compositor.output_fbo, W, H);
+        assert_ne!(
+            frame_pixel(&dimmed, W as usize, H as usize, 80, 50),
+            clean_px,
+            "the dim frame must dim the probe pixel"
+        );
+
+        compositor.set_brightness(1.0);
+        compositor
+            .dirty_region_tracker
+            .mark_dirty(super::dirty_region::DirtyRect::new(0.0, 0.0, 8.0, 8.0));
+        assert!(compositor.render_frame(&gl, &[], None, false, false, false, None, false));
+        let restored = read_fbo_frame(&gl, compositor.output_fbo, W, H);
+        assert_pixel(
+            frame_pixel(&restored, W as usize, H as usize, 80, 50),
+            clean_px,
+            1,
+            "the dim must not survive outside the damage box",
+        );
+
+        assert!(compositor.release_gpu_resources(
+            &gl,
+            super::CompositorOutputTextureOwnership::RawCompositor,
+        ));
+    }
+}
+
+/// An internalized KMS element (a cursor, a layer surface) that stays put is
+/// re-drawn into the retained linear target every frame. A still element
+/// stays out of the partial damage box (only a moved element or one with a
+/// new content key damages its footprint), and its redraw is scissored to the
+/// box. Outside the box the retained target keeps it composited exactly once,
+/// so a translucent element is never blended again over its own pixels and
+/// does not darken frame after frame. The 8x8 dirty box at the origin
+/// deliberately misses the element at (60, 40): that is the case the scissor
+/// has to protect.
+#[test]
+fn wayland_still_translucent_element_is_not_reblended_under_partial_damage() {
+    let Some(_headless) = HeadlessGl::new(GlApi::Gles3) else {
+        eprintln!("headless GL unavailable - skipping still element damage test");
+        return;
+    };
+    let gl = smithay::backend::renderer::gles::ffi::Gles2::load_with(|symbol| {
+        egl::get_proc_address(symbol) as *const c_void
+    });
+    const W: i32 = 96;
+    const H: i32 = 64;
+    unsafe {
+        let mut compositor = super::WaylandCompositor::new(&gl, W as u32, H as u32, false)
+            .expect("headless Wayland compositor must initialize");
+        compositor.scene_linear_requested = true;
+        compositor.sync_scene_linear_target(&gl);
+        assert_ne!(compositor.linear_fbo, 0);
+        compositor.set_partial_damage(true);
+        let element_tex = create_element_texture(&gl, 4, 4, &[100u8, 20, 20, 128].repeat(16));
+        let stage = |compositor: &mut super::WaylandCompositor| {
+            compositor.set_external_elements(
+                vec![super::ExternalElementVisual {
+                    texture: element_tex,
+                    owner: None,
+                    rect: [60, 40, 4, 4],
+                    content_key: 1,
+                }],
+                false,
+            );
+        };
+
+        // DeferredHardware: output_fbo is a full blit of the linear target.
+        stage(&mut compositor);
+        compositor.force_full_redraw();
+        assert!(compositor.render_frame(&gl, &[], None, true, true, true, None, false));
+        let first = read_fbo_frame(&gl, compositor.output_fbo, W, H);
+        let first_px = frame_pixel(&first, W as usize, H as usize, 61, 41);
+        for _ in 0..3 {
+            stage(&mut compositor);
+            compositor
+                .dirty_region_tracker
+                .mark_dirty(super::dirty_region::DirtyRect::new(0.0, 0.0, 8.0, 8.0));
+            compositor.force_full_redraw();
+            assert!(compositor.render_frame(&gl, &[], None, true, true, true, None, false));
+        }
+        let later = read_fbo_frame(&gl, compositor.output_fbo, W, H);
+        assert_pixel(
+            frame_pixel(&later, W as usize, H as usize, 61, 41),
+            first_px,
+            1,
+            "a still translucent element must not accumulate",
+        );
+
+        gl.DeleteTextures(1, &element_tex);
+        assert!(compositor.release_gpu_resources(
+            &gl,
+            super::CompositorOutputTextureOwnership::RawCompositor,
+        ));
+    }
+}
+
+/// On the scene-linear routes the KMS planner internalizes the cursor
+/// whenever the pointer is on the output. A resting cursor must stay out of
+/// every partial box: it is scissored to the box instead, so damage far away
+/// stays a small partial repair rather than stretching to the pointer (and
+/// usually past the full-redraw cutoff). A moved cursor repaints its old and
+/// new rects, and a new image at the same rect (a changed content key)
+/// repaints its footprint.
+#[test]
+fn wayland_resting_cursor_stays_out_of_the_partial_box_and_a_move_repaints_both_rects() {
+    let Some(_headless) = HeadlessGl::new(GlApi::Gles3) else {
+        eprintln!("headless GL unavailable - skipping resting cursor damage test");
+        return;
+    };
+    use smithay::backend::renderer::gles::ffi;
+    let gl = ffi::Gles2::load_with(|symbol| egl::get_proc_address(symbol) as *const c_void);
+    const W: i32 = 320;
+    const H: i32 = 200;
+    // Far from the content damage, from the resting cursor and from both
+    // cursor positions, but inside the box the old code grew to the cursor.
+    const SENTINEL: (i32, i32) = (150, 100);
+    const RESTING: [i32; 4] = [296, 176, 8, 8];
+    const MOVED: [i32; 4] = [296, 120, 8, 8];
+    unsafe {
+        let mut compositor = super::WaylandCompositor::new(&gl, W as u32, H as u32, false)
+            .expect("headless Wayland compositor must initialize");
+        compositor.scene_linear_requested = true;
+        compositor.sync_scene_linear_target(&gl);
+        assert_ne!(compositor.linear_fbo, 0);
+        compositor.set_partial_damage(true);
+        // Translucent, so a second blend over retained pixels would show.
+        let arrow_tex = create_element_texture(&gl, 8, 8, &[100u8, 20, 20, 128].repeat(64));
+        let hand_tex = create_element_texture(&gl, 8, 8, &[20u8, 100, 20, 128].repeat(64));
+        let stage = |compositor: &mut super::WaylandCompositor, texture, rect, content_key| {
+            compositor.set_external_elements(
+                vec![super::ExternalElementVisual {
+                    texture,
+                    owner: None,
+                    rect,
+                    content_key,
+                }],
+                true,
+            );
+        };
+        // DeferredHardware: output_fbo is a full blit of the retained linear
+        // target, so whatever the frame did not repaint there shows as is.
+        let frame = |compositor: &mut super::WaylandCompositor| {
+            compositor.force_full_redraw();
+            assert!(compositor.render_frame(&gl, &[], None, true, true, true, None, false));
+            read_fbo_frame(&gl, compositor.output_fbo, W, H)
+        };
+        let px = |frame: &[u8], x: i32, y: i32| {
+            frame_pixel(frame, W as usize, H as usize, x as usize, y as usize)
+        };
+        // Paint a sentinel into the retained linear target. Only a pass that
+        // repaints its pixels can remove it.
+        let paint_sentinel = |compositor: &super::WaylandCompositor| {
+            gl.BindFramebuffer(ffi::FRAMEBUFFER, compositor.linear_fbo);
+            gl.Enable(ffi::SCISSOR_TEST);
+            gl.Scissor(SENTINEL.0, H - SENTINEL.1 - 4, 4, 4);
+            gl.ClearColor(0.0, 1.0, 0.0, 1.0);
+            gl.Clear(ffi::COLOR_BUFFER_BIT);
+            gl.Disable(ffi::SCISSOR_TEST);
+            gl.BindFramebuffer(ffi::FRAMEBUFFER, 0);
+        };
+        let content_damage = |compositor: &mut super::WaylandCompositor, x: f32, y: f32| {
+            compositor
+                .dirty_region_tracker
+                .mark_dirty(super::dirty_region::DirtyRect::new(x, y, 8.0, 8.0));
+        };
+        let sentinel = [0, 255, 0, 255];
+
+        // Frame 1 is the full transition frame after enabling partial repair.
+        stage(&mut compositor, arrow_tex, RESTING, 1);
+        let first = frame(&mut compositor);
+        let background = px(&first, MOVED[0] + 3, MOVED[1] + 3);
+        let arrow = px(&first, RESTING[0] + 3, RESTING[1] + 3);
+        assert_ne!(arrow, background, "the cursor must be drawn");
+
+        // Frame 2: a caret blinks in the top-left corner while the cursor
+        // rests in the bottom-right one. Before the fix the box spanned both
+        // (past 70% of the screen, so a full redraw) and cleared the sentinel.
+        paint_sentinel(&compositor);
+        stage(&mut compositor, arrow_tex, RESTING, 1);
+        content_damage(&mut compositor, 0.0, 0.0);
+        let resting = frame(&mut compositor);
+        assert_pixel(
+            px(&resting, SENTINEL.0 + 1, SENTINEL.1 + 1),
+            sentinel,
+            0,
+            "the partial box must not grow to the resting cursor",
+        );
+        assert_pixel(
+            px(&resting, RESTING[0] + 3, RESTING[1] + 3),
+            arrow,
+            1,
+            "a resting cursor outside the box is neither lost nor blended again",
+        );
+
+        // Frame 3: only the cursor moves. Its old rect shows the background
+        // again, its new rect shows it exactly once, and nothing else is
+        // repainted.
+        stage(&mut compositor, arrow_tex, MOVED, 1);
+        let moved = frame(&mut compositor);
+        assert_pixel(
+            px(&moved, RESTING[0] + 3, RESTING[1] + 3),
+            background,
+            1,
+            "the old cursor rect must be repaired, not ghosted",
+        );
+        assert_pixel(
+            px(&moved, MOVED[0] + 3, MOVED[1] + 3),
+            arrow,
+            1,
+            "the cursor must be drawn once at its new rect",
+        );
+        assert_pixel(
+            px(&moved, SENTINEL.0 + 1, SENTINEL.1 + 1),
+            sentinel,
+            0,
+            "a cursor move repaints only the cursor's rects",
+        );
+
+        // Frame 4: the cursor changes shape at the same rect while unrelated
+        // damage keeps the frame partial. The new content key damages the
+        // footprint, so the new image replaces the old one.
+        stage(&mut compositor, hand_tex, MOVED, 2);
+        content_damage(&mut compositor, 280.0, 20.0);
+        let reshaped = frame(&mut compositor);
+        assert_pixel(
+            px(&reshaped, SENTINEL.0 + 1, SENTINEL.1 + 1),
+            sentinel,
+            0,
+            "the reshape frame must stay a partial one",
+        );
+        let hand = px(&reshaped, MOVED[0] + 3, MOVED[1] + 3);
+        assert_ne!(hand, arrow, "a new cursor image must not leave the old one");
+        // The same staging on a full frame is the reference.
+        compositor.force_full_damage_next = true;
+        stage(&mut compositor, hand_tex, MOVED, 2);
+        let full = frame(&mut compositor);
+        assert_pixel(
+            hand,
+            px(&full, MOVED[0] + 3, MOVED[1] + 3),
+            1,
+            "a partial reshape must draw what a full frame draws",
+        );
+
+        gl.DeleteTextures(1, &arrow_tex);
+        gl.DeleteTextures(1, &hand_tex);
+        assert!(compositor.release_gpu_resources(
+            &gl,
+            super::CompositorOutputTextureOwnership::RawCompositor,
+        ));
+    }
+}
+
+/// Raising a window without moving anything changes which pixels win where
+/// two windows overlap. A partial frame must damage the restacked span, even
+/// when the only content damage that frame is a commit far away.
+#[test]
+fn wayland_restack_without_moves_repaints_the_overlap() {
+    let Some(_headless) = HeadlessGl::new(GlApi::Gles3) else {
+        eprintln!("headless GL unavailable - skipping restack damage test");
+        return;
+    };
+    let gl = smithay::backend::renderer::gles::ffi::Gles2::load_with(|symbol| {
+        egl::get_proc_address(symbol) as *const c_void
+    });
+    const W: i32 = 200;
+    const H: i32 = 120;
+    unsafe {
+        let mut compositor = super::WaylandCompositor::new(&gl, W as u32, H as u32, false)
+            .expect("headless Wayland compositor must initialize");
+        compositor.shadow_enabled = false;
+        compositor.border_enabled = false;
+        compositor.inactive_opacity = 1.0;
+        compositor.active_opacity = 1.0;
+        compositor.inactive_dim = 1.0;
+        compositor.set_partial_damage(true);
+        let red = create_element_texture(&gl, 40, 40, &[255u8, 0, 0, 255].repeat(1600));
+        let green = create_element_texture(&gl, 40, 40, &[0u8, 255, 0, 255].repeat(1600));
+        let blue = create_element_texture(&gl, 10, 10, &[0u8, 0, 255, 255].repeat(100));
+        insert_opaque_test_window(&mut compositor, 1, red, 40, 40);
+        insert_opaque_test_window(&mut compositor, 2, green, 40, 40);
+        insert_opaque_test_window(&mut compositor, 3, blue, 10, 10);
+        let a = (1u64, 0i32, 0i32, 40u32, 40u32);
+        let b = (2u64, 20i32, 20i32, 40u32, 40u32);
+        let c = (3u64, 170i32, 100i32, 10u32, 10u32);
+
+        compositor.force_full_redraw();
+        assert!(compositor.render_frame(&gl, &[a, b, c], None, false, false, false, None, false));
+        let before = read_fbo_frame(&gl, compositor.output_fbo, W, H);
+        let px = frame_pixel(&before, W as usize, H as usize, 30, 30);
+        assert!(px[1] > 200 && px[0] < 80, "B starts on top: {px:?}");
+
+        // Raise A without moving anything; C commits far away.
+        compositor.content_dirty_ids.insert(3);
+        compositor.force_full_redraw();
+        assert!(compositor.render_frame(&gl, &[b, a, c], None, false, false, false, None, false));
+        let after = read_fbo_frame(&gl, compositor.output_fbo, W, H);
+        let px = frame_pixel(&after, W as usize, H as usize, 30, 30);
+        assert!(
+            px[0] > 200 && px[1] < 80,
+            "the raised A must win the overlap: {px:?}"
+        );
+
+        for tex in [red, green, blue] {
+            gl.DeleteTextures(1, &tex);
+        }
+        assert!(compositor.release_gpu_resources(
+            &gl,
+            super::CompositorOutputTextureOwnership::RawCompositor,
+        ));
+    }
+}
+
+/// Idle dim must darken by the same amount on every route. The legacy route
+/// multiplies encoded sRGB; the deferred hardware route hands output_fbo to a
+/// CRTC LUT as linear light, so it must hold the linear value of that same
+/// encoded dim, and the capture view must be dimmed exactly once.
+#[test]
+fn wayland_deferred_hardware_dim_matches_the_encoded_dim() {
+    let Some(_headless) = HeadlessGl::new(GlApi::Gles3) else {
+        eprintln!("headless GL unavailable - skipping deferred dim test");
+        return;
+    };
+    use crate::backend::wayland_udev::color_pipeline::TransferKind;
+    let gl = smithay::backend::renderer::gles::ffi::Gles2::load_with(|symbol| {
+        egl::get_proc_address(symbol) as *const c_void
+    });
+    const W: i32 = 64;
+    const H: i32 = 48;
+    unsafe {
+        let mut compositor = super::WaylandCompositor::new(&gl, W as u32, H as u32, false)
+            .expect("headless Wayland compositor must initialize");
+        compositor.shadow_enabled = false;
+        compositor.border_enabled = false;
+        compositor.inactive_opacity = 1.0;
+        compositor.inactive_dim = 1.0;
+        let tex =
+            create_element_texture(&gl, W, H, &[200u8, 200, 200, 255].repeat((W * H) as usize));
+        insert_opaque_test_window(&mut compositor, 1, tex, W as u32, H as u32);
+        let scene = [(1u64, 0i32, 0i32, W as u32, H as u32)];
+        compositor.set_brightness(0.5);
+
+        // Legacy encoded route: 200 * 0.5 = 100 encoded.
+        compositor.force_full_redraw();
+        assert!(compositor.render_frame(&gl, &scene, None, false, false, false, None, false));
+        let legacy = read_fbo_frame(&gl, compositor.output_fbo, W, H);
+        assert_pixel(
+            frame_pixel(&legacy, W as usize, H as usize, 32, 24),
+            [100, 100, 100, 255],
+            2,
+            "legacy encoded dim",
+        );
+
+        // DeferredHardware: output_fbo holds linear light for the CRTC LUT.
+        compositor.scene_linear_requested = true;
+        compositor.sync_scene_linear_target(&gl);
+        compositor.force_full_redraw();
+        assert!(compositor.render_frame(&gl, &scene, None, true, true, true, None, true));
+        let deferred = read_fbo_frame(&gl, compositor.output_fbo, W, H);
+        let expected = (TransferKind::Srgb.inverse(100.0 / 255.0) * 255.0).round() as u8;
+        assert_pixel(
+            frame_pixel(&deferred, W as usize, H as usize, 32, 24),
+            [expected, expected, expected, 255],
+            2,
+            "the LUT input carries the linear value of the encoded dim",
+        );
+        let view = read_fbo_frame(&gl, compositor.capture_view_fbo, W, H);
+        assert_pixel(
+            frame_pixel(&view, W as usize, H as usize, 32, 24),
+            [100, 100, 100, 255],
+            2,
+            "the capture view is dimmed exactly once",
+        );
+
+        gl.DeleteTextures(1, &tex);
+        assert!(compositor.release_gpu_resources(
+            &gl,
+            super::CompositorOutputTextureOwnership::RawCompositor,
+        ));
+    }
+}
+
+/// The wallpaper lands in the encoded output_fbo ahead of the scene-linear
+/// decode pass, so it must draw with the window program in the encoded
+/// domain on every frame. The deferred route ends a frame with that program
+/// still at `u_scene_linear = 1`; a wallpaper inheriting it was decoded twice
+/// from the second frame on (a 0.5 grey fell to about 0.037 linear instead
+/// of 0.214).
+#[test]
+fn wayland_wallpaper_keeps_its_value_on_the_second_scene_linear_frame() {
+    let Some(_headless) = HeadlessGl::new(GlApi::Gles3) else {
+        eprintln!("headless GL unavailable - skipping scene-linear wallpaper test");
+        return;
+    };
+    use smithay::backend::renderer::gles::ffi;
+    let gl = ffi::Gles2::load_with(|symbol| egl::get_proc_address(symbol) as *const c_void);
+    const W: i32 = 64;
+    const H: i32 = 48;
+    unsafe {
+        let mut compositor = super::WaylandCompositor::new(&gl, W as u32, H as u32, false)
+            .expect("headless Wayland compositor must initialize");
+        compositor.inactive_dim = 1.0;
+        compositor.inactive_desaturate = 0.0;
+        compositor.shadow_enabled = false;
+        compositor.border_enabled = false;
+        let grey = create_element_texture(&gl, 4, 4, &[128u8, 128, 128, 255].repeat(16));
+        compositor.wallpaper_texture = Some(grey);
+        compositor.wallpaper_img_w = 4;
+        compositor.wallpaper_img_h = 4;
+        compositor.wallpaper_mode =
+            crate::backend::compositor_common::wallpaper::WallpaperMode::Stretch;
+        // A window drawn on the linear route leaves the window program in
+        // the linear domain at the end of the frame.
+        let win_tex = create_element_texture(&gl, 8, 6, &[40u8, 40, 200, 255].repeat(8 * 6));
+        insert_opaque_test_window(&mut compositor, 7, win_tex, 8, 6);
+        let scene = [(7u64, 10i32, 20i32, 8u32, 6u32)];
+
+        compositor.scene_linear_requested = true;
+        compositor.sync_scene_linear_target(&gl);
+        assert_ne!(compositor.linear_fbo, 0);
+        let region = crate::backend::wayland_udev::color_pipeline::OutputColorRegion {
+            rect: [0, 0, W, H],
+            output_tf: crate::backend::wayland_udev::color_pipeline::TransferKind::Srgb,
+            working_to_output_row_major: crate::backend::wayland_udev::color_pipeline::IDENTITY_CTM,
+            tone_map: crate::backend::wayland_udev::color_pipeline::OutputToneMapPlan::IDENTITY,
+        };
+        let mut wallpaper_px = Vec::new();
+        for _ in 0..2 {
+            compositor.force_full_redraw();
+            assert!(compositor.render_frame(
+                &gl,
+                &scene,
+                None,
+                true,
+                false,
+                false,
+                Some(std::slice::from_ref(&region)),
+                false,
+            ));
+            let frame = read_fbo_frame(&gl, compositor.output_fbo, W, H);
+            wallpaper_px.push(frame_pixel(&frame, W as usize, H as usize, 48, 8));
+        }
+        // sRGB region delivery re-encodes the decoded wallpaper: 128 in,
+        // 128 out, on the first frame and every one after it.
+        assert_pixel(wallpaper_px[0], [128, 128, 128, 255], 2, "first frame");
+        assert_pixel(
+            wallpaper_px[1],
+            wallpaper_px[0],
+            1,
+            "the second frame must not decode the wallpaper twice",
+        );
+
+        compositor.wallpaper_texture = None;
+        gl.DeleteTextures(1, &grey);
+        gl.DeleteTextures(1, &win_tex);
+        assert!(compositor.release_gpu_resources(
+            &gl,
+            super::CompositorOutputTextureOwnership::RawCompositor,
+        ));
+    }
+}
+
+/// Closed windows must leave the subpixel manager when they are retired, on
+/// the live path and on the path for an entry that is already gone. The
+/// manager's size cap is only a backstop.
+#[test]
+fn wayland_retired_windows_leave_the_subpixel_manager() {
+    let Some(_headless) = HeadlessGl::new(GlApi::Gles3) else {
+        eprintln!("headless GL unavailable - skipping subpixel retirement test");
+        return;
+    };
+    use super::subpixel_render::SubpixelMode;
+    let gl = smithay::backend::renderer::gles::ffi::Gles2::load_with(|symbol| {
+        egl::get_proc_address(symbol) as *const c_void
+    });
+    unsafe {
+        let mut compositor = super::WaylandCompositor::new(&gl, 32, 24, false)
+            .expect("headless Wayland compositor must initialize");
+        let tex = create_element_texture(&gl, 4, 4, &[40u8, 40, 200, 255].repeat(16));
+        insert_opaque_test_window(&mut compositor, 7, tex, 4, 4);
+        compositor.set_window_class(7, "kitty");
+        assert_eq!(
+            compositor.subpixel_mgr.get_subpixel_mode(7),
+            SubpixelMode::RGB
+        );
+
+        // Live path: the WindowState stays for the close fade.
+        compositor.remove_window(7);
+        assert!(
+            compositor
+                .windows
+                .get(&7)
+                .is_some_and(|window| window.fading_out)
+        );
+        assert_eq!(
+            compositor.subpixel_mgr.get_subpixel_mode(7),
+            SubpixelMode::None
+        );
+
+        // Already-gone path: no WindowState left to retire.
+        compositor.subpixel_mgr.register_window(9, "kitty");
+        compositor.remove_window(9);
+        assert_eq!(
+            compositor.subpixel_mgr.get_subpixel_mode(9),
+            SubpixelMode::None
+        );
+
+        compositor.windows.clear();
+        gl.DeleteTextures(1, &tex);
+        assert!(compositor.release_gpu_resources(
+            &gl,
+            super::CompositorOutputTextureOwnership::RawCompositor,
+        ));
+    }
+}
+
+/// On a HiDPI output the KMS planner stages a layer surface or a drag icon
+/// into a texture of the tree's physical size. The composite must draw the
+/// tree at the output scale it was built for: through a scale-1 damage
+/// tracker Smithay drew each surface at its logical size, so at scale 2 a
+/// bar filled only the top-left quarter of its texture, and the compositor
+/// stretched that texture, mostly transparent, over the bar's whole strip.
+#[cfg(feature = "backend-wayland-udev")]
+#[test]
+fn wayland_kms_staged_buffer_covers_its_texture_at_every_scale() {
+    let Some(mut headless) = HeadlessSmithayGles::new() else {
+        eprintln!("headless Smithay GLES unavailable - skipping KMS staging scale test");
+        return;
+    };
+    // (output scale, client buffer scale): a scale-1 output, a scale-2 output
+    // with a buffer_scale=2 client, and a fractional output downsampling it.
+    for (scale, buffer_scale) in [(1.0, 1), (2.0, 2), (1.5, 2)] {
+        let (size, rgba) =
+            crate::backend::wayland_udev::backend::composite_scaled_buffer_for_tests(
+                &mut headless.renderer,
+                (20, 6),
+                buffer_scale,
+                scale,
+            )
+            .unwrap_or_else(|| panic!("staging at scale {scale} must composite"));
+        assert_eq!(size, ((20.0 * scale) as i32, (6.0 * scale) as i32));
+        assert_eq!(rgba.len(), (size.0 * size.1 * 4) as usize);
+        for (texel, pixel) in rgba.chunks_exact(4).enumerate() {
+            let (x, y) = (texel as i32 % size.0, texel as i32 / size.0);
+            assert_eq!(
+                pixel,
+                [255, 0, 0, 255],
+                "scale {scale}: texel ({x}, {y}) of the {size:?} texture must be covered"
+            );
+        }
+    }
+}
+
+/// The synthesised recording pointer is clipped to the canvas. Once a region
+/// reshaped mid-recording is letterboxed, a pointer outside the region maps
+/// into a bar, and without the clip the arrow was painted there, tracking
+/// pointer activity outside the recorded area. The part of an arrow reaching
+/// into the canvas still shows, and the scene's scissor state, enabled or
+/// not, is put back afterwards.
+#[test]
+fn wayland_recording_cursor_stays_out_of_the_letterbox_bars() {
+    let Some(_headless) = HeadlessGl::new(GlApi::Gles3) else {
+        eprintln!("headless GL unavailable - skipping recording cursor clip test");
+        return;
+    };
+    use smithay::backend::renderer::gles::ffi;
+    let gl = ffi::Gles2::load_with(|symbol| egl::get_proc_address(symbol) as *const c_void);
+    // Recorded at 160x90, then the region was narrowed to 80x90: the canvas
+    // stays 160x90 and shows the region between two 40-pixel bars.
+    const W: i32 = 160;
+    const H: i32 = 90;
+    const CANVAS_LEFT: usize = 40;
+    const GREY: [u8; 4] = [128, 128, 128, 255];
+    const FILL: [u8; 4] = [250, 250, 250, 255];
+    unsafe {
+        let program = super::shader_cache::ShaderCache::compile_program(
+            &gl,
+            super::recording::RECORDING_QUAD_VERTEX,
+            super::recording::RECORDING_CURSOR_FRAGMENT,
+        )
+        .unwrap_or_else(|error| panic!("recording cursor shader failed to link: {error}"));
+        let recording = super::recording::RecordingState::letterboxed_for_tests(
+            (W as u32, H as u32),
+            (W as u32, H as u32),
+            (0, 0, 80, 90),
+            program,
+        );
+        let (fbo, texture) = super::create_fbo_texture(&gl, W as u32, H as u32);
+
+        // Draw the arrow for `pointer` over a grey target, with the scene's
+        // scissor `enabled` or not at `scissor_box`. Returns the frame and the
+        // scissor state the draw left behind.
+        let draw = |pointer: (f32, f32), enabled: bool, scissor_box: [i32; 4]| {
+            gl.BindFramebuffer(ffi::FRAMEBUFFER, fbo);
+            gl.Viewport(0, 0, W, H);
+            gl.Disable(ffi::SCISSOR_TEST);
+            gl.ClearColor(128.0 / 255.0, 128.0 / 255.0, 128.0 / 255.0, 1.0);
+            gl.Clear(ffi::COLOR_BUFFER_BIT);
+            gl.Scissor(
+                scissor_box[0],
+                scissor_box[1],
+                scissor_box[2],
+                scissor_box[3],
+            );
+            if enabled {
+                gl.Enable(ffi::SCISSOR_TEST);
+            }
+            recording.draw_cursor_for_tests(&gl, pointer);
+            let still_enabled = gl.IsEnabled(ffi::SCISSOR_TEST) != ffi::FALSE;
+            let mut box_after = [0; 4];
+            gl.GetIntegerv(ffi::SCISSOR_BOX, box_after.as_mut_ptr());
+            gl.Disable(ffi::SCISSOR_TEST);
+            let frame = read_fbo_frame(&gl, fbo, W, H);
+            (frame, still_enabled, box_after)
+        };
+        let px =
+            |frame: &[u8], x: usize, y: usize| frame_pixel(frame, W as usize, H as usize, x, y);
+
+        // Inside the region the arrow is drawn, its tip on the pointer's
+        // canvas pixel (the region starts at the bar's edge).
+        let unrelated_box = [5, 6, 7, 8];
+        let (inside, enabled, scissor_box) = draw((10.0, 20.0), false, unrelated_box);
+        assert_pixel(px(&inside, CANVAS_LEFT + 10, 20), FILL, 0, "arrow tip");
+        assert!(!enabled, "a disabled scene scissor must stay disabled");
+        assert_eq!(scissor_box, unrelated_box, "the scene's scissor box");
+
+        // Left of the region the whole arrow maps into the left bar, which
+        // must stay untouched. The scene's full-frame scissor would not stop
+        // it; only the canvas clip does.
+        let full_frame = [0, 0, W, H];
+        let (outside, enabled, scissor_box) = draw((-30.0, 20.0), true, full_frame);
+        for y in 0..H as usize {
+            for x in 0..W as usize {
+                assert_pixel(
+                    px(&outside, x, y),
+                    GREY,
+                    0,
+                    &format!("pixel ({x}, {y}) of an arrow in the bar"),
+                );
+            }
+        }
+        assert!(enabled, "an enabled scene scissor must stay enabled");
+        assert_eq!(scissor_box, full_frame, "the scene's scissor box");
+
+        // An arrow straddling the canvas edge keeps its part inside: its
+        // eleven-pixel-wide row 10 is cut at the bar's edge.
+        let (straddling, _, _) = draw((-5.0, 20.0), false, unrelated_box);
+        for x in CANVAS_LEFT - 5..CANVAS_LEFT {
+            assert_pixel(px(&straddling, x, 30), GREY, 0, "arrow row in the bar");
+        }
+        for x in CANVAS_LEFT..CANVAS_LEFT + 6 {
+            assert_pixel(px(&straddling, x, 30), FILL, 0, "arrow row in the canvas");
+        }
+
+        gl.BindFramebuffer(ffi::FRAMEBUFFER, 0);
+        gl.DeleteFramebuffers(1, &fbo);
+        gl.DeleteTextures(1, &texture);
+        gl.DeleteProgram(program);
     }
 }

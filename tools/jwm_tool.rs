@@ -499,8 +499,8 @@ enum Commands {
         long_about = "通过 Unix 套接字向 JWM 发送 IPC 消息。\n\
                       名称以 get_ 开头或已注册为查询时自动发送 query。\n\n\
                       \x1b[1m可用命令:\x1b[0m\n  \
-                      窗口: focusstack, killclient, zoom, togglefloating, togglesticky,\n        \
-                      togglepip, togglescratchpad, movestack\n  \
+                      窗口: focusstack, killclient, zoom, togglefloating, togglemaximize,\n        \
+                      togglesticky, togglepip, togglescratchpad, movestack\n  \
                       布局: setmfact, setcfact, incnmaster, setlayout, cyclelayout, togglebar\n  \
                       标签: view, tag, toggleview, toggletag, loopview\n  \
                       显示器: focusmon, tagmon\n  \
@@ -682,22 +682,37 @@ impl JwmManager {
             ));
         }
         log_line(&format!("启动JWM: {}", self.jwm_binary.display()));
+        let child = self.launch_command().spawn()?;
+        let pid = child.id() as i32;
+        self.jwm_pid = Some(pid);
+        self.jwm_child = Some(child);
+        log_line(&format!("JWM已启动，PID: {}", pid));
+        Ok(())
+    }
+
+    /// The command that launches the managed JWM.
+    ///
+    /// It carries this daemon's PID in `DAEMON_PID_ENV`. On a normal exit JWM
+    /// runs `jwm-tool quit` only when that marker names its direct parent, so
+    /// the daemon's own child still shuts the daemon down synchronously while
+    /// a nested or test JWM that merely inherits the runtime directory (and
+    /// therefore finds this daemon's control pipe) can never quit it.
+    fn launch_command(&self) -> Command {
         let mut command = Command::new(&self.jwm_binary);
         if let Some(backend) = self.backend.as_ref() {
             if !backend.trim().is_empty() {
                 command.env("JWM_BACKEND", backend);
             }
         }
-        let child = command
+        command
+            .env(
+                jwm::application::DAEMON_PID_ENV,
+                std::process::id().to_string(),
+            )
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()?;
-        let pid = child.id() as i32;
-        self.jwm_pid = Some(pid);
-        self.jwm_child = Some(child);
-        log_line(&format!("JWM已启动，PID: {}", pid));
-        Ok(())
+            .stderr(Stdio::null());
+        command
     }
 
     /// Wait for the managed process to exit within `timeout`.
@@ -1439,15 +1454,32 @@ fn install_jwm(jwm_dir: &str) -> io::Result<()> {
 
 // --- Debug ---
 
-/// Run `ps aux | grep <pattern>` and print matching lines.
-fn ps_grep(pattern: &str) {
+/// `grep` argv for the `debug` report's JWM process check.
+///
+/// `ps_grep` spawns grep without a shell, so the flag and the pattern must be
+/// separate argv elements with no shell quoting: a single `-E "jwm[^_]"`
+/// element makes grep reject it as an option cluster and print its usage
+/// instead of any process line. `$` is an alternative to `[^_]` because
+/// `ps aux` ends a bare `jwm` command line right after the name, and the
+/// `[^_]` class alone needs one more character there.
+const DEBUG_JWM_PROCESS_GREP_ARGS: &[&str] = &["-E", "jwm([^_]|$)"];
+
+/// Build the `grep` command `ps_grep` runs; each element of `args` is passed
+/// to grep as exactly one argv element.
+fn grep_command(args: &[&str]) -> Command {
+    let mut grep = Command::new("grep");
+    grep.args(args);
+    grep
+}
+
+/// Run `ps aux | grep <args...>` and print matching lines.
+fn ps_grep(args: &[&str]) {
     let _ = Command::new("ps")
         .arg("aux")
         .stdout(Stdio::piped())
         .spawn()
         .and_then(|mut ps| {
-            let mut grep = Command::new("grep")
-                .arg(pattern)
+            let mut grep = grep_command(args)
                 .stdin(ps.stdout.take().expect("ps stdout"))
                 .stdout(Stdio::inherit())
                 .spawn()?;
@@ -1480,7 +1512,7 @@ fn debug_info() {
     println!();
 
     println!("1. 检查守护进程:");
-    ps_grep("jwm-tool");
+    ps_grep(&["jwm-tool"]);
 
     println!("\n2. 检查PID文件:");
     if let Ok(pid) = fs::read_to_string(pidfile_path()) {
@@ -1512,7 +1544,7 @@ fn debug_info() {
     }
 
     println!("\n4. 检查JWM进程:");
-    ps_grep("-E \"jwm[^_]\"");
+    ps_grep(DEBUG_JWM_PROCESS_GREP_ARGS);
 
     println!("\n5. 检查日志:");
     let lf = log_file();
@@ -1532,7 +1564,7 @@ fn debug_info() {
 
     println!("\n6. X11信息:");
     println!("DISPLAY: {}", env::var("DISPLAY").unwrap_or_default());
-    ps_grep(" X");
+    ps_grep(&[" X"]);
 }
 
 // --- Wayland competitiveness audit ---
@@ -2864,18 +2896,19 @@ fn run_ipc_msg(name: &str, args_str: &str, subscribe: Option<&str>, raw: bool) -
 #[allow(clippy::items_after_test_module)]
 mod tests {
     use super::{
-        Cli, Commands, InstallPlanEntry, IpcLineReader, MAX_IPC_FRAME_BYTES, SmokeTarget,
-        WaylandStatusCompleteness, WaylandStatusCoverage, acquire_daemon_lock_at,
-        acquire_response_lock, aggregated_wayland_status_data, append_log_with_rotation,
-        capabilities_output_lines, daemon_command_response, ensure_ipc_response_succeeded,
-        health_output_lines, ipc_request, jwm_install_plan, legacy_daemon_metadata_matches,
-        mkfifo_safe, parse_boot_id, parse_daemon_pidfile, parse_legacy_daemon_pidfile,
-        parse_linux_proc_stat_identity, parse_msg_args, parse_subscription_topics,
-        parse_v1_daemon_pidfile, process_identity, process_identity_matches, response_data,
-        response_flock_path, response_lock_path, rotated_log_path,
-        should_attempt_wayland_status_fallback, smoke_artifacts_json, smoke_ci_profile_json,
-        smoke_manual_kms_checklist_json, smoke_target_json, split_path_list, successful_query_data,
-        validate_daemon_response, validate_ipc_response, write_fifo_nonblock,
+        Cli, Commands, DEBUG_JWM_PROCESS_GREP_ARGS, InstallPlanEntry, IpcLineReader, JwmManager,
+        MAX_IPC_FRAME_BYTES, SmokeTarget, WaylandStatusCompleteness, WaylandStatusCoverage,
+        acquire_daemon_lock_at, acquire_response_lock, aggregated_wayland_status_data,
+        append_log_with_rotation, capabilities_output_lines, daemon_command_response,
+        ensure_ipc_response_succeeded, grep_command, health_output_lines, ipc_request,
+        jwm_install_plan, legacy_daemon_metadata_matches, mkfifo_safe, parse_boot_id,
+        parse_daemon_pidfile, parse_legacy_daemon_pidfile, parse_linux_proc_stat_identity,
+        parse_msg_args, parse_subscription_topics, parse_v1_daemon_pidfile, process_identity,
+        process_identity_matches, response_data, response_flock_path, response_lock_path,
+        rotated_log_path, should_attempt_wayland_status_fallback, smoke_artifacts_json,
+        smoke_ci_profile_json, smoke_manual_kms_checklist_json, smoke_target_json, split_path_list,
+        successful_query_data, validate_daemon_response, validate_ipc_response,
+        write_fifo_nonblock,
     };
     use clap::Parser;
     use std::collections::HashSet;
@@ -3607,6 +3640,108 @@ mod tests {
             .read_line_until(Instant::now() + Duration::from_secs(1))
             .unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::UnexpectedEof);
+    }
+
+    /// JWM asks its daemon to quit on a normal exit only when
+    /// `DAEMON_PID_ENV` names its direct parent. Without the marker on the
+    /// launch command a daemon-managed session would never send that quit.
+    #[test]
+    fn the_managed_jwm_is_told_which_daemon_launched_it() {
+        use std::ffi::OsStr;
+
+        let manager = JwmManager::new(PathBuf::from("/nonexistent/jwm"), Some("xcb".into()));
+        let command = manager.launch_command();
+        assert_eq!(command.get_program(), OsStr::new("/nonexistent/jwm"));
+        let daemon_pid = std::process::id().to_string();
+        let envs: Vec<_> = command.get_envs().collect();
+        assert!(
+            envs.contains(&(
+                OsStr::new(jwm::application::DAEMON_PID_ENV),
+                Some(OsStr::new(&daemon_pid))
+            )),
+            "launch environment {envs:?} lacks the daemon marker"
+        );
+        assert!(
+            envs.contains(&(OsStr::new("JWM_BACKEND"), Some(OsStr::new("xcb")))),
+            "the backend choice still reaches the child: {envs:?}"
+        );
+
+        // A blank backend is still not forwarded, and the marker is.
+        let command =
+            JwmManager::new(PathBuf::from("/nonexistent/jwm"), Some("  ".into())).launch_command();
+        let names: Vec<_> = command.get_envs().map(|(name, _)| name).collect();
+        assert_eq!(names, [OsStr::new(jwm::application::DAEMON_PID_ENV)]);
+    }
+
+    #[test]
+    fn debug_jwm_process_grep_argv_keeps_flag_and_pattern_separate() {
+        // `ps_grep` runs grep without a shell: shell quoting would reach grep
+        // verbatim and a flag glued to its pattern becomes an option cluster.
+        let command = grep_command(DEBUG_JWM_PROCESS_GREP_ARGS);
+        let args: Vec<_> = command.get_args().collect();
+        assert_eq!(args, ["-E", "jwm([^_]|$)"]);
+        for arg in DEBUG_JWM_PROCESS_GREP_ARGS {
+            assert!(!arg.contains(['"', '\'']), "shell quoting in {arg:?}");
+            if arg.starts_with('-') {
+                assert!(
+                    !arg.contains(char::is_whitespace),
+                    "flag {arg:?} carries a second word"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn debug_jwm_process_check_lists_jwm_lines_through_real_grep() {
+        use std::io::Write;
+        use std::process::Stdio;
+
+        const PS_AUX: &str = "\
+USER PID %CPU %MEM VSZ RSS TTY STAT START TIME COMMAND
+yj 1201 0.5 1.0 123456 7890 ? Ssl 10:00 0:05 /usr/local/bin/jwm
+yj 1202 0.1 0.2 23456 1890 ? Sl 10:00 0:01 jwm --backend udev
+yj 1203 0.0 0.1 12345 990 ? S 10:00 0:00 /usr/bin/xbar
+yj 1204 0.0 0.0 5432 700 pts/0 S+ 10:01 0:00 tail -f /run/user/1000/jwm_daemon.log
+";
+        let mut child = match grep_command(DEBUG_JWM_PROCESS_GREP_ARGS)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+        {
+            Ok(child) => child,
+            // Degrade honestly on a host without grep; the argv shape is still
+            // pinned by the pure test above.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                eprintln!("skipping: grep is not installed: {error}");
+                return;
+            }
+            Err(error) => panic!("spawn grep: {error}"),
+        };
+        // Dropping the handle at the end of the statement closes grep's stdin.
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(PS_AUX.as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+
+        assert!(
+            output.status.success(),
+            "grep rejected the debug argv: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        // A bare `jwm` ends the line, so it only matches through `$`; the
+        // `jwm_daemon.log` tail stays out through `[^_]`.
+        assert_eq!(
+            stdout.lines().collect::<Vec<_>>(),
+            [
+                "yj 1201 0.5 1.0 123456 7890 ? Ssl 10:00 0:05 /usr/local/bin/jwm",
+                "yj 1202 0.1 0.2 23456 1890 ? Sl 10:00 0:01 jwm --backend udev",
+            ]
+        );
     }
 }
 

@@ -158,9 +158,22 @@ fn read_number(dir: &Path, name: &str) -> Option<u64> {
 }
 
 /// Read one `/sys/class/power_supply/*` directory as a battery.
+///
+/// Only the machine's own battery counts. A wireless mouse, keyboard or
+/// gamepad (hid-input, hidpp, hid-playstation, ...) registers as type
+/// `Battery` too, but with `scope` = `Device`, and hid-input reports it as
+/// discharging; taking it for the system battery would show a desktop as
+/// "on battery" and raise a critical "Battery low" alert when the mouse runs
+/// down. ACPI `BAT*` entries usually have no `scope` file at all, so an
+/// absent (or `System`/`Unknown`) scope still counts.
 #[must_use]
 pub fn read_battery_in(dir: &Path) -> Option<BatteryState> {
     if read_field(dir, "type").as_deref() != Some("Battery") {
+        return None;
+    }
+    // Same rule as the backend's power-saving battery probe
+    // (`backend::power_supply`): only an explicit `Device` scope excludes.
+    if read_field(dir, "scope").is_some_and(|scope| scope.eq_ignore_ascii_case("Device")) {
         return None;
     }
     let percent = u8::try_from(read_number(dir, "capacity")?).ok()?;
@@ -365,6 +378,15 @@ pub fn profiles() -> Option<(Vec<String>, String)> {
 
 /// Switch profiles. Returns false when the tool refused, so the caller can
 /// leave the row showing what is really in effect.
+///
+/// Blocking: on a power-profiles-daemon host this runs `powerprofilesctl`,
+/// a Python D-Bus client that takes hundreds of milliseconds to start and
+/// up to the helper timeout when the daemon is wedged — the same reason
+/// `get_power_status` serves the control-center worker's read instead of
+/// calling [`profiles`]. A caller on the event thread would stall every frame
+/// for that long, so the only caller is the controls worker
+/// (`ControlRequest::PowerProfileSet`), which runs the set and its verifying
+/// re-read for both the Hub row and IPC `set_power_profile`.
 #[must_use]
 pub fn set_profile(name: &str) -> bool {
     let Some(name) = profile_name(name) else {
@@ -749,6 +771,46 @@ mod tests {
         assert_eq!(state.time_remaining_mins, Some(120));
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn peripheral_batteries_are_not_the_system_battery() {
+        let root = std::env::temp_dir().join(format!(
+            "jwm-power-scope-{}-{:016x}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let write_battery = |name: &str, scope: Option<&str>| {
+            let dir = root.join(name);
+            std::fs::create_dir_all(&dir).expect("temp dir");
+            std::fs::write(dir.join("type"), "Battery\n").expect("write type");
+            std::fs::write(dir.join("capacity"), "5\n").expect("write capacity");
+            std::fs::write(dir.join("status"), "Discharging\n").expect("write status");
+            if let Some(scope) = scope {
+                std::fs::write(dir.join("scope"), format!("{scope}\n")).expect("write scope");
+            }
+            dir
+        };
+
+        // A Logitech mouse on a desktop: type Battery, scope Device.
+        let mouse = write_battery("hidpp_battery_0", Some("Device"));
+        assert!(
+            read_battery_in(&mouse).is_none(),
+            "a mouse battery must not raise the system low-battery alert"
+        );
+        // The laptop battery: no scope file, or an explicit System scope.
+        let acpi = write_battery("BAT0", None);
+        assert_eq!(read_battery_in(&acpi).map(|state| state.percent), Some(5));
+        let system = write_battery("BAT1", Some("System"));
+        assert_eq!(read_battery_in(&system).map(|state| state.percent), Some(5));
+        let unknown = write_battery("BAT2", Some("Unknown"));
+        assert!(read_battery_in(&unknown).is_some());
+        // The scope is matched without regard to case, like the backend's
+        // probe does.
+        let headset = write_battery("hid-headset-battery", Some("device"));
+        assert!(read_battery_in(&headset).is_none());
+
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]

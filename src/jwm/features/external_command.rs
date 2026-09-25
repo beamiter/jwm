@@ -48,6 +48,32 @@ pub(crate) fn daemon_launcher_output_with_limits(
     )
 }
 
+/// Run a synchronous helper that reads caller-provided stdin, under the same
+/// deadline, output bound and descendant cleanup as [`output_with_limits`].
+///
+/// The stdin is the caller's to prepare — a pipe whose write end is already
+/// closed, typically, so a helper that reads more than it was given sees end
+/// of file instead of waiting out the deadline. Unlike the selection-owner
+/// runner below, nothing the helper forks outlives it.
+pub(crate) fn output_with_input_and_limits(
+    cmd: &str,
+    args: &[&str],
+    stdin: Stdio,
+    timeout: Duration,
+    output_limit: usize,
+) -> io::Result<Output> {
+    let mut command = Command::new(cmd);
+    command.args(args);
+    command_output_bounded_with_policy(
+        &mut command,
+        stdin,
+        true,
+        timeout,
+        output_limit,
+        SuccessfulDescendants::Terminate,
+    )
+}
+
 /// Run a selection-owner launcher that consumes caller-provided stdin.
 ///
 /// `wl-copy` forks after reading the payload and its successful descendant is
@@ -78,13 +104,17 @@ pub(crate) fn status_with_timeout(
     args: &[&str],
     timeout: Duration,
 ) -> io::Result<ExitStatus> {
-    let mut child = Command::new(cmd)
+    let mut command = Command::new(cmd);
+    command
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .process_group(0)
-        .spawn()?;
+        // No SIGCHLD hook: a pre_exec closure would take std off posix_spawn
+        // (see `unblock_sigchld_in_child`), and a helper that is waited for
+        // and whose group is killed afterwards leaves nobody who needs it.
+        .process_group(0);
+    let mut child = command.spawn()?;
     let started = Instant::now();
     loop {
         match child.try_wait() {
@@ -132,7 +162,40 @@ pub(crate) fn spawn_detached(
     for (key, value) in env {
         command.env(key, value);
     }
+    unblock_sigchld_in_child(&mut command);
     command.spawn()
+}
+
+/// Unblock `SIGCHLD` in `command`'s child and change nothing else — no
+/// `setsid`, no disposition reset, no process group — for a child that
+/// outlives the call that started it.
+///
+/// The child inherits the spawning thread's signal mask (std does not reset
+/// it), and JWM keeps SIGCHLD blocked on its event thread and on the worker
+/// threads it starts, so the event loop's signalfd is the only taker. A
+/// child that relies on a SIGCHLD handler without resetting its own mask —
+/// the daemon a launcher leaves behind, the Bluetooth pairing agent — would
+/// never receive the signal. The module sits at the crate root, so the
+/// policy layer's spawn points and the backends can share this one hook.
+///
+/// Only long-lived children get it: std spawns through `posix_spawn` (a
+/// vfork-style clone that copies nothing) only while a command has no
+/// `pre_exec` closure, and with one it forks the whole compositor, page
+/// tables included. The synchronous helpers here are waited for and their
+/// process group is killed once they finish, so no descendant of theirs is
+/// left to need the signal, and they keep the cheap spawn.
+pub(crate) fn unblock_sigchld_in_child(command: &mut Command) {
+    // SAFETY: the hook only calls sigemptyset/sigaddset/sigprocmask, which
+    // are async-signal-safe, and the forked child has one thread.
+    unsafe {
+        command.pre_exec(|| {
+            let mut unblock: libc::sigset_t = std::mem::zeroed();
+            libc::sigemptyset(&mut unblock);
+            libc::sigaddset(&mut unblock, libc::SIGCHLD);
+            libc::sigprocmask(libc::SIG_UNBLOCK, &unblock, std::ptr::null_mut());
+            Ok(())
+        });
+    }
 }
 
 fn command_output_bounded(
@@ -186,6 +249,12 @@ fn command_output_bounded_with_policy(
         // whole launch tree. The synchronous policy also cleans it after a
         // successful direct-child exit; daemon launchers deliberately do not.
         .process_group(0);
+    if successful_descendants == SuccessfulDescendants::Preserve {
+        // A preserved descendant (the daemon a launcher leaves, wl-copy's
+        // selection owner) outlives this call. Terminated trees do not, and
+        // stay on posix_spawn; see `unblock_sigchld_in_child`.
+        unblock_sigchld_in_child(command);
+    }
     let mut child = command.spawn()?;
     let child_id = child.id();
     let mut stdout = if capture_stdout {
@@ -382,6 +451,125 @@ fn terminate_child_group(child: &mut std::process::Child) {
     let _ = child.wait();
 }
 
+/// Shared by the spawn-site tests here, in the policy modules that start
+/// processes (launched apps, status bar, session, idle and recorder
+/// commands) and in the backends' encoder spawn: a thread that blocks
+/// SIGCHLD the way JWM's threads do, and a probe that records the signal
+/// mask a child ran with.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::path::PathBuf;
+
+    /// Blocks SIGCHLD on the calling thread, as JWM's event loop and worker
+    /// threads do, and restores the previous mask on drop so a failed
+    /// assertion cannot leave a test thread with it blocked.
+    pub(crate) struct SigchldBlockedOnThisThread(libc::sigset_t);
+
+    impl SigchldBlockedOnThisThread {
+        pub(crate) fn new() -> Self {
+            // SAFETY: plain signal-set manipulation on this thread's mask.
+            unsafe {
+                let mut block: libc::sigset_t = std::mem::zeroed();
+                libc::sigemptyset(&mut block);
+                libc::sigaddset(&mut block, libc::SIGCHLD);
+                let mut previous: libc::sigset_t = std::mem::zeroed();
+                assert_eq!(
+                    libc::pthread_sigmask(libc::SIG_BLOCK, &block, &mut previous),
+                    0
+                );
+                Self(previous)
+            }
+        }
+    }
+
+    impl Drop for SigchldBlockedOnThisThread {
+        fn drop(&mut self) {
+            // SAFETY: restores the mask saved by `new` on the same thread.
+            unsafe {
+                libc::pthread_sigmask(libc::SIG_SETMASK, &self.0, std::ptr::null_mut());
+            }
+        }
+    }
+
+    /// Whether SIGCHLD is in the `SigBlk` mask of a `/proc/<pid>/status`
+    /// dump.
+    pub(crate) fn status_blocks_sigchld(status: &str) -> bool {
+        let mask = status
+            .lines()
+            .find_map(|line| line.strip_prefix("SigBlk:"))
+            .map(str::trim)
+            .and_then(|hex| u64::from_str_radix(hex, 16).ok())
+            .expect("a SigBlk line");
+        mask & (1 << (libc::SIGCHLD - 1)) != 0
+    }
+
+    /// A private directory for one child's `/proc/self/status`, for spawn
+    /// paths whose stdout the test cannot capture. Removed on drop.
+    pub(crate) struct SigchldProbe(PathBuf);
+
+    impl SigchldProbe {
+        pub(crate) fn new(label: &str) -> Self {
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let sequence = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "jwm-sigchld-probe-{label}-{}-{sequence}",
+                std::process::id()
+            ));
+            // `create_dir`, not `create_dir_all`: a leftover of the same name
+            // fails the test instead of being written through.
+            std::fs::create_dir(&path).expect("create the probe directory");
+            Self(path)
+        }
+
+        /// A `sh -c` script that dumps the shell's own status into the
+        /// probe. `exec` matters: dash resets the mask of the commands it
+        /// forks, so only a command it execs in place reports the mask the
+        /// shell itself was started with.
+        pub(crate) fn script(&self) -> String {
+            format!(
+                "exec cat /proc/self/status > '{}'",
+                self.0.join("status").display()
+            )
+        }
+
+        /// [`Self::script`] as a file, for a command whose one argument is
+        /// the script `sh` runs.
+        pub(crate) fn script_file(&self) -> PathBuf {
+            let path = self.0.join("probe.sh");
+            std::fs::write(&path, self.script()).expect("write the probe script");
+            path
+        }
+
+        fn status(&self) -> String {
+            std::fs::read_to_string(self.0.join("status"))
+                .expect("the probed child wrote its status")
+        }
+
+        /// Whether the child that ran [`Self::script`] had SIGCHLD blocked.
+        pub(crate) fn child_blocked_sigchld(&self) -> bool {
+            status_blocks_sigchld(&self.status())
+        }
+
+        /// The session the child that ran [`Self::script`] belonged to, as
+        /// seen from its own (and this test's) PID namespace — the last
+        /// `NSsid` entry.
+        pub(crate) fn child_session(&self) -> i32 {
+            self.status()
+                .lines()
+                .find_map(|line| line.strip_prefix("NSsid:"))
+                .and_then(|ids| ids.split_whitespace().last())
+                .and_then(|id| id.parse().ok())
+                .expect("an NSsid line")
+        }
+    }
+
+    impl Drop for SigchldProbe {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -521,6 +709,47 @@ mod tests {
     }
 
     #[test]
+    fn a_helper_reads_the_callers_stdin_and_leaves_no_descendants() {
+        use std::io::Write as _;
+
+        let (reader, mut writer) = std::io::pipe().unwrap();
+        writer.write_all(b"hunter22\n").unwrap();
+        drop(writer);
+        let output = output_with_input_and_limits(
+            "sh",
+            &[
+                "-c",
+                // Echo the first line back, then try to leave a background
+                // process behind; a second read sees end of file at once.
+                "IFS= read -r line; printf '%s:' \"$line\"; \
+                 if IFS= read -r extra; then exit 9; fi; \
+                 sleep 10 & printf %s \"$!\"",
+            ],
+            Stdio::from(reader),
+            Duration::from_secs(2),
+            64,
+        )
+        .expect("the helper completed");
+
+        assert!(output.status.success(), "{output:?}");
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let (line, descendant) = stdout.split_once(':').expect("line and pid");
+        assert_eq!(line, "hunter22");
+        let descendant = descendant.parse::<u32>().unwrap();
+        // The runner returned only after the descendant's end of the stdout
+        // pipe closed, so it is already exiting; spin (never sleep) past the
+        // few instructions between closing its files and becoming a zombie.
+        for _ in 0..1_000_000 {
+            if !process_can_run(descendant) {
+                return;
+            }
+            thread::yield_now();
+        }
+        let _ = unsafe { libc::kill(descendant as i32, libc::SIGKILL) };
+        panic!("helper descendant {descendant} outlived a stdin-fed helper");
+    }
+
+    #[test]
     fn status_helper_preserves_exit_status_and_enforces_timeout() {
         let status = status_with_timeout("sh", &["-c", "exit 7"], Duration::from_secs(1)).unwrap();
         assert_eq!(status.code(), Some(7));
@@ -542,6 +771,100 @@ mod tests {
         .expect("detached spawn");
         let status = child.wait().expect("reap the child we spawned");
         assert!(status.success(), "extra env did not reach the child");
+    }
+
+    /// Regression: helpers start from threads that keep SIGCHLD blocked for
+    /// the event loop's signalfd, and std hands that mask to the child, so
+    /// the pairing agent and every daemon a launcher left behind ran with
+    /// SIGCHLD blocked. Every spawn point whose child outlives the call
+    /// unblocks it.
+    #[test]
+    fn helpers_start_with_sigchld_unblocked() {
+        use test_support::{SigchldBlockedOnThisThread, SigchldProbe, status_blocks_sigchld};
+
+        let _blocked = SigchldBlockedOnThisThread::new();
+        let status_of = |output: Output| {
+            assert!(output.status.success(), "{output:?}");
+            String::from_utf8(output.stdout).expect("a UTF-8 status")
+        };
+
+        // Control: a plain spawn from this thread inherits the blocked mask,
+        // so the assertions below are measuring the hook.
+        let plain = Command::new("cat")
+            .arg("/proc/self/status")
+            .output()
+            .expect("run cat");
+        assert!(status_blocks_sigchld(&status_of(plain)));
+
+        let launcher = daemon_launcher_output_with_limits(
+            "cat",
+            &["/proc/self/status"],
+            Duration::from_secs(5),
+            64 * 1024,
+        )
+        .expect("daemon launcher");
+        assert!(!status_blocks_sigchld(&status_of(launcher)));
+
+        let probe = SigchldProbe::new("selection-owner");
+        let owner = selection_owner_output_with_input(
+            "sh",
+            &["-c", &probe.script()],
+            Stdio::null(),
+            Duration::from_secs(5),
+            64 * 1024,
+        )
+        .expect("selection owner");
+        assert!(owner.status.success(), "{owner:?}");
+        assert!(!probe.child_blocked_sigchld());
+
+        let probe = SigchldProbe::new("detached");
+        let mut child =
+            spawn_detached("sh", &["-c", &probe.script()], &[]).expect("detached spawn");
+        assert!(child.wait().expect("reap the child we spawned").success());
+        assert!(!probe.child_blocked_sigchld());
+    }
+
+    /// Regression: the SIGCHLD hook is a `pre_exec` closure, and std forks
+    /// the whole compositor instead of using `posix_spawn` for any command
+    /// that carries one. Every periodic poll (wpctl, nmcli, brightnessctl)
+    /// went through a full fork once the hook was added to the one-shot
+    /// runners. Those helpers are waited for and their group is killed
+    /// afterwards, so they carry no hook and keep the mask they inherited —
+    /// the observable sign that nothing pushed them off the cheap spawn.
+    #[test]
+    fn one_shot_helpers_carry_no_sigchld_hook() {
+        use test_support::{SigchldBlockedOnThisThread, SigchldProbe, status_blocks_sigchld};
+
+        let _blocked = SigchldBlockedOnThisThread::new();
+        let status_of = |output: Output| {
+            assert!(output.status.success(), "{output:?}");
+            String::from_utf8(output.stdout).expect("a UTF-8 status")
+        };
+
+        let bounded = output_with_limits(
+            "cat",
+            &["/proc/self/status"],
+            Duration::from_secs(5),
+            64 * 1024,
+        )
+        .expect("bounded helper");
+        assert!(status_blocks_sigchld(&status_of(bounded)));
+
+        let fed = output_with_input_and_limits(
+            "cat",
+            &["/proc/self/status"],
+            Stdio::null(),
+            Duration::from_secs(5),
+            64 * 1024,
+        )
+        .expect("stdin-fed helper");
+        assert!(status_blocks_sigchld(&status_of(fed)));
+
+        let probe = SigchldProbe::new("status");
+        let status = status_with_timeout("sh", &["-c", &probe.script()], Duration::from_secs(5))
+            .expect("status helper");
+        assert!(status.success());
+        assert!(probe.child_blocked_sigchld());
     }
 
     fn process_can_run(pid: u32) -> bool {

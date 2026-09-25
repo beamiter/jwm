@@ -53,9 +53,8 @@ Run on `wayland-udev` unless a row says otherwise. Mark Pass / Fail / Skip.
 On each machine that will be cited in release notes:
 
 ```bash
-jwm-tool perf record --output perf/baselines/<label>.json
-jwm-tool perf compare --baseline perf/baselines/<label>.json \
-  --candidate <second-recording>.json
+jwm-tool perf record --out perf/baselines/<label>.json
+jwm-tool perf compare perf/baselines/<label>.json <second-recording>.json
 ```
 
 Skips must carry reasons. A release that cites performance claims without a

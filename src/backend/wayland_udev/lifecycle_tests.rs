@@ -1,12 +1,15 @@
 use super::{JwmClientState, JwmWaylandState};
-use crate::backend::api::{BackendEvent, Geometry, NetWmAction, NetWmState, WindowType};
+use crate::backend::api::{
+    BackendEvent, Geometry, MaximizeAxes, NetWmAction, NetWmState, WindowType,
+};
 use crate::backend::common_define::WindowId;
 use smithay::reexports::calloop::{EventLoop, channel};
+use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
 use smithay::reexports::wayland_server::Display;
 use smithay::reexports::x11rb::connection::Connection;
 use smithay::reexports::x11rb::protocol::xproto::{
-    Atom, AtomEnum, ClientMessageData, ClientMessageEvent, ConnectionExt, CreateWindowAux,
-    EventMask, WindowClass,
+    Atom, AtomEnum, ClientMessageData, ClientMessageEvent, ConfigureWindowAux, ConnectionExt,
+    CreateWindowAux, EventMask, WindowClass,
 };
 use smithay::reexports::x11rb::rust_connection::RustConnection;
 use smithay::wayland::xdg_activation::{
@@ -156,6 +159,212 @@ fn discover_globals(peer: &mut UnixStream) -> Vec<(u32, String, u32)> {
         offset += size;
     }
     globals
+}
+
+/// Wire events up to and including `wl_callback.done` of `callback_id`, as
+/// (sender, opcode, payload). The caller has already sent
+/// `wl_display.sync(callback_id)`, dispatched it and flushed the clients, so
+/// the marker is on the socket and a read never waits on the server.
+fn read_frames_until_callback(peer: &mut UnixStream, callback_id: u32) -> Vec<(u32, u16, Vec<u8>)> {
+    peer.set_read_timeout(Some(std::time::Duration::from_secs(2)))
+        .expect("set wire read timeout");
+    let mut bytes = Vec::new();
+    let mut frames = Vec::new();
+    let mut offset = 0;
+    loop {
+        let mut chunk = [0u8; 8192];
+        let read = peer.read(&mut chunk).expect("read Wayland events");
+        assert!(read > 0, "Wayland server closed before the sync callback");
+        bytes.extend_from_slice(&chunk[..read]);
+
+        while bytes.len().saturating_sub(offset) >= 8 {
+            let sender = read_u32(&bytes, offset);
+            let header = read_u32(&bytes, offset + 4);
+            let size = (header >> 16) as usize;
+            let opcode = header as u16;
+            assert!(size >= 8, "malformed Wayland event header");
+            if bytes.len() - offset < size {
+                break;
+            }
+            frames.push((sender, opcode, bytes[offset + 8..offset + size].to_vec()));
+            offset += size;
+            if sender == callback_id && opcode == 0 {
+                return frames;
+            }
+        }
+    }
+}
+
+/// Decoded `xdg_toplevel.configure` events (opcode 0) sent to `toplevel_id`:
+/// width, height and the states array.
+fn toplevel_configures(
+    frames: &[(u32, u16, Vec<u8>)],
+    toplevel_id: u32,
+) -> Vec<(i32, i32, Vec<u32>)> {
+    frames
+        .iter()
+        .filter(|(sender, opcode, _)| *sender == toplevel_id && *opcode == 0)
+        .map(|(_, _, payload)| {
+            let width = read_u32(payload, 0) as i32;
+            let height = read_u32(payload, 4) as i32;
+            let states_len = read_u32(payload, 8) as usize;
+            let states = payload[12..12 + states_len]
+                .chunks_exact(4)
+                .map(|state| u32::from_ne_bytes(state.try_into().expect("wire state u32")))
+                .collect();
+            (width, height, states)
+        })
+        .collect()
+}
+
+/// `xdg_toplevel.state.maximized` on the wire.
+const XDG_STATE_MAXIMIZED: u32 = 1;
+/// Object id the xdg wire fixture gives its `xdg_toplevel`.
+const WIRE_TOPLEVEL: u32 = 8;
+
+/// A raw Wayland client with one xdg_toplevel (object 8) that has not yet
+/// received its initial configure. Fields drop in the order the inline
+/// fixture of `xdg_toplevel_wire_requests_reach_shared_window_policy` drops
+/// its locals: the client first, the event loop last.
+struct XdgWireFixture {
+    peer: UnixStream,
+    state: JwmWaylandState,
+    pending_events: Arc<Mutex<VecDeque<BackendEvent>>>,
+    display: Display<JwmWaylandState>,
+    // Keeps the per-toplevel initial-configure timer armed but never
+    // dispatched, so no fallback configure lands in a count.
+    _event_loop: EventLoop<'static, JwmWaylandState>,
+    window: WindowId,
+    next_callback: u32,
+}
+
+impl XdgWireFixture {
+    fn new(seat_name: &str) -> Self {
+        let event_loop: EventLoop<'static, JwmWaylandState> =
+            EventLoop::try_new().expect("create test event loop");
+        let mut display = Display::<JwmWaylandState>::new().expect("create test display");
+        let mut display_handle = display.handle();
+        let pending_events = Arc::new(Mutex::new(VecDeque::new()));
+        let (flush_tx, _flush_rx) = channel::channel();
+        let (mut state, socket_name) = JwmWaylandState::init(
+            &display_handle,
+            event_loop.handle(),
+            pending_events.clone(),
+            flush_tx,
+            Arc::new(AtomicBool::new(false)),
+            seat_name.to_owned(),
+            false,
+            false,
+        )
+        .expect("initialize wire-test Wayland state");
+        assert!(socket_name.is_none());
+
+        let (server, mut peer) = UnixStream::pair().expect("create Wayland socket pair");
+        display_handle
+            .insert_client(server, Arc::new(JwmClientState::default()))
+            .expect("insert raw Wayland client");
+
+        // wl_display.get_registry(new_id=2), then sync(new_id=3) as the
+        // discovery end marker.
+        let mut discovery = wire_message(1, 1, &wire_u32(2));
+        discovery.extend_from_slice(&wire_message(1, 0, &wire_u32(3)));
+        peer.write_all(&discovery).expect("send registry request");
+        display
+            .dispatch_clients(&mut state)
+            .expect("dispatch registry request");
+        display.flush_clients().expect("flush registry events");
+        let globals = discover_globals(&mut peer);
+        let global = |wanted: &str| {
+            globals
+                .iter()
+                .find_map(|(name, interface, version)| {
+                    (interface == wanted).then_some((*name, *version))
+                })
+                .unwrap_or_else(|| panic!("{wanted} global"))
+        };
+        let (compositor_name, compositor_version) = global("wl_compositor");
+        let (xdg_name, xdg_version) = global("xdg_wm_base");
+
+        let mut requests = wire_bind(
+            compositor_name,
+            4,
+            "wl_compositor",
+            compositor_version.min(6),
+        );
+        requests.extend_from_slice(&wire_bind(xdg_name, 5, "xdg_wm_base", xdg_version.min(6)));
+        // wl_compositor.create_surface(6)
+        requests.extend_from_slice(&wire_message(4, 0, &wire_u32(6)));
+        // xdg_wm_base.get_xdg_surface(new_id=7, wl_surface=6)
+        let mut get_xdg_surface = Vec::new();
+        get_xdg_surface.extend_from_slice(&wire_u32(7));
+        get_xdg_surface.extend_from_slice(&wire_u32(6));
+        requests.extend_from_slice(&wire_message(5, 2, &get_xdg_surface));
+        // xdg_surface.get_toplevel(new_id=8)
+        requests.extend_from_slice(&wire_message(7, 1, &wire_u32(WIRE_TOPLEVEL)));
+        peer.write_all(&requests)
+            .expect("send xdg toplevel requests");
+        display
+            .dispatch_clients(&mut state)
+            .expect("dispatch xdg toplevel requests");
+
+        let window = pending_events
+            .lock()
+            .expect("pending event lock")
+            .drain(..)
+            .find_map(|event| match event {
+                BackendEvent::WindowCreated(window) => Some(window),
+                _ => None,
+            })
+            .expect("xdg_toplevel creation reaches the backend");
+
+        Self {
+            peer,
+            state,
+            pending_events,
+            display,
+            _event_loop: event_loop,
+            window,
+            next_callback: 9,
+        }
+    }
+
+    /// Send raw xdg_toplevel requests and dispatch them.
+    fn send_toplevel_requests(&mut self, opcodes: &[u16]) {
+        let mut requests = Vec::new();
+        for opcode in opcodes {
+            requests.extend_from_slice(&wire_message(WIRE_TOPLEVEL, *opcode, &[]));
+        }
+        self.peer
+            .write_all(&requests)
+            .expect("send xdg toplevel requests");
+        self.display
+            .dispatch_clients(&mut self.state)
+            .expect("dispatch xdg toplevel requests");
+    }
+
+    /// Every `xdg_toplevel.configure` the client received since the last
+    /// call, delimited by a fresh `wl_display.sync` round trip.
+    fn configures_since_last_sync(&mut self) -> Vec<(i32, i32, Vec<u32>)> {
+        let callback = self.next_callback;
+        self.next_callback += 1;
+        self.peer
+            .write_all(&wire_message(1, 0, &wire_u32(callback)))
+            .expect("send wl_display.sync");
+        self.display
+            .dispatch_clients(&mut self.state)
+            .expect("dispatch wl_display.sync");
+        self.display.flush_clients().expect("flush Wayland events");
+        let frames = read_frames_until_callback(&mut self.peer, callback);
+        toplevel_configures(&frames, WIRE_TOPLEVEL)
+    }
+
+    fn stage_size(&self, width: i32, height: i32) {
+        self.state
+            .toplevels
+            .get(&self.window)
+            .expect("wire toplevel stays live")
+            .with_pending_state(|pending| pending.size = Some((width, height).into()));
+    }
 }
 
 #[test]
@@ -328,6 +537,147 @@ fn xdg_toplevel_wire_requests_reach_shared_window_policy() {
     );
 }
 
+fn toplevel_pending_is_maximized(state: &JwmWaylandState, window: WindowId) -> bool {
+    state
+        .toplevels
+        .get(&window)
+        .expect("wire toplevel stays live")
+        .with_pending_state(|pending| pending.states.contains(xdg_toplevel::State::Maximized))
+}
+
+#[test]
+fn xdg_maximize_wire_requests_enter_shared_policy_and_owe_exactly_one_reply() {
+    let mut fixture = XdgWireFixture::new("maximize-wire-seat");
+    let window = fixture.window;
+
+    // xdg_toplevel.set_maximized (9) and unset_maximized (10).
+    fixture.send_toplevel_requests(&[9, 10]);
+
+    let events = fixture
+        .pending_events
+        .lock()
+        .expect("pending event lock")
+        .drain(..)
+        .collect::<Vec<_>>();
+    let maximize_requests = events
+        .iter()
+        .filter_map(|event| match event {
+            BackendEvent::WindowMaximizeRequest {
+                window: event_window,
+                action,
+                axes,
+            } if *event_window == window => Some((*action, *axes)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        maximize_requests,
+        [
+            (NetWmAction::Add, MaximizeAxes::BOTH),
+            (NetWmAction::Remove, MaximizeAxes::BOTH),
+        ]
+    );
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            BackendEvent::WindowStateRequest {
+                state: NetWmState::MaximizedVert | NetWmState::MaximizedHorz,
+                ..
+            }
+        )),
+        "xdg maximize must not arrive as per-axis state requests"
+    );
+    assert!(
+        !fixture.state.window_maximized.contains_key(&window),
+        "protocol callbacks must leave confirmation to shared policy"
+    );
+    assert!(!toplevel_pending_is_maximized(&fixture.state, window));
+    assert!(fixture.state.xdg_state_reply_owed.contains(&window));
+
+    // Policy dropped both requests: the post-drain backstop pays the reply
+    // exactly once.
+    assert!(fixture.state.flush_owed_xdg_state_replies());
+    assert!(!fixture.state.flush_owed_xdg_state_replies());
+    let configures = fixture.configures_since_last_sync();
+    assert_eq!(
+        configures.len(),
+        1,
+        "one reply for the owed requests: {configures:?}"
+    );
+    assert!(!configures[0].2.contains(&XDG_STATE_MAXIMIZED));
+}
+
+#[test]
+fn xdg_maximized_state_rides_the_policy_configure_and_refusals_still_reply() {
+    let mut fixture = XdgWireFixture::new("maximize-reply-seat");
+    let window = fixture.window;
+
+    // 1. Manage: the initial configure.
+    fixture.stage_size(800, 600);
+    assert!(fixture.state.send_toplevel_configure(window, false));
+    let configures = fixture.configures_since_last_sync();
+    assert_eq!(configures.len(), 1, "{configures:?}");
+    assert_eq!((configures[0].0, configures[0].1), (800, 600));
+    assert!(!configures[0].2.contains(&XDG_STATE_MAXIMIZED));
+
+    // 2. set_maximized is owed, not answered by the callback.
+    fixture.send_toplevel_requests(&[9]);
+    assert!(fixture.state.xdg_state_reply_owed.contains(&window));
+    assert!(
+        fixture.configures_since_last_sync().is_empty(),
+        "the callback must not announce state before policy decides"
+    );
+
+    // 3. Policy accepts: state and size ride one configure.
+    fixture
+        .state
+        .set_window_maximized(window, MaximizeAxes::BOTH)
+        .expect("publish accepted maximize");
+    fixture.stage_size(1280, 690);
+    assert!(fixture.state.send_toplevel_configure(window, false));
+    let configures = fixture.configures_since_last_sync();
+    assert_eq!(configures.len(), 1, "{configures:?}");
+    assert_eq!((configures[0].0, configures[0].1), (1280, 690));
+    assert!(configures[0].2.contains(&XDG_STATE_MAXIMIZED));
+    assert!(fixture.state.xdg_state_reply_owed.is_empty());
+    assert_eq!(
+        fixture.state.window_maximized.get(&window),
+        Some(&MaximizeAxes::BOTH)
+    );
+
+    // 4. unset_maximized accepted: one configure with the restore size.
+    fixture.send_toplevel_requests(&[10]);
+    fixture
+        .state
+        .set_window_maximized(window, MaximizeAxes::NONE)
+        .expect("publish accepted unmaximize");
+    fixture.stage_size(800, 600);
+    assert!(fixture.state.send_toplevel_configure(window, false));
+    let configures = fixture.configures_since_last_sync();
+    assert_eq!(configures.len(), 1, "{configures:?}");
+    assert_eq!((configures[0].0, configures[0].1), (800, 600));
+    assert!(!configures[0].2.contains(&XDG_STATE_MAXIMIZED));
+    assert!(!fixture.state.window_maximized.contains_key(&window));
+
+    // 5. set_maximized refused: the repair republish stages nothing new, yet
+    //    the owed reply still repeats the current state once.
+    fixture.send_toplevel_requests(&[9]);
+    fixture
+        .state
+        .set_window_maximized(window, MaximizeAxes::NONE)
+        .expect("republish current state");
+    assert!(fixture.state.send_toplevel_configure(window, false));
+    let configures = fixture.configures_since_last_sync();
+    assert_eq!(configures.len(), 1, "{configures:?}");
+    assert_eq!((configures[0].0, configures[0].1), (800, 600));
+    assert!(!configures[0].2.contains(&XDG_STATE_MAXIMIZED));
+    assert!(fixture.state.xdg_state_reply_owed.is_empty());
+
+    // 6. Nothing owed and nothing staged: udev sends nothing.
+    assert!(!fixture.state.send_toplevel_configure(window, false));
+    assert!(fixture.configures_since_last_sync().is_empty());
+}
+
 #[test]
 fn xwm_above_below_requests_write_real_properties_and_raise_real_windows() {
     let xvfb = crate::backend::clipboard_offer::IsolatedXvfb::acquire();
@@ -493,6 +843,96 @@ fn xwm_above_below_requests_write_real_properties_and_raise_real_windows() {
         "raised window must be above its peer"
     );
     assert_eq!(state.window_stack.last(), Some(&first_win));
+
+    // Maximize round trip: the paired atoms become one shared request, the
+    // accepted state is written back as real atoms, and a maximized window's
+    // own resize request is answered with JWM's geometry.
+    let maximized_horz = intern(&conn, b"_NET_WM_STATE_MAXIMIZED_HORZ");
+    let maximized_vert = intern(&conn, b"_NET_WM_STATE_MAXIMIZED_VERT");
+    let send_maximize_message = |action: u32| {
+        let event = ClientMessageEvent::new(
+            32,
+            first,
+            net_wm_state,
+            ClientMessageData::from([action, maximized_horz, maximized_vert, 1, 0]),
+        );
+        conn.send_event(
+            false,
+            root,
+            EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY,
+            event,
+        )
+        .expect("send paired maximize request");
+        conn.flush().expect("flush paired maximize request");
+    };
+    pending_events.lock().expect("pending event lock").clear();
+    send_maximize_message(1);
+    pump_xwm(&mut event_loop, &mut state, |_| {
+        !pending_events
+            .lock()
+            .expect("pending event lock")
+            .is_empty()
+    });
+    let actual = pending_events
+        .lock()
+        .expect("pending event lock")
+        .pop_front()
+        .expect("maximize request event");
+    assert!(matches!(
+        actual,
+        BackendEvent::WindowMaximizeRequest { window, action: NetWmAction::Add, axes }
+            if window == first_win && axes == MaximizeAxes::BOTH
+    ));
+
+    state
+        .set_window_maximized(first_win, MaximizeAxes::BOTH)
+        .expect("publish XWayland maximize");
+    conn.flush().expect("flush X11 property read connection");
+    assert!(state.x11_surfaces[&first_win].is_maximized());
+    let atoms = conn
+        .get_property(false, first, net_wm_state, AtomEnum::ATOM, 0, u32::MAX)
+        .expect("query _NET_WM_STATE")
+        .reply()
+        .expect("read _NET_WM_STATE")
+        .value32()
+        .expect("32-bit state atoms")
+        .collect::<Vec<_>>();
+    assert!(atoms.contains(&maximized_horz) && atoms.contains(&maximized_vert));
+
+    // `Geometry` has no `PartialEq`; compare its fields.
+    let geometry_of = |state: &JwmWaylandState| {
+        let g = state.window_geometry[&first_win];
+        (g.x, g.y, g.w, g.h, g.border)
+    };
+    let geometry_before = geometry_of(&state);
+    conn.configure_window(first, &ConfigureWindowAux::new().width(200).height(150))
+        .expect("send client resize request");
+    // The unmaximize message doubles as an ordering marker: the XWM sees the
+    // ConfigureRequest before it.
+    send_maximize_message(0);
+    pump_xwm(&mut event_loop, &mut state, |_| {
+        !pending_events
+            .lock()
+            .expect("pending event lock")
+            .is_empty()
+    });
+    let events = pending_events
+        .lock()
+        .expect("pending event lock")
+        .drain(..)
+        .collect::<Vec<_>>();
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, BackendEvent::WindowConfigured { .. })),
+        "a maximized window's resize request must not reach policy: {events:?}"
+    );
+    assert_eq!(geometry_of(&state), geometry_before);
+    assert!(matches!(
+        events.as_slice(),
+        [BackendEvent::WindowMaximizeRequest { window, action: NetWmAction::Remove, axes }]
+            if *window == first_win && *axes == MaximizeAxes::BOTH
+    ));
 }
 
 #[test]
@@ -537,6 +977,8 @@ fn remove_wayland_window_closes_foreign_handle_and_clears_owned_state() {
             .window_activation_app_id
             .insert(win, "activation.app".to_owned());
         state.window_is_fullscreen.insert(win, true);
+        state.window_maximized.insert(win, MaximizeAxes::BOTH);
+        state.xdg_state_reply_owed.insert(win);
         state
             .window_type_overrides
             .insert(win, vec![WindowType::Dialog]);
@@ -558,6 +1000,8 @@ fn remove_wayland_window_closes_foreign_handle_and_clears_owned_state() {
     assert!(!state.window_app_id.contains_key(&removed));
     assert!(!state.window_activation_app_id.contains_key(&removed));
     assert!(!state.window_is_fullscreen.contains_key(&removed));
+    assert!(!state.window_maximized.contains_key(&removed));
+    assert!(!state.xdg_state_reply_owed.contains(&removed));
     assert!(!state.window_type_overrides.contains_key(&removed));
     assert!(!state.window_border_color.contains_key(&removed));
 
@@ -570,6 +1014,8 @@ fn remove_wayland_window_closes_foreign_handle_and_clears_owned_state() {
     assert!(state.window_app_id.contains_key(&surviving));
     assert!(state.window_activation_app_id.contains_key(&surviving));
     assert!(state.window_is_fullscreen.contains_key(&surviving));
+    assert!(state.window_maximized.contains_key(&surviving));
+    assert!(state.xdg_state_reply_owed.contains(&surviving));
     assert!(state.window_type_overrides.contains_key(&surviving));
     assert!(state.window_border_color.contains_key(&surviving));
 
@@ -654,4 +1100,323 @@ fn manager_hidden_window_stays_gated_until_explicit_restore() {
     state.set_manager_window_mapped(win, true);
     assert!(state.mapped_windows.contains(&win));
     assert!(state.manager_allows_surface_map(win));
+}
+
+#[test]
+fn x11_maximize_callbacks_reuse_the_shared_maximize_request() {
+    let (mut state, pending_events) = headless_state();
+    let win = WindowId::from_raw(71);
+    state.x11_surface_to_window.insert(0x1234, win);
+
+    state.request_x11_maximize(0x1234, true);
+    state.request_x11_maximize(0x1234, false);
+    state.request_x11_maximize(0x9999, true);
+
+    let events = pending_events
+        .lock()
+        .expect("pending event lock")
+        .drain(..)
+        .collect::<Vec<_>>();
+    assert_eq!(events.len(), 2, "an unknown X11 id must not emit an event");
+    assert!(matches!(
+        events[0],
+        BackendEvent::WindowMaximizeRequest { window, action: NetWmAction::Add, axes }
+            if window == win && axes == MaximizeAxes::BOTH
+    ));
+    assert!(matches!(
+        events[1],
+        BackendEvent::WindowMaximizeRequest { window, action: NetWmAction::Remove, axes }
+            if window == win && axes == MaximizeAxes::BOTH
+    ));
+    assert!(
+        state.xdg_state_reply_owed.is_empty(),
+        "XWayland has no xdg configure to owe"
+    );
+
+    state
+        .set_window_maximized(win, MaximizeAxes::BOTH)
+        .expect("publishing without surfaces only updates the cache");
+    assert_eq!(state.window_maximized.get(&win), Some(&MaximizeAxes::BOTH));
+    assert!(state.has_window_net_state(win, NetWmState::MaximizedVert));
+    assert!(state.has_window_net_state(win, NetWmState::MaximizedHorz));
+    assert!(!state.has_x11_net_state(win, NetWmState::MaximizedVert));
+}
+
+#[test]
+fn per_axis_net_state_writes_merge_through_the_maximize_cache() {
+    let (mut state, _pending_events) = headless_state();
+    let win = WindowId::from_raw(81);
+
+    for (flag, on, expected) in [
+        (NetWmState::MaximizedVert, true, Some(MaximizeAxes::VERT)),
+        (NetWmState::MaximizedHorz, true, Some(MaximizeAxes::BOTH)),
+        (NetWmState::MaximizedVert, false, Some(MaximizeAxes::HORZ)),
+        (NetWmState::MaximizedHorz, false, None),
+    ] {
+        state
+            .set_window_net_state(win, flag, on)
+            .expect("per-axis maximize write");
+        assert_eq!(
+            state.window_maximized.get(&win).copied(),
+            expected,
+            "after {flag:?} = {on}"
+        );
+        assert_eq!(state.has_window_net_state(win, flag), on);
+    }
+
+    state.window_maximized.insert(win, MaximizeAxes::VERT);
+    state
+        .set_window_net_state(win, NetWmState::Above, true)
+        .expect("non-maximize write");
+    assert_eq!(
+        state.window_maximized.get(&win),
+        Some(&MaximizeAxes::VERT),
+        "other atoms must leave the maximize cache alone"
+    );
+}
+
+#[test]
+fn every_wayland_run_loop_flushes_owed_xdg_state_replies() {
+    let flush_call = format!("{}(", "flush_owed_xdg_state_replies");
+    let drain_call = format!("{}(self, ev)?", "handler.handle_event");
+    let configure_send = format!("{}(", "send_toplevel_configure");
+    for (name, source) in [
+        ("wayland_udev", include_str!("backend.rs")),
+        ("wayland_x11", include_str!("../wayland_x11/backend.rs")),
+        ("wayland_winit", include_str!("../wayland_winit/backend.rs")),
+    ] {
+        let run = source
+            .split_once("fn run(&mut self, handler: &mut dyn EventHandler)")
+            .unwrap_or_else(|| panic!("{name}: Backend::run"))
+            .1;
+        let flush_at = run
+            .find(&flush_call)
+            .unwrap_or_else(|| panic!("{name}: the run loop must pay owed xdg replies"));
+        let drain_at = run
+            .find(&drain_call)
+            .unwrap_or_else(|| panic!("{name}: the run loop drains pending events"));
+        assert!(
+            drain_at < flush_at,
+            "{name}: owed replies are paid only after policy saw the queued requests"
+        );
+
+        let window_ops = source
+            .split_once("impl WindowOps for WaylandWindowOps")
+            .unwrap_or_else(|| panic!("{name}: WindowOps impl"))
+            .1;
+        let configure = window_ops
+            .split_once("fn configure(")
+            .unwrap_or_else(|| panic!("{name}: WindowOps::configure"))
+            .1;
+        let configure_body = configure
+            .split_once("\n    fn ")
+            .map_or(configure, |(body, _)| body);
+        assert!(
+            configure_body.contains(&configure_send),
+            "{name}: WindowOps::configure must send through send_toplevel_configure"
+        );
+    }
+}
+
+/// The interfaces a fresh client is advertised by a state initialized the
+/// way a backend with (`true`) or without (`false`) the DRM/KMS output
+/// pipeline initializes it.
+fn advertised_interfaces(drm_output_pipeline: bool) -> Vec<String> {
+    let event_loop: EventLoop<'static, JwmWaylandState> =
+        EventLoop::try_new().expect("create test event loop");
+    let mut display = Display::<JwmWaylandState>::new().expect("create test display");
+    let (flush_tx, _flush_rx) = channel::channel();
+    let (mut state, _) = JwmWaylandState::init(
+        &display.handle(),
+        event_loop.handle(),
+        Arc::new(Mutex::new(VecDeque::new())),
+        flush_tx,
+        Arc::new(AtomicBool::new(false)),
+        "globals-test-seat".to_owned(),
+        false,
+        drm_output_pipeline,
+    )
+    .expect("initialize headless Wayland state");
+    let (server, mut peer) = UnixStream::pair().expect("create Wayland socket pair");
+    display
+        .handle()
+        .insert_client(server, Arc::new(JwmClientState::default()))
+        .expect("insert raw Wayland client");
+    // wl_display.get_registry(new_id=2), then sync(new_id=3) as the end marker.
+    let mut discovery = wire_message(1, 1, &wire_u32(2));
+    discovery.extend_from_slice(&wire_message(1, 0, &wire_u32(3)));
+    peer.write_all(&discovery).expect("send registry request");
+    display
+        .dispatch_clients(&mut state)
+        .expect("dispatch registry request");
+    display.flush_clients().expect("flush registry events");
+    discover_globals(&mut peer)
+        .into_iter()
+        .map(|(_, interface, _)| interface)
+        .collect()
+}
+
+#[test]
+fn output_management_is_advertised_only_where_output_configure_is_serviced() {
+    // A nested backend never pops the ack an Apply queues: wlr-randr and
+    // kanshi blocked forever there.
+    assert!(
+        !advertised_interfaces(false)
+            .iter()
+            .any(|interface| interface == "zwlr_output_manager_v1"),
+        "nested backends must not advertise wlr-output-management"
+    );
+    if crate::config::CONFIG
+        .load()
+        .behavior()
+        .wayland_enable_output_management
+    {
+        assert!(
+            advertised_interfaces(true)
+                .iter()
+                .any(|interface| interface == "zwlr_output_manager_v1"),
+            "the DRM/KMS backend keeps wlr-output-management"
+        );
+    }
+}
+
+/// `source` with everything from its first `#[cfg(test)]` on removed, so a
+/// pin cannot be satisfied by a test's own needle.
+fn production(source: &str) -> &str {
+    source
+        .split_once("#[cfg(test)]")
+        .map_or(source, |(code, _)| code)
+}
+
+#[test]
+fn every_wayland_run_loop_syncs_foreign_toplevel_outputs() {
+    let sync_call = format!("{}()", "sync_foreign_toplevel_outputs");
+    for (name, source) in [
+        ("wayland_udev", include_str!("backend.rs")),
+        ("wayland_x11", include_str!("../wayland_x11/backend.rs")),
+        ("wayland_winit", include_str!("../wayland_winit/backend.rs")),
+    ] {
+        let run = production(source)
+            .split_once("fn run(&mut self, handler: &mut dyn EventHandler)")
+            .unwrap_or_else(|| panic!("{name}: Backend::run"))
+            .1;
+        assert!(
+            run.contains(&sync_call),
+            "{name}: taskbar handles must follow windows to their outputs"
+        );
+    }
+}
+
+#[test]
+fn every_wayland_backend_confirms_session_locks_from_presented_frames() {
+    let note = format!("{}(", "note_locked_frame_presented");
+    // The DRM path confirms from the page flip of a locked frame.
+    let kms = production(include_str!("../udev_kms.rs"));
+    let notifier = kms
+        .split_once("DrmEvent::VBlank(crtc) =>")
+        .expect("DRM notifier callback")
+        .1;
+    let notifier = notifier
+        .split_once("DrmEvent::Error")
+        .map_or(notifier, |(arm, _)| arm);
+    assert!(
+        notifier.contains("take_presented_locked_frames()") && notifier.contains(&note),
+        "the vblank handler must report presented locked frames"
+    );
+    assert!(
+        kms.contains("frame_pending_lock_epoch.take()")
+            && kms.contains("state.session_locked.then_some(state.session_lock_epoch)"),
+        "a queued frame must remember whether it was rendered locked"
+    );
+    // The nested paths confirm once the host took the frame.
+    for (name, source, submit) in [
+        (
+            "wayland_x11",
+            include_str!("../wayland_x11/backend.rs"),
+            "self.x11_surface.submit()",
+        ),
+        (
+            "wayland_winit",
+            include_str!("../wayland_winit/backend.rs"),
+            "self.winit_backend.submit(",
+        ),
+    ] {
+        let render = production(source)
+            .split_once("fn render_if_needed(&mut self)")
+            .unwrap_or_else(|| panic!("{name}: render_if_needed"))
+            .1;
+        let render = render
+            .split_once("\n    pub fn new(")
+            .map_or(render, |(body, _)| body);
+        let submit_at = render
+            .find(submit)
+            .unwrap_or_else(|| panic!("{name}: the frame is submitted"));
+        let note_at = render
+            .find(&note)
+            .unwrap_or_else(|| panic!("{name}: a presented locked frame confirms the lock"));
+        assert!(
+            submit_at < note_at,
+            "{name}: only a submitted frame can confirm the lock"
+        );
+        assert!(
+            render.contains("self.lock_shield_id.clone()"),
+            "{name}: a locked frame draws the opaque shield"
+        );
+    }
+}
+
+#[test]
+fn managed_xwayland_windows_reach_foreign_toplevel_managers() {
+    let source = production(include_str!("state.rs"));
+    let xwm = source
+        .split_once("impl XwmHandler for JwmWaylandState")
+        .expect("XwmHandler impl")
+        .1;
+    let body = |name: &str| {
+        let start = xwm
+            .split_once(&format!("fn {name}("))
+            .unwrap_or_else(|| panic!("XwmHandler::{name}"))
+            .1;
+        start
+            .split_once("\n    fn ")
+            .map_or(start, |(body, _)| body)
+    };
+    assert!(
+        body("map_window_request").contains("announce_new_toplevel("),
+        "a managed X11 window must be announced to taskbars"
+    );
+    assert!(
+        !body("mapped_override_redirect_window").contains("announce_new_toplevel("),
+        "override-redirect menus and tooltips are not toplevels"
+    );
+    for name in ["unmapped_window", "destroyed_window"] {
+        assert!(
+            body(name).contains("ftm.remove_window(win_id)"),
+            "{name} must send `closed` for the X11 window"
+        );
+    }
+    let property = body("property_notify");
+    assert!(property.contains("ftm.update_title(") && property.contains("ftm.update_app_id("));
+}
+
+#[test]
+fn every_wayland_backend_publishes_monitors_to_workspace_managers() {
+    let sync_call = format!("{}(monitors)", "self.state.sync_workspace_monitors");
+    for (name, source) in [
+        ("wayland_udev", include_str!("backend.rs")),
+        ("wayland_x11", include_str!("../wayland_x11/backend.rs")),
+        ("wayland_winit", include_str!("../wayland_winit/backend.rs")),
+    ] {
+        let set_monitors = production(source)
+            .split_once("fn compositor_set_monitors(")
+            .unwrap_or_else(|| panic!("{name}: compositor_set_monitors"))
+            .1;
+        let body = set_monitors
+            .split_once("\n    fn ")
+            .map_or(set_monitors, |(body, _)| body);
+        assert!(
+            body.contains(&sync_call),
+            "{name}: taskbars must follow monitor and tag changes"
+        );
+    }
 }

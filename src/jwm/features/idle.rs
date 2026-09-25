@@ -59,8 +59,9 @@ pub const UNEXPLAINED_LOCK_RETRIES: u32 = 12;
 /// Why a lock attempt failed, as far as retrying is concerned.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LockFailure {
-    /// Something that passes on its own — a menu holding the pointer grab,
-    /// another panel open. Worth asking again in a moment.
+    /// Something that passes on its own — a menu holding the pointer grab.
+    /// Worth asking again in a moment. (An ordinary panel that is open no
+    /// longer refuses a lock: the lock screen takes over from it.)
     Transient,
     /// The backend tried to start a compositor for the lock screen and the
     /// attempt came back with an error whose cause travels as prose this
@@ -442,7 +443,7 @@ impl crate::jwm::Jwm {
         let Some(idle_millis) = clock else {
             // Whatever an earlier clock dimmed is put back rather than left
             // dark, now that nothing can notice the activity that undoes it.
-            let locked = self.features.system_ui.is_locked();
+            let locked = self.idle_session_locked();
             for action in self.idle.poll(&settings, Duration::ZERO, true, locked, now) {
                 self.apply_idle_action(backend, action);
             }
@@ -470,12 +471,25 @@ impl crate::jwm::Jwm {
             &settings,
             Duration::from_millis(idle_millis),
             inhibited,
-            self.features.system_ui.is_locked(),
+            self.idle_session_locked(),
             now,
         );
         for action in actions {
             self.apply_idle_action(backend, action);
         }
+    }
+
+    /// Whether the idle policy should treat the session as already locked.
+    ///
+    /// Only the session lock counts. A monitor's unlock prompt is a lock card
+    /// too, but it guards one output while the rest of the seat stays open:
+    /// read as "locked", a prompt left on screen kept the idle lock from ever
+    /// firing, and backing out of it then started the unlock grace as though
+    /// a password had been accepted. [`Self::lock_screen`] replaces such a
+    /// prompt with the session lock, which is the takeover the idle lock is
+    /// there to perform.
+    fn idle_session_locked(&self) -> bool {
+        self.features.system_ui.is_session_lock()
     }
 
     /// Put the dim back after a config apply. Applying the configuration
@@ -622,7 +636,9 @@ impl crate::jwm::Jwm {
             self.idle_inhibited,
             self.idle.is_dimmed(),
             self.idle.is_screen_off(),
-            self.features.system_ui.is_locked(),
+            // What the policy itself acts on, so a bar counting down to the
+            // lock is not told a monitor prompt already is one.
+            self.idle_session_locked(),
         )
     }
 
@@ -700,7 +716,12 @@ fn run_idle_command(what: &str, command: &str) -> Option<std::process::Child> {
         return None;
     };
     log::info!("Idle: {what} \u{2192} {command}");
-    match std::process::Command::new(&program).args(&args).spawn() {
+    let mut launch = std::process::Command::new(&program);
+    launch.args(&args);
+    // Run from the event thread, whose SIGCHLD stays blocked for the run
+    // loop's signalfd; std would hand the lock and DPMS commands that mask.
+    crate::external_command::unblock_sigchld_in_child(&mut launch);
+    match launch.spawn() {
         Ok(child) => Some(child),
         Err(error) => {
             log::warn!("Idle: could not run {command:?}: {error}");
@@ -712,6 +733,7 @@ fn run_idle_command(what: &str, command: &str) -> Option<std::process::Child> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::jwm::features::monitor_lock::test_support::{LockSpyBackend, jwm_on_two_monitors};
 
     fn settings() -> IdleSettings {
         IdleSettings::from_secs(60, 0.3, 300, 600, true)
@@ -1225,10 +1247,6 @@ mod tests {
     #[test]
     fn lock_refusals_are_classified_from_the_messages_the_lock_screen_sends() {
         assert_eq!(
-            classify_lock_failure("another system UI panel is open"),
-            LockFailure::Transient
-        );
-        assert_eq!(
             classify_lock_failure("could not grab pointer for lock screen"),
             LockFailure::Transient
         );
@@ -1374,5 +1392,69 @@ mod tests {
                 .poll(&settings, secs(300), false, false, start + secs(2))
                 .contains(&IdleAction::Lock)
         );
+    }
+
+    /// Regression: the lock and DPMS commands are started from the event
+    /// thread, whose SIGCHLD stays blocked for the run loop's signalfd, and
+    /// std handed them that mask. They start with it unblocked.
+    #[test]
+    fn idle_commands_start_with_sigchld_unblocked() {
+        use crate::external_command::test_support::{SigchldBlockedOnThisThread, SigchldProbe};
+
+        let _blocked = SigchldBlockedOnThisThread::new();
+        let probe = SigchldProbe::new("idle");
+        let command = format!("sh -c \"{}\"", probe.script());
+
+        let mut child = run_idle_command("lock", &command).expect("the probe command starts");
+
+        assert!(child.wait().expect("reap the probe command").success());
+        assert!(!probe.child_blocked_sigchld());
+    }
+
+    /// A monitor's unlock prompt is a lock card, but not the session lock:
+    /// the rest of the seat is open around it. Read as "already locked", a
+    /// prompt left on screen kept the idle lock from ever firing. The policy
+    /// reads the session lock alone, so the lock fires and takes the screen
+    /// from the prompt, leaving the shade it was asking about in place.
+    #[test]
+    fn a_monitor_unlock_prompt_does_not_hold_the_idle_lock_off() {
+        let mut backend = LockSpyBackend::new();
+        let mut jwm = jwm_on_two_monitors(&mut backend);
+        jwm.lock_monitor(&mut backend, &crate::jwm::types::WMArgEnum::Int(1))
+            .expect("monitor 1 locks");
+        // The same key again over the shade asks for its password.
+        jwm.lock_monitor(&mut backend, &crate::jwm::types::WMArgEnum::Int(1))
+            .expect("its prompt opens");
+        assert_eq!(jwm.features.system_ui.monitor_lock_target(), Some(1));
+        assert!(
+            jwm.features.system_ui.is_locked(),
+            "the prompt is a lock card: the input that used to hold the lock off"
+        );
+        assert!(!jwm.idle_session_locked());
+        assert_eq!(
+            jwm.idle_status_json()["locked"],
+            false,
+            "get_idle_status reports the lock the policy acts on"
+        );
+
+        let actions = jwm.idle.poll(
+            &settings(),
+            secs(301),
+            false,
+            jwm.idle_session_locked(),
+            now(),
+        );
+        assert!(actions.contains(&IdleAction::Lock), "{actions:?}");
+        for action in actions {
+            jwm.apply_idle_action(&mut backend, action);
+        }
+
+        assert!(jwm.features.system_ui.is_session_lock());
+        assert!(
+            jwm.monitor_is_locked(1),
+            "the shade stays under the session lock"
+        );
+        assert!(jwm.idle_session_locked(), "and the next poll sees the lock");
+        assert_eq!(jwm.idle_status_json()["locked"], true);
     }
 }

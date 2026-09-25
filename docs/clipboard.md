@@ -158,10 +158,10 @@ when the `xvfb` package is installed.
 ## IPC
 
 ```sh
-jwm-msg '{"query": "get_clipboard"}'
-jwm-msg '{"command": "clipboard_copy", "args": {"index": 1}}'
-jwm-msg '{"command": "clipboard_record", "args": {"text": "hello"}}'
-jwm-msg '{"command": "clear_clipboard"}'
+jwm-tool msg get_clipboard
+jwm-tool msg clipboard_copy --args '{"index": 1}'
+jwm-tool msg clipboard_record --args '{"text": "hello"}'
+jwm-tool msg clear_clipboard
 ```
 
 `clipboard_copy` puts a history entry back on the clipboard by index — the

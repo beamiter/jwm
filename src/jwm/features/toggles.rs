@@ -2,10 +2,11 @@
 //!
 //! 这个模块包含所有窗口管理器特性的切换函数（toggle* 系列）
 
-use crate::backend::api::Backend;
+use crate::backend::api::{Backend, MaximizeAxes};
 use crate::backend::common_define::{EventMaskBits, Mods, StdCursorKind};
 use crate::config::CONFIG;
 use crate::core::animation::AnimationKind;
+use crate::core::maximize::MaximizeOrigin;
 use crate::core::models::ClientKey;
 use crate::core::types::Rect;
 use crate::jwm::Jwm;
@@ -17,12 +18,42 @@ use log::{error, info, warn};
 use std::process::Command;
 
 const RECORDING_PROBE_ATTEMPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The wallpaper picker's status line while its directory is listed.
+const WALLPAPER_SCANNING: &str = "Scanning\u{2026}";
+/// The wallpaper picker's status line when no worker could list it.
+const WALLPAPER_SCAN_REFUSED: &str = "Could not start the wallpaper scan";
+
+/// Replace the wallpaper picker's status line. `SystemUiState` has no setter
+/// for this list kind; the scanning state is the only writer.
+fn set_wallpaper_picker_message(state: &mut SystemUiState, text: &str) {
+    if let SystemUiState::ListPanel {
+        kind: crate::jwm::features::system_ui::ListKind::Wallpaper,
+        message,
+        ..
+    } = state
+    {
+        *message = text.to_string();
+    }
+}
 const RECORDING_CONCAT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5 * 60);
 
 pub(crate) const fn configured_feature_toggle_allowed(active: bool, enabled: bool) -> bool {
     // Config flags gate entry only. An already-active mode must always retain
     // its exit path so it can release input grabs and compositor state.
     active || enabled
+}
+
+/// Where the overview selection lands once the entries whose window has gone
+/// are dropped: on the same window when it survived, otherwise on the
+/// survivor that took its place (the next one, or the last when it was at
+/// the end). `alive` is one flag per entry, in list order. `None` when
+/// nothing survived.
+fn overview_index_after_prune(alive: &[bool], index: usize) -> Option<usize> {
+    let survivors = alive.iter().filter(|&&alive| alive).count();
+    let last = survivors.checked_sub(1)?;
+    let before = alive.iter().take(index).filter(|&&alive| alive).count();
+    Some(before.min(last))
 }
 
 /// What a shell panel's opener should do about whatever is already on screen.
@@ -178,6 +209,19 @@ fn finalize_concat_segments(
         }
     }
     Ok(())
+}
+
+/// The command a session-menu action (suspend, hibernate, reboot, shutdown)
+/// runs.
+///
+/// The menu is driven from the event thread, whose SIGCHLD stays blocked for
+/// the run loop's signalfd, and std hands that mask to the child. Only the
+/// mask is reset: the command stays in JWM's session (no `setsid`).
+fn session_action_command(program: &str, args: &[String]) -> Command {
+    let mut command = Command::new(program);
+    command.args(args);
+    crate::external_command::unblock_sigchld_in_child(&mut command);
+    command
 }
 
 impl Jwm {
@@ -399,6 +443,39 @@ impl Jwm {
         Some((seq, estimate))
     }
 
+    /// Queue a power-profile switch on the controls worker and draw it on the
+    /// row at once. `available` is the cached list the caller picked `name`
+    /// from: both callers (the Hub row and IPC `set_power_profile`) validate
+    /// against it, so nothing on this path runs `powerprofilesctl`. Returns
+    /// the submission's sequence, or `None` when no worker thread exists — in
+    /// which case nothing was queued or drawn.
+    ///
+    /// The drawn profile stands until the worker's re-read lands: the cache
+    /// write bumps the snapshot epoch, so a snapshot read already in flight
+    /// cannot roll it back, and [`Self::adopt_power_profile_report`] then
+    /// shows what really took.
+    pub(crate) fn queue_power_profile_request(
+        &mut self,
+        available: Vec<String>,
+        name: String,
+    ) -> Option<u64> {
+        use crate::jwm::features::system_controls;
+        let confirmed = self
+            .features
+            .control_snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.power_profiles.clone());
+        let seq = system_controls::queue_control_request(
+            system_controls::ControlRequest::PowerProfileSet(name.clone()),
+            self.async_update_notifier.clone(),
+        )?;
+        self.features
+            .control_feedback
+            .note_power_profile_estimate(seq, name.clone(), confirmed);
+        self.cache_control_power_profiles(available, name);
+        Some(seq)
+    }
+
     /// Adopt the controls worker's newest read-backs: confirm the estimate
     /// on screen, correct it when the true value drifted, or revert it when
     /// the change failed outright. Runs from the frame tick; never blocks,
@@ -520,6 +597,10 @@ impl Jwm {
             self.adopt_audio_switch(audio);
         }
 
+        if let Some(profile) = report.power_profile {
+            self.adopt_power_profile_report(&profile, now);
+        }
+
         if panel_changed {
             self.refresh_open_control_center();
         }
@@ -588,6 +669,74 @@ impl Jwm {
         }
     }
 
+    /// Adopt the worker's answer to a power-profile switch: the row, the
+    /// `power/profile` publish and any correction of a live card follow the
+    /// re-read, never the request. Runs from the frame tick via
+    /// [`Self::poll_control_feedback`]; never blocks.
+    pub(crate) fn adopt_power_profile_report(
+        &mut self,
+        report: &crate::jwm::features::system_controls::PowerProfileReport,
+        now: std::time::Instant,
+    ) {
+        use crate::jwm::features::system_controls::ProfileFeedback;
+
+        let cached = self
+            .features
+            .control_snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.power_profiles.clone());
+        match self
+            .features
+            .control_feedback
+            .resolve_power_profile(report, now)
+        {
+            ProfileFeedback::KeepEstimate => {}
+            ProfileFeedback::Adopt {
+                available,
+                active,
+                took,
+            } => {
+                if !took {
+                    log::warn!(
+                        "power: profile stayed on {active} after asking for {}",
+                        report.asked
+                    );
+                }
+                let read = (available, active.clone());
+                let moved = cached.as_ref() != Some(&read);
+                // Cached even when it matches what is shown: the epoch bump
+                // discards a snapshot read that started before the switch
+                // and would otherwise roll the row back when it lands.
+                self.cache_control_power_profiles(read.0, read.1);
+                if moved {
+                    self.refresh_open_control_center();
+                }
+                // Every resolved switch publishes the verified profile, took
+                // or not, as the synchronous IPC path did after its re-read.
+                self.broadcast_ipc_event("power/profile", serde_json::json!({ "active": active }));
+            }
+            ProfileFeedback::Revert(previous) => {
+                log::warn!(
+                    "power: could not switch to {}; the profile tool refused",
+                    report.asked
+                );
+                if let Some(previous) = previous
+                    && cached.as_ref() != Some(&previous)
+                {
+                    let (available, active) = previous;
+                    self.cache_control_power_profiles(available, active);
+                    self.refresh_open_control_center();
+                }
+            }
+            ProfileFeedback::KeepShown => {
+                log::debug!(
+                    "power: switched to {} but the profile list could not be re-read",
+                    report.asked
+                );
+            }
+        }
+    }
+
     fn show_volume_osd(
         &mut self,
         backend: &mut dyn Backend,
@@ -618,6 +767,18 @@ impl Jwm {
             std::time::Instant::now(),
         );
         backend.compositor_show_osd(crate::backend::api::OsdKind::MicMute(muted), 0);
+    }
+
+    /// The labeled Power Profile card for a switch just queued, noted so a
+    /// re-read that contradicts it can refresh it in place.
+    pub(crate) fn show_power_profile_osd(&mut self, backend: &mut dyn Backend, name: String) {
+        self.features.control_feedback.note_osd_shown(
+            crate::jwm::features::system_controls::ControlDomain::PowerProfile,
+            0,
+            false,
+            std::time::Instant::now(),
+        );
+        backend.compositor_show_osd(crate::backend::api::OsdKind::PowerProfile(name), 0);
     }
 
     /// Toggle playback on the active MPRIS player.
@@ -804,24 +965,74 @@ impl Jwm {
         });
     }
 
-    fn wallpaper_picker_state() -> crate::jwm::features::SystemUiState {
+    /// Open the wallpaper picker in its scanning state and list the
+    /// directory on a worker.
+    ///
+    /// One readdir of a large `~/Pictures` — or of an NFS/sshfs mount — used
+    /// to run right here on the event loop, and resolving the directory stats
+    /// the configured paths too; both run on the worker now. The frame tick
+    /// fills the rows in through [`Self::poll_wallpaper_listing_job`] while
+    /// this picker is still up.
+    fn wallpaper_picker_state(&mut self) -> crate::jwm::features::SystemUiState {
         use crate::jwm::features::wallpaper;
 
-        let (current, directory) = {
+        let (current, configured_dir) = {
             let cfg = CONFIG.load();
             let behavior = cfg.behavior();
-            let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/"));
-            (
-                behavior.wallpaper.clone(),
-                wallpaper::resolve_directory(&behavior.wallpaper_dir, &behavior.wallpaper, &home),
-            )
+            (behavior.wallpaper.clone(), behavior.wallpaper_dir.clone())
         };
-        let paths = wallpaper::list_wallpapers(&directory);
-        crate::jwm::features::SystemUiState::wallpaper_picker(
+        let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/"));
+        let worker_current = current.clone();
+        let job = crate::jwm::features::connectivity::BackgroundJob::spawn(move || {
+            let directory = wallpaper::resolve_directory(&configured_dir, &worker_current, &home);
+            let paths = wallpaper::list_wallpapers(&directory);
+            (directory, paths)
+        });
+        let mut state = crate::jwm::features::SystemUiState::wallpaper_picker(&[], &current, "");
+        if job.started() {
+            // Replacing an older listing detaches it: only the newest
+            // opening's answer is adopted.
+            self.features.wallpaper_listing = Some(self.track_background_job(job));
+            set_wallpaper_picker_message(&mut state, WALLPAPER_SCANNING);
+        } else {
+            self.features.wallpaper_listing = None;
+            set_wallpaper_picker_message(&mut state, WALLPAPER_SCAN_REFUSED);
+        }
+        state
+    }
+
+    /// Adopt a finished wallpaper listing into the picker that asked for it.
+    ///
+    /// A picker closed (or swapped for another page) in the meantime simply
+    /// drops the answer. A handle whose thread the OS refused never fills, so
+    /// it is dropped here with the reason on the panel rather than leaving
+    /// the picker "Scanning…" for good.
+    pub(crate) fn poll_wallpaper_listing_job(&mut self) {
+        let Some(job) = self.features.wallpaper_listing.as_ref() else {
+            return;
+        };
+        if !job.started() {
+            self.features.wallpaper_listing = None;
+            if self.features.system_ui.is_wallpaper_picker() {
+                set_wallpaper_picker_message(&mut self.features.system_ui, WALLPAPER_SCAN_REFUSED);
+                self.mark_system_ui_dirty();
+            }
+            return;
+        }
+        let Some((directory, paths)) = job.take() else {
+            return;
+        };
+        self.features.wallpaper_listing = None;
+        if !self.features.system_ui.is_wallpaper_picker() {
+            return;
+        }
+        let current = CONFIG.load().behavior().wallpaper.clone();
+        self.features.system_ui = crate::jwm::features::SystemUiState::wallpaper_picker(
             &paths,
             &current,
             &directory.to_string_lossy(),
-        )
+        );
+        self.mark_system_ui_dirty();
     }
 
     fn theme_picker_state() -> crate::jwm::features::SystemUiState {
@@ -904,7 +1115,7 @@ impl Jwm {
                 SystemUiState::clipboard_picker(&self.features.clipboard)
             }
             ShellHubRoute::Calendar => SystemUiState::calendar(chrono::Local::now().naive_local()),
-            ShellHubRoute::Wallpaper => Self::wallpaper_picker_state(),
+            ShellHubRoute::Wallpaper => self.wallpaper_picker_state(),
             ShellHubRoute::Theme => Self::theme_picker_state(),
         };
 
@@ -1126,7 +1337,7 @@ impl Jwm {
         // back to a stale menu would be confusing.
         self.close_system_ui(backend);
         info!("Session menu: {} -> {command}", action.as_str());
-        match Command::new(&program).args(&args).spawn() {
+        match session_action_command(&program, &args).spawn() {
             Ok(child) => {
                 self.supervise_transient_child(child);
                 Ok(())
@@ -1253,12 +1464,14 @@ impl Jwm {
         if self.toggle_off_system_ui(backend, SystemUiState::is_wallpaper_picker) {
             return Ok(());
         }
-        let next = Self::wallpaper_picker_state();
         self.prepare_system_ui(
             backend,
             "the wallpaper picker",
             SystemUiPointerGrab::Buttons,
         )?;
+        // Built once the grabs are held, so a picker that cannot open never
+        // starts a directory scan.
+        let next = self.wallpaper_picker_state();
         self.features.system_ui_return_to_hub = false;
         self.features.system_ui = next;
         self.sync_system_ui(backend);
@@ -1309,20 +1522,63 @@ impl Jwm {
             &serde_json::Value::String(theme.clone()),
         ) {
             error!("Theme: {error}");
+            self.report_theme_failure(backend, "Theme not applied", error.to_string());
             return;
         }
         CONFIG.store(std::sync::Arc::new(updated));
         self.apply_config_changes(backend);
-        match CONFIG.load().persist_ui_theme(&theme) {
-            Ok(revision) => self.note_config_written_by_us(revision),
-            Err(error) => error!("Theme: failed to persist {theme}: {error}"),
-        }
+        // Stat the file before writing it: an edit the user saved within the
+        // last poll interval is otherwise first seen *after* JWM's own write,
+        // and settling that write would swallow it. Observed first, it stays
+        // pending, and the reload of JWM's revision carries both the theme
+        // and the edit.
+        self.observe_config_reload(std::time::Instant::now(), "pre-save check");
+        let persisted = CONFIG.load().persist_ui_theme(&theme);
+        self.settle_theme_persist(backend, &theme, persisted);
         info!("Theme: {theme}");
         self.broadcast_ipc_event(
             "config/changed",
             serde_json::json!({ "key": "appearance.ui_theme", "value": theme }),
         );
         self.close_system_ui(backend);
+    }
+
+    /// Account for the theme write: settle JWM's own revision of the file,
+    /// or say on screen that the theme was not saved.
+    fn settle_theme_persist(
+        &mut self,
+        backend: &mut dyn Backend,
+        theme: &str,
+        persisted: Result<std::time::SystemTime, crate::config::ConfigError>,
+    ) {
+        match persisted {
+            Ok(revision) => self.note_config_written_by_us(revision),
+            Err(error) => {
+                error!("Theme: failed to persist {theme}: {error}");
+                // The theme is live, but only in memory: the next reload or
+                // login brings the old one back. A refusal to edit the file
+                // tells the user to set the key by hand, which does nothing
+                // from the journal alone.
+                self.report_theme_failure(backend, "Theme not saved", error.to_string());
+            }
+        }
+    }
+
+    /// Put a theme picker failure on screen. Otherwise it reaches only the
+    /// journal: an unsaved theme closes the picker exactly as a saved one
+    /// does. Through do-not-disturb, like the other failures that lose a
+    /// setting.
+    fn report_theme_failure(&mut self, backend: &mut dyn Backend, title: &str, body: String) {
+        self.push_system_toast(
+            backend,
+            crate::backend::api::ToastNotification {
+                title: format!("\u{f1fc}  {title}"),
+                body,
+                urgency: 2,
+                timeout_ms: 8000,
+                ..Default::default()
+            },
+        );
     }
 
     /// Open the clipboard picker.
@@ -2093,30 +2349,17 @@ impl Jwm {
         // later release.
         self.tab_drag = None;
 
-        // Expose, the tag overview and annotation are not system-UI panels,
-        // but each holds its own keyboard/pointer grab and draws its own
-        // overlay. A shell key reaches this common opener while one of them is
-        // up (the expose key branch deliberately falls through for unhandled
-        // keys), and the grab a panel takes below would silently replace
-        // theirs; then `close_system_ui`'s ungrab drops it, leaving the mode
-        // still drawn with no grabs and no way out but its own toggle. Tear
-        // them down first, exactly as `prepare_for_compositor_disable` does.
-        // Each is guarded by its own flag, so this is a no-op when inactive.
-        if self.features.overview.active {
-            self.features.overview.deactivate();
-            backend.compositor_set_overview_mode(false, &[]);
-            let _ = backend.key_ops().ungrab_keyboard();
-        }
-        if self.features.expose_active {
-            self.apply_expose_action(backend, expose_plan::ExposeAction::Exit { focus: None })?;
-        }
-        if self.features.annotation_active {
-            self.features.annotation_active = false;
-            self.features.annotation_drawing = false;
-            backend.compositor_set_annotation_mode(false);
-            let _ = backend.key_ops().ungrab_keyboard();
-            let _ = backend.input_ops().ungrab_pointer();
-        }
+        // Expose, the tag overview, annotation and the two capture selectors
+        // are not system-UI panels, but each holds its own keyboard/pointer
+        // grab and draws its own overlay. A shell key reaches this common
+        // opener while one of them is up (the expose key branch deliberately
+        // falls through for unhandled keys), and so do the idle lock and IPC,
+        // whatever is on screen. The grab a panel takes below would silently
+        // replace theirs; then `close_system_ui`'s ungrab drops it, leaving
+        // the mode still drawn with no grabs and no way out but its own
+        // toggle. Tear them down first, through the same list the compositor
+        // disable uses.
+        let closed_a_mode = self.close_grab_holding_modes(backend)?;
 
         // Any other panel still on screen at this point means a hand-over: one
         // shell key pressed while another key's panel was up. The keyboard and
@@ -2125,6 +2368,23 @@ impl Jwm {
         // compositor and open a window for the desktop to take the keyboard
         // back mid-swap.
         if self.features.system_ui.is_active() {
+            // Except when a capture selector was up over the panel (entered
+            // over IPC, which no modal state gates): its teardown above
+            // ungrabbed the keyboard, and an X11 grab is not
+            // reference-counted, so the panel's grab went with it. Inheriting
+            // nothing would put the incoming panel — the session lock, say —
+            // on screen with every keystroke still reaching the focused
+            // client. Take the keyboard back first; if it cannot be had, the
+            // outgoing panel has lost it too, so it is closed rather than
+            // left on screen deaf, and the opener fails as it would from an
+            // empty screen.
+            if closed_a_mode
+                && let Some(root) = backend.root_window()
+                && let Err(error) = backend.key_ops().grab_keyboard(root)
+            {
+                self.close_system_ui(backend);
+                return Err(error.into());
+            }
             // The pointer is usually already held (every clickable shell
             // panel grabs Buttons or more). Re-grabbing costs a round-trip
             // and always succeeds for the client that already holds it, so
@@ -2468,13 +2728,14 @@ impl Jwm {
         if self.features.system_ui.monitor_lock_target().is_some() {
             self.close_system_ui(backend);
         }
-        // Another panel is in the way. Reported rather than swallowed: a
-        // caller that believes it locked the session and did not is how a
-        // desk gets left unattended and unlocked, and the idle policy uses
-        // this to try again in a moment.
-        if self.features.system_ui.is_active() {
-            return Err("another system UI panel is open".into());
-        }
+        // Any other panel still up is replaced, not waited out: the launcher,
+        // the hub, a picker or the notification center stays until somebody
+        // acts on it, so an idle lock that refused (and retried) behind one
+        // left an unattended desk unlocked all night. `prepare_system_ui`
+        // hands it over like any shell key would — running its own teardown
+        // (a browsed layout goes back, a pairing is cancelled) and keeping the
+        // keyboard grab and any leased compositor it already holds.
+        //
         // On X11, never display a pretend lock if the exclusive keyboard grab
         // failed. Wayland-udev performs interception in its input pipeline.
         self.prepare_system_ui(backend, "lock screen", SystemUiPointerGrab::Buttons)?;
@@ -2527,6 +2788,33 @@ impl Jwm {
             .is_some_and(|client| client.state.is_fullscreen || client.state.is_pip)
         {
             return Ok(());
+        }
+        // Maximize owns a maximized window's geometry and state atoms: end it
+        // through its transaction first, so the atoms are cleared and the
+        // pre-maximize rect (not the maximized one) becomes the floating rect
+        // a later toggle back restores. A window that maximize promoted out
+        // of the tiling is re-tiled by that same unmaximize; that is the
+        // whole toggle.
+        if self
+            .state
+            .clients
+            .get(sel_client_key)
+            .is_some_and(|client| client.state.is_maximize_realized())
+        {
+            self.set_client_maximized(
+                backend,
+                sel_client_key,
+                MaximizeAxes::NONE,
+                MaximizeOrigin::User,
+            )?;
+            if self
+                .state
+                .clients
+                .get(sel_client_key)
+                .is_some_and(|client| !client.state.is_floating)
+            {
+                return Ok(());
+            }
         }
         let geom = if let Some(client) = self.state.clients.get_mut(sel_client_key) {
             client.state.is_floating = !client.state.is_floating;
@@ -2641,13 +2929,40 @@ impl Jwm {
             self.stop_recording(backend)?;
         }
 
+        self.close_grab_holding_modes(backend)?;
+        Ok(())
+    }
+
+    /// Take down every mode that holds its own keyboard/pointer grab and
+    /// draws its own overlay: the overview prism, expose, annotation, the
+    /// screenshot selector and the recording-region selector.
+    ///
+    /// Shared by the two places that must take the screen from all of them —
+    /// a system UI panel opening and the compositor turning off — so the list
+    /// cannot drift between them again. It did once: panels skipped both
+    /// selectors, so a lock screen the idle timer put over a screenshot
+    /// selection took its grabs, and the unlock handed them back, leaving the
+    /// selector drawn and armed with nothing to finish or cancel it. Each arm
+    /// is guarded by its own flag, so this is a no-op when nothing is up.
+    ///
+    /// Returns whether anything was taken down. Every exit here ungrabs
+    /// input unconditionally, and an X11 grab is not reference-counted, so a
+    /// caller that keeps a grab of its own across this call has to take it
+    /// again when the answer is `true`.
+    fn close_grab_holding_modes(
+        &mut self,
+        backend: &mut dyn Backend,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
+        let mut closed = false;
         if self.features.overview.active {
             self.features.overview.deactivate();
             backend.compositor_set_overview_mode(false, &[]);
             let _ = backend.key_ops().ungrab_keyboard();
+            closed = true;
         }
         if self.features.expose_active {
             self.apply_expose_action(backend, expose_plan::ExposeAction::Exit { focus: None })?;
+            closed = true;
         }
         if self.features.annotation_active {
             self.features.annotation_active = false;
@@ -2655,15 +2970,50 @@ impl Jwm {
             backend.compositor_set_annotation_mode(false);
             let _ = backend.key_ops().ungrab_keyboard();
             let _ = backend.input_ops().ungrab_pointer();
+            closed = true;
         }
         if self.features.screenshot.active {
+            // As the selector's own cancel key does: a capture still parked
+            // for the pointer belongs to the same request.
             self.features.deferred_grab = None;
             self.cancel_screenshot_select(backend);
+            closed = true;
         }
         if self.features.recording.selecting_region {
             self.cancel_recording_region_interaction(backend);
+            closed = true;
         }
-        Ok(())
+        Ok(closed)
+    }
+
+    /// The grab-holding mode already on screen, named for a refusal.
+    ///
+    /// Overview, expose and annotation each take the keyboard (expose and
+    /// annotation the pointer too), and each one's exit hands its grabs back
+    /// unconditionally. Two of them up at once cannot end well: whichever
+    /// exits first ungrabs input the other still needs, leaving it drawn
+    /// with no way to reach its keys. Entering one while another is up is
+    /// reachable — the expose and annotation key branches fall through to
+    /// the global bindings on purpose, and IPC reaches every toggle — so the
+    /// entry paths refuse instead of stacking. Only called on an entry path,
+    /// where the entering mode's own flag is necessarily clear.
+    pub(crate) fn grab_holding_mode_on_screen(&self) -> Option<&'static str> {
+        let features = &self.features;
+        if features.system_ui.is_active() {
+            Some("a system UI panel")
+        } else if features.overview.active {
+            Some("the overview")
+        } else if features.expose_active {
+            Some("expose")
+        } else if features.annotation_active {
+            Some("screen annotation")
+        } else if features.screenshot.active {
+            Some("screenshot selection")
+        } else if features.recording.selecting_region {
+            Some("recording region selection")
+        } else {
+            None
+        }
     }
 
     /// 切换合成器开关
@@ -2839,17 +3189,27 @@ impl Jwm {
         if !self.features.overview.active && !backend.has_compositor() {
             return Err("overview requires an active compositor".into());
         }
+        if !self.features.overview.active
+            && let Some(mode) = self.grab_holding_mode_on_screen()
+        {
+            return Err(format!("overview cannot open while {mode} is active").into());
+        }
         if self.features.overview.active {
-            // End overview: focus selected window and promote it to master
-            if let Some(&client_key) = self
+            // End overview: focus the selected window and move it to the
+            // front of its group (a tile becomes master; a floating window
+            // only moves ahead of the other floating windows, see
+            // `Jwm::move_to_front`).
+            // A selection whose window closed since has nothing to confirm:
+            // the overview just closes, and focus stays where the unmanage
+            // put it rather than on a fallback the user never saw.
+            if let Some(client_key) = self
                 .features
                 .overview
-                .clients
-                .get(self.features.overview.index)
+                .get_selected_client()
+                .filter(|&client_key| self.state.clients.contains_key(client_key))
             {
                 if let Some(mon_key) = self.state.sel_mon {
-                    self.detach(client_key);
-                    self.attach_front(client_key);
+                    self.move_to_front(client_key);
                     self.focus(backend, Some(client_key))?;
                     self.arrange(backend, Some(mon_key));
                 } else {
@@ -2942,6 +3302,10 @@ impl Jwm {
         if !self.features.overview.active || self.features.overview.clients.is_empty() {
             return Ok(());
         }
+        let pruned = self.prune_overview_clients(backend);
+        if !self.features.overview.active {
+            return Ok(());
+        }
 
         let direction = match arg {
             WMArgEnum::Int(d) => *d,
@@ -2960,7 +3324,22 @@ impl Jwm {
         self.features.overview.index = plan.index;
         self.features.overview.slide_offset = plan.slide_offset;
 
-        if let Some((window_start, window_end, selected_in_window)) = plan.refresh_window {
+        // After a prune the prism still holds the old subset, the gone
+        // window's face included, so it is re-sent even when the window did
+        // not slide.
+        let refresh_window = plan.refresh_window.or_else(|| {
+            pruned.then(|| {
+                let len = self.features.overview.clients.len();
+                let end =
+                    (plan.slide_offset + crate::jwm::features::overview_plan::MAX_VISIBLE).min(len);
+                (
+                    plan.slide_offset,
+                    end,
+                    plan.index.saturating_sub(plan.slide_offset),
+                )
+            })
+        });
+        if let Some((window_start, window_end, selected_in_window)) = refresh_window {
             // Window shifted: refresh prism with new 6-client subset.
             let subset: Vec<ClientKey> =
                 self.features.overview.clients[window_start..window_end].to_vec();
@@ -2979,6 +3358,47 @@ impl Jwm {
             backend.compositor_set_overview_selection(client.win);
         }
         Ok(())
+    }
+
+    /// Drop the overview entries whose window has been unmanaged since the
+    /// prism opened. The selection stays on its window when that survived
+    /// and otherwise moves to the one that took its place; the overview
+    /// closes when nothing is left. Returns whether anything was dropped.
+    ///
+    /// Nothing else prunes the list. A stale entry is skipped silently by
+    /// `build_overview_layout`, which shifts every later face one place
+    /// against the positional selection flag, and an index resting on it
+    /// never reaches the compositor's rotation — so Enter confirmed a
+    /// window other than the one the prism was facing.
+    fn prune_overview_clients(&mut self, backend: &mut dyn Backend) -> bool {
+        let alive: Vec<bool> = self
+            .features
+            .overview
+            .clients
+            .iter()
+            .map(|&client_key| self.state.clients.contains_key(client_key))
+            .collect();
+        if alive.iter().all(|&alive| alive) {
+            return false;
+        }
+        let index = overview_index_after_prune(&alive, self.features.overview.index);
+        let clients = &self.state.clients;
+        self.features
+            .overview
+            .clients
+            .retain(|&client_key| clients.contains_key(client_key));
+        let Some(index) = index else {
+            self.features.overview.deactivate();
+            backend.compositor_set_overview_mode(false, &[]);
+            let _ = backend.key_ops().ungrab_keyboard();
+            return true;
+        };
+        self.features.overview.index = index;
+        self.features.overview.slide_offset = crate::jwm::features::overview_plan::window_start(
+            index,
+            self.features.overview.clients.len(),
+        );
+        true
     }
 
     /// 切换放大镜功能
@@ -3032,6 +3452,9 @@ impl Jwm {
         if !backend.has_compositor() {
             return Err("screen annotation requires an active compositor".into());
         }
+        if let Some(mode) = self.grab_holding_mode_on_screen() {
+            return Err(format!("screen annotation cannot start while {mode} is active").into());
+        }
 
         let keyboard_grabbed = if let Some(root) = backend.root_window() {
             backend.key_ops().grab_keyboard(root)?;
@@ -3074,6 +3497,18 @@ impl Jwm {
             if self.features.recording.selecting_region {
                 self.cancel_recording_region_interaction(backend);
                 return Ok(());
+            }
+            // The selector takes the keyboard and the pointer, and IPC
+            // reaches this whatever is on screen. Stacked over a panel or
+            // another mode, whichever exits first ungrabs input the other
+            // still needs — and a panel opening over the selector takes it
+            // down with the keyboard grab. Refused before anything is
+            // probed or created on disk.
+            if let Some(mode) = self.grab_holding_mode_on_screen() {
+                return Err(format!(
+                    "recording region selection cannot start while {mode} is active"
+                )
+                .into());
             }
             if let Err(error) = Self::require_recording_runtime() {
                 self.push_system_toast(
@@ -3119,6 +3554,15 @@ impl Jwm {
     ) -> Result<(), Box<dyn std::error::Error>> {
         if !self.features.recording.active {
             return Err("recording region adjustment requires an active recording".into());
+        }
+        // As for the initial selection in `toggle_recording`. An adjustment
+        // already under way is its own mode, and stays the no-op below.
+        if !self.features.recording.selecting_region
+            && let Some(mode) = self.grab_holding_mode_on_screen()
+        {
+            return Err(
+                format!("recording region adjustment cannot start while {mode} is active").into(),
+            );
         }
         if !self.features.recording.begin_region_adjustment() {
             return Ok(());
@@ -3335,6 +3779,11 @@ impl Jwm {
     }
 
     /// Toggle the built-in microphone recorder (Alt+Ctrl+M by default).
+    ///
+    /// The stop half does not wait for the file: the MIC chip clears at
+    /// once, and the stopped (or failed) toast follows from the frame tick
+    /// when the recorder has finished writing — see
+    /// [`Self::begin_stopping_audio_recording`].
     pub fn toggle_audio_recording(
         &mut self,
         backend: &mut dyn Backend,
@@ -3342,7 +3791,7 @@ impl Jwm {
     ) -> Result<(), Box<dyn std::error::Error>> {
         self.features.audio_recording.refresh();
         if self.features.audio_recording.active {
-            self.stop_audio_recording(backend)?;
+            self.begin_stopping_audio_recording(backend)?;
         } else {
             let behavior = CONFIG.load().behavior().clone();
             let output_dir = if !behavior.audio_recording_output_dir.is_empty() {
@@ -3387,6 +3836,10 @@ impl Jwm {
         backend: &mut dyn Backend,
         output_path: &std::path::Path,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        // Report a previous recording that finished finalizing (or died on
+        // its own) since the last tick before starting over it, so its toast
+        // is not lost and the recorder does not refuse a start it could take.
+        self.poll_audio_recording(backend);
         let behavior = CONFIG.load().behavior().clone();
         let started = if self.features.recording.active && behavior.recording_audio_enabled {
             Err(
@@ -3453,19 +3906,104 @@ impl Jwm {
         Ok(())
     }
 
+    /// Stop the microphone recorder and wait for its file to be finalized.
+    ///
+    /// For the paths that need the file finished before they go on: IPC
+    /// `stop_audio_recording` (its reply confirms finalization), the screen
+    /// recorder's microphone hand-off (the device must be free before ffmpeg
+    /// opens it), and the tick's collection of a recorder that died on its
+    /// own (already returned, so nothing waits). The key toggle stops through
+    /// [`Self::begin_stopping_audio_recording`] instead.
     pub(crate) fn stop_audio_recording(
+        &mut self,
+        backend: &mut dyn Backend,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        // A recording the key already stopped is still this call's to
+        // report: the blocking stop collects its finalization.
+        let was_active =
+            self.features.audio_recording.active || self.features.audio_recording.is_finalizing();
+        let path = self.features.audio_recording.output_path.clone();
+        let stopped = self.features.audio_recording.stop();
+        self.settle_audio_recording_stop(backend, was_active, path, stopped)
+    }
+
+    /// Stop the microphone recorder without waiting for it to finalize.
+    ///
+    /// Joining here blocked the event thread for as long as the recorder took
+    /// to finish its file — a WAV header rewrite and sync, or up to ffmpeg's
+    /// stop grace. The microphone session ends now (the chip clears, and the
+    /// recorder reads inactive to idle and the effect queries); the stopped
+    /// or failed toast and the `audio_recording/stopped` or `/error` event
+    /// follow from [`Self::poll_audio_recording`] once the thread returns.
+    pub(crate) fn begin_stopping_audio_recording(
         &mut self,
         backend: &mut dyn Backend,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let was_active = self.features.audio_recording.active;
         let path = self.features.audio_recording.output_path.clone();
-        let stopped = self.features.audio_recording.stop();
+        let Some(stopped) = self.features.audio_recording.begin_stop() else {
+            backend.compositor_set_mic_indicator(false);
+            info!(
+                "[audio-recording] stopping → {} (finalizing off the event thread)",
+                path.as_deref().unwrap_or("(unset)")
+            );
+            return Ok(());
+        };
+        // Nothing to wait for (a recorder that died on its own, or none):
+        // report it now, exactly as the blocking stop would.
+        self.settle_audio_recording_stop(backend, was_active, path, stopped)
+    }
+
+    /// Collect the microphone recorder's asynchronous outcomes. Runs from the
+    /// frame tick; never blocks.
+    ///
+    /// A recording the key stopped is reported once its file is finalized.
+    /// A recorder that ended on its own — a USB microphone unplugged, ffmpeg
+    /// dying — would otherwise leave the MIC chip, the idle inhibit and
+    /// `has_active_feature` on until somebody pressed the toggle again; it is
+    /// stopped here, which clears the chip and raises the failure toast with
+    /// the recorder's own error. Its thread has already returned, so the
+    /// blocking stop does not wait.
+    pub(crate) fn poll_audio_recording(&mut self, backend: &mut dyn Backend) {
+        if let Some(finalized) = self.features.audio_recording.poll_finalized() {
+            let _ = self.settle_audio_recording_stop(
+                backend,
+                true,
+                finalized.output_path,
+                finalized.outcome,
+            );
+        }
+        if self.features.audio_recording.refresh() {
+            let _ = self.stop_audio_recording(backend);
+        }
+    }
+
+    /// Report a stop whose outcome is known: clear the MIC chip, publish the
+    /// result, and toast it. Every stop path ends here, so the three stop
+    /// flavors cannot drift apart.
+    fn settle_audio_recording_stop(
+        &mut self,
+        backend: &mut dyn Backend,
+        was_active: bool,
+        path: Option<String>,
+        stopped: Result<(), String>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         // The chip answers "is the microphone live right now?", so it clears
         // with the stop request either way: a failed stop means the capture
         // thread could not be joined (it panicked — it is not still
         // recording), and the urgency-2 toast below covers the file.
         backend.compositor_set_mic_indicator(false);
         if let Err(error) = stopped {
+            // Subscribers heard `audio_recording/started`; a session that
+            // ended in a failure must not end silently for them.
+            self.broadcast_ipc_event(
+                "audio_recording/error",
+                serde_json::json!({
+                    "operation": "stop",
+                    "error": error,
+                    "output_path": path,
+                }),
+            );
             // A stop that failed leaves the file unfinalized — say so,
             // through do-not-disturb like any recording failure.
             self.push_system_toast(
@@ -3504,6 +4042,31 @@ impl Jwm {
         Ok(())
     }
 
+    /// A standalone WAV recording and the synchronized screen audio track
+    /// must not race for the same capture device. Finalize the standalone
+    /// file before handing the microphone to a screen recording that
+    /// `captures_audio`.
+    ///
+    /// That includes a recording the key stopped a moment ago: it reads
+    /// inactive at once but still holds the device while it finalizes (up to
+    /// ffmpeg's stop grace), so the screen recorder's ffmpeg would find it
+    /// busy. The blocking stop joins it — bounded by that grace — and reports
+    /// it exactly once, in place of the frame tick.
+    fn free_microphone_for_screen_recording(
+        &mut self,
+        backend: &mut dyn Backend,
+        captures_audio: bool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if captures_audio
+            && (self.features.audio_recording.active
+                || self.features.audio_recording.is_finalizing())
+        {
+            info!("[recording] stopping standalone audio before synchronized capture");
+            self.stop_audio_recording(backend)?;
+        }
+        Ok(())
+    }
+
     /// Start a recording from a source rectangle. The encoded dimensions are
     /// fixed from this initial rectangle while later region updates are scaled
     /// into the same video canvas.
@@ -3534,14 +4097,10 @@ impl Jwm {
         }
         let region = self.normalize_initial_recording_region(region)?;
 
-        // A standalone WAV recording and the synchronized screen audio track
-        // must not race for the same capture device. Finalize the standalone
-        // file before handing the microphone to the screen recorder.
-        if CONFIG.load().behavior().recording_audio_enabled && self.features.audio_recording.active
-        {
-            info!("[recording] stopping standalone audio before synchronized capture");
-            self.stop_audio_recording(backend)?;
-        }
+        self.free_microphone_for_screen_recording(
+            backend,
+            CONFIG.load().behavior().recording_audio_enabled,
+        )?;
 
         self.features.recording.start(output_path.to_string());
         self.features.recording.set_region(region);
@@ -3768,36 +4327,65 @@ impl Jwm {
         if !self.features.expose_active && !backend.has_compositor() {
             return Err("expose requires an active compositor".into());
         }
-        // Collect windows visible on their monitor; eligibility filtering and
-        // the enter/exit decision live in the pure plan. The title rides
-        // along so the compositor can label each thumbnail; the plan
-        // sanitizes it (control characters collapse to spaces, like the
-        // launcher and notification surfaces do).
-        let mut candidates: Vec<expose_plan::ExposeCandidate> = Vec::new();
-        if !self.features.expose_active {
-            for &mon_key in &self.state.monitor_order.clone() {
-                // A locked monitor's windows are behind a shade. Expose
-                // spreads its thumbnails across the whole desktop, so one of
-                // them would put those windows back on a screen that is not
-                // locked — and clicking it could not focus them anyway.
-                if self.monitor_key_is_locked(mon_key) {
-                    continue;
-                }
-                if let Some(clients) = self.state.monitor_clients.get(mon_key) {
-                    for &ck in clients {
-                        if !self.is_client_visible_on_monitor(ck, mon_key) {
-                            continue;
-                        }
-                        if let Some(client) = self.state.clients.get(ck) {
-                            let g = &client.geometry;
-                            candidates.push((client.win, g.x, g.y, g.w, g.h, client.name.clone()));
-                        }
-                    }
-                }
-            }
+        if !self.features.expose_active
+            && let Some(mode) = self.grab_holding_mode_on_screen()
+        {
+            return Err(format!("expose cannot open while {mode} is active").into());
         }
+        // Collect windows visible on their monitor; eligibility filtering and
+        // the enter/exit decision live in the pure plan.
+        let candidates = if self.features.expose_active {
+            Vec::new()
+        } else {
+            self.expose_candidates()
+        };
         let action = expose_plan::plan_toggle(self.features.expose_active, candidates);
         self.apply_expose_action(backend, action)
+    }
+
+    /// The windows expose lays out as thumbnails, in entry order: every
+    /// managed window visible on an unlocked monitor, minus the shell chrome.
+    /// The title rides along so the compositor can label each thumbnail; the
+    /// plan sanitizes it (control characters collapse to spaces, like the
+    /// launcher and notification surfaces do).
+    ///
+    /// The close paths (Delete, middle-click) recompute the grid from this
+    /// same collection. It has to be the one `toggle_expose` entered with: a
+    /// close only ever removes entries, so the rebuilt grid keeps every
+    /// survivor exactly where the list had it — a second copy that forgot a
+    /// filter would slip a bar or a locked monitor's window into the grid.
+    pub(crate) fn expose_candidates(&self) -> Vec<expose_plan::ExposeCandidate> {
+        let mut candidates = Vec::new();
+        for &mon_key in &self.state.monitor_order {
+            // A locked monitor's windows are behind a shade. Expose spreads
+            // its thumbnails across the whole desktop, so one of them would
+            // put those windows back on a screen that is not locked — and
+            // clicking it could not focus them anyway.
+            if self.monitor_key_is_locked(mon_key) {
+                continue;
+            }
+            let Some(clients) = self.state.monitor_clients.get(mon_key) else {
+                continue;
+            };
+            for &ck in clients {
+                if !self.is_client_visible_on_monitor(ck, mon_key) {
+                    continue;
+                }
+                let Some(client) = self.state.clients.get(ck) else {
+                    continue;
+                };
+                // A managed bar (polybar, tint2) or desktop window is shell
+                // chrome, not workspace content — the tags overview and the
+                // switcher leave it out too — and clicking its thumbnail
+                // would focus the bar.
+                if client.state.is_dock || client.state.is_desktop {
+                    continue;
+                }
+                let g = &client.geometry;
+                candidates.push((client.win, g.x, g.y, g.w, g.h, client.name.clone()));
+            }
+        }
+        candidates
     }
 
     /// 执行 expose 计划：进入时排布窗口并抓取输入，退出时统一走同一段
@@ -4479,6 +5067,26 @@ mod shell_entry_tests {
             .unwrap()
             .0;
         assert!(!open_paths.contains("AudioDefaults::read()"));
+
+        // The wallpaper picker used to readdir its whole directory on the
+        // event loop; both the directory resolution (stats) and the listing
+        // must stay inside the worker closure.
+        let picker = SOURCE
+            .split_once("fn wallpaper_picker_state")
+            .unwrap()
+            .1
+            .split_once("pub(crate) fn poll_wallpaper_listing_job")
+            .unwrap()
+            .0;
+        let spawn = picker
+            .find("BackgroundJob::spawn(move ||")
+            .expect("the wallpaper listing no longer runs on a worker");
+        for call in ["list_wallpapers(", "resolve_directory("] {
+            let at = picker
+                .find(call)
+                .unwrap_or_else(|| panic!("the picker no longer calls {call}"));
+            assert!(at > spawn, "{call} runs on the event loop again");
+        }
     }
 
     /// Theme apply must mirror wallpaper's in-memory path, then surgically
@@ -4510,6 +5118,16 @@ mod shell_entry_tests {
         assert!(
             !apply.contains("save_to_file"),
             "apply_selected_theme must not wholesale-save the config"
+        );
+        // An edit saved just before the theme write must be observed before
+        // JWM's own write is settled, or it is swallowed.
+        let observe = apply
+            .find(&format!("self.{}(", "observe_config_reload"))
+            .expect("apply_selected_theme no longer stats the config before writing it");
+        let persist = apply.find("persist_ui_theme").expect("the theme write");
+        assert!(
+            observe < persist,
+            "the pre-save check must run before the theme is written"
         );
         assert!(
             SOURCE.contains("ShellHubRoute::Theme => Self::theme_picker_state()"),
@@ -4589,6 +5207,18 @@ mod shell_entry_tests {
                 "the feedback poll regained a blocking tool call: {needle}"
             );
         }
+        // The power-profile report is adopted by value too.
+        for primitive in ["set_profile", "profiles"] {
+            let needle = format!("power::{primitive}(");
+            assert!(
+                !poll.contains(&needle),
+                "the feedback poll regained a blocking tool call: {needle}"
+            );
+        }
+        assert!(
+            poll.contains(&format!("self.{}(", "adopt_power_profile_report")),
+            "the feedback poll no longer adopts the power-profile report"
+        );
     }
 
     /// The control-center Input row reads the mic flag now, so a read-back
@@ -4910,11 +5540,46 @@ mod shell_entry_tests {
             toggle.contains(&start_call),
             "the toggle no longer starts through the toasting path ({start_call})"
         );
-        let stop_call = format!("self.{}(backend)?", "stop_audio_recording");
+        // The key stops without joining the recorder: the toast comes from
+        // the settle path once the file is finalized.
+        let key_stop_call = format!("self.{}(backend)?", "begin_stopping_audio_recording");
         assert!(
-            toggle.contains(&stop_call),
-            "the toggle no longer stops through the toasting path ({stop_call})"
+            toggle.contains(&key_stop_call),
+            "the toggle no longer stops through the non-blocking path ({key_stop_call})"
         );
+        let settle = format!("self.{}(", "settle_audio_recording_stop");
+        for (name, body) in [
+            (
+                "blocking stop",
+                stop.split_once("pub(crate) fn begin_stopping_audio_recording")
+                    .expect("begin_stopping_audio_recording")
+                    .0,
+            ),
+            (
+                "key stop",
+                stop.split_once("pub(crate) fn begin_stopping_audio_recording")
+                    .expect("begin_stopping_audio_recording")
+                    .1
+                    .split_once("pub(crate) fn poll_audio_recording")
+                    .expect("poll_audio_recording")
+                    .0,
+            ),
+            (
+                "finalization poll",
+                stop.split_once("pub(crate) fn poll_audio_recording")
+                    .expect("poll_audio_recording")
+                    .1
+                    .split_once("fn settle_audio_recording_stop")
+                    .expect("settle_audio_recording_stop")
+                    .0,
+            ),
+        ] {
+            assert!(
+                body.contains(&settle),
+                "the {name} no longer reports through the shared settle path ({settle})"
+            );
+        }
+        let stop_call = format!("self.{}(backend)?", "stop_audio_recording");
         let handoff = shipped
             .split_once("stopping standalone audio before synchronized capture")
             .expect("the screen recorder's microphone handoff")
@@ -4925,6 +5590,33 @@ mod shell_entry_tests {
         assert!(
             handoff.contains(&stop_call),
             "the synchronized-capture handoff no longer stops through the toasting path ({stop_call})"
+        );
+        // A recording the key stopped reads inactive while it still holds
+        // the device; the handoff waits for it too.
+        let handoff_gate = shipped
+            .split_once("fn free_microphone_for_screen_recording")
+            .expect("the microphone handoff helper")
+            .1
+            .split_once("stopping standalone audio before synchronized capture")
+            .expect("the handoff gate")
+            .0;
+        let finalizing = format!("audio_recording.{}()", "is_finalizing");
+        assert!(
+            handoff_gate.contains(&finalizing),
+            "the synchronized-capture handoff skips a recorder that is still finalizing"
+        );
+        // And the screen recorder goes through it before it starts.
+        let screen_start = shipped
+            .split_once("pub(crate) fn start_recording_region")
+            .expect("start_recording_region")
+            .1
+            .split_once("self.features.recording.start(")
+            .expect("the screen recording start")
+            .0;
+        let handoff_call = format!("self.{}(", "free_microphone_for_screen_recording");
+        assert!(
+            screen_start.contains(&handoff_call),
+            "start_recording_region no longer frees the microphone first ({handoff_call})"
         );
     }
 
@@ -4971,14 +5663,39 @@ mod shell_entry_tests {
             !start.contains(&chip_off),
             "start must never clear the chip it just parked"
         );
-        assert_eq!(
-            stop.matches(&chip_off).count(),
-            1,
-            "stop must clear the MIC chip exactly once"
-        );
         assert!(
             !stop.contains(&chip_on),
             "stop must never park the chip it is tearing down"
+        );
+        // Two clear points: the shared settle every stop outcome goes
+        // through, and the key stop's finalizing branch — the microphone is
+        // released the moment the key asks, not when the file is done.
+        let settle = stop
+            .split_once("fn settle_audio_recording_stop")
+            .expect("settle_audio_recording_stop")
+            .1;
+        assert_eq!(
+            settle.matches(&chip_off).count(),
+            1,
+            "the settle path must clear the MIC chip exactly once"
+        );
+        let key_stop = stop
+            .split_once("pub(crate) fn begin_stopping_audio_recording")
+            .expect("begin_stopping_audio_recording")
+            .1
+            .split_once("pub(crate) fn poll_audio_recording")
+            .expect("poll_audio_recording")
+            .0;
+        let finalizing = key_stop
+            .split_once("begin_stop() else {")
+            .expect("the finalizing branch")
+            .1
+            .split_once("return Ok(());")
+            .expect("the end of the finalizing branch")
+            .0;
+        assert!(
+            finalizing.contains(&chip_off),
+            "the key stop must clear the MIC chip before the file is finalized"
         );
 
         // The chip goes on only past the failure early-return: a start that
@@ -4996,8 +5713,8 @@ mod shell_entry_tests {
         // The chip clears before either stop exit (the failure toast or the
         // success path) — a joined or panicked capture thread is not a live
         // microphone, so no path may leave the cue behind.
-        let chip = stop.find(&chip_off).expect("the chip call");
-        let first_toast = stop
+        let chip = settle.find(&chip_off).expect("the chip call");
+        let first_toast = settle
             .find(&format!("self.{}(", "push_system_toast"))
             .expect("a stop toast");
         assert!(
@@ -5016,5 +5733,730 @@ mod shell_entry_tests {
             !screen.contains(&format!("compositor_{}", "set_mic_indicator")),
             "screen recording keeps only the compositor-derived REC chip"
         );
+    }
+}
+
+#[cfg(test)]
+mod modal_grab_tests {
+    use super::{
+        WALLPAPER_SCAN_REFUSED, WALLPAPER_SCANNING, overview_index_after_prune,
+        set_wallpaper_picker_message,
+    };
+    use crate::backend::common_define::WindowId;
+    use crate::core::models::{ClientKey, WMClient};
+    use crate::jwm::Jwm;
+    use crate::jwm::features::SystemUiState;
+    use crate::jwm::features::connectivity::BackgroundJob;
+    use crate::jwm::features::monitor_lock::test_support::{LockSpyBackend, jwm_on_two_monitors};
+    use crate::jwm::types::WMArgEnum;
+    use std::path::PathBuf;
+
+    const NO_ARG: WMArgEnum = WMArgEnum::Int(0);
+
+    /// A tiled 800x600 window on the first tag of monitor 0, in its client
+    /// list and focus stack the way a managed window is, so overview and
+    /// expose both find it.
+    fn window(jwm: &mut Jwm, raw: u64) -> ClientKey {
+        let monitor = jwm.state.monitor_order[0];
+        let mut client = WMClient::new(WindowId::from_raw(raw));
+        client.mon = Some(monitor);
+        client.state.tags = 1;
+        client.geometry.w = 800;
+        client.geometry.h = 600;
+        let client_key = jwm.insert_client(client);
+        jwm.attach_to_monitor(client_key, monitor);
+        client_key
+    }
+
+    /// The idle lock used to refuse (and retry every few seconds, forever)
+    /// while any panel was up, and a launcher or notification center stays
+    /// up until somebody acts on it: the unattended desk never locked. The
+    /// lock takes the screen instead, inheriting the panel's compositor
+    /// lease, which its own unlock then hands back.
+    #[test]
+    fn an_open_panel_does_not_keep_the_session_from_locking() {
+        let mut backend = LockSpyBackend::new();
+        let mut jwm = jwm_on_two_monitors(&mut backend);
+        backend.compositor_enabled = false;
+        jwm.notification_center(&mut backend, &NO_ARG)
+            .expect("the notification center opens");
+        assert!(jwm.features.system_ui.is_notification_center());
+        assert!(jwm.features.system_ui_temporary_compositor);
+
+        jwm.lock_screen(&mut backend, &NO_ARG)
+            .expect("the lock takes the screen from the panel");
+
+        assert!(jwm.features.system_ui.is_session_lock());
+        assert!(backend.compositor_enabled, "the lease carried over");
+        jwm.close_system_ui(&mut backend);
+        assert!(
+            !backend.compositor_enabled,
+            "the unlock returns the panel's lease"
+        );
+        assert!(!jwm.features.system_ui_temporary_compositor);
+    }
+
+    /// A panel took the selector's grabs and `close_system_ui` handed them
+    /// back, leaving the selector drawn and armed with no grab to finish or
+    /// cancel it. Opening the panel takes each selector down first.
+    #[test]
+    fn a_lock_over_a_capture_selector_takes_the_selector_down() {
+        let mut backend = LockSpyBackend::new();
+        let mut jwm = jwm_on_two_monitors(&mut backend);
+        jwm.features.screenshot.start();
+
+        jwm.lock_screen(&mut backend, &NO_ARG)
+            .expect("the idle lock opens over the screenshot selector");
+
+        assert!(jwm.features.system_ui.is_session_lock());
+        assert!(!jwm.features.screenshot.active, "the selector is gone");
+
+        let mut backend = LockSpyBackend::new();
+        let mut jwm = jwm_on_two_monitors(&mut backend);
+        jwm.features
+            .recording
+            .begin_initial_region_selection("recording.mp4".to_owned());
+
+        jwm.lock_screen(&mut backend, &NO_ARG)
+            .expect("the idle lock opens over the region selector");
+
+        assert!(jwm.features.system_ui.is_session_lock());
+        assert!(
+            !jwm.features.recording.selecting_region,
+            "the region selector is gone"
+        );
+        assert_eq!(jwm.features.recording.pending_output_path, None);
+    }
+
+    /// The expose and annotation key branches fall through to the global
+    /// bindings, so another mode's key reaches its toggle mid-mode. Stacked,
+    /// the first mode's exit ungrabbed input the second still needed; entry
+    /// is refused instead, while each mode's own key still takes it down.
+    #[test]
+    fn overview_expose_and_annotation_refuse_to_stack() {
+        let mut backend = LockSpyBackend::new();
+        let mut jwm = jwm_on_two_monitors(&mut backend);
+        window(&mut jwm, 0x901);
+        window(&mut jwm, 0x902);
+
+        jwm.toggle_expose(&mut backend, &NO_ARG)
+            .expect("expose opens");
+        assert!(jwm.features.expose_active);
+        assert!(jwm.toggle_overview(&mut backend, &NO_ARG).is_err());
+        assert!(!jwm.features.overview.active);
+        assert!(backend.overview_modes.is_empty(), "no prism over the grid");
+        assert!(jwm.toggle_annotation(&mut backend, &NO_ARG).is_err());
+        assert!(!jwm.features.annotation_active);
+        jwm.toggle_expose(&mut backend, &NO_ARG)
+            .expect("expose's own key closes it");
+        assert!(!jwm.features.expose_active);
+
+        jwm.toggle_annotation(&mut backend, &NO_ARG)
+            .expect("annotation starts");
+        assert!(jwm.toggle_expose(&mut backend, &NO_ARG).is_err());
+        assert!(!jwm.features.expose_active);
+        assert_eq!(backend.expose_modes, vec![true, false]);
+        jwm.toggle_annotation(&mut backend, &NO_ARG)
+            .expect("annotation's own key ends it");
+        assert!(!jwm.features.annotation_active);
+
+        jwm.toggle_overview(&mut backend, &NO_ARG)
+            .expect("the overview opens");
+        assert!(jwm.toggle_expose(&mut backend, &NO_ARG).is_err());
+        assert!(jwm.toggle_annotation(&mut backend, &NO_ARG).is_err());
+        assert!(!jwm.features.expose_active && !jwm.features.annotation_active);
+        assert!(jwm.features.overview.active);
+    }
+
+    /// Nothing pruned the overview's list when a window closed under it. The
+    /// cycle then rested the selection on the dead entry — which never
+    /// reaches the compositor's rotation — and Enter confirmed a window the
+    /// prism was not facing.
+    #[test]
+    fn a_window_closed_under_the_overview_leaves_no_stale_entry() {
+        let mut backend = LockSpyBackend::new();
+        let mut jwm = jwm_on_two_monitors(&mut backend);
+        let a = window(&mut jwm, 0x911);
+        let b = window(&mut jwm, 0x912);
+        let c = window(&mut jwm, 0x913);
+        let d = window(&mut jwm, 0x914);
+        jwm.toggle_overview(&mut backend, &NO_ARG)
+            .expect("the overview opens");
+        assert_eq!(jwm.features.overview.clients, vec![a, b, c, d]);
+        // Nothing is focused yet, so the prism opens on the first window.
+        assert_eq!(jwm.features.overview.get_selected_client(), Some(a));
+
+        jwm.unmanage(&mut backend, Some(c), true)
+            .expect("the window closes");
+        jwm.cycle_overview(&mut backend, &WMArgEnum::Int(1))
+            .expect("the first cycle");
+        assert_eq!(jwm.features.overview.clients, vec![a, b, d]);
+        assert_eq!(
+            backend.overview_modes,
+            vec![true, true],
+            "the prism is re-sent without the closed window's face"
+        );
+        assert_eq!(jwm.features.overview.get_selected_client(), Some(b));
+        jwm.cycle_overview(&mut backend, &WMArgEnum::Int(1))
+            .expect("the second cycle");
+        assert_eq!(
+            jwm.features.overview.get_selected_client(),
+            Some(d),
+            "the step after b is d, not the closed c"
+        );
+
+        jwm.toggle_overview(&mut backend, &NO_ARG)
+            .expect("Enter confirms");
+        assert!(!jwm.features.overview.active);
+        assert_eq!(jwm.get_selected_client_key(), Some(d));
+    }
+
+    /// Regression: the overview confirm moved the chosen window to the front
+    /// by detaching it and reinserting it at index 0. The overview lists
+    /// maximized windows too, and a promoted one stays listed, yet the
+    /// detach handed its anchor on to the window resting in front of it:
+    /// both named the same tile, and returning `b` first left the old
+    /// master `a` second. A floating pick now moves only to the front of
+    /// the floating windows.
+    #[test]
+    fn confirming_a_promoted_window_in_the_overview_keeps_neighbours_in_order() {
+        use crate::core::layout::LayoutEnum;
+        use std::rc::Rc;
+
+        fn toggle_maximize_of(jwm: &mut Jwm, backend: &mut LockSpyBackend, key: ClientKey) {
+            let monitor = jwm.state.monitor_order[0];
+            jwm.state.monitors[monitor].set_selected_client_for_current_tag(Some(key));
+            jwm.togglemaximize(backend, &NO_ARG)
+                .expect("togglemaximize");
+        }
+
+        for return_first in [0, 1] {
+            let mut backend = LockSpyBackend::new();
+            let mut jwm = jwm_on_two_monitors(&mut backend);
+            let monitor = jwm.state.monitor_order[0];
+            jwm.state.monitors[monitor].lt = Rc::new(LayoutEnum::TILE);
+            let [a, b, c] = [0x931, 0x932, 0x933].map(|raw| window(&mut jwm, raw));
+            jwm.arrange(&mut backend, Some(monitor));
+            toggle_maximize_of(&mut jwm, &mut backend, b);
+            toggle_maximize_of(&mut jwm, &mut backend, a);
+            assert_eq!(jwm.state.monitor_clients[monitor], vec![c, b, a]);
+
+            jwm.state.monitors[monitor].set_selected_client_for_current_tag(Some(b));
+            jwm.toggle_overview(&mut backend, &NO_ARG)
+                .expect("the overview opens");
+            assert_eq!(jwm.features.overview.get_selected_client(), Some(b));
+            jwm.toggle_overview(&mut backend, &NO_ARG)
+                .expect("Enter confirms");
+            // A floating (promoted) pick moves to the front of the floating
+            // windows, never ahead of the tiles.
+            assert_eq!(jwm.state.monitor_clients[monitor], vec![c, b, a]);
+
+            let order = if return_first == 0 { [a, b] } else { [b, a] };
+            for key in order {
+                toggle_maximize_of(&mut jwm, &mut backend, key);
+            }
+            assert_eq!(
+                jwm.state.monitor_clients[monitor],
+                vec![a, b, c],
+                "back first: {return_first}"
+            );
+        }
+    }
+
+    /// A managed polybar or tint2 got an expose thumbnail, and clicking it
+    /// focused the bar. Shell chrome stays out, as it does in the tags
+    /// overview and the switcher.
+    #[test]
+    fn expose_leaves_the_shell_chrome_out() {
+        let mut backend = LockSpyBackend::new();
+        let mut jwm = jwm_on_two_monitors(&mut backend);
+        window(&mut jwm, 0x921);
+        let bar = window(&mut jwm, 0x922);
+        let desktop = window(&mut jwm, 0x923);
+        jwm.state.clients[bar].state.is_dock = true;
+        jwm.state.clients[desktop].state.is_desktop = true;
+
+        let windows: Vec<WindowId> = jwm
+            .expose_candidates()
+            .into_iter()
+            .map(|candidate| candidate.0)
+            .collect();
+
+        assert_eq!(windows, vec![WindowId::from_raw(0x921)]);
+    }
+
+    fn wallpaper_picker_message(state: &SystemUiState) -> Option<&str> {
+        match state {
+            SystemUiState::ListPanel { message, .. } if state.is_wallpaper_picker() => {
+                Some(message.as_str())
+            }
+            _ => None,
+        }
+    }
+
+    fn scanning_wallpaper_picker() -> SystemUiState {
+        let mut state = SystemUiState::wallpaper_picker(&[], "", "");
+        set_wallpaper_picker_message(&mut state, WALLPAPER_SCANNING);
+        state
+    }
+
+    /// Spin (never sleep) until the frame-tick poll has taken the listing.
+    fn poll_until_listing_taken(jwm: &mut Jwm) {
+        while jwm.features.wallpaper_listing.is_some() {
+            jwm.poll_wallpaper_listing_job();
+            std::thread::yield_now();
+        }
+    }
+
+    #[test]
+    fn the_wallpaper_listing_fills_the_picker_that_is_still_open() {
+        let mut backend = LockSpyBackend::new();
+        let mut jwm = jwm_on_two_monitors(&mut backend);
+        jwm.features.system_ui = scanning_wallpaper_picker();
+        assert_eq!(
+            wallpaper_picker_message(&jwm.features.system_ui),
+            Some(WALLPAPER_SCANNING)
+        );
+        jwm.features.wallpaper_listing = Some(BackgroundJob::spawn(|| {
+            (
+                PathBuf::from("/walls"),
+                vec![PathBuf::from("/walls/a.png"), PathBuf::from("/walls/b.jpg")],
+            )
+        }));
+        jwm.system_ui_dirty = false;
+
+        poll_until_listing_taken(&mut jwm);
+
+        assert!(jwm.features.system_ui.is_wallpaper_picker());
+        assert_eq!(wallpaper_picker_message(&jwm.features.system_ui), Some(""));
+        assert!(
+            jwm.features.system_ui.selected_wallpaper().is_some(),
+            "the rows arrived"
+        );
+        assert!(
+            jwm.system_ui_dirty,
+            "the frame tick pushes the filled picker"
+        );
+    }
+
+    #[test]
+    fn a_listing_for_a_closed_picker_is_dropped() {
+        let mut backend = LockSpyBackend::new();
+        let mut jwm = jwm_on_two_monitors(&mut backend);
+        jwm.features.wallpaper_listing = Some(BackgroundJob::spawn(|| {
+            (PathBuf::from("/walls"), vec![PathBuf::from("/walls/a.png")])
+        }));
+
+        poll_until_listing_taken(&mut jwm);
+
+        assert!(
+            !jwm.features.system_ui.is_active(),
+            "a late listing must not reopen the picker"
+        );
+    }
+
+    #[test]
+    fn a_refused_wallpaper_scan_says_so_instead_of_scanning_forever() {
+        let mut backend = LockSpyBackend::new();
+        let mut jwm = jwm_on_two_monitors(&mut backend);
+        jwm.features.system_ui = scanning_wallpaper_picker();
+        jwm.features.wallpaper_listing = Some(BackgroundJob::refused());
+
+        jwm.poll_wallpaper_listing_job();
+
+        assert!(jwm.features.wallpaper_listing.is_none());
+        assert_eq!(
+            wallpaper_picker_message(&jwm.features.system_ui),
+            Some(WALLPAPER_SCAN_REFUSED)
+        );
+    }
+
+    #[test]
+    fn a_pruned_selection_stays_on_its_window_or_takes_the_next() {
+        let alive = [true, true, false, true];
+        assert_eq!(overview_index_after_prune(&alive, 1), Some(1));
+        assert_eq!(overview_index_after_prune(&alive, 3), Some(2));
+        // The dead entry's place goes to the survivor after it.
+        assert_eq!(overview_index_after_prune(&alive, 2), Some(2));
+        // At the end, the last survivor.
+        assert_eq!(overview_index_after_prune(&[true, true, false], 2), Some(1));
+        assert_eq!(overview_index_after_prune(&[false, false], 0), None);
+        assert_eq!(overview_index_after_prune(&[], 0), None);
+    }
+}
+
+#[cfg(test)]
+mod keyboard_grab_tests {
+    use crate::backend::api::{
+        Backend, BackendDiagnostics, Capabilities, ColorAllocator, CompositorAnnotation,
+        CompositorBenchmark, CompositorControl, CompositorMedia, CompositorWindowEffects,
+        CompositorWorkspaceEffects, CursorProvider, DisplayControl, EventHandler, InputOps, KeyOps,
+        OutputOps, PropertyOps, RenderScheduler, ToastNotification, WindowOps,
+    };
+    use crate::backend::common_define::{KeySym, Mods, WindowId};
+    use crate::backend::error::BackendError;
+    use crate::backend::wayland_dummy_ops::{
+        DummyColorAllocator, DummyCursorProvider, DummyInputOps, DummyOutputOps, DummyPropertyOps,
+        DummyWindowOps,
+    };
+    use crate::core::types::Rect;
+    use crate::jwm::Jwm;
+    use crate::jwm::features::audio_recording::AudioRecordingState;
+    use crate::jwm::types::WMArgEnum;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    const NO_ARG: WMArgEnum = WMArgEnum::Int(0);
+
+    /// Keyboard grab *state*, the way X11 keeps it: one grab per client, not
+    /// a count, so any ungrab drops it whoever took it.
+    #[derive(Default)]
+    struct KeyboardGrabKeyOps {
+        held: AtomicBool,
+        /// Refuse the next grabs, as X11 does when another client holds the
+        /// keyboard.
+        refuse: AtomicBool,
+    }
+
+    impl KeyOps for KeyboardGrabKeyOps {
+        fn grab_keys(
+            &self,
+            _root: WindowId,
+            _bindings: &[(Mods, KeySym)],
+        ) -> Result<(), BackendError> {
+            Ok(())
+        }
+
+        fn clear_key_grabs(&self, _root: WindowId) -> Result<(), BackendError> {
+            Ok(())
+        }
+
+        fn grab_keyboard(&self, _root: WindowId) -> Result<(), BackendError> {
+            if self.refuse.load(Ordering::Relaxed) {
+                return Err(BackendError::Message(
+                    "keyboard grab refused: AlreadyGrabbed".into(),
+                ));
+            }
+            self.held.store(true, Ordering::Relaxed);
+            Ok(())
+        }
+
+        fn ungrab_keyboard(&self) -> Result<(), BackendError> {
+            self.held.store(false, Ordering::Relaxed);
+            Ok(())
+        }
+
+        fn clean_mods(&self, _raw_state: u16) -> Mods {
+            Mods::empty()
+        }
+
+        fn keysym_from_keycode(&mut self, keycode: u8) -> Result<KeySym, BackendError> {
+            Ok(u32::from(keycode))
+        }
+
+        fn clear_cache(&mut self) {}
+    }
+
+    struct GrabSpyBackend {
+        window_ops: DummyWindowOps,
+        input_ops: DummyInputOps,
+        property_ops: DummyPropertyOps,
+        output_ops: DummyOutputOps,
+        key_ops: KeyboardGrabKeyOps,
+        cursor_provider: DummyCursorProvider,
+        color_allocator: DummyColorAllocator,
+        /// Every toast pushed past the do-not-disturb gate, in order.
+        toasts: Vec<ToastNotification>,
+    }
+
+    impl GrabSpyBackend {
+        fn new() -> Self {
+            Self {
+                window_ops: DummyWindowOps,
+                input_ops: DummyInputOps,
+                property_ops: DummyPropertyOps,
+                output_ops: DummyOutputOps,
+                key_ops: KeyboardGrabKeyOps::default(),
+                cursor_provider: DummyCursorProvider,
+                color_allocator: DummyColorAllocator,
+                toasts: Vec::new(),
+            }
+        }
+
+        fn keyboard_held(&self) -> bool {
+            self.key_ops.held.load(Ordering::Relaxed)
+        }
+
+        fn toast_titles(&self) -> Vec<&str> {
+            self.toasts
+                .iter()
+                .map(|toast| toast.title.as_str())
+                .collect()
+        }
+    }
+
+    impl CompositorBenchmark for GrabSpyBackend {}
+    impl BackendDiagnostics for GrabSpyBackend {}
+    impl CompositorControl for GrabSpyBackend {}
+    impl CompositorMedia for GrabSpyBackend {}
+    impl CompositorWorkspaceEffects for GrabSpyBackend {
+        fn compositor_push_toast(&mut self, toast: ToastNotification) {
+            self.toasts.push(toast);
+        }
+    }
+    impl CompositorWindowEffects for GrabSpyBackend {}
+    impl CompositorAnnotation for GrabSpyBackend {}
+    impl DisplayControl for GrabSpyBackend {}
+    impl RenderScheduler for GrabSpyBackend {
+        fn has_compositor(&self) -> bool {
+            true
+        }
+    }
+
+    impl Backend for GrabSpyBackend {
+        fn capabilities(&self) -> Capabilities {
+            Capabilities::default()
+        }
+
+        fn root_window(&self) -> Option<WindowId> {
+            Some(WindowId::from_raw(0))
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+
+        fn check_existing_wm(&self) -> Result<(), BackendError> {
+            Ok(())
+        }
+
+        fn window_ops(&self) -> &dyn WindowOps {
+            &self.window_ops
+        }
+
+        fn input_ops(&self) -> &dyn InputOps {
+            &self.input_ops
+        }
+
+        fn property_ops(&self) -> &dyn PropertyOps {
+            &self.property_ops
+        }
+
+        fn output_ops(&self) -> &dyn OutputOps {
+            &self.output_ops
+        }
+
+        fn key_ops(&self) -> &dyn KeyOps {
+            &self.key_ops
+        }
+
+        fn key_ops_mut(&mut self) -> &mut dyn KeyOps {
+            &mut self.key_ops
+        }
+
+        fn cursor_provider(&mut self) -> &mut dyn CursorProvider {
+            &mut self.cursor_provider
+        }
+
+        fn color_allocator(&mut self) -> &mut dyn ColorAllocator {
+            &mut self.color_allocator
+        }
+
+        fn run(&mut self, _handler: &mut dyn EventHandler) -> Result<(), BackendError> {
+            Ok(())
+        }
+    }
+
+    fn jwm(backend: &mut GrabSpyBackend) -> Jwm {
+        Jwm::new_with_runtime_backend(backend, "test").expect("test jwm")
+    }
+
+    /// A capture selector started over IPC while a panel was up, then the
+    /// idle lock. Taking the selector down ungrabbed the keyboard — X11 keeps
+    /// one grab, not a count — and the hand-over re-took only the pointer,
+    /// so the session lock went up with every keystroke reaching the focused
+    /// client behind it.
+    #[test]
+    fn a_lock_over_a_selector_stacked_on_a_panel_keeps_the_keyboard() {
+        for selector in ["screenshot", "recording region"] {
+            let mut backend = GrabSpyBackend::new();
+            let mut jwm = jwm(&mut backend);
+            jwm.notification_center(&mut backend, &NO_ARG)
+                .expect("the notification center opens");
+            assert!(backend.keyboard_held());
+            // What `take_screenshot` / `toggle_recording` over IPC leave
+            // behind: the selector armed on top of the panel, sharing the
+            // one keyboard grab.
+            match selector {
+                "screenshot" => jwm.features.screenshot.start(),
+                _ => jwm
+                    .features
+                    .recording
+                    .begin_initial_region_selection("recording.mp4".to_owned()),
+            }
+
+            jwm.lock_screen(&mut backend, &NO_ARG)
+                .expect("the lock takes the screen");
+
+            assert!(jwm.features.system_ui.is_session_lock(), "{selector}");
+            assert!(!jwm.features.screenshot.active, "{selector}");
+            assert!(!jwm.features.recording.selecting_region, "{selector}");
+            assert!(
+                backend.keyboard_held(),
+                "the lock over a {selector} selector must hold the keyboard"
+            );
+        }
+    }
+
+    /// The same hand-over when the keyboard cannot be taken back: the panel
+    /// that lost it is not left on screen deaf, and no lock is drawn.
+    #[test]
+    fn a_hand_over_that_cannot_retake_the_keyboard_fails_with_nothing_on_screen() {
+        let mut backend = GrabSpyBackend::new();
+        let mut jwm = jwm(&mut backend);
+        jwm.notification_center(&mut backend, &NO_ARG)
+            .expect("the notification center opens");
+        jwm.features.screenshot.start();
+        backend.key_ops.refuse.store(true, Ordering::Relaxed);
+
+        assert!(jwm.lock_screen(&mut backend, &NO_ARG).is_err());
+
+        assert!(!jwm.features.system_ui.is_active());
+        assert!(!jwm.features.system_ui.is_locked());
+        assert!(!jwm.features.screenshot.active);
+        assert!(!backend.keyboard_held());
+    }
+
+    /// The recording selectors take the keyboard and the pointer like the
+    /// modes that already refuse to stack; IPC reaches them over any panel.
+    #[test]
+    fn recording_selectors_refuse_to_start_over_a_panel() {
+        let mut backend = GrabSpyBackend::new();
+        let mut jwm = jwm(&mut backend);
+        jwm.notification_center(&mut backend, &NO_ARG)
+            .expect("the notification center opens");
+
+        let error = jwm
+            .toggle_recording(&mut backend, &NO_ARG)
+            .expect_err("no region selection over the panel");
+        assert!(error.to_string().contains("a system UI panel"), "{error}");
+        assert!(!jwm.features.recording.selecting_region);
+        assert_eq!(jwm.features.recording.pending_output_path, None);
+
+        // A recording already running: its region adjustment is refused the
+        // same way, and leaves the recording as it was.
+        let region = Rect::new(100, 100, 640, 480);
+        jwm.features.recording.start("recording.mp4".to_owned());
+        jwm.features.recording.set_region(region);
+        assert!(jwm.adjust_recording_region(&mut backend, &NO_ARG).is_err());
+        assert!(!jwm.features.recording.selecting_region);
+        assert!(!jwm.features.recording.adjusting_region);
+        assert_eq!(jwm.features.recording.region, Some(region));
+        assert!(jwm.features.system_ui.is_notification_center());
+        assert!(backend.keyboard_held(), "the panel keeps its keyboard");
+
+        // With the panel gone the adjustment starts.
+        jwm.close_system_ui(&mut backend);
+        jwm.adjust_recording_region(&mut backend, &NO_ARG)
+            .expect("the adjustment starts over an empty screen");
+        assert!(jwm.features.recording.adjusting_region);
+    }
+
+    /// The key stops the microphone without waiting for its file, so the
+    /// recorder reads inactive while it still holds the device. The screen
+    /// recorder's hand-off keyed on "active" alone skipped it, and its
+    /// ffmpeg opened a busy device.
+    #[test]
+    fn a_key_stopped_microphone_recording_is_finalized_before_the_hand_off() {
+        let mut backend = GrabSpyBackend::new();
+        let mut jwm = jwm(&mut backend);
+        let (release, finalize) = std::sync::mpsc::channel::<()>();
+        jwm.features.audio_recording =
+            AudioRecordingState::recording_for_test("/tmp/jwm-handoff.wav", move |stop| {
+                // Stands in for the file still being finalized after the
+                // stop; the bound only keeps a regression from hanging.
+                let _ = finalize.recv_timeout(std::time::Duration::from_secs(30));
+                if stop.load(Ordering::Acquire) {
+                    Ok(())
+                } else {
+                    Err("finalized without being asked to stop".into())
+                }
+            });
+        jwm.toggle_audio_recording(&mut backend, &NO_ARG)
+            .expect("the key stop");
+        assert!(!jwm.features.audio_recording.active);
+        assert!(jwm.features.audio_recording.is_finalizing());
+
+        // A screen recording without audio does not need the device.
+        jwm.free_microphone_for_screen_recording(&mut backend, false)
+            .expect("nothing to hand off");
+        assert!(jwm.features.audio_recording.is_finalizing());
+
+        // Let the recorder finish; the hand-off joins it either way.
+        release.send(()).expect("the recorder is waiting");
+        jwm.free_microphone_for_screen_recording(&mut backend, true)
+            .expect("the hand-off");
+
+        assert!(
+            !jwm.features.audio_recording.is_finalizing(),
+            "the device is free before the screen recorder opens it"
+        );
+        assert_eq!(
+            backend.toast_titles(),
+            vec!["\u{f130}  Audio recording stopped"]
+        );
+        jwm.poll_audio_recording(&mut backend);
+        assert_eq!(backend.toasts.len(), 1, "reported once");
+    }
+
+    /// A theme the config file refused to take is live only until the next
+    /// reload; the picker closes as if it were saved, so the refusal — which
+    /// tells the user to set the key by hand — has to reach the screen.
+    #[test]
+    fn an_unsaved_theme_says_so_on_screen() {
+        let mut backend = GrabSpyBackend::new();
+        let mut jwm = jwm(&mut backend);
+
+        jwm.settle_theme_persist(
+            &mut backend,
+            "nord",
+            Err(crate::config::ConfigError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "appearance.ui_theme cannot be edited into config.toml without breaking it; \
+                 the file was left unchanged, set the key by hand",
+            ))),
+        );
+
+        assert_eq!(backend.toasts.len(), 1);
+        let toast = &backend.toasts[0];
+        assert!(toast.title.ends_with("Theme not saved"), "{}", toast.title);
+        assert_eq!(toast.urgency, 2, "through do-not-disturb");
+        assert!(toast.body.contains("set the key by hand"), "{}", toast.body);
+
+        // A saved theme says nothing.
+        jwm.settle_theme_persist(&mut backend, "nord", Ok(std::time::SystemTime::UNIX_EPOCH));
+        assert_eq!(backend.toasts.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod session_action_command_tests {
+    use super::session_action_command;
+    use crate::external_command::test_support::{SigchldBlockedOnThisThread, SigchldProbe};
+
+    /// Regression: suspend, reboot and shutdown ran with SIGCHLD blocked,
+    /// inherited from the event thread. The command unblocks it and stays in
+    /// JWM's session.
+    #[test]
+    fn session_actions_start_with_sigchld_unblocked_and_in_jwms_session() {
+        let _blocked = SigchldBlockedOnThisThread::new();
+        let probe = SigchldProbe::new("session-action");
+
+        let mut child = session_action_command("sh", &["-c".to_owned(), probe.script()])
+            .spawn()
+            .expect("spawn the probe action");
+
+        assert!(child.wait().expect("reap the probe action").success());
+        assert!(!probe.child_blocked_sigchld());
+        assert_eq!(probe.child_session(), unsafe { libc::getsid(0) });
     }
 }

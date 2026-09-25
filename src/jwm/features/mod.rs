@@ -211,6 +211,12 @@ pub struct FeatureStates {
     /// Completion time of the last catalog scan, for the bounded stale-while-
     /// revalidate policy in the launcher opener.
     pub launcher_catalog_refreshed_at: Option<std::time::Instant>,
+    /// The directory listing for an open wallpaper picker: the resolved
+    /// directory and the images in it. A large folder or a network mount
+    /// can take seconds to read, so the picker opens scanning and the frame
+    /// tick fills it in; a picker closed meanwhile drops the answer.
+    pub wallpaper_listing:
+        Option<connectivity::BackgroundJob<(std::path::PathBuf, Vec<std::path::PathBuf>)>>,
     /// A page opened from the Shell Hub returns there on Escape. Directly
     /// opened panels still close normally.
     pub system_ui_return_to_hub: bool,

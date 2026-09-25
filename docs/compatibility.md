@@ -8,7 +8,7 @@ current development/testing contract, not a production-support promise.
 | Surface | Current status | Important gaps |
 | --- | --- | --- |
 | Wayland DRM/KMS | **Primary production backend** | Needs DRM/GBM/EGL, input, seat permissions, and real-hardware validation ([hardware-validation](hardware-validation.md)) |
-| Nested Wayland | CI/development smoke backends | Not a production DRM/KMS substitute; capture is absent where unsupported; no shell panels or lock screen |
+| Nested Wayland | CI/development smoke backends | Not a production DRM/KMS substitute; capture is absent where unsupported; no shell panels or lock screen; wlr-output-management (kanshi/wlr-randr) is advertised only on DRM/KMS |
 | X11RB | First-class compatibility; integrated compositor | Inherits X11's session-wide trust model; server/driver extensions vary |
 | XCB | Differential policy coverage with X11RB | Parity tests cannot cover every server, extension, or GPU |
 | XWayland | Available in Wayland sessions | Inherits X11 isolation limits and application/driver quirks |
@@ -25,8 +25,34 @@ Native xdg fullscreen and minimize requests use the shared window policy, as do
 XWayland fullscreen, minimize and activation requests. Fullscreen uses the
 window's current monitor; the optional xdg output hint is not applied. Activation
 can reveal another tag or restore a minimized window, and xdg activation keeps
-the existing ten-second token freshness check. Maximize requests and XWayland
-Above/Below requests still need complete policy and protocol write-back support.
+the existing ten-second token freshness check.
+
+Maximize requests from native X11, xdg-shell, XWayland and wlr-foreign-toplevel
+use the same shared policy. A maximized window fills its monitor's work area —
+the monitor minus the status bar, docks and the tab bar — with its border inside
+that area and no gaps. What each protocol can express differs:
+
+| Protocol | Maximize support |
+| --- | --- |
+| Native X11 | Per axis: `_NET_WM_STATE_MAXIMIZED_VERT` and `_HORZ` are independent, and one message naming both is a single request |
+| xdg-shell | Both axes only; `Maximized` is reported only while both are set, and every set/unset request gets exactly one configure, a refused one included |
+| XWayland | Only the paired request; `Maximized` is published only for both axes, and a maximized window cannot move or resize itself |
+| wlr-foreign-toplevel | Both axes; taskbar set/unset requests go through the same policy, and managed XWayland windows are listed and accept them too |
+
+A maximize that a client or taskbar requests, or that a window already carries
+when JWM starts managing it, is refused for a window the tiling layout manages,
+as in sway: the current state is republished, so the client does not believe a
+maximize that did not happen, and pre-set maximized atoms are cleared. The
+`togglemaximize` command takes a tiled window out of the layout while it is
+maximized, and toggling again puts it back. Floating windows and every window
+under the float layout accept client requests; fixed-size windows and docks are
+never maximized. Known limit: xdg-shell interactive move and resize requests
+(client-side-decoration title-bar or edge drags) are ignored for every xdg
+window, maximized or not; move or resize such a window with the modifier drag
+(`movemouse`/`resizemouse`, `Alt` with the left or right button by default).
+Native X11 and XWayland title-bar drags (`_NET_WM_MOVERESIZE`) go through the
+same drag pipeline as the modifier drag and unmaximize in place. See
+[window placement](window-placement.md#maximize).
 
 Managed-client Above/Below is handled consistently for XWayland and native X11
 policy: conflicting flags resolve to Above, property writes are echoed back,
@@ -68,20 +94,26 @@ they do depends on the backend:
   through its modeset fallback is undone again and VRR control is withdrawn
   from that output for the rest of the session: the probe said no modeset was
   needed, the commit said otherwise, and a full modesetting commit per
-  fullscreen window is worse than no VRR at all. `get_outputs` reports
-  `vrr.supported` from the same probe the enable command gates on, so it
-  cannot invite a `set_vrr_enabled` it would then refuse, and what a frame
-  reports as VRR-active is what the last `use_vrr` actually took rather than
-  what it was asked for.
+  fullscreen window is worse than no VRR at all. `get_wayland_status` reports
+  each output's capability under `outputs[].vrr`: `supported` comes from the
+  same probe that decides whether VRR is programmed at all, so it never
+  claims support the policy would then decline to use, and `current_enabled`
+  is the CRTC's `VRR_ENABLED` value. What `render_decisions.vrr` reports as
+  VRR-active is what the last `use_vrr` actually took rather than what it was
+  asked for.
 
-  `set_vrr_enabled` over IPC latches an override the policy reads rather than
-  programming the hardware directly; without that the next rendered frame
-  would recompute VRR from content and undo the request.
+  VRR is not switched by hand over IPC: no command toggles or forces it, and
+  the only controls are `vrr_enabled` and the fullscreen content rule above.
+  The backend does keep a per-output override that the policy reads, so a
+  future control can latch a request instead of programming the hardware
+  directly (the next rendered frame would otherwise recompute VRR from content
+  and undo it), but nothing exposes it yet.
 
   (Before this, VRR was written straight onto the CRTC property at output
-  init and by `set_vrr_enabled`, and never survived: Smithay re-asserts its
-  own cached VRR value in every atomic request it builds, so the enable was
-  undone by the very next page flip while the IPC call reported success.)
+  init and by the backend's enable path, and never survived: Smithay
+  re-asserts its own cached VRR value in every atomic request it builds, so
+  the enable was undone by the very next page flip while the call reported
+  success.)
 
   `wp_tearing_control_manager_v1` is published when
   `wayland_enable_tearing_control` is on (default true). Hints are
@@ -90,7 +122,7 @@ they do depends on the backend:
   but it never is, and the reason is reported rather than implied: JWM's
   frame submission goes through Smithay's `DrmCompositor::queue_frame`, whose
   submission step hardcodes its atomic commit flags and offers no way to
-  request `PAGE_FLIP_ASYNC`. `jwm-tool get_tearing_hints` and
+  request `PAGE_FLIP_ASYNC`. `jwm-tool msg get_tearing_hints` and
   `render_decisions.tearing` name that blocker
   (`submission_cannot_request_async_flip`) per output, alongside the ones
   that would apply anyway: a driver without
@@ -98,12 +130,15 @@ they do depends on the backend:
   colour-delivery retry, or pending surface state that forces a modesetting
   commit.
 - **X11:** the X server owns DRM master, so no per-output VRR toggle is
-  reachable through RandR or any X extension; `set_vrr_enabled` therefore
-  returns an explicit "unsupported" error instead of pretending. The flags only
-  drive the HUD/metrics "VRR active" indicator. Real VRR for games comes from
-  `fullscreen_unredirect` (default true) letting the game present directly,
-  plus driver-side configuration such as amdgpu's `VariableRefresh` xorg.conf
-  option.
+  reachable through RandR or any X extension; the X11 backends therefore
+  refuse a VRR toggle with an explicit "unsupported" error instead of
+  pretending, and JWM never switches VRR itself. While `vrr_enabled` is on,
+  `get_wayland_status` reports `outputs[].vrr.supported` from the output's
+  RandR `vrr_capable` property, with `current_enabled` always false. The flags
+  only drive the HUD/metrics "VRR active" indicator. Real VRR for games comes
+  from `fullscreen_unredirect` (default true) letting the game present
+  directly, plus driver-side configuration such as amdgpu's `VariableRefresh`
+  xorg.conf option.
 
 ## Independent component SemVer
 

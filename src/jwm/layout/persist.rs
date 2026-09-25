@@ -47,6 +47,83 @@ fn settle_layout_persist_dirty(dirty: &mut Option<Instant>, retry_at: Instant, s
     *dirty = if succeeded { None } else { Some(retry_at) };
 }
 
+/// What a failed per-tag layout write means for the write still pending.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LayoutPersistFailure {
+    /// The failure can clear up by itself (a rename race, a disk being
+    /// cleaned up, ...), so the write stays pending and is tried again.
+    Retry,
+    /// The file cannot be written at all: a read-only filesystem, such as a
+    /// home-manager config linked into the Nix store, or a directory the user
+    /// may not write to. It also covers a file whose shape the text edit
+    /// cannot extend without breaking it (an inline `tags = [...]` under
+    /// `[layout]`): the writer refuses that with `InvalidData` and leaves the
+    /// file alone. No retry can succeed until the user changes something, so
+    /// the pending write is dropped. The next layout change arms a fresh
+    /// attempt, which is also how a repaired permission or file is picked
+    /// up.
+    Unwritable,
+}
+
+fn classify_layout_persist_failure(error: &ConfigError) -> LayoutPersistFailure {
+    match error {
+        // EACCES and EPERM both surface as `PermissionDenied`; `InvalidData`
+        // is the writer refusing an edit that would break a valid file (or a
+        // file that is not UTF-8 at all), which retrying cannot change.
+        ConfigError::Io(io)
+            if matches!(
+                io.kind(),
+                std::io::ErrorKind::ReadOnlyFilesystem
+                    | std::io::ErrorKind::PermissionDenied
+                    | std::io::ErrorKind::InvalidData
+            ) =>
+        {
+            LayoutPersistFailure::Unwritable
+        }
+        _ => LayoutPersistFailure::Retry,
+    }
+}
+
+/// Settle the pending marker after a failed write: re-arm it for a failure
+/// worth retrying, drop it for a file that cannot be written.
+fn settle_failed_layout_persist(
+    dirty: &mut Option<Instant>,
+    retry_at: Instant,
+    error: &ConfigError,
+) -> LayoutPersistFailure {
+    let failure = classify_layout_persist_failure(error);
+    match failure {
+        LayoutPersistFailure::Retry => settle_layout_persist_dirty(dirty, retry_at, false),
+        LayoutPersistFailure::Unwritable => *dirty = None,
+    }
+    failure
+}
+
+/// What an exit or restart flush reports once its write has run.
+///
+/// Restart preparation treats an error as "cancel the restart and keep this
+/// process running", which is right for a failure a later attempt can fix:
+/// the next process reads these layouts straight back in. For a file that
+/// cannot be written at all it would refuse every restart for the rest of
+/// the session, so that failure is logged and the arrangement, which could
+/// never have been saved, is let go instead.
+fn settle_layout_persist_exit_flush(
+    dirty: &mut Option<Instant>,
+    retry_at: Instant,
+    result: Result<(), ConfigError>,
+) -> Result<(), ConfigError> {
+    let Err(error) = result else {
+        return Ok(());
+    };
+    match settle_failed_layout_persist(dirty, retry_at, &error) {
+        LayoutPersistFailure::Retry => Err(error),
+        LayoutPersistFailure::Unwritable => {
+            warn!("[layout] per-tag layouts cannot be written ({error}); continuing without them");
+            Ok(())
+        }
+    }
+}
+
 fn pending_layout_persist_wakeup(
     dirty: Option<Instant>,
     config_reload_pending: bool,
@@ -160,6 +237,12 @@ impl Jwm {
             self.layout_persist_dirty = None;
             return;
         }
+        // Stat the file once more before writing: the mtime poll runs at most
+        // once a second and the nested backends have no inotify, so a user
+        // save inside that gap is not pending yet. The write below re-reads
+        // the file (keeping the edit) and settles its own new mtime, which
+        // would swallow the edit's reload for good.
+        self.observe_config_reload(now, "pre-save check");
         // An edit of the user's is waiting to be reloaded. Writing now would
         // stamp a new revision over it and the reload would never happen, so
         // the save waits for the next tick instead.
@@ -167,11 +250,22 @@ impl Jwm {
             return;
         }
         if let Err(error) = self.save_layout_tags() {
-            // Keep the write pending, but restart the debounce so a read-only
-            // filesystem or transient rename failure does not turn the update
-            // loop into a tight I/O retry loop.
-            settle_layout_persist_dirty(&mut self.layout_persist_dirty, now, false);
-            warn!("[layout] could not save per-tag layouts: {error}");
+            // A transient failure keeps the write pending but restarts the
+            // debounce, so a rename race does not turn the update loop into a
+            // tight I/O retry loop. A file that cannot be written at all is
+            // not retried until the layout changes again; otherwise it would
+            // warn every debounce period for the rest of the session.
+            match settle_failed_layout_persist(&mut self.layout_persist_dirty, now, &error) {
+                LayoutPersistFailure::Retry => {
+                    warn!("[layout] could not save per-tag layouts: {error}");
+                }
+                LayoutPersistFailure::Unwritable => {
+                    warn!(
+                        "[layout] could not save per-tag layouts: {error}; \
+                         not retrying until the layout changes again"
+                    );
+                }
+            }
         }
     }
 
@@ -181,20 +275,19 @@ impl Jwm {
     /// window keeps the arrangement that was on screen — which is the whole
     /// point on the restart path, where the next process reads it straight
     /// back in.
+    ///
+    /// A retryable failure is returned with the write still pending: restart
+    /// preparation propagates it and resumes this same event loop, so a later
+    /// periodic flush gets another chance. A config file that cannot be
+    /// written at all (read-only filesystem, permission denied) is logged and
+    /// reported as `Ok`, because refusing the restart would not make it
+    /// writable and would refuse every later restart too.
     pub(crate) fn flush_layout_persistence_on_exit(&mut self) -> Result<(), ConfigError> {
         if self.layout_persist_dirty.is_none() || !CONFIG.load().layout_persist_tags() {
             return Ok(());
         }
-        match self.save_layout_tags() {
-            Ok(()) => Ok(()),
-            Err(error) => {
-                // Preserve an explicit retryable marker. Restart preparation
-                // propagates the error and resumes this same event loop; a
-                // later periodic flush therefore gets another chance.
-                settle_layout_persist_dirty(&mut self.layout_persist_dirty, Instant::now(), false);
-                Err(error)
-            }
-        }
+        let result = self.save_layout_tags();
+        settle_layout_persist_exit_flush(&mut self.layout_persist_dirty, Instant::now(), result)
     }
 
     fn save_layout_tags(&mut self) -> Result<(), ConfigError> {
@@ -306,6 +399,218 @@ mod tests {
 
         settle_layout_persist_dirty(&mut dirty, retry_at, true);
         assert_eq!(dirty, None);
+    }
+
+    fn io_failure(kind: std::io::ErrorKind) -> ConfigError {
+        ConfigError::Io(std::io::Error::from(kind))
+    }
+
+    /// Regression: restart preparation runs this flush first and cancels the
+    /// restart on any error. A config that can never be written (a
+    /// home-manager link into the read-only Nix store) used to fail here and
+    /// re-arm the marker, so every later restart was refused the same way.
+    #[test]
+    fn an_unwritable_config_does_not_refuse_restart() {
+        let changed_at = Instant::now();
+        let retry_at = changed_at + Duration::from_secs(3);
+
+        for kind in [
+            std::io::ErrorKind::ReadOnlyFilesystem,
+            std::io::ErrorKind::PermissionDenied,
+        ] {
+            let mut dirty = Some(changed_at);
+            let result =
+                settle_layout_persist_exit_flush(&mut dirty, retry_at, Err(io_failure(kind)));
+            assert!(result.is_ok(), "{kind:?} must not cancel the restart");
+            assert_eq!(
+                dirty, None,
+                "{kind:?} must not leave a marker that fails the next restart again"
+            );
+        }
+    }
+
+    #[test]
+    fn a_retryable_exit_flush_failure_still_cancels_restart_and_stays_pending() {
+        let changed_at = Instant::now();
+        let retry_at = changed_at + Duration::from_secs(3);
+
+        let mut dirty = Some(changed_at);
+        let result = settle_layout_persist_exit_flush(
+            &mut dirty,
+            retry_at,
+            Err(io_failure(std::io::ErrorKind::Interrupted)),
+        );
+        assert!(matches!(result, Err(ConfigError::Io(_))));
+        assert_eq!(dirty, Some(retry_at));
+
+        let mut committed = None;
+        assert!(settle_layout_persist_exit_flush(&mut committed, retry_at, Ok(())).is_ok());
+        assert_eq!(committed, None);
+    }
+
+    /// The periodic flush drops a write that cannot succeed instead of
+    /// warning every debounce period for the rest of the session.
+    #[test]
+    fn periodic_flush_stops_retrying_an_unwritable_config() {
+        let changed_at = Instant::now();
+        let retry_at = changed_at + Duration::from_secs(3);
+
+        let mut dirty = Some(changed_at);
+        assert_eq!(
+            settle_failed_layout_persist(
+                &mut dirty,
+                retry_at,
+                &io_failure(std::io::ErrorKind::ReadOnlyFilesystem),
+            ),
+            LayoutPersistFailure::Unwritable
+        );
+        assert_eq!(dirty, None);
+
+        let mut dirty = Some(changed_at);
+        assert_eq!(
+            settle_failed_layout_persist(
+                &mut dirty,
+                retry_at,
+                &io_failure(std::io::ErrorKind::StorageFull),
+            ),
+            LayoutPersistFailure::Retry
+        );
+        assert_eq!(dirty, Some(retry_at));
+    }
+
+    /// A directory whose mode is restored and which is removed on drop, so a
+    /// failed assertion does not leave an undeletable fixture behind.
+    struct ReadOnlyFixtureDir(std::path::PathBuf);
+
+    impl Drop for ReadOnlyFixtureDir {
+        fn drop(&mut self) {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o700));
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// The classification has to match what the real writer returns, not
+    /// just a hand-built error: write into a config whose directory the
+    /// current user may not create files in.
+    #[test]
+    fn a_real_write_into_a_read_only_directory_does_not_refuse_restart() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        static SEQUENCE: AtomicUsize = AtomicUsize::new(0);
+        let directory = ReadOnlyFixtureDir(std::env::temp_dir().join(format!(
+            "jwm-layout-persist-read-only-{}-{}",
+            std::process::id(),
+            SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        )));
+        std::fs::create_dir(&directory.0).expect("create fixture directory");
+        let path = directory.0.join("config.toml");
+        std::fs::write(&path, "[layout]\n").expect("write fixture config");
+        std::fs::set_permissions(&directory.0, std::fs::Permissions::from_mode(0o555))
+            .expect("make fixture directory read-only");
+
+        let write = Config::default().persist_layout_tags_to(&path, &[entry(1, 0, "grid")]);
+        let error = match write {
+            Err(error) => error,
+            Ok(_) => {
+                // Permission bits do not bind a privileged user (root, or
+                // CAP_DAC_OVERRIDE); there is no unwritable file to test.
+                eprintln!("skipping: the fixture directory stayed writable for this user");
+                return;
+            }
+        };
+        assert_eq!(
+            classify_layout_persist_failure(&error),
+            LayoutPersistFailure::Unwritable,
+            "unexpected write failure: {error}"
+        );
+
+        let mut dirty = Some(Instant::now());
+        assert!(settle_layout_persist_exit_flush(&mut dirty, Instant::now(), Err(error)).is_ok());
+        assert_eq!(dirty, None);
+    }
+
+    /// A config whose `[layout]` holds an inline `tags = [...]` array cannot
+    /// take an appended `[[layout.tags]]` table. The writer refuses and
+    /// leaves the file alone; the refusal must neither be retried every
+    /// debounce period nor cancel a restart, exactly like an unwritable file.
+    #[test]
+    fn a_refused_edit_is_dropped_like_an_unwritable_config() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        static SEQUENCE: AtomicUsize = AtomicUsize::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "jwm-layout-persist-refused-{}-{}.toml",
+            std::process::id(),
+            SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let handwritten = "[layout]\ntags = [{ tag = 4, monitor = -1, layout = \"grid\" }]\n";
+        std::fs::write(&path, handwritten).expect("write fixture config");
+
+        let write = Config::default().persist_layout_tags_to(&path, &[entry(1, 0, "deck")]);
+        let on_disk = std::fs::read_to_string(&path);
+        let _ = std::fs::remove_file(&path);
+        let error = write.expect_err("the edit would break a valid file");
+        assert_eq!(on_disk.expect("fixture still readable"), handwritten);
+        assert_eq!(
+            classify_layout_persist_failure(&error),
+            LayoutPersistFailure::Unwritable,
+            "{error}"
+        );
+
+        let changed_at = Instant::now();
+        let retry_at = changed_at + Duration::from_secs(3);
+        let mut dirty = Some(changed_at);
+        assert_eq!(
+            settle_failed_layout_persist(&mut dirty, retry_at, &error),
+            LayoutPersistFailure::Unwritable
+        );
+        assert_eq!(dirty, None);
+
+        let mut dirty = Some(changed_at);
+        assert!(
+            settle_layout_persist_exit_flush(
+                &mut dirty,
+                retry_at,
+                Err(io_failure(std::io::ErrorKind::InvalidData)),
+            )
+            .is_ok(),
+            "a refused edit must not cancel the restart"
+        );
+        assert_eq!(dirty, None);
+    }
+
+    /// The pre-save stat is what turns a user save that landed inside the
+    /// one-second poll gap into a pending reload before JWM writes its own
+    /// revision over it (the tracker half is pinned in lifecycle.rs by
+    /// `observing_before_an_own_write_catches_an_unpolled_user_edit`). It has
+    /// to run before the pending check, or it would only postpone the edit to
+    /// the next save.
+    #[test]
+    fn the_periodic_flush_observes_the_config_before_checking_for_a_pending_edit() {
+        let source = include_str!("persist.rs");
+        let start = source
+            .find("pub(crate) fn flush_layout_persistence(")
+            .expect("the periodic flush");
+        let body = &source[start..];
+        let end = body
+            .find("pub(crate) fn flush_layout_persistence_on_exit(")
+            .expect("the exit flush follows");
+        let body = &body[..end];
+        let observe = body
+            .find(&format!(
+                "observe_config_reload(now, {:?})",
+                "pre-save check"
+            ))
+            .expect("the flush stats the config before writing");
+        let pending = body
+            .find("if self.config_reload_is_pending()")
+            .expect("the flush defers to a pending edit");
+        let save = body
+            .find("self.save_layout_tags()")
+            .expect("the flush writes");
+        assert!(observe < pending && pending < save);
     }
 
     #[test]

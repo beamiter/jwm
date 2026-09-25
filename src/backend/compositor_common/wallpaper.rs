@@ -101,7 +101,12 @@ pub(crate) fn resolve_wallpaper_for_tag(
     let mut best: Option<&WallpaperTagConfig> = None;
     let mut best_specific = false;
     for wt in &behavior.wallpaper_tags {
-        if wt.path.is_empty() || active_tags & (1u32 << wt.tag) == 0 {
+        // `tag` comes straight from the config file; an index past the mask
+        // width (only warned about at load) must match no tag rather than
+        // overflow the shift, which panics with overflow checks and otherwise
+        // wraps onto tag `tag % 32`.
+        let bit = 1u32.checked_shl(wt.tag).unwrap_or(0);
+        if wt.path.is_empty() || active_tags & bit == 0 {
             continue;
         }
         let specific = wt.monitor == monitor_idx as i32;
@@ -148,7 +153,63 @@ pub(crate) fn resolve_wallpaper_for_tag(
 
 #[cfg(test)]
 mod tests {
-    use super::{PreviewRequest, preview_request};
+    use super::{PreviewRequest, preview_request, resolve_wallpaper_for_tag};
+    use crate::config::{BehaviorConfig, Config, WallpaperTagConfig};
+
+    fn behavior_with_tags(tags: &[(u32, &str)]) -> BehaviorConfig {
+        let mut behavior = Config::default().behavior().clone();
+        behavior.wallpaper = "/walls/global.png".to_string();
+        behavior.wallpaper_mode = "fill".to_string();
+        behavior.wallpaper_monitors.clear();
+        behavior.wallpaper_tags = tags
+            .iter()
+            .map(|&(tag, path)| WallpaperTagConfig {
+                tag,
+                monitor: -1,
+                path: path.to_string(),
+                mode: String::new(),
+            })
+            .collect();
+        behavior
+    }
+
+    #[test]
+    fn a_tag_wallpaper_applies_while_its_tag_is_active() {
+        let behavior = behavior_with_tags(&[(1, "/walls/two.png")]);
+        assert_eq!(
+            resolve_wallpaper_for_tag(&behavior, 0, 0b10),
+            ("/walls/two.png", "fill")
+        );
+        assert_eq!(
+            resolve_wallpaper_for_tag(&behavior, 0, 0b01),
+            ("/walls/global.png", "fill")
+        );
+    }
+
+    #[test]
+    fn an_out_of_range_tag_index_matches_no_tag() {
+        // Tag 32 would alias tag 0 and tag 33 tag 1 under a wrapping shift
+        // (and panic with overflow checks on); neither may win over the
+        // global wallpaper, whatever tags are active.
+        let behavior = behavior_with_tags(&[
+            (32, "/walls/bogus-32.png"),
+            (33, "/walls/bogus-33.png"),
+            (u32::MAX, "/walls/bogus-max.png"),
+        ]);
+        for active_tags in [0b01, 0b10, u32::MAX] {
+            assert_eq!(
+                resolve_wallpaper_for_tag(&behavior, 0, active_tags),
+                ("/walls/global.png", "fill"),
+                "{active_tags:#b}"
+            );
+        }
+        // The highest valid bit still resolves.
+        let behavior = behavior_with_tags(&[(31, "/walls/last.png")]);
+        assert_eq!(
+            resolve_wallpaper_for_tag(&behavior, 0, 1 << 31).0,
+            "/walls/last.png"
+        );
+    }
 
     #[test]
     fn a_repeated_path_keeps_the_in_flight_preview_decode() {
