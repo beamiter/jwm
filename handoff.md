@@ -4,7 +4,33 @@
 
 ---
 
-## 2026-09-27：状态栏共享内存按 compositor PID 隔离
+## 2026-09-27（二）：WM_NORMAL_HINTS 变更后刷新 `_NET_WM_ALLOWED_ACTIONS`
+
+选题 = evolve 第二轮；闭合 handoff maximize 延后项「hints 变化后刷新 `_NET_WM_ALLOWED_ACTIONS`」。
+
+1. **契约**：`handle_normal_hints_change` 在失效缓存后调用 `updatesizehints`，再经 `sync_allowed_actions` 按当前 `is_fixed` 重写 EWMH allowed-actions（固定尺寸客户端继续省略 Resize/Maximize）。
+2. **回归**：`fixed_size_clients_do_not_advertise_maximize_or_resize` 仍覆盖 allowed-actions 集合；property 路径源码钉住 `sync_allowed_actions` 调用。
+
+**验证**：`cargo test fixed_size_clients_do_not_advertise` + `cargo check -p jwm`。无真机。
+
+**仍然开着的**：继承 2026-09-27（一）与 2026-09-25 列表；去掉「hints 变化后刷新 allowed actions」一条。
+
+---
+
+## 2026-09-27（二）：启动时清理 legacy bar 共享内存 flink
+
+选题 = evolve wave 3；在 PID 命名空间隔离之上，避免旧版 `/dev/shm/jwm_bar_mon_*` 残留干扰新 buffer 创建。
+
+1. **Legacy 路径 helper**：`legacy_secondary_bar_shared_memory_path` 与 `secondary_bar_shared_memory_path` 并列，spawn 前 best-effort `remove_file` legacy flink（忽略 `NotFound`）。
+2. **回归**：`legacy_paths_stay_distinct_from_pid_scoped_names` 锁定两套命名不相交。
+
+**验证**：`cargo test secondary_bar_shared_path` + 修改范围 `cargo check`。无真机。
+
+**仍然开着的**：继承上节 2026-09-27（一）列表。
+
+---
+
+## 2026-09-27（一）：状态栏共享内存按 compositor PID 隔离
 
 选题 = evolve 一轮，闭合 handoff「嵌套/测试 JWM 与宿主争用 `jwm_bar_mon_*`」项；无需 DRM/KMS。
 
@@ -39,7 +65,7 @@
 - XWM maximize 往返（真实 `_NET_WM_STATE` 与 configure_request 拦截）只在有 Xvfb 时跑，本机无 Xvfb，仍在那 12 个已知失败里。
 - 同设备 KMS 重建复用 DrmDeviceFd（logind TakeDevice 限制，#50）、重建后复用 `wl_output` global（#44）、重建后保持 soft-disable（#49，牵涉 swayidle DPMS 语义），都需要真机。
 - 策略待定：XWayland keyboard grab 是否视同快捷键抑制（#41）；IPC 订阅者半关闭后是否保活（#1c，当前 EOF 即断开是固定设计）；音频录制异步 START 需要 IPC 回复契约签字。
-- maximize 延后项：可见窗口的提升状态与恢复矩形跨重启持久化；EWMH source indication；xdg `move_request` / `resize_request`（CSD 标题栏拖动最大化 xdg 窗口不会取消最大化）；XWayland 单轴最大化；snap 半屏和四分屏仍用 `m_*` 而非工作区；窗口状态 IPC 事件；hints 变化后刷新 `_NET_WM_ALLOWED_ACTIONS`；xdg `Tiled*` 与 `Maximized` 共存的取舍。
+- maximize 延后项：可见窗口的提升状态与恢复矩形跨重启持久化；EWMH source indication；xdg `move_request` / `resize_request`（CSD 标题栏拖动最大化 xdg 窗口不会取消最大化）；XWayland 单轴最大化；snap 半屏和四分屏仍用 `m_*` 而非工作区；窗口状态 IPC 事件；xdg `Tiled*` 与 `Maximized` 共存的取舍。
 - 提升窗口在全屏或 PiP 期间被取消最大化会丢锚点，回到平铺尾部（已写进文档）；可选的「仍提升的全屏跟随者」锁定测试未加。
 - portal `ipc::query_windows` 协议已修正但仍无调用方。
 

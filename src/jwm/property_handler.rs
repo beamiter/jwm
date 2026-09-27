@@ -104,11 +104,14 @@ impl Jwm {
     /// 标记尺寸提示缓存为无效，下次使用时重新获取
     pub(crate) fn handle_normal_hints_change(
         &mut self,
+        backend: &mut dyn Backend,
         client_key: ClientKey,
     ) -> Result<(), Box<dyn std::error::Error>> {
         if let Some(client) = self.state.clients.get_mut(client_key) {
             client.size_hints.hints_valid = false;
         }
+        self.updatesizehints(backend, client_key)?;
+        self.sync_allowed_actions(backend, client_key);
         Ok(())
     }
 
@@ -489,7 +492,16 @@ impl Jwm {
         backend: &mut dyn Backend,
         client_key: ClientKey,
     ) {
-        // Computed once, at manage, after WM_NORMAL_HINTS decided is_fixed.
+        self.sync_allowed_actions(backend, client_key);
+    }
+
+    /// Rewrite `_NET_WM_ALLOWED_ACTIONS` from the client's current `is_fixed`
+    /// state. Fixed-size clients must not advertise resize or maximize.
+    pub(crate) fn sync_allowed_actions(
+        &mut self,
+        backend: &mut dyn Backend,
+        client_key: ClientKey,
+    ) {
         let (win, is_fixed) = match self.state.clients.get(client_key) {
             Some(c) => (c.win, c.state.is_fixed),
             None => return,
@@ -517,6 +529,20 @@ mod tests {
     use super::allowed_actions_for;
     use crate::Jwm;
     use crate::backend::api::AllowedAction;
+
+    #[test]
+    fn normal_hints_change_refreshes_allowed_actions() {
+        let source = include_str!("property_handler.rs");
+        let body = source
+            .split("fn handle_normal_hints_change")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    /// 处理窗口 WM hints").next())
+            .expect("handle_normal_hints_change body");
+        assert!(
+            body.contains("updatesizehints") && body.contains("sync_allowed_actions"),
+            "WM_NORMAL_HINTS changes must refresh allowed actions"
+        );
+    }
 
     #[test]
     fn fixed_size_clients_do_not_advertise_maximize_or_resize() {

@@ -1515,7 +1515,7 @@ impl WMController for Jwm {
         if let Some(client_key) = self.wintoclient(win) {
             let res = match kind {
                 PropertyKind::TransientFor => self.handle_transient_for_change(backend, client_key),
-                PropertyKind::SizeHints => self.handle_normal_hints_change(client_key),
+                PropertyKind::SizeHints => self.handle_normal_hints_change(backend, client_key),
                 PropertyKind::Urgency => self.handle_wm_hints_change(backend, client_key),
                 PropertyKind::Title => self.handle_title_change(backend, client_key),
                 PropertyKind::Class => self.handle_class_change(backend, client_key),
