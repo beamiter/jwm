@@ -35,6 +35,11 @@ pub(crate) fn secondary_bar_shared_memory_path(monitor_id: i32) -> String {
     )
 }
 
+/// Pre-PID-isolation path kept only so a compositor can unlink stale flinks.
+pub(crate) fn legacy_secondary_bar_shared_memory_path(monitor_id: i32) -> String {
+    format!("/dev/shm/jwm_bar_mon_{monitor_id}")
+}
+
 fn min_bar_wakeup(left: Option<Duration>, right: Option<Duration>) -> Option<Duration> {
     match (left, right) {
         (Some(left), Some(right)) => Some(left.min(right)),
@@ -522,6 +527,16 @@ impl Jwm {
 
     pub(super) fn spawn_secondary_bar(&mut self, monitor_id: i32, now: Instant) {
         let shared_path = secondary_bar_shared_memory_path(monitor_id);
+        let legacy_path = legacy_secondary_bar_shared_memory_path(monitor_id);
+        if legacy_path != shared_path {
+            if let Err(error) = std::fs::remove_file(&legacy_path) {
+                if error.kind() != io::ErrorKind::NotFound {
+                    warn!(
+                        "Could not remove legacy status-bar shared memory {legacy_path}: {error}"
+                    );
+                }
+            }
+        }
 
         // JWM is the single supervisor for per-monitor bar buffers. Reclaim a
         // mapping whose creator died before Drop could unlink its flink, then
@@ -652,7 +667,9 @@ impl Jwm {
 
 #[cfg(test)]
 mod secondary_bar_shared_path_tests {
-    use super::secondary_bar_shared_memory_path;
+    use super::{
+        legacy_secondary_bar_shared_memory_path, secondary_bar_shared_memory_path,
+    };
 
     #[test]
     fn paths_are_scoped_to_this_compositor_and_monitor() {
@@ -675,6 +692,18 @@ mod secondary_bar_shared_path_tests {
             .and_then(|value| value.parse::<i32>().ok())
             .expect("parse monitor suffix");
         assert_eq!(monitor, 7);
+    }
+
+    #[test]
+    fn legacy_paths_stay_distinct_from_pid_scoped_names() {
+        assert_eq!(
+            legacy_secondary_bar_shared_memory_path(3),
+            "/dev/shm/jwm_bar_mon_3"
+        );
+        assert_ne!(
+            legacy_secondary_bar_shared_memory_path(3),
+            secondary_bar_shared_memory_path(3)
+        );
     }
 }
 
