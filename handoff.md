@@ -4,6 +4,24 @@
 
 ---
 
+## 2026-09-28（七）：xdg CSD move/resize 进入共享拖拽管线
+
+选题 = evolve wave 8；闭合 handoff maximize 延后项「xdg `move_request` /
+`resize_request`（CSD 标题栏拖动最大化窗口不会取消最大化）」。
+
+1. **契约**：`XdgShellHandler::{move,resize}_request` 在 seat 仍持有该 serial 的
+   pointer/touch grab 时发出 `BackendEvent::MoveResizeRequest`（与 XWayland 同码），
+   进入 `on_moveresize_request` → `start_pointer_drag`；拖拽激活时
+   `unmaximize_in_place` 与 X11 路径一致。
+2. **回归**：`xdg_moveresize_requests_feed_the_shared_drag_pipeline` +
+   `xdg_resize_edges_match_net_wm_moveresize_codes`。
+
+**验证**：`cargo test -p jwm xdg_moveresize` + 修改范围 `cargo check`。
+
+**仍然开着的**：继承 2026-09-25 maximize 延后项，去掉 xdg move/resize 一条。
+
+---
+
 ## 2026-09-27（二）：WM_NORMAL_HINTS 变更后刷新 `_NET_WM_ALLOWED_ACTIONS`
 
 选题 = evolve 第二轮；闭合 handoff maximize 延后项「hints 变化后刷新 `_NET_WM_ALLOWED_ACTIONS`」。
@@ -112,7 +130,7 @@
 - XWM maximize 往返（真实 `_NET_WM_STATE` 与 configure_request 拦截）只在有 Xvfb 时跑，本机无 Xvfb，仍在那 12 个已知失败里。
 - 同设备 KMS 重建复用 DrmDeviceFd（logind TakeDevice 限制，#50）、重建后复用 `wl_output` global（#44）、重建后保持 soft-disable（#49，牵涉 swayidle DPMS 语义），都需要真机。
 - 策略待定：XWayland keyboard grab 是否视同快捷键抑制（#41）；IPC 订阅者半关闭后是否保活（#1c，当前 EOF 即断开是固定设计）；音频录制异步 START 需要 IPC 回复契约签字。
-- maximize 延后项：可见窗口的提升状态与恢复矩形跨重启持久化；EWMH source indication；xdg `move_request` / `resize_request`（CSD 标题栏拖动最大化 xdg 窗口不会取消最大化）；XWayland 单轴最大化；snap 半屏和四分屏仍用 `m_*` 而非工作区；窗口状态 IPC 事件；xdg `Tiled*` 与 `Maximized` 共存的取舍。
+- maximize 延后项：可见窗口的提升状态与恢复矩形跨重启持久化；EWMH source indication；XWayland 单轴最大化；snap 半屏和四分屏仍用 `m_*` 而非工作区；窗口状态 IPC 事件；xdg `Tiled*` 与 `Maximized` 共存的取舍。
 - 提升窗口在全屏或 PiP 期间被取消最大化会丢锚点，回到平铺尾部（已写进文档）；可选的「仍提升的全屏跟随者」锁定测试未加。
 - portal `ipc::query_windows` 协议已修正但仍无调用方。
 

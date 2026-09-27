@@ -1971,6 +1971,41 @@ fn xwm_resize_edge_direction(edge: XwmResizeEdge) -> u32 {
     }
 }
 
+/// Map an xdg_toplevel resize edge onto the same `_NET_WM_MOVERESIZE` codes.
+fn xdg_resize_edge_direction(edge: xdg_toplevel::ResizeEdge) -> Option<u32> {
+    match edge {
+        xdg_toplevel::ResizeEdge::TopLeft => Some(0),
+        xdg_toplevel::ResizeEdge::Top => Some(1),
+        xdg_toplevel::ResizeEdge::TopRight => Some(2),
+        xdg_toplevel::ResizeEdge::Right => Some(3),
+        xdg_toplevel::ResizeEdge::BottomRight => Some(4),
+        xdg_toplevel::ResizeEdge::Bottom => Some(5),
+        xdg_toplevel::ResizeEdge::BottomLeft => Some(6),
+        xdg_toplevel::ResizeEdge::Left => Some(7),
+        _ => None,
+    }
+}
+
+/// Accept an xdg interactive move/resize only when the seat still holds the
+/// serial's pointer (or touch) grab — the protocol requires a button press that
+/// the compositor owns, and a forged serial must not start a drag.
+fn xdg_seat_has_interactive_grab(
+    seat: &Seat<JwmWaylandState>,
+    serial: Serial,
+) -> Option<u32> {
+    if let Some(pointer) = seat.get_pointer() {
+        if pointer.has_grab(serial) {
+            return Some(0);
+        }
+    }
+    if let Some(touch) = seat.get_touch() {
+        if touch.has_grab(serial) {
+            return Some(0);
+        }
+    }
+    None
+}
+
 // ---------------------------------------------------------------------------
 // XWM Handler – manages X11 windows running under XWayland
 // ---------------------------------------------------------------------------
@@ -5042,6 +5077,56 @@ impl XdgShellHandler for JwmWaylandState {
         }
     }
 
+    fn move_request(
+        &mut self,
+        surface: ToplevelSurface,
+        seat: smithay::reexports::wayland_server::protocol::wl_seat::WlSeat,
+        serial: Serial,
+    ) {
+        let Some(seat) = Seat::<Self>::from_resource(&seat) else {
+            return;
+        };
+        let Some(button) = xdg_seat_has_interactive_grab(&seat, serial) else {
+            return;
+        };
+        let Some(window) = self.surface_to_window.get(&surface.wl_surface().id()).copied() else {
+            return;
+        };
+        // Same shared drag pipeline as XWayland / `_NET_WM_MOVERESIZE`: a
+        // maximized window is unmaximized when the pointer drag activates.
+        self.push_event(BackendEvent::MoveResizeRequest {
+            window,
+            direction: 8, // _NET_WM_MOVERESIZE_MOVE
+            button,
+        });
+    }
+
+    fn resize_request(
+        &mut self,
+        surface: ToplevelSurface,
+        seat: smithay::reexports::wayland_server::protocol::wl_seat::WlSeat,
+        serial: Serial,
+        edges: xdg_toplevel::ResizeEdge,
+    ) {
+        let Some(seat) = Seat::<Self>::from_resource(&seat) else {
+            return;
+        };
+        let Some(button) = xdg_seat_has_interactive_grab(&seat, serial) else {
+            return;
+        };
+        let Some(direction) = xdg_resize_edge_direction(edges) else {
+            return;
+        };
+        let Some(window) = self.surface_to_window.get(&surface.wl_surface().id()).copied() else {
+            return;
+        };
+        self.push_event(BackendEvent::MoveResizeRequest {
+            window,
+            direction,
+            button,
+        });
+    }
+
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
         if let Some(win) = self.surface_to_window.remove(&surface.wl_surface().id()) {
             info!("[udev/wayland] toplevel_destroyed win={win:?}");
@@ -5423,7 +5508,7 @@ fn route_xwayland_configure_request(
 
 #[cfg(test)]
 mod xwayland_moveresize_tests {
-    use super::xwm_resize_edge_direction;
+    use super::{xdg_resize_edge_direction, xwm_resize_edge_direction};
     use smithay::xwayland::xwm::ResizeEdge as XwmResizeEdge;
 
     #[test]
@@ -5456,6 +5541,47 @@ mod xwayland_moveresize_tests {
                 && !production.contains("Interactive move not yet supported for X11 windows."),
             "XWayland interactive move/resize stubs must not remain empty"
         );
+    }
+
+    #[test]
+    fn xdg_moveresize_requests_feed_the_shared_drag_pipeline() {
+        const SOURCE: &str = include_str!("state.rs");
+        let production = SOURCE.split_once("#[cfg(test)]").unwrap().0;
+        assert!(
+            production.contains("fn xdg_resize_edge_direction")
+                && production.contains("fn xdg_seat_has_interactive_grab"),
+            "xdg move/resize must map edges and require a live seat grab"
+        );
+        assert!(
+            production.contains("fn move_request")
+                && production.contains("fn resize_request")
+                && production.contains("BackendEvent::MoveResizeRequest"),
+            "xdg CSD move/resize must emit MoveResizeRequest so maximize is cleared on drag"
+        );
+        // Refuse leaving the Smithay defaults that silently ignore the request.
+        let xdg_impl = production
+            .split("impl XdgShellHandler for JwmWaylandState")
+            .nth(1)
+            .expect("XdgShellHandler impl");
+        assert!(
+            xdg_impl.contains("direction: 8")
+                && xdg_impl.contains("xdg_resize_edge_direction"),
+            "XdgShellHandler must not keep empty move/resize defaults"
+        );
+    }
+
+    #[test]
+    fn xdg_resize_edges_match_net_wm_moveresize_codes() {
+        use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::ResizeEdge;
+        assert_eq!(xdg_resize_edge_direction(ResizeEdge::TopLeft), Some(0));
+        assert_eq!(xdg_resize_edge_direction(ResizeEdge::Top), Some(1));
+        assert_eq!(xdg_resize_edge_direction(ResizeEdge::TopRight), Some(2));
+        assert_eq!(xdg_resize_edge_direction(ResizeEdge::Right), Some(3));
+        assert_eq!(xdg_resize_edge_direction(ResizeEdge::BottomRight), Some(4));
+        assert_eq!(xdg_resize_edge_direction(ResizeEdge::Bottom), Some(5));
+        assert_eq!(xdg_resize_edge_direction(ResizeEdge::BottomLeft), Some(6));
+        assert_eq!(xdg_resize_edge_direction(ResizeEdge::Left), Some(7));
+        assert_eq!(xdg_resize_edge_direction(ResizeEdge::None), None);
     }
 }
 
