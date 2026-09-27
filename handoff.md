@@ -30,6 +30,17 @@
 
 ---
 
+## 2026-09-27（四）：非 creator 的 bar 映射重试前清理 legacy flink
+
+选题 = evolve wave 5；`open_or_create` 发现 live creator 占用了 PID 作用域 buffer 时，仍可能残留旧版 `/dev/shm/jwm_bar_mon_*` flink，下一次 spawn 前若未删除会干扰 reclaim。
+
+1. **契约**：`spawn_secondary_bar` 在 `!ring_buffer.is_creator()` 分支记录 failure 前同样调用 `remove_legacy_secondary_bar_shared_memory`。
+2. **回归**：继承 `legacy_shared_memory_cleanup_is_best_effort`；源码路径与 wave 4 的 failure/retire 清理一致。
+
+**验证**：`cargo test legacy_shared_memory` + 修改范围 `cargo check`。
+
+---
+
 ## 2026-09-27（三）：bar 退出时也清理 legacy 共享内存 flink
 
 选题 = evolve wave 4；spawn 时的 legacy 清理无法覆盖「旧实例已退出但 flink 仍指向 stale mapping」的窗口。

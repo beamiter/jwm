@@ -572,6 +572,7 @@ impl Jwm {
         // supervisor still owns this monitor's buffer. Do not attach a second
         // bar to it; wait for the normal retry path instead.
         if !ring_buffer.is_creator() {
+            remove_legacy_secondary_bar_shared_memory(monitor_id);
             let reason = format!(
                 "shared memory is owned by live creator process {}",
                 ring_buffer.creator_pid()
