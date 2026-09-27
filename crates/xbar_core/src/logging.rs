@@ -78,8 +78,8 @@ mod tests {
     fn basename_distinguishes_shared_monitor_paths() {
         assert_eq!(frontend_basename("xbar", ""), "xbar");
         assert_eq!(
-            frontend_basename("xbar", "/dev/shm/jwm_bar_mon_2"),
-            "xbar_jwm_bar_mon_2"
+            frontend_basename("xbar", "/dev/shm/jwm_bar_p4242_mon_2"),
+            "xbar_jwm_bar_p4242_mon_2"
         );
     }
 }

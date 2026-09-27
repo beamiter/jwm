@@ -262,7 +262,7 @@ fn main() -> glib::ExitCode {
 
     // Get monitor ID from environment or shared path to create unique application ID
     let monitor_id = env::var("JWM_MONITOR_ID").unwrap_or_else(|_| {
-        // Extract monitor ID from shared path like "/dev/shm/jwm_bar_mon_1"
+        // Extract monitor ID from shared path like "/dev/shm/jwm_bar_p1234_mon_1"
         shared_path
             .split('_')
             .next_back()

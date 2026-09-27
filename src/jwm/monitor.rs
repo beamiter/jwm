@@ -1102,7 +1102,7 @@ impl Jwm {
 
     pub(crate) fn add_monitor(&mut self, info: crate::backend::api::OutputInfo) {
         info!("[add_monitor] Adding output: {:?}", info);
-        // Monitor numbers are protocol identities (bar shm key, Dock command
+        // Monitor numbers are protocol identities (bar command source, Dock command
         // source, saved per-tag layouts), not the current slotmap length.
         // Reusing `len()` after a non-tail hot-unplug can collide with a
         // surviving monitor.

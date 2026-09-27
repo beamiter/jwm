@@ -1292,7 +1292,7 @@ impl Jwm {
             drop(bar);
             #[cfg(unix)]
             {
-                let path = format!("/dev/shm/jwm_bar_mon_{}", mon_id);
+                let path = super::monitor_management::secondary_bar_shared_memory_path(mon_id);
                 if std::path::Path::new(&path).exists() {
                     if let Err(e) = std::fs::remove_file(&path) {
                         warn!("Failed to remove {}: {}", path, e);

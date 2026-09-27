@@ -23,6 +23,18 @@ const BAR_MAX_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(
 const BAR_EXIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const BAR_HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 
+/// POSIX shared-memory path for a monitor's status bar ring buffer.
+///
+/// Names include this compositor's PID so a nested or test JWM that inherits
+/// the host session's `XDG_RUNTIME_DIR` does not fight the host over
+/// `/dev/shm/jwm_bar_mon_{monitor}` and enter the 30s retry loop.
+pub(crate) fn secondary_bar_shared_memory_path(monitor_id: i32) -> String {
+    format!(
+        "/dev/shm/jwm_bar_p{}_mon_{monitor_id}",
+        std::process::id()
+    )
+}
+
 fn min_bar_wakeup(left: Option<Duration>, right: Option<Duration>) -> Option<Duration> {
     match (left, right) {
         (Some(left), Some(right)) => Some(left.min(right)),
@@ -509,8 +521,7 @@ impl Jwm {
     }
 
     pub(super) fn spawn_secondary_bar(&mut self, monitor_id: i32, now: Instant) {
-        // Create unique shared memory path for this monitor
-        let shared_path = format!("/dev/shm/jwm_bar_mon_{}", monitor_id);
+        let shared_path = secondary_bar_shared_memory_path(monitor_id);
 
         // JWM is the single supervisor for per-monitor bar buffers. Reclaim a
         // mapping whose creator died before Drop could unlink its flink, then
@@ -636,6 +647,34 @@ impl Jwm {
         target_monitor_key: MonitorKey,
     ) -> Result<(), Box<dyn std::error::Error>> {
         self.handle_monitor_switch_by_key(backend, Some(target_monitor_key))
+    }
+}
+
+#[cfg(test)]
+mod secondary_bar_shared_path_tests {
+    use super::secondary_bar_shared_memory_path;
+
+    #[test]
+    fn paths_are_scoped_to_this_compositor_and_monitor() {
+        let mon0 = secondary_bar_shared_memory_path(0);
+        let mon1 = secondary_bar_shared_memory_path(1);
+        assert_ne!(mon0, mon1);
+        assert_eq!(
+            mon0,
+            format!("/dev/shm/jwm_bar_p{}_mon_0", std::process::id())
+        );
+        assert_ne!(mon0, "/dev/shm/jwm_bar_mon_0");
+    }
+
+    #[test]
+    fn monitor_id_stays_the_final_path_segment_for_bar_frontends() {
+        let path = secondary_bar_shared_memory_path(7);
+        let monitor = path
+            .split('_')
+            .next_back()
+            .and_then(|value| value.parse::<i32>().ok())
+            .expect("parse monitor suffix");
+        assert_eq!(monitor, 7);
     }
 }
 

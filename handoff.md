@@ -4,6 +4,19 @@
 
 ---
 
+## 2026-09-27：状态栏共享内存按 compositor PID 隔离
+
+选题 = evolve 一轮，闭合 handoff「嵌套/测试 JWM 与宿主争用 `jwm_bar_mon_*`」项；无需 DRM/KMS。
+
+1. **路径契约**：`secondary_bar_shared_memory_path` 生成 `/dev/shm/jwm_bar_p{pid}_mon_{id}`，替代仅按 monitor 编号的全局名；spawn 与 shutdown 清理共用同一 helper。
+2. **回归**：`secondary_bar_shared_path_tests` 断言不同 monitor、不同 compositor PID 不会落回旧路径；末段仍 parse 为 monitor id（gtk_bar 等前端约定不变）。
+
+**验证**：`cargo test secondary_bar_shared_path` + `cargo test -p xbar_core basename_distinguishes` + 修改范围 `cargo check`。无真机。
+
+**仍然开着的**：继承上节 2026-09-25 列表，去掉「bar 共享内存名未按运行目录隔离」一条（已用 compositor PID 命名空间闭合；若两实例同 PID 仍不可能并存）。
+
+---
+
 ## 2026-09-25（四）：maximize 几何恢复事务与全协议写回 + 全仓缺陷扫除（Opus 5.5 工作流）
 
 选题 = 用户「jwm全面进化升级，workflow的subagent使用opus5.5」。闭合 09-22 两条记录遗留的 maximize 待办，并做一次全仓缺陷扫除。全程多智能体：规格 → 实现 → 交接波 → 六轮独立复查，审查者、修复者、复查者始终是不同批次的智能体。
@@ -29,8 +42,6 @@
 - maximize 延后项：可见窗口的提升状态与恢复矩形跨重启持久化；EWMH source indication；xdg `move_request` / `resize_request`（CSD 标题栏拖动最大化 xdg 窗口不会取消最大化）；XWayland 单轴最大化；snap 半屏和四分屏仍用 `m_*` 而非工作区；窗口状态 IPC 事件；hints 变化后刷新 `_NET_WM_ALLOWED_ACTIONS`；xdg `Tiled*` 与 `Maximized` 共存的取舍。
 - 提升窗口在全屏或 PiP 期间被取消最大化会丢锚点，回到平铺尾部（已写进文档）；可选的「仍提升的全屏跟随者」锁定测试未加。
 - portal `ipc::query_windows` 协议已修正但仍无调用方。
-- 嵌套或测试用的 jwm 会尝试用与宿主会话同名的共享内存创建状态栏，因为属主是宿主进程而被拒绝，之后每 30 s 重试一次。无害，但日志噪音大，也说明 bar 的共享内存名没有按运行目录隔离。
-- 本轮全部改动未提交（130 个跟踪文件约 +38.7k / -2.7k，另有 3 个新文件约 3.1k 行）。
 
 ---
 
