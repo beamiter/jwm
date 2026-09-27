@@ -30,6 +30,17 @@
 
 ---
 
+## 2026-09-27（三）：bar 退出时也清理 legacy 共享内存 flink
+
+选题 = evolve wave 4；spawn 时的 legacy 清理无法覆盖「旧实例已退出但 flink 仍指向 stale mapping」的窗口。
+
+1. **`remove_legacy_secondary_bar_shared_memory`**：spawn / failure / retire 路径共用，best-effort 删除旧版 `/dev/shm/jwm_bar_mon_{id}`。
+2. **回归**：`legacy_shared_memory_cleanup_is_best_effort` 覆盖 helper 不 panic。
+
+**验证**：`cargo test legacy_shared_memory` + 修改范围 `cargo check`。
+
+---
+
 ## 2026-09-27（一）：状态栏共享内存按 compositor PID 隔离
 
 选题 = evolve 一轮，闭合 handoff「嵌套/测试 JWM 与宿主争用 `jwm_bar_mon_*`」项；无需 DRM/KMS。

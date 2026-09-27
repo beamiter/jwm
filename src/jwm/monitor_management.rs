@@ -40,6 +40,20 @@ pub(crate) fn legacy_secondary_bar_shared_memory_path(monitor_id: i32) -> String
     format!("/dev/shm/jwm_bar_mon_{monitor_id}")
 }
 
+/// Best-effort unlink of pre-PID-isolation bar shared-memory flinks.
+pub(crate) fn remove_legacy_secondary_bar_shared_memory(monitor_id: i32) {
+    let legacy_path = legacy_secondary_bar_shared_memory_path(monitor_id);
+    let current_path = secondary_bar_shared_memory_path(monitor_id);
+    if legacy_path == current_path {
+        return;
+    }
+    if let Err(error) = std::fs::remove_file(&legacy_path) {
+        if error.kind() != io::ErrorKind::NotFound {
+            warn!("Could not remove legacy status-bar shared memory {legacy_path}: {error}");
+        }
+    }
+}
+
 fn min_bar_wakeup(left: Option<Duration>, right: Option<Duration>) -> Option<Duration> {
     match (left, right) {
         (Some(left), Some(right)) => Some(left.min(right)),
@@ -447,6 +461,7 @@ impl Jwm {
                     monitor_id, error
                 );
             }
+            remove_legacy_secondary_bar_shared_memory(monitor_id);
         }
         self.clear_minimized_dock_for_monitor(backend, monitor_id);
         self.note_secondary_bar_failure(monitor_id, now, reason);
@@ -493,6 +508,7 @@ impl Jwm {
                 monitor_id, error
             );
         }
+        remove_legacy_secondary_bar_shared_memory(monitor_id);
 
         retired_client
     }
@@ -527,16 +543,7 @@ impl Jwm {
 
     pub(super) fn spawn_secondary_bar(&mut self, monitor_id: i32, now: Instant) {
         let shared_path = secondary_bar_shared_memory_path(monitor_id);
-        let legacy_path = legacy_secondary_bar_shared_memory_path(monitor_id);
-        if legacy_path != shared_path {
-            if let Err(error) = std::fs::remove_file(&legacy_path) {
-                if error.kind() != io::ErrorKind::NotFound {
-                    warn!(
-                        "Could not remove legacy status-bar shared memory {legacy_path}: {error}"
-                    );
-                }
-            }
-        }
+        remove_legacy_secondary_bar_shared_memory(monitor_id);
 
         // JWM is the single supervisor for per-monitor bar buffers. Reclaim a
         // mapping whose creator died before Drop could unlink its flink, then
@@ -668,7 +675,8 @@ impl Jwm {
 #[cfg(test)]
 mod secondary_bar_shared_path_tests {
     use super::{
-        legacy_secondary_bar_shared_memory_path, secondary_bar_shared_memory_path,
+        legacy_secondary_bar_shared_memory_path, remove_legacy_secondary_bar_shared_memory,
+        secondary_bar_shared_memory_path,
     };
 
     #[test]
@@ -704,6 +712,11 @@ mod secondary_bar_shared_path_tests {
             legacy_secondary_bar_shared_memory_path(3),
             secondary_bar_shared_memory_path(3)
         );
+    }
+
+    #[test]
+    fn legacy_shared_memory_cleanup_is_best_effort() {
+        remove_legacy_secondary_bar_shared_memory(99);
     }
 }
 
