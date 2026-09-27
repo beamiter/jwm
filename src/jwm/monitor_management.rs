@@ -617,6 +617,7 @@ impl Jwm {
                 self.secondary_bars.insert(monitor_id, bar_instance);
             }
             Err(e) => {
+                remove_legacy_secondary_bar_shared_memory(monitor_id);
                 let reason = format!("process spawn failed: {e}");
                 error!(
                     "Failed to spawn secondary bar for monitor {}: {}",

@@ -30,6 +30,20 @@
 
 ---
 
+## 2026-09-28（六）：bar 进程 spawn 失败时也清理 legacy flink
+
+选题 = evolve wave 7；共享内存已创建但 secondary bar 进程 spawn 失败时，旧版
+`/dev/shm/jwm_bar_mon_*` 仍可能残留，下一次 spawn 前若未删除会干扰 reclaim。
+
+1. **契约**：`spawn_secondary_bar` 在 `command.spawn()` 的 `Err` 分支记录 failure
+   前同样调用 `remove_legacy_secondary_bar_shared_memory`。
+2. **回归**：继承 `legacy_shared_memory_cleanup_is_best_effort`；与 wave 4–6 的
+   failure 清理路径一致。
+
+**验证**：`cargo test legacy_shared_memory` + 修改范围 `cargo check`。
+
+---
+
 ## 2026-09-28（五）：共享内存 open 失败时也清理 legacy flink
 
 选题 = evolve wave 6；`open_or_create` 报错时旧版 `/dev/shm/jwm_bar_mon_*` 仍可能残留，下一次 spawn 前若未删除会干扰 reclaim。
