@@ -558,6 +558,7 @@ impl Jwm {
         {
             Ok(rb) => rb,
             Err(e) => {
+                remove_legacy_secondary_bar_shared_memory(monitor_id);
                 let reason = format!("shared-memory setup failed: {e}");
                 error!(
                     "Failed to prepare shared memory for monitor {}: {}",
