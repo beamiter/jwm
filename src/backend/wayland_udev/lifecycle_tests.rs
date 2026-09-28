@@ -1420,3 +1420,91 @@ fn every_wayland_backend_publishes_monitors_to_workspace_managers() {
         );
     }
 }
+
+#[test]
+fn status_bar_layer_receives_pointer_on_offset_outputs() {
+    use crate::backend::wayland_udev::image_copy_capture::wire_test_client::{Server, test_output};
+    use smithay::output::Scale;
+    use std::os::fd::AsRawFd;
+
+    for (x, y, scale) in [(0, 0, 1), (1920, 0, 1), (-800, 120, 2), (0, -600, 1)] {
+        let mut server = Server::new();
+        let output = test_output("bar-output");
+        output.change_current_state(None, None, Some(Scale::Integer(scale)), Some((x, y).into()));
+        if (x, y) != (0, 0) {
+            server.state.outputs.push(test_output("primary"));
+        }
+        server.state.outputs.push(output);
+        server.state.pointer_location = (f64::from(x + 1), f64::from(y + 1)).into();
+        let mut client = server.connect();
+        let compositor = client.bind("wl_compositor", 4);
+        let shell = client.bind("zwlr_layer_shell_v1", 1);
+        let shm = client.bind("wl_shm", 1);
+        let surface = client.new_id();
+        client.request(compositor, 0, &[surface]);
+        let layer = client.new_id();
+        // get_layer_surface(surface, output=null, layer=top, namespace="bar")
+        client.request(
+            shell,
+            0,
+            &[layer, surface, 0, 2, 4, u32::from_ne_bytes(*b"bar\0")],
+        );
+        client.request(layer, 0, &[20, 8]); // set_size
+        client.request(layer, 1, &[5]); // anchor top + left
+        client.request(layer, 3, &[3, 0, 0, 5]); // margin top/right/bottom/left
+        client.request(surface, 6, &[]); // initial commit
+        server.roundtrip();
+        let serial = client
+            .events()
+            .into_iter()
+            .find(|event| event.sender == layer && event.opcode == 0)
+            .expect("layer configure")
+            .args[0];
+        client.request(layer, 6, &[serial]); // ack_configure
+
+        let fd = nix::sys::memfd::memfd_create(c"bar-hit-test", nix::sys::memfd::MFdFlags::empty())
+            .unwrap();
+        nix::unistd::ftruncate(&fd, 20 * 8 * 4).unwrap();
+        let pool = client.new_id();
+        client.request_with_fd_args(shm, 0, &[pool, 20 * 8 * 4], fd.as_raw_fd());
+        let buffer = client.new_id();
+        client.request(pool, 0, &[buffer, 0, 20, 8, 20 * 4, 0]);
+        client.request(surface, 1, &[buffer, 0, 0]); // attach
+        client.request(surface, 6, &[]);
+        // The fd transfer splits the socket stream; dispatch again to
+        // consume the attach/commit requests after the pool creation.
+        server.roundtrip();
+        server.roundtrip();
+        assert!(
+            !client
+                .events()
+                .iter()
+                .any(|event| event.sender == 1 && event.opcode == 0),
+            "Wayland protocol error"
+        );
+
+        let (&window, bar_surface) = server
+            .state
+            .layer_surfaces
+            .iter()
+            .next()
+            .expect("mapped bar");
+        let geometry = server.state.window_geometry[&window];
+        assert_eq!((geometry.x, geometry.y), (x + 5, y + 3));
+        assert_eq!((geometry.w, geometry.h), (20, 8));
+        let point = (f64::from(x) + 7.5, f64::from(y) + 5.5).into();
+        let (_, hit, origin) = server.state.surface_under(point).unwrap_or_else(|| {
+            panic!("bar receives pointer on output ({x}, {y}) scale={scale}; geometry={geometry:?}")
+        });
+        assert_eq!(&hit, bar_surface);
+        assert_eq!((origin.x, origin.y), (f64::from(x + 5), f64::from(y + 3)));
+        let local = point - origin;
+        assert_eq!((local.x, local.y), (2.5, 2.5));
+        assert!(
+            server
+                .state
+                .surface_under((f64::from(x + 30), f64::from(y + 20)).into())
+                .is_none()
+        );
+    }
+}

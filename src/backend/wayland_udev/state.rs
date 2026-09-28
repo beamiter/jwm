@@ -3265,13 +3265,16 @@ impl JwmWaylandState {
             }
 
             let map = layer_map_for_output(output);
+            // LayerMap geometry is output-local; pointer events and the
+            // returned surface origin are desktop-global.
+            let output_origin = output.current_location().to_f64();
+            let local_location = location - output_origin;
 
             // Prefer overlay then top layer for hit-testing.
             for layer in [Layer::Overlay, Layer::Top] {
-                if let Some(ls) = map.layer_under(layer, location) {
+                if let Some(ls) = map.layer_under(layer, local_location) {
                     if let Some(geo) = map.layer_geometry(ls) {
-                        let origin: Point<f64, Logical> =
-                            (geo.loc.x as f64, geo.loc.y as f64).into();
+                        let origin = output_origin + geo.loc.to_f64();
                         return Some((None, ls.wl_surface().clone(), origin));
                     }
                 }
@@ -4156,9 +4159,10 @@ impl CompositorHandler for JwmWaylandState {
                 self.window_layer_info.insert(win, layer_info);
 
                 if let Some(geo) = map.layer_geometry(layer) {
+                    let origin = output.current_location() + geo.loc;
                     let new_geo = Geometry {
-                        x: geo.loc.x,
-                        y: geo.loc.y,
+                        x: origin.x,
+                        y: origin.y,
                         w: geo.size.w.max(0) as u32,
                         h: geo.size.h.max(0) as u32,
                         border: 0,

@@ -1044,7 +1044,17 @@ pub(crate) mod wire_test_client {
 
         /// Send one request carrying a single fd argument (and nothing else).
         pub(crate) fn request_with_fd(&mut self, object: u32, opcode: u16, fd: RawFd) {
-            let message = message(object, opcode, &[]);
+            self.request_with_fd_args(object, opcode, &[], fd);
+        }
+
+        pub(crate) fn request_with_fd_args(
+            &mut self,
+            object: u32,
+            opcode: u16,
+            args: &[u32],
+            fd: RawFd,
+        ) {
+            let message = message(object, opcode, args);
             let mut iov = libc::iovec {
                 iov_base: message.as_ptr() as *mut libc::c_void,
                 iov_len: message.len(),
