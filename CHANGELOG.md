@@ -13,6 +13,14 @@ monorepo use independent Semantic Versions.
   optional `tab_index`. See
   [docs/window-placement.md](docs/window-placement.md).
 
+- Layout picker answers `Home`/`End`/`Page Up`/`Page Down` and middle-click
+  confirms like Enter. Tags overview vertical wheel browses; calendar wheel
+  steps months; MonitorLayout Home/End/Page jump the target and middle-click
+  applies; keybindings Info wheel pages like PgUp/PgDn. See
+  [docs/layout-picker.md](docs/layout-picker.md),
+  [docs/tags-overview.md](docs/tags-overview.md),
+  [docs/calendar.md](docs/calendar.md).
+
 - Session snapshots are version 10: `client_fact`, hand-float
   (`is_drag_floating`), and `no_decorations` persist across restart;
   maximize restore re-applies via `adopt_client_maximized` using the

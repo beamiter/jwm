@@ -2709,6 +2709,56 @@ impl Jwm {
         Ok(())
     }
 
+    /// Apply the open display-layout plan through `xrandr` (Enter / middle).
+    pub(crate) fn apply_monitor_layout(&mut self, backend: &mut dyn Backend) {
+        if !self.features.system_ui.is_monitor_layout() {
+            return;
+        }
+        let args = self
+            .features
+            .system_ui
+            .monitor_layout_xrandr_args()
+            .unwrap_or_default();
+        let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+        match crate::jwm::features::external_command::output_with_limits(
+            "xrandr",
+            &arg_refs,
+            std::time::Duration::from_secs(5),
+            64 * 1024,
+        ) {
+            Ok(output) if output.status.success() => {
+                info!("Applied display layout with xrandr {args:?}");
+                self.close_system_ui(backend);
+                backend.output_ops().invalidate_output_cache();
+                self.updategeom(backend);
+                backend.compositor_force_full_redraw();
+            }
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let detail = stderr.trim();
+                let message = if detail.is_empty() {
+                    format!("xrandr exited with {}", output.status)
+                } else {
+                    let first_line = detail.lines().next().unwrap_or(detail);
+                    format!(
+                        "xrandr: {}",
+                        first_line.chars().take(120).collect::<String>()
+                    )
+                };
+                error!("Could not apply display layout: {message}");
+                self.features.system_ui.monitor_layout_error(message);
+                self.sync_system_ui(backend);
+            }
+            Err(err) => {
+                error!("Could not run xrandr: {err}");
+                self.features
+                    .system_ui
+                    .monitor_layout_error(format!("could not run xrandr: {err}"));
+                self.sync_system_ui(backend);
+            }
+        }
+    }
+
     pub(crate) fn lock_screen(
         &mut self,
         backend: &mut dyn Backend,

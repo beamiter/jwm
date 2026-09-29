@@ -4,7 +4,7 @@
 
 ---
 
-## Evolve backlog（目标 199 轮；已完成 wave 9–135，本地 ahead）
+## Evolve backlog（目标 199 轮；已完成 wave 9–145，本地 ahead）
 
 | # | 选题 | Size |
 | --- | --- | --- |
@@ -28,7 +28,29 @@
 | 119–125 | WindowInfo maximize_promoted/restore、swallowing/swallowed_by、transient_for、minimized_order、tab_index/is_tabbed | ✓ |
 | 126–130 | MonitorInfo name/vendor/serial/VRR；WorkspaceInfo has_fullscreen/is_occupied | ✓ |
 | 131–135 | Session client_fact v10；hand-float；no_decorations；maximize promoted adopt pin | ✓ |
+| 136–145 | Layout picker Home/End/Page/middle；tags wheel；calendar month wheel；MonitorLayout Home/End/Page/middle；Info wheel page | ✓ |
 | … | 跳过：Annotation/Screenshot CommonLinear、toast Closed(1)、BT withdraw、FS/PiP 自身丢锚点（own-anchor drop）、Recording EncodedOnly、XWayland 单轴 | |
+
+---
+
+## 2026-09-29（五十）：UI Home/End/Page/middle + wheel twins
+
+选题 = evolve waves 136–145 / evolve7h。
+
+1. **Wave 136–138**：Layout picker Home/End/Page + middle→Enter。
+2. **Wave 139**：Tags overview vertical wheel browse。
+3. **Wave 140**：Calendar wheel→month（已有；docs 补齐）。
+4. **Wave 141–143**：MonitorLayout jump/page + middle→apply。
+5. **Wave 144–145**：Keybindings Info wheel→page_selection。
+   Docs layout-picker / tags-overview / calendar；hints。
+
+**刻意不做**：跳过表不变。
+
+**验证**：`scripts/test.sh --lib -- home_end_and_page_jump middle_click_on_the_layout_picker monitor_layout_preview`。
+
+**下一轮候选**：recording elapsed/last_error/capture_target；idle；
+clipboard TIFF/AVIF；portal；effect/waterlily/media/clipboard count；
+size_hints。
 
 ---
 

@@ -4,8 +4,8 @@
 //! 负责分发所有来自 Backend 的事件到对应的处理函数
 
 use crate::backend::api::{
-    Backend, BackendEvent, EventHandler, HitTarget, InteractionAction, MaximizeAxes, NetWmAction,
-    NetWmState, PropertyKind, ResizeEdge, WindowChanges,
+    Backend, BackendEvent, EventHandler, ExposeNavDirection, HitTarget, InteractionAction,
+    MaximizeAxes, NetWmAction, NetWmState, PropertyKind, ResizeEdge, WindowChanges,
 };
 use crate::backend::common_define::{KeySym, Mods, OutputId, WindowId};
 use crate::backend::error::BackendError;
@@ -640,24 +640,29 @@ impl WMController for Jwm {
                 3 => self.cancel_layout_picker(backend),
                 // Left-click: apply under the pointer (or the highlight).
                 1 => self.click_layout_picker(backend, x, y),
-                // Middle stays inert (never commits a browsed layout by accident).
+                // Middle: Enter twin — commit the highlighted layout.
+                2 => self.confirm_layout_picker(backend),
                 _ => {}
             }
             return;
         }
         if self.features.system_ui.is_tags_overview() {
             // The compositors register no hit map for the grid, so — like the
-            // film strip — the WM hit-tests the shared geometry itself. Only
-            // the left button acts; every other press is swallowed by the
-            // grab, which is what keeps clicks off the desktop below. A cell
-            // press commits nothing yet: it arms a pending press the release
-            // settles as the click's tag jump or a wireframe drag's move.
-            if detail == 1 {
-                let (x, y) = backend
-                    .input_ops()
-                    .get_pointer_position()
-                    .unwrap_or(self.last_mouse_root);
-                self.press_tags_overview(backend, x, y);
+            // film strip — the WM hit-tests the shared geometry itself. Left
+            // button arms a pending press; vertical wheel browses the
+            // highlight (Up/Down twin); other presses stay swallowed by the
+            // grab so clicks never fall through to the desktop.
+            match detail {
+                1 => {
+                    let (x, y) = backend
+                        .input_ops()
+                        .get_pointer_position()
+                        .unwrap_or(self.last_mouse_root);
+                    self.press_tags_overview(backend, x, y);
+                }
+                4 => self.move_tags_overview_selection(backend, ExposeNavDirection::Up),
+                5 => self.move_tags_overview_selection(backend, ExposeNavDirection::Down),
+                _ => {}
             }
             return;
         }
@@ -826,6 +831,10 @@ impl WMController for Jwm {
                             error!("Error activating system UI row: {error}");
                         }
                     }
+                }
+                2 if self.features.system_ui.is_monitor_layout() => {
+                    // Enter twin: apply the planned layout through xrandr.
+                    self.apply_monitor_layout(backend);
                 }
                 2 if self.features.system_ui.is_control_center() => {
                     use crate::backend::common_define::keys;
@@ -7134,13 +7143,12 @@ mod tests {
     }
 
     #[test]
-    fn middle_click_on_the_layout_picker_is_inert() {
+    fn middle_click_on_the_layout_picker_confirms_like_enter() {
         let mut jwm = jwm_with_monitor();
         let mut backend = RenderSpyBackend::new();
-        let after_open = {
-            jwm.cyclelayout(&mut backend, &WMArgEnum::Int(1)).unwrap();
-            current_layout(&jwm)
-        };
+        jwm.cyclelayout(&mut backend, &WMArgEnum::Int(1)).unwrap();
+        assert!(jwm.features.system_ui.is_layout_picker());
+        let after_open = current_layout(&jwm);
 
         <Jwm as WMController>::on_button_press(
             &mut jwm,
@@ -7152,8 +7160,8 @@ mod tests {
         );
 
         assert!(
-            jwm.features.system_ui.is_layout_picker(),
-            "middle-click must not commit"
+            !jwm.features.system_ui.is_layout_picker(),
+            "middle-click must commit like Enter"
         );
         assert_eq!(current_layout(&jwm), after_open);
     }

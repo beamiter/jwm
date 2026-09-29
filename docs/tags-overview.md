@@ -42,7 +42,8 @@ with modifiers held too: the panel holds the keyboard grab, so the global
 
 The panel grabs the pointer while it is open, so no click can fall through
 to the windows underneath. A press on a cell commits nothing by itself —
-the release settles what the gesture meant.
+the release settles what the gesture meant. The vertical wheel browses the
+highlight Up/Down like the arrows (no commit); a horizontal wheel is inert.
 
 - Moving the pointer over a cell highlights it. Mouse and keyboard share the
   one highlight, so you can mix them freely; the dead space between cells

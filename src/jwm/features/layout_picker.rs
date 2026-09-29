@@ -80,6 +80,35 @@ impl LayoutPickerState {
         Some(self.selected_layout())
     }
 
+    /// Jump to the first or last cell without wrapping. Returns the layout
+    /// when the highlight moved.
+    pub fn jump_edge(&mut self, to_end: bool) -> Option<&'static LayoutEnum> {
+        if self.layouts.is_empty() {
+            return None;
+        }
+        let next = if to_end {
+            self.layouts.len() - 1
+        } else {
+            0
+        };
+        self.select(next)
+    }
+
+    /// Page the strip by a quarter of its length (at least 1), clamping at
+    /// the ends — the twin of switcher / Info Page Up/Down.
+    pub fn page(&mut self, direction: i32) -> Option<&'static LayoutEnum> {
+        if self.layouts.is_empty() || direction == 0 {
+            return None;
+        }
+        let step = (self.layouts.len() / 4).max(1) as i32;
+        let next = if direction < 0 {
+            self.selected.saturating_sub(step as usize)
+        } else {
+            (self.selected + step as usize).min(self.layouts.len() - 1)
+        };
+        self.select(next)
+    }
+
     /// Restart the auto-confirm delay. Every interaction does this: someone
     /// still driving the picker has not finished choosing.
     pub fn touch(&mut self) {
@@ -218,6 +247,23 @@ mod tests {
         // the press commits the layout the strip is already showing.
         assert_eq!(picker.select(index), None);
         assert_eq!(picker.selected_layout(), picker.layouts[index]);
+    }
+
+    #[test]
+    fn home_end_and_page_jump_without_wrapping() {
+        let mut picker = LayoutPickerState::new(&LayoutEnum::TILE);
+        let last = picker.layouts.len() - 1;
+        assert!(picker.jump_edge(true).is_some());
+        assert_eq!(picker.selected, last);
+        assert!(picker.jump_edge(true).is_none());
+        assert!(picker.jump_edge(false).is_some());
+        assert_eq!(picker.selected, 0);
+        assert!(picker.jump_edge(false).is_none());
+        assert!(picker.page(1).is_some());
+        assert!(picker.selected > 0);
+        let mid = picker.selected;
+        assert!(picker.page(-1).is_some());
+        assert!(picker.selected < mid);
     }
 
     #[test]

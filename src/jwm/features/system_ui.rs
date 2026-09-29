@@ -1680,6 +1680,10 @@ impl SystemUiState {
         matches!(self, Self::Calendar { .. })
     }
 
+    pub fn is_keybindings(&self) -> bool {
+        matches!(self, Self::Info { .. })
+    }
+
     /// The calendar card's view while the card is the panel on screen. The
     /// pointer's click mapper reads it; the keys mutate it through
     /// [`Self::shift_calendar`].
@@ -3558,8 +3562,8 @@ impl SystemUiState {
     }
 
     /// Jump to the first or last selectable row. Returns false for panels
-    /// whose arrows mean something else (calendar/display layout) or which do
-    /// not carry a selection.
+    /// whose arrows mean something else (calendar) or which do not carry a
+    /// selection.
     pub fn jump_selection(&mut self, to_end: bool) -> bool {
         let edge = |len: usize| if to_end { len.saturating_sub(1) } else { 0 };
         match self {
@@ -3596,10 +3600,29 @@ impl SystemUiState {
                 *armed = false;
                 *selected = edge(entries.len());
             }
+            Self::MonitorLayout {
+                entries,
+                selected,
+                reference,
+                message,
+            } => {
+                if entries.is_empty() {
+                    return false;
+                }
+                let previous = *selected;
+                let next = edge(entries.len());
+                if next == previous {
+                    return false;
+                }
+                *selected = next;
+                if *reference == *selected {
+                    *reference = previous;
+                }
+                message.clear();
+            }
             Self::Inactive
             | Self::LayoutPicker(_)
             | Self::TagsOverview(_)
-            | Self::MonitorLayout { .. }
             | Self::Locked { .. }
             | Self::Calendar { .. } => return false,
         }
@@ -3663,10 +3686,29 @@ impl SystemUiState {
                 *armed = false;
                 *selected = stepped(*selected, entries.len(), entries.len().max(1), direction);
             }
+            Self::MonitorLayout {
+                entries,
+                selected,
+                reference,
+                message,
+            } => {
+                if entries.len() < 2 {
+                    return false;
+                }
+                let previous = *selected;
+                let next = stepped(*selected, entries.len(), 1, direction);
+                if next == previous {
+                    return false;
+                }
+                *selected = next;
+                if *reference == *selected {
+                    *reference = previous;
+                }
+                message.clear();
+            }
             Self::Inactive
             | Self::LayoutPicker(_)
             | Self::TagsOverview(_)
-            | Self::MonitorLayout { .. }
             | Self::Locked { .. }
             | Self::Calendar { .. } => return false,
         }
@@ -3931,7 +3973,7 @@ impl SystemUiState {
                     items: vec![format!("{}   {}", layout.symbol(), layout.label())],
                     icons: None,
                     selected: Some(0),
-                    hint: "\u{f060}/\u{f061}  browse    Enter / click  apply    Esc / right-click  cancel".into(),
+                    hint: "\u{f060}/\u{f061}  browse    Home/End / Pg  jump    Enter / middle / click  apply    Esc / right-click  cancel".into(),
                     scroll: None,
                 }
             }
@@ -4641,7 +4683,7 @@ fn monitor_layout_overlay(
         writeln!(out, "\n! {message}").expect("writing to a String cannot fail");
     }
     out.push_str(
-        "\nTab  target    [ / ]  reference    Arrow  attach side\nShift+Arrow  10px adjust    Ctrl+Arrow  1px adjust\nS / C / E  align start / center / end\nEnter  apply with xrandr    Esc  cancel",
+        "\nTab  target    [ / ]  reference    Arrow  attach side\nHome/End / PgUp/PgDn  jump target    Shift+Arrow  10px    Ctrl+Arrow  1px\nS / C / E  align start / center / end\nEnter / middle-click  apply with xrandr    Esc  cancel",
     );
     out
 }

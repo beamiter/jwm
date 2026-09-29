@@ -2114,6 +2114,10 @@ impl Jwm {
             self.features
                 .system_ui
                 .shift_calendar(direction.signum() as i32, 0, false);
+        } else if self.features.system_ui.is_keybindings() {
+            // Info offset pages like PgUp/PgDn; a one-row wheel crawl is too
+            // slow for a long binding list.
+            let _ = self.features.system_ui.page_selection(direction.signum());
         } else {
             self.features.system_ui.move_selection(direction.signum());
         }
@@ -2437,6 +2441,18 @@ impl Jwm {
                     keys::KEY_Right | keys::KEY_Down | keys::KEY_Tab => {
                         self.layout_picker(backend, &WMArgEnum::Int(1))?
                     }
+                    keys::KEY_Home => {
+                        self.jump_layout_picker_edge(backend, false);
+                    }
+                    keys::KEY_End => {
+                        self.jump_layout_picker_edge(backend, true);
+                    }
+                    keys::KEY_Page_Up => {
+                        self.page_layout_picker(backend, -1);
+                    }
+                    keys::KEY_Page_Down => {
+                        self.page_layout_picker(backend, 1);
+                    }
                     keys::KEY_space => {
                         let delta = if clean_state.contains(Mods::SHIFT) {
                             -1
@@ -2585,6 +2601,14 @@ impl Jwm {
                     self.features.system_ui.cycle_monitor_reference(-1);
                 } else if keysym == keys::KEY_bracketright {
                     self.features.system_ui.cycle_monitor_reference(1);
+                } else if keysym == keys::KEY_Home {
+                    let _ = self.features.system_ui.jump_selection(false);
+                } else if keysym == keys::KEY_End {
+                    let _ = self.features.system_ui.jump_selection(true);
+                } else if keysym == keys::KEY_Page_Up {
+                    let _ = self.features.system_ui.page_selection(-1);
+                } else if keysym == keys::KEY_Page_Down {
+                    let _ = self.features.system_ui.page_selection(1);
                 } else if let (Some(step), Some(direction)) = (adjustment_step, arrow_direction) {
                     self.features.system_ui.fine_tune_monitor(direction, step);
                 } else if let Some(direction) = arrow_direction {
@@ -2596,48 +2620,8 @@ impl Jwm {
                 } else if keysym == keys::KEY_e {
                     self.features.system_ui.align_monitor_end();
                 } else if keysym == keys::KEY_Return {
-                    let args = self
-                        .features
-                        .system_ui
-                        .monitor_layout_xrandr_args()
-                        .unwrap_or_default();
-                    let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
-                    match crate::jwm::features::external_command::output_with_limits(
-                        "xrandr",
-                        &arg_refs,
-                        std::time::Duration::from_secs(5),
-                        64 * 1024,
-                    ) {
-                        Ok(output) if output.status.success() => {
-                            info!("Applied display layout with xrandr {args:?}");
-                            self.close_system_ui(backend);
-                            backend.output_ops().invalidate_output_cache();
-                            self.updategeom(backend);
-                            backend.compositor_force_full_redraw();
-                            return Ok(());
-                        }
-                        Ok(output) => {
-                            let stderr = String::from_utf8_lossy(&output.stderr);
-                            let detail = stderr.trim();
-                            let message = if detail.is_empty() {
-                                format!("xrandr exited with {}", output.status)
-                            } else {
-                                let first_line = detail.lines().next().unwrap_or(detail);
-                                format!(
-                                    "xrandr: {}",
-                                    first_line.chars().take(120).collect::<String>()
-                                )
-                            };
-                            error!("Could not apply display layout: {message}");
-                            self.features.system_ui.monitor_layout_error(message);
-                        }
-                        Err(err) => {
-                            error!("Could not run xrandr: {err}");
-                            self.features
-                                .system_ui
-                                .monitor_layout_error(format!("could not run xrandr: {err}"));
-                        }
-                    }
+                    self.apply_monitor_layout(backend);
+                    return Ok(());
                 }
                 self.sync_system_ui(backend);
                 return Ok(());

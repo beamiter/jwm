@@ -115,6 +115,40 @@ impl Jwm {
         Ok(true)
     }
 
+    /// Home / End on an open picker. Returns false when none is open.
+    pub(crate) fn jump_layout_picker_edge(
+        &mut self,
+        backend: &mut dyn Backend,
+        to_end: bool,
+    ) -> bool {
+        let Some(picker) = self.features.system_ui.layout_picker_mut() else {
+            return false;
+        };
+        let Some(target) = picker.jump_edge(to_end) else {
+            return true;
+        };
+        self.apply_picked_layout(backend, target);
+        self.sync_system_ui(backend);
+        true
+    }
+
+    /// Page Up / Down on an open picker. Returns false when none is open.
+    pub(crate) fn page_layout_picker(
+        &mut self,
+        backend: &mut dyn Backend,
+        direction: i32,
+    ) -> bool {
+        let Some(picker) = self.features.system_ui.layout_picker_mut() else {
+            return false;
+        };
+        let Some(target) = picker.page(direction) else {
+            return true;
+        };
+        self.apply_picked_layout(backend, target);
+        self.sync_system_ui(backend);
+        true
+    }
+
     /// Highlight the cell under the pointer, following the mouse.
     pub(crate) fn hover_layout_picker(&mut self, backend: &mut dyn Backend, x: f64, y: f64) {
         let Some(index) = self.layout_picker_cell_at(x, y) else {
