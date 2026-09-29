@@ -4,17 +4,29 @@
 
 ---
 
-## Evolve backlog（目标 100 轮；已完成 wave 9–29，本地 ahead）
+## Evolve backlog（目标 100 轮；已完成 wave 9–30，本地 ahead）
 
 按日常命中 × 可交付性排序的下一波候选（S/小 M，无 DRM）：
 
 | # | 选题 | Size |
 | --- | --- | --- |
-| 14–27 | IPC window/state 全族 + Tiled* + restore_rect | S/M ✓ |
-| 28 | seamless promote adoption | S ✓ |
-| 29 | view/toggleview → window/state | S ✓ |
-| 30 | session 持久化 maximize + restore_rect | M |
-| … | 跳过：Annotation/Screenshot toolbar CommonLinear（capture bake）、toast Closed(1)、BT withdraw、FS/PiP 丢锚点、Recording EncodedOnly | |
+| 14–30 | IPC window/state 全族 + seamless promote + session maximize | S/M ✓ |
+| 31 | … |  |
+| … | 跳过：Annotation/Screenshot toolbar CommonLinear（capture bake）、toast Closed(1)、BT withdraw、FS/PiP 丢锚点、Recording EncodedOnly、XWayland 单轴 | |
+
+---
+
+## 2026-09-29（二十一）：session persist maximize
+
+选题 = evolve wave 30。
+
+1. **契约**：SESSION_VERSION=4；`SessionMaximize{vert,horz,restore,promoted}`；
+   capture 保留休息态 + maximize；restore unmax→place→arrange→User re-max。
+2. **回归**：capture / master restore / migration pins。
+
+**验证**：`scripts/test.sh --lib -- capture_snapshot_records_the_pre_maximize a_session_saved_with_the_master migrate_session`。
+
+**仍然开着的**：见上表 31+。
 
 ---
 

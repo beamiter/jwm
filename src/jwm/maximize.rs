@@ -81,7 +81,20 @@ impl Jwm {
         axes: MaximizeAxes,
         origin: MaximizeOrigin,
     ) -> Result<bool, Box<dyn std::error::Error>> {
-        self.maximize_transaction(backend, client_key, axes, origin, None)
+        self.set_client_maximized_with_hint(backend, client_key, axes, origin, None)
+    }
+
+    /// Like [`Self::set_client_maximized`], with an optional restore rectangle
+    /// used when entering maximize from NONE (session restore, seamless adopt).
+    pub(crate) fn set_client_maximized_with_hint(
+        &mut self,
+        backend: &mut dyn Backend,
+        client_key: ClientKey,
+        axes: MaximizeAxes,
+        origin: MaximizeOrigin,
+        restore_hint: Option<Rect>,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
+        self.maximize_transaction(backend, client_key, axes, origin, restore_hint)
     }
 
     /// Manage-time adoption of pre-set maximize atoms. `restore_hint` is the

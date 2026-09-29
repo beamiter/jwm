@@ -11,6 +11,9 @@
 //! `restore_session` 在套用完全部标签 / 浮动状态后，按保存顺序重排每个
 //! 显示器的客户端列表再统一 `arrange`，从而保留用户手工调整过的平铺顺序
 //! （master/stack 排列与拖拽换序的结果）。
+//!
+//! v4 起，最大化状态（轴、恢复矩形、是否从平铺提升）一并写入快照；恢复时
+//! 先落到休息态几何，再以 `MaximizeOrigin::User` 重新最大化。
 
 use crate::backend::api::{Backend, MaximizeAxes};
 use crate::config::CONFIG;
@@ -30,7 +33,7 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-const SESSION_VERSION: u32 = 3;
+const SESSION_VERSION: u32 = 4;
 const MIN_SUPPORTED_SESSION_VERSION: u32 = 1;
 const MAX_SESSION_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_SESSION_CLIENTS: usize = 16_384;
@@ -55,6 +58,53 @@ pub struct SessionEntry {
     pub monitor_num: u32,
     /// 浮动几何 (x, y, w, h)；仅当窗口为浮动时记录。
     pub floating: Option<(i32, i32, i32, i32)>,
+    /// v4：最大化轴与恢复矩形。缺省 / 旧版本快照为 `None`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub maximize: Option<SessionMaximize>,
+}
+
+/// 会话里保存的最大化状态（v4）。休息态几何仍写在 `is_floating` /
+/// `floating`；本结构在恢复末尾再套一层 maximize。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionMaximize {
+    pub vert: bool,
+    pub horz: bool,
+    /// 取消最大化后回到的内容矩形；缺省时由事务用休息态推算。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restore: Option<(i32, i32, i32, i32)>,
+    /// `maximize_restore_tiled`：用户从平铺提升。
+    #[serde(default)]
+    pub promoted: bool,
+}
+
+impl SessionMaximize {
+    fn from_client(client: &WMClient) -> Option<Self> {
+        let axes = client.state.maximized_axes();
+        if !axes.any() {
+            return None;
+        }
+        let restore = client
+            .geometry
+            .maximize_restore_rect
+            .filter(|rect| rect.w > 0 && rect.h > 0)
+            .map(|rect| (rect.x, rect.y, rect.w, rect.h));
+        Some(Self {
+            vert: axes.vert,
+            horz: axes.horz,
+            restore,
+            promoted: client.state.maximize_restore_tiled,
+        })
+    }
+
+    fn axes(&self) -> MaximizeAxes {
+        MaximizeAxes::new(self.vert, self.horz)
+    }
+
+    fn restore_hint(&self) -> Option<Rect> {
+        self.restore
+            .filter(|&(_, _, w, h)| w > 0 && h > 0)
+            .map(|(x, y, w, h)| Rect::new(x, y, w, h))
+    }
 }
 
 /// 恢复匹配用的窗口身份（class + instance；重启后 `WindowId` 失效，不持久化）。
@@ -130,15 +180,24 @@ struct SessionSnapshotV1 {
     clients: Vec<SessionEntryV1>,
 }
 
-/// 版本 2 快照：与当前版本共用条目表示，但还没有每显示器顺序列表。
+/// 版本 2 快照：条目与当前同形（`maximize` 缺省为 None），但还没有每显示器顺序列表。
 ///
-/// 保持严格（字段无缺省）：v2 是当前版本直系前身，缺字段说明写入方出了
+/// 保持严格（字段无缺省）：v2 是直系前身，缺字段说明写入方出了
 /// 问题，迁移不做静默补全。
 #[derive(Deserialize)]
 struct SessionSnapshotV2 {
     #[allow(dead_code)]
     version: u32,
     clients: Vec<SessionEntry>,
+}
+
+/// 版本 3 快照：已有 monitor_orders，尚无 maximize 字段（反序列化时缺省 None）。
+#[derive(Deserialize)]
+struct SessionSnapshotV3 {
+    #[allow(dead_code)]
+    version: u32,
+    clients: Vec<SessionEntry>,
+    monitor_orders: Vec<SessionMonitorOrder>,
 }
 
 /// 把任一受支持版本的会话 JSON 迁移为当前版本的快照。
@@ -157,12 +216,17 @@ pub fn migrate_session_json(json: &str) -> Result<SessionSnapshot, String> {
         1 => {
             let v1: SessionSnapshotV1 = serde_json::from_str(json)
                 .map_err(|error| format!("cannot parse version 1 session snapshot: {error}"))?;
-            migrate_snapshot_v2(migrate_snapshot_v1(v1))
+            migrate_snapshot_v3(migrate_snapshot_v2(migrate_snapshot_v1(v1)))
         }
         2 => {
             let v2: SessionSnapshotV2 = serde_json::from_str(json)
                 .map_err(|error| format!("cannot parse version 2 session snapshot: {error}"))?;
-            migrate_snapshot_v2(v2)
+            migrate_snapshot_v3(migrate_snapshot_v2(v2))
+        }
+        3 => {
+            let v3: SessionSnapshotV3 = serde_json::from_str(json)
+                .map_err(|error| format!("cannot parse version 3 session snapshot: {error}"))?;
+            migrate_snapshot_v3(v3)
         }
         SESSION_VERSION => SessionSnapshot::from_json(json)
             .map_err(|error| format!("cannot parse session snapshot: {error}"))?,
@@ -195,6 +259,7 @@ fn migrate_snapshot_v1(v1: SessionSnapshotV1) -> SessionSnapshotV2 {
                 is_floating: entry.is_floating,
                 monitor_num: entry.monitor_num,
                 floating,
+                maximize: None,
             }
         })
         .collect();
@@ -206,11 +271,20 @@ fn migrate_snapshot_v1(v1: SessionSnapshotV1) -> SessionSnapshotV2 {
 
 /// v2 -> v3：v2 没有每显示器顺序列表，补空列表即可；恢复时空列表意味着
 /// 不重排，行为与 v2 完全一致。
-fn migrate_snapshot_v2(v2: SessionSnapshotV2) -> SessionSnapshot {
-    SessionSnapshot {
-        version: SESSION_VERSION,
+fn migrate_snapshot_v2(v2: SessionSnapshotV2) -> SessionSnapshotV3 {
+    SessionSnapshotV3 {
+        version: 3,
         clients: v2.clients,
         monitor_orders: Vec::new(),
+    }
+}
+
+/// v3 -> v4：maximize 字段在反序列化时已缺省为 None；只抬版本号。
+fn migrate_snapshot_v3(v3: SessionSnapshotV3) -> SessionSnapshot {
+    SessionSnapshot {
+        version: SESSION_VERSION,
+        clients: v3.clients,
+        monitor_orders: v3.monitor_orders,
     }
 }
 
@@ -228,6 +302,7 @@ pub struct RestorePlan {
 struct DetailedRestorePlan {
     restore: RestorePlan,
     monitor_num: u32,
+    maximize: Option<SessionMaximize>,
 }
 
 impl SessionSnapshot {
@@ -272,6 +347,21 @@ impl SessionSnapshot {
                 return Err(format!(
                     "session client {index} has floating geometry but is not floating"
                 ));
+            }
+            if let Some(maximize) = &entry.maximize {
+                if !maximize.vert && !maximize.horz {
+                    return Err(format!(
+                        "session client {index} has a maximize entry with no axes"
+                    ));
+                }
+                if let Some((_, _, width, height)) = maximize.restore
+                    && (width <= 0 || height <= 0)
+                {
+                    return Err(format!(
+                        "session client {index} has invalid maximize restore size \
+                         {width}x{height}"
+                    ));
+                }
             }
         }
         if self.monitor_orders.len() > MAX_SESSION_MONITORS {
@@ -604,14 +694,10 @@ pub fn capture_snapshot_excluding(
         if skipped(*key, c) {
             continue;
         }
-        // Maximize is never persisted: a maximized client is saved in the
-        // state it returns to. A window maximize pulled out of the layout
-        // goes back to tiling; any other one rests floating at its
-        // pre-maximize rect, read from the dedicated restore slot rather
-        // than trusting floating_* to mirror it. That holds while PiP or
-        // fullscreen is layered on top too (the axes survive both): PiP
-        // borrows floating_* for the maximized rect it returns to, and
-        // both force is_floating on a promoted window.
+        // Resting placement first: a maximized client is saved in the state
+        // it returns to (tiled if promoted, else floating at the pre-maximize
+        // rect). Maximize axes / restore / promoted travel separately in
+        // `maximize` so restore can re-apply them after arrange.
         let (is_floating, floating) = if c.state.maximized_axes().any() {
             if c.state.maximize_restore_tiled {
                 (false, None)
@@ -639,6 +725,7 @@ pub fn capture_snapshot_excluding(
             is_floating,
             monitor_num,
             floating,
+            maximize: SessionMaximize::from_client(c),
         });
     }
     let monitor_orders = state
@@ -747,6 +834,7 @@ where
                         floating: e.floating,
                     },
                     monitor_num: e.monitor_num,
+                    maximize: e.maximize.clone(),
                 },
             ));
         }
@@ -889,10 +977,9 @@ impl Jwm {
             }
         }
 
-        // Maximize is never persisted, so the saved placement describes an
-        // unmaximized window. Leave maximize through the shared transaction
-        // first (which also clears the published atoms and re-tiles a
-        // promoted window) so the writes below own the geometry.
+        // Leave maximize through the shared transaction first so resting
+        // tags / float / geometry own the slot; axes are re-applied below
+        // after arrange from the saved `maximize` entry.
         for (key, _) in &plans {
             if self
                 .state
@@ -956,6 +1043,28 @@ impl Jwm {
         let monitor_keys: Vec<_> = self.state.monitor_order.clone();
         for mk in monitor_keys {
             self.arrange(backend, Some(mk));
+        }
+
+        // Re-apply persisted maximize after resting placement and arrange so
+        // User admission promotes into the restored tile order, and floating
+        // maximize keeps the saved restore hint.
+        for (key, plan) in &plans {
+            let Some(maximize) = &plan.maximize else {
+                continue;
+            };
+            let axes = maximize.axes();
+            if !axes.any() {
+                continue;
+            }
+            if let Err(error) = self.set_client_maximized_with_hint(
+                backend,
+                *key,
+                axes,
+                MaximizeOrigin::User,
+                maximize.restore_hint(),
+            ) {
+                log::warn!("session restore could not re-maximize a matched client: {error}");
+            }
         }
 
         plans.len()
@@ -1090,6 +1199,7 @@ mod tests {
             is_floating: false,
             monitor_num: 0,
             floating: None,
+            maximize: None,
         }
     }
 
@@ -1126,6 +1236,12 @@ mod tests {
                     is_floating: true,
                     monitor_num: 1,
                     floating: Some((10, 20, 800, 600)),
+                    maximize: Some(SessionMaximize {
+                        vert: true,
+                        horz: true,
+                        restore: Some((40, 50, 700, 500)),
+                        promoted: false,
+                    }),
                 },
                 entry("Alacritty", "alacritty", 0b1),
             ],
@@ -1470,6 +1586,10 @@ mod tests {
             snapshot.monitor_orders[1].clients,
             vec![identity("Firefox", "Navigator")]
         );
+        assert!(
+            snapshot.clients.iter().all(|entry| entry.maximize.is_none()),
+            "a v3 file migrates with no maximize state"
+        );
 
         // `capture_snapshot` derives both lists from the same monitor
         // relation, so the frozen file must agree with itself: every ordered
@@ -1536,8 +1656,8 @@ mod tests {
     #[test]
     fn migration_refuses_future_versions_and_unreadable_documents() {
         let error =
-            migrate_session_json(r#"{"version":4,"clients":[],"monitor_orders":[]}"#).unwrap_err();
-        assert!(error.contains("unsupported session version 4"));
+            migrate_session_json(r#"{"version":5,"clients":[],"monitor_orders":[]}"#).unwrap_err();
+        assert!(error.contains("unsupported session version 5"));
 
         let error = migrate_session_json("not JSON").unwrap_err();
         assert!(error.contains("no readable version"));
@@ -1548,8 +1668,12 @@ mod tests {
                 .unwrap_err();
         assert!(error.contains("cannot parse version 2 session snapshot"));
 
-        // v3（当前版本）同样严格：缺 monitor_orders 字段直接拒绝。
+        // v3 保持严格：缺 monitor_orders 字段直接拒绝。
         let error = migrate_session_json(r#"{"version":3,"clients":[]}"#).unwrap_err();
+        assert!(error.contains("cannot parse version 3 session snapshot"));
+
+        // v4（当前版本）同样严格：缺 monitor_orders 字段直接拒绝。
+        let error = migrate_session_json(r#"{"version":4,"clients":[]}"#).unwrap_err();
         assert!(error.contains("cannot parse session snapshot"));
     }
 
@@ -1626,12 +1750,30 @@ mod tests {
             Some((restore.x, restore.y, restore.w, restore.h)),
             "a maximized floating window is saved at its pre-maximize rect"
         );
+        assert_eq!(
+            floating.maximize,
+            Some(SessionMaximize {
+                vert: true,
+                horz: true,
+                restore: Some((restore.x, restore.y, restore.w, restore.h)),
+                promoted: false,
+            })
+        );
         let promoted = &snapshot.clients[1];
         assert!(
             !promoted.is_floating,
             "a window maximize pulled out of the layout is saved tiled"
         );
         assert_eq!(promoted.floating, None);
+        assert_eq!(
+            promoted.maximize,
+            Some(SessionMaximize {
+                vert: true,
+                horz: true,
+                restore: Some((restore.x, restore.y, restore.w, restore.h)),
+                promoted: true,
+            })
+        );
         assert!(snapshot.validate().is_ok());
     }
 
@@ -1687,6 +1829,15 @@ mod tests {
             Some((restore.x, restore.y, restore.w, restore.h)),
             "a maximized window in PiP is saved at its pre-maximize rect"
         );
+        assert_eq!(
+            pip.maximize,
+            Some(SessionMaximize {
+                vert: true,
+                horz: true,
+                restore: Some((restore.x, restore.y, restore.w, restore.h)),
+                promoted: false,
+            })
+        );
         for promoted in &snapshot.clients[1..] {
             assert!(
                 !promoted.is_floating,
@@ -1694,6 +1845,17 @@ mod tests {
                 promoted.class
             );
             assert_eq!(promoted.floating, None, "{}", promoted.class);
+            assert_eq!(
+                promoted.maximize,
+                Some(SessionMaximize {
+                    vert: true,
+                    horz: true,
+                    restore: Some((restore.x, restore.y, restore.w, restore.h)),
+                    promoted: true,
+                }),
+                "{}",
+                promoted.class
+            );
         }
         assert!(snapshot.validate().is_ok());
     }
@@ -1892,13 +2054,30 @@ mod tests {
         );
 
         assert_eq!(jwm.apply_session_snapshot(&mut backend, &snapshot), 3);
-        assert_eq!(jwm.state.monitor_clients[monitor], vec![a, b, c]);
-        assert!(!jwm.state.clients[a].state.is_floating);
+        assert!(jwm.state.clients[a].state.maximize_restore_tiled);
+        assert_eq!(
+            jwm.state.clients[a].state.maximized_axes(),
+            MaximizeAxes::BOTH
+        );
+        // While maximized, a promoted window sits in the floating tail —
+        // same as the live togglemaximize that produced the snapshot.
+        assert_eq!(jwm.state.monitor_clients[monitor], vec![b, c, a]);
+        jwm.togglemaximize(&mut backend, &WMArgEnum::Int(0))
+            .expect("unmaximize");
+        assert_eq!(
+            jwm.state.monitor_clients[monitor],
+            vec![a, b, c],
+            "unmaximize returns the restored master to its tile slot"
+        );
         assert!(!jwm.state.clients[a].state.maximized_axes().any());
 
         jwm.state.monitor_clients.insert(monitor, vec![c, b, a]);
         jwm.apply_session_snapshot(&mut backend, &snapshot);
-        assert_eq!(jwm.state.monitor_clients[monitor], vec![a, b, c]);
+        assert_eq!(jwm.state.monitor_clients[monitor], vec![b, c, a]);
+        assert_eq!(
+            jwm.state.clients[a].state.maximized_axes(),
+            MaximizeAxes::BOTH
+        );
     }
 
     #[test]

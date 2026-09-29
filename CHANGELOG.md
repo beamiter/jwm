@@ -11,7 +11,9 @@ monorepo use independent Semantic Versions.
   rectangle in `_JWM_MAXIMIZE_RESTORE_V1` so unmaximize after exec returns to
   the same slot instead of the centered fallback. The property's promoted
   flag re-admits a tiling-layout `togglemaximize` across the restart; a plain
-  tiled maximize without that flag is still refused. See
+  tiled maximize without that flag is still refused. Session snapshots (v4+)
+  also persist maximize axes, restore rectangle and promote flag, and
+  re-apply them after resting placement. See
   [docs/window-placement.md](docs/window-placement.md#restarts-and-sessions).
 
 - IPC `window/state` event: an accepted maximize / unmaximize / drag-cancel
