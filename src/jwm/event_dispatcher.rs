@@ -1843,6 +1843,10 @@ impl Jwm {
         let Some(client) = self.state.clients.get_mut(client_key) else {
             return;
         };
+        let changed = client.geometry.x != x
+            || client.geometry.y != y
+            || client.geometry.w != w
+            || client.geometry.h != h;
         (client.geometry.x, client.geometry.y) = (x, y);
         (client.geometry.w, client.geometry.h) = (w, h);
         (client.geometry.floating_x, client.geometry.floating_y) = (x, y);
@@ -1868,6 +1872,10 @@ impl Jwm {
                 return;
             }
             self.sendmon(backend, Some(client_key), Some(target));
+            return;
+        }
+        if changed {
+            self.broadcast_window_state_ipc(client_key);
         }
     }
 }

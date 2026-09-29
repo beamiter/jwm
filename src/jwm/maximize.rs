@@ -1778,6 +1778,30 @@ mod tests {
             snap_rect.contains(&broadcast),
             "apply_float_snap_rect must broadcast after a half/quarter snap"
         );
+        let render = include_str!("rendering.rs");
+        let sync_float = render
+            .split_once("pub(super) fn sync_focused_floating_geometry(")
+            .expect("sync_focused_floating_geometry")
+            .1
+            .split_once("pub(super) fn configure_client(")
+            .expect("configure_client")
+            .0;
+        assert!(
+            sync_float.contains(&broadcast) && sync_float.contains("if changed"),
+            "sync_focused_floating_geometry must broadcast only when the rect moves"
+        );
+        let dispatcher = include_str!("event_dispatcher.rs");
+        let settle = dispatcher
+            .split_once("fn settle_released_drag(")
+            .expect("settle_released_drag")
+            .1
+            .split_once("fn close_managed_window_on_request(")
+            .expect("close_managed_window_on_request")
+            .0;
+        assert!(
+            settle.contains(&broadcast) && settle.contains("if changed"),
+            "settle_released_drag must broadcast when an unselected float settles in place"
+        );
         let toggle = include_str!("features/toggles.rs");
         let float = toggle
             .split_once("pub fn togglefloating(")

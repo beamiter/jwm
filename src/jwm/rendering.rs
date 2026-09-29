@@ -723,15 +723,29 @@ impl Jwm {
             Ok(g) => g,
             Err(_) => return,
         };
-        if let Some(client) = self.state.clients.get_mut(sel_key) {
-            client.geometry.x = geom.x as i32;
-            client.geometry.y = geom.y as i32;
-            client.geometry.w = geom.w as i32;
-            client.geometry.h = geom.h as i32;
-            client.geometry.floating_x = geom.x as i32;
-            client.geometry.floating_y = geom.y as i32;
-            client.geometry.floating_w = geom.w as i32;
-            client.geometry.floating_h = geom.h as i32;
+        let changed = if let Some(client) = self.state.clients.get_mut(sel_key) {
+            let nx = geom.x as i32;
+            let ny = geom.y as i32;
+            let nw = geom.w as i32;
+            let nh = geom.h as i32;
+            let changed = client.geometry.x != nx
+                || client.geometry.y != ny
+                || client.geometry.w != nw
+                || client.geometry.h != nh;
+            client.geometry.x = nx;
+            client.geometry.y = ny;
+            client.geometry.w = nw;
+            client.geometry.h = nh;
+            client.geometry.floating_x = nx;
+            client.geometry.floating_y = ny;
+            client.geometry.floating_w = nw;
+            client.geometry.floating_h = nh;
+            changed
+        } else {
+            false
+        };
+        if changed {
+            self.broadcast_window_state_ipc(sel_key);
         }
     }
 

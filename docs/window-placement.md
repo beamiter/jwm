@@ -164,10 +164,11 @@ The same event fires on fullscreen enter/leave, minimize/unminimize, a real
 ICCCM urgency), an `is_sticky` change, a real `tag` / `toggletag` mask change,
 a cross-monitor `sendmon` / `tagmon`, an Above/Below stacking flip, a PiP
 enter/leave, a real title or `WM_CLASS` change, a real focus change
-(`is_focused` for the previous and new clients), and a half/quarter float
-snap (keyboard `snap_window` or mouse edge/corner drop). Refused or no-op
-requests do not emit it; subscribe to `window` or `window/state` to follow
-flips without polling. A title change also emits the lighter `window/title`
+(`is_focused` for the previous and new clients), a half/quarter float snap
+(keyboard `snap_window` or mouse edge/corner drop), and a free float
+move/resize that actually changes the rectangle. Refused or no-op requests
+do not emit it; subscribe to `window` or `window/state` to follow flips
+without polling. A title change also emits the lighter `window/title`
 event; focus still emits `window/focus`.
 
 A refused request, like one that changes nothing, leaves the window alone:
