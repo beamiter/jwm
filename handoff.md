@@ -4,17 +4,30 @@
 
 ---
 
-## Evolve backlog（目标 100 轮；已完成 wave 9–28，本地 ahead）
+## Evolve backlog（目标 100 轮；已完成 wave 9–29，本地 ahead）
 
 按日常命中 × 可交付性排序的下一波候选（S/小 M，无 DRM）：
 
 | # | 选题 | Size |
 | --- | --- | --- |
 | 14–27 | IPC window/state 全族 + Tiled* + restore_rect | S/M ✓ |
-| 28 | seamless promote adoption（`_JWM_MAXIMIZE_RESTORE_V1.promoted`） | S ✓ |
-| 29 | view/toggleview → window/state | S |
+| 28 | seamless promote adoption | S ✓ |
+| 29 | view/toggleview → window/state | S ✓ |
 | 30 | session 持久化 maximize + restore_rect | M |
-| … | 跳过：Annotation/Screenshot toolbar CommonLinear（capture/PostDelivery bake）、toast Closed(1)、BT withdraw、FS/PiP 丢锚点、Recording EncodedOnly | |
+| … | 跳过：Annotation/Screenshot toolbar CommonLinear（capture bake）、toast Closed(1)、BT withdraw、FS/PiP 丢锚点、Recording EncodedOnly | |
+
+---
+
+## 2026-09-29（二十）：view / toggleview → `window/state`
+
+选题 = evolve wave 29。
+
+1. **契约**：`view` / `toggleview` arrange 后广播可见窗（焦点广播不够覆盖新可见几何）。
+2. **回归**：sibling pin。
+
+**验证**：`scripts/test.sh --lib -- sibling_window_state_paths`。
+
+**仍然开着的**：见上表 30+。
 
 ---
 

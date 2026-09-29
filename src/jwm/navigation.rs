@@ -858,6 +858,7 @@ impl Jwm {
         self.suppress_layout_animation = motion != TagSwitchMotion::Layout;
         self.arrange(backend, Some(sel_mon_key));
         self.suppress_layout_animation = false;
+        self.broadcast_visible_window_states_on_monitor(sel_mon_key);
         self.update_ewmh_desktop(backend)?;
         // Tag changed: re-resolve per-tag wallpapers in the compositor.
         if old_tag_mask != new_tag_mask {
@@ -926,6 +927,7 @@ impl Jwm {
         self.suppress_layout_animation = transitioning;
         self.arrange(backend, Some(sel_mon_key));
         self.suppress_layout_animation = false;
+        self.broadcast_visible_window_states_on_monitor(sel_mon_key);
         self.update_ewmh_desktop(backend)?;
         if old_tag_mask != new_tag_mask {
             self.refresh_compositor_monitors(backend);

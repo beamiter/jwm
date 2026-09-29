@@ -21,8 +21,9 @@ monorepo use independent Semantic Versions.
   flip, PiP enter/leave, a real title / `WM_CLASS` change, a real focus
   change, a half/quarter float snap, a free float move/resize that changes
   geometry, a tiling reorder (`zoom` / `movestack` / scrolling column move
-  or resize), or a layout-parameter change (`incnmaster` / `setmfact` /
-  `setgaps` / `setlayout`·cycle·last) pushes a `WindowInfo`-shaped payload
+  or resize), a layout-parameter change (`incnmaster` / `setmfact` /
+  `setgaps` / `setlayout`·cycle·last), or a tag `view` / `toggleview`
+  that rearranges visible clients pushes a `WindowInfo`-shaped payload
   so subscribers of `window` need not poll `get_windows`. Refused maximize
   requests and no-op mode changes stay silent. See
   [docs/window-placement.md](docs/window-placement.md#who-may-maximize-what).

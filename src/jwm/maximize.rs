@@ -1847,6 +1847,31 @@ mod tests {
             move_col.contains(&layout_broadcast),
             "scrolling_move_column must broadcast after a column swap"
         );
+        let nav = include_str!("navigation.rs");
+        for (name, start, end) in [
+            (
+                "view",
+                "pub fn view(",
+                "pub fn toggleview(",
+            ),
+            (
+                "toggleview",
+                "pub fn toggleview(",
+                "pub fn toggletag(",
+            ),
+        ] {
+            let body = nav
+                .split_once(start)
+                .unwrap_or_else(|| panic!("{name}"))
+                .1
+                .split_once(end)
+                .unwrap_or_else(|| panic!("{name} end"))
+                .0;
+            assert!(
+                body.contains(&layout_broadcast),
+                "{name} must broadcast visible clients after arrange"
+            );
+        }
         let layout_state = include_str!("layout/state.rs");
         for (name, start, end) in [
             (
