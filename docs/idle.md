@@ -208,7 +208,9 @@ instead of ending up with neither.
 
 ```sh
 jwm-tool msg get_idle_status
-# {"inhibited": false, "dimmed": true, "screen_off": false, "locked": false,
+# {"inhibited": false, "manual_inhibit": false, "client_inhibit": false,
+#  "recording_inhibit": false, "caffeine": false,
+#  "dimmed": true, "screen_off": false, "locked": false,
 #  "dim_level": 0.35, "idle_for": 180,
 #  "dim_secs": 120, "lock_secs": 600, "screen_off_secs": 900,
 #  "secs_until_dim": 0, "secs_until_lock": 420, "secs_until_screen_off": 720}
@@ -219,6 +221,11 @@ jwm-tool msg toggle_idle_inhibit
 An `idle/state` event carrying the same payload is broadcast on the `idle`
 topic whenever anything changes, so a status bar can show a caffeine indicator
 without polling.
+
+`inhibited` is the aggregate the policy uses (manual caffeine, a client idle
+inhibitor, or an active screen/audio recording). `manual_inhibit` /
+`client_inhibit` / `recording_inhibit` split those sources; `caffeine` is an
+alias for `manual_inhibit`.
 
 `locked` means the session lock and nothing else. A monitor that is
 [locked on its own](monitor-lock.md), even one showing its unlock prompt,

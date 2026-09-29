@@ -4,7 +4,7 @@
 
 ---
 
-## Evolve backlog（目标 1000 轮；已完成 wave 9–220，本地 ahead）
+## Evolve backlog（目标 1000 轮；已完成 wave 9–250，本地 ahead）
 
 | # | 选题 | Size |
 | --- | --- | --- |
@@ -38,7 +38,36 @@
 | 200–209 | WindowInfo old_border_w / hidden_restore / maximize_restore_anchor / pip_restore_sticky / old_state / remembers_closed_placement / dock_* / is_status_bar | ✓ |
 | 210–215 | MonitorInfoIpc vrr_min/max_hz / prev_layout / show_bar / strut_* / selected_id | ✓ |
 | 216–220 | WorkspaceInfo show_bar / prev_layout / selected_id | ✓ |
+| 221–231 | get_mfact；set_mfact/set_gaps；get_outputs/tags/desktops；workspace→tag；night_light/scratchpads/struts/get_window | ✓ |
+| 232–235 | idle inhibit split（manual/client/recording + caffeine） | ✓ |
+| 236–242 | RuntimeFeatureStates launcher/session_menu/notifications/waterlily/night_light/idle_inhibit | ✓ |
+| 243–250 | capabilities/serialize/dispatch pins + idle docs + handoff/CHANGELOG | ✓ |
 | … | 跳过：Annotation/Screenshot CommonLinear、toast Closed(1)、BT withdraw、FS/PiP 自身丢锚点（own-anchor drop）、Recording EncodedOnly、XWayland 单轴 | |
+
+---
+
+## 2026-09-29（五十四）：IPC aliases + idle inhibit + status flags → 250
+
+选题 = evolve waves 221–250 / evolve7h。
+
+1. **Wave 221–231**：`get_mfact`；`set_mfact`/`set_gaps` 调度别名；
+   `get_outputs` / `get_tags`/`get_desktops`；subscribe `workspace`→`tag`；
+   `get_night_light`(+`_status`)；`get_scratchpads`；`get_struts`；
+   `get_window`（`args.id`）。
+2. **Wave 232–235**：`get_idle_status` / `idle/state` 拆
+   `manual_inhibit` / `client_inhibit` / `recording_inhibit`，保留聚合
+   `inhibited`，`caffeine`=`manual_inhibit`。
+3. **Wave 236–242**：`get_status` features 补 launcher / session_menu /
+   notifications / waterlily / night_light / idle_inhibit（dnd 已有
+   `do_not_disturb`）。
+4. **Wave 243–250**：capabilities / serialize / dispatch 契约 pin；idle
+   docs；CHANGELOG；handoff。
+
+**刻意不做**：跳过表不变。
+
+**验证**：`scripts/test.sh --lib -- get_mfact set_mfact set_gaps get_outputs night_light scratchpad strut get_window idle_status RuntimeFeature workspace_subscription`。
+
+**下一轮候选**：251+；或跳过表项。
 
 ---
 

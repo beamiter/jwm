@@ -529,7 +529,7 @@ impl crate::jwm::Jwm {
                 let brightness = configured_brightness() * level;
                 log::info!("Idle: dimming to {level} (brightness {brightness})");
                 backend.compositor_set_brightness(brightness);
-                self.broadcast_idle_state();
+                self.broadcast_idle_state(backend);
             }
             IdleAction::Undim => {
                 // Logged as loudly as the dim: a dim with no matching restore
@@ -538,7 +538,7 @@ impl crate::jwm::Jwm {
                 let brightness = configured_brightness();
                 log::info!("Idle: restoring brightness to {brightness}");
                 backend.compositor_set_brightness(brightness);
-                self.broadcast_idle_state();
+                self.broadcast_idle_state(backend);
             }
             IdleAction::Lock => {
                 log::info!("Idle: locking");
@@ -589,7 +589,7 @@ impl crate::jwm::Jwm {
                 if let Some(child) = run_idle_command("screen off", &command) {
                     self.supervise_transient_child(child);
                 }
-                self.broadcast_idle_state();
+                self.broadcast_idle_state(backend);
             }
             IdleAction::ScreenOn => {
                 let command = crate::config::CONFIG
@@ -602,7 +602,7 @@ impl crate::jwm::Jwm {
                         self.supervise_transient_child(child);
                     }
                 }
-                self.broadcast_idle_state();
+                self.broadcast_idle_state(backend);
             }
         }
     }
@@ -622,7 +622,7 @@ impl crate::jwm::Jwm {
         // while the screen is already dim should brighten it immediately.
         self.last_idle_poll = None;
         self.poll_idle(backend);
-        self.broadcast_idle_state();
+        self.broadcast_idle_state(backend);
         // Bound to a key with the control center closed, the card is the only
         // confirmation the flip happened.
         backend.compositor_show_osd(
@@ -633,10 +633,19 @@ impl crate::jwm::Jwm {
     }
 
     /// The idle policy's state, for `get_idle_status` and the `idle` topic.
-    pub(crate) fn idle_status_json(&self) -> serde_json::Value {
+    pub(crate) fn idle_status_json(
+        &self,
+        backend: &dyn crate::backend::api::Backend,
+    ) -> serde_json::Value {
+        let manual_inhibit = self.idle_inhibited;
+        let client_inhibit = backend.idle_inhibited_by_client();
+        let recording_inhibit =
+            self.features.recording.active || self.features.audio_recording.active;
         idle_status_payload(
             &configured_idle_settings(),
-            self.idle_inhibited,
+            manual_inhibit,
+            client_inhibit,
+            recording_inhibit,
             self.idle.is_dimmed(),
             self.idle.is_screen_off(),
             // What the policy itself acts on, so a bar counting down to the
@@ -646,8 +655,8 @@ impl crate::jwm::Jwm {
         )
     }
 
-    fn broadcast_idle_state(&mut self) {
-        let payload = self.idle_status_json();
+    fn broadcast_idle_state(&mut self, backend: &dyn crate::backend::api::Backend) {
+        let payload = self.idle_status_json(backend);
         self.broadcast_ipc_event("idle/state", payload);
     }
 }
@@ -661,14 +670,21 @@ fn configured_brightness() -> f32 {
 /// on — a lock timeout raised to [`MIN_LOCK_SECS`], a screen-off stage with
 /// no command reported as off — rather than the configured numbers, so a bar
 /// that counts down to the lock counts down to the lock that will happen.
+///
+/// `inhibited` is the aggregate the policy uses; `manual_inhibit` /
+/// `client_inhibit` / `recording_inhibit` split the sources, and `caffeine`
+/// aliases the manual toggle.
 fn idle_status_payload(
     settings: &IdleSettings,
-    inhibited: bool,
+    manual_inhibit: bool,
+    client_inhibit: bool,
+    recording_inhibit: bool,
     dimmed: bool,
     screen_off: bool,
     locked: bool,
     idle_for: Option<Duration>,
 ) -> serde_json::Value {
+    let inhibited = manual_inhibit || client_inhibit || recording_inhibit;
     let secs = |stage: Option<Duration>| stage.map_or(0, |after| after.as_secs());
     let idle_secs = idle_for.map_or(0, |d| d.as_secs());
     let until = |stage: Option<Duration>| {
@@ -680,6 +696,10 @@ fn idle_status_payload(
     };
     serde_json::json!({
         "inhibited": inhibited,
+        "manual_inhibit": manual_inhibit,
+        "client_inhibit": client_inhibit,
+        "recording_inhibit": recording_inhibit,
+        "caffeine": manual_inhibit,
         "dimmed": dimmed,
         "screen_off": screen_off,
         "locked": locked,
@@ -861,8 +881,12 @@ mod tests {
         // `idle_lock_secs = 1` locks after the floor, and a screen-off stage
         // without a command never runs: the report says so, as the gate does.
         let settings = IdleSettings::from_secs(120, 0.3, 1, 900, false);
-        let payload = idle_status_payload(&settings, true, false, false, false, None);
+        let payload = idle_status_payload(&settings, true, false, false, false, false, false, None);
         assert_eq!(payload["inhibited"], true);
+        assert_eq!(payload["manual_inhibit"], true);
+        assert_eq!(payload["client_inhibit"], false);
+        assert_eq!(payload["recording_inhibit"], false);
+        assert_eq!(payload["caffeine"], true);
         assert_eq!(payload["dim_secs"], 120u64);
         assert_eq!(payload["lock_secs"], MIN_LOCK_SECS);
         assert_eq!(payload["screen_off_secs"], 0u64);
@@ -874,11 +898,17 @@ mod tests {
         let payload = idle_status_payload(
             &settings,
             false,
+            true,
+            false,
             false,
             false,
             false,
             Some(Duration::from_secs(100)),
         );
+        assert_eq!(payload["inhibited"], true);
+        assert_eq!(payload["manual_inhibit"], false);
+        assert_eq!(payload["client_inhibit"], true);
+        assert_eq!(payload["caffeine"], false);
         assert_eq!(payload["dim_secs"], 0u64);
         assert_eq!(payload["lock_secs"], 600u64);
         assert_eq!(payload["screen_off_secs"], 900u64);
@@ -886,6 +916,20 @@ mod tests {
         assert_eq!(payload["secs_until_dim"], 0u64);
         assert_eq!(payload["secs_until_lock"], 500u64);
         assert_eq!(payload["secs_until_screen_off"], 800u64);
+
+        let recording = idle_status_payload(
+            &settings,
+            false,
+            false,
+            true,
+            false,
+            false,
+            false,
+            None,
+        );
+        assert_eq!(recording["inhibited"], true);
+        assert_eq!(recording["recording_inhibit"], true);
+        assert_eq!(recording["caffeine"], false);
     }
 
     #[test]
@@ -1464,7 +1508,7 @@ mod tests {
         );
         assert!(!jwm.idle_session_locked());
         assert_eq!(
-            jwm.idle_status_json()["locked"],
+            jwm.idle_status_json(&backend)["locked"],
             false,
             "get_idle_status reports the lock the policy acts on"
         );
@@ -1487,6 +1531,6 @@ mod tests {
             "the shade stays under the session lock"
         );
         assert!(jwm.idle_session_locked(), "and the next poll sees the lock");
-        assert_eq!(jwm.idle_status_json()["locked"], true);
+        assert_eq!(jwm.idle_status_json(&backend)["locked"], true);
     }
 }

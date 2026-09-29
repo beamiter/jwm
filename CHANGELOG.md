@@ -7,6 +7,20 @@ monorepo use independent Semantic Versions.
 
 ### Added
 
+- IPC aliases: `get_mfact`; `set_mfact` (= `setmfact`), `set_gaps` (= `setgaps`);
+  `get_outputs` (= `get_monitors`), `get_tags` / `get_desktops` (= `get_workspaces`);
+  subscribe topic `workspace` (= `tag`).
+- `get_night_light` / `get_night_light_status` report `active`, `override`, and
+  configured `temp`.
+- `get_scratchpads` maps scratchpad name → window id; `get_struts` reports
+  per-monitor reservations plus contributing window ids; `get_window` filters
+  `get_windows` by `id`.
+- `get_idle_status` / `idle/state` split inhibit sources as `manual_inhibit`,
+  `client_inhibit`, and `recording_inhibit` (aggregate `inhibited` kept;
+  `caffeine` aliases manual). See [docs/idle.md](docs/idle.md).
+- `get_status` feature flags include `launcher`, `session_menu`,
+  `notifications`, `waterlily`, `night_light`, and `idle_inhibit`.
+
 - `get_windows` / `get_clients` / `get_tree` / `window/state` report
   `old_border_w`, optional `hidden_restore` / `maximize_restore_anchor`,
   `pip_restore_sticky`, `old_state`, `remembers_closed_placement`, dock

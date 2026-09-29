@@ -679,22 +679,33 @@ fn normalize_subscriptions(topics: Vec<String>) -> SubscriptionOutcome {
         ..SubscriptionOutcome::default()
     };
     for topic in &topics {
-        let topic = topic.trim();
+        let topic = normalize_subscription_topic(topic.trim());
         let reason = if topic.is_empty() {
             DroppedTopicReason::Empty
         } else if topic.len() > MAX_SUBSCRIPTION_TOPIC_LEN {
             DroppedTopicReason::TooLong
-        } else if outcome.subscribed.iter().any(|existing| existing == topic) {
+        } else if outcome.subscribed.iter().any(|existing| existing == &topic) {
             DroppedTopicReason::Duplicate
         } else if outcome.subscribed.len() == MAX_SUBSCRIPTION_TOPICS {
             DroppedTopicReason::Limit
         } else {
-            outcome.subscribed.push(topic.to_string());
+            outcome.subscribed.push(topic);
             continue;
         };
-        outcome.drop_topic(topic, reason);
+        outcome.drop_topic(&topic, reason);
     }
     outcome
+}
+
+/// `workspace` is an alias for the `tag` event family (sway-style naming).
+fn normalize_subscription_topic(topic: &str) -> String {
+    if topic == "workspace" {
+        return "tag".to_string();
+    }
+    if let Some(rest) = topic.strip_prefix("workspace/") {
+        return format!("tag/{rest}");
+    }
+    topic.to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -1793,6 +1804,27 @@ mod tests {
                 .iter()
                 .all(|topic| topic.len() <= MAX_SUBSCRIPTION_TOPIC_LEN)
         );
+    }
+
+    #[test]
+    fn workspace_subscription_aliases_to_tag() {
+        let outcome = normalize_subscriptions(vec![
+            "workspace".into(),
+            "workspace/view".into(),
+            "tag".into(),
+        ]);
+        assert_eq!(
+            outcome.subscribed,
+            vec!["tag".to_string(), "tag/view".to_string()]
+        );
+        assert_eq!(outcome.dropped_total, 1);
+
+        let (stream, _peer) = UnixStream::pair().unwrap();
+        let mut client = IpcClient::new(stream).unwrap();
+        client.subscriptions = outcome.subscribed;
+        assert!(client.is_subscribed("tag/view"));
+        assert!(client.is_subscribed("tag/focus"));
+        assert!(!client.is_subscribed("workspace/view"));
     }
 
     #[test]

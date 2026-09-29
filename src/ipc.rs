@@ -214,7 +214,9 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "scrolling_move_column",
         "scrolling_toggle_attach_mode",
         "session_menu",
+        "set_gaps",
         "set_layout",
+        "set_mfact",
         "set_nmaster",
         "setcfact",
         "setgaps",
@@ -304,6 +306,7 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "get_config",
         "get_config_status",
         "get_connectivity",
+        "get_desktops",
         "get_dnd",
         "get_effect_status",
         "get_gaps",
@@ -314,25 +317,33 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "get_magnifier",
         "get_media_status",
         "get_metrics",
+        "get_mfact",
         "get_mic_mute",
         "get_monitors",
+        "get_night_light",
+        "get_night_light_status",
         "get_nmaster",
         "get_notifications",
+        "get_outputs",
         "get_peek",
         "get_power_status",
         "get_recording_status",
         "get_resources",
+        "get_scratchpads",
         "get_scrolling_status",
         "get_session_lock",
         "get_status",
+        "get_struts",
         "get_system_ui",
         "get_tab_bar",
+        "get_tags",
         "get_tearing_hints",
         "get_tree",
         "get_version",
         "get_wallpaper_colors",
         "get_waterlily_status",
         "get_wayland_status",
+        "get_window",
         "get_windows",
         "get_workspaces",
         "get_xwayland_status",
@@ -358,6 +369,7 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "tag",
         "theme",
         "window",
+        "workspace",
     ],
 };
 
@@ -417,6 +429,18 @@ pub struct RuntimeFeatureStates {
     pub keybindings: bool,
     /// Monitor layout editor is up.
     pub monitor_layout: bool,
+    /// App launcher panel is up.
+    pub launcher: bool,
+    /// Session menu panel is up.
+    pub session_menu: bool,
+    /// Notification center panel is up.
+    pub notifications: bool,
+    /// WaterLily effect toggle is on.
+    pub waterlily: bool,
+    /// Night light is currently warming the screen.
+    pub night_light: bool,
+    /// Manual caffeine / idle inhibit is on.
+    pub idle_inhibit: bool,
 }
 
 /// Last runtime compositor hand-off as observed by the WM. This remains
@@ -904,8 +928,8 @@ pub fn dispatch_command(name: &str, args: &Value) -> Result<(WMFuncType, WMArgEn
         }
 
         // --- Layout ---
-        "setmfact" => Ok((Jwm::setmfact, parse_float_arg(args, 0.0)?)),
-        "setgaps" => Ok((Jwm::setgaps, parse_int_arg(args, 1)?)),
+        "setmfact" | "set_mfact" => Ok((Jwm::setmfact, parse_float_arg(args, 0.0)?)),
+        "setgaps" | "set_gaps" => Ok((Jwm::setgaps, parse_int_arg(args, 1)?)),
         "setcfact" => Ok((Jwm::setcfact, parse_float_arg(args, 0.0)?)),
         "incnmaster" => Ok((Jwm::incnmaster, parse_int_arg(args, 1)?)),
         "setnmaster" | "set_nmaster" => Ok((Jwm::setnmaster, parse_int_arg(args, 1)?)),
@@ -2335,8 +2359,66 @@ mod tests {
             capabilities
                 .queries
                 .iter()
+                .any(|name| name == "get_mfact"),
+            "get_mfact twins get_gaps/get_nmaster in capabilities"
+        );
+        assert!(
+            capabilities
+                .queries
+                .iter()
                 .any(|name| name == "get_clients"),
             "get_clients aliases get_windows in capabilities"
+        );
+        assert!(
+            capabilities
+                .queries
+                .iter()
+                .any(|name| name == "get_outputs"),
+            "get_outputs aliases get_monitors in capabilities"
+        );
+        assert!(
+            capabilities
+                .queries
+                .iter()
+                .any(|name| name == "get_tags"),
+            "get_tags aliases get_workspaces in capabilities"
+        );
+        assert!(
+            capabilities
+                .queries
+                .iter()
+                .any(|name| name == "get_desktops"),
+            "get_desktops aliases get_workspaces in capabilities"
+        );
+        assert!(
+            capabilities
+                .queries
+                .iter()
+                .any(|name| name == "get_night_light")
+        );
+        assert!(
+            capabilities
+                .queries
+                .iter()
+                .any(|name| name == "get_night_light_status")
+        );
+        assert!(
+            capabilities
+                .queries
+                .iter()
+                .any(|name| name == "get_scratchpads")
+        );
+        assert!(
+            capabilities
+                .queries
+                .iter()
+                .any(|name| name == "get_struts")
+        );
+        assert!(
+            capabilities
+                .queries
+                .iter()
+                .any(|name| name == "get_window")
         );
         assert!(
             capabilities
@@ -2358,6 +2440,20 @@ mod tests {
         );
         assert!(
             capabilities
+                .commands
+                .iter()
+                .any(|name| name == "set_mfact"),
+            "set_mfact aliases setmfact in capabilities"
+        );
+        assert!(
+            capabilities
+                .commands
+                .iter()
+                .any(|name| name == "set_gaps"),
+            "set_gaps aliases setgaps in capabilities"
+        );
+        assert!(
+            capabilities
                 .queries
                 .iter()
                 .any(|name| name == "get_waterlily_status")
@@ -2373,6 +2469,13 @@ mod tests {
                 .subscription_topics
                 .iter()
                 .any(|name| name == "window")
+        );
+        assert!(
+            capabilities
+                .subscription_topics
+                .iter()
+                .any(|name| name == "workspace"),
+            "workspace aliases tag in subscription topics"
         );
         assert!(is_supported_query("benchmark_report"));
         assert!(!is_supported_query("not_a_query"));
@@ -2421,6 +2524,12 @@ mod tests {
                 calendar: false,
                 keybindings: false,
                 monitor_layout: false,
+                launcher: false,
+                session_menu: false,
+                notifications: false,
+                waterlily: false,
+                night_light: true,
+                idle_inhibit: false,
             },
             compositor_metrics: None,
         };
@@ -2446,6 +2555,12 @@ mod tests {
         assert_eq!(json["features"]["calendar"], false);
         assert_eq!(json["features"]["keybindings"], false);
         assert_eq!(json["features"]["monitor_layout"], false);
+        assert_eq!(json["features"]["launcher"], false);
+        assert_eq!(json["features"]["session_menu"], false);
+        assert_eq!(json["features"]["notifications"], false);
+        assert_eq!(json["features"]["waterlily"], false);
+        assert_eq!(json["features"]["night_light"], true);
+        assert_eq!(json["features"]["idle_inhibit"], false);
         assert!(json["compositor_metrics"].is_null());
     }
 
@@ -2457,6 +2572,18 @@ mod tests {
         assert!(nmaster.is_ok(), "{nmaster:?}");
         let setn = dispatch_command("setnmaster", &serde_json::json!({"value": 3}));
         assert!(setn.is_ok(), "{setn:?}");
+    }
+
+    #[test]
+    fn set_mfact_and_set_gaps_dispatch_aliases() {
+        let mfact = dispatch_command("set_mfact", &serde_json::json!({"value": 0.6}));
+        assert!(mfact.is_ok(), "{mfact:?}");
+        let gaps = dispatch_command("set_gaps", &serde_json::json!({"value": 8}));
+        assert!(gaps.is_ok(), "{gaps:?}");
+        let canonical_mfact = dispatch_command("setmfact", &serde_json::json!({"value": 0.55}));
+        assert!(canonical_mfact.is_ok(), "{canonical_mfact:?}");
+        let canonical_gaps = dispatch_command("setgaps", &serde_json::json!({"value": 4}));
+        assert!(canonical_gaps.is_ok(), "{canonical_gaps:?}");
     }
 
     #[test]

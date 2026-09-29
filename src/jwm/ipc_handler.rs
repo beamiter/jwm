@@ -2611,11 +2611,12 @@ impl Jwm {
                 let windows = self.query_windows(backend);
                 IpcResponse::ok(Some(serde_json::to_value(windows).unwrap_or_default()))
             }
-            "get_workspaces" => {
+            "get_window" => self.query_window(backend, args),
+            "get_workspaces" | "get_tags" | "get_desktops" => {
                 let workspaces = self.query_workspaces(backend);
                 IpcResponse::ok(Some(serde_json::to_value(workspaces).unwrap_or_default()))
             }
-            "get_monitors" => {
+            "get_monitors" | "get_outputs" => {
                 let monitors = self.query_monitors(backend);
                 IpcResponse::ok(Some(serde_json::to_value(monitors).unwrap_or_default()))
             }
@@ -2627,6 +2628,12 @@ impl Jwm {
             "get_layout" => IpcResponse::ok(Some(self.query_focused_layout(backend))),
             "get_gaps" => IpcResponse::ok(Some(self.query_focused_gaps(backend))),
             "get_nmaster" => IpcResponse::ok(Some(self.query_focused_nmaster(backend))),
+            "get_mfact" => IpcResponse::ok(Some(self.query_focused_mfact(backend))),
+            "get_scratchpads" => IpcResponse::ok(Some(self.query_scratchpads())),
+            "get_struts" => IpcResponse::ok(Some(self.query_struts(backend))),
+            "get_night_light" | "get_night_light_status" => {
+                IpcResponse::ok(Some(self.query_night_light()))
+            }
             "get_gesture_status" => IpcResponse::ok(Some(self.query_gesture_status())),
             "get_wayland_status" => IpcResponse::ok(Some(self.query_wayland_status(backend))),
             "get_config_status" => IpcResponse::ok(Some(self.query_config_status())),
@@ -2682,7 +2689,7 @@ impl Jwm {
                 })))
             }
             "get_wallpaper_colors" => IpcResponse::ok(Some(self.wallpaper_theme_json())),
-            "get_idle_status" => IpcResponse::ok(Some(self.idle_status_json())),
+            "get_idle_status" => IpcResponse::ok(Some(self.idle_status_json(backend))),
             "get_resources" => IpcResponse::ok(Some(self.resources_json())),
             "get_clipboard" => IpcResponse::ok(Some(self.clipboard_json())),
             "get_recording_status" => {
@@ -3661,6 +3668,14 @@ impl Jwm {
                 calendar: self.features.system_ui.is_calendar(),
                 keybindings: self.features.system_ui.is_keybindings(),
                 monitor_layout: self.features.system_ui.is_monitor_layout(),
+                launcher: self.features.system_ui.is_launcher(),
+                session_menu: self.features.system_ui.is_session_menu(),
+                notifications: self.features.system_ui.is_notification_center(),
+                waterlily: backend
+                    .compositor_waterlily_status()
+                    .is_some_and(|status| status.enabled),
+                night_light: self.night_light_active(),
+                idle_inhibit: self.idle_inhibited,
             },
             compositor_metrics: backend
                 .compositor_get_metrics()
@@ -4000,6 +4015,112 @@ impl Jwm {
                 "monitor": serde_json::Value::Null,
                 "n_master": serde_json::Value::Null,
             }),
+        }
+    }
+
+    /// Focused monitor's `m_fact` only (same source as [`Self::query_focused_layout`]).
+    pub(crate) fn query_focused_mfact(&self, backend: &dyn Backend) -> serde_json::Value {
+        match self.focused_layout_snapshot(backend) {
+            Some(snapshot) => {
+                let mut value = serde_json::json!({
+                    "monitor": snapshot["monitor"].clone(),
+                    "m_fact": snapshot["m_fact"].clone(),
+                });
+                if let Some(connector) = snapshot.get("connector") {
+                    value
+                        .as_object_mut()
+                        .expect("mfact snapshot object")
+                        .insert("connector".into(), connector.clone());
+                }
+                value
+            }
+            None => serde_json::json!({
+                "monitor": serde_json::Value::Null,
+                "m_fact": serde_json::Value::Null,
+            }),
+        }
+    }
+
+    /// Named scratchpads currently bound to a managed window (`name` → id).
+    pub(crate) fn query_scratchpads(&self) -> serde_json::Value {
+        let mut map = serde_json::Map::new();
+        for (name, &client_key) in &self.scratchpads {
+            if let Some(client) = self.state.clients.get(client_key) {
+                map.insert(name.clone(), serde_json::json!(client.win.raw()));
+            }
+        }
+        serde_json::Value::Object(map)
+    }
+
+    /// Per-monitor strut reservations plus the external windows that contribute.
+    pub(crate) fn query_struts(&self, backend: &dyn Backend) -> serde_json::Value {
+        let mut out = Vec::new();
+        for &mk in &self.state.monitor_order {
+            let Some(mon) = self.state.monitors.get(mk) else {
+                continue;
+            };
+            let (top, bottom, left, right) = self.get_strut_reserved(mk);
+            let windows: Vec<u64> = self
+                .external_struts
+                .iter()
+                .filter(|(_, (_, host))| host.is_none_or(|host| host == mk))
+                .map(|(win, _)| win.raw())
+                .collect();
+            let mut value = serde_json::json!({
+                "monitor": mon.num,
+                "top": top,
+                "bottom": bottom,
+                "left": left,
+                "right": right,
+                "windows": windows,
+            });
+            if let Some(connector) = self.output_key_for_monitor(backend, mk) {
+                value
+                    .as_object_mut()
+                    .expect("struts snapshot object")
+                    .insert("connector".into(), serde_json::Value::String(connector));
+            }
+            out.push(value);
+        }
+        serde_json::Value::Array(out)
+    }
+
+    /// Night light schedule / override snapshot for bars and OSD consumers.
+    pub(crate) fn query_night_light(&self) -> serde_json::Value {
+        let cfg = CONFIG.load();
+        serde_json::json!({
+            "active": self.night_light_active(),
+            "override": self.night_light_override,
+            "temp": cfg.behavior().night_light_temp,
+        })
+    }
+
+    /// Single-window filter over [`Self::query_windows`] (`args.id`).
+    pub(crate) fn query_window(
+        &self,
+        backend: &dyn Backend,
+        args: &serde_json::Value,
+    ) -> IpcResponse {
+        let id = args
+            .get("id")
+            .or_else(|| args.get("value"))
+            .or_else(|| args.get("v"))
+            .and_then(|value| value.as_u64())
+            .or_else(|| args.as_u64());
+        let Some(id) = id else {
+            return IpcResponse::err(
+                "get_window requires an \"id\" argument (window id as u64)",
+            );
+        };
+        match self
+            .query_windows(backend)
+            .into_iter()
+            .find(|window| window.id == id)
+        {
+            Some(window) => {
+                IpcResponse::ok(Some(serde_json::to_value(window).unwrap_or_default()))
+            }
+            None => IpcResponse::err(format!("window {id:#x} not found")),
         }
     }
 
@@ -4986,6 +5107,23 @@ mod tests {
         let nmaster = jwm.query_focused_nmaster(&backend);
         assert_eq!(nmaster["n_master"], 3);
         assert_eq!(nmaster["monitor"], layout["monitor"]);
+
+        let mfact = jwm.query_focused_mfact(&backend);
+        assert!((mfact["m_fact"].as_f64().unwrap() - 0.42).abs() < 1e-6);
+        assert_eq!(mfact["monitor"], layout["monitor"]);
+
+        let night = jwm.query_night_light();
+        assert!(night.get("active").and_then(|v| v.as_bool()).is_some());
+        assert!(night.get("temp").and_then(|v| v.as_f64()).is_some());
+        assert!(night.get("override").is_some());
+
+        let scratchpads = jwm.query_scratchpads();
+        assert!(scratchpads.as_object().is_some());
+
+        let struts = jwm.query_struts(&backend);
+        assert!(struts.as_array().is_some_and(|rows| !rows.is_empty()));
+        assert!(struts[0].get("windows").and_then(|v| v.as_array()).is_some());
+        assert!(struts[0].get("top").is_some());
 
         let monitors = jwm.query_monitors(&backend);
         assert_eq!(monitors[0].gap, 14);
@@ -7148,6 +7286,7 @@ mod tests {
             unknown_subscription_topics(&topics(&[
                 "window",
                 " tag ",
+                "workspace",
                 "*",
                 "bluetooth/pairing_response",
                 "media/status",
