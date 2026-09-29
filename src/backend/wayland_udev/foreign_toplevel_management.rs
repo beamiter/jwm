@@ -1031,6 +1031,40 @@ mod tests {
     }
 
     #[test]
+    fn wlr_foreign_toplevel_set_maximized_carries_pager_source() {
+        // Set/UnsetMaximized must emit Pager so shared admission promotes a
+        // tiled window the same way an EWMH taskbar (source 2) does.
+        // `rsplit_once` takes the real Dispatch at the bottom of the file,
+        // not the needle this test embeds in its own source.
+        const SOURCE: &str = include_str!("foreign_toplevel_management.rs");
+        let handle_dispatch = SOURCE
+            .rsplit_once("impl Dispatch<ZwlrForeignToplevelHandleV1")
+            .map(|(_, rest)| rest)
+            .expect("handle Dispatch impl");
+        let set_arm = handle_dispatch
+            .split_once("Request::SetMaximized =>")
+            .and_then(|(_, rest)| rest.split_once("Request::UnsetMaximized =>"))
+            .map(|(arm, _)| arm)
+            .expect("SetMaximized arm");
+        let unset_arm = handle_dispatch
+            .split_once("Request::UnsetMaximized =>")
+            .and_then(|(_, rest)| rest.split_once("Request::SetMinimized =>"))
+            .map(|(arm, _)| arm)
+            .expect("UnsetMaximized arm");
+        for (name, arm) in [("SetMaximized", set_arm), ("UnsetMaximized", unset_arm)] {
+            assert!(
+                arm.contains("EwmhSourceIndication::Pager"),
+                "{name} must carry Pager source indication"
+            );
+            assert!(
+                !arm.contains("EwmhSourceIndication::Unspecified")
+                    && !arm.contains("EwmhSourceIndication::Application"),
+                "{name} must not fall back to a Client-like source"
+            );
+        }
+    }
+
+    #[test]
     fn setting_an_unchanged_flag_is_a_noop() {
         let mut state = PublishedToplevelState::default();
         assert!(state.set(StateFlag::Minimized, true));
@@ -1112,15 +1146,17 @@ impl Dispatch<ZwlrForeignToplevelHandleV1, ForeignToplevelHandleData> for JwmWay
                 state.push_event(BackendEvent::ForeignToplevelClose(win));
             }
             // wlr has one maximized bit, so a taskbar always names both
-            // axes. Shared policy decides and publishes the result.
+            // axes. Shared policy decides and publishes the result. There is
+            // no EWMH source field, but set_maximized is always a taskbar
+            // acting for the user — map to Pager so a tiled window promotes
+            // like an EWMH pager click (`data[3] == 2`).
             zwlr_foreign_toplevel_handle_v1::Request::SetMaximized => {
                 debug!("[foreign-toplevel] set_maximized for {:?}", win);
                 state.push_event(BackendEvent::WindowMaximizeRequest {
                     window: win,
                     action: NetWmAction::Add,
                     axes: MaximizeAxes::BOTH,
-                    // wlr has no EWMH source field; admission stays Client.
-                    source: EwmhSourceIndication::Unspecified,
+                    source: EwmhSourceIndication::Pager,
                 });
             }
             zwlr_foreign_toplevel_handle_v1::Request::UnsetMaximized => {
@@ -1129,7 +1165,7 @@ impl Dispatch<ZwlrForeignToplevelHandleV1, ForeignToplevelHandleData> for JwmWay
                     window: win,
                     action: NetWmAction::Remove,
                     axes: MaximizeAxes::BOTH,
-                    source: EwmhSourceIndication::Unspecified,
+                    source: EwmhSourceIndication::Pager,
                 });
             }
             zwlr_foreign_toplevel_handle_v1::Request::SetMinimized => {

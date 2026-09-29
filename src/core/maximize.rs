@@ -18,10 +18,11 @@ use crate::core::types::Rect;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MaximizeOrigin {
     /// EWMH ClientMessage from the application (source 0/1), xdg-shell,
-    /// XWayland, wlr-foreign-toplevel.
+    /// XWayland.
     Client,
     /// JWM command/keybinding/IPC, snap_window, top-edge drop zone, session
-    /// restore, or an EWMH pager/taskbar request (`data[3] == 2`).
+    /// restore, an EWMH pager/taskbar request (`data[3] == 2`), or
+    /// wlr-foreign-toplevel `set_maximized`.
     User,
     /// Manage-time adoption of pre-set protocol state.
     Adopt,

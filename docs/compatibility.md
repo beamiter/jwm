@@ -37,15 +37,16 @@ that area and no gaps. What each protocol can express differs:
 | Native X11 | Per axis: `_NET_WM_STATE_MAXIMIZED_VERT` and `_HORZ` are independent, and one message naming both is a single request. EWMH source indication (`data[3]`) is honored: pager (2) may promote a tiled window; application/unspecified (0/1) may not |
 | xdg-shell | Both axes only; `Maximized` is reported only while both are set, and every set/unset request gets exactly one configure, a refused one included |
 | XWayland | Only the paired request; `Maximized` is published only for both axes, and a maximized window cannot move or resize itself |
-| wlr-foreign-toplevel | Both axes; taskbar set/unset requests go through the same policy (no EWMH source field, so tiling admission stays client-like), and managed XWayland windows are listed and accept them too |
+| wlr-foreign-toplevel | Both axes; taskbar set/unset requests go through the same policy and are treated as pager/user origin (may promote a tiled window), and managed XWayland windows are listed and accept them too |
 
-A maximize that an application (or a source-less protocol) requests, or that a
-window already carries when JWM starts managing it, is refused for a window the
+A maximize that an application (or xdg/XWayland) requests, or that a window
+already carries when JWM starts managing it, is refused for a window the
 tiling layout manages, as in sway: the current state is republished, so the
 client does not believe a maximize that did not happen, and pre-set maximized
-atoms are cleared. An EWMH pager with source indication 2 may promote a tiled
-window like `togglemaximize`. The `togglemaximize` command takes a tiled window
-out of the layout while it is maximized, and toggling again puts it back.
+atoms are cleared. An EWMH pager with source indication 2, and a
+wlr-foreign-toplevel taskbar `set_maximized`, may promote a tiled window like
+`togglemaximize`. The `togglemaximize` command takes a tiled window out of the
+layout while it is maximized, and toggling again puts it back.
 Floating windows and every window under the float layout accept client
 requests; fixed-size windows and docks are never maximized. Native X11,
 XWayland and xdg-shell interactive move/resize requests feed the shared drag

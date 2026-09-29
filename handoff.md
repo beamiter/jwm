@@ -4,6 +4,24 @@
 
 ---
 
+## 2026-09-29（三）：wlr-foreign-toplevel maximize → Pager
+
+选题 = evolve wave 11；闭合 wave 9 留下的「wlr 无 source 仍 Client」项。
+
+1. **契约**：`zwlr_foreign_toplevel_handle_v1::{set,unset}_maximized` 发出
+   `WindowMaximizeRequest` 时 `source = Pager` → `MaximizeOrigin::User`，
+   平铺窗可提升；xdg / XWayland 的 `request_window_maximize` 仍
+   `Unspecified` → Client。
+2. **回归**：`wlr_foreign_toplevel_set_maximized_carries_pager_source`；
+   行为复用 `pager_source_indication_promotes_a_tiled_window`。
+
+**验证**：`scripts/test.sh --lib -- wlr_foreign_toplevel_set_maximized pager_source_indication`。
+
+**仍然开着的**：maximize 延后项去掉 wlr Client 不对称；仍开：跨重启持久化、
+XWayland 单轴、窗口状态 IPC 事件、xdg `Tiled*` 取舍。
+
+---
+
 ## 2026-09-29（二）：snap 半屏/四分屏改走工作区
 
 选题 = evolve wave 10；闭合 handoff maximize 延后项「snap 半屏和四分屏仍用

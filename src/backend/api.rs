@@ -2176,9 +2176,10 @@ pub enum BackendEvent {
     /// A client, pager or taskbar asked to change maximize state. `axes` names
     /// the axes the request covers and is never `NONE`. Both X11 transports
     /// turn one `_NET_WM_STATE` message naming both MAXIMIZED atoms into ONE
-    /// event and carry EWMH source indication in `source`; xdg-shell,
-    /// XWayland and wlr-foreign-toplevel always send `BOTH` with
-    /// `Add`/`Remove` and [`EwmhSourceIndication::Unspecified`]. Protocol
+    /// event and carry EWMH source indication in `source`; xdg-shell and
+    /// XWayland always send `BOTH` with `Add`/`Remove` and
+    /// [`EwmhSourceIndication::Unspecified`]; wlr-foreign-toplevel sends
+    /// `BOTH` with [`EwmhSourceIndication::Pager`] (taskbar = user). Protocol
     /// callbacks never pre-confirm: shared policy publishes accepted state
     /// via `PropertyOps::set_maximized_state`.
     WindowMaximizeRequest {

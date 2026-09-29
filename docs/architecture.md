@@ -120,7 +120,8 @@ tools/jwm_remote.rs         separate trusted-LAN X11 helper
   wlr-foreign-toplevel enter one `WindowMaximizeRequest` event; the shared X11
   `_NET_WM_STATE` expander coalesces a message naming both maximize atoms into
   one request instead of two per-axis transactions and carries EWMH source
-  indication so a pager (`data[3] == 2`) maps to `MaximizeOrigin::User`.
+  indication so a pager (`data[3] == 2`) maps to `MaximizeOrigin::User`;
+  wlr-foreign-toplevel maximize requests use the same pager origin.
   `core::maximize` plans admission and geometry as pure functions, and
   `jwm::maximize` executes them as a snapshot/rollback transaction around a
   dedicated restore slot (`maximize_restore_rect`) that never shares storage

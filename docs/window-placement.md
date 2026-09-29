@@ -110,13 +110,13 @@ on both axes covers exactly what the monocle layout would give it.
 
 Requests come from three origins. The user asks through `togglemaximize`,
 `snap_window maximize` (`Alt+Shift+Up`), dropping a dragged window at the top
-edge, `restore_session`, and an EWMH `_NET_WM_STATE` maximize whose source
-indication is pager (`data[3] == 2`). A client asks through EWMH with
-application or unspecified source (`data[3]` 0/1), xdg-shell, XWayland or
-wlr-foreign-toplevel (those protocols have no source field). Adoption is a
-window that already carries maximized state when JWM starts managing it,
-including every window after a seamless restart. The first matching row
-decides:
+edge, `restore_session`, an EWMH `_NET_WM_STATE` maximize whose source
+indication is pager (`data[3] == 2`), and a wlr-foreign-toplevel taskbar
+`set_maximized` (mapped to the same pager origin). A client asks through EWMH
+with application or unspecified source (`data[3]` 0/1), xdg-shell or
+XWayland. Adoption is a window that already carries maximized state when JWM
+starts managing it, including every window after a seamless restart. The first
+matching row decides:
 
 | Request | Window | Outcome |
 | --- | --- | --- |
@@ -125,8 +125,8 @@ decides:
 | adds an axis | floating, including underneath fullscreen or PiP | applied |
 | adds an axis | tiled underneath fullscreen or PiP | refused |
 | adds an axis | tiled, float layout, any origin | promoted |
-| adds an axis | tiled, tiling layout, user or EWMH pager | promoted |
-| adds an axis | tiled, tiling layout, client, adoption, or source-less protocol | refused |
+| adds an axis | tiled, tiling layout, user, EWMH pager, or wlr taskbar | promoted |
+| adds an axis | tiled, tiling layout, client, adoption, xdg, or XWayland | refused |
 
 A promoted window leaves the layout while it is maximized and goes back into
 the slot it left when its last axis is cleared: in front of the window that

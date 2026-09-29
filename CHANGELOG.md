@@ -294,6 +294,11 @@ monorepo use independent Semantic Versions.
 
 ### Changed
 
+- wlr-foreign-toplevel `set_maximized` / `unset_maximized` are treated as
+  pager/user origin, so a Wayland taskbar can promote a tiled window like an
+  EWMH pager (`data[3] == 2`). xdg-shell and XWayland stay client-like. See
+  [docs/window-placement.md](docs/window-placement.md#who-may-maximize-what).
+
 - Float snap halves and corner quarters (`snap_window` and mouse edge/corner
   drops) fill the monitor work area — the same area maximize uses — so they
   no longer cover the status bar, docks or tab bar. Drop-zone hit-tests still
@@ -302,9 +307,9 @@ monorepo use independent Semantic Versions.
 
 - Native X11 `_NET_WM_STATE` maximize requests honor EWMH source indication
   (`data[3]`): a pager (2) may promote a tiled window like `togglemaximize`;
-  an application or unspecified source (0/1) still cannot. xdg-shell,
-  XWayland and wlr-foreign-toplevel have no source field and keep the
-  client-like admission rule. See
+  an application or unspecified source (0/1) still cannot. xdg-shell and
+  XWayland have no source field and keep the client-like admission rule;
+  wlr-foreign-toplevel is mapped to pager (see above). See
   [docs/window-placement.md](docs/window-placement.md#who-may-maximize-what).
 
 - `snap_window maximize` (`Alt+Shift+Up`) and dropping a dragged window at
