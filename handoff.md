@@ -4,13 +4,32 @@
 
 ---
 
-## Evolve backlog（目标 100 轮；已完成 wave 9–47，本地 ahead）
+## Evolve backlog（目标 100 轮；已完成 wave 9–50，本地 ahead）
 
 | # | 选题 | Size |
 | --- | --- | --- |
 | 14–44 | topology/state 全族含 refit/strut/topology + seamless + session + placement + layout tags + X11 seed + maximize clamp + MonitorInfo connector | ✓ |
 | 45–47 | Hub DND/Caffeine/NightLight 中键 + Sticky manage/session + WindowInfo.connector | ✓ |
+| 48–50 | Above/Below session v7 + Hub Power Profile / Media 中键 | ✓ |
 | … | 跳过：Annotation/Screenshot CommonLinear、toast Closed(1)、BT withdraw、FS/PiP 丢锚点、Recording EncodedOnly、XWayland 单轴 | |
+
+---
+
+## 2026-09-29（三十二）：Above/Below session + Hub Power/Media middle-click
+
+选题 = evolve waves 48–50 / evolve7h。
+
+1. **Wave 48**：`session.json` → v7；`SessionEntry.is_above` / `is_below`
+   （serde default）；restore 经 `apply_external_stacking_request`（两者皆真
+   时 Above 胜出）；v6 迁移。Docs window-placement Restarts。
+2. **Wave 49**：Hub Power Profile button-2 → 选中行后走 `KEY_Return`（与
+   Enter / 左键同 OSD 循环）。Docs control-center + event_dispatcher pin。
+3. **Wave 50**：Hub Media button-2 → 选中行后走 `KEY_p` cycle-pin。Docs
+   control-center / media-controls + pin。
+
+**验证**：`scripts/test.sh --lib -- session_captures_and_restores control_center_hub_middle_click v6_snapshot_without_stacking`。
+
+**下一轮候选**：见跳过表；或其它 topology/state 边角。
 
 ---
 

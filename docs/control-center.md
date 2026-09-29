@@ -51,9 +51,11 @@ lands on the bar (it never seeks); middle click on the Input row selects
 that row and mutes the microphone through the same path as `m`. Middle
 click on the Network or Bluetooth row selects that row and toggles the
 radio through the same path as `Left`/`Right` (Bluetooth power-off still
-arms on the first press). Middle click on Do Not Disturb, Caffeine, or
-Night Light selects that row and toggles through the same Enter / OSD
-path as a left-click. Middle click on every other Hub row is inert.
+arms on the first press). Middle click on Do Not Disturb, Caffeine, Night
+Light, or Power Profile selects that row and toggles / advances through
+the same Enter / OSD path as a left-click. Middle click on the Media row
+selects that row and pins the next player through the same path as `p`.
+Middle click on every other Hub row is inert.
 On the Input row, a click on the
 microphone glyph toggles mic mute (the pointer twin of `m`); a click on
 the label or device name still opens the input picker. On the Media row,
@@ -106,7 +108,7 @@ PipeWire output and input defaults come from one shared `wpctl status` read.
 
 | Row | Appears when | Keys |
 | --- | --- | --- |
-| Media | An MPRIS player is running | `Left`/`Right` skip, `Enter` play/pause, `p` pins the next player, `o` opens the Players picker (pointer: `· p` / `· o`) |
+| Media | An MPRIS player is running | `Left`/`Right` skip, `Enter` play/pause, `p`/middle click pins the next player, `o` opens the Players picker (pointer: `· p` / `· o`) |
 | Network | A wireless radio exists (`nmcli` or `rfkill`) | `Enter` opens the picker, `Left`/`Right`/middle click toggles the radio |
 | Bluetooth | A controller exists (`bluetoothctl` or `rfkill`) | `Enter` opens the picker, `Left`/`Right`/middle click toggles power |
 | Volume | `wpctl`, `pactl`, or `amixer` works | `Left`/`Right` adjust, `Enter`/`m`/middle click mute |
@@ -117,7 +119,7 @@ PipeWire output and input defaults come from one shared `wpctl status` read.
 | CPU | `/proc/stat` is readable | read-only ([resource rows](resources.md)) |
 | Memory | `/proc/meminfo` is readable | read-only |
 | Network I/O | an interface worth counting exists in `/proc/net/dev` | read-only |
-| Power Profile | `powerprofilesctl` or ACPI `platform_profile` | `Left`/`Right` / `Enter` / wheel cycle |
+| Power Profile | `powerprofilesctl` or ACPI `platform_profile` | `Left`/`Right` / `Enter` / middle click / wheel cycle |
 | Night Light | always | `Enter` / middle click toggles |
 | Do Not Disturb | always | `Enter` / middle click toggles |
 | Caffeine | always | `Enter` / middle click holds the session awake ([idle policy](idle.md)) |
@@ -133,10 +135,11 @@ rather than a toast precisely because toasts are DND-gated. The Network
 and Bluetooth rows' `Left`/`Right` radio flips (and a confirmed Bluetooth
 power-off) raise the same Wi-Fi / Bluetooth OSD the key bindings use; the
 first press that only arms Bluetooth power-off stays quiet. The Power
-Profile row's `Left`/`Right` cycle, `Enter` / left-click (one notch
-forward), and wheel over the row raise a labeled Power Profile OSD with
-the active name (and the same icon the row already uses) after a
-successful switch.
+Profile row's `Left`/`Right` cycle, `Enter` / left-click / middle click
+(one notch forward), and wheel over the row raise a labeled Power Profile
+OSD with the active name (and the same icon the row already uses) after a
+successful switch. Middle click on the Media row pins the next player the
+same way `p` does.
 
 The panel rebuilds itself when the state behind a row changes — a track
 change, a battery poll — so an open card never shows a stale value, and the

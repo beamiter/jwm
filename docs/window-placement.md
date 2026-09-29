@@ -305,6 +305,10 @@ connector remap. Session snapshots (v6+) also store sticky
 (`_NET_WM_STATE_STICKY`); `restore_session` re-applies it through
 `set_client_sticky` after placement, and manage adopts a pre-map Sticky atom
 the same way it adopts Above / Below / maximize across a seamless restart.
+Session snapshots (v7+) also store Above / Below
+(`_NET_WM_STATE_ABOVE` / `_BELOW`); `restore_session` re-applies them through
+the same `apply_external_stacking_request` path client `_NET_WM_STATE`
+requests use, with Above winning when both flags were somehow saved.
 Across a
 seamless X11 restart the EWMH atoms carry the maximize state, and JWM's
 private `_JWM_MAXIMIZE_RESTORE_V1` property carries the pre-maximize

@@ -114,8 +114,9 @@ request, so pressing play after switching players drives the one now in front.
 The ranking loses to a pin. With more than one player running, the media row
 ends with a `· p ‹next player›` hint naming what the key would switch to
 (`· p spotify`), then a `· o` hint for the Players picker, and pressing `p`
-— or clicking that `· p` hint — pins the row — and the transport keys with
-it — to that next player, wrapping around the list. Pressing `o` — or
+— or middle-clicking the Media Hub row, or clicking that `· p` hint — pins
+the row — and the transport keys with it — to that next player, wrapping
+around the list. Pressing `o` — or
 clicking `· o` — opens a Players picker listing every player the sweep
 saw (filled marker on the active one). When the bridge sends
 `player_details`, each row prefers the player's MPRIS `Identity` over the

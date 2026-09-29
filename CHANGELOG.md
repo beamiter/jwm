@@ -7,6 +7,16 @@ monorepo use independent Semantic Versions.
 
 ### Added
 
+- Hub Power Profile middle-click selects the pointed row and advances one
+  notch through the same Enter / OSD path as left-click. Hub Media
+  middle-click selects the pointed row and pins the next player through
+  the same `p` path. See [docs/control-center.md](docs/control-center.md).
+
+- Session snapshots (v7+) persist Above / Below (`_NET_WM_STATE_ABOVE` /
+  `_BELOW`); `restore_session` re-applies them through
+  `apply_external_stacking_request` (Above wins if both). See
+  [docs/window-placement.md](docs/window-placement.md#restarts-and-sessions).
+
 - Hub Do Not Disturb, Caffeine, and Night Light middle-click select the
   pointed row and toggle through the same Enter / OSD path as left-click.
   See [docs/control-center.md](docs/control-center.md).
