@@ -1210,6 +1210,42 @@ impl SystemUiState {
     pub fn is_active(&self) -> bool {
         !matches!(self, Self::Inactive)
     }
+
+    /// Stable IPC / status name for the open panel, or `None` when inactive.
+    pub fn panel_kind(&self) -> Option<&'static str> {
+        Some(match self {
+            Self::Inactive => return None,
+            Self::Launcher { .. } => "launcher",
+            Self::Info { .. } => "keybindings",
+            Self::LayoutPicker(_) => "layout_picker",
+            Self::TagsOverview(_) => "tags_overview",
+            Self::MonitorLayout { .. } => "monitor_layout",
+            Self::Locked {
+                scope: LockScope::Session,
+                ..
+            } => "lock_screen",
+            Self::Locked {
+                scope: LockScope::Monitor(_),
+                ..
+            } => "monitor_lock",
+            Self::ControlCenter { .. } => "control_center",
+            Self::ListPanel { kind, .. } => match kind {
+                ListKind::Notifications => "notification_center",
+                ListKind::Clipboard => "clipboard_picker",
+                ListKind::Wifi => "wifi_picker",
+                ListKind::Bluetooth => "bluetooth_picker",
+                ListKind::Wallpaper => "wallpaper_picker",
+                ListKind::Theme => "theme_picker",
+                ListKind::AudioOutput => "audio_output_picker",
+                ListKind::AudioInput => "audio_input_picker",
+                ListKind::MediaPlayers => "media_players",
+                ListKind::WindowSwitcher => "window_switcher",
+            },
+            Self::Calendar { .. } => "calendar",
+            Self::SessionMenu { .. } => "session_menu",
+        })
+    }
+
     pub fn is_locked(&self) -> bool {
         matches!(self, Self::Locked { .. })
     }
@@ -5353,6 +5389,12 @@ mod tests {
         assert_eq!(menu.activate_session_entry(), None);
         menu.move_selection(1);
         assert!(menu.is_session_menu());
+        assert_eq!(menu.panel_kind(), Some("session_menu"));
+        assert_eq!(SystemUiState::Inactive.panel_kind(), None);
+        assert_eq!(
+            SystemUiState::info("T", vec!["a".into()]).panel_kind(),
+            Some("keybindings")
+        );
     }
 
     #[test]

@@ -7,6 +7,12 @@ monorepo use independent Semantic Versions.
 
 ### Added
 
+- `get_system_ui` reports whether a shell panel is open and its `kind`
+  (`launcher`, `notification_center`, `keybindings`, …).
+  `get_notifications` adds `center_open` and `selected_id`.
+  `get_tab_bar` / `MonitorInfoIpc.tab_bar_reserved` expose the window tab
+  strip reservation and focused-monitor membership.
+
 - Keybinding viewer synthetic tag chords follow config `modkey` (not
   hardcoded `Mod1`); configured leader-chord bindings appear as
   `{leader} then {key}` rows. See README `Alt+Shift+/`.

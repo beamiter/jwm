@@ -1318,6 +1318,12 @@ impl crate::jwm::Jwm {
             "do_not_disturb": self.do_not_disturb,
             "count": items.len(),
             "capacity": MAX_HISTORY,
+            "center_open": self.features.system_ui.is_notification_center(),
+            "selected_id": self
+                .features
+                .system_ui
+                .selected_notification()
+                .map(|(id, _)| id),
             "notifications": items,
         })
     }

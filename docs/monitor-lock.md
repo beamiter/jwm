@@ -164,7 +164,10 @@ also reports the live tiling `gap` (pixels), `m_fact`, `n_master`, and
 symbol + `m_fact` + `n_master` + `gap`), `get_gaps`, and `get_nmaster`
 return the selected monitor's live values (optional `connector` when
 known). IPC `setgaps` adjusts the focused monitor's gap like the
-keybinding.
+keybinding. Each monitor also reports `tab_bar_reserved` (pixels for the
+window tab strip, or `0`). `get_tab_bar` returns the focused monitor's
+strip membership; `get_system_ui` reports the open shell panel `kind`.
+`get_notifications` adds `center_open` / `selected_id`.
 `get_workspaces` / `get_windows` /
 `get_tree` / `window/state` expose the same optional `connector` and
 `monitor_name` on each workspace and window row (omitted when unknown).

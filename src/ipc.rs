@@ -321,6 +321,8 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "get_scrolling_status",
         "get_session_lock",
         "get_status",
+        "get_system_ui",
+        "get_tab_bar",
         "get_tearing_hints",
         "get_tree",
         "get_version",
@@ -645,6 +647,9 @@ pub struct MonitorInfoIpc {
     pub n_master: u32,
     /// `wl_output` transform (`OutputInfo.transform`, `0..=7`; `0` = normal).
     pub transform: i32,
+    /// Pixels reserved at the top of the work area for the window tab bar;
+    /// `0` when the strip is not shown on this monitor.
+    pub tab_bar_reserved: i32,
 }
 
 #[derive(Debug, Serialize)]
@@ -1390,6 +1395,7 @@ mod tests {
             m_fact: 0.55,
             n_master: 1,
             transform: 1,
+            tab_bar_reserved: 28,
         })
         .expect("serialize");
         assert_eq!(with_connector["connector"], "DP-1");
@@ -1406,6 +1412,7 @@ mod tests {
         assert!((with_connector["m_fact"].as_f64().unwrap() - 0.55).abs() < 1e-6);
         assert_eq!(with_connector["n_master"], 1);
         assert_eq!(with_connector["transform"], 1);
+        assert_eq!(with_connector["tab_bar_reserved"], 28);
 
         let without = serde_json::to_value(MonitorInfoIpc {
             num: 1,
@@ -1430,6 +1437,7 @@ mod tests {
             m_fact: 0.55,
             n_master: 1,
             transform: 0,
+            tab_bar_reserved: 0,
         })
         .expect("serialize");
         assert!(without.get("connector").is_none());
@@ -1444,6 +1452,7 @@ mod tests {
         assert_eq!(without["hdr_capable"], false);
         assert_eq!(without["gap"], 0);
         assert_eq!(without["transform"], 0);
+        assert_eq!(without["tab_bar_reserved"], 0);
     }
 
     #[test]

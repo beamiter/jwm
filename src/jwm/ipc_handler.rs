@@ -2551,6 +2551,11 @@ impl Jwm {
                 "enabled": self.do_not_disturb,
             }))),
             "get_notifications" => IpcResponse::ok(Some(self.notifications_json())),
+            "get_system_ui" => IpcResponse::ok(Some(serde_json::json!({
+                "active": self.features.system_ui.is_active(),
+                "kind": self.features.system_ui.panel_kind(),
+            }))),
+            "get_tab_bar" => IpcResponse::ok(Some(self.query_focused_tab_bar(backend))),
             "get_media_status" => IpcResponse::ok(Some(self.media_status_json())),
             "get_power_status" => {
                 // Warm the Shell Hub's coalesced snapshot before answering,
@@ -3686,7 +3691,51 @@ impl Jwm {
             m_fact: m.layout.m_fact,
             n_master: m.layout.n_master,
             transform: self.output_transform_for_monitor(backend, mk),
+            tab_bar_reserved: self.tab_bar_reserved(mk),
         }
+    }
+
+    /// Focused monitor's window tab strip, if any.
+    pub(crate) fn query_focused_tab_bar(&self, backend: &dyn Backend) -> serde_json::Value {
+        let Some(mk) = self.state.sel_mon else {
+            return serde_json::json!({
+                "monitor": serde_json::Value::Null,
+                "reserved": 0,
+                "windows": [],
+            });
+        };
+        let mon_num = self
+            .state
+            .monitors
+            .get(mk)
+            .map(|m| m.num)
+            .unwrap_or_default();
+        let group = self.tab_group_clients(mk);
+        let reserved = self.tab_bar_reserved(mk);
+        let windows: Vec<serde_json::Value> = group
+            .iter()
+            .filter_map(|&ck| {
+                let client = self.state.clients.get(ck)?;
+                Some(serde_json::json!({
+                    "id": client.win.raw(),
+                    "name": client.name,
+                    "class": client.class,
+                    "focused": self.state.monitors.get(mk).and_then(|m| m.sel) == Some(ck),
+                }))
+            })
+            .collect();
+        let mut value = serde_json::json!({
+            "monitor": mon_num,
+            "reserved": reserved,
+            "windows": windows,
+        });
+        if let Some(connector) = self.output_key_for_monitor(backend, mk) {
+            value
+                .as_object_mut()
+                .expect("tab bar object")
+                .insert("connector".into(), serde_json::Value::String(connector));
+        }
+        value
     }
 
     /// Focused monitor's live layout parameters (`setlayout` / `setmfact` /

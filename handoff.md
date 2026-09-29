@@ -4,7 +4,7 @@
 
 ---
 
-## Evolve backlog（目标 199 轮；已完成 wave 9–114，本地 ahead）
+## Evolve backlog（目标 199 轮；已完成 wave 9–118，本地 ahead）
 
 | # | 选题 | Size |
 | --- | --- | --- |
@@ -24,7 +24,27 @@
 | 101–105 | Workspace/Monitor gap；get_layout / get_gaps / get_nmaster | ✓ |
 | 106–112 | setgaps IPC；Monitor transform/m_fact/n_master；recording segments；effect expose | ✓ |
 | 113–114 | keybinding viewer modkey + chord rows | ✓ |
+| 115–118 | get_system_ui / get_tab_bar；tab_bar_reserved；notifications center_open | ✓ |
 | … | 跳过：Annotation/Screenshot CommonLinear、toast Closed(1)、BT withdraw、FS/PiP 自身丢锚点（own-anchor drop）、Recording EncodedOnly、XWayland 单轴 | |
+
+---
+
+## 2026-09-29（四十六）：system_ui / tab bar / notifications IPC
+
+选题 = evolve waves 115–118 / evolve7h。
+
+1. **Wave 115**：`get_system_ui`（active + kind）。
+2. **Wave 116**：`MonitorInfoIpc.tab_bar_reserved`。
+3. **Wave 117**：`get_tab_bar`（focused membership + reserved）。
+4. **Wave 118**：`get_notifications` 增 `center_open` / `selected_id`。
+   CHANGELOG；panel_kind + serialize pins。
+
+**刻意不做**：跳过表不变。
+
+**验证**：`scripts/test.sh --lib -- monitor_info_serializes an_empty_session_menu panel_kind`。
+
+**下一轮候选**：session client_fact v10；RandR transform；recording
+capture_target；get_expose；WindowInfo maximize_restore_rect。
 
 ---
 
