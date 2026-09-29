@@ -1445,9 +1445,10 @@ impl Jwm {
         client_key: ClientKey,
         urgent: bool,
     ) -> Result<WindowId, Box<dyn std::error::Error>> {
-        let win = if let Some(client) = self.state.clients.get_mut(client_key) {
+        let (win, previous_urgent) = if let Some(client) = self.state.clients.get_mut(client_key) {
+            let previous = client.state.is_urgent;
             client.state.is_urgent = urgent;
-            client.win
+            (client.win, previous)
         } else {
             return Err("Client not found".into());
         };
@@ -1462,6 +1463,9 @@ impl Jwm {
         // changes arrange nothing, so the rebuild has to be asked for here
         // (the dirty flag pushes it once, on the next flush).
         self.refresh_tags_overview();
+        if previous_urgent != urgent {
+            self.broadcast_window_state_ipc(client_key);
+        }
         Ok(win)
     }
 

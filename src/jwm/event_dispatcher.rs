@@ -1945,7 +1945,12 @@ impl Jwm {
         client_key: ClientKey,
         on: bool,
     ) {
-        let Some(win) = self.state.clients.get(client_key).map(|c| c.win) else {
+        let Some((win, previous_urgent)) = self
+            .state
+            .clients
+            .get(client_key)
+            .map(|c| (c.win, c.state.is_urgent))
+        else {
             return;
         };
         let hinted = !on
@@ -1983,6 +1988,11 @@ impl Jwm {
         // The grid's attention dot follows the same flag as the bar's urgent
         // mask, and nothing here arranges.
         self.refresh_tags_overview();
+        // WindowInfo only carries `is_urgent`; skip when the EWMH bit flips
+        // but a standing ICCCM hint keeps urgency unchanged.
+        if previous_urgent != urgent {
+            self.broadcast_window_state_ipc(client_key);
+        }
     }
 }
 

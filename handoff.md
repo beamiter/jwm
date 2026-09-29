@@ -4,6 +4,40 @@
 
 ---
 
+## Evolve backlog（目标 100 轮；已完成 wave 9–13，本地 ahead）
+
+按日常命中 × 可交付性排序的下一波候选（S/小 M，无 DRM）：
+
+| # | 选题 | Size |
+| --- | --- | --- |
+| 14 | urgent → `window/state` | S |
+| 15 | xdg Maximized 时清 `Tiled*` | S |
+| 16 | toast 过期发 `NotificationClosed(1)` | S |
+| 17 | BT pairing cancel 撤回提示 | S |
+| 18 | 提升窗 FS/PiP 取消最大化保留锚点 | S |
+| 19 | Annotation → CommonLinearAware | S |
+| 20 | Screenshot toolbar → CommonLinearAware | S |
+| 21 | Recording overlay → CommonLinearAware | S |
+| 22 | session 持久化 maximize + restore_rect | M |
+| 23 | seamless restart maximize restore_rect | S–M |
+| … | 继续从 sota-gap / roadmap Phase 2–3 / handoff 扫 | |
+
+---
+
+## 2026-09-29（六）：urgent → `window/state`
+
+选题 = evolve wave 14；闭合 wave 13 urgent follow-up。
+
+1. **契约**：`set_client_demands_attention` / `sync_client_urgent_state` 在
+   `is_urgent` 实际翻转时广播；仅 EWMH 位变、ICCCM 仍 urgent 则不广播。
+2. **回归**：`sibling_window_state_paths_broadcast_window_state_ipc` 扩 urgent。
+
+**验证**：`scripts/test.sh --lib -- sibling_window_state_paths`。
+
+**仍然开着的**：见上表 15+；maximize 跨重启 / XWayland 单轴 / Tiled*。
+
+---
+
 ## 2026-09-29（五）：fullscreen / minimize / float 也广播 `window/state`
 
 选题 = evolve wave 13；闭合 wave 12 follow-up。

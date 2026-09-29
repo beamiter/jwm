@@ -158,9 +158,10 @@ something unmaximizes it.
 An accepted maximize change (including promote / unmaximize / drag-cancel
 reinstate) also broadcasts a `window/state` IPC event whose payload is the
 same shape as one `get_windows` row (`is_maximized`, `is_maximized_vert`,
-`is_maximized_horz`, geometry, floating, minimized, fullscreen, …). The same
-event fires on fullscreen enter/leave, minimize/unminimize, and a real
-`togglefloating` flip. Refused or no-op requests do not emit it; subscribe to
+`is_maximized_horz`, geometry, floating, minimized, fullscreen, urgent, …).
+The same event fires on fullscreen enter/leave, minimize/unminimize, a real
+`togglefloating` flip, and an `is_urgent` change (EWMH demands-attention or
+ICCCM urgency). Refused or no-op requests do not emit it; subscribe to
 `window` or `window/state` to follow flips without polling.
 
 A refused request, like one that changes nothing, leaves the window alone:

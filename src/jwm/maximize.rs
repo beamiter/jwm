@@ -1639,8 +1639,8 @@ mod tests {
 
     #[test]
     fn sibling_window_state_paths_broadcast_window_state_ipc() {
-        // Fullscreen / minimize / float flips share the maximize event. Needles
-        // are assembled so this test cannot match itself.
+        // Fullscreen / minimize / float / urgent flips share the maximize
+        // event. Needles are assembled so this test cannot match itself.
         let broadcast = format!("broadcast_window_{}_ipc", "state");
         let fullscreen = include_str!("window_state.rs");
         let setfullscreen = fullscreen
@@ -1666,6 +1666,18 @@ mod tests {
             minimized.contains(&broadcast),
             "set_client_minimized must broadcast on the Ok(true) exit"
         );
+        let sync_urgent = fullscreen
+            .split_once("fn sync_client_urgent_state(")
+            .expect("sync_client_urgent_state")
+            .1
+            .split_once("pub(super) fn setclientstate(")
+            .expect("setclientstate")
+            .0;
+        assert!(
+            sync_urgent.contains(&broadcast)
+                && sync_urgent.contains("previous_urgent != urgent"),
+            "sync_client_urgent_state must broadcast only when is_urgent flips"
+        );
         let toggle = include_str!("features/toggles.rs");
         let float = toggle
             .split_once("pub fn togglefloating(")
@@ -1677,6 +1689,18 @@ mod tests {
         assert!(
             float.contains(&broadcast),
             "togglefloating must broadcast after a real float flip"
+        );
+        let attention = include_str!("event_dispatcher.rs");
+        let demands = attention
+            .split_once("pub(super) fn set_client_demands_attention(")
+            .expect("set_client_demands_attention")
+            .1
+            .split_once("mod tests {")
+            .expect("tests module")
+            .0;
+        assert!(
+            demands.contains(&broadcast) && demands.contains("previous_urgent != urgent"),
+            "set_client_demands_attention must broadcast only when is_urgent flips"
         );
     }
 
