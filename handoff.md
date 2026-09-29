@@ -4,20 +4,32 @@
 
 ---
 
-## Evolve backlog（目标 100 轮；已完成 wave 9–17，本地 ahead）
+## Evolve backlog（目标 100 轮；已完成 wave 9–18，本地 ahead）
 
 按日常命中 × 可交付性排序的下一波候选（S/小 M，无 DRM）：
 
 | # | 选题 | Size |
 | --- | --- | --- |
-| 14–16 | urgent / Tiled* / sticky → `window/state` | S ✓ |
-| 17 | tag / sendmon / toggletag → `window/state` | S ✓ |
-| 18 | Above/Below → `WindowInfo` + `window/state` | S |
+| 14–18 | window window/state 族 + Tiled* | S ✓ |
 | 19 | seamless restart maximize restore_rect | S–M |
 | 20 | Annotation → CommonLinearAware | S–M（PostDelivery 迁移） |
 | 21 | Screenshot toolbar → CommonLinearAware | S–M |
 | 22 | session 持久化 maximize + restore_rect | M |
 | … | 跳过：toast Closed(1)、BT withdraw、FS/PiP 丢锚点、Recording EncodedOnly | |
+
+---
+
+## 2026-09-29（十）：Above/Below → WindowInfo + `window/state`
+
+选题 = evolve wave 18。
+
+1. **契约**：`WindowInfo` 增 `is_above` / `is_below`；
+   `apply_external_stacking_request` 在 flags 实际翻转且 restack 成功后广播。
+2. **回归**：sibling pin + `window_info_serializes` 字段断言。
+
+**验证**：`scripts/test.sh --lib -- sibling_window_state_paths window_info_serializes`。
+
+**仍然开着的**：见上表 19+。
 
 ---
 

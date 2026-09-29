@@ -56,6 +56,7 @@ pipeline and unmaximize in place. See
 Managed-client Above/Below is handled consistently for XWayland and native X11
 policy: conflicting flags resolve to Above, property writes are echoed back,
 and the managed stack uses `Below < Normal < Above < focused fullscreen < PiP`.
+`get_windows` / `window/state` expose `is_above` and `is_below`.
 Layer-shell background/top/overlay surfaces remain compositor-owned layers.
 
 The binary-bundle design currently targets **x86_64 Linux built on Ubuntu

@@ -497,6 +497,10 @@ pub struct WindowInfo {
     pub is_fullscreen: bool,
     pub is_urgent: bool,
     pub is_sticky: bool,
+    /// `_NET_WM_STATE_ABOVE` / keep-above.
+    pub is_above: bool,
+    /// `_NET_WM_STATE_BELOW` / keep-below. Exclusive with `is_above`.
+    pub is_below: bool,
     pub is_pip: bool,
     /// Both maximize axes are set (what xdg/wlr call maximized).
     pub is_maximized: bool,
@@ -1038,6 +1042,8 @@ mod tests {
             is_fullscreen: false,
             is_urgent: false,
             is_sticky: false,
+            is_above: false,
+            is_below: false,
             is_pip: false,
             is_maximized: false,
             is_maximized_vert: true,
@@ -1052,6 +1058,8 @@ mod tests {
         assert_eq!(value["is_maximized"], false);
         assert_eq!(value["is_maximized_vert"], true);
         assert_eq!(value["is_maximized_horz"], false);
+        assert_eq!(value["is_above"], false);
+        assert_eq!(value["is_below"], false);
     }
 
     #[test]

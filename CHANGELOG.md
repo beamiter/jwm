@@ -10,12 +10,15 @@ monorepo use independent Semantic Versions.
 - IPC `window/state` event: an accepted maximize / unmaximize / drag-cancel
   reinstate, fullscreen enter/leave, minimize/unminimize, `togglefloating`,
   urgency (`is_urgent`), sticky (`is_sticky`), a real `tag` / `toggletag`
-  change, or a cross-monitor `sendmon` / `tagmon` pushes a `WindowInfo`-shaped
-  payload (`is_maximized*`, geometry, floating, minimized, fullscreen, urgent,
-  sticky, tags, monitor, …) so subscribers of `window` need not poll
-  `get_windows`. Refused maximize requests and no-op mode changes stay silent.
-  See
+  change, a cross-monitor `sendmon` / `tagmon`, or an Above/Below stacking
+  flip pushes a `WindowInfo`-shaped payload (`is_maximized*`, geometry,
+  floating, minimized, fullscreen, urgent, sticky, `is_above` / `is_below`,
+  tags, monitor, …) so subscribers of `window` need not poll `get_windows`.
+  Refused maximize requests and no-op mode changes stay silent. See
   [docs/window-placement.md](docs/window-placement.md#who-may-maximize-what).
+
+- `get_windows` / `get_tree` / `window/state` report `is_above` and
+  `is_below` for `_NET_WM_STATE_ABOVE` / `BELOW`.
 
 - Maximize is a real window state on every backend. Native X11
   `_NET_WM_STATE` (per axis; a message naming both atoms is one request),

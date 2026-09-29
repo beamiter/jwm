@@ -1749,6 +1749,17 @@ mod tests {
             toggletag.contains(&broadcast) && toggletag.contains("newtags == current_tags"),
             "toggletag must broadcast only when the tag mask changes"
         );
+        let stacking = attention
+            .split_once("fn apply_external_stacking_request(")
+            .expect("apply_external_stacking_request")
+            .1
+            .split_once("fn requested_attention_state(")
+            .expect("requested_attention_state")
+            .0;
+        assert!(
+            stacking.contains(&broadcast) && stacking.contains("previous != next"),
+            "apply_external_stacking_request must broadcast only when Above/Below flips"
+        );
     }
 
     #[test]

@@ -111,6 +111,8 @@ fn client_window_info(client: &WMClient, monitor: i32, is_focused: bool) -> Wind
         is_fullscreen: client.state.is_fullscreen,
         is_urgent: client.state.is_urgent,
         is_sticky: client.state.is_sticky,
+        is_above: client.state.is_above,
+        is_below: client.state.is_below,
         is_pip: client.state.is_pip,
         is_maximized: client.state.is_maximized_vert && client.state.is_maximized_horz,
         is_maximized_vert: client.state.is_maximized_vert,

@@ -185,6 +185,9 @@ fn apply_external_stacking_request(
             return Err(error);
         }
     }
+    if previous != next {
+        wm.broadcast_window_state_ipc(client_key);
+    }
     Ok(())
 }
 
