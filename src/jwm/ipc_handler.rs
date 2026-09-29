@@ -122,7 +122,10 @@ fn client_window_info(
     transient_for: Option<u64>,
     is_tabbed: bool,
     tab_index: Option<usize>,
+    maximize_restore_anchor: Option<u64>,
+    is_status_bar: bool,
 ) -> WindowInfo {
+    let dock = client.state.dock_layer_info;
     WindowInfo {
         id: client.win.raw(),
         name: client.name.clone(),
@@ -203,6 +206,23 @@ fn client_window_info(
             w: client.geometry.old_w,
             h: client.geometry.old_h,
         },
+        old_border_w: client.geometry.old_border_w,
+        hidden_restore: client.geometry.hidden_restore_rect.map(|r| RectIpc {
+            x: r.x,
+            y: r.y,
+            w: r.w,
+            h: r.h,
+        }),
+        maximize_restore_anchor,
+        pip_restore_sticky: client.state.pip_restore_sticky,
+        old_state: client.state.old_state,
+        remembers_closed_placement: client.state.remembers_closed_placement,
+        dock_exclusive_zone: dock.map(|d| d.exclusive_zone),
+        dock_anchor_top: dock.is_some_and(|d| d.anchor_top),
+        dock_anchor_bottom: dock.is_some_and(|d| d.anchor_bottom),
+        dock_anchor_left: dock.is_some_and(|d| d.anchor_left),
+        dock_anchor_right: dock.is_some_and(|d| d.anchor_right),
+        is_status_bar,
     }
 }
 
@@ -485,6 +505,43 @@ fn workspace_layout_state(mon: &WMMonitor, tag_index: usize) -> (String, f32, u3
         .unwrap_or(mon.layout.gap);
 
     (layout, m_fact, n_master, gap)
+}
+
+/// Per-tag show_bar / prev_layout / selected window id for workspace IPC.
+fn workspace_tag_extras(
+    mon: &WMMonitor,
+    tag_index: usize,
+    clients: &slotmap::SlotMap<ClientKey, WMClient>,
+) -> (bool, String, Option<u64>) {
+    let default_show = mon
+        .pertag
+        .as_ref()
+        .and_then(|p| p.show_bars.get(p.cur_tag).copied())
+        .unwrap_or(true);
+    let default_prev = format!("{:?}", *mon.prev_lt);
+    let Some(pertag_index) = tag_index.checked_add(1) else {
+        return (default_show, default_prev, None);
+    };
+    let Some(pertag) = mon.pertag.as_ref() else {
+        return (default_show, default_prev, None);
+    };
+    let show_bar = pertag
+        .show_bars
+        .get(pertag_index)
+        .copied()
+        .unwrap_or(default_show);
+    let prev_layout = pertag
+        .prev_lts
+        .get(pertag_index)
+        .map(|layout| format!("{:?}", **layout))
+        .unwrap_or(default_prev);
+    let selected_id = pertag
+        .sel
+        .get(pertag_index)
+        .copied()
+        .flatten()
+        .and_then(|ck| clients.get(ck).map(|c| c.win.raw()));
+    (show_bar, prev_layout, selected_id)
 }
 
 fn system_time_unix_ms(time: std::time::SystemTime) -> Option<u64> {
@@ -3663,6 +3720,10 @@ impl Jwm {
             .transient_for(client.win)
             .map(|win| win.raw());
         let has_strut = self.external_struts.contains_key(&client.win);
+        let maximize_restore_anchor = client.state.maximize_restore_anchor.and_then(|anchor| {
+            self.state.clients.get(anchor).map(|c| c.win.raw())
+        });
+        let is_status_bar = client.is_status_bar(CONFIG.load().status_bar_name());
         Some(client_window_info(
             client,
             resolved_client_monitor_num(&self.state.monitors, client),
@@ -3679,6 +3740,8 @@ impl Jwm {
             transient_for,
             is_tabbed,
             tab_index,
+            maximize_restore_anchor,
+            is_status_bar,
         ))
     }
 
@@ -3718,6 +3781,8 @@ impl Jwm {
                 let tag_bit = 1u32 << i;
                 let is_active = (active_tags & tag_bit) != 0;
                 let (layout, m_fact, n_master, gap) = workspace_layout_state(mon, i);
+                let (show_bar, prev_layout, selected_id) =
+                    workspace_tag_extras(mon, i, &self.state.clients);
                 result.push(WorkspaceInfo {
                     tag_mask: tag_bit,
                     tag_index: i,
@@ -3733,6 +3798,9 @@ impl Jwm {
                     has_fullscreen: tag_has_fullscreen(&self.state, mk, tag_bit),
                     connector: connector.clone(),
                     monitor_name: monitor_name.clone(),
+                    show_bar,
+                    prev_layout,
+                    selected_id,
                 });
             }
         }
@@ -3767,12 +3835,22 @@ impl Jwm {
         let (scale, refresh_mhz) = self.output_scale_refresh_for_monitor(backend, mk);
         let (vendor, product_code, serial_number, monitor_serial) =
             self.output_edid_ids_for_monitor(backend, mk);
-        let (vrr_supported, vrr_enabled) = self.output_vrr_for_monitor(backend, mk);
+        let (vrr_supported, vrr_enabled, vrr_min_hz, vrr_max_hz) =
+            self.output_vrr_for_monitor(backend, mk);
         let (physical_width_mm, physical_height_mm) =
             self.output_physical_mm_for_monitor(backend, mk);
         let (preferred_width, preferred_height, preferred_refresh_mhz) =
             self.output_preferred_mode_for_monitor(backend, mk);
         let hdr_metadata = self.output_hdr_metadata_for_monitor(backend, mk);
+        let (strut_top, strut_bottom, strut_left, strut_right) = self.get_strut_reserved(mk);
+        let show_bar = m
+            .pertag
+            .as_ref()
+            .and_then(|p| p.show_bars.get(p.cur_tag).copied())
+            .unwrap_or(true);
+        let selected_id = m
+            .sel
+            .and_then(|ck| self.state.clients.get(ck).map(|c| c.win.raw()));
         MonitorInfoIpc {
             num: m.num,
             x: m.geometry.m_x,
@@ -3810,6 +3888,15 @@ impl Jwm {
             preferred_width,
             preferred_height,
             preferred_refresh_mhz,
+            vrr_min_hz,
+            vrr_max_hz,
+            prev_layout: format!("{:?}", *m.prev_lt),
+            show_bar,
+            strut_top,
+            strut_bottom,
+            strut_left,
+            strut_right,
+            selected_id,
         }
     }
 
@@ -4554,6 +4641,8 @@ mod tests {
             None,
             false,
             None,
+            None,
+            false,
         );
         assert_eq!(info.id, 0x2a);
         assert_eq!(info.monitor, 7);
@@ -4582,6 +4671,14 @@ mod tests {
         assert!(!info.has_strut);
         assert_eq!(info.client_fact, 0.0);
         assert_eq!(info.border_w, 0);
+        assert_eq!(info.old_border_w, 0);
+        assert!(info.hidden_restore.is_none());
+        assert!(info.maximize_restore_anchor.is_none());
+        assert!(!info.pip_restore_sticky);
+        assert!(!info.old_state);
+        assert!(!info.remembers_closed_placement);
+        assert!(info.dock_exclusive_zone.is_none());
+        assert!(!info.is_status_bar);
         assert!(info.layout.is_none());
         assert!(info.scratchpad.is_none());
 
@@ -4593,8 +4690,20 @@ mod tests {
         client.state.client_fact = 1.25;
         client.state.maximize_restore_tiled = true;
         client.state.minimized_order = 9;
+        client.state.pip_restore_sticky = true;
+        client.state.old_state = true;
+        client.state.remembers_closed_placement = true;
         client.geometry.border_w = 4;
+        client.geometry.old_border_w = 2;
         client.geometry.maximize_restore_rect = Some(crate::core::types::Rect::new(10, 20, 30, 40));
+        client.geometry.hidden_restore_rect = Some(crate::core::types::Rect::new(1, 2, 3, 4));
+        client.state.dock_layer_info = Some(crate::backend::api::LayerSurfaceInfo {
+            exclusive_zone: 32,
+            anchor_top: true,
+            anchor_bottom: false,
+            anchor_left: false,
+            anchor_right: false,
+        });
         let restored = client_window_info(
             &client,
             7,
@@ -4611,6 +4720,8 @@ mod tests {
             Some(77),
             true,
             Some(1),
+            Some(0x99),
+            true,
         );
         assert!(!restored.is_minimized);
         assert_eq!(restored.minimized_order, 9);
@@ -4645,6 +4756,24 @@ mod tests {
         assert!(restored.has_strut);
         assert_eq!(restored.client_fact, 1.25);
         assert_eq!(restored.border_w, 4);
+        assert_eq!(restored.old_border_w, 2);
+        assert_eq!(
+            restored.hidden_restore,
+            Some(crate::ipc::RectIpc {
+                x: 1,
+                y: 2,
+                w: 3,
+                h: 4
+            })
+        );
+        assert_eq!(restored.maximize_restore_anchor, Some(0x99));
+        assert!(restored.pip_restore_sticky);
+        assert!(restored.old_state);
+        assert!(restored.remembers_closed_placement);
+        assert_eq!(restored.dock_exclusive_zone, Some(32));
+        assert!(restored.dock_anchor_top);
+        assert!(!restored.dock_anchor_bottom);
+        assert!(restored.is_status_bar);
         assert_eq!(restored.scratchpad.as_deref(), Some("term"));
         assert_eq!(restored.layout.as_deref(), Some("TILE"));
         assert_eq!(restored.connector.as_deref(), Some("DP-1"));

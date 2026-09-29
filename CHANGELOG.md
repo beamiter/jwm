@@ -7,6 +7,15 @@ monorepo use independent Semantic Versions.
 
 ### Added
 
+- `get_windows` / `get_clients` / `get_tree` / `window/state` report
+  `old_border_w`, optional `hidden_restore` / `maximize_restore_anchor`,
+  `pip_restore_sticky`, `old_state`, `remembers_closed_placement`, dock
+  exclusive-zone / anchors, and `is_status_bar`.
+- `get_monitors` / `get_tree` report `vrr_min_hz` / `vrr_max_hz`,
+  `prev_layout`, `show_bar`, strut reservations, and `selected_id`.
+- `get_workspaces` reports per-tag `show_bar`, `prev_layout`, and
+  `selected_id`.
+
 - `get_windows` / `get_clients` / `get_tree` / `window/state` report resting
   `float_rect` and `old_geometry` beside live `x`/`y`/`w`/`h`.
 - `get_monitors` / `get_tree` report optional `hdr_metadata`, physical size

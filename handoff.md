@@ -4,7 +4,7 @@
 
 ---
 
-## Evolve backlog（目标 199 轮；已完成 wave 9–199，本地 ahead）
+## Evolve backlog（目标 1000 轮；已完成 wave 9–220，本地 ahead）
 
 | # | 选题 | Size |
 | --- | --- | --- |
@@ -35,7 +35,30 @@
 | 171–180 | empty_jwm XDG pin；maximize oversized restore clamp；switcher instance icons；set_layout/setnmaster；get_config keys；status UI feature flags | ✓ |
 | 181–190 | audio output_bytes；docs cube/switcher/compat/audio；gesture viewer rows（已有）；ListKind middle（已有） | ✓ |
 | 191–199 | serialize / dispatch / include_str! contract pins（capabilities、TreeNode、overview routing、switcher icon、restore clamp） | ✓ |
+| 200–209 | WindowInfo old_border_w / hidden_restore / maximize_restore_anchor / pip_restore_sticky / old_state / remembers_closed_placement / dock_* / is_status_bar | ✓ |
+| 210–215 | MonitorInfoIpc vrr_min/max_hz / prev_layout / show_bar / strut_* / selected_id | ✓ |
+| 216–220 | WorkspaceInfo show_bar / prev_layout / selected_id | ✓ |
 | … | 跳过：Annotation/Screenshot CommonLinear、toast Closed(1)、BT withdraw、FS/PiP 自身丢锚点（own-anchor drop）、Recording EncodedOnly、XWayland 单轴 | |
+
+---
+
+## 2026-09-29（五十三）：Window/Monitor/Workspace IPC fields → 220
+
+选题 = evolve waves 200–220 / evolve7h。目标上调至 1000。
+
+1. **Wave 200–209**：`WindowInfo` 补 `old_border_w` / `hidden_restore` /
+   `maximize_restore_anchor` / `pip_restore_sticky` / `old_state` /
+   `remembers_closed_placement` / dock exclusive+anchors / `is_status_bar`。
+2. **Wave 210–215**：`MonitorInfoIpc` 补 `vrr_min_hz`/`vrr_max_hz` /
+   `prev_layout` / `show_bar` / `strut_*` / `selected_id`。
+3. **Wave 216–220**：`WorkspaceInfo` 补 `show_bar` / `prev_layout` /
+   `selected_id`。
+
+**刻意不做**：跳过表不变；audio peak / `mapped_ms` / `is_override_redirect` 仍延后。
+
+**验证**：`scripts/test.sh --lib -- window_info_serializes monitor_info_serializes workspace_info_serializes tree_node_serializes window_query_projection`。
+
+**下一轮候选**：221+ IPC aliases + status/idle/recording polish。
 
 ---
 

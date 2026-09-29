@@ -652,6 +652,29 @@ pub struct WindowInfo {
     /// Previous layout / fullscreen rectangle (`ClientGeometry::old_*`),
     /// the twin of live `x`/`y`/`w`/`h` that `resizeclient` uses.
     pub old_geometry: RectIpc,
+    /// Border width remembered for fullscreen return (`old_border_w`).
+    pub old_border_w: i32,
+    /// Geometry parked while minimized or off-view (`hidden_restore_rect`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hidden_restore: Option<RectIpc>,
+    /// Neighbor this maximize was promoted against, as a window id.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub maximize_restore_anchor: Option<u64>,
+    /// Sticky bit to restore when leaving PiP.
+    pub pip_restore_sticky: bool,
+    /// Floating bit remembered under fullscreen / PiP (`old_state`).
+    pub old_state: bool,
+    /// Eligible for closed-placement memory.
+    pub remembers_closed_placement: bool,
+    /// Layer-shell exclusive zone when dock layer info is present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dock_exclusive_zone: Option<i32>,
+    pub dock_anchor_top: bool,
+    pub dock_anchor_bottom: bool,
+    pub dock_anchor_left: bool,
+    pub dock_anchor_right: bool,
+    /// Matches the configured status-bar name (title/class/instance).
+    pub is_status_bar: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -683,6 +706,13 @@ pub struct WorkspaceInfo {
     /// when unknown. Same field as [`MonitorInfoIpc::monitor_name`].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub monitor_name: Option<String>,
+    /// Whether the status bar is shown for this tag (`Pertag.show_bars`).
+    pub show_bar: bool,
+    /// Previous layout symbol for this tag (`Pertag.prev_lts`).
+    pub prev_layout: String,
+    /// Selected client window id on this tag when any (`Pertag.sel`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected_id: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -767,6 +797,22 @@ pub struct MonitorInfoIpc {
     pub preferred_height: i32,
     /// Preferred mode refresh in millihertz (`0` when unknown).
     pub preferred_refresh_mhz: u32,
+    /// VRR minimum refresh rate in Hz (`0` when unknown / unsupported).
+    pub vrr_min_hz: u32,
+    /// VRR maximum refresh rate in Hz (`0` when unknown / unsupported).
+    pub vrr_max_hz: u32,
+    /// Previous layout symbol on this monitor (`WMMonitor.prev_lt`).
+    pub prev_layout: String,
+    /// Whether the status bar is shown for the current tag.
+    pub show_bar: bool,
+    /// External strut reservation on this monitor (top/bottom/left/right).
+    pub strut_top: i32,
+    pub strut_bottom: i32,
+    pub strut_left: i32,
+    pub strut_right: i32,
+    /// Selected client window id on this monitor (`WMMonitor.sel`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected_id: Option<u64>,
 }
 
 /// EDID HDR static metadata projected on [`MonitorInfoIpc`] and status queries.
@@ -1330,6 +1376,18 @@ mod tests {
             size_hints: None,
             float_rect: RectIpc { x: 0, y: 0, w: 100, h: 100 },
             old_geometry: RectIpc { x: 0, y: 0, w: 100, h: 100 },
+            old_border_w: 0,
+            hidden_restore: None,
+            maximize_restore_anchor: None,
+            pip_restore_sticky: false,
+            old_state: false,
+            remembers_closed_placement: false,
+            dock_exclusive_zone: None,
+            dock_anchor_top: false,
+            dock_anchor_bottom: false,
+            dock_anchor_left: false,
+            dock_anchor_right: false,
+            is_status_bar: false,
         })
         .expect("serialize WindowInfo");
 
@@ -1370,6 +1428,15 @@ mod tests {
         assert!(value.get("size_hints").is_none());
         assert_eq!(value["float_rect"]["w"], 100);
         assert_eq!(value["old_geometry"]["h"], 100);
+        assert_eq!(value["old_border_w"], 0);
+        assert!(value.get("hidden_restore").is_none());
+        assert!(value.get("maximize_restore_anchor").is_none());
+        assert_eq!(value["pip_restore_sticky"], false);
+        assert_eq!(value["old_state"], false);
+        assert_eq!(value["remembers_closed_placement"], false);
+        assert!(value.get("dock_exclusive_zone").is_none());
+        assert_eq!(value["dock_anchor_top"], false);
+        assert_eq!(value["is_status_bar"], false);
 
         let without_pid = serde_json::to_value(WindowInfo {
             id: 1,
@@ -1425,6 +1492,18 @@ mod tests {
             size_hints: None,
             float_rect: RectIpc { x: 0, y: 0, w: 100, h: 100 },
             old_geometry: RectIpc { x: 0, y: 0, w: 100, h: 100 },
+            old_border_w: 0,
+            hidden_restore: None,
+            maximize_restore_anchor: None,
+            pip_restore_sticky: false,
+            old_state: false,
+            remembers_closed_placement: false,
+            dock_exclusive_zone: None,
+            dock_anchor_top: false,
+            dock_anchor_bottom: false,
+            dock_anchor_left: false,
+            dock_anchor_right: false,
+            is_status_bar: false,
         })
         .expect("serialize");
         assert!(without_pid.get("pid").is_none());
@@ -1493,6 +1572,18 @@ mod tests {
             size_hints: None,
             float_rect: RectIpc { x: 0, y: 0, w: 100, h: 100 },
             old_geometry: RectIpc { x: 0, y: 0, w: 100, h: 100 },
+            old_border_w: 0,
+            hidden_restore: None,
+            maximize_restore_anchor: None,
+            pip_restore_sticky: false,
+            old_state: false,
+            remembers_closed_placement: false,
+            dock_exclusive_zone: None,
+            dock_anchor_top: false,
+            dock_anchor_bottom: false,
+            dock_anchor_left: false,
+            dock_anchor_right: false,
+            is_status_bar: false,
         })
         .expect("serialize");
         assert_eq!(with_connector["connector"], "HDMI-A-1");
@@ -1554,6 +1645,18 @@ mod tests {
             size_hints: None,
             float_rect: RectIpc { x: 0, y: 0, w: 100, h: 100 },
             old_geometry: RectIpc { x: 0, y: 0, w: 100, h: 100 },
+            old_border_w: 0,
+            hidden_restore: None,
+            maximize_restore_anchor: None,
+            pip_restore_sticky: false,
+            old_state: false,
+            remembers_closed_placement: false,
+            dock_exclusive_zone: None,
+            dock_anchor_top: false,
+            dock_anchor_bottom: false,
+            dock_anchor_left: false,
+            dock_anchor_right: false,
+            is_status_bar: false,
         })
         .expect("serialize");
         assert!(without.get("connector").is_none());
@@ -1600,6 +1703,15 @@ mod tests {
             preferred_width: 1920,
             preferred_height: 1080,
             preferred_refresh_mhz: 60_000,
+            vrr_min_hz: 0,
+            vrr_max_hz: 0,
+            prev_layout: "TILE".into(),
+            show_bar: true,
+            strut_top: 0,
+            strut_bottom: 0,
+            strut_left: 0,
+            strut_right: 0,
+            selected_id: None,
         })
         .expect("serialize");
         assert_eq!(with_connector["connector"], "DP-1");
@@ -1630,6 +1742,12 @@ mod tests {
         assert_eq!(with_connector["preferred_width"], 1920);
         assert_eq!(with_connector["preferred_height"], 1080);
         assert_eq!(with_connector["preferred_refresh_mhz"], 60_000);
+        assert_eq!(with_connector["vrr_min_hz"], 0);
+        assert_eq!(with_connector["vrr_max_hz"], 0);
+        assert_eq!(with_connector["prev_layout"], "TILE");
+        assert_eq!(with_connector["show_bar"], true);
+        assert_eq!(with_connector["strut_top"], 0);
+        assert!(with_connector.get("selected_id").is_none());
 
         let without = serde_json::to_value(MonitorInfoIpc {
             num: 1,
@@ -1668,6 +1786,15 @@ mod tests {
             preferred_width: 0,
             preferred_height: 0,
             preferred_refresh_mhz: 0,
+            vrr_min_hz: 0,
+            vrr_max_hz: 0,
+            prev_layout: "TILE".into(),
+            show_bar: true,
+            strut_top: 0,
+            strut_bottom: 0,
+            strut_left: 0,
+            strut_right: 0,
+            selected_id: None,
         })
         .expect("serialize");
         assert!(without.get("connector").is_none());
@@ -1705,6 +1832,9 @@ mod tests {
             has_fullscreen: false,
             connector: Some("DP-1".into()),
             monitor_name: Some("Dell U2720Q".into()),
+            show_bar: true,
+            prev_layout: "TILE".into(),
+            selected_id: None,
         })
         .expect("serialize");
         assert_eq!(with_connector["connector"], "DP-1");
@@ -1714,6 +1844,9 @@ mod tests {
         assert_eq!(with_connector["is_occupied"], false);
         assert_eq!(with_connector["has_fullscreen"], false);
         assert_eq!(with_connector["gap"], 12);
+        assert_eq!(with_connector["show_bar"], true);
+        assert_eq!(with_connector["prev_layout"], "TILE");
+        assert!(with_connector.get("selected_id").is_none());
 
         let without = serde_json::to_value(WorkspaceInfo {
             tag_mask: 2,
@@ -1730,6 +1863,9 @@ mod tests {
             has_fullscreen: false,
             connector: None,
             monitor_name: None,
+            show_bar: true,
+            prev_layout: "TILE".into(),
+            selected_id: None,
         })
         .expect("serialize");
         assert!(without.get("connector").is_none());
@@ -2363,6 +2499,15 @@ mod tests {
                 preferred_width: 0,
                 preferred_height: 0,
                 preferred_refresh_mhz: 0,
+                vrr_min_hz: 0,
+                vrr_max_hz: 0,
+                prev_layout: "TILE".into(),
+                show_bar: true,
+                strut_top: 0,
+                strut_bottom: 0,
+                strut_left: 0,
+                strut_right: 0,
+                selected_id: None,
             },
             windows: Vec::new(),
             selected_id: Some(42),

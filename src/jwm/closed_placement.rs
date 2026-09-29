@@ -1045,21 +1045,28 @@ impl Jwm {
         )
     }
 
-    /// VRR supported / currently enabled for the live output backing
-    /// `mon_key`. Both false when the output map has no entry or the backend
-    /// reports no capabilities.
+    /// VRR supported / currently enabled / min·max Hz for the live output
+    /// backing `mon_key`. All zeros/false when the output map has no entry or
+    /// the backend reports no capabilities.
     pub(crate) fn output_vrr_for_monitor(
         &self,
         backend: &dyn Backend,
         mon_key: crate::core::models::MonitorKey,
-    ) -> (bool, bool) {
+    ) -> (bool, bool, u32, u32) {
         let Some(output) = self.live_output_info(backend, mon_key) else {
-            return (false, false);
+            return (false, false, 0, 0);
         };
         backend
             .query_vrr_capabilities(output.id)
-            .map(|caps| (caps.supported, caps.current_enabled))
-            .unwrap_or((false, false))
+            .map(|caps| {
+                (
+                    caps.supported,
+                    caps.current_enabled,
+                    caps.min_refresh_hz,
+                    caps.max_refresh_hz,
+                )
+            })
+            .unwrap_or((false, false, 0, 0))
     }
 
     /// Fractional scale and mode refresh (mHz) for the live output backing
