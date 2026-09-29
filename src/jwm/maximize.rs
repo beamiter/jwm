@@ -1690,6 +1690,17 @@ mod tests {
             float.contains(&broadcast),
             "togglefloating must broadcast after a real float flip"
         );
+        let sticky = toggle
+            .split_once("pub(crate) fn set_client_sticky(")
+            .expect("set_client_sticky")
+            .1
+            .split_once("pub(crate) fn prepare_for_compositor_disable(")
+            .expect("prepare_for_compositor_disable")
+            .0;
+        assert!(
+            sticky.contains(&broadcast) && sticky.contains("previous == sticky"),
+            "set_client_sticky must broadcast only when is_sticky flips"
+        );
         let attention = include_str!("event_dispatcher.rs");
         let demands = attention
             .split_once("pub(super) fn set_client_demands_attention(")

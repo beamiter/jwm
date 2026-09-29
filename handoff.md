@@ -4,7 +4,7 @@
 
 ---
 
-## Evolve backlog（目标 100 轮；已完成 wave 9–15，本地 ahead）
+## Evolve backlog（目标 100 轮；已完成 wave 9–16，本地 ahead）
 
 按日常命中 × 可交付性排序的下一波候选（S/小 M，无 DRM）：
 
@@ -12,15 +12,28 @@
 | --- | --- | --- |
 | 14 | urgent → `window/state` | S ✓ |
 | 15 | xdg Maximized 时清 `Tiled*` | S ✓ |
-| 16 | toast 过期发 `NotificationClosed(1)` | S |
-| 17 | BT pairing cancel 撤回提示 | S |
-| 18 | 提升窗 FS/PiP 取消最大化保留锚点 | S |
-| 19 | Annotation → CommonLinearAware | S |
-| 20 | Screenshot toolbar → CommonLinearAware | S |
-| 21 | Recording overlay → CommonLinearAware | S |
+| 16 | sticky → `window/state` | S ✓ |
+| 17 | tag / sendmon → `window/state` | S |
+| 18 | Above/Below → `WindowInfo` + `window/state` | S |
+| 19 | seamless restart maximize restore_rect | S–M |
+| 20 | Annotation → CommonLinearAware | S–M（PostDelivery 迁移） |
+| 21 | Screenshot toolbar → CommonLinearAware | S–M |
 | 22 | session 持久化 maximize + restore_rect | M |
-| 23 | seamless restart maximize restore_rect | S–M |
-| … | 继续从 sota-gap / roadmap Phase 2–3 / handoff 扫 | |
+| … | 跳过：toast Closed(1) 成文、BT withdraw 已落、FS/PiP 丢锚点成文、Recording EncodedOnly 故意 | |
+
+---
+
+## 2026-09-29（八）：sticky → `window/state`
+
+选题 = evolve wave 16。toast Closed(1) / BT withdraw / FS 锚点 / Recording
+CommonLinear 均跳过（成文或已落）。
+
+1. **契约**：`set_client_sticky` 在 `is_sticky` 实际翻转时广播；同值早退。
+2. **回归**：`sibling_window_state_paths_broadcast_window_state_ipc` 扩 sticky。
+
+**验证**：`scripts/test.sh --lib -- sibling_window_state_paths`。
+
+**仍然开着的**：见上表 17+。
 
 ---
 

@@ -2891,14 +2891,18 @@ impl Jwm {
         client_key: ClientKey,
         sticky: bool,
     ) {
-        let Some((win, mon)) = self
-            .state
-            .clients
-            .get(client_key)
-            .map(|client| (client.win, client.mon))
-        else {
+        let Some((win, mon, previous)) = self.state.clients.get(client_key).map(|client| {
+            (
+                client.win,
+                client.mon,
+                client.state.is_sticky,
+            )
+        }) else {
             return;
         };
+        if previous == sticky {
+            return;
+        }
         let current_tags = mon
             .and_then(|mon_key| self.state.monitors.get(mon_key))
             .map(|monitor| monitor.get_active_tags());
@@ -2913,6 +2917,7 @@ impl Jwm {
             .set_net_wm_state_flag(win, crate::backend::api::NetWmState::Sticky, sticky);
         let _ = self.setclienttagprop(backend, client_key);
         self.arrange(backend, mon);
+        self.broadcast_window_state_ipc(client_key);
     }
 
     /// Close compositor-owned modal work before the X11 tree becomes native.

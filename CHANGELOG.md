@@ -9,10 +9,10 @@ monorepo use independent Semantic Versions.
 
 - IPC `window/state` event: an accepted maximize / unmaximize / drag-cancel
   reinstate, fullscreen enter/leave, minimize/unminimize, `togglefloating`,
-  or urgency (`is_urgent`) flip pushes a `WindowInfo`-shaped payload
-  (`is_maximized*`, geometry, floating, minimized, fullscreen, urgent, …) so
-  subscribers of `window` need not poll `get_windows`. Refused maximize
-  requests and no-op mode changes stay silent. See
+  urgency (`is_urgent`), or sticky (`is_sticky`) flip pushes a `WindowInfo`-shaped
+  payload (`is_maximized*`, geometry, floating, minimized, fullscreen, urgent,
+  sticky, …) so subscribers of `window` need not poll `get_windows`. Refused
+  maximize requests and no-op mode changes stay silent. See
   [docs/window-placement.md](docs/window-placement.md#who-may-maximize-what).
 
 - Maximize is a real window state on every backend. Native X11
