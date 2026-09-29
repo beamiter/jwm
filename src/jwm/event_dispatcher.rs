@@ -690,8 +690,10 @@ impl WMController for Jwm {
             match detail {
                 // Wheel anywhere on the card browses the current page. The
                 // scrim stays inert so an accidental scroll never changes a
-                // modal selection the pointer is not near.
-                4 if !matches!(
+                // modal selection the pointer is not near. Vertical (4/5)
+                // and horizontal (6/7) wheels both step — layout-picker /
+                // tags-overview twin.
+                4 | 6 if !matches!(
                     hit,
                     SystemUiHitTarget::Outside | SystemUiHitTarget::Unavailable
                 ) =>
@@ -702,7 +704,7 @@ impl WMController for Jwm {
                         .contains(Mods::SHIFT);
                     self.scroll_system_ui_from_pointer(backend, -1, wheel_row, shift);
                 }
-                5 if !matches!(
+                5 | 7 if !matches!(
                     hit,
                     SystemUiHitTarget::Outside | SystemUiHitTarget::Unavailable
                 ) =>

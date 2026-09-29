@@ -174,10 +174,13 @@ pub struct IpcRegistry {
 pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
     dispatch_commands: &[
         "adjust_recording_region",
+        "annotate",
         "app_launcher",
         "audio_input_picker",
         "audio_output_picker",
         "bluetooth_picker",
+        "bt",
+        "caffeine",
         "calendar",
         "clipboard_picker",
         "control_center",
@@ -185,6 +188,7 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "cycle_overview",
         "cyclelayout",
         "exit",
+        "floating",
         "focus_mon",
         "focus_none",
         "focus_stack",
@@ -192,6 +196,7 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "focus_window",
         "focusmon",
         "focusstack",
+        "hub",
         "inc_nmaster",
         "incnmaster",
         "kill_client",
@@ -201,12 +206,15 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "launcher",
         "layout_picker",
         "layouts",
+        "lily",
         "load_session",
         "lock",
         "lock_monitor",
         "lock_screen",
         "loop_view",
         "loopview",
+        "mag",
+        "maximize",
         "media_next",
         "media_play_pause",
         "media_previous",
@@ -216,9 +224,13 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "monitor_layout",
         "move_stack",
         "movestack",
+        "night",
         "notif_center",
         "notification_center",
+        "overview",
+        "peek",
         "persist_session",
+        "pip",
         "quit",
         "refocus",
         "reload_wm",
@@ -233,6 +245,7 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "scrolling_focus_window",
         "scrolling_move_column",
         "scrolling_toggle_attach_mode",
+        "session",
         "session_menu",
         "set_cfact",
         "set_gaps",
@@ -246,9 +259,12 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "setnmaster",
         "snap_window",
         "spawn",
+        "sticky",
+        "switcher",
         "tag",
         "tag_mon",
         "tagmon",
+        "tags",
         "take_screenshot",
         "take_screenshot_fullscreen",
         "toggle_annotation",
@@ -287,13 +303,16 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "toggleview",
         "unlock_monitor",
         "view",
+        "wall",
         "wallpaper_picker",
         "waterlily_case",
         "waterlily_palette",
+        "wifi",
         "wifi_picker",
         "window_switcher",
         "zoom",
         "zoom_master",
+    
     ],
     special_commands: &[
         "batch",
@@ -331,10 +350,12 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "get_audio_devices",
         "get_audio_recording",
         "get_audio_recording_status",
+        "get_bench",
         "get_bluetooth",
         "get_bluetooth_pairing",
         "get_blur",
         "get_blur_status",
+        "get_bt",
         "get_capabilities",
         "get_caps",
         "get_capture",
@@ -344,6 +365,7 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "get_clients",
         "get_clip",
         "get_clipboard",
+        "get_cm",
         "get_color_management",
         "get_color_management_status",
         "get_config",
@@ -356,7 +378,9 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "get_effect_status",
         "get_effects",
         "get_focused_window",
+        "get_gap",
         "get_gaps",
+        "get_gest",
         "get_gesture",
         "get_gesture_status",
         "get_hdr",
@@ -370,13 +394,17 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "get_media",
         "get_media_status",
         "get_metrics",
+        "get_mf",
         "get_mfact",
         "get_mic",
         "get_mic_mute",
         "get_monitors",
+        "get_mons",
         "get_network",
         "get_night_light",
         "get_night_light_status",
+        "get_nl",
+        "get_nm",
         "get_nmaster",
         "get_notif",
         "get_notifications",
@@ -391,15 +419,19 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "get_recording_status",
         "get_res",
         "get_resources",
+        "get_scratch",
         "get_scratchpads",
         "get_scrolling",
         "get_scrolling_status",
         "get_selected",
+        "get_sess",
         "get_session_lock",
         "get_show_bar",
         "get_status",
+        "get_strut",
         "get_struts",
         "get_system_ui",
+        "get_tab",
         "get_tab_bar",
         "get_tabs",
         "get_tags",
@@ -409,6 +441,7 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "get_ui",
         "get_ver",
         "get_version",
+        "get_wall",
         "get_wallpaper",
         "get_wallpaper_colors",
         "get_waterlily",
@@ -418,9 +451,12 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "get_window",
         "get_windows",
         "get_wins",
+        "get_wl",
         "get_workspaces",
+        "get_ws",
         "get_xwayland",
         "get_xwayland_status",
+    
     ],
     subscription_topics: &[
         "*",
@@ -670,6 +706,33 @@ pub struct RuntimeStatusV1 {
     /// Compact twin of `get_layout` (focused monitor layout symbol).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub layout: Option<Value>,
+    /// Compact twin of `get_tab_bar` / `get_tabs`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tabs: Option<Value>,
+    /// Compact twin of `get_struts`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub struts: Option<Value>,
+    /// Compact twin of `get_scratchpads` / `get_pads`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scratchpads: Option<Value>,
+    /// Compact twin of `get_gaps`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gaps: Option<Value>,
+    /// Compact twin of `get_mfact`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mfact: Option<Value>,
+    /// Compact twin of `get_nmaster`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nmaster: Option<Value>,
+    /// Compact twin of `get_show_bar`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub show_bar: Option<Value>,
+    /// Compact twin of `get_metrics` / `get_perf` (renderer metrics when any).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metrics: Option<Value>,
+    /// Compact twin of `get_version` / `get_ver`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version_info: Option<Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -968,6 +1031,15 @@ pub struct WorkspaceInfo {
     pub scratchpad_count: usize,
     /// How many clients on this tag on this monitor are in the window-tab strip.
     pub tabbed_count: usize,
+    /// How many clients on this tag on this monitor are docks / panels.
+    pub dock_count: usize,
+    /// How many clients on this tag on this monitor are desktop-layer chrome.
+    pub desktop_count: usize,
+    /// How many clients on this tag on this monitor are never-focus chrome.
+    pub never_focus_count: usize,
+    /// How many clients on this tag on this monitor demand attention
+    /// (`demands_attention`, distinct from urgency).
+    pub demands_attention_count: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -1114,6 +1186,14 @@ pub struct MonitorInfoIpc {
     pub scratchpad_count: usize,
     /// How many of those clients are in the window-tab strip.
     pub tabbed_count: usize,
+    /// How many of those clients are docks / panels.
+    pub dock_count: usize,
+    /// How many of those clients are desktop-layer chrome.
+    pub desktop_count: usize,
+    /// How many of those clients are never-focus chrome.
+    pub never_focus_count: usize,
+    /// How many of those clients demand attention (not merely urgent).
+    pub demands_attention_count: usize,
 }
 
 /// EDID HDR static metadata projected on [`MonitorInfoIpc`] and status queries.
@@ -1162,6 +1242,14 @@ pub struct TreeNode {
     pub tabbed_count: usize,
     /// How many of `windows` report `is_fixed`.
     pub fixed_count: usize,
+    /// How many of `windows` report `is_dock`.
+    pub dock_count: usize,
+    /// How many of `windows` report `is_desktop`.
+    pub desktop_count: usize,
+    /// How many of `windows` report `never_focus`.
+    pub never_focus_count: usize,
+    /// How many of `windows` report `demands_attention`.
+    pub demands_attention_count: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -1173,23 +1261,23 @@ pub fn dispatch_command(name: &str, args: &Value) -> Result<(WMFuncType, WMArgEn
         // --- Window management ---
         "focusstack" | "focus_stack" => Ok((Jwm::focusstack as WMFuncType, parse_int_arg(args, 1)?)),
         "app_launcher" | "launcher" => Ok((Jwm::app_launcher as WMFuncType, WMArgEnum::Int(0))),
-        "control_center" => Ok((Jwm::control_center as WMFuncType, WMArgEnum::Int(0))),
+        "control_center" | "hub" => Ok((Jwm::control_center as WMFuncType, WMArgEnum::Int(0))),
         "notification_center" | "notif_center" => {
             Ok((Jwm::notification_center as WMFuncType, WMArgEnum::Int(0)))
         }        "media_play_pause" => Ok((Jwm::media_play_pause as WMFuncType, WMArgEnum::Int(0))),
         "media_next" => Ok((Jwm::media_next as WMFuncType, WMArgEnum::Int(0))),
         "media_previous" => Ok((Jwm::media_previous as WMFuncType, WMArgEnum::Int(0))),
         "media_stop" => Ok((Jwm::media_stop as WMFuncType, WMArgEnum::Int(0))),
-        "session_menu" => Ok((Jwm::session_menu as WMFuncType, WMArgEnum::Int(0))),
-        "toggle_night_light" => Ok((Jwm::toggle_night_light as WMFuncType, WMArgEnum::Int(0))),
+        "session_menu" | "session" => Ok((Jwm::session_menu as WMFuncType, WMArgEnum::Int(0))),
+        "toggle_night_light" | "night" => Ok((Jwm::toggle_night_light as WMFuncType, WMArgEnum::Int(0))),
         "toggle_wifi" => Ok((Jwm::toggle_wifi as WMFuncType, WMArgEnum::Int(0))),
-        "wifi_picker" => Ok((Jwm::wifi_picker as WMFuncType, WMArgEnum::Int(0))),
+        "wifi_picker" | "wifi" => Ok((Jwm::wifi_picker as WMFuncType, WMArgEnum::Int(0))),
         "audio_output_picker" => Ok((Jwm::audio_output_picker as WMFuncType, WMArgEnum::Int(0))),
         "audio_input_picker" => Ok((Jwm::audio_input_picker as WMFuncType, WMArgEnum::Int(0))),
-        "bluetooth_picker" => Ok((Jwm::bluetooth_picker as WMFuncType, WMArgEnum::Int(0))),
+        "bluetooth_picker" | "bt" => Ok((Jwm::bluetooth_picker as WMFuncType, WMArgEnum::Int(0))),
         "calendar" => Ok((Jwm::calendar as WMFuncType, WMArgEnum::Int(0))),
         "clipboard_picker" => Ok((Jwm::clipboard_picker as WMFuncType, WMArgEnum::Int(0))),
-        "wallpaper_picker" => Ok((Jwm::wallpaper_picker as WMFuncType, WMArgEnum::Int(0))),
+        "wallpaper_picker" | "wall" => Ok((Jwm::wallpaper_picker as WMFuncType, WMArgEnum::Int(0))),
         "toggle_bluetooth" => Ok((Jwm::toggle_bluetooth as WMFuncType, WMArgEnum::Int(0))),
         "monitor_layout" => Ok((Jwm::monitor_layout as WMFuncType, WMArgEnum::Int(0))),
         "lock_screen" | "lock" => Ok((Jwm::lock_screen as WMFuncType, WMArgEnum::Int(0))),
@@ -1200,10 +1288,10 @@ pub fn dispatch_command(name: &str, args: &Value) -> Result<(WMFuncType, WMArgEn
         "killclient" | "kill_client" => Ok((Jwm::killclient, parse_int_arg(args, 0)?)),
         "minimize" | "minimize_window" => Ok((Jwm::minimize, parse_int_arg(args, 0)?)),
         "zoom" | "zoom_master" => Ok((Jwm::zoom, parse_int_arg(args, 0)?)),
-        "togglefloating" | "toggle_floating" => Ok((Jwm::togglefloating, parse_int_arg(args, 0)?)),
-        "togglesticky" | "toggle_sticky" => Ok((Jwm::togglesticky, parse_int_arg(args, 0)?)),
-        "togglepip" | "toggle_pip" => Ok((Jwm::togglepip, parse_int_arg(args, 0)?)),
-        "togglemaximize" | "toggle_maximize" => Ok((Jwm::togglemaximize, parse_int_arg(args, 0)?)),
+        "togglefloating" | "toggle_floating" | "floating" => Ok((Jwm::togglefloating, parse_int_arg(args, 0)?)),
+        "togglesticky" | "toggle_sticky" | "sticky" => Ok((Jwm::togglesticky, parse_int_arg(args, 0)?)),
+        "togglepip" | "toggle_pip" | "pip" => Ok((Jwm::togglepip, parse_int_arg(args, 0)?)),
+        "togglemaximize" | "toggle_maximize" | "maximize" => Ok((Jwm::togglemaximize, parse_int_arg(args, 0)?)),
         "togglescratchpad" | "toggle_scratchpad" => {
             let cmd = if argument_is_omitted(args) {
                 vec!["term".to_string()]
@@ -1264,7 +1352,7 @@ pub fn dispatch_command(name: &str, args: &Value) -> Result<(WMFuncType, WMArgEn
             parse_configured_tag_mask_arg("toggletag", args)?,
         )),
         "loopview" | "loop_view" => Ok((Jwm::loopview, parse_int_arg(args, 1)?)),
-        "window_switcher" => Ok((Jwm::window_switcher, parse_int_arg(args, 1)?)),
+        "window_switcher" | "switcher" => Ok((Jwm::window_switcher, parse_int_arg(args, 1)?)),
 
         // --- Monitor ---
         "focusmon" | "focus_mon" => Ok((Jwm::focusmon, parse_int_arg(args, 1)?)),
@@ -1297,7 +1385,7 @@ pub fn dispatch_command(name: &str, args: &Value) -> Result<(WMFuncType, WMArgEn
         "togglepartialdamage" | "toggle_partial_damage" => {
             Ok((Jwm::togglepartialdamage, parse_int_arg(args, 0)?))
         }
-        "toggle_waterlily" => Ok((Jwm::toggle_waterlily, parse_int_arg(args, 0)?)),
+        "toggle_waterlily" | "lily" => Ok((Jwm::toggle_waterlily, parse_int_arg(args, 0)?)),
         "waterlily_case" => {
             let requested = if argument_is_omitted(args) {
                 vec!["next".to_string()]
@@ -1319,17 +1407,17 @@ pub fn dispatch_command(name: &str, args: &Value) -> Result<(WMFuncType, WMArgEn
             log::warn!("IPC action `toggle_slime` is deprecated; use `toggle_waterlily` instead");
             Ok((Jwm::toggle_waterlily, parse_int_arg(args, 0)?))
         }
-        "toggle_overview" => Ok((Jwm::toggle_overview, parse_int_arg(args, 0)?)),
-        "toggle_tags_overview" => Ok((Jwm::toggle_tags_overview, parse_int_arg(args, 0)?)),
+        "toggle_overview" | "overview" => Ok((Jwm::toggle_overview, parse_int_arg(args, 0)?)),
+        "toggle_tags_overview" | "tags" => Ok((Jwm::toggle_tags_overview, parse_int_arg(args, 0)?)),
         "cycle_overview" => Ok((Jwm::cycle_overview, parse_int_arg(args, 1)?)),
-        "toggle_magnifier" => Ok((Jwm::toggle_magnifier, parse_int_arg(args, 0)?)),
-        "toggle_peek" => Ok((Jwm::toggle_peek, parse_int_arg(args, 0)?)),
-        "toggle_annotation" => Ok((Jwm::toggle_annotation, parse_int_arg(args, 0)?)),
+        "toggle_magnifier" | "mag" => Ok((Jwm::toggle_magnifier, parse_int_arg(args, 0)?)),
+        "toggle_peek" | "peek" => Ok((Jwm::toggle_peek, parse_int_arg(args, 0)?)),
+        "toggle_annotation" | "annotate" => Ok((Jwm::toggle_annotation, parse_int_arg(args, 0)?)),
         "toggle_recording" => Ok((Jwm::toggle_recording, parse_int_arg(args, 0)?)),
         "adjust_recording_region" => Ok((Jwm::adjust_recording_region, parse_int_arg(args, 0)?)),
         "toggle_audio_recording" => Ok((Jwm::toggle_audio_recording, parse_int_arg(args, 0)?)),
         "toggle_dnd" | "toggle_do_not_disturb" => Ok((Jwm::toggle_dnd, parse_int_arg(args, 0)?)),
-        "toggle_idle_inhibit" => Ok((Jwm::toggle_idle_inhibit, parse_int_arg(args, 0)?)),
+        "toggle_idle_inhibit" | "caffeine" => Ok((Jwm::toggle_idle_inhibit, parse_int_arg(args, 0)?)),
 
         // --- Session ---
         "save_session" | "persist_session" => Ok((Jwm::save_session, parse_int_arg(args, 0)?)),
@@ -2089,6 +2177,10 @@ mod tests {
             fixed_count: 0,
             scratchpad_count: 0,
             tabbed_count: 0,
+            dock_count: 0,
+            desktop_count: 0,
+            never_focus_count: 0,
+            demands_attention_count: 0,
         })
         .expect("serialize");
         assert_eq!(with_connector["connector"], "DP-1");
@@ -2197,6 +2289,10 @@ mod tests {
             fixed_count: 0,
             scratchpad_count: 0,
             tabbed_count: 0,
+            dock_count: 0,
+            desktop_count: 0,
+            never_focus_count: 0,
+            demands_attention_count: 0,
         })
         .expect("serialize");
         assert!(without.get("connector").is_none());
@@ -2249,6 +2345,10 @@ mod tests {
             fixed_count: 0,
             scratchpad_count: 0,
             tabbed_count: 0,
+            dock_count: 0,
+            desktop_count: 0,
+            never_focus_count: 0,
+            demands_attention_count: 0,
         })
         .expect("serialize");
         assert_eq!(with_connector["connector"], "DP-1");
@@ -2295,6 +2395,10 @@ mod tests {
             fixed_count: 0,
             scratchpad_count: 0,
             tabbed_count: 0,
+            dock_count: 0,
+            desktop_count: 0,
+            never_focus_count: 0,
+            demands_attention_count: 0,
         })
         .expect("serialize");
         assert!(without.get("connector").is_none());
@@ -3032,6 +3136,15 @@ mod tests {
             bluetooth: None,
             system_ui: None,
             layout: None,
+            tabs: None,
+            struts: None,
+            scratchpads: None,
+            gaps: None,
+            mfact: None,
+            nmaster: None,
+            show_bar: None,
+            metrics: None,
+            version_info: None,
         };
 
         let json = serde_json::to_value(status).unwrap();
@@ -3211,6 +3324,10 @@ mod tests {
             fixed_count: 0,
             scratchpad_count: 0,
             tabbed_count: 0,
+            dock_count: 0,
+            desktop_count: 0,
+            never_focus_count: 0,
+            demands_attention_count: 0,
             },
             windows: Vec::new(),
             selected_id: Some(42),
@@ -3227,6 +3344,10 @@ mod tests {
             scratchpad_count: 0,
             tabbed_count: 0,
             fixed_count: 0,
+            dock_count: 0,
+            desktop_count: 0,
+            never_focus_count: 0,
+            demands_attention_count: 0,
         };
         let json = serde_json::to_value(node).unwrap();
         assert_eq!(json["selected_id"], 42);
@@ -3305,6 +3426,10 @@ mod tests {
             fixed_count: 0,
             scratchpad_count: 0,
             tabbed_count: 0,
+            dock_count: 0,
+            desktop_count: 0,
+            never_focus_count: 0,
+            demands_attention_count: 0,
             },
             windows: Vec::new(),
             selected_id: None,
@@ -3321,6 +3446,10 @@ mod tests {
             scratchpad_count: 0,
             tabbed_count: 0,
             fixed_count: 0,
+            dock_count: 0,
+            desktop_count: 0,
+            never_focus_count: 0,
+            demands_attention_count: 0,
         };
         let json = serde_json::to_value(node).unwrap();
         assert_eq!(json["window_count"], 3);

@@ -7,6 +7,25 @@ monorepo use independent Semantic Versions.
 
 ### Added
 
+- `get_monitors` / `get_workspaces` / `get_tree` report dock / desktop /
+  never_focus / demands_attention counts.
+- IPC query aliases: `get_bt`, `get_wl`, `get_nl`, `get_cm`, `get_sess`,
+  `get_strut`, `get_scratch`, `get_mons`, `get_ws`, `get_gap`, `get_nm`,
+  `get_mf`, `get_tab`, `get_bench`, `get_gest`, `get_wall`.
+- IPC command aliases: `hub`, `switcher`, `tags`, `overview`, `peek`, `mag`,
+  `annotate`, `lily`, `night`, `caffeine`, `wifi`, `bt`, `wall`, `session`,
+  `floating`, `sticky`, `pip`, `maximize`.
+- `get_status` nests compact `tabs` / `struts` / `scratchpads` / `gaps` /
+  `mfact` / `nmaster` / `show_bar` / `metrics` / `version_info`.
+- `get_config` polish5: rule-list counts, swallow lists, blur-by-hz/monitor,
+  appearance `ui_theme` / `border_px` / `gap_px` / `snap`.
+- Session snapshot v15 persists optional `hidden_restore`.
+- System UI panels (launcher, Hub, pickers, …): horizontal wheel browses
+  like the vertical wheel.
+- Portal `WindowInfo` deserializes dock/desktop/strut/fixed/skip_*/decor/
+  drag_float; `MonitorInfo` gains dock/desktop/never_focus/demands_attention
+  counts.
+
 - `get_monitors` / `get_workspaces` report urgent / fullscreen / pip /
   maximized / above / below / fixed / scratchpad / tabbed counts (tree /
   workspace symmetry).

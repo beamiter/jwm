@@ -4,7 +4,7 @@
 
 ---
 
-## Evolve backlog（目标 1000 轮；已完成 wave 9–700，本地 ahead）
+## Evolve backlog（目标 1000 轮；已完成 wave 9–800，本地 ahead）
 
 | # | 选题 | Size |
 | --- | --- | --- |
@@ -76,7 +76,44 @@
 | 676–690 | get_config polish4 scalars + session v14 minimized_order | ✓ |
 | 691–695 | layout picker horizontal wheel；portal Window/Monitor fields | ✓ |
 | 696–700 | include_str!/serialize/dispatch contract pins + docs drift + handoff/CHANGELOG | ✓ |
+| 701–720 | Monitor/Workspace/Tree dock/desktop/never_focus/demands_attention counts | ✓ |
+| 721–740 | short query aliases（get_bt/wl/nl/cm/sess/strut/scratch/mons/ws/gap/nm/mf/tab/bench/gest/wall） | ✓ |
+| 741–755 | command aliases（hub/switcher/tags/overview/peek/mag/annotate/lily/night/caffeine/wifi/bt/wall/session/floating/sticky/pip/maximize） | ✓ |
+| 756–775 | get_status nests tabs/struts/scratchpads/gaps/mfact/nmaster/show_bar/metrics/version_info | ✓ |
+| 776–790 | get_config polish5 + session v15 hidden_restore | ✓ |
+| 791–795 | system_ui horizontal wheel；portal Window/Monitor fields | ✓ |
+| 796–800 | include_str!/serialize/dispatch contract pins + docs drift + handoff/CHANGELOG | ✓ |
 | … | 跳过：Annotation/Screenshot CommonLinear、toast Closed(1)、BT withdraw、FS/PiP 自身丢锚点（own-anchor drop）、Recording EncodedOnly、XWayland 单轴 | |
+
+---
+
+## 2026-09-29（六十）：IPC leftovers + session v15 → 800
+
+选题 = evolve waves 701–800 / evolve7h。
+
+1. **Wave 701–720**：`MonitorInfoIpc` / `WorkspaceInfo` / `TreeNode`
+   dock / desktop / never_focus / demands_attention counts。
+2. **Wave 721–740**：短 query 别名（`get_bt` / `get_wl` / `get_nl` /
+   `get_cm` / `get_sess` / `get_strut` / `get_scratch` / `get_mons` /
+   `get_ws` / `get_gap` / `get_nm` / `get_mf` / `get_tab` / `get_bench` /
+   `get_gest` / `get_wall`）。
+3. **Wave 741–755**：command 别名（`hub` / `switcher` / `tags` /
+   `overview` / `peek` / `mag` / `annotate` / `lily` / `night` /
+   `caffeine` / `wifi` / `bt` / `wall` / `session` / `floating` /
+   `sticky` / `pip` / `maximize`）。
+4. **Wave 756–775**：`get_status` nests tabs / struts / scratchpads /
+   gaps / mfact / nmaster / show_bar / metrics / version_info。
+5. **Wave 776–790**：`get_config` polish5；Session v15 `hidden_restore`。
+6. **Wave 791–795**：system_ui 水平滚轮；portal Window/Monitor 字段。
+7. **Wave 796–800**：contract pins；docs drift；CHANGELOG；handoff。
+
+**刻意不做**：跳过表不变；不发明 DRM/EncodedOnly/CommonLinear / peak meter /
+`mapped_ms` / `is_override_redirect`。
+
+**验证**：`scripts/test.sh --lib --` 聚焦 dock_count / get_bt / session v15 /
+system_ui horizontal / evolve7h_waves_701。
+
+**下一轮候选**：801+；或跳过表项。
 
 ---
 

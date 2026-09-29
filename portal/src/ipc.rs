@@ -70,6 +70,22 @@ pub struct WindowInfo {
     #[serde(default)]
     pub client_fact: f32,
     #[serde(default)]
+    pub is_dock: bool,
+    #[serde(default)]
+    pub is_desktop: bool,
+    #[serde(default)]
+    pub has_strut: bool,
+    #[serde(default)]
+    pub is_fixed: bool,
+    #[serde(default)]
+    pub skip_taskbar: bool,
+    #[serde(default)]
+    pub skip_pager: bool,
+    #[serde(default)]
+    pub no_decorations: bool,
+    #[serde(default)]
+    pub is_drag_floating: bool,
+    #[serde(default)]
     pub border_w: i32,
     #[serde(default)]
     pub total_w: i32,
@@ -123,6 +139,14 @@ pub struct MonitorInfo {
     pub scratchpad_count: usize,
     #[serde(default)]
     pub tabbed_count: usize,
+    #[serde(default)]
+    pub dock_count: usize,
+    #[serde(default)]
+    pub desktop_count: usize,
+    #[serde(default)]
+    pub never_focus_count: usize,
+    #[serde(default)]
+    pub demands_attention_count: usize,
     #[serde(default)]
     pub scale: f32,
     #[serde(default)]

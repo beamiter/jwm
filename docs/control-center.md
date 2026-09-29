@@ -38,7 +38,7 @@ pages still close with one `Esc`.
 
 The same surface is pointer-operable: hover shows a quiet cue without moving
 keyboard focus or making the list jump, a left click performs the row's `Enter` action, and the
-wheel browses the current list — except over a Volume or Brightness slider row,
+vertical or horizontal wheel browses the current list — except over a Volume or Brightness slider row,
 where it adjusts that value by 5% per click, and over Power Profile, where it
 cycles one notch per click (both the pointer counterpart of `Left`/`Right`, and
 the selection pill follows so a later keypress stays on the
