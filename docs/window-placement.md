@@ -33,18 +33,22 @@ deleted (or ignored); it is only loaded at startup when the feature is on.
 ## What is remembered
 
 When a regular top-level window is unmanaged, closed by the user or by its
-process, JWM records its monitor number and tag mask under its `WM_CLASS`
-(class and instance, matched exactly). The newest close of an identity
+process, JWM records its output identity and tag mask under its `WM_CLASS`
+(class and instance, matched exactly). The output is remembered by
+`OutputIdentity.stable_key` (the connector name when EDID is absent), with
+the monitor number kept as a fallback for older snapshots and for moments
+when the output map has no identity. The newest close of an identity
 replaces the previous one. Status bars, docks, scratchpads, sticky windows,
 transients and popup-like window types (dialogs, tooltips, notifications,
 splash screens, utility windows) are never recorded.
 
 The memory holds up to 256 identities, evicts the oldest when full, and is
-persisted to `closed_placement.json` beside `session.json` under the XDG
-state directory (`$XDG_STATE_HOME/jwm/`, else `~/.local/state/jwm/`). A
-restart of JWM reloads it so a browser reopened from a shell still returns
-where it was last closed. The JWM launch registry that attributes keybinding
-and launcher windows is process-only and is not written to disk.
+persisted to `closed_placement.json` (schema v2) beside `session.json` under
+the XDG state directory (`$XDG_STATE_HOME/jwm/`, else `~/.local/state/jwm/`).
+A restart of JWM reloads it so a browser reopened from a shell still returns
+where it was last closed; v1 files without a connector still load and keep
+using `monitor_num`. The JWM launch registry that attributes keybinding and
+launcher windows is process-only and is not written to disk.
 
 ## Who gets the memory
 
@@ -77,12 +81,16 @@ X11 when those values are present.
 
 ## Where the window goes
 
-The remembered monitor and tags are applied after rules. A rule that pins
+The remembered output and tags are applied after rules. A rule that pins
 tags keeps its tags; a rule that pins a monitor keeps its monitor; the memory
-fills in only what the rule left open. If the remembered monitor is no
-longer connected, the window stays on the selected monitor and only the
-remembered tags apply, because tags are the user's workspaces and travel
-with them across outputs.
+fills in only what the rule left open. Apply prefers the saved connector /
+stable key: it looks up the live output through `output_map` and
+`enumerate_outputs`, then uses that output's current monitor number, so a
+hotplug hole-fill that renumbers monitors still restores to the same panel.
+If the connector is missing (v1 snapshot) or the output is gone, the saved
+`monitor_num` is used; if that monitor is also gone, the window stays on the
+selected monitor and only the remembered tags apply, because tags are the
+user's workspaces and travel with them across outputs.
 
 ## Focus stays where it is
 

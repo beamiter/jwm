@@ -9,10 +9,11 @@
 //!
 //! Two bounded registries implement that:
 //!
-//! - [`ClosedPlacementMemory`] remembers, per WM_CLASS identity, the monitor
-//!   number and tag mask a regular client held when it was unmanaged, and
-//!   persists that map beside the session snapshot so reopen-from-shell and
-//!   agent-spawn placement survive a WM restart. [`JwmLaunchRegistry`] stays
+//! - [`ClosedPlacementMemory`] remembers, per WM_CLASS identity, the output
+//!   (connector / stable key, with monitor number as fallback) and tag mask a
+//!   regular client held when it was unmanaged, and persists that map beside
+//!   the session snapshot so reopen-from-shell and agent-spawn placement
+//!   survive a WM restart and hotplug renumbering. [`JwmLaunchRegistry`] stays
 //!   process-only: spawn attribution is only meaningful for the current run.
 //! - [`JwmLaunchRegistry`] records every child process JWM spawns itself, so
 //!   a new window can be attributed either to an explicit keybinding,
@@ -63,7 +64,12 @@ pub(crate) const UNRESOLVED_LAUNCH_ATTRIBUTION_WINDOW: Duration = Duration::from
 /// Ancestors examined above a window's own PID.
 pub(crate) const MAX_ANCESTRY_DEPTH: usize = 16;
 
-const CLOSED_PLACEMENT_VERSION: u32 = 1;
+/// Current on-disk schema. v1 stored bare `monitor_num`; v2 adds an optional
+/// `connector` (an [`OutputIdentity::stable_key`], falling back to the
+/// connector name) so hole-fill renumbering after hotplug does not send a
+/// reopen to the wrong output.
+const CLOSED_PLACEMENT_VERSION: u32 = 2;
+const CLOSED_PLACEMENT_MIN_SUPPORTED_VERSION: u32 = 1;
 const MAX_CLOSED_PLACEMENT_BYTES: u64 = 1024 * 1024;
 const MAX_IDENTITY_FIELD_BYTES: usize = 65_536;
 const CLOSED_PLACEMENT_FILE: &str = "closed_placement.json";
@@ -103,9 +109,14 @@ impl std::fmt::Display for PlacementIdentity {
 }
 
 /// Monitor and tags a client held when it was closed.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct RememberedPlacement {
     pub monitor_num: i32,
+    /// Prefer this over [`Self::monitor_num`] when resolving: the output's
+    /// [`crate::backend::api::OutputIdentity::stable_key`] (or connector
+    /// name). Absent for pre-v2 snapshots and when the output map had no
+    /// identity at close time.
+    pub connector: Option<String>,
     pub tags: u32,
     /// Monotonic close order; the smallest seq is evicted first when full.
     closed_seq: u64,
@@ -123,6 +134,10 @@ struct ClosedPlacementEntry {
     class: String,
     instance: String,
     monitor_num: i32,
+    /// Output identity key; see [`RememberedPlacement::connector`]. Omitted
+    /// in v1 files and when unknown at close time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    connector: Option<String>,
     tags: u32,
     seq: u64,
 }
@@ -136,6 +151,7 @@ impl ClosedPlacementSnapshot {
                 class: identity.class.clone(),
                 instance: identity.instance.clone(),
                 monitor_num: placement.monitor_num,
+                connector: placement.connector.clone(),
                 tags: placement.tags,
                 seq: placement.closed_seq,
             })
@@ -148,7 +164,9 @@ impl ClosedPlacementSnapshot {
     }
 
     fn validate(&self) -> Result<(), String> {
-        if self.version != CLOSED_PLACEMENT_VERSION {
+        if self.version < CLOSED_PLACEMENT_MIN_SUPPORTED_VERSION
+            || self.version > CLOSED_PLACEMENT_VERSION
+        {
             return Err(format!(
                 "unsupported closed-placement version {}",
                 self.version
@@ -172,6 +190,15 @@ impl ClosedPlacementSnapshot {
             {
                 return Err(format!(
                     "closed-placement entry {index} has oversized text fields"
+                ));
+            }
+            if entry
+                .connector
+                .as_ref()
+                .is_some_and(|connector| connector.len() > MAX_IDENTITY_FIELD_BYTES)
+            {
+                return Err(format!(
+                    "closed-placement entry {index} has an oversized connector"
                 ));
             }
             if entry.tags == 0 {
@@ -198,6 +225,9 @@ impl ClosedPlacementSnapshot {
         let mut next_seq = 0_u64;
         for entry in self.placements {
             next_seq = next_seq.max(entry.seq.saturating_add(1));
+            let connector = entry
+                .connector
+                .filter(|connector| !connector.is_empty());
             by_identity.insert(
                 PlacementIdentity {
                     class: entry.class,
@@ -205,6 +235,7 @@ impl ClosedPlacementSnapshot {
                 },
                 RememberedPlacement {
                     monitor_num: entry.monitor_num,
+                    connector,
                     tags: entry.tags,
                     closed_seq: entry.seq,
                 },
@@ -499,10 +530,15 @@ impl ClosedPlacementMemory {
     /// Remember where `identity` was just closed. A later close of the same
     /// identity replaces the earlier one; the newest word wins. Returns
     /// `false` for a tag mask with nothing in it.
+    ///
+    /// `connector` is the output's stable identity key when known; apply
+    /// prefers it over `monitor_num` so a hotplug renumber still finds the
+    /// same physical output.
     pub(crate) fn remember(
         &mut self,
         identity: PlacementIdentity,
         monitor_num: i32,
+        connector: Option<String>,
         tags: u32,
     ) -> bool {
         if tags == 0 {
@@ -522,10 +558,12 @@ impl ClosedPlacementMemory {
         }
         let closed_seq = self.next_seq;
         self.next_seq = self.next_seq.saturating_add(1);
+        let connector = connector.filter(|connector| !connector.is_empty());
         self.by_identity.insert(
             identity,
             RememberedPlacement {
                 monitor_num,
+                connector,
                 tags,
                 closed_seq,
             },
@@ -535,7 +573,7 @@ impl ClosedPlacementMemory {
 
     #[must_use]
     pub(crate) fn lookup(&self, identity: &PlacementIdentity) -> Option<RememberedPlacement> {
-        self.by_identity.get(identity).copied()
+        self.by_identity.get(identity).cloned()
     }
 
     /// Drop everything in memory. Used when the feature is switched off so a
@@ -718,9 +756,33 @@ pub(crate) struct MemoryPlacement {
     pub tags: Option<u32>,
 }
 
+/// Pick the current monitor number for a remembered placement.
+///
+/// When `remembered_connector` matches a live output's `stable_key` or
+/// `connector`, return that output's current monitor number (so hole-fill
+/// renumbering after hotplug still lands on the same panel). Otherwise fall
+/// back to `remembered_monitor_num` for pre-v2 snapshots and missing
+/// identities.
+#[must_use]
+pub(crate) fn resolve_closed_placement_monitor_num(
+    remembered_monitor_num: i32,
+    remembered_connector: Option<&str>,
+    live: &[(i32, &str, &str)],
+) -> i32 {
+    if let Some(key) = remembered_connector {
+        if let Some(&(num, _, _)) = live
+            .iter()
+            .find(|(_, connector, stable_key)| *connector == key || *stable_key == key)
+        {
+            return num;
+        }
+    }
+    remembered_monitor_num
+}
+
 #[must_use]
 pub(crate) fn resolve_memory_against_rule(
-    remembered: RememberedPlacement,
+    remembered: &RememberedPlacement,
     rule: Option<&crate::jwm::types::WMRule>,
     tagmask: u32,
 ) -> MemoryPlacement {
@@ -834,8 +896,12 @@ impl Jwm {
             return false;
         }
 
+        let mut remembered = remembered;
+        remembered.monitor_num =
+            self.resolve_remembered_monitor_num(backend, &remembered);
+
         let rule = RuleMatcher::find_matching_rule(&name, &class, &instance);
-        let placement = resolve_memory_against_rule(remembered, rule.as_ref(), cfg.tagmask());
+        let placement = resolve_memory_against_rule(&remembered, rule.as_ref(), cfg.tagmask());
         // A monitor that has gone away keeps the client on the selected one;
         // the remembered tags still apply there, because tags are the
         // user's workspaces and travel with them across outputs.
@@ -869,6 +935,66 @@ impl Jwm {
             );
         }
         moved
+    }
+
+    /// Map a remembered output identity to the monitor number that currently
+    /// owns that output. Falls back to the saved `monitor_num` when the
+    /// connector is missing or no longer connected.
+    fn resolve_remembered_monitor_num(
+        &self,
+        backend: &dyn Backend,
+        remembered: &RememberedPlacement,
+    ) -> i32 {
+        let live: Vec<(i32, String, String)> = backend
+            .output_ops()
+            .enumerate_outputs()
+            .into_iter()
+            .filter_map(|output| {
+                let mon_key = self
+                    .state
+                    .output_map
+                    .iter()
+                    .find(|(_, id)| **id == output.id)
+                    .map(|(key, _)| key)?;
+                let num = self.state.monitors.get(mon_key)?.num;
+                Some((
+                    num,
+                    output.identity.connector,
+                    output.identity.stable_key,
+                ))
+            })
+            .collect();
+        let live_refs: Vec<(i32, &str, &str)> = live
+            .iter()
+            .map(|(num, connector, stable_key)| (*num, connector.as_str(), stable_key.as_str()))
+            .collect();
+        resolve_closed_placement_monitor_num(
+            remembered.monitor_num,
+            remembered.connector.as_deref(),
+            &live_refs,
+        )
+    }
+
+    /// Stable identity key for the output currently backing `mon_key`.
+    fn output_key_for_monitor(
+        &self,
+        backend: &dyn Backend,
+        mon_key: crate::core::models::MonitorKey,
+    ) -> Option<String> {
+        let output_id = *self.state.output_map.get(mon_key)?;
+        backend
+            .output_ops()
+            .enumerate_outputs()
+            .into_iter()
+            .find(|output| output.id == output_id)
+            .map(|output| {
+                if !output.identity.stable_key.is_empty() {
+                    output.identity.stable_key
+                } else {
+                    output.identity.connector
+                }
+            })
+            .filter(|key| !key.is_empty())
     }
 
     /// Whether a client sits on the selected monitor and inside its current
@@ -928,7 +1054,11 @@ impl Jwm {
     }
 
     /// A regular client is going away: remember where it was.
-    pub(crate) fn remember_closed_placement(&mut self, client_key: ClientKey) {
+    pub(crate) fn remember_closed_placement(
+        &mut self,
+        backend: &dyn Backend,
+        client_key: ClientKey,
+    ) {
         let cfg = CONFIG.load();
         if !cfg.behavior().remember_closed_placement {
             return;
@@ -949,21 +1079,28 @@ impl Jwm {
             return;
         };
         let tags = client.state.tags & cfg.tagmask();
-        let Some(monitor_num) = client
-            .mon
-            .and_then(|key| self.state.monitors.get(key))
-            .map(|monitor| monitor.num)
-        else {
+        let Some(mon_key) = client.mon else {
             return;
         };
+        let Some(monitor_num) = self.state.monitors.get(mon_key).map(|monitor| monitor.num) else {
+            return;
+        };
+        let connector = self.output_key_for_monitor(backend, mon_key);
         let win = client.win;
-        if self
-            .closed_placements
-            .remember(identity.clone(), monitor_num, tags)
-        {
-            info!(
-                "[closed-placement] {win:?} ({identity}) closed on monitor {monitor_num} tags {tags:#b}"
-            );
+        if self.closed_placements.remember(
+            identity.clone(),
+            monitor_num,
+            connector.clone(),
+            tags,
+        ) {
+            match connector.as_deref() {
+                Some(connector) => info!(
+                    "[closed-placement] {win:?} ({identity}) closed on {connector} (monitor {monitor_num}) tags {tags:#b}"
+                ),
+                None => info!(
+                    "[closed-placement] {win:?} ({identity}) closed on monitor {monitor_num} tags {tags:#b}"
+                ),
+            }
             // Lib tests exercise remember through unmanage; they must not
             // write the developer's XDG state directory.
             #[cfg(not(test))]
@@ -1043,10 +1180,11 @@ mod tests {
     #[test]
     fn memory_keeps_the_newest_close_per_identity() {
         let mut memory = ClosedPlacementMemory::default();
-        assert!(memory.remember(identity("firefox"), 1, 0b100));
-        assert!(memory.remember(identity("firefox"), 0, 0b10));
+        assert!(memory.remember(identity("firefox"), 1, Some("DP-2".into()), 0b100));
+        assert!(memory.remember(identity("firefox"), 0, Some("DP-1".into()), 0b10));
         let placement = memory.lookup(&identity("firefox")).expect("remembered");
         assert_eq!((placement.monitor_num, placement.tags), (0, 0b10));
+        assert_eq!(placement.connector.as_deref(), Some("DP-1"));
         assert_eq!(memory.len(), 1);
         assert!(memory.lookup(&identity("kitty")).is_none());
     }
@@ -1054,7 +1192,7 @@ mod tests {
     #[test]
     fn memory_rejects_an_empty_tag_mask() {
         let mut memory = ClosedPlacementMemory::default();
-        assert!(!memory.remember(identity("firefox"), 0, 0));
+        assert!(!memory.remember(identity("firefox"), 0, None, 0));
         assert!(memory.is_empty());
     }
 
@@ -1063,10 +1201,10 @@ mod tests {
         let mut memory = ClosedPlacementMemory::default();
         for index in 0..MAX_REMEMBERED_PLACEMENTS {
             let identity = PlacementIdentity::new(&format!("app{index}"), "").unwrap();
-            assert!(memory.remember(identity, 0, 1));
+            assert!(memory.remember(identity, 0, None, 1));
         }
         assert_eq!(memory.len(), MAX_REMEMBERED_PLACEMENTS);
-        assert!(memory.remember(identity("newest"), 0, 1));
+        assert!(memory.remember(identity("newest"), 0, None, 1));
         assert_eq!(memory.len(), MAX_REMEMBERED_PLACEMENTS);
         assert!(
             memory
@@ -1246,6 +1384,7 @@ mod tests {
     fn remembered(monitor_num: i32, tags: u32) -> RememberedPlacement {
         RememberedPlacement {
             monitor_num,
+            connector: None,
             tags,
             closed_seq: 0,
         }
@@ -1266,14 +1405,14 @@ mod tests {
     fn the_memory_fills_only_what_a_rule_left_open() {
         let tagmask = 0b1_1111_1111;
         assert_eq!(
-            resolve_memory_against_rule(remembered(1, 0b100), None, tagmask),
+            resolve_memory_against_rule(&remembered(1, 0b100), None, tagmask),
             MemoryPlacement {
                 monitor_num: Some(1),
                 tags: Some(0b100)
             }
         );
         assert_eq!(
-            resolve_memory_against_rule(remembered(1, 0b100), Some(&rule(0b10, -1)), tagmask),
+            resolve_memory_against_rule(&remembered(1, 0b100), Some(&rule(0b10, -1)), tagmask),
             MemoryPlacement {
                 monitor_num: Some(1),
                 tags: None
@@ -1281,7 +1420,7 @@ mod tests {
             "a rule's tags win; the monitor is still the memory's"
         );
         assert_eq!(
-            resolve_memory_against_rule(remembered(1, 0b100), Some(&rule(0, 0)), tagmask),
+            resolve_memory_against_rule(&remembered(1, 0b100), Some(&rule(0, 0)), tagmask),
             MemoryPlacement {
                 monitor_num: None,
                 tags: Some(0b100)
@@ -1289,7 +1428,7 @@ mod tests {
             "a rule's monitor wins; the tags are still the memory's"
         );
         assert_eq!(
-            resolve_memory_against_rule(remembered(1, 0b100), Some(&rule(0b10, 0)), tagmask),
+            resolve_memory_against_rule(&remembered(1, 0b100), Some(&rule(0b10, 0)), tagmask),
             MemoryPlacement {
                 monitor_num: None,
                 tags: None
@@ -1300,7 +1439,7 @@ mod tests {
     #[test]
     fn a_tag_that_no_longer_exists_is_not_applied() {
         assert_eq!(
-            resolve_memory_against_rule(remembered(0, 0b1_0000_0000), None, 0b1111),
+            resolve_memory_against_rule(&remembered(0, 0b1_0000_0000), None, 0b1111),
             MemoryPlacement {
                 monitor_num: Some(0),
                 tags: None
@@ -1356,18 +1495,33 @@ mod tests {
         let dir = TestDir::new("roundtrip");
         let path = dir.file();
         let mut memory = ClosedPlacementMemory::default();
-        assert!(memory.remember(identity("firefox"), 1, 0b100));
-        assert!(memory.remember(identity("kitty"), 0, 0b10));
+        assert!(memory.remember(
+            identity("firefox"),
+            1,
+            Some("HDMI-A-1".into()),
+            0b100
+        ));
+        assert!(memory.remember(identity("kitty"), 0, Some("DP-1".into()), 0b10));
         memory.save_to_path(&path);
 
         let loaded = ClosedPlacementMemory::load_from_path(&path);
         assert_eq!(loaded.len(), 2);
         let firefox = loaded.lookup(&identity("firefox")).expect("firefox");
         assert_eq!((firefox.monitor_num, firefox.tags), (1, 0b100));
+        assert_eq!(firefox.connector.as_deref(), Some("HDMI-A-1"));
         let kitty = loaded.lookup(&identity("kitty")).expect("kitty");
         assert_eq!((kitty.monitor_num, kitty.tags), (0, 0b10));
+        assert_eq!(kitty.connector.as_deref(), Some("DP-1"));
         // Eviction order survived: firefox was remembered first.
         assert!(firefox.closed_seq < kitty.closed_seq);
+
+        let json = fs::read_to_string(&path).unwrap();
+        let snapshot: ClosedPlacementSnapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(snapshot.version, CLOSED_PLACEMENT_VERSION);
+        assert!(
+            json.contains("\"connector\":\"HDMI-A-1\""),
+            "connector must be persisted: {json}"
+        );
     }
 
     #[test]
@@ -1380,6 +1534,67 @@ mod tests {
     }
 
     #[test]
+    fn closed_placement_v1_without_connector_still_loads() {
+        let dir = TestDir::new("v1-migrate");
+        let path = dir.file();
+        // Pre-wave-39 snapshot: version 1, bare monitor_num, no connector.
+        // Mode must be private: the loader refuses group/other-writable files.
+        fs::write(
+            &path,
+            r#"{"version":1,"placements":[{"class":"firefox","instance":"Navigator","monitor_num":1,"tags":4,"seq":0}]}"#,
+        )
+        .unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        let loaded = ClosedPlacementMemory::load_from_path(&path);
+        let firefox = loaded
+            .lookup(&PlacementIdentity::new("firefox", "Navigator").unwrap())
+            .expect("firefox/Navigator");
+        assert_eq!(firefox.monitor_num, 1);
+        assert_eq!(firefox.tags, 4);
+        assert_eq!(firefox.connector, None);
+
+        // A later save upgrades to the current schema while keeping the
+        // monitor_num fallback.
+        loaded.save_to_path(&path);
+        let upgraded = fs::read_to_string(&path).unwrap();
+        let snapshot: ClosedPlacementSnapshot = serde_json::from_str(&upgraded).unwrap();
+        assert_eq!(snapshot.version, CLOSED_PLACEMENT_VERSION);
+        assert_eq!(snapshot.placements[0].connector, None);
+        assert_eq!(snapshot.placements[0].monitor_num, 1);
+    }
+
+    #[test]
+    fn closed_placement_resolves_connector_after_monitor_renumber() {
+        // Closed on HDMI-A-1 when it was monitor 1; after unplugging the
+        // left panel, hole-fill renumbered HDMI-A-1 to monitor 0. The stale
+        // monitor_num must not win over the connector.
+        let live = [
+            (0, "HDMI-A-1", "HDMI-A-1"),
+            (1, "DP-2", "edid:DEL:1234"),
+        ];
+        assert_eq!(
+            resolve_closed_placement_monitor_num(1, Some("HDMI-A-1"), &live),
+            0,
+            "connector finds the renumbered output"
+        );
+        assert_eq!(
+            resolve_closed_placement_monitor_num(1, Some("edid:DEL:1234"), &live),
+            1,
+            "stable_key matches when the remembered key came from EDID"
+        );
+        assert_eq!(
+            resolve_closed_placement_monitor_num(1, Some("gone"), &live),
+            1,
+            "missing connector falls back to saved monitor_num"
+        );
+        assert_eq!(
+            resolve_closed_placement_monitor_num(1, None, &live),
+            1,
+            "pre-v2 entries without a connector keep monitor_num"
+        );
+    }
+
+    #[test]
     fn closed_placement_snapshot_rejects_out_of_bounds() {
         let too_many = ClosedPlacementSnapshot {
             version: CLOSED_PLACEMENT_VERSION,
@@ -1388,6 +1603,7 @@ mod tests {
                     class: format!("app{index}"),
                     instance: String::new(),
                     monitor_num: 0,
+                    connector: None,
                     tags: 1,
                     seq: index as u64,
                 })
@@ -1406,6 +1622,7 @@ mod tests {
                 class: "firefox".into(),
                 instance: String::new(),
                 monitor_num: 0,
+                connector: None,
                 tags: 0,
                 seq: 0,
             }],
@@ -1434,7 +1651,7 @@ mod tests {
         let dir = TestDir::new("disable");
         let path = dir.file();
         let mut memory = ClosedPlacementMemory::default();
-        assert!(memory.remember(identity("firefox"), 0, 1));
+        assert!(memory.remember(identity("firefox"), 0, Some("eDP-1".into()), 1));
         memory.save_to_path(&path);
         assert!(path.is_file());
 
@@ -1454,7 +1671,7 @@ mod tests {
         let dir = TestDir::new("private");
         let path = dir.file();
         let mut memory = ClosedPlacementMemory::default();
-        assert!(memory.remember(identity("firefox"), 0, 1));
+        assert!(memory.remember(identity("firefox"), 0, None, 1));
         memory.save_to_path(&path);
 
         assert_eq!(

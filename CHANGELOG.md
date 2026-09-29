@@ -7,6 +7,13 @@ monorepo use independent Semantic Versions.
 
 ### Added
 
+- Closed-placement memory keys reopen on the output's connector /
+  `stable_key` (schema v2), not bare `monitor_num`, so hotplug hole-fill
+  renumbering after wave 33 persist no longer restores to the wrong
+  monitor across a restart. v1 `closed_placement.json` files without a
+  connector still load and fall back to `monitor_num`. See
+  [docs/window-placement.md](docs/window-placement.md).
+
 - Wayland closed-placement attribution reads real PIDs: xdg/layer surfaces
   via the client's socket credentials, XWayland via `_NET_WM_PID`. See
   [docs/window-placement.md](docs/window-placement.md).

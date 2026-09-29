@@ -4,13 +4,30 @@
 
 ---
 
-## Evolve backlog（目标 100 轮；已完成 wave 9–38，本地 ahead）
+## Evolve backlog（目标 100 轮；已完成 wave 9–39，本地 ahead）
 
 | # | 选题 | Size |
 | --- | --- | --- |
-| 14–38 | window/state 全族含 refit/strut/topology + seamless + session + placement | ✓ |
-| 39 | connector-stable closed placement | M |
+| 14–39 | window/state 全族含 refit/strut/topology + seamless + session + placement | ✓ |
+| 40 | （建议）session / per-tag layout 也改 connector-stable；或 maximize restore 跨 output 几何重定位 | M |
 | … | 跳过：Annotation/Screenshot CommonLinear、toast Closed(1)、BT withdraw、FS/PiP 丢锚点、Recording EncodedOnly、XWayland 单轴 | |
+
+---
+
+## 2026-09-29（二十七）：connector-stable closed placement
+
+选题 = evolve wave 39 / evolve7h。
+
+1. **契约**：`closed_placement.json` → v2，条目带 optional `connector`
+   （`OutputIdentity.stable_key` / connector）；apply 经 `output_map` +
+   `enumerate_outputs` 解析到当前 `monitor_num`；缺/失联回退旧
+   `monitor_num`；v1 无 connector 仍可加载。
+2. **回归**：connector round-trip；renumber 后仍命中同输出；v1 迁移。
+
+**验证**：`scripts/test.sh --lib -- closed_placement`。
+
+**下一轮候选**：session / per-tag layout 的 connector-stable；或 maximize
+restore 跨 output 几何重定位。
 
 ---
 
