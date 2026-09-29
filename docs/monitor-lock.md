@@ -193,5 +193,11 @@ plus chrome / size-hint fields (`is_fixed`, `is_dock`, `is_desktop`,
 `is_drag_floating`, `never_focus`, `skip_taskbar`, `skip_pager`,
 `no_decorations`, `demands_attention`, `has_strut`, `client_fact`).
 `get_status` nests compact `resources` / `connectivity` / `power` / `media` /
-`notifications` / `blur` / `hdr` / `capture` summaries beside feature flags
-for shell pickers and the session lock.
+`notifications` / `blur` / `hdr` / `capture` / `idle` / `recording` /
+`audio_recording` / `clipboard` / `waterlily` / `night_light` / `magnifier` /
+`peek` / `expose` / `gesture` / `wayland` / `dnd` / `session_lock` summaries
+beside feature flags for shell pickers, monitor lock, and the debug HUD.
+`get_workspaces` / `get_tree` also report pip / maximized / above / below /
+fixed (and tree scratchpad / tabbed) counts; monitors report
+`window_count` / floating / minimized / sticky counts; windows report
+optional `stack_index`.

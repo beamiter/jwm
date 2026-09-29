@@ -70,7 +70,7 @@ a row as its window closes, and the survivors keep their MRU order.
 
 | Key | Action |
 | --- | --- |
-| `Tab` / `Shift+Tab`, `Up` / `Down` | move the highlight, wrapping around both ends |
+| `Tab` / `Shift+Tab`, `Up` / `Down`, `Left` / `Right` | move the highlight, wrapping around both ends |
 | `Home` / `End` | jump to the newest / oldest row |
 | `Page Up` / `Page Down` | step by one visible page without wrapping |
 | `Return` | commit the highlighted window |
@@ -103,9 +103,9 @@ non-wheel button, still cancels.
 The wheel is the exception, and it browses rather than cancels: a scroll
 over the panel steps the highlight the way it does on every other panel,
 because a touchpad flick while the modifier is still held is asking for the
-next row, not for the switch in flight to be thrown away. A scroll on the
-dimmed area outside the panel does nothing, and neither does a horizontal
-one anywhere — there is nothing sideways to browse.
+next row, not for the switch in flight to be thrown away. Vertical and
+horizontal wheels both step (Left/Right keyboard twins). A scroll on the
+dimmed area outside the panel does nothing.
 
 If another client already holds the pointer — a drag in flight, a menu's own
 grab — the gesture is not spent on it: `Alt+Tab` is a keyboard gesture first,

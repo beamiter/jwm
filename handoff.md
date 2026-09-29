@@ -4,7 +4,7 @@
 
 ---
 
-## Evolve backlog（目标 1000 轮；已完成 wave 9–500，本地 ahead）
+## Evolve backlog（目标 1000 轮；已完成 wave 9–600，本地 ahead）
 
 | # | 选题 | Size |
 | --- | --- | --- |
@@ -61,7 +61,47 @@
 | 466–480 | Session v12 never_focus/old_state/pip_restore_sticky/remembers_closed_placement；layout persist show_bar + togglebar dirty | ✓ |
 | 481–490 | Portal WindowInfo/MonitorInfo fields；expose horizontal wheel Left/Right | ✓ |
 | 491–500 | include_str!/serialize/dispatch contract pins + docs drift + handoff/CHANGELOG | ✓ |
+| 501–515 | WindowInfo stack_index；Workspace/Tree pip/maximized/above/below/fixed(+scratchpad/tabbed) counts | ✓ |
+| 516–530 | MonitorInfoIpc window/floating/minimized/sticky counts | ✓ |
+| 531–545 | short query aliases（get_notif/ui/lock/xwayland/tearing/scrolling/effects/tabs/network/clip/dnd） | ✓ |
+| 546–555 | command aliases（minimize_window/zoom_master/exit/reload_wm/persist_session） | ✓ |
+| 556–575 | get_status nests waterlily/night_light/magnifier/peek/expose/gesture/wayland/dnd/session_lock；effect_status picker symmetry | ✓ |
+| 576–590 | get_config polish2 + session v13 old_border_w | ✓ |
+| 591–595 | switcher Left/Right + horizontal wheel；overview horizontal wheel；portal fields | ✓ |
+| 596–600 | include_str!/serialize/dispatch contract pins + docs drift + handoff/CHANGELOG | ✓ |
 | … | 跳过：Annotation/Screenshot CommonLinear、toast Closed(1)、BT withdraw、FS/PiP 自身丢锚点（own-anchor drop）、Recording EncodedOnly、XWayland 单轴 | |
+
+---
+
+## 2026-09-29（五十八）：IPC leftovers + session v13 → 600
+
+选题 = evolve waves 501–600 / evolve7h。
+
+1. **Wave 501–515**：`WindowInfo.stack_index`；`WorkspaceInfo` /
+   `TreeNode` pip/maximized/above/below/fixed（+ tree scratchpad/tabbed）
+   counts。
+2. **Wave 516–530**：`MonitorInfoIpc.window_count` / floating /
+   minimized / sticky counts。
+3. **Wave 531–545**：短 query 别名（`get_notif` / `get_ui` / `get_lock` /
+   `get_xwayland` / `get_tearing` / `get_scrolling` / `get_effects` /
+   `get_tabs` / `get_network` / `get_clip` / `get_do_not_disturb`）。
+4. **Wave 546–555**：command 别名（`minimize_window` / `zoom_master` /
+   `exit` / `reload_wm` / `persist_session`）。
+5. **Wave 556–575**：`get_status` nests waterlily/night_light/magnifier/
+   peek/expose/gesture/wayland/dnd/session_lock；`get_effect_status`
+   picker / lock / debug_hud 对称。
+6. **Wave 576–590**：`get_config` polish2；Session v13 `old_border_w`。
+7. **Wave 591–595**：switcher Left/Right + 水平滚轮；overview 水平滚轮；
+   portal Window/Monitor 字段。
+8. **Wave 596–600**：contract pins；docs drift；CHANGELOG；handoff。
+
+**刻意不做**：跳过表不变；不发明 DRM/EncodedOnly/CommonLinear / peak meter /
+`mapped_ms` / `is_override_redirect`。
+
+**验证**：`scripts/test.sh --lib --` 聚焦 stack_index / pip_count /
+get_notif / session v13 / switcher horizontal / evolve7h_waves_501。
+
+**下一轮候选**：601+；或跳过表项。
 
 ---
 

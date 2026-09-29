@@ -49,6 +49,22 @@ pub struct WindowInfo {
     pub is_minimized: bool,
     #[serde(default)]
     pub is_urgent: bool,
+    #[serde(default)]
+    pub is_sticky: bool,
+    #[serde(default)]
+    pub is_pip: bool,
+    #[serde(default)]
+    pub is_maximized: bool,
+    #[serde(default)]
+    pub is_above: bool,
+    #[serde(default)]
+    pub border_w: i32,
+    #[serde(default)]
+    pub total_w: i32,
+    #[serde(default)]
+    pub total_h: i32,
+    #[serde(default)]
+    pub stack_index: Option<usize>,
     /// Current layout symbol on the window's monitor when known.
     #[serde(default)]
     pub layout: Option<String>,
@@ -69,6 +85,14 @@ pub struct MonitorInfo {
     pub lt_symbol: Option<String>,
     #[serde(default)]
     pub output_id: Option<u64>,
+    #[serde(default)]
+    pub window_count: usize,
+    #[serde(default)]
+    pub floating_count: usize,
+    #[serde(default)]
+    pub minimized_count: usize,
+    #[serde(default)]
+    pub sticky_count: usize,
 }
 
 /// Mirror of the compositor's per-client IPC buffer ceiling, the cap the

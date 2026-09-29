@@ -100,14 +100,19 @@ fn tag_client_counts(
     state: &WMState,
     monitor: MonitorKey,
     tag_mask: u32,
-) -> (usize, usize, usize, usize, usize) {
+) -> (usize, usize, usize, usize, usize, usize, usize, usize, usize, usize) {
     let mut minimized = 0;
     let mut floating = 0;
     let mut sticky = 0;
     let mut urgent = 0;
     let mut fullscreen = 0;
+    let mut pip = 0;
+    let mut maximized = 0;
+    let mut above = 0;
+    let mut below = 0;
+    let mut fixed = 0;
     let Some(clients) = state.monitor_clients.get(monitor) else {
-        return (0, 0, 0, 0, 0);
+        return (0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
     };
     for &key in clients {
         let Some(client) = state.clients.get(key) else {
@@ -131,8 +136,25 @@ fn tag_client_counts(
         if client.state.is_fullscreen {
             fullscreen += 1;
         }
+        if client.state.is_pip {
+            pip += 1;
+        }
+        if client.state.is_maximized_vert || client.state.is_maximized_horz {
+            maximized += 1;
+        }
+        if client.state.is_above {
+            above += 1;
+        }
+        if client.state.is_below {
+            below += 1;
+        }
+        if client.state.is_fixed {
+            fixed += 1;
+        }
     }
-    (minimized, floating, sticky, urgent, fullscreen)
+    (
+        minimized, floating, sticky, urgent, fullscreen, pip, maximized, above, below, fixed,
+    )
 }
 
 fn tag_has_fullscreen(state: &WMState, monitor: MonitorKey, tag_mask: u32) -> bool {
@@ -163,6 +185,7 @@ fn client_window_info(
     tab_index: Option<usize>,
     maximize_restore_anchor: Option<u64>,
     is_status_bar: bool,
+    stack_index: Option<usize>,
 ) -> WindowInfo {
     let dock = client.state.dock_layer_info;
     WindowInfo {
@@ -267,6 +290,7 @@ fn client_window_info(
         sync_value: client.state.sync_value,
         total_w: client.total_width(),
         total_h: client.total_height(),
+        stack_index,
     }
 }
 
@@ -2668,7 +2692,7 @@ impl Jwm {
                 let tree = self.query_tree(backend);
                 IpcResponse::ok(Some(serde_json::to_value(tree).unwrap_or_default()))
             }
-            "get_scrolling_status" => IpcResponse::ok(Some(self.query_scrolling_status())),
+            "get_scrolling_status" | "get_scrolling" => IpcResponse::ok(Some(self.query_scrolling_status())),
             "get_layout" => IpcResponse::ok(Some(self.query_focused_layout(backend))),
             "get_gaps" => IpcResponse::ok(Some(self.query_focused_gaps(backend))),
             "get_nmaster" => IpcResponse::ok(Some(self.query_focused_nmaster(backend))),
@@ -2689,15 +2713,15 @@ impl Jwm {
             "get_wayland_status" | "get_wayland" => IpcResponse::ok(Some(self.query_wayland_status(backend))),
             "get_config_status" => IpcResponse::ok(Some(self.query_config_status())),
             "get_config" => IpcResponse::ok(Some(self.query_config_subset(args))),
-            "get_dnd" => IpcResponse::ok(Some(serde_json::json!({
+            "get_dnd" | "get_do_not_disturb" => IpcResponse::ok(Some(serde_json::json!({
                 "enabled": self.do_not_disturb,
             }))),
-            "get_notifications" => IpcResponse::ok(Some(self.notifications_json())),
-            "get_system_ui" => IpcResponse::ok(Some(serde_json::json!({
+            "get_notifications" | "get_notif" => IpcResponse::ok(Some(self.notifications_json())),
+            "get_system_ui" | "get_ui" => IpcResponse::ok(Some(serde_json::json!({
                 "active": self.features.system_ui.is_active(),
                 "kind": self.features.system_ui.panel_kind(),
             }))),
-            "get_tab_bar" => IpcResponse::ok(Some(self.query_focused_tab_bar(backend))),
+            "get_tab_bar" | "get_tabs" => IpcResponse::ok(Some(self.query_focused_tab_bar(backend))),
             "get_media_status" | "get_media" => IpcResponse::ok(Some(self.media_status_json())),
             "get_power_status" | "get_power" => {
                 // Warm the Shell Hub's coalesced snapshot before answering,
@@ -2709,7 +2733,7 @@ impl Jwm {
                 self.ensure_control_snapshot_refresh(std::time::Instant::now());
                 IpcResponse::ok(Some(self.power_status_json()))
             }
-            "get_connectivity" => IpcResponse::ok(Some(self.connectivity_json())),
+            "get_connectivity" | "get_network" => IpcResponse::ok(Some(self.connectivity_json())),
             "get_bluetooth_pairing" | "get_bluetooth" => {
                 IpcResponse::ok(Some(crate::jwm::features::pairing::session_json(
                     self.features.bluetooth_pairing.as_ref(),
@@ -2742,7 +2766,7 @@ impl Jwm {
             "get_wallpaper_colors" | "get_wallpaper" => IpcResponse::ok(Some(self.wallpaper_theme_json())),
             "get_idle_status" | "get_idle" => IpcResponse::ok(Some(self.idle_status_json(backend))),
             "get_resources" => IpcResponse::ok(Some(self.resources_json())),
-            "get_clipboard" => IpcResponse::ok(Some(self.clipboard_json())),
+            "get_clipboard" | "get_clip" => IpcResponse::ok(Some(self.clipboard_json())),
             "get_recording_status" | "get_recording" => {
                 let output_path = self.features.recording.output_path.clone();
                 let active = self.features.recording.active;
@@ -2854,7 +2878,7 @@ impl Jwm {
                     "last_error": recording.last_error,
                 })))
             }
-            "get_effect_status" => IpcResponse::ok(Some(serde_json::json!({
+            "get_effect_status" | "get_effects" => IpcResponse::ok(Some(serde_json::json!({
                 "overview": self.features.overview.active,
                 "expose": self.features.expose_active,
                 "audio_recording": self.features.audio_recording.active,
@@ -2876,6 +2900,33 @@ impl Jwm {
                 "launcher": self.features.system_ui.is_launcher(),
                 "session_menu": self.features.system_ui.is_session_menu(),
                 "notifications": self.features.system_ui.is_notification_center(),
+                "control_center": self.features.system_ui.is_control_center(),
+                "clipboard_picker": self.features.system_ui.is_clipboard_picker(),
+                "wifi_picker": self.features.system_ui.is_wifi_picker(),
+                "bluetooth_picker": self.features.system_ui.is_bluetooth_picker(),
+                "wallpaper_picker": self.features.system_ui.is_wallpaper_picker(),
+                "theme_picker": self.features.system_ui.is_theme_picker(),
+                "audio_output_picker": self
+                    .features
+                    .system_ui
+                    .audio_picker_direction()
+                    == Some(crate::jwm::features::system_controls::AudioDirection::Output),
+                "audio_input_picker": self
+                    .features
+                    .system_ui
+                    .audio_picker_direction()
+                    == Some(crate::jwm::features::system_controls::AudioDirection::Input),
+                "media_players": self.features.system_ui.is_media_players_picker(),
+                "window_switcher": self.features.system_ui.is_window_switcher(),
+                "session_lock": self.features.system_ui.is_session_lock(),
+                "monitor_lock": self
+                    .features
+                    .system_ui
+                    .lock_scope()
+                    .is_some_and(|scope| {
+                        matches!(scope, crate::jwm::features::LockScope::Monitor(_))
+                    }),
+                "debug_hud": self.debug_hud_on,
                 "corner_radius": cfg.behavior().corner_radius,
                 "shadow_enabled": cfg.behavior().shadow_enabled,
                 "blur_enabled": cfg.behavior().blur_enabled,
@@ -2939,7 +2990,7 @@ impl Jwm {
                     "color_delivery": color_delivery,
                 })))
             }
-            "get_tearing_hints" => {
+            "get_tearing_hints" | "get_tearing" => {
                 // `active_surface_count` is client demand and always has
                 // been; `outputs` is what the compositor did with it, one
                 // row per output with a named reason when it did nothing.
@@ -2959,7 +3010,7 @@ impl Jwm {
                         .collect::<Vec<_>>(),
                 })))
             }
-            "get_session_lock" => IpcResponse::ok(Some(serde_json::json!({
+            "get_session_lock" | "get_lock" => IpcResponse::ok(Some(serde_json::json!({
                 "locked": backend.compositor_session_locked(),
                 "lock_surface_count": backend.compositor_session_lock_surface_count(),
             }))),
@@ -2985,7 +3036,7 @@ impl Jwm {
                     "color_delivery": color_delivery,
                 })))
             }
-            "get_xwayland_status" => {
+            "get_xwayland_status" | "get_xwayland" => {
                 if let Some(status) = backend.compositor_xwayland_status() {
                     IpcResponse::ok(Some(serde_json::to_value(status).unwrap_or_default()))
                 } else {
@@ -3777,6 +3828,15 @@ impl Jwm {
             recording: Some(self.recording_status_summary(backend)),
             audio_recording: Some(self.audio_recording_status_summary()),
             clipboard: Some(self.clipboard_status_summary()),
+            waterlily: Some(self.waterlily_status_summary(backend)),
+            night_light: Some(self.night_light_status_summary()),
+            magnifier: Some(self.magnifier_status_summary()),
+            peek: Some(self.peek_status_summary(backend)),
+            expose: Some(self.expose_status_summary()),
+            gesture: Some(self.gesture_status_summary()),
+            wayland: Some(self.wayland_status_summary(backend)),
+            dnd: Some(serde_json::json!({ "enabled": self.do_not_disturb })),
+            session_lock: Some(self.session_lock_status_summary(backend)),
         }
     }
 
@@ -3836,6 +3896,12 @@ impl Jwm {
             self.state.clients.get(anchor).map(|c| c.win.raw())
         });
         let is_status_bar = client.is_status_bar(CONFIG.load().status_bar_name());
+        let stack_index = client.mon.and_then(|mk| {
+            self.state
+                .monitor_clients
+                .get(mk)
+                .and_then(|clients| clients.iter().position(|&ck| ck == client_key))
+        });
         Some(client_window_info(
             client,
             resolved_client_monitor_num(&self.state.monitors, client),
@@ -3854,6 +3920,7 @@ impl Jwm {
             tab_index,
             maximize_restore_anchor,
             is_status_bar,
+            stack_index,
         ))
     }
 
@@ -3895,8 +3962,18 @@ impl Jwm {
                 let (layout, m_fact, n_master, gap) = workspace_layout_state(mon, i);
                 let (show_bar, prev_layout, selected_id) =
                     workspace_tag_extras(mon, i, &self.state.clients);
-                let (minimized_count, floating_count, sticky_count, urgent_count, fullscreen_count) =
-                    tag_client_counts(&self.state, mk, tag_bit);
+                let (
+                    minimized_count,
+                    floating_count,
+                    sticky_count,
+                    urgent_count,
+                    fullscreen_count,
+                    pip_count,
+                    maximized_count,
+                    above_count,
+                    below_count,
+                    fixed_count,
+                ) = tag_client_counts(&self.state, mk, tag_bit);
                 result.push(WorkspaceInfo {
                     tag_mask: tag_bit,
                     tag_index: i,
@@ -3920,6 +3997,11 @@ impl Jwm {
                     sticky_count,
                     urgent_count,
                     fullscreen_count,
+                    pip_count,
+                    maximized_count,
+                    above_count,
+                    below_count,
+                    fixed_count,
                 });
             }
         }
@@ -4030,6 +4112,60 @@ impl Jwm {
             output_connector: self.output_connector_for_monitor(backend, mk),
             lt_symbol: m.lt_symbol.clone(),
             output_id: self.output_id_for_monitor(backend, mk),
+            window_count: self
+                .state
+                .monitor_clients
+                .get(mk)
+                .map(|clients| clients.len())
+                .unwrap_or(0),
+            floating_count: self
+                .state
+                .monitor_clients
+                .get(mk)
+                .map(|clients| {
+                    clients
+                        .iter()
+                        .filter(|&&ck| {
+                            self.state
+                                .clients
+                                .get(ck)
+                                .is_some_and(|c| c.state.is_floating)
+                        })
+                        .count()
+                })
+                .unwrap_or(0),
+            minimized_count: self
+                .state
+                .monitor_clients
+                .get(mk)
+                .map(|clients| {
+                    clients
+                        .iter()
+                        .filter(|&&ck| {
+                            self.state
+                                .clients
+                                .get(ck)
+                                .is_some_and(|c| c.state.is_hidden)
+                        })
+                        .count()
+                })
+                .unwrap_or(0),
+            sticky_count: self
+                .state
+                .monitor_clients
+                .get(mk)
+                .map(|clients| {
+                    clients
+                        .iter()
+                        .filter(|&&ck| {
+                            self.state
+                                .clients
+                                .get(ck)
+                                .is_some_and(|c| c.state.is_sticky)
+                        })
+                        .count()
+                })
+                .unwrap_or(0),
         }
     }
 
@@ -4396,6 +4532,75 @@ impl Jwm {
             "capacity": full.get("capacity").cloned().unwrap_or(serde_json::json!(0)),
         })
     }
+
+    fn waterlily_status_summary(&self, backend: &dyn Backend) -> serde_json::Value {
+        match backend.compositor_waterlily_status() {
+            Some(status) => serde_json::json!({
+                "enabled": status.enabled,
+                "active": status.active,
+                "worker_connected": status.worker_connected,
+                "requested_case": status.requested_case,
+                "requested_palette": status.requested_palette,
+            }),
+            None => serde_json::json!({
+                "enabled": false,
+                "active": false,
+                "worker_connected": false,
+                "requested_case": serde_json::Value::Null,
+                "requested_palette": serde_json::Value::Null,
+            }),
+        }
+    }
+
+    fn night_light_status_summary(&self) -> serde_json::Value {
+        let full = self.query_night_light();
+        serde_json::json!({
+            "active": full.get("active").cloned().unwrap_or(serde_json::json!(false)),
+            "override": full.get("override").cloned().unwrap_or(serde_json::Value::Null),
+            "temp": full.get("temp").cloned().unwrap_or(serde_json::Value::Null),
+        })
+    }
+
+    fn magnifier_status_summary(&self) -> serde_json::Value {
+        serde_json::json!({
+            "enabled": self.features.magnifier.enabled,
+            "zoom": self.features.magnifier.zoom_level,
+            "radius": self.features.magnifier.radius,
+        })
+    }
+
+    fn peek_status_summary(&self, backend: &dyn Backend) -> serde_json::Value {
+        serde_json::json!({
+            "active": self.features.peek_active,
+            "compositor_active": backend.has_compositor(),
+        })
+    }
+
+    fn expose_status_summary(&self) -> serde_json::Value {
+        serde_json::json!({
+            "active": self.features.expose_active,
+        })
+    }
+
+    fn gesture_status_summary(&self) -> serde_json::Value {
+        self.query_gesture_status()
+    }
+
+    fn wayland_status_summary(&self, backend: &dyn Backend) -> serde_json::Value {
+        let full = self.query_wayland_status(backend);
+        serde_json::json!({
+            "backend_family": full.get("backend_family").cloned().unwrap_or(serde_json::Value::Null),
+            "outputs": full.get("outputs").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0),
+        })
+    }
+
+    fn session_lock_status_summary(&self, backend: &dyn Backend) -> serde_json::Value {
+        serde_json::json!({
+            "locked": backend.compositor_session_locked(),
+            "lock_surface_count": backend.compositor_session_lock_surface_count(),
+        })
+    }
+
 
     /// Named scratchpads currently bound to a managed window (`name` → id).
     pub(crate) fn query_scratchpads(&self) -> serde_json::Value {
@@ -4900,12 +5105,88 @@ impl Jwm {
             "window_animation_style": cfg.behavior().window_animation_style,
             "attention_animation": cfg.behavior().attention_animation,
         });
+        let polish2 = serde_json::json!({
+            "focus_follows_new_window": cfg.behavior().focus_follows_new_window,
+            "border_enabled": cfg.behavior().border_enabled,
+            "border_width": cfg.behavior().border_width,
+            "border_color_focused": cfg.behavior().border_color_focused,
+            "border_color_unfocused": cfg.behavior().border_color_unfocused,
+            "border_glow_color": cfg.behavior().border_glow_color,
+            "border_gradient_enabled": cfg.behavior().border_gradient_enabled,
+            "border_gradient_color_a": cfg.behavior().border_gradient_color_a,
+            "border_gradient_color_b": cfg.behavior().border_gradient_color_b,
+            "border_gradient_angle": cfg.behavior().border_gradient_angle,
+            "border_gradient_speed": cfg.behavior().border_gradient_speed,
+            "debug_hud": cfg.behavior().debug_hud,
+            "debug_hud_extended": cfg.behavior().debug_hud_extended,
+            "profiling_enabled": cfg.behavior().profiling_enabled,
+            "direct_scanout_enabled": cfg.behavior().direct_scanout_enabled,
+            "window_animation_scale": cfg.behavior().window_animation_scale,
+            "inactive_dim": cfg.behavior().inactive_dim,
+            "inactive_desaturate": cfg.behavior().inactive_desaturate,
+            "edge_glow": cfg.behavior().edge_glow,
+            "edge_glow_color": cfg.behavior().edge_glow_color,
+            "edge_glow_width": cfg.behavior().edge_glow_width,
+            "attention_color": cfg.behavior().attention_color,
+            "pip_border_color": cfg.behavior().pip_border_color,
+            "pip_border_width": cfg.behavior().pip_border_width,
+            "window_tilt": cfg.behavior().window_tilt,
+            "tilt_amount": cfg.behavior().tilt_amount,
+            "expose_gap": cfg.behavior().expose_gap,
+            "snap_animation_duration_ms": cfg.behavior().snap_animation_duration_ms,
+            "motion_trail_frames": cfg.behavior().motion_trail_frames,
+            "motion_trail_opacity": cfg.behavior().motion_trail_opacity,
+        });
+        let polish3 = serde_json::json!({
+            "ripple_on_open": cfg.behavior().ripple_on_open,
+            "ripple_duration": cfg.behavior().ripple_duration,
+            "ripple_amplitude": cfg.behavior().ripple_amplitude,
+            "focus_highlight_color": cfg.behavior().focus_highlight_color,
+            "wallpaper_crossfade": cfg.behavior().wallpaper_crossfade,
+            "wallpaper_crossfade_duration_ms": cfg.behavior().wallpaper_crossfade_duration_ms,
+            "wallpaper_dir": cfg.behavior().wallpaper_dir,
+            "overview_thumbnail_gap": cfg.behavior().overview_thumbnail_gap,
+            "wobbly_stiffness": cfg.behavior().wobbly_stiffness,
+            "wobbly_damping": cfg.behavior().wobbly_damping,
+            "wobbly_grid_size": cfg.behavior().wobbly_grid_size,
+            "gesture_swipe": cfg.behavior().gesture_swipe,
+            "hdr_peak_nits": cfg.behavior().hdr_peak_nits,
+            "fade_in_step": cfg.behavior().fade_in_step,
+            "fade_out_step": cfg.behavior().fade_out_step,
+            "blur_status_bar": cfg.behavior().blur_status_bar,
+            "blur_temporal_enabled": cfg.behavior().blur_temporal_enabled,
+            "wayland_enable_screencopy": cfg.behavior().wayland_enable_screencopy,
+            "wayland_enable_color_management": cfg.behavior().wayland_enable_color_management,
+            "wayland_enable_output_management": cfg.behavior().wayland_enable_output_management,
+            "wayland_enable_gamma_control": cfg.behavior().wayland_enable_gamma_control,
+            "suspend_command": cfg.behavior().suspend_command,
+            "hibernate_command": cfg.behavior().hibernate_command,
+            "reboot_command": cfg.behavior().reboot_command,
+            "shutdown_command": cfg.behavior().shutdown_command,
+            "idle_screen_off_command": cfg.behavior().idle_screen_off_command,
+            "idle_screen_on_command": cfg.behavior().idle_screen_on_command,
+            "audio_recording_output_dir": cfg.behavior().audio_recording_output_dir,
+            "recording_quality": cfg.behavior().recording_quality,
+            "colorblind_mode": cfg.behavior().colorblind_mode,
+            "annotation_color": cfg.behavior().annotation_color,
+            "annotation_line_width": cfg.behavior().annotation_line_width,
+        });
         if let (Some(base), Some(more)) = (full.as_object_mut(), extra.as_object()) {
             for (key, value) in more {
                 base.insert(key.clone(), value.clone());
             }
         }
         if let (Some(base), Some(more)) = (full.as_object_mut(), polish.as_object()) {
+            for (key, value) in more {
+                base.insert(key.clone(), value.clone());
+            }
+        }
+        if let (Some(base), Some(more)) = (full.as_object_mut(), polish2.as_object()) {
+            for (key, value) in more {
+                base.insert(key.clone(), value.clone());
+            }
+        }
+        if let (Some(base), Some(more)) = (full.as_object_mut(), polish3.as_object()) {
             for (key, value) in more {
                 base.insert(key.clone(), value.clone());
             }
@@ -4961,6 +5242,13 @@ impl Jwm {
                     minimized_count: windows.iter().filter(|w| w.is_minimized).count(),
                     sticky_count: windows.iter().filter(|w| w.is_sticky).count(),
                     fullscreen_count: windows.iter().filter(|w| w.is_fullscreen).count(),
+                    pip_count: windows.iter().filter(|w| w.is_pip).count(),
+                    maximized_count: windows.iter().filter(|w| w.is_maximized).count(),
+                    above_count: windows.iter().filter(|w| w.is_above).count(),
+                    below_count: windows.iter().filter(|w| w.is_below).count(),
+                    scratchpad_count: windows.iter().filter(|w| w.is_scratchpad).count(),
+                    tabbed_count: windows.iter().filter(|w| w.is_tabbed).count(),
+                    fixed_count: windows.iter().filter(|w| w.is_fixed).count(),
                     selected_id: m.sel.and_then(|ck| {
                         self.state.clients.get(ck).map(|client| client.win.raw())
                     }),
@@ -5219,6 +5507,7 @@ mod tests {
             None,
             None,
             false,
+            None,
         );
         assert_eq!(info.id, 0x2a);
         assert_eq!(info.monitor, 7);
@@ -5304,6 +5593,7 @@ mod tests {
             Some(1),
             Some(0x99),
             true,
+            Some(3),
         );
         assert!(!restored.is_minimized);
         assert_eq!(restored.minimized_order, 9);
@@ -8187,7 +8477,7 @@ mod tests {
         }
 
         let effect = SOURCE
-            .split_once("\"get_effect_status\" =>")
+            .split_once("\"get_effect_status\"")
             .expect("get_effect_status arm")
             .1
             .split_once("\"get_magnifier\" =>")
@@ -8278,7 +8568,7 @@ mod tests {
         assert!(SOURCE.contains("\"get_prev_layout\""));
 
         let effect = SOURCE
-            .split_once("\"get_effect_status\" =>")
+            .split_once("\"get_effect_status\"")
             .expect("get_effect_status arm")
             .1
             .split_once("\"get_magnifier\" =>")
@@ -8417,12 +8707,11 @@ mod tests {
         assert!(SOURCE.contains("\"resource_rows\""));
         assert!(SOURCE.contains("\"new_client_position\""));
 
-        assert!(SESSION.contains("const SESSION_VERSION: u32 = 12"));
+        assert!(SESSION.contains("fn migrate_snapshot_v11"));
         assert!(SESSION.contains("pub never_focus:"));
         assert!(SESSION.contains("pub old_state:"));
         assert!(SESSION.contains("pub pip_restore_sticky:"));
         assert!(SESSION.contains("pub remembers_closed_placement:"));
-        assert!(SESSION.contains("fn migrate_snapshot_v11"));
 
         assert!(PERSIST.contains("show_bar: pertag.show_bars.get(tag).copied()"));
         assert!(PERSIST.contains("if let Some(show_bar) = entry.show_bar"));
@@ -8449,6 +8738,63 @@ mod tests {
             .expect("window_info follows")
             .0;
         for nest in ["idle:", "recording:", "audio_recording:", "clipboard:"] {
+            assert!(status.contains(nest), "get_status must nest {nest}");
+        }
+    }
+
+    #[test]
+    fn evolve7h_waves_501_600_ipc_contract_pins() {
+        const SOURCE: &str = include_str!("ipc_handler.rs");
+        const IPC: &str = include_str!("../ipc.rs");
+        const SESSION: &str = include_str!("session.rs");
+        const SWITCHER: &str = include_str!("features/switcher.rs");
+        const INPUT: &str = include_str!("input_handler.rs");
+        const PORTAL: &str = include_str!("../../portal/src/ipc.rs");
+
+        assert!(IPC.contains("pub stack_index:"));
+        assert!(IPC.contains("pub pip_count:"));
+        assert!(IPC.contains("pub maximized_count:"));
+        assert!(IPC.contains("pub above_count:"));
+        assert!(IPC.contains("pub scratchpad_count:"));
+        assert!(IPC.contains("pub tabbed_count:"));
+        assert!(IPC.contains("pub waterlily:"));
+        assert!(IPC.contains("pub session_lock:"));
+        assert!(IPC.contains("\"get_notif\""));
+        assert!(IPC.contains("\"get_effects\""));
+        assert!(IPC.contains("\"get_lock\""));
+        assert!(IPC.contains("\"minimize_window\""));
+        assert!(IPC.contains("\"persist_session\""));
+
+        assert!(SOURCE.contains("fn waterlily_status_summary"));
+        assert!(SOURCE.contains("fn session_lock_status_summary"));
+        assert!(SOURCE.contains("\"focus_follows_new_window\""));
+        assert!(SOURCE.contains("\"border_gradient_enabled\""));
+        assert!(SOURCE.contains("\"gesture_swipe\""));
+        assert!(SOURCE.contains("\"control_center\": self.features.system_ui.is_control_center()"));
+
+        assert!(SESSION.contains("const SESSION_VERSION: u32 = 13"));
+        assert!(SESSION.contains("pub old_border_w:"));
+        assert!(SESSION.contains("fn migrate_snapshot_v12"));
+
+        assert!(SWITCHER.contains("4 | 6 => SwitcherPress::Browse(-1)"));
+        assert!(SWITCHER.contains("5 | 7 => SwitcherPress::Browse(1)"));
+
+        let compact: String = INPUT.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(compact.contains("MouseButton::Other(4)|MouseButton::Other(6)"));
+        assert!(compact.contains("keys::KEY_Up|keys::KEY_Left"));
+
+        assert!(PORTAL.contains("pub is_sticky:"));
+        assert!(PORTAL.contains("pub total_w:"));
+        assert!(PORTAL.contains("pub window_count:"));
+
+        let status = SOURCE
+            .split_once("compositor_metrics: backend")
+            .expect("status metrics")
+            .1
+            .split_once("fn window_info")
+            .expect("window_info follows")
+            .0;
+        for nest in ["waterlily:", "night_light:", "magnifier:", "peek:", "expose:", "gesture:", "wayland:", "dnd:", "session_lock:"] {
             assert!(status.contains(nest), "get_status must nest {nest}");
         }
     }

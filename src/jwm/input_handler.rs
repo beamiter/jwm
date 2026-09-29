@@ -1340,11 +1340,11 @@ impl Jwm {
                     .move_selection(if backwards { -1 } else { 1 });
                 self.sync_system_ui(backend);
             }
-            keys::KEY_Up => {
+            keys::KEY_Up | keys::KEY_Left => {
                 self.features.system_ui.move_selection(-1);
                 self.sync_system_ui(backend);
             }
-            keys::KEY_Down => {
+            keys::KEY_Down | keys::KEY_Right => {
                 self.features.system_ui.move_selection(1);
                 self.sync_system_ui(backend);
             }
@@ -3497,15 +3497,16 @@ impl Jwm {
             }
         }
 
-        // Overview cube: vertical wheel cycles faces like Tab / Shift+Tab.
+        // Overview cube: vertical / horizontal wheel cycles faces like
+        // Tab / Shift+Tab (and Left/Right).
         if self.features.overview.active {
             let button = MouseButton::from_u8(detail_btn);
             match button {
-                MouseButton::Other(4) => {
+                MouseButton::Other(4) | MouseButton::Other(6) => {
                     self.features.capture.swallow_next_button_release();
                     return self.cycle_overview(backend, &WMArgEnum::Int(-1));
                 }
-                MouseButton::Other(5) => {
+                MouseButton::Other(5) | MouseButton::Other(7) => {
                     self.features.capture.swallow_next_button_release();
                     return self.cycle_overview(backend, &WMArgEnum::Int(1));
                 }

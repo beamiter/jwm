@@ -7,6 +7,29 @@ monorepo use independent Semantic Versions.
 
 ### Added
 
+- `get_windows` / `get_tree` / `window/state` report optional `stack_index`.
+- `get_workspaces` / `get_tree` report pip / maximized / above / below /
+  fixed counts; tree nodes also report scratchpad / tabbed counts.
+- `get_monitors` / `get_tree` report per-monitor `window_count` /
+  `floating_count` / `minimized_count` / `sticky_count`.
+- IPC query aliases: `get_notif`, `get_ui`, `get_lock`, `get_xwayland`,
+  `get_tearing`, `get_scrolling`, `get_effects`, `get_tabs`, `get_network`,
+  `get_clip`, `get_do_not_disturb`.
+- IPC command aliases: `minimize_window`, `zoom_master`, `exit`,
+  `reload_wm`, `persist_session`.
+- `get_status` nests compact `waterlily` / `night_light` / `magnifier` /
+  `peek` / `expose` / `gesture` / `wayland` / `dnd` / `session_lock`.
+- `get_effect_status` / `get_effects` mirrors shell picker / lock /
+  debug_hud feature flags.
+- `get_config` polish2 keys: border colors/gradient, edge glow, tilt,
+  ripple, wallpaper crossfade/dir, wobbly details, gesture_swipe,
+  wayland_enable_*, power/idle commands, annotation colors, …
+- Session snapshot v13 persists optional `old_border_w`.
+- Window switcher Left/Right + horizontal wheel browse; overview cube
+  horizontal wheel cycles faces.
+- Portal `WindowInfo` deserializes sticky/pip/maximized/above/border/
+  total/stack_index; `MonitorInfo` gains window counts.
+
 - `get_windows` / `get_clients` / `get_tree` / `window/state` report
   border-inclusive `total_w` / `total_h`.
 - `get_monitors` / `get_tree` report `lt_symbol` and optional `output_id`.

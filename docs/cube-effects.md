@@ -71,7 +71,8 @@ the cube settles instead of snapping back to opaque.
 Keyboard / pointer navigation matches the other overviews: `Tab` /
 `Shift+Tab` (and `Alt+J` / `Alt+K`) cycle faces, `Home` / `End` jump to the
 first / last face, `Page Up` / `Page Down` page by the visible prism window
-(≤6), and the vertical wheel cycles like Tab. `Enter` or a second
+(≤6), and the vertical / horizontal wheel cycles like Tab (and Left/Right).
+`Enter` or a second
 `Alt+Ctrl+Tab` confirms; `Esc` cancels.
 
 The X11 switcher animates continuously (twinkling sky, sheening caps), so it

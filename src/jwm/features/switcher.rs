@@ -137,8 +137,6 @@ pub(crate) enum SwitcherPress {
     /// The wheel: step the highlight by this much without committing, the
     /// way it browses every other panel the grab hands presses to.
     Browse(isize),
-    /// The horizontal wheel: not a click, and nothing to browse with.
-    Inert,
     /// Any other real click: the gesture ends.
     Cancel,
 }
@@ -151,17 +149,17 @@ pub(crate) enum SwitcherPress {
 /// the modifier is still held — throw away the switch the user is in the
 /// middle of making; a scroll asks to *browse*, which is exactly what the
 /// same wheel does over the control center, the launcher and the layout
-/// picker. Same rule, same reason as `input_handler::toast_press`: the
-/// wheel is not a click. Middle-click closes the pointed row the way Delete
-/// closes the highlight and expose's middle-click closes a cell; right-click
-/// and other buttons still cancel.
+/// picker. Vertical (4/5) and horizontal (6/7) wheels both step the
+/// highlight — Left/Right keyboard twins. Same rule, same reason as
+/// `input_handler::toast_press`: the wheel is not a click. Middle-click
+/// closes the pointed row the way Delete closes the highlight and expose's
+/// middle-click closes a cell; right-click and other buttons still cancel.
 pub(crate) fn switcher_press(button: u8) -> SwitcherPress {
     match button {
         1 => SwitcherPress::PickRow,
         2 => SwitcherPress::CloseRow,
-        4 => SwitcherPress::Browse(-1),
-        5 => SwitcherPress::Browse(1),
-        6 | 7 => SwitcherPress::Inert,
+        4 | 6 => SwitcherPress::Browse(-1),
+        5 | 7 => SwitcherPress::Browse(1),
         _ => SwitcherPress::Cancel,
     }
 }
@@ -431,8 +429,8 @@ mod tests {
         assert_eq!(switcher_press(2), SwitcherPress::CloseRow);
         assert_eq!(switcher_press(4), SwitcherPress::Browse(-1));
         assert_eq!(switcher_press(5), SwitcherPress::Browse(1));
-        assert_eq!(switcher_press(6), SwitcherPress::Inert);
-        assert_eq!(switcher_press(7), SwitcherPress::Inert);
+        assert_eq!(switcher_press(6), SwitcherPress::Browse(-1));
+        assert_eq!(switcher_press(7), SwitcherPress::Browse(1));
         // A real click that is not pick or close still ends it.
         for button in [3u8, 8, 9] {
             assert_eq!(

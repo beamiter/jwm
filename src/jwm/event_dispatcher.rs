@@ -618,7 +618,6 @@ impl WMController for Jwm {
                         self.scroll_system_ui_from_pointer(backend, step, row, false);
                     }
                 }
-                SwitcherPress::Inert => {}
                 SwitcherPress::Cancel => self.cancel_window_switcher(backend),
             }
             return;
