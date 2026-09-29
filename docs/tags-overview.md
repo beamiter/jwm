@@ -43,7 +43,8 @@ with modifiers held too: the panel holds the keyboard grab, so the global
 The panel grabs the pointer while it is open, so no click can fall through
 to the windows underneath. A press on a cell commits nothing by itself —
 the release settles what the gesture meant. The vertical wheel browses the
-highlight Up/Down like the arrows (no commit); a horizontal wheel is inert.
+highlight Up/Down like the arrows (no commit); the horizontal wheel browses
+Left/Right. Middle-click confirms the highlighted tag like `Return`.
 
 - Moving the pointer over a cell highlights it. Mouse and keyboard share the
   one highlight, so you can mix them freely; the dead space between cells
@@ -55,6 +56,8 @@ highlight Up/Down like the arrows (no commit); a horizontal wheel is inert.
   drawn on top.
 - Clicking a cell — press and release on the same cell — jumps to that tag
   and closes, exactly like `Return`.
+- Middle-click anywhere on the grab (with a highlight) jumps to the
+  highlighted tag and closes, the Enter twin shared with the layout picker.
 - Dragging a window's wireframe from its cell onto another cell moves the
   window to that tag and keeps the grid open, so several windows can be
   dealt out in one visit. The move replaces the window's whole tag mask with

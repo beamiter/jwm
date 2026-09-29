@@ -162,12 +162,22 @@ plus `scale` (fractional) and `refresh_mhz` (mode refresh in millihertz),
 `vrr_enabled` (status mirror of `get_wayland_status` VRR caps). Each
 monitor row also reports the live tiling `gap` (pixels), `m_fact`,
 `n_master`, and `transform` (`wl_output` 0..=7 from the live output; `0`
-when unknown). `get_workspaces` rows carry the same per-tag `gap` beside
-`m_fact` / `n_master`. Focused-monitor convenience queries `get_layout`
-(layout symbol + `m_fact` + `n_master` + `gap`), `get_gaps`, and
-`get_nmaster` return the selected monitor's live values (optional
-`connector` when known). IPC `setgaps` adjusts the focused monitor's gap
-like the keybinding. Each monitor also reports `tab_bar_reserved` (pixels
+when unknown). Optional `hdr_metadata`, physical size (`physical_*_mm`),
+preferred mode, `vrr_min_hz` / `vrr_max_hz`, `prev_layout`, `show_bar`,
+strut reservations, `selected_id`, dual-tagset `sel_tags` /
+`previous_tags`, pertag `cur_tag` / `prev_tag`, and optional
+`output_connector` (raw `OutputIdentity.connector`, which may differ from
+`connector` when `stable_key` is EDID-derived) round out the row.
+`get_workspaces` rows carry the same per-tag `gap` beside
+`m_fact` / `n_master`, plus `show_bar` / `prev_layout` / `selected_id` and
+per-tag `minimized_count` / `floating_count` / `sticky_count`. Focused-monitor
+convenience queries `get_layout`
+(layout symbol + `m_fact` + `n_master` + `gap`), `get_gaps`, `get_mfact`,
+`get_nmaster`, `get_show_bar`, and `get_prev_layout` return the selected
+monitor's live values (optional `connector` when known). `get_cfact` /
+`get_selected` / `get_focused_window` twin the focused client. IPC `setgaps` /
+`set_gaps`, `setmfact` / `set_mfact`, and `setcfact` / `set_cfact` adjust the
+focused monitor or client. Each monitor also reports `tab_bar_reserved` (pixels
 for the window tab strip, or `0`). `get_tab_bar` returns the focused
 monitor's strip membership; `get_system_ui` reports the open shell panel
 `kind`. `get_notifications` adds `center_open` / `selected_id`.
@@ -182,3 +192,6 @@ plus `is_occupied` (status-bar occupied mask) and `has_fullscreen`.
 plus chrome / size-hint fields (`is_fixed`, `is_dock`, `is_desktop`,
 `is_drag_floating`, `never_focus`, `skip_taskbar`, `skip_pager`,
 `no_decorations`, `demands_attention`, `has_strut`, `client_fact`).
+`get_status` nests compact `resources` / `connectivity` / `power` / `media` /
+`notifications` / `blur` / `hdr` / `capture` summaries beside feature flags
+for shell pickers and the session lock.

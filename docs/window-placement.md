@@ -217,6 +217,11 @@ optional `size_hints` carries `base_*` / `inc_*` / `min_*` / `max_*` /
 child is swallowing) and `swallowed_by` (child id that swallowed this
 terminal). Optional `transient_for` is the `WM_TRANSIENT_FOR` / xdg parent
 id. Tab strip membership is `is_tabbed` plus optional `tab_index`.
+Resting geometry beside live `x`/`y`/`w`/`h`: `float_rect`, `old_geometry`,
+`old_border_w`, optional `hidden_restore`, optional `hidden_x` (park marker),
+optional `maximize_restore_anchor`, `pip_restore_sticky`, `old_state`,
+`remembers_closed_placement`, dock exclusive-zone / anchors, and
+`is_status_bar`. XSync: optional `sync_counter` and `sync_value`.
 `get_monitors` / `get_tree` expose the usable work area as `wx` / `wy` /
 `ww` / `wh` beside the full-output `x` / `y` / `w` / `h`, plus `scale`
 (fractional), `refresh_mhz` (mode refresh in millihertz; `60000` is

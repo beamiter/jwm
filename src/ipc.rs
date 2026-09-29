@@ -181,18 +181,25 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "clipboard_picker",
         "control_center",
         "cycle_overview",
+        "cycle_layout",
         "cyclelayout",
         "layout_picker",
+        "focus_mon",
         "focus_none",
+        "focus_stack",
         "focus_tab",
         "focus_window",
         "focusmon",
         "focusstack",
+        "inc_nmaster",
         "incnmaster",
+        "kill_client",
         "killclient",
+        "last_layout",
         "lastlayout",
         "lock_monitor",
         "lock_screen",
+        "loop_view",
         "loopview",
         "media_next",
         "media_play_pause",
@@ -200,6 +207,7 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "media_stop",
         "minimize",
         "monitor_layout",
+        "move_stack",
         "movestack",
         "notification_center",
         "quit",
@@ -214,6 +222,7 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "scrolling_move_column",
         "scrolling_toggle_attach_mode",
         "session_menu",
+        "set_cfact",
         "set_gaps",
         "set_layout",
         "set_mfact",
@@ -226,18 +235,28 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "snap_window",
         "spawn",
         "tag",
+        "tag_mon",
         "tagmon",
         "take_screenshot",
         "take_screenshot_fullscreen",
         "toggle_annotation",
         "adjust_recording_region",
         "toggle_audio_recording",
+        "toggle_bar",
         "toggle_bluetooth",
+        "toggle_compositor",
         "toggle_dnd",
+        "toggle_floating",
         "toggle_idle_inhibit",
         "toggle_magnifier",
+        "toggle_maximize",
         "toggle_night_light",
         "toggle_overview",
+        "toggle_partial_damage",
+        "toggle_pip",
+        "toggle_sticky",
+        "toggle_tag",
+        "toggle_view",
         "toggle_wifi",
         "toggle_peek",
         "toggle_recording",
@@ -300,6 +319,7 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "get_blur_status",
         "get_capabilities",
         "get_capture_status",
+        "get_cfact",
         "get_clipboard",
         "get_clients",
         "get_color_management_status",
@@ -309,6 +329,7 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "get_desktops",
         "get_dnd",
         "get_effect_status",
+        "get_focused_window",
         "get_gaps",
         "get_gesture_status",
         "get_hdr_status",
@@ -327,11 +348,14 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "get_outputs",
         "get_peek",
         "get_power_status",
+        "get_prev_layout",
         "get_recording_status",
         "get_resources",
         "get_scratchpads",
         "get_scrolling_status",
+        "get_selected",
         "get_session_lock",
+        "get_show_bar",
         "get_status",
         "get_struts",
         "get_system_ui",
@@ -441,6 +465,28 @@ pub struct RuntimeFeatureStates {
     pub night_light: bool,
     /// Manual caffeine / idle inhibit is on.
     pub idle_inhibit: bool,
+    /// Shell Hub / control center panel is up.
+    pub control_center: bool,
+    /// Clipboard history picker is up.
+    pub clipboard_picker: bool,
+    /// Wi-Fi picker is up.
+    pub wifi_picker: bool,
+    /// Bluetooth picker is up.
+    pub bluetooth_picker: bool,
+    /// Wallpaper picker is up.
+    pub wallpaper_picker: bool,
+    /// Theme picker is up.
+    pub theme_picker: bool,
+    /// Audio output picker is up.
+    pub audio_output_picker: bool,
+    /// Audio input picker is up.
+    pub audio_input_picker: bool,
+    /// Media players picker is up.
+    pub media_players: bool,
+    /// Window switcher is up.
+    pub window_switcher: bool,
+    /// Session lock screen is up (not a per-monitor lock shade).
+    pub session_lock: bool,
 }
 
 /// Last runtime compositor hand-off as observed by the WM. This remains
@@ -480,6 +526,30 @@ pub struct RuntimeStatusV1 {
     pub compositor_transition: CompositorTransitionStatus,
     pub features: RuntimeFeatureStates,
     pub compositor_metrics: Option<Value>,
+    /// Compact twin of `get_resources` for bar polls that only hit `get_status`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resources: Option<Value>,
+    /// Compact twin of `get_connectivity`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub connectivity: Option<Value>,
+    /// Compact twin of `get_power_status`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub power: Option<Value>,
+    /// Compact twin of `get_media_status`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub media: Option<Value>,
+    /// Compact twin of `get_notifications` (`count` / `center_open` / DND).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notifications: Option<Value>,
+    /// Compact twin of `get_blur_status` (strength / enabled flags).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blur: Option<Value>,
+    /// Compact twin of `get_hdr_status` (config + capable summary).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hdr: Option<Value>,
+    /// Compact twin of `get_capture_status` (pending / dmabuf flags).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capture: Option<Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -699,6 +769,14 @@ pub struct WindowInfo {
     pub dock_anchor_right: bool,
     /// Matches the configured status-bar name (title/class/instance).
     pub is_status_bar: bool,
+    /// Off-screen park X when minimized / off-view (`ClientGeometry::hidden_x`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hidden_x: Option<i32>,
+    /// XSync counter id when the client advertises one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sync_counter: Option<u32>,
+    /// Last observed XSync counter value (`0` when unused).
+    pub sync_value: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -737,6 +815,12 @@ pub struct WorkspaceInfo {
     /// Selected client window id on this tag when any (`Pertag.sel`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub selected_id: Option<u64>,
+    /// How many clients on this tag on this monitor are minimized.
+    pub minimized_count: usize,
+    /// How many clients on this tag on this monitor are floating.
+    pub floating_count: usize,
+    /// How many sticky clients on this monitor also carry this tag bit.
+    pub sticky_count: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -837,6 +921,20 @@ pub struct MonitorInfoIpc {
     /// Selected client window id on this monitor (`WMMonitor.sel`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub selected_id: Option<u64>,
+    /// Dual tagset index (`WMMonitor.sel_tags` & 1): `0` or `1`.
+    pub sel_tags: usize,
+    /// Inactive tagset mask (`tag_set[1 - sel_tags]`), the twin of
+    /// [`Self::active_tags`].
+    pub previous_tags: u32,
+    /// Pertag current tag index (`Pertag.cur_tag`; `0` = all-tags slot).
+    pub cur_tag: usize,
+    /// Pertag previous tag index (`Pertag.prev_tag`).
+    pub prev_tag: usize,
+    /// Physical connector name (`OutputIdentity.connector`) when known;
+    /// omitted when the live output map has no identity. May differ from
+    /// [`Self::connector`] when `stable_key` is an EDID-derived key.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_connector: Option<String>,
 }
 
 /// EDID HDR static metadata projected on [`MonitorInfoIpc`] and status queries.
@@ -874,7 +972,7 @@ pub struct TreeNode {
 pub fn dispatch_command(name: &str, args: &Value) -> Result<(WMFuncType, WMArgEnum), String> {
     match name {
         // --- Window management ---
-        "focusstack" => Ok((Jwm::focusstack as WMFuncType, parse_int_arg(args, 1)?)),
+        "focusstack" | "focus_stack" => Ok((Jwm::focusstack as WMFuncType, parse_int_arg(args, 1)?)),
         "app_launcher" => Ok((Jwm::app_launcher as WMFuncType, WMArgEnum::Int(0))),
         "control_center" => Ok((Jwm::control_center as WMFuncType, WMArgEnum::Int(0))),
         "notification_center" => Ok((Jwm::notification_center as WMFuncType, WMArgEnum::Int(0))),
@@ -899,13 +997,13 @@ pub fn dispatch_command(name: &str, args: &Value) -> Result<(WMFuncType, WMArgEn
         // the most recently locked one for `unlock_monitor`.
         "lock_monitor" => Ok((Jwm::lock_monitor as WMFuncType, parse_int_arg(args, -1)?)),
         "unlock_monitor" => Ok((Jwm::unlock_monitor as WMFuncType, parse_int_arg(args, -1)?)),
-        "killclient" => Ok((Jwm::killclient, parse_int_arg(args, 0)?)),
+        "killclient" | "kill_client" => Ok((Jwm::killclient, parse_int_arg(args, 0)?)),
         "minimize" => Ok((Jwm::minimize, parse_int_arg(args, 0)?)),
         "zoom" => Ok((Jwm::zoom, parse_int_arg(args, 0)?)),
-        "togglefloating" => Ok((Jwm::togglefloating, parse_int_arg(args, 0)?)),
-        "togglesticky" => Ok((Jwm::togglesticky, parse_int_arg(args, 0)?)),
-        "togglepip" => Ok((Jwm::togglepip, parse_int_arg(args, 0)?)),
-        "togglemaximize" => Ok((Jwm::togglemaximize, parse_int_arg(args, 0)?)),
+        "togglefloating" | "toggle_floating" => Ok((Jwm::togglefloating, parse_int_arg(args, 0)?)),
+        "togglesticky" | "toggle_sticky" => Ok((Jwm::togglesticky, parse_int_arg(args, 0)?)),
+        "togglepip" | "toggle_pip" => Ok((Jwm::togglepip, parse_int_arg(args, 0)?)),
+        "togglemaximize" | "toggle_maximize" => Ok((Jwm::togglemaximize, parse_int_arg(args, 0)?)),
         "togglescratchpad" => {
             let cmd = if argument_is_omitted(args) {
                 vec!["term".to_string()]
@@ -914,7 +1012,7 @@ pub fn dispatch_command(name: &str, args: &Value) -> Result<(WMFuncType, WMArgEn
             };
             Ok((Jwm::togglescratchpad, WMArgEnum::StringVec(cmd)))
         }
-        "movestack" => Ok((Jwm::movestack, parse_int_arg(args, 1)?)),
+        "movestack" | "move_stack" => Ok((Jwm::movestack, parse_int_arg(args, 1)?)),
         "focus_none" => Ok((Jwm::focus_none, parse_int_arg(args, 0)?)),
         "focus_window" => Ok((Jwm::focus_window, parse_window_id_arg(args)?)),
         "focus_tab" => {
@@ -934,8 +1032,8 @@ pub fn dispatch_command(name: &str, args: &Value) -> Result<(WMFuncType, WMArgEn
         // --- Layout ---
         "setmfact" | "set_mfact" => Ok((Jwm::setmfact, parse_float_arg(args, 0.0)?)),
         "setgaps" | "set_gaps" => Ok((Jwm::setgaps, parse_int_arg(args, 1)?)),
-        "setcfact" => Ok((Jwm::setcfact, parse_float_arg(args, 0.0)?)),
-        "incnmaster" => Ok((Jwm::incnmaster, parse_int_arg(args, 1)?)),
+        "setcfact" | "set_cfact" => Ok((Jwm::setcfact, parse_float_arg(args, 0.0)?)),
+        "incnmaster" | "inc_nmaster" => Ok((Jwm::incnmaster, parse_int_arg(args, 1)?)),
         "setnmaster" | "set_nmaster" => Ok((Jwm::setnmaster, parse_int_arg(args, 1)?)),
         "scrolling_toggle_attach_mode" => {
             Ok((Jwm::scrolling_toggle_attach_mode, parse_int_arg(args, 0)?))
@@ -949,28 +1047,28 @@ pub fn dispatch_command(name: &str, args: &Value) -> Result<(WMFuncType, WMArgEn
             let layout = parse_layout_arg(args)?;
             Ok((Jwm::setlayout, layout))
         }
-        "lastlayout" => Ok((Jwm::lastlayout, parse_int_arg(args, 0)?)),
-        "cyclelayout" => Ok((Jwm::cyclelayout, parse_int_arg(args, 1)?)),
+        "lastlayout" | "last_layout" => Ok((Jwm::lastlayout, parse_int_arg(args, 0)?)),
+        "cyclelayout" | "cycle_layout" => Ok((Jwm::cyclelayout, parse_int_arg(args, 1)?)),
         "layout_picker" => Ok((Jwm::layout_picker, parse_int_arg(args, 0)?)),
-        "togglebar" => Ok((Jwm::togglebar, parse_int_arg(args, 0)?)),
+        "togglebar" | "toggle_bar" => Ok((Jwm::togglebar, parse_int_arg(args, 0)?)),
 
         // --- Tags ---
         "view" => Ok((Jwm::view, parse_configured_tag_mask_arg("view", args)?)),
         "tag" => Ok((Jwm::tag, parse_configured_tag_mask_arg("tag", args)?)),
-        "toggleview" => Ok((
+        "toggleview" | "toggle_view" => Ok((
             Jwm::toggleview,
             parse_configured_tag_mask_arg("toggleview", args)?,
         )),
-        "toggletag" => Ok((
+        "toggletag" | "toggle_tag" => Ok((
             Jwm::toggletag,
             parse_configured_tag_mask_arg("toggletag", args)?,
         )),
-        "loopview" => Ok((Jwm::loopview, parse_int_arg(args, 1)?)),
+        "loopview" | "loop_view" => Ok((Jwm::loopview, parse_int_arg(args, 1)?)),
         "window_switcher" => Ok((Jwm::window_switcher, parse_int_arg(args, 1)?)),
 
         // --- Monitor ---
-        "focusmon" => Ok((Jwm::focusmon, parse_int_arg(args, 1)?)),
-        "tagmon" => Ok((Jwm::tagmon, parse_int_arg(args, 1)?)),
+        "focusmon" | "focus_mon" => Ok((Jwm::focusmon, parse_int_arg(args, 1)?)),
+        "tagmon" | "tag_mon" => Ok((Jwm::tagmon, parse_int_arg(args, 1)?)),
 
         // --- Spawn ---
         "spawn" => {
@@ -993,8 +1091,12 @@ pub fn dispatch_command(name: &str, args: &Value) -> Result<(WMFuncType, WMArgEn
         // --- Misc ---
         "quit" => Ok((Jwm::quit, parse_int_arg(args, 0)?)),
         "restart" => Ok((Jwm::restart, parse_int_arg(args, 0)?)),
-        "togglecompositor" => Ok((Jwm::togglecompositor, parse_int_arg(args, 0)?)),
-        "togglepartialdamage" => Ok((Jwm::togglepartialdamage, parse_int_arg(args, 0)?)),
+        "togglecompositor" | "toggle_compositor" => {
+            Ok((Jwm::togglecompositor, parse_int_arg(args, 0)?))
+        }
+        "togglepartialdamage" | "toggle_partial_damage" => {
+            Ok((Jwm::togglepartialdamage, parse_int_arg(args, 0)?))
+        }
         "toggle_waterlily" => Ok((Jwm::toggle_waterlily, parse_int_arg(args, 0)?)),
         "waterlily_case" => {
             let requested = if argument_is_omitted(args) {
@@ -1416,6 +1518,9 @@ mod tests {
             dock_anchor_left: false,
             dock_anchor_right: false,
             is_status_bar: false,
+            hidden_x: None,
+            sync_counter: None,
+            sync_value: 0,
         })
         .expect("serialize WindowInfo");
 
@@ -1465,6 +1570,9 @@ mod tests {
         assert!(value.get("dock_exclusive_zone").is_none());
         assert_eq!(value["dock_anchor_top"], false);
         assert_eq!(value["is_status_bar"], false);
+        assert!(value.get("hidden_x").is_none());
+        assert!(value.get("sync_counter").is_none());
+        assert_eq!(value["sync_value"], 0);
 
         let without_pid = serde_json::to_value(WindowInfo {
             id: 1,
@@ -1532,6 +1640,9 @@ mod tests {
             dock_anchor_left: false,
             dock_anchor_right: false,
             is_status_bar: false,
+            hidden_x: None,
+            sync_counter: None,
+            sync_value: 0,
         })
         .expect("serialize");
         assert!(without_pid.get("pid").is_none());
@@ -1612,6 +1723,9 @@ mod tests {
             dock_anchor_left: false,
             dock_anchor_right: false,
             is_status_bar: false,
+            hidden_x: None,
+            sync_counter: None,
+            sync_value: 0,
         })
         .expect("serialize");
         assert_eq!(with_connector["connector"], "HDMI-A-1");
@@ -1685,6 +1799,9 @@ mod tests {
             dock_anchor_left: false,
             dock_anchor_right: false,
             is_status_bar: false,
+            hidden_x: None,
+            sync_counter: None,
+            sync_value: 0,
         })
         .expect("serialize");
         assert!(without.get("connector").is_none());
@@ -1740,6 +1857,11 @@ mod tests {
             strut_left: 0,
             strut_right: 0,
             selected_id: None,
+            sel_tags: 0,
+            previous_tags: 0,
+            cur_tag: 1,
+            prev_tag: 1,
+            output_connector: None,
         })
         .expect("serialize");
         assert_eq!(with_connector["connector"], "DP-1");
@@ -1776,6 +1898,11 @@ mod tests {
         assert_eq!(with_connector["show_bar"], true);
         assert_eq!(with_connector["strut_top"], 0);
         assert!(with_connector.get("selected_id").is_none());
+        assert_eq!(with_connector["sel_tags"], 0);
+        assert_eq!(with_connector["previous_tags"], 0);
+        assert_eq!(with_connector["cur_tag"], 1);
+        assert_eq!(with_connector["prev_tag"], 1);
+        assert!(with_connector.get("output_connector").is_none());
 
         let without = serde_json::to_value(MonitorInfoIpc {
             num: 1,
@@ -1823,6 +1950,11 @@ mod tests {
             strut_left: 0,
             strut_right: 0,
             selected_id: None,
+            sel_tags: 0,
+            previous_tags: 0,
+            cur_tag: 1,
+            prev_tag: 1,
+            output_connector: None,
         })
         .expect("serialize");
         assert!(without.get("connector").is_none());
@@ -1863,6 +1995,9 @@ mod tests {
             show_bar: true,
             prev_layout: "TILE".into(),
             selected_id: None,
+            minimized_count: 0,
+            floating_count: 0,
+            sticky_count: 0,
         })
         .expect("serialize");
         assert_eq!(with_connector["connector"], "DP-1");
@@ -1875,6 +2010,9 @@ mod tests {
         assert_eq!(with_connector["show_bar"], true);
         assert_eq!(with_connector["prev_layout"], "TILE");
         assert!(with_connector.get("selected_id").is_none());
+        assert_eq!(with_connector["minimized_count"], 0);
+        assert_eq!(with_connector["floating_count"], 0);
+        assert_eq!(with_connector["sticky_count"], 0);
 
         let without = serde_json::to_value(WorkspaceInfo {
             tag_mask: 2,
@@ -1894,6 +2032,9 @@ mod tests {
             show_bar: true,
             prev_layout: "TILE".into(),
             selected_id: None,
+            minimized_count: 0,
+            floating_count: 0,
+            sticky_count: 0,
         })
         .expect("serialize");
         assert!(without.get("connector").is_none());
@@ -2458,6 +2599,58 @@ mod tests {
         );
         assert!(
             capabilities
+                .commands
+                .iter()
+                .any(|name| name == "set_cfact"),
+            "set_cfact aliases setcfact in capabilities"
+        );
+        assert!(
+            capabilities
+                .commands
+                .iter()
+                .any(|name| name == "toggle_floating"),
+            "toggle_floating aliases togglefloating"
+        );
+        assert!(
+            capabilities
+                .commands
+                .iter()
+                .any(|name| name == "kill_client"),
+            "kill_client aliases killclient"
+        );
+        assert!(
+            capabilities
+                .queries
+                .iter()
+                .any(|name| name == "get_cfact"),
+            "get_cfact twins get_mfact in capabilities"
+        );
+        assert!(
+            capabilities
+                .queries
+                .iter()
+                .any(|name| name == "get_show_bar")
+        );
+        assert!(
+            capabilities
+                .queries
+                .iter()
+                .any(|name| name == "get_selected")
+        );
+        assert!(
+            capabilities
+                .queries
+                .iter()
+                .any(|name| name == "get_focused_window")
+        );
+        assert!(
+            capabilities
+                .queries
+                .iter()
+                .any(|name| name == "get_prev_layout")
+        );
+        assert!(
+            capabilities
                 .queries
                 .iter()
                 .any(|name| name == "get_waterlily_status")
@@ -2534,8 +2727,27 @@ mod tests {
                 waterlily: false,
                 night_light: true,
                 idle_inhibit: false,
+                control_center: false,
+                clipboard_picker: false,
+                wifi_picker: false,
+                bluetooth_picker: false,
+                wallpaper_picker: false,
+                theme_picker: false,
+                audio_output_picker: false,
+                audio_input_picker: false,
+                media_players: false,
+                window_switcher: false,
+                session_lock: false,
             },
             compositor_metrics: None,
+            resources: None,
+            connectivity: None,
+            power: None,
+            media: None,
+            notifications: None,
+            blur: None,
+            hdr: None,
+            capture: None,
         };
 
         let json = serde_json::to_value(status).unwrap();
@@ -2565,7 +2777,48 @@ mod tests {
         assert_eq!(json["features"]["waterlily"], false);
         assert_eq!(json["features"]["night_light"], true);
         assert_eq!(json["features"]["idle_inhibit"], false);
+        assert_eq!(json["features"]["control_center"], false);
+        assert_eq!(json["features"]["clipboard_picker"], false);
+        assert_eq!(json["features"]["wifi_picker"], false);
+        assert_eq!(json["features"]["bluetooth_picker"], false);
+        assert_eq!(json["features"]["wallpaper_picker"], false);
+        assert_eq!(json["features"]["theme_picker"], false);
+        assert_eq!(json["features"]["audio_output_picker"], false);
+        assert_eq!(json["features"]["audio_input_picker"], false);
+        assert_eq!(json["features"]["media_players"], false);
+        assert_eq!(json["features"]["window_switcher"], false);
+        assert_eq!(json["features"]["session_lock"], false);
+        assert!(json.get("resources").is_none());
+        assert!(json.get("connectivity").is_none());
+        assert!(json.get("power").is_none());
+        assert!(json.get("media").is_none());
+        assert!(json.get("notifications").is_none());
+        assert!(json.get("blur").is_none());
+        assert!(json.get("hdr").is_none());
+        assert!(json.get("capture").is_none());
         assert!(json["compositor_metrics"].is_null());
+    }
+
+    #[test]
+    fn set_cfact_and_toggle_underscore_dispatch_aliases() {
+        let cfact = dispatch_command("set_cfact", &serde_json::json!({"value": 1.25}));
+        assert!(cfact.is_ok(), "{cfact:?}");
+        let floating = dispatch_command("toggle_floating", &serde_json::json!({}));
+        assert!(floating.is_ok(), "{floating:?}");
+        let sticky = dispatch_command("toggle_sticky", &serde_json::json!({}));
+        assert!(sticky.is_ok(), "{sticky:?}");
+        let pip = dispatch_command("toggle_pip", &serde_json::json!({}));
+        assert!(pip.is_ok(), "{pip:?}");
+        let maximize = dispatch_command("toggle_maximize", &serde_json::json!({}));
+        assert!(maximize.is_ok(), "{maximize:?}");
+        let bar = dispatch_command("toggle_bar", &serde_json::json!({}));
+        assert!(bar.is_ok(), "{bar:?}");
+        let kill = dispatch_command("kill_client", &serde_json::json!({}));
+        assert!(kill.is_ok(), "{kill:?}");
+        let focus = dispatch_command("focus_stack", &serde_json::json!({"value": 1}));
+        assert!(focus.is_ok(), "{focus:?}");
+        let cycle = dispatch_command("cycle_layout", &serde_json::json!({"value": 1}));
+        assert!(cycle.is_ok(), "{cycle:?}");
     }
 
     #[test]
@@ -2639,6 +2892,11 @@ mod tests {
                 strut_left: 0,
                 strut_right: 0,
                 selected_id: None,
+                sel_tags: 0,
+                previous_tags: 0,
+                cur_tag: 1,
+                prev_tag: 1,
+                output_connector: None,
             },
             windows: Vec::new(),
             selected_id: Some(42),
@@ -2703,6 +2961,11 @@ mod tests {
                 strut_left: 0,
                 strut_right: 0,
                 selected_id: None,
+                sel_tags: 0,
+                previous_tags: 0,
+                cur_tag: 1,
+                prev_tag: 1,
+                output_connector: None,
             },
             windows: Vec::new(),
             selected_id: None,

@@ -3986,7 +3986,7 @@ impl SystemUiState {
                 items: vec![format!("Tag {}", overview.selected + 1)],
                 icons: None,
                 selected: Some(0),
-                hint: "\u{f060}\u{f061}\u{f062}\u{f063}  choose    Enter  jump    1-9  direct    Esc  close"
+                hint: "\u{f060}\u{f061}\u{f062}\u{f063}  choose    Home/End / Pg  jump    Enter / middle  jump    wheel  browse    1-9  direct    Esc  close"
                     .into(),
                 scroll: None,
             },

@@ -650,7 +650,8 @@ impl WMController for Jwm {
             // The compositors register no hit map for the grid, so — like the
             // film strip — the WM hit-tests the shared geometry itself. Left
             // button arms a pending press; vertical wheel browses the
-            // highlight (Up/Down twin); other presses stay swallowed by the
+            // highlight (Up/Down twin); middle confirms like Enter; horizontal
+            // wheel browses Left/Right; other presses stay swallowed by the
             // grab so clicks never fall through to the desktop.
             match detail {
                 1 => {
@@ -660,8 +661,16 @@ impl WMController for Jwm {
                         .unwrap_or(self.last_mouse_root);
                     self.press_tags_overview(backend, x, y);
                 }
+                // Middle: Enter twin — jump to the highlighted tag.
+                2 => {
+                    if let Err(error) = self.confirm_tags_overview(backend) {
+                        error!("Error confirming tags overview: {error}");
+                    }
+                }
                 4 => self.move_tags_overview_selection(backend, ExposeNavDirection::Up),
                 5 => self.move_tags_overview_selection(backend, ExposeNavDirection::Down),
+                6 => self.move_tags_overview_selection(backend, ExposeNavDirection::Left),
+                7 => self.move_tags_overview_selection(backend, ExposeNavDirection::Right),
                 _ => {}
             }
             return;
@@ -7188,6 +7197,32 @@ mod tests {
             "middle-click must commit like Enter"
         );
         assert_eq!(current_layout(&jwm), after_open);
+    }
+
+    /// Tags overview middle confirms like Enter; horizontal wheel Left/Right.
+    #[test]
+    fn tags_overview_middle_and_horizontal_wheel_are_wired() {
+        const SOURCE: &str = include_str!("event_dispatcher.rs");
+        let compact: String = SOURCE.chars().filter(|c| !c.is_whitespace()).collect();
+        let arm = compact
+            .split_once("ifself.features.system_ui.is_tags_overview(){")
+            .expect("tags overview pointer branch")
+            .1
+            .split_once("ifself.features.system_ui.is_active(){")
+            .expect("end of tags overview branch")
+            .0;
+        assert!(
+            arm.contains("2=>") && arm.contains("confirm_tags_overview"),
+            "middle-click must confirm like Enter: {arm}"
+        );
+        assert!(
+            arm.contains("6=>self.move_tags_overview_selection(backend,ExposeNavDirection::Left)"),
+            "button 6 must browse Left"
+        );
+        assert!(
+            arm.contains("7=>self.move_tags_overview_selection(backend,ExposeNavDirection::Right)"),
+            "button 7 must browse Right"
+        );
     }
 
     /// Layout-picker button 3 must cancel (Esc twin); button 1 still

@@ -4,7 +4,7 @@
 
 ---
 
-## Evolve backlog（目标 1000 轮；已完成 wave 9–300，本地 ahead）
+## Evolve backlog（目标 1000 轮；已完成 wave 9–400，本地 ahead）
 
 | # | 选题 | Size |
 | --- | --- | --- |
@@ -47,7 +47,45 @@
 | 266–275 | get_config hdr/idle_dim/night_light/remember_closed/waterlily_*；effect/magnifier/peek polish | ✓ |
 | 276–285 | TreeNode urgent/floating_count；get_tab_bar selected_id；calendar End + Shift+wheel year | ✓ |
 | 286–300 | docs drift + include_str!/serialize contract pins + handoff/CHANGELOG | ✓ |
+| 301–310 | WindowInfo hidden_x / sync_counter / sync_value | ✓ |
+| 311–325 | MonitorInfo sel_tags/previous_tags/cur_tag/prev_tag/output_connector；Workspace minimized/floating/sticky counts | ✓ |
+| 326–345 | get_cfact/get_show_bar/get_prev_layout/get_selected/get_focused_window；set_cfact + underscore command twins | ✓ |
+| 346–370 | RuntimeFeatureStates picker/lock flags；get_status nests resources/connectivity/power/media/notifications/blur/hdr/capture；effect_status symmetry | ✓ |
+| 371–385 | get_config expose/peek/tags/magnifier/tabs/vrr/swallow/idle/wallpaper/opacity/blur/recording… | ✓ |
+| 386–395 | Tags overview middle→Enter + horizontal wheel；hint + docs | ✓ |
+| 396–400 | include_str!/serialize/dispatch contract pins + docs drift + handoff/CHANGELOG | ✓ |
 | … | 跳过：Annotation/Screenshot CommonLinear、toast Closed(1)、BT withdraw、FS/PiP 自身丢锚点（own-anchor drop）、Recording EncodedOnly、XWayland 单轴 | |
+
+---
+
+## 2026-09-29（五十六）：IPC density + status nests → 400
+
+选题 = evolve waves 301–400 / evolve7h。
+
+1. **Wave 301–310**：`WindowInfo.hidden_x` / `sync_counter` / `sync_value`。
+2. **Wave 311–325**：`MonitorInfoIpc.sel_tags` / `previous_tags` /
+   `cur_tag` / `prev_tag` / `output_connector`；`WorkspaceInfo`
+   `minimized_count` / `floating_count` / `sticky_count`。
+3. **Wave 326–345**：`get_cfact` / `get_show_bar` / `get_prev_layout` /
+   `get_selected` / `get_focused_window`；`set_cfact` 与 underscore
+   command twins（toggle_*/kill_client/focus_stack/…）。
+4. **Wave 346–370**：`RuntimeFeatureStates` picker/lock flags；
+   `get_status` nests resources/connectivity/power/media/notifications/
+   blur/hdr/capture；`get_effect_status` ↔ features 对称
+   （launcher/session_menu/notifications）。
+5. **Wave 371–385**：`get_config` 扩 expose/peek/tags/magnifier/tabs/vrr/
+   swallow/idle/wallpaper/opacity/blur/recording 等。
+6. **Wave 386–395**：Tags overview middle→Enter + 水平 wheel；hint/docs。
+7. **Wave 396–400**：contract pins；docs drift；CHANGELOG；handoff。
+
+**刻意不做**：跳过表不变；不发明 DRM/EncodedOnly/CommonLinear / peak meter /
+`mapped_ms` / `is_override_redirect`。
+
+**验证**：`scripts/test.sh --lib --` 聚焦 window_info / monitor_info /
+workspace_info / get_cfact / set_cfact / RuntimeFeature / tags_overview_middle /
+evolve7h_waves_301。
+
+**下一轮候选**：401+；或跳过表项。
 
 ---
 

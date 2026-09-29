@@ -1000,6 +1000,19 @@ impl Jwm {
         })
     }
 
+    /// Physical connector name (`OutputIdentity.connector`) for the live
+    /// output backing `mon_key`. Distinct from [`Self::output_key_for_monitor`]
+    /// when `stable_key` is an EDID-derived identity.
+    pub(crate) fn output_connector_for_monitor(
+        &self,
+        backend: &dyn Backend,
+        mon_key: crate::core::models::MonitorKey,
+    ) -> Option<String> {
+        self.live_output_identity(backend, mon_key)
+            .map(|identity| identity.connector)
+            .filter(|name| !name.is_empty())
+    }
+
     /// EDID monitor name for the output currently backing `mon_key`.
     pub(crate) fn output_monitor_name_for_monitor(
         &self,

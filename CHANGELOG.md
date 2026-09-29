@@ -7,6 +7,36 @@ monorepo use independent Semantic Versions.
 
 ### Added
 
+- `get_windows` / `get_clients` / `get_tree` / `window/state` report optional
+  `hidden_x`, optional `sync_counter`, and `sync_value`.
+- `get_monitors` / `get_tree` report dual-tagset `sel_tags` /
+  `previous_tags`, pertag `cur_tag` / `prev_tag`, and optional
+  `output_connector` (raw connector name).
+- `get_workspaces` report per-tag `minimized_count` / `floating_count` /
+  `sticky_count`.
+- IPC aliases: `get_cfact`, `get_show_bar`, `get_prev_layout`, `get_selected`,
+  `get_focused_window`; `set_cfact`; underscore twins
+  (`toggle_floating` / `toggle_sticky` / `toggle_pip` / `toggle_maximize` /
+  `toggle_bar` / `toggle_compositor` / `toggle_partial_damage` /
+  `toggle_tag` / `toggle_view` / `kill_client` / `focus_stack` /
+  `move_stack` / `focus_mon` / `tag_mon` / `cycle_layout` / `last_layout` /
+  `inc_nmaster` / `loop_view`).
+- `get_status` feature flags include shell pickers (`control_center`,
+  `clipboard_picker`, `wifi_picker`, `bluetooth_picker`,
+  `wallpaper_picker`, `theme_picker`, `audio_*_picker`, `media_players`,
+  `window_switcher`) and `session_lock`; nests compact `resources` /
+  `connectivity` / `power` / `media` / `notifications` / `blur` / `hdr` /
+  `capture` summaries.
+- `get_effect_status` mirrors launcher / session_menu / notifications flags.
+- `get_config` keys: expose/peek/tags_overview/layout_picker, magnifier trio,
+  window_tabs / tab_bar_height, VRR trio, compositor, swallow, idle lock /
+  screen-off, genie/focus_highlight/snap_preview, blur_strength /
+  shadow_radius, opacities, wallpaper / wallpaper_mode, persist_tags,
+  status-bar chrome, cursor theme/size, system_ui_font, recording bitrate /
+  max_height / output_dir.
+- Tags overview: middle-click confirms like Enter; horizontal wheel browses
+  Left/Right. See [docs/tags-overview.md](docs/tags-overview.md).
+
 - Session snapshot v11 persists `is_urgent`, `demands_attention`,
   `skip_taskbar` / `skip_pager`, `is_fixed`, and optional `border_w` (older
   snapshots keep defaults / leave border alone).

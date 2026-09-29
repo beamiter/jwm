@@ -96,6 +96,37 @@ fn tagged_client_count(state: &WMState, monitor: MonitorKey, tag_mask: u32) -> u
     })
 }
 
+fn tag_client_counts(
+    state: &WMState,
+    monitor: MonitorKey,
+    tag_mask: u32,
+) -> (usize, usize, usize) {
+    let mut minimized = 0;
+    let mut floating = 0;
+    let mut sticky = 0;
+    let Some(clients) = state.monitor_clients.get(monitor) else {
+        return (0, 0, 0);
+    };
+    for &key in clients {
+        let Some(client) = state.clients.get(key) else {
+            continue;
+        };
+        if client.state.tags & tag_mask == 0 {
+            continue;
+        }
+        if client.state.is_hidden {
+            minimized += 1;
+        }
+        if client.state.is_floating {
+            floating += 1;
+        }
+        if client.state.is_sticky {
+            sticky += 1;
+        }
+    }
+    (minimized, floating, sticky)
+}
+
 fn tag_has_fullscreen(state: &WMState, monitor: MonitorKey, tag_mask: u32) -> bool {
     state.monitor_clients.get(monitor).is_some_and(|clients| {
         clients.iter().any(|&key| {
@@ -223,6 +254,9 @@ fn client_window_info(
         dock_anchor_left: dock.is_some_and(|d| d.anchor_left),
         dock_anchor_right: dock.is_some_and(|d| d.anchor_right),
         is_status_bar,
+        hidden_x: client.geometry.hidden_x,
+        sync_counter: client.state.sync_counter,
+        sync_value: client.state.sync_value,
     }
 }
 
@@ -2629,6 +2663,13 @@ impl Jwm {
             "get_gaps" => IpcResponse::ok(Some(self.query_focused_gaps(backend))),
             "get_nmaster" => IpcResponse::ok(Some(self.query_focused_nmaster(backend))),
             "get_mfact" => IpcResponse::ok(Some(self.query_focused_mfact(backend))),
+            "get_cfact" => IpcResponse::ok(Some(self.query_focused_cfact(backend))),
+            "get_show_bar" => IpcResponse::ok(Some(self.query_focused_show_bar(backend))),
+            "get_prev_layout" => IpcResponse::ok(Some(self.query_focused_prev_layout(backend))),
+            "get_selected" => IpcResponse::ok(Some(self.query_selected_window(backend, false))),
+            "get_focused_window" => {
+                IpcResponse::ok(Some(self.query_selected_window(backend, true)))
+            }
             "get_scratchpads" => IpcResponse::ok(Some(self.query_scratchpads())),
             "get_struts" => IpcResponse::ok(Some(self.query_struts(backend))),
             "get_night_light" | "get_night_light_status" => {
@@ -2822,6 +2863,9 @@ impl Jwm {
                 "calendar": self.features.system_ui.is_calendar(),
                 "keybindings": self.features.system_ui.is_keybindings(),
                 "monitor_layout": self.features.system_ui.is_monitor_layout(),
+                "launcher": self.features.system_ui.is_launcher(),
+                "session_menu": self.features.system_ui.is_session_menu(),
+                "notifications": self.features.system_ui.is_notification_center(),
                 "corner_radius": cfg.behavior().corner_radius,
                 "shadow_enabled": cfg.behavior().shadow_enabled,
                 "blur_enabled": cfg.behavior().blur_enabled,
@@ -3680,10 +3724,37 @@ impl Jwm {
                     .is_some_and(|status| status.enabled),
                 night_light: self.night_light_active(),
                 idle_inhibit: self.idle_inhibited,
+                control_center: self.features.system_ui.is_control_center(),
+                clipboard_picker: self.features.system_ui.is_clipboard_picker(),
+                wifi_picker: self.features.system_ui.is_wifi_picker(),
+                bluetooth_picker: self.features.system_ui.is_bluetooth_picker(),
+                wallpaper_picker: self.features.system_ui.is_wallpaper_picker(),
+                theme_picker: self.features.system_ui.is_theme_picker(),
+                audio_output_picker: self
+                    .features
+                    .system_ui
+                    .audio_picker_direction()
+                    == Some(crate::jwm::features::system_controls::AudioDirection::Output),
+                audio_input_picker: self
+                    .features
+                    .system_ui
+                    .audio_picker_direction()
+                    == Some(crate::jwm::features::system_controls::AudioDirection::Input),
+                media_players: self.features.system_ui.is_media_players_picker(),
+                window_switcher: self.features.system_ui.is_window_switcher(),
+                session_lock: self.features.system_ui.is_session_lock(),
             },
             compositor_metrics: backend
                 .compositor_get_metrics()
                 .and_then(|metrics| serde_json::to_value(metrics).ok()),
+            resources: Some(self.resources_json()),
+            connectivity: Some(self.connectivity_json()),
+            power: Some(self.power_status_json()),
+            media: Some(self.media_status_json()),
+            notifications: Some(self.notifications_status_summary()),
+            blur: Some(self.blur_status_summary(backend)),
+            hdr: Some(self.hdr_status_summary(backend)),
+            capture: Some(self.capture_status_summary(backend)),
         }
     }
 
@@ -3802,6 +3873,8 @@ impl Jwm {
                 let (layout, m_fact, n_master, gap) = workspace_layout_state(mon, i);
                 let (show_bar, prev_layout, selected_id) =
                     workspace_tag_extras(mon, i, &self.state.clients);
+                let (minimized_count, floating_count, sticky_count) =
+                    tag_client_counts(&self.state, mk, tag_bit);
                 result.push(WorkspaceInfo {
                     tag_mask: tag_bit,
                     tag_index: i,
@@ -3820,6 +3893,9 @@ impl Jwm {
                     show_bar,
                     prev_layout,
                     selected_id,
+                    minimized_count,
+                    floating_count,
+                    sticky_count,
                 });
             }
         }
@@ -3870,6 +3946,13 @@ impl Jwm {
         let selected_id = m
             .sel
             .and_then(|ck| self.state.clients.get(ck).map(|c| c.win.raw()));
+        let sel_tags = m.sel_tags & 1;
+        let previous_tags = m.tag_set[1 - sel_tags];
+        let (cur_tag, prev_tag) = m
+            .pertag
+            .as_ref()
+            .map(|p| (p.cur_tag, p.prev_tag))
+            .unwrap_or((0, 0));
         MonitorInfoIpc {
             num: m.num,
             x: m.geometry.m_x,
@@ -3916,6 +3999,11 @@ impl Jwm {
             strut_left,
             strut_right,
             selected_id,
+            sel_tags,
+            previous_tags,
+            cur_tag,
+            prev_tag,
+            output_connector: self.output_connector_for_monitor(backend, mk),
         }
     }
 
@@ -4054,6 +4142,181 @@ impl Jwm {
             None => serde_json::json!({
                 "monitor": serde_json::Value::Null,
                 "m_fact": serde_json::Value::Null,
+            }),
+        }
+    }
+
+    /// Focused client's `client_fact` (twin of [`Self::query_focused_mfact`]).
+    pub(crate) fn query_focused_cfact(&self, backend: &dyn Backend) -> serde_json::Value {
+        let Some(ck) = self.get_selected_client_key() else {
+            return serde_json::json!({
+                "id": serde_json::Value::Null,
+                "client_fact": serde_json::Value::Null,
+            });
+        };
+        let Some(client) = self.state.clients.get(ck) else {
+            return serde_json::json!({
+                "id": serde_json::Value::Null,
+                "client_fact": serde_json::Value::Null,
+            });
+        };
+        let mut value = serde_json::json!({
+            "id": client.win.raw(),
+            "client_fact": client.state.client_fact,
+        });
+        if let Some(mk) = client.mon {
+            if let Some(connector) = self.output_key_for_monitor(backend, mk) {
+                value
+                    .as_object_mut()
+                    .expect("cfact snapshot object")
+                    .insert("connector".into(), serde_json::Value::String(connector));
+            }
+        }
+        value
+    }
+
+    /// Focused monitor's status-bar visibility for the current tag.
+    pub(crate) fn query_focused_show_bar(&self, backend: &dyn Backend) -> serde_json::Value {
+        match self.state.sel_mon.and_then(|mk| {
+            let mon = self.state.monitors.get(mk)?;
+            let show_bar = mon
+                .pertag
+                .as_ref()
+                .and_then(|p| p.show_bars.get(p.cur_tag).copied())
+                .unwrap_or(true);
+            Some((mk, mon.num, show_bar))
+        }) {
+            Some((mk, num, show_bar)) => {
+                let mut value = serde_json::json!({
+                    "monitor": num,
+                    "show_bar": show_bar,
+                });
+                if let Some(connector) = self.output_key_for_monitor(backend, mk) {
+                    value
+                        .as_object_mut()
+                        .expect("show_bar snapshot object")
+                        .insert("connector".into(), serde_json::Value::String(connector));
+                }
+                value
+            }
+            None => serde_json::json!({
+                "monitor": serde_json::Value::Null,
+                "show_bar": serde_json::Value::Null,
+            }),
+        }
+    }
+
+    /// Focused monitor's previous layout symbol.
+    pub(crate) fn query_focused_prev_layout(&self, backend: &dyn Backend) -> serde_json::Value {
+        match self.state.sel_mon.and_then(|mk| {
+            let mon = self.state.monitors.get(mk)?;
+            Some((mk, mon.num, format!("{:?}", *mon.prev_lt)))
+        }) {
+            Some((mk, num, prev_layout)) => {
+                let mut value = serde_json::json!({
+                    "monitor": num,
+                    "prev_layout": prev_layout,
+                });
+                if let Some(connector) = self.output_key_for_monitor(backend, mk) {
+                    value
+                        .as_object_mut()
+                        .expect("prev_layout snapshot object")
+                        .insert("connector".into(), serde_json::Value::String(connector));
+                }
+                value
+            }
+            None => serde_json::json!({
+                "monitor": serde_json::Value::Null,
+                "prev_layout": serde_json::Value::Null,
+            }),
+        }
+    }
+
+    /// Focused / selected window id (and optional full [`WindowInfo`]).
+    pub(crate) fn query_selected_window(
+        &self,
+        backend: &dyn Backend,
+        full: bool,
+    ) -> serde_json::Value {
+        let Some(ck) = self.get_selected_client_key() else {
+            return serde_json::json!({
+                "id": serde_json::Value::Null,
+            });
+        };
+        if full {
+            if let Some(info) = self.window_info(backend, ck, true) {
+                return serde_json::to_value(info).unwrap_or_else(|_| {
+                    serde_json::json!({ "id": serde_json::Value::Null })
+                });
+            }
+        }
+        let id = self
+            .state
+            .clients
+            .get(ck)
+            .map(|c| c.win.raw())
+            .unwrap_or(0);
+        serde_json::json!({ "id": id })
+    }
+
+    /// Compact notification nest for `get_status` (count / center / DND).
+    fn notifications_status_summary(&self) -> serde_json::Value {
+        let full = self.notifications_json();
+        serde_json::json!({
+            "count": full.get("count").cloned().unwrap_or(serde_json::json!(0)),
+            "center_open": full.get("center_open").cloned().unwrap_or(serde_json::json!(false)),
+            "do_not_disturb": full.get("do_not_disturb").cloned().unwrap_or(serde_json::json!(false)),
+        })
+    }
+
+    /// Compact blur nest for `get_status`.
+    fn blur_status_summary(&self, backend: &dyn Backend) -> serde_json::Value {
+        let cfg = CONFIG.load();
+        match backend.compositor_blur_status() {
+            Some(b) => serde_json::json!({
+                "config_enabled": cfg.behavior().blur_enabled,
+                "current_strength": b.current_strength,
+                "temporal_enabled": b.temporal_enabled,
+                "status_bar_frosted": b.status_bar_frosted,
+            }),
+            None => serde_json::json!({
+                "config_enabled": cfg.behavior().blur_enabled,
+                "current_strength": serde_json::Value::Null,
+                "temporal_enabled": false,
+                "status_bar_frosted": false,
+            }),
+        }
+    }
+
+    /// Compact HDR nest for `get_status`.
+    fn hdr_status_summary(&self, backend: &dyn Backend) -> serde_json::Value {
+        let cfg = CONFIG.load();
+        let outputs = backend.output_ops().enumerate_outputs();
+        let capable = outputs.iter().filter(|o| o.hdr_capable).count();
+        serde_json::json!({
+            "config_enabled": cfg.behavior().hdr_enabled,
+            "config_peak_nits": cfg.behavior().hdr_peak_nits,
+            "outputs_total": outputs.len(),
+            "outputs_capable": capable,
+        })
+    }
+
+    /// Compact capture nest for `get_status`.
+    fn capture_status_summary(&self, backend: &dyn Backend) -> serde_json::Value {
+        match backend.compositor_capture_status() {
+            Some(status) => serde_json::json!({
+                "screencopy_enabled": status.screencopy.enabled,
+                "screencopy_pending_frames": status.screencopy.pending_frames,
+                "image_copy_capture_enabled": status.image_copy_capture.enabled,
+                "image_copy_capture_pending_frames": status.image_copy_capture.pending_frames,
+                "dmabuf_advertised": status.dmabuf_advertised,
+            }),
+            None => serde_json::json!({
+                "screencopy_enabled": false,
+                "screencopy_pending_frames": 0,
+                "image_copy_capture_enabled": false,
+                "image_copy_capture_pending_frames": 0,
+                "dmabuf_advertised": false,
             }),
         }
     }
@@ -4447,7 +4710,9 @@ impl Jwm {
     /// `keys` returns the whole subset.
     pub(crate) fn query_config_subset(&self, args: &serde_json::Value) -> serde_json::Value {
         let cfg = CONFIG.load();
-        let full = serde_json::json!({
+        // Split across two `json!` trees so the macro stays under the crate
+        // recursion limit as the key set grows.
+        let mut full = serde_json::json!({
             "border_px": cfg.border_px(),
             "gap_px": cfg.gap_px(),
             "snap": cfg.snap(),
@@ -4497,6 +4762,48 @@ impl Jwm {
                 .unwrap_or(1.0)
                 .clamp(0.0, 1.0),
         });
+        let extra = serde_json::json!({
+            "expose_enabled": cfg.behavior().expose_enabled,
+            "peek_enabled": cfg.behavior().peek_enabled,
+            "tags_overview_enabled": cfg.behavior().tags_overview_enabled,
+            "layout_picker": cfg.behavior().layout_picker,
+            "magnifier_enabled": cfg.behavior().magnifier_enabled,
+            "magnifier_radius": cfg.behavior().magnifier_radius,
+            "magnifier_zoom": cfg.behavior().magnifier_zoom,
+            "window_tabs": cfg.behavior().window_tabs,
+            "tab_bar_height": cfg.behavior().tab_bar_height,
+            "vrr_enabled": cfg.behavior().vrr_enabled,
+            "vrr_min_fps": cfg.behavior().vrr_min_fps,
+            "vrr_max_fps": cfg.behavior().vrr_max_fps,
+            "compositor": cfg.behavior().compositor,
+            "swallow_enabled": cfg.behavior().swallow_enabled,
+            "idle_lock_secs": cfg.behavior().idle_lock_secs,
+            "idle_screen_off_secs": cfg.behavior().idle_screen_off_secs,
+            "genie_minimize": cfg.behavior().genie_minimize,
+            "focus_highlight": cfg.behavior().focus_highlight,
+            "snap_preview": cfg.behavior().snap_preview,
+            "blur_strength": cfg.behavior().blur_strength,
+            "shadow_radius": cfg.behavior().shadow_radius,
+            "inactive_opacity": cfg.behavior().inactive_opacity,
+            "active_opacity": cfg.behavior().active_opacity,
+            "wallpaper": cfg.behavior().wallpaper,
+            "wallpaper_mode": cfg.behavior().wallpaper_mode,
+            "persist_tags": cfg.layout_persist_tags(),
+            "status_bar_name": cfg.status_bar_name(),
+            "status_bar_height": cfg.status_bar_height(),
+            "status_bar_padding": cfg.status_bar_padding(),
+            "cursor_theme": cfg.cursor_theme(),
+            "cursor_size": cfg.cursor_size(),
+            "system_ui_font": cfg.system_ui_font(),
+            "recording_bitrate": cfg.behavior().recording_bitrate,
+            "recording_max_height": cfg.behavior().recording_max_height,
+            "recording_output_dir": cfg.behavior().recording_output_dir,
+        });
+        if let (Some(base), Some(more)) = (full.as_object_mut(), extra.as_object()) {
+            for (key, value) in more {
+                base.insert(key.clone(), value.clone());
+            }
+        }
         let Some(keys) = args.get("keys").and_then(|v| v.as_array()) else {
             return full;
         };
@@ -4839,6 +5146,9 @@ mod tests {
         assert!(!info.remembers_closed_placement);
         assert!(info.dock_exclusive_zone.is_none());
         assert!(!info.is_status_bar);
+        assert!(info.hidden_x.is_none());
+        assert!(info.sync_counter.is_none());
+        assert_eq!(info.sync_value, 0);
         assert!(info.layout.is_none());
         assert!(info.scratchpad.is_none());
 
@@ -4853,8 +5163,11 @@ mod tests {
         client.state.pip_restore_sticky = true;
         client.state.old_state = true;
         client.state.remembers_closed_placement = true;
+        client.state.sync_counter = Some(0xabc);
+        client.state.sync_value = 42;
         client.geometry.border_w = 4;
         client.geometry.old_border_w = 2;
+        client.geometry.hidden_x = Some(-4096);
         client.geometry.maximize_restore_rect = Some(crate::core::types::Rect::new(10, 20, 30, 40));
         client.geometry.hidden_restore_rect = Some(crate::core::types::Rect::new(1, 2, 3, 4));
         client.state.dock_layer_info = Some(crate::backend::api::LayerSurfaceInfo {
@@ -4938,6 +5251,9 @@ mod tests {
         assert_eq!(restored.layout.as_deref(), Some("TILE"));
         assert_eq!(restored.connector.as_deref(), Some("DP-1"));
         assert_eq!(restored.monitor_name.as_deref(), Some("Dell U2720Q"));
+        assert_eq!(restored.hidden_x, Some(-4096));
+        assert_eq!(restored.sync_counter, Some(0xabc));
+        assert_eq!(restored.sync_value, 42);
     }
 
     #[test]
@@ -7810,5 +8126,135 @@ mod tests {
             .0;
         assert!(tree.contains("urgent_count"));
         assert!(tree.contains("floating_count"));
+    }
+
+    /// Waves 301–400 contract pins: Window/Monitor/Workspace fields, get_*
+    /// aliases, status nests, get_config expansion, effect_status symmetry.
+    #[test]
+    fn evolve7h_waves_301_400_ipc_contract_pins() {
+        const SOURCE: &str = include_str!("ipc_handler.rs");
+        const IPC: &str = include_str!("../ipc.rs");
+
+        assert!(IPC.contains("pub hidden_x:"));
+        assert!(IPC.contains("pub sync_counter:"));
+        assert!(IPC.contains("pub sync_value:"));
+        assert!(IPC.contains("pub sel_tags:"));
+        assert!(IPC.contains("pub previous_tags:"));
+        assert!(IPC.contains("pub cur_tag:"));
+        assert!(IPC.contains("pub prev_tag:"));
+        assert!(IPC.contains("pub output_connector:"));
+        assert!(IPC.contains("pub minimized_count:"));
+        assert!(IPC.contains("pub floating_count:"));
+        assert!(IPC.contains("pub sticky_count:"));
+        assert!(IPC.contains("pub control_center:"));
+        assert!(IPC.contains("pub clipboard_picker:"));
+        assert!(IPC.contains("pub session_lock:"));
+        assert!(IPC.contains("pub resources:"));
+        assert!(IPC.contains("pub connectivity:"));
+        assert!(IPC.contains("pub capture:"));
+
+        assert!(SOURCE.contains("hidden_x: client.geometry.hidden_x"));
+        assert!(SOURCE.contains("sync_counter: client.state.sync_counter"));
+        assert!(SOURCE.contains("output_connector:"));
+        assert!(SOURCE.contains("previous_tags"));
+        assert!(SOURCE.contains("minimized_count"));
+        assert!(SOURCE.contains("fn query_focused_cfact"));
+        assert!(SOURCE.contains("fn query_focused_show_bar"));
+        assert!(SOURCE.contains("fn query_focused_prev_layout"));
+        assert!(SOURCE.contains("fn query_selected_window"));
+        assert!(SOURCE.contains("\"get_cfact\""));
+        assert!(SOURCE.contains("\"get_show_bar\""));
+        assert!(SOURCE.contains("\"get_selected\""));
+        assert!(SOURCE.contains("\"get_focused_window\""));
+        assert!(SOURCE.contains("\"get_prev_layout\""));
+
+        let effect = SOURCE
+            .split_once("\"get_effect_status\" =>")
+            .expect("get_effect_status arm")
+            .1
+            .split_once("\"get_magnifier\" =>")
+            .expect("get_magnifier follows")
+            .0;
+        assert!(effect.contains("\"launcher\""));
+        assert!(effect.contains("\"session_menu\""));
+        assert!(effect.contains("\"notifications\""));
+
+        let features = SOURCE
+            .split_once("features: RuntimeFeatureStates {")
+            .expect("RuntimeFeatureStates fill")
+            .1
+            .split_once("compositor_metrics:")
+            .expect("metrics follows")
+            .0;
+        for flag in [
+            "control_center",
+            "clipboard_picker",
+            "wifi_picker",
+            "bluetooth_picker",
+            "wallpaper_picker",
+            "theme_picker",
+            "audio_output_picker",
+            "audio_input_picker",
+            "media_players",
+            "window_switcher",
+            "session_lock",
+        ] {
+            assert!(
+                features.contains(flag),
+                "get_status features must include {flag}"
+            );
+        }
+
+        let status = SOURCE
+            .split_once("compositor_metrics: backend")
+            .expect("status metrics")
+            .1
+            .split_once("fn window_info")
+            .expect("window_info follows")
+            .0;
+        for nest in [
+            "resources:",
+            "connectivity:",
+            "power:",
+            "media:",
+            "notifications:",
+            "blur:",
+            "hdr:",
+            "capture:",
+        ] {
+            assert!(
+                status.contains(nest),
+                "get_status must nest {nest}"
+            );
+        }
+
+        let config = SOURCE
+            .split_once("fn query_config_subset")
+            .expect("query_config_subset")
+            .1
+            .split_once("fn query_tree")
+            .expect("query_tree follows")
+            .0;
+        for key in [
+            "expose_enabled",
+            "peek_enabled",
+            "tags_overview_enabled",
+            "magnifier_enabled",
+            "vrr_enabled",
+            "swallow_enabled",
+            "wallpaper",
+            "persist_tags",
+            "recording_bitrate",
+        ] {
+            assert!(
+                config.contains(&format!("\"{key}\"")),
+                "get_config must expose {key}"
+            );
+        }
+
+        assert!(
+            IPC.contains("\"set_cfact\"") && IPC.contains("\"toggle_floating\""),
+            "dispatch registry must list underscore command twins"
+        );
     }
 }
