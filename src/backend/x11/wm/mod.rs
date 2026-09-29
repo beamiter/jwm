@@ -1,8 +1,8 @@
 use crate::backend::api::OutputInfo;
 use crate::backend::api::{
-    AllowedAction, BackendEvent, EwmhFeature, HitTarget, IconData, MaximizeAxes, MotifWmHints,
-    NetWmAction, NetWmState, NormalHints, PropertyKind, StackMode, StrutPartial, WindowChanges,
-    WindowType, WmHints,
+    AllowedAction, BackendEvent, EwmhFeature, EwmhSourceIndication, HitTarget, IconData,
+    MaximizeAxes, MotifWmHints, NetWmAction, NetWmState, NormalHints, PropertyKind, StackMode,
+    StrutPartial, WindowChanges, WindowType, WmHints,
 };
 use crate::backend::common_define::{OutputId, WindowId};
 use std::ops::BitOr;
@@ -147,6 +147,8 @@ pub enum ClientMessageKind {
         action: NetWmAction,
         first: u32,
         second: u32,
+        /// EWMH `_NET_WM_STATE` `data[3]` source indication.
+        source: EwmhSourceIndication,
     },
     ActiveWindow,
     CloseWindow,
@@ -391,6 +393,7 @@ pub fn classify_client_message(
                 action,
                 first: data[1],
                 second: data[2],
+                source: EwmhSourceIndication::from_raw(data[3]),
             };
         }
     }
@@ -653,15 +656,18 @@ pub fn enrich_background_event<Lookup, Invalidate>(
 
 /// One `_NET_WM_STATE` ClientMessage -> policy events in message order. Decoded
 /// MaximizedVert/MaximizedHorz atoms merge into ONE
-/// `BackendEvent::WindowMaximizeRequest { window, action, axes }` placed where the
-/// first maximize atom appeared; every other decoded atom becomes a
-/// `WindowStateRequest`. Zero, unknown and repeated atoms are skipped. An empty
-/// result keeps the transports' generic ClientMessage fallback.
+/// `BackendEvent::WindowMaximizeRequest { window, action, axes, source }`
+/// placed where the first maximize atom appeared; every other decoded atom
+/// becomes a `WindowStateRequest`. Zero, unknown and repeated atoms are
+/// skipped. An empty result keeps the transports' generic ClientMessage
+/// fallback. `source` is the EWMH `data[3]` indication and applies only to
+/// the coalesced maximize event.
 pub fn expand_net_wm_state_requests<F>(
     window: WindowId,
     action: NetWmAction,
     first: u32,
     second: u32,
+    source: EwmhSourceIndication,
     mut decode_state: F,
 ) -> Vec<BackendEvent>
 where
@@ -701,6 +707,7 @@ where
                 window,
                 action,
                 axes,
+                source,
             },
         );
     }
@@ -1243,7 +1250,8 @@ mod tests {
         refresh_millihz_to_hz, unclassified_client_message_event, with_maximize_atoms,
     };
     use crate::backend::api::{
-        BackendEvent, EwmhFeature, HitTarget, MaximizeAxes, NetWmAction, NetWmState, PropertyKind,
+        BackendEvent, EwmhFeature, EwmhSourceIndication, HitTarget, MaximizeAxes, NetWmAction,
+        NetWmState, PropertyKind,
     };
     use crate::backend::common_define::{OutputId, WindowId};
     use std::cell::Cell;
@@ -1448,13 +1456,23 @@ mod tests {
     #[derive(Debug, PartialEq)]
     enum Expanded {
         State(WindowId, NetWmAction, NetWmState),
-        Maximize(WindowId, NetWmAction, MaximizeAxes),
+        Maximize(WindowId, NetWmAction, MaximizeAxes, EwmhSourceIndication),
     }
 
-    fn expand(action: NetWmAction, first: u32, second: u32) -> Vec<Expanded> {
-        expand_net_wm_state_requests(WindowId::from_raw(7), action, first, second, |atom| {
-            net_wm_state_from_atom(atom, STATE_ATOMS)
-        })
+    fn expand(
+        action: NetWmAction,
+        first: u32,
+        second: u32,
+        source: EwmhSourceIndication,
+    ) -> Vec<Expanded> {
+        expand_net_wm_state_requests(
+            WindowId::from_raw(7),
+            action,
+            first,
+            second,
+            source,
+            |atom| net_wm_state_from_atom(atom, STATE_ATOMS),
+        )
         .into_iter()
         .map(|event| match event {
             BackendEvent::WindowStateRequest {
@@ -1466,10 +1484,15 @@ mod tests {
                 window,
                 action,
                 axes,
-            } => Expanded::Maximize(window, action, axes),
+                source,
+            } => Expanded::Maximize(window, action, axes, source),
             other => panic!("unexpected event: {other:?}"),
         })
         .collect()
+    }
+
+    fn expand_app(action: NetWmAction, first: u32, second: u32) -> Vec<Expanded> {
+        expand(action, first, second, EwmhSourceIndication::Application)
     }
 
     #[test]
@@ -1541,6 +1564,40 @@ mod tests {
                 action: NetWmAction::Toggle,
                 first: VERT,
                 second: HORZ,
+                source: EwmhSourceIndication::Application,
+            }
+        ));
+    }
+
+    #[test]
+    fn classify_client_message_preserves_pager_source_indication() {
+        let kind = classify_client_message(
+            MESSAGE_ATOMS.net_wm_state,
+            32,
+            [1, VERT, HORZ, 2, 0],
+            MESSAGE_ATOMS,
+        );
+        assert!(matches!(
+            kind,
+            ClientMessageKind::WindowState {
+                action: NetWmAction::Add,
+                first: VERT,
+                second: HORZ,
+                source: EwmhSourceIndication::Pager,
+            }
+        ));
+        // Unknown source values collapse to Unspecified (same as 0).
+        let kind = classify_client_message(
+            MESSAGE_ATOMS.net_wm_state,
+            32,
+            [1, VERT, 0, 99, 0],
+            MESSAGE_ATOMS,
+        );
+        assert!(matches!(
+            kind,
+            ClientMessageKind::WindowState {
+                source: EwmhSourceIndication::Unspecified,
+                ..
             }
         ));
     }
@@ -1552,11 +1609,12 @@ mod tests {
         let win = WindowId::from_raw(7);
         for (first, second) in [(VERT, HORZ), (HORZ, VERT)] {
             assert_eq!(
-                expand(NetWmAction::Toggle, first, second),
+                expand_app(NetWmAction::Toggle, first, second),
                 vec![Expanded::Maximize(
                     win,
                     NetWmAction::Toggle,
-                    MaximizeAxes::BOTH
+                    MaximizeAxes::BOTH,
+                    EwmhSourceIndication::Application,
                 )],
                 "first={first} second={second}"
             );
@@ -1564,20 +1622,40 @@ mod tests {
     }
 
     #[test]
+    fn expand_carries_pager_source_into_the_maximize_request() {
+        let win = WindowId::from_raw(7);
+        assert_eq!(
+            expand(
+                NetWmAction::Add,
+                VERT,
+                HORZ,
+                EwmhSourceIndication::Pager,
+            ),
+            vec![Expanded::Maximize(
+                win,
+                NetWmAction::Add,
+                MaximizeAxes::BOTH,
+                EwmhSourceIndication::Pager,
+            )]
+        );
+    }
+
+    #[test]
     fn single_maximize_atom_and_other_states_keep_message_order() {
         let win = WindowId::from_raw(7);
+        let app = EwmhSourceIndication::Application;
         for action in [NetWmAction::Add, NetWmAction::Remove, NetWmAction::Toggle] {
             assert_eq!(
-                expand(action, FULLSCREEN, HORZ),
+                expand_app(action, FULLSCREEN, HORZ),
                 vec![
                     Expanded::State(win, action, NetWmState::Fullscreen),
-                    Expanded::Maximize(win, action, MaximizeAxes::HORZ),
+                    Expanded::Maximize(win, action, MaximizeAxes::HORZ, app),
                 ]
             );
             assert_eq!(
-                expand(action, VERT, ABOVE),
+                expand_app(action, VERT, ABOVE),
                 vec![
-                    Expanded::Maximize(win, action, MaximizeAxes::VERT),
+                    Expanded::Maximize(win, action, MaximizeAxes::VERT, app),
                     Expanded::State(win, action, NetWmState::Above),
                 ]
             );
@@ -1591,11 +1669,12 @@ mod tests {
             win,
             NetWmAction::Add,
             MaximizeAxes::VERT,
+            EwmhSourceIndication::Application,
         )];
-        assert_eq!(expand(NetWmAction::Add, VERT, 0), vert_only);
-        assert_eq!(expand(NetWmAction::Add, VERT, VERT), vert_only);
+        assert_eq!(expand_app(NetWmAction::Add, VERT, 0), vert_only);
+        assert_eq!(expand_app(NetWmAction::Add, VERT, VERT), vert_only);
         // Nothing decodable leaves the transports' ClientMessage fallback.
-        assert_eq!(expand(NetWmAction::Add, 0, 999), vec![]);
+        assert_eq!(expand_app(NetWmAction::Add, 0, 999), vec![]);
     }
 
     #[test]

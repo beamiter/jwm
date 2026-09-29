@@ -2110,7 +2110,9 @@ mod tests {
         let mut backend = DockSpyBackend::new();
         let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
         let mon = jwm.state.monitor_order[0];
-        let (_, work) = jwm.monitor_migration_areas(mon).unwrap();
+        // Work area must differ from m_* so a full-monitor half would fail.
+        shrink_work_area_top(&mut jwm, mon, 30);
+        let work = jwm.maximize_work_area(mon).unwrap();
         let key = floating_client(
             &mut jwm,
             mon,
@@ -2127,9 +2129,8 @@ mod tests {
         jwm.snap_window(&mut backend, &WMArgEnum::StringVec(vec!["left".into()]))
             .unwrap();
 
-        // The classic left half of the monitor (snap_rect's Left).
-        let (mx, my, mw, mh) = jwm.monitor_rect(mon);
-        let half = Rect::new(mx, my, mw as i32 / 2, mh as i32);
+        // Left half of the work area (same geometry as a mouse float snap).
+        let half = Rect::new(work.x, work.y, work.w / 2, work.h);
         let client = &jwm.state.clients[key];
         assert_eq!(client.state.maximized_axes(), MaximizeAxes::NONE);
         assert_eq!(client.geometry.maximize_restore_rect, None);
@@ -2142,6 +2143,11 @@ mod tests {
             Rect::new(half.x + bw, half.y + bw, half.w - 2 * bw, half.h - 2 * bw)
         );
         assert_eq!(floating_rect(client), live_rect(client));
+        assert_eq!(
+            live_rect(client).y,
+            work.y + bw,
+            "the bar strip stays uncovered after a half snap"
+        );
     }
 
     #[test]

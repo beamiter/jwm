@@ -87,43 +87,28 @@ impl SnapDirection {
 }
 
 /// The snap geometry of the classic mouse float snap, extracted so the
-/// keyboard command produces the same rect: left/right halves of the monitor
-/// and the four corner quarters. Quarters reuse the halves' integer rule —
-/// both dimensions floor, so an odd width or height leaves the last
-/// column/row uncovered.
+/// keyboard command produces the same rect: left/right halves of `area` and
+/// the four corner quarters. Callers pass the monitor **work area** (bar,
+/// docks and tab bar excluded) so halves and quarters align with maximize.
+/// Quarters reuse the halves' integer rule — both dimensions floor, so an
+/// odd width or height leaves the last column/row uncovered.
 ///
-/// `Maximize` still maps to the full monitor rect for its unit tests, but no
+/// `Maximize` still maps to the full `area` rect for its unit tests, but no
 /// caller snaps to it any more: the top-edge drop and `snap_window maximize`
-/// are real maximize requests that fill the work area (bar, docks and tab bar
-/// excluded) through `Jwm::set_client_maximized`.
-pub(crate) fn snap_rect(monitor: Rect, direction: SnapDirection) -> Rect {
+/// are real maximize requests through `Jwm::set_client_maximized`.
+pub(crate) fn snap_rect(area: Rect, direction: SnapDirection) -> Rect {
     match direction {
-        SnapDirection::Left => Rect::new(monitor.x, monitor.y, monitor.w / 2, monitor.h),
-        SnapDirection::Right => Rect::new(
-            monitor.x + monitor.w / 2,
-            monitor.y,
-            monitor.w / 2,
-            monitor.h,
-        ),
-        SnapDirection::Maximize => monitor,
-        SnapDirection::TopLeft => Rect::new(monitor.x, monitor.y, monitor.w / 2, monitor.h / 2),
-        SnapDirection::TopRight => Rect::new(
-            monitor.x + monitor.w / 2,
-            monitor.y,
-            monitor.w / 2,
-            monitor.h / 2,
-        ),
-        SnapDirection::BottomLeft => Rect::new(
-            monitor.x,
-            monitor.y + monitor.h / 2,
-            monitor.w / 2,
-            monitor.h / 2,
-        ),
+        SnapDirection::Left => Rect::new(area.x, area.y, area.w / 2, area.h),
+        SnapDirection::Right => Rect::new(area.x + area.w / 2, area.y, area.w / 2, area.h),
+        SnapDirection::Maximize => area,
+        SnapDirection::TopLeft => Rect::new(area.x, area.y, area.w / 2, area.h / 2),
+        SnapDirection::TopRight => Rect::new(area.x + area.w / 2, area.y, area.w / 2, area.h / 2),
+        SnapDirection::BottomLeft => Rect::new(area.x, area.y + area.h / 2, area.w / 2, area.h / 2),
         SnapDirection::BottomRight => Rect::new(
-            monitor.x + monitor.w / 2,
-            monitor.y + monitor.h / 2,
-            monitor.w / 2,
-            monitor.h / 2,
+            area.x + area.w / 2,
+            area.y + area.h / 2,
+            area.w / 2,
+            area.h / 2,
         ),
     }
 }
@@ -349,7 +334,10 @@ impl Jwm {
                 rect: self.maximize_work_area(mon_key)?,
             });
         }
-        let rect = snap_rect(Rect::new(mx, my, mw, mh), direction);
+        // Edge hit-tests stay on the outer monitor (`m_*` above); the settled
+        // half/quarter fills the work area so it does not cover the bar.
+        let area = self.maximize_work_area(mon_key)?;
+        let rect = snap_rect(area, direction);
         Some(DragSnapPlan::Float { rect })
     }
 
@@ -740,8 +728,10 @@ impl Jwm {
             self.unmaximize_in_place(backend, client_key)?;
         }
 
-        let (mx, my, mw, mh) = self.monitor_rect(mon_key);
-        let rect = snap_rect(Rect::new(mx, my, mw as i32, mh as i32), direction);
+        let Some(area) = self.maximize_work_area(mon_key) else {
+            return Ok(());
+        };
+        let rect = snap_rect(area, direction);
         info!(
             "[snap_window] snapping client {:?} {} -> {:?}",
             client_key,
@@ -1048,6 +1038,64 @@ mod tests {
             snap_rect(mon, SnapDirection::BottomRight),
             Rect::new(3200, 760, 1280, 720)
         );
+    }
+
+    #[test]
+    fn half_and_quarter_float_snaps_use_the_work_area_not_m_star() {
+        use crate::jwm::monitor::test_support::{DisplaySpyBackend, output};
+
+        let mut backend = DisplaySpyBackend::new(vec![output(1, 0, 0, 1920, 1080)]);
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").expect("test jwm");
+        let mon = jwm.state.monitor_order[0];
+        // Reserve a top strip so work area ≠ monitor outer rect.
+        {
+            let geometry = &mut jwm.state.monitors[mon].geometry;
+            geometry.w_y += 30;
+            geometry.w_h -= 30;
+        }
+        let work = jwm.maximize_work_area(mon).expect("work area");
+        let (mx, my, mw, mh) = jwm.monitor_rect(mon);
+        assert_ne!(work.y, my);
+        assert_ne!(work.h, mh as i32);
+
+        let key = shown_window(&mut jwm, 0x5d10, mon, Rect::new(200, 150, 600, 400), false);
+        jwm.focus(&mut backend, Some(key)).expect("focus");
+
+        // Left-edge hit still uses outer m_*; the planned rect is work-area half.
+        let left = jwm
+            .plan_drag_snap_for(key, mon, mx + 1, my + mh as i32 / 2)
+            .expect("left half zone");
+        match left {
+            DragSnapPlan::Float { rect } => {
+                assert_eq!(rect, snap_rect(work, SnapDirection::Left));
+                assert_ne!(
+                    rect,
+                    snap_rect(Rect::new(mx, my, mw as i32, mh as i32), SnapDirection::Left)
+                );
+            }
+            _ => panic!("expected Float snap on the left edge"),
+        }
+
+        // Bottom-right corner: outer-edge hit, work-area quarter.
+        let corner = jwm
+            .plan_drag_snap_for(key, mon, mx + mw as i32 - 1, my + mh as i32 - 1)
+            .expect("bottom-right quarter zone");
+        match corner {
+            DragSnapPlan::Float { rect } => {
+                assert_eq!(rect, snap_rect(work, SnapDirection::BottomRight));
+            }
+            _ => panic!("expected Float snap on the bottom-right corner"),
+        }
+
+        // Top edge stays a real maximize over the work area.
+        let top = jwm
+            .plan_drag_snap_for(key, mon, mx + mw as i32 / 2, my + 1)
+            .expect("top maximize zone");
+        assert_eq!(top.maximize_monitor(), Some(mon));
+        match top {
+            DragSnapPlan::Maximize { rect, .. } => assert_eq!(rect, work),
+            _ => panic!("expected Maximize on the top edge"),
+        }
     }
 
     #[test]

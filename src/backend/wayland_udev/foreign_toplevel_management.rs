@@ -20,7 +20,7 @@ use smithay::reexports::wayland_server::{
 };
 use smithay::utils::{Logical, Rectangle};
 
-use crate::backend::api::{BackendEvent, MaximizeAxes, NetWmAction};
+use crate::backend::api::{BackendEvent, EwmhSourceIndication, MaximizeAxes, NetWmAction};
 use crate::backend::common_define::WindowId;
 use crate::backend::wayland::state::JwmWaylandState;
 
@@ -1119,6 +1119,8 @@ impl Dispatch<ZwlrForeignToplevelHandleV1, ForeignToplevelHandleData> for JwmWay
                     window: win,
                     action: NetWmAction::Add,
                     axes: MaximizeAxes::BOTH,
+                    // wlr has no EWMH source field; admission stays Client.
+                    source: EwmhSourceIndication::Unspecified,
                 });
             }
             zwlr_foreign_toplevel_handle_v1::Request::UnsetMaximized => {
@@ -1127,6 +1129,7 @@ impl Dispatch<ZwlrForeignToplevelHandleV1, ForeignToplevelHandleData> for JwmWay
                     window: win,
                     action: NetWmAction::Remove,
                     axes: MaximizeAxes::BOTH,
+                    source: EwmhSourceIndication::Unspecified,
                 });
             }
             zwlr_foreign_toplevel_handle_v1::Request::SetMinimized => {

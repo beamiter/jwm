@@ -4,6 +4,45 @@
 
 ---
 
+## 2026-09-29（二）：snap 半屏/四分屏改走工作区
+
+选题 = evolve wave 10；闭合 handoff maximize 延后项「snap 半屏和四分屏仍用
+`m_*` 而非工作区」。
+
+1. **契约**：`plan_drag_snap_for` / `snap_window` 对 half/quarter 把
+   `maximize_work_area` 传入 `snap_rect`；边缘命中仍用外层 `m_*`；顶边 /
+   `snap_window maximize` 不变。
+2. **回归**：`half_and_quarter_float_snaps_use_the_work_area_not_m_star`；
+   `snapping_a_maximized_window_to_a_half_drops_maximize_in_place` 与
+   `move_float_drop_snaps_the_dragged_window_after_focus_moved` 改为钉工作区。
+
+**验证**：`scripts/test.sh --lib -- half_and_quarter_float snapping_a_maximized_window_to_a_half move_float_drop_snaps`。
+
+**仍然开着的**：继承 maximize 延后项，去掉 snap `m_*` 一条。
+
+---
+
+## 2026-09-29：EWMH source indication → MaximizeOrigin
+
+选题 = evolve wave 9；闭合 handoff maximize 延后项「EWMH source indication」。
+
+1. **契约**：`classify_client_message` 保留 `_NET_WM_STATE` `data[3]`；
+   `expand_net_wm_state_requests` 写入 `WindowMaximizeRequest.source`；
+   `maximize_origin_from_ewmh_source`：pager(2) → `User`（可提升平铺窗），
+   application/unspecified → `Client`。xdg / XWayland / wlr 无 source 字段，
+   仍为 `Unspecified` → Client。
+2. **回归**：`classify_client_message_preserves_pager_source_indication`、
+   `expand_carries_pager_source_into_the_maximize_request`、
+   `ewmh_pager_source_maps_to_user_origin`、
+   `pager_source_indication_promotes_a_tiled_window`。
+
+**验证**：`scripts/test.sh --lib -- ewmh_pager_source pager_source_indication classify_client_message_preserves expand_carries_pager` + 修改范围 `cargo check`。
+
+**仍然开着的**：继承 2026-09-25 maximize 延后项，去掉 EWMH source indication；
+wlr-foreign-toplevel 仍无 source（刻意本轮不升为 User）。
+
+---
+
 ## 2026-09-28（七）：xdg CSD move/resize 进入共享拖拽管线
 
 选题 = evolve wave 8；闭合 handoff maximize 延后项「xdg `move_request` /

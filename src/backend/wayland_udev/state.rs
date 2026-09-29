@@ -755,6 +755,7 @@ impl JwmWaylandState {
                 NetWmAction::Remove
             },
             axes: MaximizeAxes::BOTH,
+            source: crate::backend::api::EwmhSourceIndication::Unspecified,
         });
     }
 

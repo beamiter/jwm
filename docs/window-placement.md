@@ -110,8 +110,10 @@ on both axes covers exactly what the monocle layout would give it.
 
 Requests come from three origins. The user asks through `togglemaximize`,
 `snap_window maximize` (`Alt+Shift+Up`), dropping a dragged window at the top
-edge, and `restore_session`. A client or a taskbar asks through EWMH
-`_NET_WM_STATE`, xdg-shell, XWayland or wlr-foreign-toplevel. Adoption is a
+edge, `restore_session`, and an EWMH `_NET_WM_STATE` maximize whose source
+indication is pager (`data[3] == 2`). A client asks through EWMH with
+application or unspecified source (`data[3]` 0/1), xdg-shell, XWayland or
+wlr-foreign-toplevel (those protocols have no source field). Adoption is a
 window that already carries maximized state when JWM starts managing it,
 including every window after a seamless restart. The first matching row
 decides:
@@ -123,8 +125,8 @@ decides:
 | adds an axis | floating, including underneath fullscreen or PiP | applied |
 | adds an axis | tiled underneath fullscreen or PiP | refused |
 | adds an axis | tiled, float layout, any origin | promoted |
-| adds an axis | tiled, tiling layout, user | promoted |
-| adds an axis | tiled, tiling layout, client or adoption | refused |
+| adds an axis | tiled, tiling layout, user or EWMH pager | promoted |
+| adds an axis | tiled, tiling layout, client, adoption, or source-less protocol | refused |
 
 A promoted window leaves the layout while it is maximized and goes back into
 the slot it left when its last axis is cleared: in front of the window that
@@ -214,8 +216,9 @@ cancelled drag puts the window back, maximized, with its original restore
 rectangle. Dropping a window at the top edge maximizes it on the monitor it
 was dropped on. `snap_window maximize` toggles: it maximizes a floating
 window, and pressing it again restores the window. Snapping a maximized window
-to a half or a quarter unmaximizes it in place first; halves and quarters still
-cover the whole monitor rather than the work area.
+to a half or a quarter unmaximizes it in place first; halves and quarters fill
+the same work area maximize uses (bar, docks and tab bar excluded). Drop-zone
+proximity still uses the outer monitor edges.
 
 `togglefloating` on a maximized window unmaximizes it first. A promoted
 window then simply returns to the layout; any other window is unmaximized and

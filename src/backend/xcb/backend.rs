@@ -1961,9 +1961,10 @@ impl XcbBackend {
                 action,
                 first,
                 second,
+                source,
             } => {
                 let mut events =
-                    expand_net_wm_state_requests(window, action, first, second, |atom| {
+                    expand_net_wm_state_requests(window, action, first, second, source, |atom| {
                         self.atoms.state_from_atom(x::Atom::new(atom))
                     });
                 if events.is_empty() {

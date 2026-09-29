@@ -3033,12 +3033,14 @@ mod event_source {
                             action,
                             first,
                             second,
+                            source,
                         } => {
                             let mut events = expand_net_wm_state_requests(
                                 window,
                                 action,
                                 first,
                                 second,
+                                source,
                                 |atom| self.atom_to_net_wm_state(atom),
                             );
                             if events.is_empty() {

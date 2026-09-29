@@ -10,19 +10,34 @@
 //! Rectangles follow the client geometry convention: outer origin, content
 //! (inner) size, border drawn outside the content.
 
-use crate::backend::api::{MaximizeAxes, NetWmAction};
+use crate::backend::api::{EwmhSourceIndication, MaximizeAxes, NetWmAction};
 use crate::backend::common_define::ConfigWindowBits;
 use crate::core::types::Rect;
 
 /// Who asked for a maximize change; decides whether a layout-managed window may leave the layout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MaximizeOrigin {
-    /// EWMH ClientMessage, xdg-shell, XWayland, wlr-foreign-toplevel.
+    /// EWMH ClientMessage from the application (source 0/1), xdg-shell,
+    /// XWayland, wlr-foreign-toplevel.
     Client,
-    /// JWM command/keybinding/IPC, snap_window, top-edge drop zone, session restore.
+    /// JWM command/keybinding/IPC, snap_window, top-edge drop zone, session
+    /// restore, or an EWMH pager/taskbar request (`data[3] == 2`).
     User,
     /// Manage-time adoption of pre-set protocol state.
     Adopt,
+}
+
+/// Map EWMH `_NET_WM_STATE` source indication onto [`MaximizeOrigin`].
+///
+/// Pagers (source 2) act for the user and may promote a tiled window; the
+/// application and unspecified sources stay [`MaximizeOrigin::Client`].
+pub fn maximize_origin_from_ewmh_source(source: EwmhSourceIndication) -> MaximizeOrigin {
+    match source {
+        EwmhSourceIndication::Pager => MaximizeOrigin::User,
+        EwmhSourceIndication::Unspecified | EwmhSourceIndication::Application => {
+            MaximizeOrigin::Client
+        }
+    }
 }
 
 /// Outcome of [`admit_maximize`].
@@ -158,8 +173,9 @@ pub fn admit_maximize(
     if facts.suspended {
         return MaximizeAdmission::Reject;
     }
-    // Clients, taskbars and adoption must not un-tile a layout-managed
-    // window in a tiling layout; only the user may, and the FLOAT layout has
+    // Applications, adoption and protocols without a pager source must not
+    // un-tile a layout-managed window in a tiling layout; only the user (or
+    // an EWMH pager with source indication 2) may, and the FLOAT layout has
     // no tiles to protect.
     if facts.float_layout || origin == MaximizeOrigin::User {
         MaximizeAdmission::Promote
@@ -319,7 +335,7 @@ pub fn has_configure_geometry_bits(mask_bits: u16) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::api::NetWmState;
+    use crate::backend::api::{EwmhSourceIndication, NetWmState};
 
     const NONE: MaximizeAxes = MaximizeAxes::NONE;
     const VERT: MaximizeAxes = MaximizeAxes::VERT;
@@ -328,6 +344,28 @@ mod tests {
 
     fn area() -> Rect {
         Rect::new(0, 30, 1920, 1050)
+    }
+
+    #[test]
+    fn ewmh_pager_source_maps_to_user_origin() {
+        assert_eq!(
+            maximize_origin_from_ewmh_source(EwmhSourceIndication::Pager),
+            MaximizeOrigin::User
+        );
+        for source in [
+            EwmhSourceIndication::Unspecified,
+            EwmhSourceIndication::Application,
+        ] {
+            assert_eq!(
+                maximize_origin_from_ewmh_source(source),
+                MaximizeOrigin::Client,
+                "{source:?}"
+            );
+        }
+        assert_eq!(EwmhSourceIndication::from_raw(0), EwmhSourceIndication::Unspecified);
+        assert_eq!(EwmhSourceIndication::from_raw(1), EwmhSourceIndication::Application);
+        assert_eq!(EwmhSourceIndication::from_raw(2), EwmhSourceIndication::Pager);
+        assert_eq!(EwmhSourceIndication::from_raw(99), EwmhSourceIndication::Unspecified);
     }
 
     #[test]

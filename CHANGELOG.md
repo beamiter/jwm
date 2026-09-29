@@ -294,17 +294,31 @@ monorepo use independent Semantic Versions.
 
 ### Changed
 
+- Float snap halves and corner quarters (`snap_window` and mouse edge/corner
+  drops) fill the monitor work area — the same area maximize uses — so they
+  no longer cover the status bar, docks or tab bar. Drop-zone hit-tests still
+  use the outer monitor edges; top-edge / `snap_window maximize` is unchanged.
+  See [docs/window-placement.md](docs/window-placement.md#drag-and-snap).
+
+- Native X11 `_NET_WM_STATE` maximize requests honor EWMH source indication
+  (`data[3]`): a pager (2) may promote a tiled window like `togglemaximize`;
+  an application or unspecified source (0/1) still cannot. xdg-shell,
+  XWayland and wlr-foreign-toplevel have no source field and keep the
+  client-like admission rule. See
+  [docs/window-placement.md](docs/window-placement.md#who-may-maximize-what).
+
 - `snap_window maximize` (`Alt+Shift+Up`) and dropping a dragged window at
   the top edge now perform a real maximize: they fill the work area instead
   of the whole monitor, set the EWMH/xdg maximized state, and toggle back to
   the previous rectangle. Dragging a maximized window, or snapping it to a
   half or a quarter, unmaximizes it in place first, and a cancelled drag
   restores it maximized. `togglefloating` on a maximized window unmaximizes
-  it first. A maximize that a client, a taskbar or a pre-set atom asks for is
-  refused for a window the tiling layout manages, as in sway, and pre-set
-  maximized atoms on tiled windows are cleared when JWM manages them; use
-  `togglemaximize` to maximize a tiled window. Fixed-size windows no longer
-  advertise Resize or Maximize in `_NET_WM_ALLOWED_ACTIONS`.
+  it first. A maximize that an application, a source-less protocol or a
+  pre-set atom asks for is refused for a window the tiling layout manages,
+  as in sway, and pre-set maximized atoms on tiled windows are cleared when
+  JWM manages them; use `togglemaximize` or an EWMH pager (source 2) to
+  maximize a tiled window. Fixed-size windows no longer advertise Resize or
+  Maximize in `_NET_WM_ALLOWED_ACTIONS`.
 
 - IPC `view`, `tag`, `toggleview` and `toggletag` reject a missing argument, a
   zero mask, and a mask with no bit inside the configured `tags_length`, with

@@ -566,6 +566,7 @@ fn xdg_maximize_wire_requests_enter_shared_policy_and_owe_exactly_one_reply() {
                 window: event_window,
                 action,
                 axes,
+                source: _,
             } if *event_window == window => Some((*action, *axes)),
             _ => None,
         })
@@ -880,7 +881,7 @@ fn xwm_above_below_requests_write_real_properties_and_raise_real_windows() {
         .expect("maximize request event");
     assert!(matches!(
         actual,
-        BackendEvent::WindowMaximizeRequest { window, action: NetWmAction::Add, axes }
+        BackendEvent::WindowMaximizeRequest { window, action: NetWmAction::Add, axes, source: _ }
             if window == first_win && axes == MaximizeAxes::BOTH
     ));
 
@@ -930,7 +931,7 @@ fn xwm_above_below_requests_write_real_properties_and_raise_real_windows() {
     assert_eq!(geometry_of(&state), geometry_before);
     assert!(matches!(
         events.as_slice(),
-        [BackendEvent::WindowMaximizeRequest { window, action: NetWmAction::Remove, axes }]
+        [BackendEvent::WindowMaximizeRequest { window, action: NetWmAction::Remove, axes, source: _ }]
             if *window == first_win && *axes == MaximizeAxes::BOTH
     ));
 }
@@ -1120,12 +1121,12 @@ fn x11_maximize_callbacks_reuse_the_shared_maximize_request() {
     assert_eq!(events.len(), 2, "an unknown X11 id must not emit an event");
     assert!(matches!(
         events[0],
-        BackendEvent::WindowMaximizeRequest { window, action: NetWmAction::Add, axes }
+        BackendEvent::WindowMaximizeRequest { window, action: NetWmAction::Add, axes, source: _ }
             if window == win && axes == MaximizeAxes::BOTH
     ));
     assert!(matches!(
         events[1],
-        BackendEvent::WindowMaximizeRequest { window, action: NetWmAction::Remove, axes }
+        BackendEvent::WindowMaximizeRequest { window, action: NetWmAction::Remove, axes, source: _ }
             if window == win && axes == MaximizeAxes::BOTH
     ));
     assert!(

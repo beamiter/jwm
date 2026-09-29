@@ -224,12 +224,13 @@ The default modifier is Alt (`Mod1`). Useful built-in bindings include:
 | Alt+Control+Shift+R | Move, resize, or replace the active recording source |
 | XF86AudioMicMute | Toggle the default microphone's mute (labeled OSD confirms) |
 | Alt+Shift+C | Close focused client |
-| Alt+Shift+Left / Alt+Shift+Right | Snap the focused floating window to that half of its monitor |
+| Alt+Shift+Left / Alt+Shift+Right | Snap the focused floating window to that half of its monitor's work area |
 | Alt+Shift+Up | Toggle maximize of the focused floating window (fills the work area; press again to restore) |
 
 Mouse users get the same geometry: dragging a floating window to a side edge
-snaps it to that half, dropping it at the top edge performs the same real
-maximize as `Alt+Shift+Up`, and dropping it into a corner quarters it there.
+snaps it to that half of the work area (bar, docks and tab bar excluded),
+dropping it at the top edge performs the same real maximize as `Alt+Shift+Up`,
+and dropping it into a corner quarters it there.
 The quarters have no default bindings, but `snap_window top-left` /
 `top-right` / `bottom-left` / `bottom-right` are bindable and scriptable over
 IPC like the three defaults. The bindable `togglemaximize` command (no default

@@ -1703,6 +1703,30 @@ pub enum NetWmAction {
     Toggle,
 }
 
+/// EWMH source indication carried in `_NET_WM_STATE` ClientMessage `data[3]`.
+///
+/// Spec values: `0` unspecified (older clients), `1` application, `2` pager.
+/// Unknown values collapse to [`Unspecified`](Self::Unspecified). Protocols
+/// without a source field (xdg-shell, XWayland, wlr-foreign-toplevel) emit
+/// [`Unspecified`](Self::Unspecified).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EwmhSourceIndication {
+    #[default]
+    Unspecified,
+    Application,
+    Pager,
+}
+
+impl EwmhSourceIndication {
+    pub fn from_raw(value: u32) -> Self {
+        match value {
+            1 => Self::Application,
+            2 => Self::Pager,
+            _ => Self::Unspecified,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StackMode {
     Above,
@@ -2152,13 +2176,16 @@ pub enum BackendEvent {
     /// A client, pager or taskbar asked to change maximize state. `axes` names
     /// the axes the request covers and is never `NONE`. Both X11 transports
     /// turn one `_NET_WM_STATE` message naming both MAXIMIZED atoms into ONE
-    /// event; xdg-shell, XWayland and wlr-foreign-toplevel always send `BOTH`
-    /// with `Add`/`Remove`. Protocol callbacks never pre-confirm: shared
-    /// policy publishes accepted state via `PropertyOps::set_maximized_state`.
+    /// event and carry EWMH source indication in `source`; xdg-shell,
+    /// XWayland and wlr-foreign-toplevel always send `BOTH` with
+    /// `Add`/`Remove` and [`EwmhSourceIndication::Unspecified`]. Protocol
+    /// callbacks never pre-confirm: shared policy publishes accepted state
+    /// via `PropertyOps::set_maximized_state`.
     WindowMaximizeRequest {
         window: WindowId,
         action: NetWmAction,
         axes: MaximizeAxes,
+        source: EwmhSourceIndication,
     },
     PropertyChanged {
         window: WindowId,

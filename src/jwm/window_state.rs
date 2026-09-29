@@ -2253,8 +2253,9 @@ mod tests {
         BackendDiagnostics, Capabilities, CloseResult, ColorAllocator, CompositorAnnotation,
         CompositorBenchmark, CompositorControl, CompositorMedia, CompositorRect,
         CompositorWindowEffects, CompositorWorkspaceEffects, CursorProvider, DisplayControl,
-        EventHandler, InputOps, KeyOps, MaximizeAxes, NetWmAction, NetWmState, NormalHints,
-        OutputOps, PropertyOps, RenderScheduler, WindowAttributes, WindowOps, WindowType, WmHints,
+        EventHandler, EwmhSourceIndication, InputOps, KeyOps, MaximizeAxes, NetWmAction,
+        NetWmState, NormalHints, OutputOps, PropertyOps, RenderScheduler, WindowAttributes,
+        WindowOps, WindowType, WmHints,
     };
     use crate::backend::common_define::Pixel;
     use crate::backend::error::BackendError;
@@ -5970,7 +5971,13 @@ mod tests {
         let border_w = jwm.state.clients[client_key].geometry.border_w;
         let configures = window_configures(&backend, window).len();
 
-        jwm.handle_maximize_request(&mut backend, window, NetWmAction::Add, MAX_BOTH);
+        jwm.handle_maximize_request(
+            &mut backend,
+            window,
+            NetWmAction::Add,
+            MAX_BOTH,
+            EwmhSourceIndication::Application,
+        );
         let client = &jwm.state.clients[client_key];
         assert!(!client.state.is_floating);
         assert_eq!(client.state.maximized_axes(), MAX_NONE);
@@ -5988,11 +5995,18 @@ mod tests {
             WindowId::from_raw(0x5a4f),
             NetWmAction::Add,
             MAX_BOTH,
+            EwmhSourceIndication::Application,
         );
         assert_eq!(maximized_writes(&backend), vec![MAX_NONE]);
 
         jwm.state.monitors[monitor].lt = Rc::new(LayoutEnum::FLOAT);
-        jwm.handle_maximize_request(&mut backend, window, NetWmAction::Toggle, MAX_BOTH);
+        jwm.handle_maximize_request(
+            &mut backend,
+            window,
+            NetWmAction::Toggle,
+            MAX_BOTH,
+            EwmhSourceIndication::Application,
+        );
         let client = &jwm.state.clients[client_key];
         assert!(client.state.is_floating);
         assert!(client.state.maximize_restore_tiled);
@@ -6009,13 +6023,72 @@ mod tests {
 
         // Under the FLOAT layout the retile restores the pre-maximize rect
         // directly, since no layout will place the window.
-        jwm.handle_maximize_request(&mut backend, window, NetWmAction::Remove, MAX_BOTH);
+        jwm.handle_maximize_request(
+            &mut backend,
+            window,
+            NetWmAction::Remove,
+            MAX_BOTH,
+            EwmhSourceIndication::Application,
+        );
         let client = &jwm.state.clients[client_key];
         assert!(!client.state.is_floating);
         assert!(!client.state.maximize_restore_tiled);
         assert_eq!(client.state.maximized_axes(), MAX_NONE);
         assert_eq!(client.geometry.maximize_restore_rect, None);
         assert_eq!(client_rect(&jwm, client_key), restore);
+    }
+
+    #[test]
+    fn pager_source_indication_promotes_a_tiled_window() {
+        let mut backend = MinimizeSpyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let monitor = jwm.state.monitor_order[0];
+        jwm.state.monitors[monitor].lt = Rc::new(LayoutEnum::TILE);
+        let area = jwm.monitor_work_area(monitor).expect("monitor work area");
+        let source = Rect::new(area.x + 20, area.y + 20, 500, 400);
+        let window = WindowId::from_raw(0x5a41);
+        let (_, client_key) = add_mode_client(&mut jwm, window, source, false, false);
+        jwm.arrange(&mut backend, Some(monitor));
+        let tile_slot = client_rect(&jwm, client_key);
+        let border_w = jwm.state.clients[client_key].geometry.border_w;
+
+        // Application / unspecified still refuse (same as before).
+        for indication in [
+            EwmhSourceIndication::Unspecified,
+            EwmhSourceIndication::Application,
+        ] {
+            jwm.handle_maximize_request(
+                &mut backend,
+                window,
+                NetWmAction::Add,
+                MAX_BOTH,
+                indication,
+            );
+            let client = &jwm.state.clients[client_key];
+            assert!(
+                !client.state.is_floating,
+                "{indication:?} must not promote a tiled window"
+            );
+            assert_eq!(client.state.maximized_axes(), MAX_NONE);
+            assert_eq!(client_rect(&jwm, client_key), tile_slot);
+        }
+
+        // EWMH pager source (data[3] == 2) acts for the user.
+        jwm.handle_maximize_request(
+            &mut backend,
+            window,
+            NetWmAction::Add,
+            MAX_BOTH,
+            EwmhSourceIndication::Pager,
+        );
+        let client = &jwm.state.clients[client_key];
+        assert!(client.state.is_floating);
+        assert!(client.state.maximize_restore_tiled);
+        assert_eq!(client.state.maximized_axes(), MAX_BOTH);
+        assert_eq!(
+            client_rect(&jwm, client_key),
+            maximize_target(tile_slot, area, MAX_BOTH, border_w)
+        );
     }
 
     #[test]
@@ -6373,7 +6446,13 @@ mod tests {
             geometry.floating_h = pre_promotion.h;
         }
 
-        jwm.handle_maximize_request(&mut backend, window, NetWmAction::Add, MAX_VERT);
+        jwm.handle_maximize_request(
+            &mut backend,
+            window,
+            NetWmAction::Add,
+            MAX_VERT,
+            EwmhSourceIndication::Application,
+        );
         let client = &jwm.state.clients[client_key];
         assert!(
             client.state.maximize_restore_tiled,
@@ -6384,8 +6463,20 @@ mod tests {
         assert_ne!(maximized.x, pre_promotion.x);
 
         assert!(jwm.set_client_pip(&mut backend, client_key, true).unwrap());
-        jwm.handle_maximize_request(&mut backend, window, NetWmAction::Add, MAX_HORZ);
-        jwm.handle_maximize_request(&mut backend, window, NetWmAction::Remove, MAX_HORZ);
+        jwm.handle_maximize_request(
+            &mut backend,
+            window,
+            NetWmAction::Add,
+            MAX_HORZ,
+            EwmhSourceIndication::Application,
+        );
+        jwm.handle_maximize_request(
+            &mut backend,
+            window,
+            NetWmAction::Remove,
+            MAX_HORZ,
+            EwmhSourceIndication::Application,
+        );
         let client = &jwm.state.clients[client_key];
         assert!(client.state.is_pip);
         assert_eq!(client.state.maximized_axes(), MAX_VERT);

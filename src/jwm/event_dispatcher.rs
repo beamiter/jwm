@@ -1664,7 +1664,15 @@ impl WMController for Jwm {
                 // coalesced WindowMaximizeRequest.
                 NetWmState::MaximizedVert | NetWmState::MaximizedHorz => {
                     if let Some(axes) = MaximizeAxes::from_net_wm_state(state) {
-                        self.handle_maximize_request(backend, win, action, axes);
+                        // Legacy per-axis path has no EWMH source; treat as
+                        // application (cannot promote tiled windows).
+                        self.handle_maximize_request(
+                            backend,
+                            win,
+                            action,
+                            axes,
+                            crate::backend::api::EwmhSourceIndication::Unspecified,
+                        );
                     }
                 }
             }
@@ -8285,6 +8293,7 @@ mod tests {
                 window,
                 action,
                 axes,
+                source: crate::backend::api::EwmhSourceIndication::Unspecified,
             },
         )
         .unwrap();
@@ -9453,9 +9462,9 @@ mod tests {
         let other_rect = live_rect(&jwm, other);
         let dragged_window = jwm.state.clients[dragged].win;
         let monitor = jwm.state.clients[dragged].mon.expect("dragged monitor");
-        // The classic float snap's left half of the monitor.
-        let (mx, my, mw, mh) = jwm.monitor_rect(monitor);
-        let left_half = Rect::new(mx, my, mw as i32 / 2, mh as i32);
+        // Float snap halves fill the work area (bar strip excluded), not m_*.
+        let work = jwm.maximize_work_area(monitor).expect("work area");
+        let left_half = Rect::new(work.x, work.y, work.w / 2, work.h);
         // Where the backend moved the dragged window: at the left edge, in
         // the snap zone of the monitor.
         let dropped = Rect::new(2, 400, 640, 480);
@@ -9825,7 +9834,8 @@ impl EventHandler for Jwm {
                 window,
                 action,
                 axes,
-            } => self.handle_maximize_request(backend, window, action, axes),
+                source,
+            } => self.handle_maximize_request(backend, window, action, axes, source),
             BackendEvent::ActiveWindowMessage { window } => self.on_client_message(backend, window),
             BackendEvent::CloseWindowRequest { window } => {
                 self.close_managed_window_on_request(backend, window, "_NET_CLOSE_WINDOW");

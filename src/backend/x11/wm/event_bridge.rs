@@ -701,6 +701,7 @@ mod tests {
                 window: win(5),
                 action: NetWmAction::Add,
                 axes: MaximizeAxes::BOTH,
+                source: crate::backend::api::EwmhSourceIndication::Unspecified,
             },
             BackendEvent::WindowStateRequest {
                 window: win(5),

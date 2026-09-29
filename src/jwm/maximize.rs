@@ -13,11 +13,12 @@
 
 use log::{debug, error, warn};
 
-use crate::backend::api::{Backend, MaximizeAxes, NetWmAction};
+use crate::backend::api::{Backend, EwmhSourceIndication, MaximizeAxes, NetWmAction};
 use crate::backend::common_define::WindowId;
 use crate::core::maximize::{
     MaximizeAdmission, MaximizeFacts, MaximizeInput, MaximizeOrigin, MaximizeSnapshot, RestingSlot,
-    admit_maximize, maximize_target, mirror_free_axes, plan_maximize, requested_axes, resting_slot,
+    admit_maximize, maximize_origin_from_ewmh_source, maximize_target, mirror_free_axes,
+    plan_maximize, requested_axes, resting_slot,
 };
 use crate::core::models::{ClientKey, MonitorKey, WMClient};
 use crate::core::state::WMState;
@@ -36,15 +37,18 @@ impl Jwm {
         self.monitor_migration_areas(mon_key).map(|(_, work)| work)
     }
 
-    /// Entry for every protocol request (WindowMaximizeRequest and the legacy per-axis
-    /// WindowStateRequest). Unknown windows are ignored. next = requested_axes(current,
-    /// action, named); set_client_maximized(.., MaximizeOrigin::Client); errors logged with error!.
+    /// Entry for every protocol request (WindowMaximizeRequest and the legacy
+    /// per-axis WindowStateRequest). Unknown windows are ignored.
+    /// `next = requested_axes(current, action, named)`; origin comes from
+    /// EWMH source indication (pager → User, else Client). Errors logged
+    /// with `error!`.
     pub(crate) fn handle_maximize_request(
         &mut self,
         backend: &mut dyn Backend,
         win: WindowId,
         action: NetWmAction,
         named: MaximizeAxes,
+        source: EwmhSourceIndication,
     ) {
         let Some(client_key) = self.wintoclient(win) else {
             return;
@@ -58,8 +62,8 @@ impl Jwm {
             return;
         };
         let next = requested_axes(current, action, named);
-        if let Err(e) = self.set_client_maximized(backend, client_key, next, MaximizeOrigin::Client)
-        {
+        let origin = maximize_origin_from_ewmh_source(source);
+        if let Err(e) = self.set_client_maximized(backend, client_key, next, origin) {
             error!("Could not apply maximize request for {win:?}: {e}");
         }
     }
