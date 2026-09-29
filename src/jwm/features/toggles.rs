@@ -2852,6 +2852,7 @@ impl Jwm {
         self.reorder_client_in_monitor_groups(sel_client_key);
 
         self.arrange(backend, Some(sel_mon_key));
+        self.broadcast_window_state_ipc(sel_client_key);
         Ok(())
     }
 

@@ -898,6 +898,9 @@ impl Jwm {
             );
             return Err(error);
         }
+        if previous_client.state.is_fullscreen != fullscreen {
+            self.broadcast_window_state_ipc(client_key);
+        }
         Ok(())
     }
 
@@ -1963,6 +1966,7 @@ impl Jwm {
             }
             self.clear_hidden_client_park_retry(client_key);
         }
+        self.broadcast_window_state_ipc(client_key);
         Ok(true)
     }
 }

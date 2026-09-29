@@ -4,6 +4,22 @@
 
 ---
 
+## 2026-09-29（五）：fullscreen / minimize / float 也广播 `window/state`
+
+选题 = evolve wave 13；闭合 wave 12 follow-up。
+
+1. **契约**：`setfullscreen`（仅 `previous != requested`）、
+   `set_client_minimized` 的 `Ok(true)`、`togglefloating` 真实翻转后调用
+   `broadcast_window_state_ipc`。
+2. **回归**：`sibling_window_state_paths_broadcast_window_state_ipc`。
+
+**验证**：`scripts/test.sh --lib -- sibling_window_state_paths maximize_commit_paths_broadcast`。
+
+**仍然开着的**：跨重启持久化、XWayland 单轴、xdg `Tiled*`；urgent 未接
+`window/state`（可选）。
+
+---
+
 ## 2026-09-29（四）：maximize 提交后广播 `window/state`
 
 选题 = evolve wave 12；闭合 handoff maximize 延后项「窗口状态 IPC 事件」

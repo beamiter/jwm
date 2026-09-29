@@ -1638,6 +1638,49 @@ mod tests {
     }
 
     #[test]
+    fn sibling_window_state_paths_broadcast_window_state_ipc() {
+        // Fullscreen / minimize / float flips share the maximize event. Needles
+        // are assembled so this test cannot match itself.
+        let broadcast = format!("broadcast_window_{}_ipc", "state");
+        let fullscreen = include_str!("window_state.rs");
+        let setfullscreen = fullscreen
+            .split_once("pub(super) fn setfullscreen(")
+            .expect("setfullscreen")
+            .1
+            .split_once("fn setfullscreen_inner(")
+            .expect("setfullscreen_inner")
+            .0;
+        assert!(
+            setfullscreen.contains(&broadcast)
+                && setfullscreen.contains("previous_client.state.is_fullscreen != fullscreen"),
+            "setfullscreen must broadcast only when fullscreen actually flips"
+        );
+        let minimized = fullscreen
+            .rsplit_once("pub(crate) fn set_client_minimized(")
+            .expect("set_client_minimized")
+            .1
+            .split_once("Ok(true)")
+            .expect("Ok(true) exit")
+            .0;
+        assert!(
+            minimized.contains(&broadcast),
+            "set_client_minimized must broadcast on the Ok(true) exit"
+        );
+        let toggle = include_str!("features/toggles.rs");
+        let float = toggle
+            .split_once("pub fn togglefloating(")
+            .expect("togglefloating")
+            .1
+            .split_once("pub fn togglesticky(")
+            .expect("togglesticky")
+            .0;
+        assert!(
+            float.contains(&broadcast),
+            "togglefloating must broadcast after a real float flip"
+        );
+    }
+
+    #[test]
     fn maximize_commit_paths_broadcast_window_state_ipc() {
         // Accepted maximize / unmaximize / reinstate commit paths must push
         // `window/state` after the outer rollback wrapper returns Ok; refusals
