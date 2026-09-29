@@ -1,13 +1,11 @@
 // Window swallowing: hide a terminal when it spawns a graphical child.
 //
-// Mechanism: each managed window stores its PID (via _NET_WM_PID on X11). When
-// a new window is mapped, walk up its `/proc/<pid>/status` parent chain. If
-// any ancestor PID matches a currently-managed window whose class is in the
-// `swallow_terminals` allowlist, that ancestor is "swallowed" — unmapped and
-// hidden from arrange/visibility queries until the swallowing child unmaps.
-//
-// Wayland backends return `None` from `get_window_pid` so swallowing simply
-// never activates there.
+// Mechanism: each managed window stores its PID (`_NET_WM_PID` on X11 /
+// XWayland; Wayland socket credentials on xdg). When a new window is mapped,
+// walk up its `/proc/<pid>/status` parent chain. If any ancestor PID matches
+// a currently-managed window whose class is in the `swallow_terminals`
+// allowlist, that ancestor is "swallowed" — unmapped and hidden from
+// arrange/visibility queries until the swallowing child unmaps.
 
 use crate::Jwm;
 use crate::backend::api::{Backend, ManagedUnmapReason, WindowOps};

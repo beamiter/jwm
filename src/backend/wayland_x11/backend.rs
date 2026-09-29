@@ -582,6 +582,10 @@ impl PropertyOps for WaylandPropertyOps {
     ) -> Result<(), BackendError> {
         Ok(())
     }
+
+    fn get_window_pid(&self, win: WindowId) -> Option<u32> {
+        unsafe { self.with_state_mut(|state| state.get_window_pid(win)) }
+    }
 }
 
 pub struct WaylandX11Backend {

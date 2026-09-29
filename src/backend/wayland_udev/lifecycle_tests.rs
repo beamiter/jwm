@@ -1425,6 +1425,40 @@ fn managed_xwayland_windows_reach_foreign_toplevel_managers() {
 }
 
 #[test]
+fn every_wayland_property_ops_has_get_window_pid() {
+    let method = format!("fn {}(", "get_window_pid");
+    let helper = format!("state.{}(win)", "get_window_pid");
+    for (name, source) in [
+        ("wayland_udev", include_str!("backend.rs")),
+        ("wayland_x11", include_str!("../wayland_x11/backend.rs")),
+        ("wayland_winit", include_str!("../wayland_winit/backend.rs")),
+    ] {
+        let ops = production(source)
+            .split_once("impl PropertyOps for WaylandPropertyOps")
+            .unwrap_or_else(|| panic!("{name}: PropertyOps impl"))
+            .1;
+        let body = ops
+            .split_once(&method)
+            .unwrap_or_else(|| panic!("{name}: WaylandPropertyOps must override get_window_pid"))
+            .1;
+        let body = body
+            .split_once("\n    fn ")
+            .map_or(body, |(body, _)| body);
+        assert!(
+            body.contains(&helper),
+            "{name}: get_window_pid must ask JwmWaylandState"
+        );
+    }
+    let state = production(include_str!("state.rs"));
+    assert!(
+        state.contains("fn get_window_pid(&self, win: WindowId)")
+            && state.contains("x11.pid()")
+            && state.contains("get_credentials("),
+        "shared helper must cover XWayland _NET_WM_PID and xdg peer credentials"
+    );
+}
+
+#[test]
 fn every_wayland_backend_publishes_monitors_to_workspace_managers() {
     let sync_call = format!("{}(monitors)", "self.state.sync_workspace_monitors");
     for (name, source) in [

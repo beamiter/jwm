@@ -1170,6 +1170,10 @@ impl PropertyOps for WaylandPropertyOps {
         Ok(())
     }
 
+    fn get_window_pid(&self, win: WindowId) -> Option<u32> {
+        unsafe { self.with_state_mut(|state| state.get_window_pid(win)) }
+    }
+
     fn get_motif_hints(&self, win: WindowId) -> Option<crate::backend::api::MotifWmHints> {
         unsafe {
             self.with_state_mut(|state| {

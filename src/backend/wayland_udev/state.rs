@@ -3752,6 +3752,22 @@ impl JwmWaylandState {
         None
     }
 
+    /// Process that owns `win`, for closed-placement ancestry and swallowing.
+    ///
+    /// XWayland windows use `_NET_WM_PID` via [`X11Surface::pid`] — the
+    /// socket credentials of the `wl_surface` would only name the Xwayland
+    /// server. Native xdg/layer surfaces take the Wayland client's
+    /// `SO_PEERCRED` pid; zero is treated as unknown.
+    pub fn get_window_pid(&self, win: WindowId) -> Option<u32> {
+        if let Some(x11) = self.x11_surfaces.get(&win) {
+            return x11.pid().filter(|&pid| pid != 0);
+        }
+        let surface = self.surface_for_window(win)?;
+        let client = surface.client()?;
+        let pid = client.get_credentials(&self.display_handle).ok()?.pid;
+        u32::try_from(pid).ok().filter(|&pid| pid != 0)
+    }
+
     pub fn hit_test(
         &self,
         location: Point<f64, Logical>,

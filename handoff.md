@@ -4,19 +4,33 @@
 
 ---
 
-## Evolve backlog（目标 100 轮；已完成 wave 9–33，本地 ahead）
+## Evolve backlog（目标 100 轮；已完成 wave 9–34，本地 ahead）
 
 | # | 选题 | Size |
 | --- | --- | --- |
-| 14–33 | ipc/state 全族 + seamless + session maximize + scratchpad + hand-float + closed-placement 落盘 | S/M ✓ |
+| 14–34 | ipc/state 全族 + seamless + session maximize + scratchpad + hand-float + closed-placement 落盘 + Wayland PID | S/M ✓ |
 | … | 跳过：Annotation/Screenshot CommonLinear、toast Closed(1)、BT withdraw、FS/PiP 丢锚点、Recording EncodedOnly、XWayland 单轴 | |
 
 **下一轮候选**（从跳过项与 closed-placement 延伸里挑）：
 
-- Wayland PID / 进程链补齐（wave 33 刻意跳过的 S）：xdg / XWayland 无 PID 时 closed-placement 归因仍靠 10s spawn 窗口。
 - Annotation / Screenshot CommonLinear（跳过表）。
 - toast `NotificationClosed(1)` 语义（跳过表）。
 - Recording EncodedOnly / FS·PiP 丢锚点（跳过表，需真机）。
+
+---
+
+## 2026-09-29（二十五）：Wayland `get_window_pid`（evolve7h）
+
+选题 = evolve wave 34 / evolve7h。
+
+1. **契约**：三路 Wayland `PropertyOps::get_window_pid` → 共享
+   `JwmWaylandState::get_window_pid`；xdg：surface→client→credentials（跳过 0）；
+   XWayland：`X11Surface::pid()`（`_NET_WM_PID`）。
+2. **回归**：三后端 PropertyOps 源 pin + 共享 helper pin。
+
+**验证**：`scripts/test.sh --lib -- closed_placement get_window_pid`。
+
+**仍然开着的**：见上表「下一轮候选」。
 
 ---
 

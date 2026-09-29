@@ -7,6 +7,10 @@ monorepo use independent Semantic Versions.
 
 ### Added
 
+- Wayland closed-placement attribution reads real PIDs: xdg/layer surfaces
+  via the client's socket credentials, XWayland via `_NET_WM_PID`. See
+  [docs/window-placement.md](docs/window-placement.md).
+
 - Closed-placement memory survives a JWM restart: up to 256 class/instance →
   (monitor, tags) entries are written atomically to
   `closed_placement.json` beside `session.json` under the XDG state

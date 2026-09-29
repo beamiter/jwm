@@ -67,11 +67,13 @@ by the process start time, so a recycled PID cannot claim it.
 
 Two situations give no chain to walk. A D-Bus-activated application (for
 example `gnome-terminal`, whose spawned wrapper exits while a long-lived
-server maps the window) reaches nothing JWM knows, and Wayland backends
-currently report no PID at all. In both cases the window is blamed on the
-newest JWM spawn that has not produced a window yet, provided that spawn is
-at most ten seconds old, and each spawn can be blamed once. Outside that
-window such a window counts as external and gets the memory.
+server maps the window) reaches nothing JWM knows. In that case the window
+is blamed on the newest JWM spawn that has not produced a window yet,
+provided that spawn is at most ten seconds old, and each spawn can be
+blamed once. Outside that window such a window counts as external and gets
+the memory. On Wayland, native xdg clients expose their socket-peer PID and
+XWayland windows expose `_NET_WM_PID`, so ancestry walks the same way as on
+X11 when those values are present.
 
 ## Where the window goes
 
