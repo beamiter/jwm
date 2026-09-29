@@ -1730,6 +1730,29 @@ mod tests {
             pip.contains(&broadcast) && pip.contains("if changed"),
             "set_client_pip must broadcast only when PiP actually flips"
         );
+        let props = include_str!("property_handler.rs");
+        let title = props
+            .split_once("pub(crate) fn updatetitle_by_key(")
+            .expect("updatetitle_by_key")
+            .1
+            .split_once("fn truncate_chars(")
+            .expect("truncate_chars")
+            .0;
+        assert!(
+            title.contains(&broadcast) && title.contains("client.name == new_title"),
+            "updatetitle_by_key must broadcast window/state only when the title flips"
+        );
+        let class = props
+            .split_once("pub(crate) fn handle_class_change(")
+            .expect("handle_class_change")
+            .1
+            .split_once("pub(crate) fn handle_motif_hints_change(")
+            .expect("handle_motif_hints_change")
+            .0;
+        assert!(
+            class.contains(&broadcast) && class.contains("if !changed"),
+            "handle_class_change must broadcast window/state only when class/instance flips"
+        );
         let toggle = include_str!("features/toggles.rs");
         let float = toggle
             .split_once("pub fn togglefloating(")

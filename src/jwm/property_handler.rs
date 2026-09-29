@@ -142,18 +142,24 @@ impl Jwm {
         let new_title = self.fetch_window_title(backend, win);
         let title_for_event;
         if let Some(client) = self.state.clients.get_mut(client_key) {
+            if client.name == new_title {
+                return;
+            }
             client.name = new_title;
             title_for_event = client.name.clone();
             debug!("Updated title for window {:?}: '{}'", win, client.name);
         } else {
             return;
         }
+        // Dedicated title topic for lightweight subscribers; full WindowInfo
+        // on window/state so get_windows polls are not required after a rename.
         self.broadcast_ipc_event(
             "window/title",
             serde_json::json!({
                 "id": win.raw(), "name": title_for_event,
             }),
         );
+        self.broadcast_window_state_ipc(client_key);
     }
 
     /// 截断字符串到指定字符数
@@ -331,6 +337,7 @@ impl Jwm {
         if monitor_id.is_some() {
             self.mark_bar_update_needed_if_visible(monitor_id);
         }
+        self.broadcast_window_state_ipc(client_key);
         Ok(())
     }
 
