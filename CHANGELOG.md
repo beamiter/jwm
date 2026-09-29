@@ -7,6 +7,17 @@ monorepo use independent Semantic Versions.
 
 ### Added
 
+- Session snapshots (v9+) persist fullscreen and picture-in-picture;
+  `restore_session` re-applies them through `setfullscreen` /
+  `set_client_pip` (Fullscreen wins if both). See
+  [docs/window-placement.md](docs/window-placement.md#restarts-and-sessions).
+
+- `get_workspaces` reports `is_urgent` per tag (same urgent mask as the
+  status bar). See [docs/monitor-lock.md](docs/monitor-lock.md).
+
+- Application launcher middle-click activates the pointed row through the
+  same Enter path as left-click. See [docs/launcher.md](docs/launcher.md).
+
 - Session snapshots (v8+) persist minimized; `restore_session` re-applies it
   through `set_client_minimized`. See
   [docs/window-placement.md](docs/window-placement.md#restarts-and-sessions).
@@ -619,6 +630,11 @@ monorepo use independent Semantic Versions.
   geometry is untouched. See [README.md](README.md#the-screenshot-editor).
 
 ### Fixed
+
+- X11: a toast card press that dismisses or invokes an action now swallows
+  the paired button release (same one-shot latch as the screenshot wheel),
+  so clients under the card no longer see a stuck button. Wayland already
+  latched toast buttons at the compositor.
 
 - Wayland: `unset_maximized` from an xdg-shell client always gets a
   configure, and every set/unset request gets exactly one, a refused one

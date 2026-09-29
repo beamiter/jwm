@@ -6,10 +6,13 @@
 close. Direct Unicode keysyms are accepted, so an international keyboard can
 search with the characters it produces.
 
-With a pointer, hover previews the row that a click will use, left-click opens
-it, the wheel browses the result list, and clicking outside the card closes the
-launcher. Keyboard selection stays where it was until a click commits, so
-moving the pointer across a windowed result list does not make the list jump.
+With a pointer, hover previews the row that a click will use, left-click or
+middle-click opens it (the same Enter path), the wheel browses the result
+list, and clicking outside the card closes the launcher. Keyboard selection
+stays where it was until a click commits, so moving the pointer across a
+windowed result list does not make the list jump. Middle-click does not
+close a window row the way the window switcher or expose do — use those
+surfaces (or the tab strip) to close.
 
 Applications come from the desktop entries in `$XDG_DATA_HOME/applications` and
 `$XDG_DATA_DIRS`, plus every executable on `PATH` that no desktop entry already

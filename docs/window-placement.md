@@ -314,7 +314,11 @@ the same `apply_external_stacking_request` path client `_NET_WM_STATE`
 requests use, with Above winning when both flags were somehow saved.
 Session snapshots (v8+) also store minimized; `restore_session` re-applies
 it through `set_client_minimized` after placement / maximize / stacking.
-Across a
+Session snapshots (v9+) also store fullscreen and picture-in-picture;
+`restore_session` leaves any live FS/PiP first, restores resting placement,
+then re-applies fullscreen (winning over PiP when both were somehow saved)
+or PiP through `setfullscreen` / `set_client_pip` after stacking and before
+minimized. Across a
 seamless X11 restart the EWMH atoms carry the maximize state, and JWM's
 private `_JWM_MAXIMIZE_RESTORE_V1` property carries the pre-maximize
 rectangle and whether the window was promoted for a *visible* maximized

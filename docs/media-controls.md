@@ -116,14 +116,15 @@ ends with a `· p ‹next player›` hint naming what the key would switch to
 (`· p spotify`), then a `· o` hint for the Players picker, and pressing `p`
 — or middle-clicking the Media Hub row, or clicking that `· p` hint — pins
 the row — and the transport keys with it — to that next player, wrapping
-around the list. Pressing `o` — or
+around the list. On the Hub Media row itself, `Enter` / left-click play/pauses
+(or the matching transport glyph: previous / next skip; title or status icon
+still play/pause). Pressing `o` — or
 clicking `· o` — opens a Players picker listing every player the sweep
 saw (filled marker on the active one). When the bridge sends
 `player_details`, each row prefers the player's MPRIS `Identity` over the
 bus suffix and trails a Playing/Paused/Stopped icon; without details (an
-old bridge) the rows stay suffix-only. Enter / left-click / middle click
-pins by bus suffix and returns to the hub. A click on the previous / next
-glyph skips; a click on the title or status icon still play/pauses. The
+old bridge) the rows stay suffix-only. In the Players picker, Enter /
+left-click / middle click pins by bus suffix and returns to the hub. The
 bridge holds the
 pin while the pinned player's bus name is alive and re-publishes its
 state, so the switch raises the media OSD like any track change; when the

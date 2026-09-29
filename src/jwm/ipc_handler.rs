@@ -3526,6 +3526,18 @@ impl Jwm {
             let connector = self.output_key_for_monitor(backend, mk);
             let monitor_name = self.output_monitor_name_for_monitor(backend, mk);
             let active_tags = mon.get_active_tags();
+            let (_, urgent_tags_mask) = {
+                const EMPTY_CLIENTS: &[ClientKey] = &[];
+                let monitor_clients = self
+                    .state
+                    .monitor_clients
+                    .get(mk)
+                    .map_or(EMPTY_CLIENTS, Vec::as_slice);
+                crate::jwm::StatusBarBuilder::calculate_tag_masks(
+                    &self.state.clients,
+                    monitor_clients,
+                )
+            };
             for i in 0..cfg.tags_length() {
                 let tag_bit = 1u32 << i;
                 let is_active = (active_tags & tag_bit) != 0;
@@ -3539,6 +3551,7 @@ impl Jwm {
                     n_master,
                     num_clients: tagged_client_count(&self.state, mk, tag_bit),
                     focused: is_active && self.state.sel_mon == Some(mk),
+                    is_urgent: (urgent_tags_mask & tag_bit) != 0,
                     connector: connector.clone(),
                     monitor_name: monitor_name.clone(),
                 });

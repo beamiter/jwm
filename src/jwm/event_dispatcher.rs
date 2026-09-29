@@ -737,9 +737,10 @@ impl WMController for Jwm {
                 // through Enter (OSD / cycle path); Media middle-click pins
                 // the next player through `p`; Shell routes, Audio Output,
                 // Session, and Lock* middle-click activate through Enter;
-                // Brightness and read-only rows stay inert. Blank is inert on
-                // every picker; the notification action strip stays left-only
-                // (middle-click there is a miss).
+                // launcher middle-click activates through the same Enter path
+                // as left-click; Brightness and read-only rows stay inert.
+                // Blank is inert on every picker; the notification action
+                // strip stays left-only (middle-click there is a miss).
                 2 if self.features.system_ui.is_clipboard_picker() => {
                     if let SystemUiHitTarget::Item(row, _) = hit
                         && self.features.system_ui.select_visible_row(row).is_some()
@@ -813,6 +814,17 @@ impl WMController for Jwm {
                     {
                         use crate::backend::common_define::keys;
                         self.handle_session_menu_key(backend, keys::KEY_Return);
+                    }
+                }
+                2 if self.features.system_ui.is_launcher() => {
+                    // Same Enter path left-click uses: select the pointed row
+                    // then activate (launch / focus / copy / command).
+                    if let SystemUiHitTarget::Item(row, text_x) = hit {
+                        if let Err(error) =
+                            self.activate_system_ui_pointer_row(backend, row, text_x)
+                        {
+                            error!("Error activating system UI row: {error}");
+                        }
                     }
                 }
                 2 if self.features.system_ui.is_control_center() => {
@@ -3967,6 +3979,9 @@ mod tests {
         let session = system_ui
             .find("2ifself.features.system_ui.is_session_menu()")
             .expect("Session menu middle-click arm");
+        let launcher = system_ui
+            .find("2ifself.features.system_ui.is_launcher()")
+            .expect("Launcher middle-click arm");
         let hub = system_ui
             .find("2ifself.features.system_ui.is_control_center()")
             .expect("Hub middle-click arm");
@@ -3980,7 +3995,8 @@ mod tests {
                 && wallpaper < audio
                 && audio < players
                 && players < session
-                && session < hub,
+                && session < launcher
+                && launcher < hub,
             "picker apply arms must sit between Wi-Fi/BT forget and Hub mute/toggle"
         );
 
@@ -4014,7 +4030,7 @@ mod tests {
             "Players middle-click must select then pin like Enter"
         );
 
-        let session_body = &system_ui[session..hub];
+        let session_body = &system_ui[session..launcher];
         assert!(
             session_body.contains("select_visible_row(row)")
                 && session_body.contains(&format!("{}(", "handle_session_menu_key"))
@@ -4026,6 +4042,12 @@ mod tests {
                 && !session_body.contains("reboot")
                 && !session_body.contains("poweroff"),
             "Session menu middle-click must not short-circuit the two-press confirm"
+        );
+
+        let launcher_body = &system_ui[launcher..hub];
+        assert!(
+            launcher_body.contains(&format!("{}(", "activate_system_ui_pointer_row")),
+            "Launcher middle-click must activate through the same pointer Enter path"
         );
     }
 

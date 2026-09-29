@@ -155,3 +155,5 @@ monitor, so a status bar can show which screens are down and key or label
 panels the same way session restore does. `get_workspaces` / `get_windows` /
 `get_tree` / `window/state` expose the same optional `connector` and
 `monitor_name` on each workspace and window row (omitted when unknown).
+`get_workspaces` also reports `is_urgent` per tag (true when any non-sticky
+client on that tag demands attention), matching the status-bar urgent mask.

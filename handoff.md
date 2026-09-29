@@ -4,7 +4,7 @@
 
 ---
 
-## Evolve backlog（目标 100 轮；已完成 wave 9–63，本地 ahead）
+## Evolve backlog（目标 100 轮；已完成 wave 9–68，本地 ahead）
 
 | # | 选题 | Size |
 | --- | --- | --- |
@@ -15,7 +15,35 @@
 | 54–56 | Theme / Wallpaper / Audio / Players / Session menu 中键→Enter | ✓ |
 | 57–58 | vstack focusstack + scrolling focus → window/state；MonitorInfoIpc.monitor_name | ✓ |
 | 59–63 | Session minimized v8；Window/Workspace monitor_name；portal IPC picker；clipboard JPEG/BMP→PNG；FS/PiP promoted-neighbour lock test | ✓ |
+| 64–68 | Session FS/PiP v9；X11 toast release swallow；Launcher 中键→Enter；WorkspaceInfo.is_urgent；media-controls Hub vs Players docs | ✓ |
 | … | 跳过：Annotation/Screenshot CommonLinear、toast Closed(1)、BT withdraw、FS/PiP 自身丢锚点（own-anchor drop）、Recording EncodedOnly、XWayland 单轴 | |
+
+---
+
+## 2026-09-29（三十七）：session FS/PiP + toast release + launcher middle + workspace urgent
+
+选题 = evolve waves 64–68 / evolve7h。
+
+1. **Wave 64**：`session.json` → v9；`SessionEntry.is_fullscreen` /
+   `is_pip`（serde default）；restore 先离开 live FS/PiP，再经
+   `setfullscreen` / `set_client_pip`（两者皆真时 Fullscreen 胜出）；v8
+   迁移。Docs window-placement Restarts。
+2. **Wave 65**：X11 toast Dismissed / Action 臂
+   `swallow_next_button_release`（对齐 Wayland compositor latch 与截图滚轮）。
+3. **Wave 66**：Launcher button-2 → `activate_system_ui_pointer_row`（与
+   Enter / 左键同路径）。Docs launcher.md + picker pin。
+4. **Wave 67**：`WorkspaceInfo.is_urgent`（同 status-bar urgent mask）；
+   `get_workspaces` / serialize。Docs monitor-lock。
+5. **Wave 68**：docs — media-controls 拆清 Hub Enter=play/pause vs Players
+   picker Enter/middle=pin；launcher 中键说明。
+
+**刻意不做**：session `is_urgent`（瞬时 cue，seamless 已有 EWMH）；
+allowed-actions 在 `updatesizehints` 内二次 sync（property 路径已闭合）。
+
+**验证**：`scripts/test.sh --lib -- session_captures_and_restores toast_click_swallows picker_middle_click_applies_like_enter workspace_info_serializes`.
+
+**下一轮候选**：见跳过表；或 `WindowInfo.is_swallowed` / `MonitorInfoIpc` work
+area / `WindowInfo.is_on_view`；FS/PiP own-anchor 仍为策略延后。
 
 ---
 

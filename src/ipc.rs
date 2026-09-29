@@ -535,6 +535,10 @@ pub struct WorkspaceInfo {
     pub n_master: u32,
     pub num_clients: usize,
     pub focused: bool,
+    /// True when any client on this tag (on this monitor) demands attention
+    /// / is urgent. Sticky all-tags clients are excluded, matching the
+    /// status-bar urgent mask.
+    pub is_urgent: bool,
     /// Output connector / `OutputIdentity.stable_key` for this workspace's
     /// monitor when known; omitted when the live output map has no identity.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1242,6 +1246,7 @@ mod tests {
             n_master: 1,
             num_clients: 2,
             focused: true,
+            is_urgent: true,
             connector: Some("DP-1".into()),
             monitor_name: Some("Dell U2720Q".into()),
         })
@@ -1249,6 +1254,7 @@ mod tests {
         assert_eq!(with_connector["connector"], "DP-1");
         assert_eq!(with_connector["monitor_name"], "Dell U2720Q");
         assert_eq!(with_connector["focused"], true);
+        assert_eq!(with_connector["is_urgent"], true);
 
         let without = serde_json::to_value(WorkspaceInfo {
             tag_mask: 2,
@@ -1259,12 +1265,14 @@ mod tests {
             n_master: 1,
             num_clients: 0,
             focused: false,
+            is_urgent: false,
             connector: None,
             monitor_name: None,
         })
         .expect("serialize");
         assert!(without.get("connector").is_none());
         assert!(without.get("monitor_name").is_none());
+        assert_eq!(without["is_urgent"], false);
     }
 
     #[test]

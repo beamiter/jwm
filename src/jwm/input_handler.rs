@@ -3408,7 +3408,13 @@ impl Jwm {
             let (rx, ry) = self.last_mouse_root;
             match backend.compositor_click_toast(rx as f32, ry as f32) {
                 crate::backend::api::ToastClick::Miss => {}
-                crate::backend::api::ToastClick::Dismissed => return Ok(()),
+                crate::backend::api::ToastClick::Dismissed => {
+                    // Pair the press with its release so X11 clients under the
+                    // card never see a stuck button (Wayland latches at the
+                    // compositor; screenshot wheel uses the same one-shot).
+                    self.features.capture.swallow_next_button_release();
+                    return Ok(());
+                }
                 crate::backend::api::ToastClick::Action {
                     notification_id,
                     action_key,
@@ -3419,6 +3425,7 @@ impl Jwm {
                     if press == ToastPress::Activate {
                         self.invoke_notification_action(notification_id, &action_key);
                     }
+                    self.features.capture.swallow_next_button_release();
                     return Ok(());
                 }
             }
@@ -5832,6 +5839,26 @@ mod tests {
                 ToastPress::Ignored
             );
         }
+    }
+
+    /// X11 toast dismiss / action must arm the one-shot release swallow so the
+    /// paired release never reaches the client under the card (Wayland latches
+    /// at the compositor; screenshot wheel uses the same capture latch).
+    #[test]
+    fn toast_click_swallows_the_paired_button_release() {
+        const SOURCE: &str = include_str!("input_handler.rs");
+        let compact: String = SOURCE.chars().filter(|c| !c.is_whitespace()).collect();
+        let toast = compact
+            .split_once("ToastClick::Dismissed=>")
+            .expect("Dismissed toast arm")
+            .1
+            .split_once("letmutclick_type")
+            .expect("end of toast match")
+            .0;
+        assert!(
+            toast.matches("swallow_next_button_release()").count() >= 2,
+            "Dismissed and Action must each arm swallow_next_button_release before return"
+        );
     }
 
     #[test]

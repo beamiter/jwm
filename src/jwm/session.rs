@@ -29,6 +29,10 @@
 //!
 //! v8 起，Minimized（语义隐藏 / Dock）一并写入快照；恢复时经
 //! `set_client_minimized` 套用。缺省 / 旧版本快照为 `false`。
+//!
+//! v9 起，Fullscreen / PiP 一并写入快照；恢复时经 `setfullscreen` /
+//! `set_client_pip` 在 stacking 之后、minimized 之前套用（两者皆真时
+//! Fullscreen 胜出，与运行时互斥一致）。缺省 / 旧版本快照为 `false`。
 
 use crate::backend::api::{Backend, MaximizeAxes, NetWmAction, NetWmState};
 use crate::config::CONFIG;
@@ -50,7 +54,7 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-const SESSION_VERSION: u32 = 8;
+const SESSION_VERSION: u32 = 9;
 const MIN_SUPPORTED_SESSION_VERSION: u32 = 1;
 const MAX_SESSION_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_SESSION_CLIENTS: usize = 16_384;
@@ -97,6 +101,13 @@ pub struct SessionEntry {
     /// v8：语义 minimized（Dock / Iconic）。缺省 / 旧版本快照为 `false`。
     #[serde(default)]
     pub is_minimized: bool,
+    /// v9：fullscreen。缺省 / 旧版本快照为 `false`。与 `is_pip` 同时为真时
+    /// 恢复侧 Fullscreen 胜出。
+    #[serde(default)]
+    pub is_fullscreen: bool,
+    /// v9：picture-in-picture。缺省 / 旧版本快照为 `false`。
+    #[serde(default)]
+    pub is_pip: bool,
 }
 
 /// 会话里保存的最大化状态（v4）。休息态几何仍写在 `is_floating` /
@@ -277,6 +288,15 @@ struct SessionSnapshotV7 {
     monitor_orders: Vec<SessionMonitorOrder>,
 }
 
+/// 版本 8 快照：已有 is_minimized，尚无 is_fullscreen / is_pip（反序列化时缺省 false）。
+#[derive(Deserialize)]
+struct SessionSnapshotV8 {
+    #[allow(dead_code)]
+    version: u32,
+    clients: Vec<SessionEntry>,
+    monitor_orders: Vec<SessionMonitorOrder>,
+}
+
 /// 把任一受支持版本的会话 JSON 迁移为当前版本的快照。
 ///
 /// 崩溃安全约定：迁移是纯内存操作，绝不改写磁盘上的旧快照；升级后的
@@ -293,43 +313,54 @@ pub fn migrate_session_json(json: &str) -> Result<SessionSnapshot, String> {
         1 => {
             let v1: SessionSnapshotV1 = serde_json::from_str(json)
                 .map_err(|error| format!("cannot parse version 1 session snapshot: {error}"))?;
-            migrate_snapshot_v7(migrate_snapshot_v6(migrate_snapshot_v5(migrate_snapshot_v4(
-                migrate_snapshot_v3(migrate_snapshot_v2(migrate_snapshot_v1(v1))),
+            migrate_snapshot_v8(migrate_snapshot_v7(migrate_snapshot_v6(migrate_snapshot_v5(
+                migrate_snapshot_v4(migrate_snapshot_v3(migrate_snapshot_v2(migrate_snapshot_v1(
+                    v1,
+                )))),
             ))))
         }
         2 => {
             let v2: SessionSnapshotV2 = serde_json::from_str(json)
                 .map_err(|error| format!("cannot parse version 2 session snapshot: {error}"))?;
-            migrate_snapshot_v7(migrate_snapshot_v6(migrate_snapshot_v5(migrate_snapshot_v4(
-                migrate_snapshot_v3(migrate_snapshot_v2(v2)),
+            migrate_snapshot_v8(migrate_snapshot_v7(migrate_snapshot_v6(migrate_snapshot_v5(
+                migrate_snapshot_v4(migrate_snapshot_v3(migrate_snapshot_v2(v2))),
             ))))
         }
         3 => {
             let v3: SessionSnapshotV3 = serde_json::from_str(json)
                 .map_err(|error| format!("cannot parse version 3 session snapshot: {error}"))?;
-            migrate_snapshot_v7(migrate_snapshot_v6(migrate_snapshot_v5(migrate_snapshot_v4(
-                migrate_snapshot_v3(v3),
+            migrate_snapshot_v8(migrate_snapshot_v7(migrate_snapshot_v6(migrate_snapshot_v5(
+                migrate_snapshot_v4(migrate_snapshot_v3(v3)),
             ))))
         }
         4 => {
             let v4: SessionSnapshotV4 = serde_json::from_str(json)
                 .map_err(|error| format!("cannot parse version 4 session snapshot: {error}"))?;
-            migrate_snapshot_v7(migrate_snapshot_v6(migrate_snapshot_v5(migrate_snapshot_v4(v4))))
+            migrate_snapshot_v8(migrate_snapshot_v7(migrate_snapshot_v6(migrate_snapshot_v5(
+                migrate_snapshot_v4(v4),
+            ))))
         }
         5 => {
             let v5: SessionSnapshotV5 = serde_json::from_str(json)
                 .map_err(|error| format!("cannot parse version 5 session snapshot: {error}"))?;
-            migrate_snapshot_v7(migrate_snapshot_v6(migrate_snapshot_v5(v5)))
+            migrate_snapshot_v8(migrate_snapshot_v7(migrate_snapshot_v6(migrate_snapshot_v5(
+                v5,
+            ))))
         }
         6 => {
             let v6: SessionSnapshotV6 = serde_json::from_str(json)
                 .map_err(|error| format!("cannot parse version 6 session snapshot: {error}"))?;
-            migrate_snapshot_v7(migrate_snapshot_v6(v6))
+            migrate_snapshot_v8(migrate_snapshot_v7(migrate_snapshot_v6(v6)))
         }
         7 => {
             let v7: SessionSnapshotV7 = serde_json::from_str(json)
                 .map_err(|error| format!("cannot parse version 7 session snapshot: {error}"))?;
-            migrate_snapshot_v7(v7)
+            migrate_snapshot_v8(migrate_snapshot_v7(v7))
+        }
+        8 => {
+            let v8: SessionSnapshotV8 = serde_json::from_str(json)
+                .map_err(|error| format!("cannot parse version 8 session snapshot: {error}"))?;
+            migrate_snapshot_v8(v8)
         }
         SESSION_VERSION => SessionSnapshot::from_json(json)
             .map_err(|error| format!("cannot parse session snapshot: {error}"))?,
@@ -368,6 +399,8 @@ fn migrate_snapshot_v1(v1: SessionSnapshotV1) -> SessionSnapshotV2 {
                 is_above: false,
                 is_below: false,
                 is_minimized: false,
+                is_fullscreen: false,
+                is_pip: false,
             }
         })
         .collect();
@@ -424,11 +457,20 @@ fn migrate_snapshot_v6(v6: SessionSnapshotV6) -> SessionSnapshotV7 {
 }
 
 /// v7 -> v8：is_minimized 字段在反序列化时已缺省为 false；只抬版本号。
-fn migrate_snapshot_v7(v7: SessionSnapshotV7) -> SessionSnapshot {
-    SessionSnapshot {
-        version: SESSION_VERSION,
+fn migrate_snapshot_v7(v7: SessionSnapshotV7) -> SessionSnapshotV8 {
+    SessionSnapshotV8 {
+        version: 8,
         clients: v7.clients,
         monitor_orders: v7.monitor_orders,
+    }
+}
+
+/// v8 -> v9：is_fullscreen / is_pip 字段在反序列化时已缺省为 false；只抬版本号。
+fn migrate_snapshot_v8(v8: SessionSnapshotV8) -> SessionSnapshot {
+    SessionSnapshot {
+        version: SESSION_VERSION,
+        clients: v8.clients,
+        monitor_orders: v8.monitor_orders,
     }
 }
 
@@ -452,6 +494,8 @@ struct DetailedRestorePlan {
     is_above: bool,
     is_below: bool,
     is_minimized: bool,
+    is_fullscreen: bool,
+    is_pip: bool,
 }
 
 impl SessionSnapshot {
@@ -900,6 +944,8 @@ pub fn capture_snapshot_excluding(
             is_above: c.state.is_above,
             is_below: c.state.is_below,
             is_minimized: c.state.is_hidden,
+            is_fullscreen: c.state.is_fullscreen,
+            is_pip: c.state.is_pip,
         });
     }
     let monitor_orders = state
@@ -1015,6 +1061,8 @@ where
                     is_above: e.is_above,
                     is_below: e.is_below,
                     is_minimized: e.is_minimized,
+                    is_fullscreen: e.is_fullscreen,
+                    is_pip: e.is_pip,
                 },
             ));
         }
@@ -1209,6 +1257,30 @@ impl Jwm {
             }
         }
 
+        // Leave fullscreen / PiP before resting placement so tag / float /
+        // maximize can own the slot; modes are re-applied below after
+        // stacking from the saved flags.
+        for (key, _) in &plans {
+            if self
+                .state
+                .clients
+                .get(*key)
+                .is_some_and(|client| client.state.is_fullscreen)
+                && let Err(error) = self.setfullscreen(backend, *key, false)
+            {
+                log::warn!("session restore could not leave fullscreen for a matched client: {error}");
+            }
+            if self
+                .state
+                .clients
+                .get(*key)
+                .is_some_and(|client| client.state.is_pip)
+                && let Err(error) = self.set_client_pip(backend, *key, false)
+            {
+                log::warn!("session restore could not leave PiP for a matched client: {error}");
+            }
+        }
+
         // Leave maximize through the shared transaction first so resting
         // tags / float / geometry own the slot; axes are re-applied below
         // after arrange from the saved `maximize` entry.
@@ -1357,8 +1429,28 @@ impl Jwm {
             }
         }
 
-        // Minimized last: park after placement / maximize / stacking so the
-        // Dock sees the resting state the snapshot intended.
+        // Fullscreen / PiP after stacking and before minimized: both modes
+        // own floating geometry the same way maximize does under them, and
+        // minimize parks last so Dock sees the resting snapshot. Fullscreen
+        // wins when a snapshot somehow recorded both (runtime mutual exclusion).
+        for (key, plan) in &plans {
+            if plan.is_fullscreen {
+                if let Err(error) = self.setfullscreen(backend, *key, true) {
+                    log::warn!(
+                        "session restore could not re-apply fullscreen for a matched client: {error}"
+                    );
+                }
+            } else if plan.is_pip {
+                if let Err(error) = self.set_client_pip(backend, *key, true) {
+                    log::warn!(
+                        "session restore could not re-apply PiP for a matched client: {error}"
+                    );
+                }
+            }
+        }
+
+        // Minimized last: park after placement / maximize / stacking / FS·PiP
+        // so the Dock sees the resting state the snapshot intended.
         for (key, plan) in &plans {
             if let Err(error) = self.set_client_minimized(backend, *key, plan.is_minimized) {
                 log::warn!(
@@ -1514,6 +1606,8 @@ mod tests {
             is_above: false,
             is_below: false,
             is_minimized: false,
+            is_fullscreen: false,
+            is_pip: false,
         }
     }
 
@@ -1561,6 +1655,8 @@ mod tests {
                     is_above: true,
                     is_below: false,
                     is_minimized: true,
+                    is_fullscreen: true,
+                    is_pip: false,
                 },
                 entry("Alacritty", "alacritty", 0b1),
             ],
@@ -2026,8 +2122,8 @@ mod tests {
     #[test]
     fn migration_refuses_future_versions_and_unreadable_documents() {
         let error =
-            migrate_session_json(r#"{"version":9,"clients":[],"monitor_orders":[]}"#).unwrap_err();
-        assert!(error.contains("unsupported session version 9"));
+            migrate_session_json(r#"{"version":10,"clients":[],"monitor_orders":[]}"#).unwrap_err();
+        assert!(error.contains("unsupported session version 10"));
 
         let error = migrate_session_json("not JSON").unwrap_err();
         assert!(error.contains("no readable version"));
@@ -2058,8 +2154,12 @@ mod tests {
         let error = migrate_session_json(r#"{"version":7,"clients":[]}"#).unwrap_err();
         assert!(error.contains("cannot parse version 7 session snapshot"));
 
-        // v8（当前版本）同样严格：缺 monitor_orders 字段直接拒绝。
+        // v8 保持严格：缺 monitor_orders 字段直接拒绝。
         let error = migrate_session_json(r#"{"version":8,"clients":[]}"#).unwrap_err();
+        assert!(error.contains("cannot parse version 8 session snapshot"));
+
+        // v9（当前版本）同样严格：缺 monitor_orders 字段直接拒绝。
+        let error = migrate_session_json(r#"{"version":9,"clients":[]}"#).unwrap_err();
         assert!(error.contains("cannot parse session snapshot"));
     }
 
@@ -2074,6 +2174,8 @@ mod tests {
         assert!(!snapshot.clients[0].is_above);
         assert!(!snapshot.clients[0].is_below);
         assert!(!snapshot.clients[0].is_minimized);
+        assert!(!snapshot.clients[0].is_fullscreen);
+        assert!(!snapshot.clients[0].is_pip);
     }
 
     #[test]
@@ -2087,6 +2189,8 @@ mod tests {
         assert!(!snapshot.clients[0].is_above);
         assert!(!snapshot.clients[0].is_below);
         assert!(!snapshot.clients[0].is_minimized);
+        assert!(!snapshot.clients[0].is_fullscreen);
+        assert!(!snapshot.clients[0].is_pip);
     }
 
     #[test]
@@ -2097,6 +2201,20 @@ mod tests {
         .expect("v7 without is_minimized still loads");
         assert_eq!(snapshot.version, SESSION_VERSION);
         assert!(!snapshot.clients[0].is_minimized);
+        assert!(!snapshot.clients[0].is_fullscreen);
+        assert!(!snapshot.clients[0].is_pip);
+    }
+
+    #[test]
+    fn v8_snapshot_without_fullscreen_or_pip_migrates_to_false() {
+        let snapshot = migrate_session_json(
+            r#"{"version":8,"clients":[{"class":"A","instance":"a","name":"","tags":1,"is_floating":false,"monitor_num":0,"floating":null,"is_sticky":false,"is_above":false,"is_below":false,"is_minimized":true}],"monitor_orders":[]}"#,
+        )
+        .expect("v8 without is_fullscreen/is_pip still loads");
+        assert_eq!(snapshot.version, SESSION_VERSION);
+        assert!(snapshot.clients[0].is_minimized);
+        assert!(!snapshot.clients[0].is_fullscreen);
+        assert!(!snapshot.clients[0].is_pip);
     }
 
     #[test]
@@ -2950,6 +3068,87 @@ mod tests {
         assert!(
             jwm.state.clients[key].state.is_hidden,
             "restore must re-apply minimized through set_client_minimized"
+        );
+    }
+
+    #[test]
+    fn session_captures_and_restores_fullscreen_and_pip() {
+        let mut backend = DisplaySpyBackend::new(vec![output(1, 0, 0, 1920, 1080)]);
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").expect("test jwm");
+        let monitor = jwm.state.monitor_order[0];
+        let tags = jwm.state.monitors[monitor].get_active_tags();
+
+        let mut fs_client = WMClient::new(WindowId::from_raw(0x77));
+        fs_client.class = "FsApp".into();
+        fs_client.instance = "fsapp".into();
+        fs_client.mon = Some(monitor);
+        fs_client.state.tags = tags;
+        fs_client.geometry.x = 100;
+        fs_client.geometry.y = 80;
+        fs_client.geometry.w = 640;
+        fs_client.geometry.h = 480;
+        fs_client.geometry.border_w = 2;
+        let fs_key = jwm.insert_client(fs_client);
+        jwm.attach_to_monitor(fs_key, monitor);
+
+        jwm.setfullscreen(&mut backend, fs_key, true)
+            .expect("enter fullscreen");
+        assert!(jwm.state.clients[fs_key].state.is_fullscreen);
+
+        let fs_snap = capture_snapshot(&jwm.state, "status-bar");
+        assert!(
+            fs_snap.clients.iter().any(|e| e.class == "FsApp" && e.is_fullscreen && !e.is_pip),
+            "capture must record fullscreen"
+        );
+
+        jwm.setfullscreen(&mut backend, fs_key, false)
+            .expect("leave fullscreen");
+        assert!(!jwm.state.clients[fs_key].state.is_fullscreen);
+        assert_eq!(jwm.apply_session_snapshot(&mut backend, &fs_snap), 1);
+        assert!(
+            jwm.state.clients[fs_key].state.is_fullscreen && !jwm.state.clients[fs_key].state.is_pip,
+            "restore must re-apply fullscreen through setfullscreen"
+        );
+
+        jwm.setfullscreen(&mut backend, fs_key, false)
+            .expect("leave before pip");
+        jwm.set_client_pip(&mut backend, fs_key, true)
+            .expect("enter pip");
+        assert!(jwm.state.clients[fs_key].state.is_pip);
+
+        let pip_snap = capture_snapshot(&jwm.state, "status-bar");
+        assert!(
+            pip_snap
+                .clients
+                .iter()
+                .any(|e| e.class == "FsApp" && e.is_pip && !e.is_fullscreen),
+            "capture must record PiP"
+        );
+
+        jwm.set_client_pip(&mut backend, fs_key, false)
+            .expect("leave pip");
+        assert!(!jwm.state.clients[fs_key].state.is_pip);
+        assert_eq!(jwm.apply_session_snapshot(&mut backend, &pip_snap), 1);
+        assert!(
+            jwm.state.clients[fs_key].state.is_pip && !jwm.state.clients[fs_key].state.is_fullscreen,
+            "restore must re-apply PiP through set_client_pip"
+        );
+
+        // Fullscreen wins when a snapshot somehow recorded both.
+        let mut both = pip_snap;
+        let entry = both
+            .clients
+            .iter_mut()
+            .find(|e| e.class == "FsApp")
+            .expect("FsApp entry");
+        entry.is_fullscreen = true;
+        entry.is_pip = true;
+        jwm.set_client_pip(&mut backend, fs_key, false)
+            .expect("clear before both");
+        assert_eq!(jwm.apply_session_snapshot(&mut backend, &both), 1);
+        assert!(
+            jwm.state.clients[fs_key].state.is_fullscreen && !jwm.state.clients[fs_key].state.is_pip,
+            "Fullscreen must win when both flags are saved"
         );
     }
 }
