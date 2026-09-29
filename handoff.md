@@ -4,22 +4,34 @@
 
 ---
 
-## Evolve backlog（目标 100 轮；已完成 wave 9–16，本地 ahead）
+## Evolve backlog（目标 100 轮；已完成 wave 9–17，本地 ahead）
 
 按日常命中 × 可交付性排序的下一波候选（S/小 M，无 DRM）：
 
 | # | 选题 | Size |
 | --- | --- | --- |
-| 14 | urgent → `window/state` | S ✓ |
-| 15 | xdg Maximized 时清 `Tiled*` | S ✓ |
-| 16 | sticky → `window/state` | S ✓ |
-| 17 | tag / sendmon → `window/state` | S |
+| 14–16 | urgent / Tiled* / sticky → `window/state` | S ✓ |
+| 17 | tag / sendmon / toggletag → `window/state` | S ✓ |
 | 18 | Above/Below → `WindowInfo` + `window/state` | S |
 | 19 | seamless restart maximize restore_rect | S–M |
 | 20 | Annotation → CommonLinearAware | S–M（PostDelivery 迁移） |
 | 21 | Screenshot toolbar → CommonLinearAware | S–M |
 | 22 | session 持久化 maximize + restore_rect | M |
-| … | 跳过：toast Closed(1) 成文、BT withdraw 已落、FS/PiP 丢锚点成文、Recording EncodedOnly 故意 | |
+| … | 跳过：toast Closed(1)、BT withdraw、FS/PiP 丢锚点、Recording EncodedOnly | |
+
+---
+
+## 2026-09-29（九）：tag / sendmon / toggletag → `window/state`
+
+选题 = evolve wave 17。
+
+1. **契约**：`move_client_to_tag` / `toggletag` 仅在 tags 实际变化时广播；
+   `sendmon` 在跨显示器迁移成功后广播（同显示器早退已有）。
+2. **回归**：`sibling_window_state_paths_broadcast_window_state_ipc` 扩三条路径。
+
+**验证**：`scripts/test.sh --lib -- sibling_window_state_paths`。
+
+**仍然开着的**：见上表 18+。
 
 ---
 

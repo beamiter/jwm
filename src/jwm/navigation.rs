@@ -964,6 +964,9 @@ impl Jwm {
             let newtags = current_tags ^ (ui & CONFIG.load().tagmask());
 
             if newtags > 0 {
+                if newtags == current_tags {
+                    return Ok(());
+                }
                 if let Some(client) = self.state.clients.get_mut(sel_client_key) {
                     client.state.tags = newtags;
                 } else {
@@ -974,6 +977,7 @@ impl Jwm {
 
                 self.focus(backend, None)?;
                 self.arrange(backend, self.state.sel_mon);
+                self.broadcast_window_state_ipc(sel_client_key);
             }
         }
 

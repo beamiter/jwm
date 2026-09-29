@@ -1713,6 +1713,42 @@ mod tests {
             demands.contains(&broadcast) && demands.contains("previous_urgent != urgent"),
             "set_client_demands_attention must broadcast only when is_urgent flips"
         );
+        let tags = include_str!("tag_manager.rs");
+        let move_tag = tags
+            .split_once("pub(crate) fn move_client_to_tag(")
+            .expect("move_client_to_tag")
+            .1
+            .split_once("pub fn tagmon(")
+            .expect("tagmon")
+            .0;
+        assert!(
+            move_tag.contains(&broadcast) && move_tag.contains("previous == Some(target_tag)"),
+            "move_client_to_tag must broadcast only when tags actually change"
+        );
+        let sendmon = tags
+            .split_once("pub(crate) fn sendmon(")
+            .expect("sendmon")
+            .1
+            .split_once("pub(crate) fn setclienttagprop(")
+            .expect("setclienttagprop")
+            .0;
+        assert!(
+            sendmon.contains(&broadcast)
+                && sendmon.contains("client.mon == Some(target_mon_key)"),
+            "sendmon must broadcast after a real monitor move"
+        );
+        let nav = include_str!("navigation.rs");
+        let toggletag = nav
+            .split_once("pub fn toggletag(")
+            .expect("toggletag")
+            .1
+            .split_once("pub fn quit(")
+            .expect("quit")
+            .0;
+        assert!(
+            toggletag.contains(&broadcast) && toggletag.contains("newtags == current_tags"),
+            "toggletag must broadcast only when the tag mask changes"
+        );
     }
 
     #[test]

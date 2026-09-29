@@ -42,6 +42,14 @@ impl Jwm {
         if target_tag == 0 {
             return Ok(());
         }
+        let previous = self
+            .state
+            .clients
+            .get(client_key)
+            .map(|client| client.state.tags);
+        if previous == Some(target_tag) {
+            return Ok(());
+        }
         if let Some(client) = self.state.clients.get_mut(client_key) {
             client.state.tags = target_tag;
         }
@@ -49,6 +57,7 @@ impl Jwm {
 
         self.focus(backend, None)?;
         self.arrange(backend, self.state.sel_mon);
+        self.broadcast_window_state_ipc(client_key);
         Ok(())
     }
 
@@ -212,6 +221,7 @@ impl Jwm {
         if is_hidden && let Err(error) = self.persist_minimized_restore_state(backend, client_key) {
             warn!("could not refresh minimized restore state after sendmon: {error}");
         }
+        self.broadcast_window_state_ipc(client_key);
     }
 
     /// 设置窗口的标签属性（EWMH）
