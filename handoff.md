@@ -4,7 +4,7 @@
 
 ---
 
-## Evolve backlog（目标 100 轮；已完成 wave 9–79，本地 ahead）
+## Evolve backlog（目标 100 轮；已完成 wave 9–91，本地 ahead）
 
 | # | 选题 | Size |
 | --- | --- | --- |
@@ -18,7 +18,38 @@
 | 64–68 | Session FS/PiP v9；X11 toast release swallow；Launcher 中键→Enter；WorkspaceInfo.is_urgent；media-controls Hub vs Players docs | ✓ |
 | 69–72 | WindowInfo.is_swallowed / is_on_view；MonitorInfoIpc wx/wy/ww/wh；相关 docs | ✓ |
 | 73–79 | swallow→window/state；WindowInfo scratchpad/border_w/layout；switcher Home/End；expose wheel browse；calendar Page year；clipboard WebP/GIF | ✓ |
+| 80–91 | WindowInfo fixed/dock/desktop/drag_float/strut/cfact；MonitorInfo scale/refresh_mhz；switcher Page；tags/expose Home/End；get_magnifier/get_peek | ✓ |
 | … | 跳过：Annotation/Screenshot CommonLinear、toast Closed(1)、BT withdraw、FS/PiP 自身丢锚点（own-anchor drop）、Recording EncodedOnly、XWayland 单轴 | |
+
+---
+
+## 2026-09-29（四十）：WindowInfo chrome + monitor scale + UI edge jumps
+
+选题 = evolve waves 80–91 / evolve7h。
+
+1. **Wave 80–85**：`WindowInfo` 增 `is_fixed` / `is_dock` / `is_desktop` /
+   `is_drag_floating` / `has_strut` / `client_fact`；`get_windows` /
+   `get_tree` / `window/state` 填充；serialize + projection pin。
+2. **Wave 86–87**：`MonitorInfoIpc.scale` + `refresh_mhz`（live
+   `OutputInfo`；无映射时 `1.0` / `0`）；`get_monitors` / `get_tree`。
+3. **Wave 88**：switcher `Page Up` / `Page Down` → `page_selection`（不
+   wrap）；hint 行 + source pin。
+4. **Wave 89**：tags overview `Home` / `End` → 首/末格（不 commit）；
+   `TagsOverviewState::jump_selection_edge` pin。
+5. **Wave 90**：expose `Home` / `End` → `edge_window` +
+   `compositor_expose_select`；source pin。
+6. **Wave 91**：IPC `get_magnifier`（enabled + zoom）/ `get_peek`；
+   `get_effect_status` 增 `magnifier_zoom`。Docs window-placement /
+   monitor-lock / compatibility / switcher / expose / tags-overview；
+   CHANGELOG。
+
+**刻意不做**：跳过表不变；`MonitorInfoIpc.transform`（需扩 `OutputInfo`）；
+waterlily status 不报 palette（worker 解析 `next`/`auto`，本机无权威名）。
+
+**验证**：`scripts/test.sh --lib -- window_info_serializes monitor_info_serializes window_query_projection edge_window home_and_end_jump switcher_page_keys expose_home_end`（全库 4040 pass；`xwm_above_below…` 为既有 smithay flake，与本轮无关）。
+
+**下一轮候选**：见跳过表；`never_focus` IPC；monitor transform；waterlily
+requested_palette；maximize restore 跨 output。
 
 ---
 

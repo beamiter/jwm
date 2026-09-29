@@ -1011,17 +1011,37 @@ impl Jwm {
             .filter(|name| !name.is_empty())
     }
 
-    fn live_output_identity(
+    /// Fractional scale and mode refresh (mHz) for the live output backing
+    /// `mon_key`. Defaults to `(1.0, 0)` when the output map has no entry.
+    pub(crate) fn output_scale_refresh_for_monitor(
         &self,
         backend: &dyn Backend,
         mon_key: crate::core::models::MonitorKey,
-    ) -> Option<crate::backend::api::OutputIdentity> {
+    ) -> (f32, u32) {
+        self.live_output_info(backend, mon_key)
+            .map(|output| (output.scale, output.refresh_rate))
+            .unwrap_or((1.0, 0))
+    }
+
+    fn live_output_info(
+        &self,
+        backend: &dyn Backend,
+        mon_key: crate::core::models::MonitorKey,
+    ) -> Option<crate::backend::api::OutputInfo> {
         let output_id = *self.state.output_map.get(mon_key)?;
         backend
             .output_ops()
             .enumerate_outputs()
             .into_iter()
             .find(|output| output.id == output_id)
+    }
+
+    fn live_output_identity(
+        &self,
+        backend: &dyn Backend,
+        mon_key: crate::core::models::MonitorKey,
+    ) -> Option<crate::backend::api::OutputIdentity> {
+        self.live_output_info(backend, mon_key)
             .map(|output| output.identity)
     }
 

@@ -304,11 +304,13 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "get_gesture_status",
         "get_hdr_status",
         "get_idle_status",
+        "get_magnifier",
         "get_media_status",
         "get_metrics",
         "get_mic_mute",
         "get_monitors",
         "get_notifications",
+        "get_peek",
         "get_power_status",
         "get_recording_status",
         "get_resources",
@@ -517,6 +519,22 @@ pub struct WindowInfo {
     pub is_on_view: bool,
     /// True when this client is a named scratchpad (shown or parked).
     pub is_scratchpad: bool,
+    /// Size-hints fixed: the client refuses resize (never maximized, floats).
+    pub is_fixed: bool,
+    /// Managed `_NET_WM_WINDOW_TYPE_DOCK` / panel chrome.
+    pub is_dock: bool,
+    /// Managed `_NET_WM_WINDOW_TYPE_DESKTOP` / desktop icon layer.
+    pub is_desktop: bool,
+    /// Floated only because the user dragged/resized it out of the tiling
+    /// grid (`ClientState::is_drag_floating`); re-applying a layout pulls
+    /// these back under management.
+    pub is_drag_floating: bool,
+    /// True when this window contributes an `_NET_WM_STRUT(_PARTIAL)`
+    /// reservation that shrinks a monitor's work area.
+    pub has_strut: bool,
+    /// Per-window client factor (`ClientState::client_fact`), the twin of
+    /// workspace `m_fact` for tiled share.
+    pub client_fact: f32,
     /// Drawn border width in pixels (`ClientGeometry::border_w`).
     pub border_w: i32,
     pub is_focused: bool,
@@ -595,6 +613,12 @@ pub struct MonitorInfoIpc {
     /// identity or the EDID did not advertise a name.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub monitor_name: Option<String>,
+    /// Fractional scale from the live output (`OutputInfo.scale`), typically
+    /// `1.0` / `1.25` / `1.5` / `2.0`. `1.0` when the output map has no entry.
+    pub scale: f32,
+    /// Mode refresh in millihertz (`OutputInfo.refresh_rate`); `60000` is
+    /// 60 Hz. `0` when the output map has no entry.
+    pub refresh_mhz: u32,
 }
 
 #[derive(Debug, Serialize)]
@@ -1109,6 +1133,12 @@ mod tests {
             is_swallowed: true,
             is_on_view: false,
             is_scratchpad: true,
+            is_fixed: false,
+            is_dock: false,
+            is_desktop: false,
+            is_drag_floating: false,
+            has_strut: false,
+            client_fact: 1.0,
             border_w: 2,
             is_focused: false,
             pid: Some(1234),
@@ -1129,6 +1159,12 @@ mod tests {
         assert_eq!(value["is_swallowed"], true);
         assert_eq!(value["is_on_view"], false);
         assert_eq!(value["is_scratchpad"], true);
+        assert_eq!(value["is_fixed"], false);
+        assert_eq!(value["is_dock"], false);
+        assert_eq!(value["is_desktop"], false);
+        assert_eq!(value["is_drag_floating"], false);
+        assert_eq!(value["has_strut"], false);
+        assert_eq!(value["client_fact"], 1.0);
         assert_eq!(value["border_w"], 2);
         assert_eq!(value["scratchpad"], "term");
         assert_eq!(value["layout"], "TILE");
@@ -1160,6 +1196,12 @@ mod tests {
             is_swallowed: false,
             is_on_view: true,
             is_scratchpad: false,
+            is_fixed: false,
+            is_dock: false,
+            is_desktop: false,
+            is_drag_floating: false,
+            has_strut: false,
+            client_fact: 1.0,
             border_w: 0,
             is_focused: false,
             pid: None,
@@ -1206,6 +1248,12 @@ mod tests {
             is_swallowed: false,
             is_on_view: true,
             is_scratchpad: false,
+            is_fixed: false,
+            is_dock: false,
+            is_desktop: false,
+            is_drag_floating: false,
+            has_strut: false,
+            client_fact: 1.0,
             border_w: 3,
             is_focused: true,
             pid: None,
@@ -1245,6 +1293,12 @@ mod tests {
             is_swallowed: false,
             is_on_view: false,
             is_scratchpad: false,
+            is_fixed: false,
+            is_dock: false,
+            is_desktop: false,
+            is_drag_floating: false,
+            has_strut: false,
+            client_fact: 1.0,
             border_w: 0,
             is_focused: false,
             pid: None,
@@ -1277,6 +1331,8 @@ mod tests {
             locked: false,
             connector: Some("DP-1".into()),
             monitor_name: Some("Dell U2720Q".into()),
+            scale: 1.5,
+            refresh_mhz: 60_000,
         })
         .expect("serialize");
         assert_eq!(with_connector["connector"], "DP-1");
@@ -1286,6 +1342,8 @@ mod tests {
         assert_eq!(with_connector["wy"], 32);
         assert_eq!(with_connector["ww"], 1920);
         assert_eq!(with_connector["wh"], 1048);
+        assert_eq!(with_connector["scale"], 1.5);
+        assert_eq!(with_connector["refresh_mhz"], 60_000);
 
         let without = serde_json::to_value(MonitorInfoIpc {
             num: 1,
@@ -1303,6 +1361,8 @@ mod tests {
             locked: true,
             connector: None,
             monitor_name: None,
+            scale: 1.0,
+            refresh_mhz: 0,
         })
         .expect("serialize");
         assert!(without.get("connector").is_none());
@@ -1312,6 +1372,8 @@ mod tests {
         assert_eq!(without["wy"], 0);
         assert_eq!(without["ww"], 1920);
         assert_eq!(without["wh"], 1080);
+        assert_eq!(without["scale"], 1.0);
+        assert_eq!(without["refresh_mhz"], 0);
     }
 
     #[test]

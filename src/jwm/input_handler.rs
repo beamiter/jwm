@@ -1295,7 +1295,8 @@ impl Jwm {
     /// Return invokes the sender's default action, `d`/Delete dismisses one
     /// row, `c` clears the history.
     /// Key handling while the Alt+Tab switcher is up: Tab and the arrows
-    /// walk the list (wrapping), Home/End jump to the ends, Return commits,
+    /// walk the list (wrapping), Home/End jump to the ends, Page Up/Down
+    /// step by one visible page without wrapping, Return commits,
     /// Delete or BackSpace closes the highlighted window without leaving the
     /// gesture, Escape cancels, and every other key is swallowed — the
     /// modifier is still down, so nothing else may fire.
@@ -1319,6 +1320,16 @@ impl Jwm {
             }
             keys::KEY_End => {
                 if self.features.system_ui.jump_selection(true) {
+                    self.sync_system_ui(backend);
+                }
+            }
+            keys::KEY_Page_Up => {
+                if self.features.system_ui.page_selection(-1) {
+                    self.sync_system_ui(backend);
+                }
+            }
+            keys::KEY_Page_Down => {
+                if self.features.system_ui.page_selection(1) {
                     self.sync_system_ui(backend);
                 }
             }
@@ -1383,6 +1394,19 @@ impl Jwm {
             self.sync_system_ui(backend);
         }
         Ok(())
+    }
+
+    /// Home / End with expose up: jump the highlight to the first / last
+    /// thumbnail without committing. The grid order is
+    /// [`Self::expose_candidates`] filtered the same way Delete / middle-click
+    /// close use — so the edge matches what arrows walk. An empty grid is a
+    /// no-op.
+    fn jump_expose_selection_edge(&mut self, backend: &mut dyn Backend, to_end: bool) {
+        let candidates = self.expose_candidates();
+        let Some(window) = expose_plan::edge_window(&candidates, to_end) else {
+            return;
+        };
+        backend.compositor_expose_select(Some(window));
     }
 
     /// Delete or BackSpace with expose up: close the highlighted thumbnail's
@@ -2433,6 +2457,14 @@ impl Jwm {
                         self.move_tags_overview_selection(backend, ExposeNavDirection::Down);
                         true
                     }
+                    keys::KEY_Home => {
+                        self.jump_tags_overview_edge(backend, false);
+                        true
+                    }
+                    keys::KEY_End => {
+                        self.jump_tags_overview_edge(backend, true);
+                        true
+                    }
                     // A digit jumps straight to its tag and commits, with or
                     // without modifiers: the panel holds the keyboard grab,
                     // so the global Mod1+N bindings never see the key.
@@ -2999,6 +3031,10 @@ impl Jwm {
                     _ => ExposeNavDirection::Down,
                 };
                 backend.compositor_expose_move(dir);
+                return Ok(());
+            }
+            if keysym == keys::KEY_Home || keysym == keys::KEY_End {
+                self.jump_expose_selection_edge(backend, keysym == keys::KEY_End);
                 return Ok(());
             }
             if keysym == keys::KEY_Return || keysym == keys::KEY_KP_Enter {
@@ -6495,6 +6531,49 @@ mod tests {
             "apply_expose_action(backend,expose_plan::plan",
             "_escape())"
         )));
+    }
+
+    /// Switcher Page Up/Down must page through `page_selection` (Home/End twin).
+    #[test]
+    fn switcher_page_keys_route_through_page_selection() {
+        const SOURCE: &str = include_str!("input_handler.rs");
+        let compact: String = SOURCE.chars().filter(|c| !c.is_whitespace()).collect();
+        let branch = compact
+            .split_once("fnhandle_window_switcher_key(")
+            .expect("switcher key helper")
+            .1
+            .split_once("fnclose_window_switcher_row(")
+            .expect("end of switcher key helper")
+            .0;
+        assert!(
+            branch.contains("keys::KEY_Page_Up=>{ifself.features.system_ui.page_selection(-1)"),
+            "Page Up must call page_selection(-1)"
+        );
+        assert!(
+            branch.contains("keys::KEY_Page_Down=>{ifself.features.system_ui.page_selection(1)"),
+            "Page Down must call page_selection(1)"
+        );
+    }
+
+    /// Expose Home/End must jump via `jump_expose_selection_edge` / `edge_window`.
+    #[test]
+    fn expose_home_end_route_through_edge_jump() {
+        const SOURCE: &str = include_str!("input_handler.rs");
+        let compact: String = SOURCE.chars().filter(|c| !c.is_whitespace()).collect();
+        let branch = compact
+            .split_once(concat!("ifself.features.expose", "_active{"))
+            .expect("the expose key branch")
+            .1
+            .split_once(concat!("ifself.features.annotation", "_active{"))
+            .expect("the end of the expose key branch")
+            .0;
+        assert!(
+            branch.contains(concat!(
+                "keysym==keys::KEY_Home||keysym==keys::KEY_End{",
+                "self.jump_expose_selection_edge(backend,keysym==keys::KEY_End);"
+            )),
+            "expose Home/End must call jump_expose_selection_edge"
+        );
     }
 
     /// The slider paths used to shell out to the session's tools — plus a

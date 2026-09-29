@@ -42,6 +42,7 @@ is a no-op round trip — a safe way to peek at the grid.
 | Key | Action |
 | --- | --- |
 | `Left` / `Right` / `Up` / `Down` | move the highlight through the grid |
+| `Home` / `End` | jump to the first / last thumbnail |
 | `Return` / keypad `Enter` | focus the highlighted window and exit |
 | `Delete` / `BackSpace` | close the highlighted window; the grid stays up |
 | `Esc` | exit without changing focus |

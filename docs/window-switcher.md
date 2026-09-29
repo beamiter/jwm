@@ -71,6 +71,7 @@ a row as its window closes, and the survivors keep their MRU order.
 | --- | --- |
 | `Tab` / `Shift+Tab`, `Up` / `Down` | move the highlight, wrapping around both ends |
 | `Home` / `End` | jump to the newest / oldest row |
+| `Page Up` / `Page Down` | step by one visible page without wrapping |
 | `Return` | commit the highlighted window |
 | `Delete` / `BackSpace` | close the highlighted window without leaving the gesture — the next-oldest window slides under the highlight; closing the last row ends the gesture |
 | `Esc` | cancel |

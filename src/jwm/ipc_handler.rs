@@ -101,6 +101,7 @@ fn client_window_info(
     is_focused: bool,
     is_on_view: bool,
     is_scratchpad: bool,
+    has_strut: bool,
     scratchpad: Option<String>,
     layout: Option<String>,
     connector: Option<String>,
@@ -131,6 +132,12 @@ fn client_window_info(
         is_swallowed: client.state.is_swallowed,
         is_on_view,
         is_scratchpad,
+        is_fixed: client.state.is_fixed,
+        is_dock: client.state.is_dock,
+        is_desktop: client.state.is_desktop,
+        is_drag_floating: client.state.is_drag_floating,
+        has_strut,
+        client_fact: client.state.client_fact,
         border_w: client.geometry.border_w,
         is_focused,
         pid: client.pid,
@@ -2661,6 +2668,7 @@ impl Jwm {
                 "overview": self.features.overview.active,
                 "audio_recording": self.features.audio_recording.active,
                 "magnifier": self.features.magnifier.enabled,
+                "magnifier_zoom": self.features.magnifier.zoom_level,
                 "annotation": self.features.annotation_active,
                 "peek": self.features.peek_active,
                 "corner_radius": cfg.behavior().corner_radius,
@@ -2669,6 +2677,13 @@ impl Jwm {
                 "fading": cfg.behavior().fading,
                 "wobbly_windows": cfg.behavior().wobbly_windows,
                 "motion_trail": cfg.behavior().motion_trail,
+            }))),
+            "get_magnifier" => IpcResponse::ok(Some(serde_json::json!({
+                "enabled": self.features.magnifier.enabled,
+                "zoom": self.features.magnifier.zoom_level,
+            }))),
+            "get_peek" => IpcResponse::ok(Some(serde_json::json!({
+                "active": self.features.peek_active,
             }))),
             "get_hdr_status" => {
                 let outputs: Vec<serde_json::Value> = backend
@@ -3523,12 +3538,14 @@ impl Jwm {
             }
             None => (None, None, false, None),
         };
+        let has_strut = self.external_struts.contains_key(&client.win);
         Some(client_window_info(
             client,
             resolved_client_monitor_num(&self.state.monitors, client),
             is_focused,
             is_on_view,
             is_scratchpad,
+            has_strut,
             scratchpad,
             layout,
             connector,
@@ -3615,6 +3632,7 @@ impl Jwm {
                 m.geometry.w_h,
             )
         });
+        let (scale, refresh_mhz) = self.output_scale_refresh_for_monitor(backend, mk);
         MonitorInfoIpc {
             num: m.num,
             x: m.geometry.m_x,
@@ -3631,6 +3649,8 @@ impl Jwm {
             locked: self.monitor_is_locked(m.num),
             connector: self.output_key_for_monitor(backend, mk),
             monitor_name: self.output_monitor_name_for_monitor(backend, mk),
+            scale,
+            refresh_mhz,
         }
     }
 
@@ -4173,7 +4193,9 @@ mod tests {
         client.geometry.w = 640;
         client.geometry.h = 480;
 
-        let info = client_window_info(&client, 7, false, false, false, None, None, None, None);
+        let info = client_window_info(
+            &client, 7, false, false, false, false, None, None, None, None,
+        );
         assert_eq!(info.id, 0x2a);
         assert_eq!(info.monitor, 7);
         assert!(info.is_minimized);
@@ -4181,16 +4203,27 @@ mod tests {
         assert!(!info.is_swallowed);
         assert!(!info.is_on_view);
         assert!(!info.is_scratchpad);
+        assert!(!info.is_fixed);
+        assert!(!info.is_dock);
+        assert!(!info.is_desktop);
+        assert!(!info.is_drag_floating);
+        assert!(!info.has_strut);
+        assert_eq!(info.client_fact, 0.0);
         assert_eq!(info.border_w, 0);
         assert!(info.layout.is_none());
         assert!(info.scratchpad.is_none());
 
         client.state.is_hidden = false;
         client.state.is_swallowed = true;
+        client.state.is_fixed = true;
+        client.state.is_dock = true;
+        client.state.is_desktop = true;
+        client.state.client_fact = 1.25;
         client.geometry.border_w = 4;
         let restored = client_window_info(
             &client,
             7,
+            true,
             true,
             true,
             true,
@@ -4204,6 +4237,12 @@ mod tests {
         assert!(restored.is_swallowed);
         assert!(restored.is_on_view);
         assert!(restored.is_scratchpad);
+        assert!(restored.is_fixed);
+        assert!(restored.is_dock);
+        assert!(restored.is_desktop);
+        assert!(!restored.is_drag_floating);
+        assert!(restored.has_strut);
+        assert_eq!(restored.client_fact, 1.25);
         assert_eq!(restored.border_w, 4);
         assert_eq!(restored.scratchpad.as_deref(), Some("term"));
         assert_eq!(restored.layout.as_deref(), Some("TILE"));

@@ -103,6 +103,19 @@ pub fn grid_index(candidates: &[ExposeCandidate], window: WindowId) -> Option<us
         .position(|&(win, ..)| win == window)
 }
 
+/// First (`to_end == false`) or last (`to_end == true`) eligible window in
+/// grid order — what Home / End select without committing. Empty grids
+/// yield `None`.
+#[must_use]
+pub fn edge_window(candidates: &[ExposeCandidate], to_end: bool) -> Option<WindowId> {
+    let mut iter = candidates.iter().filter(|candidate| eligible(candidate));
+    if to_end {
+        iter.next_back().map(|&(win, ..)| win)
+    } else {
+        iter.next().map(|&(win, ..)| win)
+    }
+}
+
 /// 决定一次 expose 切换要做什么。
 ///
 /// 已激活时总是退出且不聚焦任何窗口；未激活时过滤掉尺寸非正的候选，
@@ -538,6 +551,22 @@ mod tests {
         // resolves to nothing either.
         assert_eq!(grid_index(&grid, win(9)), None);
         assert_eq!(grid_index(&[], win(1)), None);
+    }
+
+    #[test]
+    fn edge_window_picks_first_and_last_eligible() {
+        let grid = vec![
+            (win(1), 0, 0, 100, 100, "one".to_string()),
+            (win(2), 0, 0, 0, 50, "dead".to_string()),
+            (win(3), 0, 0, 100, 100, "three".to_string()),
+        ];
+        assert_eq!(edge_window(&grid, false), Some(win(1)));
+        assert_eq!(edge_window(&grid, true), Some(win(3)));
+        assert_eq!(edge_window(&[], false), None);
+        assert_eq!(edge_window(&[], true), None);
+        let only_dead = vec![(win(2), 0, 0, 0, 50, "dead".to_string())];
+        assert_eq!(edge_window(&only_dead, false), None);
+        assert_eq!(edge_window(&only_dead, true), None);
     }
 
     #[test]

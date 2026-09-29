@@ -7,6 +7,24 @@ monorepo use independent Semantic Versions.
 
 ### Added
 
+- `get_windows` / `get_tree` / `window/state` report `is_fixed`, `is_dock`,
+  `is_desktop`, `is_drag_floating`, `has_strut`, and `client_fact` beside the
+  existing state flags. See
+  [docs/window-placement.md](docs/window-placement.md).
+
+- `get_monitors` / `get_tree` report `scale` (fractional) and `refresh_mhz`
+  (mode refresh in millihertz; `60000` is 60 Hz). See
+  [docs/monitor-lock.md](docs/monitor-lock.md).
+
+- The Alt+Tab switcher answers `Page Up` / `Page Down` (one visible page,
+  no wrap). Tags overview and expose answer `Home` / `End` (first / last
+  cell, no commit). See [docs/window-switcher.md](docs/window-switcher.md),
+  [docs/tags-overview.md](docs/tags-overview.md), and
+  [docs/expose.md](docs/expose.md).
+
+- `get_magnifier` / `get_peek` query the magnifier (enabled + zoom) and peek
+  overlay; `get_effect_status` also carries `magnifier_zoom`.
+
 - `get_windows` / `get_tree` / `window/state` report `is_scratchpad`,
   `border_w`, optional `scratchpad` (binding name), and optional `layout`
   (the monitor's current layout symbol). Terminal swallow / unswallow

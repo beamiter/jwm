@@ -157,6 +157,25 @@ impl TagsOverviewState {
             _ => false,
         }
     }
+
+    /// Jump the highlight to the first or last cell. Returns whether the
+    /// selection actually moved (Home on cell 0 / End on the last cell are
+    /// no-ops for redraw).
+    pub fn jump_selection_edge(&mut self, to_end: bool) -> bool {
+        if self.cells.is_empty() {
+            return false;
+        }
+        let next = if to_end {
+            self.cells.len() - 1
+        } else {
+            0
+        };
+        if self.selected == next {
+            return false;
+        }
+        self.selected = next;
+        true
+    }
 }
 
 /// Columns of the overview grid: the expose grid's aspect-driven shape over
@@ -428,6 +447,18 @@ impl Jwm {
     /// there is nothing to undo (unlike the layout picker's restore).
     pub(crate) fn cancel_tags_overview(&mut self, backend: &mut dyn Backend) {
         self.close_system_ui(backend);
+    }
+
+    /// Home / End jump the highlight to the first / last cell without
+    /// committing — the twin of the switcher's edge jump. Empty grids are a
+    /// no-op; an already-at-edge press stays put and still syncs nothing.
+    pub(crate) fn jump_tags_overview_edge(&mut self, backend: &mut dyn Backend, to_end: bool) {
+        let Some(overview) = self.features.system_ui.tags_overview_mut() else {
+            return;
+        };
+        if overview.jump_selection_edge(to_end) {
+            self.sync_system_ui(backend);
+        }
     }
 
     /// A digit jumps straight to its tag and commits, which is exactly what
@@ -968,6 +999,18 @@ mod tests {
         assert_eq!(state.selected, 1);
         let none_active = TagsOverviewState::new(&[], 0, WORK, 9);
         assert_eq!(none_active.selected, 0);
+    }
+
+    #[test]
+    fn home_and_end_jump_to_grid_edges_without_wrapping() {
+        let mut state = TagsOverviewState::new(&[], 0b001, WORK, 9);
+        assert_eq!(state.selected, 0);
+        assert!(state.jump_selection_edge(true));
+        assert_eq!(state.selected, 8);
+        assert!(!state.jump_selection_edge(true));
+        assert!(state.jump_selection_edge(false));
+        assert_eq!(state.selected, 0);
+        assert!(!state.jump_selection_edge(false));
     }
 
     #[test]
