@@ -9,7 +9,7 @@ use crate::core::models::{ClientKey, MonitorKey, WMClient, WMMonitor};
 use crate::core::state::WMState;
 use crate::core::types::Rect;
 use crate::ipc::{
-    self, CompositorTransitionStatus, IpcEvent, IpcResponse, MonitorInfoIpc, RuntimeCounts,
+    self, CompositorTransitionStatus, IpcEvent, IpcResponse, MonitorInfoIpc, RectIpc, RuntimeCounts,
     RuntimeFeatureStates, RuntimeHealth, RuntimeStatusV1, TreeNode, WindowInfo, WorkspaceInfo,
 };
 use crate::ipc_server::IncomingIpc;
@@ -106,6 +106,11 @@ fn client_window_info(
     layout: Option<String>,
     connector: Option<String>,
     monitor_name: Option<String>,
+    swallowing: Option<u64>,
+    swallowed_by: Option<u64>,
+    transient_for: Option<u64>,
+    is_tabbed: bool,
+    tab_index: Option<usize>,
 ) -> WindowInfo {
     WindowInfo {
         id: client.win.raw(),
@@ -128,8 +133,21 @@ fn client_window_info(
         is_maximized: client.state.is_maximized_vert && client.state.is_maximized_horz,
         is_maximized_vert: client.state.is_maximized_vert,
         is_maximized_horz: client.state.is_maximized_horz,
+        maximize_promoted: client.state.maximize_restore_tiled,
+        maximize_restore: client.geometry.maximize_restore_rect.map(|r| RectIpc {
+            x: r.x,
+            y: r.y,
+            w: r.w,
+            h: r.h,
+        }),
         is_minimized: client.state.is_hidden,
+        minimized_order: client.state.minimized_order,
         is_swallowed: client.state.is_swallowed,
+        swallowing,
+        swallowed_by,
+        transient_for,
+        is_tabbed,
+        tab_index,
         is_on_view,
         is_scratchpad,
         is_fixed: client.state.is_fixed,
@@ -3555,23 +3573,44 @@ impl Jwm {
             .find(|(_, key)| **key == client_key)
             .map(|(name, _)| name.clone());
         let is_scratchpad = scratchpad.is_some();
-        let (connector, monitor_name, is_on_view, layout) = match client.mon {
-            Some(mk) => {
-                let mon = self.state.monitors.get(mk);
-                let is_on_view = mon.is_some_and(|monitor| {
-                    client.state.is_sticky
-                        || (client.state.tags & monitor.get_active_tags()) != 0
-                });
-                let layout = mon.map(|monitor| format!("{:?}", *monitor.lt));
-                (
-                    self.output_key_for_monitor(backend, mk),
-                    self.output_monitor_name_for_monitor(backend, mk),
-                    is_on_view,
-                    layout,
-                )
-            }
-            None => (None, None, false, None),
+        let (connector, monitor_name, is_on_view, layout, is_tabbed, tab_index) =
+            match client.mon {
+                Some(mk) => {
+                    let mon = self.state.monitors.get(mk);
+                    let is_on_view = mon.is_some_and(|monitor| {
+                        client.state.is_sticky
+                            || (client.state.tags & monitor.get_active_tags()) != 0
+                    });
+                    let layout = mon.map(|monitor| format!("{:?}", *monitor.lt));
+                    let group = self.tab_group_clients(mk);
+                    let tab_index = group.iter().position(|&ck| ck == client_key);
+                    let is_tabbed = tab_index.is_some();
+                    (
+                        self.output_key_for_monitor(backend, mk),
+                        self.output_monitor_name_for_monitor(backend, mk),
+                        is_on_view,
+                        layout,
+                        is_tabbed,
+                        tab_index,
+                    )
+                }
+                None => (None, None, false, None, false, None),
+            };
+        let swallowing = client.swallowing.and_then(|parent_key| {
+            self.state.clients.get(parent_key).map(|parent| parent.win.raw())
+        });
+        let swallowed_by = if client.state.is_swallowed {
+            self.state.client_order.iter().find_map(|&ck| {
+                let other = self.state.clients.get(ck)?;
+                (other.swallowing == Some(client_key)).then_some(other.win.raw())
+            })
+        } else {
+            None
         };
+        let transient_for = backend
+            .property_ops()
+            .transient_for(client.win)
+            .map(|win| win.raw());
         let has_strut = self.external_struts.contains_key(&client.win);
         Some(client_window_info(
             client,
@@ -3584,6 +3623,11 @@ impl Jwm {
             layout,
             connector,
             monitor_name,
+            swallowing,
+            swallowed_by,
+            transient_for,
+            is_tabbed,
+            tab_index,
         ))
     }
 
@@ -4358,13 +4402,35 @@ mod tests {
         client.geometry.h = 480;
 
         let info = client_window_info(
-            &client, 7, false, false, false, false, None, None, None, None,
+            &client,
+            7,
+            false,
+            false,
+            false,
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            None,
         );
         assert_eq!(info.id, 0x2a);
         assert_eq!(info.monitor, 7);
         assert!(info.is_minimized);
+        assert_eq!(info.minimized_order, 0);
         assert!(!info.is_focused);
         assert!(!info.is_swallowed);
+        assert!(!info.maximize_promoted);
+        assert!(info.maximize_restore.is_none());
+        assert!(info.swallowing.is_none());
+        assert!(info.swallowed_by.is_none());
+        assert!(info.transient_for.is_none());
+        assert!(!info.is_tabbed);
+        assert!(info.tab_index.is_none());
         assert!(!info.is_on_view);
         assert!(!info.is_scratchpad);
         assert!(!info.is_fixed);
@@ -4388,7 +4454,10 @@ mod tests {
         client.state.is_dock = true;
         client.state.is_desktop = true;
         client.state.client_fact = 1.25;
+        client.state.maximize_restore_tiled = true;
+        client.state.minimized_order = 9;
         client.geometry.border_w = 4;
+        client.geometry.maximize_restore_rect = Some(crate::core::types::Rect::new(10, 20, 30, 40));
         let restored = client_window_info(
             &client,
             7,
@@ -4400,10 +4469,31 @@ mod tests {
             Some("TILE".into()),
             Some("DP-1".into()),
             Some("Dell U2720Q".into()),
+            Some(99),
+            Some(88),
+            Some(77),
+            true,
+            Some(1),
         );
         assert!(!restored.is_minimized);
+        assert_eq!(restored.minimized_order, 9);
         assert!(restored.is_focused);
         assert!(restored.is_swallowed);
+        assert!(restored.maximize_promoted);
+        assert_eq!(
+            restored.maximize_restore,
+            Some(crate::ipc::RectIpc {
+                x: 10,
+                y: 20,
+                w: 30,
+                h: 40
+            })
+        );
+        assert_eq!(restored.swallowing, Some(99));
+        assert_eq!(restored.swallowed_by, Some(88));
+        assert_eq!(restored.transient_for, Some(77));
+        assert!(restored.is_tabbed);
+        assert_eq!(restored.tab_index, Some(1));
         assert!(restored.is_on_view);
         assert!(restored.is_scratchpad);
         assert!(restored.is_fixed);

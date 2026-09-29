@@ -489,6 +489,16 @@ pub fn is_supported_query(name: &str) -> bool {
 // Query result types
 // ---------------------------------------------------------------------------
 
+/// Content rectangle projected over IPC (`x`/`y`/`w`/`h` naming matches
+/// [`WindowInfo`] geometry fields).
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+pub struct RectIpc {
+    pub x: i32,
+    pub y: i32,
+    pub w: i32,
+    pub h: i32,
+}
+
 #[derive(Debug, Serialize)]
 pub struct WindowInfo {
     pub id: u64,
@@ -514,12 +524,39 @@ pub struct WindowInfo {
     pub is_maximized: bool,
     pub is_maximized_vert: bool,
     pub is_maximized_horz: bool,
+    /// Maximize was promoted out of the tiling grid
+    /// (`ClientState::maximize_restore_tiled`).
+    pub maximize_promoted: bool,
+    /// Pre-maximize content rectangle when a maximize axis is set; omitted
+    /// otherwise. Same convention as `x`/`y`/`w`/`h`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub maximize_restore: Option<RectIpc>,
     /// True only for JWM's semantic minimized state. Windows parked off-screen
     /// because their tag is not selected are not minimized.
     pub is_minimized: bool,
+    /// Dock / iconic restore order (`ClientState::minimized_order`); `0` when
+    /// not minimized.
+    pub minimized_order: u64,
     /// True when this client is a terminal swallowed by a child (excluded from
     /// arrange / visibility until the child unmaps).
     pub is_swallowed: bool,
+    /// Window id of the parent terminal this client is swallowing; omitted
+    /// when this client is not a swallowing child.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub swallowing: Option<u64>,
+    /// Window id of the child that swallowed this terminal; omitted when this
+    /// client is not currently swallowed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub swallowed_by: Option<u64>,
+    /// `WM_TRANSIENT_FOR` / xdg parent window id when known; omitted otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transient_for: Option<u64>,
+    /// True when this window is a member of the monitor's window-tab strip.
+    pub is_tabbed: bool,
+    /// Index within the monitor's tab group when [`Self::is_tabbed`]; omitted
+    /// otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tab_index: Option<usize>,
     /// True when the window's tags intersect the active tags on its monitor
     /// (or it is sticky): on the current view, not merely mapped.
     pub is_on_view: bool,
@@ -1161,8 +1198,16 @@ mod tests {
             is_maximized: false,
             is_maximized_vert: true,
             is_maximized_horz: false,
+            maximize_promoted: false,
+            maximize_restore: None,
             is_minimized: true,
+            minimized_order: 0,
             is_swallowed: true,
+            swallowing: None,
+            swallowed_by: None,
+            transient_for: None,
+            is_tabbed: false,
+            tab_index: None,
             is_on_view: false,
             is_scratchpad: true,
             is_fixed: false,
@@ -1191,9 +1236,17 @@ mod tests {
         assert_eq!(value["is_maximized"], false);
         assert_eq!(value["is_maximized_vert"], true);
         assert_eq!(value["is_maximized_horz"], false);
+        assert_eq!(value["maximize_promoted"], false);
+        assert!(value.get("maximize_restore").is_none());
         assert_eq!(value["is_above"], false);
         assert_eq!(value["is_below"], false);
         assert_eq!(value["is_swallowed"], true);
+        assert_eq!(value["minimized_order"], 0);
+        assert!(value.get("swallowing").is_none());
+        assert!(value.get("swallowed_by").is_none());
+        assert!(value.get("transient_for").is_none());
+        assert_eq!(value["is_tabbed"], false);
+        assert!(value.get("tab_index").is_none());
         assert_eq!(value["is_on_view"], false);
         assert_eq!(value["is_scratchpad"], true);
         assert_eq!(value["is_fixed"], false);
@@ -1234,8 +1287,16 @@ mod tests {
             is_maximized: false,
             is_maximized_vert: false,
             is_maximized_horz: false,
+            maximize_promoted: false,
+            maximize_restore: None,
             is_minimized: false,
+            minimized_order: 0,
             is_swallowed: false,
+            swallowing: None,
+            swallowed_by: None,
+            transient_for: None,
+            is_tabbed: false,
+            tab_index: None,
             is_on_view: true,
             is_scratchpad: false,
             is_fixed: false,
@@ -1291,8 +1352,16 @@ mod tests {
             is_maximized: false,
             is_maximized_vert: false,
             is_maximized_horz: false,
+            maximize_promoted: false,
+            maximize_restore: None,
             is_minimized: false,
+            minimized_order: 0,
             is_swallowed: false,
+            swallowing: None,
+            swallowed_by: None,
+            transient_for: None,
+            is_tabbed: false,
+            tab_index: None,
             is_on_view: true,
             is_scratchpad: false,
             is_fixed: false,
@@ -1341,8 +1410,16 @@ mod tests {
             is_maximized: false,
             is_maximized_vert: false,
             is_maximized_horz: false,
+            maximize_promoted: false,
+            maximize_restore: None,
             is_minimized: false,
+            minimized_order: 0,
             is_swallowed: false,
+            swallowing: None,
+            swallowed_by: None,
+            transient_for: None,
+            is_tabbed: false,
+            tab_index: None,
             is_on_view: false,
             is_scratchpad: false,
             is_fixed: false,

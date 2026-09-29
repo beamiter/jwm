@@ -209,7 +209,12 @@ resize), `is_dock`, `is_desktop`, `is_drag_floating` (user-promoted float),
 `never_focus`, `skip_taskbar`, `skip_pager`, `no_decorations`,
 `demands_attention` (EWMH demands-attention, distinct from `is_urgent`),
 `has_strut` (contributes a `_NET_WM_STRUT(_PARTIAL)` reservation), and
-`client_fact` (per-window tiled share).
+`client_fact` (per-window tiled share). Maximize detail: `maximize_promoted`
+(`maximize_restore_tiled`), optional `maximize_restore` `{x,y,w,h}`, and
+`minimized_order`. Swallow edges: optional `swallowing` (parent id this
+child is swallowing) and `swallowed_by` (child id that swallowed this
+terminal). Optional `transient_for` is the `WM_TRANSIENT_FOR` / xdg parent
+id. Tab strip membership is `is_tabbed` plus optional `tab_index`.
 `get_monitors` / `get_tree` expose the usable work area as `wx` / `wy` /
 `ww` / `wh` beside the full-output `x` / `y` / `w` / `h`, plus `scale`
 (fractional), `refresh_mhz` (mode refresh in millihertz; `60000` is

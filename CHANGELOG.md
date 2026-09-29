@@ -7,6 +7,12 @@ monorepo use independent Semantic Versions.
 
 ### Added
 
+- `get_windows` / `get_tree` / `window/state` report `maximize_promoted`,
+  optional `maximize_restore` `{x,y,w,h}`, `minimized_order`, optional
+  `swallowing` / `swallowed_by` / `transient_for`, and `is_tabbed` /
+  optional `tab_index`. See
+  [docs/window-placement.md](docs/window-placement.md).
+
 - `get_system_ui` reports whether a shell panel is open and its `kind`
   (`launcher`, `notification_center`, `keybindings`, …).
   `get_notifications` adds `center_open` and `selected_id`.

@@ -4,7 +4,7 @@
 
 ---
 
-## Evolve backlog（目标 199 轮；已完成 wave 9–118，本地 ahead）
+## Evolve backlog（目标 199 轮；已完成 wave 9–125，本地 ahead）
 
 | # | 选题 | Size |
 | --- | --- | --- |
@@ -25,7 +25,29 @@
 | 106–112 | setgaps IPC；Monitor transform/m_fact/n_master；recording segments；effect expose | ✓ |
 | 113–114 | keybinding viewer modkey + chord rows | ✓ |
 | 115–118 | get_system_ui / get_tab_bar；tab_bar_reserved；notifications center_open | ✓ |
+| 119–125 | WindowInfo maximize_promoted/restore、swallowing/swallowed_by、transient_for、minimized_order、tab_index/is_tabbed | ✓ |
 | … | 跳过：Annotation/Screenshot CommonLinear、toast Closed(1)、BT withdraw、FS/PiP 自身丢锚点（own-anchor drop）、Recording EncodedOnly、XWayland 单轴 | |
+
+---
+
+## 2026-09-29（四十七）：WindowInfo maximize / swallow / tab IPC
+
+选题 = evolve waves 119–125 / evolve7h。
+
+1. **Wave 119**：`WindowInfo.maximize_promoted`（`maximize_restore_tiled`）。
+2. **Wave 120**：`WindowInfo.maximize_restore` `{x,y,w,h}`。
+3. **Wave 121–122**：`swallowing` / `swallowed_by` window ids。
+4. **Wave 123**：`transient_for`（property ops）。
+5. **Wave 124**：`minimized_order`。
+6. **Wave 125**：`is_tabbed` / `tab_index`（`tab_group_clients`）。
+   CHANGELOG；window-placement；serialize + projection pins。
+
+**刻意不做**：跳过表不变。
+
+**验证**：`scripts/test.sh --lib -- window_info_serializes window_query_projection`。
+
+**下一轮候选**：MonitorInfo name/vendor/serial/VRR；WorkspaceInfo
+has_fullscreen/is_occupied；session client_fact v10。
 
 ---
 
