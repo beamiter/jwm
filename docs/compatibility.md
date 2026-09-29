@@ -80,9 +80,11 @@ particles, …). `get_tree` nodes also carry `selected_id`, `window_count`,
 urgency / floating / minimized / sticky / fullscreen / pip / maximized /
 above / below / scratchpad / tabbed / fixed / dock / desktop /
 never_focus / demands_attention / skip_taskbar / skip_pager /
-no_decorations / drag_float counts. `get_workspaces`
+no_decorations / drag_float / swallowed / on_view / maximize_promoted /
+strut / status_bar counts. `get_workspaces`
 includes per-tag `gap` plus matching count fields (including scratchpad /
-tabbed / dock / desktop / skip_* / drag_float); `get_monitors` report the
+tabbed / dock / desktop / skip_* / drag_float / swallowed / on_view /
+maximize_promoted / strut / status_bar); `get_monitors` report the
 same count family plus `lt_symbol` / optional `output_id`. `get_layout` /
 `get_gaps` / `get_nmaster` return the focused monitor's live layout
 parameters; `setgaps` / `setnmaster` / `set_nmaster` / `set_layout` are
@@ -91,8 +93,9 @@ bindable over IPC. Window rows also report border-inclusive `total_w` /
 xwayland / scrolling / color_management / audio / wallpaper / bluetooth /
 system_ui / layout / tabs / struts / scratchpads / gaps / mfact / nmaster /
 show_bar / metrics / version_info / monitors / workspaces / windows / tree /
-focused / cfact / prev_layout / effects / mic summaries alongside earlier
-nests. `get_effect_status` /
+focused / cfact / prev_layout / effects / mic / capabilities / selected /
+bench / floating / minimized / sticky / urgent / fullscreen / pip
+summaries alongside earlier nests. `get_effect_status` /
 `get_effects` reports shell picker flags, magnifier radius, and
 `compositor_active`; short query aliases include `get_notif`, `get_ui`,
 `get_lock`, `get_tabs`, `get_clip`, `get_network`, `get_tearing`,
@@ -103,14 +106,18 @@ nests. `get_effect_status` /
 `get_mf`, `get_tab`, `get_bench`, `get_gest`, `get_wall`, `get_lt`,
 `get_cf`, `get_sel`, `get_fw`, `get_pl`, `get_bar`, `get_tr`, `get_win`,
 `get_conn`, `get_st`, `get_fx`, `get_mute`, `get_cli`, `get_wc`, `get_th`,
-`get_pair`. Command aliases
+`get_pair`, `get_pk`, `get_bm`, `get_conf`, `get_rec`, `get_arec`,
+`get_cap`, `get_xw`, `get_wly`, `get_idl`. Command aliases
 include `launcher`, `notif_center`, `screenshot`, `lock`, `layouts`,
 `load_session`, `toggle_do_not_disturb`, `hub`, `switcher`, `tags`,
 `overview`, `peek`, `mag`, `annotate`, `lily`, `night`, `caffeine`, `wifi`,
 `bt`, `wall`, `session`, `floating`, `sticky`, `pip`, `maximize`, `cal`,
 `clip`, `monlayout`, `aout`, `ain`, `unlock`, `snap`, `record`, `arecord`,
 `bar`, `comp`, `play`, `next`, `prev`, `stop`, `unfocus`, `damage`,
-`cycle`. Session snapshots are at v16 (`old_geometry`). `get_magnifier` /
+`cycle`, `kill`, `last`, `loop`, `save`, `restore`, `pad`, `ftab`, `fwin`,
+`case`, `palette`, `region`, `attach`, `scol`, `smov`, `swin`, `scons`,
+`sexp`, `twifi`, `tbt`, `clayout`. Session snapshots are at v17
+(`hidden_x`). `get_magnifier` /
 `get_mag` reports `radius`; `get_peek` reports `compositor_active`;
 `get_tab_bar` / `get_tabs` reports `selected_id` when a tab group is focused.
 Layer-shell background/top/overlay surfaces remain compositor-owned layers.

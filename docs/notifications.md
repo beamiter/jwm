@@ -50,7 +50,7 @@ never falls through to the client underneath the card. Every button
 dismisses, not only the left one: the stack docks exactly where a monitor's
 tab strip lies, so a middle or right press falling past the card would close
 or focus the strip cell hidden under it. Only the left button invokes an
-action chip. The wheel (X11 buttons 4-7; on Wayland the axis events and the
+action chip. The wheel (X11 buttons 4-7, vertical or horizontal; on Wayland the axis events and the
 physical buttons whose codes map there) is not a click — it dismisses
 nothing and goes to whatever is under the card. Dismissing a card is not
 closing the notification: the row stays in the center (see
@@ -88,7 +88,7 @@ text-only exactly as before.
 
 Pointer input follows the same model: hover highlights a notification, left
 click invokes its current/default action (or dismisses an action-less row),
-the wheel browses history, and left-clicking outside closes the card. Middle
+the vertical or horizontal wheel browses history (Up/Down twins), and left-clicking outside closes the card. Middle
 click on a notification row selects that row and dismisses it in one shot —
 the pointer twin of `d` / `Delete`, not of `Enter`. A middle click on blank
 space (panel chrome, outside, or a miss) is inert. The numbered action strip

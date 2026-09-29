@@ -7,6 +7,24 @@ monorepo use independent Semantic Versions.
 
 ### Added
 
+### Added
+
+- `get_monitors` / `get_workspaces` / `get_tree` report swallowed / on_view /
+  maximize_promoted / strut / status_bar counts.
+- IPC query aliases: `get_pk`, `get_bm`, `get_conf`, `get_rec`, `get_arec`,
+  `get_cap`, `get_xw`, `get_wly`, `get_idl`.
+- IPC command aliases: `kill`, `last`, `loop`, `save`, `restore`, `pad`,
+  `ftab`, `fwin`, `case`, `palette`, `region`, `attach`, `scol`, `smov`,
+  `swin`, `scons`, `sexp`, `twifi`, `tbt`, `clayout`.
+- `get_status` nests compact `capabilities` / `selected` / `bench` /
+  `floating` / `minimized` / `sticky` / `urgent` / `fullscreen` / `pip`.
+- `get_config` polish7: animation_speed/easing/duration, backend_family,
+  buttons/chord/termcmd lengths, color accents, behavior feature mirrors.
+- Session snapshot v17 persists optional `hidden_x`.
+- Clipboard + notification center: docs advertise vertical or horizontal wheel.
+- Portal `WindowInfo` deserializes maximized_vert/horz; `MonitorInfo` gains
+  swallowed/on_view/maximize_promoted/strut/status_bar counts.
+
 - `get_monitors` / `get_workspaces` / `get_tree` report skip_taskbar /
   skip_pager / no_decorations / drag_float counts.
 - IPC query aliases: `get_lt`, `get_cf`, `get_sel`, `get_fw`, `get_pl`,

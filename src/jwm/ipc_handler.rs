@@ -118,6 +118,11 @@ struct TagClientCounts {
     skip_pager: usize,
     no_decorations: usize,
     drag_float: usize,
+    swallowed: usize,
+    on_view: usize,
+    maximize_promoted: usize,
+    strut: usize,
+    status_bar: usize,
 }
 
 fn tag_client_counts(
@@ -126,6 +131,9 @@ fn tag_client_counts(
     tag_mask: u32,
     scratchpads: &[ClientKey],
     tabbed: &[ClientKey],
+    strut_wins: &std::collections::HashSet<crate::backend::common_define::WindowId>,
+    status_bar_name: &str,
+    active_tags: u32,
 ) -> TagClientCounts {
     let mut counts = TagClientCounts::default();
     let Some(clients) = state.monitor_clients.get(monitor) else {
@@ -197,6 +205,21 @@ fn tag_client_counts(
         }
         if client.state.is_drag_floating {
             counts.drag_float += 1;
+        }
+        if client.state.is_swallowed {
+            counts.swallowed += 1;
+        }
+        if client.state.is_sticky || (client.state.tags & active_tags) != 0 {
+            counts.on_view += 1;
+        }
+        if client.state.maximize_restore_tiled {
+            counts.maximize_promoted += 1;
+        }
+        if strut_wins.contains(&client.win) {
+            counts.strut += 1;
+        }
+        if client.is_status_bar(status_bar_name) {
+            counts.status_bar += 1;
         }
     }
     counts
@@ -2757,7 +2780,7 @@ impl Jwm {
             "get_gesture_status" | "get_gesture" | "get_gest" => IpcResponse::ok(Some(self.query_gesture_status())),
             "get_wayland_status" | "get_wayland" | "get_wl" => IpcResponse::ok(Some(self.query_wayland_status(backend))),
             "get_config_status" | "get_cfg" => IpcResponse::ok(Some(self.query_config_status())),
-            "get_config" => IpcResponse::ok(Some(self.query_config_subset(args))),
+            "get_config" | "get_conf" => IpcResponse::ok(Some(self.query_config_subset(args))),
             "get_dnd" | "get_do_not_disturb" => IpcResponse::ok(Some(serde_json::json!({
                 "enabled": self.do_not_disturb,
             }))),
@@ -2809,10 +2832,10 @@ impl Jwm {
                 })))
             }
             "get_wallpaper_colors" | "get_wallpaper" | "get_wall" | "get_wc" => IpcResponse::ok(Some(self.wallpaper_theme_json())),
-            "get_idle_status" | "get_idle" => IpcResponse::ok(Some(self.idle_status_json(backend))),
+            "get_idle_status" | "get_idle" | "get_idl" => IpcResponse::ok(Some(self.idle_status_json(backend))),
             "get_resources" | "get_res" => IpcResponse::ok(Some(self.resources_json())),
             "get_clipboard" | "get_clip" => IpcResponse::ok(Some(self.clipboard_json())),
-            "get_recording_status" | "get_recording" => {
+            "get_recording_status" | "get_recording" | "get_rec" => {
                 let output_path = self.features.recording.output_path.clone();
                 let active = self.features.recording.active;
                 // Validation still runs synchronously (with a hard helper
@@ -2894,7 +2917,7 @@ impl Jwm {
                     })),
                 })))
             }
-            "get_audio_recording_status" | "get_audio_recording" => {
+            "get_audio_recording_status" | "get_audio_recording" | "get_arec" => {
                 self.features.audio_recording.refresh();
                 let recording = &self.features.audio_recording;
                 let (output_exists, output_bytes) = recording
@@ -2984,7 +3007,7 @@ impl Jwm {
                 "zoom": self.features.magnifier.zoom_level,
                 "radius": self.features.magnifier.radius,
             }))),
-            "get_peek" => IpcResponse::ok(Some(serde_json::json!({
+            "get_peek" | "get_pk" => IpcResponse::ok(Some(serde_json::json!({
                 "active": self.features.peek_active,
                 "compositor_active": backend.has_compositor(),
             }))),
@@ -3081,7 +3104,7 @@ impl Jwm {
                     "color_delivery": color_delivery,
                 })))
             }
-            "get_xwayland_status" | "get_xwayland" => {
+            "get_xwayland_status" | "get_xwayland" | "get_xw" => {
                 if let Some(status) = backend.compositor_xwayland_status() {
                     IpcResponse::ok(Some(serde_json::to_value(status).unwrap_or_default()))
                 } else {
@@ -3095,7 +3118,7 @@ impl Jwm {
                     })))
                 }
             }
-            "get_capture_status" | "get_capture" => {
+            "get_capture_status" | "get_capture" | "get_cap" => {
                 if let Some(status) = backend.compositor_capture_status() {
                     IpcResponse::ok(Some(serde_json::to_value(status).unwrap_or_default()))
                 } else {
@@ -3157,7 +3180,7 @@ impl Jwm {
                 }
                 None => IpcResponse::err("compositor not active".to_string()),
             },
-            "get_waterlily_status" | "get_waterlily" => match backend.compositor_waterlily_status() {
+            "get_waterlily_status" | "get_waterlily" | "get_wly" => match backend.compositor_waterlily_status() {
                 Some(status) => IpcResponse::ok(Some(serde_json::json!({
                     "enabled": status.enabled,
                     "active": status.active,
@@ -3200,7 +3223,7 @@ impl Jwm {
                     })))
                 }
             }
-            "benchmark_report" | "get_bench" => {
+            "benchmark_report" | "get_bench" | "get_bm" => {
                 if let Some(report) = backend.compositor_benchmark_report() {
                     IpcResponse::ok(Some(serde_json::from_str(&report).unwrap_or_default()))
                 } else {
@@ -3913,6 +3936,17 @@ impl Jwm {
             prev_layout: Some(self.query_focused_prev_layout(backend)),
             effects: Some(self.effects_status_summary()),
             mic: Some(self.mic_status_summary()),
+            capabilities: Some(
+                serde_json::to_value(crate::ipc::ipc_capabilities()).unwrap_or_default(),
+            ),
+            selected: Some(self.query_selected_window(backend, false)),
+            bench: Some(self.bench_status_summary(backend)),
+            floating: Some(self.windows_flag_status_summary(backend, "floating")),
+            minimized: Some(self.windows_flag_status_summary(backend, "minimized")),
+            sticky: Some(self.windows_flag_status_summary(backend, "sticky")),
+            urgent: Some(self.windows_flag_status_summary(backend, "urgent")),
+            fullscreen: Some(self.windows_flag_status_summary(backend, "fullscreen")),
+            pip: Some(self.windows_flag_status_summary(backend, "pip")),
         }
     }
 
@@ -4040,7 +4074,19 @@ impl Jwm {
                 let (layout, m_fact, n_master, gap) = workspace_layout_state(mon, i);
                 let (show_bar, prev_layout, selected_id) =
                     workspace_tag_extras(mon, i, &self.state.clients);
-                let counts = tag_client_counts(&self.state, mk, tag_bit, &scratchpads, &tabbed);
+                let strut_wins: std::collections::HashSet<_> =
+                    self.external_struts.keys().copied().collect();
+                let status_bar_name = cfg.status_bar_name();
+                let counts = tag_client_counts(
+                    &self.state,
+                    mk,
+                    tag_bit,
+                    &scratchpads,
+                    &tabbed,
+                    &strut_wins,
+                    status_bar_name,
+                    active_tags,
+                );
                 result.push(WorkspaceInfo {
                     tag_mask: tag_bit,
                     tag_index: i,
@@ -4079,6 +4125,11 @@ impl Jwm {
                     skip_pager_count: counts.skip_pager,
                     no_decorations_count: counts.no_decorations,
                     drag_float_count: counts.drag_float,
+                    swallowed_count: counts.swallowed,
+                    on_view_count: counts.on_view,
+                    maximize_promoted_count: counts.maximize_promoted,
+                    strut_count: counts.strut,
+                    status_bar_count: counts.status_bar,
                 });
             }
         }
@@ -4498,6 +4549,89 @@ impl Jwm {
                         .count()
                 })
                 .unwrap_or(0),
+            swallowed_count: self
+                .state
+                .monitor_clients
+                .get(mk)
+                .map(|clients| {
+                    clients
+                        .iter()
+                        .filter(|&&ck| {
+                            self.state
+                                .clients
+                                .get(ck)
+                                .is_some_and(|c| c.state.is_swallowed)
+                        })
+                        .count()
+                })
+                .unwrap_or(0),
+            on_view_count: {
+                let active = m.get_active_tags();
+                self.state
+                    .monitor_clients
+                    .get(mk)
+                    .map(|clients| {
+                        clients
+                            .iter()
+                            .filter(|&&ck| {
+                                self.state.clients.get(ck).is_some_and(|c| {
+                                    c.state.is_sticky || (c.state.tags & active) != 0
+                                })
+                            })
+                            .count()
+                    })
+                    .unwrap_or(0)
+            },
+            maximize_promoted_count: self
+                .state
+                .monitor_clients
+                .get(mk)
+                .map(|clients| {
+                    clients
+                        .iter()
+                        .filter(|&&ck| {
+                            self.state
+                                .clients
+                                .get(ck)
+                                .is_some_and(|c| c.state.maximize_restore_tiled)
+                        })
+                        .count()
+                })
+                .unwrap_or(0),
+            strut_count: self
+                .state
+                .monitor_clients
+                .get(mk)
+                .map(|clients| {
+                    clients
+                        .iter()
+                        .filter(|&&ck| {
+                            self.state
+                                .clients
+                                .get(ck)
+                                .is_some_and(|c| self.external_struts.contains_key(&c.win))
+                        })
+                        .count()
+                })
+                .unwrap_or(0),
+            status_bar_count: {
+                let bar = CONFIG.load().status_bar_name().to_string();
+                self.state
+                    .monitor_clients
+                    .get(mk)
+                    .map(|clients| {
+                        clients
+                            .iter()
+                            .filter(|&&ck| {
+                                self.state
+                                    .clients
+                                    .get(ck)
+                                    .is_some_and(|c| c.is_status_bar(&bar))
+                            })
+                            .count()
+                    })
+                    .unwrap_or(0)
+            },
         }
     }
 
@@ -5108,6 +5242,43 @@ impl Jwm {
                 .unwrap_or(false),
         })
     }
+
+    fn bench_status_summary(&self, backend: &dyn Backend) -> serde_json::Value {
+        match backend.compositor_benchmark_report() {
+            Some(report) => serde_json::json!({
+                "ready": true,
+                "report": serde_json::from_str::<serde_json::Value>(&report).unwrap_or_default(),
+            }),
+            None => serde_json::json!({ "ready": false }),
+        }
+    }
+
+    fn windows_flag_status_summary(
+        &self,
+        backend: &dyn Backend,
+        flag: &str,
+    ) -> serde_json::Value {
+        let full = self.query_windows(backend);
+        let pred = |w: &crate::ipc::WindowInfo| -> bool {
+            match flag {
+                "floating" => w.is_floating,
+                "minimized" => w.is_minimized,
+                "sticky" => w.is_sticky,
+                "urgent" => w.is_urgent || w.demands_attention,
+                "fullscreen" => w.is_fullscreen,
+                "pip" => w.is_pip,
+                _ => false,
+            }
+        };
+        serde_json::json!({
+            "count": full.iter().filter(|w| pred(w)).count(),
+            "focused_id": full
+                .iter()
+                .find(|w| w.is_focused && pred(w))
+                .map(|w| w.id),
+        })
+    }
+
 
     fn query_runtime_status_metrics(&self, backend: &dyn Backend) -> Option<serde_json::Value> {
         backend
@@ -5832,6 +6003,46 @@ impl Jwm {
                 base.insert(key.clone(), value.clone());
             }
         }
+        let animation_speed = match cfg.animation_speed() {
+            crate::core::animation::AnimationSpeed::Instant => "instant",
+            crate::core::animation::AnimationSpeed::Fast => "fast",
+            crate::core::animation::AnimationSpeed::Normal => "normal",
+            crate::core::animation::AnimationSpeed::Slow => "slow",
+        };
+        let animation_easing = format!("{:?}", cfg.animation_easing());
+        let polish7 = serde_json::json!({
+            "animation_speed": animation_speed,
+            "animation_easing": animation_easing,
+            "animation_duration_ms": cfg.animation_duration().as_millis() as u64,
+            "backend_family": format!("{:?}", crate::config::get_backend_family()),
+            "buttons_count": cfg.get_buttons().len(),
+            "layout_persist_tags": cfg.layout_persist_tags(),
+            "chord_leader_key": cfg.chord_config().leader_key,
+            "chord_timeout_ms": cfg.chord_config().timeout_ms,
+            "chord_bindings_count": cfg.chord_config().bindings.len(),
+            "termcmd_len": crate::config::Config::get_termcmd().len(),
+            "scratchpad_termcmd_len": crate::config::Config::get_scratchpad_termcmd().len(),
+            "ui_theme": cfg.ui_theme(),
+            "colors_cyan": cfg.colors().cyan,
+            "colors_white": cfg.colors().white,
+            "colors_black": cfg.colors().black,
+            "behavior_shadow_enabled": cfg.behavior().shadow_enabled,
+            "behavior_corner_radius": cfg.behavior().corner_radius,
+            "behavior_fading": cfg.behavior().fading,
+            "behavior_vrr_enabled": cfg.behavior().vrr_enabled,
+            "behavior_swallow_enabled": cfg.behavior().swallow_enabled,
+            "behavior_window_tabs": cfg.behavior().window_tabs,
+            "behavior_overview_enabled": cfg.behavior().overview_enabled,
+            "behavior_expose_enabled": cfg.behavior().expose_enabled,
+            "behavior_peek_enabled": cfg.behavior().peek_enabled,
+            "behavior_magnifier_enabled": cfg.behavior().magnifier_enabled,
+            "behavior_clipboard_history": cfg.behavior().clipboard_history,
+        });
+        if let (Some(base), Some(more)) = (full.as_object_mut(), polish7.as_object()) {
+            for (key, value) in more {
+                base.insert(key.clone(), value.clone());
+            }
+        }
         let Some(keys) = args.get("keys").and_then(|v| v.as_array()) else {
             return full;
         };
@@ -5901,6 +6112,14 @@ impl Jwm {
                     skip_pager_count: windows.iter().filter(|w| w.skip_pager).count(),
                     no_decorations_count: windows.iter().filter(|w| w.no_decorations).count(),
                     drag_float_count: windows.iter().filter(|w| w.is_drag_floating).count(),
+                    swallowed_count: windows.iter().filter(|w| w.is_swallowed).count(),
+                    on_view_count: windows.iter().filter(|w| w.is_on_view).count(),
+                    maximize_promoted_count: windows
+                        .iter()
+                        .filter(|w| w.maximize_promoted)
+                        .count(),
+                    strut_count: windows.iter().filter(|w| w.has_strut).count(),
+                    status_bar_count: windows.iter().filter(|w| w.is_status_bar).count(),
                     selected_id: m.sel.and_then(|ck| {
                         self.state.clients.get(ck).map(|client| client.win.raw())
                     }),
@@ -9142,13 +9361,13 @@ mod tests {
             .split_once("\"get_magnifier\" | \"get_mag\" =>")
             .expect("get_magnifier arm")
             .1
-            .split_once("\"get_peek\" =>")
+            .split_once("\"get_peek\" | \"get_pk\" =>")
             .expect("get_peek follows")
             .0;
         assert!(magnifier.contains("\"radius\""));
 
         let peek = SOURCE
-            .split_once("\"get_peek\" =>")
+            .split_once("\"get_peek\" | \"get_pk\" =>")
             .expect("get_peek arm")
             .1
             .split_once("\"get_hdr_status\" | \"get_hdr\" =>")
@@ -9706,7 +9925,6 @@ mod tests {
         assert!(SOURCE.contains("skip_taskbar_count:"));
         assert!(SOURCE.contains("drag_float_count:"));
 
-        assert!(SESSION.contains("const SESSION_VERSION: u32 = 16"));
         assert!(SESSION.contains("pub old_geometry:"));
         assert!(SESSION.contains("fn migrate_snapshot_v15"));
 
@@ -9738,6 +9956,110 @@ mod tests {
             "prev_layout:",
             "effects:",
             "mic:",
+        ] {
+            assert!(status.contains(nest), "get_status must nest {nest}");
+        }
+    }
+
+    #[test]
+    fn evolve7h_waves_901_1000_ipc_contract_pins() {
+        const SOURCE: &str = include_str!("ipc_handler.rs");
+        const IPC: &str = include_str!("../ipc.rs");
+        const SESSION: &str = include_str!("session.rs");
+        const CLIPBOARD: &str = include_str!("../../docs/clipboard.md");
+        const NOTIF: &str = include_str!("../../docs/notifications.md");
+        const PORTAL: &str = include_str!("../../portal/src/ipc.rs");
+
+        assert!(IPC.contains("pub swallowed_count:"));
+        assert!(IPC.contains("pub on_view_count:"));
+        assert!(IPC.contains("pub maximize_promoted_count:"));
+        assert!(IPC.contains("pub strut_count:"));
+        assert!(IPC.contains("pub status_bar_count:"));
+        assert!(IPC.contains("pub capabilities:"));
+        assert!(IPC.contains("pub selected:"));
+        assert!(IPC.contains("pub bench:"));
+        assert!(IPC.contains("pub floating:"));
+        assert!(IPC.contains("pub minimized:"));
+        assert!(IPC.contains("pub sticky:"));
+        assert!(IPC.contains("pub urgent:"));
+        assert!(IPC.contains("pub fullscreen:"));
+        assert!(IPC.contains("pub pip:"));
+        assert!(IPC.contains("\"get_pk\""));
+        assert!(IPC.contains("\"get_bm\""));
+        assert!(IPC.contains("\"get_conf\""));
+        assert!(IPC.contains("\"get_rec\""));
+        assert!(IPC.contains("\"get_arec\""));
+        assert!(IPC.contains("\"get_cap\""));
+        assert!(IPC.contains("\"get_xw\""));
+        assert!(IPC.contains("\"get_wly\""));
+        assert!(IPC.contains("\"get_idl\""));
+        assert!(IPC.contains("\"kill\""));
+        assert!(IPC.contains("\"last\""));
+        assert!(IPC.contains("\"loop\""));
+        assert!(IPC.contains("\"save\""));
+        assert!(IPC.contains("\"restore\""));
+        assert!(IPC.contains("\"pad\""));
+        assert!(IPC.contains("\"ftab\""));
+        assert!(IPC.contains("\"fwin\""));
+        assert!(IPC.contains("\"case\""));
+        assert!(IPC.contains("\"palette\""));
+        assert!(IPC.contains("\"region\""));
+        assert!(IPC.contains("\"attach\""));
+        assert!(IPC.contains("\"scol\""));
+        assert!(IPC.contains("\"smov\""));
+        assert!(IPC.contains("\"swin\""));
+        assert!(IPC.contains("\"scons\""));
+        assert!(IPC.contains("\"sexp\""));
+        assert!(IPC.contains("\"twifi\""));
+        assert!(IPC.contains("\"tbt\""));
+        assert!(IPC.contains("\"clayout\""));
+
+        assert!(SOURCE.contains("fn bench_status_summary"));
+        assert!(SOURCE.contains("fn windows_flag_status_summary"));
+        assert!(SOURCE.contains("\"animation_speed\""));
+        assert!(SOURCE.contains("\"chord_leader_key\""));
+        assert!(SOURCE.contains("\"backend_family\""));
+        assert!(SOURCE.contains("swallowed_count:"));
+        assert!(SOURCE.contains("status_bar_count:"));
+
+        assert!(SESSION.contains("const SESSION_VERSION: u32 = 17"));
+        assert!(SESSION.contains("pub hidden_x:"));
+        assert!(SESSION.contains("fn migrate_snapshot_v16"));
+
+        assert!(
+            CLIPBOARD.contains("vertical or horizontal wheel"),
+            "clipboard docs must advertise horizontal wheel twin"
+        );
+        assert!(
+            NOTIF.contains("vertical or horizontal wheel"),
+            "notification center docs must advertise horizontal wheel twin"
+        );
+
+        assert!(PORTAL.contains("pub swallowed_count:"));
+        assert!(PORTAL.contains("pub on_view_count:"));
+        assert!(PORTAL.contains("pub maximize_promoted_count:"));
+        assert!(PORTAL.contains("pub strut_count:"));
+        assert!(PORTAL.contains("pub status_bar_count:"));
+        assert!(PORTAL.contains("pub is_maximized_vert:"));
+        assert!(PORTAL.contains("pub is_maximized_horz:"));
+
+        let status = SOURCE
+            .split_once("compositor_metrics: backend")
+            .expect("status metrics")
+            .1
+            .split_once("fn window_info")
+            .expect("window_info follows")
+            .0;
+        for nest in [
+            "capabilities:",
+            "selected:",
+            "bench:",
+            "floating:",
+            "minimized:",
+            "sticky:",
+            "urgent:",
+            "fullscreen:",
+            "pip:",
         ] {
             assert!(status.contains(nest), "get_status must nest {nest}");
         }

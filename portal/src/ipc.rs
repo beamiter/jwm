@@ -92,6 +92,10 @@ pub struct WindowInfo {
     #[serde(default)]
     pub maximize_promoted: bool,
     #[serde(default)]
+    pub is_maximized_vert: bool,
+    #[serde(default)]
+    pub is_maximized_horz: bool,
+    #[serde(default)]
     pub border_w: i32,
     #[serde(default)]
     pub total_w: i32,
@@ -161,6 +165,16 @@ pub struct MonitorInfo {
     pub no_decorations_count: usize,
     #[serde(default)]
     pub drag_float_count: usize,
+    #[serde(default)]
+    pub swallowed_count: usize,
+    #[serde(default)]
+    pub on_view_count: usize,
+    #[serde(default)]
+    pub maximize_promoted_count: usize,
+    #[serde(default)]
+    pub strut_count: usize,
+    #[serde(default)]
+    pub status_bar_count: usize,
     #[serde(default)]
     pub scale: f32,
     #[serde(default)]

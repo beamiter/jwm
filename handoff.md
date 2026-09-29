@@ -4,7 +4,7 @@
 
 ---
 
-## Evolve backlog（目标 1000 轮；已完成 wave 9–900，本地 ahead）
+## Evolve backlog（目标 1000 轮；已完成 wave 9–1000，本地 ahead）
 
 | # | 选题 | Size |
 | --- | --- | --- |
@@ -90,7 +90,44 @@
 | 876–890 | get_config polish6 + session v16 old_geometry | ✓ |
 | 891–895 | calendar horizontal wheel docs；portal Window/Monitor fields | ✓ |
 | 896–900 | include_str!/serialize/dispatch contract pins + docs drift + handoff/CHANGELOG | ✓ |
+| 901–920 | Monitor/Workspace/Tree swallowed/on_view/maximize_promoted/strut/status_bar counts | ✓ |
+| 921–940 | short query aliases（get_pk/bm/conf/rec/arec/cap/xw/wly/idl） | ✓ |
+| 941–955 | command aliases（kill/last/loop/save/restore/pad/ftab/fwin/case/palette/region/attach/scroll shorts/twifi/tbt/clayout） | ✓ |
+| 956–975 | get_status nests capabilities/selected/bench/floating/minimized/sticky/urgent/fullscreen/pip | ✓ |
+| 976–990 | get_config polish7 + session v17 hidden_x | ✓ |
+| 991–995 | clipboard/notifications horizontal wheel docs；portal Window/Monitor fields | ✓ |
+| 996–1000 | include_str!/serialize/dispatch contract pins + docs drift + handoff/CHANGELOG | ✓ |
+| — | **Handoff target 1000 reached**（wave 9–1000） | ✓ |
 | … | 跳过：Annotation/Screenshot CommonLinear、toast Closed(1)、BT withdraw、FS/PiP 自身丢锚点（own-anchor drop）、Recording EncodedOnly、XWayland 单轴 | |
+
+---
+
+## 2026-09-29（六十二）：IPC leftovers + session v17 → 1000（handoff）
+
+选题 = evolve waves 901–1000 / evolve7h；目标 1000 收官。
+
+1. **Wave 901–920**：`MonitorInfoIpc` / `WorkspaceInfo` / `TreeNode`
+   swallowed / on_view / maximize_promoted / strut / status_bar counts。
+2. **Wave 921–940**：短 query 别名（`get_pk` / `get_bm` / `get_conf` /
+   `get_rec` / `get_arec` / `get_cap` / `get_xw` / `get_wly` / `get_idl`）。
+3. **Wave 941–955**：command 别名（`kill` / `last` / `loop` / `save` /
+   `restore` / `pad` / `ftab` / `fwin` / `case` / `palette` / `region` /
+   `attach` / `scol` / `smov` / `swin` / `scons` / `sexp` / `twifi` /
+   `tbt` / `clayout`）。
+4. **Wave 956–975**：`get_status` nests capabilities / selected / bench /
+   floating / minimized / sticky / urgent / fullscreen / pip。
+5. **Wave 976–990**：`get_config` polish7；Session v17 `hidden_x`。
+6. **Wave 991–995**：clipboard / notifications 水平滚轮文档；portal
+   Window/Monitor 字段。
+7. **Wave 996–1000**：contract pins；docs drift；CHANGELOG；handoff 收官。
+
+**刻意不做**：跳过表不变；不发明 DRM/EncodedOnly/CommonLinear / peak meter /
+`mapped_ms` / `is_override_redirect`。
+
+**验证**：`scripts/test.sh --lib --` 聚焦 swallowed_count / get_pk /
+session v17 / clipboard horizontal / evolve7h_waves_901。
+
+**Handoff**：已完成 wave 9–1000。
 
 ---
 
@@ -119,7 +156,7 @@
 **验证**：`scripts/test.sh --lib --` 聚焦 skip_taskbar_count / get_lt /
 session v16 / calendar horizontal / evolve7h_waves_801。
 
-**下一轮候选**：901+；或跳过表项。
+**下一轮候选**：已收官于 1000；后续仅跳过表项或新选题。
 
 ---
 

@@ -15,8 +15,7 @@ puts the entry you choose back on the clipboard.
 
 ## Pointer
 
-Left click on a row copies it back — the same as `Enter`. The wheel browses
-the list. Middle click on a row selects that row and forgets it in one shot
+Left click on a row copies it back — the same as `Enter`. The vertical or horizontal wheel browses the list (Up/Down keyboard twins). Middle click on a row selects that row and forgets it in one shot
 (the pointer twin of `d` / `Delete`; no arm, and never clear-all). A middle
 click on blank space is inert. Wi-Fi and Bluetooth pickers use the same
 middle-click hit shape, but keep their two-press armed confirm (first
