@@ -4,7 +4,7 @@
 
 ---
 
-## Evolve backlog（目标 100 轮；已完成 wave 9–68，本地 ahead）
+## Evolve backlog（目标 100 轮；已完成 wave 9–72，本地 ahead）
 
 | # | 选题 | Size |
 | --- | --- | --- |
@@ -16,7 +16,30 @@
 | 57–58 | vstack focusstack + scrolling focus → window/state；MonitorInfoIpc.monitor_name | ✓ |
 | 59–63 | Session minimized v8；Window/Workspace monitor_name；portal IPC picker；clipboard JPEG/BMP→PNG；FS/PiP promoted-neighbour lock test | ✓ |
 | 64–68 | Session FS/PiP v9；X11 toast release swallow；Launcher 中键→Enter；WorkspaceInfo.is_urgent；media-controls Hub vs Players docs | ✓ |
+| 69–72 | WindowInfo.is_swallowed / is_on_view；MonitorInfoIpc wx/wy/ww/wh；相关 docs | ✓ |
 | … | 跳过：Annotation/Screenshot CommonLinear、toast Closed(1)、BT withdraw、FS/PiP 自身丢锚点（own-anchor drop）、Recording EncodedOnly、XWayland 单轴 | |
+
+---
+
+## 2026-09-29（三十八）：WindowInfo swallowed/on_view + monitor work area IPC
+
+选题 = evolve waves 69–72 / evolve7h。
+
+1. **Wave 69**：`WindowInfo.is_swallowed`（`ClientState::is_swallowed`）；
+   `get_windows` / `get_tree` / `window/state` 填充；serialize pin。
+2. **Wave 70**：`MonitorInfoIpc` 增 `wx` / `wy` / `ww` / `wh`（
+   `monitor_work_area`，bar/struts/tab bar 已扣）；`get_monitors` /
+   `get_tree` 填充；与全屏 `x`/`y`/`w`/`h` 并列。
+3. **Wave 71**：`WindowInfo.is_on_view`（sticky 或 tags ∩ active tags）；
+   serialize pin。
+4. **Wave 72**：docs — window-placement / monitor-lock / compatibility；
+   CHANGELOG。
+
+**刻意不做**：跳过表不变；FS/PiP own-anchor 仍策略延后。
+
+**验证**：`scripts/test.sh --lib -- window_info_serializes monitor_info_serializes window_query_projection`.
+
+**下一轮候选**：见跳过表；FS/PiP own-anchor drop 仍为策略延后项。
 
 ---
 

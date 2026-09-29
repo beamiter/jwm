@@ -7,6 +7,15 @@ monorepo use independent Semantic Versions.
 
 ### Added
 
+- `get_windows` / `get_tree` / `window/state` report `is_swallowed` (terminal
+  swallowed by a child) and `is_on_view` (tags intersect the monitor's active
+  tags, or sticky — on the current view, not merely mapped). See
+  [docs/window-placement.md](docs/window-placement.md).
+
+- `get_monitors` / `get_tree` expose the work area as `wx` / `wy` / `ww` / `wh`
+  (bar, struts, and tab bar excluded), beside the full-output `x` / `y` / `w` /
+  `h`. See [docs/monitor-lock.md](docs/monitor-lock.md).
+
 - Session snapshots (v9+) persist fullscreen and picture-in-picture;
   `restore_session` re-applies them through `setfullscreen` /
   `set_client_pip` (Fullscreen wins if both). See

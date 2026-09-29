@@ -197,7 +197,11 @@ and optional `connector` / `monitor_name` (`OutputIdentity.stable_key` /
 connector name, and EDID name when known — the same fields as
 `MonitorInfoIpc`) so scripts can key windows to panels across hotplug
 renumbering. Both are omitted when the live output map has no identity for
-that monitor.
+that monitor. The same rows carry `is_swallowed` (a terminal hidden behind
+its child) and `is_on_view` (the window's tags intersect the monitor's
+active tags, or it is sticky — on the current view, not merely mapped).
+`get_monitors` / `get_tree` expose the usable work area as `wx` / `wy` /
+`ww` / `wh` beside the full-output `x` / `y` / `w` / `h`.
 
 A refused request, like one that changes nothing, leaves the window alone:
 JWM republishes the current state and replies with the current geometry, a

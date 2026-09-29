@@ -509,6 +509,12 @@ pub struct WindowInfo {
     /// True only for JWM's semantic minimized state. Windows parked off-screen
     /// because their tag is not selected are not minimized.
     pub is_minimized: bool,
+    /// True when this client is a terminal swallowed by a child (excluded from
+    /// arrange / visibility until the child unmaps).
+    pub is_swallowed: bool,
+    /// True when the window's tags intersect the active tags on its monitor
+    /// (or it is sticky): on the current view, not merely mapped.
+    pub is_on_view: bool,
     pub is_focused: bool,
     /// Process id when the backend reported one (`_NET_WM_PID` / Wayland
     /// credentials); `None` when unknown.
@@ -556,6 +562,12 @@ pub struct MonitorInfoIpc {
     pub y: i32,
     pub w: i32,
     pub h: i32,
+    /// Work area (bar / struts / tab bar excluded), matching internal `w_*`
+    /// geometry naming compressed like `x`/`y`/`w`/`h` for the full output.
+    pub wx: i32,
+    pub wy: i32,
+    pub ww: i32,
+    pub wh: i32,
     pub active_tags: u32,
     pub layout: String,
     pub focused: bool,
@@ -1082,6 +1094,8 @@ mod tests {
             is_maximized_vert: true,
             is_maximized_horz: false,
             is_minimized: true,
+            is_swallowed: true,
+            is_on_view: false,
             is_focused: false,
             pid: Some(1234),
             connector: Some("DP-1".into()),
@@ -1096,6 +1110,8 @@ mod tests {
         assert_eq!(value["is_maximized_horz"], false);
         assert_eq!(value["is_above"], false);
         assert_eq!(value["is_below"], false);
+        assert_eq!(value["is_swallowed"], true);
+        assert_eq!(value["is_on_view"], false);
         assert_eq!(value["pid"], 1234);
         assert_eq!(value["connector"], "DP-1");
 
@@ -1121,6 +1137,8 @@ mod tests {
             is_maximized_vert: false,
             is_maximized_horz: false,
             is_minimized: false,
+            is_swallowed: false,
+            is_on_view: true,
             is_focused: false,
             pid: None,
             connector: None,
@@ -1129,6 +1147,8 @@ mod tests {
         .expect("serialize");
         assert!(without_pid.get("pid").is_none());
         assert!(without_pid.get("connector").is_none());
+        assert_eq!(without_pid["is_swallowed"], false);
+        assert_eq!(without_pid["is_on_view"], true);
     }
 
     #[test]
@@ -1155,6 +1175,8 @@ mod tests {
             is_maximized_vert: false,
             is_maximized_horz: false,
             is_minimized: false,
+            is_swallowed: false,
+            is_on_view: true,
             is_focused: true,
             pid: None,
             connector: Some("HDMI-A-1".into()),
@@ -1186,6 +1208,8 @@ mod tests {
             is_maximized_vert: false,
             is_maximized_horz: false,
             is_minimized: false,
+            is_swallowed: false,
+            is_on_view: false,
             is_focused: false,
             pid: None,
             connector: None,
@@ -1204,6 +1228,10 @@ mod tests {
             y: 0,
             w: 1920,
             h: 1080,
+            wx: 0,
+            wy: 32,
+            ww: 1920,
+            wh: 1048,
             active_tags: 1,
             layout: "TILE".into(),
             focused: true,
@@ -1215,6 +1243,10 @@ mod tests {
         assert_eq!(with_connector["connector"], "DP-1");
         assert_eq!(with_connector["monitor_name"], "Dell U2720Q");
         assert_eq!(with_connector["locked"], false);
+        assert_eq!(with_connector["wx"], 0);
+        assert_eq!(with_connector["wy"], 32);
+        assert_eq!(with_connector["ww"], 1920);
+        assert_eq!(with_connector["wh"], 1048);
 
         let without = serde_json::to_value(MonitorInfoIpc {
             num: 1,
@@ -1222,6 +1254,10 @@ mod tests {
             y: 0,
             w: 1920,
             h: 1080,
+            wx: 1920,
+            wy: 0,
+            ww: 1920,
+            wh: 1080,
             active_tags: 1,
             layout: "TILE".into(),
             focused: false,
@@ -1233,6 +1269,10 @@ mod tests {
         assert!(without.get("connector").is_none());
         assert!(without.get("monitor_name").is_none());
         assert_eq!(without["locked"], true);
+        assert_eq!(without["wx"], 1920);
+        assert_eq!(without["wy"], 0);
+        assert_eq!(without["ww"], 1920);
+        assert_eq!(without["wh"], 1080);
     }
 
     #[test]

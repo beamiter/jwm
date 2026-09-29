@@ -99,6 +99,7 @@ fn client_window_info(
     client: &WMClient,
     monitor: i32,
     is_focused: bool,
+    is_on_view: bool,
     connector: Option<String>,
     monitor_name: Option<String>,
 ) -> WindowInfo {
@@ -124,6 +125,8 @@ fn client_window_info(
         is_maximized_vert: client.state.is_maximized_vert,
         is_maximized_horz: client.state.is_maximized_horz,
         is_minimized: client.state.is_hidden,
+        is_swallowed: client.state.is_swallowed,
+        is_on_view,
         is_focused,
         pid: client.pid,
         connector,
@@ -3490,17 +3493,25 @@ impl Jwm {
         is_focused: bool,
     ) -> Option<WindowInfo> {
         let client = self.state.clients.get(client_key)?;
-        let (connector, monitor_name) = match client.mon {
-            Some(mk) => (
-                self.output_key_for_monitor(backend, mk),
-                self.output_monitor_name_for_monitor(backend, mk),
-            ),
-            None => (None, None),
+        let (connector, monitor_name, is_on_view) = match client.mon {
+            Some(mk) => {
+                let is_on_view = self.state.monitors.get(mk).is_some_and(|monitor| {
+                    client.state.is_sticky
+                        || (client.state.tags & monitor.get_active_tags()) != 0
+                });
+                (
+                    self.output_key_for_monitor(backend, mk),
+                    self.output_monitor_name_for_monitor(backend, mk),
+                    is_on_view,
+                )
+            }
+            None => (None, None, false),
         };
         Some(client_window_info(
             client,
             resolved_client_monitor_num(&self.state.monitors, client),
             is_focused,
+            is_on_view,
             connector,
             monitor_name,
         ))
@@ -3577,12 +3588,24 @@ impl Jwm {
         mk: MonitorKey,
         m: &WMMonitor,
     ) -> MonitorInfoIpc {
+        let work = self.monitor_work_area(mk).unwrap_or_else(|| {
+            crate::core::types::Rect::new(
+                m.geometry.w_x,
+                m.geometry.w_y,
+                m.geometry.w_w,
+                m.geometry.w_h,
+            )
+        });
         MonitorInfoIpc {
             num: m.num,
             x: m.geometry.m_x,
             y: m.geometry.m_y,
             w: m.geometry.m_w,
             h: m.geometry.m_h,
+            wx: work.x,
+            wy: work.y,
+            ww: work.w,
+            wh: work.h,
             active_tags: m.get_active_tags(),
             layout: format!("{:?}", *m.lt),
             focused: self.state.sel_mon == Some(mk),
@@ -4131,22 +4154,28 @@ mod tests {
         client.geometry.w = 640;
         client.geometry.h = 480;
 
-        let info = client_window_info(&client, 7, false, None, None);
+        let info = client_window_info(&client, 7, false, false, None, None);
         assert_eq!(info.id, 0x2a);
         assert_eq!(info.monitor, 7);
         assert!(info.is_minimized);
         assert!(!info.is_focused);
+        assert!(!info.is_swallowed);
+        assert!(!info.is_on_view);
 
         client.state.is_hidden = false;
+        client.state.is_swallowed = true;
         let restored = client_window_info(
             &client,
             7,
+            true,
             true,
             Some("DP-1".into()),
             Some("Dell U2720Q".into()),
         );
         assert!(!restored.is_minimized);
         assert!(restored.is_focused);
+        assert!(restored.is_swallowed);
+        assert!(restored.is_on_view);
         assert_eq!(restored.connector.as_deref(), Some("DP-1"));
         assert_eq!(restored.monitor_name.as_deref(), Some("Dell U2720Q"));
     }

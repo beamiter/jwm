@@ -152,8 +152,13 @@ Every lock and unlock broadcasts a `monitor/lock` IPC event
 `locked` flag, an optional `connector` (`OutputIdentity.stable_key` /
 connector name), and an optional `monitor_name` (EDID name when known) per
 monitor, so a status bar can show which screens are down and key or label
-panels the same way session restore does. `get_workspaces` / `get_windows` /
+panels the same way session restore does. Each monitor row also reports the
+work area as `wx` / `wy` / `ww` / `wh` (status bar, strut docks, and the
+window tab bar excluded) beside the full-output `x` / `y` / `w` / `h`.
+`get_workspaces` / `get_windows` /
 `get_tree` / `window/state` expose the same optional `connector` and
 `monitor_name` on each workspace and window row (omitted when unknown).
 `get_workspaces` also reports `is_urgent` per tag (true when any non-sticky
 client on that tag demands attention), matching the status-bar urgent mask.
+`get_windows` / `get_tree` / `window/state` also report `is_swallowed` and
+`is_on_view` (tag intersection with the monitor's active tags, or sticky).
