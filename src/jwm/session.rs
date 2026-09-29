@@ -1166,7 +1166,9 @@ impl Jwm {
 
         // Re-apply persisted maximize after resting placement and arrange so
         // User admission promotes into the restored tile order, and floating
-        // maximize keeps the saved restore hint.
+        // maximize keeps the saved restore hint. Clamp absolute restore coords
+        // into the destination work area so a connector remap cannot leave
+        // the hint off-screen.
         for (key, plan) in &plans {
             let Some(maximize) = &plan.maximize else {
                 continue;
@@ -1175,12 +1177,28 @@ impl Jwm {
             if !axes.any() {
                 continue;
             }
+            let restore_hint = maximize.restore_hint().map(|hint| {
+                let area = self
+                    .state
+                    .clients
+                    .get(*key)
+                    .and_then(|client| client.mon)
+                    .and_then(|monitor_key| self.monitor_work_area(monitor_key));
+                match area {
+                    Some(area) => {
+                        let (x, y, w, h) =
+                            clamp_floating_rect((hint.x, hint.y, hint.w, hint.h), area);
+                        Rect::new(x, y, w, h)
+                    }
+                    None => hint,
+                }
+            });
             if let Err(error) = self.set_client_maximized_with_hint(
                 backend,
                 *key,
                 axes,
                 MaximizeOrigin::User,
-                maximize.restore_hint(),
+                restore_hint,
             ) {
                 log::warn!("session restore could not re-maximize a matched client: {error}");
             }
@@ -2528,6 +2546,64 @@ mod tests {
             jwm.state.clients[key].mon,
             Some(mon1),
             "pre-v5 entries without a connector keep monitor_num"
+        );
+    }
+
+    #[test]
+    fn session_maximize_restore_hint_is_clamped_to_destination_work_area() {
+        let mut backend = DisplaySpyBackend::new(vec![output(1, 0, 0, 1920, 1080)]);
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").expect("test jwm");
+        let monitor = jwm.state.monitor_order[0];
+        let tags = jwm.state.monitors[monitor].get_active_tags();
+        let work = jwm.monitor_work_area(monitor).expect("work area");
+
+        let mut client = WMClient::new(WindowId::from_raw(0x73));
+        client.class = "FloatApp".into();
+        client.instance = "floatapp".into();
+        client.mon = Some(monitor);
+        client.state.tags = tags;
+        client.state.is_floating = true;
+        let key = jwm.insert_client(client);
+        jwm.attach_to_monitor(key, monitor);
+
+        // Absolute coords from a previous geometry (e.g. another monitor's
+        // origin) that sit entirely off this work area.
+        let off_screen = (
+            work.x + work.w + 500,
+            work.y + work.h + 200,
+            400,
+            300,
+        );
+        let mut entry = entry("FloatApp", "floatapp", tags);
+        entry.is_floating = true;
+        entry.floating = Some(off_screen);
+        entry.maximize = Some(SessionMaximize {
+            vert: true,
+            horz: true,
+            restore: Some(off_screen),
+            promoted: false,
+        });
+        let snapshot = SessionSnapshot {
+            version: SESSION_VERSION,
+            clients: vec![entry],
+            monitor_orders: vec![],
+        };
+
+        assert_eq!(jwm.apply_session_snapshot(&mut backend, &snapshot), 1);
+        assert_eq!(
+            jwm.state.clients[key].state.maximized_axes(),
+            MaximizeAxes::BOTH
+        );
+        let hint = jwm.state.clients[key]
+            .geometry
+            .maximize_restore_rect
+            .expect("restore hint after maximize");
+        assert!(
+            hint.x >= work.x
+                && hint.y >= work.y
+                && hint.x + hint.w <= work.x + work.w
+                && hint.y + hint.h <= work.y + work.h,
+            "restore hint {hint:?} must sit inside work area {work:?}"
         );
     }
 }

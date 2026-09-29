@@ -2460,11 +2460,11 @@ impl Jwm {
                 IpcResponse::ok(Some(serde_json::to_value(workspaces).unwrap_or_default()))
             }
             "get_monitors" => {
-                let monitors = self.query_monitors();
+                let monitors = self.query_monitors(backend);
                 IpcResponse::ok(Some(serde_json::to_value(monitors).unwrap_or_default()))
             }
             "get_tree" => {
-                let tree = self.query_tree();
+                let tree = self.query_tree(backend);
                 IpcResponse::ok(Some(serde_json::to_value(tree).unwrap_or_default()))
             }
             "get_scrolling_status" => IpcResponse::ok(Some(self.query_scrolling_status())),
@@ -3415,7 +3415,7 @@ impl Jwm {
     fn query_runtime_status(&self, backend: &dyn Backend) -> RuntimeStatusV1 {
         let config = self.query_config_status();
         let windows = self.query_windows().len();
-        let monitors = self.query_monitors().len();
+        let monitors = self.query_monitors(backend).len();
         let workspaces = self.query_workspaces().len();
         let uptime_ms = u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
         let configured_compositor = CONFIG.load().compositor_enabled();
@@ -3521,25 +3521,35 @@ impl Jwm {
         result
     }
 
-    pub(crate) fn query_monitors(&self) -> Vec<MonitorInfoIpc> {
+    pub(crate) fn query_monitors(&self, backend: &dyn Backend) -> Vec<MonitorInfoIpc> {
         self.state
             .monitor_order
             .iter()
             .filter_map(|&mk| {
                 let m = self.state.monitors.get(mk)?;
-                Some(MonitorInfoIpc {
-                    num: m.num,
-                    x: m.geometry.m_x,
-                    y: m.geometry.m_y,
-                    w: m.geometry.m_w,
-                    h: m.geometry.m_h,
-                    active_tags: m.get_active_tags(),
-                    layout: format!("{:?}", *m.lt),
-                    focused: self.state.sel_mon == Some(mk),
-                    locked: self.monitor_is_locked(m.num),
-                })
+                Some(self.monitor_info_ipc(backend, mk, m))
             })
             .collect()
+    }
+
+    fn monitor_info_ipc(
+        &self,
+        backend: &dyn Backend,
+        mk: MonitorKey,
+        m: &WMMonitor,
+    ) -> MonitorInfoIpc {
+        MonitorInfoIpc {
+            num: m.num,
+            x: m.geometry.m_x,
+            y: m.geometry.m_y,
+            w: m.geometry.m_w,
+            h: m.geometry.m_h,
+            active_tags: m.get_active_tags(),
+            layout: format!("{:?}", *m.lt),
+            focused: self.state.sel_mon == Some(mk),
+            locked: self.monitor_is_locked(m.num),
+            connector: self.output_key_for_monitor(backend, mk),
+        }
     }
 
     pub(crate) fn query_scrolling_status(&self) -> serde_json::Value {
@@ -3824,7 +3834,7 @@ impl Jwm {
         })
     }
 
-    pub(crate) fn query_tree(&self) -> Vec<TreeNode> {
+    pub(crate) fn query_tree(&self, backend: &dyn Backend) -> Vec<TreeNode> {
         // `is_focused` means the one window with input focus, exactly as
         // `get_windows` reports it. Each monitor's own selection would mark
         // one window per monitor, and a script looking for "the focused
@@ -3847,17 +3857,7 @@ impl Jwm {
                     })
                     .unwrap_or_default();
                 Some(TreeNode {
-                    monitor: MonitorInfoIpc {
-                        num: m.num,
-                        x: m.geometry.m_x,
-                        y: m.geometry.m_y,
-                        w: m.geometry.m_w,
-                        h: m.geometry.m_h,
-                        active_tags: m.get_active_tags(),
-                        layout: format!("{:?}", *m.lt),
-                        focused: self.state.sel_mon == Some(mk),
-                        locked: self.monitor_is_locked(m.num),
-                    },
+                    monitor: self.monitor_info_ipc(backend, mk, m),
                     windows,
                 })
             })
@@ -6234,7 +6234,7 @@ mod tests {
         jwm.state.sel_mon = Some(monitors[1]);
 
         let focused_in_tree: Vec<u64> = jwm
-            .query_tree()
+            .query_tree(&backend)
             .iter()
             .flat_map(|node| node.windows.iter())
             .filter(|window| window.is_focused)

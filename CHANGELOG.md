@@ -7,6 +7,12 @@ monorepo use independent Semantic Versions.
 
 ### Added
 
+- `get_monitors` / `get_tree` expose an optional `connector` field
+  (`OutputIdentity.stable_key` / connector name) so status bars and scripts
+  can key panels the same way session / closed-placement / per-tag layouts
+  do. Omitted when the live output map has no identity. See
+  [docs/monitor-lock.md](docs/monitor-lock.md).
+
 - Per-tag layout entries (`[[layout.tags]]`) key the output by optional
   `connector` (`OutputIdentity.stable_key` / connector name) alongside the
   numeric `monitor` index, so hotplug hole-fill renumbering restores each
@@ -362,6 +368,18 @@ monorepo use independent Semantic Versions.
   the header remain no-ops. See [docs/calendar.md](docs/calendar.md).
 
 ### Changed
+
+- X11 `updategeom` / `createmon` seed per-tag layouts by the output's
+  connector / `stable_key` (same key as Wayland `add_monitor`), so RandR
+  display changes restore connector-keyed `[[layout.tags]]` instead of only
+  the positional monitor index. See
+  [docs/window-placement.md](docs/window-placement.md#restarts-and-sessions).
+
+- Session restore clamps a maximized window's saved restore rectangle into
+  the destination monitor's work area before re-applying maximize, so
+  absolute coords from another geometry cannot land off-screen after a
+  connector remap. See
+  [docs/window-placement.md](docs/window-placement.md#restarts-and-sessions).
 
 - xdg-shell dual-axis maximize clears the four `Tiled*` edge states, and
   configure / focus / size-enforce paths keep them off while the window is

@@ -257,11 +257,22 @@ impl Jwm {
     }
 
     pub(super) fn createmon(&mut self, show_bar: bool) -> WMMonitor {
+        // Test helpers and call sites without an output identity seed by
+        // monitor index only.
+        self.createmon_seeded(show_bar, None)
+    }
+
+    /// Like [`Self::createmon`], but seeds per-tag layouts by the output's
+    /// `stable_key` / connector when `updategeom` or `add_monitor` knows it.
+    pub(super) fn createmon_seeded(
+        &mut self,
+        show_bar: bool,
+        connector: Option<&str>,
+    ) -> WMMonitor {
         // The X11 setup paths number monitors by position and append them,
-        // so the next number is the current length. No output identity is
-        // available here; seeding falls back to the monitor index.
+        // so the next number is the current length.
         let num = self.state.monitor_order.len() as i32;
-        self.createmon_numbered(show_bar, num, None)
+        self.createmon_numbered(show_bar, num, connector)
     }
 
     /// A monitor that will answer to `num`: saved per-tag layouts are keyed

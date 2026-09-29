@@ -4,13 +4,30 @@
 
 ---
 
-## Evolve backlog（目标 100 轮；已完成 wave 9–41，本地 ahead）
+## Evolve backlog（目标 100 轮；已完成 wave 9–44，本地 ahead）
 
 | # | 选题 | Size |
 | --- | --- | --- |
-| 14–41 | topology/state 全族含 refit/strut/topology + seamless + session + placement + layout tags | ✓ |
-| 42 | （建议）maximize restore 跨 output 几何重定位 | M |
+| 14–44 | topology/state 全族含 refit/strut/topology + seamless + session + placement + layout tags + X11 seed + maximize clamp + MonitorInfo connector | ✓ |
 | … | 跳过：Annotation/Screenshot CommonLinear、toast Closed(1)、BT withdraw、FS/PiP 丢锚点、Recording EncodedOnly、XWayland 单轴 | |
+
+---
+
+## 2026-09-29（三十）：X11 layout seed + maximize clamp + MonitorInfo connector
+
+选题 = evolve waves 42–44 / evolve7h。
+
+1. **Wave 42**：X11 `updategeom` / `createmon` 经 `OutputIdentity.stable_key`
+   （同 `add_monitor`）seed per-tag layout；Wayland 槽位规划一并带 connector。
+2. **Wave 43**：`apply_session_snapshot` 再套 maximize 前把 `restore_hint`
+   clamp 进目标 monitor work area（`clamp_floating_rect`），connector remap
+   后绝对坐标不落屏外。
+3. **Wave 44**：`MonitorInfoIpc` 增 optional `connector`；`get_monitors` /
+   `get_tree` 从 live identity 填充。Docs + CHANGELOG。
+
+**验证**：`scripts/test.sh --lib -- layout_tag layout::persist session query_monitors`。
+
+**下一轮候选**：见跳过表；或其它 topology/state 边角。
 
 ---
 

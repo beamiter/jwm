@@ -542,6 +542,10 @@ pub struct MonitorInfoIpc {
     /// way to tell a dark monitor from a locked one, and `focused` cannot say
     /// it: a locked monitor is never the focused one.
     pub locked: bool,
+    /// Output connector / `OutputIdentity.stable_key` when known; omitted when
+    /// the live output map has no identity for this monitor.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub connector: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1094,6 +1098,41 @@ mod tests {
         })
         .expect("serialize");
         assert!(without_pid.get("pid").is_none());
+    }
+
+    #[test]
+    fn monitor_info_serializes_optional_connector() {
+        let with_connector = serde_json::to_value(MonitorInfoIpc {
+            num: 0,
+            x: 0,
+            y: 0,
+            w: 1920,
+            h: 1080,
+            active_tags: 1,
+            layout: "TILE".into(),
+            focused: true,
+            locked: false,
+            connector: Some("DP-1".into()),
+        })
+        .expect("serialize");
+        assert_eq!(with_connector["connector"], "DP-1");
+        assert_eq!(with_connector["locked"], false);
+
+        let without = serde_json::to_value(MonitorInfoIpc {
+            num: 1,
+            x: 1920,
+            y: 0,
+            w: 1920,
+            h: 1080,
+            active_tags: 1,
+            layout: "TILE".into(),
+            focused: false,
+            locked: true,
+            connector: None,
+        })
+        .expect("serialize");
+        assert!(without.get("connector").is_none());
+        assert_eq!(without["locked"], true);
     }
 
     #[test]

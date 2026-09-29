@@ -513,23 +513,35 @@ fn lowest_unused_monitor_num<'a>(monitor_nums: impl Iterator<Item = &'a i32>) ->
     candidate
 }
 
-/// The output rectangles for `setup_multiple_monitors`, reordered so that
+/// Same key `add_monitor` / session / closed-placement use for layout seeding:
+/// `OutputIdentity.stable_key`, else the connector name.
+fn output_identity_seed_key(identity: &crate::backend::api::OutputIdentity) -> Option<&str> {
+    if !identity.stable_key.is_empty() {
+        Some(identity.stable_key.as_str())
+    } else if !identity.connector.is_empty() {
+        Some(identity.connector.as_str())
+    } else {
+        None
+    }
+}
+
+/// Output enumeration indices for `setup_multiple_monitors`, reordered so that
 /// position `i` (the monitor at `monitor_order[i]`, or a monitor about to be
 /// created there) receives the output that monitor already stands for.
 ///
-/// `setup_multiple_monitors` hands rectangles out by position. On Wayland a
-/// non-tail unplug and re-plug leaves `monitor_order` in a different order
-/// than `enumerate_outputs`, and handing out by position then swaps geometry
-/// between two monitors that both still have their output. Here a surviving
-/// position (one below the output count; `remove_excess_monitors` drops the
-/// tail) whose mapped output is still enumerated keeps it; every other
-/// position takes the next unclaimed output in enumeration order, which is
-/// exactly the positional result when nothing moved. The result has one
-/// rectangle per output.
-fn plan_monitor_rects_by_output(
+/// `setup_multiple_monitors` hands rectangles (and layout-seed connectors) out
+/// by position. On Wayland a non-tail unplug and re-plug leaves `monitor_order`
+/// in a different order than `enumerate_outputs`, and handing out by position
+/// then swaps geometry between two monitors that both still have their output.
+/// Here a surviving position (one below the output count;
+/// `remove_excess_monitors` drops the tail) whose mapped output is still
+/// enumerated keeps it; every other position takes the next unclaimed output
+/// in enumeration order, which is exactly the positional result when nothing
+/// moved. The result has one index per output.
+fn plan_monitor_output_indices(
     monitor_outputs: &[Option<OutputId>],
     outputs: &[(OutputId, Rect)],
-) -> Vec<Rect> {
+) -> Vec<usize> {
     let survivors = monitor_outputs.len().min(outputs.len());
     let mut claimed = vec![false; outputs.len()];
     let mut slots: Vec<Option<usize>> = vec![None; outputs.len()];
@@ -550,6 +562,15 @@ fn plan_monitor_rects_by_output(
     slots
         .into_iter()
         .filter_map(|slot| slot.or_else(|| unclaimed.next()))
+        .collect()
+}
+
+fn plan_monitor_rects_by_output(
+    monitor_outputs: &[Option<OutputId>],
+    outputs: &[(OutputId, Rect)],
+) -> Vec<Rect> {
+    plan_monitor_output_indices(monitor_outputs, outputs)
+        .into_iter()
         .map(|index| outputs[index].1)
         .collect()
 }
@@ -1107,13 +1128,7 @@ impl Jwm {
         // Reusing `len()` after a non-tail hot-unplug can collide with a
         // surviving monitor.
         let num = lowest_unused_monitor_num(self.state.monitors.values().map(|monitor| &monitor.num));
-        let connector = if !info.identity.stable_key.is_empty() {
-            Some(info.identity.stable_key.as_str())
-        } else if !info.identity.connector.is_empty() {
-            Some(info.identity.connector.as_str())
-        } else {
-            None
-        };
+        let connector = output_identity_seed_key(&info.identity);
         let mut m = self.createmon_numbered(CONFIG.load().show_bar(), num, connector);
 
         // 设置 Monitor 几何属性
@@ -1388,35 +1403,52 @@ impl Jwm {
             let output = outputs
                 .first()
                 .map(|output| Rect::new(output.x, output.y, output.width, output.height));
-            self.setup_single_monitor(backend, output)
+            let connector = outputs
+                .first()
+                .and_then(|output| output_identity_seed_key(&output.identity));
+            self.setup_single_monitor(backend, output, connector)
         } else {
-            let mons: Vec<(i32, i32, i32, i32)> = if get_backend_family() == BackendFamily::Wayland
-            {
-                // Wayland outputs carry stable ids that `output_map` tracks
-                // through hotplug, so each monitor keeps its own output. X11
-                // keeps the positional hand-out: RandR's order is what the
-                // monitors are numbered by.
-                let monitor_outputs: Vec<Option<OutputId>> = self
-                    .state
-                    .monitor_order
-                    .iter()
-                    .map(|key| self.state.output_map.get(*key).copied())
-                    .collect();
-                let outputs: Vec<(OutputId, Rect)> = outputs
-                    .iter()
-                    .map(|o| (o.id, Rect::new(o.x, o.y, o.width, o.height)))
-                    .collect();
-                plan_monitor_rects_by_output(&monitor_outputs, &outputs)
-                    .into_iter()
-                    .map(|rect| (rect.x, rect.y, rect.w, rect.h))
-                    .collect()
-            } else {
-                outputs
-                    .iter()
-                    .map(|o| (o.x, o.y, o.width, o.height))
-                    .collect()
-            };
-            self.setup_multiple_monitors(backend, mons)
+            let (mons, connectors): (Vec<(i32, i32, i32, i32)>, Vec<Option<&str>>) =
+                if get_backend_family() == BackendFamily::Wayland {
+                    // Wayland outputs carry stable ids that `output_map` tracks
+                    // through hotplug, so each monitor keeps its own output. X11
+                    // keeps the positional hand-out: RandR's order is what the
+                    // monitors are numbered by.
+                    let monitor_outputs: Vec<Option<OutputId>> = self
+                        .state
+                        .monitor_order
+                        .iter()
+                        .map(|key| self.state.output_map.get(*key).copied())
+                        .collect();
+                    let output_pairs: Vec<(OutputId, Rect)> = outputs
+                        .iter()
+                        .map(|o| (o.id, Rect::new(o.x, o.y, o.width, o.height)))
+                        .collect();
+                    let slots = plan_monitor_output_indices(&monitor_outputs, &output_pairs);
+                    let mons = slots
+                        .iter()
+                        .map(|&index| {
+                            let o = &outputs[index];
+                            (o.x, o.y, o.width, o.height)
+                        })
+                        .collect();
+                    let connectors = slots
+                        .iter()
+                        .map(|&index| output_identity_seed_key(&outputs[index].identity))
+                        .collect();
+                    (mons, connectors)
+                } else {
+                    let mons = outputs
+                        .iter()
+                        .map(|o| (o.x, o.y, o.width, o.height))
+                        .collect();
+                    let connectors = outputs
+                        .iter()
+                        .map(|o| output_identity_seed_key(&o.identity))
+                        .collect();
+                    (mons, connectors)
+                };
+            self.setup_multiple_monitors(backend, mons, &connectors)
         };
         // Before anything resolves a point to a monitor, the selection
         // re-pick below included.
@@ -1514,12 +1546,13 @@ impl Jwm {
         &mut self,
         backend: &mut dyn Backend,
         output: Option<Rect>,
+        connector: Option<&str>,
     ) -> bool {
         let mut dirty = false;
         let target = output.unwrap_or_else(|| Rect::new(0, 0, self.s_w, self.s_h));
 
         if self.state.monitor_order.is_empty() {
-            let new_monitor = self.createmon(CONFIG.load().show_bar());
+            let new_monitor = self.createmon_seeded(CONFIG.load().show_bar(), connector);
             let mon_key = self.insert_monitor(new_monitor);
             self.state.sel_mon = Some(mon_key);
             dirty = true;
@@ -1588,6 +1621,7 @@ impl Jwm {
         &mut self,
         backend: &mut dyn Backend,
         monitors: Vec<(i32, i32, i32, i32)>,
+        connectors: &[Option<&str>],
     ) -> bool {
         let mut dirty = false;
         let num_detected_monitors = monitors.len();
@@ -1595,8 +1629,9 @@ impl Jwm {
 
         if num_detected_monitors > current_num_monitors {
             dirty = true;
-            for _ in current_num_monitors..num_detected_monitors {
-                let new_monitor = self.createmon(CONFIG.load().show_bar());
+            for i in current_num_monitors..num_detected_monitors {
+                let connector = connectors.get(i).copied().flatten();
+                let new_monitor = self.createmon_seeded(CONFIG.load().show_bar(), connector);
                 let mon_key = self.insert_monitor(new_monitor);
                 info!(
                     "[setup_multiple_monitors] Created new monitor {:?}",
