@@ -4,14 +4,28 @@
 
 ---
 
-## Evolve backlog（目标 100 轮；已完成 wave 9–31，本地 ahead）
+## Evolve backlog（目标 100 轮；已完成 wave 9–32，本地 ahead）
 
 | # | 选题 | Size |
 | --- | --- | --- |
-| 14–31 | window/state 全族 + seamless promote + session maximize + scratchpad | S/M ✓ |
-| 32 | seamless hand-float `_JWM_FLOATING_V1` | S–M |
+| 14–32 | ipc/state 全族 + seamless promote + session maximize + scratchpad + hand-float | S/M ✓ |
 | 33 | closed-placement 落盘跨重启 | M |
 | … | 跳过：Annotation/Screenshot CommonLinear、toast Closed(1)、BT withdraw、FS/PiP 丢锚点、Recording EncodedOnly、XWayland 单轴 | |
+
+---
+
+## 2026-09-29（二十三）：seamless hand-float `_JWM_FLOATING_V1`
+
+选题 = evolve wave 32。
+
+1. **契约**：可见手浮窗在 `_JWM_FLOATING_V1`（6 CARDINAL）写入 float 矩形；
+   仅 `is_floating && !drag && !FS && !PiP && !maximized` 时持久化；平铺 /
+   最大化 / FS / PiP / drag-float 时清除。manage 在仍平铺时采纳并 regroup。
+2. **回归**：codec 往返；双 X11 后端源 pin；manage 采纳；togglefloating 同步 pin。
+
+**验证**：`scripts/test.sh --lib -- floating_restore both_x11_property_backends manage_adopts_hand_float togglefloating`。
+
+**仍然开着的**：见上表 33+（closed-placement 落盘跨重启）。
 
 ---
 
@@ -24,7 +38,7 @@
 
 **验证**：`scripts/test.sh --lib -- sibling_window_state_paths`。
 
-**仍然开着的**：见上表 32+。
+**仍然开着的**：见上表 33+。
 
 ---
 

@@ -1939,6 +1939,14 @@ pub struct MaximizeRestoreState {
     pub promoted: bool,
 }
 
+/// Hand-float rectangle carried across a seamless X11 exec for a visible
+/// user-floated window (`togglefloating`). Persisted only while the window is
+/// floating, not drag-floating, not fullscreen/PiP, and not maximized.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FloatingRestoreState {
+    pub floating_rect: MinimizedRestoreRect,
+}
+
 /// A single output's requested configuration, produced by the
 /// wlr-output-management protocol and applied by the backend.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2519,6 +2527,29 @@ pub trait PropertyOps: Send {
 
     /// Remove JWM's private maximize-restore restart snapshot. Idempotent.
     fn clear_maximize_restore_state(&self, _win: WindowId) -> Result<(), BackendError> {
+        Ok(())
+    }
+
+    /// Read JWM's private hand-float restart snapshot for a visible
+    /// user-floated window. Missing or malformed properties are `Ok(None)`.
+    fn get_floating_restore_state(
+        &self,
+        _win: WindowId,
+    ) -> Result<Option<FloatingRestoreState>, BackendError> {
+        Ok(None)
+    }
+
+    /// Replace JWM's private hand-float restart snapshot.
+    fn set_floating_restore_state(
+        &self,
+        _win: WindowId,
+        _state: FloatingRestoreState,
+    ) -> Result<(), BackendError> {
+        Ok(())
+    }
+
+    /// Remove JWM's private hand-float restart snapshot. Idempotent.
+    fn clear_floating_restore_state(&self, _win: WindowId) -> Result<(), BackendError> {
         Ok(())
     }
 

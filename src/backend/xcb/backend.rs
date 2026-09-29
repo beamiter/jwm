@@ -47,6 +47,9 @@ use crate::backend::x11::wm::{
     maximize_restore::{
         MAXIMIZE_RESTORE_V1_LONG_LENGTH, decode_maximize_restore_v1, encode_maximize_restore_v1,
     },
+    floating_restore::{
+        FLOATING_RESTORE_V1_LONG_LENGTH, decode_floating_restore_v1, encode_floating_restore_v1,
+    },
     net_wm_ping_message, net_wm_state_from_atom, net_wm_sync_request_message, output_at,
     parse_gtk_frame_extents, parse_icon_data, parse_motif_hints, parse_normal_hints,
     parse_opaque_region, parse_strut, parse_strut_partial, parse_wm_class, parse_wm_hints,
@@ -91,6 +94,7 @@ struct XcbAtoms {
     wm_state: x::Atom,
     jwm_minimized_restore_v1: x::Atom,
     jwm_maximize_restore_v1: x::Atom,
+    jwm_floating_v1: x::Atom,
     wm_transient_for: x::Atom,
     wm_class: x::Atom,
     wm_hints: x::Atom,
@@ -198,6 +202,7 @@ impl XcbAtoms {
             wm_state: Self::intern(conn, b"WM_STATE")?,
             jwm_minimized_restore_v1: Self::intern(conn, b"_JWM_MINIMIZED_RESTORE_V1")?,
             jwm_maximize_restore_v1: Self::intern(conn, b"_JWM_MAXIMIZE_RESTORE_V1")?,
+            jwm_floating_v1: Self::intern(conn, b"_JWM_FLOATING_V1")?,
             wm_transient_for: x::ATOM_WM_TRANSIENT_FOR,
             wm_class: x::ATOM_WM_CLASS,
             wm_hints: x::ATOM_WM_HINTS,
@@ -3995,6 +4000,58 @@ impl PropertyOps for XcbPropertyOps {
             .map_err(xcb_err)
     }
 
+    fn get_floating_restore_state(
+        &self,
+        win: WindowId,
+    ) -> XcbResult<Option<crate::backend::api::FloatingRestoreState>> {
+        let cookie = self.conn.send_request(&x::GetProperty {
+            delete: false,
+            window: self.win(win)?,
+            property: self.atoms.jwm_floating_v1,
+            r#type: self.atoms.cardinal,
+            long_offset: 0,
+            long_length: FLOATING_RESTORE_V1_LONG_LENGTH,
+        });
+        let reply = self.conn.wait_for_reply(cookie).map_err(xcb_err)?;
+        let words: &[u32] = if reply.format() == 32 {
+            reply.value::<u32>()
+        } else {
+            &[]
+        };
+        Ok(decode_floating_restore_v1(
+            reply.r#type(),
+            self.atoms.cardinal,
+            reply.format(),
+            reply.bytes_after(),
+            words,
+        ))
+    }
+
+    fn set_floating_restore_state(
+        &self,
+        win: WindowId,
+        state: crate::backend::api::FloatingRestoreState,
+    ) -> XcbResult<()> {
+        let words = encode_floating_restore_v1(state)
+            .ok_or_else(|| BackendError::Message("invalid floating restore state".to_string()))?;
+        change_u32s(
+            &self.conn,
+            self.win(win)?,
+            self.atoms.jwm_floating_v1,
+            self.atoms.cardinal,
+            &words,
+        )
+    }
+
+    fn clear_floating_restore_state(&self, win: WindowId) -> XcbResult<()> {
+        self.conn
+            .send_and_check_request(&x::DeleteProperty {
+                window: self.win(win)?,
+                property: self.atoms.jwm_floating_v1,
+            })
+            .map_err(xcb_err)
+    }
+
     fn set_client_info_props(&self, win: WindowId, tags: u32, monitor_num: u32) -> XcbResult<()> {
         change_u32s(
             &self.conn,
@@ -7035,6 +7092,37 @@ mod parity_tests {
             );
 
             let clear = impl_body_after(source, "fn clear_maximize_restore_state");
+            assert!(
+                clear.contains(atom_spelling)
+                    && (clear.contains("delete_property") || clear.contains("DeleteProperty")),
+                "{label} clearer must delete the exact V1 property"
+            );
+        }
+    }
+
+    #[test]
+    fn both_x11_property_backends_use_the_strict_shared_floating_restore_codec() {
+        for (label, source, atom_spelling) in [
+            ("x11rb", X11RB_BACKEND_SRC, "_JWM_FLOATING_V1"),
+            ("xcb", XCB_BACKEND_SRC, "jwm_floating_v1"),
+        ] {
+            let get = impl_body_after(source, "fn get_floating_restore_state");
+            assert!(
+                get.contains(atom_spelling)
+                    && get.contains("FLOATING_RESTORE_V1_LONG_LENGTH")
+                    && get.contains("decode_floating_restore_v1")
+                    && get.contains("bytes_after")
+                    && (get.contains("CARDINAL") || get.contains(".cardinal")),
+                "{label} getter must validate the complete CARDINAL reply through the shared V1 codec"
+            );
+
+            let set = impl_body_after(source, "fn set_floating_restore_state");
+            assert!(
+                set.contains(atom_spelling) && set.contains("encode_floating_restore_v1"),
+                "{label} setter must encode and replace the exact V1 property"
+            );
+
+            let clear = impl_body_after(source, "fn clear_floating_restore_state");
             assert!(
                 clear.contains(atom_spelling)
                     && (clear.contains("delete_property") || clear.contains("DeleteProperty")),

@@ -270,8 +270,12 @@ private `_JWM_MAXIMIZE_RESTORE_V1` property carries the pre-maximize
 rectangle and whether the window was promoted for a *visible* maximized
 window. Minimized clients already embed that rectangle in
 `_JWM_MINIMIZED_RESTORE_V1`. A visible window's plain hand-float flag is
-still not remembered as layout membership: it floats again only when
-`WM_TRANSIENT_FOR`, a matching rule or a popup-like window type floats it. A
+remembered as layout membership in `_JWM_FLOATING_V1` (the float rectangle)
+when the window is floating, not drag-floating, not fullscreen or PiP, and
+not maximized — so a seamless X11 restart re-floats it at that rectangle
+even without `WM_TRANSIENT_FOR`, a matching rule or a popup-like window
+type. Transient / rule / dialog / fixed-size floats still win on manage and
+do not need the property. A
 promoted maximize recorded in the restore property is re-admitted under a
 tiling layout (user promote); a plain tiled maximize without that flag is
 still refused and its atoms cleared. Under FLOAT, adoption promotes either

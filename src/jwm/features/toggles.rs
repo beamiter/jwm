@@ -2813,6 +2813,7 @@ impl Jwm {
                 .get(sel_client_key)
                 .is_some_and(|client| !client.state.is_floating)
             {
+                self.sync_floating_restore_property(backend, sel_client_key);
                 return Ok(());
             }
         }
@@ -2853,6 +2854,7 @@ impl Jwm {
 
         self.arrange(backend, Some(sel_mon_key));
         self.broadcast_window_state_ipc(sel_client_key);
+        self.sync_floating_restore_property(backend, sel_client_key);
         Ok(())
     }
 

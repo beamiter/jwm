@@ -901,6 +901,7 @@ impl Jwm {
         if previous_client.state.is_fullscreen != fullscreen {
             self.broadcast_window_state_ipc(client_key);
         }
+        self.sync_floating_restore_property(backend, client_key);
         Ok(())
     }
 
@@ -1144,6 +1145,7 @@ impl Jwm {
                 if changed {
                     self.broadcast_window_state_ipc(client_key);
                 }
+                self.sync_floating_restore_property(backend, client_key);
                 Ok(changed)
             }
             Err(error) => {

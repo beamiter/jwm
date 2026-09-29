@@ -7,6 +7,12 @@ monorepo use independent Semantic Versions.
 
 ### Added
 
+- Seamless X11 restart keeps a visible hand-floated window's layout membership
+  in `_JWM_FLOATING_V1` so `togglefloating` survives exec at the same
+  rectangle. The property is cleared when the window is tiled, maximized,
+  fullscreen, PiP or drag-floating. See
+  [docs/window-placement.md](docs/window-placement.md#restarts-and-sessions).
+
 - Seamless X11 restart keeps a visible maximized window's pre-maximize
   rectangle in `_JWM_MAXIMIZE_RESTORE_V1` so unmaximize after exec returns to
   the same slot instead of the centered fallback. The property's promoted

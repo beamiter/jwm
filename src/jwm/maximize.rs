@@ -14,8 +14,8 @@
 use log::{debug, error, warn};
 
 use crate::backend::api::{
-    Backend, EwmhSourceIndication, MaximizeAxes, MaximizeRestoreState, MinimizedRestoreRect,
-    NetWmAction,
+    Backend, EwmhSourceIndication, FloatingRestoreState, MaximizeAxes, MaximizeRestoreState,
+    MinimizedRestoreRect, NetWmAction,
 };
 use crate::backend::common_define::WindowId;
 use crate::core::maximize::{
@@ -392,6 +392,58 @@ impl Jwm {
         };
         if let Err(error) = result {
             warn!("could not sync maximize restore property for {win:?}: {error}");
+        }
+        // A maximized (or drag-unmaximized) window is never a hand-float; keep
+        // `_JWM_FLOATING_V1` aligned with the same live membership.
+        self.sync_floating_restore_property(backend, client_key);
+    }
+
+    /// Keep `_JWM_FLOATING_V1` aligned with visible hand-float layout membership
+    /// so a seamless X11 exec can re-float the window at the same rectangle.
+    pub(crate) fn sync_floating_restore_property(
+        &self,
+        backend: &mut dyn Backend,
+        client_key: ClientKey,
+    ) {
+        let Some(client) = self.state.clients.get(client_key) else {
+            return;
+        };
+        let win = client.win;
+        let should_persist = client.state.is_floating
+            && !client.state.is_drag_floating
+            && !client.state.is_fullscreen
+            && !client.state.is_pip
+            && !client.state.maximized_axes().any();
+        let snapshot = should_persist
+            .then(|| {
+                let (x, y, w, h) =
+                    if client.geometry.floating_w > 0 && client.geometry.floating_h > 0 {
+                        (
+                            client.geometry.floating_x,
+                            client.geometry.floating_y,
+                            client.geometry.floating_w,
+                            client.geometry.floating_h,
+                        )
+                    } else {
+                        (
+                            client.geometry.x,
+                            client.geometry.y,
+                            client.geometry.w,
+                            client.geometry.h,
+                        )
+                    };
+                let floating_rect = MinimizedRestoreRect { x, y, w, h };
+                floating_rect
+                    .is_configurable()
+                    .then_some(FloatingRestoreState { floating_rect })
+            })
+            .flatten();
+        let result = match snapshot {
+            Some(state) => backend.property_ops().set_floating_restore_state(win, state),
+            None => backend.property_ops().clear_floating_restore_state(win),
+        };
+        if let Err(error) = result {
+            warn!("could not sync floating restore property for {win:?}: {error}");
         }
     }
 
@@ -1932,6 +1984,10 @@ mod tests {
             float.contains(&broadcast),
             "togglefloating must broadcast after a real float flip"
         );
+        assert!(
+            float.contains("sync_floating_restore_property"),
+            "togglefloating must sync `_JWM_FLOATING_V1` after a real float flip"
+        );
         let sticky = toggle
             .split_once("pub(crate) fn set_client_sticky(")
             .expect("set_client_sticky")
@@ -2049,6 +2105,11 @@ mod tests {
                 && adopt.contains("let promoted =")
                 && adopt.contains("adopt_client_maximized"),
             "manage must pass the restore property's promoted flag into adoption"
+        );
+        assert!(
+            manage.contains("adopt_floating_restore_if_tiled")
+                && manage.contains("get_floating_restore_state"),
+            "manage must adopt `_JWM_FLOATING_V1` before maximize adoption"
         );
     }
 

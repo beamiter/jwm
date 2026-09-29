@@ -677,6 +677,10 @@ impl Jwm {
         if let Some(state) = minimized_restore {
             self.apply_minimized_restore_after_window_type(client_key, state);
         }
+        // Visible hand-float across seamless X11 exec: adopt `_JWM_FLOATING_V1`
+        // only when the client is still tiled (rules / Dialog / fixed-size /
+        // transient / minimized restore already floated it).
+        self.adopt_floating_restore_if_tiled(backend, client_key);
         if initial_maximize.any() {
             // Adopt pre-set maximize atoms now that floating, fullscreen, PiP
             // and the minimized placement are final. A window the policy
@@ -974,6 +978,47 @@ impl Jwm {
         if is_floating != was_floating {
             self.reorder_client_in_monitor_groups(client_key);
         }
+    }
+
+    /// Re-admit a visible hand-float from `_JWM_FLOATING_V1` across seamless
+    /// X11 exec. Only applies when the client is still tiled after rules,
+    /// window type, fixed-size float and minimized restore; those paths own
+    /// floating for dialogs / transients / fixed-size windows on their own.
+    fn adopt_floating_restore_if_tiled(
+        &mut self,
+        backend: &mut dyn Backend,
+        client_key: ClientKey,
+    ) {
+        let Some(client) = self.state.clients.get(client_key) else {
+            return;
+        };
+        if client.state.is_floating {
+            return;
+        }
+        let win = client.win;
+        let Some(state) = backend
+            .property_ops()
+            .get_floating_restore_state(win)
+            .ok()
+            .flatten()
+        else {
+            return;
+        };
+        let rect = state.floating_rect;
+        if let Some(client) = self.state.clients.get_mut(client_key) {
+            client.state.is_floating = true;
+            client.state.is_drag_floating = false;
+            client.geometry.floating_x = rect.x;
+            client.geometry.floating_y = rect.y;
+            client.geometry.floating_w = rect.w;
+            client.geometry.floating_h = rect.h;
+            client.geometry.x = rect.x;
+            client.geometry.y = rect.y;
+            client.geometry.w = rect.w;
+            client.geometry.h = rect.h;
+        }
+        // Same regroup togglefloating uses; a no-op before attach_new_client.
+        self.reorder_client_in_monitor_groups(client_key);
     }
 
     /// Preserve a visible restore target while keeping an adopted Iconic
@@ -2220,9 +2265,9 @@ mod unmanage_minimized_tests {
         BackendDiagnostics, Capabilities, CloseResult, ColorAllocator, CompositorAnnotation,
         CompositorBenchmark, CompositorControl, CompositorMedia, CompositorRect,
         CompositorWindowEffects, CompositorWorkspaceEffects, CursorProvider, DisplayControl,
-        InputOps, KeyOps, MaximizeRestoreState, MinimizedRestoreRect, MinimizedRestoreState,
-        MotifWmHints, NormalHints, OutputOps, PropertyOps, RenderScheduler, WindowAttributes,
-        WindowOps, WmHints,
+        InputOps, KeyOps, FloatingRestoreState, MaximizeRestoreState, MinimizedRestoreRect,
+        MinimizedRestoreState, MotifWmHints, NormalHints, OutputOps, PropertyOps, RenderScheduler,
+        WindowAttributes, WindowOps, WmHints,
     };
     use crate::backend::common_define::Pixel;
     use crate::backend::error::BackendError;
@@ -2287,6 +2332,7 @@ mod unmanage_minimized_tests {
         writes: Mutex<Vec<ProtocolWrite>>,
         minimized_restore: Mutex<Option<MinimizedRestoreState>>,
         maximize_restore: Mutex<Option<MaximizeRestoreState>>,
+        floating_restore: Mutex<Option<FloatingRestoreState>>,
         restore_accesses: Mutex<Vec<RestoreAccess>>,
         window_pid: AtomicU32,
         /// `(instance, class)` reported for every window, as `get_class` does.
@@ -2473,6 +2519,36 @@ mod unmanage_minimized_tests {
                 .maximize_restore
                 .lock()
                 .expect("maximize restore lock") = None;
+            Ok(())
+        }
+
+        fn get_floating_restore_state(
+            &self,
+            _win: WindowId,
+        ) -> Result<Option<FloatingRestoreState>, BackendError> {
+            Ok(*self
+                .floating_restore
+                .lock()
+                .expect("floating restore lock"))
+        }
+
+        fn set_floating_restore_state(
+            &self,
+            _win: WindowId,
+            state: FloatingRestoreState,
+        ) -> Result<(), BackendError> {
+            *self
+                .floating_restore
+                .lock()
+                .expect("floating restore lock") = Some(state);
+            Ok(())
+        }
+
+        fn clear_floating_restore_state(&self, _win: WindowId) -> Result<(), BackendError> {
+            *self
+                .floating_restore
+                .lock()
+                .expect("floating restore lock") = None;
             Ok(())
         }
 
@@ -5846,6 +5922,57 @@ mod unmanage_minimized_tests {
         assert!(!refused.is_floating);
         assert!(!refused.promoted);
         assert_eq!(refused.restore, None);
+    }
+
+    /// Seamless X11 restart: `_JWM_FLOATING_V1` re-floats a tiled window that
+    /// the previous process had hand-floated. Dialogs still float from type
+    /// without needing the property.
+    #[test]
+    fn manage_adopts_hand_float_from_floating_restore_property() {
+        let hint = MinimizedRestoreRect {
+            x: 140,
+            y: 90,
+            w: 700,
+            h: 500,
+        };
+
+        // Tiling + property → floating at the stored rect.
+        let mut backend = ClientSpyBackend::new();
+        *backend
+            .property_ops
+            .floating_restore
+            .lock()
+            .expect("floating restore lock") = Some(FloatingRestoreState {
+            floating_rect: hint,
+        });
+        set_class(&backend, "FloatProbe", "float-probe");
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let key = manage_window(&mut jwm, &mut backend, 0x9b01);
+        let client = &jwm.state.clients[key];
+        assert!(client.state.is_floating);
+        assert!(!client.state.is_drag_floating);
+        assert_eq!(client.geometry.x, hint.x);
+        assert_eq!(client.geometry.y, hint.y);
+        assert_eq!(client.geometry.w, hint.w);
+        assert_eq!(client.geometry.h, hint.h);
+        assert_eq!(client.geometry.floating_x, hint.x);
+        assert_eq!(client.geometry.floating_y, hint.y);
+        assert_eq!(client.geometry.floating_w, hint.w);
+        assert_eq!(client.geometry.floating_h, hint.h);
+        let monitor = client.mon.expect("managed on a monitor");
+        let listed = jwm.state.monitor_clients[monitor]
+            .iter()
+            .filter(|&&listed| listed == key)
+            .count();
+        assert_eq!(listed, 1);
+
+        // No property → tiled.
+        let tiled = manage_with_initial_maximize(0x9b02, false, false, false);
+        assert!(!tiled.is_floating);
+
+        // Dialog still floats without the property.
+        let dialog = manage_with_initial_maximize(0x9b03, false, true, false);
+        assert!(dialog.is_floating);
     }
 
     /// The live rect a BOTH maximize from `managed`'s restore rect fills.
