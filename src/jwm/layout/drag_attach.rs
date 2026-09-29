@@ -671,7 +671,7 @@ impl Jwm {
         );
         // Half / quarter snaps (keyboard and mouse drop) change geometry
         // without a maximize commit; push WindowInfo so bars need not poll.
-        self.broadcast_window_state_ipc(client_key);
+        self.broadcast_window_state_ipc(backend, client_key);
     }
 
     /// `snap_window` command: the keyboard/IPC form of dropping a dragged

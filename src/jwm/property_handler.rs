@@ -159,7 +159,7 @@ impl Jwm {
                 "id": win.raw(), "name": title_for_event,
             }),
         );
-        self.broadcast_window_state_ipc(client_key);
+        self.broadcast_window_state_ipc(backend, client_key);
     }
 
     /// 截断字符串到指定字符数
@@ -337,7 +337,7 @@ impl Jwm {
         if monitor_id.is_some() {
             self.mark_bar_update_needed_if_visible(monitor_id);
         }
-        self.broadcast_window_state_ipc(client_key);
+        self.broadcast_window_state_ipc(backend, client_key);
         Ok(())
     }
 

@@ -191,7 +191,10 @@ refit, or a strut / output topology rearrange for every affected client.
 Refused or no-op requests do not emit it; subscribe to `window` or
 `window/state` to follow flips without polling. A title change also emits
 the lighter `window/title` event; focus still emits `window/focus`.
-`get_windows` / `get_tree` / `window/state` also report `pid` when known.
+`get_windows` / `get_tree` / `window/state` also report `pid` when known,
+and an optional `connector` (`OutputIdentity.stable_key` / connector name)
+for the window's monitor — the same identity `get_monitors` exposes —
+omitted when the live output map has no identity for that monitor.
 
 A refused request, like one that changes nothing, leaves the window alone:
 JWM republishes the current state and replies with the current geometry, a
@@ -298,7 +301,11 @@ window, applies the saved resting placement and tile order, then re-applies
 maximize with a user origin so a promoted tile is promoted again; the saved
 restore rectangle is clamped into the destination monitor's work area so
 absolute coords from another geometry cannot land off-screen after a
-connector remap. Across a
+connector remap. Session snapshots (v6+) also store sticky
+(`_NET_WM_STATE_STICKY`); `restore_session` re-applies it through
+`set_client_sticky` after placement, and manage adopts a pre-map Sticky atom
+the same way it adopts Above / Below / maximize across a seamless restart.
+Across a
 seamless X11 restart the EWMH atoms carry the maximize state, and JWM's
 private `_JWM_MAXIMIZE_RESTORE_V1` property carries the pre-maximize
 rectangle and whether the window was promoted for a *visible* maximized

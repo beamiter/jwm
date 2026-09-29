@@ -899,7 +899,7 @@ impl Jwm {
             return Err(error);
         }
         if previous_client.state.is_fullscreen != fullscreen {
-            self.broadcast_window_state_ipc(client_key);
+            self.broadcast_window_state_ipc(backend, client_key);
         }
         self.sync_floating_restore_property(backend, client_key);
         Ok(())
@@ -1143,7 +1143,7 @@ impl Jwm {
         match self.set_client_pip_inner(backend, client_key, pip) {
             Ok(changed) => {
                 if changed {
-                    self.broadcast_window_state_ipc(client_key);
+                    self.broadcast_window_state_ipc(backend, client_key);
                 }
                 self.sync_floating_restore_property(backend, client_key);
                 Ok(changed)
@@ -1471,7 +1471,7 @@ impl Jwm {
         // (the dirty flag pushes it once, on the next flush).
         self.refresh_tags_overview();
         if previous_urgent != urgent {
-            self.broadcast_window_state_ipc(client_key);
+            self.broadcast_window_state_ipc(backend, client_key);
         }
         Ok(win)
     }
@@ -1977,7 +1977,7 @@ impl Jwm {
             }
             self.clear_hidden_client_park_retry(client_key);
         }
-        self.broadcast_window_state_ipc(client_key);
+        self.broadcast_window_state_ipc(backend, client_key);
         Ok(true)
     }
 }

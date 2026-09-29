@@ -7,6 +7,20 @@ monorepo use independent Semantic Versions.
 
 ### Added
 
+- Hub Do Not Disturb, Caffeine, and Night Light middle-click select the
+  pointed row and toggle through the same Enter / OSD path as left-click.
+  See [docs/control-center.md](docs/control-center.md).
+
+- Session snapshots (v6+) persist sticky (`_NET_WM_STATE_STICKY`);
+  `restore_session` re-applies it through `set_client_sticky`, and manage
+  adopts a pre-map Sticky atom like Above / Below / maximize. See
+  [docs/window-placement.md](docs/window-placement.md#restarts-and-sessions).
+
+- `get_windows` / `get_tree` / `window/state` expose an optional `connector`
+  field on each window (the same live output identity as `MonitorInfoIpc`),
+  omitted when unknown. See
+  [docs/window-placement.md](docs/window-placement.md).
+
 - `get_monitors` / `get_tree` expose an optional `connector` field
   (`OutputIdentity.stable_key` / connector name) so status bars and scripts
   can key panels the same way session / closed-placement / per-tag layouts

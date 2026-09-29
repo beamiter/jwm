@@ -95,7 +95,12 @@ fn tagged_client_count(state: &WMState, monitor: MonitorKey, tag_mask: u32) -> u
     })
 }
 
-fn client_window_info(client: &WMClient, monitor: i32, is_focused: bool) -> WindowInfo {
+fn client_window_info(
+    client: &WMClient,
+    monitor: i32,
+    is_focused: bool,
+    connector: Option<String>,
+) -> WindowInfo {
     WindowInfo {
         id: client.win.raw(),
         name: client.name.clone(),
@@ -120,6 +125,7 @@ fn client_window_info(client: &WMClient, monitor: i32, is_focused: bool) -> Wind
         is_minimized: client.state.is_hidden,
         is_focused,
         pid: client.pid,
+        connector,
     }
 }
 
@@ -2452,7 +2458,7 @@ impl Jwm {
                 serde_json::to_value(ipc::ipc_capabilities()).unwrap_or_default(),
             )),
             "get_windows" => {
-                let windows = self.query_windows();
+                let windows = self.query_windows(backend);
                 IpcResponse::ok(Some(serde_json::to_value(windows).unwrap_or_default()))
             }
             "get_workspaces" => {
@@ -3085,7 +3091,7 @@ impl Jwm {
             },
             "outputs": output_details,
             "workspaces": self.query_workspaces(),
-            "windows": self.query_windows(),
+            "windows": self.query_windows(backend),
             "config": self.query_config_status(),
             "scrolling": self.query_scrolling_status(),
             "gestures": self.query_gesture_status(),
@@ -3414,7 +3420,7 @@ impl Jwm {
 
     fn query_runtime_status(&self, backend: &dyn Backend) -> RuntimeStatusV1 {
         let config = self.query_config_status();
-        let windows = self.query_windows().len();
+        let windows = self.query_windows(backend).len();
         let monitors = self.query_monitors(backend).len();
         let workspaces = self.query_workspaces().len();
         let uptime_ms = u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
@@ -3475,21 +3481,30 @@ impl Jwm {
         }
     }
 
-    fn window_info(&self, client_key: ClientKey, is_focused: bool) -> Option<WindowInfo> {
+    fn window_info(
+        &self,
+        backend: &dyn Backend,
+        client_key: ClientKey,
+        is_focused: bool,
+    ) -> Option<WindowInfo> {
         let client = self.state.clients.get(client_key)?;
+        let connector = client
+            .mon
+            .and_then(|mk| self.output_key_for_monitor(backend, mk));
         Some(client_window_info(
             client,
             resolved_client_monitor_num(&self.state.monitors, client),
             is_focused,
+            connector,
         ))
     }
 
-    pub(crate) fn query_windows(&self) -> Vec<WindowInfo> {
+    pub(crate) fn query_windows(&self, backend: &dyn Backend) -> Vec<WindowInfo> {
         let sel_client = self.get_selected_client_key();
         self.state
             .client_order
             .iter()
-            .filter_map(|&ck| self.window_info(ck, sel_client == Some(ck)))
+            .filter_map(|&ck| self.window_info(backend, ck, sel_client == Some(ck)))
             .collect()
     }
 
@@ -3852,7 +3867,9 @@ impl Jwm {
                     .map(|clients| {
                         clients
                             .iter()
-                            .filter_map(|&ck| self.window_info(ck, sel_client == Some(ck)))
+                            .filter_map(|&ck| {
+                                self.window_info(backend, ck, sel_client == Some(ck))
+                            })
                             .collect()
                     })
                     .unwrap_or_default();
@@ -3881,9 +3898,13 @@ impl Jwm {
     /// `client_key`. Subscribers of `window` / `window/state` / `*` see
     /// maximize (and later sibling) flips without polling `get_windows`.
     /// Missing clients are a no-op; serialization failure is ignored.
-    pub(crate) fn broadcast_window_state_ipc(&mut self, client_key: ClientKey) {
+    pub(crate) fn broadcast_window_state_ipc(
+        &mut self,
+        backend: &dyn Backend,
+        client_key: ClientKey,
+    ) {
         let focused = self.get_selected_client_key() == Some(client_key);
-        let Some(info) = self.window_info(client_key, focused) else {
+        let Some(info) = self.window_info(backend, client_key, focused) else {
             return;
         };
         let Ok(payload) = serde_json::to_value(&info) else {
@@ -3895,7 +3916,11 @@ impl Jwm {
     /// Push `window/state` for every visible client on `mon` after a layout
     /// reorder (zoom / movestack / scrolling column move) changed many
     /// geometries at once.
-    pub(crate) fn broadcast_visible_window_states_on_monitor(&mut self, mon: MonitorKey) {
+    pub(crate) fn broadcast_visible_window_states_on_monitor(
+        &mut self,
+        backend: &dyn Backend,
+        mon: MonitorKey,
+    ) {
         let keys: Vec<_> = self
             .state
             .monitor_clients
@@ -3904,7 +3929,7 @@ impl Jwm {
             .unwrap_or_default();
         for client_key in keys {
             if self.is_client_visible_by_key(client_key) {
-                self.broadcast_window_state_ipc(client_key);
+                self.broadcast_window_state_ipc(backend, client_key);
             }
         }
     }
@@ -3912,10 +3937,13 @@ impl Jwm {
     /// Like [`Self::broadcast_visible_window_states_on_monitor`] for every
     /// monitor — used after a global `arrange(None)` from strut / topology
     /// changes that rewrite work areas on all outputs.
-    pub(crate) fn broadcast_visible_window_states_all_monitors(&mut self) {
+    pub(crate) fn broadcast_visible_window_states_all_monitors(
+        &mut self,
+        backend: &dyn Backend,
+    ) {
         let monitors: Vec<_> = self.state.monitor_order.clone();
         for mon in monitors {
-            self.broadcast_visible_window_states_on_monitor(mon);
+            self.broadcast_visible_window_states_on_monitor(backend, mon);
         }
     }
 }
@@ -4078,16 +4106,17 @@ mod tests {
         client.geometry.w = 640;
         client.geometry.h = 480;
 
-        let info = client_window_info(&client, 7, false);
+        let info = client_window_info(&client, 7, false, None);
         assert_eq!(info.id, 0x2a);
         assert_eq!(info.monitor, 7);
         assert!(info.is_minimized);
         assert!(!info.is_focused);
 
         client.state.is_hidden = false;
-        let restored = client_window_info(&client, 7, true);
+        let restored = client_window_info(&client, 7, true, Some("DP-1".into()));
         assert!(!restored.is_minimized);
         assert!(restored.is_focused);
+        assert_eq!(restored.connector.as_deref(), Some("DP-1"));
     }
 
     #[test]
@@ -6241,7 +6270,7 @@ mod tests {
             .map(|window| window.id)
             .collect();
         let focused_in_windows: Vec<u64> = jwm
-            .query_windows()
+            .query_windows(&backend)
             .iter()
             .filter(|window| window.is_focused)
             .map(|window| window.id)

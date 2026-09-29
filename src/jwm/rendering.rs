@@ -745,7 +745,7 @@ impl Jwm {
             false
         };
         if changed {
-            self.broadcast_window_state_ipc(sel_key);
+            self.broadcast_window_state_ipc(backend, sel_key);
         }
     }
 

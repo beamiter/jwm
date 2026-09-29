@@ -51,7 +51,9 @@ lands on the bar (it never seeks); middle click on the Input row selects
 that row and mutes the microphone through the same path as `m`. Middle
 click on the Network or Bluetooth row selects that row and toggles the
 radio through the same path as `Left`/`Right` (Bluetooth power-off still
-arms on the first press). Middle click on every other Hub row is inert.
+arms on the first press). Middle click on Do Not Disturb, Caffeine, or
+Night Light selects that row and toggles through the same Enter / OSD
+path as a left-click. Middle click on every other Hub row is inert.
 On the Input row, a click on the
 microphone glyph toggles mic mute (the pointer twin of `m`); a click on
 the label or device name still opens the input picker. On the Media row,
@@ -116,24 +118,25 @@ PipeWire output and input defaults come from one shared `wpctl status` read.
 | Memory | `/proc/meminfo` is readable | read-only |
 | Network I/O | an interface worth counting exists in `/proc/net/dev` | read-only |
 | Power Profile | `powerprofilesctl` or ACPI `platform_profile` | `Left`/`Right` / `Enter` / wheel cycle |
-| Night Light | always | `Enter` toggles |
-| Do Not Disturb | always | `Enter` toggles |
-| Caffeine | always | `Enter` holds the session awake ([idle policy](idle.md)) |
+| Night Light | always | `Enter` / middle click toggles |
+| Do Not Disturb | always | `Enter` / middle click toggles |
+| Caffeine | always | `Enter` / middle click holds the session awake ([idle policy](idle.md)) |
 | Lock Screen | always | `Enter` locks |
 | Lock This Monitor | two outputs or more, one of them staying unlocked | `Enter` shades the monitor in use ([monitor lock](monitor-lock.md)) |
 | Unlock Monitor N… | a monitor is behind a lock shade | `Enter` asks for the password that lifts it |
 | Session… | always | `Enter` opens the [session menu](session-menu.md) |
 
 The Do Not Disturb, Caffeine, and Night Light rows flip through the same
-toggles their key bindings use, so `Enter` there raises the labeled OSD
-card too — DND's confirmation is an OSD rather than a toast precisely
-because toasts are DND-gated. The Network and Bluetooth rows' `Left`/
-`Right` radio flips (and a confirmed Bluetooth power-off) raise the same
-Wi-Fi / Bluetooth OSD the key bindings use; the first press that only
-arms Bluetooth power-off stays quiet. The Power Profile row's `Left`/
-`Right` cycle, `Enter` / left-click (one notch forward), and wheel over the
-row raise a labeled Power Profile OSD with the active name (and the same
-icon the row already uses) after a successful switch.
+toggles their key bindings use, so `Enter` / left-click / middle click
+there raises the labeled OSD card too — DND's confirmation is an OSD
+rather than a toast precisely because toasts are DND-gated. The Network
+and Bluetooth rows' `Left`/`Right` radio flips (and a confirmed Bluetooth
+power-off) raise the same Wi-Fi / Bluetooth OSD the key bindings use; the
+first press that only arms Bluetooth power-off stays quiet. The Power
+Profile row's `Left`/`Right` cycle, `Enter` / left-click (one notch
+forward), and wheel over the row raise a labeled Power Profile OSD with
+the active name (and the same icon the row already uses) after a
+successful switch.
 
 The panel rebuilds itself when the state behind a row changes — a track
 change, a battery poll — so an open card never shows a stale value, and the

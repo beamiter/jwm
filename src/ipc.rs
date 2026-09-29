@@ -514,6 +514,10 @@ pub struct WindowInfo {
     /// credentials); `None` when unknown.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pid: Option<u32>,
+    /// Output connector / `OutputIdentity.stable_key` for the window's
+    /// monitor when known; omitted when the live output map has no identity.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub connector: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1059,6 +1063,7 @@ mod tests {
             is_minimized: true,
             is_focused: false,
             pid: Some(1234),
+            connector: Some("DP-1".into()),
         })
         .expect("serialize WindowInfo");
 
@@ -1070,6 +1075,7 @@ mod tests {
         assert_eq!(value["is_above"], false);
         assert_eq!(value["is_below"], false);
         assert_eq!(value["pid"], 1234);
+        assert_eq!(value["connector"], "DP-1");
 
         let without_pid = serde_json::to_value(WindowInfo {
             id: 1,
@@ -1095,9 +1101,72 @@ mod tests {
             is_minimized: false,
             is_focused: false,
             pid: None,
+            connector: None,
         })
         .expect("serialize");
         assert!(without_pid.get("pid").is_none());
+        assert!(without_pid.get("connector").is_none());
+    }
+
+    #[test]
+    fn window_info_serializes_optional_connector() {
+        let with_connector = serde_json::to_value(WindowInfo {
+            id: 7,
+            name: "app".into(),
+            class: "App".into(),
+            instance: "app".into(),
+            tags: 1,
+            monitor: 0,
+            x: 0,
+            y: 0,
+            w: 100,
+            h: 100,
+            is_floating: false,
+            is_fullscreen: false,
+            is_urgent: false,
+            is_sticky: false,
+            is_above: false,
+            is_below: false,
+            is_pip: false,
+            is_maximized: false,
+            is_maximized_vert: false,
+            is_maximized_horz: false,
+            is_minimized: false,
+            is_focused: true,
+            pid: None,
+            connector: Some("HDMI-A-1".into()),
+        })
+        .expect("serialize");
+        assert_eq!(with_connector["connector"], "HDMI-A-1");
+
+        let without = serde_json::to_value(WindowInfo {
+            id: 8,
+            name: String::new(),
+            class: String::new(),
+            instance: String::new(),
+            tags: 1,
+            monitor: 1,
+            x: 0,
+            y: 0,
+            w: 100,
+            h: 100,
+            is_floating: false,
+            is_fullscreen: false,
+            is_urgent: false,
+            is_sticky: false,
+            is_above: false,
+            is_below: false,
+            is_pip: false,
+            is_maximized: false,
+            is_maximized_vert: false,
+            is_maximized_horz: false,
+            is_minimized: false,
+            is_focused: false,
+            pid: None,
+            connector: None,
+        })
+        .expect("serialize");
+        assert!(without.get("connector").is_none());
     }
 
     #[test]

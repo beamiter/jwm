@@ -141,7 +141,7 @@ impl Jwm {
         })?;
         self.sync_maximize_restore_property(backend, client_key);
         if changed {
-            self.broadcast_window_state_ipc(client_key);
+            self.broadcast_window_state_ipc(backend, client_key);
         }
         Ok(changed)
     }
@@ -186,7 +186,7 @@ impl Jwm {
             jwm.reinstate_maximize_snapshot_inner(backend, client_key, snapshot)
         })?;
         self.sync_maximize_restore_property(backend, client_key);
-        self.broadcast_window_state_ipc(client_key);
+        self.broadcast_window_state_ipc(backend, client_key);
         Ok(())
     }
 
@@ -273,7 +273,7 @@ impl Jwm {
                 if let Err(error) = self.refit_keeping_restore_slot(backend, client_key, target) {
                     warn!("could not refit maximized window {win:?}: {error}");
                 } else {
-                    self.broadcast_window_state_ipc(client_key);
+                    self.broadcast_window_state_ipc(backend, client_key);
                 }
             }
         }
@@ -360,7 +360,7 @@ impl Jwm {
         // Only after the outer transaction commits: a rolled-back inner step
         // must not tell subscribers a maximize that did not stick.
         if changed {
-            self.broadcast_window_state_ipc(client_key);
+            self.broadcast_window_state_ipc(backend, client_key);
         }
         Ok(changed)
     }

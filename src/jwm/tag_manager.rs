@@ -57,7 +57,7 @@ impl Jwm {
 
         self.focus(backend, None)?;
         self.arrange(backend, self.state.sel_mon);
-        self.broadcast_window_state_ipc(client_key);
+        self.broadcast_window_state_ipc(backend, client_key);
         Ok(())
     }
 
@@ -221,7 +221,7 @@ impl Jwm {
         if is_hidden && let Err(error) = self.persist_minimized_restore_state(backend, client_key) {
             warn!("could not refresh minimized restore state after sendmon: {error}");
         }
-        self.broadcast_window_state_ipc(client_key);
+        self.broadcast_window_state_ipc(backend, client_key);
     }
 
     /// 设置窗口的标签属性（EWMH）

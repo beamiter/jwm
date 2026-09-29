@@ -19,6 +19,9 @@
 //! `stable_key`；恢复时经 `output_map` + `enumerate_outputs` 解析到当前
 //! `monitor_num`，热插拔 hole-fill 重编号后仍落到同一面板；缺/失联回退旧
 //! `monitor_num`。
+//!
+//! v6 起，Sticky（`_NET_WM_STATE_STICKY`）一并写入快照；恢复时经
+//! `set_client_sticky` 套用。缺省 / 旧版本快照为 `false`。
 
 use crate::backend::api::{Backend, MaximizeAxes};
 use crate::config::CONFIG;
@@ -39,7 +42,7 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-const SESSION_VERSION: u32 = 5;
+const SESSION_VERSION: u32 = 6;
 const MIN_SUPPORTED_SESSION_VERSION: u32 = 1;
 const MAX_SESSION_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_SESSION_CLIENTS: usize = 16_384;
@@ -73,6 +76,9 @@ pub struct SessionEntry {
     /// v4：最大化轴与恢复矩形。缺省 / 旧版本快照为 `None`。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub maximize: Option<SessionMaximize>,
+    /// v6：`_NET_WM_STATE_STICKY`。缺省 / 旧版本快照为 `false`。
+    #[serde(default)]
+    pub is_sticky: bool,
 }
 
 /// 会话里保存的最大化状态（v4）。休息态几何仍写在 `is_floating` /
@@ -226,6 +232,15 @@ struct SessionSnapshotV4 {
     monitor_orders: Vec<SessionMonitorOrder>,
 }
 
+/// 版本 5 快照：已有 connector，尚无 is_sticky（反序列化时缺省 false）。
+#[derive(Deserialize)]
+struct SessionSnapshotV5 {
+    #[allow(dead_code)]
+    version: u32,
+    clients: Vec<SessionEntry>,
+    monitor_orders: Vec<SessionMonitorOrder>,
+}
+
 /// 把任一受支持版本的会话 JSON 迁移为当前版本的快照。
 ///
 /// 崩溃安全约定：迁移是纯内存操作，绝不改写磁盘上的旧快照；升级后的
@@ -242,24 +257,31 @@ pub fn migrate_session_json(json: &str) -> Result<SessionSnapshot, String> {
         1 => {
             let v1: SessionSnapshotV1 = serde_json::from_str(json)
                 .map_err(|error| format!("cannot parse version 1 session snapshot: {error}"))?;
-            migrate_snapshot_v4(migrate_snapshot_v3(migrate_snapshot_v2(migrate_snapshot_v1(
-                v1,
-            ))))
+            migrate_snapshot_v5(migrate_snapshot_v4(migrate_snapshot_v3(
+                migrate_snapshot_v2(migrate_snapshot_v1(v1)),
+            )))
         }
         2 => {
             let v2: SessionSnapshotV2 = serde_json::from_str(json)
                 .map_err(|error| format!("cannot parse version 2 session snapshot: {error}"))?;
-            migrate_snapshot_v4(migrate_snapshot_v3(migrate_snapshot_v2(v2)))
+            migrate_snapshot_v5(migrate_snapshot_v4(migrate_snapshot_v3(
+                migrate_snapshot_v2(v2),
+            )))
         }
         3 => {
             let v3: SessionSnapshotV3 = serde_json::from_str(json)
                 .map_err(|error| format!("cannot parse version 3 session snapshot: {error}"))?;
-            migrate_snapshot_v4(migrate_snapshot_v3(v3))
+            migrate_snapshot_v5(migrate_snapshot_v4(migrate_snapshot_v3(v3)))
         }
         4 => {
             let v4: SessionSnapshotV4 = serde_json::from_str(json)
                 .map_err(|error| format!("cannot parse version 4 session snapshot: {error}"))?;
-            migrate_snapshot_v4(v4)
+            migrate_snapshot_v5(migrate_snapshot_v4(v4))
+        }
+        5 => {
+            let v5: SessionSnapshotV5 = serde_json::from_str(json)
+                .map_err(|error| format!("cannot parse version 5 session snapshot: {error}"))?;
+            migrate_snapshot_v5(v5)
         }
         SESSION_VERSION => SessionSnapshot::from_json(json)
             .map_err(|error| format!("cannot parse session snapshot: {error}"))?,
@@ -294,6 +316,7 @@ fn migrate_snapshot_v1(v1: SessionSnapshotV1) -> SessionSnapshotV2 {
                 connector: None,
                 floating,
                 maximize: None,
+                is_sticky: false,
             }
         })
         .collect();
@@ -323,11 +346,20 @@ fn migrate_snapshot_v3(v3: SessionSnapshotV3) -> SessionSnapshotV4 {
 }
 
 /// v4 -> v5：connector 字段在反序列化时已缺省为 None；只抬版本号。
-fn migrate_snapshot_v4(v4: SessionSnapshotV4) -> SessionSnapshot {
-    SessionSnapshot {
-        version: SESSION_VERSION,
+fn migrate_snapshot_v4(v4: SessionSnapshotV4) -> SessionSnapshotV5 {
+    SessionSnapshotV5 {
+        version: 5,
         clients: v4.clients,
         monitor_orders: v4.monitor_orders,
+    }
+}
+
+/// v5 -> v6：is_sticky 字段在反序列化时已缺省为 false；只抬版本号。
+fn migrate_snapshot_v5(v5: SessionSnapshotV5) -> SessionSnapshot {
+    SessionSnapshot {
+        version: SESSION_VERSION,
+        clients: v5.clients,
+        monitor_orders: v5.monitor_orders,
     }
 }
 
@@ -347,6 +379,7 @@ struct DetailedRestorePlan {
     monitor_num: u32,
     connector: Option<String>,
     maximize: Option<SessionMaximize>,
+    is_sticky: bool,
 }
 
 impl SessionSnapshot {
@@ -791,6 +824,7 @@ pub fn capture_snapshot_excluding(
             connector: None,
             floating,
             maximize: SessionMaximize::from_client(c),
+            is_sticky: c.state.is_sticky,
         });
     }
     let monitor_orders = state
@@ -902,6 +936,7 @@ where
                     monitor_num: e.monitor_num,
                     connector: e.connector.clone(),
                     maximize: e.maximize.clone(),
+                    is_sticky: e.is_sticky,
                 },
             ));
         }
@@ -1204,6 +1239,12 @@ impl Jwm {
             }
         }
 
+        // Sticky last: set_client_sticky adopts the monitor's current tags
+        // when turning sticky on, and mirrors the EWMH atom for pagers.
+        for (key, plan) in &plans {
+            self.set_client_sticky(backend, *key, plan.is_sticky);
+        }
+
         plans.len()
     }
 
@@ -1347,6 +1388,7 @@ mod tests {
             connector: None,
             floating: None,
             maximize: None,
+            is_sticky: false,
         }
     }
 
@@ -1390,6 +1432,7 @@ mod tests {
                         restore: Some((40, 50, 700, 500)),
                         promoted: false,
                     }),
+                    is_sticky: true,
                 },
                 entry("Alacritty", "alacritty", 0b1),
             ],
@@ -1855,8 +1898,8 @@ mod tests {
     #[test]
     fn migration_refuses_future_versions_and_unreadable_documents() {
         let error =
-            migrate_session_json(r#"{"version":6,"clients":[],"monitor_orders":[]}"#).unwrap_err();
-        assert!(error.contains("unsupported session version 6"));
+            migrate_session_json(r#"{"version":7,"clients":[],"monitor_orders":[]}"#).unwrap_err();
+        assert!(error.contains("unsupported session version 7"));
 
         let error = migrate_session_json("not JSON").unwrap_err();
         assert!(error.contains("no readable version"));
@@ -1875,9 +1918,23 @@ mod tests {
         let error = migrate_session_json(r#"{"version":4,"clients":[]}"#).unwrap_err();
         assert!(error.contains("cannot parse version 4 session snapshot"));
 
-        // v5（当前版本）同样严格：缺 monitor_orders 字段直接拒绝。
+        // v5 保持严格：缺 monitor_orders 字段直接拒绝。
         let error = migrate_session_json(r#"{"version":5,"clients":[]}"#).unwrap_err();
+        assert!(error.contains("cannot parse version 5 session snapshot"));
+
+        // v6（当前版本）同样严格：缺 monitor_orders 字段直接拒绝。
+        let error = migrate_session_json(r#"{"version":6,"clients":[]}"#).unwrap_err();
         assert!(error.contains("cannot parse session snapshot"));
+    }
+
+    #[test]
+    fn v5_snapshot_without_sticky_migrates_to_false() {
+        let snapshot = migrate_session_json(
+            r#"{"version":5,"clients":[{"class":"A","instance":"a","name":"","tags":1,"is_floating":false,"monitor_num":0,"floating":null}],"monitor_orders":[]}"#,
+        )
+        .expect("v5 without is_sticky still loads");
+        assert_eq!(snapshot.version, SESSION_VERSION);
+        assert!(!snapshot.clients[0].is_sticky);
     }
 
     #[test]
@@ -2604,6 +2661,36 @@ mod tests {
                 && hint.x + hint.w <= work.x + work.w
                 && hint.y + hint.h <= work.y + work.h,
             "restore hint {hint:?} must sit inside work area {work:?}"
+        );
+    }
+
+    #[test]
+    fn session_captures_and_restores_sticky() {
+        let mut backend = DisplaySpyBackend::new(vec![output(1, 0, 0, 1920, 1080)]);
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").expect("test jwm");
+        let monitor = jwm.state.monitor_order[0];
+        let tags = jwm.state.monitors[monitor].get_active_tags();
+
+        let mut client = WMClient::new(WindowId::from_raw(0x74));
+        client.class = "StickyApp".into();
+        client.instance = "stickyapp".into();
+        client.mon = Some(monitor);
+        client.state.tags = tags;
+        client.state.is_sticky = true;
+        let key = jwm.insert_client(client);
+        jwm.attach_to_monitor(key, monitor);
+
+        let snapshot = capture_snapshot(&jwm.state, "status-bar");
+        assert!(
+            snapshot.clients[0].is_sticky,
+            "capture must record sticky"
+        );
+
+        jwm.state.clients[key].state.is_sticky = false;
+        assert_eq!(jwm.apply_session_snapshot(&mut backend, &snapshot), 1);
+        assert!(
+            jwm.state.clients[key].state.is_sticky,
+            "restore must re-apply sticky through set_client_sticky"
         );
     }
 }

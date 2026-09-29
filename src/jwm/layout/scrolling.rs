@@ -139,7 +139,7 @@ impl Jwm {
         state.focused_clients.swap(cur_col, new_col);
         state.set_focused_column(new_col);
         self.arrange(backend, Some(mon_key));
-        self.broadcast_visible_window_states_on_monitor(mon_key);
+        self.broadcast_visible_window_states_on_monitor(backend, mon_key);
         Ok(())
     }
 
@@ -184,7 +184,7 @@ impl Jwm {
         if (new_factor - current).abs() > 0.0001 {
             state.column_width_factors[cur_col] = new_factor;
             self.arrange(backend, Some(mon_key));
-            self.broadcast_visible_window_states_on_monitor(mon_key);
+            self.broadcast_visible_window_states_on_monitor(backend, mon_key);
         }
 
         Ok(())

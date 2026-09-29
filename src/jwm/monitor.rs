@@ -1174,7 +1174,7 @@ impl Jwm {
         self.attach_unassigned_clients_to_selected_monitor(backend);
 
         self.arrange(backend, None);
-        self.broadcast_visible_window_states_all_monitors();
+        self.broadcast_visible_window_states_all_monitors(backend);
         // Every display change re-validates the monitor locks, as
         // `updategeom` does for X11: a shade must never outlive the output
         // rectangle it was cut for.
@@ -1287,7 +1287,7 @@ impl Jwm {
             }
 
             self.arrange(backend, None);
-            self.broadcast_visible_window_states_all_monitors();
+            self.broadcast_visible_window_states_all_monitors(backend);
             self.mark_bar_update_needed_if_visible(None);
             if dropped_scrolling_states > 0 {
                 info!(
@@ -1344,7 +1344,7 @@ impl Jwm {
             );
             self.repark_all_hidden_clients(backend);
             self.arrange(backend, Some(mon_key));
-            self.broadcast_visible_window_states_on_monitor(mon_key);
+            self.broadcast_visible_window_states_on_monitor(backend, mon_key);
             self.refresh_migrated_client_properties(backend, &migrated);
             self.mark_bar_update_needed_if_visible(monitor_num);
             // A mode or scale change resizes the output under its shade.

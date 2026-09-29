@@ -186,7 +186,7 @@ fn apply_external_stacking_request(
         }
     }
     if previous != next {
-        wm.broadcast_window_state_ipc(client_key);
+        wm.broadcast_window_state_ipc(backend, client_key);
     }
     Ok(())
 }
@@ -730,9 +730,10 @@ impl WMController for Jwm {
                 // `m` — Volume also of Enter, ignoring the slider bar so it
                 // never seeks); Network and Bluetooth middle-click toggle the
                 // radio (the twin of Left/Right — BT power-off still arms);
-                // every other Hub row stays inert. Blank is inert on every
-                // picker; the notification action strip stays left-only
-                // (middle-click there is a miss).
+                // Do Not Disturb / Caffeine / Night Light middle-click toggle
+                // through Enter (OSD path); every other Hub row stays inert.
+                // Blank is inert on every picker; the notification action
+                // strip stays left-only (middle-click there is a miss).
                 2 if self.features.system_ui.is_clipboard_picker() => {
                     if let SystemUiHitTarget::Item(row, _) = hit
                         && self.features.system_ui.select_visible_row(row).is_some()
@@ -778,11 +779,17 @@ impl WMController for Jwm {
                                 | ControlKind::AudioInput
                                 | ControlKind::Network
                                 | ControlKind::Bluetooth
+                                | ControlKind::DoNotDisturb
+                                | ControlKind::Caffeine
+                                | ControlKind::NightLight
                         )
                         && self.features.system_ui.select_visible_row(row).is_some()
                     {
                         let keysym = match kind {
                             ControlKind::Network | ControlKind::Bluetooth => keys::KEY_Left,
+                            ControlKind::DoNotDisturb
+                            | ControlKind::Caffeine
+                            | ControlKind::NightLight => keys::KEY_Return,
                             _ => keys::KEY_m,
                         };
                         self.handle_control_center_key(
@@ -1875,7 +1882,7 @@ impl Jwm {
             return;
         }
         if changed {
-            self.broadcast_window_state_ipc(client_key);
+            self.broadcast_window_state_ipc(backend, client_key);
         }
     }
 }
@@ -2002,7 +2009,7 @@ impl Jwm {
         // WindowInfo only carries `is_urgent`; skip when the EWMH bit flips
         // but a standing ICCCM hint keeps urgency unchanged.
         if previous_urgent != urgent {
-            self.broadcast_window_state_ipc(client_key);
+            self.broadcast_window_state_ipc(backend, client_key);
         }
     }
 }
@@ -3750,13 +3757,13 @@ mod tests {
         );
     }
 
-    /// Hub Volume / Input / Network / Bluetooth button 2 must select the
-    /// pointed row and share the keyboard path — `KEY_m` for mute rows,
-    /// `KEY_Left` for connectivity radios — never Return (slider seek /
-    /// open picker). Needles are built at runtime so this cannot match its
-    /// own source.
+    /// Hub Volume / Input / Network / Bluetooth / DND / Caffeine / Night Light
+    /// button 2 must select the pointed row and share the keyboard path —
+    /// `KEY_m` for mute rows, `KEY_Left` for connectivity radios, `KEY_Return`
+    /// for the three toggle rows (OSD path). Needles are built at runtime so
+    /// this cannot match its own source.
     #[test]
-    fn control_center_hub_middle_click_routes_mute_and_radio() {
+    fn control_center_hub_middle_click_routes_mute_radio_and_toggles() {
         const SOURCE: &str = include_str!("event_dispatcher.rs");
         let compact: String = SOURCE.chars().filter(|c| !c.is_whitespace()).collect();
 
@@ -3786,8 +3793,11 @@ mod tests {
             system_ui.contains("ControlKind::Volume")
                 && system_ui.contains("ControlKind::AudioInput")
                 && system_ui.contains("ControlKind::Network")
-                && system_ui.contains("ControlKind::Bluetooth"),
-            "middle-click must cover mute and radio Hub rows"
+                && system_ui.contains("ControlKind::Bluetooth")
+                && system_ui.contains("ControlKind::DoNotDisturb")
+                && system_ui.contains("ControlKind::Caffeine")
+                && system_ui.contains("ControlKind::NightLight"),
+            "middle-click must cover mute, radio, and toggle Hub rows"
         );
         assert!(
             system_ui.contains("select_visible_row(row)"),
@@ -3809,16 +3819,22 @@ mod tests {
             .expect("the middle-click catch-all");
         let arm_body = &system_ui[hub..hub + catch_all];
         assert!(
-            arm_body.contains("keys::KEY_m") && arm_body.contains("keys::KEY_Left"),
-            "middle-click must mute with m and toggle radios with Left"
+            arm_body.contains("keys::KEY_m")
+                && arm_body.contains("keys::KEY_Left")
+                && arm_body.contains("keys::KEY_Return"),
+            "middle-click must mute with m, toggle radios with Left, and toggle DND/Caffeine/Night Light with Return"
         );
         assert!(
-            !arm_body.contains("KEY_Return") && !arm_body.contains("KEY_space"),
-            "middle-click must not replay Enter (slider seek / open picker)"
+            !arm_body.contains("KEY_space"),
+            "middle-click must not replay Space"
         );
         assert!(
-            !arm_body.contains("toggle_mic_mute") && !arm_body.contains("request_radio_set"),
-            "middle-click must reach mute/radio through the key path, not call helpers directly"
+            !arm_body.contains("toggle_mic_mute")
+                && !arm_body.contains("request_radio_set")
+                && !arm_body.contains("toggle_dnd")
+                && !arm_body.contains("toggle_idle_inhibit")
+                && !arm_body.contains("toggle_night_light"),
+            "middle-click must reach mute/radio/toggles through the key path, not call helpers directly"
         );
         assert!(
             wifi_bt < hub,

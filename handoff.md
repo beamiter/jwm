@@ -4,12 +4,32 @@
 
 ---
 
-## Evolve backlog（目标 100 轮；已完成 wave 9–44，本地 ahead）
+## Evolve backlog（目标 100 轮；已完成 wave 9–47，本地 ahead）
 
 | # | 选题 | Size |
 | --- | --- | --- |
 | 14–44 | topology/state 全族含 refit/strut/topology + seamless + session + placement + layout tags + X11 seed + maximize clamp + MonitorInfo connector | ✓ |
+| 45–47 | Hub DND/Caffeine/NightLight 中键 + Sticky manage/session + WindowInfo.connector | ✓ |
 | … | 跳过：Annotation/Screenshot CommonLinear、toast Closed(1)、BT withdraw、FS/PiP 丢锚点、Recording EncodedOnly、XWayland 单轴 | |
+
+---
+
+## 2026-09-29（三十一）：Hub toggle middle-click + sticky survive + WindowInfo.connector
+
+选题 = evolve waves 45–47 / evolve7h。
+
+1. **Wave 45**：Hub button-2 臂扩展 DND / Caffeine / Night Light → 选中行后走
+   `KEY_Return`（与左键/Enter 同 OSD 路径）。Docs control-center + event_dispatcher
+   pin。
+2. **Wave 46**：manage 采纳预 map `_NET_WM_STATE_STICKY`（同 Above/Below/
+   maximize）；`session.json` → v6，`SessionEntry.is_sticky`（serde default）；
+   restore 经 `set_client_sticky`。Docs window-placement Restarts。
+3. **Wave 47**：`WindowInfo` 增 optional `connector`（同 `MonitorInfoIpc` live
+   identity）；`get_windows` / `get_tree` / `window/state` 填充。Serialize pins。
+
+**验证**：`scripts/test.sh --lib -- control_center_hub_middle_click sticky window_info session manage_adopts_initial_sticky`。
+
+**下一轮候选**：见跳过表；或其它 topology/state 边角。
 
 ---
 

@@ -248,7 +248,7 @@ impl Jwm {
 
             // Re-arrange all windows on this monitor to fill or vacate the bar space.
             self.arrange(backend, Some(sel_mon_key));
-            self.broadcast_visible_window_states_on_monitor(sel_mon_key);
+            self.broadcast_visible_window_states_on_monitor(backend, sel_mon_key);
         }
 
         Ok(())
@@ -297,7 +297,7 @@ impl Jwm {
             }
             self.arrange(backend, self.state.sel_mon);
             if let Some(mon) = self.state.sel_mon {
-                self.broadcast_visible_window_states_on_monitor(mon);
+                self.broadcast_visible_window_states_on_monitor(backend, mon);
             }
         }
 
@@ -333,7 +333,7 @@ impl Jwm {
 
                 self.arrange(backend, self.state.sel_mon);
                 if let Some(mon) = self.state.sel_mon {
-                    self.broadcast_visible_window_states_on_monitor(mon);
+                    self.broadcast_visible_window_states_on_monitor(backend, mon);
                 }
 
                 self.suppress_mouse_focus_until =
@@ -862,7 +862,7 @@ impl Jwm {
         self.suppress_layout_animation = motion != TagSwitchMotion::Layout;
         self.arrange(backend, Some(sel_mon_key));
         self.suppress_layout_animation = false;
-        self.broadcast_visible_window_states_on_monitor(sel_mon_key);
+        self.broadcast_visible_window_states_on_monitor(backend, sel_mon_key);
         self.update_ewmh_desktop(backend)?;
         // Tag changed: re-resolve per-tag wallpapers in the compositor.
         if old_tag_mask != new_tag_mask {
@@ -931,7 +931,7 @@ impl Jwm {
         self.suppress_layout_animation = transitioning;
         self.arrange(backend, Some(sel_mon_key));
         self.suppress_layout_animation = false;
-        self.broadcast_visible_window_states_on_monitor(sel_mon_key);
+        self.broadcast_visible_window_states_on_monitor(backend, sel_mon_key);
         self.update_ewmh_desktop(backend)?;
         if old_tag_mask != new_tag_mask {
             self.refresh_compositor_monitors(backend);
@@ -986,7 +986,7 @@ impl Jwm {
 
                 self.focus(backend, None)?;
                 self.arrange(backend, self.state.sel_mon);
-                self.broadcast_window_state_ipc(sel_client_key);
+                self.broadcast_window_state_ipc(backend, sel_client_key);
             }
         }
 

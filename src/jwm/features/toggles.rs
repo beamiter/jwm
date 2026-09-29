@@ -2853,7 +2853,7 @@ impl Jwm {
         self.reorder_client_in_monitor_groups(sel_client_key);
 
         self.arrange(backend, Some(sel_mon_key));
-        self.broadcast_window_state_ipc(sel_client_key);
+        self.broadcast_window_state_ipc(backend, sel_client_key);
         self.sync_floating_restore_property(backend, sel_client_key);
         Ok(())
     }
@@ -2919,7 +2919,7 @@ impl Jwm {
             .set_net_wm_state_flag(win, crate::backend::api::NetWmState::Sticky, sticky);
         let _ = self.setclienttagprop(backend, client_key);
         self.arrange(backend, mon);
-        self.broadcast_window_state_ipc(client_key);
+        self.broadcast_window_state_ipc(backend, client_key);
     }
 
     /// Close compositor-owned modal work before the X11 tree becomes native.
@@ -4544,7 +4544,7 @@ impl Jwm {
                 if let Some(mk) = mon_key {
                     self.arrange(backend, Some(mk));
                 }
-                self.broadcast_window_state_ipc(sp_key);
+                self.broadcast_window_state_ipc(backend, sp_key);
             } else {
                 let was_minimized = self
                     .state
@@ -4561,7 +4561,7 @@ impl Jwm {
                 if !self.reveal_and_focus(backend, window)? {
                     return Err("scratchpad disappeared before reveal".into());
                 }
-                self.broadcast_window_state_ipc(sp_key);
+                self.broadcast_window_state_ipc(backend, sp_key);
 
                 // A minimized scratchpad already has the compositor's reverse
                 // Genie. Starting the scratchpad Appear animation as well would

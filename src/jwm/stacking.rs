@@ -136,7 +136,7 @@ impl Jwm {
         let _ = self.focus(backend, Some(client_key));
         if let Some(mon_key) = mon_key {
             self.arrange(backend, Some(mon_key));
-            self.broadcast_visible_window_states_on_monitor(mon_key);
+            self.broadcast_visible_window_states_on_monitor(backend, mon_key);
         }
     }
 

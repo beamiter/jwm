@@ -921,10 +921,10 @@ impl Jwm {
         // still fires for callers that only watch that topic).
         if previous_focus != client_key_opt {
             if let Some(prev) = previous_focus {
-                self.broadcast_window_state_ipc(prev);
+                self.broadcast_window_state_ipc(backend, prev);
             }
             if let Some(ck) = client_key_opt {
-                self.broadcast_window_state_ipc(ck);
+                self.broadcast_window_state_ipc(backend, ck);
             }
         }
 

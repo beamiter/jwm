@@ -38,7 +38,7 @@ impl Jwm {
             }
             self.mark_layout_dirty();
             self.arrange(backend, Some(sel_mon_key));
-            self.broadcast_visible_window_states_on_monitor(sel_mon_key);
+            self.broadcast_visible_window_states_on_monitor(backend, sel_mon_key);
         }
         Ok(())
     }
@@ -108,7 +108,7 @@ impl Jwm {
             }
             self.mark_layout_dirty();
             self.arrange(backend, Some(sel_mon_key));
-            self.broadcast_visible_window_states_on_monitor(sel_mon_key);
+            self.broadcast_visible_window_states_on_monitor(backend, sel_mon_key);
         }
         Ok(())
     }
@@ -131,7 +131,7 @@ impl Jwm {
             }
             self.mark_layout_dirty();
             self.arrange(backend, Some(sel_mon_key));
-            self.broadcast_visible_window_states_on_monitor(sel_mon_key);
+            self.broadcast_visible_window_states_on_monitor(backend, sel_mon_key);
         }
         Ok(())
     }
@@ -210,7 +210,7 @@ impl Jwm {
         let (should_arrange, mon_num) = self.finalize_layout_update(sel_mon_key);
         if should_arrange || reclaimed > 0 {
             self.arrange(backend, Some(sel_mon_key));
-            self.broadcast_visible_window_states_on_monitor(sel_mon_key);
+            self.broadcast_visible_window_states_on_monitor(backend, sel_mon_key);
         } else {
             self.mark_bar_update_needed_if_visible(mon_num);
         }

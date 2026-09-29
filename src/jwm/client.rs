@@ -112,6 +112,9 @@ impl Jwm {
         let initial_ewmh_below = backend
             .property_ops()
             .has_net_wm_state_flag(win, NetWmState::Below)?;
+        let initial_ewmh_sticky = backend
+            .property_ops()
+            .has_net_wm_state_flag(win, NetWmState::Sticky)?;
         // Pre-map maximize atoms are adopted through the shared maximize
         // transaction once the window type (and so floating) is known. The
         // read is best-effort: an unreadable atom counts as not maximized and
@@ -127,9 +130,12 @@ impl Jwm {
         // Adopt pre-map EWMH stacking requests before the client enters the
         // shared stack. Above wins an invalid double state, and the public
         // property is normalized best-effort without making the window
-        // unmanageable when that cleanup fails.
+        // unmanageable when that cleanup fails. Sticky is adopted the same
+        // way maximize / Above / Below are: the atom on the window is the
+        // source of truth across a seamless restart.
         client.state.is_above = initial_ewmh_above;
         client.state.is_below = initial_ewmh_below && !initial_ewmh_above;
+        client.state.is_sticky = initial_ewmh_sticky;
         if initial_ewmh_above
             && initial_ewmh_below
             && let Err(error) =
@@ -2311,6 +2317,7 @@ mod unmanage_minimized_tests {
         hidden: AtomicBool,
         above: AtomicBool,
         below: AtomicBool,
+        sticky: AtomicBool,
         wm_state: AtomicI64,
         dock_type: AtomicBool,
         /// Report `_NET_WM_WINDOW_TYPE_DIALOG` (a floating type) instead of Normal.
@@ -2590,6 +2597,8 @@ mod unmanage_minimized_tests {
                     .lock()
                     .expect("protocol writes lock")
                     .push(ProtocolWrite::Below(on));
+            } else if state == NetWmState::Sticky {
+                self.sticky.store(on, Ordering::Relaxed);
             }
             Ok(())
         }
@@ -2610,6 +2619,7 @@ mod unmanage_minimized_tests {
                 NetWmState::Hidden => self.hidden.load(Ordering::Relaxed),
                 NetWmState::Above => self.above.load(Ordering::Relaxed),
                 NetWmState::Below => self.below.load(Ordering::Relaxed),
+                NetWmState::Sticky => self.sticky.load(Ordering::Relaxed),
                 NetWmState::MaximizedVert => self.maximized_vert.load(Ordering::Relaxed),
                 NetWmState::MaximizedHorz => self.maximized_horz.load(Ordering::Relaxed),
                 _ => false,
@@ -5700,6 +5710,41 @@ mod unmanage_minimized_tests {
             both.6.contains(&ProtocolWrite::Below(false)),
             "conflicting Above+Below was not normalized on the client"
         );
+    }
+
+    #[test]
+    fn manage_adopts_initial_sticky_without_changing_window_state() {
+        let baseline = manage_with_initial_sticky(0x9800, false);
+        let sticky = manage_with_initial_sticky(0x9801, true);
+
+        assert_eq!(sticky.0, baseline.0, "sticky adoption changed geometry");
+        assert_eq!(sticky.1, baseline.1, "sticky adoption changed floating");
+        assert_eq!(sticky.2, baseline.2, "sticky adoption changed hidden");
+        assert!(!baseline.3);
+        assert!(sticky.3);
+    }
+
+    fn manage_with_initial_sticky(
+        raw: u64,
+        sticky: bool,
+    ) -> ((i32, i32, i32, i32, i32), bool, bool, bool) {
+        let mut backend = ClientSpyBackend::new();
+        backend.property_ops.sticky.store(sticky, Ordering::Relaxed);
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let key = manage_window(&mut jwm, &mut backend, raw);
+        let client = &jwm.state.clients[key];
+        (
+            (
+                client.geometry.x,
+                client.geometry.y,
+                client.geometry.w,
+                client.geometry.h,
+                client.geometry.border_w,
+            ),
+            client.state.is_floating,
+            client.state.is_hidden,
+            client.state.is_sticky,
+        )
     }
 
     /// What manage made of one window, for the maximize adoption tests.
