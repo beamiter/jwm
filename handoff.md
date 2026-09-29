@@ -4,7 +4,7 @@
 
 ---
 
-## Evolve backlog（目标 199 轮；已完成 wave 9–130，本地 ahead）
+## Evolve backlog（目标 199 轮；已完成 wave 9–135，本地 ahead）
 
 | # | 选题 | Size |
 | --- | --- | --- |
@@ -27,7 +27,27 @@
 | 115–118 | get_system_ui / get_tab_bar；tab_bar_reserved；notifications center_open | ✓ |
 | 119–125 | WindowInfo maximize_promoted/restore、swallowing/swallowed_by、transient_for、minimized_order、tab_index/is_tabbed | ✓ |
 | 126–130 | MonitorInfo name/vendor/serial/VRR；WorkspaceInfo has_fullscreen/is_occupied | ✓ |
+| 131–135 | Session client_fact v10；hand-float；no_decorations；maximize promoted adopt pin | ✓ |
 | … | 跳过：Annotation/Screenshot CommonLinear、toast Closed(1)、BT withdraw、FS/PiP 自身丢锚点（own-anchor drop）、Recording EncodedOnly、XWayland 单轴 | |
+
+---
+
+## 2026-09-29（四十九）：Session v10 client_fact / hand-float / decorations
+
+选题 = evolve waves 131–135 / evolve7h。
+
+1. **Wave 131**：`SessionEntry.client_fact`（缺省 1.0；恢复 clamp 0.25..=4）。
+2. **Wave 132**：`is_drag_floating` 手浮位。
+3. **Wave 133**：`no_decorations`（恢复时 border_w=0）。
+4. **Wave 134–135**：maximize 再套用改 `adopt_client_maximized(promoted)`；
+   往返 pin。CHANGELOG；migrate v9→v10。
+
+**刻意不做**：跳过表不变；scratchpad 仍不进 session。
+
+**验证**：`scripts/test.sh --lib -- session_captures_and_restores v9_snapshot session_restore_reapplies_maximize`。
+
+**下一轮候选**：Layout picker / tags / calendar / MonitorLayout / keybindings
+UI twins。
 
 ---
 

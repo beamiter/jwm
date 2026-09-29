@@ -326,7 +326,8 @@ working. Session
 snapshots (v4+) also store maximize axes, the pre-maximize rectangle and
 whether the window was promoted. `restore_session` unmaximizes every matched
 window, applies the saved resting placement and tile order, then re-applies
-maximize with a user origin so a promoted tile is promoted again; the saved
+maximize through `adopt_client_maximized` using the saved `promoted` bit
+(same origin choice as seamless restart); the saved
 restore rectangle is clamped into the destination monitor's work area so
 absolute coords from another geometry cannot land off-screen after a
 connector remap. Session snapshots (v6+) also store sticky
@@ -343,7 +344,9 @@ Session snapshots (v9+) also store fullscreen and picture-in-picture;
 `restore_session` leaves any live FS/PiP first, restores resting placement,
 then re-applies fullscreen (winning over PiP when both were somehow saved)
 or PiP through `setfullscreen` / `set_client_pip` after stacking and before
-minimized. Across a
+minimized. Session snapshots (v10+) also store `client_fact`, hand-float
+(`is_drag_floating`), and `no_decorations`; `restore_session` applies them
+during resting placement (`client_fact` clamped to `0.25..=4.0`). Across a
 seamless X11 restart the EWMH atoms carry the maximize state, and JWM's
 private `_JWM_MAXIMIZE_RESTORE_V1` property carries the pre-maximize
 rectangle and whether the window was promoted for a *visible* maximized

@@ -13,7 +13,8 @@
 //! （master/stack 排列与拖拽换序的结果）。
 //!
 //! v4 起，最大化状态（轴、恢复矩形、是否从平铺提升）一并写入快照；恢复时
-//! 先落到休息态几何，再以 `MaximizeOrigin::User` 重新最大化。
+//! 先落到休息态几何，再按保存的 `maximize.promoted` 经
+//! `adopt_client_maximized` 重新最大化（与 seamless 重启同源）。
 //!
 //! v5 起，`SessionEntry` 与 `SessionMonitorOrder` 额外记录输出的 connector /
 //! `stable_key`；恢复时经 `output_map` + `enumerate_outputs` 解析到当前
@@ -33,6 +34,11 @@
 //! v9 起，Fullscreen / PiP 一并写入快照；恢复时经 `setfullscreen` /
 //! `set_client_pip` 在 stacking 之后、minimized 之前套用（两者皆真时
 //! Fullscreen 胜出，与运行时互斥一致）。缺省 / 旧版本快照为 `false`。
+//!
+//! v10 起，`client_fact`、手浮（`is_drag_floating`）与 `no_decorations`
+//! 一并写入快照；恢复时在休息态放置阶段套用。缺省 / 旧版本快照为
+//! `client_fact = 1.0`、两个布尔为 `false`。最大化再套用改为按保存的
+//! `maximize.promoted` 走 `adopt_client_maximized`（与 seamless 重启同源）。
 
 use crate::backend::api::{Backend, MaximizeAxes, NetWmAction, NetWmState};
 use crate::config::CONFIG;
@@ -54,7 +60,7 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-const SESSION_VERSION: u32 = 9;
+const SESSION_VERSION: u32 = 10;
 const MIN_SUPPORTED_SESSION_VERSION: u32 = 1;
 const MAX_SESSION_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_SESSION_CLIENTS: usize = 16_384;
@@ -108,6 +114,27 @@ pub struct SessionEntry {
     /// v9：picture-in-picture。缺省 / 旧版本快照为 `false`。
     #[serde(default)]
     pub is_pip: bool,
+    /// v10：per-window tiled share (`ClientState::client_fact`)。缺省 / 旧版本
+    /// 快照为 `1.0`。
+    #[serde(default = "default_client_fact")]
+    pub client_fact: f32,
+    /// v10：用户拖出平铺的手浮（`is_drag_floating`）。缺省 / 旧版本为 `false`。
+    #[serde(default)]
+    pub is_drag_floating: bool,
+    /// v10：无装饰请求（`no_decorations`）。缺省 / 旧版本为 `false`。
+    #[serde(default)]
+    pub no_decorations: bool,
+}
+
+fn default_client_fact() -> f32 {
+    1.0
+}
+
+fn sanitize_client_fact(fact: f32) -> f32 {
+    if !fact.is_finite() {
+        return 1.0;
+    }
+    fact.clamp(0.25, 4.0)
 }
 
 /// 会话里保存的最大化状态（v4）。休息态几何仍写在 `is_floating` /
@@ -297,6 +324,16 @@ struct SessionSnapshotV8 {
     monitor_orders: Vec<SessionMonitorOrder>,
 }
 
+/// 版本 9 快照：已有 is_fullscreen / is_pip，尚无 client_fact / hand-float /
+/// no_decorations（反序列化时缺省）。
+#[derive(Deserialize)]
+struct SessionSnapshotV9 {
+    #[allow(dead_code)]
+    version: u32,
+    clients: Vec<SessionEntry>,
+    monitor_orders: Vec<SessionMonitorOrder>,
+}
+
 /// 把任一受支持版本的会话 JSON 迁移为当前版本的快照。
 ///
 /// 崩溃安全约定：迁移是纯内存操作，绝不改写磁盘上的旧快照；升级后的
@@ -313,54 +350,61 @@ pub fn migrate_session_json(json: &str) -> Result<SessionSnapshot, String> {
         1 => {
             let v1: SessionSnapshotV1 = serde_json::from_str(json)
                 .map_err(|error| format!("cannot parse version 1 session snapshot: {error}"))?;
-            migrate_snapshot_v8(migrate_snapshot_v7(migrate_snapshot_v6(migrate_snapshot_v5(
-                migrate_snapshot_v4(migrate_snapshot_v3(migrate_snapshot_v2(migrate_snapshot_v1(
-                    v1,
+            migrate_snapshot_v9(migrate_snapshot_v8(migrate_snapshot_v7(migrate_snapshot_v6(
+                migrate_snapshot_v5(migrate_snapshot_v4(migrate_snapshot_v3(migrate_snapshot_v2(
+                    migrate_snapshot_v1(v1),
                 )))),
             ))))
         }
         2 => {
             let v2: SessionSnapshotV2 = serde_json::from_str(json)
                 .map_err(|error| format!("cannot parse version 2 session snapshot: {error}"))?;
-            migrate_snapshot_v8(migrate_snapshot_v7(migrate_snapshot_v6(migrate_snapshot_v5(
-                migrate_snapshot_v4(migrate_snapshot_v3(migrate_snapshot_v2(v2))),
+            migrate_snapshot_v9(migrate_snapshot_v8(migrate_snapshot_v7(migrate_snapshot_v6(
+                migrate_snapshot_v5(migrate_snapshot_v4(migrate_snapshot_v3(migrate_snapshot_v2(
+                    v2,
+                )))),
             ))))
         }
         3 => {
             let v3: SessionSnapshotV3 = serde_json::from_str(json)
                 .map_err(|error| format!("cannot parse version 3 session snapshot: {error}"))?;
-            migrate_snapshot_v8(migrate_snapshot_v7(migrate_snapshot_v6(migrate_snapshot_v5(
-                migrate_snapshot_v4(migrate_snapshot_v3(v3)),
+            migrate_snapshot_v9(migrate_snapshot_v8(migrate_snapshot_v7(migrate_snapshot_v6(
+                migrate_snapshot_v5(migrate_snapshot_v4(migrate_snapshot_v3(v3))),
             ))))
         }
         4 => {
             let v4: SessionSnapshotV4 = serde_json::from_str(json)
                 .map_err(|error| format!("cannot parse version 4 session snapshot: {error}"))?;
-            migrate_snapshot_v8(migrate_snapshot_v7(migrate_snapshot_v6(migrate_snapshot_v5(
-                migrate_snapshot_v4(v4),
+            migrate_snapshot_v9(migrate_snapshot_v8(migrate_snapshot_v7(migrate_snapshot_v6(
+                migrate_snapshot_v5(migrate_snapshot_v4(v4)),
             ))))
         }
         5 => {
             let v5: SessionSnapshotV5 = serde_json::from_str(json)
                 .map_err(|error| format!("cannot parse version 5 session snapshot: {error}"))?;
-            migrate_snapshot_v8(migrate_snapshot_v7(migrate_snapshot_v6(migrate_snapshot_v5(
-                v5,
+            migrate_snapshot_v9(migrate_snapshot_v8(migrate_snapshot_v7(migrate_snapshot_v6(
+                migrate_snapshot_v5(v5),
             ))))
         }
         6 => {
             let v6: SessionSnapshotV6 = serde_json::from_str(json)
                 .map_err(|error| format!("cannot parse version 6 session snapshot: {error}"))?;
-            migrate_snapshot_v8(migrate_snapshot_v7(migrate_snapshot_v6(v6)))
+            migrate_snapshot_v9(migrate_snapshot_v8(migrate_snapshot_v7(migrate_snapshot_v6(v6))))
         }
         7 => {
             let v7: SessionSnapshotV7 = serde_json::from_str(json)
                 .map_err(|error| format!("cannot parse version 7 session snapshot: {error}"))?;
-            migrate_snapshot_v8(migrate_snapshot_v7(v7))
+            migrate_snapshot_v9(migrate_snapshot_v8(migrate_snapshot_v7(v7)))
         }
         8 => {
             let v8: SessionSnapshotV8 = serde_json::from_str(json)
                 .map_err(|error| format!("cannot parse version 8 session snapshot: {error}"))?;
-            migrate_snapshot_v8(v8)
+            migrate_snapshot_v9(migrate_snapshot_v8(v8))
+        }
+        9 => {
+            let v9: SessionSnapshotV9 = serde_json::from_str(json)
+                .map_err(|error| format!("cannot parse version 9 session snapshot: {error}"))?;
+            migrate_snapshot_v9(v9)
         }
         SESSION_VERSION => SessionSnapshot::from_json(json)
             .map_err(|error| format!("cannot parse session snapshot: {error}"))?,
@@ -401,6 +445,9 @@ fn migrate_snapshot_v1(v1: SessionSnapshotV1) -> SessionSnapshotV2 {
                 is_minimized: false,
                 is_fullscreen: false,
                 is_pip: false,
+                client_fact: 1.0,
+                is_drag_floating: false,
+                no_decorations: false,
             }
         })
         .collect();
@@ -466,11 +513,20 @@ fn migrate_snapshot_v7(v7: SessionSnapshotV7) -> SessionSnapshotV8 {
 }
 
 /// v8 -> v9：is_fullscreen / is_pip 字段在反序列化时已缺省为 false；只抬版本号。
-fn migrate_snapshot_v8(v8: SessionSnapshotV8) -> SessionSnapshot {
-    SessionSnapshot {
-        version: SESSION_VERSION,
+fn migrate_snapshot_v8(v8: SessionSnapshotV8) -> SessionSnapshotV9 {
+    SessionSnapshotV9 {
+        version: 9,
         clients: v8.clients,
         monitor_orders: v8.monitor_orders,
+    }
+}
+
+/// v9 -> v10：client_fact / hand-float / no_decorations 在反序列化时已缺省；只抬版本号。
+fn migrate_snapshot_v9(v9: SessionSnapshotV9) -> SessionSnapshot {
+    SessionSnapshot {
+        version: SESSION_VERSION,
+        clients: v9.clients,
+        monitor_orders: v9.monitor_orders,
     }
 }
 
@@ -496,6 +552,9 @@ struct DetailedRestorePlan {
     is_minimized: bool,
     is_fullscreen: bool,
     is_pip: bool,
+    client_fact: f32,
+    is_drag_floating: bool,
+    no_decorations: bool,
 }
 
 impl SessionSnapshot {
@@ -946,6 +1005,9 @@ pub fn capture_snapshot_excluding(
             is_minimized: c.state.is_hidden,
             is_fullscreen: c.state.is_fullscreen,
             is_pip: c.state.is_pip,
+            client_fact: c.state.client_fact,
+            is_drag_floating: is_floating && c.state.is_drag_floating,
+            no_decorations: c.state.no_decorations,
         });
     }
     let monitor_orders = state
@@ -1063,6 +1125,9 @@ where
                     is_minimized: e.is_minimized,
                     is_fullscreen: e.is_fullscreen,
                     is_pip: e.is_pip,
+                    client_fact: e.client_fact,
+                    is_drag_floating: e.is_drag_floating,
+                    no_decorations: e.no_decorations,
                 },
             ));
         }
@@ -1320,7 +1385,12 @@ impl Jwm {
             if let Some(c) = self.state.clients.get_mut(*key) {
                 c.state.tags = restored_tags;
                 c.state.is_floating = restore.is_floating;
-                c.state.is_drag_floating = false;
+                c.state.is_drag_floating = restore.is_floating && plan.is_drag_floating;
+                c.state.client_fact = sanitize_client_fact(plan.client_fact);
+                c.state.no_decorations = plan.no_decorations;
+                if plan.no_decorations {
+                    c.geometry.border_w = 0;
+                }
                 if let Some((x, y, w, h)) = floating {
                     c.geometry.floating_x = x;
                     c.geometry.floating_y = y;
@@ -1378,12 +1448,12 @@ impl Jwm {
                     None => hint,
                 }
             });
-            if let Err(error) = self.set_client_maximized_with_hint(
+            if let Err(error) = self.adopt_client_maximized(
                 backend,
                 *key,
                 axes,
-                MaximizeOrigin::User,
                 restore_hint,
+                maximize.promoted,
             ) {
                 log::warn!("session restore could not re-maximize a matched client: {error}");
             }
@@ -1608,6 +1678,9 @@ mod tests {
             is_minimized: false,
             is_fullscreen: false,
             is_pip: false,
+            client_fact: 1.0,
+            is_drag_floating: false,
+            no_decorations: false,
         }
     }
 
@@ -1657,6 +1730,9 @@ mod tests {
                     is_minimized: true,
                     is_fullscreen: true,
                     is_pip: false,
+                    client_fact: 1.0,
+                    is_drag_floating: false,
+                    no_decorations: false,
                 },
                 entry("Alacritty", "alacritty", 0b1),
             ],
@@ -2123,7 +2199,7 @@ mod tests {
     fn migration_refuses_future_versions_and_unreadable_documents() {
         let error =
             migrate_session_json(r#"{"version":10,"clients":[],"monitor_orders":[]}"#).unwrap_err();
-        assert!(error.contains("unsupported session version 10"));
+        assert!(error.contains("unsupported session version 11"));
 
         let error = migrate_session_json("not JSON").unwrap_err();
         assert!(error.contains("no readable version"));
@@ -2215,6 +2291,129 @@ mod tests {
         assert!(snapshot.clients[0].is_minimized);
         assert!(!snapshot.clients[0].is_fullscreen);
         assert!(!snapshot.clients[0].is_pip);
+        assert!((snapshot.clients[0].client_fact - 1.0).abs() < f32::EPSILON);
+        assert!(!snapshot.clients[0].is_drag_floating);
+        assert!(!snapshot.clients[0].no_decorations);
+    }
+
+    #[test]
+    fn v9_snapshot_without_client_fact_migrates_to_defaults() {
+        let snapshot = migrate_session_json(
+            r#"{"version":9,"clients":[{"class":"A","instance":"a","name":"","tags":1,"is_floating":false,"monitor_num":0,"floating":null,"is_sticky":false,"is_above":false,"is_below":false,"is_minimized":false,"is_fullscreen":false,"is_pip":false}],"monitor_orders":[]}"#,
+        )
+        .expect("v9 without client_fact still loads");
+        assert_eq!(snapshot.version, SESSION_VERSION);
+        assert!((snapshot.clients[0].client_fact - 1.0).abs() < f32::EPSILON);
+        assert!(!snapshot.clients[0].is_drag_floating);
+        assert!(!snapshot.clients[0].no_decorations);
+    }
+
+    #[test]
+    fn session_captures_and_restores_client_fact_hand_float_and_decorations() {
+        let mut backend = DisplaySpyBackend::new(vec![output(1, 0, 0, 1920, 1080)]);
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").expect("test jwm");
+        let monitor = jwm.state.monitor_order[0];
+        let tags = jwm.state.monitors[monitor].get_active_tags();
+
+        let mut client = WMClient::new(WindowId::from_raw(0x81));
+        client.class = "FactApp".into();
+        client.instance = "factapp".into();
+        client.mon = Some(monitor);
+        client.state.tags = tags;
+        client.state.is_floating = true;
+        client.state.is_drag_floating = true;
+        client.state.client_fact = 1.5;
+        client.state.no_decorations = true;
+        client.geometry.border_w = 0;
+        client.geometry.x = 40;
+        client.geometry.y = 50;
+        client.geometry.w = 400;
+        client.geometry.h = 300;
+        client.geometry.floating_x = 40;
+        client.geometry.floating_y = 50;
+        client.geometry.floating_w = 400;
+        client.geometry.floating_h = 300;
+        let key = jwm.insert_client(client);
+        jwm.attach_to_monitor(key, monitor);
+
+        let snap = capture_snapshot(&jwm.state, "status-bar");
+        let entry = snap
+            .clients
+            .iter()
+            .find(|e| e.class == "FactApp")
+            .expect("FactApp");
+        assert!((entry.client_fact - 1.5).abs() < f32::EPSILON);
+        assert!(entry.is_drag_floating);
+        assert!(entry.no_decorations);
+
+        jwm.state.clients[key].state.client_fact = 1.0;
+        jwm.state.clients[key].state.is_drag_floating = false;
+        jwm.state.clients[key].state.no_decorations = false;
+        jwm.state.clients[key].geometry.border_w = 2;
+        assert_eq!(jwm.apply_session_snapshot(&mut backend, &snap), 1);
+        let restored = &jwm.state.clients[key].state;
+        assert!((restored.client_fact - 1.5).abs() < f32::EPSILON);
+        assert!(restored.is_drag_floating);
+        assert!(restored.no_decorations);
+        assert_eq!(jwm.state.clients[key].geometry.border_w, 0);
+    }
+
+    #[test]
+    fn session_restore_reapplies_maximize_promoted_via_adopt() {
+        let mut backend = DisplaySpyBackend::new(vec![output(1, 0, 0, 1920, 1080)]);
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").expect("test jwm");
+        let monitor = jwm.state.monitor_order[0];
+        let tags = jwm.state.monitors[monitor].get_active_tags();
+
+        let mut tiled = WMClient::new(WindowId::from_raw(0x91));
+        tiled.class = "TileApp".into();
+        tiled.instance = "tileapp".into();
+        tiled.mon = Some(monitor);
+        tiled.state.tags = tags;
+        tiled.geometry.x = 0;
+        tiled.geometry.y = 30;
+        tiled.geometry.w = 900;
+        tiled.geometry.h = 700;
+        tiled.geometry.border_w = 2;
+        let key = jwm.insert_client(tiled);
+        jwm.attach_to_monitor(key, monitor);
+
+        jwm.set_client_maximized(
+            &mut backend,
+            key,
+            MaximizeAxes::BOTH,
+            MaximizeOrigin::User,
+        )
+        .expect("promote maximize");
+        assert!(jwm.state.clients[key].state.maximize_restore_tiled);
+
+        let snap = capture_snapshot(&jwm.state, "status-bar");
+        let entry = snap
+            .clients
+            .iter()
+            .find(|e| e.class == "TileApp")
+            .expect("TileApp");
+        assert_eq!(
+            entry.maximize.as_ref().map(|m| m.promoted),
+            Some(true),
+            "capture must record promoted"
+        );
+
+        jwm.set_client_maximized(
+            &mut backend,
+            key,
+            MaximizeAxes::NONE,
+            MaximizeOrigin::User,
+        )
+        .expect("clear maximize");
+        assert!(!jwm.state.clients[key].state.maximize_restore_tiled);
+
+        assert_eq!(jwm.apply_session_snapshot(&mut backend, &snap), 1);
+        assert!(
+            jwm.state.clients[key].state.maximize_restore_tiled,
+            "restore must re-promote via adopt_client_maximized"
+        );
+        assert!(jwm.state.clients[key].state.maximized_axes().any());
     }
 
     #[test]

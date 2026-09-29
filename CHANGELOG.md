@@ -13,6 +13,12 @@ monorepo use independent Semantic Versions.
   optional `tab_index`. See
   [docs/window-placement.md](docs/window-placement.md).
 
+- Session snapshots are version 10: `client_fact`, hand-float
+  (`is_drag_floating`), and `no_decorations` persist across restart;
+  maximize restore re-applies via `adopt_client_maximized` using the
+  saved `promoted` bit. See
+  [docs/window-placement.md](docs/window-placement.md).
+
 - `get_monitors` / `get_tree` report optional `name` (wl_output), `vendor` /
   `product_code` / `serial_number` / `monitor_serial`, and
   `vrr_supported` / `vrr_enabled`. `get_workspaces` rows add `is_occupied`
