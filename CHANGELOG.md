@@ -7,6 +7,25 @@ monorepo use independent Semantic Versions.
 
 ### Added
 
+- `get_windows` / `get_clients` / `get_tree` / `window/state` report resting
+  `float_rect` and `old_geometry` beside live `x`/`y`/`w`/`h`.
+- `get_monitors` / `get_tree` report optional `hdr_metadata`, physical size
+  (`physical_width_mm` / `physical_height_mm`), and preferred mode fields.
+- `get_tree` nodes carry `selected_id` and `window_count`.
+- IPC aliases: `get_clients` (= `get_windows`), `set_layout` (= `setlayout`),
+  `setnmaster` / `set_nmaster` (absolute master count).
+- `get_config` accepts optional `keys` to return a field subset; also reports
+  `overview_enabled` and `modkey`.
+- Overview cube: `Home`/`End` jump, `Page Up`/`Down` page, vertical wheel
+  cycles faces. See [docs/cube-effects.md](docs/cube-effects.md).
+- Window switcher icons fall back through `WM_CLASS` instance. See
+  [docs/window-switcher.md](docs/window-switcher.md).
+- `get_audio_recording_status` reports `output_bytes`.
+- `get_status` feature flags include `layout_picker`, `tags_overview`,
+  `calendar`, `keybindings`, and `monitor_layout`.
+- Oversized maximize restore rects shrink to fit the target work area on
+  cross-output migration.
+
 - `get_recording_status` reports top-level `elapsed_secs`, `capture_target`,
   and `last_error` beside the existing nested `capture` block and segment
   fields.

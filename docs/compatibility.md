@@ -56,18 +56,22 @@ pipeline and unmaximize in place. See
 Managed-client Above/Below is handled consistently for XWayland and native X11
 policy: conflicting flags resolve to Above, property writes are echoed back,
 and the managed stack uses `Below < Normal < Above < focused fullscreen < PiP`.
-`get_windows` / `window/state` expose `is_above` and `is_below`, plus
+`get_windows` / `get_clients` / `window/state` expose `is_above` and `is_below`, plus
 `is_swallowed`, `is_on_view`, `is_scratchpad`, `border_w`, optional
-`scratchpad` / `layout`, and chrome / size-hint flags (`is_fixed`,
+`scratchpad` / `layout`, chrome / size-hint flags (`is_fixed`,
 `is_dock`, `is_desktop`, `is_drag_floating`, `never_focus`,
 `skip_taskbar`, `skip_pager`, `no_decorations`, `demands_attention`,
-`has_strut`, `client_fact`).
+`has_strut`, `client_fact`), resting `float_rect`, and `old_geometry`.
 `get_monitors` / `get_tree` report the work area as `wx` / `wy` / `ww` /
-`wh`, plus `scale`, `refresh_mhz`, `hdr_capable`, tiling `gap` /
-`m_fact` / `n_master`, and `transform`.
+`wh`, plus `scale`, `refresh_mhz`, `hdr_capable`, optional `hdr_metadata`,
+tiling `gap` / `m_fact` / `n_master`, `transform`, physical size
+(`physical_width_mm` / `physical_height_mm`), and preferred mode
+(`preferred_width` / `preferred_height` / `preferred_refresh_mhz`).
+`get_tree` nodes also carry `selected_id` and `window_count`.
 `get_workspaces` includes per-tag `gap`; `get_layout` / `get_gaps` /
 `get_nmaster` return the focused monitor's live layout parameters;
-`setgaps` is bindable over IPC.
+`setgaps` / `setnmaster` / `set_nmaster` / `set_layout` are bindable over IPC.
+`get_config` accepts optional `keys` to return a field subset.
 Layer-shell background/top/overlay surfaces remain compositor-owned layers.
 
 The binary-bundle design currently targets **x86_64 Linux built on Ubuntu

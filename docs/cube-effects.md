@@ -68,6 +68,12 @@ Rotation is an exponential ease with a spin-energy term that drives the
 see-through body, an extra camera pull-back and a deeper tilt, then decays so
 the cube settles instead of snapping back to opaque.
 
+Keyboard / pointer navigation matches the other overviews: `Tab` /
+`Shift+Tab` (and `Alt+J` / `Alt+K`) cycle faces, `Home` / `End` jump to the
+first / last face, `Page Up` / `Page Down` page by the visible prism window
+(≤6), and the vertical wheel cycles like Tab. `Enter` or a second
+`Alt+Ctrl+Tab` confirms; `Esc` cancels.
+
 The X11 switcher animates continuously (twinkling sky, sheening caps), so it
 asks for frames until it closes. Wayland's stars, light pool, caps and reflection
 are deterministic for the current angle; after opacity and rotation converge,

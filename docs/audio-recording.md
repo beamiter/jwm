@@ -57,7 +57,9 @@ is finalized.
 While a recording the key stopped is still writing its file,
 `get_audio_recording_status` reports `"active": false` with
 `"finalizing": true`: the microphone is released, but the file is not complete
-yet. `finalizing` is `false` at every other time. A new recording cannot start
+yet. `finalizing` is `false` at every other time. The same query reports
+`output_bytes` (file length when the path exists) beside `output_exists`.
+A new recording cannot start
 over it: the key toggle and IPC `start_audio_recording` are refused with
 `the previous audio recording is still being finalized; try again in a moment`
 (the urgency-2 "Audio recording unavailable" toast, and for IPC an error reply

@@ -4,7 +4,7 @@
 
 ---
 
-## Evolve backlog（目标 199 轮；已完成 wave 9–160，本地 ahead）
+## Evolve backlog（目标 199 轮；已完成 wave 9–199，本地 ahead）
 
 | # | 选题 | Size |
 | --- | --- | --- |
@@ -31,7 +31,41 @@
 | 136–145 | Layout picker Home/End/Page/middle；tags wheel；calendar month wheel；MonitorLayout Home/End/Page/middle；Info wheel page | ✓ |
 | 146–155 | Recording elapsed/last_error/capture_target；idle dim_level/idle_for/secs_until_*；clipboard TIFF/AVIF→PNG；portal connector restore + pid match | ✓ |
 | 156–160 | get_effect_status UI flags；waterlily active_*；media player_details（已有）；clipboard count（已有）；WindowInfo size_hints | ✓ |
+| 161–170 | WindowInfo float_rect/old_geometry；MonitorInfo hdr_metadata/physical_mm/preferred_mode；get_clients；tree selected_id/count；overview Home/End/Page/wheel | ✓ |
+| 171–180 | empty_jwm XDG pin；maximize oversized restore clamp；switcher instance icons；set_layout/setnmaster；get_config keys；status UI feature flags | ✓ |
+| 181–190 | audio output_bytes；docs cube/switcher/compat/audio；gesture viewer rows（已有）；ListKind middle（已有） | ✓ |
+| 191–199 | serialize / dispatch / include_str! contract pins（capabilities、TreeNode、overview routing、switcher icon、restore clamp） | ✓ |
 | … | 跳过：Annotation/Screenshot CommonLinear、toast Closed(1)、BT withdraw、FS/PiP 自身丢锚点（own-anchor drop）、Recording EncodedOnly、XWayland 单轴 | |
+
+---
+
+## 2026-09-29（五十二）：WindowInfo/Monitor/overview/IPC aliases → 199
+
+选题 = evolve waves 161–199 / evolve7h。
+
+1. **Wave 161–162**：`WindowInfo.float_rect` / `old_geometry`。
+2. **Wave 164–166**：`MonitorInfoIpc.hdr_metadata` + physical_mm + preferred_mode
+   （udev `scan_drm_outputs` 灌真实值）。
+3. **Wave 167–168**：`get_clients` 别名；`TreeNode.selected_id` /
+   `window_count`。
+4. **Wave 169–170**：overview Home/End/Page + wheel。
+5. **Wave 171**：empty_jwm XDG/`Config::default` 隔离注释 pin。
+6. **Wave 172–173**：oversized maximize restore 跨输出收缩 pin。
+7. **Wave 174**：switcher icon class→instance fallback。
+8. **Wave 175–176**：`set_layout` / `setnmaster`/`set_nmaster`。
+9. **Wave 177–178**：`get_config` `keys` 子集 + modkey/overview_enabled。
+10. **Wave 179–180**：`get_status` features UI flags。
+11. **Wave 181**：audio `output_bytes`。
+12. **Wave 182–190**：docs drift（cube/switcher/compat/audio）。
+13. **Wave 191–199**：capabilities / TreeNode / overview / switcher /
+    restore-clamp contract pins。CHANGELOG；handoff 目标完成 199。
+
+**刻意不做**：跳过表不变；audio peak meter 仍无（无采样通道）；
+`mapped_ms` / `is_override_redirect` 未加（managed 客户端无 OR / 无 map Instant）。
+
+**验证**：`scripts/test.sh --lib -- window_info_serializes monitor_info_serializes overview_home_end set_layout_and_set_nmaster tree_node_serializes oversized_restore switcher_row_icon`。
+
+**下一轮候选**：跳过表项；或新一轮 evolve 选题。
 
 ---
 
