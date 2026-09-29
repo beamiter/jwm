@@ -660,6 +660,7 @@ impl WaylandWinitBackend {
             height,
             scale: 1.0,
             refresh_rate: 60_000,
+            transform: 0,
             hdr_capable: true,
             hdr_metadata: None,
             identity: crate::backend::api::OutputIdentity::connector_only("winit"),
@@ -1399,6 +1400,7 @@ impl WaylandWinitBackend {
                                 height: mode.size.h,
                                 scale: scale_factor as f32,
                                 refresh_rate: 60_000,
+                                transform: 0,
                                 hdr_capable: true,
                                 hdr_metadata: None,
                                 identity: crate::backend::api::OutputIdentity::connector_only(

@@ -5613,6 +5613,7 @@ mod unmanage_minimized_tests {
             height: 1080,
             scale: 1.0,
             refresh_rate: 60_000,
+            transform: 0,
             hdr_capable: false,
             hdr_metadata: None,
             identity: crate::backend::api::OutputIdentity::connector_only("Virtual-2"),

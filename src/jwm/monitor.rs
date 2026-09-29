@@ -1856,6 +1856,7 @@ pub(crate) mod test_support {
             height,
             scale: 1.0,
             refresh_rate: 60_000,
+            transform: 0,
             hdr_capable: false,
             hdr_metadata: None,
             identity: OutputIdentity::connector_only(name),

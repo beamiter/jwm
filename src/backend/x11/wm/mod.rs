@@ -933,6 +933,7 @@ pub fn build_output_info(
         height,
         scale: 1.0,
         refresh_rate,
+        transform: 0,
         hdr_capable,
         hdr_metadata,
         identity,

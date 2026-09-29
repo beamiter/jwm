@@ -2650,6 +2650,9 @@ impl Jwm {
                         })),
                     "selecting_region": self.features.recording.selecting_region,
                     "adjusting_region": self.features.recording.adjusting_region,
+                    "pending_output_path": self.features.recording.pending_output_path.clone(),
+                    "segments": self.features.recording.segments.clone(),
+                    "segment_count": self.features.recording.segment_count(),
                     // What the recording is actually achieving. A recorder that
                     // silently runs at a third of the requested rate, or that is
                     // discarding frames because the encoder cannot keep up,
@@ -2689,6 +2692,7 @@ impl Jwm {
             }
             "get_effect_status" => IpcResponse::ok(Some(serde_json::json!({
                 "overview": self.features.overview.active,
+                "expose": self.features.expose_active,
                 "audio_recording": self.features.audio_recording.active,
                 "magnifier": self.features.magnifier.enabled,
                 "magnifier_zoom": self.features.magnifier.zoom_level,
@@ -3679,6 +3683,9 @@ impl Jwm {
             refresh_mhz,
             hdr_capable: self.output_hdr_capable_for_monitor(backend, mk),
             gap: m.layout.gap,
+            m_fact: m.layout.m_fact,
+            n_master: m.layout.n_master,
+            transform: self.output_transform_for_monitor(backend, mk),
         }
     }
 
@@ -4221,6 +4228,7 @@ mod tests {
             height: 2160,
             scale: 1.0,
             refresh_rate: 60_000,
+            transform: 0,
             hdr_capable: hdr_metadata.is_some(),
             hdr_metadata,
             identity: OutputIdentity::connector_only("HDMI-A-1"),
@@ -4576,6 +4584,9 @@ mod tests {
 
         let monitors = jwm.query_monitors(&backend);
         assert_eq!(monitors[0].gap, 14);
+        assert_eq!(monitors[0].n_master, 3);
+        assert!((monitors[0].m_fact as f64 - 0.42).abs() < 1e-6);
+        assert_eq!(monitors[0].transform, 0);
         let workspaces = jwm.query_workspaces(&backend);
         let focused = workspaces
             .iter()

@@ -4,7 +4,7 @@
 
 ---
 
-## Evolve backlog（目标 199 轮；已完成 wave 9–105，本地 ahead）
+## Evolve backlog（目标 199 轮；已完成 wave 9–112，本地 ahead）
 
 | # | 选题 | Size |
 | --- | --- | --- |
@@ -22,7 +22,30 @@
 | 92–95 | never_focus；tags/expose Page；waterlily requested_case/palette | ✓ |
 | 96–100 | skip_taskbar/pager；no_decorations；demands_attention；MonitorInfoIpc.hdr_capable | ✓ |
 | 101–105 | Workspace/Monitor gap；get_layout / get_gaps / get_nmaster | ✓ |
+| 106–112 | setgaps IPC；Monitor transform/m_fact/n_master；recording segments；effect expose | ✓ |
 | … | 跳过：Annotation/Screenshot CommonLinear、toast Closed(1)、BT withdraw、FS/PiP 自身丢锚点（own-anchor drop）、Recording EncodedOnly、XWayland 单轴 | |
+
+---
+
+## 2026-09-29（四十四）：setgaps IPC + transform + recording/effect polish
+
+选题 = evolve waves 106–112 / evolve7h。
+
+1. **Wave 106**：IPC `setgaps`（与 keybinding / `setmfact` 对称）。
+2. **Wave 107–109**：`OutputInfo.transform` + `MonitorInfoIpc.transform`；
+   wayland-udev `KmsOutputGeometry` writeback；其它后端默认 `0`。
+3. **Wave 110**：`MonitorInfoIpc.m_fact` / `n_master`（live）。
+4. **Wave 111**：`get_recording_status` 增 `segments` / `segment_count` /
+   `pending_output_path`。
+5. **Wave 112**：`get_effect_status.expose`。
+   Docs + CHANGELOG + serialize / dispatch pins。
+
+**刻意不做**：跳过表不变；X11 RandR rotation→wl 映射仍默认 `0`。
+
+**验证**：`scripts/test.sh --lib -- monitor_info_serializes dispatch_known_commands focused_layout_queries output_info_equivalent`。
+
+**下一轮候选**：见跳过表；keybinding viewer modkey/chords；session
+client_fact；tab bar / system_ui IPC；RandR transform 映射。
 
 ---
 

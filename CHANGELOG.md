@@ -7,6 +7,15 @@ monorepo use independent Semantic Versions.
 
 ### Added
 
+- IPC `setgaps` (parity with the keybinding / `incnmaster` / `setmfact`).
+
+- `get_monitors` / `get_tree` report live `m_fact`, `n_master`, and
+  `transform` (`wl_output` 0..=7; live on wayland-udev, else `0`). See
+  [docs/monitor-lock.md](docs/monitor-lock.md).
+
+- `get_recording_status` reports `segments`, `segment_count`, and
+  `pending_output_path`. `get_effect_status` reports `expose`.
+
 - `get_workspaces` / `get_monitors` / `get_tree` report tiling `gap`
   (pixels). Focused-monitor queries `get_layout` (layout + `m_fact` +
   `n_master` + `gap`), `get_gaps`, and `get_nmaster` return the selected

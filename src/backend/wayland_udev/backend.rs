@@ -3920,6 +3920,8 @@ struct KmsOutputGeometry {
     /// Exact mode refresh in mHz.
     refresh_mhz: i32,
     scale: f64,
+    /// `wl_output` transform (`0..=7`).
+    transform: i32,
 }
 
 impl KmsOutputGeometry {
@@ -3934,7 +3936,21 @@ impl KmsOutputGeometry {
             height: mode.size.h,
             refresh_mhz: mode.refresh,
             scale: output.current_scale().fractional_scale(),
+            transform: smithay_output_transform_to_wl(output.current_transform()),
         })
+    }
+}
+
+fn smithay_output_transform_to_wl(transform: smithay::utils::Transform) -> i32 {
+    match transform {
+        smithay::utils::Transform::Normal => 0,
+        smithay::utils::Transform::_90 => 1,
+        smithay::utils::Transform::_180 => 2,
+        smithay::utils::Transform::_270 => 3,
+        smithay::utils::Transform::Flipped => 4,
+        smithay::utils::Transform::Flipped90 => 5,
+        smithay::utils::Transform::Flipped180 => 6,
+        smithay::utils::Transform::Flipped270 => 7,
     }
 }
 
@@ -3963,6 +3979,7 @@ fn write_back_kms_output_geometry(
             info.width = head.width;
             info.height = head.height;
             info.scale = head.scale as f32;
+            info.transform = head.transform;
             // The DRM scan reports whole hertz; rounding the exact mHz the
             // same way keeps an untouched mode from reading as a change.
             if head.refresh_mhz > 0 {
@@ -8087,6 +8104,7 @@ mod udev_backend_selection_tests {
             height: 1080,
             scale: 1.0,
             refresh_rate: 60_000,
+            transform: 0,
             hdr_capable: false,
             hdr_metadata: None,
             identity: crate::backend::api::OutputIdentity::connector_only(name),
@@ -8134,6 +8152,7 @@ mod udev_backend_selection_tests {
             height: 1080,
             refresh_mhz,
             scale,
+            transform: 0,
         }
     }
 
@@ -8810,6 +8829,7 @@ fn output_info_equivalent(a: &OutputInfo, b: &OutputInfo) -> bool {
         && a.height == b.height
         && a.scale.to_bits() == b.scale.to_bits()
         && a.refresh_rate == b.refresh_rate
+        && a.transform == b.transform
         && a.hdr_capable == b.hdr_capable
         && output_identity_equivalent(&a.identity, &b.identity)
         && hdr_metadata_equivalent(a.hdr_metadata.as_ref(), b.hdr_metadata.as_ref())
@@ -8936,6 +8956,7 @@ fn scan_drm_outputs(dev_id: u64, path: &Path) -> Result<Vec<(u64, OutputInfo)>, 
                 height,
                 scale: 1.0,
                 refresh_rate,
+                transform: 0,
                 hdr_capable: hdr_metadata.is_some(),
                 hdr_metadata,
                 identity,

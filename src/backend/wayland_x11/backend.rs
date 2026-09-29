@@ -667,6 +667,7 @@ impl WaylandX11Backend {
             height,
             scale: 1.0,
             refresh_rate: 60_000,
+            transform: 0,
             hdr_capable: true,
             hdr_metadata: None,
             identity: crate::backend::api::OutputIdentity::connector_only("x11"),
@@ -1552,6 +1553,7 @@ Fallback: run the winit backend instead: `JWM_BACKEND=wayland-winit` (same binar
                                 height: mode.size.h,
                                 scale: 1.0,
                                 refresh_rate: 60_000,
+                                transform: 0,
                                 hdr_capable: true,
                                 hdr_metadata: None,
                                 identity: crate::backend::api::OutputIdentity::connector_only(

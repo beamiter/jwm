@@ -215,6 +215,7 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "scrolling_toggle_attach_mode",
         "session_menu",
         "setcfact",
+        "setgaps",
         "setlayout",
         "setmfact",
         "snap_window",
@@ -638,6 +639,12 @@ pub struct MonitorInfoIpc {
     pub hdr_capable: bool,
     /// Current tiling gap in pixels on this monitor (`MonitorLayout.gap`).
     pub gap: i32,
+    /// Live master area factor (`MonitorLayout.m_fact`).
+    pub m_fact: f32,
+    /// Live master-client count (`MonitorLayout.n_master`).
+    pub n_master: u32,
+    /// `wl_output` transform (`OutputInfo.transform`, `0..=7`; `0` = normal).
+    pub transform: i32,
 }
 
 #[derive(Debug, Serialize)]
@@ -712,6 +719,7 @@ pub fn dispatch_command(name: &str, args: &Value) -> Result<(WMFuncType, WMArgEn
 
         // --- Layout ---
         "setmfact" => Ok((Jwm::setmfact, parse_float_arg(args, 0.0)?)),
+        "setgaps" => Ok((Jwm::setgaps, parse_int_arg(args, 1)?)),
         "setcfact" => Ok((Jwm::setcfact, parse_float_arg(args, 0.0)?)),
         "incnmaster" => Ok((Jwm::incnmaster, parse_int_arg(args, 1)?)),
         "scrolling_toggle_attach_mode" => {
@@ -1379,6 +1387,9 @@ mod tests {
             refresh_mhz: 60_000,
             hdr_capable: true,
             gap: 8,
+            m_fact: 0.55,
+            n_master: 1,
+            transform: 1,
         })
         .expect("serialize");
         assert_eq!(with_connector["connector"], "DP-1");
@@ -1392,6 +1403,9 @@ mod tests {
         assert_eq!(with_connector["refresh_mhz"], 60_000);
         assert_eq!(with_connector["hdr_capable"], true);
         assert_eq!(with_connector["gap"], 8);
+        assert!((with_connector["m_fact"].as_f64().unwrap() - 0.55).abs() < 1e-6);
+        assert_eq!(with_connector["n_master"], 1);
+        assert_eq!(with_connector["transform"], 1);
 
         let without = serde_json::to_value(MonitorInfoIpc {
             num: 1,
@@ -1413,6 +1427,9 @@ mod tests {
             refresh_mhz: 0,
             hdr_capable: false,
             gap: 0,
+            m_fact: 0.55,
+            n_master: 1,
+            transform: 0,
         })
         .expect("serialize");
         assert!(without.get("connector").is_none());
@@ -1426,6 +1443,7 @@ mod tests {
         assert_eq!(without["refresh_mhz"], 0);
         assert_eq!(without["hdr_capable"], false);
         assert_eq!(without["gap"], 0);
+        assert_eq!(without["transform"], 0);
     }
 
     #[test]
@@ -1500,6 +1518,13 @@ mod tests {
         let args = serde_json::json!(0.05);
         let (_, arg) = dispatch_command("setmfact", &args).unwrap();
         assert_eq!(arg, WMArgEnum::Float(0.05));
+
+        // setgaps
+        let args = serde_json::json!({"value": 2});
+        let (_, arg) = dispatch_command("setgaps", &args).unwrap();
+        assert_eq!(arg, WMArgEnum::Int(2));
+        let (_, arg) = dispatch_command("setgaps", &serde_json::Value::Null).unwrap();
+        assert_eq!(arg, WMArgEnum::Int(1));
 
         // killclient (no args)
         let args = serde_json::json!(null);

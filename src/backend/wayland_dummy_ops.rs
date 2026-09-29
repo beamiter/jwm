@@ -268,6 +268,7 @@ impl OutputOps for DummyOutputOps {
             height: 1080,
             scale: 1.0,
             refresh_rate: 60000,
+            transform: 0,
             hdr_capable: true,
             hdr_metadata: None,
             identity: crate::backend::api::OutputIdentity::connector_only("Virtual-1"),

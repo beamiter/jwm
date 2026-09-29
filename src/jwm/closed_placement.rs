@@ -1033,6 +1033,18 @@ impl Jwm {
             .is_some_and(|output| output.hdr_capable)
     }
 
+    /// `wl_output` transform (`0..=7`) for the live output backing `mon_key`.
+    /// Defaults to `0` (normal) when the output map has no entry.
+    pub(crate) fn output_transform_for_monitor(
+        &self,
+        backend: &dyn Backend,
+        mon_key: crate::core::models::MonitorKey,
+    ) -> i32 {
+        self.live_output_info(backend, mon_key)
+            .map(|output| output.transform)
+            .unwrap_or(0)
+    }
+
     fn live_output_info(
         &self,
         backend: &dyn Backend,

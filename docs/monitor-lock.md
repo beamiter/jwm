@@ -157,11 +157,14 @@ work area as `wx` / `wy` / `ww` / `wh` (status bar, strut docks, and the
 window tab bar excluded) beside the full-output `x` / `y` / `w` / `h`,
 plus `scale` (fractional) and `refresh_mhz` (mode refresh in millihertz),
 and `hdr_capable` when the live output advertised HDR. Each monitor row
-also reports the live tiling `gap` (pixels). `get_workspaces` rows carry
-the same per-tag `gap` beside `m_fact` / `n_master`. Focused-monitor
-convenience queries `get_layout` (layout symbol + `m_fact` + `n_master` +
-`gap`), `get_gaps`, and `get_nmaster` return the selected monitor's live
-values (optional `connector` when known).
+also reports the live tiling `gap` (pixels), `m_fact`, `n_master`, and
+`transform` (`wl_output` 0..=7 from the live output; `0` when unknown).
+`get_workspaces` rows carry the same per-tag `gap` beside `m_fact` /
+`n_master`. Focused-monitor convenience queries `get_layout` (layout
+symbol + `m_fact` + `n_master` + `gap`), `get_gaps`, and `get_nmaster`
+return the selected monitor's live values (optional `connector` when
+known). IPC `setgaps` adjusts the focused monitor's gap like the
+keybinding.
 `get_workspaces` / `get_windows` /
 `get_tree` / `window/state` expose the same optional `connector` and
 `monitor_name` on each workspace and window row (omitted when unknown).
