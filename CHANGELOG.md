@@ -7,6 +7,10 @@ monorepo use independent Semantic Versions.
 
 ### Added
 
+- Keybinding viewer synthetic tag chords follow config `modkey` (not
+  hardcoded `Mod1`); configured leader-chord bindings appear as
+  `{leader} then {key}` rows. See README `Alt+Shift+/`.
+
 - IPC `setgaps` (parity with the keybinding / `incnmaster` / `setmfact`).
 
 - `get_monitors` / `get_tree` report live `m_fact`, `n_master`, and

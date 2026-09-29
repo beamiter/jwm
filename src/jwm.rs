@@ -2412,6 +2412,8 @@ impl Jwm {
             cfg.key_configs(),
             cfg.tags_length(),
             &cfg.behavior().gesture_swipe,
+            cfg.modkey(),
+            cfg.chord_config(),
         );
 
         self.prepare_system_ui(
@@ -2793,13 +2795,18 @@ fn keybinding_action_desc(function: &str, argument: &crate::config::ArgumentConf
 }
 
 /// Lines shown by `show_keybindings`: configured keys, the synthetic tag
-/// chords, then any `behavior.gesture_swipe` rows (`3f left` style). An empty
-/// swipe table adds nothing so the viewer stays byte-identical.
+/// chords (keyed by config `modkey`), optional leader-chord bindings, then
+/// any `behavior.gesture_swipe` rows (`3f left` style). An empty swipe /
+/// chord table adds nothing so the viewer stays byte-identical when those
+/// are unset.
 fn keybinding_viewer_lines(
     keys: &[crate::config::KeyConfig],
     tags_len: usize,
     gestures: &[crate::config::GestureSwipeConfig],
+    modkey: &str,
+    chord: &crate::config::ChordConfig,
 ) -> Vec<String> {
+    let modkey = if modkey.is_empty() { "Mod1" } else { modkey };
     let mut lines: Vec<String> = Vec::new();
     for kc in keys {
         let mods = kc.modifier.join("+");
@@ -2812,20 +2819,37 @@ fn keybinding_viewer_lines(
         lines.push(format!("{:<28} {}", shortcut, desc));
     }
 
-    lines.push(format!("{:<28} view tag 1-{}", "Mod1+[1-9]", tags_len));
+    lines.push(format!("{:<28} view tag 1-{}", format!("{modkey}+[1-9]"), tags_len));
     lines.push(format!(
         "{:<28} move to tag 1-{}",
-        "Mod1+Shift+[1-9]", tags_len
+        format!("{modkey}+Shift+[1-9]"),
+        tags_len
     ));
     lines.push(format!(
         "{:<28} toggle view tag 1-{}",
-        "Mod1+Ctrl+[1-9]", tags_len
+        format!("{modkey}+Ctrl+[1-9]"),
+        tags_len
     ));
     lines.push(format!(
         "{:<28} toggle tag 1-{}",
-        "Mod1+Ctrl+Shift+[1-9]", tags_len
+        format!("{modkey}+Ctrl+Shift+[1-9]"),
+        tags_len
     ));
-    lines.push(format!("{:<28} {}", "Mod1+0", "view all tags"));
+    lines.push(format!("{:<28} {}", format!("{modkey}+0"), "view all tags"));
+
+    if !chord.leader_key.is_empty() {
+        let leader_mods = chord.leader_modifier.join("+");
+        let leader = if leader_mods.is_empty() {
+            chord.leader_key.clone()
+        } else {
+            format!("{}+{}", leader_mods, chord.leader_key)
+        };
+        for binding in &chord.bindings {
+            let shortcut = format!("{leader} then {}", binding.key);
+            let desc = keybinding_action_desc(&binding.function, &binding.argument);
+            lines.push(format!("{:<28} {}", shortcut, desc));
+        }
+    }
 
     for g in gestures {
         let shortcut = format!("{}f {}", g.fingers, g.direction);
@@ -2838,7 +2862,7 @@ fn keybinding_viewer_lines(
 #[cfg(test)]
 mod keybinding_viewer_tests {
     use super::{keybinding_action_desc, keybinding_viewer_lines};
-    use crate::config::{ArgumentConfig, GestureSwipeConfig, KeyConfig};
+    use crate::config::{ArgumentConfig, ChordConfig, GestureSwipeConfig, KeyConfig};
 
     fn sample_key() -> KeyConfig {
         KeyConfig {
@@ -2849,15 +2873,70 @@ mod keybinding_viewer_tests {
         }
     }
 
+    fn viewer_lines(
+        keys: &[KeyConfig],
+        tags_len: usize,
+        gestures: &[GestureSwipeConfig],
+    ) -> Vec<String> {
+        keybinding_viewer_lines(keys, tags_len, gestures, "Mod1", &ChordConfig::default())
+    }
+
     #[test]
     fn empty_gesture_swipe_leaves_viewer_lines_unchanged() {
         let keys = [sample_key()];
-        let lines = keybinding_viewer_lines(&keys, 9, &[]);
+        let lines = viewer_lines(&keys, 9, &[]);
         assert_eq!(lines.len(), keys.len() + 5, "{lines:?}");
         let last = format!("{:<28} {}", "Mod1+0", "view all tags");
         assert_eq!(lines.last().map(String::as_str), Some(last.as_str()));
         // Rebuilding with another empty slice is byte-identical.
-        assert_eq!(lines.join("\n"), keybinding_viewer_lines(&keys, 9, &[]).join("\n"));
+        assert_eq!(
+            lines.join("\n"),
+            keybinding_viewer_lines(&keys, 9, &[], "Mod1", &ChordConfig::default()).join("\n")
+        );
+    }
+
+    #[test]
+    fn synthetic_tag_lines_follow_configured_modkey() {
+        let keys = [sample_key()];
+        let lines = keybinding_viewer_lines(&keys, 9, &[], "Mod4", &ChordConfig::default());
+        assert!(
+            lines.iter().any(|line| line.starts_with("Mod4+[1-9]")),
+            "{lines:?}"
+        );
+        assert!(
+            lines.iter().any(|line| line.starts_with("Mod4+0 ")),
+            "{lines:?}"
+        );
+        assert!(
+            lines.iter().all(|line| !line.starts_with("Mod1+[1-9]")),
+            "{lines:?}"
+        );
+    }
+
+    #[test]
+    fn chord_bindings_appear_after_tag_lines() {
+        let keys = [sample_key()];
+        let chord = ChordConfig {
+            leader_modifier: vec!["Mod4".into()],
+            leader_key: "space".into(),
+            timeout_ms: 1500,
+            bindings: vec![KeyConfig {
+                modifier: vec![],
+                key: "b".into(),
+                function: "spawn".into(),
+                argument: ArgumentConfig::StringVec(vec!["browser".into()]),
+            }],
+        };
+        let lines = keybinding_viewer_lines(&keys, 9, &[], "Mod1", &chord);
+        let expected = format!(
+            "{:<28} {}",
+            "Mod4+space then b",
+            keybinding_action_desc("spawn", &ArgumentConfig::StringVec(vec!["browser".into()]))
+        );
+        assert!(
+            lines.iter().any(|line| line == &expected),
+            "missing {expected:?} in {lines:?}"
+        );
     }
 
     #[test]
@@ -2877,7 +2956,7 @@ mod keybinding_viewer_tests {
                 argument: ArgumentConfig::Int(1),
             },
         ];
-        let lines = keybinding_viewer_lines(&keys, 9, &gestures);
+        let lines = viewer_lines(&keys, 9, &gestures);
         let expected_raw = format!(
             "{:<28} {}",
             "3f left",
@@ -2904,7 +2983,7 @@ mod keybinding_viewer_tests {
             lines.iter().any(|line| line == &expected_special),
             "missing special-cased gesture row {expected_special:?} in {lines:?}"
         );
-        let keys_only = keybinding_viewer_lines(&keys, 9, &[]);
+        let keys_only = viewer_lines(&keys, 9, &[]);
         assert_eq!(&lines[..keys_only.len()], keys_only.as_slice());
         assert_eq!(lines.len(), keys_only.len() + gestures.len());
     }

@@ -4,7 +4,7 @@
 
 ---
 
-## Evolve backlog（目标 199 轮；已完成 wave 9–112，本地 ahead）
+## Evolve backlog（目标 199 轮；已完成 wave 9–114，本地 ahead）
 
 | # | 选题 | Size |
 | --- | --- | --- |
@@ -23,7 +23,25 @@
 | 96–100 | skip_taskbar/pager；no_decorations；demands_attention；MonitorInfoIpc.hdr_capable | ✓ |
 | 101–105 | Workspace/Monitor gap；get_layout / get_gaps / get_nmaster | ✓ |
 | 106–112 | setgaps IPC；Monitor transform/m_fact/n_master；recording segments；effect expose | ✓ |
+| 113–114 | keybinding viewer modkey + chord rows | ✓ |
 | … | 跳过：Annotation/Screenshot CommonLinear、toast Closed(1)、BT withdraw、FS/PiP 自身丢锚点（own-anchor drop）、Recording EncodedOnly、XWayland 单轴 | |
+
+---
+
+## 2026-09-29（四十五）：keybinding viewer modkey + chords
+
+选题 = evolve waves 113–114 / evolve7h。
+
+1. **Wave 113**：synthetic tag 行用 config `modkey`（不再写死 Mod1）。
+2. **Wave 114**：leader-chord bindings 以 `{leader} then {key}` 行展示。
+   CHANGELOG；pins。
+
+**刻意不做**：跳过表不变；函数名美化仍 cosmetic。
+
+**验证**：`scripts/test.sh --lib -- empty_gesture_swipe synthetic_tag_lines chord_bindings gesture_swipe_rows`。
+
+**下一轮候选**：session client_fact v10；tab_bar / system_ui IPC；
+RandR transform 映射；recording capture_target；get_expose。
 
 ---
 

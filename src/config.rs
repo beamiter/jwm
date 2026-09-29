@@ -2887,6 +2887,17 @@ impl Config {
         &self.inner.keybindings.keys
     }
 
+    /// Configured primary modifier name (`Mod1`, `Mod4`, …) used for
+    /// synthetic tag chords in the keybinding viewer and the tag table.
+    pub fn modkey(&self) -> &str {
+        &self.inner.keybindings.modkey
+    }
+
+    /// Optional two-step chord table (`leader` then second key).
+    pub fn chord_config(&self) -> &ChordConfig {
+        &self.inner.keybindings.chord
+    }
+
     pub fn border_px(&self) -> u32 {
         self.inner.appearance.border_px
     }
