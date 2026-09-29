@@ -1153,6 +1153,8 @@ impl<C: CompositorConnection> Compositor<C> {
                 .map(|value| value != "0" && !value.eq_ignore_ascii_case("false"))
                 .unwrap_or(false),
             waterlily_active: false,
+            waterlily_requested_case: None,
+            waterlily_requested_palette: None,
             waterlily_layer_dirty: false,
             waterlily_opacity: std::env::var("JWM_WATERLILY_OPACITY")
                 .ok()

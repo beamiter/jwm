@@ -176,6 +176,28 @@ impl TagsOverviewState {
         self.selected = next;
         true
     }
+
+    /// Page Up / Page Down: jump by one grid row (`cols` cells), clamping at
+    /// the ends — the twin of the switcher's page step against a wrapping
+    /// arrow walk.
+    pub fn page_selection(&mut self, direction: isize) -> bool {
+        if self.cells.is_empty() || direction == 0 {
+            return false;
+        }
+        let step = self.cols.max(1) as usize;
+        let next = if direction < 0 {
+            self.selected.saturating_sub(step)
+        } else {
+            self.selected
+                .saturating_add(step)
+                .min(self.cells.len() - 1)
+        };
+        if self.selected == next {
+            return false;
+        }
+        self.selected = next;
+        true
+    }
 }
 
 /// Columns of the overview grid: the expose grid's aspect-driven shape over
@@ -457,6 +479,16 @@ impl Jwm {
             return;
         };
         if overview.jump_selection_edge(to_end) {
+            self.sync_system_ui(backend);
+        }
+    }
+
+    /// Page Up / Page Down jump by one grid row without committing.
+    pub(crate) fn page_tags_overview(&mut self, backend: &mut dyn Backend, direction: isize) {
+        let Some(overview) = self.features.system_ui.tags_overview_mut() else {
+            return;
+        };
+        if overview.page_selection(direction) {
             self.sync_system_ui(backend);
         }
     }
@@ -1011,6 +1043,21 @@ mod tests {
         assert!(state.jump_selection_edge(false));
         assert_eq!(state.selected, 0);
         assert!(!state.jump_selection_edge(false));
+    }
+
+    #[test]
+    fn page_selection_steps_by_one_grid_row() {
+        let mut state = TagsOverviewState::new(&[], 0b001, WORK, 9);
+        let cols = state.cols as usize;
+        assert!(state.page_selection(1));
+        assert_eq!(state.selected, cols);
+        assert!(state.page_selection(1));
+        assert_eq!(state.selected, (cols * 2).min(8));
+        // Already near the end: clamp, then a further page is a no-op.
+        state.selected = 8;
+        assert!(!state.page_selection(1));
+        assert!(state.page_selection(-1));
+        assert_eq!(state.selected, 8usize.saturating_sub(cols));
     }
 
     #[test]

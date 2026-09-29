@@ -26,6 +26,7 @@ like the other shell cards.
 | --- | --- |
 | `Left` / `Right` / `Up` / `Down` | move the highlight through the grid |
 | `Home` / `End` | jump to the first / last cell (no commit) |
+| `Page Up` / `Page Down` | jump by one grid row (no commit) |
 | `Return` / keypad `Enter` | jump to the highlighted tag and close |
 | `1`–`9` | jump straight to that tag and close |
 | `Esc` | close without switching |

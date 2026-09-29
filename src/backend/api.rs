@@ -242,6 +242,13 @@ pub struct WaterlilyStatus {
     pub frame_depth: u32,
     /// Sequence number of the last uploaded frame, or zero before the first.
     pub frame_sequence: u64,
+    /// Last `waterlily_case` / `case …` request the compositor delivered to
+    /// the worker (`next` kept as-is — the worker resolves it). `None` before
+    /// any successful delivery.
+    pub requested_case: Option<String>,
+    /// Last `waterlily_palette` / `palette …` request delivered (`next` /
+    /// `auto` kept as-is). `None` before any successful delivery.
+    pub requested_palette: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -386,6 +386,10 @@ Case names are restricted to short lowercase identifiers on the compositor
 side, and the worker validates them against its registry, so a compositor
 with a stale case list logs a warning instead of wedging the worker. If no
 worker is connected the request is dropped with a log message.
+`get_waterlily_status` reports the last successfully delivered
+`requested_case` / `requested_palette` (verbatim, so `next` / `auto` stay as
+requested — the worker resolves them) beside the existing enabled / frame
+fields.
 
 The following environment variables are read when the integration starts:
 

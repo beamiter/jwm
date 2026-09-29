@@ -136,6 +136,7 @@ fn client_window_info(
         is_dock: client.state.is_dock,
         is_desktop: client.state.is_desktop,
         is_drag_floating: client.state.is_drag_floating,
+        never_focus: client.state.never_focus,
         has_strut,
         client_fact: client.state.client_fact,
         border_w: client.geometry.border_w,
@@ -2863,6 +2864,8 @@ impl Jwm {
                     "frame_height": status.frame_height,
                     "frame_depth": status.frame_depth,
                     "frame_sequence": status.frame_sequence,
+                    "requested_case": status.requested_case,
+                    "requested_palette": status.requested_palette,
                 }))),
                 None => IpcResponse::err("compositor not active".to_string()),
             },
@@ -4207,6 +4210,7 @@ mod tests {
         assert!(!info.is_dock);
         assert!(!info.is_desktop);
         assert!(!info.is_drag_floating);
+        assert!(!info.never_focus);
         assert!(!info.has_strut);
         assert_eq!(info.client_fact, 0.0);
         assert_eq!(info.border_w, 0);
@@ -4241,6 +4245,7 @@ mod tests {
         assert!(restored.is_dock);
         assert!(restored.is_desktop);
         assert!(!restored.is_drag_floating);
+        assert!(!restored.never_focus);
         assert!(restored.has_strut);
         assert_eq!(restored.client_fact, 1.25);
         assert_eq!(restored.border_w, 4);

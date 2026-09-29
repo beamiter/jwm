@@ -164,4 +164,4 @@ client on that tag demands attention), matching the status-bar urgent mask.
 `get_windows` / `get_tree` / `window/state` also report `is_swallowed` and
 `is_on_view` (tag intersection with the monitor's active tags, or sticky),
 plus chrome / size-hint fields (`is_fixed`, `is_dock`, `is_desktop`,
-`is_drag_floating`, `has_strut`, `client_fact`).
+`is_drag_floating`, `never_focus`, `has_strut`, `client_fact`).

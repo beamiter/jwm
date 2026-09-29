@@ -705,6 +705,10 @@ where
     waterlily_texture: Option<WaterlilyTexture>,
     waterlily_effect_enabled: bool,
     waterlily_active: bool,
+    /// Last delivered `case …` / `palette …` worker requests (verbatim,
+    /// including `next` / `auto`). Reported by `get_waterlily_status`.
+    waterlily_requested_case: Option<String>,
+    waterlily_requested_palette: Option<String>,
     /// A WaterLily publication/visibility change that must reach the front
     /// buffer before fullscreen bypass paths may resume.
     waterlily_layer_dirty: bool,

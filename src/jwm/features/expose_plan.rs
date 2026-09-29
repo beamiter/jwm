@@ -116,6 +116,43 @@ pub fn edge_window(candidates: &[ExposeCandidate], to_end: bool) -> Option<Windo
     }
 }
 
+/// Page Up / Page Down: move the highlight by one grid row. `cols` is the
+/// expose column count; the selection clamps at both ends. Returns the
+/// window to select, or `None` when the grid is empty or the page would
+/// not move the highlight.
+#[must_use]
+pub fn page_window(
+    candidates: &[ExposeCandidate],
+    selected: Option<WindowId>,
+    cols: u32,
+    direction: isize,
+) -> Option<WindowId> {
+    if direction == 0 {
+        return None;
+    }
+    let windows: Vec<WindowId> = candidates
+        .iter()
+        .filter(|candidate| eligible(candidate))
+        .map(|&(win, ..)| win)
+        .collect();
+    if windows.is_empty() {
+        return None;
+    }
+    let cols = cols.max(1) as usize;
+    let current = selected
+        .and_then(|win| windows.iter().position(|&w| w == win))
+        .unwrap_or(0);
+    let next = if direction < 0 {
+        current.saturating_sub(cols)
+    } else {
+        current.saturating_add(cols).min(windows.len() - 1)
+    };
+    if next == current {
+        return None;
+    }
+    Some(windows[next])
+}
+
 /// 决定一次 expose 切换要做什么。
 ///
 /// 已激活时总是退出且不聚焦任何窗口；未激活时过滤掉尺寸非正的候选，
@@ -567,6 +604,21 @@ mod tests {
         let only_dead = vec![(win(2), 0, 0, 0, 50, "dead".to_string())];
         assert_eq!(edge_window(&only_dead, false), None);
         assert_eq!(edge_window(&only_dead, true), None);
+    }
+
+    #[test]
+    fn page_window_steps_by_column_count() {
+        let grid: Vec<ExposeCandidate> = (1..=6)
+            .map(|n| (win(n), 0, 0, 100, 100, format!("{n}")))
+            .collect();
+        // 3 columns → page from 1 jumps to 4.
+        assert_eq!(page_window(&grid, Some(win(1)), 3, 1), Some(win(4)));
+        assert_eq!(page_window(&grid, Some(win(4)), 3, 1), Some(win(6)));
+        assert_eq!(page_window(&grid, Some(win(6)), 3, 1), None);
+        assert_eq!(page_window(&grid, Some(win(6)), 3, -1), Some(win(3)));
+        assert_eq!(page_window(&grid, Some(win(3)), 3, -1), Some(win(1)));
+        assert_eq!(page_window(&grid, Some(win(1)), 3, -1), None);
+        assert_eq!(page_window(&[], None, 3, 1), None);
     }
 
     #[test]

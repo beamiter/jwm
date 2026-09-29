@@ -644,16 +644,22 @@ impl<C: CompositorConnection> Compositor<C> {
         if !self.ensure_waterlily_ipc() {
             return false;
         }
-        let Some(ipc) = self.waterlily_ipc.as_ref() else {
-            return false;
+        let delivered = {
+            let Some(ipc) = self.waterlily_ipc.as_ref() else {
+                return false;
+            };
+            if !ipc.connected() {
+                log::info!("compositor: no WaterLily worker connected; case request dropped");
+                return false;
+            }
+            let delivered = ipc.send_command(&format!("case {case}"));
+            if delivered {
+                ipc.request_poll();
+            }
+            delivered
         };
-        if !ipc.connected() {
-            log::info!("compositor: no WaterLily worker connected; case request dropped");
-            return false;
-        }
-        let delivered = ipc.send_command(&format!("case {case}"));
         if delivered {
-            ipc.request_poll();
+            self.waterlily_requested_case = Some(case.to_string());
             log::info!("compositor: requested WaterLily case {case}");
         }
         delivered
@@ -670,16 +676,22 @@ impl<C: CompositorConnection> Compositor<C> {
         if !self.ensure_waterlily_ipc() {
             return false;
         }
-        let Some(ipc) = self.waterlily_ipc.as_ref() else {
-            return false;
+        let delivered = {
+            let Some(ipc) = self.waterlily_ipc.as_ref() else {
+                return false;
+            };
+            if !ipc.connected() {
+                log::info!("compositor: no WaterLily worker connected; palette request dropped");
+                return false;
+            }
+            let delivered = ipc.send_command(&format!("palette {palette}"));
+            if delivered {
+                ipc.request_poll();
+            }
+            delivered
         };
-        if !ipc.connected() {
-            log::info!("compositor: no WaterLily worker connected; palette request dropped");
-            return false;
-        }
-        let delivered = ipc.send_command(&format!("palette {palette}"));
         if delivered {
-            ipc.request_poll();
+            self.waterlily_requested_palette = Some(palette.to_string());
             log::info!("compositor: requested WaterLily palette {palette}");
         }
         delivered
@@ -710,6 +722,8 @@ impl<C: CompositorConnection> Compositor<C> {
             frame_height,
             frame_depth,
             frame_sequence,
+            requested_case: self.waterlily_requested_case.clone(),
+            requested_palette: self.waterlily_requested_palette.clone(),
         }
     }
 

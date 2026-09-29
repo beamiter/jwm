@@ -1409,6 +1409,28 @@ impl Jwm {
         backend.compositor_expose_select(Some(window));
     }
 
+    /// Page Up / Page Down with expose up: jump by one grid row without
+    /// committing. Column count matches the compositor's expose grid.
+    fn page_expose_selection(&mut self, backend: &mut dyn Backend, direction: isize) {
+        let candidates = self.expose_candidates();
+        let selected = backend.compositor_expose_selected();
+        let (sw, sh) = self
+            .state
+            .sel_mon
+            .and_then(|mk| self.state.monitors.get(mk))
+            .map(|m| (m.geometry.m_w as f32, m.geometry.m_h as f32))
+            .unwrap_or((1920.0, 1080.0));
+        let n = candidates
+            .iter()
+            .filter(|c| c.3 > 0 && c.4 > 0)
+            .count();
+        let cols = crate::backend::compositor_common::expose::expose_grid_cols(n, sw, sh);
+        let Some(window) = expose_plan::page_window(&candidates, selected, cols, direction) else {
+            return;
+        };
+        backend.compositor_expose_select(Some(window));
+    }
+
     /// Delete or BackSpace with expose up: close the highlighted thumbnail's
     /// window without leaving the gesture — the highlighted cell, not the
     /// focused window (the two usually differ mid-gesture; the switcher
@@ -2465,6 +2487,14 @@ impl Jwm {
                         self.jump_tags_overview_edge(backend, true);
                         true
                     }
+                    keys::KEY_Page_Up => {
+                        self.page_tags_overview(backend, -1);
+                        true
+                    }
+                    keys::KEY_Page_Down => {
+                        self.page_tags_overview(backend, 1);
+                        true
+                    }
                     // A digit jumps straight to its tag and commits, with or
                     // without modifiers: the panel holds the keyboard grab,
                     // so the global Mod1+N bindings never see the key.
@@ -3035,6 +3065,11 @@ impl Jwm {
             }
             if keysym == keys::KEY_Home || keysym == keys::KEY_End {
                 self.jump_expose_selection_edge(backend, keysym == keys::KEY_End);
+                return Ok(());
+            }
+            if keysym == keys::KEY_Page_Up || keysym == keys::KEY_Page_Down {
+                let direction = if keysym == keys::KEY_Page_Up { -1 } else { 1 };
+                self.page_expose_selection(backend, direction);
                 return Ok(());
             }
             if keysym == keys::KEY_Return || keysym == keys::KEY_KP_Enter {

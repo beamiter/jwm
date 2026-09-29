@@ -4,7 +4,7 @@
 
 ---
 
-## Evolve backlog（目标 100 轮；已完成 wave 9–91，本地 ahead）
+## Evolve backlog（目标 100 轮；已完成 wave 9–95，本地 ahead）
 
 | # | 选题 | Size |
 | --- | --- | --- |
@@ -19,7 +19,31 @@
 | 69–72 | WindowInfo.is_swallowed / is_on_view；MonitorInfoIpc wx/wy/ww/wh；相关 docs | ✓ |
 | 73–79 | swallow→window/state；WindowInfo scratchpad/border_w/layout；switcher Home/End；expose wheel browse；calendar Page year；clipboard WebP/GIF | ✓ |
 | 80–91 | WindowInfo fixed/dock/desktop/drag_float/strut/cfact；MonitorInfo scale/refresh_mhz；switcher Page；tags/expose Home/End；get_magnifier/get_peek | ✓ |
+| 92–95 | never_focus；tags/expose Page；waterlily requested_case/palette | ✓ |
 | … | 跳过：Annotation/Screenshot CommonLinear、toast Closed(1)、BT withdraw、FS/PiP 自身丢锚点（own-anchor drop）、Recording EncodedOnly、XWayland 单轴 | |
+
+---
+
+## 2026-09-29（四十一）：never_focus + tags/expose Page + waterlily request IPC
+
+选题 = evolve waves 92–95 / evolve7h。
+
+1. **Wave 92**：`WindowInfo.never_focus`（`ClientState::never_focus`）。
+2. **Wave 93**：tags overview `Page Up` / `Page Down` → 按一行
+   (`cols`) 跳格；`TagsOverviewState::page_selection` pin。
+3. **Wave 94**：expose `Page Up` / `Page Down` → `page_window`（同
+   `expose_grid_cols`）+ `compositor_expose_select`。
+4. **Wave 95**：`get_waterlily_status` 增 `requested_case` /
+   `requested_palette`（成功投递给 worker 的原文，含 `next`/`auto`）。
+   Docs tags-overview / expose / waterlily / window-placement /
+   monitor-lock / compatibility；CHANGELOG。
+
+**刻意不做**：跳过表不变；`MonitorInfoIpc.transform`（需扩 `OutputInfo`）。
+
+**验证**：`scripts/test.sh --lib -- window_info_serializes window_query_projection page_selection_steps page_window_steps edge_window` + waterlily 族。
+
+**下一轮候选**：见跳过表；`skip_taskbar` / `skip_pager`；monitor transform；
+maximize restore 跨 output。
 
 ---
 

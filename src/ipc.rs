@@ -529,6 +529,8 @@ pub struct WindowInfo {
     /// grid (`ClientState::is_drag_floating`); re-applying a layout pulls
     /// these back under management.
     pub is_drag_floating: bool,
+    /// `WM_HINTS` input flag false / never-focus chrome (`ClientState::never_focus`).
+    pub never_focus: bool,
     /// True when this window contributes an `_NET_WM_STRUT(_PARTIAL)`
     /// reservation that shrinks a monitor's work area.
     pub has_strut: bool,
@@ -1137,6 +1139,7 @@ mod tests {
             is_dock: false,
             is_desktop: false,
             is_drag_floating: false,
+            never_focus: false,
             has_strut: false,
             client_fact: 1.0,
             border_w: 2,
@@ -1163,6 +1166,7 @@ mod tests {
         assert_eq!(value["is_dock"], false);
         assert_eq!(value["is_desktop"], false);
         assert_eq!(value["is_drag_floating"], false);
+        assert_eq!(value["never_focus"], false);
         assert_eq!(value["has_strut"], false);
         assert_eq!(value["client_fact"], 1.0);
         assert_eq!(value["border_w"], 2);
@@ -1200,6 +1204,7 @@ mod tests {
             is_dock: false,
             is_desktop: false,
             is_drag_floating: false,
+            never_focus: false,
             has_strut: false,
             client_fact: 1.0,
             border_w: 0,
@@ -1252,6 +1257,7 @@ mod tests {
             is_dock: false,
             is_desktop: false,
             is_drag_floating: false,
+            never_focus: false,
             has_strut: false,
             client_fact: 1.0,
             border_w: 3,
@@ -1297,6 +1303,7 @@ mod tests {
             is_dock: false,
             is_desktop: false,
             is_drag_floating: false,
+            never_focus: false,
             has_strut: false,
             client_fact: 1.0,
             border_w: 0,
