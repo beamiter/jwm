@@ -721,22 +721,25 @@ impl WMController for Jwm {
                     }
                     SystemUiHitTarget::Panel | SystemUiHitTarget::Unavailable => {}
                 },
-                // List-picker middle-click forget / dismiss. Clipboard and the
-                // notification center are one-shot (the twin of `d` / Delete,
-                // no arm). Wi-Fi / Bluetooth keep the two-press armed confirm
-                // keyboard `d` uses — first press arms, second deletes — and
-                // stay inert while a passphrase or pairing prompt owns the
-                // surface. Hub Volume and Input middle-click mute (the twin of
-                // `m` — Volume also of Enter, ignoring the slider bar so it
-                // never seeks); Network and Bluetooth middle-click toggle the
-                // radio (the twin of Left/Right — BT power-off still arms);
-                // Do Not Disturb / Caffeine / Night Light / Power Profile
-                // middle-click toggle through Enter (OSD / cycle path); Media
-                // middle-click pins the next player through `p`; Shell routes,
-                // Audio Output, Session, and Lock* middle-click activate through
-                // Enter; Brightness and read-only rows stay inert. Blank is
-                // inert on every picker; the notification action strip stays
-                // left-only (middle-click there is a miss).
+                // List-picker middle-click forget / dismiss / apply. Clipboard
+                // and the notification center are one-shot (the twin of `d` /
+                // Delete, no arm). Wi-Fi / Bluetooth keep the two-press armed
+                // confirm keyboard `d` uses — first press arms, second deletes
+                // — and stay inert while a passphrase or pairing prompt owns
+                // the surface. Theme / Wallpaper / Audio / Players / Session
+                // middle-click apply through the same Enter path as left-click
+                // (session keeps its two-press confirm). Hub Volume and Input
+                // middle-click mute (the twin of `m` — Volume also of Enter,
+                // ignoring the slider bar so it never seeks); Network and
+                // Bluetooth middle-click toggle the radio (the twin of
+                // Left/Right — BT power-off still arms); Do Not Disturb /
+                // Caffeine / Night Light / Power Profile middle-click toggle
+                // through Enter (OSD / cycle path); Media middle-click pins
+                // the next player through `p`; Shell routes, Audio Output,
+                // Session, and Lock* middle-click activate through Enter;
+                // Brightness and read-only rows stay inert. Blank is inert on
+                // every picker; the notification action strip stays left-only
+                // (middle-click there is a miss).
                 2 if self.features.system_ui.is_clipboard_picker() => {
                     if let SystemUiHitTarget::Item(row, _) = hit
                         && self.features.system_ui.select_visible_row(row).is_some()
@@ -768,6 +771,48 @@ impl WMController for Jwm {
                             self.forget_selected_bluetooth();
                         }
                         self.sync_system_ui(backend);
+                    }
+                }
+                2 if self.features.system_ui.is_theme_picker() => {
+                    if let SystemUiHitTarget::Item(row, _) = hit
+                        && self.features.system_ui.select_visible_row(row).is_some()
+                    {
+                        self.apply_selected_theme(backend);
+                    }
+                }
+                2 if self.features.system_ui.is_wallpaper_picker() => {
+                    match hit {
+                        SystemUiHitTarget::Item(row, _)
+                            if self.features.system_ui.select_visible_row(row).is_some() =>
+                        {
+                            self.apply_selected_wallpaper(backend);
+                        }
+                        SystemUiHitTarget::Preview => {
+                            self.apply_selected_wallpaper(backend);
+                        }
+                        _ => {}
+                    }
+                }
+                2 if self.features.system_ui.audio_picker_direction().is_some() => {
+                    if let SystemUiHitTarget::Item(row, _) = hit
+                        && self.features.system_ui.select_visible_row(row).is_some()
+                    {
+                        self.use_selected_audio_device(backend);
+                    }
+                }
+                2 if self.features.system_ui.is_media_players_picker() => {
+                    if let SystemUiHitTarget::Item(row, _) = hit
+                        && self.features.system_ui.select_visible_row(row).is_some()
+                    {
+                        self.apply_selected_media_player(backend);
+                    }
+                }
+                2 if self.features.system_ui.is_session_menu() => {
+                    if let SystemUiHitTarget::Item(row, _) = hit
+                        && self.features.system_ui.select_visible_row(row).is_some()
+                    {
+                        use crate::backend::common_define::keys;
+                        self.handle_session_menu_key(backend, keys::KEY_Return);
                     }
                 }
                 2 if self.features.system_ui.is_control_center() => {
@@ -3883,6 +3928,104 @@ mod tests {
         assert!(
             wifi_bt < hub,
             "Hub middle-click must sit after the picker forget arms"
+        );
+    }
+
+    /// Theme / Wallpaper / Audio / Players / Session picker middle-click must
+    /// select the pointed row and share the Enter / apply path left-click uses.
+    /// Wallpaper Preview middle-click applies without picking a list row.
+    /// Needles are built at runtime so this cannot match its own source.
+    #[test]
+    fn picker_middle_click_applies_like_enter() {
+        const SOURCE: &str = include_str!("event_dispatcher.rs");
+        let compact: String = SOURCE.chars().filter(|c| !c.is_whitespace()).collect();
+
+        let press = compact
+            .split_once("fnon_button_press(")
+            .expect("on_button_press")
+            .1;
+        let system_ui = press
+            .split_once("ifself.features.system_ui.is_active(){")
+            .expect("the system-ui pointer branch")
+            .1
+            .split_once("//Annotationmode:")
+            .expect("the end of the system-ui pointer branch")
+            .0;
+
+        let theme = system_ui
+            .find("2ifself.features.system_ui.is_theme_picker()")
+            .expect("Theme middle-click arm");
+        let wallpaper = system_ui
+            .find("2ifself.features.system_ui.is_wallpaper_picker()")
+            .expect("Wallpaper middle-click arm");
+        let audio = system_ui
+            .find("2ifself.features.system_ui.audio_picker_direction().is_some()")
+            .expect("Audio middle-click arm");
+        let players = system_ui
+            .find("2ifself.features.system_ui.is_media_players_picker()")
+            .expect("Players middle-click arm");
+        let session = system_ui
+            .find("2ifself.features.system_ui.is_session_menu()")
+            .expect("Session menu middle-click arm");
+        let hub = system_ui
+            .find("2ifself.features.system_ui.is_control_center()")
+            .expect("Hub middle-click arm");
+        let wifi_bt = system_ui
+            .find("is_wifi_picker()")
+            .expect("Wi-Fi/BT middle-click arm");
+
+        assert!(
+            wifi_bt < theme
+                && theme < wallpaper
+                && wallpaper < audio
+                && audio < players
+                && players < session
+                && session < hub,
+            "picker apply arms must sit between Wi-Fi/BT forget and Hub mute/toggle"
+        );
+
+        let theme_body = &system_ui[theme..wallpaper];
+        assert!(
+            theme_body.contains("select_visible_row(row)")
+                && theme_body.contains(&format!("{}(", "apply_selected_theme")),
+            "Theme middle-click must select then apply like Enter"
+        );
+
+        let wallpaper_body = &system_ui[wallpaper..audio];
+        assert!(
+            wallpaper_body.contains("select_visible_row(row)")
+                && wallpaper_body.contains("SystemUiHitTarget::Preview")
+                && wallpaper_body.matches(&format!("{}(", "apply_selected_wallpaper")).count()
+                    >= 2,
+            "Wallpaper middle-click must apply on a list row and on Preview"
+        );
+
+        let audio_body = &system_ui[audio..players];
+        assert!(
+            audio_body.contains("select_visible_row(row)")
+                && audio_body.contains(&format!("{}(", "use_selected_audio_device")),
+            "Audio picker middle-click must select then switch like Enter"
+        );
+
+        let players_body = &system_ui[players..session];
+        assert!(
+            players_body.contains("select_visible_row(row)")
+                && players_body.contains(&format!("{}(", "apply_selected_media_player")),
+            "Players middle-click must select then pin like Enter"
+        );
+
+        let session_body = &system_ui[session..hub];
+        assert!(
+            session_body.contains("select_visible_row(row)")
+                && session_body.contains(&format!("{}(", "handle_session_menu_key"))
+                && session_body.contains("keys::KEY_Return"),
+            "Session menu middle-click must select then share the Enter key path"
+        );
+        assert!(
+            !session_body.contains("logout")
+                && !session_body.contains("reboot")
+                && !session_body.contains("poweroff"),
+            "Session menu middle-click must not short-circuit the two-press confirm"
         );
     }
 

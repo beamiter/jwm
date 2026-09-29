@@ -398,6 +398,9 @@ impl Jwm {
             }
             self.focus(backend, Some(target))?;
             self.arrange(backend, Some(mon_key));
+            // Column focus rearrange moves sibling geometries; focus() only
+            // emits focus flips, so broadcast the new rects here.
+            self.broadcast_visible_window_states_on_monitor(backend, mon_key);
         }
         Ok(())
     }

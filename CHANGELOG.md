@@ -7,6 +7,24 @@ monorepo use independent Semantic Versions.
 
 ### Added
 
+- Theme, Wallpaper, Audio device, and Players pickers, plus the Session menu,
+  middle-click the pointed row (or Wallpaper preview) and apply through the
+  same Enter path as left-click; Session keeps its two-press confirm. See
+  [docs/control-center.md](docs/control-center.md),
+  [docs/wallpaper.md](docs/wallpaper.md),
+  [docs/ui-theme.md](docs/ui-theme.md),
+  [docs/media-controls.md](docs/media-controls.md), and
+  [docs/session-menu.md](docs/session-menu.md).
+
+- V-stack `focusstack` and scrolling column focus rearrange broadcast
+  `window/state` for every visible client on the monitor after geometries
+  move (focus flips alone already covered the selection). See
+  [docs/window-placement.md](docs/window-placement.md).
+
+- `get_monitors` / `get_tree` expose an optional `monitor_name` (EDID name)
+  beside `connector`, omitted when unknown. See
+  [docs/monitor-lock.md](docs/monitor-lock.md).
+
 - Hub Shell routes, Audio Output, Session…, Lock Screen, Lock This Monitor,
   and Unlock Monitor middle-click select the pointed row and activate through
   the same Enter path as left-click. Brightness and read-only System rows

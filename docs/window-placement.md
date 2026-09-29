@@ -183,7 +183,8 @@ enter/leave, a real title or `WM_CLASS` change, a real focus change
 (`is_focused` for the previous and new clients), a half/quarter float snap
 (keyboard `snap_window` or mouse edge/corner drop), a free float move/resize
 that actually changes the rectangle, a tiling reorder (`zoom` / `pop`,
-`movestack`, scrolling column move/resize), a layout-parameter change
+`movestack`, scrolling column move/resize, vstack `focusstack`, scrolling
+column focus), a layout-parameter change
 (`incnmaster`, `setmfact`, `setgaps`, or `setlayout` / cycle / last via
 `apply_layout_change`), a tag `view` / `toggleview`, and a scratchpad
 hide/reveal, a `togglebar` / `setcfact` rearrange, a maximize work-area

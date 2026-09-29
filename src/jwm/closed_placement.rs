@@ -990,20 +990,39 @@ impl Jwm {
         backend: &dyn Backend,
         mon_key: crate::core::models::MonitorKey,
     ) -> Option<String> {
+        self.live_output_identity(backend, mon_key).and_then(|identity| {
+            let key = if !identity.stable_key.is_empty() {
+                identity.stable_key
+            } else {
+                identity.connector
+            };
+            (!key.is_empty()).then_some(key)
+        })
+    }
+
+    /// EDID monitor name for the output currently backing `mon_key`.
+    pub(crate) fn output_monitor_name_for_monitor(
+        &self,
+        backend: &dyn Backend,
+        mon_key: crate::core::models::MonitorKey,
+    ) -> Option<String> {
+        self.live_output_identity(backend, mon_key)
+            .and_then(|identity| identity.monitor_name)
+            .filter(|name| !name.is_empty())
+    }
+
+    fn live_output_identity(
+        &self,
+        backend: &dyn Backend,
+        mon_key: crate::core::models::MonitorKey,
+    ) -> Option<crate::backend::api::OutputIdentity> {
         let output_id = *self.state.output_map.get(mon_key)?;
         backend
             .output_ops()
             .enumerate_outputs()
             .into_iter()
             .find(|output| output.id == output_id)
-            .map(|output| {
-                if !output.identity.stable_key.is_empty() {
-                    output.identity.stable_key
-                } else {
-                    output.identity.connector
-                }
-            })
-            .filter(|key| !key.is_empty())
+            .map(|output| output.identity)
     }
 
     /// Whether a client sits on the selected monitor and inside its current

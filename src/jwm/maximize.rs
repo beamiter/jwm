@@ -1914,6 +1914,31 @@ mod tests {
             move_col.contains(&layout_broadcast),
             "scrolling_move_column must broadcast after a column swap"
         );
+        let scroll_focus = scrolling
+            .split_once("pub(crate) fn scrolling_focus_window(")
+            .expect("scrolling_focus_window")
+            .1
+            .split_once("pub(crate) fn scrolling_column_width_rule_for_window(")
+            .expect("scrolling_column_width_rule_for_window")
+            .0;
+        assert!(
+            scroll_focus.contains(&layout_broadcast)
+                && scroll_focus.contains("self.arrange"),
+            "scrolling_focus_window must broadcast after a column rearrange"
+        );
+        let focus_mgr = include_str!("focus_manager.rs");
+        let focusstack = focus_mgr
+            .split_once("pub fn focusstack(")
+            .expect("focusstack")
+            .1
+            .split_once("pub fn focus_none(")
+            .expect("focus_none")
+            .0;
+        assert!(
+            focusstack.contains(&layout_broadcast)
+                && focusstack.contains("is_vstack_layout"),
+            "focusstack must broadcast visible clients after a vstack rearrange"
+        );
         let nav = include_str!("navigation.rs");
         for (name, start, end) in [
             (

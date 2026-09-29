@@ -121,9 +121,10 @@ clicking `· o` — opens a Players picker listing every player the sweep
 saw (filled marker on the active one). When the bridge sends
 `player_details`, each row prefers the player's MPRIS `Identity` over the
 bus suffix and trails a Playing/Paused/Stopped icon; without details (an
-old bridge) the rows stay suffix-only. Enter / click pins by bus suffix
-and returns to the hub. A click on the previous / next glyph skips; a
-click on the title or status icon still play/pauses. The bridge holds the
+old bridge) the rows stay suffix-only. Enter / left-click / middle click
+pins by bus suffix and returns to the hub. A click on the previous / next
+glyph skips; a click on the title or status icon still play/pauses. The
+bridge holds the
 pin while the pinned player's bus name is alive and re-publishes its
 state, so the switch raises the media OSD like any track change; when the
 pinned player exits while another player remains, the pin clears itself

@@ -4,7 +4,7 @@
 
 ---
 
-## Evolve backlog（目标 100 轮；已完成 wave 9–53，本地 ahead）
+## Evolve backlog（目标 100 轮；已完成 wave 9–58，本地 ahead）
 
 | # | 选题 | Size |
 | --- | --- | --- |
@@ -12,7 +12,31 @@
 | 45–47 | Hub DND/Caffeine/NightLight 中键 + Sticky manage/session + WindowInfo.connector | ✓ |
 | 48–50 | Above/Below session v7 + Hub Power Profile / Media 中键 | ✓ |
 | 51–53 | WorkspaceInfo.connector + Hub Shell / AudioOutput / Session / Lock* 中键→Enter | ✓ |
+| 54–56 | Theme / Wallpaper / Audio / Players / Session menu 中键→Enter | ✓ |
+| 57–58 | vstack focusstack + scrolling focus → window/state；MonitorInfoIpc.monitor_name | ✓ |
 | … | 跳过：Annotation/Screenshot CommonLinear、toast Closed(1)、BT withdraw、FS/PiP 丢锚点、Recording EncodedOnly、XWayland 单轴 | |
+
+---
+
+## 2026-09-29（三十五）：picker middle-click + focusstack broadcast + monitor_name
+
+选题 = evolve waves 54–58 / evolve7h。
+
+1. **Wave 54–56**：Theme / Wallpaper（含 Preview）/ Audio device / Players /
+   Session menu button-2 → 选中行后走 Enter / apply 路径（Session 保留二段
+   确认）。修 control-center「every other Hub row is inert」陈词。Docs
+   control-center / wallpaper / ui-theme / media-controls / session-menu +
+   `picker_middle_click_applies_like_enter` pin。
+2. **Wave 57**：vstack `focusstack` arrangemon 后与 `scrolling_focus_window`
+   arrange 后广播 `broadcast_visible_window_states_on_monitor`（focus 只报
+   焦点翻转）。sibling pin + window-placement。
+3. **Wave 58**：`MonitorInfoIpc` 增 optional `monitor_name`（EDID）；
+   `get_monitors` / `get_tree` 填充；`live_output_identity` 抽出供 connector /
+   name 共用。Serialize + monitor-lock docs。
+
+**验证**：`scripts/test.sh --lib -- picker_middle_click_applies_like_enter sibling_window_state_paths monitor_info_serializes`。
+
+**下一轮候选**：见跳过表；S 库存已薄（Hub 中键与 connector 族基本收口）。
 
 ---
 

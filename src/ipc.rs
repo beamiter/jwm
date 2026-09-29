@@ -554,6 +554,10 @@ pub struct MonitorInfoIpc {
     /// the live output map has no identity for this monitor.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub connector: Option<String>,
+    /// EDID monitor name when known; omitted when the live output map has no
+    /// identity or the EDID did not advertise a name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub monitor_name: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1186,9 +1190,11 @@ mod tests {
             focused: true,
             locked: false,
             connector: Some("DP-1".into()),
+            monitor_name: Some("Dell U2720Q".into()),
         })
         .expect("serialize");
         assert_eq!(with_connector["connector"], "DP-1");
+        assert_eq!(with_connector["monitor_name"], "Dell U2720Q");
         assert_eq!(with_connector["locked"], false);
 
         let without = serde_json::to_value(MonitorInfoIpc {
@@ -1202,9 +1208,11 @@ mod tests {
             focused: false,
             locked: true,
             connector: None,
+            monitor_name: None,
         })
         .expect("serialize");
         assert!(without.get("connector").is_none());
+        assert!(without.get("monitor_name").is_none());
         assert_eq!(without["locked"], true);
     }
 

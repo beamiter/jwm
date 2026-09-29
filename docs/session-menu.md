@@ -4,19 +4,19 @@
 
 `Alt+Shift+Escape` (`session_menu`) opens the power actions as a material
 card: lock, suspend, hibernate, log out, restart, shut down. `Up`/`Down` move,
-`Enter` selects, `Esc` — or `Alt+Shift+Escape` again — closes. The control
-center's `Session…` row opens the same panel.
+`Enter` / left-click / middle click selects, `Esc` — or `Alt+Shift+Escape`
+again — closes. The control center's `Session…` row opens the same panel.
 
 Hibernate is listed only when the kernel advertises suspend-to-disk in
 `/sys/power/state`, so the row is never an action that cannot work.
 
 ### Confirmation
 
-Log out, restart, and shut down need **two** presses of `Enter`: the first
-arms the row and it says `Enter to confirm`, the second runs it. Moving the
-selection or pressing `Esc` cancels the arming. Suspend and hibernate run on
-the first press — a key wakes the machine back up, so there is nothing to
-protect against.
+Log out, restart, and shut down need **two** presses of `Enter` (or
+left-click / middle click): the first arms the row and it says `Enter to
+confirm`, the second runs it. Moving the selection or pressing `Esc`
+cancels the arming. Suspend and hibernate run on the first press — a key
+wakes the machine back up, so there is nothing to protect against.
 
 ### What each action does
 

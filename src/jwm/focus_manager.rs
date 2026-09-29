@@ -211,6 +211,9 @@ impl Jwm {
                     }
 
                     let _ = self.restack(backend, Some(mk));
+                    // V-stack focus cycling rearranges sibling geometries;
+                    // focus() only emits focus flips, so broadcast here.
+                    self.broadcast_visible_window_states_on_monitor(backend, mk);
                 }
             }
 

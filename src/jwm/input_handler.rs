@@ -1524,7 +1524,7 @@ impl Jwm {
 
     /// Key handling while the session menu is open: Up/Down move, Return
     /// arms a destructive row and then runs it.
-    fn handle_session_menu_key(&mut self, backend: &mut dyn Backend, keysym: u32) {
+    pub(crate) fn handle_session_menu_key(&mut self, backend: &mut dyn Backend, keysym: u32) {
         if keysym == keys::KEY_Up {
             self.features.system_ui.move_selection(-1);
         } else if keysym == keys::KEY_Down || keysym == keys::KEY_Tab {

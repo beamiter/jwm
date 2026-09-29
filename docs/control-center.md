@@ -23,11 +23,11 @@ The first section routes to the shell's pages:
 
 Shell section order is Applications → Notifications → Clipboard (optional) →
 Calendar → Wallpaper → Theme. Theme lists the seven known
-`appearance.ui_theme` values; `Enter` / middle click applies through the
-same in-memory `set_config` path Wallpaper uses, then surgically writes
-`appearance.ui_theme` into the live TOML (comments and other keys preserved).
-IPC `set_config` for the same key remains session-only. There is no
-standalone Theme keybind. The other Shell rows open their pages the same
+`appearance.ui_theme` values; `Enter` / left-click / middle click applies
+through the same in-memory `set_config` path Wallpaper uses, then surgically
+writes `appearance.ui_theme` into the live TOML (comments and other keys
+preserved). IPC `set_config` for the same key remains session-only. There is
+no standalone Theme keybind. The other Shell rows open their pages the same
 way: `Enter` / left-click / middle click.
 
 `Up`/`Down` and `Tab`/`Shift+Tab` move between selectable rows,
@@ -59,7 +59,7 @@ selects that row and pins the next player through the same path as `p`.
 Middle click on a Shell route, Output, Session…, Lock Screen, Lock This
 Monitor, or Unlock Monitor row selects that row and activates through the
 same Enter path as a left-click. Brightness and read-only rows stay inert
-under middle click; middle click on every other Hub row is inert.
+under middle click.
 On the Input row, a click on the
 microphone glyph toggles mic mute (the pointer twin of `m`); a click on
 the label or device name still opens the input picker. On the Media row,
@@ -514,9 +514,9 @@ discoverable behind you.
 `audio_output_picker` and `audio_input_picker`, or `Enter` on the Output/Input
 row, list what this machine can play to and record from — speakers, HDMI
 outputs, headsets, microphones — with a filled marker on the device in use.
-`Up`/`Down` move, `Enter` switches, `Esc` closes. Neither has a default
-binding; bind them like any other action if you want them without opening the
-control center first.
+`Up`/`Down` move, `Enter` / left-click / middle click switches, `Esc` closes.
+Neither has a default binding; bind them like any other action if you want
+them without opening the control center first.
 
 The list comes from `wpctl status` (PipeWire) or `pactl list` (PulseAudio),
 whichever the volume control already settled on. A monitor source — a sink's

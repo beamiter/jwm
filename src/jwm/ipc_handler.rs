@@ -3566,6 +3566,7 @@ impl Jwm {
             focused: self.state.sel_mon == Some(mk),
             locked: self.monitor_is_locked(m.num),
             connector: self.output_key_for_monitor(backend, mk),
+            monitor_name: self.output_monitor_name_for_monitor(backend, mk),
         }
     }
 

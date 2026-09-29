@@ -171,10 +171,11 @@ jwm-tool msg set_config --args '{"key": "appearance.ui_theme", "value": "glass"}
 
 The Shell Hub also has a **Theme** page (`T` from the Hub, or bar parameter
 `6`): it lists the seven known values from `KNOWN_UI_THEMES`, marks the
-current one, and applies the selection through the same in-memory
-`set_config` / `apply_config_changes` path Wallpaper uses, then surgically
-persists `appearance.ui_theme` to the live TOML file (comments and other
-keys are preserved; a missing `[appearance]` section or key is inserted).
+current one, and applies the selection — `Enter` / left-click / middle click —
+through the same in-memory `set_config` / `apply_config_changes` path
+Wallpaper uses, then surgically persists `appearance.ui_theme` to the live
+TOML file (comments and other keys are preserved; a missing `[appearance]`
+section or key is inserted).
 The `[appearance]` header is found by name, so a trailing comment, spaces
 inside the brackets or a quoted `["appearance"]` are edited in place. The
 edited text is checked before it is written: if the file uses a shape the

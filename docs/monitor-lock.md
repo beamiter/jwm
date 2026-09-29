@@ -149,7 +149,8 @@ or already spends that chord. The log line says which happened.
 
 Every lock and unlock broadcasts a `monitor/lock` IPC event
 (`{"monitor": 1, "locked": true}`), and `get_monitors` / `get_tree` carry a
-`locked` flag and an optional `connector` (`OutputIdentity.stable_key` /
-connector name) per monitor, so a status bar can show which screens are down
-and key panels the same way session restore does. `get_workspaces` exposes
-the same optional `connector` on each workspace row (omitted when unknown).
+`locked` flag, an optional `connector` (`OutputIdentity.stable_key` /
+connector name), and an optional `monitor_name` (EDID name when known) per
+monitor, so a status bar can show which screens are down and key or label
+panels the same way session restore does. `get_workspaces` exposes the same
+optional `connector` on each workspace row (omitted when unknown).
