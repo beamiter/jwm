@@ -1933,8 +1933,9 @@ pub struct MinimizedRestoreState {
 pub struct MaximizeRestoreState {
     pub restore_rect: MinimizedRestoreRect,
     /// The window was promoted out of the tiling layout (`togglemaximize`).
-    /// Stored for completeness; under a tiling layout adoption still refuses
-    /// a promoted restart the same way a visible promoted window is refused.
+    /// Manage-time adoption treats this as a user promote so a seamless X11
+    /// restart under a tiling layout re-admits the maximize instead of
+    /// clearing the atoms.
     pub promoted: bool,
 }
 

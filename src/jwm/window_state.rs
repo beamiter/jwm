@@ -6117,7 +6117,7 @@ mod tests {
         let floating_window = WindowId::from_raw(0x5a50);
         let (_, floating) = add_mode_client(&mut jwm, floating_window, full, true, false);
         assert!(
-            jwm.adopt_client_maximized(&mut backend, floating, MAX_BOTH, Some(hint))
+            jwm.adopt_client_maximized(&mut backend, floating, MAX_BOTH, Some(hint), false)
                 .unwrap()
         );
         let client = &jwm.state.clients[floating];
@@ -6128,7 +6128,7 @@ mod tests {
         let tiled_window = WindowId::from_raw(0x5a51);
         let (_, tiled) = add_mode_client(&mut jwm, tiled_window, full, false, false);
         assert!(
-            !jwm.adopt_client_maximized(&mut backend, tiled, MAX_BOTH, Some(hint))
+            !jwm.adopt_client_maximized(&mut backend, tiled, MAX_BOTH, Some(hint), false)
                 .unwrap()
         );
         let client = &jwm.state.clients[tiled];
@@ -6139,6 +6139,20 @@ mod tests {
             Some(MAX_NONE),
             "a refused adoption clears the pre-set atoms"
         );
+
+        // A seamless restart that recorded `promoted` re-admits under tiling.
+        let promoted_window = WindowId::from_raw(0x5a52);
+        let (_, promoted) = add_mode_client(&mut jwm, promoted_window, full, false, false);
+        assert!(
+            jwm.adopt_client_maximized(&mut backend, promoted, MAX_BOTH, Some(hint), true)
+                .unwrap()
+        );
+        let client = &jwm.state.clients[promoted];
+        assert!(client.state.is_floating);
+        assert!(client.state.maximize_restore_tiled);
+        assert_eq!(client.state.maximized_axes(), MAX_BOTH);
+        assert_eq!(client.geometry.maximize_restore_rect, Some(hint));
+        assert_eq!(client_rect(&jwm, promoted), full);
     }
 
     #[test]

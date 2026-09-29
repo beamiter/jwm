@@ -84,22 +84,27 @@ impl Jwm {
         self.maximize_transaction(backend, client_key, axes, origin, None)
     }
 
-    /// Manage-time adoption: same transaction with origin Adopt and `restore_hint`
-    /// (V1 floating_rect) used when entering from NONE.
+    /// Manage-time adoption of pre-set maximize atoms. `restore_hint` is the
+    /// V1 restore rectangle (minimized snapshot or `_JWM_MAXIMIZE_RESTORE_V1`).
+    /// When `promoted` is set on that property, the origin is
+    /// [`MaximizeOrigin::User`] so a tiling-layout seamless restart re-promotes
+    /// the window the same way `togglemaximize` did before the exec; otherwise
+    /// adoption stays [`MaximizeOrigin::Adopt`] and still refuses layout-managed
+    /// windows under a tiling layout.
     pub(crate) fn adopt_client_maximized(
         &mut self,
         backend: &mut dyn Backend,
         client_key: ClientKey,
         axes: MaximizeAxes,
         restore_hint: Option<Rect>,
+        promoted: bool,
     ) -> Result<bool, Box<dyn std::error::Error>> {
-        self.maximize_transaction(
-            backend,
-            client_key,
-            axes,
-            MaximizeOrigin::Adopt,
-            restore_hint,
-        )
+        let origin = if promoted {
+            MaximizeOrigin::User
+        } else {
+            MaximizeOrigin::Adopt
+        };
+        self.maximize_transaction(backend, client_key, axes, origin, restore_hint)
     }
 
     /// Drag start / non-maximize snap / legacy release: no-op Ok(false) unless realized.
@@ -1580,7 +1585,7 @@ mod tests {
         let key = jwm.insert_client(client);
 
         assert!(
-            jwm.adopt_client_maximized(&mut backend, key, MaximizeAxes::BOTH, None)
+            jwm.adopt_client_maximized(&mut backend, key, MaximizeAxes::BOTH, None, false)
                 .expect("adoption succeeds")
         );
         let client = &jwm.state.clients[key];
@@ -1984,15 +1989,17 @@ mod tests {
         );
         let manage = include_str!("client.rs");
         let adopt = manage
-            .split_once("let restore_hint = minimized_restore")
-            .expect("restore_hint")
+            .split_once("let maximize_restore = win.and_then")
+            .expect("maximize_restore")
             .1
-            .split_once("let suppress_flag = self.suppress_layout_animation")
-            .expect("suppress")
+            .split_once("self.suppress_layout_animation = suppress_flag;")
+            .expect("restore suppress")
             .0;
         assert!(
-            adopt.contains("get_maximize_restore_state"),
-            "manage must fall back to the maximize restore property for restore_hint"
+            adopt.contains("get_maximize_restore_state")
+                && adopt.contains("let promoted =")
+                && adopt.contains("adopt_client_maximized"),
+            "manage must pass the restore property's promoted flag into adoption"
         );
     }
 

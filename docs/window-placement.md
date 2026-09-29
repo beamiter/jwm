@@ -263,16 +263,18 @@ as EWMH and xdg-shell allow.
 Session snapshots do not store maximize: `restore_session` unmaximizes every
 window it matches, then applies the saved placement. Across a seamless X11
 restart the EWMH atoms carry the maximize state, and JWM's private
-`_JWM_MAXIMIZE_RESTORE_V1` property carries the pre-maximize rectangle (and
-whether the window was promoted) for a *visible* maximized window. Minimized
+`_JWM_MAXIMIZE_RESTORE_V1` property carries the pre-maximize rectangle and
+whether the window was promoted for a *visible* maximized window. Minimized
 clients already embed that rectangle in `_JWM_MINIMIZED_RESTORE_V1`. A
-visible window's hand-float / promote flag is still not remembered as layout
+visible window's plain hand-float flag is still not remembered as layout
 membership: it floats again only when `WM_TRANSIENT_FOR`, a matching rule or
-a popup-like window type floats it. Under a tiling layout a promoted restart
-is refused and its atoms cleared, as before; under FLOAT it is promoted
-again. When the restore property is present and maximize is admitted,
-unmaximize returns to that exact rectangle instead of the centered fallback.
-A minimized window keeps its resting floating state through its restore
-snapshot, and a floating one outside PiP also keeps its exact pre-maximize
-rectangle. A minimized promoted window is saved tiled, the state it rests
-in, so it comes back like a visible one.
+a popup-like window type floats it. A promoted maximize recorded in the
+restore property is re-admitted under a tiling layout (user promote); a
+plain tiled maximize without that flag is still refused and its atoms
+cleared. Under FLOAT, adoption promotes either way. When the restore
+property is present and maximize is admitted, unmaximize returns to that
+exact rectangle instead of the centered fallback. A minimized window keeps
+its resting floating state through its restore snapshot, and a floating one
+outside PiP also keeps its exact pre-maximize rectangle. A minimized
+promoted window is saved tiled, the state it rests in, so it comes back
+like a visible one.

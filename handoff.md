@@ -4,17 +4,31 @@
 
 ---
 
-## Evolve backlog（目标 100 轮；已完成 wave 9–27，本地 ahead）
+## Evolve backlog（目标 100 轮；已完成 wave 9–28，本地 ahead）
 
 按日常命中 × 可交付性排序的下一波候选（S/小 M，无 DRM）：
 
 | # | 选题 | Size |
 | --- | --- | --- |
 | 14–27 | IPC window/state 全族 + Tiled* + restore_rect | S/M ✓ |
-| 28 | Annotation → CommonLinearAware | S–M |
-| 29 | Screenshot toolbar → CommonLinearAware | S–M |
+| 28 | seamless promote adoption（`_JWM_MAXIMIZE_RESTORE_V1.promoted`） | S ✓ |
+| 29 | view/toggleview → window/state | S |
 | 30 | session 持久化 maximize + restore_rect | M |
-| … | 跳过：toast Closed(1)、BT withdraw、FS/PiP 丢锚点、Recording EncodedOnly | |
+| … | 跳过：Annotation/Screenshot toolbar CommonLinear（capture/PostDelivery bake）、toast Closed(1)、BT withdraw、FS/PiP 丢锚点、Recording EncodedOnly | |
+
+---
+
+## 2026-09-29（十九）：seamless promote adoption
+
+选题 = evolve wave 28。
+
+1. **契约**：manage 读 `_JWM_MAXIMIZE_RESTORE_V1.promoted`；为真时
+   `MaximizeOrigin::User` 再提升，tiling 下跨 seamless exec 保留布局归属。
+2. **回归**：adoption + manage pin；未带 promoted 的 tiled 仍拒绝。
+
+**验证**：`scripts/test.sh --lib -- adoption_uses_the_restore_hint manage_re_promotes maximize_commit_syncs`。
+
+**仍然开着的**：见上表 29+。
 
 ---
 

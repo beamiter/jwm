@@ -684,40 +684,46 @@ impl Jwm {
             // transaction's republish. The adopted geometry is where the
             // window starts, not a move, so it must not animate. A restart
             // snapshot's floating rect is the exact pre-maximize rect of a
-            // floating window; a promoted window is snapshotted tiled (its
-            // floating rect is the pre-promotion slot), so adoption refuses
-            // or re-promotes it like a visible one. A visible maximized
-            // window's private `_JWM_MAXIMIZE_RESTORE_V1` fills the same
-            // restore_hint when no minimized snapshot carried one.
+            // floating window. A visible maximized window's private
+            // `_JWM_MAXIMIZE_RESTORE_V1` fills the same restore_hint when no
+            // minimized snapshot carried one; its `promoted` flag re-promotes
+            // under a tiling layout so layout membership survives seamless
+            // exec (plain Adopt still refuses a plain tiled maximize).
             let win = self
                 .state
                 .clients
                 .get(client_key)
                 .map(|client| client.win);
+            let maximize_restore = win.and_then(|win| {
+                backend
+                    .property_ops()
+                    .get_maximize_restore_state(win)
+                    .ok()
+                    .flatten()
+            });
             let restore_hint = minimized_restore
                 .and_then(|state| state.floating_rect)
                 .map(|rect| Rect::new(rect.x, rect.y, rect.w, rect.h))
                 .or_else(|| {
-                    win.and_then(|win| {
-                        backend
-                            .property_ops()
-                            .get_maximize_restore_state(win)
-                            .ok()
-                            .flatten()
-                            .map(|state| {
-                                Rect::new(
-                                    state.restore_rect.x,
-                                    state.restore_rect.y,
-                                    state.restore_rect.w,
-                                    state.restore_rect.h,
-                                )
-                            })
+                    maximize_restore.map(|state| {
+                        Rect::new(
+                            state.restore_rect.x,
+                            state.restore_rect.y,
+                            state.restore_rect.w,
+                            state.restore_rect.h,
+                        )
                     })
                 });
+            let promoted = maximize_restore.is_some_and(|state| state.promoted);
             let suppress_flag = self.suppress_layout_animation;
             self.suppress_layout_animation = true;
-            let adopted =
-                self.adopt_client_maximized(backend, client_key, initial_maximize, restore_hint);
+            let adopted = self.adopt_client_maximized(
+                backend,
+                client_key,
+                initial_maximize,
+                restore_hint,
+                promoted,
+            );
             self.suppress_layout_animation = suppress_flag;
             if let Err(error) = adopted {
                 let win = self.state.clients.get(client_key).map(|client| client.win);
@@ -2214,8 +2220,9 @@ mod unmanage_minimized_tests {
         BackendDiagnostics, Capabilities, CloseResult, ColorAllocator, CompositorAnnotation,
         CompositorBenchmark, CompositorControl, CompositorMedia, CompositorRect,
         CompositorWindowEffects, CompositorWorkspaceEffects, CursorProvider, DisplayControl,
-        InputOps, KeyOps, MinimizedRestoreRect, MinimizedRestoreState, MotifWmHints, NormalHints,
-        OutputOps, PropertyOps, RenderScheduler, WindowAttributes, WindowOps, WmHints,
+        InputOps, KeyOps, MaximizeRestoreState, MinimizedRestoreRect, MinimizedRestoreState,
+        MotifWmHints, NormalHints, OutputOps, PropertyOps, RenderScheduler, WindowAttributes,
+        WindowOps, WmHints,
     };
     use crate::backend::common_define::Pixel;
     use crate::backend::error::BackendError;
@@ -2279,6 +2286,7 @@ mod unmanage_minimized_tests {
         fail_next_wm_state_write: AtomicBool,
         writes: Mutex<Vec<ProtocolWrite>>,
         minimized_restore: Mutex<Option<MinimizedRestoreState>>,
+        maximize_restore: Mutex<Option<MaximizeRestoreState>>,
         restore_accesses: Mutex<Vec<RestoreAccess>>,
         window_pid: AtomicU32,
         /// `(instance, class)` reported for every window, as `get_class` does.
@@ -2435,6 +2443,36 @@ mod unmanage_minimized_tests {
                 .lock()
                 .expect("restore accesses lock")
                 .push(RestoreAccess::Clear(win));
+            Ok(())
+        }
+
+        fn get_maximize_restore_state(
+            &self,
+            _win: WindowId,
+        ) -> Result<Option<MaximizeRestoreState>, BackendError> {
+            Ok(*self
+                .maximize_restore
+                .lock()
+                .expect("maximize restore lock"))
+        }
+
+        fn set_maximize_restore_state(
+            &self,
+            _win: WindowId,
+            state: MaximizeRestoreState,
+        ) -> Result<(), BackendError> {
+            *self
+                .maximize_restore
+                .lock()
+                .expect("maximize restore lock") = Some(state);
+            Ok(())
+        }
+
+        fn clear_maximize_restore_state(&self, _win: WindowId) -> Result<(), BackendError> {
+            *self
+                .maximize_restore
+                .lock()
+                .expect("maximize restore lock") = None;
             Ok(())
         }
 
@@ -5612,17 +5650,19 @@ mod unmanage_minimized_tests {
         dialog: bool,
         fixed: bool,
     ) -> ManagedMaximize {
-        manage_with_initial_maximize_in(raw, preset, dialog, fixed, false)
+        manage_with_initial_maximize_in(raw, preset, dialog, fixed, false, None)
     }
 
     /// [`manage_with_initial_maximize`] with the selected monitor showing
-    /// the FLOAT layout when `float_layout`.
+    /// the FLOAT layout when `float_layout`, and an optional
+    /// `_JWM_MAXIMIZE_RESTORE_V1` seed `(restore_rect, promoted)`.
     fn manage_with_initial_maximize_in(
         raw: u64,
         preset: bool,
         dialog: bool,
         fixed: bool,
         float_layout: bool,
+        maximize_restore: Option<(MinimizedRestoreRect, bool)>,
     ) -> ManagedMaximize {
         let mut backend = ClientSpyBackend::new();
         backend
@@ -5648,6 +5688,16 @@ mod unmanage_minimized_tests {
                 max_w: 400,
                 max_h: 300,
                 ..Default::default()
+            });
+        }
+        if let Some((restore_rect, promoted)) = maximize_restore {
+            *backend
+                .property_ops
+                .maximize_restore
+                .lock()
+                .expect("maximize restore lock") = Some(MaximizeRestoreState {
+                restore_rect,
+                promoted,
             });
         }
         // A window with no class, instance or title floats automatically;
@@ -5748,7 +5798,7 @@ mod unmanage_minimized_tests {
     /// visited it twice and its close left a stale key in the monitor list.
     #[test]
     fn manage_lists_a_window_promoted_by_initial_maximize_under_float_layout_once() {
-        let promoted = manage_with_initial_maximize_in(0x9a07, true, false, false, true);
+        let promoted = manage_with_initial_maximize_in(0x9a07, true, false, false, true, None);
         assert_eq!(promoted.axes, MaximizeAxes::BOTH, "FLOAT admits the pair");
         assert!(promoted.is_floating, "admission promoted the window");
         assert!(promoted.promoted, "the window remembers it left the layout");
@@ -5761,10 +5811,41 @@ mod unmanage_minimized_tests {
 
         // The other pre-attach float paths list the window once too.
         for (raw, dialog, fixed) in [(0x9a08, true, false), (0x9a09, false, true)] {
-            let managed = manage_with_initial_maximize_in(raw, true, dialog, fixed, true);
+            let managed = manage_with_initial_maximize_in(raw, true, dialog, fixed, true, None);
             assert!(managed.is_floating);
             assert_eq!(managed.listed, 1, "{raw:#x} is listed once");
         }
+    }
+
+    /// Seamless X11 restart: `_JWM_MAXIMIZE_RESTORE_V1.promoted` re-admits a
+    /// tiling-layout maximize that plain Adopt would refuse.
+    #[test]
+    fn manage_re_promotes_from_maximize_restore_property_under_tiling() {
+        let hint = MinimizedRestoreRect {
+            x: 120,
+            y: 80,
+            w: 640,
+            h: 480,
+        };
+        let promoted =
+            manage_with_initial_maximize_in(0x9a0b, true, false, false, false, Some((hint, true)));
+        assert_eq!(promoted.axes, MaximizeAxes::BOTH);
+        assert!(promoted.is_floating);
+        assert!(promoted.promoted);
+        assert_eq!(
+            promoted.restore,
+            Some(Rect::new(hint.x, hint.y, hint.w, hint.h))
+        );
+        assert_eq!(promoted.listed, 1);
+        assert_eq!(promoted.live, maximize_target_for(&promoted));
+
+        // Without the promoted flag, tiling still refuses.
+        let refused =
+            manage_with_initial_maximize_in(0x9a0c, true, false, false, false, Some((hint, false)));
+        assert_eq!(refused.axes, MaximizeAxes::NONE);
+        assert!(!refused.is_floating);
+        assert!(!refused.promoted);
+        assert_eq!(refused.restore, None);
     }
 
     /// The live rect a BOTH maximize from `managed`'s restore rect fills.
