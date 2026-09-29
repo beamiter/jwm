@@ -1842,6 +1842,41 @@ mod tests {
             move_col.contains(&layout_broadcast),
             "scrolling_move_column must broadcast after a column swap"
         );
+        let layout_state = include_str!("layout/state.rs");
+        for (name, start, end) in [
+            (
+                "incnmaster",
+                "pub(crate) fn incnmaster(",
+                "pub(crate) fn is_scrolling_layout(",
+            ),
+            (
+                "setmfact",
+                "pub(crate) fn setmfact(",
+                "pub(crate) fn setgaps(",
+            ),
+            (
+                "setgaps",
+                "pub(crate) fn setgaps(",
+                "fn exit_fullscreen_on_monitor(",
+            ),
+            (
+                "apply_layout_change",
+                "pub(crate) fn apply_layout_change<",
+                "pub(crate) fn setlayout(",
+            ),
+        ] {
+            let body = layout_state
+                .split_once(start)
+                .unwrap_or_else(|| panic!("{name}"))
+                .1
+                .split_once(end)
+                .unwrap_or_else(|| panic!("{name} end"))
+                .0;
+            assert!(
+                body.contains(&layout_broadcast),
+                "{name} must broadcast visible clients after arrange"
+            );
+        }
         let toggle = include_str!("features/toggles.rs");
         let float = toggle
             .split_once("pub fn togglefloating(")
