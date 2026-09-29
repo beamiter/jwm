@@ -510,6 +510,10 @@ pub struct WindowInfo {
     /// because their tag is not selected are not minimized.
     pub is_minimized: bool,
     pub is_focused: bool,
+    /// Process id when the backend reported one (`_NET_WM_PID` / Wayland
+    /// credentials); `None` when unknown.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1050,6 +1054,7 @@ mod tests {
             is_maximized_horz: false,
             is_minimized: true,
             is_focused: false,
+            pid: Some(1234),
         })
         .expect("serialize WindowInfo");
 
@@ -1060,6 +1065,35 @@ mod tests {
         assert_eq!(value["is_maximized_horz"], false);
         assert_eq!(value["is_above"], false);
         assert_eq!(value["is_below"], false);
+        assert_eq!(value["pid"], 1234);
+
+        let without_pid = serde_json::to_value(WindowInfo {
+            id: 1,
+            name: String::new(),
+            class: String::new(),
+            instance: String::new(),
+            tags: 1,
+            monitor: 0,
+            x: 0,
+            y: 0,
+            w: 100,
+            h: 100,
+            is_floating: false,
+            is_fullscreen: false,
+            is_urgent: false,
+            is_sticky: false,
+            is_above: false,
+            is_below: false,
+            is_pip: false,
+            is_maximized: false,
+            is_maximized_vert: false,
+            is_maximized_horz: false,
+            is_minimized: false,
+            is_focused: false,
+            pid: None,
+        })
+        .expect("serialize");
+        assert!(without_pid.get("pid").is_none());
     }
 
     #[test]

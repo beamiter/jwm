@@ -119,6 +119,7 @@ fn client_window_info(client: &WMClient, monitor: i32, is_focused: bool) -> Wind
         is_maximized_horz: client.state.is_maximized_horz,
         is_minimized: client.state.is_hidden,
         is_focused,
+        pid: client.pid,
     }
 }
 
