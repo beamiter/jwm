@@ -100,6 +100,7 @@ fn client_window_info(
     monitor: i32,
     is_focused: bool,
     connector: Option<String>,
+    monitor_name: Option<String>,
 ) -> WindowInfo {
     WindowInfo {
         id: client.win.raw(),
@@ -126,6 +127,7 @@ fn client_window_info(
         is_focused,
         pid: client.pid,
         connector,
+        monitor_name,
     }
 }
 
@@ -3488,14 +3490,19 @@ impl Jwm {
         is_focused: bool,
     ) -> Option<WindowInfo> {
         let client = self.state.clients.get(client_key)?;
-        let connector = client
-            .mon
-            .and_then(|mk| self.output_key_for_monitor(backend, mk));
+        let (connector, monitor_name) = match client.mon {
+            Some(mk) => (
+                self.output_key_for_monitor(backend, mk),
+                self.output_monitor_name_for_monitor(backend, mk),
+            ),
+            None => (None, None),
+        };
         Some(client_window_info(
             client,
             resolved_client_monitor_num(&self.state.monitors, client),
             is_focused,
             connector,
+            monitor_name,
         ))
     }
 
@@ -3517,6 +3524,7 @@ impl Jwm {
                 None => continue,
             };
             let connector = self.output_key_for_monitor(backend, mk);
+            let monitor_name = self.output_monitor_name_for_monitor(backend, mk);
             let active_tags = mon.get_active_tags();
             for i in 0..cfg.tags_length() {
                 let tag_bit = 1u32 << i;
@@ -3532,6 +3540,7 @@ impl Jwm {
                     num_clients: tagged_client_count(&self.state, mk, tag_bit),
                     focused: is_active && self.state.sel_mon == Some(mk),
                     connector: connector.clone(),
+                    monitor_name: monitor_name.clone(),
                 });
             }
         }
@@ -4109,17 +4118,24 @@ mod tests {
         client.geometry.w = 640;
         client.geometry.h = 480;
 
-        let info = client_window_info(&client, 7, false, None);
+        let info = client_window_info(&client, 7, false, None, None);
         assert_eq!(info.id, 0x2a);
         assert_eq!(info.monitor, 7);
         assert!(info.is_minimized);
         assert!(!info.is_focused);
 
         client.state.is_hidden = false;
-        let restored = client_window_info(&client, 7, true, Some("DP-1".into()));
+        let restored = client_window_info(
+            &client,
+            7,
+            true,
+            Some("DP-1".into()),
+            Some("Dell U2720Q".into()),
+        );
         assert!(!restored.is_minimized);
         assert!(restored.is_focused);
         assert_eq!(restored.connector.as_deref(), Some("DP-1"));
+        assert_eq!(restored.monitor_name.as_deref(), Some("Dell U2720Q"));
     }
 
     #[test]

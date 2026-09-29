@@ -16,6 +16,7 @@
 use std::io::Write;
 use std::process::{Command, Stdio};
 
+use crate::picker_match::filter_portal_window_spec;
 use crate::wayland::{OutputInfo, ToplevelInfo};
 
 #[derive(Debug, Default, Clone)]
@@ -69,15 +70,11 @@ pub fn pick_outputs(available: &[OutputInfo], multiple: bool) -> PickerOutcome<O
 
 pub fn pick_windows(available: &[ToplevelInfo], multiple: bool) -> PickerOutcome<ToplevelInfo> {
     if let Ok(spec) = std::env::var("JWM_PORTAL_WINDOW") {
-        let (kind, needle) = spec.split_once(':').unwrap_or(("title", spec.as_str()));
-        let filtered: Vec<_> = available
-            .iter()
-            .filter(|t| match kind {
-                "class" | "app_id" => t.app_id == needle,
-                _ => t.title.contains(needle),
-            })
-            .cloned()
-            .collect();
+        // Prefer Wayland app_id/title; when that misses, enrich from jwm IPC
+        // get_windows so class:firefox still works when app_id is empty/wrong.
+        let ipc = crate::ipc::query_windows().ok();
+        let filtered =
+            filter_portal_window_spec(&spec, available, ipc.as_deref());
         if !filtered.is_empty() {
             return PickerOutcome::Picked(filtered);
         }

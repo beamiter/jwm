@@ -26,6 +26,9 @@
 //! v7 起，Above / Below（`_NET_WM_STATE_ABOVE` / `_BELOW`）一并写入快照；
 //! 恢复时经 `apply_external_stacking_request` 套用（两者皆真时 Above 胜出）。
 //! 缺省 / 旧版本快照为 `false`。
+//!
+//! v8 起，Minimized（语义隐藏 / Dock）一并写入快照；恢复时经
+//! `set_client_minimized` 套用。缺省 / 旧版本快照为 `false`。
 
 use crate::backend::api::{Backend, MaximizeAxes, NetWmAction, NetWmState};
 use crate::config::CONFIG;
@@ -47,7 +50,7 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-const SESSION_VERSION: u32 = 7;
+const SESSION_VERSION: u32 = 8;
 const MIN_SUPPORTED_SESSION_VERSION: u32 = 1;
 const MAX_SESSION_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_SESSION_CLIENTS: usize = 16_384;
@@ -91,6 +94,9 @@ pub struct SessionEntry {
     /// v7：`_NET_WM_STATE_BELOW`。缺省 / 旧版本快照为 `false`。
     #[serde(default)]
     pub is_below: bool,
+    /// v8：语义 minimized（Dock / Iconic）。缺省 / 旧版本快照为 `false`。
+    #[serde(default)]
+    pub is_minimized: bool,
 }
 
 /// 会话里保存的最大化状态（v4）。休息态几何仍写在 `is_floating` /
@@ -262,6 +268,15 @@ struct SessionSnapshotV6 {
     monitor_orders: Vec<SessionMonitorOrder>,
 }
 
+/// 版本 7 快照：已有 is_above / is_below，尚无 is_minimized（反序列化时缺省 false）。
+#[derive(Deserialize)]
+struct SessionSnapshotV7 {
+    #[allow(dead_code)]
+    version: u32,
+    clients: Vec<SessionEntry>,
+    monitor_orders: Vec<SessionMonitorOrder>,
+}
+
 /// 把任一受支持版本的会话 JSON 迁移为当前版本的快照。
 ///
 /// 崩溃安全约定：迁移是纯内存操作，绝不改写磁盘上的旧快照；升级后的
@@ -278,38 +293,43 @@ pub fn migrate_session_json(json: &str) -> Result<SessionSnapshot, String> {
         1 => {
             let v1: SessionSnapshotV1 = serde_json::from_str(json)
                 .map_err(|error| format!("cannot parse version 1 session snapshot: {error}"))?;
-            migrate_snapshot_v6(migrate_snapshot_v5(migrate_snapshot_v4(migrate_snapshot_v3(
-                migrate_snapshot_v2(migrate_snapshot_v1(v1)),
+            migrate_snapshot_v7(migrate_snapshot_v6(migrate_snapshot_v5(migrate_snapshot_v4(
+                migrate_snapshot_v3(migrate_snapshot_v2(migrate_snapshot_v1(v1))),
             ))))
         }
         2 => {
             let v2: SessionSnapshotV2 = serde_json::from_str(json)
                 .map_err(|error| format!("cannot parse version 2 session snapshot: {error}"))?;
-            migrate_snapshot_v6(migrate_snapshot_v5(migrate_snapshot_v4(migrate_snapshot_v3(
-                migrate_snapshot_v2(v2),
+            migrate_snapshot_v7(migrate_snapshot_v6(migrate_snapshot_v5(migrate_snapshot_v4(
+                migrate_snapshot_v3(migrate_snapshot_v2(v2)),
             ))))
         }
         3 => {
             let v3: SessionSnapshotV3 = serde_json::from_str(json)
                 .map_err(|error| format!("cannot parse version 3 session snapshot: {error}"))?;
-            migrate_snapshot_v6(migrate_snapshot_v5(migrate_snapshot_v4(migrate_snapshot_v3(
-                v3,
+            migrate_snapshot_v7(migrate_snapshot_v6(migrate_snapshot_v5(migrate_snapshot_v4(
+                migrate_snapshot_v3(v3),
             ))))
         }
         4 => {
             let v4: SessionSnapshotV4 = serde_json::from_str(json)
                 .map_err(|error| format!("cannot parse version 4 session snapshot: {error}"))?;
-            migrate_snapshot_v6(migrate_snapshot_v5(migrate_snapshot_v4(v4)))
+            migrate_snapshot_v7(migrate_snapshot_v6(migrate_snapshot_v5(migrate_snapshot_v4(v4))))
         }
         5 => {
             let v5: SessionSnapshotV5 = serde_json::from_str(json)
                 .map_err(|error| format!("cannot parse version 5 session snapshot: {error}"))?;
-            migrate_snapshot_v6(migrate_snapshot_v5(v5))
+            migrate_snapshot_v7(migrate_snapshot_v6(migrate_snapshot_v5(v5)))
         }
         6 => {
             let v6: SessionSnapshotV6 = serde_json::from_str(json)
                 .map_err(|error| format!("cannot parse version 6 session snapshot: {error}"))?;
-            migrate_snapshot_v6(v6)
+            migrate_snapshot_v7(migrate_snapshot_v6(v6))
+        }
+        7 => {
+            let v7: SessionSnapshotV7 = serde_json::from_str(json)
+                .map_err(|error| format!("cannot parse version 7 session snapshot: {error}"))?;
+            migrate_snapshot_v7(v7)
         }
         SESSION_VERSION => SessionSnapshot::from_json(json)
             .map_err(|error| format!("cannot parse session snapshot: {error}"))?,
@@ -347,6 +367,7 @@ fn migrate_snapshot_v1(v1: SessionSnapshotV1) -> SessionSnapshotV2 {
                 is_sticky: false,
                 is_above: false,
                 is_below: false,
+                is_minimized: false,
             }
         })
         .collect();
@@ -394,11 +415,20 @@ fn migrate_snapshot_v5(v5: SessionSnapshotV5) -> SessionSnapshotV6 {
 }
 
 /// v6 -> v7：is_above / is_below 字段在反序列化时已缺省为 false；只抬版本号。
-fn migrate_snapshot_v6(v6: SessionSnapshotV6) -> SessionSnapshot {
-    SessionSnapshot {
-        version: SESSION_VERSION,
+fn migrate_snapshot_v6(v6: SessionSnapshotV6) -> SessionSnapshotV7 {
+    SessionSnapshotV7 {
+        version: 7,
         clients: v6.clients,
         monitor_orders: v6.monitor_orders,
+    }
+}
+
+/// v7 -> v8：is_minimized 字段在反序列化时已缺省为 false；只抬版本号。
+fn migrate_snapshot_v7(v7: SessionSnapshotV7) -> SessionSnapshot {
+    SessionSnapshot {
+        version: SESSION_VERSION,
+        clients: v7.clients,
+        monitor_orders: v7.monitor_orders,
     }
 }
 
@@ -421,6 +451,7 @@ struct DetailedRestorePlan {
     is_sticky: bool,
     is_above: bool,
     is_below: bool,
+    is_minimized: bool,
 }
 
 impl SessionSnapshot {
@@ -868,6 +899,7 @@ pub fn capture_snapshot_excluding(
             is_sticky: c.state.is_sticky,
             is_above: c.state.is_above,
             is_below: c.state.is_below,
+            is_minimized: c.state.is_hidden,
         });
     }
     let monitor_orders = state
@@ -982,6 +1014,7 @@ where
                     is_sticky: e.is_sticky,
                     is_above: e.is_above,
                     is_below: e.is_below,
+                    is_minimized: e.is_minimized,
                 },
             ));
         }
@@ -1291,7 +1324,7 @@ impl Jwm {
             self.set_client_sticky(backend, *key, plan.is_sticky);
         }
 
-        // Above / Below last: share the EWMH stacking path so restack and
+        // Above / Below: share the EWMH stacking path so restack and
         // property writes stay consistent with client requests. Above wins
         // when a snapshot somehow recorded both.
         for (key, plan) in &plans {
@@ -1320,6 +1353,16 @@ impl Jwm {
             {
                 log::warn!(
                     "session restore could not re-apply Above/Below for a matched client: {error}"
+                );
+            }
+        }
+
+        // Minimized last: park after placement / maximize / stacking so the
+        // Dock sees the resting state the snapshot intended.
+        for (key, plan) in &plans {
+            if let Err(error) = self.set_client_minimized(backend, *key, plan.is_minimized) {
+                log::warn!(
+                    "session restore could not re-apply minimized for a matched client: {error}"
                 );
             }
         }
@@ -1470,6 +1513,7 @@ mod tests {
             is_sticky: false,
             is_above: false,
             is_below: false,
+            is_minimized: false,
         }
     }
 
@@ -1516,6 +1560,7 @@ mod tests {
                     is_sticky: true,
                     is_above: true,
                     is_below: false,
+                    is_minimized: true,
                 },
                 entry("Alacritty", "alacritty", 0b1),
             ],
@@ -1981,8 +2026,8 @@ mod tests {
     #[test]
     fn migration_refuses_future_versions_and_unreadable_documents() {
         let error =
-            migrate_session_json(r#"{"version":8,"clients":[],"monitor_orders":[]}"#).unwrap_err();
-        assert!(error.contains("unsupported session version 8"));
+            migrate_session_json(r#"{"version":9,"clients":[],"monitor_orders":[]}"#).unwrap_err();
+        assert!(error.contains("unsupported session version 9"));
 
         let error = migrate_session_json("not JSON").unwrap_err();
         assert!(error.contains("no readable version"));
@@ -2009,8 +2054,12 @@ mod tests {
         let error = migrate_session_json(r#"{"version":6,"clients":[]}"#).unwrap_err();
         assert!(error.contains("cannot parse version 6 session snapshot"));
 
-        // v7（当前版本）同样严格：缺 monitor_orders 字段直接拒绝。
+        // v7 保持严格：缺 monitor_orders 字段直接拒绝。
         let error = migrate_session_json(r#"{"version":7,"clients":[]}"#).unwrap_err();
+        assert!(error.contains("cannot parse version 7 session snapshot"));
+
+        // v8（当前版本）同样严格：缺 monitor_orders 字段直接拒绝。
+        let error = migrate_session_json(r#"{"version":8,"clients":[]}"#).unwrap_err();
         assert!(error.contains("cannot parse session snapshot"));
     }
 
@@ -2024,6 +2073,7 @@ mod tests {
         assert!(!snapshot.clients[0].is_sticky);
         assert!(!snapshot.clients[0].is_above);
         assert!(!snapshot.clients[0].is_below);
+        assert!(!snapshot.clients[0].is_minimized);
     }
 
     #[test]
@@ -2036,6 +2086,17 @@ mod tests {
         assert!(snapshot.clients[0].is_sticky);
         assert!(!snapshot.clients[0].is_above);
         assert!(!snapshot.clients[0].is_below);
+        assert!(!snapshot.clients[0].is_minimized);
+    }
+
+    #[test]
+    fn v7_snapshot_without_minimized_migrates_to_false() {
+        let snapshot = migrate_session_json(
+            r#"{"version":7,"clients":[{"class":"A","instance":"a","name":"","tags":1,"is_floating":false,"monitor_num":0,"floating":null,"is_sticky":false,"is_above":false,"is_below":false}],"monitor_orders":[]}"#,
+        )
+        .expect("v7 without is_minimized still loads");
+        assert_eq!(snapshot.version, SESSION_VERSION);
+        assert!(!snapshot.clients[0].is_minimized);
     }
 
     #[test]
@@ -2849,6 +2910,46 @@ mod tests {
         assert!(
             jwm.state.clients[key].state.is_above && !jwm.state.clients[key].state.is_below,
             "Above must win when both flags are saved"
+        );
+    }
+
+    #[test]
+    fn session_captures_and_restores_minimized() {
+        let mut backend = DisplaySpyBackend::new(vec![output(1, 0, 0, 1920, 1080)]);
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").expect("test jwm");
+        let monitor = jwm.state.monitor_order[0];
+        let tags = jwm.state.monitors[monitor].get_active_tags();
+
+        let mut client = WMClient::new(WindowId::from_raw(0x76));
+        client.class = "MinApp".into();
+        client.instance = "minapp".into();
+        client.mon = Some(monitor);
+        client.state.tags = tags;
+        client.geometry.x = 100;
+        client.geometry.y = 80;
+        client.geometry.w = 640;
+        client.geometry.h = 480;
+        client.geometry.border_w = 2;
+        let key = jwm.insert_client(client);
+        jwm.attach_to_monitor(key, monitor);
+
+        jwm.set_client_minimized(&mut backend, key, true)
+            .expect("minimize");
+        assert!(jwm.state.clients[key].state.is_hidden);
+
+        let snapshot = capture_snapshot(&jwm.state, "status-bar");
+        assert!(
+            snapshot.clients[0].is_minimized,
+            "capture must record minimized"
+        );
+
+        jwm.set_client_minimized(&mut backend, key, false)
+            .expect("unminimize");
+        assert!(!jwm.state.clients[key].state.is_hidden);
+        assert_eq!(jwm.apply_session_snapshot(&mut backend, &snapshot), 1);
+        assert!(
+            jwm.state.clients[key].state.is_hidden,
+            "restore must re-apply minimized through set_client_minimized"
         );
     }
 }

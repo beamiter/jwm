@@ -4683,9 +4683,10 @@ impl JwmWaylandState {
     /// Ask the selection owner for its payload and record it in the history.
     ///
     /// Offers marked as secrets never get this far. Text wins when present;
-    /// otherwise `image/png` is read under the image history cap. The payload
-    /// is read on a thread: the owning client writes at its own pace, and a
-    /// compositor that waited would stall every other client with it.
+    /// otherwise PNG / JPEG / BMP is read under the image history cap
+    /// (JPEG/BMP decode to PNG before recording). The payload is read on a
+    /// thread: the owning client writes at its own pace, and a compositor
+    /// that waited would stall every other client with it.
     fn capture_clipboard(&mut self, mime_types: &[String]) {
         if !crate::config::CONFIG.load().behavior().clipboard_history {
             return;
@@ -4715,6 +4716,7 @@ impl JwmWaylandState {
                 return;
             }
         };
+        let mime_for_decode = mime.clone();
         if let Err(error) = request_data_device_client_selection(&self.seat, mime, write.into()) {
             warn!("clipboard: requesting the selection failed: {error:?}");
             return;
@@ -4745,7 +4747,13 @@ impl JwmWaylandState {
                     {
                         return;
                     }
-                    crate::backend::clipboard_offer::CapturedClipboard::Png(buffer)
+                    let Some(png) = crate::backend::clipboard_offer::image_offer_to_history_png(
+                        &buffer,
+                        &mime_for_decode,
+                    ) else {
+                        return;
+                    };
+                    crate::backend::clipboard_offer::CapturedClipboard::Png(png)
                 } else {
                     if buffer.len() > crate::backend::clipboard_offer::MAX_TEXT_BYTES {
                         return;

@@ -152,5 +152,6 @@ Every lock and unlock broadcasts a `monitor/lock` IPC event
 `locked` flag, an optional `connector` (`OutputIdentity.stable_key` /
 connector name), and an optional `monitor_name` (EDID name when known) per
 monitor, so a status bar can show which screens are down and key or label
-panels the same way session restore does. `get_workspaces` exposes the same
-optional `connector` on each workspace row (omitted when unknown).
+panels the same way session restore does. `get_workspaces` / `get_windows` /
+`get_tree` / `window/state` expose the same optional `connector` and
+`monitor_name` on each workspace and window row (omitted when unknown).

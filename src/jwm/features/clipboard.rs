@@ -10,7 +10,8 @@
 //! The history is **memory only**. It is never written to disk and does not
 //! survive a restart; a clipboard manager that persisted passwords to a file
 //! would be a liability, not a feature. Text and PNG shares one newest-first
-//! list; JPEG/BMP and remote image payloads are out of scope.
+//! list; remote image payloads remain out of scope. JPEG/BMP offers are
+//! decoded into PNG under the image history cap before recording.
 
 use crate::config::CONFIG;
 use std::collections::VecDeque;

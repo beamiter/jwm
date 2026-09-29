@@ -366,21 +366,61 @@ pub fn preferred_text_mime(mime_types: &[String]) -> Option<String> {
     None
 }
 
-/// Pick an `image/png` offer for history capture.
+/// Pick an image offer for history capture.
 ///
-/// JPEG/BMP are intentionally ignored: the picker stores and re-offers PNG
-/// only. Callers still prefer text when [`preferred_text_mime`] finds one.
+/// Prefers `image/png`, then `image/jpeg`, then `image/bmp`. Non-PNG offers
+/// are decoded into PNG under [`MAX_IMAGE_HISTORY_BYTES`] before the history
+/// stores them (see [`image_offer_to_history_png`]). Callers still prefer
+/// text when [`preferred_text_mime`] finds one.
 #[must_use]
 pub fn preferred_image_mime(mime_types: &[String]) -> Option<String> {
-    mime_types
-        .iter()
-        .find(|mime| mime.eq_ignore_ascii_case("image/png"))
-        .cloned()
+    const PREFERRED: [&str; 3] = ["image/png", "image/jpeg", "image/bmp"];
+    for wanted in PREFERRED {
+        if let Some(found) = mime_types
+            .iter()
+            .find(|mime| mime.eq_ignore_ascii_case(wanted))
+        {
+            return Some(found.clone());
+        }
+    }
+    None
+}
+
+/// Decode a captured image offer into PNG bytes for the history.
+///
+/// PNG offers pass through when they fit under [`MAX_IMAGE_HISTORY_BYTES`].
+/// JPEG/BMP offers are decoded and re-encoded as PNG; empty, undecodable, or
+/// oversized results are dropped. The history stores and re-offers PNG only.
+#[must_use]
+pub fn image_offer_to_history_png(bytes: &[u8], mime: &str) -> Option<Vec<u8>> {
+    if bytes.is_empty() || bytes.len() > MAX_IMAGE_HISTORY_BYTES {
+        return None;
+    }
+    let mime = mime.to_ascii_lowercase();
+    if mime == "image/png" {
+        return Some(bytes.to_vec());
+    }
+    if mime != "image/jpeg" && mime != "image/jpg" && mime != "image/bmp" {
+        return None;
+    }
+    let image = image::load_from_memory(bytes).ok()?;
+    let mut png = Vec::new();
+    {
+        let mut cursor = std::io::Cursor::new(&mut png);
+        image
+            .write_to(&mut cursor, image::ImageFormat::Png)
+            .ok()?;
+    }
+    if png.is_empty() || png.len() > MAX_IMAGE_HISTORY_BYTES {
+        return None;
+    }
+    Some(png)
 }
 
 /// What the history should request from an offer, after secret filtering.
 ///
-/// Policy: text wins when present; otherwise PNG. Everything else is skipped.
+/// Policy: text wins when present; otherwise PNG / JPEG / BMP. Everything
+/// else is skipped.
 #[must_use]
 pub fn preferred_history_mime(mime_types: &[String]) -> Option<String> {
     preferred_text_mime(mime_types).or_else(|| preferred_image_mime(mime_types))
@@ -454,7 +494,7 @@ mod tests {
     }
 
     #[test]
-    fn image_png_is_the_only_history_image_mime() {
+    fn image_history_accepts_png_jpeg_and_bmp_mimes() {
         assert_eq!(
             preferred_image_mime(&["image/png".to_string()]).as_deref(),
             Some("image/png")
@@ -464,13 +504,31 @@ mod tests {
             Some("IMAGE/PNG")
         );
         assert_eq!(
-            preferred_image_mime(&["image/jpeg".to_string(), "image/bmp".to_string()]),
+            preferred_image_mime(&["image/jpeg".to_string(), "image/bmp".to_string()]).as_deref(),
+            Some("image/jpeg")
+        );
+        assert_eq!(
+            preferred_image_mime(&["image/bmp".to_string()]).as_deref(),
+            Some("image/bmp")
+        );
+        assert_eq!(
+            preferred_image_mime(&["image/webp".to_string()]),
             None
+        );
+        // PNG wins over JPEG when both are advertised.
+        assert_eq!(
+            preferred_image_mime(&[
+                "image/jpeg".to_string(),
+                "image/png".to_string(),
+                "image/bmp".to_string(),
+            ])
+            .as_deref(),
+            Some("image/png")
         );
     }
 
     #[test]
-    fn history_mime_prefers_text_over_png() {
+    fn history_mime_prefers_text_over_images() {
         let both = vec![
             "image/png".to_string(),
             "text/plain;charset=utf-8".to_string(),
@@ -484,9 +542,57 @@ mod tests {
             Some("image/png")
         );
         assert_eq!(
-            preferred_history_mime(&["image/jpeg".to_string(), "text/uri-list".to_string()]),
-            None
+            preferred_history_mime(&["image/jpeg".to_string(), "text/uri-list".to_string()])
+                .as_deref(),
+            Some("image/jpeg")
         );
+    }
+
+    #[test]
+    fn jpeg_offer_decodes_to_png_under_the_image_cap() {
+        // 1×1 red JPEG.
+        let jpeg = {
+            let img = image::RgbImage::from_pixel(1, 1, image::Rgb([255, 0, 0]));
+            let mut bytes = Vec::new();
+            image::DynamicImage::ImageRgb8(img)
+                .write_to(
+                    &mut std::io::Cursor::new(&mut bytes),
+                    image::ImageFormat::Jpeg,
+                )
+                .expect("encode jpeg");
+            bytes
+        };
+        let png = image_offer_to_history_png(&jpeg, "image/jpeg").expect("jpeg→png");
+        assert!(png.starts_with(b"\x89PNG"), "must be a PNG");
+        assert!(png.len() <= MAX_IMAGE_HISTORY_BYTES);
+        // Round-trip through history PNG path is a no-op copy.
+        let again = image_offer_to_history_png(&png, "image/png").expect("png passthrough");
+        assert_eq!(again, png);
+    }
+
+    #[test]
+    fn bmp_offer_decodes_to_png_under_the_image_cap() {
+        let bmp = {
+            let img = image::RgbImage::from_pixel(2, 2, image::Rgb([0, 128, 255]));
+            let mut bytes = Vec::new();
+            image::DynamicImage::ImageRgb8(img)
+                .write_to(
+                    &mut std::io::Cursor::new(&mut bytes),
+                    image::ImageFormat::Bmp,
+                )
+                .expect("encode bmp");
+            bytes
+        };
+        let png = image_offer_to_history_png(&bmp, "image/bmp").expect("bmp→png");
+        assert!(png.starts_with(b"\x89PNG"));
+    }
+
+    #[test]
+    fn oversized_or_empty_image_offers_are_dropped() {
+        assert!(image_offer_to_history_png(&[], "image/png").is_none());
+        let huge = vec![0u8; MAX_IMAGE_HISTORY_BYTES + 1];
+        assert!(image_offer_to_history_png(&huge, "image/png").is_none());
+        assert!(image_offer_to_history_png(b"not-an-image", "image/jpeg").is_none());
     }
 
     #[test]

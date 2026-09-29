@@ -4,7 +4,7 @@
 
 ---
 
-## Evolve backlog（目标 100 轮；已完成 wave 9–58，本地 ahead）
+## Evolve backlog（目标 100 轮；已完成 wave 9–63，本地 ahead）
 
 | # | 选题 | Size |
 | --- | --- | --- |
@@ -14,7 +14,32 @@
 | 51–53 | WorkspaceInfo.connector + Hub Shell / AudioOutput / Session / Lock* 中键→Enter | ✓ |
 | 54–56 | Theme / Wallpaper / Audio / Players / Session menu 中键→Enter | ✓ |
 | 57–58 | vstack focusstack + scrolling focus → window/state；MonitorInfoIpc.monitor_name | ✓ |
-| … | 跳过：Annotation/Screenshot CommonLinear、toast Closed(1)、BT withdraw、FS/PiP 丢锚点、Recording EncodedOnly、XWayland 单轴 | |
+| 59–63 | Session minimized v8；Window/Workspace monitor_name；portal IPC picker；clipboard JPEG/BMP→PNG；FS/PiP promoted-neighbour lock test | ✓ |
+| … | 跳过：Annotation/Screenshot CommonLinear、toast Closed(1)、BT withdraw、FS/PiP 自身丢锚点（own-anchor drop）、Recording EncodedOnly、XWayland 单轴 | |
+
+---
+
+## 2026-09-29（三十六）：session minimized + monitor_name + portal IPC + clipboard JPEG + FS/PiP lock
+
+选题 = evolve waves 59–63 / evolve7h。
+
+1. **Wave 59**：`session.json` → v8；`SessionEntry.is_minimized`（serde default）；
+   restore 经 `set_client_minimized`；v7 迁移。Docs window-placement Restarts。
+2. **Wave 60**：`WindowInfo` / `WorkspaceInfo` 增 optional `monitor_name`（同
+   `MonitorInfoIpc`）；`get_windows` / `get_workspaces` / `get_tree` /
+   `window/state` 填充。Serialize pins。
+3. **Wave 61**：portal `pick_windows` 在 Wayland app_id/title 未命中时走
+   `ipc::query_windows`，按 class/instance/name 回映 toplevel；失败保持原
+   回退。`picker_match` 纯函数 pin。
+4. **Wave 62**：clipboard `preferred_image_mime` 接受 JPEG/BMP；
+   `image_offer_to_history_png` 解码入库（帽 4 MiB）；X11/Wayland 捕获接线。
+   Docs clipboard.md。
+5. **Wave 63**：仍提升的邻居在 FS/PiP 下继续承载 maximize 链的锁定测试
+   （关闭时传出 own_anchor）；**不做**自身在 FS/PiP 下取消最大化丢锚点修复。
+
+**验证**：`scripts/test.sh --lib -- session_captures_and_restores window_info workspace_info clipboard_offer promoted_neighbour_under_fs`.
+
+**下一轮候选**：见跳过表；FS/PiP 自身丢锚点仍为策略/延后项。
 
 ---
 

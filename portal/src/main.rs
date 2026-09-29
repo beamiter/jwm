@@ -13,6 +13,7 @@ mod dbus;
 mod dmabuf;
 mod ipc;
 mod picker;
+mod picker_match;
 mod pipewire_stream;
 mod restore;
 mod session;

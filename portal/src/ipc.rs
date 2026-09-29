@@ -4,12 +4,9 @@
 //! list, so we don't depend on the user having set wm_class properly in the
 //! Wayland toplevel-list app_id.
 //!
-//! Not wired in yet: `picker::pick_windows` still matches `JWM_PORTAL_WINDOW`
-//! against the Wayland toplevel list alone. The socket resolution, endpoint
-//! checks and wire format here are kept to the compositor's contract so that
-//! wiring it in is only a matter of calling [`query_windows`].
-//!
-//! Failure is non-fatal — the picker keeps the Wayland-bound app_id/title.
+//! [`crate::picker::pick_windows`] calls [`query_windows`] when the Wayland
+//! app_id/title match misses; failure is non-fatal — the picker keeps the
+//! Wayland-bound app_id/title fallback (and the interactive picker).
 
 use std::ffi::OsStr;
 use std::fs;

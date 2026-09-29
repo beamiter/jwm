@@ -193,9 +193,11 @@ Refused or no-op requests do not emit it; subscribe to `window` or
 `window/state` to follow flips without polling. A title change also emits
 the lighter `window/title` event; focus still emits `window/focus`.
 `get_windows` / `get_tree` / `window/state` also report `pid` when known,
-and an optional `connector` (`OutputIdentity.stable_key` / connector name)
-for the window's monitor — the same identity `get_monitors` exposes —
-omitted when the live output map has no identity for that monitor.
+and optional `connector` / `monitor_name` (`OutputIdentity.stable_key` /
+connector name, and EDID name when known — the same fields as
+`MonitorInfoIpc`) so scripts can key windows to panels across hotplug
+renumbering. Both are omitted when the live output map has no identity for
+that monitor.
 
 A refused request, like one that changes nothing, leaves the window alone:
 JWM republishes the current state and replies with the current geometry, a
@@ -310,6 +312,8 @@ Session snapshots (v7+) also store Above / Below
 (`_NET_WM_STATE_ABOVE` / `_BELOW`); `restore_session` re-applies them through
 the same `apply_external_stacking_request` path client `_NET_WM_STATE`
 requests use, with Above winning when both flags were somehow saved.
+Session snapshots (v8+) also store minimized; `restore_session` re-applies
+it through `set_client_minimized` after placement / maximize / stacking.
 Across a
 seamless X11 restart the EWMH atoms carry the maximize state, and JWM's
 private `_JWM_MAXIMIZE_RESTORE_V1` property carries the pre-maximize

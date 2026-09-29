@@ -518,6 +518,11 @@ pub struct WindowInfo {
     /// monitor when known; omitted when the live output map has no identity.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub connector: Option<String>,
+    /// EDID monitor name for the window's monitor when known; omitted when
+    /// the live output map has no identity or the EDID did not advertise a
+    /// name. Same field as [`MonitorInfoIpc::monitor_name`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub monitor_name: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -534,6 +539,10 @@ pub struct WorkspaceInfo {
     /// monitor when known; omitted when the live output map has no identity.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub connector: Option<String>,
+    /// EDID monitor name for this workspace's monitor when known; omitted
+    /// when unknown. Same field as [`MonitorInfoIpc::monitor_name`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub monitor_name: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1072,6 +1081,7 @@ mod tests {
             is_focused: false,
             pid: Some(1234),
             connector: Some("DP-1".into()),
+            monitor_name: None,
         })
         .expect("serialize WindowInfo");
 
@@ -1110,6 +1120,7 @@ mod tests {
             is_focused: false,
             pid: None,
             connector: None,
+            monitor_name: None,
         })
         .expect("serialize");
         assert!(without_pid.get("pid").is_none());
@@ -1143,9 +1154,11 @@ mod tests {
             is_focused: true,
             pid: None,
             connector: Some("HDMI-A-1".into()),
+            monitor_name: Some("Dell U2720Q".into()),
         })
         .expect("serialize");
         assert_eq!(with_connector["connector"], "HDMI-A-1");
+        assert_eq!(with_connector["monitor_name"], "Dell U2720Q");
 
         let without = serde_json::to_value(WindowInfo {
             id: 8,
@@ -1172,9 +1185,11 @@ mod tests {
             is_focused: false,
             pid: None,
             connector: None,
+            monitor_name: None,
         })
         .expect("serialize");
         assert!(without.get("connector").is_none());
+        assert!(without.get("monitor_name").is_none());
     }
 
     #[test]
@@ -1228,9 +1243,11 @@ mod tests {
             num_clients: 2,
             focused: true,
             connector: Some("DP-1".into()),
+            monitor_name: Some("Dell U2720Q".into()),
         })
         .expect("serialize");
         assert_eq!(with_connector["connector"], "DP-1");
+        assert_eq!(with_connector["monitor_name"], "Dell U2720Q");
         assert_eq!(with_connector["focused"], true);
 
         let without = serde_json::to_value(WorkspaceInfo {
@@ -1243,9 +1260,11 @@ mod tests {
             num_clients: 0,
             focused: false,
             connector: None,
+            monitor_name: None,
         })
         .expect("serialize");
         assert!(without.get("connector").is_none());
+        assert!(without.get("monitor_name").is_none());
     }
 
     #[test]

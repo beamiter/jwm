@@ -72,6 +72,8 @@ struct Atoms {
     text_plain_utf8: Atom,
     text_plain: Atom,
     image_png: Atom,
+    image_jpeg: Atom,
+    image_bmp: Atom,
     incr: Atom,
     /// Property on our own window that conversions are delivered into.
     transfer: Atom,
@@ -488,6 +490,8 @@ impl Watcher {
             text_plain_utf8: intern(&conn, "text/plain;charset=utf-8")?,
             text_plain: intern(&conn, "text/plain")?,
             image_png: intern(&conn, "image/png")?,
+            image_jpeg: intern(&conn, "image/jpeg")?,
+            image_bmp: intern(&conn, "image/bmp")?,
             incr: intern(&conn, "INCR")?,
             transfer: intern(&conn, "JWM_CLIPBOARD")?,
         };
@@ -1139,8 +1143,10 @@ impl Watcher {
                     self.cancel_capture();
                     return None;
                 }
+                let mime = self.image_mime_for_atom(event.target);
                 self.cancel_capture();
-                (!reply.value.is_empty()).then_some(CapturedClipboard::Png(reply.value))
+                crate::backend::clipboard_offer::image_offer_to_history_png(&reply.value, mime)
+                    .map(CapturedClipboard::Png)
             }
         }
     }
@@ -1201,6 +1207,10 @@ impl Watcher {
             (Conversion::Text, target)
         } else if targets.contains(&self.atoms.image_png) {
             (Conversion::Png, self.atoms.image_png)
+        } else if targets.contains(&self.atoms.image_jpeg) {
+            (Conversion::Png, self.atoms.image_jpeg)
+        } else if targets.contains(&self.atoms.image_bmp) {
+            (Conversion::Png, self.atoms.image_bmp)
         } else {
             self.cancel_capture();
             return;
@@ -1708,9 +1718,25 @@ impl Watcher {
                 String::from_utf8(bytes).ok().map(CapturedClipboard::Text)
             }
             Conversion::Png => {
+                let mime = self
+                    .capture
+                    .as_ref()
+                    .map(|capture| self.image_mime_for_atom(capture.target))
+                    .unwrap_or("image/png");
                 self.cancel_capture();
-                (!bytes.is_empty()).then_some(CapturedClipboard::Png(bytes))
+                crate::backend::clipboard_offer::image_offer_to_history_png(&bytes, mime)
+                    .map(CapturedClipboard::Png)
             }
+        }
+    }
+
+    fn image_mime_for_atom(&self, atom: Atom) -> &'static str {
+        if atom == self.atoms.image_jpeg {
+            "image/jpeg"
+        } else if atom == self.atoms.image_bmp {
+            "image/bmp"
+        } else {
+            "image/png"
         }
     }
 

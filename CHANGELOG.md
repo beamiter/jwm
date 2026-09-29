@@ -7,6 +7,23 @@ monorepo use independent Semantic Versions.
 
 ### Added
 
+- Session snapshots (v8+) persist minimized; `restore_session` re-applies it
+  through `set_client_minimized`. See
+  [docs/window-placement.md](docs/window-placement.md#restarts-and-sessions).
+
+- `get_windows` / `get_tree` / `window/state` and `get_workspaces` expose an
+  optional `monitor_name` (EDID name) beside `connector`, omitted when
+  unknown. See [docs/monitor-lock.md](docs/monitor-lock.md) and
+  [docs/window-placement.md](docs/window-placement.md).
+
+- Portal `JWM_PORTAL_WINDOW` matching consults jwm IPC `get_windows` when the
+  Wayland foreign-toplevel `app_id` / title miss, so `class:firefox` still
+  resolves; Wayland-only matching remains the fallback.
+
+- Clipboard history decodes JPEG/BMP offers into PNG under the 4 MiB image
+  cap (PNG still preferred when advertised). See
+  [docs/clipboard.md](docs/clipboard.md).
+
 - Theme, Wallpaper, Audio device, and Players pickers, plus the Session menu,
   middle-click the pointed row (or Wallpaper preview) and apply through the
   same Enter path as left-click; Session keeps its two-press confirm. See

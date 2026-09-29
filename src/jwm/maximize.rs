@@ -1578,6 +1578,114 @@ mod tests {
         }
     }
 
+    /// Lock: a neighbour that is still promoted keeps carrying the maximize
+    /// chain even while it is fullscreen or in picture-in-picture. This is
+    /// not the own-anchor-drop case of unmaximizing *yourself* under FS/PiP
+    /// (that still rests at the tiled tail — see window-placement.md).
+    #[test]
+    fn promoted_neighbour_under_fs_or_pip_still_carries_the_chain() {
+        for (mode, return_first) in [("fullscreen", 0), ("fullscreen", 1), ("pip", 0), ("pip", 1)] {
+            let mut backend = DisplaySpyBackend::new(vec![output(1, 0, 0, 1920, 1080)]);
+            let (mut jwm, [x, y, z]) = three_tiles(&mut backend, 0x5c10);
+            let monitor = jwm.state.monitor_order[0];
+            let case = format!("{mode}, back first: {return_first}");
+
+            toggle_maximize_of(&mut jwm, &mut backend, y);
+            toggle_maximize_of(&mut jwm, &mut backend, x);
+            assert_eq!(jwm.state.clients[x].state.maximize_restore_anchor, Some(y));
+            assert_eq!(jwm.state.clients[y].state.maximize_restore_anchor, Some(z));
+            assert!(jwm.state.clients[y].state.maximize_restore_tiled);
+
+            if mode == "fullscreen" {
+                jwm.setfullscreen(&mut backend, y, true)
+                    .expect("fullscreen");
+                assert!(jwm.state.clients[y].state.is_fullscreen, "{case}");
+            } else {
+                jwm.set_client_pip(&mut backend, y, true).expect("pip");
+                assert!(jwm.state.clients[y].state.is_pip, "{case}");
+            }
+            assert!(
+                jwm.state.clients[y].state.maximize_restore_tiled,
+                "promotion survives {case}"
+            );
+            assert_eq!(
+                jwm.state.clients[y].state.maximize_restore_anchor,
+                Some(z),
+                "{case}"
+            );
+
+            // resting_anchor must walk through the still-promoted FS/PiP
+            // neighbour to the tile behind it.
+            let clients = jwm.state.monitor_clients[monitor].clone();
+            assert_eq!(
+                crate::jwm::maximize::resting_anchor(
+                    &jwm.state,
+                    &clients,
+                    x,
+                    Some(y),
+                ),
+                Some(z),
+                "chain through promoted neighbour under {case}"
+            );
+
+            let order = if return_first == 0 { [x, y] } else { [y, x] };
+            for key in order {
+                // Leave FS/PiP on y before unmaximizing it so the retile can
+                // land; x can unmaximize while y is still suspended.
+                if key == y {
+                    if mode == "fullscreen" {
+                        jwm.setfullscreen(&mut backend, y, false)
+                            .expect("leave fullscreen");
+                    } else {
+                        jwm.set_client_pip(&mut backend, y, false).expect("leave pip");
+                    }
+                }
+                toggle_maximize_of(&mut jwm, &mut backend, key);
+            }
+            assert_eq!(
+                jwm.state.monitor_clients[monitor],
+                vec![x, y, z],
+                "slots restored after {case}"
+            );
+        }
+    }
+
+    /// Lock: closing a still-promoted neighbour under FS/PiP hands its own
+    /// anchor on (like any promoted window), so the window that named it
+    /// keeps its slot. A non-promoted floated anchor would hand on none.
+    #[test]
+    fn closing_a_promoted_neighbour_under_fs_or_pip_passes_its_slot_on() {
+        for mode in ["fullscreen", "pip"] {
+            let mut backend = DisplaySpyBackend::new(vec![output(1, 0, 0, 1920, 1080)]);
+            let (mut jwm, [x, y, z]) = three_tiles(&mut backend, 0x5c20);
+            let monitor = jwm.state.monitor_order[0];
+            toggle_maximize_of(&mut jwm, &mut backend, y);
+            toggle_maximize_of(&mut jwm, &mut backend, x);
+            if mode == "fullscreen" {
+                jwm.setfullscreen(&mut backend, y, true)
+                    .expect("fullscreen");
+            } else {
+                jwm.set_client_pip(&mut backend, y, true).expect("pip");
+            }
+            assert!(jwm.state.clients[y].state.maximize_restore_tiled);
+
+            jwm.unmanage_regular_client(&mut backend, y, true)
+                .expect("y closes");
+            assert_eq!(
+                jwm.state.clients[x].state.maximize_restore_anchor,
+                Some(z),
+                "{mode}: promoted neighbour must pass its own anchor on"
+            );
+
+            toggle_maximize_of(&mut jwm, &mut backend, x);
+            assert_eq!(
+                jwm.state.monitor_clients[monitor],
+                vec![x, z],
+                "{mode}: x returns in front of z"
+            );
+        }
+    }
+
     /// Regression: a window that left the tiles without maximize (it went
     /// fullscreen, or the user floated it) sits in the floating tail, where
     /// [`resting_anchor`] already gives up on it. Closing it handed the
