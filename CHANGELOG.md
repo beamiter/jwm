@@ -7,6 +7,13 @@ monorepo use independent Semantic Versions.
 
 ### Added
 
+- Closed-placement memory survives a JWM restart: up to 256 class/instance →
+  (monitor, tags) entries are written atomically to
+  `closed_placement.json` beside `session.json` under the XDG state
+  directory. Disabling `behavior.remember_closed_placement` clears memory
+  and deletes the file. The JWM launch registry is not persisted. See
+  [docs/window-placement.md](docs/window-placement.md).
+
 - Seamless X11 restart keeps a visible hand-floated window's layout membership
   in `_JWM_FLOATING_V1` so `togglefloating` survives exec at the same
   rectangle. The property is cleared when the window is tiled, maximized,

@@ -25,8 +25,10 @@ remember_closed_placement = true   # default
 ```
 
 The key is hot-reloadable and accepts `set_config`. Switching it off also
-forgets everything remembered so far, so a later re-enable starts from what
-the user does next rather than from stale history.
+forgets everything remembered so far — both the in-memory map and the on-disk
+snapshot — so a later re-enable starts from what the user does next rather
+than from stale history. While the feature is disabled the snapshot file is
+deleted (or ignored); it is only loaded at startup when the feature is on.
 
 ## What is remembered
 
@@ -37,8 +39,12 @@ replaces the previous one. Status bars, docks, scratchpads, sticky windows,
 transients and popup-like window types (dialogs, tooltips, notifications,
 splash screens, utility windows) are never recorded.
 
-The memory lives in the JWM process. It holds up to 256 identities, evicts
-the oldest when full, and does not survive a restart of JWM.
+The memory holds up to 256 identities, evicts the oldest when full, and is
+persisted to `closed_placement.json` beside `session.json` under the XDG
+state directory (`$XDG_STATE_HOME/jwm/`, else `~/.local/state/jwm/`). A
+restart of JWM reloads it so a browser reopened from a shell still returns
+where it was last closed. The JWM launch registry that attributes keybinding
+and launcher windows is process-only and is not written to disk.
 
 ## Who gets the memory
 

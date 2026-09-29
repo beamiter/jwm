@@ -1891,7 +1891,7 @@ impl Jwm {
         self.animations.remove(client_key);
         // Where this window sat is the best guess for where its application
         // goes next time; capture it while monitor and tags are still bound.
-        self.remember_closed_placement(client_key, std::time::Instant::now());
+        self.remember_closed_placement(client_key);
         // If this client is swallowing a parent, restore the parent first so
         // it gets remapped before we drop our reference to the swallow link.
         self.try_unswallow(backend, client_key);

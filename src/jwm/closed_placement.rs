@@ -7,10 +7,13 @@
 //! inside a terminal, an application's own second top-level. Those belong
 //! where the same application was last closed.
 //!
-//! Two bounded, in-memory registries implement that:
+//! Two bounded registries implement that:
 //!
 //! - [`ClosedPlacementMemory`] remembers, per WM_CLASS identity, the monitor
-//!   number and tag mask a regular client held when it was unmanaged.
+//!   number and tag mask a regular client held when it was unmanaged, and
+//!   persists that map beside the session snapshot so reopen-from-shell and
+//!   agent-spawn placement survive a WM restart. [`JwmLaunchRegistry`] stays
+//!   process-only: spawn attribution is only meaningful for the current run.
 //! - [`JwmLaunchRegistry`] records every child process JWM spawns itself, so
 //!   a new window can be attributed either to an explicit keybinding,
 //!   launcher, scratchpad or shell-panel action (which keeps the default
@@ -22,7 +25,7 @@
 //! window. A window with no PID, or whose chain reaches nothing JWM knows,
 //! is blamed on the newest unclaimed JWM spawn only while that spawn is a
 //! few seconds old; D-Bus-activated applications and PID-less Wayland
-//! surfaces have no better evidence. Neither registry touches the disk.
+//! surfaces have no better evidence.
 //!
 //! A window the memory sends somewhere other than the focused window's
 //! monitor and tag never pulls focus or the view along: it is laid out
@@ -35,8 +38,15 @@ use crate::config::CONFIG;
 use crate::core::models::ClientKey;
 use crate::jwm::rules::RuleMatcher;
 use crate::jwm::scratchpad_pending::linux_process_start_time;
+use crate::jwm::session::{ensure_private_directory, session_file_path};
 use log::{debug, info, warn};
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::fs::{self, OpenOptions};
+use std::io::{self, Read, Write};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 /// Distinct WM_CLASS identities the memory keeps before evicting the oldest.
@@ -52,6 +62,17 @@ pub(crate) const LAUNCH_RECORD_TTL: Duration = Duration::from_secs(600);
 pub(crate) const UNRESOLVED_LAUNCH_ATTRIBUTION_WINDOW: Duration = Duration::from_secs(10);
 /// Ancestors examined above a window's own PID.
 pub(crate) const MAX_ANCESTRY_DEPTH: usize = 16;
+
+const CLOSED_PLACEMENT_VERSION: u32 = 1;
+const MAX_CLOSED_PLACEMENT_BYTES: u64 = 1024 * 1024;
+const MAX_IDENTITY_FIELD_BYTES: usize = 65_536;
+const CLOSED_PLACEMENT_FILE: &str = "closed_placement.json";
+/// Temporaries are `<prefix><pid>-<sequence>`: unique per writer, so a crash
+/// between create and rename leaves one behind that nothing would ever reuse
+/// or delete without the sweep in `atomic_write_closed_placement`.
+const CLOSED_PLACEMENT_TEMPORARY_PREFIX: &str = ".closed_placement.json.tmp-";
+const MAX_CLOSED_PLACEMENT_SWEEP_ENTRIES: usize = 1024;
+static CLOSED_PLACEMENT_WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// WM_CLASS identity a placement is remembered under. Exact, case-sensitive.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -86,12 +107,302 @@ impl std::fmt::Display for PlacementIdentity {
 pub(crate) struct RememberedPlacement {
     pub monitor_num: i32,
     pub tags: u32,
-    closed_at: Instant,
+    /// Monotonic close order; the smallest seq is evicted first when full.
+    closed_seq: u64,
+}
+
+/// Versioned on-disk snapshot of [`ClosedPlacementMemory`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct ClosedPlacementSnapshot {
+    version: u32,
+    placements: Vec<ClosedPlacementEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct ClosedPlacementEntry {
+    class: String,
+    instance: String,
+    monitor_num: i32,
+    tags: u32,
+    seq: u64,
+}
+
+impl ClosedPlacementSnapshot {
+    fn from_memory(memory: &ClosedPlacementMemory) -> Self {
+        let mut placements: Vec<ClosedPlacementEntry> = memory
+            .by_identity
+            .iter()
+            .map(|(identity, placement)| ClosedPlacementEntry {
+                class: identity.class.clone(),
+                instance: identity.instance.clone(),
+                monitor_num: placement.monitor_num,
+                tags: placement.tags,
+                seq: placement.closed_seq,
+            })
+            .collect();
+        placements.sort_by_key(|entry| entry.seq);
+        Self {
+            version: CLOSED_PLACEMENT_VERSION,
+            placements,
+        }
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        if self.version != CLOSED_PLACEMENT_VERSION {
+            return Err(format!(
+                "unsupported closed-placement version {}",
+                self.version
+            ));
+        }
+        if self.placements.len() > MAX_REMEMBERED_PLACEMENTS {
+            return Err(format!(
+                "closed-placement snapshot has {} entries; limit is {MAX_REMEMBERED_PLACEMENTS}",
+                self.placements.len()
+            ));
+        }
+        let mut seen = HashSet::with_capacity(self.placements.len());
+        for (index, entry) in self.placements.iter().enumerate() {
+            if entry.class.is_empty() && entry.instance.is_empty() {
+                return Err(format!(
+                    "closed-placement entry {index} has an empty identity"
+                ));
+            }
+            if entry.class.len() > MAX_IDENTITY_FIELD_BYTES
+                || entry.instance.len() > MAX_IDENTITY_FIELD_BYTES
+            {
+                return Err(format!(
+                    "closed-placement entry {index} has oversized text fields"
+                ));
+            }
+            if entry.tags == 0 {
+                return Err(format!(
+                    "closed-placement entry {index} has an empty tag mask"
+                ));
+            }
+            let identity = PlacementIdentity {
+                class: entry.class.clone(),
+                instance: entry.instance.clone(),
+            };
+            if !seen.insert(identity) {
+                return Err(format!(
+                    "closed-placement entry {index} duplicates an earlier identity"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn into_memory(self) -> Result<ClosedPlacementMemory, String> {
+        self.validate()?;
+        let mut by_identity = HashMap::with_capacity(self.placements.len());
+        let mut next_seq = 0_u64;
+        for entry in self.placements {
+            next_seq = next_seq.max(entry.seq.saturating_add(1));
+            by_identity.insert(
+                PlacementIdentity {
+                    class: entry.class,
+                    instance: entry.instance,
+                },
+                RememberedPlacement {
+                    monitor_num: entry.monitor_num,
+                    tags: entry.tags,
+                    closed_seq: entry.seq,
+                },
+            );
+        }
+        Ok(ClosedPlacementMemory {
+            by_identity,
+            next_seq,
+        })
+    }
+
+    fn to_json(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string(self)
+    }
+
+    fn from_json(json: &str) -> Result<Self, serde_json::Error> {
+        serde_json::from_str(json)
+    }
 }
 
 #[derive(Debug, Default)]
 pub(crate) struct ClosedPlacementMemory {
     by_identity: HashMap<PlacementIdentity, RememberedPlacement>,
+    next_seq: u64,
+}
+
+/// Path of the closed-placement snapshot: same XDG state directory as
+/// [`session_file_path`], file name `closed_placement.json`.
+#[must_use]
+#[cfg_attr(test, allow(dead_code))]
+pub(crate) fn closed_placement_file_path() -> PathBuf {
+    session_file_path().with_file_name(CLOSED_PLACEMENT_FILE)
+}
+
+fn process_alive(pid: u32) -> bool {
+    let Ok(pid) = i32::try_from(pid) else {
+        return true;
+    };
+    if pid <= 0 {
+        return true;
+    }
+    if unsafe { libc::kill(pid, 0) } == 0 {
+        return true;
+    }
+    io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+fn orphaned_closed_placement_temporary(
+    name: &str,
+    own_pid: u32,
+    process_alive: impl Fn(u32) -> bool,
+) -> bool {
+    let Some(rest) = name.strip_prefix(CLOSED_PLACEMENT_TEMPORARY_PREFIX) else {
+        return false;
+    };
+    let Some((pid, _sequence)) = rest.split_once('-') else {
+        return false;
+    };
+    let Ok(pid) = pid.parse::<u32>() else {
+        return false;
+    };
+    pid != own_pid && !process_alive(pid)
+}
+
+fn sweep_orphaned_closed_placement_temporaries(parent: &Path) {
+    let Ok(entries) = fs::read_dir(parent) else {
+        return;
+    };
+    let own_pid = std::process::id();
+    for entry in entries.flatten().take(MAX_CLOSED_PLACEMENT_SWEEP_ENTRIES) {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !orphaned_closed_placement_temporary(name, own_pid, process_alive) {
+            continue;
+        }
+        let path = entry.path();
+        if fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.is_file()) {
+            let _ = fs::remove_file(&path);
+        }
+    }
+}
+
+fn atomic_write_closed_placement(path: &Path, contents: &[u8]) -> io::Result<()> {
+    if contents.len() as u64 > MAX_CLOSED_PLACEMENT_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "closed-placement snapshot exceeds the 1 MiB limit",
+        ));
+    }
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    ensure_private_directory(parent)?;
+    sweep_orphaned_closed_placement_temporaries(parent);
+
+    if fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "refusing to replace closed-placement symlink: {}",
+                path.display()
+            ),
+        ));
+    }
+
+    let sequence = CLOSED_PLACEMENT_WRITE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let temporary = parent.join(format!(
+        "{CLOSED_PLACEMENT_TEMPORARY_PREFIX}{}-{sequence}",
+        std::process::id()
+    ));
+    let result = (|| {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&temporary)?;
+        file.write_all(contents)?;
+        file.sync_all()?;
+        fs::rename(&temporary, path)?;
+        fs::File::open(parent)?.sync_all()?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
+fn load_closed_placement_snapshot(
+    path: &Path,
+) -> Result<ClosedPlacementSnapshot, Box<dyn std::error::Error>> {
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(format!(
+            "closed-placement path is not a regular file: {}",
+            path.display()
+        )
+        .into());
+    }
+    if metadata.uid() != unsafe { libc::geteuid() } {
+        return Err(format!(
+            "closed-placement file is owned by another user: {}",
+            path.display()
+        )
+        .into());
+    }
+    if metadata.mode() & 0o022 != 0 {
+        return Err(format!(
+            "closed-placement file is writable by another user or group: {}",
+            path.display()
+        )
+        .into());
+    }
+    if metadata.len() > MAX_CLOSED_PLACEMENT_BYTES {
+        return Err(format!(
+            "closed-placement file exceeds the 1 MiB limit: {}",
+            path.display()
+        )
+        .into());
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.take(MAX_CLOSED_PLACEMENT_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_CLOSED_PLACEMENT_BYTES {
+        return Err(format!(
+            "closed-placement file exceeds the 1 MiB limit: {}",
+            path.display()
+        )
+        .into());
+    }
+    let json = String::from_utf8(bytes).map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("closed-placement file is not valid UTF-8: {error}"),
+        )
+    })?;
+    let snapshot = ClosedPlacementSnapshot::from_json(&json)?;
+    snapshot.validate()?;
+    Ok(snapshot)
+}
+
+/// Remove the on-disk snapshot. Missing is fine; other errors are logged.
+fn clear_closed_placement_file(path: &Path) {
+    match fs::remove_file(path) {
+        Ok(()) => info!(
+            "[closed-placement] removed persisted placements at {}",
+            path.display()
+        ),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => warn!(
+            "[closed-placement] could not remove {}: {error}",
+            path.display()
+        ),
+    }
 }
 
 impl ClosedPlacementMemory {
@@ -106,6 +417,85 @@ impl ClosedPlacementMemory {
         self.by_identity.is_empty()
     }
 
+    /// Load from the default XDG path. Missing or unreadable → empty memory;
+    /// a corrupt file must not keep the WM from starting.
+    #[must_use]
+    #[cfg_attr(test, allow(dead_code))]
+    pub(crate) fn load() -> Self {
+        Self::load_from_path(&closed_placement_file_path())
+    }
+
+    /// Feature disabled at startup: delete any leftover snapshot and return
+    /// empty memory so a later re-enable does not revive stale history.
+    #[must_use]
+    #[cfg_attr(test, allow(dead_code))]
+    pub(crate) fn load_disabled() -> Self {
+        clear_closed_placement_file(&closed_placement_file_path());
+        Self::default()
+    }
+
+    #[must_use]
+    pub(crate) fn load_from_path(path: &Path) -> Self {
+        match load_closed_placement_snapshot(path) {
+            Ok(snapshot) => match snapshot.into_memory() {
+                Ok(memory) => {
+                    if !memory.is_empty() {
+                        info!(
+                            "[closed-placement] loaded {} placements from {}",
+                            memory.by_identity.len(),
+                            path.display()
+                        );
+                    }
+                    memory
+                }
+                Err(error) => {
+                    warn!(
+                        "[closed-placement] ignoring invalid snapshot {}: {error}",
+                        path.display()
+                    );
+                    Self::default()
+                }
+            },
+            Err(error)
+                if error
+                    .downcast_ref::<io::Error>()
+                    .is_some_and(|error| error.kind() == io::ErrorKind::NotFound) =>
+            {
+                Self::default()
+            }
+            Err(error) => {
+                warn!(
+                    "[closed-placement] could not load {}: {error}; starting empty",
+                    path.display()
+                );
+                Self::default()
+            }
+        }
+    }
+
+    /// Persist to the default XDG path. Failures are logged and dropped.
+    #[cfg_attr(test, allow(dead_code))]
+    pub(crate) fn save(&self) {
+        self.save_to_path(&closed_placement_file_path())
+    }
+
+    pub(crate) fn save_to_path(&self, path: &Path) {
+        let snapshot = ClosedPlacementSnapshot::from_memory(self);
+        let json = match snapshot.to_json() {
+            Ok(json) => json,
+            Err(error) => {
+                warn!("[closed-placement] could not serialise placements: {error}");
+                return;
+            }
+        };
+        if let Err(error) = atomic_write_closed_placement(path, json.as_bytes()) {
+            warn!(
+                "[closed-placement] could not save {}: {error}",
+                path.display()
+            );
+        }
+    }
+
     /// Remember where `identity` was just closed. A later close of the same
     /// identity replaces the earlier one; the newest word wins. Returns
     /// `false` for a tag mask with nothing in it.
@@ -114,7 +504,6 @@ impl ClosedPlacementMemory {
         identity: PlacementIdentity,
         monitor_num: i32,
         tags: u32,
-        now: Instant,
     ) -> bool {
         if tags == 0 {
             return false;
@@ -125,18 +514,20 @@ impl ClosedPlacementMemory {
             let oldest = self
                 .by_identity
                 .iter()
-                .min_by_key(|(_, placement)| placement.closed_at)
+                .min_by_key(|(_, placement)| placement.closed_seq)
                 .map(|(identity, _)| identity.clone());
             if let Some(oldest) = oldest {
                 self.by_identity.remove(&oldest);
             }
         }
+        let closed_seq = self.next_seq;
+        self.next_seq = self.next_seq.saturating_add(1);
         self.by_identity.insert(
             identity,
             RememberedPlacement {
                 monitor_num,
                 tags,
-                closed_at: now,
+                closed_seq,
             },
         );
         true
@@ -147,11 +538,12 @@ impl ClosedPlacementMemory {
         self.by_identity.get(identity).copied()
     }
 
-    /// Drop everything. Used when the feature is switched off at runtime so a
+    /// Drop everything in memory. Used when the feature is switched off so a
     /// later re-enable starts from what the user does next, not from stale
     /// history.
     pub(crate) fn clear(&mut self) {
         self.by_identity.clear();
+        self.next_seq = 0;
     }
 }
 
@@ -536,7 +928,7 @@ impl Jwm {
     }
 
     /// A regular client is going away: remember where it was.
-    pub(crate) fn remember_closed_placement(&mut self, client_key: ClientKey, now: Instant) {
+    pub(crate) fn remember_closed_placement(&mut self, client_key: ClientKey) {
         let cfg = CONFIG.load();
         if !cfg.behavior().remember_closed_placement {
             return;
@@ -567,21 +959,35 @@ impl Jwm {
         let win = client.win;
         if self
             .closed_placements
-            .remember(identity.clone(), monitor_num, tags, now)
+            .remember(identity.clone(), monitor_num, tags)
         {
             info!(
                 "[closed-placement] {win:?} ({identity}) closed on monitor {monitor_num} tags {tags:#b}"
             );
+            // Lib tests exercise remember through unmanage; they must not
+            // write the developer's XDG state directory.
+            #[cfg(not(test))]
+            self.closed_placements.save();
         } else {
             warn!("[closed-placement] {win:?} ({identity}) closed without a tag; not remembered");
         }
     }
 
-    /// Config reload: a feature switched off forgets what it learned.
+    /// Config reload: a feature switched off forgets what it learned, including
+    /// the on-disk snapshot, so a later re-enable starts empty.
     pub(crate) fn reconcile_closed_placement_config(&mut self, enabled: bool) {
-        if !enabled && !self.closed_placements.is_empty() {
+        if enabled {
+            return;
+        }
+        if !self.closed_placements.is_empty() {
             self.closed_placements.clear();
             info!("[closed-placement] disabled; forgetting remembered placements");
+        }
+        #[cfg(not(test))]
+        {
+            // Delete any leftover file while the feature is off, whether or
+            // not this process still held entries in memory.
+            clear_closed_placement_file(&closed_placement_file_path());
         }
     }
 }
@@ -589,6 +995,7 @@ impl Jwm {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
 
     fn identity(class: &str) -> PlacementIdentity {
         PlacementIdentity::new(class, class).expect("non-empty identity")
@@ -635,10 +1042,9 @@ mod tests {
 
     #[test]
     fn memory_keeps_the_newest_close_per_identity() {
-        let now = Instant::now();
         let mut memory = ClosedPlacementMemory::default();
-        assert!(memory.remember(identity("firefox"), 1, 0b100, now));
-        assert!(memory.remember(identity("firefox"), 0, 0b10, now + Duration::from_secs(1)));
+        assert!(memory.remember(identity("firefox"), 1, 0b100));
+        assert!(memory.remember(identity("firefox"), 0, 0b10));
         let placement = memory.lookup(&identity("firefox")).expect("remembered");
         assert_eq!((placement.monitor_num, placement.tags), (0, 0b10));
         assert_eq!(memory.len(), 1);
@@ -648,20 +1054,19 @@ mod tests {
     #[test]
     fn memory_rejects_an_empty_tag_mask() {
         let mut memory = ClosedPlacementMemory::default();
-        assert!(!memory.remember(identity("firefox"), 0, 0, Instant::now()));
+        assert!(!memory.remember(identity("firefox"), 0, 0));
         assert!(memory.is_empty());
     }
 
     #[test]
     fn memory_evicts_the_oldest_identity_when_full() {
-        let now = Instant::now();
         let mut memory = ClosedPlacementMemory::default();
         for index in 0..MAX_REMEMBERED_PLACEMENTS {
             let identity = PlacementIdentity::new(&format!("app{index}"), "").unwrap();
-            assert!(memory.remember(identity, 0, 1, now + Duration::from_millis(index as u64)));
+            assert!(memory.remember(identity, 0, 1));
         }
         assert_eq!(memory.len(), MAX_REMEMBERED_PLACEMENTS);
-        assert!(memory.remember(identity("newest"), 0, 1, now + Duration::from_secs(1)));
+        assert!(memory.remember(identity("newest"), 0, 1));
         assert_eq!(memory.len(), MAX_REMEMBERED_PLACEMENTS);
         assert!(
             memory
@@ -842,7 +1247,7 @@ mod tests {
         RememberedPlacement {
             monitor_num,
             tags,
-            closed_at: Instant::now(),
+            closed_seq: 0,
         }
     }
 
@@ -920,5 +1325,149 @@ mod tests {
             now + LAUNCH_RECORD_TTL + Duration::from_secs(1),
         );
         assert_eq!(registry.len(), 1, "everything older than the TTL is gone");
+    }
+
+    struct TestDir(PathBuf);
+
+    impl TestDir {
+        fn new(label: &str) -> Self {
+            let sequence = CLOSED_PLACEMENT_WRITE_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "jwm-closed-placement-{label}-{}-{sequence}",
+                std::process::id()
+            ));
+            fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+
+        fn file(&self) -> PathBuf {
+            self.0.join(CLOSED_PLACEMENT_FILE)
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn closed_placement_round_trips_through_disk() {
+        let dir = TestDir::new("roundtrip");
+        let path = dir.file();
+        let mut memory = ClosedPlacementMemory::default();
+        assert!(memory.remember(identity("firefox"), 1, 0b100));
+        assert!(memory.remember(identity("kitty"), 0, 0b10));
+        memory.save_to_path(&path);
+
+        let loaded = ClosedPlacementMemory::load_from_path(&path);
+        assert_eq!(loaded.len(), 2);
+        let firefox = loaded.lookup(&identity("firefox")).expect("firefox");
+        assert_eq!((firefox.monitor_num, firefox.tags), (1, 0b100));
+        let kitty = loaded.lookup(&identity("kitty")).expect("kitty");
+        assert_eq!((kitty.monitor_num, kitty.tags), (0, 0b10));
+        // Eviction order survived: firefox was remembered first.
+        assert!(firefox.closed_seq < kitty.closed_seq);
+    }
+
+    #[test]
+    fn closed_placement_load_on_missing_is_empty() {
+        let dir = TestDir::new("missing");
+        let path = dir.file();
+        assert!(!path.exists());
+        let loaded = ClosedPlacementMemory::load_from_path(&path);
+        assert!(loaded.is_empty());
+    }
+
+    #[test]
+    fn closed_placement_snapshot_rejects_out_of_bounds() {
+        let too_many = ClosedPlacementSnapshot {
+            version: CLOSED_PLACEMENT_VERSION,
+            placements: (0..=MAX_REMEMBERED_PLACEMENTS)
+                .map(|index| ClosedPlacementEntry {
+                    class: format!("app{index}"),
+                    instance: String::new(),
+                    monitor_num: 0,
+                    tags: 1,
+                    seq: index as u64,
+                })
+                .collect(),
+        };
+        assert!(
+            too_many
+                .validate()
+                .unwrap_err()
+                .contains("limit is")
+        );
+
+        let empty_tags = ClosedPlacementSnapshot {
+            version: CLOSED_PLACEMENT_VERSION,
+            placements: vec![ClosedPlacementEntry {
+                class: "firefox".into(),
+                instance: String::new(),
+                monitor_num: 0,
+                tags: 0,
+                seq: 0,
+            }],
+        };
+        assert!(
+            empty_tags
+                .validate()
+                .unwrap_err()
+                .contains("empty tag mask")
+        );
+
+        let bad_version = ClosedPlacementSnapshot {
+            version: CLOSED_PLACEMENT_VERSION + 1,
+            placements: Vec::new(),
+        };
+        assert!(
+            bad_version
+                .validate()
+                .unwrap_err()
+                .contains("unsupported")
+        );
+    }
+
+    #[test]
+    fn closed_placement_disable_clears_memory_and_deletes_file() {
+        let dir = TestDir::new("disable");
+        let path = dir.file();
+        let mut memory = ClosedPlacementMemory::default();
+        assert!(memory.remember(identity("firefox"), 0, 1));
+        memory.save_to_path(&path);
+        assert!(path.is_file());
+
+        memory.clear();
+        clear_closed_placement_file(&path);
+        assert!(memory.is_empty());
+        assert!(!path.exists());
+
+        // Re-enable starts empty even if somehow a file were still there —
+        // load after delete is empty; and while disabled the file is gone.
+        let reloaded = ClosedPlacementMemory::load_from_path(&path);
+        assert!(reloaded.is_empty());
+    }
+
+    #[test]
+    fn closed_placement_atomic_store_is_private() {
+        let dir = TestDir::new("private");
+        let path = dir.file();
+        let mut memory = ClosedPlacementMemory::default();
+        assert!(memory.remember(identity("firefox"), 0, 1));
+        memory.save_to_path(&path);
+
+        assert_eq!(
+            fs::metadata(path.parent().unwrap())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
 }

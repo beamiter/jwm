@@ -453,7 +453,10 @@ fn path_entry_exists(path: &Path) -> bool {
     }
 }
 
-fn ensure_private_directory(path: &Path) -> io::Result<()> {
+/// Ensure `path` is a real, current-user-owned directory with mode `0700`,
+/// creating it when missing. Shared with other XDG-state writers that live
+/// beside `session.json`.
+pub(crate) fn ensure_private_directory(path: &Path) -> io::Result<()> {
     match fs::symlink_metadata(path) {
         Ok(metadata) => {
             if metadata.file_type().is_symlink() || !metadata.is_dir() {

@@ -4,13 +4,35 @@
 
 ---
 
-## Evolve backlog（目标 100 轮；已完成 wave 9–32，本地 ahead）
+## Evolve backlog（目标 100 轮；已完成 wave 9–33，本地 ahead）
 
 | # | 选题 | Size |
 | --- | --- | --- |
-| 14–32 | ipc/state 全族 + seamless promote + session maximize + scratchpad + hand-float | S/M ✓ |
-| 33 | closed-placement 落盘跨重启 | M |
+| 14–33 | ipc/state 全族 + seamless + session maximize + scratchpad + hand-float + closed-placement 落盘 | S/M ✓ |
 | … | 跳过：Annotation/Screenshot CommonLinear、toast Closed(1)、BT withdraw、FS/PiP 丢锚点、Recording EncodedOnly、XWayland 单轴 | |
+
+**下一轮候选**（从跳过项与 closed-placement 延伸里挑）：
+
+- Wayland PID / 进程链补齐（wave 33 刻意跳过的 S）：xdg / XWayland 无 PID 时 closed-placement 归因仍靠 10s spawn 窗口。
+- Annotation / Screenshot CommonLinear（跳过表）。
+- toast `NotificationClosed(1)` 语义（跳过表）。
+- Recording EncodedOnly / FS·PiP 丢锚点（跳过表，需真机）。
+
+---
+
+## 2026-09-29（二十四）：closed-placement 落盘跨重启
+
+选题 = evolve wave 33。
+
+1. **契约**：`closed_placement.json`（versioned，≤256）与 `session.json` 同 XDG
+   state 目录；atomic write + orphan tmp sweep；启动时 load；
+   `behavior.remember_closed_placement=false` 清内存并删文件；
+   `JwmLaunchRegistry` 不落盘。
+2. **回归**：round-trip / bounds / disable clears / missing=empty。
+
+**验证**：`scripts/test.sh --lib -- closed_placement`。
+
+**仍然开着的**：见上表「下一轮候选」。
 
 ---
 

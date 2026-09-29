@@ -1336,7 +1336,22 @@ impl Jwm {
             last_stacking: SecondaryMap::new(),
             scratchpads: HashMap::new(),
             scratchpad_pending: scratchpad_pending::ScratchpadPendingRegistry::default(),
-            closed_placements: closed_placement::ClosedPlacementMemory::default(),
+            closed_placements: {
+                // Lib tests must not read or delete the developer's real
+                // closed-placement snapshot under XDG state.
+                #[cfg(test)]
+                {
+                    closed_placement::ClosedPlacementMemory::default()
+                }
+                #[cfg(not(test))]
+                {
+                    if CONFIG.load().behavior().remember_closed_placement {
+                        closed_placement::ClosedPlacementMemory::load()
+                    } else {
+                        closed_placement::ClosedPlacementMemory::load_disabled()
+                    }
+                }
+            },
             jwm_launches: closed_placement::JwmLaunchRegistry::default(),
             animations: AnimationManager::new(),
             hidden_client_park_retries: monitor::HiddenClientParkRetries::default(),
