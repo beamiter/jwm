@@ -530,6 +530,10 @@ pub struct WorkspaceInfo {
     pub n_master: u32,
     pub num_clients: usize,
     pub focused: bool,
+    /// Output connector / `OutputIdentity.stable_key` for this workspace's
+    /// monitor when known; omitted when the live output map has no identity.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub connector: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1202,6 +1206,38 @@ mod tests {
         .expect("serialize");
         assert!(without.get("connector").is_none());
         assert_eq!(without["locked"], true);
+    }
+
+    #[test]
+    fn workspace_info_serializes_optional_connector() {
+        let with_connector = serde_json::to_value(WorkspaceInfo {
+            tag_mask: 1,
+            tag_index: 0,
+            monitor: 0,
+            layout: "TILE".into(),
+            m_fact: 0.55,
+            n_master: 1,
+            num_clients: 2,
+            focused: true,
+            connector: Some("DP-1".into()),
+        })
+        .expect("serialize");
+        assert_eq!(with_connector["connector"], "DP-1");
+        assert_eq!(with_connector["focused"], true);
+
+        let without = serde_json::to_value(WorkspaceInfo {
+            tag_mask: 2,
+            tag_index: 1,
+            monitor: 1,
+            layout: "MONOCLE".into(),
+            m_fact: 0.55,
+            n_master: 1,
+            num_clients: 0,
+            focused: false,
+            connector: None,
+        })
+        .expect("serialize");
+        assert!(without.get("connector").is_none());
     }
 
     #[test]

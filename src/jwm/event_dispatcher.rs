@@ -732,10 +732,11 @@ impl WMController for Jwm {
                 // radio (the twin of Left/Right — BT power-off still arms);
                 // Do Not Disturb / Caffeine / Night Light / Power Profile
                 // middle-click toggle through Enter (OSD / cycle path); Media
-                // middle-click pins the next player through `p`; every other
-                // Hub row stays inert. Blank is inert on every picker; the
-                // notification action strip stays left-only (middle-click
-                // there is a miss).
+                // middle-click pins the next player through `p`; Shell routes,
+                // Audio Output, Session, and Lock* middle-click activate through
+                // Enter; Brightness and read-only rows stay inert. Blank is
+                // inert on every picker; the notification action strip stays
+                // left-only (middle-click there is a miss).
                 2 if self.features.system_ui.is_clipboard_picker() => {
                     if let SystemUiHitTarget::Item(row, _) = hit
                         && self.features.system_ui.select_visible_row(row).is_some()
@@ -786,6 +787,12 @@ impl WMController for Jwm {
                                 | ControlKind::NightLight
                                 | ControlKind::PowerProfile
                                 | ControlKind::Media
+                                | ControlKind::Shell(_)
+                                | ControlKind::AudioOutput
+                                | ControlKind::Session
+                                | ControlKind::LockScreen
+                                | ControlKind::LockMonitor
+                                | ControlKind::UnlockMonitor
                         )
                         && self.features.system_ui.select_visible_row(row).is_some()
                     {
@@ -794,7 +801,13 @@ impl WMController for Jwm {
                             ControlKind::DoNotDisturb
                             | ControlKind::Caffeine
                             | ControlKind::NightLight
-                            | ControlKind::PowerProfile => keys::KEY_Return,
+                            | ControlKind::PowerProfile
+                            | ControlKind::Shell(_)
+                            | ControlKind::AudioOutput
+                            | ControlKind::Session
+                            | ControlKind::LockScreen
+                            | ControlKind::LockMonitor
+                            | ControlKind::UnlockMonitor => keys::KEY_Return,
                             ControlKind::Media => keys::KEY_p,
                             _ => keys::KEY_m,
                         };
@@ -3764,11 +3777,13 @@ mod tests {
     }
 
     /// Hub Volume / Input / Network / Bluetooth / DND / Caffeine / Night Light
-    /// / Power Profile / Media button 2 must select the pointed row and share
-    /// the keyboard path — `KEY_m` for mute rows, `KEY_Left` for connectivity
-    /// radios, `KEY_Return` for toggle / Power Profile rows (OSD path),
-    /// `KEY_p` for Media cycle-pin. Needles are built at runtime so this
-    /// cannot match its own source.
+    /// / Power Profile / Media / Shell / Audio Output / Session / Lock* button 2
+    /// must select the pointed row and share the keyboard path — `KEY_m` for
+    /// mute rows, `KEY_Left` for connectivity radios, `KEY_Return` for toggle /
+    /// Power Profile / Shell / Audio Output / Session / Lock* rows (OSD /
+    /// activate path), `KEY_p` for Media cycle-pin. Brightness and read-only
+    /// rows stay out of the gate. Needles are built at runtime so this cannot
+    /// match its own source.
     #[test]
     fn control_center_hub_middle_click_routes_mute_radio_and_toggles() {
         const SOURCE: &str = include_str!("event_dispatcher.rs");
@@ -3805,8 +3820,14 @@ mod tests {
                 && system_ui.contains("ControlKind::Caffeine")
                 && system_ui.contains("ControlKind::NightLight")
                 && system_ui.contains("ControlKind::PowerProfile")
-                && system_ui.contains("ControlKind::Media"),
-            "middle-click must cover mute, radio, toggle, Power Profile, and Media Hub rows"
+                && system_ui.contains("ControlKind::Media")
+                && system_ui.contains("ControlKind::Shell(_)")
+                && system_ui.contains("ControlKind::AudioOutput")
+                && system_ui.contains("ControlKind::Session")
+                && system_ui.contains("ControlKind::LockScreen")
+                && system_ui.contains("ControlKind::LockMonitor")
+                && system_ui.contains("ControlKind::UnlockMonitor"),
+            "middle-click must cover mute, radio, toggle, Power Profile, Media, Shell, Audio Output, Session, and Lock* Hub rows"
         );
         assert!(
             system_ui.contains("select_visible_row(row)"),
@@ -3828,11 +3849,19 @@ mod tests {
             .expect("the middle-click catch-all");
         let arm_body = &system_ui[hub..hub + catch_all];
         assert!(
+            !arm_body.contains("ControlKind::Brightness")
+                && !arm_body.contains("ControlKind::Battery")
+                && !arm_body.contains("ControlKind::Cpu")
+                && !arm_body.contains("ControlKind::Memory")
+                && !arm_body.contains("ControlKind::NetworkThroughput"),
+            "Brightness and read-only rows must stay out of the middle-click gate"
+        );
+        assert!(
             arm_body.contains("keys::KEY_m")
                 && arm_body.contains("keys::KEY_Left")
                 && arm_body.contains("keys::KEY_Return")
                 && arm_body.contains("keys::KEY_p"),
-            "middle-click must mute with m, toggle radios with Left, toggle DND/Caffeine/Night Light/Power Profile with Return, and Media-pin with p"
+            "middle-click must mute with m, toggle radios with Left, activate Shell/Audio Output/Session/Lock*/toggles/Power Profile with Return, and Media-pin with p"
         );
         assert!(
             !arm_body.contains("KEY_space"),
@@ -3845,8 +3874,11 @@ mod tests {
                 && !arm_body.contains("toggle_idle_inhibit")
                 && !arm_body.contains("toggle_night_light")
                 && !arm_body.contains("cycle_media_player")
-                && !arm_body.contains("queue_power_profile_request"),
-            "middle-click must reach mute/radio/toggles/pin through the key path, not call helpers directly"
+                && !arm_body.contains("queue_power_profile_request")
+                && !arm_body.contains("open_shell_hub_route")
+                && !arm_body.contains("lock_monitor")
+                && !arm_body.contains("session_menu"),
+            "middle-click must reach mute/radio/toggles/pin/activate through the key path, not call helpers directly"
         );
         assert!(
             wifi_bt < hub,

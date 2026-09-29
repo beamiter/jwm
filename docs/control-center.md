@@ -23,11 +23,12 @@ The first section routes to the shell's pages:
 
 Shell section order is Applications → Notifications → Clipboard (optional) →
 Calendar → Wallpaper → Theme. Theme lists the seven known
-`appearance.ui_theme` values; `Enter` applies through the same in-memory
-`set_config` path Wallpaper uses, then surgically writes
+`appearance.ui_theme` values; `Enter` / middle click applies through the
+same in-memory `set_config` path Wallpaper uses, then surgically writes
 `appearance.ui_theme` into the live TOML (comments and other keys preserved).
 IPC `set_config` for the same key remains session-only. There is no
-standalone Theme keybind.
+standalone Theme keybind. The other Shell rows open their pages the same
+way: `Enter` / left-click / middle click.
 
 `Up`/`Down` and `Tab`/`Shift+Tab` move between selectable rows,
 `Page Up`/`Page Down` move through a long page, `Home`/`End` jump to its edges,
@@ -55,7 +56,10 @@ arms on the first press). Middle click on Do Not Disturb, Caffeine, Night
 Light, or Power Profile selects that row and toggles / advances through
 the same Enter / OSD path as a left-click. Middle click on the Media row
 selects that row and pins the next player through the same path as `p`.
-Middle click on every other Hub row is inert.
+Middle click on a Shell route, Output, Session…, Lock Screen, Lock This
+Monitor, or Unlock Monitor row selects that row and activates through the
+same Enter path as a left-click. Brightness and read-only rows stay inert
+under middle click; middle click on every other Hub row is inert.
 On the Input row, a click on the
 microphone glyph toggles mic mute (the pointer twin of `m`); a click on
 the label or device name still opens the input picker. On the Media row,
@@ -112,7 +116,7 @@ PipeWire output and input defaults come from one shared `wpctl status` read.
 | Network | A wireless radio exists (`nmcli` or `rfkill`) | `Enter` opens the picker, `Left`/`Right`/middle click toggles the radio |
 | Bluetooth | A controller exists (`bluetoothctl` or `rfkill`) | `Enter` opens the picker, `Left`/`Right`/middle click toggles power |
 | Volume | `wpctl`, `pactl`, or `amixer` works | `Left`/`Right` adjust, `Enter`/`m`/middle click mute |
-| Output | The sound server can switch devices (`wpctl` or `pactl`) | `Enter` opens the [device picker](#audio-device-pickers) |
+| Output | The sound server can switch devices (`wpctl` or `pactl`) | `Enter` / middle click opens the [device picker](#audio-device-pickers) |
 | Input | Same | `Enter` opens the input picker, `m`/middle click toggles the microphone |
 | Brightness | `brightnessctl` or `/sys/class/backlight` | `Left`/`Right` adjust |
 | Battery | A `power_supply` device of type `Battery` exists | read-only |
@@ -123,10 +127,10 @@ PipeWire output and input defaults come from one shared `wpctl status` read.
 | Night Light | always | `Enter` / middle click toggles |
 | Do Not Disturb | always | `Enter` / middle click toggles |
 | Caffeine | always | `Enter` / middle click holds the session awake ([idle policy](idle.md)) |
-| Lock Screen | always | `Enter` locks |
-| Lock This Monitor | two outputs or more, one of them staying unlocked | `Enter` shades the monitor in use ([monitor lock](monitor-lock.md)) |
-| Unlock Monitor N… | a monitor is behind a lock shade | `Enter` asks for the password that lifts it |
-| Session… | always | `Enter` opens the [session menu](session-menu.md) |
+| Lock Screen | always | `Enter` / middle click locks |
+| Lock This Monitor | two outputs or more, one of them staying unlocked | `Enter` / middle click shades the monitor in use ([monitor lock](monitor-lock.md)) |
+| Unlock Monitor N… | a monitor is behind a lock shade | `Enter` / middle click asks for the password that lifts it |
+| Session… | always | `Enter` / middle click opens the [session menu](session-menu.md) |
 
 The Do Not Disturb, Caffeine, and Night Light rows flip through the same
 toggles their key bindings use, so `Enter` / left-click / middle click
@@ -139,7 +143,9 @@ Profile row's `Left`/`Right` cycle, `Enter` / left-click / middle click
 (one notch forward), and wheel over the row raise a labeled Power Profile
 OSD with the active name (and the same icon the row already uses) after a
 successful switch. Middle click on the Media row pins the next player the
-same way `p` does.
+same way `p` does. Middle click on a Shell route, Output, Session…, or
+Lock* row activates through the same Enter path as left-click; Brightness
+and the read-only System rows stay inert.
 
 The panel rebuilds itself when the state behind a row changes — a track
 change, a battery poll — so an open card never shows a stale value, and the

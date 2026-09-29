@@ -4,14 +4,36 @@
 
 ---
 
-## Evolve backlog（目标 100 轮；已完成 wave 9–50，本地 ahead）
+## Evolve backlog（目标 100 轮；已完成 wave 9–53，本地 ahead）
 
 | # | 选题 | Size |
 | --- | --- | --- |
 | 14–44 | topology/state 全族含 refit/strut/topology + seamless + session + placement + layout tags + X11 seed + maximize clamp + MonitorInfo connector | ✓ |
 | 45–47 | Hub DND/Caffeine/NightLight 中键 + Sticky manage/session + WindowInfo.connector | ✓ |
 | 48–50 | Above/Below session v7 + Hub Power Profile / Media 中键 | ✓ |
+| 51–53 | WorkspaceInfo.connector + Hub Shell / AudioOutput / Session / Lock* 中键→Enter | ✓ |
 | … | 跳过：Annotation/Screenshot CommonLinear、toast Closed(1)、BT withdraw、FS/PiP 丢锚点、Recording EncodedOnly、XWayland 单轴 | |
+
+---
+
+## 2026-09-29（三十三）：WorkspaceInfo.connector + Hub Shell/Session/Lock middle-click
+
+选题 = evolve waves 51–53 / evolve7h。
+
+1. **Wave 51**：`WorkspaceInfo` 增 optional `connector`（同 `MonitorInfoIpc` /
+   `WindowInfo` live identity）；`query_workspaces` 经 `output_key_for_monitor`
+   填充并传入 `backend`；`get_workspaces` / wayland status / runtime 计数路径
+   一并带上。Serialize pin。
+2. **Wave 52**：Hub `ControlKind::Shell(_)` button-2 → 选中行后走
+   `KEY_Return`（与 Enter / 左键同路径）。Docs control-center +
+   event_dispatcher pin。
+3. **Wave 53**：Hub Audio Output / Session / LockScreen / LockMonitor /
+   UnlockMonitor button-2 → 同 `KEY_Return`；Brightness 与只读 System 行保持
+   惰性。Docs control-center + pin。
+
+**验证**：`scripts/test.sh --lib -- workspace_info_serializes control_center_hub_middle_click`。
+
+**下一轮候选**：见跳过表；或其它 topology/state 边角。
 
 ---
 

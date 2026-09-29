@@ -7,6 +7,15 @@ monorepo use independent Semantic Versions.
 
 ### Added
 
+- Hub Shell routes, Audio Output, Session…, Lock Screen, Lock This Monitor,
+  and Unlock Monitor middle-click select the pointed row and activate through
+  the same Enter path as left-click. Brightness and read-only System rows
+  stay inert. See [docs/control-center.md](docs/control-center.md).
+
+- `get_workspaces` exposes an optional `connector` field on each workspace
+  (the same live output identity as `MonitorInfoIpc` / `WindowInfo`), omitted
+  when unknown. See [docs/monitor-lock.md](docs/monitor-lock.md).
+
 - Hub Power Profile middle-click selects the pointed row and advances one
   notch through the same Enter / OSD path as left-click. Hub Media
   middle-click selects the pointed row and pins the next player through

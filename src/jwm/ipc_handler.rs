@@ -2462,7 +2462,7 @@ impl Jwm {
                 IpcResponse::ok(Some(serde_json::to_value(windows).unwrap_or_default()))
             }
             "get_workspaces" => {
-                let workspaces = self.query_workspaces();
+                let workspaces = self.query_workspaces(backend);
                 IpcResponse::ok(Some(serde_json::to_value(workspaces).unwrap_or_default()))
             }
             "get_monitors" => {
@@ -3090,7 +3090,7 @@ impl Jwm {
                 })
             },
             "outputs": output_details,
-            "workspaces": self.query_workspaces(),
+            "workspaces": self.query_workspaces(backend),
             "windows": self.query_windows(backend),
             "config": self.query_config_status(),
             "scrolling": self.query_scrolling_status(),
@@ -3422,7 +3422,7 @@ impl Jwm {
         let config = self.query_config_status();
         let windows = self.query_windows(backend).len();
         let monitors = self.query_monitors(backend).len();
-        let workspaces = self.query_workspaces().len();
+        let workspaces = self.query_workspaces(backend).len();
         let uptime_ms = u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
         let configured_compositor = CONFIG.load().compositor_enabled();
         let compositor_configured = if matches!(self.runtime_backend.as_str(), "x11rb" | "xcb") {
@@ -3508,7 +3508,7 @@ impl Jwm {
             .collect()
     }
 
-    pub(crate) fn query_workspaces(&self) -> Vec<WorkspaceInfo> {
+    pub(crate) fn query_workspaces(&self, backend: &dyn Backend) -> Vec<WorkspaceInfo> {
         let cfg = CONFIG.load();
         let mut result = Vec::new();
         for &mk in &self.state.monitor_order {
@@ -3516,6 +3516,7 @@ impl Jwm {
                 Some(m) => m,
                 None => continue,
             };
+            let connector = self.output_key_for_monitor(backend, mk);
             let active_tags = mon.get_active_tags();
             for i in 0..cfg.tags_length() {
                 let tag_bit = 1u32 << i;
@@ -3530,6 +3531,7 @@ impl Jwm {
                     n_master,
                     num_clients: tagged_client_count(&self.state, mk, tag_bit),
                     focused: is_active && self.state.sel_mon == Some(mk),
+                    connector: connector.clone(),
                 });
             }
         }
