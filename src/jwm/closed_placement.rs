@@ -1011,6 +1011,57 @@ impl Jwm {
             .filter(|name| !name.is_empty())
     }
 
+    /// Backend / wl_output name for the live output backing `mon_key`.
+    pub(crate) fn output_name_for_monitor(
+        &self,
+        backend: &dyn Backend,
+        mon_key: crate::core::models::MonitorKey,
+    ) -> Option<String> {
+        self.live_output_info(backend, mon_key)
+            .map(|output| output.name)
+            .filter(|name| !name.is_empty())
+    }
+
+    /// EDID vendor / product / serial fields for the live output backing
+    /// `mon_key`.
+    pub(crate) fn output_edid_ids_for_monitor(
+        &self,
+        backend: &dyn Backend,
+        mon_key: crate::core::models::MonitorKey,
+    ) -> (
+        Option<String>,
+        Option<u16>,
+        Option<u32>,
+        Option<String>,
+    ) {
+        let Some(identity) = self.live_output_identity(backend, mon_key) else {
+            return (None, None, None, None);
+        };
+        (
+            identity.vendor.filter(|v| !v.is_empty()),
+            identity.product_code,
+            identity.serial_number,
+            identity.monitor_serial.filter(|s| !s.is_empty()),
+        )
+    }
+
+    /// VRR supported / currently enabled for the live output backing
+    /// `mon_key`. Both false when the output map has no entry or the backend
+    /// reports no capabilities.
+    pub(crate) fn output_vrr_for_monitor(
+        &self,
+        backend: &dyn Backend,
+        mon_key: crate::core::models::MonitorKey,
+    ) -> (bool, bool) {
+        let Some(output) = self.live_output_info(backend, mon_key) else {
+            return (false, false);
+        };
+        backend
+            .query_vrr_capabilities(output.id)
+            .map(|caps| (caps.supported, caps.current_enabled))
+            .unwrap_or((false, false))
+    }
+
     /// Fractional scale and mode refresh (mHz) for the live output backing
     /// `mon_key`. Defaults to `(1.0, 0)` when the output map has no entry.
     pub(crate) fn output_scale_refresh_for_monitor(

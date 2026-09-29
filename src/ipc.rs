@@ -630,6 +630,11 @@ pub struct WorkspaceInfo {
     /// / is urgent. Sticky all-tags clients are excluded, matching the
     /// status-bar urgent mask.
     pub is_urgent: bool,
+    /// True when at least one non-sticky client on this monitor carries this
+    /// tag bit (status-bar occupied mask).
+    pub is_occupied: bool,
+    /// True when any client on this tag on this monitor is fullscreen.
+    pub has_fullscreen: bool,
     /// Output connector / `OutputIdentity.stable_key` for this workspace's
     /// monitor when known; omitted when the live output map has no identity.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -664,10 +669,26 @@ pub struct MonitorInfoIpc {
     /// the live output map has no identity for this monitor.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub connector: Option<String>,
+    /// Backend output name (`OutputInfo.name` / wl_output name) when known;
+    /// omitted when the live output map has no entry.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     /// EDID monitor name when known; omitted when the live output map has no
     /// identity or the EDID did not advertise a name.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub monitor_name: Option<String>,
+    /// EDID vendor string when known; omitted otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vendor: Option<String>,
+    /// EDID product code when known; omitted otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub product_code: Option<u16>,
+    /// EDID numeric serial when known; omitted otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub serial_number: Option<u32>,
+    /// EDID monitor serial string when known; omitted otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub monitor_serial: Option<String>,
     /// Fractional scale from the live output (`OutputInfo.scale`), typically
     /// `1.0` / `1.25` / `1.5` / `2.0`. `1.0` when the output map has no entry.
     pub scale: f32,
@@ -676,6 +697,10 @@ pub struct MonitorInfoIpc {
     pub refresh_mhz: u32,
     /// Whether the live output advertised HDR capability (`OutputInfo.hdr_capable`).
     pub hdr_capable: bool,
+    /// Whether VRR is supported on this output (`query_vrr_capabilities`).
+    pub vrr_supported: bool,
+    /// Whether VRR is currently enabled on this output.
+    pub vrr_enabled: bool,
     /// Current tiling gap in pixels on this monitor (`MonitorLayout.gap`).
     pub gap: i32,
     /// Live master area factor (`MonitorLayout.m_fact`).
@@ -1464,10 +1489,17 @@ mod tests {
             focused: true,
             locked: false,
             connector: Some("DP-1".into()),
+            name: None,
             monitor_name: Some("Dell U2720Q".into()),
+            vendor: None,
+            product_code: None,
+            serial_number: None,
+            monitor_serial: None,
             scale: 1.5,
             refresh_mhz: 60_000,
             hdr_capable: true,
+            vrr_supported: false,
+            vrr_enabled: false,
             gap: 8,
             m_fact: 0.55,
             n_master: 1,
@@ -1477,6 +1509,11 @@ mod tests {
         .expect("serialize");
         assert_eq!(with_connector["connector"], "DP-1");
         assert_eq!(with_connector["monitor_name"], "Dell U2720Q");
+        assert!(with_connector.get("name").is_none());
+        assert!(with_connector.get("vendor").is_none());
+        assert!(with_connector.get("product_code").is_none());
+        assert!(with_connector.get("serial_number").is_none());
+        assert!(with_connector.get("monitor_serial").is_none());
         assert_eq!(with_connector["locked"], false);
         assert_eq!(with_connector["wx"], 0);
         assert_eq!(with_connector["wy"], 32);
@@ -1485,6 +1522,8 @@ mod tests {
         assert_eq!(with_connector["scale"], 1.5);
         assert_eq!(with_connector["refresh_mhz"], 60_000);
         assert_eq!(with_connector["hdr_capable"], true);
+        assert_eq!(with_connector["vrr_supported"], false);
+        assert_eq!(with_connector["vrr_enabled"], false);
         assert_eq!(with_connector["gap"], 8);
         assert!((with_connector["m_fact"].as_f64().unwrap() - 0.55).abs() < 1e-6);
         assert_eq!(with_connector["n_master"], 1);
@@ -1506,10 +1545,17 @@ mod tests {
             focused: false,
             locked: true,
             connector: None,
+            name: None,
             monitor_name: None,
+            vendor: None,
+            product_code: None,
+            serial_number: None,
+            monitor_serial: None,
             scale: 1.0,
             refresh_mhz: 0,
             hdr_capable: false,
+            vrr_supported: false,
+            vrr_enabled: false,
             gap: 0,
             m_fact: 0.55,
             n_master: 1,
@@ -1545,6 +1591,8 @@ mod tests {
             num_clients: 2,
             focused: true,
             is_urgent: true,
+            is_occupied: false,
+            has_fullscreen: false,
             connector: Some("DP-1".into()),
             monitor_name: Some("Dell U2720Q".into()),
         })
@@ -1553,6 +1601,8 @@ mod tests {
         assert_eq!(with_connector["monitor_name"], "Dell U2720Q");
         assert_eq!(with_connector["focused"], true);
         assert_eq!(with_connector["is_urgent"], true);
+        assert_eq!(with_connector["is_occupied"], false);
+        assert_eq!(with_connector["has_fullscreen"], false);
         assert_eq!(with_connector["gap"], 12);
 
         let without = serde_json::to_value(WorkspaceInfo {
@@ -1566,6 +1616,8 @@ mod tests {
             num_clients: 0,
             focused: false,
             is_urgent: false,
+            is_occupied: false,
+            has_fullscreen: false,
             connector: None,
             monitor_name: None,
         })

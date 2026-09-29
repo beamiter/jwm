@@ -95,6 +95,16 @@ fn tagged_client_count(state: &WMState, monitor: MonitorKey, tag_mask: u32) -> u
     })
 }
 
+fn tag_has_fullscreen(state: &WMState, monitor: MonitorKey, tag_mask: u32) -> bool {
+    state.monitor_clients.get(monitor).is_some_and(|clients| {
+        clients.iter().any(|&key| {
+            state.clients.get(key).is_some_and(|client| {
+                client.state.is_fullscreen && client.state.tags & tag_mask != 0
+            })
+        })
+    })
+}
+
 fn client_window_info(
     client: &WMClient,
     monitor: i32,
@@ -3651,7 +3661,7 @@ impl Jwm {
             let connector = self.output_key_for_monitor(backend, mk);
             let monitor_name = self.output_monitor_name_for_monitor(backend, mk);
             let active_tags = mon.get_active_tags();
-            let (_, urgent_tags_mask) = {
+            let (occupied_tags_mask, urgent_tags_mask) = {
                 const EMPTY_CLIENTS: &[ClientKey] = &[];
                 let monitor_clients = self
                     .state
@@ -3678,6 +3688,8 @@ impl Jwm {
                     num_clients: tagged_client_count(&self.state, mk, tag_bit),
                     focused: is_active && self.state.sel_mon == Some(mk),
                     is_urgent: (urgent_tags_mask & tag_bit) != 0,
+                    is_occupied: (occupied_tags_mask & tag_bit) != 0,
+                    has_fullscreen: tag_has_fullscreen(&self.state, mk, tag_bit),
                     connector: connector.clone(),
                     monitor_name: monitor_name.clone(),
                 });
@@ -3712,6 +3724,9 @@ impl Jwm {
             )
         });
         let (scale, refresh_mhz) = self.output_scale_refresh_for_monitor(backend, mk);
+        let (vendor, product_code, serial_number, monitor_serial) =
+            self.output_edid_ids_for_monitor(backend, mk);
+        let (vrr_supported, vrr_enabled) = self.output_vrr_for_monitor(backend, mk);
         MonitorInfoIpc {
             num: m.num,
             x: m.geometry.m_x,
@@ -3727,10 +3742,17 @@ impl Jwm {
             focused: self.state.sel_mon == Some(mk),
             locked: self.monitor_is_locked(m.num),
             connector: self.output_key_for_monitor(backend, mk),
+            name: self.output_name_for_monitor(backend, mk),
             monitor_name: self.output_monitor_name_for_monitor(backend, mk),
+            vendor,
+            product_code,
+            serial_number,
+            monitor_serial,
             scale,
             refresh_mhz,
             hdr_capable: self.output_hdr_capable_for_monitor(backend, mk),
+            vrr_supported,
+            vrr_enabled,
             gap: m.layout.gap,
             m_fact: m.layout.m_fact,
             n_master: m.layout.n_master,

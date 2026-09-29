@@ -150,29 +150,33 @@ or already spends that chord. The log line says which happened.
 Every lock and unlock broadcasts a `monitor/lock` IPC event
 (`{"monitor": 1, "locked": true}`), and `get_monitors` / `get_tree` carry a
 `locked` flag, an optional `connector` (`OutputIdentity.stable_key` /
-connector name), and an optional `monitor_name` (EDID name when known) per
+connector name), an optional `name` (backend / wl_output name), an
+optional `monitor_name` (EDID name when known), and optional EDID
+`vendor` / `product_code` / `serial_number` / `monitor_serial` per
 monitor, so a status bar can show which screens are down and key or label
 panels the same way session restore does. Each monitor row also reports the
 work area as `wx` / `wy` / `ww` / `wh` (status bar, strut docks, and the
 window tab bar excluded) beside the full-output `x` / `y` / `w` / `h`,
 plus `scale` (fractional) and `refresh_mhz` (mode refresh in millihertz),
-and `hdr_capable` when the live output advertised HDR. Each monitor row
-also reports the live tiling `gap` (pixels), `m_fact`, `n_master`, and
-`transform` (`wl_output` 0..=7 from the live output; `0` when unknown).
-`get_workspaces` rows carry the same per-tag `gap` beside `m_fact` /
-`n_master`. Focused-monitor convenience queries `get_layout` (layout
-symbol + `m_fact` + `n_master` + `gap`), `get_gaps`, and `get_nmaster`
-return the selected monitor's live values (optional `connector` when
-known). IPC `setgaps` adjusts the focused monitor's gap like the
-keybinding. Each monitor also reports `tab_bar_reserved` (pixels for the
-window tab strip, or `0`). `get_tab_bar` returns the focused monitor's
-strip membership; `get_system_ui` reports the open shell panel `kind`.
-`get_notifications` adds `center_open` / `selected_id`.
+`hdr_capable` when the live output advertised HDR, and `vrr_supported` /
+`vrr_enabled` (status mirror of `get_wayland_status` VRR caps). Each
+monitor row also reports the live tiling `gap` (pixels), `m_fact`,
+`n_master`, and `transform` (`wl_output` 0..=7 from the live output; `0`
+when unknown). `get_workspaces` rows carry the same per-tag `gap` beside
+`m_fact` / `n_master`. Focused-monitor convenience queries `get_layout`
+(layout symbol + `m_fact` + `n_master` + `gap`), `get_gaps`, and
+`get_nmaster` return the selected monitor's live values (optional
+`connector` when known). IPC `setgaps` adjusts the focused monitor's gap
+like the keybinding. Each monitor also reports `tab_bar_reserved` (pixels
+for the window tab strip, or `0`). `get_tab_bar` returns the focused
+monitor's strip membership; `get_system_ui` reports the open shell panel
+`kind`. `get_notifications` adds `center_open` / `selected_id`.
 `get_workspaces` / `get_windows` /
 `get_tree` / `window/state` expose the same optional `connector` and
 `monitor_name` on each workspace and window row (omitted when unknown).
 `get_workspaces` also reports `is_urgent` per tag (true when any non-sticky
-client on that tag demands attention), matching the status-bar urgent mask.
+client on that tag demands attention), matching the status-bar urgent mask,
+plus `is_occupied` (status-bar occupied mask) and `has_fullscreen`.
 `get_windows` / `get_tree` / `window/state` also report `is_swallowed` and
 `is_on_view` (tag intersection with the monitor's active tags, or sticky),
 plus chrome / size-hint fields (`is_fixed`, `is_dock`, `is_desktop`,

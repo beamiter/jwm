@@ -13,6 +13,12 @@ monorepo use independent Semantic Versions.
   optional `tab_index`. See
   [docs/window-placement.md](docs/window-placement.md).
 
+- `get_monitors` / `get_tree` report optional `name` (wl_output), `vendor` /
+  `product_code` / `serial_number` / `monitor_serial`, and
+  `vrr_supported` / `vrr_enabled`. `get_workspaces` rows add `is_occupied`
+  and `has_fullscreen`. See
+  [docs/monitor-lock.md](docs/monitor-lock.md).
+
 - `get_system_ui` reports whether a shell panel is open and its `kind`
   (`launcher`, `notification_center`, `keybindings`, …).
   `get_notifications` adds `center_open` and `selected_id`.

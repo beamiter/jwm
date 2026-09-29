@@ -4,7 +4,7 @@
 
 ---
 
-## Evolve backlog（目标 199 轮；已完成 wave 9–125，本地 ahead）
+## Evolve backlog（目标 199 轮；已完成 wave 9–130，本地 ahead）
 
 | # | 选题 | Size |
 | --- | --- | --- |
@@ -26,7 +26,28 @@
 | 113–114 | keybinding viewer modkey + chord rows | ✓ |
 | 115–118 | get_system_ui / get_tab_bar；tab_bar_reserved；notifications center_open | ✓ |
 | 119–125 | WindowInfo maximize_promoted/restore、swallowing/swallowed_by、transient_for、minimized_order、tab_index/is_tabbed | ✓ |
+| 126–130 | MonitorInfo name/vendor/serial/VRR；WorkspaceInfo has_fullscreen/is_occupied | ✓ |
 | … | 跳过：Annotation/Screenshot CommonLinear、toast Closed(1)、BT withdraw、FS/PiP 自身丢锚点（own-anchor drop）、Recording EncodedOnly、XWayland 单轴 | |
+
+---
+
+## 2026-09-29（四十八）：Monitor identity / VRR + Workspace occupancy
+
+选题 = evolve waves 126–130 / evolve7h。
+
+1. **Wave 126**：`MonitorInfoIpc.name`（`OutputInfo.name`）。
+2. **Wave 127**：`vendor` / `product_code`。
+3. **Wave 128**：`serial_number` / `monitor_serial`。
+4. **Wave 129**：`vrr_supported` / `vrr_enabled`。
+5. **Wave 130**：`WorkspaceInfo.is_occupied` / `has_fullscreen`。
+   CHANGELOG；monitor-lock；serialize pins。
+
+**刻意不做**：跳过表不变。
+
+**验证**：`scripts/test.sh --lib -- monitor_info_serializes workspace_info_serializes`。
+
+**下一轮候选**：session client_fact v10；hand-float；no_decorations；
+maximize promoted pin；UI Home/End/Page twins。
 
 ---
 
