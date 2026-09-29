@@ -1766,6 +1766,18 @@ mod tests {
                 && focus_fn.contains("previous_focus != client_key_opt"),
             "focus must broadcast window/state for previous and new clients only on a real flip"
         );
+        let snap = include_str!("layout/drag_attach.rs");
+        let snap_rect = snap
+            .split_once("fn apply_float_snap_rect(")
+            .expect("apply_float_snap_rect")
+            .1
+            .split_once("pub(crate) fn snap_window(")
+            .expect("snap_window")
+            .0;
+        assert!(
+            snap_rect.contains(&broadcast),
+            "apply_float_snap_rect must broadcast after a half/quarter snap"
+        );
         let toggle = include_str!("features/toggles.rs");
         let float = toggle
             .split_once("pub fn togglefloating(")
