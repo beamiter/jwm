@@ -328,6 +328,9 @@ impl Jwm {
                 self.swap_clients_in_monitor(selected_client_key, target_key)?;
 
                 self.arrange(backend, self.state.sel_mon);
+                if let Some(mon) = self.state.sel_mon {
+                    self.broadcast_visible_window_states_on_monitor(mon);
+                }
 
                 self.suppress_mouse_focus_until =
                     Some(std::time::Instant::now() + std::time::Duration::from_millis(200));

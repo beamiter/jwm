@@ -1802,6 +1802,46 @@ mod tests {
             settle.contains(&broadcast) && settle.contains("if changed"),
             "settle_released_drag must broadcast when an unselected float settles in place"
         );
+        let layout_broadcast = format!(
+            "broadcast_visible_window_{}_on_monitor",
+            "states"
+        );
+        let nav = include_str!("navigation.rs");
+        let movestack = nav
+            .split_once("pub fn movestack(")
+            .expect("movestack")
+            .1
+            .split_once("pub(crate) fn is_tiled_and_visible(")
+            .expect("is_tiled_and_visible")
+            .0;
+        assert!(
+            movestack.contains(&layout_broadcast),
+            "movestack must broadcast visible clients after a real swap"
+        );
+        let stacking = include_str!("stacking.rs");
+        let pop = stacking
+            .split_once("pub(crate) fn pop(")
+            .expect("pop")
+            .1
+            .split_once("pub(crate) fn restack(")
+            .expect("restack")
+            .0;
+        assert!(
+            pop.contains(&layout_broadcast),
+            "pop (zoom) must broadcast visible clients after arrange"
+        );
+        let scrolling = include_str!("layout/scrolling.rs");
+        let move_col = scrolling
+            .split_once("pub(crate) fn scrolling_move_column(")
+            .expect("scrolling_move_column")
+            .1
+            .split_once("pub(crate) fn scrolling_set_column_width(")
+            .expect("scrolling_set_column_width")
+            .0;
+        assert!(
+            move_col.contains(&layout_broadcast),
+            "scrolling_move_column must broadcast after a column swap"
+        );
         let toggle = include_str!("features/toggles.rs");
         let float = toggle
             .split_once("pub fn togglefloating(")

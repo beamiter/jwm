@@ -3890,6 +3890,23 @@ impl Jwm {
         };
         self.broadcast_ipc_event("window/state", payload);
     }
+
+    /// Push `window/state` for every visible client on `mon` after a layout
+    /// reorder (zoom / movestack / scrolling column move) changed many
+    /// geometries at once.
+    pub(crate) fn broadcast_visible_window_states_on_monitor(&mut self, mon: MonitorKey) {
+        let keys: Vec<_> = self
+            .state
+            .monitor_clients
+            .get(mon)
+            .map(|clients| clients.iter().copied().collect())
+            .unwrap_or_default();
+        for client_key in keys {
+            if self.is_client_visible_by_key(client_key) {
+                self.broadcast_window_state_ipc(client_key);
+            }
+        }
+    }
 }
 
 #[cfg(test)]

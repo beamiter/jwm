@@ -4,17 +4,31 @@
 
 ---
 
-## Evolve backlog（目标 100 轮；已完成 wave 9–25，本地 ahead）
+## Evolve backlog（目标 100 轮；已完成 wave 9–26，本地 ahead）
 
 按日常命中 × 可交付性排序的下一波候选（S/小 M，无 DRM）：
 
 | # | 选题 | Size |
 | --- | --- | --- |
-| 14–25 | IPC window/state 全族 + Tiled* + restore_rect | S/M ✓ |
-| 26 | Annotation → CommonLinearAware | S–M |
-| 27 | Screenshot toolbar → CommonLinearAware | S–M |
-| 28 | session 持久化 maximize + restore_rect | M |
+| 14–26 | IPC window/state 全族 + Tiled* + restore_rect | S/M ✓ |
+| 27 | Annotation → CommonLinearAware | S–M |
+| 28 | Screenshot toolbar → CommonLinearAware | S–M |
+| 29 | session 持久化 maximize + restore_rect | M |
 | … | 跳过：toast Closed(1)、BT withdraw、FS/PiP 丢锚点、Recording EncodedOnly | |
+
+---
+
+## 2026-09-29（十七）：tiling reorder → `window/state`
+
+选题 = evolve wave 26。
+
+1. **契约**：`broadcast_visible_window_states_on_monitor` 在 `movestack` /
+   `pop`(zoom) / scrolling column move·resize 后推送可见窗。
+2. **回归**：sibling pin。
+
+**验证**：`scripts/test.sh --lib -- sibling_window_state_paths`。
+
+**仍然开着的**：见上表 27+。
 
 ---
 
