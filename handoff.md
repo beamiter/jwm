@@ -4,7 +4,7 @@
 
 ---
 
-## Evolve backlog（目标 1000 轮；已完成 wave 9–400，本地 ahead）
+## Evolve backlog（目标 1000 轮；已完成 wave 9–500，本地 ahead）
 
 | # | 选题 | Size |
 | --- | --- | --- |
@@ -54,7 +54,41 @@
 | 371–385 | get_config expose/peek/tags/magnifier/tabs/vrr/swallow/idle/wallpaper/opacity/blur/recording… | ✓ |
 | 386–395 | Tags overview middle→Enter + horizontal wheel；hint + docs | ✓ |
 | 396–400 | include_str!/serialize/dispatch contract pins + docs drift + handoff/CHANGELOG | ✓ |
+| 401–415 | WindowInfo total_w/total_h；MonitorInfo lt_symbol/output_id；Workspace/Tree urgent/fullscreen/minimized/sticky counts | ✓ |
+| 416–430 | toggle_scratchpad + short get_* query aliases | ✓ |
+| 431–450 | RuntimeFeatureStates monitor_lock/debug_hud；get_status idle/recording/audio_recording/clipboard nests；resources available_kib；connectivity scanning | ✓ |
+| 451–465 | get_config polish（clipboard/border_glow/shadow/genie/focus/placement/compositor_api/resource_rows/…） | ✓ |
+| 466–480 | Session v12 never_focus/old_state/pip_restore_sticky/remembers_closed_placement；layout persist show_bar + togglebar dirty | ✓ |
+| 481–490 | Portal WindowInfo/MonitorInfo fields；expose horizontal wheel Left/Right | ✓ |
+| 491–500 | include_str!/serialize/dispatch contract pins + docs drift + handoff/CHANGELOG | ✓ |
 | … | 跳过：Annotation/Screenshot CommonLinear、toast Closed(1)、BT withdraw、FS/PiP 自身丢锚点（own-anchor drop）、Recording EncodedOnly、XWayland 单轴 | |
+
+---
+
+## 2026-09-29（五十七）：IPC density + session v12 → 500
+
+选题 = evolve waves 401–500 / evolve7h。
+
+1. **Wave 401–415**：`WindowInfo.total_w` / `total_h`；`MonitorInfoIpc.lt_symbol` /
+   `output_id`；`WorkspaceInfo` / `TreeNode` urgent/fullscreen/minimized/sticky counts。
+2. **Wave 416–430**：`toggle_scratchpad`；短 query 别名（`get_idle` /
+   `get_recording` / `get_blur` / `get_hdr` / `get_power` / …）。
+3. **Wave 431–450**：`RuntimeFeatureStates.monitor_lock` / `debug_hud`；
+   `get_status` nests idle/recording/audio_recording/clipboard；
+   resources `available_kib`；connectivity `scanning`。
+4. **Wave 451–465**：`get_config` polish keys（clipboard / border_glow /
+   shadow / genie / placement / compositor_api / resource_rows / …）。
+5. **Wave 466–480**：Session v12；layout persist `show_bar`；`togglebar` dirty。
+6. **Wave 481–490**：portal Window/Monitor 字段；expose 水平滚轮 Left/Right。
+7. **Wave 491–500**：contract pins；docs drift；CHANGELOG；handoff。
+
+**刻意不做**：跳过表不变；不发明 DRM/EncodedOnly/CommonLinear / peak meter /
+`mapped_ms` / `is_override_redirect`。
+
+**验证**：`scripts/test.sh --lib --` 聚焦 total_w / lt_symbol / get_idle /
+session v12 / show_bar / expose horizontal / evolve7h_waves_401。
+
+**下一轮候选**：501+；或跳过表项。
 
 ---
 

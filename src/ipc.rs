@@ -260,6 +260,7 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "toggle_wifi",
         "toggle_peek",
         "toggle_recording",
+        "toggle_scratchpad",
         "toggle_tags_overview",
         "toggle_waterlily",
         "togglebar",
@@ -313,15 +314,21 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
     ],
     queries: &[
         "benchmark_report",
+        "get_audio",
         "get_audio_devices",
+        "get_audio_recording",
         "get_audio_recording_status",
+        "get_bluetooth",
         "get_bluetooth_pairing",
+        "get_blur",
         "get_blur_status",
         "get_capabilities",
+        "get_capture",
         "get_capture_status",
         "get_cfact",
         "get_clipboard",
         "get_clients",
+        "get_color_management",
         "get_color_management_status",
         "get_config",
         "get_config_status",
@@ -331,14 +338,19 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "get_effect_status",
         "get_focused_window",
         "get_gaps",
+        "get_gesture",
         "get_gesture_status",
+        "get_hdr",
         "get_hdr_status",
+        "get_idle",
         "get_idle_status",
         "get_layout",
         "get_magnifier",
+        "get_media",
         "get_media_status",
         "get_metrics",
         "get_mfact",
+        "get_mic",
         "get_mic_mute",
         "get_monitors",
         "get_night_light",
@@ -347,8 +359,10 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "get_notifications",
         "get_outputs",
         "get_peek",
+        "get_power",
         "get_power_status",
         "get_prev_layout",
+        "get_recording",
         "get_recording_status",
         "get_resources",
         "get_scratchpads",
@@ -364,8 +378,11 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "get_tearing_hints",
         "get_tree",
         "get_version",
+        "get_wallpaper",
         "get_wallpaper_colors",
+        "get_waterlily",
         "get_waterlily_status",
+        "get_wayland",
         "get_wayland_status",
         "get_window",
         "get_windows",
@@ -487,6 +504,10 @@ pub struct RuntimeFeatureStates {
     pub window_switcher: bool,
     /// Session lock screen is up (not a per-monitor lock shade).
     pub session_lock: bool,
+    /// Per-monitor lock shade is up (not the session lock).
+    pub monitor_lock: bool,
+    /// Compositor debug HUD overlay is on.
+    pub debug_hud: bool,
 }
 
 /// Last runtime compositor hand-off as observed by the WM. This remains
@@ -550,6 +571,18 @@ pub struct RuntimeStatusV1 {
     /// Compact twin of `get_capture_status` (pending / dmabuf flags).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub capture: Option<Value>,
+    /// Compact twin of `get_idle_status` (inhibited / dimmed / locked).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub idle: Option<Value>,
+    /// Compact twin of `get_recording_status` (active / elapsed / target).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recording: Option<Value>,
+    /// Compact twin of `get_audio_recording_status`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audio_recording: Option<Value>,
+    /// Compact twin of `get_clipboard` (`enabled` / `count` / capacity).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub clipboard: Option<Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -777,6 +810,10 @@ pub struct WindowInfo {
     pub sync_counter: Option<u32>,
     /// Last observed XSync counter value (`0` when unused).
     pub sync_value: u64,
+    /// Outer width including borders (`w + 2 * border_w`).
+    pub total_w: i32,
+    /// Outer height including borders (`h + 2 * border_w`).
+    pub total_h: i32,
 }
 
 #[derive(Debug, Serialize)]
@@ -821,6 +858,11 @@ pub struct WorkspaceInfo {
     pub floating_count: usize,
     /// How many sticky clients on this monitor also carry this tag bit.
     pub sticky_count: usize,
+    /// How many clients on this tag on this monitor are urgent /
+    /// demand attention.
+    pub urgent_count: usize,
+    /// How many clients on this tag on this monitor are fullscreen.
+    pub fullscreen_count: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -935,6 +977,12 @@ pub struct MonitorInfoIpc {
     /// [`Self::connector`] when `stable_key` is an EDID-derived key.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_connector: Option<String>,
+    /// Layout symbol shown on the status bar (`WMMonitor.lt_symbol`).
+    pub lt_symbol: String,
+    /// Backend output id (`OutputInfo.id`) when the live output map has an
+    /// entry; omitted otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_id: Option<u64>,
 }
 
 /// EDID HDR static metadata projected on [`MonitorInfoIpc`] and status queries.
@@ -963,6 +1011,12 @@ pub struct TreeNode {
     pub urgent_count: usize,
     /// How many of `windows` report `is_floating`.
     pub floating_count: usize,
+    /// How many of `windows` report `is_minimized`.
+    pub minimized_count: usize,
+    /// How many of `windows` report `is_sticky`.
+    pub sticky_count: usize,
+    /// How many of `windows` report `is_fullscreen`.
+    pub fullscreen_count: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -1004,7 +1058,7 @@ pub fn dispatch_command(name: &str, args: &Value) -> Result<(WMFuncType, WMArgEn
         "togglesticky" | "toggle_sticky" => Ok((Jwm::togglesticky, parse_int_arg(args, 0)?)),
         "togglepip" | "toggle_pip" => Ok((Jwm::togglepip, parse_int_arg(args, 0)?)),
         "togglemaximize" | "toggle_maximize" => Ok((Jwm::togglemaximize, parse_int_arg(args, 0)?)),
-        "togglescratchpad" => {
+        "togglescratchpad" | "toggle_scratchpad" => {
             let cmd = if argument_is_omitted(args) {
                 vec!["term".to_string()]
             } else {
@@ -1521,6 +1575,8 @@ mod tests {
             hidden_x: None,
             sync_counter: None,
             sync_value: 0,
+            total_w: 800,
+            total_h: 600,
         })
         .expect("serialize WindowInfo");
 
@@ -1643,6 +1699,8 @@ mod tests {
             hidden_x: None,
             sync_counter: None,
             sync_value: 0,
+            total_w: 800,
+            total_h: 600,
         })
         .expect("serialize");
         assert!(without_pid.get("pid").is_none());
@@ -1726,6 +1784,8 @@ mod tests {
             hidden_x: None,
             sync_counter: None,
             sync_value: 0,
+            total_w: 800,
+            total_h: 600,
         })
         .expect("serialize");
         assert_eq!(with_connector["connector"], "HDMI-A-1");
@@ -1802,6 +1862,8 @@ mod tests {
             hidden_x: None,
             sync_counter: None,
             sync_value: 0,
+            total_w: 800,
+            total_h: 600,
         })
         .expect("serialize");
         assert!(without.get("connector").is_none());
@@ -1862,6 +1924,8 @@ mod tests {
             cur_tag: 1,
             prev_tag: 1,
             output_connector: None,
+            lt_symbol: "[]".into(),
+            output_id: None,
         })
         .expect("serialize");
         assert_eq!(with_connector["connector"], "DP-1");
@@ -1955,6 +2019,8 @@ mod tests {
             cur_tag: 1,
             prev_tag: 1,
             output_connector: None,
+            lt_symbol: "[]".into(),
+            output_id: None,
         })
         .expect("serialize");
         assert!(without.get("connector").is_none());
@@ -1998,6 +2064,8 @@ mod tests {
             minimized_count: 0,
             floating_count: 0,
             sticky_count: 0,
+            urgent_count: 0,
+            fullscreen_count: 0,
         })
         .expect("serialize");
         assert_eq!(with_connector["connector"], "DP-1");
@@ -2035,6 +2103,8 @@ mod tests {
             minimized_count: 0,
             floating_count: 0,
             sticky_count: 0,
+            urgent_count: 0,
+            fullscreen_count: 0,
         })
         .expect("serialize");
         assert!(without.get("connector").is_none());
@@ -2738,6 +2808,8 @@ mod tests {
                 media_players: false,
                 window_switcher: false,
                 session_lock: false,
+                monitor_lock: false,
+                debug_hud: false,
             },
             compositor_metrics: None,
             resources: None,
@@ -2748,6 +2820,10 @@ mod tests {
             blur: None,
             hdr: None,
             capture: None,
+            idle: None,
+            recording: None,
+            audio_recording: None,
+            clipboard: None,
         };
 
         let json = serde_json::to_value(status).unwrap();
@@ -2796,6 +2872,12 @@ mod tests {
         assert!(json.get("blur").is_none());
         assert!(json.get("hdr").is_none());
         assert!(json.get("capture").is_none());
+        assert!(json.get("idle").is_none());
+        assert!(json.get("recording").is_none());
+        assert!(json.get("audio_recording").is_none());
+        assert!(json.get("clipboard").is_none());
+        assert_eq!(json["features"]["monitor_lock"], false);
+        assert_eq!(json["features"]["debug_hud"], false);
         assert!(json["compositor_metrics"].is_null());
     }
 
@@ -2897,12 +2979,17 @@ mod tests {
                 cur_tag: 1,
                 prev_tag: 1,
                 output_connector: None,
+                lt_symbol: "[]".into(),
+                output_id: None,
             },
             windows: Vec::new(),
             selected_id: Some(42),
             window_count: 0,
             urgent_count: 0,
             floating_count: 0,
+            minimized_count: 0,
+            sticky_count: 0,
+            fullscreen_count: 0,
         };
         let json = serde_json::to_value(node).unwrap();
         assert_eq!(json["selected_id"], 42);
@@ -2966,12 +3053,17 @@ mod tests {
                 cur_tag: 1,
                 prev_tag: 1,
                 output_connector: None,
+                lt_symbol: "[]".into(),
+                output_id: None,
             },
             windows: Vec::new(),
             selected_id: None,
             window_count: 3,
             urgent_count: 1,
             floating_count: 2,
+            minimized_count: 0,
+            sticky_count: 0,
+            fullscreen_count: 0,
         };
         let json = serde_json::to_value(node).unwrap();
         assert_eq!(json["window_count"], 3);

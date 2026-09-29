@@ -100,12 +100,14 @@ fn tag_client_counts(
     state: &WMState,
     monitor: MonitorKey,
     tag_mask: u32,
-) -> (usize, usize, usize) {
+) -> (usize, usize, usize, usize, usize) {
     let mut minimized = 0;
     let mut floating = 0;
     let mut sticky = 0;
+    let mut urgent = 0;
+    let mut fullscreen = 0;
     let Some(clients) = state.monitor_clients.get(monitor) else {
-        return (0, 0, 0);
+        return (0, 0, 0, 0, 0);
     };
     for &key in clients {
         let Some(client) = state.clients.get(key) else {
@@ -123,8 +125,14 @@ fn tag_client_counts(
         if client.state.is_sticky {
             sticky += 1;
         }
+        if client.state.is_urgent || client.state.demands_attention {
+            urgent += 1;
+        }
+        if client.state.is_fullscreen {
+            fullscreen += 1;
+        }
     }
-    (minimized, floating, sticky)
+    (minimized, floating, sticky, urgent, fullscreen)
 }
 
 fn tag_has_fullscreen(state: &WMState, monitor: MonitorKey, tag_mask: u32) -> bool {
@@ -257,6 +265,8 @@ fn client_window_info(
         hidden_x: client.geometry.hidden_x,
         sync_counter: client.state.sync_counter,
         sync_value: client.state.sync_value,
+        total_w: client.total_width(),
+        total_h: client.total_height(),
     }
 }
 
@@ -2675,8 +2685,8 @@ impl Jwm {
             "get_night_light" | "get_night_light_status" => {
                 IpcResponse::ok(Some(self.query_night_light()))
             }
-            "get_gesture_status" => IpcResponse::ok(Some(self.query_gesture_status())),
-            "get_wayland_status" => IpcResponse::ok(Some(self.query_wayland_status(backend))),
+            "get_gesture_status" | "get_gesture" => IpcResponse::ok(Some(self.query_gesture_status())),
+            "get_wayland_status" | "get_wayland" => IpcResponse::ok(Some(self.query_wayland_status(backend))),
             "get_config_status" => IpcResponse::ok(Some(self.query_config_status())),
             "get_config" => IpcResponse::ok(Some(self.query_config_subset(args))),
             "get_dnd" => IpcResponse::ok(Some(serde_json::json!({
@@ -2688,8 +2698,8 @@ impl Jwm {
                 "kind": self.features.system_ui.panel_kind(),
             }))),
             "get_tab_bar" => IpcResponse::ok(Some(self.query_focused_tab_bar(backend))),
-            "get_media_status" => IpcResponse::ok(Some(self.media_status_json())),
-            "get_power_status" => {
+            "get_media_status" | "get_media" => IpcResponse::ok(Some(self.media_status_json())),
+            "get_power_status" | "get_power" => {
                 // Warm the Shell Hub's coalesced snapshot before answering,
                 // the `get_connectivity` shape. The contract for the read
                 // below is to answer from `features.control_snapshot`
@@ -2700,12 +2710,12 @@ impl Jwm {
                 IpcResponse::ok(Some(self.power_status_json()))
             }
             "get_connectivity" => IpcResponse::ok(Some(self.connectivity_json())),
-            "get_bluetooth_pairing" => {
+            "get_bluetooth_pairing" | "get_bluetooth" => {
                 IpcResponse::ok(Some(crate::jwm::features::pairing::session_json(
                     self.features.bluetooth_pairing.as_ref(),
                 )))
             }
-            "get_audio_devices" => {
+            "get_audio_devices" | "get_audio" => {
                 // Same contract as `get_power_status`, now that the snapshot
                 // carries the whole `AudioInventory` and not just the two
                 // devices in use: warm the coalesced read so the next poll is
@@ -2715,7 +2725,7 @@ impl Jwm {
                 self.ensure_control_snapshot_refresh(std::time::Instant::now());
                 IpcResponse::ok(Some(self.audio_devices_json()))
             }
-            "get_mic_mute" => {
+            "get_mic_mute" | "get_mic" => {
                 // Same stale-while-revalidate contract as `get_audio_devices`:
                 // warm the coalesced snapshot, then answer from memory. A
                 // null `muted` means the flag was never read (no tool / not
@@ -2729,11 +2739,11 @@ impl Jwm {
                         .and_then(|snapshot| snapshot.mic_muted),
                 })))
             }
-            "get_wallpaper_colors" => IpcResponse::ok(Some(self.wallpaper_theme_json())),
-            "get_idle_status" => IpcResponse::ok(Some(self.idle_status_json(backend))),
+            "get_wallpaper_colors" | "get_wallpaper" => IpcResponse::ok(Some(self.wallpaper_theme_json())),
+            "get_idle_status" | "get_idle" => IpcResponse::ok(Some(self.idle_status_json(backend))),
             "get_resources" => IpcResponse::ok(Some(self.resources_json())),
             "get_clipboard" => IpcResponse::ok(Some(self.clipboard_json())),
-            "get_recording_status" => {
+            "get_recording_status" | "get_recording" => {
                 let output_path = self.features.recording.output_path.clone();
                 let active = self.features.recording.active;
                 // Validation still runs synchronously (with a hard helper
@@ -2815,7 +2825,7 @@ impl Jwm {
                     })),
                 })))
             }
-            "get_audio_recording_status" => {
+            "get_audio_recording_status" | "get_audio_recording" => {
                 self.features.audio_recording.refresh();
                 let recording = &self.features.audio_recording;
                 let (output_exists, output_bytes) = recording
@@ -2882,7 +2892,7 @@ impl Jwm {
                 "active": self.features.peek_active,
                 "compositor_active": backend.has_compositor(),
             }))),
-            "get_hdr_status" => {
+            "get_hdr_status" | "get_hdr" => {
                 let outputs: Vec<serde_json::Value> = backend
                     .output_ops()
                     .enumerate_outputs()
@@ -2953,7 +2963,7 @@ impl Jwm {
                 "locked": backend.compositor_session_locked(),
                 "lock_surface_count": backend.compositor_session_lock_surface_count(),
             }))),
-            "get_color_management_status" => {
+            "get_color_management_status" | "get_color_management" => {
                 let surfaces = backend.compositor_color_managed_surfaces();
                 let detail: Vec<serde_json::Value> =
                     surfaces.iter().map(color_managed_surface_json).collect();
@@ -2989,7 +2999,7 @@ impl Jwm {
                     })))
                 }
             }
-            "get_capture_status" => {
+            "get_capture_status" | "get_capture" => {
                 if let Some(status) = backend.compositor_capture_status() {
                     IpcResponse::ok(Some(serde_json::to_value(status).unwrap_or_default()))
                 } else {
@@ -3021,7 +3031,7 @@ impl Jwm {
                     })))
                 }
             }
-            "get_blur_status" => match backend.compositor_blur_status() {
+            "get_blur_status" | "get_blur" => match backend.compositor_blur_status() {
                 Some(b) => {
                     let hz_table: Vec<serde_json::Value> = b
                         .hz_table
@@ -3051,7 +3061,7 @@ impl Jwm {
                 }
                 None => IpcResponse::err("compositor not active".to_string()),
             },
-            "get_waterlily_status" => match backend.compositor_waterlily_status() {
+            "get_waterlily_status" | "get_waterlily" => match backend.compositor_waterlily_status() {
                 Some(status) => IpcResponse::ok(Some(serde_json::json!({
                     "enabled": status.enabled,
                     "active": status.active,
@@ -3743,6 +3753,14 @@ impl Jwm {
                 media_players: self.features.system_ui.is_media_players_picker(),
                 window_switcher: self.features.system_ui.is_window_switcher(),
                 session_lock: self.features.system_ui.is_session_lock(),
+                monitor_lock: self
+                    .features
+                    .system_ui
+                    .lock_scope()
+                    .is_some_and(|scope| {
+                        matches!(scope, crate::jwm::features::LockScope::Monitor(_))
+                    }),
+                debug_hud: self.debug_hud_on,
             },
             compositor_metrics: backend
                 .compositor_get_metrics()
@@ -3755,6 +3773,10 @@ impl Jwm {
             blur: Some(self.blur_status_summary(backend)),
             hdr: Some(self.hdr_status_summary(backend)),
             capture: Some(self.capture_status_summary(backend)),
+            idle: Some(self.idle_status_summary(backend)),
+            recording: Some(self.recording_status_summary(backend)),
+            audio_recording: Some(self.audio_recording_status_summary()),
+            clipboard: Some(self.clipboard_status_summary()),
         }
     }
 
@@ -3873,7 +3895,7 @@ impl Jwm {
                 let (layout, m_fact, n_master, gap) = workspace_layout_state(mon, i);
                 let (show_bar, prev_layout, selected_id) =
                     workspace_tag_extras(mon, i, &self.state.clients);
-                let (minimized_count, floating_count, sticky_count) =
+                let (minimized_count, floating_count, sticky_count, urgent_count, fullscreen_count) =
                     tag_client_counts(&self.state, mk, tag_bit);
                 result.push(WorkspaceInfo {
                     tag_mask: tag_bit,
@@ -3896,6 +3918,8 @@ impl Jwm {
                     minimized_count,
                     floating_count,
                     sticky_count,
+                    urgent_count,
+                    fullscreen_count,
                 });
             }
         }
@@ -4004,6 +4028,8 @@ impl Jwm {
             cur_tag,
             prev_tag,
             output_connector: self.output_connector_for_monitor(backend, mk),
+            lt_symbol: m.lt_symbol.clone(),
+            output_id: self.output_id_for_monitor(backend, mk),
         }
     }
 
@@ -4319,6 +4345,56 @@ impl Jwm {
                 "dmabuf_advertised": false,
             }),
         }
+    }
+
+    /// Compact idle nest for `get_status`.
+    fn idle_status_summary(&self, backend: &dyn Backend) -> serde_json::Value {
+        let full = self.idle_status_json(backend);
+        serde_json::json!({
+            "inhibited": full.get("inhibited").cloned().unwrap_or(serde_json::json!(false)),
+            "caffeine": full.get("caffeine").cloned().unwrap_or(serde_json::json!(false)),
+            "dimmed": full.get("dimmed").cloned().unwrap_or(serde_json::json!(false)),
+            "screen_off": full.get("screen_off").cloned().unwrap_or(serde_json::json!(false)),
+            "locked": full.get("locked").cloned().unwrap_or(serde_json::json!(false)),
+            "idle_for": full.get("idle_for").cloned().unwrap_or(serde_json::json!(0)),
+        })
+    }
+
+    /// Compact recording nest for `get_status`.
+    fn recording_status_summary(&self, backend: &dyn Backend) -> serde_json::Value {
+        let capture_stats = backend.compositor_recording_stats();
+        let elapsed_secs = capture_stats
+            .as_ref()
+            .map(|stats| (stats.elapsed_secs * 10.0).round() / 10.0);
+        serde_json::json!({
+            "active": self.features.recording.active,
+            "selecting_region": self.features.recording.selecting_region,
+            "elapsed_secs": elapsed_secs,
+            "capture_target": self.features.capture.recording.label(),
+            "last_error": self.features.recording.last_error,
+            "segment_count": self.features.recording.segment_count(),
+        })
+    }
+
+    /// Compact audio-recording nest for `get_status`.
+    fn audio_recording_status_summary(&self) -> serde_json::Value {
+        let recording = &self.features.audio_recording;
+        serde_json::json!({
+            "active": recording.active,
+            "finalizing": recording.is_finalizing(),
+            "elapsed_ms": u64::try_from(recording.elapsed().as_millis()).unwrap_or(u64::MAX),
+            "last_error": recording.last_error,
+        })
+    }
+
+    /// Compact clipboard nest for `get_status`.
+    fn clipboard_status_summary(&self) -> serde_json::Value {
+        let full = self.clipboard_json();
+        serde_json::json!({
+            "enabled": full.get("enabled").cloned().unwrap_or(serde_json::json!(false)),
+            "count": full.get("count").cloned().unwrap_or(serde_json::json!(0)),
+            "capacity": full.get("capacity").cloned().unwrap_or(serde_json::json!(0)),
+        })
     }
 
     /// Named scratchpads currently bound to a managed window (`name` → id).
@@ -4799,7 +4875,37 @@ impl Jwm {
             "recording_max_height": cfg.behavior().recording_max_height,
             "recording_output_dir": cfg.behavior().recording_output_dir,
         });
+        let polish = serde_json::json!({
+            "clipboard_history": cfg.behavior().clipboard_history,
+            "border_glow_enabled": cfg.behavior().border_glow_enabled,
+            "border_glow_focused_only": cfg.behavior().border_glow_focused_only,
+            "border_glow_radius": cfg.behavior().border_glow_radius,
+            "border_glow_intensity": cfg.behavior().border_glow_intensity,
+            "shadow_inactive_opacity": cfg.behavior().shadow_inactive_opacity,
+            "shadow_offset": cfg.behavior().shadow_offset,
+            "shadow_color": cfg.behavior().shadow_color,
+            "genie_duration_ms": cfg.behavior().genie_duration_ms,
+            "focus_highlight_duration_ms": cfg.behavior().focus_highlight_duration_ms,
+            "snap_preview_color": cfg.behavior().snap_preview_color,
+            "new_client_position": cfg.behavior().new_client_position,
+            "drag_threshold_px": cfg.behavior().drag_threshold_px,
+            "client_moveresize": cfg.behavior().client_moveresize,
+            "resize_hints": cfg.behavior().resize_hints,
+            "lock_fullscreen": cfg.behavior().lock_fullscreen,
+            "compositor_api": cfg.behavior().compositor_api,
+            "resource_rows": cfg.behavior().resource_rows,
+            "gesture_swipe_threshold": cfg.behavior().gesture_swipe_threshold,
+            "wayland_enable_tearing_control": cfg.behavior().wayland_enable_tearing_control,
+            "window_animation": cfg.behavior().window_animation,
+            "window_animation_style": cfg.behavior().window_animation_style,
+            "attention_animation": cfg.behavior().attention_animation,
+        });
         if let (Some(base), Some(more)) = (full.as_object_mut(), extra.as_object()) {
+            for (key, value) in more {
+                base.insert(key.clone(), value.clone());
+            }
+        }
+        if let (Some(base), Some(more)) = (full.as_object_mut(), polish.as_object()) {
             for (key, value) in more {
                 base.insert(key.clone(), value.clone());
             }
@@ -4852,6 +4958,9 @@ impl Jwm {
                     window_count: windows.len(),
                     urgent_count: windows.iter().filter(|w| w.is_urgent).count(),
                     floating_count: windows.iter().filter(|w| w.is_floating).count(),
+                    minimized_count: windows.iter().filter(|w| w.is_minimized).count(),
+                    sticky_count: windows.iter().filter(|w| w.is_sticky).count(),
+                    fullscreen_count: windows.iter().filter(|w| w.is_fullscreen).count(),
                     selected_id: m.sel.and_then(|ck| {
                         self.state.clients.get(ck).map(|client| client.win.raw())
                     }),
@@ -8100,7 +8209,7 @@ mod tests {
             .split_once("\"get_peek\" =>")
             .expect("get_peek arm")
             .1
-            .split_once("\"get_hdr_status\" =>")
+            .split_once("\"get_hdr_status\" | \"get_hdr\" =>")
             .expect("get_hdr_status follows")
             .0;
         assert!(peek.contains("\"compositor_active\""));
@@ -8256,5 +8365,91 @@ mod tests {
             IPC.contains("\"set_cfact\"") && IPC.contains("\"toggle_floating\""),
             "dispatch registry must list underscore command twins"
         );
+    }
+
+    /// Waves 401–500 contract pins: Window/Monitor/Workspace/Tree leftovers,
+    /// short query aliases, status nests, get_config polish, session v12 /
+    /// layout show_bar, RuntimeFeatureStates monitor_lock/debug_hud.
+    #[test]
+    fn evolve7h_waves_401_500_ipc_contract_pins() {
+        const SOURCE: &str = include_str!("ipc_handler.rs");
+        const IPC: &str = include_str!("../ipc.rs");
+        const SESSION: &str = include_str!("session.rs");
+        const PERSIST: &str = include_str!("layout/persist.rs");
+        const EXPOSE: &str = include_str!("features/expose_plan.rs");
+        const RESOURCES: &str = include_str!("features/resources.rs");
+        const CONNECTIVITY: &str = include_str!("features/connectivity.rs");
+        const PORTAL: &str = include_str!("../../portal/src/ipc.rs");
+
+        assert!(IPC.contains("pub total_w:"));
+        assert!(IPC.contains("pub total_h:"));
+        assert!(IPC.contains("pub lt_symbol:"));
+        assert!(IPC.contains("pub output_id:"));
+        assert!(IPC.contains("pub urgent_count:"));
+        assert!(IPC.contains("pub fullscreen_count:"));
+        assert!(IPC.contains("pub monitor_lock:"));
+        assert!(IPC.contains("pub debug_hud:"));
+        assert!(IPC.contains("pub idle:"));
+        assert!(IPC.contains("pub recording:"));
+        assert!(IPC.contains("pub audio_recording:"));
+        assert!(IPC.contains("pub clipboard:"));
+        assert!(IPC.contains("\"toggle_scratchpad\""));
+        assert!(IPC.contains("\"get_idle\""));
+        assert!(IPC.contains("\"get_recording\""));
+        assert!(IPC.contains("\"get_blur\""));
+        assert!(IPC.contains("\"get_hdr\""));
+        assert!(IPC.contains("\"get_power\""));
+        assert!(IPC.contains("\"get_media\""));
+        assert!(IPC.contains("\"get_waterlily\""));
+
+        assert!(SOURCE.contains("total_w: client.total_width()"));
+        assert!(SOURCE.contains("lt_symbol: m.lt_symbol.clone()"));
+        assert!(SOURCE.contains("output_id: self.output_id_for_monitor"));
+        assert!(SOURCE.contains("\"get_idle\""));
+        assert!(SOURCE.contains("\"get_recording\""));
+        assert!(SOURCE.contains("fn idle_status_summary"));
+        assert!(SOURCE.contains("fn recording_status_summary"));
+        assert!(SOURCE.contains("fn clipboard_status_summary"));
+        assert!(SOURCE.contains("monitor_lock:"));
+        assert!(SOURCE.contains("debug_hud: self.debug_hud_on"));
+        assert!(SOURCE.contains("\"clipboard_history\""));
+        assert!(SOURCE.contains("\"border_glow_enabled\""));
+        assert!(SOURCE.contains("\"resource_rows\""));
+        assert!(SOURCE.contains("\"new_client_position\""));
+
+        assert!(SESSION.contains("const SESSION_VERSION: u32 = 12"));
+        assert!(SESSION.contains("pub never_focus:"));
+        assert!(SESSION.contains("pub old_state:"));
+        assert!(SESSION.contains("pub pip_restore_sticky:"));
+        assert!(SESSION.contains("pub remembers_closed_placement:"));
+        assert!(SESSION.contains("fn migrate_snapshot_v11"));
+
+        assert!(PERSIST.contains("show_bar: pertag.show_bars.get(tag).copied()"));
+        assert!(PERSIST.contains("if let Some(show_bar) = entry.show_bar"));
+
+        assert!(EXPOSE.contains("ExposeNavDirection::Left"));
+        assert!(EXPOSE.contains("ExposeNavDirection::Right"));
+
+        assert!(RESOURCES.contains("\"available_kib\""));
+        assert!(CONNECTIVITY.contains("\"scanning\""));
+
+        assert!(PORTAL.contains("pub is_floating:"));
+        assert!(PORTAL.contains("pub is_fullscreen:"));
+        assert!(PORTAL.contains("pub is_minimized:"));
+        assert!(PORTAL.contains("pub is_urgent:"));
+        assert!(PORTAL.contains("pub monitor_name:"));
+        assert!(PORTAL.contains("pub lt_symbol:"));
+        assert!(PORTAL.contains("pub output_id:"));
+
+        let status = SOURCE
+            .split_once("compositor_metrics: backend")
+            .expect("status metrics")
+            .1
+            .split_once("fn window_info")
+            .expect("window_info follows")
+            .0;
+        for nest in ["idle:", "recording:", "audio_recording:", "clipboard:"] {
+            assert!(status.contains(nest), "get_status must nest {nest}");
+        }
     }
 }

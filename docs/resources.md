@@ -32,12 +32,14 @@ build pins sixteen cores would be a lie, so the shell reads what `top` and
 | Row | Source | Shows |
 | --- | --- | --- |
 | CPU | `/proc/stat`, aggregate `cpu` line | busy share since the last sample |
-| Memory | `/proc/meminfo` | `MemTotal − MemAvailable`, and the total |
+| Memory | `/proc/meminfo` | `MemTotal − MemAvailable`, the total, and `available_kib` over IPC |
 | Network I/O | `/proc/net/dev` | received and sent bytes per second |
 
 Memory is `MemTotal − MemAvailable`, not `MemTotal − MemFree`. A machine with
 twenty gigabytes of page cache is not nearly full, and reporting it that way
-sends people hunting for a leak that is a feature.
+sends people hunting for a leak that is a feature. `get_resources` (and the
+compact `get_status.resources` nest) expose `available_kib` beside
+`used_kib` / `total_kib`.
 
 The CPU figure counts `iowait` as idle: a machine blocked on a disk is not
 busy, whatever the scheduler is doing about it.

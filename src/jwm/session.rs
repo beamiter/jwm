@@ -43,6 +43,8 @@
 //! v11 起，`is_urgent` / `demands_attention` / `skip_taskbar` / `skip_pager` /
 //! `is_fixed` 与可选 `border_w` 一并写入快照；恢复时在休息态放置阶段套用。
 //! 缺省 / 旧版本快照布尔为 `false`、`border_w` 为 `None`（不改写边框）。
+//! v12 起，`never_focus` / `old_state` / `pip_restore_sticky` /
+//! `remembers_closed_placement` 一并写入；缺省 / 旧版本为 `false`。
 
 use crate::backend::api::{Backend, MaximizeAxes, NetWmAction, NetWmState};
 use crate::config::CONFIG;
@@ -64,7 +66,7 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-const SESSION_VERSION: u32 = 11;
+const SESSION_VERSION: u32 = 12;
 const MIN_SUPPORTED_SESSION_VERSION: u32 = 1;
 const MAX_SESSION_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_SESSION_CLIENTS: usize = 16_384;
@@ -146,6 +148,18 @@ pub struct SessionEntry {
     /// v11：drawn border width。缺省 / 旧版本为 `None`（恢复时不改写）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub border_w: Option<i32>,
+    /// v12：`WM_HINTS` input / never-focus chrome。缺省 / 旧版本为 `false`。
+    #[serde(default)]
+    pub never_focus: bool,
+    /// v12：fullscreen / PiP 下记住的 floating bit（`old_state`）。缺省为 `false`。
+    #[serde(default)]
+    pub old_state: bool,
+    /// v12：离开 PiP 时恢复的 sticky bit。缺省 / 旧版本为 `false`。
+    #[serde(default)]
+    pub pip_restore_sticky: bool,
+    /// v12：关闭放置记忆资格。缺省 / 旧版本为 `false`。
+    #[serde(default)]
+    pub remembers_closed_placement: bool,
 }
 
 fn default_client_fact() -> f32 {
@@ -366,6 +380,17 @@ struct SessionSnapshotV10 {
     monitor_orders: Vec<SessionMonitorOrder>,
 }
 
+/// 版本 11 快照：已有 urgency / attention / skip_* / is_fixed / border_w，
+/// 尚无 never_focus / old_state / pip_restore_sticky / remembers_closed_placement
+/// （反序列化时缺省）。
+#[derive(Deserialize)]
+struct SessionSnapshotV11 {
+    #[allow(dead_code)]
+    version: u32,
+    clients: Vec<SessionEntry>,
+    monitor_orders: Vec<SessionMonitorOrder>,
+}
+
 /// 把任一受支持版本的会话 JSON 迁移为当前版本的快照。
 ///
 /// 崩溃安全约定：迁移是纯内存操作，绝不改写磁盘上的旧快照；升级后的
@@ -382,72 +407,83 @@ pub fn migrate_session_json(json: &str) -> Result<SessionSnapshot, String> {
         1 => {
             let v1: SessionSnapshotV1 = serde_json::from_str(json)
                 .map_err(|error| format!("cannot parse version 1 session snapshot: {error}"))?;
-            migrate_snapshot_v10(migrate_snapshot_v9(migrate_snapshot_v8(migrate_snapshot_v7(
-                migrate_snapshot_v6(migrate_snapshot_v5(migrate_snapshot_v4(migrate_snapshot_v3(
-                    migrate_snapshot_v2(migrate_snapshot_v1(v1)),
-                )))),
+            migrate_snapshot_v11(migrate_snapshot_v10(migrate_snapshot_v9(migrate_snapshot_v8(
+                migrate_snapshot_v7(migrate_snapshot_v6(migrate_snapshot_v5(
+                    migrate_snapshot_v4(migrate_snapshot_v3(migrate_snapshot_v2(
+                        migrate_snapshot_v1(v1),
+                    ))),
+                ))),
             ))))
         }
         2 => {
             let v2: SessionSnapshotV2 = serde_json::from_str(json)
                 .map_err(|error| format!("cannot parse version 2 session snapshot: {error}"))?;
-            migrate_snapshot_v10(migrate_snapshot_v9(migrate_snapshot_v8(migrate_snapshot_v7(
-                migrate_snapshot_v6(migrate_snapshot_v5(migrate_snapshot_v4(migrate_snapshot_v3(
-                    migrate_snapshot_v2(v2),
-                )))),
+            migrate_snapshot_v11(migrate_snapshot_v10(migrate_snapshot_v9(migrate_snapshot_v8(
+                migrate_snapshot_v7(migrate_snapshot_v6(migrate_snapshot_v5(
+                    migrate_snapshot_v4(migrate_snapshot_v3(migrate_snapshot_v2(v2))),
+                ))),
             ))))
         }
         3 => {
             let v3: SessionSnapshotV3 = serde_json::from_str(json)
                 .map_err(|error| format!("cannot parse version 3 session snapshot: {error}"))?;
-            migrate_snapshot_v10(migrate_snapshot_v9(migrate_snapshot_v8(migrate_snapshot_v7(
-                migrate_snapshot_v6(migrate_snapshot_v5(migrate_snapshot_v4(migrate_snapshot_v3(
-                    v3,
-                )))),
+            migrate_snapshot_v11(migrate_snapshot_v10(migrate_snapshot_v9(migrate_snapshot_v8(
+                migrate_snapshot_v7(migrate_snapshot_v6(migrate_snapshot_v5(
+                    migrate_snapshot_v4(migrate_snapshot_v3(v3)),
+                ))),
             ))))
         }
         4 => {
             let v4: SessionSnapshotV4 = serde_json::from_str(json)
                 .map_err(|error| format!("cannot parse version 4 session snapshot: {error}"))?;
-            migrate_snapshot_v10(migrate_snapshot_v9(migrate_snapshot_v8(migrate_snapshot_v7(
-                migrate_snapshot_v6(migrate_snapshot_v5(migrate_snapshot_v4(v4))),
+            migrate_snapshot_v11(migrate_snapshot_v10(migrate_snapshot_v9(migrate_snapshot_v8(
+                migrate_snapshot_v7(migrate_snapshot_v6(migrate_snapshot_v5(
+                    migrate_snapshot_v4(v4),
+                ))),
             ))))
         }
         5 => {
             let v5: SessionSnapshotV5 = serde_json::from_str(json)
                 .map_err(|error| format!("cannot parse version 5 session snapshot: {error}"))?;
-            migrate_snapshot_v10(migrate_snapshot_v9(migrate_snapshot_v8(migrate_snapshot_v7(
-                migrate_snapshot_v6(migrate_snapshot_v5(v5)),
+            migrate_snapshot_v11(migrate_snapshot_v10(migrate_snapshot_v9(migrate_snapshot_v8(
+                migrate_snapshot_v7(migrate_snapshot_v6(migrate_snapshot_v5(v5))),
             ))))
         }
         6 => {
             let v6: SessionSnapshotV6 = serde_json::from_str(json)
                 .map_err(|error| format!("cannot parse version 6 session snapshot: {error}"))?;
-            migrate_snapshot_v10(migrate_snapshot_v9(migrate_snapshot_v8(migrate_snapshot_v7(
-                migrate_snapshot_v6(v6),
+            migrate_snapshot_v11(migrate_snapshot_v10(migrate_snapshot_v9(migrate_snapshot_v8(
+                migrate_snapshot_v7(migrate_snapshot_v6(v6)),
             ))))
         }
         7 => {
             let v7: SessionSnapshotV7 = serde_json::from_str(json)
                 .map_err(|error| format!("cannot parse version 7 session snapshot: {error}"))?;
-            migrate_snapshot_v10(migrate_snapshot_v9(migrate_snapshot_v8(migrate_snapshot_v7(
-                v7,
+            migrate_snapshot_v11(migrate_snapshot_v10(migrate_snapshot_v9(migrate_snapshot_v8(
+                migrate_snapshot_v7(v7),
             ))))
         }
         8 => {
             let v8: SessionSnapshotV8 = serde_json::from_str(json)
                 .map_err(|error| format!("cannot parse version 8 session snapshot: {error}"))?;
-            migrate_snapshot_v10(migrate_snapshot_v9(migrate_snapshot_v8(v8)))
+            migrate_snapshot_v11(migrate_snapshot_v10(migrate_snapshot_v9(
+                migrate_snapshot_v8(v8),
+            )))
         }
         9 => {
             let v9: SessionSnapshotV9 = serde_json::from_str(json)
                 .map_err(|error| format!("cannot parse version 9 session snapshot: {error}"))?;
-            migrate_snapshot_v10(migrate_snapshot_v9(v9))
+            migrate_snapshot_v11(migrate_snapshot_v10(migrate_snapshot_v9(v9)))
         }
         10 => {
             let v10: SessionSnapshotV10 = serde_json::from_str(json)
                 .map_err(|error| format!("cannot parse version 10 session snapshot: {error}"))?;
-            migrate_snapshot_v10(v10)
+            migrate_snapshot_v11(migrate_snapshot_v10(v10))
+        }
+        11 => {
+            let v11: SessionSnapshotV11 = serde_json::from_str(json)
+                .map_err(|error| format!("cannot parse version 11 session snapshot: {error}"))?;
+            migrate_snapshot_v11(v11)
         }
         SESSION_VERSION => SessionSnapshot::from_json(json)
             .map_err(|error| format!("cannot parse session snapshot: {error}"))?,
@@ -497,6 +533,10 @@ fn migrate_snapshot_v1(v1: SessionSnapshotV1) -> SessionSnapshotV2 {
                 skip_pager: false,
                 is_fixed: false,
                 border_w: None,
+                never_focus: false,
+                old_state: false,
+                pip_restore_sticky: false,
+                remembers_closed_placement: false,
             }
         })
         .collect();
@@ -580,11 +620,21 @@ fn migrate_snapshot_v9(v9: SessionSnapshotV9) -> SessionSnapshotV10 {
 }
 
 /// v10 -> v11：urgency / attention / skip_* / is_fixed / border_w 在反序列化时已缺省；只抬版本号。
-fn migrate_snapshot_v10(v10: SessionSnapshotV10) -> SessionSnapshot {
-    SessionSnapshot {
-        version: SESSION_VERSION,
+fn migrate_snapshot_v10(v10: SessionSnapshotV10) -> SessionSnapshotV11 {
+    SessionSnapshotV11 {
+        version: 11,
         clients: v10.clients,
         monitor_orders: v10.monitor_orders,
+    }
+}
+
+/// v11 -> v12：never_focus / old_state / pip_restore_sticky /
+/// remembers_closed_placement 在反序列化时已缺省；只抬版本号。
+fn migrate_snapshot_v11(v11: SessionSnapshotV11) -> SessionSnapshot {
+    SessionSnapshot {
+        version: SESSION_VERSION,
+        clients: v11.clients,
+        monitor_orders: v11.monitor_orders,
     }
 }
 
@@ -619,6 +669,10 @@ struct DetailedRestorePlan {
     skip_pager: bool,
     is_fixed: bool,
     border_w: Option<i32>,
+    never_focus: bool,
+    old_state: bool,
+    pip_restore_sticky: bool,
+    remembers_closed_placement: bool,
 }
 
 impl SessionSnapshot {
@@ -1078,6 +1132,10 @@ pub fn capture_snapshot_excluding(
             skip_pager: c.state.skip_pager,
             is_fixed: c.state.is_fixed,
             border_w: Some(c.geometry.border_w),
+            never_focus: c.state.never_focus,
+            old_state: c.state.old_state,
+            pip_restore_sticky: c.state.pip_restore_sticky,
+            remembers_closed_placement: c.state.remembers_closed_placement,
         });
     }
     let monitor_orders = state
@@ -1204,6 +1262,10 @@ where
                     skip_pager: e.skip_pager,
                     is_fixed: e.is_fixed,
                     border_w: e.border_w,
+                    never_focus: e.never_focus,
+                    old_state: e.old_state,
+                    pip_restore_sticky: e.pip_restore_sticky,
+                    remembers_closed_placement: e.remembers_closed_placement,
                 },
             ));
         }
@@ -1469,6 +1531,10 @@ impl Jwm {
                 c.state.skip_taskbar = plan.skip_taskbar;
                 c.state.skip_pager = plan.skip_pager;
                 c.state.is_fixed = plan.is_fixed;
+                c.state.never_focus = plan.never_focus;
+                c.state.old_state = plan.old_state;
+                c.state.pip_restore_sticky = plan.pip_restore_sticky;
+                c.state.remembers_closed_placement = plan.remembers_closed_placement;
                 if plan.no_decorations {
                     c.geometry.border_w = 0;
                 } else if let Some(border_w) = plan.border_w {
@@ -1622,6 +1688,10 @@ impl Jwm {
                 c.state.skip_taskbar = plan.skip_taskbar;
                 c.state.skip_pager = plan.skip_pager;
                 c.state.is_fixed = plan.is_fixed;
+                c.state.never_focus = plan.never_focus;
+                c.state.old_state = plan.old_state;
+                c.state.pip_restore_sticky = plan.pip_restore_sticky;
+                c.state.remembers_closed_placement = plan.remembers_closed_placement;
                 if plan.no_decorations {
                     c.geometry.border_w = 0;
                 } else if let Some(border_w) = plan.border_w {
@@ -1788,6 +1858,10 @@ mod tests {
             skip_pager: false,
             is_fixed: false,
             border_w: None,
+            never_focus: false,
+            old_state: false,
+            pip_restore_sticky: false,
+            remembers_closed_placement: false,
         }
     }
 
@@ -1846,6 +1920,10 @@ mod tests {
                     skip_pager: false,
                     is_fixed: false,
                     border_w: Some(3),
+                never_focus: false,
+                old_state: false,
+                pip_restore_sticky: false,
+                remembers_closed_placement: false,
                 },
                 entry("Alacritty", "alacritty", 0b1),
             ],

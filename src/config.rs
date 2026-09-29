@@ -1763,6 +1763,10 @@ pub struct LayoutTagConfig {
     /// Pixels between tiled windows. Absent means `appearance.gap_px`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gap: Option<i32>,
+    /// Whether the status bar is shown for this tag. Absent means the
+    /// global `status_bar.show_bar` / seed default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub show_bar: Option<bool>,
 }
 
 fn default_layout_tag_monitor() -> i32 {
@@ -5386,6 +5390,7 @@ mod tests {
             n_master: Some(2),
             m_fact: Some(0.62),
             gap: Some(8),
+            show_bar: None,
         }
     }
 

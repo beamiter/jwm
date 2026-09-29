@@ -3476,7 +3476,7 @@ impl Jwm {
         // click instead closes the clicked cell's window, browser-tab style,
         // and never commits: on a miss it is a no-op and the gesture stays
         // up. The vertical wheel browses the highlight (Up/Down) like the
-        // arrows; a horizontal wheel is inert.
+        // arrows; a horizontal wheel browses Left/Right (tags-overview twin).
         if self.features.expose_active {
             match expose_plan::expose_press(detail_btn) {
                 expose_plan::ExposePress::Close => {
@@ -6404,10 +6404,10 @@ mod tests {
 
     /// The expose pointer branch classifies buttons through
     /// [`expose_plan::expose_press`]: middle closes the pointed cell, the
-    /// vertical wheel browses Up/Down, the horizontal wheel is inert, and
-    /// every other button still commits through `plan_click`. The haystack
-    /// is the shipped source; needles are built at runtime so this test
-    /// cannot match its own.
+    /// vertical wheel browses Up/Down, the horizontal wheel browses
+    /// Left/Right (tags-overview twin), and every other button still commits
+    /// through `plan_click`. The haystack is the shipped source; needles are
+    /// built at runtime so this test cannot match its own.
     #[test]
     fn expose_pointer_routes_close_browse_and_commit() {
         const SOURCE: &str = include_str!("input_handler.rs");
@@ -6446,7 +6446,7 @@ mod tests {
         );
         assert!(
             branch.contains(concat!("expose_plan::ExposePress::Inert=>returnOk(()),")),
-            "the horizontal wheel must be inert"
+            "Inert presses must still short-circuit"
         );
         assert!(
             branch.contains(concat!(

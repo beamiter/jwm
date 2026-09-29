@@ -187,6 +187,11 @@ pub(crate) fn seed_pertag_from_config(
         if let Some(gap) = entry.gap {
             pertag.gaps[tag] = gap.clamp(0, MAX_GAP);
         }
+        if let Some(show_bar) = entry.show_bar {
+            if let Some(slot) = pertag.show_bars.get_mut(tag) {
+                *slot = show_bar;
+            }
+        }
     }
 
     if restored > 0 {
@@ -395,6 +400,7 @@ impl Jwm {
                     n_master: pertag.n_masters.get(tag).copied(),
                     m_fact: pertag.m_facts.get(tag).copied(),
                     gap: pertag.gaps.get(tag).copied(),
+                    show_bar: pertag.show_bars.get(tag).copied(),
                 });
             }
         }
@@ -434,6 +440,7 @@ mod tests {
             n_master: None,
             m_fact: None,
             gap: None,
+            show_bar: None,
         }
     }
 

@@ -69,12 +69,18 @@ tiling `gap` / `m_fact` / `n_master`, `transform`, physical size
 (`preferred_width` / `preferred_height` / `preferred_refresh_mhz`).
 `get_config` accepts optional `keys` to return a field subset, including
 `hdr_enabled`, `idle_dim_secs` / `idle_dim_level`, `night_light*` schedule
-fields, `remember_closed_placement`, and WaterLily env mirrors
-(`waterlily_enabled` / `waterlily_opacity`). `get_tree` nodes also carry
-`selected_id`, `window_count`, `urgent_count`, and `floating_count`.
-`get_workspaces` includes per-tag `gap`; `get_layout` / `get_gaps` /
-`get_nmaster` return the focused monitor's live layout parameters;
-`setgaps` / `setnmaster` / `set_nmaster` / `set_layout` are bindable over IPC.
+fields, `remember_closed_placement`, WaterLily env mirrors
+(`waterlily_enabled` / `waterlily_opacity`), expose/peek/tags/magnifier/
+tabs/VRR/swallow/idle/wallpaper/opacity/blur/recording keys, and polish
+keys (`clipboard_history`, `border_glow_*`, `resource_rows`,
+`new_client_position`, `compositor_api`, …). `get_tree` nodes also carry
+`selected_id`, `window_count`, `urgent_count`, `floating_count`,
+`minimized_count`, `sticky_count`, and `fullscreen_count`.
+`get_workspaces` includes per-tag `gap` plus count fields; `get_layout` /
+`get_gaps` / `get_nmaster` return the focused monitor's live layout
+parameters; `setgaps` / `setnmaster` / `set_nmaster` / `set_layout` are
+bindable over IPC. Window rows also report border-inclusive `total_w` /
+`total_h`; monitors report `lt_symbol` and optional `output_id`.
 `get_effect_status` reports `magnifier_radius` and `compositor_active`;
 `get_magnifier` reports `radius`; `get_peek` reports `compositor_active`;
 `get_tab_bar` reports `selected_id` when a tab group is focused.

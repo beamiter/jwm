@@ -7,6 +7,35 @@ monorepo use independent Semantic Versions.
 
 ### Added
 
+- `get_windows` / `get_clients` / `get_tree` / `window/state` report
+  border-inclusive `total_w` / `total_h`.
+- `get_monitors` / `get_tree` report `lt_symbol` and optional `output_id`.
+- `get_workspaces` report per-tag `urgent_count` / `fullscreen_count`;
+  `get_tree` nodes also carry `minimized_count` / `sticky_count` /
+  `fullscreen_count`.
+- IPC aliases: `toggle_scratchpad`; short query twins (`get_idle`,
+  `get_recording`, `get_audio_recording`, `get_blur`, `get_hdr`,
+  `get_capture`, `get_power`, `get_media`, `get_gesture`, `get_wayland`,
+  `get_waterlily`, `get_bluetooth`, `get_mic`, `get_wallpaper`,
+  `get_audio`, `get_color_management`).
+- `get_status` feature flags include `monitor_lock` / `debug_hud`; nests
+  compact `idle` / `recording` / `audio_recording` / `clipboard` summaries.
+- `get_resources` memory reports `available_kib`; `get_connectivity`
+  reports `scanning` on network / bluetooth.
+- `get_config` keys: clipboard_history, border_glow_*, shadow extras,
+  genie/focus durations, snap_preview_color, new_client_position,
+  drag_threshold_px, client_moveresize, resize_hints, lock_fullscreen,
+  compositor_api, resource_rows, gesture_swipe_threshold,
+  wayland_enable_tearing_control, window_animation*, attention_animation.
+- Session snapshot v12 persists `never_focus` / `old_state` /
+  `pip_restore_sticky` / `remembers_closed_placement`.
+- Per-tag layout persistence saves / restores `show_bar`; `togglebar`
+  marks layout dirty.
+- Expose horizontal wheel browses Left/Right (tags-overview twin).
+- Portal `WindowInfo` deserializes floating/fullscreen/minimized/urgent /
+  monitor_name / layout; `MonitorInfo` gains monitor_name /
+  output_connector / lt_symbol / output_id.
+
 - `get_windows` / `get_clients` / `get_tree` / `window/state` report optional
   `hidden_x`, optional `sync_counter`, and `sync_value`.
 - `get_monitors` / `get_tree` report dual-tagset `sel_tags` /

@@ -1035,6 +1035,17 @@ impl Jwm {
             .filter(|name| !name.is_empty())
     }
 
+    /// Backend output id (`OutputInfo.id`) for the live output backing
+    /// `mon_key`.
+    pub(crate) fn output_id_for_monitor(
+        &self,
+        backend: &dyn Backend,
+        mon_key: crate::core::models::MonitorKey,
+    ) -> Option<u64> {
+        self.live_output_info(backend, mon_key)
+            .map(|output| output.id.0)
+    }
+
     /// EDID vendor / product / serial fields for the live output backing
     /// `mon_key`.
     pub(crate) fn output_edid_ids_for_monitor(

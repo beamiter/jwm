@@ -2040,6 +2040,11 @@ impl crate::jwm::Jwm {
 
     /// JSON snapshot for the `get_connectivity` query and the event payload.
     pub(crate) fn connectivity_json(&self) -> serde_json::Value {
+        let bluetooth = self.features.connectivity.bluetooth;
+        let wifi_scanning =
+            crate::jwm::features::connectivity::job_in_flight(self.features.wifi_scan.as_ref());
+        let bluetooth_scanning =
+            crate::jwm::features::connectivity::job_in_flight(self.features.bluetooth_scan.as_ref());
         let network = match &self.features.connectivity.network {
             Some(state) => serde_json::json!({
                 "present": true,
@@ -2047,15 +2052,16 @@ impl crate::jwm::Jwm {
                 "connection": state.connection,
                 "kind": state.kind.as_str(),
                 "signal": state.signal,
+                "scanning": wifi_scanning,
             }),
-            None => serde_json::json!({ "present": false }),
+            None => serde_json::json!({ "present": false, "scanning": wifi_scanning }),
         };
-        let bluetooth = self.features.connectivity.bluetooth;
         serde_json::json!({
             "network": network,
             "bluetooth": {
                 "present": bluetooth.present,
                 "powered": bluetooth.powered,
+                "scanning": bluetooth_scanning,
             },
         })
     }

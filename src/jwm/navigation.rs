@@ -226,6 +226,7 @@ impl Jwm {
         }
 
         if let Some((mon_num, bar_visible)) = monitor_num_opt {
+            self.mark_layout_dirty();
             self.mark_bar_update_needed_if_visible(Some(mon_num));
 
             if !bar_visible {

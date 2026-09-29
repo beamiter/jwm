@@ -19,19 +19,21 @@ pub enum ExposePress {
     Close,
     /// Vertical wheel: step the highlight one cell (Up/Down), keep expose.
     Browse(ExposeNavDirection),
-    /// Horizontal wheel: nothing to browse sideways on a thumbnail grid.
+    /// Reserved for presses that consume the event without acting.
     Inert,
 }
 
 /// Classify a button press for expose. Vertical wheel browses like the
-/// arrows; horizontal wheel is inert; middle closes; everything else commits.
+/// arrows; horizontal wheel browses Left/Right (tags-overview twin); middle
+/// closes; everything else commits.
 #[must_use]
 pub fn expose_press(button: u8) -> ExposePress {
     match button {
         2 => ExposePress::Close,
         4 => ExposePress::Browse(ExposeNavDirection::Up),
         5 => ExposePress::Browse(ExposeNavDirection::Down),
-        6 | 7 => ExposePress::Inert,
+        6 => ExposePress::Browse(ExposeNavDirection::Left),
+        7 => ExposePress::Browse(ExposeNavDirection::Right),
         _ => ExposePress::Commit,
     }
 }
@@ -635,8 +637,14 @@ mod tests {
             expose_press(5),
             ExposePress::Browse(ExposeNavDirection::Down)
         );
-        assert_eq!(expose_press(6), ExposePress::Inert);
-        assert_eq!(expose_press(7), ExposePress::Inert);
+        assert_eq!(
+            expose_press(6),
+            ExposePress::Browse(ExposeNavDirection::Left)
+        );
+        assert_eq!(
+            expose_press(7),
+            ExposePress::Browse(ExposeNavDirection::Right)
+        );
         assert_eq!(expose_press(8), ExposePress::Commit);
     }
 }

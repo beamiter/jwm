@@ -543,6 +543,7 @@ impl crate::jwm::Jwm {
             "memory": state.memory.map(|memory| serde_json::json!({
                 "total_kib": memory.total_kib,
                 "used_kib": memory.used_kib,
+                "available_kib": memory.total_kib.saturating_sub(memory.used_kib),
                 "percent": memory.percent(),
             })),
             "net_present": state.net_present,

@@ -34,10 +34,24 @@ pub struct WindowInfo {
     /// DRM / wlr connector when jwm reported one.
     #[serde(default)]
     pub connector: Option<String>,
+    /// EDID monitor name when jwm reported one.
+    #[serde(default)]
+    pub monitor_name: Option<String>,
     /// True when the window's tags intersect the active tags on its monitor
     /// (or it is sticky). Useful for preferring on-view windows in the picker.
     #[serde(default)]
     pub is_on_view: bool,
+    #[serde(default)]
+    pub is_floating: bool,
+    #[serde(default)]
+    pub is_fullscreen: bool,
+    #[serde(default)]
+    pub is_minimized: bool,
+    #[serde(default)]
+    pub is_urgent: bool,
+    /// Current layout symbol on the window's monitor when known.
+    #[serde(default)]
+    pub layout: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -47,6 +61,14 @@ pub struct MonitorInfo {
     pub name: Option<String>,
     #[serde(default)]
     pub connector: Option<String>,
+    #[serde(default)]
+    pub monitor_name: Option<String>,
+    #[serde(default)]
+    pub output_connector: Option<String>,
+    #[serde(default)]
+    pub lt_symbol: Option<String>,
+    #[serde(default)]
+    pub output_id: Option<u64>,
 }
 
 /// Mirror of the compositor's per-client IPC buffer ceiling, the cap the
