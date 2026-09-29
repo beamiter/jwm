@@ -16,12 +16,12 @@ monorepo use independent Semantic Versions.
   reinstate, fullscreen enter/leave, minimize/unminimize, `togglefloating`,
   urgency (`is_urgent`), sticky (`is_sticky`), a real `tag` / `toggletag`
   change, a cross-monitor `sendmon` / `tagmon`, an Above/Below stacking
-  flip, PiP enter/leave, or a real title / `WM_CLASS` change pushes a
-  `WindowInfo`-shaped payload (`is_maximized*`, geometry, floating,
-  minimized, fullscreen, urgent, sticky, `is_above` / `is_below`, `is_pip`,
-  name, class, tags, monitor, …) so subscribers of `window` need not poll
-  `get_windows`. Refused maximize requests and no-op mode changes stay silent.
-  See
+  flip, PiP enter/leave, a real title / `WM_CLASS` change, or a real focus
+  change pushes a `WindowInfo`-shaped payload (`is_maximized*`, geometry,
+  floating, minimized, fullscreen, urgent, sticky, `is_above` / `is_below`,
+  `is_pip`, name, class, tags, monitor, `is_focused`, …) so subscribers of
+  `window` need not poll `get_windows`. Refused maximize requests and no-op
+  mode changes stay silent. See
   [docs/window-placement.md](docs/window-placement.md#who-may-maximize-what).
 
 - `get_windows` / `get_tree` / `window/state` report `is_above` and

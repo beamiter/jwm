@@ -4,17 +4,30 @@
 
 ---
 
-## Evolve backlog（目标 100 轮；已完成 wave 9–22，本地 ahead）
+## Evolve backlog（目标 100 轮；已完成 wave 9–23，本地 ahead）
 
 按日常命中 × 可交付性排序的下一波候选（S/小 M，无 DRM）：
 
 | # | 选题 | Size |
 | --- | --- | --- |
-| 14–22 | IPC window/state 族 + Tiled* + restore_rect | S/M ✓ |
-| 23 | Annotation → CommonLinearAware | S–M |
-| 24 | Screenshot toolbar → CommonLinearAware | S–M |
-| 25 | session 持久化 maximize + restore_rect | M |
+| 14–23 | IPC window/state 全族 + Tiled* + restore_rect | S/M ✓ |
+| 24 | Annotation → CommonLinearAware | S–M |
+| 25 | Screenshot toolbar → CommonLinearAware | S–M |
+| 26 | session 持久化 maximize + restore_rect | M |
 | … | 跳过：toast Closed(1)、BT withdraw、FS/PiP 丢锚点、Recording EncodedOnly | |
+
+---
+
+## 2026-09-29（十四）：focus → `window/state`
+
+选题 = evolve wave 23。
+
+1. **契约**：`focus` 在 previous≠new 时对两者广播；同窗重入不广播。
+2. **回归**：sibling pin 扩 focus。
+
+**验证**：`scripts/test.sh --lib -- sibling_window_state_paths`。
+
+**仍然开着的**：见上表 24+。
 
 ---
 

@@ -1753,6 +1753,19 @@ mod tests {
             class.contains(&broadcast) && class.contains("if !changed"),
             "handle_class_change must broadcast window/state only when class/instance flips"
         );
+        let focus = include_str!("focus_manager.rs");
+        let focus_fn = focus
+            .split_once("pub(crate) fn focus(")
+            .expect("focus")
+            .1
+            .split_once("mod scratchpad_reveal_tests {")
+            .expect("scratchpad_reveal_tests")
+            .0;
+        assert!(
+            focus_fn.contains(&broadcast)
+                && focus_fn.contains("previous_focus != client_key_opt"),
+            "focus must broadcast window/state for previous and new clients only on a real flip"
+        );
         let toggle = include_str!("features/toggles.rs");
         let float = toggle
             .split_once("pub fn togglefloating(")

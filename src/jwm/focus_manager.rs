@@ -867,6 +867,8 @@ impl Jwm {
             client_key_opt = None;
         }
 
+        let previous_focus = self.get_selected_client_key();
+
         let is_visible = match client_key_opt {
             Some(client_key) => self.is_client_visible_by_key(client_key),
             None => false,
@@ -912,6 +914,17 @@ impl Jwm {
                         "id": id, "name": name,
                     }),
                 );
+            }
+        }
+        // WindowInfo.is_focused flipped for the previous and/or new client.
+        // Re-focusing the same window is a no-op for this payload (window/focus
+        // still fires for callers that only watch that topic).
+        if previous_focus != client_key_opt {
+            if let Some(prev) = previous_focus {
+                self.broadcast_window_state_ipc(prev);
+            }
+            if let Some(ck) = client_key_opt {
+                self.broadcast_window_state_ipc(ck);
             }
         }
 
