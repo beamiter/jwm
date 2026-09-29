@@ -137,6 +137,10 @@ fn client_window_info(
         is_desktop: client.state.is_desktop,
         is_drag_floating: client.state.is_drag_floating,
         never_focus: client.state.never_focus,
+        skip_taskbar: client.state.skip_taskbar,
+        skip_pager: client.state.skip_pager,
+        no_decorations: client.state.no_decorations,
+        demands_attention: client.state.demands_attention,
         has_strut,
         client_fact: client.state.client_fact,
         border_w: client.geometry.border_w,
@@ -3654,6 +3658,7 @@ impl Jwm {
             monitor_name: self.output_monitor_name_for_monitor(backend, mk),
             scale,
             refresh_mhz,
+            hdr_capable: self.output_hdr_capable_for_monitor(backend, mk),
         }
     }
 
@@ -4211,6 +4216,10 @@ mod tests {
         assert!(!info.is_desktop);
         assert!(!info.is_drag_floating);
         assert!(!info.never_focus);
+        assert!(!info.skip_taskbar);
+        assert!(!info.skip_pager);
+        assert!(!info.no_decorations);
+        assert!(!info.demands_attention);
         assert!(!info.has_strut);
         assert_eq!(info.client_fact, 0.0);
         assert_eq!(info.border_w, 0);
@@ -4246,6 +4255,10 @@ mod tests {
         assert!(restored.is_desktop);
         assert!(!restored.is_drag_floating);
         assert!(!restored.never_focus);
+        assert!(!restored.skip_taskbar);
+        assert!(!restored.skip_pager);
+        assert!(!restored.no_decorations);
+        assert!(!restored.demands_attention);
         assert!(restored.has_strut);
         assert_eq!(restored.client_fact, 1.25);
         assert_eq!(restored.border_w, 4);

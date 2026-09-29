@@ -1023,6 +1023,16 @@ impl Jwm {
             .unwrap_or((1.0, 0))
     }
 
+    /// Whether the live output backing `mon_key` advertised HDR capability.
+    pub(crate) fn output_hdr_capable_for_monitor(
+        &self,
+        backend: &dyn Backend,
+        mon_key: crate::core::models::MonitorKey,
+    ) -> bool {
+        self.live_output_info(backend, mon_key)
+            .is_some_and(|output| output.hdr_capable)
+    }
+
     fn live_output_info(
         &self,
         backend: &dyn Backend,

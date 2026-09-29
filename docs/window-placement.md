@@ -206,12 +206,14 @@ active tags, or it is sticky — on the current view, not merely mapped),
 `MonitorInfoIpc.layout`, omitted when the window has no monitor).
 Chrome / size-hint flags on the same rows: `is_fixed` (size-hints refuse
 resize), `is_dock`, `is_desktop`, `is_drag_floating` (user-promoted float),
-`never_focus`, `has_strut` (contributes a `_NET_WM_STRUT(_PARTIAL)`
-reservation), and `client_fact` (per-window tiled share).
+`never_focus`, `skip_taskbar`, `skip_pager`, `no_decorations`,
+`demands_attention` (EWMH demands-attention, distinct from `is_urgent`),
+`has_strut` (contributes a `_NET_WM_STRUT(_PARTIAL)` reservation), and
+`client_fact` (per-window tiled share).
 `get_monitors` / `get_tree` expose the usable work area as `wx` / `wy` /
 `ww` / `wh` beside the full-output `x` / `y` / `w` / `h`, plus `scale`
-(fractional) and `refresh_mhz` (mode refresh in millihertz; `60000` is
-60 Hz).
+(fractional), `refresh_mhz` (mode refresh in millihertz; `60000` is
+60 Hz), and `hdr_capable`.
 
 A refused request, like one that changes nothing, leaves the window alone:
 JWM republishes the current state and replies with the current geometry, a

@@ -4,7 +4,7 @@
 
 ---
 
-## Evolve backlog（目标 100 轮；已完成 wave 9–95，本地 ahead）
+## Evolve backlog（目标 100 轮；已完成 wave 9–100，本地 ahead）
 
 | # | 选题 | Size |
 | --- | --- | --- |
@@ -20,7 +20,27 @@
 | 73–79 | swallow→window/state；WindowInfo scratchpad/border_w/layout；switcher Home/End；expose wheel browse；calendar Page year；clipboard WebP/GIF | ✓ |
 | 80–91 | WindowInfo fixed/dock/desktop/drag_float/strut/cfact；MonitorInfo scale/refresh_mhz；switcher Page；tags/expose Home/End；get_magnifier/get_peek | ✓ |
 | 92–95 | never_focus；tags/expose Page；waterlily requested_case/palette | ✓ |
+| 96–100 | skip_taskbar/pager；no_decorations；demands_attention；MonitorInfoIpc.hdr_capable | ✓ |
 | … | 跳过：Annotation/Screenshot CommonLinear、toast Closed(1)、BT withdraw、FS/PiP 自身丢锚点（own-anchor drop）、Recording EncodedOnly、XWayland 单轴 | |
+
+---
+
+## 2026-09-29（四十二）：skip_* / decorations / demands_attention / HDR IPC
+
+选题 = evolve waves 96–100 / evolve7h。
+
+1. **Wave 96–97**：`WindowInfo.skip_taskbar` / `skip_pager`。
+2. **Wave 98**：`WindowInfo.no_decorations`。
+3. **Wave 99**：`WindowInfo.demands_attention`（EWMH，与 `is_urgent` 分立）。
+4. **Wave 100**：`MonitorInfoIpc.hdr_capable`（live `OutputInfo`）。
+   Docs + CHANGELOG + serialize pins。
+
+**刻意不做**：跳过表不变；`MonitorInfoIpc.transform`（需扩 `OutputInfo`）。
+
+**验证**：`scripts/test.sh --lib -- window_info_serializes monitor_info_serializes window_query_projection`。
+
+**下一轮候选**：见跳过表；monitor transform；maximize restore 跨 output；
+其它 topology/state 边角。
 
 ---
 

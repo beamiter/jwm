@@ -531,6 +531,14 @@ pub struct WindowInfo {
     pub is_drag_floating: bool,
     /// `WM_HINTS` input flag false / never-focus chrome (`ClientState::never_focus`).
     pub never_focus: bool,
+    /// `_NET_WM_STATE_SKIP_TASKBAR` / equivalent.
+    pub skip_taskbar: bool,
+    /// `_NET_WM_STATE_SKIP_PAGER` / equivalent.
+    pub skip_pager: bool,
+    /// Client asked for undecorated chrome (`ClientState::no_decorations`).
+    pub no_decorations: bool,
+    /// `_NET_WM_STATE_DEMANDS_ATTENTION` (distinct from urgency/`is_urgent`).
+    pub demands_attention: bool,
     /// True when this window contributes an `_NET_WM_STRUT(_PARTIAL)`
     /// reservation that shrinks a monitor's work area.
     pub has_strut: bool,
@@ -621,6 +629,8 @@ pub struct MonitorInfoIpc {
     /// Mode refresh in millihertz (`OutputInfo.refresh_rate`); `60000` is
     /// 60 Hz. `0` when the output map has no entry.
     pub refresh_mhz: u32,
+    /// Whether the live output advertised HDR capability (`OutputInfo.hdr_capable`).
+    pub hdr_capable: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -1140,6 +1150,10 @@ mod tests {
             is_desktop: false,
             is_drag_floating: false,
             never_focus: false,
+            skip_taskbar: false,
+            skip_pager: false,
+            no_decorations: false,
+            demands_attention: false,
             has_strut: false,
             client_fact: 1.0,
             border_w: 2,
@@ -1167,6 +1181,10 @@ mod tests {
         assert_eq!(value["is_desktop"], false);
         assert_eq!(value["is_drag_floating"], false);
         assert_eq!(value["never_focus"], false);
+        assert_eq!(value["skip_taskbar"], false);
+        assert_eq!(value["skip_pager"], false);
+        assert_eq!(value["no_decorations"], false);
+        assert_eq!(value["demands_attention"], false);
         assert_eq!(value["has_strut"], false);
         assert_eq!(value["client_fact"], 1.0);
         assert_eq!(value["border_w"], 2);
@@ -1205,6 +1223,10 @@ mod tests {
             is_desktop: false,
             is_drag_floating: false,
             never_focus: false,
+            skip_taskbar: false,
+            skip_pager: false,
+            no_decorations: false,
+            demands_attention: false,
             has_strut: false,
             client_fact: 1.0,
             border_w: 0,
@@ -1258,6 +1280,10 @@ mod tests {
             is_desktop: false,
             is_drag_floating: false,
             never_focus: false,
+            skip_taskbar: false,
+            skip_pager: false,
+            no_decorations: false,
+            demands_attention: false,
             has_strut: false,
             client_fact: 1.0,
             border_w: 3,
@@ -1304,6 +1330,10 @@ mod tests {
             is_desktop: false,
             is_drag_floating: false,
             never_focus: false,
+            skip_taskbar: false,
+            skip_pager: false,
+            no_decorations: false,
+            demands_attention: false,
             has_strut: false,
             client_fact: 1.0,
             border_w: 0,
@@ -1340,6 +1370,7 @@ mod tests {
             monitor_name: Some("Dell U2720Q".into()),
             scale: 1.5,
             refresh_mhz: 60_000,
+            hdr_capable: true,
         })
         .expect("serialize");
         assert_eq!(with_connector["connector"], "DP-1");
@@ -1351,6 +1382,7 @@ mod tests {
         assert_eq!(with_connector["wh"], 1048);
         assert_eq!(with_connector["scale"], 1.5);
         assert_eq!(with_connector["refresh_mhz"], 60_000);
+        assert_eq!(with_connector["hdr_capable"], true);
 
         let without = serde_json::to_value(MonitorInfoIpc {
             num: 1,
@@ -1370,6 +1402,7 @@ mod tests {
             monitor_name: None,
             scale: 1.0,
             refresh_mhz: 0,
+            hdr_capable: false,
         })
         .expect("serialize");
         assert!(without.get("connector").is_none());
@@ -1381,6 +1414,7 @@ mod tests {
         assert_eq!(without["wh"], 1080);
         assert_eq!(without["scale"], 1.0);
         assert_eq!(without["refresh_mhz"], 0);
+        assert_eq!(without["hdr_capable"], false);
     }
 
     #[test]

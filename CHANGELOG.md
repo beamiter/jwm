@@ -8,12 +8,13 @@ monorepo use independent Semantic Versions.
 ### Added
 
 - `get_windows` / `get_tree` / `window/state` report `is_fixed`, `is_dock`,
-  `is_desktop`, `is_drag_floating`, `never_focus`, `has_strut`, and
+  `is_desktop`, `is_drag_floating`, `never_focus`, `skip_taskbar`,
+  `skip_pager`, `no_decorations`, `demands_attention`, `has_strut`, and
   `client_fact` beside the existing state flags. See
   [docs/window-placement.md](docs/window-placement.md).
 
-- `get_monitors` / `get_tree` report `scale` (fractional) and `refresh_mhz`
-  (mode refresh in millihertz; `60000` is 60 Hz). See
+- `get_monitors` / `get_tree` report `scale` (fractional), `refresh_mhz`
+  (mode refresh in millihertz; `60000` is 60 Hz), and `hdr_capable`. See
   [docs/monitor-lock.md](docs/monitor-lock.md).
 
 - The Alt+Tab switcher answers `Page Up` / `Page Down` (one visible page,

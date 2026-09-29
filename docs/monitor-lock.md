@@ -155,7 +155,8 @@ monitor, so a status bar can show which screens are down and key or label
 panels the same way session restore does. Each monitor row also reports the
 work area as `wx` / `wy` / `ww` / `wh` (status bar, strut docks, and the
 window tab bar excluded) beside the full-output `x` / `y` / `w` / `h`,
-plus `scale` (fractional) and `refresh_mhz` (mode refresh in millihertz).
+plus `scale` (fractional) and `refresh_mhz` (mode refresh in millihertz),
+and `hdr_capable` when the live output advertised HDR.
 `get_workspaces` / `get_windows` /
 `get_tree` / `window/state` expose the same optional `connector` and
 `monitor_name` on each workspace and window row (omitted when unknown).
@@ -164,4 +165,5 @@ client on that tag demands attention), matching the status-bar urgent mask.
 `get_windows` / `get_tree` / `window/state` also report `is_swallowed` and
 `is_on_view` (tag intersection with the monitor's active tags, or sticky),
 plus chrome / size-hint fields (`is_fixed`, `is_dock`, `is_desktop`,
-`is_drag_floating`, `never_focus`, `has_strut`, `client_fact`).
+`is_drag_floating`, `never_focus`, `skip_taskbar`, `skip_pager`,
+`no_decorations`, `demands_attention`, `has_strut`, `client_fact`).

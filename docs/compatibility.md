@@ -59,10 +59,11 @@ and the managed stack uses `Below < Normal < Above < focused fullscreen < PiP`.
 `get_windows` / `window/state` expose `is_above` and `is_below`, plus
 `is_swallowed`, `is_on_view`, `is_scratchpad`, `border_w`, optional
 `scratchpad` / `layout`, and chrome / size-hint flags (`is_fixed`,
-`is_dock`, `is_desktop`, `is_drag_floating`, `never_focus`, `has_strut`,
-`client_fact`).
+`is_dock`, `is_desktop`, `is_drag_floating`, `never_focus`,
+`skip_taskbar`, `skip_pager`, `no_decorations`, `demands_attention`,
+`has_strut`, `client_fact`).
 `get_monitors` / `get_tree` report the work area as `wx` / `wy` / `ww` /
-`wh`, plus `scale` and `refresh_mhz`.
+`wh`, plus `scale`, `refresh_mhz`, and `hdr_capable`.
 Layer-shell background/top/overlay surfaces remain compositor-owned layers.
 
 The binary-bundle design currently targets **x86_64 Linux built on Ubuntu
