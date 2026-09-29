@@ -1924,6 +1924,20 @@ pub struct MinimizedRestoreState {
     pub minimized_order: u64,
 }
 
+/// Pre-maximize restore rectangle carried across a seamless X11 exec for a
+/// visible maximized window. Minimized clients already embed the same rect in
+/// [`MinimizedRestoreState::floating_rect`]; this property covers the live
+/// case where `_NET_WM_STATE` maximize atoms survive but the restore slot
+/// would otherwise be lost.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MaximizeRestoreState {
+    pub restore_rect: MinimizedRestoreRect,
+    /// The window was promoted out of the tiling layout (`togglemaximize`).
+    /// Stored for completeness; under a tiling layout adoption still refuses
+    /// a promoted restart the same way a visible promoted window is refused.
+    pub promoted: bool,
+}
+
 /// A single output's requested configuration, produced by the
 /// wlr-output-management protocol and applied by the backend.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2481,6 +2495,29 @@ pub trait PropertyOps: Send {
     /// Remove JWM's private minimized-client restart snapshot. This operation
     /// is idempotent when no snapshot exists.
     fn clear_minimized_restore_state(&self, _win: WindowId) -> Result<(), BackendError> {
+        Ok(())
+    }
+
+    /// Read JWM's private maximize-restore restart snapshot for a visible
+    /// maximized window. Missing or malformed properties are `Ok(None)`.
+    fn get_maximize_restore_state(
+        &self,
+        _win: WindowId,
+    ) -> Result<Option<MaximizeRestoreState>, BackendError> {
+        Ok(None)
+    }
+
+    /// Replace JWM's private maximize-restore restart snapshot.
+    fn set_maximize_restore_state(
+        &self,
+        _win: WindowId,
+        _state: MaximizeRestoreState,
+    ) -> Result<(), BackendError> {
+        Ok(())
+    }
+
+    /// Remove JWM's private maximize-restore restart snapshot. Idempotent.
+    fn clear_maximize_restore_state(&self, _win: WindowId) -> Result<(), BackendError> {
         Ok(())
     }
 

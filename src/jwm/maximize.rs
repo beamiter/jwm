@@ -13,7 +13,10 @@
 
 use log::{debug, error, warn};
 
-use crate::backend::api::{Backend, EwmhSourceIndication, MaximizeAxes, NetWmAction};
+use crate::backend::api::{
+    Backend, EwmhSourceIndication, MaximizeAxes, MaximizeRestoreState, MinimizedRestoreRect,
+    NetWmAction,
+};
 use crate::backend::common_define::WindowId;
 use crate::core::maximize::{
     MaximizeAdmission, MaximizeFacts, MaximizeInput, MaximizeOrigin, MaximizeSnapshot, RestingSlot,
@@ -118,6 +121,7 @@ impl Jwm {
         let changed = self.with_maximize_rollback(backend, client_key, |jwm, backend| {
             jwm.unmaximize_in_place_inner(backend, client_key)
         })?;
+        self.sync_maximize_restore_property(backend, client_key);
         if changed {
             self.broadcast_window_state_ipc(client_key);
         }
@@ -163,6 +167,7 @@ impl Jwm {
         self.with_maximize_rollback(backend, client_key, |jwm, backend| {
             jwm.reinstate_maximize_snapshot_inner(backend, client_key, snapshot)
         })?;
+        self.sync_maximize_restore_property(backend, client_key);
         self.broadcast_window_state_ipc(client_key);
         Ok(())
     }
@@ -328,12 +333,48 @@ impl Jwm {
         let changed = self.with_maximize_rollback(backend, client_key, |jwm, backend| {
             jwm.set_client_maximized_inner(backend, client_key, next, origin, restore_hint)
         })?;
+        // Mirror the restore slot onto the private X11 property (or clear it)
+        // even when the request was refused: a seamless-restart adopt that
+        // clears pre-set atoms must not leave a stale restore property.
+        self.sync_maximize_restore_property(backend, client_key);
         // Only after the outer transaction commits: a rolled-back inner step
         // must not tell subscribers a maximize that did not stick.
         if changed {
             self.broadcast_window_state_ipc(client_key);
         }
         Ok(changed)
+    }
+
+    /// Keep `_JWM_MAXIMIZE_RESTORE_V1` aligned with the live restore slot so a
+    /// seamless X11 exec can adopt the same pre-maximize rectangle.
+    fn sync_maximize_restore_property(&self, backend: &mut dyn Backend, client_key: ClientKey) {
+        let Some(client) = self.state.clients.get(client_key) else {
+            return;
+        };
+        let win = client.win;
+        let should_persist = client.state.maximized_axes().any();
+        let snapshot = should_persist
+            .then(|| client.geometry.maximize_restore_rect)
+            .flatten()
+            .and_then(|rect| {
+                let restore_rect = MinimizedRestoreRect {
+                    x: rect.x,
+                    y: rect.y,
+                    w: rect.w,
+                    h: rect.h,
+                };
+                restore_rect.is_configurable().then_some(MaximizeRestoreState {
+                    restore_rect,
+                    promoted: client.state.maximize_restore_tiled,
+                })
+            });
+        let result = match snapshot {
+            Some(state) => backend.property_ops().set_maximize_restore_state(win, state),
+            None => backend.property_ops().clear_maximize_restore_state(win),
+        };
+        if let Err(error) = result {
+            warn!("could not sync maximize restore property for {win:?}: {error}");
+        }
     }
 
     fn set_client_maximized_inner(
@@ -1759,6 +1800,41 @@ mod tests {
         assert!(
             stacking.contains(&broadcast) && stacking.contains("previous != next"),
             "apply_external_stacking_request must broadcast only when Above/Below flips"
+        );
+    }
+
+    #[test]
+    fn maximize_commit_syncs_private_restore_property() {
+        // Accepted maximize / refuse / unmaximize paths must keep
+        // `_JWM_MAXIMIZE_RESTORE_V1` aligned with the live restore slot.
+        const SOURCE: &str = include_str!("maximize.rs");
+        let sync = format!("sync_maximize_{}_property", "restore");
+        assert!(
+            SOURCE.contains(&sync),
+            "maximize module must own the restore-property sync helper"
+        );
+        let transaction = SOURCE
+            .split_once("fn maximize_transaction(")
+            .expect("maximize_transaction")
+            .1
+            .split_once("fn set_client_maximized_inner(")
+            .expect("set_client_maximized_inner")
+            .0;
+        assert!(
+            transaction.contains(&sync),
+            "maximize_transaction must sync the restore property after every attempt"
+        );
+        let manage = include_str!("client.rs");
+        let adopt = manage
+            .split_once("let restore_hint = minimized_restore")
+            .expect("restore_hint")
+            .1
+            .split_once("let suppress_flag = self.suppress_layout_animation")
+            .expect("suppress")
+            .0;
+        assert!(
+            adopt.contains("get_maximize_restore_state"),
+            "manage must fall back to the maximize restore property for restore_hint"
         );
     }
 

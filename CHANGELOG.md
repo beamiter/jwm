@@ -7,6 +7,11 @@ monorepo use independent Semantic Versions.
 
 ### Added
 
+- Seamless X11 restart keeps a visible maximized window's pre-maximize
+  rectangle in `_JWM_MAXIMIZE_RESTORE_V1` so unmaximize after exec returns to
+  the same slot instead of the centered fallback. See
+  [docs/window-placement.md](docs/window-placement.md#restarts-and-sessions).
+
 - IPC `window/state` event: an accepted maximize / unmaximize / drag-cancel
   reinstate, fullscreen enter/leave, minimize/unminimize, `togglefloating`,
   urgency (`is_urgent`), sticky (`is_sticky`), a real `tag` / `toggletag`

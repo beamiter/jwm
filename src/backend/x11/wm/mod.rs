@@ -19,6 +19,8 @@ pub(crate) mod iconify;
 pub(crate) mod interactive_resize;
 /// Sequence-aware classification of JWM-owned X11 unmap requests.
 pub(crate) mod managed_unmap;
+/// Strict codec for JWM's private maximize-restore exec-restart snapshot.
+pub(crate) mod maximize_restore;
 /// Strict codec for JWM's private minimized-client exec-restart snapshot.
 pub(crate) mod minimized_restore;
 

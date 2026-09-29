@@ -4615,6 +4615,10 @@ mod property_ops {
             MINIMIZED_RESTORE_V1_LONG_LENGTH, decode_minimized_restore_v1,
             encode_minimized_restore_v1,
         },
+        maximize_restore::{
+            MAXIMIZE_RESTORE_V1_LONG_LENGTH, decode_maximize_restore_v1,
+            encode_maximize_restore_v1,
+        },
         net_wm_ping_message, net_wm_sync_request_message, parse_gtk_frame_extents, parse_icon_data,
         parse_motif_hints, parse_normal_hints, parse_opaque_region, parse_strut,
         parse_strut_partial, parse_wm_class, parse_wm_hints, protocol_supported,
@@ -5188,6 +5192,59 @@ mod property_ops {
         fn clear_minimized_restore_state(&self, win: WindowId) -> Result<(), BackendError> {
             self.conn
                 .delete_property(self.ids.x11(win)?, self.atoms._JWM_MINIMIZED_RESTORE_V1)?
+                .check()?;
+            Ok(())
+        }
+
+        fn get_maximize_restore_state(
+            &self,
+            win: WindowId,
+        ) -> Result<Option<crate::backend::api::MaximizeRestoreState>, BackendError> {
+            let w = self.ids.x11(win)?;
+            let reply = self
+                .conn
+                .get_property(
+                    false,
+                    w,
+                    self.atoms._JWM_MAXIMIZE_RESTORE_V1,
+                    AtomEnum::CARDINAL,
+                    0,
+                    MAXIMIZE_RESTORE_V1_LONG_LENGTH,
+                )?
+                .reply()?;
+            let words: Vec<u32> = reply.value32().into_iter().flatten().collect();
+            Ok(decode_maximize_restore_v1(
+                reply.type_,
+                u32::from(AtomEnum::CARDINAL),
+                reply.format,
+                reply.bytes_after,
+                &words,
+            ))
+        }
+
+        fn set_maximize_restore_state(
+            &self,
+            win: WindowId,
+            state: crate::backend::api::MaximizeRestoreState,
+        ) -> Result<(), BackendError> {
+            let words = encode_maximize_restore_v1(state).ok_or_else(|| {
+                BackendError::Message("invalid maximize restore state".to_string())
+            })?;
+            self.conn
+                .change_property32(
+                    PropMode::REPLACE,
+                    self.ids.x11(win)?,
+                    self.atoms._JWM_MAXIMIZE_RESTORE_V1,
+                    AtomEnum::CARDINAL,
+                    &words,
+                )?
+                .check()?;
+            Ok(())
+        }
+
+        fn clear_maximize_restore_state(&self, win: WindowId) -> Result<(), BackendError> {
+            self.conn
+                .delete_property(self.ids.x11(win)?, self.atoms._JWM_MAXIMIZE_RESTORE_V1)?
                 .check()?;
             Ok(())
         }

@@ -4,18 +4,32 @@
 
 ---
 
-## Evolve backlog（目标 100 轮；已完成 wave 9–18，本地 ahead）
+## Evolve backlog（目标 100 轮；已完成 wave 9–19，本地 ahead）
 
 按日常命中 × 可交付性排序的下一波候选（S/小 M，无 DRM）：
 
 | # | 选题 | Size |
 | --- | --- | --- |
-| 14–18 | window window/state 族 + Tiled* | S ✓ |
-| 19 | seamless restart maximize restore_rect | S–M |
+| 14–18 | IPC window/state 族 + Tiled* | S ✓ |
+| 19 | seamless restart maximize restore_rect | S–M ✓ |
 | 20 | Annotation → CommonLinearAware | S–M（PostDelivery 迁移） |
 | 21 | Screenshot toolbar → CommonLinearAware | S–M |
 | 22 | session 持久化 maximize + restore_rect | M |
 | … | 跳过：toast Closed(1)、BT withdraw、FS/PiP 丢锚点、Recording EncodedOnly | |
+
+---
+
+## 2026-09-29（十一）：seamless maximize restore_rect
+
+选题 = evolve wave 19。
+
+1. **契约**：`_JWM_MAXIMIZE_RESTORE_V1`（6 CARDINAL）在 maximize 提交后写入、
+   清空时删除；manage 采纳时作 `restore_hint`（minimized 快照优先）。
+2. **回归**：codec 往返；双 X11 后端源 pin；maximize 同步路径 pin。
+
+**验证**：`scripts/test.sh --lib -- maximize_restore both_x11_property_backends_use_the_strict_shared_maximized maximize_commit_syncs`。
+
+**仍然开着的**：见上表 20+；promote 布局归属仍不跨重启。
 
 ---
 

@@ -686,10 +686,34 @@ impl Jwm {
             // snapshot's floating rect is the exact pre-maximize rect of a
             // floating window; a promoted window is snapshotted tiled (its
             // floating rect is the pre-promotion slot), so adoption refuses
-            // or re-promotes it like a visible one.
+            // or re-promotes it like a visible one. A visible maximized
+            // window's private `_JWM_MAXIMIZE_RESTORE_V1` fills the same
+            // restore_hint when no minimized snapshot carried one.
+            let win = self
+                .state
+                .clients
+                .get(client_key)
+                .map(|client| client.win);
             let restore_hint = minimized_restore
                 .and_then(|state| state.floating_rect)
-                .map(|rect| Rect::new(rect.x, rect.y, rect.w, rect.h));
+                .map(|rect| Rect::new(rect.x, rect.y, rect.w, rect.h))
+                .or_else(|| {
+                    win.and_then(|win| {
+                        backend
+                            .property_ops()
+                            .get_maximize_restore_state(win)
+                            .ok()
+                            .flatten()
+                            .map(|state| {
+                                Rect::new(
+                                    state.restore_rect.x,
+                                    state.restore_rect.y,
+                                    state.restore_rect.w,
+                                    state.restore_rect.h,
+                                )
+                            })
+                    })
+                });
             let suppress_flag = self.suppress_layout_animation;
             self.suppress_layout_animation = true;
             let adopted =

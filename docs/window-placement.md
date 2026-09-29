@@ -254,15 +254,17 @@ as EWMH and xdg-shell allow.
 
 Session snapshots do not store maximize: `restore_session` unmaximizes every
 window it matches, then applies the saved placement. Across a seamless X11
-restart the EWMH atoms carry the state, but a visible window's floating state
-is not remembered: it floats again only when `WM_TRANSIENT_FOR`, a matching
-rule or a popup-like window type such as a dialog floats it, as for any new
-window. Such a window is maximized again; its previous restore rectangle is not
-carried over, so it gets the centered fallback when it filled the work area. A
-window floated by hand, or promoted out of a tiling layout, comes back tiled:
-under a tiling layout its maximize is refused and its atoms are cleared, and
-under the float layout it is promoted and maximized again. A minimized window
-keeps its resting floating state through its restore snapshot, and a floating
-one outside PiP also keeps its exact pre-maximize rectangle. A minimized
-promoted window is saved tiled, the state it rests in, so it comes back like a
-visible one.
+restart the EWMH atoms carry the maximize state, and JWM's private
+`_JWM_MAXIMIZE_RESTORE_V1` property carries the pre-maximize rectangle (and
+whether the window was promoted) for a *visible* maximized window. Minimized
+clients already embed that rectangle in `_JWM_MINIMIZED_RESTORE_V1`. A
+visible window's hand-float / promote flag is still not remembered as layout
+membership: it floats again only when `WM_TRANSIENT_FOR`, a matching rule or
+a popup-like window type floats it. Under a tiling layout a promoted restart
+is refused and its atoms cleared, as before; under FLOAT it is promoted
+again. When the restore property is present and maximize is admitted,
+unmaximize returns to that exact rectangle instead of the centered fallback.
+A minimized window keeps its resting floating state through its restore
+snapshot, and a floating one outside PiP also keeps its exact pre-maximize
+rectangle. A minimized promoted window is saved tiled, the state it rests
+in, so it comes back like a visible one.
