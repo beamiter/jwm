@@ -155,6 +155,13 @@ the window it followed still goes back into its own slot, and closing it
 passes its slot on like any promoted window. A promoted window stays floating
 and maximized across a switch from the float layout to a tiling one, until
 something unmaximizes it.
+An accepted maximize change (including promote / unmaximize / drag-cancel
+reinstate) also broadcasts a `window/state` IPC event whose payload is the
+same shape as one `get_windows` row (`is_maximized`, `is_maximized_vert`,
+`is_maximized_horz`, geometry, floating, …). Refused or no-op requests do
+not emit it; subscribe to `window` or `window/state` to follow flips without
+polling.
+
 A refused request, like one that changes nothing, leaves the window alone:
 JWM republishes the current state and replies with the current geometry, a
 synthetic `ConfigureNotify` on X11 and a configure on xdg-shell, so the client

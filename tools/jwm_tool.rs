@@ -518,7 +518,7 @@ enum Commands {
                       tile, float, monocle, fibonacci, centered_master, bstack,\n  \
                       grid, deck, three_col, tatami, fullscreen\n\n\
                       \x1b[1m事件主题 (--subscribe):\x1b[0m\n  \
-                      window (window/new, window/close, window/focus, window/title)\n  \
+                      window (window/new, window/close, window/focus, window/title, window/state)\n  \
                       tag (tag/view), layout (layout/set), monitor (monitor/focus)\n  \
                       config (config/reload), * (订阅全部)",
         after_help = "\x1b[1m示例:\x1b[0m\n  \
@@ -560,7 +560,7 @@ enum Commands {
             long,
             help = "订阅事件流（逗号分隔的主题列表）\n\
                       主题: window, tag, layout, monitor, config, * (全部)\n\
-                      事件: window/new, window/close, window/focus, window/title,\n\
+                      事件: window/new, window/close, window/focus, window/title, window/state,\n\
                             tag/view, layout/set, monitor/focus, config/reload"
         )]
         subscribe: Option<String>,

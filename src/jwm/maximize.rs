@@ -115,9 +115,13 @@ impl Jwm {
         if !realized {
             return Ok(false);
         }
-        self.with_maximize_rollback(backend, client_key, |jwm, backend| {
+        let changed = self.with_maximize_rollback(backend, client_key, |jwm, backend| {
             jwm.unmaximize_in_place_inner(backend, client_key)
-        })
+        })?;
+        if changed {
+            self.broadcast_window_state_ipc(client_key);
+        }
+        Ok(changed)
     }
 
     /// `MaximizeSnapshot { axes, restore_rect, restore_tiled, floating_rect }`; Default when the
@@ -158,7 +162,9 @@ impl Jwm {
         }
         self.with_maximize_rollback(backend, client_key, |jwm, backend| {
             jwm.reinstate_maximize_snapshot_inner(backend, client_key, snapshot)
-        })
+        })?;
+        self.broadcast_window_state_ipc(client_key);
+        Ok(())
     }
 
     /// Called by arrange() after arrangemon(mon). Idempotent, no protocol writes, no info!.
@@ -319,9 +325,15 @@ impl Jwm {
         origin: MaximizeOrigin,
         restore_hint: Option<Rect>,
     ) -> MaximizeResult<bool> {
-        self.with_maximize_rollback(backend, client_key, |jwm, backend| {
+        let changed = self.with_maximize_rollback(backend, client_key, |jwm, backend| {
             jwm.set_client_maximized_inner(backend, client_key, next, origin, restore_hint)
-        })
+        })?;
+        // Only after the outer transaction commits: a rolled-back inner step
+        // must not tell subscribers a maximize that did not stick.
+        if changed {
+            self.broadcast_window_state_ipc(client_key);
+        }
+        Ok(changed)
     }
 
     fn set_client_maximized_inner(
@@ -1623,5 +1635,65 @@ mod tests {
         );
         assert_eq!(client.rect(), maximized);
         assert_eq!(jwm.maximize_snapshot(key), snapshot);
+    }
+
+    #[test]
+    fn maximize_commit_paths_broadcast_window_state_ipc() {
+        // Accepted maximize / unmaximize / reinstate commit paths must push
+        // `window/state` after the outer rollback wrapper returns Ok; refusals
+        // stay silent. Needles are assembled so this test cannot match itself.
+        const SOURCE: &str = include_str!("maximize.rs");
+        let broadcast = format!("broadcast_window_{}_ipc", "state");
+        let changed_paths = [
+            (
+                "maximize_transaction",
+                "fn maximize_transaction(",
+                "fn set_client_maximized_inner(",
+                true,
+            ),
+            (
+                "unmaximize_in_place",
+                "pub(crate) fn unmaximize_in_place(",
+                "pub(crate) fn maximize_snapshot(",
+                true,
+            ),
+            (
+                "reinstate_maximize_snapshot",
+                "pub(crate) fn reinstate_maximize_snapshot(",
+                "pub(crate) fn refit_maximized_clients(",
+                false,
+            ),
+        ];
+        for (name, start, end, gates_on_changed) in changed_paths {
+            let body = SOURCE
+                .split_once(start)
+                .unwrap_or_else(|| panic!("{name} missing"))
+                .1
+                .split_once(end)
+                .unwrap_or_else(|| panic!("{name} end missing"))
+                .0;
+            assert!(
+                body.contains(&broadcast),
+                "{name} must call {broadcast} after a successful commit"
+            );
+            if gates_on_changed {
+                assert!(
+                    body.contains("if changed"),
+                    "{name} must gate the broadcast on a real state change"
+                );
+            }
+        }
+        // Rejected / no-op path inside the inner step must not broadcast.
+        let inner = SOURCE
+            .split_once("fn set_client_maximized_inner(")
+            .expect("set_client_maximized_inner")
+            .1
+            .split_once("fn unmaximize_in_place_inner(")
+            .expect("end of set_client_maximized_inner")
+            .0;
+        assert!(
+            !inner.contains(&broadcast),
+            "set_client_maximized_inner must not broadcast before the outer commit"
+        );
     }
 }

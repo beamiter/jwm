@@ -4,6 +4,24 @@
 
 ---
 
+## 2026-09-29（四）：maximize 提交后广播 `window/state`
+
+选题 = evolve wave 12；闭合 handoff maximize 延后项「窗口状态 IPC 事件」
+（本轮仅 maximize 路径）。
+
+1. **契约**：`maximize_transaction` / `unmaximize_in_place` /
+   `reinstate_maximize_snapshot` 在外层 rollback 成功且状态确实变化后调用
+   `broadcast_window_state_ipc` → `window/state`，payload 为 `WindowInfo`；
+   Reject/no-op 不广播。
+2. **回归**：`maximize_commit_paths_broadcast_window_state_ipc`。
+
+**验证**：`scripts/test.sh --lib -- maximize_commit_paths_broadcast`。
+
+**仍然开着的**：跨重启持久化、XWayland 单轴、xdg `Tiled*` 取舍；fullscreen /
+minimize / float / urgent 的 `window/state` 广播可作 follow-up。
+
+---
+
 ## 2026-09-29（三）：wlr-foreign-toplevel maximize → Pager
 
 选题 = evolve wave 11；闭合 wave 9 留下的「wlr 无 source 仍 Client」项。

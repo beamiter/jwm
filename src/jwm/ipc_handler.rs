@@ -3873,6 +3873,21 @@ impl Jwm {
             });
         }
     }
+
+    /// Push a `window/state` event with the current [`WindowInfo`] for
+    /// `client_key`. Subscribers of `window` / `window/state` / `*` see
+    /// maximize (and later sibling) flips without polling `get_windows`.
+    /// Missing clients are a no-op; serialization failure is ignored.
+    pub(crate) fn broadcast_window_state_ipc(&mut self, client_key: ClientKey) {
+        let focused = self.get_selected_client_key() == Some(client_key);
+        let Some(info) = self.window_info(client_key, focused) else {
+            return;
+        };
+        let Ok(payload) = serde_json::to_value(&info) else {
+            return;
+        };
+        self.broadcast_ipc_event("window/state", payload);
+    }
 }
 
 #[cfg(test)]

@@ -7,6 +7,12 @@ monorepo use independent Semantic Versions.
 
 ### Added
 
+- IPC `window/state` event: an accepted maximize / unmaximize / drag-cancel
+  reinstate pushes a `WindowInfo`-shaped payload (`is_maximized*`, geometry,
+  floating, …) so subscribers of `window` need not poll `get_windows`.
+  Refused maximize requests stay silent. See
+  [docs/window-placement.md](docs/window-placement.md#who-may-maximize-what).
+
 - Maximize is a real window state on every backend. Native X11
   `_NET_WM_STATE` (per axis; a message naming both atoms is one request),
   xdg-shell, XWayland and wlr-foreign-toplevel requests go through one shared
