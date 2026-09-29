@@ -1295,10 +1295,10 @@ impl Jwm {
     /// Return invokes the sender's default action, `d`/Delete dismisses one
     /// row, `c` clears the history.
     /// Key handling while the Alt+Tab switcher is up: Tab and the arrows
-    /// walk the list (wrapping), Return commits, Delete or BackSpace closes
-    /// the highlighted window without leaving the gesture, Escape cancels,
-    /// and every other key is swallowed — the modifier is still down, so
-    /// nothing else may fire.
+    /// walk the list (wrapping), Home/End jump to the ends, Return commits,
+    /// Delete or BackSpace closes the highlighted window without leaving the
+    /// gesture, Escape cancels, and every other key is swallowed — the
+    /// modifier is still down, so nothing else may fire.
     fn handle_window_switcher_key(
         &mut self,
         backend: &mut dyn Backend,
@@ -1312,6 +1312,16 @@ impl Jwm {
             keys::KEY_Escape => self.cancel_window_switcher(backend),
             keys::KEY_Return | keys::KEY_KP_Enter => self.commit_window_switcher(backend)?,
             keys::KEY_Delete | keys::KEY_BackSpace => self.close_window_switcher_row(backend)?,
+            keys::KEY_Home => {
+                if self.features.system_ui.jump_selection(false) {
+                    self.sync_system_ui(backend);
+                }
+            }
+            keys::KEY_End => {
+                if self.features.system_ui.jump_selection(true) {
+                    self.sync_system_ui(backend);
+                }
+            }
             keys::KEY_Tab | keys::KEY_ISO_Left_Tab => {
                 let backwards = mods.contains(Mods::SHIFT) || keysym == keys::KEY_ISO_Left_Tab;
                 self.features
@@ -2704,13 +2714,14 @@ impl Jwm {
                 return Ok(());
             }
             if self.features.system_ui.is_calendar() {
-                // Left/Right step months, Up/Down step years, t returns to
-                // today; nothing here can leave the card in a bad state.
+                // Left/Right step months, Up/Down (and Page Up/Down) step
+                // years, t / Home returns to today; nothing here can leave
+                // the card in a bad state.
                 let (months, years, today) = match keysym {
                     keys::KEY_Left => (-1, 0, false),
                     keys::KEY_Right => (1, 0, false),
-                    keys::KEY_Up => (0, -1, false),
-                    keys::KEY_Down => (0, 1, false),
+                    keys::KEY_Up | keys::KEY_Page_Up => (0, -1, false),
+                    keys::KEY_Down | keys::KEY_Page_Down => (0, 1, false),
                     keys::KEY_t | keys::KEY_Home => (0, 0, true),
                     _ => (0, 0, false),
                 };
@@ -3384,18 +3395,31 @@ impl Jwm {
             return Ok(());
         }
 
-        // Expose mode intercept: route clicks to compositor. Every button
-        // except middle commits exactly as it always has — a hit focuses the
-        // clicked window; hit or miss, expose exits. A middle click instead
-        // closes the clicked cell's window, browser-tab style, and never
-        // commits: on a miss it is a no-op and the gesture stays up.
+        // Expose mode intercept: route clicks to compositor. Left / right /
+        // other non-wheel buttons commit exactly as they always have — a hit
+        // focuses the clicked window; hit or miss, expose exits. A middle
+        // click instead closes the clicked cell's window, browser-tab style,
+        // and never commits: on a miss it is a no-op and the gesture stays
+        // up. The vertical wheel browses the highlight (Up/Down) like the
+        // arrows; a horizontal wheel is inert.
         if self.features.expose_active {
-            let (rx, ry) = self.last_mouse_root;
-            let hit = backend.compositor_expose_click(rx as f32, ry as f32);
-            if MouseButton::from_u8(detail_btn) == MouseButton::Middle {
-                return self.close_expose_clicked(backend, hit);
+            match expose_plan::expose_press(detail_btn) {
+                expose_plan::ExposePress::Close => {
+                    let (rx, ry) = self.last_mouse_root;
+                    let hit = backend.compositor_expose_click(rx as f32, ry as f32);
+                    return self.close_expose_clicked(backend, hit);
+                }
+                expose_plan::ExposePress::Browse(dir) => {
+                    backend.compositor_expose_move(dir);
+                    return Ok(());
+                }
+                expose_plan::ExposePress::Inert => return Ok(()),
+                expose_plan::ExposePress::Commit => {
+                    let (rx, ry) = self.last_mouse_root;
+                    let hit = backend.compositor_expose_click(rx as f32, ry as f32);
+                    return self.apply_expose_action(backend, expose_plan::plan_click(hit));
+                }
             }
-            return self.apply_expose_action(backend, expose_plan::plan_click(hit));
         }
 
         // A click on a toast card dismisses it; a left click on an action
@@ -6287,16 +6311,14 @@ mod tests {
         assert_eq!(backend.expose_selected, Some(window));
     }
 
-    /// The expose pointer branch discriminates exactly one button: middle
-    /// routes to the close helper (the clicked cell's index drives the same
-    /// close execution the keyboard path uses); every other button — the
-    /// left commit, right, scroll — falls through to the `plan_click` it
-    /// always took. Round 16 deliberately shipped this branch
-    /// button-agnostic; this round intentionally changes THAT and nothing
-    /// else about it. The haystack is the shipped source, and the needles
-    /// are built at runtime so this test cannot match its own.
+    /// The expose pointer branch classifies buttons through
+    /// [`expose_plan::expose_press`]: middle closes the pointed cell, the
+    /// vertical wheel browses Up/Down, the horizontal wheel is inert, and
+    /// every other button still commits through `plan_click`. The haystack
+    /// is the shipped source; needles are built at runtime so this test
+    /// cannot match its own.
     #[test]
-    fn only_the_middle_button_routes_to_the_expose_close() {
+    fn expose_pointer_routes_close_browse_and_commit() {
         const SOURCE: &str = include_str!("input_handler.rs");
         let compact: String = SOURCE.chars().filter(|c| !c.is_whitespace()).collect();
 
@@ -6311,34 +6333,36 @@ mod tests {
             .split_once(concat!("letpress=toast", "_press("))
             .expect("the end of the expose pointer branch")
             .0;
-        // The one and only button check: middle goes to the close helper…
-        let routing = concat!(
-            "MouseButton::from_u8(detail",
-            "_btn)==MouseButton::Middle{returnself.close_expose",
-            "_clicked(backend,hit);}"
+        assert!(
+            branch.contains(concat!("expose_plan::expose", "_press(detail_btn)")),
+            "the expose pointer branch must classify buttons through expose_press"
         );
         assert!(
-            branch.contains(routing),
-            "the expose pointer branch must route the middle button to the close helper"
+            branch.contains(concat!("expose_plan::ExposePress::Close=>{")),
+            "middle must still close the pointed cell"
         );
-        // …and no other button is named in the branch: left, right and
-        // scroll keep the plan_click fall-through they always had.
-        for button in [
-            "MouseButton::Left",
-            "MouseButton::Right",
-            "MouseButton::Other",
-        ] {
-            assert!(
-                !branch.contains(button),
-                "the expose pointer branch grew a {button} special case"
-            );
-        }
+        assert!(
+            branch.contains(concat!("returnself.close_expose", "_clicked(backend,hit);")),
+            "Close must call the click-close helper"
+        );
+        assert!(
+            branch.contains(concat!("expose_plan::ExposePress::Browse(dir)=>{")),
+            "the vertical wheel must browse"
+        );
+        assert!(
+            branch.contains("compositor_expose_move(dir)"),
+            "Browse must move the expose highlight"
+        );
+        assert!(
+            branch.contains(concat!("expose_plan::ExposePress::Inert=>returnOk(()),")),
+            "the horizontal wheel must be inert"
+        );
         assert!(
             branch.contains(concat!(
                 "apply_expose_action(backend,expose_plan::plan",
                 "_click(hit))"
             )),
-            "the non-middle buttons no longer fall through to plan_click"
+            "Commit must still fall through to plan_click"
         );
 
         // The click-close helper resolves the clicked window to its grid

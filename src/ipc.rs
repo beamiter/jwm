@@ -515,6 +515,10 @@ pub struct WindowInfo {
     /// True when the window's tags intersect the active tags on its monitor
     /// (or it is sticky): on the current view, not merely mapped.
     pub is_on_view: bool,
+    /// True when this client is a named scratchpad (shown or parked).
+    pub is_scratchpad: bool,
+    /// Drawn border width in pixels (`ClientGeometry::border_w`).
+    pub border_w: i32,
     pub is_focused: bool,
     /// Process id when the backend reported one (`_NET_WM_PID` / Wayland
     /// credentials); `None` when unknown.
@@ -529,6 +533,14 @@ pub struct WindowInfo {
     /// name. Same field as [`MonitorInfoIpc::monitor_name`].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub monitor_name: Option<String>,
+    /// Scratchpad binding name when [`Self::is_scratchpad`]; omitted otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scratchpad: Option<String>,
+    /// Current layout on the window's monitor (`TILE`, `MONOCLE`, …), matching
+    /// [`MonitorInfoIpc::layout`]. Omitted when the window has no monitor
+    /// (a parked scratchpad).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub layout: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1096,10 +1108,14 @@ mod tests {
             is_minimized: true,
             is_swallowed: true,
             is_on_view: false,
+            is_scratchpad: true,
+            border_w: 2,
             is_focused: false,
             pid: Some(1234),
             connector: Some("DP-1".into()),
             monitor_name: None,
+            scratchpad: Some("term".into()),
+            layout: Some("TILE".into()),
         })
         .expect("serialize WindowInfo");
 
@@ -1112,6 +1128,10 @@ mod tests {
         assert_eq!(value["is_below"], false);
         assert_eq!(value["is_swallowed"], true);
         assert_eq!(value["is_on_view"], false);
+        assert_eq!(value["is_scratchpad"], true);
+        assert_eq!(value["border_w"], 2);
+        assert_eq!(value["scratchpad"], "term");
+        assert_eq!(value["layout"], "TILE");
         assert_eq!(value["pid"], 1234);
         assert_eq!(value["connector"], "DP-1");
 
@@ -1139,16 +1159,24 @@ mod tests {
             is_minimized: false,
             is_swallowed: false,
             is_on_view: true,
+            is_scratchpad: false,
+            border_w: 0,
             is_focused: false,
             pid: None,
             connector: None,
             monitor_name: None,
+            scratchpad: None,
+            layout: None,
         })
         .expect("serialize");
         assert!(without_pid.get("pid").is_none());
         assert!(without_pid.get("connector").is_none());
+        assert!(without_pid.get("scratchpad").is_none());
+        assert!(without_pid.get("layout").is_none());
         assert_eq!(without_pid["is_swallowed"], false);
         assert_eq!(without_pid["is_on_view"], true);
+        assert_eq!(without_pid["is_scratchpad"], false);
+        assert_eq!(without_pid["border_w"], 0);
     }
 
     #[test]
@@ -1177,14 +1205,20 @@ mod tests {
             is_minimized: false,
             is_swallowed: false,
             is_on_view: true,
+            is_scratchpad: false,
+            border_w: 3,
             is_focused: true,
             pid: None,
             connector: Some("HDMI-A-1".into()),
             monitor_name: Some("Dell U2720Q".into()),
+            scratchpad: None,
+            layout: Some("MONOCLE".into()),
         })
         .expect("serialize");
         assert_eq!(with_connector["connector"], "HDMI-A-1");
         assert_eq!(with_connector["monitor_name"], "Dell U2720Q");
+        assert_eq!(with_connector["layout"], "MONOCLE");
+        assert_eq!(with_connector["border_w"], 3);
 
         let without = serde_json::to_value(WindowInfo {
             id: 8,
@@ -1210,14 +1244,19 @@ mod tests {
             is_minimized: false,
             is_swallowed: false,
             is_on_view: false,
+            is_scratchpad: false,
+            border_w: 0,
             is_focused: false,
             pid: None,
             connector: None,
             monitor_name: None,
+            scratchpad: None,
+            layout: None,
         })
         .expect("serialize");
         assert!(without.get("connector").is_none());
         assert!(without.get("monitor_name").is_none());
+        assert!(without.get("layout").is_none());
     }
 
     #[test]

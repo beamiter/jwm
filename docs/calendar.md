@@ -6,7 +6,7 @@ the month laid out as a grid with today in brackets.
 | Key | Action |
 | --- | --- |
 | `Left` / `Right` | previous / next month |
-| `Up` / `Down` | previous / next year |
+| `Up` / `Down`, `Page Up` / `Page Down` | previous / next year |
 | `t` / `Home` | back to the month containing today |
 | `Esc` or `Alt+F9` | close — the key that opened the card also dismisses it |
 | another panel key | hand the screen to that panel, closing the card |

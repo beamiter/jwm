@@ -78,6 +78,10 @@ space, or on a cell whose window already died mid-expose, is a no-op that
 neither closes nor exits: the click never commits, so the grid simply
 ignores it.
 
+The vertical wheel steps the highlight Up / Down the same way the arrow
+keys do (clamping at the grid edges); a horizontal scroll is inert. Unlike
+the switcher, the wheel never commits or cancels.
+
 While expose is up, the keyboard and the pointer's buttons are grabbed, so
 a stray keystroke does not leak to a window behind the grid.
 

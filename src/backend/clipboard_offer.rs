@@ -368,13 +368,20 @@ pub fn preferred_text_mime(mime_types: &[String]) -> Option<String> {
 
 /// Pick an image offer for history capture.
 ///
-/// Prefers `image/png`, then `image/jpeg`, then `image/bmp`. Non-PNG offers
-/// are decoded into PNG under [`MAX_IMAGE_HISTORY_BYTES`] before the history
-/// stores them (see [`image_offer_to_history_png`]). Callers still prefer
-/// text when [`preferred_text_mime`] finds one.
+/// Prefers `image/png`, then `image/jpeg`, then `image/webp`, then
+/// `image/gif`, then `image/bmp`. Non-PNG offers are decoded into PNG under
+/// [`MAX_IMAGE_HISTORY_BYTES`] before the history stores them (see
+/// [`image_offer_to_history_png`]). Callers still prefer text when
+/// [`preferred_text_mime`] finds one.
 #[must_use]
 pub fn preferred_image_mime(mime_types: &[String]) -> Option<String> {
-    const PREFERRED: [&str; 3] = ["image/png", "image/jpeg", "image/bmp"];
+    const PREFERRED: [&str; 5] = [
+        "image/png",
+        "image/jpeg",
+        "image/webp",
+        "image/gif",
+        "image/bmp",
+    ];
     for wanted in PREFERRED {
         if let Some(found) = mime_types
             .iter()
@@ -389,8 +396,9 @@ pub fn preferred_image_mime(mime_types: &[String]) -> Option<String> {
 /// Decode a captured image offer into PNG bytes for the history.
 ///
 /// PNG offers pass through when they fit under [`MAX_IMAGE_HISTORY_BYTES`].
-/// JPEG/BMP offers are decoded and re-encoded as PNG; empty, undecodable, or
-/// oversized results are dropped. The history stores and re-offers PNG only.
+/// JPEG/WebP/GIF/BMP offers are decoded and re-encoded as PNG; empty,
+/// undecodable, or oversized results are dropped. The history stores and
+/// re-offers PNG only.
 #[must_use]
 pub fn image_offer_to_history_png(bytes: &[u8], mime: &str) -> Option<Vec<u8>> {
     if bytes.is_empty() || bytes.len() > MAX_IMAGE_HISTORY_BYTES {
@@ -400,7 +408,12 @@ pub fn image_offer_to_history_png(bytes: &[u8], mime: &str) -> Option<Vec<u8>> {
     if mime == "image/png" {
         return Some(bytes.to_vec());
     }
-    if mime != "image/jpeg" && mime != "image/jpg" && mime != "image/bmp" {
+    if mime != "image/jpeg"
+        && mime != "image/jpg"
+        && mime != "image/webp"
+        && mime != "image/gif"
+        && mime != "image/bmp"
+    {
         return None;
     }
     let image = image::load_from_memory(bytes).ok()?;
@@ -494,7 +507,7 @@ mod tests {
     }
 
     #[test]
-    fn image_history_accepts_png_jpeg_and_bmp_mimes() {
+    fn image_history_accepts_png_jpeg_webp_gif_and_bmp_mimes() {
         assert_eq!(
             preferred_image_mime(&["image/png".to_string()]).as_deref(),
             Some("image/png")
@@ -508,11 +521,19 @@ mod tests {
             Some("image/jpeg")
         );
         assert_eq!(
+            preferred_image_mime(&["image/webp".to_string(), "image/bmp".to_string()]).as_deref(),
+            Some("image/webp")
+        );
+        assert_eq!(
+            preferred_image_mime(&["image/gif".to_string()]).as_deref(),
+            Some("image/gif")
+        );
+        assert_eq!(
             preferred_image_mime(&["image/bmp".to_string()]).as_deref(),
             Some("image/bmp")
         );
         assert_eq!(
-            preferred_image_mime(&["image/webp".to_string()]),
+            preferred_image_mime(&["image/tiff".to_string()]),
             None
         );
         // PNG wins over JPEG when both are advertised.
@@ -524,6 +545,11 @@ mod tests {
             ])
             .as_deref(),
             Some("image/png")
+        );
+        // JPEG wins over WebP when both are advertised (preference order).
+        assert_eq!(
+            preferred_image_mime(&["image/webp".to_string(), "image/jpeg".to_string()]).as_deref(),
+            Some("image/jpeg")
         );
     }
 
@@ -584,6 +610,41 @@ mod tests {
             bytes
         };
         let png = image_offer_to_history_png(&bmp, "image/bmp").expect("bmp→png");
+        assert!(png.starts_with(b"\x89PNG"));
+    }
+
+    #[test]
+    fn webp_offer_decodes_to_png_under_the_image_cap() {
+        let webp = {
+            let img = image::RgbImage::from_pixel(2, 1, image::Rgb([10, 20, 30]));
+            let mut bytes = Vec::new();
+            image::DynamicImage::ImageRgb8(img)
+                .write_to(
+                    &mut std::io::Cursor::new(&mut bytes),
+                    image::ImageFormat::WebP,
+                )
+                .expect("encode webp");
+            bytes
+        };
+        let png = image_offer_to_history_png(&webp, "image/webp").expect("webp→png");
+        assert!(png.starts_with(b"\x89PNG"));
+        assert!(png.len() <= MAX_IMAGE_HISTORY_BYTES);
+    }
+
+    #[test]
+    fn gif_offer_decodes_to_png_under_the_image_cap() {
+        let gif = {
+            let img = image::RgbImage::from_pixel(1, 2, image::Rgb([200, 100, 50]));
+            let mut bytes = Vec::new();
+            image::DynamicImage::ImageRgb8(img)
+                .write_to(
+                    &mut std::io::Cursor::new(&mut bytes),
+                    image::ImageFormat::Gif,
+                )
+                .expect("encode gif");
+            bytes
+        };
+        let png = image_offer_to_history_png(&gif, "image/gif").expect("gif→png");
         assert!(png.starts_with(b"\x89PNG"));
     }
 

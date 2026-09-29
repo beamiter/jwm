@@ -7,6 +7,25 @@ monorepo use independent Semantic Versions.
 
 ### Added
 
+- `get_windows` / `get_tree` / `window/state` report `is_scratchpad`,
+  `border_w`, optional `scratchpad` (binding name), and optional `layout`
+  (the monitor's current layout symbol). Terminal swallow / unswallow
+  broadcasts `window/state` when `is_swallowed` flips. See
+  [docs/window-placement.md](docs/window-placement.md).
+
+- The Alt+Tab switcher answers `Home` / `End` (newest / oldest row). Expose's
+  vertical wheel steps the highlight Up / Down without committing; a
+  horizontal scroll stays inert. See
+  [docs/window-switcher.md](docs/window-switcher.md) and
+  [docs/expose.md](docs/expose.md).
+
+- Calendar `Page Up` / `Page Down` step a year (twin of `Up` / `Down`). See
+  [docs/calendar.md](docs/calendar.md).
+
+- Clipboard history decodes WebP/GIF offers into PNG under the 4 MiB image
+  cap (after PNG, JPEG, then WebP/GIF, then BMP). See
+  [docs/clipboard.md](docs/clipboard.md).
+
 - `get_windows` / `get_tree` / `window/state` report `is_swallowed` (terminal
   swallowed by a child) and `is_on_view` (tags intersect the monitor's active
   tags, or sticky — on the current view, not merely mapped). See

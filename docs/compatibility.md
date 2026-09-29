@@ -57,7 +57,8 @@ Managed-client Above/Below is handled consistently for XWayland and native X11
 policy: conflicting flags resolve to Above, property writes are echoed back,
 and the managed stack uses `Below < Normal < Above < focused fullscreen < PiP`.
 `get_windows` / `window/state` expose `is_above` and `is_below`, plus
-`is_swallowed` and `is_on_view`. `get_monitors` / `get_tree` report the work
+`is_swallowed`, `is_on_view`, `is_scratchpad`, `border_w`, and optional
+`scratchpad` / `layout`. `get_monitors` / `get_tree` report the work
 area as `wx` / `wy` / `ww` / `wh`.
 Layer-shell background/top/overlay surfaces remain compositor-owned layers.
 

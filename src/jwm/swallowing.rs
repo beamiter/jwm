@@ -323,6 +323,7 @@ impl Jwm {
             }
         }
         self.reconcile_minimized_dock_eligibility(backend, parent_key, was_dock_eligible);
+        self.broadcast_window_state_ipc(backend, parent_key);
         log::info!(
             "[swallow] '{}' swallowed by '{}'",
             self.state
@@ -359,6 +360,7 @@ impl Jwm {
             }
         }
         self.reconcile_minimized_dock_eligibility(backend, parent_key, was_dock_eligible);
+        self.broadcast_window_state_ipc(backend, parent_key);
     }
 }
 
@@ -648,5 +650,36 @@ mod tests {
         assert!(clients[parent_key].state.is_swallowed);
         assert_eq!(window_ops.unmap_attempts(), vec![parent_window]);
         assert!(window_ops.viewable.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn swallow_and_unswallow_broadcast_window_state_ipc() {
+        // is_swallowed flips must reach window/state subscribers (wave 69
+        // exposed the field; this closes the event gap). Needles assembled
+        // so this test cannot match itself.
+        let broadcast = format!("broadcast_window_{}_ipc", "state");
+        let source = include_str!("swallowing.rs");
+        let try_swallow = source
+            .split_once("pub(crate) fn try_swallow(")
+            .expect("try_swallow")
+            .1
+            .split_once("pub(crate) fn try_unswallow(")
+            .expect("try_unswallow")
+            .0;
+        assert!(
+            try_swallow.contains(&broadcast),
+            "try_swallow must broadcast window/state after a successful swallow"
+        );
+        let try_unswallow = source
+            .split_once("pub(crate) fn try_unswallow(")
+            .expect("try_unswallow")
+            .1
+            .split_once("fn can_enter_swallowed_state(")
+            .expect("can_enter_swallowed_state")
+            .0;
+        assert!(
+            try_unswallow.contains(&broadcast),
+            "try_unswallow must broadcast window/state after restoring the parent"
+        );
     }
 }

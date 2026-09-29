@@ -100,6 +100,9 @@ fn client_window_info(
     monitor: i32,
     is_focused: bool,
     is_on_view: bool,
+    is_scratchpad: bool,
+    scratchpad: Option<String>,
+    layout: Option<String>,
     connector: Option<String>,
     monitor_name: Option<String>,
 ) -> WindowInfo {
@@ -127,10 +130,14 @@ fn client_window_info(
         is_minimized: client.state.is_hidden,
         is_swallowed: client.state.is_swallowed,
         is_on_view,
+        is_scratchpad,
+        border_w: client.geometry.border_w,
         is_focused,
         pid: client.pid,
         connector,
         monitor_name,
+        scratchpad,
+        layout,
     }
 }
 
@@ -3493,25 +3500,37 @@ impl Jwm {
         is_focused: bool,
     ) -> Option<WindowInfo> {
         let client = self.state.clients.get(client_key)?;
-        let (connector, monitor_name, is_on_view) = match client.mon {
+        let scratchpad = self
+            .scratchpads
+            .iter()
+            .find(|(_, key)| **key == client_key)
+            .map(|(name, _)| name.clone());
+        let is_scratchpad = scratchpad.is_some();
+        let (connector, monitor_name, is_on_view, layout) = match client.mon {
             Some(mk) => {
-                let is_on_view = self.state.monitors.get(mk).is_some_and(|monitor| {
+                let mon = self.state.monitors.get(mk);
+                let is_on_view = mon.is_some_and(|monitor| {
                     client.state.is_sticky
                         || (client.state.tags & monitor.get_active_tags()) != 0
                 });
+                let layout = mon.map(|monitor| format!("{:?}", *monitor.lt));
                 (
                     self.output_key_for_monitor(backend, mk),
                     self.output_monitor_name_for_monitor(backend, mk),
                     is_on_view,
+                    layout,
                 )
             }
-            None => (None, None, false),
+            None => (None, None, false, None),
         };
         Some(client_window_info(
             client,
             resolved_client_monitor_num(&self.state.monitors, client),
             is_focused,
             is_on_view,
+            is_scratchpad,
+            scratchpad,
+            layout,
             connector,
             monitor_name,
         ))
@@ -4154,21 +4173,29 @@ mod tests {
         client.geometry.w = 640;
         client.geometry.h = 480;
 
-        let info = client_window_info(&client, 7, false, false, None, None);
+        let info = client_window_info(&client, 7, false, false, false, None, None, None, None);
         assert_eq!(info.id, 0x2a);
         assert_eq!(info.monitor, 7);
         assert!(info.is_minimized);
         assert!(!info.is_focused);
         assert!(!info.is_swallowed);
         assert!(!info.is_on_view);
+        assert!(!info.is_scratchpad);
+        assert_eq!(info.border_w, 0);
+        assert!(info.layout.is_none());
+        assert!(info.scratchpad.is_none());
 
         client.state.is_hidden = false;
         client.state.is_swallowed = true;
+        client.geometry.border_w = 4;
         let restored = client_window_info(
             &client,
             7,
             true,
             true,
+            true,
+            Some("term".into()),
+            Some("TILE".into()),
             Some("DP-1".into()),
             Some("Dell U2720Q".into()),
         );
@@ -4176,6 +4203,10 @@ mod tests {
         assert!(restored.is_focused);
         assert!(restored.is_swallowed);
         assert!(restored.is_on_view);
+        assert!(restored.is_scratchpad);
+        assert_eq!(restored.border_w, 4);
+        assert_eq!(restored.scratchpad.as_deref(), Some("term"));
+        assert_eq!(restored.layout.as_deref(), Some("TILE"));
         assert_eq!(restored.connector.as_deref(), Some("DP-1"));
         assert_eq!(restored.monitor_name.as_deref(), Some("Dell U2720Q"));
     }

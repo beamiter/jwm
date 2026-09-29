@@ -4,7 +4,7 @@
 
 ---
 
-## Evolve backlog（目标 100 轮；已完成 wave 9–72，本地 ahead）
+## Evolve backlog（目标 100 轮；已完成 wave 9–79，本地 ahead）
 
 | # | 选题 | Size |
 | --- | --- | --- |
@@ -17,7 +17,39 @@
 | 59–63 | Session minimized v8；Window/Workspace monitor_name；portal IPC picker；clipboard JPEG/BMP→PNG；FS/PiP promoted-neighbour lock test | ✓ |
 | 64–68 | Session FS/PiP v9；X11 toast release swallow；Launcher 中键→Enter；WorkspaceInfo.is_urgent；media-controls Hub vs Players docs | ✓ |
 | 69–72 | WindowInfo.is_swallowed / is_on_view；MonitorInfoIpc wx/wy/ww/wh；相关 docs | ✓ |
+| 73–79 | swallow→window/state；WindowInfo scratchpad/border_w/layout；switcher Home/End；expose wheel browse；calendar Page year；clipboard WebP/GIF | ✓ |
 | … | 跳过：Annotation/Screenshot CommonLinear、toast Closed(1)、BT withdraw、FS/PiP 自身丢锚点（own-anchor drop）、Recording EncodedOnly、XWayland 单轴 | |
+
+---
+
+## 2026-09-29（三十九）：IPC scratchpad/border/layout + swallow event + switcher/expose/calendar/clipboard
+
+选题 = evolve waves 73–79 / evolve7h。
+
+1. **Wave 73**：`try_swallow` / `try_unswallow` 成功后
+   `broadcast_window_state_ipc`（闭合 wave 69 的 `is_swallowed` 事件缺口）；
+   source pin。
+2. **Wave 74**：`WindowInfo.is_scratchpad` + optional `scratchpad` 名；
+   serialize / projection pin。
+3. **Wave 75**：`WindowInfo.border_w`（`ClientGeometry::border_w`）。
+4. **Wave 76**：optional `WindowInfo.layout`（monitor 当前 `lt`，同
+   `MonitorInfoIpc.layout`；无 monitor 时省略）。
+5. **Wave 77**：switcher `Home` / `End` → `jump_selection`；docs
+   window-switcher。
+6. **Wave 78**：expose 竖直滚轮 → `ExposeNavDirection::{Up,Down}`（不
+   commit）；水平 inert；`expose_press` 纯函数 + pointer 臂重写；docs
+   expose。
+7. **Wave 79**：clipboard `preferred_image_mime` / decode 接受 WebP/GIF
+   （PNG→JPEG→WebP→GIF→BMP）；calendar `Page Up`/`Page Down` = 年翻页。
+   Docs clipboard / calendar / window-placement / compatibility；CHANGELOG。
+
+**刻意不做**：跳过表不变；session `is_urgent`（瞬时 cue）；FS/PiP
+own-anchor drop 仍策略延后。
+
+**验证**：`scripts/test.sh --lib -- window_info_serializes window_query_projection swallow_and_unswallow expose_press image_history webp_offer gif_offer`.
+
+**下一轮候选**：见跳过表；maximize restore 跨 output；或其它 topology/state
+边角。
 
 ---
 

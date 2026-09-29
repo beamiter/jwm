@@ -188,7 +188,8 @@ column focus), a layout-parameter change
 (`incnmaster`, `setmfact`, `setgaps`, or `setlayout` / cycle / last via
 `apply_layout_change`), a tag `view` / `toggleview`, and a scratchpad
 hide/reveal, a `togglebar` / `setcfact` rearrange, a maximize work-area
-refit, or a strut / output topology rearrange for every affected client.
+refit, a strut / output topology rearrange for every affected client, or a
+terminal swallow / unswallow (`is_swallowed` on the parent).
 Refused or no-op requests do not emit it; subscribe to `window` or
 `window/state` to follow flips without polling. A title change also emits
 the lighter `window/title` event; focus still emits `window/focus`.
@@ -198,8 +199,11 @@ connector name, and EDID name when known — the same fields as
 `MonitorInfoIpc`) so scripts can key windows to panels across hotplug
 renumbering. Both are omitted when the live output map has no identity for
 that monitor. The same rows carry `is_swallowed` (a terminal hidden behind
-its child) and `is_on_view` (the window's tags intersect the monitor's
-active tags, or it is sticky — on the current view, not merely mapped).
+its child), `is_on_view` (the window's tags intersect the monitor's
+active tags, or it is sticky — on the current view, not merely mapped),
+`is_scratchpad` / optional `scratchpad` name, `border_w`, and optional
+`layout` (the monitor's current layout symbol, matching
+`MonitorInfoIpc.layout`, omitted when the window has no monitor).
 `get_monitors` / `get_tree` expose the usable work area as `wx` / `wy` /
 `ww` / `wh` beside the full-output `x` / `y` / `w` / `h`.
 

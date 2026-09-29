@@ -6,7 +6,35 @@
 //! 规则（可见且尺寸为正、无候选则不进入）内联在切换函数里。这里把
 //! 决策收敛为纯函数返回的 [`ExposeAction`]，编排层只负责执行动作。
 
+use crate::backend::api::ExposeNavDirection;
 use crate::backend::common_define::WindowId;
+
+/// What a pointer press means while expose is up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExposePress {
+    /// Left / right / other non-wheel: commit the cell under the pointer
+    /// (or exit on a miss), the historical expose click.
+    Commit,
+    /// Middle: close the pointed cell without ending the gesture.
+    Close,
+    /// Vertical wheel: step the highlight one cell (Up/Down), keep expose.
+    Browse(ExposeNavDirection),
+    /// Horizontal wheel: nothing to browse sideways on a thumbnail grid.
+    Inert,
+}
+
+/// Classify a button press for expose. Vertical wheel browses like the
+/// arrows; horizontal wheel is inert; middle closes; everything else commits.
+#[must_use]
+pub fn expose_press(button: u8) -> ExposePress {
+    match button {
+        2 => ExposePress::Close,
+        4 => ExposePress::Browse(ExposeNavDirection::Up),
+        5 => ExposePress::Browse(ExposeNavDirection::Down),
+        6 | 7 => ExposePress::Inert,
+        _ => ExposePress::Commit,
+    }
+}
 
 /// 一个待进入 expose 的候选窗口：`(窗口, x, y, 宽, 高, 标题)`，几何与
 /// 标题均为客户端原始记录（宽高可能为非正值，由计划过滤；标题由计划
@@ -510,5 +538,24 @@ mod tests {
         // resolves to nothing either.
         assert_eq!(grid_index(&grid, win(9)), None);
         assert_eq!(grid_index(&[], win(1)), None);
+    }
+
+    #[test]
+    fn expose_press_classifies_buttons_like_the_switcher_wheel() {
+        use crate::backend::api::ExposeNavDirection;
+        assert_eq!(expose_press(1), ExposePress::Commit);
+        assert_eq!(expose_press(2), ExposePress::Close);
+        assert_eq!(expose_press(3), ExposePress::Commit);
+        assert_eq!(
+            expose_press(4),
+            ExposePress::Browse(ExposeNavDirection::Up)
+        );
+        assert_eq!(
+            expose_press(5),
+            ExposePress::Browse(ExposeNavDirection::Down)
+        );
+        assert_eq!(expose_press(6), ExposePress::Inert);
+        assert_eq!(expose_press(7), ExposePress::Inert);
+        assert_eq!(expose_press(8), ExposePress::Commit);
     }
 }
