@@ -1719,6 +1719,17 @@ mod tests {
                 && sync_urgent.contains("previous_urgent != urgent"),
             "sync_client_urgent_state must broadcast only when is_urgent flips"
         );
+        let pip = fullscreen
+            .split_once("pub(super) fn set_client_pip(")
+            .expect("set_client_pip")
+            .1
+            .split_once("fn set_client_pip_inner(")
+            .expect("set_client_pip_inner")
+            .0;
+        assert!(
+            pip.contains(&broadcast) && pip.contains("if changed"),
+            "set_client_pip must broadcast only when PiP actually flips"
+        );
         let toggle = include_str!("features/toggles.rs");
         let float = toggle
             .split_once("pub fn togglefloating(")

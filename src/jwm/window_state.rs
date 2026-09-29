@@ -1140,7 +1140,12 @@ impl Jwm {
         let crossing_from_fullscreen = pip && previous_client.state.is_fullscreen;
 
         match self.set_client_pip_inner(backend, client_key, pip) {
-            Ok(changed) => Ok(changed),
+            Ok(changed) => {
+                if changed {
+                    self.broadcast_window_state_ipc(client_key);
+                }
+                Ok(changed)
+            }
             Err(error) => {
                 if crossing_from_fullscreen {
                     self.restore_failed_mode_transition(

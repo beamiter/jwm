@@ -4,18 +4,30 @@
 
 ---
 
-## Evolve backlog（目标 100 轮；已完成 wave 9–19，本地 ahead）
+## Evolve backlog（目标 100 轮；已完成 wave 9–20，本地 ahead）
 
 按日常命中 × 可交付性排序的下一波候选（S/小 M，无 DRM）：
 
 | # | 选题 | Size |
 | --- | --- | --- |
-| 14–18 | IPC window/state 族 + Tiled* | S ✓ |
-| 19 | seamless restart maximize restore_rect | S–M ✓ |
-| 20 | Annotation → CommonLinearAware | S–M（PostDelivery 迁移） |
-| 21 | Screenshot toolbar → CommonLinearAware | S–M |
-| 22 | session 持久化 maximize + restore_rect | M |
+| 14–20 | IPC window/state 族 + Tiled* + restore_rect | S/M ✓ |
+| 21 | Annotation → CommonLinearAware | S–M（PostDelivery 迁移） |
+| 22 | Screenshot toolbar → CommonLinearAware | S–M |
+| 23 | session 持久化 maximize + restore_rect | M |
 | … | 跳过：toast Closed(1)、BT withdraw、FS/PiP 丢锚点、Recording EncodedOnly | |
+
+---
+
+## 2026-09-29（十二）：PiP → `window/state`
+
+选题 = evolve wave 20。
+
+1. **契约**：`set_client_pip` 在 `Ok(true)` 时广播。
+2. **回归**：sibling pin 扩 pip。
+
+**验证**：`scripts/test.sh --lib -- sibling_window_state_paths`。
+
+**仍然开着的**：见上表 21+。
 
 ---
 

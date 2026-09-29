@@ -162,9 +162,9 @@ same shape as one `get_windows` row (`is_maximized`, `is_maximized_vert`,
 The same event fires on fullscreen enter/leave, minimize/unminimize, a real
 `togglefloating` flip, an `is_urgent` change (EWMH demands-attention or
 ICCCM urgency), an `is_sticky` change, a real `tag` / `toggletag` mask change,
-a cross-monitor `sendmon` / `tagmon`, and an Above/Below stacking flip.
-Refused or no-op requests do not emit it; subscribe to `window` or
-`window/state` to follow flips without polling.
+a cross-monitor `sendmon` / `tagmon`, an Above/Below stacking flip, and a
+PiP enter/leave. Refused or no-op requests do not emit it; subscribe to
+`window` or `window/state` to follow flips without polling.
 
 A refused request, like one that changes nothing, leaves the window alone:
 JWM republishes the current state and replies with the current geometry, a
