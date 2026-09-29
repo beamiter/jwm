@@ -39,6 +39,10 @@
 //! 一并写入快照；恢复时在休息态放置阶段套用。缺省 / 旧版本快照为
 //! `client_fact = 1.0`、两个布尔为 `false`。最大化再套用改为按保存的
 //! `maximize.promoted` 走 `adopt_client_maximized`（与 seamless 重启同源）。
+//!
+//! v11 起，`is_urgent` / `demands_attention` / `skip_taskbar` / `skip_pager` /
+//! `is_fixed` 与可选 `border_w` 一并写入快照；恢复时在休息态放置阶段套用。
+//! 缺省 / 旧版本快照布尔为 `false`、`border_w` 为 `None`（不改写边框）。
 
 use crate::backend::api::{Backend, MaximizeAxes, NetWmAction, NetWmState};
 use crate::config::CONFIG;
@@ -60,7 +64,7 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-const SESSION_VERSION: u32 = 10;
+const SESSION_VERSION: u32 = 11;
 const MIN_SUPPORTED_SESSION_VERSION: u32 = 1;
 const MAX_SESSION_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_SESSION_CLIENTS: usize = 16_384;
@@ -124,6 +128,24 @@ pub struct SessionEntry {
     /// v10：无装饰请求（`no_decorations`）。缺省 / 旧版本为 `false`。
     #[serde(default)]
     pub no_decorations: bool,
+    /// v11：urgency。缺省 / 旧版本为 `false`。
+    #[serde(default)]
+    pub is_urgent: bool,
+    /// v11：`_NET_WM_STATE_DEMANDS_ATTENTION`。缺省 / 旧版本为 `false`。
+    #[serde(default)]
+    pub demands_attention: bool,
+    /// v11：`_NET_WM_STATE_SKIP_TASKBAR`。缺省 / 旧版本为 `false`。
+    #[serde(default)]
+    pub skip_taskbar: bool,
+    /// v11：`_NET_WM_STATE_SKIP_PAGER`。缺省 / 旧版本为 `false`。
+    #[serde(default)]
+    pub skip_pager: bool,
+    /// v11：size-hints fixed。缺省 / 旧版本为 `false`。
+    #[serde(default)]
+    pub is_fixed: bool,
+    /// v11：drawn border width。缺省 / 旧版本为 `None`（恢复时不改写）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub border_w: Option<i32>,
 }
 
 fn default_client_fact() -> f32 {
@@ -334,6 +356,16 @@ struct SessionSnapshotV9 {
     monitor_orders: Vec<SessionMonitorOrder>,
 }
 
+/// 版本 10 快照：已有 client_fact / hand-float / no_decorations，尚无
+/// urgency / attention / skip_* / is_fixed / border_w（反序列化时缺省）。
+#[derive(Deserialize)]
+struct SessionSnapshotV10 {
+    #[allow(dead_code)]
+    version: u32,
+    clients: Vec<SessionEntry>,
+    monitor_orders: Vec<SessionMonitorOrder>,
+}
+
 /// 把任一受支持版本的会话 JSON 迁移为当前版本的快照。
 ///
 /// 崩溃安全约定：迁移是纯内存操作，绝不改写磁盘上的旧快照；升级后的
@@ -350,61 +382,72 @@ pub fn migrate_session_json(json: &str) -> Result<SessionSnapshot, String> {
         1 => {
             let v1: SessionSnapshotV1 = serde_json::from_str(json)
                 .map_err(|error| format!("cannot parse version 1 session snapshot: {error}"))?;
-            migrate_snapshot_v9(migrate_snapshot_v8(migrate_snapshot_v7(migrate_snapshot_v6(
-                migrate_snapshot_v5(migrate_snapshot_v4(migrate_snapshot_v3(migrate_snapshot_v2(
-                    migrate_snapshot_v1(v1),
+            migrate_snapshot_v10(migrate_snapshot_v9(migrate_snapshot_v8(migrate_snapshot_v7(
+                migrate_snapshot_v6(migrate_snapshot_v5(migrate_snapshot_v4(migrate_snapshot_v3(
+                    migrate_snapshot_v2(migrate_snapshot_v1(v1)),
                 )))),
             ))))
         }
         2 => {
             let v2: SessionSnapshotV2 = serde_json::from_str(json)
                 .map_err(|error| format!("cannot parse version 2 session snapshot: {error}"))?;
-            migrate_snapshot_v9(migrate_snapshot_v8(migrate_snapshot_v7(migrate_snapshot_v6(
-                migrate_snapshot_v5(migrate_snapshot_v4(migrate_snapshot_v3(migrate_snapshot_v2(
-                    v2,
+            migrate_snapshot_v10(migrate_snapshot_v9(migrate_snapshot_v8(migrate_snapshot_v7(
+                migrate_snapshot_v6(migrate_snapshot_v5(migrate_snapshot_v4(migrate_snapshot_v3(
+                    migrate_snapshot_v2(v2),
                 )))),
             ))))
         }
         3 => {
             let v3: SessionSnapshotV3 = serde_json::from_str(json)
                 .map_err(|error| format!("cannot parse version 3 session snapshot: {error}"))?;
-            migrate_snapshot_v9(migrate_snapshot_v8(migrate_snapshot_v7(migrate_snapshot_v6(
-                migrate_snapshot_v5(migrate_snapshot_v4(migrate_snapshot_v3(v3))),
+            migrate_snapshot_v10(migrate_snapshot_v9(migrate_snapshot_v8(migrate_snapshot_v7(
+                migrate_snapshot_v6(migrate_snapshot_v5(migrate_snapshot_v4(migrate_snapshot_v3(
+                    v3,
+                )))),
             ))))
         }
         4 => {
             let v4: SessionSnapshotV4 = serde_json::from_str(json)
                 .map_err(|error| format!("cannot parse version 4 session snapshot: {error}"))?;
-            migrate_snapshot_v9(migrate_snapshot_v8(migrate_snapshot_v7(migrate_snapshot_v6(
-                migrate_snapshot_v5(migrate_snapshot_v4(v4)),
+            migrate_snapshot_v10(migrate_snapshot_v9(migrate_snapshot_v8(migrate_snapshot_v7(
+                migrate_snapshot_v6(migrate_snapshot_v5(migrate_snapshot_v4(v4))),
             ))))
         }
         5 => {
             let v5: SessionSnapshotV5 = serde_json::from_str(json)
                 .map_err(|error| format!("cannot parse version 5 session snapshot: {error}"))?;
-            migrate_snapshot_v9(migrate_snapshot_v8(migrate_snapshot_v7(migrate_snapshot_v6(
-                migrate_snapshot_v5(v5),
+            migrate_snapshot_v10(migrate_snapshot_v9(migrate_snapshot_v8(migrate_snapshot_v7(
+                migrate_snapshot_v6(migrate_snapshot_v5(v5)),
             ))))
         }
         6 => {
             let v6: SessionSnapshotV6 = serde_json::from_str(json)
                 .map_err(|error| format!("cannot parse version 6 session snapshot: {error}"))?;
-            migrate_snapshot_v9(migrate_snapshot_v8(migrate_snapshot_v7(migrate_snapshot_v6(v6))))
+            migrate_snapshot_v10(migrate_snapshot_v9(migrate_snapshot_v8(migrate_snapshot_v7(
+                migrate_snapshot_v6(v6),
+            ))))
         }
         7 => {
             let v7: SessionSnapshotV7 = serde_json::from_str(json)
                 .map_err(|error| format!("cannot parse version 7 session snapshot: {error}"))?;
-            migrate_snapshot_v9(migrate_snapshot_v8(migrate_snapshot_v7(v7)))
+            migrate_snapshot_v10(migrate_snapshot_v9(migrate_snapshot_v8(migrate_snapshot_v7(
+                v7,
+            ))))
         }
         8 => {
             let v8: SessionSnapshotV8 = serde_json::from_str(json)
                 .map_err(|error| format!("cannot parse version 8 session snapshot: {error}"))?;
-            migrate_snapshot_v9(migrate_snapshot_v8(v8))
+            migrate_snapshot_v10(migrate_snapshot_v9(migrate_snapshot_v8(v8)))
         }
         9 => {
             let v9: SessionSnapshotV9 = serde_json::from_str(json)
                 .map_err(|error| format!("cannot parse version 9 session snapshot: {error}"))?;
-            migrate_snapshot_v9(v9)
+            migrate_snapshot_v10(migrate_snapshot_v9(v9))
+        }
+        10 => {
+            let v10: SessionSnapshotV10 = serde_json::from_str(json)
+                .map_err(|error| format!("cannot parse version 10 session snapshot: {error}"))?;
+            migrate_snapshot_v10(v10)
         }
         SESSION_VERSION => SessionSnapshot::from_json(json)
             .map_err(|error| format!("cannot parse session snapshot: {error}"))?,
@@ -448,6 +491,12 @@ fn migrate_snapshot_v1(v1: SessionSnapshotV1) -> SessionSnapshotV2 {
                 client_fact: 1.0,
                 is_drag_floating: false,
                 no_decorations: false,
+                is_urgent: false,
+                demands_attention: false,
+                skip_taskbar: false,
+                skip_pager: false,
+                is_fixed: false,
+                border_w: None,
             }
         })
         .collect();
@@ -522,11 +571,20 @@ fn migrate_snapshot_v8(v8: SessionSnapshotV8) -> SessionSnapshotV9 {
 }
 
 /// v9 -> v10：client_fact / hand-float / no_decorations 在反序列化时已缺省；只抬版本号。
-fn migrate_snapshot_v9(v9: SessionSnapshotV9) -> SessionSnapshot {
-    SessionSnapshot {
-        version: SESSION_VERSION,
+fn migrate_snapshot_v9(v9: SessionSnapshotV9) -> SessionSnapshotV10 {
+    SessionSnapshotV10 {
+        version: 10,
         clients: v9.clients,
         monitor_orders: v9.monitor_orders,
+    }
+}
+
+/// v10 -> v11：urgency / attention / skip_* / is_fixed / border_w 在反序列化时已缺省；只抬版本号。
+fn migrate_snapshot_v10(v10: SessionSnapshotV10) -> SessionSnapshot {
+    SessionSnapshot {
+        version: SESSION_VERSION,
+        clients: v10.clients,
+        monitor_orders: v10.monitor_orders,
     }
 }
 
@@ -555,6 +613,12 @@ struct DetailedRestorePlan {
     client_fact: f32,
     is_drag_floating: bool,
     no_decorations: bool,
+    is_urgent: bool,
+    demands_attention: bool,
+    skip_taskbar: bool,
+    skip_pager: bool,
+    is_fixed: bool,
+    border_w: Option<i32>,
 }
 
 impl SessionSnapshot {
@@ -1008,6 +1072,12 @@ pub fn capture_snapshot_excluding(
             client_fact: c.state.client_fact,
             is_drag_floating: is_floating && c.state.is_drag_floating,
             no_decorations: c.state.no_decorations,
+            is_urgent: c.state.is_urgent,
+            demands_attention: c.state.demands_attention,
+            skip_taskbar: c.state.skip_taskbar,
+            skip_pager: c.state.skip_pager,
+            is_fixed: c.state.is_fixed,
+            border_w: Some(c.geometry.border_w),
         });
     }
     let monitor_orders = state
@@ -1128,6 +1198,12 @@ where
                     client_fact: e.client_fact,
                     is_drag_floating: e.is_drag_floating,
                     no_decorations: e.no_decorations,
+                    is_urgent: e.is_urgent,
+                    demands_attention: e.demands_attention,
+                    skip_taskbar: e.skip_taskbar,
+                    skip_pager: e.skip_pager,
+                    is_fixed: e.is_fixed,
+                    border_w: e.border_w,
                 },
             ));
         }
@@ -1388,8 +1464,15 @@ impl Jwm {
                 c.state.is_drag_floating = restore.is_floating && plan.is_drag_floating;
                 c.state.client_fact = sanitize_client_fact(plan.client_fact);
                 c.state.no_decorations = plan.no_decorations;
+                c.state.is_urgent = plan.is_urgent;
+                c.state.demands_attention = plan.demands_attention;
+                c.state.skip_taskbar = plan.skip_taskbar;
+                c.state.skip_pager = plan.skip_pager;
+                c.state.is_fixed = plan.is_fixed;
                 if plan.no_decorations {
                     c.geometry.border_w = 0;
+                } else if let Some(border_w) = plan.border_w {
+                    c.geometry.border_w = border_w.max(0);
                 }
                 if let Some((x, y, w, h)) = floating {
                     c.geometry.floating_x = x;
@@ -1526,6 +1609,24 @@ impl Jwm {
                 log::warn!(
                     "session restore could not re-apply minimized for a matched client: {error}"
                 );
+            }
+        }
+
+        // Chrome flags that `updatesizehints` / arrange may have recomputed:
+        // re-assert the snapshot's urgency / attention / skip_* / fixed /
+        // border after the resting geometry pass.
+        for (key, plan) in &plans {
+            if let Some(c) = self.state.clients.get_mut(*key) {
+                c.state.is_urgent = plan.is_urgent;
+                c.state.demands_attention = plan.demands_attention;
+                c.state.skip_taskbar = plan.skip_taskbar;
+                c.state.skip_pager = plan.skip_pager;
+                c.state.is_fixed = plan.is_fixed;
+                if plan.no_decorations {
+                    c.geometry.border_w = 0;
+                } else if let Some(border_w) = plan.border_w {
+                    c.geometry.border_w = border_w.max(0);
+                }
             }
         }
 
@@ -1681,6 +1782,12 @@ mod tests {
             client_fact: 1.0,
             is_drag_floating: false,
             no_decorations: false,
+            is_urgent: false,
+            demands_attention: false,
+            skip_taskbar: false,
+            skip_pager: false,
+            is_fixed: false,
+            border_w: None,
         }
     }
 
@@ -1733,6 +1840,12 @@ mod tests {
                     client_fact: 1.0,
                     is_drag_floating: false,
                     no_decorations: false,
+                    is_urgent: true,
+                    demands_attention: true,
+                    skip_taskbar: true,
+                    skip_pager: false,
+                    is_fixed: false,
+                    border_w: Some(3),
                 },
                 entry("Alacritty", "alacritty", 0b1),
             ],
@@ -2197,9 +2310,15 @@ mod tests {
 
     #[test]
     fn migration_refuses_future_versions_and_unreadable_documents() {
-        let error =
-            migrate_session_json(r#"{"version":10,"clients":[],"monitor_orders":[]}"#).unwrap_err();
-        assert!(error.contains("unsupported session version 11"));
+        let future = format!(
+            r#"{{"version":{},"clients":[],"monitor_orders":[]}}"#,
+            SESSION_VERSION + 1
+        );
+        let error = migrate_session_json(&future).unwrap_err();
+        assert!(
+            error.contains(&format!("unsupported session version {}", SESSION_VERSION + 1)),
+            "{error}"
+        );
 
         let error = migrate_session_json("not JSON").unwrap_err();
         assert!(error.contains("no readable version"));
@@ -2234,8 +2353,19 @@ mod tests {
         let error = migrate_session_json(r#"{"version":8,"clients":[]}"#).unwrap_err();
         assert!(error.contains("cannot parse version 8 session snapshot"));
 
-        // v9（当前版本）同样严格：缺 monitor_orders 字段直接拒绝。
+        // v9 保持严格：缺 monitor_orders 字段直接拒绝。
         let error = migrate_session_json(r#"{"version":9,"clients":[]}"#).unwrap_err();
+        assert!(error.contains("cannot parse version 9 session snapshot"));
+
+        // v10 保持严格：缺 monitor_orders 字段直接拒绝。
+        let error = migrate_session_json(r#"{"version":10,"clients":[]}"#).unwrap_err();
+        assert!(error.contains("cannot parse version 10 session snapshot"));
+
+        // 当前版本同样严格：缺 monitor_orders 字段直接拒绝。
+        let error = migrate_session_json(&format!(
+            r#"{{"version":{SESSION_VERSION},"clients":[]}}"#
+        ))
+        .unwrap_err();
         assert!(error.contains("cannot parse session snapshot"));
     }
 
@@ -2306,6 +2436,24 @@ mod tests {
         assert!((snapshot.clients[0].client_fact - 1.0).abs() < f32::EPSILON);
         assert!(!snapshot.clients[0].is_drag_floating);
         assert!(!snapshot.clients[0].no_decorations);
+        assert!(!snapshot.clients[0].is_urgent);
+        assert!(snapshot.clients[0].border_w.is_none());
+    }
+
+    #[test]
+    fn v10_snapshot_without_urgency_fields_migrates_to_defaults() {
+        let snapshot = migrate_session_json(
+            r#"{"version":10,"clients":[{"class":"A","instance":"a","name":"","tags":1,"is_floating":false,"monitor_num":0,"floating":null,"is_sticky":false,"is_above":false,"is_below":false,"is_minimized":false,"is_fullscreen":false,"is_pip":false,"client_fact":1.25,"is_drag_floating":false,"no_decorations":false}],"monitor_orders":[]}"#,
+        )
+        .expect("v10 without urgency fields still loads");
+        assert_eq!(snapshot.version, SESSION_VERSION);
+        assert!((snapshot.clients[0].client_fact - 1.25).abs() < f32::EPSILON);
+        assert!(!snapshot.clients[0].is_urgent);
+        assert!(!snapshot.clients[0].demands_attention);
+        assert!(!snapshot.clients[0].skip_taskbar);
+        assert!(!snapshot.clients[0].skip_pager);
+        assert!(!snapshot.clients[0].is_fixed);
+        assert!(snapshot.clients[0].border_w.is_none());
     }
 
     #[test]
@@ -2356,6 +2504,57 @@ mod tests {
         assert!(restored.is_drag_floating);
         assert!(restored.no_decorations);
         assert_eq!(jwm.state.clients[key].geometry.border_w, 0);
+    }
+
+    #[test]
+    fn session_captures_and_restores_urgency_attention_skip_fixed_and_border() {
+        let mut backend = DisplaySpyBackend::new(vec![output(1, 0, 0, 1920, 1080)]);
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").expect("test jwm");
+        let monitor = jwm.state.monitor_order[0];
+        let tags = jwm.state.monitors[monitor].get_active_tags();
+
+        let mut client = WMClient::new(WindowId::from_raw(0x82));
+        client.class = "UrgentApp".into();
+        client.instance = "urgent".into();
+        client.mon = Some(monitor);
+        client.state.tags = tags;
+        client.state.is_urgent = true;
+        client.state.demands_attention = true;
+        client.state.skip_taskbar = true;
+        client.state.skip_pager = true;
+        client.state.is_fixed = true;
+        client.geometry.border_w = 4;
+        let key = jwm.insert_client(client);
+        jwm.attach_to_monitor(key, monitor);
+
+        let snap = capture_snapshot(&jwm.state, "status-bar");
+        let entry = snap
+            .clients
+            .iter()
+            .find(|e| e.class == "UrgentApp")
+            .expect("UrgentApp");
+        assert!(entry.is_urgent);
+        assert!(entry.demands_attention);
+        assert!(entry.skip_taskbar);
+        assert!(entry.skip_pager);
+        assert!(entry.is_fixed);
+        assert_eq!(entry.border_w, Some(4));
+        assert_eq!(snap.version, SESSION_VERSION);
+
+        jwm.state.clients[key].state.is_urgent = false;
+        jwm.state.clients[key].state.demands_attention = false;
+        jwm.state.clients[key].state.skip_taskbar = false;
+        jwm.state.clients[key].state.skip_pager = false;
+        jwm.state.clients[key].state.is_fixed = false;
+        jwm.state.clients[key].geometry.border_w = 2;
+        assert_eq!(jwm.apply_session_snapshot(&mut backend, &snap), 1);
+        let restored = &jwm.state.clients[key];
+        assert!(restored.state.is_urgent);
+        assert!(restored.state.demands_attention);
+        assert!(restored.state.skip_taskbar);
+        assert!(restored.state.skip_pager);
+        assert!(restored.state.is_fixed);
+        assert_eq!(restored.geometry.border_w, 4);
     }
 
     #[test]

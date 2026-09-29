@@ -615,7 +615,7 @@ impl WMController for Jwm {
                         } else {
                             None
                         };
-                        self.scroll_system_ui_from_pointer(backend, step, row);
+                        self.scroll_system_ui_from_pointer(backend, step, row, false);
                     }
                 }
                 SwitcherPress::Inert => {}
@@ -687,14 +687,22 @@ impl WMController for Jwm {
                     SystemUiHitTarget::Outside | SystemUiHitTarget::Unavailable
                 ) =>
                 {
-                    self.scroll_system_ui_from_pointer(backend, -1, wheel_row);
+                    let shift = backend
+                        .key_ops()
+                        .clean_mods(state)
+                        .contains(Mods::SHIFT);
+                    self.scroll_system_ui_from_pointer(backend, -1, wheel_row, shift);
                 }
                 5 if !matches!(
                     hit,
                     SystemUiHitTarget::Outside | SystemUiHitTarget::Unavailable
                 ) =>
                 {
-                    self.scroll_system_ui_from_pointer(backend, 1, wheel_row);
+                    let shift = backend
+                        .key_ops()
+                        .clean_mods(state)
+                        .contains(Mods::SHIFT);
+                    self.scroll_system_ui_from_pointer(backend, 1, wheel_row, shift);
                 }
                 1 => match hit {
                     SystemUiHitTarget::Item(row, text_x) => {

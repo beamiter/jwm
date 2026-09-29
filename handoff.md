@@ -4,7 +4,7 @@
 
 ---
 
-## Evolve backlog（目标 1000 轮；已完成 wave 9–250，本地 ahead）
+## Evolve backlog（目标 1000 轮；已完成 wave 9–300，本地 ahead）
 
 | # | 选题 | Size |
 | --- | --- | --- |
@@ -42,7 +42,40 @@
 | 232–235 | idle inhibit split（manual/client/recording + caffeine） | ✓ |
 | 236–242 | RuntimeFeatureStates launcher/session_menu/notifications/waterlily/night_light/idle_inhibit | ✓ |
 | 243–250 | capabilities/serialize/dispatch pins + idle docs + handoff/CHANGELOG | ✓ |
+| 251–260 | Session v11 urgent/attention/skip_*/fixed/border_w | ✓ |
+| 261–265 | Portal WindowInfo monitor/connector/is_on_view；clipboard HEIC/JXL skip pin | ✓ |
+| 266–275 | get_config hdr/idle_dim/night_light/remember_closed/waterlily_*；effect/magnifier/peek polish | ✓ |
+| 276–285 | TreeNode urgent/floating_count；get_tab_bar selected_id；calendar End + Shift+wheel year | ✓ |
+| 286–300 | docs drift + include_str!/serialize contract pins + handoff/CHANGELOG | ✓ |
 | … | 跳过：Annotation/Screenshot CommonLinear、toast Closed(1)、BT withdraw、FS/PiP 自身丢锚点（own-anchor drop）、Recording EncodedOnly、XWayland 单轴 | |
+
+---
+
+## 2026-09-29（五十五）：session v11 + IPC polish → 300
+
+选题 = evolve waves 251–300 / evolve7h。
+
+1. **Wave 251–260**：Session v11 持久化 `is_urgent` /
+   `demands_attention` / `skip_taskbar` / `skip_pager` / `is_fixed` /
+   可选 `border_w`（旧快照缺省 / 不改写边框）。
+2. **Wave 261–265**：portal `WindowInfo` 反序列化 `monitor` /
+   `connector` / `is_on_view`；clipboard HEIC/JXL 跳过（`image` 无解码器）
+   + docs pin。
+3. **Wave 266–275**：`get_config` 补 `hdr_enabled` / `idle_dim_*` /
+   `night_light*` / `remember_closed_placement` / `waterlily_*`（env 镜像）；
+   `get_effect_status` / `get_magnifier` / `get_peek` 补 radius /
+   `compositor_active`。
+4. **Wave 276–285**：`TreeNode.urgent_count` / `floating_count`；
+   `get_tab_bar.selected_id`；calendar `End`=today、`Shift`+wheel 年。
+5. **Wave 286–300**：docs drift；serialize / include_str! 契约 pin；
+   CHANGELOG；handoff。
+
+**刻意不做**：跳过表不变；不发明 DRM/EncodedOnly/CommonLinear。
+
+**验证**：`scripts/test.sh --lib --` 聚焦 session migrate / clipboard heic /
+get_config / tree_node / calendar_end / evolve7h_waves_251。
+
+**下一轮候选**：301+；或跳过表项。
 
 ---
 

@@ -67,11 +67,17 @@ and the managed stack uses `Below < Normal < Above < focused fullscreen < PiP`.
 tiling `gap` / `m_fact` / `n_master`, `transform`, physical size
 (`physical_width_mm` / `physical_height_mm`), and preferred mode
 (`preferred_width` / `preferred_height` / `preferred_refresh_mhz`).
-`get_tree` nodes also carry `selected_id` and `window_count`.
+`get_config` accepts optional `keys` to return a field subset, including
+`hdr_enabled`, `idle_dim_secs` / `idle_dim_level`, `night_light*` schedule
+fields, `remember_closed_placement`, and WaterLily env mirrors
+(`waterlily_enabled` / `waterlily_opacity`). `get_tree` nodes also carry
+`selected_id`, `window_count`, `urgent_count`, and `floating_count`.
 `get_workspaces` includes per-tag `gap`; `get_layout` / `get_gaps` /
 `get_nmaster` return the focused monitor's live layout parameters;
 `setgaps` / `setnmaster` / `set_nmaster` / `set_layout` are bindable over IPC.
-`get_config` accepts optional `keys` to return a field subset.
+`get_effect_status` reports `magnifier_radius` and `compositor_active`;
+`get_magnifier` reports `radius`; `get_peek` reports `compositor_active`;
+`get_tab_bar` reports `selected_id` when a tab group is focused.
 Layer-shell background/top/overlay surfaces remain compositor-owned layers.
 
 The binary-bundle design currently targets **x86_64 Linux built on Ubuntu

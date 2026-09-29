@@ -77,7 +77,10 @@ then `image/gif`, then `image/bmp`, then `image/tiff`, then `image/avif`.
 JPEG/WebP/GIF/BMP/TIFF/AVIF payloads are decoded into PNG under the image
 history cap before the history stores them (the picker still re-offers PNG
 only). AVIF decode needs a native decoder in the `image` crate build; when
-absent the offer is dropped like any undecodable payload.
+absent the offer is dropped like any undecodable payload. HEIC/HEIF and
+JPEG XL (`image/heic`, `image/heif`, `image/jxl`) are not accepted: the
+bundled `image` crate has no decoder for those formats, so preferring the
+MIME would only drop every such offer.
 
 On X11 the clipboard is not storage but a protocol: the copying application
 keeps the data and hands it over on request. JWM therefore watches CLIPBOARD

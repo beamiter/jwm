@@ -861,6 +861,10 @@ pub struct TreeNode {
     pub selected_id: Option<u64>,
     /// `windows.len()` mirror for scripts that only need a count.
     pub window_count: usize,
+    /// How many of `windows` report `is_urgent`.
+    pub urgent_count: usize,
+    /// How many of `windows` report `is_floating`.
+    pub floating_count: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -2639,10 +2643,76 @@ mod tests {
             windows: Vec::new(),
             selected_id: Some(42),
             window_count: 0,
+            urgent_count: 0,
+            floating_count: 0,
         };
         let json = serde_json::to_value(node).unwrap();
         assert_eq!(json["selected_id"], 42);
         assert_eq!(json["window_count"], 0);
+        assert_eq!(json["urgent_count"], 0);
+        assert_eq!(json["floating_count"], 0);
         assert!(json["windows"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn tree_node_serializes_urgent_and_floating_counts() {
+        let node = TreeNode {
+            monitor: MonitorInfoIpc {
+                num: 0,
+                x: 0,
+                y: 0,
+                w: 800,
+                h: 600,
+                wx: 0,
+                wy: 0,
+                ww: 800,
+                wh: 600,
+                active_tags: 1,
+                layout: "TILE".into(),
+                focused: true,
+                locked: false,
+                connector: None,
+                name: None,
+                monitor_name: None,
+                vendor: None,
+                product_code: None,
+                serial_number: None,
+                monitor_serial: None,
+                scale: 1.0,
+                refresh_mhz: 60_000,
+                hdr_capable: false,
+                vrr_supported: false,
+                vrr_enabled: false,
+                gap: 0,
+                m_fact: 0.55,
+                n_master: 1,
+                transform: 0,
+                tab_bar_reserved: 0,
+                hdr_metadata: None,
+                physical_width_mm: 0,
+                physical_height_mm: 0,
+                preferred_width: 0,
+                preferred_height: 0,
+                preferred_refresh_mhz: 0,
+                vrr_min_hz: 0,
+                vrr_max_hz: 0,
+                prev_layout: "TILE".into(),
+                show_bar: true,
+                strut_top: 0,
+                strut_bottom: 0,
+                strut_left: 0,
+                strut_right: 0,
+                selected_id: None,
+            },
+            windows: Vec::new(),
+            selected_id: None,
+            window_count: 3,
+            urgent_count: 1,
+            floating_count: 2,
+        };
+        let json = serde_json::to_value(node).unwrap();
+        assert_eq!(json["window_count"], 3);
+        assert_eq!(json["urgent_count"], 1);
+        assert_eq!(json["floating_count"], 2);
     }
 }

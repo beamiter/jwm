@@ -7,6 +7,26 @@ monorepo use independent Semantic Versions.
 
 ### Added
 
+- Session snapshot v11 persists `is_urgent`, `demands_attention`,
+  `skip_taskbar` / `skip_pager`, `is_fixed`, and optional `border_w` (older
+  snapshots keep defaults / leave border alone).
+- Portal IPC `WindowInfo` deserializes optional `monitor`, `connector`, and
+  `is_on_view` (serde defaults) for picker enrichment.
+- `get_config` keys: `hdr_enabled`, `idle_dim_secs` / `idle_dim_level`,
+  `night_light` / `night_light_temp` / `night_light_start` /
+  `night_light_end` / `night_light_transition_mins`,
+  `remember_closed_placement`, plus WaterLily env mirrors
+  `waterlily_enabled` / `waterlily_opacity`.
+- `get_effect_status` reports `magnifier_radius` and `compositor_active`;
+  `get_magnifier` reports `radius`; `get_peek` reports `compositor_active`.
+- `get_tree` nodes report `urgent_count` / `floating_count`; `get_tab_bar`
+  reports `selected_id` when a tab group is focused.
+- Calendar: `End` jumps to today (with `Home` / `t`); `Shift`+wheel steps
+  years. See [docs/calendar.md](docs/calendar.md).
+- Clipboard history documents that HEIC/HEIF/JXL offers are skipped (no
+  decoder in the bundled `image` crate). See
+  [docs/clipboard.md](docs/clipboard.md).
+
 - IPC aliases: `get_mfact`; `set_mfact` (= `setmfact`), `set_gaps` (= `setgaps`);
   `get_outputs` (= `get_monitors`), `get_tags` / `get_desktops` (= `get_workspaces`);
   subscribe topic `workspace` (= `tag`).

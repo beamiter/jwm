@@ -373,6 +373,10 @@ pub fn preferred_text_mime(mime_types: &[String]) -> Option<String> {
 /// Non-PNG offers are decoded into PNG under [`MAX_IMAGE_HISTORY_BYTES`]
 /// before the history stores them (see [`image_offer_to_history_png`]).
 /// Callers still prefer text when [`preferred_text_mime`] finds one.
+///
+/// HEIC/HEIF and JPEG XL (`image/heic`, `image/heif`, `image/jxl`) are
+/// intentionally omitted: the bundled `image` crate has no decoder for
+/// those formats, so accepting the MIME would only drop every offer.
 #[must_use]
 pub fn preferred_image_mime(mime_types: &[String]) -> Option<String> {
     const PREFERRED: [&str; 7] = [
@@ -563,6 +567,19 @@ mod tests {
         assert_eq!(
             preferred_image_mime(&["image/webp".to_string(), "image/jpeg".to_string()]).as_deref(),
             Some("image/jpeg")
+        );
+        // HEIC / JXL: no decoder in the bundled `image` crate — never prefer.
+        assert!(
+            preferred_image_mime(&[
+                "image/heic".to_string(),
+                "image/heif".to_string(),
+                "image/jxl".to_string(),
+            ])
+            .is_none()
+        );
+        assert_eq!(
+            preferred_image_mime(&["image/heic".to_string(), "image/png".to_string()]).as_deref(),
+            Some("image/png")
         );
     }
 

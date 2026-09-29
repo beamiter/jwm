@@ -12,6 +12,8 @@
 //! would be a liability, not a feature. Text and PNG shares one newest-first
 //! list; remote image payloads remain out of scope. JPEG/BMP/WebP/GIF/TIFF/AVIF
 //! offers are decoded into PNG under the image history cap before recording.
+//! HEIC/HEIF and JPEG XL are skipped: the bundled `image` crate has no
+//! decoder for those formats.
 
 use crate::config::CONFIG;
 use std::collections::VecDeque;

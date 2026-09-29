@@ -246,6 +246,9 @@ queue.
   identities, and `restore_session` replays it onto the monitor's client list
   before arranging — saved windows keep their saved relative order, while
   windows unknown to the snapshot append under the usual insertion rules.
+  Session version 11 also restores urgency / demands-attention / skip-taskbar /
+  skip-pager / fixed and optional `border_w` beside the earlier sticky /
+  above-below / minimized / fullscreen-PiP / client-fact fields.
 - Named scratchpads also carry a bounded, versioned identity handoff across a
   seamless exec. Established X11 entries use the server-owned XID rather than
   the fresh backend's discovery-order `WindowId`, are resolved only against an

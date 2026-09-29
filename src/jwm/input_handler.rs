@@ -2083,6 +2083,7 @@ impl Jwm {
         backend: &mut dyn Backend,
         direction: isize,
         hit_row: Option<usize>,
+        shift: bool,
     ) {
         backend.compositor_set_system_ui_hover(None);
         // Scroll-on-slider: a wheel click over a Volume/Brightness row
@@ -2111,9 +2112,14 @@ impl Jwm {
             return;
         }
         if self.features.system_ui.is_calendar() {
-            self.features
-                .system_ui
-                .shift_calendar(direction.signum() as i32, 0, false);
+            // Plain wheel steps months (Left/Right twin); Shift+wheel steps
+            // years (Up/Down / Page twin).
+            let step = direction.signum() as i32;
+            if shift {
+                self.features.system_ui.shift_calendar(0, step, false);
+            } else {
+                self.features.system_ui.shift_calendar(step, 0, false);
+            }
         } else if self.features.system_ui.is_keybindings() {
             // Info offset pages like PgUp/PgDn; a one-row wheel crawl is too
             // slow for a long binding list.
@@ -2761,14 +2767,14 @@ impl Jwm {
             }
             if self.features.system_ui.is_calendar() {
                 // Left/Right step months, Up/Down (and Page Up/Down) step
-                // years, t / Home returns to today; nothing here can leave
+                // years, t / Home / End returns to today; nothing here can leave
                 // the card in a bad state.
                 let (months, years, today) = match keysym {
                     keys::KEY_Left => (-1, 0, false),
                     keys::KEY_Right => (1, 0, false),
                     keys::KEY_Up | keys::KEY_Page_Up => (0, -1, false),
                     keys::KEY_Down | keys::KEY_Page_Down => (0, 1, false),
-                    keys::KEY_t | keys::KEY_Home => (0, 0, true),
+                    keys::KEY_t | keys::KEY_Home | keys::KEY_End => (0, 0, true),
                     _ => (0, 0, false),
                 };
                 self.features.system_ui.shift_calendar(months, years, today);
@@ -6894,6 +6900,35 @@ mod tests {
                 .iter()
                 .any(|row| row.contains("no saved profile for Ghost")),
             "the failed forget never reached the status line"
+        );
+    }
+
+    /// Calendar `End` is the twin of `Home` / `t` (jump to today); Shift+wheel
+    /// steps years. Needles are assembled at runtime so this cannot match its
+    /// own prose.
+    #[test]
+    fn calendar_end_and_shift_wheel_year_are_wired() {
+        const SOURCE: &str = include_str!("input_handler.rs");
+        let shipped = SOURCE
+            .split_once("#[cfg(test)]")
+            .expect("the first test module")
+            .0;
+        let compact: String = shipped.chars().filter(|c| !c.is_whitespace()).collect();
+        let today = format!(
+            "keys::KEY_t|keys::KEY_Home|keys::KEY_End=>({},{},{})",
+            0, 0, true
+        );
+        assert!(
+            compact.contains(&today),
+            "End must jump to today with Home/t"
+        );
+        assert!(
+            compact.contains("shift_calendar(0,step,false)"),
+            "Shift+wheel must step calendar years"
+        );
+        assert!(
+            compact.contains("shift_calendar(step,0,false)"),
+            "plain wheel must still step calendar months"
         );
     }
 }

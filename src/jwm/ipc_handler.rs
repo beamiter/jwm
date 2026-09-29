@@ -2813,8 +2813,10 @@ impl Jwm {
                     && !self.features.screenshot.committed,
                 "magnifier": self.features.magnifier.enabled,
                 "magnifier_zoom": self.features.magnifier.zoom_level,
+                "magnifier_radius": self.features.magnifier.radius,
                 "annotation": self.features.annotation_active,
                 "peek": self.features.peek_active,
+                "compositor_active": backend.has_compositor(),
                 "layout_picker": self.features.system_ui.is_layout_picker(),
                 "tags_overview": self.features.system_ui.is_tags_overview(),
                 "calendar": self.features.system_ui.is_calendar(),
@@ -2830,9 +2832,11 @@ impl Jwm {
             "get_magnifier" => IpcResponse::ok(Some(serde_json::json!({
                 "enabled": self.features.magnifier.enabled,
                 "zoom": self.features.magnifier.zoom_level,
+                "radius": self.features.magnifier.radius,
             }))),
             "get_peek" => IpcResponse::ok(Some(serde_json::json!({
                 "active": self.features.peek_active,
+                "compositor_active": backend.has_compositor(),
             }))),
             "get_hdr_status" => {
                 let outputs: Vec<serde_json::Value> = backend
@@ -3949,6 +3953,19 @@ impl Jwm {
             "reserved": reserved,
             "windows": windows,
         });
+        if let Some(selected_id) = self
+            .state
+            .monitors
+            .get(mk)
+            .and_then(|m| m.sel)
+            .and_then(|ck| self.state.clients.get(ck).map(|client| client.win.raw()))
+            .filter(|_| !group.is_empty())
+        {
+            value
+                .as_object_mut()
+                .expect("tab bar object")
+                .insert("selected_id".into(), serde_json::json!(selected_id));
+        }
         if let Some(connector) = self.output_key_for_monitor(backend, mk) {
             value
                 .as_object_mut()
@@ -4459,6 +4476,26 @@ impl Jwm {
             "motion_trail": cfg.behavior().motion_trail,
             "overview_enabled": cfg.behavior().overview_enabled,
             "modkey": cfg.modkey(),
+            "hdr_enabled": cfg.behavior().hdr_enabled,
+            "idle_dim_secs": cfg.behavior().idle_dim_secs,
+            "idle_dim_level": cfg.behavior().idle_dim_level,
+            "night_light": cfg.behavior().night_light,
+            "night_light_temp": cfg.behavior().night_light_temp,
+            "night_light_start": cfg.behavior().night_light_start,
+            "night_light_end": cfg.behavior().night_light_end,
+            "night_light_transition_mins": cfg.behavior().night_light_transition_mins,
+            "remember_closed_placement": cfg.behavior().remember_closed_placement,
+            // WaterLily is env-driven (no `[behavior]` keys); mirror the
+            // compositor's startup read so scripts can filter `get_config`.
+            "waterlily_enabled": std::env::var("JWM_WATERLILY_ENABLED")
+                .map(|value| value != "0" && !value.eq_ignore_ascii_case("false"))
+                .unwrap_or(false),
+            "waterlily_opacity": std::env::var("JWM_WATERLILY_OPACITY")
+                .ok()
+                .and_then(|value| value.parse::<f32>().ok())
+                .filter(|value| value.is_finite())
+                .unwrap_or(1.0)
+                .clamp(0.0, 1.0),
         });
         let Some(keys) = args.get("keys").and_then(|v| v.as_array()) else {
             return full;
@@ -4506,6 +4543,8 @@ impl Jwm {
                 Some(TreeNode {
                     monitor: self.monitor_info_ipc(backend, mk, m),
                     window_count: windows.len(),
+                    urgent_count: windows.iter().filter(|w| w.is_urgent).count(),
+                    floating_count: windows.iter().filter(|w| w.is_floating).count(),
                     selected_id: m.sel.and_then(|ck| {
                         self.state.clients.get(ck).map(|client| client.win.raw())
                     }),
@@ -7689,5 +7728,87 @@ mod tests {
             Some(&(OsdKind::PowerProfile("balanced".into()), 0)),
             "the card is refreshed with the profile really in effect"
         );
+    }
+
+    /// Waves 251–300 contract pins: get_config key expansion, effect/magnifier/
+    /// peek polish, tab_bar selected_id, TreeNode counts.
+    #[test]
+    fn evolve7h_waves_251_300_ipc_contract_pins() {
+        const SOURCE: &str = include_str!("ipc_handler.rs");
+        let config = SOURCE
+            .split_once("fn query_config_subset")
+            .expect("query_config_subset")
+            .1
+            .split_once("fn query_tree")
+            .expect("query_tree follows")
+            .0;
+        for key in [
+            "hdr_enabled",
+            "idle_dim_secs",
+            "idle_dim_level",
+            "night_light",
+            "night_light_temp",
+            "night_light_start",
+            "night_light_end",
+            "night_light_transition_mins",
+            "remember_closed_placement",
+            "waterlily_enabled",
+            "waterlily_opacity",
+        ] {
+            assert!(
+                config.contains(&format!("\"{key}\"")),
+                "get_config must expose {key}"
+            );
+        }
+
+        let effect = SOURCE
+            .split_once("\"get_effect_status\" =>")
+            .expect("get_effect_status arm")
+            .1
+            .split_once("\"get_magnifier\" =>")
+            .expect("get_magnifier follows")
+            .0;
+        assert!(effect.contains("\"magnifier_radius\""));
+        assert!(effect.contains("\"compositor_active\""));
+
+        let magnifier = SOURCE
+            .split_once("\"get_magnifier\" =>")
+            .expect("get_magnifier arm")
+            .1
+            .split_once("\"get_peek\" =>")
+            .expect("get_peek follows")
+            .0;
+        assert!(magnifier.contains("\"radius\""));
+
+        let peek = SOURCE
+            .split_once("\"get_peek\" =>")
+            .expect("get_peek arm")
+            .1
+            .split_once("\"get_hdr_status\" =>")
+            .expect("get_hdr_status follows")
+            .0;
+        assert!(peek.contains("\"compositor_active\""));
+
+        let tab = SOURCE
+            .split_once("fn query_focused_tab_bar")
+            .expect("query_focused_tab_bar")
+            .1
+            .split_once("fn query_focused_layout")
+            .expect("query_focused_layout follows")
+            .0;
+        assert!(
+            tab.contains("\"selected_id\""),
+            "get_tab_bar must report selected_id"
+        );
+
+        let tree = SOURCE
+            .split_once("fn query_tree")
+            .expect("query_tree")
+            .1
+            .split_once("fn broadcast_ipc_event")
+            .expect("broadcast follows")
+            .0;
+        assert!(tree.contains("urgent_count"));
+        assert!(tree.contains("floating_count"));
     }
 }

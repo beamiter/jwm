@@ -7,8 +7,9 @@ the month laid out as a grid with today in brackets.
 | --- | --- |
 | `Left` / `Right` | previous / next month |
 | `Up` / `Down`, `Page Up` / `Page Down` | previous / next year |
-| `t` / `Home` | back to the month containing today |
+| `t` / `Home` / `End` | back to the month containing today |
 | vertical wheel | previous / next month (pointer twin of `Left` / `Right`) |
+| `Shift` + vertical wheel | previous / next year (pointer twin of `Up` / `Down`) |
 | `Esc` or `Alt+F9` | close — the key that opened the card also dismisses it |
 | another panel key | hand the screen to that panel, closing the card |
 
@@ -20,7 +21,7 @@ month, the pointer counterparts of `Left`/`Right` and `t`. The weekday
 header's left three cells (`Mo`–`We`) step a year back and the right three
 (`Fr`–`Su`) step a year forward — the pointer twin of `Up`/`Down`; the
 middle (`Th`) stays inert. A click on the clock line returns to the month
-containing today — the pointer twin of `t` / `Home`. Clicks on ordinary
+containing today — the pointer twin of `t` / `Home` / `End`. Clicks on ordinary
 days and the blank row remain no-ops. The footer hint advertises the gesture:
 `←/→  month    ↑/↓  year    t  today    click edge days  month    click weekday sides  year    click clock  today    Esc  close`.
 

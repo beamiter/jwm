@@ -28,6 +28,16 @@ pub struct WindowInfo {
     pub tags: u32,
     #[serde(default)]
     pub pid: Option<u32>,
+    /// Monitor index from jwm `get_windows` (`WindowInfo.monitor`).
+    #[serde(default)]
+    pub monitor: Option<i32>,
+    /// DRM / wlr connector when jwm reported one.
+    #[serde(default)]
+    pub connector: Option<String>,
+    /// True when the window's tags intersect the active tags on its monitor
+    /// (or it is sticky). Useful for preferring on-view windows in the picker.
+    #[serde(default)]
+    pub is_on_view: bool,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -450,6 +460,28 @@ mod tests {
         assert_eq!(windows[0].class, "firefox");
         assert_eq!(windows[0].instance, "Navigator");
         assert_eq!(windows[0].tags, 2);
+        assert_eq!(windows[0].monitor, Some(0));
+        assert!(!windows[0].is_on_view);
+    }
+
+    #[test]
+    fn window_info_deserializes_optional_monitor_connector_and_on_view() {
+        let reply = br#"{"success":true,"data":[{"id":1,"name":"t","class":"c","instance":"i","tags":1,"monitor":2,"connector":"DP-1","is_on_view":true,"pid":42}]}"#;
+        let windows = read_windows_response(&reply[..]).unwrap();
+        assert_eq!(windows[0].monitor, Some(2));
+        assert_eq!(windows[0].connector.as_deref(), Some("DP-1"));
+        assert!(windows[0].is_on_view);
+        assert_eq!(windows[0].pid, Some(42));
+    }
+
+    #[test]
+    fn window_info_tolerates_missing_optional_picker_fields() {
+        let reply = br#"{"success":true,"data":[{"id":1,"name":"t","class":"c","instance":"i"}]}"#;
+        let windows = read_windows_response(&reply[..]).unwrap();
+        assert!(windows[0].monitor.is_none());
+        assert!(windows[0].connector.is_none());
+        assert!(!windows[0].is_on_view);
+        assert!(windows[0].pid.is_none());
     }
 
     #[test]
