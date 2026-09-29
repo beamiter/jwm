@@ -73,24 +73,32 @@ fields, `remember_closed_placement`, WaterLily env mirrors
 (`waterlily_enabled` / `waterlily_opacity`), expose/peek/tags/magnifier/
 tabs/VRR/swallow/idle/wallpaper/opacity/blur/recording keys, and polish
 keys (`clipboard_history`, `border_glow_*`, `resource_rows`,
-`new_client_position`, `compositor_api`, …) plus a second polish set
+`new_client_position`, `compositor_api`, …) plus further polish sets
 (border colors / gradient, edge glow, tilt, ripple, wallpaper crossfade,
-wobbly details, wayland_enable_*, power commands, …). `get_tree` nodes also
-carry `selected_id`, `window_count`, urgency / floating / minimized /
-sticky / fullscreen / pip / maximized / above / below / scratchpad /
-tabbed / fixed counts. `get_workspaces` includes per-tag `gap` plus matching
-count fields; `get_layout` / `get_gaps` / `get_nmaster` return the focused
-monitor's live layout parameters; `setgaps` / `setnmaster` / `set_nmaster` /
-`set_layout` are bindable over IPC. Window rows also report border-inclusive
-`total_w` / `total_h` and optional `stack_index`; monitors report
-`lt_symbol`, optional `output_id`, and per-monitor window counts.
-`get_effect_status` / `get_effects` reports shell picker flags, magnifier
-radius, and `compositor_active`; short query aliases include `get_notif`,
-`get_ui`, `get_lock`, `get_tabs`, `get_clip`, `get_network`, `get_tearing`,
-`get_scrolling`, `get_xwayland`, `get_do_not_disturb`. Session snapshots are
-at v13 (`old_border_w`). `get_magnifier` reports `radius`; `get_peek`
-reports `compositor_active`; `get_tab_bar` / `get_tabs` reports
-`selected_id` when a tab group is focused.
+wobbly details, wayland_enable_*, power commands, color grading,
+particles, …). `get_tree` nodes also carry `selected_id`, `window_count`,
+urgency / floating / minimized / sticky / fullscreen / pip / maximized /
+above / below / scratchpad / tabbed / fixed counts. `get_workspaces`
+includes per-tag `gap` plus matching count fields (including scratchpad /
+tabbed); `get_monitors` report the same count family plus
+`lt_symbol` / optional `output_id`. `get_layout` / `get_gaps` /
+`get_nmaster` return the focused monitor's live layout parameters;
+`setgaps` / `setnmaster` / `set_nmaster` / `set_layout` are bindable over
+IPC. Window rows also report border-inclusive `total_w` / `total_h` and
+optional `stack_index`. `get_status` nests compact tearing / xwayland /
+scrolling / color_management / audio / wallpaper / bluetooth / system_ui /
+layout summaries alongside earlier nests. `get_effect_status` /
+`get_effects` reports shell picker flags, magnifier radius, and
+`compositor_active`; short query aliases include `get_notif`, `get_ui`,
+`get_lock`, `get_tabs`, `get_clip`, `get_network`, `get_tearing`,
+`get_scrolling`, `get_xwayland`, `get_do_not_disturb`, `get_caps`,
+`get_pads`, `get_mag`, `get_perf`, `get_res`, `get_wins`, `get_devices`,
+`get_cfg`, `get_ver`. Command aliases include `launcher`, `notif_center`,
+`screenshot`, `lock`, `layouts`, `load_session`,
+`toggle_do_not_disturb`. Session snapshots are at v14
+(`minimized_order`). `get_magnifier` / `get_mag` reports `radius`;
+`get_peek` reports `compositor_active`; `get_tab_bar` / `get_tabs`
+reports `selected_id` when a tab group is focused.
 Layer-shell background/top/overlay surfaces remain compositor-owned layers.
 
 The binary-bundle design currently targets **x86_64 Linux built on Ubuntu

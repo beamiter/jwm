@@ -7,6 +7,25 @@ monorepo use independent Semantic Versions.
 
 ### Added
 
+- `get_monitors` / `get_workspaces` report urgent / fullscreen / pip /
+  maximized / above / below / fixed / scratchpad / tabbed counts (tree /
+  workspace symmetry).
+- IPC query aliases: `get_caps`, `get_pads`, `get_mag`, `get_perf`,
+  `get_res`, `get_wins`, `get_devices`, `get_cfg`, `get_ver`.
+- IPC command aliases: `launcher`, `notif_center`, `screenshot`,
+  `screenshot_fullscreen`, `lock`, `layouts`, `load_session`,
+  `toggle_do_not_disturb`.
+- `get_status` nests compact `tearing` / `xwayland` / `scrolling` /
+  `color_management` / `audio` / `wallpaper` / `bluetooth` / `system_ui` /
+  `layout`.
+- `get_config` polish4 scalars: color grading, tilt details, particles,
+  wayland_enable_*, present/audio sync, wallpaper_colors, …
+- Session snapshot v14 persists optional `minimized_order`.
+- Layout picker horizontal wheel browses like Left/Right.
+- Portal `WindowInfo` deserializes below/scratchpad/tabbed/never_focus/
+  demands_attention/client_fact; `MonitorInfo` gains count family +
+  scale/refresh.
+
 - `get_windows` / `get_tree` / `window/state` report optional `stack_index`.
 - `get_workspaces` / `get_tree` report pip / maximized / above / below /
   fixed counts; tree nodes also report scratchpad / tabbed counts.

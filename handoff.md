@@ -4,7 +4,7 @@
 
 ---
 
-## Evolve backlog（目标 1000 轮；已完成 wave 9–600，本地 ahead）
+## Evolve backlog（目标 1000 轮；已完成 wave 9–700，本地 ahead）
 
 | # | 选题 | Size |
 | --- | --- | --- |
@@ -69,7 +69,44 @@
 | 576–590 | get_config polish2 + session v13 old_border_w | ✓ |
 | 591–595 | switcher Left/Right + horizontal wheel；overview horizontal wheel；portal fields | ✓ |
 | 596–600 | include_str!/serialize/dispatch contract pins + docs drift + handoff/CHANGELOG | ✓ |
+| 601–620 | Monitor/Workspace count symmetry（urgent/fs/pip/max/above/below/fixed/scratchpad/tabbed） | ✓ |
+| 621–640 | short query aliases（get_caps/pads/mag/perf/res/wins/devices/cfg/ver） | ✓ |
+| 641–655 | command aliases（launcher/notif_center/screenshot/lock/layouts/load_session/toggle_do_not_disturb） | ✓ |
+| 656–675 | get_status nests tearing/xwayland/scrolling/color_management/audio/wallpaper/bluetooth/system_ui/layout | ✓ |
+| 676–690 | get_config polish4 scalars + session v14 minimized_order | ✓ |
+| 691–695 | layout picker horizontal wheel；portal Window/Monitor fields | ✓ |
+| 696–700 | include_str!/serialize/dispatch contract pins + docs drift + handoff/CHANGELOG | ✓ |
 | … | 跳过：Annotation/Screenshot CommonLinear、toast Closed(1)、BT withdraw、FS/PiP 自身丢锚点（own-anchor drop）、Recording EncodedOnly、XWayland 单轴 | |
+
+---
+
+## 2026-09-29（五十九）：IPC leftovers + session v14 → 700
+
+选题 = evolve waves 601–700 / evolve7h。
+
+1. **Wave 601–620**：`MonitorInfoIpc` / `WorkspaceInfo` count 对称
+   （urgent / fullscreen / pip / maximized / above / below / fixed /
+   scratchpad / tabbed）。
+2. **Wave 621–640**：短 query 别名（`get_caps` / `get_pads` / `get_mag` /
+   `get_perf` / `get_res` / `get_wins` / `get_devices` / `get_cfg` /
+   `get_ver`）。
+3. **Wave 641–655**：command 别名（`launcher` / `notif_center` /
+   `screenshot` / `screenshot_fullscreen` / `lock` / `layouts` /
+   `load_session` / `toggle_do_not_disturb`）。
+4. **Wave 656–675**：`get_status` nests tearing / xwayland / scrolling /
+   color_management / audio / wallpaper / bluetooth / system_ui / layout。
+5. **Wave 676–690**：`get_config` polish4 标量；Session v14
+   `minimized_order`。
+6. **Wave 691–695**：layout picker 水平滚轮；portal Window/Monitor 字段。
+7. **Wave 696–700**：contract pins；docs drift；CHANGELOG；handoff。
+
+**刻意不做**：跳过表不变；不发明 DRM/EncodedOnly/CommonLinear / peak meter /
+`mapped_ms` / `is_override_redirect`。
+
+**验证**：`scripts/test.sh --lib --` 聚焦 scratchpad_count / get_caps /
+session v14 / layout picker horizontal / evolve7h_waves_601。
+
+**下一轮候选**：701+；或跳过表项。
 
 ---
 

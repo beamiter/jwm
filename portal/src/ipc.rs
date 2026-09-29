@@ -58,6 +58,18 @@ pub struct WindowInfo {
     #[serde(default)]
     pub is_above: bool,
     #[serde(default)]
+    pub is_below: bool,
+    #[serde(default)]
+    pub is_scratchpad: bool,
+    #[serde(default)]
+    pub is_tabbed: bool,
+    #[serde(default)]
+    pub never_focus: bool,
+    #[serde(default)]
+    pub demands_attention: bool,
+    #[serde(default)]
+    pub client_fact: f32,
+    #[serde(default)]
     pub border_w: i32,
     #[serde(default)]
     pub total_w: i32,
@@ -93,6 +105,28 @@ pub struct MonitorInfo {
     pub minimized_count: usize,
     #[serde(default)]
     pub sticky_count: usize,
+    #[serde(default)]
+    pub urgent_count: usize,
+    #[serde(default)]
+    pub fullscreen_count: usize,
+    #[serde(default)]
+    pub pip_count: usize,
+    #[serde(default)]
+    pub maximized_count: usize,
+    #[serde(default)]
+    pub above_count: usize,
+    #[serde(default)]
+    pub below_count: usize,
+    #[serde(default)]
+    pub fixed_count: usize,
+    #[serde(default)]
+    pub scratchpad_count: usize,
+    #[serde(default)]
+    pub tabbed_count: usize,
+    #[serde(default)]
+    pub scale: f32,
+    #[serde(default)]
+    pub refresh_mhz: u32,
 }
 
 /// Mirror of the compositor's per-client IPC buffer ceiling, the cap the

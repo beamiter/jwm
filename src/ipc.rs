@@ -198,7 +198,11 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "killclient",
         "last_layout",
         "lastlayout",
+        "launcher",
         "layout_picker",
+        "layouts",
+        "load_session",
+        "lock",
         "lock_monitor",
         "lock_screen",
         "loop_view",
@@ -212,6 +216,7 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "monitor_layout",
         "move_stack",
         "movestack",
+        "notif_center",
         "notification_center",
         "persist_session",
         "quit",
@@ -220,6 +225,8 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "restart",
         "restore_session",
         "save_session",
+        "screenshot",
+        "screenshot_fullscreen",
         "scrolling_consume",
         "scrolling_expel",
         "scrolling_focus_column",
@@ -250,6 +257,7 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "toggle_bluetooth",
         "toggle_compositor",
         "toggle_dnd",
+        "toggle_do_not_disturb",
         "toggle_floating",
         "toggle_idle_inhibit",
         "toggle_magnifier",
@@ -328,9 +336,11 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "get_blur",
         "get_blur_status",
         "get_capabilities",
+        "get_caps",
         "get_capture",
         "get_capture_status",
         "get_cfact",
+        "get_cfg",
         "get_clients",
         "get_clip",
         "get_clipboard",
@@ -340,6 +350,7 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "get_config_status",
         "get_connectivity",
         "get_desktops",
+        "get_devices",
         "get_dnd",
         "get_do_not_disturb",
         "get_effect_status",
@@ -354,6 +365,7 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "get_idle_status",
         "get_layout",
         "get_lock",
+        "get_mag",
         "get_magnifier",
         "get_media",
         "get_media_status",
@@ -369,12 +381,15 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "get_notif",
         "get_notifications",
         "get_outputs",
+        "get_pads",
         "get_peek",
+        "get_perf",
         "get_power",
         "get_power_status",
         "get_prev_layout",
         "get_recording",
         "get_recording_status",
+        "get_res",
         "get_resources",
         "get_scratchpads",
         "get_scrolling",
@@ -392,6 +407,7 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "get_tearing_hints",
         "get_tree",
         "get_ui",
+        "get_ver",
         "get_version",
         "get_wallpaper",
         "get_wallpaper_colors",
@@ -401,6 +417,7 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "get_wayland_status",
         "get_window",
         "get_windows",
+        "get_wins",
         "get_workspaces",
         "get_xwayland",
         "get_xwayland_status",
@@ -626,6 +643,33 @@ pub struct RuntimeStatusV1 {
     /// Compact twin of `get_session_lock`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_lock: Option<Value>,
+    /// Compact twin of `get_tearing` / `get_tearing_hints`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tearing: Option<Value>,
+    /// Compact twin of `get_xwayland` / `get_xwayland_status`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub xwayland: Option<Value>,
+    /// Compact twin of `get_scrolling` / `get_scrolling_status`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scrolling: Option<Value>,
+    /// Compact twin of `get_color_management`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color_management: Option<Value>,
+    /// Compact twin of `get_audio` / `get_audio_devices`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audio: Option<Value>,
+    /// Compact twin of `get_wallpaper` / `get_wallpaper_colors`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wallpaper: Option<Value>,
+    /// Compact twin of `get_bluetooth` / `get_bluetooth_pairing`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bluetooth: Option<Value>,
+    /// Compact twin of `get_system_ui` / `get_ui`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub system_ui: Option<Value>,
+    /// Compact twin of `get_layout` (focused monitor layout symbol).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub layout: Option<Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -920,6 +964,10 @@ pub struct WorkspaceInfo {
     pub below_count: usize,
     /// How many clients on this tag on this monitor are size-hints fixed.
     pub fixed_count: usize,
+    /// How many clients on this tag on this monitor are named scratchpads.
+    pub scratchpad_count: usize,
+    /// How many clients on this tag on this monitor are in the window-tab strip.
+    pub tabbed_count: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -1048,6 +1096,24 @@ pub struct MonitorInfoIpc {
     pub minimized_count: usize,
     /// How many of those clients are sticky.
     pub sticky_count: usize,
+    /// How many of those clients are urgent / demand attention.
+    pub urgent_count: usize,
+    /// How many of those clients are fullscreen.
+    pub fullscreen_count: usize,
+    /// How many of those clients are picture-in-picture.
+    pub pip_count: usize,
+    /// How many of those clients are maximized on either axis.
+    pub maximized_count: usize,
+    /// How many of those clients are keep-above.
+    pub above_count: usize,
+    /// How many of those clients are keep-below.
+    pub below_count: usize,
+    /// How many of those clients are size-hints fixed.
+    pub fixed_count: usize,
+    /// How many of those clients are named scratchpads.
+    pub scratchpad_count: usize,
+    /// How many of those clients are in the window-tab strip.
+    pub tabbed_count: usize,
 }
 
 /// EDID HDR static metadata projected on [`MonitorInfoIpc`] and status queries.
@@ -1106,10 +1172,11 @@ pub fn dispatch_command(name: &str, args: &Value) -> Result<(WMFuncType, WMArgEn
     match name {
         // --- Window management ---
         "focusstack" | "focus_stack" => Ok((Jwm::focusstack as WMFuncType, parse_int_arg(args, 1)?)),
-        "app_launcher" => Ok((Jwm::app_launcher as WMFuncType, WMArgEnum::Int(0))),
+        "app_launcher" | "launcher" => Ok((Jwm::app_launcher as WMFuncType, WMArgEnum::Int(0))),
         "control_center" => Ok((Jwm::control_center as WMFuncType, WMArgEnum::Int(0))),
-        "notification_center" => Ok((Jwm::notification_center as WMFuncType, WMArgEnum::Int(0))),
-        "media_play_pause" => Ok((Jwm::media_play_pause as WMFuncType, WMArgEnum::Int(0))),
+        "notification_center" | "notif_center" => {
+            Ok((Jwm::notification_center as WMFuncType, WMArgEnum::Int(0)))
+        }        "media_play_pause" => Ok((Jwm::media_play_pause as WMFuncType, WMArgEnum::Int(0))),
         "media_next" => Ok((Jwm::media_next as WMFuncType, WMArgEnum::Int(0))),
         "media_previous" => Ok((Jwm::media_previous as WMFuncType, WMArgEnum::Int(0))),
         "media_stop" => Ok((Jwm::media_stop as WMFuncType, WMArgEnum::Int(0))),
@@ -1125,7 +1192,7 @@ pub fn dispatch_command(name: &str, args: &Value) -> Result<(WMFuncType, WMArgEn
         "wallpaper_picker" => Ok((Jwm::wallpaper_picker as WMFuncType, WMArgEnum::Int(0))),
         "toggle_bluetooth" => Ok((Jwm::toggle_bluetooth as WMFuncType, WMArgEnum::Int(0))),
         "monitor_layout" => Ok((Jwm::monitor_layout as WMFuncType, WMArgEnum::Int(0))),
-        "lock_screen" => Ok((Jwm::lock_screen as WMFuncType, WMArgEnum::Int(0))),
+        "lock_screen" | "lock" => Ok((Jwm::lock_screen as WMFuncType, WMArgEnum::Int(0))),
         // `-1` — the default — is the monitor in use for `lock_monitor`, and
         // the most recently locked one for `unlock_monitor`.
         "lock_monitor" => Ok((Jwm::lock_monitor as WMFuncType, parse_int_arg(args, -1)?)),
@@ -1182,7 +1249,7 @@ pub fn dispatch_command(name: &str, args: &Value) -> Result<(WMFuncType, WMArgEn
         }
         "lastlayout" | "last_layout" => Ok((Jwm::lastlayout, parse_int_arg(args, 0)?)),
         "cyclelayout" | "cycle_layout" => Ok((Jwm::cyclelayout, parse_int_arg(args, 1)?)),
-        "layout_picker" => Ok((Jwm::layout_picker, parse_int_arg(args, 0)?)),
+        "layout_picker" | "layouts" => Ok((Jwm::layout_picker, parse_int_arg(args, 0)?)),
         "togglebar" | "toggle_bar" => Ok((Jwm::togglebar, parse_int_arg(args, 0)?)),
 
         // --- Tags ---
@@ -1215,8 +1282,8 @@ pub fn dispatch_command(name: &str, args: &Value) -> Result<(WMFuncType, WMArgEn
         // a bar asks the compositor that owns the screen to run its own
         // capture, instead of shelling out to whatever external grabber
         // happens to be installed.
-        "take_screenshot" => Ok((Jwm::take_screenshot as WMFuncType, WMArgEnum::Int(0))),
-        "take_screenshot_fullscreen" => Ok((
+        "take_screenshot" | "screenshot" => Ok((Jwm::take_screenshot as WMFuncType, WMArgEnum::Int(0))),
+        "take_screenshot_fullscreen" | "screenshot_fullscreen" => Ok((
             Jwm::take_screenshot_fullscreen as WMFuncType,
             WMArgEnum::Int(0),
         )),
@@ -1261,12 +1328,12 @@ pub fn dispatch_command(name: &str, args: &Value) -> Result<(WMFuncType, WMArgEn
         "toggle_recording" => Ok((Jwm::toggle_recording, parse_int_arg(args, 0)?)),
         "adjust_recording_region" => Ok((Jwm::adjust_recording_region, parse_int_arg(args, 0)?)),
         "toggle_audio_recording" => Ok((Jwm::toggle_audio_recording, parse_int_arg(args, 0)?)),
-        "toggle_dnd" => Ok((Jwm::toggle_dnd, parse_int_arg(args, 0)?)),
+        "toggle_dnd" | "toggle_do_not_disturb" => Ok((Jwm::toggle_dnd, parse_int_arg(args, 0)?)),
         "toggle_idle_inhibit" => Ok((Jwm::toggle_idle_inhibit, parse_int_arg(args, 0)?)),
 
         // --- Session ---
         "save_session" | "persist_session" => Ok((Jwm::save_session, parse_int_arg(args, 0)?)),
-        "restore_session" => Ok((Jwm::restore_session, parse_int_arg(args, 0)?)),
+        "restore_session" | "load_session" => Ok((Jwm::restore_session, parse_int_arg(args, 0)?)),
 
         _ => Err(format!("unknown command: {name}")),
     }
@@ -2013,6 +2080,15 @@ mod tests {
             floating_count: 0,
             minimized_count: 0,
             sticky_count: 0,
+            urgent_count: 0,
+            fullscreen_count: 0,
+            pip_count: 0,
+            maximized_count: 0,
+            above_count: 0,
+            below_count: 0,
+            fixed_count: 0,
+            scratchpad_count: 0,
+            tabbed_count: 0,
         })
         .expect("serialize");
         assert_eq!(with_connector["connector"], "DP-1");
@@ -2112,6 +2188,15 @@ mod tests {
             floating_count: 0,
             minimized_count: 0,
             sticky_count: 0,
+            urgent_count: 0,
+            fullscreen_count: 0,
+            pip_count: 0,
+            maximized_count: 0,
+            above_count: 0,
+            below_count: 0,
+            fixed_count: 0,
+            scratchpad_count: 0,
+            tabbed_count: 0,
         })
         .expect("serialize");
         assert!(without.get("connector").is_none());
@@ -2162,6 +2247,8 @@ mod tests {
             above_count: 0,
             below_count: 0,
             fixed_count: 0,
+            scratchpad_count: 0,
+            tabbed_count: 0,
         })
         .expect("serialize");
         assert_eq!(with_connector["connector"], "DP-1");
@@ -2206,6 +2293,8 @@ mod tests {
             above_count: 0,
             below_count: 0,
             fixed_count: 0,
+            scratchpad_count: 0,
+            tabbed_count: 0,
         })
         .expect("serialize");
         assert!(without.get("connector").is_none());
@@ -2934,6 +3023,15 @@ mod tests {
             wayland: None,
             dnd: None,
             session_lock: None,
+            tearing: None,
+            xwayland: None,
+            scrolling: None,
+            color_management: None,
+            audio: None,
+            wallpaper: None,
+            bluetooth: None,
+            system_ui: None,
+            layout: None,
         };
 
         let json = serde_json::to_value(status).unwrap();
@@ -3104,6 +3202,15 @@ mod tests {
                 floating_count: 0,
                 minimized_count: 0,
                 sticky_count: 0,
+            urgent_count: 0,
+            fullscreen_count: 0,
+            pip_count: 0,
+            maximized_count: 0,
+            above_count: 0,
+            below_count: 0,
+            fixed_count: 0,
+            scratchpad_count: 0,
+            tabbed_count: 0,
             },
             windows: Vec::new(),
             selected_id: Some(42),
@@ -3189,6 +3296,15 @@ mod tests {
                 floating_count: 0,
                 minimized_count: 0,
                 sticky_count: 0,
+            urgent_count: 0,
+            fullscreen_count: 0,
+            pip_count: 0,
+            maximized_count: 0,
+            above_count: 0,
+            below_count: 0,
+            fixed_count: 0,
+            scratchpad_count: 0,
+            tabbed_count: 0,
             },
             windows: Vec::new(),
             selected_id: None,

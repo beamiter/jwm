@@ -49,11 +49,12 @@ Anything that moves the selection — a key, the wheel, the pointer crossing
 into another cell — restarts the delay. Someone still driving the picker
 has not finished choosing.
 
-Inside the picker: `←`/`→`, `↑`/`↓`, `Tab`/`Shift+Tab` and the wheel browse;
-`Home` / `End` jump to the ends and `Page Up` / `Page Down` page by a
-quarter of the strip (clamped, no wrap); `Space` steps forward and
-`Shift+Space` back, so holding `Alt` and tapping `Space` keeps cycling the
-way it did before the panel existed.
+Inside the picker: `←`/`→`, `↑`/`↓`, `Tab`/`Shift+Tab` and the vertical /
+horizontal wheel browse (Left/Right keyboard twins); `Home` / `End` jump to
+the ends and `Page Up` / `Page Down` page by a quarter of the strip
+(clamped, no wrap); `Space` steps forward and `Shift+Space` back, so holding
+`Alt` and tapping `Space` keeps cycling the way it did before the panel
+existed.
 
 ## The thumbnails are the real layouts
 

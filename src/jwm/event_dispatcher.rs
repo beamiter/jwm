@@ -628,11 +628,12 @@ impl WMController for Jwm {
                 .get_pointer_position()
                 .unwrap_or(self.last_mouse_root);
             match detail {
-                // Wheel: browse the strip without committing.
-                4 => {
+                // Wheel: browse the strip without committing. Vertical and
+                // horizontal wheels both step (Left/Right keyboard twins).
+                4 | 6 => {
                     let _ = self.layout_picker(backend, &WMArgEnum::Int(-1));
                 }
-                5 => {
+                5 | 7 => {
                     let _ = self.layout_picker(backend, &WMArgEnum::Int(1));
                 }
                 // Right-click: Esc twin — restore the origin layout.
