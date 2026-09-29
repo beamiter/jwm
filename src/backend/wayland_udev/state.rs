@@ -842,10 +842,12 @@ impl JwmWaylandState {
     /// as not maximized. An xdg toplevel only has `State::Maximized` staged:
     /// nothing is sent here, because the caller's following
     /// `WindowOps::configure` must deliver the state and the new size in ONE
-    /// configure. `Tiled*` is left alone; xdg-shell allows it to coexist with
-    /// `Maximized`. wlr-foreign-toplevel keeps both axes and reports
-    /// `Maximized` only for the pair; axes turn off before others turn on so
-    /// a taskbar never sees a transient pair while one axis is swapped.
+    /// configure. Dual-axis maximize also clears `Tiled*` so clients do not
+    /// see edge-tile chrome hints under a work-area fill; single-axis leaves
+    /// `Tiled*` alone (xdg has no Maximized bit for that case).
+    /// wlr-foreign-toplevel keeps both axes and reports `Maximized` only for
+    /// the pair; axes turn off before others turn on so a taskbar never sees
+    /// a transient pair while one axis is swapped.
     pub(crate) fn set_window_maximized(
         &mut self,
         win: WindowId,
@@ -865,6 +867,10 @@ impl JwmWaylandState {
             toplevel.with_pending_state(|s| {
                 if maximized {
                     s.states.set(xdg_toplevel::State::Maximized);
+                    // Maximized owns the surface; drop edge-tile hints so the
+                    // same configure that carries Maximized never also lists
+                    // TiledLeft/Right/Top/Bottom.
+                    Self::set_toplevel_tiled_state(s, false);
                 } else {
                     s.states.unset(xdg_toplevel::State::Maximized);
                 }
@@ -1042,6 +1048,27 @@ impl JwmWaylandState {
                 state.states.unset(edge);
             }
         }
+    }
+
+    /// Whether configure / focus / size-enforce paths should advertise the
+    /// four `Tiled*` edge states. Dialogs, dual-axis maximized windows, and
+    /// fullscreen surfaces own their chrome differently; re-asserting
+    /// `Tiled*` under those modes confuses GTK/Qt CSD heuristics.
+    pub(crate) fn should_advertise_tiled(&self, win: WindowId) -> bool {
+        if self.is_dialog_like_toplevel(win) {
+            return false;
+        }
+        if self
+            .window_maximized
+            .get(&win)
+            .is_some_and(|axes| axes.both())
+        {
+            return false;
+        }
+        if self.window_is_fullscreen.get(&win).copied().unwrap_or(false) {
+            return false;
+        }
+        true
     }
 
     fn surface_window_geometry_loc(&self, surface: &WlSurface) -> Point<i32, Logical> {
@@ -2602,7 +2629,7 @@ impl JwmWaylandState {
                     .window_geometry
                     .get(&prev_win)
                     .map(|g| (g.w as i32, g.h as i32).into());
-                let tiled = !self.is_dialog_like_toplevel(prev_win);
+                let tiled = self.should_advertise_tiled(prev_win);
                 toplevel.with_pending_state(|s| {
                     s.states.unset(xdg_toplevel::State::Activated);
                     // Preserve the configured size. smithay clears s.size after each
@@ -2623,7 +2650,7 @@ impl JwmWaylandState {
                 .window_geometry
                 .get(&new_win)
                 .map(|g| (g.w as i32, g.h as i32).into());
-            let tiled = !self.is_dialog_like_toplevel(new_win);
+            let tiled = self.should_advertise_tiled(new_win);
             if let Some(toplevel) = self.toplevels.get(&new_win).cloned() {
                 toplevel.with_pending_state(|s| {
                     s.states.set(xdg_toplevel::State::Activated);
@@ -3093,13 +3120,14 @@ impl JwmWaylandState {
         // parent through the same non-reentrant mutex. WindowOps::configure
         // hoists the same check for the same reason.
         let choose_natural_size = self.is_dialog_like_toplevel(win) && w == 800 && h == 600;
+        let tiled = self.should_advertise_tiled(win);
         toplevel.with_pending_state(|s| {
             if choose_natural_size {
                 s.size = None;
                 Self::set_toplevel_tiled_state(s, false);
             } else {
                 s.size = Some((w as i32, h as i32).into());
-                Self::set_toplevel_tiled_state(s, true);
+                Self::set_toplevel_tiled_state(s, tiled);
             }
         });
         let _ = toplevel.send_configure();
@@ -3143,9 +3171,10 @@ impl JwmWaylandState {
             return;
         };
 
+        let tiled = self.should_advertise_tiled(win);
         toplevel.with_pending_state(|state| {
             state.size = Some((expected_size.0 as i32, expected_size.1 as i32).into());
-            Self::set_toplevel_tiled_state(state, true);
+            Self::set_toplevel_tiled_state(state, tiled);
         });
         if toplevel.is_initial_configure_sent() {
             toplevel.send_pending_configure();

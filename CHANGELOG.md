@@ -302,6 +302,12 @@ monorepo use independent Semantic Versions.
 
 ### Changed
 
+- xdg-shell dual-axis maximize clears the four `Tiled*` edge states, and
+  configure / focus / size-enforce paths keep them off while the window is
+  maximized or fullscreen, so clients do not keep tile-edge CSD under a
+  work-area fill. See
+  [docs/window-placement.md](docs/window-placement.md#axes).
+
 - wlr-foreign-toplevel `set_maximized` / `unset_maximized` are treated as
   pager/user origin, so a Wayland taskbar can promote a tiled window like an
   EWMH pager (`data[3] == 2`). xdg-shell and XWayland stay client-like. See

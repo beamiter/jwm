@@ -756,6 +756,7 @@ impl WindowOps for WaylandWindowOps {
                 );
                 let choose_natural_size =
                     state.is_dialog_like_toplevel(win) && w == 800 && h == 600;
+                let tiled = state.should_advertise_tiled(win);
                 if let Some(toplevel) = state.try_lookup_toplevel(win) {
                     toplevel.with_pending_state(|s| {
                         if choose_natural_size {
@@ -763,7 +764,7 @@ impl WindowOps for WaylandWindowOps {
                             JwmWaylandState::set_toplevel_tiled_state(s, false);
                         } else {
                             s.size = Some((w as i32, h as i32).into());
-                            JwmWaylandState::set_toplevel_tiled_state(s, true);
+                            JwmWaylandState::set_toplevel_tiled_state(s, tiled);
                         }
                     });
                 }

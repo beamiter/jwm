@@ -219,6 +219,11 @@ fn toplevel_configures(
 
 /// `xdg_toplevel.state.maximized` on the wire.
 const XDG_STATE_MAXIMIZED: u32 = 1;
+/// `xdg_toplevel.state.tiled_*` edge hints on the wire.
+const XDG_STATE_TILED_LEFT: u32 = 5;
+const XDG_STATE_TILED_RIGHT: u32 = 6;
+const XDG_STATE_TILED_TOP: u32 = 7;
+const XDG_STATE_TILED_BOTTOM: u32 = 8;
 /// Object id the xdg wire fixture gives its `xdg_toplevel`.
 const WIRE_TOPLEVEL: u32 = 8;
 
@@ -629,7 +634,11 @@ fn xdg_maximized_state_rides_the_policy_configure_and_refusals_still_reply() {
         "the callback must not announce state before policy decides"
     );
 
-    // 3. Policy accepts: state and size ride one configure.
+    // 3. Policy accepts: state and size ride one configure. Stage Tiled*
+    //    first so we prove Maximized clears the edge hints in the same send.
+    fixture.state.toplevels.get(&window).expect("toplevel").with_pending_state(|s| {
+        JwmWaylandState::set_toplevel_tiled_state(s, true);
+    });
     fixture
         .state
         .set_window_maximized(window, MaximizeAxes::BOTH)
@@ -640,10 +649,25 @@ fn xdg_maximized_state_rides_the_policy_configure_and_refusals_still_reply() {
     assert_eq!(configures.len(), 1, "{configures:?}");
     assert_eq!((configures[0].0, configures[0].1), (1280, 690));
     assert!(configures[0].2.contains(&XDG_STATE_MAXIMIZED));
+    for (name, state) in [
+        ("TiledLeft", XDG_STATE_TILED_LEFT),
+        ("TiledRight", XDG_STATE_TILED_RIGHT),
+        ("TiledTop", XDG_STATE_TILED_TOP),
+        ("TiledBottom", XDG_STATE_TILED_BOTTOM),
+    ] {
+        assert!(
+            !configures[0].2.contains(&state),
+            "Maximized configure must not advertise {name}: {configures:?}"
+        );
+    }
     assert!(fixture.state.xdg_state_reply_owed.is_empty());
     assert_eq!(
         fixture.state.window_maximized.get(&window),
         Some(&MaximizeAxes::BOTH)
+    );
+    assert!(
+        !fixture.state.should_advertise_tiled(window),
+        "configure/focus paths must keep Tiled* off while dual-axis maximized"
     );
 
     // 4. unset_maximized accepted: one configure with the restore size.

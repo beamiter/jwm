@@ -4,14 +4,14 @@
 
 ---
 
-## Evolve backlog（目标 100 轮；已完成 wave 9–13，本地 ahead）
+## Evolve backlog（目标 100 轮；已完成 wave 9–15，本地 ahead）
 
 按日常命中 × 可交付性排序的下一波候选（S/小 M，无 DRM）：
 
 | # | 选题 | Size |
 | --- | --- | --- |
-| 14 | urgent → `window/state` | S |
-| 15 | xdg Maximized 时清 `Tiled*` | S |
+| 14 | urgent → `window/state` | S ✓ |
+| 15 | xdg Maximized 时清 `Tiled*` | S ✓ |
 | 16 | toast 过期发 `NotificationClosed(1)` | S |
 | 17 | BT pairing cancel 撤回提示 | S |
 | 18 | 提升窗 FS/PiP 取消最大化保留锚点 | S |
@@ -21,6 +21,22 @@
 | 22 | session 持久化 maximize + restore_rect | M |
 | 23 | seamless restart maximize restore_rect | S–M |
 | … | 继续从 sota-gap / roadmap Phase 2–3 / handoff 扫 | |
+
+---
+
+## 2026-09-29（七）：xdg Maximized 清 `Tiled*`
+
+选题 = evolve wave 15。
+
+1. **契约**：`set_window_maximized(BOTH)` 同时 unset 四个 `Tiled*`；
+   `should_advertise_tiled` 在双轴最大化 / fullscreen / dialog 时为 false，
+   configure、focus、initial-configure fallback、size-enforce 共用。
+2. **回归**：`xdg_maximized_state_rides_the_policy_configure_and_refusals_still_reply`
+   断言 Maximized configure 不含 `Tiled*`。
+
+**验证**：`scripts/test.sh --lib -- xdg_maximized_state_rides`。
+
+**仍然开着的**：见上表 16+；maximize 跨重启 / XWayland 单轴。
 
 ---
 

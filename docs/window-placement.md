@@ -179,7 +179,9 @@ values. A `_NET_WM_STATE` message naming both atoms is one request, not two.
 xdg-shell, XWayland and wlr-foreign-toplevel can only express both axes and
 report the window as maximized only while both are set. Dropping one of two
 axes restores only that axis's position and size; the window stays maximized
-on the other.
+on the other. On xdg-shell, dual-axis maximize also clears the four `Tiled*`
+edge states (and configure / focus paths keep them off while maximized or
+fullscreen) so clients do not keep tile-edge CSD under a work-area fill.
 
 On X11 the target goes through the window's size hints: a terminal with
 character-cell increments can leave a partial-cell gap, and a window with a
