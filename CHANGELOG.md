@@ -24,10 +24,11 @@ monorepo use independent Semantic Versions.
   change, a half/quarter float snap, a free float move/resize that changes
   geometry, a tiling reorder (`zoom` / `movestack` / scrolling column move
   or resize), a layout-parameter change (`incnmaster` / `setmfact` /
-  `setgaps` / `setlayout`·cycle·last), or a tag `view` / `toggleview`
-  that rearranges visible clients pushes a `WindowInfo`-shaped payload
-  so subscribers of `window` need not poll `get_windows`. Refused maximize
-  requests and no-op mode changes stay silent. See
+  `setgaps` / `setlayout`·cycle·last), a tag `view` / `toggleview`
+  that rearranges visible clients, or a scratchpad hide/reveal pushes a
+  `WindowInfo`-shaped payload so subscribers of `window` need not poll
+  `get_windows`. Refused maximize requests and no-op mode changes stay
+  silent. See
   [docs/window-placement.md](docs/window-placement.md#who-may-maximize-what).
 
 - `get_windows` / `get_tree` / `window/state` report `is_above` and

@@ -1943,6 +1943,17 @@ mod tests {
             sticky.contains(&broadcast) && sticky.contains("previous == sticky"),
             "set_client_sticky must broadcast only when is_sticky flips"
         );
+        let scratch = toggle
+            .split_once("pub fn togglescratchpad(")
+            .expect("togglescratchpad")
+            .1
+            .split_once("pub fn togglepip(")
+            .expect("togglepip")
+            .0;
+        assert!(
+            scratch.contains(&broadcast),
+            "togglescratchpad must broadcast on hide and reveal"
+        );
         let attention = include_str!("event_dispatcher.rs");
         let demands = attention
             .split_once("pub(super) fn set_client_demands_attention(")

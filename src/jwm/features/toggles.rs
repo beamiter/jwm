@@ -4542,6 +4542,7 @@ impl Jwm {
                 if let Some(mk) = mon_key {
                     self.arrange(backend, Some(mk));
                 }
+                self.broadcast_window_state_ipc(sp_key);
             } else {
                 let was_minimized = self
                     .state
@@ -4558,6 +4559,7 @@ impl Jwm {
                 if !self.reveal_and_focus(backend, window)? {
                     return Err("scratchpad disappeared before reveal".into());
                 }
+                self.broadcast_window_state_ipc(sp_key);
 
                 // A minimized scratchpad already has the compositor's reverse
                 // Genie. Starting the scratchpad Appear animation as well would

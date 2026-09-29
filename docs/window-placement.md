@@ -169,11 +169,11 @@ enter/leave, a real title or `WM_CLASS` change, a real focus change
 that actually changes the rectangle, a tiling reorder (`zoom` / `pop`,
 `movestack`, scrolling column move/resize), a layout-parameter change
 (`incnmaster`, `setmfact`, `setgaps`, or `setlayout` / cycle / last via
-`apply_layout_change`), and a tag `view` / `toggleview` for every visible
-client on that monitor. Refused or no-op requests do not emit it; subscribe
-to `window` or `window/state` to follow flips without polling. A title
-change also emits the lighter `window/title` event; focus still emits
-`window/focus`.
+`apply_layout_change`), a tag `view` / `toggleview`, and a scratchpad
+hide/reveal for every affected client. Refused or no-op requests do not
+emit it; subscribe to `window` or `window/state` to follow flips without
+polling. A title change also emits the lighter `window/title` event;
+focus still emits `window/focus`.
 
 A refused request, like one that changes nothing, leaves the window alone:
 JWM republishes the current state and replies with the current geometry, a

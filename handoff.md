@@ -4,15 +4,27 @@
 
 ---
 
-## Evolve backlog（目标 100 轮；已完成 wave 9–30，本地 ahead）
-
-按日常命中 × 可交付性排序的下一波候选（S/小 M，无 DRM）：
+## Evolve backlog（目标 100 轮；已完成 wave 9–31，本地 ahead）
 
 | # | 选题 | Size |
 | --- | --- | --- |
-| 14–30 | IPC window/state 全族 + seamless promote + session maximize | S/M ✓ |
-| 31 | … |  |
-| … | 跳过：Annotation/Screenshot toolbar CommonLinear（capture bake）、toast Closed(1)、BT withdraw、FS/PiP 丢锚点、Recording EncodedOnly、XWayland 单轴 | |
+| 14–31 | window/state 全族 + seamless promote + session maximize + scratchpad | S/M ✓ |
+| 32 | seamless hand-float `_JWM_FLOATING_V1` | S–M |
+| 33 | closed-placement 落盘跨重启 | M |
+| … | 跳过：Annotation/Screenshot CommonLinear、toast Closed(1)、BT withdraw、FS/PiP 丢锚点、Recording EncodedOnly、XWayland 单轴 | |
+
+---
+
+## 2026-09-29（二十二）：scratchpad → `window/state`
+
+选题 = evolve wave 31。
+
+1. **契约**：`togglescratchpad` hide/reveal 后广播；spawn-pending 静默。
+2. **回归**：sibling pin。
+
+**验证**：`scripts/test.sh --lib -- sibling_window_state_paths`。
+
+**仍然开着的**：见上表 32+。
 
 ---
 
