@@ -86,6 +86,12 @@ pub struct WindowInfo {
     #[serde(default)]
     pub is_drag_floating: bool,
     #[serde(default)]
+    pub is_status_bar: bool,
+    #[serde(default)]
+    pub is_swallowed: bool,
+    #[serde(default)]
+    pub maximize_promoted: bool,
+    #[serde(default)]
     pub border_w: i32,
     #[serde(default)]
     pub total_w: i32,
@@ -147,6 +153,14 @@ pub struct MonitorInfo {
     pub never_focus_count: usize,
     #[serde(default)]
     pub demands_attention_count: usize,
+    #[serde(default)]
+    pub skip_taskbar_count: usize,
+    #[serde(default)]
+    pub skip_pager_count: usize,
+    #[serde(default)]
+    pub no_decorations_count: usize,
+    #[serde(default)]
+    pub drag_float_count: usize,
     #[serde(default)]
     pub scale: f32,
     #[serde(default)]

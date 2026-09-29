@@ -48,6 +48,7 @@
 //! v13 起，可选 `old_border_w`（fullscreen 返回边框）一并写入；缺省为 `None`。
 //! v14 起，可选 `minimized_order`（Dock 恢复序）一并写入；缺省为 `None`。
 //! v15 起，可选 `hidden_restore`（最小化/离视图停放几何）一并写入；缺省为 `None`。
+//! v16 起，可选 `old_geometry`（fullscreen/布局返回矩形）一并写入；缺省为 `None`。
 
 use crate::backend::api::{Backend, MaximizeAxes, NetWmAction, NetWmState};
 use crate::config::CONFIG;
@@ -69,7 +70,7 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-const SESSION_VERSION: u32 = 15;
+const SESSION_VERSION: u32 = 16;
 const MIN_SUPPORTED_SESSION_VERSION: u32 = 1;
 const MAX_SESSION_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_SESSION_CLIENTS: usize = 16_384;
@@ -175,6 +176,10 @@ pub struct SessionEntry {
     /// `None`（恢复时不改写）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hidden_restore: Option<(i32, i32, i32, i32)>,
+    /// v16：fullscreen / 布局返回矩形（`old_x/y/w/h`）。缺省 / 旧版本为
+    /// `None`（恢复时不改写）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub old_geometry: Option<(i32, i32, i32, i32)>,
 }
 
 fn default_client_fact() -> f32 {
@@ -434,6 +439,15 @@ struct SessionSnapshotV14 {
     monitor_orders: Vec<SessionMonitorOrder>,
 }
 
+/// v15：含 hidden_restore，尚无 old_geometry（反序列化时缺省）。
+#[derive(Deserialize)]
+struct SessionSnapshotV15 {
+    #[allow(dead_code)]
+    version: u32,
+    clients: Vec<SessionEntry>,
+    monitor_orders: Vec<SessionMonitorOrder>,
+}
+
 /// 把任一受支持版本的会话 JSON 迁移为当前版本的快照。
 ///
 /// 崩溃安全约定：迁移是纯内存操作，绝不改写磁盘上的旧快照；升级后的
@@ -450,114 +464,119 @@ pub fn migrate_session_json(json: &str) -> Result<SessionSnapshot, String> {
         1 => {
             let v1: SessionSnapshotV1 = serde_json::from_str(json)
                 .map_err(|error| format!("cannot parse version 1 session snapshot: {error}"))?;
-            migrate_snapshot_v14(migrate_snapshot_v13(migrate_snapshot_v12(migrate_snapshot_v11(
+            migrate_snapshot_v15(migrate_snapshot_v14(migrate_snapshot_v13(migrate_snapshot_v12(migrate_snapshot_v11(
                 migrate_snapshot_v10(migrate_snapshot_v9(migrate_snapshot_v8(migrate_snapshot_v7(
                     migrate_snapshot_v6(migrate_snapshot_v5(migrate_snapshot_v4(
                         migrate_snapshot_v3(migrate_snapshot_v2(migrate_snapshot_v1(v1))),
                     ))),
                 )))),
-            ))))
+            )))))
         }
         2 => {
             let v2: SessionSnapshotV2 = serde_json::from_str(json)
                 .map_err(|error| format!("cannot parse version 2 session snapshot: {error}"))?;
-            migrate_snapshot_v14(migrate_snapshot_v13(migrate_snapshot_v12(migrate_snapshot_v11(
+            migrate_snapshot_v15(migrate_snapshot_v14(migrate_snapshot_v13(migrate_snapshot_v12(migrate_snapshot_v11(
                 migrate_snapshot_v10(migrate_snapshot_v9(migrate_snapshot_v8(migrate_snapshot_v7(
                     migrate_snapshot_v6(migrate_snapshot_v5(migrate_snapshot_v4(
                         migrate_snapshot_v3(migrate_snapshot_v2(v2)),
                     ))),
                 )))),
-            ))))
+            )))))
         }
         3 => {
             let v3: SessionSnapshotV3 = serde_json::from_str(json)
                 .map_err(|error| format!("cannot parse version 3 session snapshot: {error}"))?;
-            migrate_snapshot_v14(migrate_snapshot_v13(migrate_snapshot_v12(migrate_snapshot_v11(
+            migrate_snapshot_v15(migrate_snapshot_v14(migrate_snapshot_v13(migrate_snapshot_v12(migrate_snapshot_v11(
                 migrate_snapshot_v10(migrate_snapshot_v9(migrate_snapshot_v8(migrate_snapshot_v7(
                     migrate_snapshot_v6(migrate_snapshot_v5(migrate_snapshot_v4(
                         migrate_snapshot_v3(v3),
                     ))),
                 )))),
-            ))))
+            )))))
         }
         4 => {
             let v4: SessionSnapshotV4 = serde_json::from_str(json)
                 .map_err(|error| format!("cannot parse version 4 session snapshot: {error}"))?;
-            migrate_snapshot_v14(migrate_snapshot_v13(migrate_snapshot_v12(migrate_snapshot_v11(
+            migrate_snapshot_v15(migrate_snapshot_v14(migrate_snapshot_v13(migrate_snapshot_v12(migrate_snapshot_v11(
                 migrate_snapshot_v10(migrate_snapshot_v9(migrate_snapshot_v8(migrate_snapshot_v7(
                     migrate_snapshot_v6(migrate_snapshot_v5(migrate_snapshot_v4(v4))),
                 )))),
-            ))))
+            )))))
         }
         5 => {
             let v5: SessionSnapshotV5 = serde_json::from_str(json)
                 .map_err(|error| format!("cannot parse version 5 session snapshot: {error}"))?;
-            migrate_snapshot_v14(migrate_snapshot_v13(migrate_snapshot_v12(migrate_snapshot_v11(
+            migrate_snapshot_v15(migrate_snapshot_v14(migrate_snapshot_v13(migrate_snapshot_v12(migrate_snapshot_v11(
                 migrate_snapshot_v10(migrate_snapshot_v9(migrate_snapshot_v8(migrate_snapshot_v7(
                     migrate_snapshot_v6(migrate_snapshot_v5(v5)),
                 )))),
-            ))))
+            )))))
         }
         6 => {
             let v6: SessionSnapshotV6 = serde_json::from_str(json)
                 .map_err(|error| format!("cannot parse version 6 session snapshot: {error}"))?;
-            migrate_snapshot_v14(migrate_snapshot_v13(migrate_snapshot_v12(migrate_snapshot_v11(
+            migrate_snapshot_v15(migrate_snapshot_v14(migrate_snapshot_v13(migrate_snapshot_v12(migrate_snapshot_v11(
                 migrate_snapshot_v10(migrate_snapshot_v9(migrate_snapshot_v8(migrate_snapshot_v7(
                     migrate_snapshot_v6(v6),
                 )))),
-            ))))
+            )))))
         }
         7 => {
             let v7: SessionSnapshotV7 = serde_json::from_str(json)
                 .map_err(|error| format!("cannot parse version 7 session snapshot: {error}"))?;
-            migrate_snapshot_v14(migrate_snapshot_v13(migrate_snapshot_v12(migrate_snapshot_v11(
+            migrate_snapshot_v15(migrate_snapshot_v14(migrate_snapshot_v13(migrate_snapshot_v12(migrate_snapshot_v11(
                 migrate_snapshot_v10(migrate_snapshot_v9(migrate_snapshot_v8(
                     migrate_snapshot_v7(v7),
                 ))),
-            ))))
+            )))))
         }
         8 => {
             let v8: SessionSnapshotV8 = serde_json::from_str(json)
                 .map_err(|error| format!("cannot parse version 8 session snapshot: {error}"))?;
-            migrate_snapshot_v14(migrate_snapshot_v13(migrate_snapshot_v12(migrate_snapshot_v11(
+            migrate_snapshot_v15(migrate_snapshot_v14(migrate_snapshot_v13(migrate_snapshot_v12(migrate_snapshot_v11(
                 migrate_snapshot_v10(migrate_snapshot_v9(migrate_snapshot_v8(v8))),
-            ))))
+            )))))
         }
         9 => {
             let v9: SessionSnapshotV9 = serde_json::from_str(json)
                 .map_err(|error| format!("cannot parse version 9 session snapshot: {error}"))?;
-            migrate_snapshot_v14(migrate_snapshot_v13(migrate_snapshot_v12(migrate_snapshot_v11(
+            migrate_snapshot_v15(migrate_snapshot_v14(migrate_snapshot_v13(migrate_snapshot_v12(migrate_snapshot_v11(
                 migrate_snapshot_v10(migrate_snapshot_v9(v9)),
-            ))))
+            )))))
         }
         10 => {
             let v10: SessionSnapshotV10 = serde_json::from_str(json)
                 .map_err(|error| format!("cannot parse version 10 session snapshot: {error}"))?;
-            migrate_snapshot_v14(migrate_snapshot_v13(migrate_snapshot_v12(
+            migrate_snapshot_v15(migrate_snapshot_v14(migrate_snapshot_v13(migrate_snapshot_v12(
                 migrate_snapshot_v11(migrate_snapshot_v10(v10)),
-            )))
+            ))))
         }
         11 => {
             let v11: SessionSnapshotV11 = serde_json::from_str(json)
                 .map_err(|error| format!("cannot parse version 11 session snapshot: {error}"))?;
-            migrate_snapshot_v14(migrate_snapshot_v13(migrate_snapshot_v12(
+            migrate_snapshot_v15(migrate_snapshot_v14(migrate_snapshot_v13(migrate_snapshot_v12(
                 migrate_snapshot_v11(v11),
-            )))
+            ))))
         }
         12 => {
             let v12: SessionSnapshotV12 = serde_json::from_str(json)
                 .map_err(|error| format!("cannot parse version 12 session snapshot: {error}"))?;
-            migrate_snapshot_v14(migrate_snapshot_v13(migrate_snapshot_v12(v12)))
+            migrate_snapshot_v15(migrate_snapshot_v14(migrate_snapshot_v13(migrate_snapshot_v12(v12))))
         }
         13 => {
             let v13: SessionSnapshotV13 = serde_json::from_str(json)
                 .map_err(|error| format!("cannot parse version 13 session snapshot: {error}"))?;
-            migrate_snapshot_v14(migrate_snapshot_v13(v13))
+            migrate_snapshot_v15(migrate_snapshot_v14(migrate_snapshot_v13(v13)))
         }
         14 => {
             let v14: SessionSnapshotV14 = serde_json::from_str(json)
                 .map_err(|error| format!("cannot parse version 14 session snapshot: {error}"))?;
-            migrate_snapshot_v14(v14)
+            migrate_snapshot_v15(migrate_snapshot_v14(v14))
+        }
+        15 => {
+            let v15: SessionSnapshotV15 = serde_json::from_str(json)
+                .map_err(|error| format!("cannot parse version 15 session snapshot: {error}"))?;
+            migrate_snapshot_v15(v15)
         }
         SESSION_VERSION => SessionSnapshot::from_json(json)
             .map_err(|error| format!("cannot parse session snapshot: {error}"))?,
@@ -615,6 +634,7 @@ fn migrate_snapshot_v1(v1: SessionSnapshotV1) -> SessionSnapshotV2 {
             old_border_w: None,
                 minimized_order: None,
                 hidden_restore: None,
+            old_geometry: None,
             }
         })
         .collect();
@@ -735,11 +755,20 @@ fn migrate_snapshot_v13(v13: SessionSnapshotV13) -> SessionSnapshotV14 {
 }
 
 /// v14 -> v15：hidden_restore 在反序列化时已缺省；只抬版本号。
-fn migrate_snapshot_v14(v14: SessionSnapshotV14) -> SessionSnapshot {
-    SessionSnapshot {
-        version: SESSION_VERSION,
+fn migrate_snapshot_v14(v14: SessionSnapshotV14) -> SessionSnapshotV15 {
+    SessionSnapshotV15 {
+        version: 15,
         clients: v14.clients,
         monitor_orders: v14.monitor_orders,
+    }
+}
+
+/// v15 -> v16：old_geometry 在反序列化时已缺省；只抬版本号。
+fn migrate_snapshot_v15(v15: SessionSnapshotV15) -> SessionSnapshot {
+    SessionSnapshot {
+        version: SESSION_VERSION,
+        clients: v15.clients,
+        monitor_orders: v15.monitor_orders,
     }
 }
 
@@ -781,6 +810,7 @@ struct DetailedRestorePlan {
     old_border_w: Option<i32>,
     minimized_order: Option<u64>,
     hidden_restore: Option<(i32, i32, i32, i32)>,
+    old_geometry: Option<(i32, i32, i32, i32)>,
 }
 
 impl SessionSnapshot {
@@ -1248,6 +1278,12 @@ pub fn capture_snapshot_excluding(
             minimized_order: (c.state.is_hidden && c.state.minimized_order > 0)
                 .then_some(c.state.minimized_order),
             hidden_restore: c.geometry.hidden_restore_rect.map(|r| (r.x, r.y, r.w, r.h)),
+            old_geometry: Some((
+                c.geometry.old_x,
+                c.geometry.old_y,
+                c.geometry.old_w,
+                c.geometry.old_h,
+            )),
         });
     }
     let monitor_orders = state
@@ -1381,6 +1417,7 @@ where
                     old_border_w: e.old_border_w,
                     minimized_order: e.minimized_order,
                     hidden_restore: e.hidden_restore,
+                    old_geometry: e.old_geometry,
                 },
             ));
         }
@@ -1831,6 +1868,12 @@ impl Jwm {
                 if let Some(old_border_w) = plan.old_border_w {
                     c.geometry.old_border_w = old_border_w.max(0);
                 }
+                if let Some((x, y, w, h)) = plan.old_geometry {
+                    c.geometry.old_x = x;
+                    c.geometry.old_y = y;
+                    c.geometry.old_w = w;
+                    c.geometry.old_h = h;
+                }
             }
         }
 
@@ -1999,6 +2042,7 @@ mod tests {
         old_border_w: None,
             minimized_order: None,
         hidden_restore: None,
+        old_geometry: None,
         }
     }
 
@@ -2064,6 +2108,7 @@ mod tests {
                 old_border_w: None,
                     minimized_order: None,
                 hidden_restore: None,
+                old_geometry: None,
                 },
                 entry("Alacritty", "alacritty", 0b1),
             ],

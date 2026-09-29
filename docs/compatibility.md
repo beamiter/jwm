@@ -79,17 +79,20 @@ wobbly details, wayland_enable_*, power commands, color grading,
 particles, …). `get_tree` nodes also carry `selected_id`, `window_count`,
 urgency / floating / minimized / sticky / fullscreen / pip / maximized /
 above / below / scratchpad / tabbed / fixed / dock / desktop /
-never_focus / demands_attention counts. `get_workspaces`
+never_focus / demands_attention / skip_taskbar / skip_pager /
+no_decorations / drag_float counts. `get_workspaces`
 includes per-tag `gap` plus matching count fields (including scratchpad /
-tabbed / dock / desktop); `get_monitors` report the same count family plus
-`lt_symbol` / optional `output_id`. `get_layout` / `get_gaps` /
-`get_nmaster` return the focused monitor's live layout parameters;
-`setgaps` / `setnmaster` / `set_nmaster` / `set_layout` are bindable over
-IPC. Window rows also report border-inclusive `total_w` / `total_h` and
-optional `stack_index`. `get_status` nests compact tearing / xwayland /
-scrolling / color_management / audio / wallpaper / bluetooth / system_ui /
-layout / tabs / struts / scratchpads / gaps / mfact / nmaster / show_bar /
-metrics / version_info summaries alongside earlier nests. `get_effect_status` /
+tabbed / dock / desktop / skip_* / drag_float); `get_monitors` report the
+same count family plus `lt_symbol` / optional `output_id`. `get_layout` /
+`get_gaps` / `get_nmaster` return the focused monitor's live layout
+parameters; `setgaps` / `setnmaster` / `set_nmaster` / `set_layout` are
+bindable over IPC. Window rows also report border-inclusive `total_w` /
+`total_h` and optional `stack_index`. `get_status` nests compact tearing /
+xwayland / scrolling / color_management / audio / wallpaper / bluetooth /
+system_ui / layout / tabs / struts / scratchpads / gaps / mfact / nmaster /
+show_bar / metrics / version_info / monitors / workspaces / windows / tree /
+focused / cfact / prev_layout / effects / mic summaries alongside earlier
+nests. `get_effect_status` /
 `get_effects` reports shell picker flags, magnifier radius, and
 `compositor_active`; short query aliases include `get_notif`, `get_ui`,
 `get_lock`, `get_tabs`, `get_clip`, `get_network`, `get_tearing`,
@@ -97,14 +100,19 @@ metrics / version_info summaries alongside earlier nests. `get_effect_status` /
 `get_pads`, `get_mag`, `get_perf`, `get_res`, `get_wins`, `get_devices`,
 `get_cfg`, `get_ver`, `get_bt`, `get_wl`, `get_nl`, `get_cm`, `get_sess`,
 `get_strut`, `get_scratch`, `get_mons`, `get_ws`, `get_gap`, `get_nm`,
-`get_mf`, `get_tab`, `get_bench`, `get_gest`, `get_wall`. Command aliases
+`get_mf`, `get_tab`, `get_bench`, `get_gest`, `get_wall`, `get_lt`,
+`get_cf`, `get_sel`, `get_fw`, `get_pl`, `get_bar`, `get_tr`, `get_win`,
+`get_conn`, `get_st`, `get_fx`, `get_mute`, `get_cli`, `get_wc`, `get_th`,
+`get_pair`. Command aliases
 include `launcher`, `notif_center`, `screenshot`, `lock`, `layouts`,
 `load_session`, `toggle_do_not_disturb`, `hub`, `switcher`, `tags`,
 `overview`, `peek`, `mag`, `annotate`, `lily`, `night`, `caffeine`, `wifi`,
-`bt`, `wall`, `session`, `floating`, `sticky`, `pip`, `maximize`. Session
-snapshots are at v15 (`hidden_restore`). `get_magnifier` / `get_mag` reports
-`radius`; `get_peek` reports `compositor_active`; `get_tab_bar` / `get_tabs`
-reports `selected_id` when a tab group is focused.
+`bt`, `wall`, `session`, `floating`, `sticky`, `pip`, `maximize`, `cal`,
+`clip`, `monlayout`, `aout`, `ain`, `unlock`, `snap`, `record`, `arecord`,
+`bar`, `comp`, `play`, `next`, `prev`, `stop`, `unfocus`, `damage`,
+`cycle`. Session snapshots are at v16 (`old_geometry`). `get_magnifier` /
+`get_mag` reports `radius`; `get_peek` reports `compositor_active`;
+`get_tab_bar` / `get_tabs` reports `selected_id` when a tab group is focused.
 Layer-shell background/top/overlay surfaces remain compositor-owned layers.
 
 The binary-bundle design currently targets **x86_64 Linux built on Ubuntu

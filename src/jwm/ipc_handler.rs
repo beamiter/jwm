@@ -114,6 +114,10 @@ struct TagClientCounts {
     desktop: usize,
     never_focus: usize,
     demands_attention: usize,
+    skip_taskbar: usize,
+    skip_pager: usize,
+    no_decorations: usize,
+    drag_float: usize,
 }
 
 fn tag_client_counts(
@@ -181,6 +185,18 @@ fn tag_client_counts(
         }
         if client.state.demands_attention {
             counts.demands_attention += 1;
+        }
+        if client.state.skip_taskbar {
+            counts.skip_taskbar += 1;
+        }
+        if client.state.skip_pager {
+            counts.skip_pager += 1;
+        }
+        if client.state.no_decorations {
+            counts.no_decorations += 1;
+        }
+        if client.state.is_drag_floating {
+            counts.drag_float += 1;
         }
     }
     counts
@@ -2698,17 +2714,17 @@ impl Jwm {
     ) -> IpcResponse {
         let cfg = CONFIG.load();
         match name {
-            "get_status" => IpcResponse::ok(Some(
+            "get_status" | "get_st" => IpcResponse::ok(Some(
                 serde_json::to_value(self.query_runtime_status(backend)).unwrap_or_default(),
             )),
             "get_capabilities" | "get_caps" => IpcResponse::ok(Some(
                 serde_json::to_value(ipc::ipc_capabilities()).unwrap_or_default(),
             )),
-            "get_windows" | "get_clients" | "get_wins" => {
+            "get_windows" | "get_clients" | "get_wins" | "get_cli" => {
                 let windows = self.query_windows(backend);
                 IpcResponse::ok(Some(serde_json::to_value(windows).unwrap_or_default()))
             }
-            "get_window" => self.query_window(backend, args),
+            "get_window" | "get_win" => self.query_window(backend, args),
             "get_workspaces" | "get_tags" | "get_desktops" | "get_ws" => {
                 let workspaces = self.query_workspaces(backend);
                 IpcResponse::ok(Some(serde_json::to_value(workspaces).unwrap_or_default()))
@@ -2717,20 +2733,20 @@ impl Jwm {
                 let monitors = self.query_monitors(backend);
                 IpcResponse::ok(Some(serde_json::to_value(monitors).unwrap_or_default()))
             }
-            "get_tree" => {
+            "get_tree" | "get_tr" => {
                 let tree = self.query_tree(backend);
                 IpcResponse::ok(Some(serde_json::to_value(tree).unwrap_or_default()))
             }
             "get_scrolling_status" | "get_scrolling" => IpcResponse::ok(Some(self.query_scrolling_status())),
-            "get_layout" => IpcResponse::ok(Some(self.query_focused_layout(backend))),
+            "get_layout" | "get_lt" => IpcResponse::ok(Some(self.query_focused_layout(backend))),
             "get_gaps" | "get_gap" => IpcResponse::ok(Some(self.query_focused_gaps(backend))),
             "get_nmaster" | "get_nm" => IpcResponse::ok(Some(self.query_focused_nmaster(backend))),
             "get_mfact" | "get_mf" => IpcResponse::ok(Some(self.query_focused_mfact(backend))),
-            "get_cfact" => IpcResponse::ok(Some(self.query_focused_cfact(backend))),
-            "get_show_bar" => IpcResponse::ok(Some(self.query_focused_show_bar(backend))),
-            "get_prev_layout" => IpcResponse::ok(Some(self.query_focused_prev_layout(backend))),
-            "get_selected" => IpcResponse::ok(Some(self.query_selected_window(backend, false))),
-            "get_focused_window" => {
+            "get_cfact" | "get_cf" => IpcResponse::ok(Some(self.query_focused_cfact(backend))),
+            "get_show_bar" | "get_bar" => IpcResponse::ok(Some(self.query_focused_show_bar(backend))),
+            "get_prev_layout" | "get_pl" => IpcResponse::ok(Some(self.query_focused_prev_layout(backend))),
+            "get_selected" | "get_sel" => IpcResponse::ok(Some(self.query_selected_window(backend, false))),
+            "get_focused_window" | "get_fw" => {
                 IpcResponse::ok(Some(self.query_selected_window(backend, true)))
             }
             "get_scratchpads" | "get_pads" | "get_scratch" => IpcResponse::ok(Some(self.query_scratchpads())),
@@ -2762,8 +2778,8 @@ impl Jwm {
                 self.ensure_control_snapshot_refresh(std::time::Instant::now());
                 IpcResponse::ok(Some(self.power_status_json()))
             }
-            "get_connectivity" | "get_network" => IpcResponse::ok(Some(self.connectivity_json())),
-            "get_bluetooth_pairing" | "get_bluetooth" | "get_bt" => {
+            "get_connectivity" | "get_network" | "get_conn" => IpcResponse::ok(Some(self.connectivity_json())),
+            "get_bluetooth_pairing" | "get_bluetooth" | "get_bt" | "get_pair" => {
                 IpcResponse::ok(Some(crate::jwm::features::pairing::session_json(
                     self.features.bluetooth_pairing.as_ref(),
                 )))
@@ -2778,7 +2794,7 @@ impl Jwm {
                 self.ensure_control_snapshot_refresh(std::time::Instant::now());
                 IpcResponse::ok(Some(self.audio_devices_json()))
             }
-            "get_mic_mute" | "get_mic" => {
+            "get_mic_mute" | "get_mic" | "get_mute" => {
                 // Same stale-while-revalidate contract as `get_audio_devices`:
                 // warm the coalesced snapshot, then answer from memory. A
                 // null `muted` means the flag was never read (no tool / not
@@ -2792,7 +2808,7 @@ impl Jwm {
                         .and_then(|snapshot| snapshot.mic_muted),
                 })))
             }
-            "get_wallpaper_colors" | "get_wallpaper" | "get_wall" => IpcResponse::ok(Some(self.wallpaper_theme_json())),
+            "get_wallpaper_colors" | "get_wallpaper" | "get_wall" | "get_wc" => IpcResponse::ok(Some(self.wallpaper_theme_json())),
             "get_idle_status" | "get_idle" => IpcResponse::ok(Some(self.idle_status_json(backend))),
             "get_resources" | "get_res" => IpcResponse::ok(Some(self.resources_json())),
             "get_clipboard" | "get_clip" => IpcResponse::ok(Some(self.clipboard_json())),
@@ -2907,7 +2923,7 @@ impl Jwm {
                     "last_error": recording.last_error,
                 })))
             }
-            "get_effect_status" | "get_effects" => IpcResponse::ok(Some(serde_json::json!({
+            "get_effect_status" | "get_effects" | "get_fx" => IpcResponse::ok(Some(serde_json::json!({
                 "overview": self.features.overview.active,
                 "expose": self.features.expose_active,
                 "audio_recording": self.features.audio_recording.active,
@@ -3019,7 +3035,7 @@ impl Jwm {
                     "color_delivery": color_delivery,
                 })))
             }
-            "get_tearing_hints" | "get_tearing" => {
+            "get_tearing_hints" | "get_tearing" | "get_th" => {
                 // `active_surface_count` is client demand and always has
                 // been; `outputs` is what the compositor did with it, one
                 // row per output with a named reason when it did nothing.
@@ -3888,6 +3904,15 @@ impl Jwm {
                 "version": env!("CARGO_PKG_VERSION"),
                 "backend": self.runtime_backend,
             })),
+            monitors: Some(self.monitors_status_summary(backend)),
+            workspaces: Some(self.workspaces_status_summary(backend)),
+            windows: Some(self.windows_status_summary(backend)),
+            tree: Some(self.tree_status_summary(backend)),
+            focused: Some(self.query_selected_window(backend, true)),
+            cfact: Some(self.query_focused_cfact(backend)),
+            prev_layout: Some(self.query_focused_prev_layout(backend)),
+            effects: Some(self.effects_status_summary()),
+            mic: Some(self.mic_status_summary()),
         }
     }
 
@@ -4050,6 +4075,10 @@ impl Jwm {
                     desktop_count: counts.desktop,
                     never_focus_count: counts.never_focus,
                     demands_attention_count: counts.demands_attention,
+                    skip_taskbar_count: counts.skip_taskbar,
+                    skip_pager_count: counts.skip_pager,
+                    no_decorations_count: counts.no_decorations,
+                    drag_float_count: counts.drag_float,
                 });
             }
         }
@@ -4401,6 +4430,70 @@ impl Jwm {
                                 .clients
                                 .get(ck)
                                 .is_some_and(|c| c.state.demands_attention)
+                        })
+                        .count()
+                })
+                .unwrap_or(0),
+            skip_taskbar_count: self
+                .state
+                .monitor_clients
+                .get(mk)
+                .map(|clients| {
+                    clients
+                        .iter()
+                        .filter(|&&ck| {
+                            self.state
+                                .clients
+                                .get(ck)
+                                .is_some_and(|c| c.state.skip_taskbar)
+                        })
+                        .count()
+                })
+                .unwrap_or(0),
+            skip_pager_count: self
+                .state
+                .monitor_clients
+                .get(mk)
+                .map(|clients| {
+                    clients
+                        .iter()
+                        .filter(|&&ck| {
+                            self.state
+                                .clients
+                                .get(ck)
+                                .is_some_and(|c| c.state.skip_pager)
+                        })
+                        .count()
+                })
+                .unwrap_or(0),
+            no_decorations_count: self
+                .state
+                .monitor_clients
+                .get(mk)
+                .map(|clients| {
+                    clients
+                        .iter()
+                        .filter(|&&ck| {
+                            self.state
+                                .clients
+                                .get(ck)
+                                .is_some_and(|c| c.state.no_decorations)
+                        })
+                        .count()
+                })
+                .unwrap_or(0),
+            drag_float_count: self
+                .state
+                .monitor_clients
+                .get(mk)
+                .map(|clients| {
+                    clients
+                        .iter()
+                        .filter(|&&ck| {
+                            self.state
+                                .clients
+                                .get(ck)
+                                .is_some_and(|c| c.state.is_drag_floating)
                         })
                         .count()
                 })
@@ -4959,6 +5052,61 @@ impl Jwm {
         let full = self.query_scratchpads();
         let count = full.as_object().map(|o| o.len()).unwrap_or(0);
         serde_json::json!({ "count": count })
+    }
+
+    fn monitors_status_summary(&self, backend: &dyn Backend) -> serde_json::Value {
+        let full = self.query_monitors(backend);
+        serde_json::json!({
+            "count": full.len(),
+            "focused": full.iter().find(|m| m.focused).map(|m| m.num),
+        })
+    }
+
+    fn workspaces_status_summary(&self, backend: &dyn Backend) -> serde_json::Value {
+        let full = self.query_workspaces(backend);
+        serde_json::json!({
+            "count": full.len(),
+            "focused_count": full.iter().filter(|w| w.focused).count(),
+        })
+    }
+
+    fn windows_status_summary(&self, backend: &dyn Backend) -> serde_json::Value {
+        let full = self.query_windows(backend);
+        serde_json::json!({
+            "count": full.len(),
+            "focused_id": full.iter().find(|w| w.is_focused).map(|w| w.id),
+        })
+    }
+
+    fn tree_status_summary(&self, backend: &dyn Backend) -> serde_json::Value {
+        let full = self.query_tree(backend);
+        serde_json::json!({
+            "monitor_count": full.len(),
+            "window_count": full.iter().map(|n| n.window_count).sum::<usize>(),
+        })
+    }
+
+    fn effects_status_summary(&self) -> serde_json::Value {
+        serde_json::json!({
+            "overview": self.features.overview.active,
+            "expose": self.features.expose_active,
+            "magnifier": self.features.magnifier.enabled,
+            "peek": self.features.peek_active,
+            "annotation": self.features.annotation_active,
+            "layout_picker": self.features.system_ui.is_layout_picker(),
+            "debug_hud": self.debug_hud_on,
+        })
+    }
+
+    fn mic_status_summary(&self) -> serde_json::Value {
+        serde_json::json!({
+            "muted": self
+                .features
+                .control_snapshot
+                .as_ref()
+                .and_then(|s| s.mic_muted)
+                .unwrap_or(false),
+        })
     }
 
     fn query_runtime_status_metrics(&self, backend: &dyn Backend) -> Option<serde_json::Value> {
@@ -5646,6 +5794,44 @@ impl Jwm {
                 base.insert(key.clone(), value.clone());
             }
         }
+        let client_moveresize = match cfg.client_moveresize() {
+            crate::config::ClientMoveResize::Always => "always",
+            crate::config::ClientMoveResize::FloatingOnly => "floating-only",
+            crate::config::ClientMoveResize::Never => "never",
+        };
+        let new_client_position = match cfg.new_client_position() {
+            crate::config::NewClientPosition::Master => "master",
+            crate::config::NewClientPosition::Tail => "tail",
+            crate::config::NewClientPosition::AfterFocused => "after_focused",
+        };
+        let polish6 = serde_json::json!({
+            "status_bar_name": cfg.status_bar_name(),
+            "status_bar_height": cfg.status_bar_height(),
+            "status_bar_padding": cfg.status_bar_padding(),
+            "system_ui_font": cfg.system_ui_font(),
+            "cursor_theme": cfg.cursor_theme(),
+            "cursor_size": cfg.cursor_size(),
+            "drag_threshold_px": cfg.drag_threshold_px(),
+            "motion_enabled": cfg.motion_enabled(),
+            "client_moveresize": client_moveresize,
+            "new_client_position": new_client_position,
+            "animation_enabled": cfg.animation_enabled(),
+            "key_configs_count": cfg.key_configs().len(),
+            "rules_count": cfg.get_rules().len(),
+            "layout_tags_count": cfg.layout_tags().len(),
+            "compositor_enabled": cfg.compositor_enabled(),
+            "tagmask": cfg.tagmask(),
+            "modkey": cfg.modkey(),
+            "show_bar": cfg.show_bar(),
+            "m_fact": cfg.m_fact(),
+            "n_master": cfg.n_master(),
+            "tags_length": cfg.tags_length(),
+        });
+        if let (Some(base), Some(more)) = (full.as_object_mut(), polish6.as_object()) {
+            for (key, value) in more {
+                base.insert(key.clone(), value.clone());
+            }
+        }
         let Some(keys) = args.get("keys").and_then(|v| v.as_array()) else {
             return full;
         };
@@ -5711,6 +5897,10 @@ impl Jwm {
                         .iter()
                         .filter(|w| w.demands_attention)
                         .count(),
+                    skip_taskbar_count: windows.iter().filter(|w| w.skip_taskbar).count(),
+                    skip_pager_count: windows.iter().filter(|w| w.skip_pager).count(),
+                    no_decorations_count: windows.iter().filter(|w| w.no_decorations).count(),
+                    drag_float_count: windows.iter().filter(|w| w.is_drag_floating).count(),
                     selected_id: m.sel.and_then(|ck| {
                         self.state.clients.get(ck).map(|client| client.win.raw())
                     }),
@@ -9407,7 +9597,6 @@ mod tests {
         assert!(SOURCE.contains("dock_count:"));
         assert!(SOURCE.contains("demands_attention_count:"));
 
-        assert!(SESSION.contains("const SESSION_VERSION: u32 = 15"));
         assert!(SESSION.contains("pub hidden_restore:"));
         assert!(SESSION.contains("fn migrate_snapshot_v14"));
 
@@ -9444,6 +9633,111 @@ mod tests {
             "show_bar:",
             "metrics:",
             "version_info:",
+        ] {
+            assert!(status.contains(nest), "get_status must nest {nest}");
+        }
+    }
+
+    #[test]
+    fn evolve7h_waves_801_900_ipc_contract_pins() {
+        const SOURCE: &str = include_str!("ipc_handler.rs");
+        const IPC: &str = include_str!("../ipc.rs");
+        const SESSION: &str = include_str!("session.rs");
+        const CALENDAR: &str = include_str!("../../docs/calendar.md");
+        const PORTAL: &str = include_str!("../../portal/src/ipc.rs");
+
+        assert!(IPC.contains("pub skip_taskbar_count:"));
+        assert!(IPC.contains("pub skip_pager_count:"));
+        assert!(IPC.contains("pub no_decorations_count:"));
+        assert!(IPC.contains("pub drag_float_count:"));
+        assert!(IPC.contains("pub monitors:"));
+        assert!(IPC.contains("pub workspaces:"));
+        assert!(IPC.contains("pub windows:"));
+        assert!(IPC.contains("pub tree:"));
+        assert!(IPC.contains("pub focused:"));
+        assert!(IPC.contains("pub cfact:"));
+        assert!(IPC.contains("pub prev_layout:"));
+        assert!(IPC.contains("pub effects:"));
+        assert!(IPC.contains("pub mic:"));
+        assert!(IPC.contains("\"get_lt\""));
+        assert!(IPC.contains("\"get_cf\""));
+        assert!(IPC.contains("\"get_sel\""));
+        assert!(IPC.contains("\"get_fw\""));
+        assert!(IPC.contains("\"get_pl\""));
+        assert!(IPC.contains("\"get_bar\""));
+        assert!(IPC.contains("\"get_tr\""));
+        assert!(IPC.contains("\"get_win\""));
+        assert!(IPC.contains("\"get_conn\""));
+        assert!(IPC.contains("\"get_st\""));
+        assert!(IPC.contains("\"get_fx\""));
+        assert!(IPC.contains("\"get_mute\""));
+        assert!(IPC.contains("\"get_cli\""));
+        assert!(IPC.contains("\"get_wc\""));
+        assert!(IPC.contains("\"get_th\""));
+        assert!(IPC.contains("\"get_pair\""));
+        assert!(IPC.contains("\"cal\""));
+        assert!(IPC.contains("\"clip\""));
+        assert!(IPC.contains("\"monlayout\""));
+        assert!(IPC.contains("\"aout\""));
+        assert!(IPC.contains("\"ain\""));
+        assert!(IPC.contains("\"unlock\""));
+        assert!(IPC.contains("\"snap\""));
+        assert!(IPC.contains("\"record\""));
+        assert!(IPC.contains("\"arecord\""));
+        assert!(IPC.contains("\"bar\""));
+        assert!(IPC.contains("\"comp\""));
+        assert!(IPC.contains("\"play\""));
+        assert!(IPC.contains("\"next\""));
+        assert!(IPC.contains("\"prev\""));
+        assert!(IPC.contains("\"stop\""));
+        assert!(IPC.contains("\"unfocus\""));
+        assert!(IPC.contains("\"damage\""));
+        assert!(IPC.contains("\"cycle\""));
+
+        assert!(SOURCE.contains("fn monitors_status_summary"));
+        assert!(SOURCE.contains("fn workspaces_status_summary"));
+        assert!(SOURCE.contains("fn windows_status_summary"));
+        assert!(SOURCE.contains("fn tree_status_summary"));
+        assert!(SOURCE.contains("fn effects_status_summary"));
+        assert!(SOURCE.contains("fn mic_status_summary"));
+        assert!(SOURCE.contains("\"status_bar_name\""));
+        assert!(SOURCE.contains("\"client_moveresize\""));
+        assert!(SOURCE.contains("\"new_client_position\""));
+        assert!(SOURCE.contains("skip_taskbar_count:"));
+        assert!(SOURCE.contains("drag_float_count:"));
+
+        assert!(SESSION.contains("const SESSION_VERSION: u32 = 16"));
+        assert!(SESSION.contains("pub old_geometry:"));
+        assert!(SESSION.contains("fn migrate_snapshot_v15"));
+
+        assert!(
+            CALENDAR.contains("vertical or horizontal wheel"),
+            "calendar docs must advertise horizontal wheel twin"
+        );
+
+        assert!(PORTAL.contains("pub is_status_bar:"));
+        assert!(PORTAL.contains("pub is_swallowed:"));
+        assert!(PORTAL.contains("pub maximize_promoted:"));
+        assert!(PORTAL.contains("pub skip_taskbar_count:"));
+        assert!(PORTAL.contains("pub drag_float_count:"));
+
+        let status = SOURCE
+            .split_once("compositor_metrics: backend")
+            .expect("status metrics")
+            .1
+            .split_once("fn window_info")
+            .expect("window_info follows")
+            .0;
+        for nest in [
+            "monitors:",
+            "workspaces:",
+            "windows:",
+            "tree:",
+            "focused:",
+            "cfact:",
+            "prev_layout:",
+            "effects:",
+            "mic:",
         ] {
             assert!(status.contains(nest), "get_status must nest {nest}");
         }

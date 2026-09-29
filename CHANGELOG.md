@@ -7,6 +7,24 @@ monorepo use independent Semantic Versions.
 
 ### Added
 
+- `get_monitors` / `get_workspaces` / `get_tree` report skip_taskbar /
+  skip_pager / no_decorations / drag_float counts.
+- IPC query aliases: `get_lt`, `get_cf`, `get_sel`, `get_fw`, `get_pl`,
+  `get_bar`, `get_tr`, `get_win`, `get_conn`, `get_st`, `get_fx`,
+  `get_mute`, `get_cli`, `get_wc`, `get_th`, `get_pair`.
+- IPC command aliases: `cal`, `clip`, `monlayout`, `aout`, `ain`, `unlock`,
+  `snap`, `record`, `arecord`, `bar`, `comp`, `play`, `next`, `prev`,
+  `stop`, `unfocus`, `damage`, `cycle`.
+- `get_status` nests compact `monitors` / `workspaces` / `windows` / `tree` /
+  `focused` / `cfact` / `prev_layout` / `effects` / `mic`.
+- `get_config` polish6: status_bar_* / cursor / drag_threshold /
+  client_moveresize / new_client_position / animation / key/rules counts /
+  layout_tags / compositor_enabled / tagmask.
+- Session snapshot v16 persists optional `old_geometry`.
+- Calendar: horizontal wheel (and Shift+horizontal) twins vertical month/year.
+- Portal `WindowInfo` deserializes status_bar / swallowed / maximize_promoted;
+  `MonitorInfo` gains skip_taskbar/skip_pager/no_decorations/drag_float counts.
+
 - `get_monitors` / `get_workspaces` / `get_tree` report dock / desktop /
   never_focus / demands_attention counts.
 - IPC query aliases: `get_bt`, `get_wl`, `get_nl`, `get_cm`, `get_sess`,

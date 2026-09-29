@@ -4,7 +4,7 @@
 
 ---
 
-## Evolve backlog（目标 1000 轮；已完成 wave 9–800，本地 ahead）
+## Evolve backlog（目标 1000 轮；已完成 wave 9–900，本地 ahead）
 
 | # | 选题 | Size |
 | --- | --- | --- |
@@ -83,7 +83,43 @@
 | 776–790 | get_config polish5 + session v15 hidden_restore | ✓ |
 | 791–795 | system_ui horizontal wheel；portal Window/Monitor fields | ✓ |
 | 796–800 | include_str!/serialize/dispatch contract pins + docs drift + handoff/CHANGELOG | ✓ |
+| 801–820 | Monitor/Workspace/Tree skip_taskbar/skip_pager/no_decorations/drag_float counts | ✓ |
+| 821–840 | short query aliases（get_lt/cf/sel/fw/pl/bar/tr/win/conn/st/fx/mute/cli/wc/th/pair） | ✓ |
+| 841–855 | command aliases（cal/clip/monlayout/aout/ain/unlock/snap/record/arecord/bar/comp/play/next/prev/stop/unfocus/damage/cycle） | ✓ |
+| 856–875 | get_status nests monitors/workspaces/windows/tree/focused/cfact/prev_layout/effects/mic | ✓ |
+| 876–890 | get_config polish6 + session v16 old_geometry | ✓ |
+| 891–895 | calendar horizontal wheel docs；portal Window/Monitor fields | ✓ |
+| 896–900 | include_str!/serialize/dispatch contract pins + docs drift + handoff/CHANGELOG | ✓ |
 | … | 跳过：Annotation/Screenshot CommonLinear、toast Closed(1)、BT withdraw、FS/PiP 自身丢锚点（own-anchor drop）、Recording EncodedOnly、XWayland 单轴 | |
+
+---
+
+## 2026-09-29（六十一）：IPC leftovers + session v16 → 900
+
+选题 = evolve waves 801–900 / evolve7h。
+
+1. **Wave 801–820**：`MonitorInfoIpc` / `WorkspaceInfo` / `TreeNode`
+   skip_taskbar / skip_pager / no_decorations / drag_float counts。
+2. **Wave 821–840**：短 query 别名（`get_lt` / `get_cf` / `get_sel` /
+   `get_fw` / `get_pl` / `get_bar` / `get_tr` / `get_win` / `get_conn` /
+   `get_st` / `get_fx` / `get_mute` / `get_cli` / `get_wc` / `get_th` /
+   `get_pair`）。
+3. **Wave 841–855**：command 别名（`cal` / `clip` / `monlayout` / `aout` /
+   `ain` / `unlock` / `snap` / `record` / `arecord` / `bar` / `comp` /
+   `play` / `next` / `prev` / `stop` / `unfocus` / `damage` / `cycle`）。
+4. **Wave 856–875**：`get_status` nests monitors / workspaces / windows /
+   tree / focused / cfact / prev_layout / effects / mic。
+5. **Wave 876–890**：`get_config` polish6；Session v16 `old_geometry`。
+6. **Wave 891–895**：calendar 水平滚轮文档；portal Window/Monitor 字段。
+7. **Wave 896–900**：contract pins；docs drift；CHANGELOG；handoff。
+
+**刻意不做**：跳过表不变；不发明 DRM/EncodedOnly/CommonLinear / peak meter /
+`mapped_ms` / `is_override_redirect`。
+
+**验证**：`scripts/test.sh --lib --` 聚焦 skip_taskbar_count / get_lt /
+session v16 / calendar horizontal / evolve7h_waves_801。
+
+**下一轮候选**：901+；或跳过表项。
 
 ---
 
