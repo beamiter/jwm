@@ -279,7 +279,14 @@ as EWMH and xdg-shell allow.
 
 ### Restarts and sessions
 
-Session snapshots (v4+) store maximize axes, the pre-maximize rectangle and
+Session snapshots (v5+) store an output connector / `stable_key` on each
+client entry and each monitor order list, alongside the numeric
+`monitor_num`. `restore_session` resolves the connector through `output_map`
+and `enumerate_outputs` to the current monitor number so hole-fill
+renumbering after hotplug still restores windows (and tile order) to the
+same panel; if the connector is missing (v4 and older) or the output is
+gone, the saved `monitor_num` is used. Session snapshots (v4+) also store
+maximize axes, the pre-maximize rectangle and
 whether the window was promoted. `restore_session` unmaximizes every matched
 window, applies the saved resting placement and tile order, then re-applies
 maximize with a user origin so a promoted tile is promoted again. Across a

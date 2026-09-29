@@ -1,0 +1,43 @@
+{
+  "version": 4,
+  "clients": [
+    {
+      "class": "Firefox",
+      "instance": "Navigator",
+      "name": "Reference page",
+      "tags": 5,
+      "is_floating": true,
+      "monitor_num": 1,
+      "floating": [40, 60, 1024, 768],
+      "maximize": {
+        "vert": true,
+        "horz": true,
+        "restore": [40, 60, 1024, 768],
+        "promoted": false
+      }
+    },
+    {
+      "class": "Alacritty",
+      "instance": "alacritty",
+      "name": "shell",
+      "tags": 1,
+      "is_floating": false,
+      "monitor_num": 0,
+      "floating": null
+    }
+  ],
+  "monitor_orders": [
+    {
+      "monitor_num": 0,
+      "clients": [
+        { "class": "Alacritty", "instance": "alacritty" }
+      ]
+    },
+    {
+      "monitor_num": 1,
+      "clients": [
+        { "class": "Firefox", "instance": "Navigator" }
+      ]
+    }
+  ]
+}

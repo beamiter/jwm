@@ -4,13 +4,33 @@
 
 ---
 
-## Evolve backlog（目标 100 轮；已完成 wave 9–39，本地 ahead）
+## Evolve backlog（目标 100 轮；已完成 wave 9–40，本地 ahead）
 
 | # | 选题 | Size |
 | --- | --- | --- |
-| 14–39 | window/state 全族含 refit/strut/topology + seamless + session + placement | ✓ |
-| 40 | （建议）session / per-tag layout 也改 connector-stable；或 maximize restore 跨 output 几何重定位 | M |
+| 14–40 | window/state 全族含 refit/strut/topology + seamless + session + placement | ✓ |
+| 41 | （建议）per-tag layout 也改 connector-stable；或 maximize restore 跨 output 几何重定位 | M |
 | … | 跳过：Annotation/Screenshot CommonLinear、toast Closed(1)、BT withdraw、FS/PiP 丢锚点、Recording EncodedOnly、XWayland 单轴 | |
+
+---
+
+## 2026-09-29（二十八）：connector-stable session restore
+
+选题 = evolve wave 40 / evolve7h。
+
+1. **契约**：`session.json` → v5；`SessionEntry` / `SessionMonitorOrder` 带
+   optional `connector`（`OutputIdentity.stable_key` / connector）；save 经
+   `output_map` + `enumerate_outputs` 写入；restore 解析到当前
+   `monitor_num`，缺/失联回退旧 `monitor_num`；v4 无 connector 仍可加载。
+   复用 closed-placement 的 `resolve_monitor_num_by_connector` /
+   `output_key_for_monitor` / `live_monitor_identities`。
+2. **回归**：connector round-trip；renumber 后仍命中同输出；v4 迁移；无
+   connector 仍按 `monitor_num`。
+
+**验证**：`scripts/test.sh --lib -- session`。
+
+**下一轮候选**：per-tag layout 的 connector-stable；或 maximize restore 跨
+output 几何重定位。
 
 ---
 

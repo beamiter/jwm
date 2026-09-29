@@ -7,6 +7,13 @@ monorepo use independent Semantic Versions.
 
 ### Added
 
+- Session snapshots (v5+) key client placement and per-monitor tile order on
+  the output's connector / `stable_key`, not bare `monitor_num`, so hotplug
+  hole-fill renumbering restores windows to the same panel across a restart.
+  v4 and older `session.json` files without a connector still load and fall
+  back to `monitor_num`. See
+  [docs/window-placement.md](docs/window-placement.md#restarts-and-sessions).
+
 - Closed-placement memory keys reopen on the output's connector /
   `stable_key` (schema v2), not bare `monitor_num`, so hotplug hole-fill
   renumbering after wave 33 persist no longer restores to the wrong

@@ -756,15 +756,15 @@ pub(crate) struct MemoryPlacement {
     pub tags: Option<u32>,
 }
 
-/// Pick the current monitor number for a remembered placement.
+/// Pick the current monitor number for a remembered output identity.
 ///
 /// When `remembered_connector` matches a live output's `stable_key` or
 /// `connector`, return that output's current monitor number (so hole-fill
 /// renumbering after hotplug still lands on the same panel). Otherwise fall
-/// back to `remembered_monitor_num` for pre-v2 snapshots and missing
-/// identities.
+/// back to `remembered_monitor_num` for older snapshots and missing
+/// identities. Shared by closed-placement memory and session restore.
 #[must_use]
-pub(crate) fn resolve_closed_placement_monitor_num(
+pub(crate) fn resolve_monitor_num_by_connector(
     remembered_monitor_num: i32,
     remembered_connector: Option<&str>,
     live: &[(i32, &str, &str)],
@@ -937,15 +937,13 @@ impl Jwm {
         moved
     }
 
-    /// Map a remembered output identity to the monitor number that currently
-    /// owns that output. Falls back to the saved `monitor_num` when the
-    /// connector is missing or no longer connected.
-    fn resolve_remembered_monitor_num(
+    /// Live outputs as `(monitor_num, connector, stable_key)`, joined through
+    /// `output_map`. Shared by closed-placement apply and session restore.
+    pub(crate) fn live_monitor_identities(
         &self,
         backend: &dyn Backend,
-        remembered: &RememberedPlacement,
-    ) -> i32 {
-        let live: Vec<(i32, String, String)> = backend
+    ) -> Vec<(i32, String, String)> {
+        backend
             .output_ops()
             .enumerate_outputs()
             .into_iter()
@@ -963,12 +961,23 @@ impl Jwm {
                     output.identity.stable_key,
                 ))
             })
-            .collect();
+            .collect()
+    }
+
+    /// Map a remembered output identity to the monitor number that currently
+    /// owns that output. Falls back to the saved `monitor_num` when the
+    /// connector is missing or no longer connected.
+    fn resolve_remembered_monitor_num(
+        &self,
+        backend: &dyn Backend,
+        remembered: &RememberedPlacement,
+    ) -> i32 {
+        let live = self.live_monitor_identities(backend);
         let live_refs: Vec<(i32, &str, &str)> = live
             .iter()
             .map(|(num, connector, stable_key)| (*num, connector.as_str(), stable_key.as_str()))
             .collect();
-        resolve_closed_placement_monitor_num(
+        resolve_monitor_num_by_connector(
             remembered.monitor_num,
             remembered.connector.as_deref(),
             &live_refs,
@@ -976,7 +985,7 @@ impl Jwm {
     }
 
     /// Stable identity key for the output currently backing `mon_key`.
-    fn output_key_for_monitor(
+    pub(crate) fn output_key_for_monitor(
         &self,
         backend: &dyn Backend,
         mon_key: crate::core::models::MonitorKey,
@@ -1573,22 +1582,22 @@ mod tests {
             (1, "DP-2", "edid:DEL:1234"),
         ];
         assert_eq!(
-            resolve_closed_placement_monitor_num(1, Some("HDMI-A-1"), &live),
+            resolve_monitor_num_by_connector(1, Some("HDMI-A-1"), &live),
             0,
             "connector finds the renumbered output"
         );
         assert_eq!(
-            resolve_closed_placement_monitor_num(1, Some("edid:DEL:1234"), &live),
+            resolve_monitor_num_by_connector(1, Some("edid:DEL:1234"), &live),
             1,
             "stable_key matches when the remembered key came from EDID"
         );
         assert_eq!(
-            resolve_closed_placement_monitor_num(1, Some("gone"), &live),
+            resolve_monitor_num_by_connector(1, Some("gone"), &live),
             1,
             "missing connector falls back to saved monitor_num"
         );
         assert_eq!(
-            resolve_closed_placement_monitor_num(1, None, &live),
+            resolve_monitor_num_by_connector(1, None, &live),
             1,
             "pre-v2 entries without a connector keep monitor_num"
         );

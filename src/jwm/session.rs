@@ -14,6 +14,11 @@
 //!
 //! v4 起，最大化状态（轴、恢复矩形、是否从平铺提升）一并写入快照；恢复时
 //! 先落到休息态几何，再以 `MaximizeOrigin::User` 重新最大化。
+//!
+//! v5 起，`SessionEntry` 与 `SessionMonitorOrder` 额外记录输出的 connector /
+//! `stable_key`；恢复时经 `output_map` + `enumerate_outputs` 解析到当前
+//! `monitor_num`，热插拔 hole-fill 重编号后仍落到同一面板；缺/失联回退旧
+//! `monitor_num`。
 
 use crate::backend::api::{Backend, MaximizeAxes};
 use crate::config::CONFIG;
@@ -22,22 +27,24 @@ use crate::core::models::{ClientKey, WMClient};
 use crate::core::state::WMState;
 use crate::core::types::Rect;
 use crate::jwm::Jwm;
+use crate::jwm::closed_placement::resolve_monitor_num_by_connector;
 use crate::jwm::geometry::GeometryConstraints;
 use crate::jwm::maximize::resting_order;
 use crate::jwm::types::WMArgEnum;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-const SESSION_VERSION: u32 = 4;
+const SESSION_VERSION: u32 = 5;
 const MIN_SUPPORTED_SESSION_VERSION: u32 = 1;
 const MAX_SESSION_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_SESSION_CLIENTS: usize = 16_384;
 const MAX_SESSION_MONITORS: usize = 64;
+const MAX_SESSION_IDENTITY_FIELD_BYTES: usize = 65_536;
 /// Temporaries are `<prefix><pid>-<sequence>`: unique per writer, so a crash
 /// between create and rename leaves one behind that nothing would ever reuse
 /// or delete without the sweep in `atomic_write_session`.
@@ -56,6 +63,11 @@ pub struct SessionEntry {
     pub tags: u32,
     pub is_floating: bool,
     pub monitor_num: u32,
+    /// v5：输出身份键（[`crate::backend::api::OutputIdentity::stable_key`]，
+    /// 无 EDID 时为 connector 名）。缺省 / 旧版本快照为 `None`，恢复时回退
+    /// `monitor_num`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connector: Option<String>,
     /// 浮动几何 (x, y, w, h)；仅当窗口为浮动时记录。
     pub floating: Option<(i32, i32, i32, i32)>,
     /// v4：最大化轴与恢复矩形。缺省 / 旧版本快照为 `None`。
@@ -133,6 +145,10 @@ impl SessionWindowIdentity {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionMonitorOrder {
     pub monitor_num: u32,
+    /// v5：该显示器对应输出的 connector / `stable_key`。缺省时回退
+    /// `monitor_num`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connector: Option<String>,
     pub clients: Vec<SessionWindowIdentity>,
 }
 
@@ -191,9 +207,19 @@ struct SessionSnapshotV2 {
     clients: Vec<SessionEntry>,
 }
 
-/// 版本 3 快照：已有 monitor_orders，尚无 maximize 字段（反序列化时缺省 None）。
+/// 版本 3 快照：已有 monitor_orders，尚无 maximize / connector 字段
+/// （反序列化时缺省 None）。
 #[derive(Deserialize)]
 struct SessionSnapshotV3 {
+    #[allow(dead_code)]
+    version: u32,
+    clients: Vec<SessionEntry>,
+    monitor_orders: Vec<SessionMonitorOrder>,
+}
+
+/// 版本 4 快照：已有 maximize，尚无 connector（反序列化时缺省 None）。
+#[derive(Deserialize)]
+struct SessionSnapshotV4 {
     #[allow(dead_code)]
     version: u32,
     clients: Vec<SessionEntry>,
@@ -216,17 +242,24 @@ pub fn migrate_session_json(json: &str) -> Result<SessionSnapshot, String> {
         1 => {
             let v1: SessionSnapshotV1 = serde_json::from_str(json)
                 .map_err(|error| format!("cannot parse version 1 session snapshot: {error}"))?;
-            migrate_snapshot_v3(migrate_snapshot_v2(migrate_snapshot_v1(v1)))
+            migrate_snapshot_v4(migrate_snapshot_v3(migrate_snapshot_v2(migrate_snapshot_v1(
+                v1,
+            ))))
         }
         2 => {
             let v2: SessionSnapshotV2 = serde_json::from_str(json)
                 .map_err(|error| format!("cannot parse version 2 session snapshot: {error}"))?;
-            migrate_snapshot_v3(migrate_snapshot_v2(v2))
+            migrate_snapshot_v4(migrate_snapshot_v3(migrate_snapshot_v2(v2)))
         }
         3 => {
             let v3: SessionSnapshotV3 = serde_json::from_str(json)
                 .map_err(|error| format!("cannot parse version 3 session snapshot: {error}"))?;
-            migrate_snapshot_v3(v3)
+            migrate_snapshot_v4(migrate_snapshot_v3(v3))
+        }
+        4 => {
+            let v4: SessionSnapshotV4 = serde_json::from_str(json)
+                .map_err(|error| format!("cannot parse version 4 session snapshot: {error}"))?;
+            migrate_snapshot_v4(v4)
         }
         SESSION_VERSION => SessionSnapshot::from_json(json)
             .map_err(|error| format!("cannot parse session snapshot: {error}"))?,
@@ -258,6 +291,7 @@ fn migrate_snapshot_v1(v1: SessionSnapshotV1) -> SessionSnapshotV2 {
                 tags: entry.tags,
                 is_floating: entry.is_floating,
                 monitor_num: entry.monitor_num,
+                connector: None,
                 floating,
                 maximize: None,
             }
@@ -280,11 +314,20 @@ fn migrate_snapshot_v2(v2: SessionSnapshotV2) -> SessionSnapshotV3 {
 }
 
 /// v3 -> v4：maximize 字段在反序列化时已缺省为 None；只抬版本号。
-fn migrate_snapshot_v3(v3: SessionSnapshotV3) -> SessionSnapshot {
-    SessionSnapshot {
-        version: SESSION_VERSION,
+fn migrate_snapshot_v3(v3: SessionSnapshotV3) -> SessionSnapshotV4 {
+    SessionSnapshotV4 {
+        version: 4,
         clients: v3.clients,
         monitor_orders: v3.monitor_orders,
+    }
+}
+
+/// v4 -> v5：connector 字段在反序列化时已缺省为 None；只抬版本号。
+fn migrate_snapshot_v4(v4: SessionSnapshotV4) -> SessionSnapshot {
+    SessionSnapshot {
+        version: SESSION_VERSION,
+        clients: v4.clients,
+        monitor_orders: v4.monitor_orders,
     }
 }
 
@@ -302,6 +345,7 @@ pub struct RestorePlan {
 struct DetailedRestorePlan {
     restore: RestorePlan,
     monitor_num: u32,
+    connector: Option<String>,
     maximize: Option<SessionMaximize>,
 }
 
@@ -328,12 +372,21 @@ impl SessionSnapshot {
             ));
         }
         for (index, entry) in self.clients.iter().enumerate() {
-            if entry.class.len() > 65_536
-                || entry.instance.len() > 65_536
-                || entry.name.len() > 65_536
+            if entry.class.len() > MAX_SESSION_IDENTITY_FIELD_BYTES
+                || entry.instance.len() > MAX_SESSION_IDENTITY_FIELD_BYTES
+                || entry.name.len() > MAX_SESSION_IDENTITY_FIELD_BYTES
             {
                 return Err(format!(
                     "session client {index} contains oversized text fields"
+                ));
+            }
+            if entry
+                .connector
+                .as_ref()
+                .is_some_and(|connector| connector.len() > MAX_SESSION_IDENTITY_FIELD_BYTES)
+            {
+                return Err(format!(
+                    "session client {index} has an oversized connector"
                 ));
             }
             if let Some((_, _, width, height)) = entry.floating
@@ -381,10 +434,18 @@ impl SessionSnapshot {
                 ));
             }
             if order
-                .clients
-                .iter()
-                .any(|identity| identity.class.len() > 65_536 || identity.instance.len() > 65_536)
+                .connector
+                .as_ref()
+                .is_some_and(|connector| connector.len() > MAX_SESSION_IDENTITY_FIELD_BYTES)
             {
+                return Err(format!(
+                    "session monitor order {index} has an oversized connector"
+                ));
+            }
+            if order.clients.iter().any(|identity| {
+                identity.class.len() > MAX_SESSION_IDENTITY_FIELD_BYTES
+                    || identity.instance.len() > MAX_SESSION_IDENTITY_FIELD_BYTES
+            }) {
                 return Err(format!(
                     "session monitor order {index} contains oversized text fields"
                 ));
@@ -727,6 +788,7 @@ pub fn capture_snapshot_excluding(
             tags: c.state.tags,
             is_floating,
             monitor_num,
+            connector: None,
             floating,
             maximize: SessionMaximize::from_client(c),
         });
@@ -760,6 +822,7 @@ pub fn capture_snapshot_excluding(
                 .unwrap_or_default();
             Some(SessionMonitorOrder {
                 monitor_num,
+                connector: None,
                 clients,
             })
         })
@@ -837,6 +900,7 @@ where
                         floating: e.floating,
                     },
                     monitor_num: e.monitor_num,
+                    connector: e.connector.clone(),
                     maximize: e.maximize.clone(),
                 },
             ));
@@ -884,12 +948,13 @@ impl Jwm {
     /// 保存当前会话（窗口标签 / 浮动布局）到磁盘。
     pub fn save_session(
         &mut self,
-        _backend: &mut dyn Backend,
+        backend: &mut dyn Backend,
         _arg: &WMArgEnum,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let status_bar_name = CONFIG.load().status_bar_name().to_string();
         let scratchpads: HashSet<ClientKey> = self.scratchpads.values().copied().collect();
-        let snapshot = capture_snapshot_excluding(&self.state, &status_bar_name, &scratchpads);
+        let mut snapshot = capture_snapshot_excluding(&self.state, &status_bar_name, &scratchpads);
+        self.attach_session_connectors(backend, &mut snapshot);
         snapshot
             .validate()
             .map_err(|error| format!("cannot save invalid session: {error}"))?;
@@ -903,6 +968,52 @@ impl Jwm {
             path.display()
         );
         Ok(())
+    }
+
+    /// Fill `connector` on every entry / monitor order from the live output
+    /// map so a later restore survives hole-fill renumbering.
+    fn attach_session_connectors(
+        &self,
+        backend: &dyn Backend,
+        snapshot: &mut SessionSnapshot,
+    ) {
+        let mut by_num: HashMap<u32, String> = HashMap::new();
+        for &mon_key in &self.state.monitor_order {
+            let Some(monitor) = self.state.monitors.get(mon_key) else {
+                continue;
+            };
+            let Ok(num) = u32::try_from(monitor.num) else {
+                continue;
+            };
+            if let Some(key) = self.output_key_for_monitor(backend, mon_key) {
+                by_num.insert(num, key);
+            }
+        }
+        for entry in &mut snapshot.clients {
+            entry.connector = by_num.get(&entry.monitor_num).cloned();
+        }
+        for order in &mut snapshot.monitor_orders {
+            order.connector = by_num.get(&order.monitor_num).cloned();
+        }
+    }
+
+    /// Resolve a saved connector / `stable_key` to the monitor number that
+    /// currently owns that output; fall back to the saved `monitor_num`.
+    fn resolve_session_monitor_num(
+        &self,
+        backend: &dyn Backend,
+        remembered_monitor_num: u32,
+        remembered_connector: Option<&str>,
+    ) -> u32 {
+        let live = self.live_monitor_identities(backend);
+        let live_refs: Vec<(i32, &str, &str)> = live
+            .iter()
+            .map(|(num, connector, stable_key)| (*num, connector.as_str(), stable_key.as_str()))
+            .collect();
+        let remembered_i32 = i32::try_from(remembered_monitor_num).unwrap_or(0);
+        let resolved =
+            resolve_monitor_num_by_connector(remembered_i32, remembered_connector, &live_refs);
+        u32::try_from(resolved).unwrap_or(remembered_monitor_num)
     }
 
     /// 从磁盘恢复会话：把保存的标签 / 浮动状态套用到当前匹配的客户端。
@@ -961,6 +1072,11 @@ impl Jwm {
         );
 
         for (key, plan) in &plans {
+            let monitor_num = self.resolve_session_monitor_num(
+                backend,
+                plan.monitor_num,
+                plan.connector.as_deref(),
+            );
             let target_monitor = self
                 .state
                 .monitor_order
@@ -970,7 +1086,7 @@ impl Jwm {
                     self.state
                         .monitors
                         .get(*monitor_key)
-                        .is_some_and(|monitor| u32::try_from(monitor.num) == Ok(plan.monitor_num))
+                        .is_some_and(|monitor| u32::try_from(monitor.num) == Ok(monitor_num))
                 });
             if let Some(target_monitor) = target_monitor
                 && self.state.clients.get(*key).and_then(|client| client.mon)
@@ -1041,7 +1157,7 @@ impl Jwm {
         // 全部窗口状态（tag / 浮动 / 所在显示器）恢复完成后，最后按快照
         // 重排每个显示器的平铺顺序，再统一 arrange。v1/v2 快照的
         // monitor_orders 为空，这里自然成为无操作。
-        self.restore_monitor_client_order(snapshot);
+        self.restore_monitor_client_order(backend, snapshot);
 
         let monitor_keys: Vec<_> = self.state.monitor_order.clone();
         for mk in monitor_keys {
@@ -1078,9 +1194,18 @@ impl Jwm {
     /// 保存列表中的窗口按保存序在前（保持相对序），列表外的新窗口按现有
     /// 相对顺序追加；`monitor_clients` 的「平铺组在前、浮动组在后」不变量
     /// 优先于保存顺序——保存后浮动状态发生变化的窗口回到它当前所属的组。
-    fn restore_monitor_client_order(&mut self, snapshot: &SessionSnapshot) {
+    fn restore_monitor_client_order(
+        &mut self,
+        backend: &dyn Backend,
+        snapshot: &SessionSnapshot,
+    ) {
         let scratchpads: HashSet<ClientKey> = self.scratchpads.values().copied().collect();
         for saved in &snapshot.monitor_orders {
+            let monitor_num = self.resolve_session_monitor_num(
+                backend,
+                saved.monitor_num,
+                saved.connector.as_deref(),
+            );
             let Some(monitor_key) = self
                 .state
                 .monitor_order
@@ -1090,7 +1215,7 @@ impl Jwm {
                     self.state
                         .monitors
                         .get(*monitor_key)
-                        .is_some_and(|monitor| u32::try_from(monitor.num) == Ok(saved.monitor_num))
+                        .is_some_and(|monitor| u32::try_from(monitor.num) == Ok(monitor_num))
                 })
             else {
                 continue;
@@ -1201,6 +1326,7 @@ mod tests {
             tags,
             is_floating: false,
             monitor_num: 0,
+            connector: None,
             floating: None,
             maximize: None,
         }
@@ -1238,6 +1364,7 @@ mod tests {
                     tags: 0b101,
                     is_floating: true,
                     monitor_num: 1,
+                    connector: Some("HDMI-A-1".into()),
                     floating: Some((10, 20, 800, 600)),
                     maximize: Some(SessionMaximize {
                         vert: true,
@@ -1251,15 +1378,21 @@ mod tests {
             monitor_orders: vec![
                 SessionMonitorOrder {
                     monitor_num: 0,
+                    connector: Some("eDP-1".into()),
                     clients: vec![identity("Alacritty", "alacritty")],
                 },
                 SessionMonitorOrder {
                     monitor_num: 1,
+                    connector: Some("HDMI-A-1".into()),
                     clients: vec![identity("Firefox", "Navigator")],
                 },
             ],
         };
         let json = snap.to_json().unwrap();
+        assert!(
+            json.contains("\"connector\": \"HDMI-A-1\""),
+            "connector must be persisted: {json}"
+        );
         let back = SessionSnapshot::from_json(&json).unwrap();
         assert_eq!(snap, back);
     }
@@ -1287,6 +1420,7 @@ mod tests {
         snapshot.monitor_orders = vec![
             SessionMonitorOrder {
                 monitor_num: 0,
+                connector: None,
                 clients: Vec::new(),
             };
             MAX_SESSION_MONITORS + 1
@@ -1301,6 +1435,7 @@ mod tests {
         let mut snapshot = snapshot_with_clients(Vec::new());
         snapshot.monitor_orders = vec![SessionMonitorOrder {
             monitor_num: 0,
+            connector: None,
             clients: vec![SessionWindowIdentity {
                 class: "x".repeat(65_537),
                 instance: String::new(),
@@ -1316,6 +1451,7 @@ mod tests {
         let mut snapshot = snapshot_with_clients(Vec::new());
         snapshot.monitor_orders = vec![SessionMonitorOrder {
             monitor_num: 0,
+            connector: None,
             clients: vec![identity("Term", "kitty"); MAX_SESSION_CLIENTS + 1],
         }];
         assert!(
@@ -1536,6 +1672,7 @@ mod tests {
     const SESSION_V1_FIXTURE: &str = include_str!("../../tests/fixtures/session_v1.json");
     const SESSION_V2_FIXTURE: &str = include_str!("../../tests/fixtures/session_v2.json");
     const SESSION_V3_FIXTURE: &str = include_str!("../../tests/fixtures/session_v3.json");
+    const SESSION_V4_FIXTURE: &str = include_str!("../../tests/fixtures/session_v4.json");
 
     #[test]
     fn recorded_v1_snapshot_migrates_tolerantly_and_normalizes_floating_state() {
@@ -1593,6 +1730,17 @@ mod tests {
             snapshot.clients.iter().all(|entry| entry.maximize.is_none()),
             "a v3 file migrates with no maximize state"
         );
+        assert!(
+            snapshot
+                .clients
+                .iter()
+                .all(|entry| entry.connector.is_none())
+                && snapshot
+                    .monitor_orders
+                    .iter()
+                    .all(|order| order.connector.is_none()),
+            "a v3 file migrates with no connector"
+        );
 
         // `capture_snapshot` derives both lists from the same monitor
         // relation, so the frozen file must agree with itself: every ordered
@@ -1612,6 +1760,36 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn recorded_v4_snapshot_loads_without_connector() {
+        let snapshot = migrate_session_json(SESSION_V4_FIXTURE).unwrap();
+        assert_eq!(snapshot.version, SESSION_VERSION);
+        assert_eq!(snapshot.clients.len(), 2);
+        assert_eq!(snapshot.monitor_orders.len(), 2);
+        assert!(
+            snapshot
+                .clients
+                .iter()
+                .all(|entry| entry.connector.is_none())
+                && snapshot
+                    .monitor_orders
+                    .iter()
+                    .all(|order| order.connector.is_none()),
+            "a v4 file without connector still loads"
+        );
+        assert_eq!(
+            snapshot.clients[0].maximize,
+            Some(SessionMaximize {
+                vert: true,
+                horz: true,
+                restore: Some((40, 60, 1024, 768)),
+                promoted: false,
+            })
+        );
+        assert_eq!(snapshot.clients[0].monitor_num, 1);
+        assert_eq!(snapshot.monitor_orders[1].monitor_num, 1);
     }
 
     /// The recorded fixture above agrees with itself because
@@ -1659,8 +1837,8 @@ mod tests {
     #[test]
     fn migration_refuses_future_versions_and_unreadable_documents() {
         let error =
-            migrate_session_json(r#"{"version":5,"clients":[],"monitor_orders":[]}"#).unwrap_err();
-        assert!(error.contains("unsupported session version 5"));
+            migrate_session_json(r#"{"version":6,"clients":[],"monitor_orders":[]}"#).unwrap_err();
+        assert!(error.contains("unsupported session version 6"));
 
         let error = migrate_session_json("not JSON").unwrap_err();
         assert!(error.contains("no readable version"));
@@ -1675,8 +1853,12 @@ mod tests {
         let error = migrate_session_json(r#"{"version":3,"clients":[]}"#).unwrap_err();
         assert!(error.contains("cannot parse version 3 session snapshot"));
 
-        // v4（当前版本）同样严格：缺 monitor_orders 字段直接拒绝。
+        // v4 保持严格：缺 monitor_orders 字段直接拒绝。
         let error = migrate_session_json(r#"{"version":4,"clients":[]}"#).unwrap_err();
+        assert!(error.contains("cannot parse version 4 session snapshot"));
+
+        // v5（当前版本）同样严格：缺 monitor_orders 字段直接拒绝。
+        let error = migrate_session_json(r#"{"version":5,"clients":[]}"#).unwrap_err();
         assert!(error.contains("cannot parse session snapshot"));
     }
 
@@ -2208,6 +2390,7 @@ mod tests {
             clients: vec![parked, entry("Alacritty", "Alacritty", 1 << 3)],
             monitor_orders: vec![SessionMonitorOrder {
                 monitor_num: 0,
+                connector: None,
                 clients: vec![
                     identity("Alacritty", "Alacritty"),
                     identity("Alacritty", "Alacritty"),
@@ -2222,5 +2405,129 @@ mod tests {
         assert!(!jwm.is_client_visible_by_key(scratchpad));
         assert_eq!(jwm.state.clients[terminal].state.tags, 1 << 3);
         assert!(!jwm.state.clients[terminal].state.is_floating);
+    }
+
+    #[test]
+    fn attach_session_connectors_records_live_output_keys() {
+        use crate::backend::api::OutputIdentity;
+
+        let mut left = output(1, 0, 0, 1920, 1080);
+        left.identity = OutputIdentity::connector_only("eDP-1");
+        left.name = "eDP-1".into();
+        let mut right = output(2, 1920, 0, 1920, 1080);
+        right.identity = OutputIdentity::connector_only("HDMI-A-1");
+        right.name = "HDMI-A-1".into();
+
+        let mut backend = DisplaySpyBackend::new(vec![left, right]);
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").expect("test jwm");
+        let mon1 = jwm.state.monitor_order[1];
+        let tags = jwm.state.monitors[mon1].get_active_tags();
+
+        let mut client = WMClient::new(WindowId::from_raw(0x42));
+        client.class = "Firefox".into();
+        client.instance = "Navigator".into();
+        client.mon = Some(mon1);
+        client.state.tags = tags;
+        let key = jwm.insert_client(client);
+        jwm.attach_to_monitor(key, mon1);
+
+        let mut snapshot = capture_snapshot(&jwm.state, "status-bar");
+        assert!(snapshot.clients[0].connector.is_none());
+        jwm.attach_session_connectors(&backend, &mut snapshot);
+        assert_eq!(snapshot.clients[0].monitor_num, 1);
+        assert_eq!(snapshot.clients[0].connector.as_deref(), Some("HDMI-A-1"));
+        let order = snapshot
+            .monitor_orders
+            .iter()
+            .find(|order| order.monitor_num == 1)
+            .expect("monitor 1 order");
+        assert_eq!(order.connector.as_deref(), Some("HDMI-A-1"));
+    }
+
+    #[test]
+    fn session_restores_to_connector_after_monitor_renumber() {
+        use crate::backend::api::OutputIdentity;
+
+        let mut left = output(1, 0, 0, 1920, 1080);
+        left.identity = OutputIdentity::connector_only("eDP-1");
+        left.name = "eDP-1".into();
+        let mut right = output(2, 1920, 0, 1920, 1080);
+        right.identity = OutputIdentity::connector_only("HDMI-A-1");
+        right.name = "HDMI-A-1".into();
+
+        let mut backend = DisplaySpyBackend::new(vec![left, right]);
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").expect("test jwm");
+        let mon_edp = jwm.state.monitor_order[0];
+        let mon_hdmi = jwm.state.monitor_order[1];
+        assert_eq!(jwm.state.monitors[mon_edp].num, 0);
+        assert_eq!(jwm.state.monitors[mon_hdmi].num, 1);
+
+        let tags = jwm.state.monitors[mon_hdmi].get_active_tags();
+        let mut client = WMClient::new(WindowId::from_raw(0x71));
+        client.class = "Firefox".into();
+        client.instance = "Navigator".into();
+        client.mon = Some(mon_hdmi);
+        client.state.tags = tags;
+        let key = jwm.insert_client(client);
+        jwm.attach_to_monitor(key, mon_hdmi);
+
+        let mut snapshot = capture_snapshot(&jwm.state, "status-bar");
+        jwm.attach_session_connectors(&backend, &mut snapshot);
+        assert_eq!(snapshot.clients[0].monitor_num, 1);
+        assert_eq!(snapshot.clients[0].connector.as_deref(), Some("HDMI-A-1"));
+
+        // Hole-fill renumber: HDMI-A-1 was monitor 1, now monitor 0.
+        jwm.state.monitors[mon_edp].num = 1;
+        jwm.state.monitors[mon_hdmi].num = 0;
+        // Park the window on eDP so restore has to move it by connector.
+        jwm.state.clients[key].mon = Some(mon_edp);
+        jwm.attach_to_monitor(key, mon_edp);
+
+        assert_eq!(jwm.apply_session_snapshot(&mut backend, &snapshot), 1);
+        assert_eq!(
+            jwm.state.clients[key].mon,
+            Some(mon_hdmi),
+            "connector finds the renumbered HDMI output despite stale monitor_num"
+        );
+    }
+
+    #[test]
+    fn session_without_connector_keeps_saved_monitor_num() {
+        let mut backend = DisplaySpyBackend::new(vec![
+            output(1, 0, 0, 1920, 1080),
+            output(2, 1920, 0, 1920, 1080),
+        ]);
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").expect("test jwm");
+        let mon0 = jwm.state.monitor_order[0];
+        let mon1 = jwm.state.monitor_order[1];
+        let tags = jwm.state.monitors[mon1].get_active_tags();
+
+        let mut client = WMClient::new(WindowId::from_raw(0x72));
+        client.class = "Term".into();
+        client.instance = "kitty".into();
+        client.mon = Some(mon0);
+        client.state.tags = tags;
+        let key = jwm.insert_client(client);
+        jwm.attach_to_monitor(key, mon0);
+
+        let mut parked = entry("Term", "kitty", tags);
+        parked.monitor_num = 1;
+        parked.connector = None;
+        let snapshot = SessionSnapshot {
+            version: SESSION_VERSION,
+            clients: vec![parked],
+            monitor_orders: vec![SessionMonitorOrder {
+                monitor_num: 1,
+                connector: None,
+                clients: vec![identity("Term", "kitty")],
+            }],
+        };
+
+        assert_eq!(jwm.apply_session_snapshot(&mut backend, &snapshot), 1);
+        assert_eq!(
+            jwm.state.clients[key].mon,
+            Some(mon1),
+            "pre-v5 entries without a connector keep monitor_num"
+        );
     }
 }
