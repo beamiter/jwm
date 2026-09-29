@@ -258,16 +258,23 @@ impl Jwm {
 
     pub(super) fn createmon(&mut self, show_bar: bool) -> WMMonitor {
         // The X11 setup paths number monitors by position and append them,
-        // so the next number is the current length.
+        // so the next number is the current length. No output identity is
+        // available here; seeding falls back to the monitor index.
         let num = self.state.monitor_order.len() as i32;
-        self.createmon_numbered(show_bar, num)
+        self.createmon_numbered(show_bar, num, None)
     }
 
     /// A monitor that will answer to `num`: saved per-tag layouts are keyed
-    /// by monitor number, so they are seeded from the number the monitor
-    /// really gets — after a hot-unplug that is the lowest free one, not the
-    /// list length.
-    pub(super) fn createmon_numbered(&mut self, show_bar: bool, num: i32) -> WMMonitor {
+    /// by connector when known (and by monitor number as fallback), so they
+    /// are seeded from the number — and identity — the monitor really gets.
+    /// After a hot-unplug that number is the lowest free one, not the list
+    /// length.
+    pub(super) fn createmon_numbered(
+        &mut self,
+        show_bar: bool,
+        num: i32,
+        connector: Option<&str>,
+    ) -> WMMonitor {
         // info!("[createmon]");
         let cfg = CONFIG.load();
         let mut m: WMMonitor = WMMonitor::new();
@@ -294,10 +301,10 @@ impl Jwm {
             ref_pertag.lts[i] = default_lt.clone();
             ref_pertag.prev_lts[i] = default_prev_lt.clone();
         }
-        // Saved per-tag layouts land on top of those defaults, keyed by the
-        // monitor number.
+        // Saved per-tag layouts land on top of those defaults, keyed by
+        // connector when known else by monitor number.
         m.num = num;
-        crate::jwm::layout::persist::seed_pertag_from_config(&mut m, num, &cfg);
+        crate::jwm::layout::persist::seed_pertag_from_config(&mut m, num, &cfg, connector);
         info!("[createmon]: {}", m);
         return m;
     }

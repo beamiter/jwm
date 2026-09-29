@@ -1736,8 +1736,16 @@ pub struct LayoutTagConfig {
     pub tag: usize,
     /// Monitor index (0-based). `-1` matches any monitor, which is what a
     /// hand-written entry usually wants; JWM writes one entry per monitor.
+    /// Prefer [`Self::connector`] when present: hotplug hole-fill can renumber
+    /// monitors while the panel stays the same.
     #[serde(default = "default_layout_tag_monitor")]
     pub monitor: i32,
+    /// Output identity (`OutputIdentity.stable_key`, else connector name)
+    /// this entry belongs to. Absent on older files and on hand-written
+    /// wildcards (`monitor = -1`); JWM writes it when known so a renumber
+    /// still restores the same panel's layouts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connector: Option<String>,
     /// Layout in use, by name: `tile`, `fibonacci`, `monocle`, `scrolling`, …
     /// An unknown name leaves the tag on the built-in default.
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -3013,15 +3021,56 @@ impl Config {
     ///
     /// A monitor-specific entry wins over an any-monitor one, so the usual
     /// hand-written `monitor = -1` line is a default the saved per-monitor
-    /// entries then refine.
+    /// entries then refine. Prefer [`Self::layout_for_tag_on_output`] when
+    /// the output's connector / `stable_key` is known.
     pub fn layout_for_tag(&self, monitor: i32, tag: usize) -> Option<&LayoutTagConfig> {
+        self.layout_for_tag_on_output(monitor, tag, None)
+    }
+
+    /// The stored layout for `tag` on the output currently numbered
+    /// `monitor`, optionally identified by `connector`
+    /// (`OutputIdentity.stable_key` / connector).
+    ///
+    /// Lookup order: an entry whose `connector` matches; then an entry whose
+    /// `monitor` equals `monitor` (skipping entries that name a different
+    /// connector); then a wildcard (`monitor < 0`). Wildcards ignore
+    /// `connector`.
+    pub fn layout_for_tag_on_output(
+        &self,
+        monitor: i32,
+        tag: usize,
+        connector: Option<&str>,
+    ) -> Option<&LayoutTagConfig> {
         let matching = |entry: &&LayoutTagConfig| entry.tag == tag;
+        let key = connector.filter(|value| !value.is_empty());
+        if let Some(key) = key {
+            if let Some(entry) = self
+                .inner
+                .layout
+                .tags
+                .iter()
+                .filter(matching)
+                .find(|entry| entry.connector.as_deref() == Some(key))
+            {
+                return Some(entry);
+            }
+        }
         self.inner
             .layout
             .tags
             .iter()
             .filter(matching)
-            .find(|entry| entry.monitor == monitor)
+            .find(|entry| {
+                entry.monitor == monitor
+                    && match (entry.connector.as_deref(), key) {
+                        // An entry that names another output belongs there,
+                        // even when its saved monitor number collides after
+                        // hotplug renumbering.
+                        (Some(saved), Some(live)) => saved == live,
+                        (Some(_), None) => true,
+                        (None, _) => true,
+                    }
+            })
             .or_else(|| {
                 self.inner
                     .layout
@@ -3733,10 +3782,11 @@ impl Config {
     /// lines are written by the window manager rather than by hand. Written
     /// verbatim and recognized verbatim, so a save replaces its own header
     /// instead of stacking a new copy on every write.
-    const LAYOUT_TAGS_HEADER: [&'static str; 3] = [
+    const LAYOUT_TAGS_HEADER: [&'static str; 4] = [
         "# --- per-tag layout, saved by jwm ---",
         "# Rewritten when a tag's layout changes; set layout.persist_tags",
         "# to false to keep this block under your own hand.",
+        "# `connector` keys the output; `monitor` is the fallback index (-1 = any).",
     ];
 
     /// Write `entries` into the config file's `[[layout.tags]]` block, leaving
@@ -4071,6 +4121,16 @@ impl Config {
             out.push_str("[[layout.tags]]\n");
             out.push_str(&format!("tag = {}\n", entry.tag));
             out.push_str(&format!("monitor = {}\n", entry.monitor));
+            if let Some(connector) = entry
+                .connector
+                .as_deref()
+                .filter(|value| !value.is_empty())
+            {
+                out.push_str(&format!(
+                    "connector = {}\n",
+                    toml_string_literal(connector)
+                ));
+            }
             if !entry.layout.is_empty() {
                 out.push_str(&format!(
                     "layout = {}\n",
@@ -5309,6 +5369,7 @@ mod tests {
         LayoutTagConfig {
             tag,
             monitor,
+            connector: None,
             layout: layout.to_owned(),
             alt: "tile".to_owned(),
             n_master: Some(2),
@@ -5854,6 +5915,62 @@ border_px = 3
         assert_eq!(config.layout_for_tag(2, 1).unwrap().layout, "deck");
         assert_eq!(config.layout_for_tag(0, 1).unwrap().layout, "grid");
         assert!(config.layout_for_tag(0, 7).is_none());
+    }
+
+    #[test]
+    fn layout_tag_connector_round_trips_through_persist() {
+        let path = temporary_config_path("layout-tags-connector");
+        Config::default().save_to_file(&path).unwrap();
+
+        let mut entry = layout_tag(1, 1, "deck");
+        entry.connector = Some("HDMI-A-1".into());
+        Config::default()
+            .persist_layout_tags_to(&path, &[entry.clone()])
+            .unwrap();
+
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            written.contains("connector = \"HDMI-A-1\""),
+            "connector must be written: {written}"
+        );
+
+        let loaded = Config::load_from_file(&path).unwrap();
+        assert_eq!(loaded.layout_tags(), [entry]);
+        assert_eq!(
+            loaded
+                .layout_for_tag_on_output(0, 1, Some("HDMI-A-1"))
+                .map(|e| e.layout.as_str()),
+            Some("deck"),
+            "connector match survives renumber"
+        );
+        assert_eq!(
+            loaded
+                .layout_for_tag_on_output(0, 1, Some("eDP-1"))
+                .map(|e| e.layout.as_str()),
+            None,
+            "a foreign connector must not inherit HDMI's layouts by stale monitor num alone"
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn layout_tags_without_connector_still_load() {
+        let path = temporary_config_path("layout-tags-no-connector");
+        Config::default().save_to_file(&path).unwrap();
+        let mut text = std::fs::read_to_string(&path).unwrap();
+        text.push_str(
+            "\n[[layout.tags]]\n\
+             tag = 1\n\
+             monitor = 0\n\
+             layout = \"monocle\"\n",
+        );
+        std::fs::write(&path, &text).unwrap();
+
+        let loaded = Config::load_from_file(&path).unwrap();
+        let entry = loaded.layout_for_tag(0, 1).expect("legacy entry");
+        assert!(entry.connector.is_none());
+        assert_eq!(entry.layout, "monocle");
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

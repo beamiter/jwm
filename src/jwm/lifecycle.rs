@@ -1016,7 +1016,7 @@ impl Jwm {
         info!("[cleanup] Starting essential cleanup (letting Rust handle memory)");
         // Before anything can fail: a layout changed seconds before a restart
         // is exactly the one the next process has to come back to.
-        if let Err(error) = self.flush_layout_persistence_on_exit() {
+        if let Err(error) = self.flush_layout_persistence_on_exit(backend) {
             // Normal-exit cleanup is already beyond its physical handoff
             // commit point, while restart has either completed this write or
             // given up on an unwritable config before entering cleanup.

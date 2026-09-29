@@ -4,13 +4,31 @@
 
 ---
 
-## Evolve backlog（目标 100 轮；已完成 wave 9–40，本地 ahead）
+## Evolve backlog（目标 100 轮；已完成 wave 9–41，本地 ahead）
 
 | # | 选题 | Size |
 | --- | --- | --- |
-| 14–40 | window/state 全族含 refit/strut/topology + seamless + session + placement | ✓ |
-| 41 | （建议）per-tag layout 也改 connector-stable；或 maximize restore 跨 output 几何重定位 | M |
+| 14–41 | topology/state 全族含 refit/strut/topology + seamless + session + placement + layout tags | ✓ |
+| 42 | （建议）maximize restore 跨 output 几何重定位 | M |
 | … | 跳过：Annotation/Screenshot CommonLinear、toast Closed(1)、BT withdraw、FS/PiP 丢锚点、Recording EncodedOnly、XWayland 单轴 | |
+
+---
+
+## 2026-09-29（二十九）：connector-stable per-tag layout
+
+选题 = evolve wave 41 / evolve7h。
+
+1. **契约**：`LayoutTagConfig` 增 optional `connector`（`OutputIdentity.stable_key`
+   / connector），与 `monitor` 并存；serde 缺省 `None`。seed/apply 优先按
+   connector 命中，再回退 `monitor`；`-1` wildcard 不变。persist 写出时经
+   `output_key_for_monitor` 记录 connector；merge 按 connector 去重以覆盖
+   renumber。
+2. **回归**：connector round-trip；renumber 后仍命中同输出；无 connector 旧
+   文件仍可加载；外键 connector 不误吃本机 `monitor` 行。
+
+**验证**：`scripts/test.sh --lib -- layout_tag` / `persist` / `LayoutTag`。
+
+**下一轮候选**：maximize restore 跨 output 几何重定位。
 
 ---
 

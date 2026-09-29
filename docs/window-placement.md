@@ -285,8 +285,12 @@ client entry and each monitor order list, alongside the numeric
 and `enumerate_outputs` to the current monitor number so hole-fill
 renumbering after hotplug still restores windows (and tile order) to the
 same panel; if the connector is missing (v4 and older) or the output is
-gone, the saved `monitor_num` is used. Session snapshots (v4+) also store
-maximize axes, the pre-maximize rectangle and
+gone, the saved `monitor_num` is used. Per-tag layouts in
+`[[layout.tags]]` follow the same rule: JWM writes an optional `connector`
+beside `monitor`, seeds by connector when the output identity is known, and
+falls back to the numeric index (with `monitor = -1` still meaning any
+monitor). Older config files without `connector` keep working. Session
+snapshots (v4+) also store maximize axes, the pre-maximize rectangle and
 whether the window was promoted. `restore_session` unmaximizes every matched
 window, applies the saved resting placement and tile order, then re-applies
 maximize with a user origin so a promoted tile is promoted again. Across a

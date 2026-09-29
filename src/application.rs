@@ -849,7 +849,7 @@ pub fn run_with_options(options: ApplicationOptions) -> Result<(), Box<dyn std::
                     |stage| -> Result<(), Box<dyn std::error::Error>> {
                         match stage {
                             RestartPreparationStage::FlushLayout => {
-                                jwm.flush_layout_persistence_on_exit()?;
+                                jwm.flush_layout_persistence_on_exit(&*backend)?;
                             }
                             RestartPreparationStage::ValidateConfig => {
                                 preflight_config(options.backend)?;

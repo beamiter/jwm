@@ -7,6 +7,13 @@ monorepo use independent Semantic Versions.
 
 ### Added
 
+- Per-tag layout entries (`[[layout.tags]]`) key the output by optional
+  `connector` (`OutputIdentity.stable_key` / connector name) alongside the
+  numeric `monitor` index, so hotplug hole-fill renumbering restores each
+  panel's layouts across a restart. Older files without `connector` still
+  load and fall back to `monitor` (`-1` remains the any-monitor wildcard).
+  See [docs/window-placement.md](docs/window-placement.md#restarts-and-sessions).
+
 - Session snapshots (v5+) key client placement and per-monitor tile order on
   the output's connector / `stable_key`, not bare `monitor_num`, so hotplug
   hole-fill renumbering restores windows to the same panel across a restart.

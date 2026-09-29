@@ -137,12 +137,18 @@ fn pending_layout_persist_wakeup(
 }
 
 /// Fill `monitor`'s pertag block from the config entries matching monitor
-/// index `mon_index`, then re-apply the current tag so the monitor shows what
-/// was restored rather than the defaults it was created with.
+/// index `mon_index` (and optional `connector` / `stable_key`), then re-apply
+/// the current tag so the monitor shows what was restored rather than the
+/// defaults it was created with.
 ///
 /// Unknown layout names and out-of-range numbers are skipped field by field:
 /// a typo in one entry costs that one value, not the whole restore.
-pub(crate) fn seed_pertag_from_config(monitor: &mut WMMonitor, mon_index: i32, config: &Config) {
+pub(crate) fn seed_pertag_from_config(
+    monitor: &mut WMMonitor,
+    mon_index: i32,
+    config: &Config,
+    connector: Option<&str>,
+) {
     if monitor.pertag.is_none() || config.layout_tags().is_empty() {
         return;
     }
@@ -150,7 +156,10 @@ pub(crate) fn seed_pertag_from_config(monitor: &mut WMMonitor, mon_index: i32, c
     let mut restored = 0usize;
 
     for tag in 0..=tags_length {
-        let Some(entry) = config.layout_for_tag(mon_index, tag).cloned() else {
+        let Some(entry) = config
+            .layout_for_tag_on_output(mon_index, tag, connector)
+            .cloned()
+        else {
             continue;
         };
         let Some(pertag) = monitor.pertag.as_mut() else {
@@ -181,7 +190,14 @@ pub(crate) fn seed_pertag_from_config(monitor: &mut WMMonitor, mon_index: i32, c
     }
 
     if restored > 0 {
-        debug!("[layout] restored {restored} saved tag layouts for monitor {mon_index}");
+        match connector {
+            Some(connector) => debug!(
+                "[layout] restored {restored} saved tag layouts for {connector} (monitor {mon_index})"
+            ),
+            None => debug!(
+                "[layout] restored {restored} saved tag layouts for monitor {mon_index}"
+            ),
+        }
     }
     monitor.reload_current_tag_context();
 }
@@ -190,15 +206,35 @@ pub(crate) fn seed_pertag_from_config(monitor: &mut WMMonitor, mon_index: i32, c
 /// for monitors that are not connected right now and the hand-written
 /// wildcard (`monitor = -1`) entries. Replacing the whole list erased an
 /// unplugged monitor's layouts on the first save after the unplug.
+///
+/// Live ownership is by monitor number **or** connector: after hotplug
+/// hole-fill renumbers a panel, the stale `(old_num, connector)` row is
+/// dropped in favour of the live one rather than kept beside it.
 fn merge_layout_tag_entries(
     existing: &[LayoutTagConfig],
     live: Vec<LayoutTagConfig>,
 ) -> Vec<LayoutTagConfig> {
     let live_monitors: std::collections::HashSet<i32> =
         live.iter().map(|entry| entry.monitor).collect();
+    let live_connectors: std::collections::HashSet<&str> = live
+        .iter()
+        .filter_map(|entry| entry.connector.as_deref())
+        .filter(|connector| !connector.is_empty())
+        .collect();
     let mut merged: Vec<LayoutTagConfig> = existing
         .iter()
-        .filter(|entry| !live_monitors.contains(&entry.monitor))
+        .filter(|entry| {
+            if entry.monitor < 0 {
+                return true;
+            }
+            if live_monitors.contains(&entry.monitor) {
+                return false;
+            }
+            match entry.connector.as_deref() {
+                Some(connector) if live_connectors.contains(connector) => false,
+                _ => true,
+            }
+        })
         .cloned()
         .collect();
     merged.extend(live);
@@ -226,7 +262,11 @@ impl Jwm {
 
     /// Write the per-tag layouts back to the config file once they have held
     /// still for [`PERSIST_DEBOUNCE`]. Called from the periodic update.
-    pub(crate) fn flush_layout_persistence(&mut self, now: Instant) {
+    pub(crate) fn flush_layout_persistence(
+        &mut self,
+        backend: &dyn crate::backend::api::Backend,
+        now: Instant,
+    ) {
         let Some(changed_at) = self.layout_persist_dirty else {
             return;
         };
@@ -249,7 +289,7 @@ impl Jwm {
         if self.config_reload_is_pending() {
             return;
         }
-        if let Err(error) = self.save_layout_tags() {
+        if let Err(error) = self.save_layout_tags(backend) {
             // A transient failure keeps the write pending but restarts the
             // debounce, so a rename race does not turn the update loop into a
             // tight I/O retry loop. A file that cannot be written at all is
@@ -282,17 +322,24 @@ impl Jwm {
     /// written at all (read-only filesystem, permission denied) is logged and
     /// reported as `Ok`, because refusing the restart would not make it
     /// writable and would refuse every later restart too.
-    pub(crate) fn flush_layout_persistence_on_exit(&mut self) -> Result<(), ConfigError> {
+    pub(crate) fn flush_layout_persistence_on_exit(
+        &mut self,
+        backend: &dyn crate::backend::api::Backend,
+    ) -> Result<(), ConfigError> {
         if self.layout_persist_dirty.is_none() || !CONFIG.load().layout_persist_tags() {
             return Ok(());
         }
-        let result = self.save_layout_tags();
+        let result = self.save_layout_tags(backend);
         settle_layout_persist_exit_flush(&mut self.layout_persist_dirty, Instant::now(), result)
     }
 
-    fn save_layout_tags(&mut self) -> Result<(), ConfigError> {
+    fn save_layout_tags(
+        &mut self,
+        backend: &dyn crate::backend::api::Backend,
+    ) -> Result<(), ConfigError> {
         let config = CONFIG.load_full();
-        let entries = merge_layout_tag_entries(config.layout_tags(), self.layout_tag_entries());
+        let entries =
+            merge_layout_tag_entries(config.layout_tags(), self.layout_tag_entries(backend));
         let revision = config.persist_layout_tags(&entries)?;
 
         // Keep the live config in step with the file, so a later whole-file
@@ -311,8 +358,13 @@ impl Jwm {
     ///
     /// One entry per (monitor, tag) including tag 0, the slot a monitor uses
     /// while showing all its tags at once — it is as much a place windows get
-    /// arranged in as the numbered ones.
-    pub(crate) fn layout_tag_entries(&self) -> Vec<LayoutTagConfig> {
+    /// arranged in as the numbered ones. `connector` is the output's
+    /// `stable_key` / connector when known, so a later hotplug renumber still
+    /// restores to the same panel.
+    pub(crate) fn layout_tag_entries(
+        &self,
+        backend: &dyn crate::backend::api::Backend,
+    ) -> Vec<LayoutTagConfig> {
         let tags_length = CONFIG.load().tags_length();
         let mut entries = Vec::with_capacity(self.state.monitor_order.len() * (tags_length + 1));
 
@@ -323,15 +375,17 @@ impl Jwm {
             let Some(pertag) = monitor.pertag.as_ref() else {
                 continue;
             };
+            let connector = self.output_key_for_monitor(backend, mon_key);
             for tag in 0..=tags_length {
                 let Some(layout) = pertag.lts.get(tag) else {
                     continue;
                 };
                 entries.push(LayoutTagConfig {
                     tag,
-                    // Keyed by monitor number, the identity a monitor keeps
-                    // across hot-plug, which is also what seeding reads.
+                    // Keyed by connector when known; `monitor` is the
+                    // fallback index for older files and missing identities.
                     monitor: monitor.num,
+                    connector: connector.clone(),
                     layout: layout.0.to_owned(),
                     alt: pertag
                         .prev_lts
@@ -374,12 +428,19 @@ mod tests {
         LayoutTagConfig {
             tag,
             monitor,
+            connector: None,
             layout: layout.to_owned(),
             alt: String::new(),
             n_master: None,
             m_fact: None,
             gap: None,
         }
+    }
+
+    fn entry_on(tag: usize, monitor: i32, connector: &str, layout: &str) -> LayoutTagConfig {
+        let mut entry = entry(tag, monitor, layout);
+        entry.connector = Some(connector.to_owned());
+        entry
     }
 
     fn config_with(tags: Vec<LayoutTagConfig>) -> Config {
@@ -608,7 +669,7 @@ mod tests {
             .find("if self.config_reload_is_pending()")
             .expect("the flush defers to a pending edit");
         let save = body
-            .find("self.save_layout_tags()")
+            .find("self.save_layout_tags(backend)")
             .expect("the flush writes");
         assert!(observe < pending && pending < save);
     }
@@ -662,6 +723,33 @@ mod tests {
     }
 
     #[test]
+    fn merge_drops_stale_rows_for_a_renumbered_connector() {
+        let existing = vec![
+            entry_on(1, 1, "HDMI-A-1", "monocle"),
+            entry(1, -1, "grid"),
+        ];
+        // HDMI was monitor 1; after hole-fill it is monitor 0.
+        let merged = merge_layout_tag_entries(
+            &existing,
+            vec![entry_on(1, 0, "HDMI-A-1", "deck")],
+        );
+        let summary: Vec<(i32, Option<&str>, &str)> = merged
+            .iter()
+            .map(|entry| {
+                (
+                    entry.monitor,
+                    entry.connector.as_deref(),
+                    entry.layout.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            summary,
+            [(-1, None, "grid"), (0, Some("HDMI-A-1"), "deck"),]
+        );
+    }
+
+    #[test]
     fn a_saved_layout_comes_back_selected_on_its_tag() {
         let mut monitor = monitor_with_tags(9);
         let mut saved = entry(1, 0, "monocle");
@@ -669,7 +757,7 @@ mod tests {
         saved.n_master = Some(3);
         saved.m_fact = Some(0.7);
         saved.gap = Some(12);
-        seed_pertag_from_config(&mut monitor, 0, &config_with(vec![saved]));
+        seed_pertag_from_config(&mut monitor, 0, &config_with(vec![saved]), None);
 
         let pertag = monitor.pertag.as_ref().expect("pertag");
         assert_eq!(*pertag.lts[1], LayoutEnum::MONOCLE);
@@ -686,7 +774,12 @@ mod tests {
     #[test]
     fn untouched_tags_keep_their_defaults() {
         let mut monitor = monitor_with_tags(9);
-        seed_pertag_from_config(&mut monitor, 0, &config_with(vec![entry(2, 0, "grid")]));
+        seed_pertag_from_config(
+            &mut monitor,
+            0,
+            &config_with(vec![entry(2, 0, "grid")]),
+            None,
+        );
         let pertag = monitor.pertag.as_ref().expect("pertag");
         assert_eq!(*pertag.lts[2], LayoutEnum::GRID);
         assert_eq!(*pertag.lts[3], LayoutEnum::FIBONACCI);
@@ -699,6 +792,7 @@ mod tests {
             &mut monitor,
             1,
             &config_with(vec![entry(1, -1, "grid"), entry(1, 1, "deck")]),
+            None,
         );
         assert_eq!(*monitor.lt, LayoutEnum::DECK);
 
@@ -708,8 +802,41 @@ mod tests {
             &mut other,
             2,
             &config_with(vec![entry(1, -1, "grid"), entry(1, 1, "deck")]),
+            None,
         );
         assert_eq!(*other.lt, LayoutEnum::GRID);
+    }
+
+    #[test]
+    fn connector_match_wins_over_stale_monitor_number() {
+        let mut monitor = monitor_with_tags(9);
+        // Saved while HDMI was monitor 1; after renumber it is monitor 0.
+        seed_pertag_from_config(
+            &mut monitor,
+            0,
+            &config_with(vec![
+                entry(1, -1, "grid"),
+                entry_on(1, 1, "HDMI-A-1", "deck"),
+                entry(1, 0, "tile"),
+            ]),
+            Some("HDMI-A-1"),
+        );
+        assert_eq!(*monitor.lt, LayoutEnum::DECK);
+    }
+
+    #[test]
+    fn a_foreign_connector_does_not_claim_this_monitor_number() {
+        let mut monitor = monitor_with_tags(9);
+        seed_pertag_from_config(
+            &mut monitor,
+            0,
+            &config_with(vec![
+                entry_on(1, 0, "HDMI-A-1", "deck"),
+                entry(1, -1, "grid"),
+            ]),
+            Some("eDP-1"),
+        );
+        assert_eq!(*monitor.lt, LayoutEnum::GRID);
     }
 
     /// A hand-edited file is the normal way these entries get written, so one
@@ -721,7 +848,7 @@ mod tests {
         saved.n_master = Some(9_999);
         saved.m_fact = Some(f32::NAN);
         saved.gap = Some(-40);
-        seed_pertag_from_config(&mut monitor, 0, &config_with(vec![saved]));
+        seed_pertag_from_config(&mut monitor, 0, &config_with(vec![saved]), None);
 
         // The unknown name left the tag on its default...
         assert_eq!(*monitor.lt, LayoutEnum::FIBONACCI);
@@ -734,7 +861,12 @@ mod tests {
     #[test]
     fn an_entry_for_a_tag_that_does_not_exist_is_ignored() {
         let mut monitor = monitor_with_tags(4);
-        seed_pertag_from_config(&mut monitor, 0, &config_with(vec![entry(30, 0, "grid")]));
+        seed_pertag_from_config(
+            &mut monitor,
+            0,
+            &config_with(vec![entry(30, 0, "grid")]),
+            None,
+        );
         assert_eq!(*monitor.lt, LayoutEnum::FIBONACCI);
     }
 }

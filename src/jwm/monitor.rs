@@ -1107,7 +1107,14 @@ impl Jwm {
         // Reusing `len()` after a non-tail hot-unplug can collide with a
         // surviving monitor.
         let num = lowest_unused_monitor_num(self.state.monitors.values().map(|monitor| &monitor.num));
-        let mut m = self.createmon_numbered(CONFIG.load().show_bar(), num);
+        let connector = if !info.identity.stable_key.is_empty() {
+            Some(info.identity.stable_key.as_str())
+        } else if !info.identity.connector.is_empty() {
+            Some(info.identity.connector.as_str())
+        } else {
+            None
+        };
+        let mut m = self.createmon_numbered(CONFIG.load().show_bar(), num, connector);
 
         // 设置 Monitor 几何属性
         m.geometry.m_x = info.x;
