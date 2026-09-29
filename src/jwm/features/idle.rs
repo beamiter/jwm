@@ -441,6 +441,7 @@ impl crate::jwm::Jwm {
         let clock = backend.idle_millis();
         self.idle.note_clock(clock.is_some());
         let Some(idle_millis) = clock else {
+            self.last_idle_for = None;
             // Whatever an earlier clock dimmed is put back rather than left
             // dark, now that nothing can notice the activity that undoes it.
             let locked = self.idle_session_locked();
@@ -449,6 +450,8 @@ impl crate::jwm::Jwm {
             }
             return;
         };
+        let idle_for = Duration::from_millis(idle_millis);
+        self.last_idle_for = Some(idle_for);
 
         // Two idle policies in one session do not share the work, they fight:
         // the X server's blanker resets the very clock read above, so a stage
@@ -469,7 +472,7 @@ impl crate::jwm::Jwm {
             || self.features.audio_recording.active;
         let actions = self.idle.poll(
             &settings,
-            Duration::from_millis(idle_millis),
+            idle_for,
             inhibited,
             self.idle_session_locked(),
             now,
@@ -639,6 +642,7 @@ impl crate::jwm::Jwm {
             // What the policy itself acts on, so a bar counting down to the
             // lock is not told a monitor prompt already is one.
             self.idle_session_locked(),
+            self.last_idle_for,
         )
     }
 
@@ -663,16 +667,30 @@ fn idle_status_payload(
     dimmed: bool,
     screen_off: bool,
     locked: bool,
+    idle_for: Option<Duration>,
 ) -> serde_json::Value {
     let secs = |stage: Option<Duration>| stage.map_or(0, |after| after.as_secs());
+    let idle_secs = idle_for.map_or(0, |d| d.as_secs());
+    let until = |stage: Option<Duration>| {
+        stage.map_or(0, |after| {
+            after
+                .saturating_sub(idle_for.unwrap_or(Duration::ZERO))
+                .as_secs()
+        })
+    };
     serde_json::json!({
         "inhibited": inhibited,
         "dimmed": dimmed,
         "screen_off": screen_off,
         "locked": locked,
+        "dim_level": settings.dim_level,
+        "idle_for": idle_secs,
         "dim_secs": secs(settings.dim_after),
         "lock_secs": secs(settings.lock_after),
         "screen_off_secs": secs(settings.screen_off_after),
+        "secs_until_dim": until(settings.dim_after),
+        "secs_until_lock": until(settings.lock_after),
+        "secs_until_screen_off": until(settings.screen_off_after),
     })
 }
 
@@ -843,17 +861,31 @@ mod tests {
         // `idle_lock_secs = 1` locks after the floor, and a screen-off stage
         // without a command never runs: the report says so, as the gate does.
         let settings = IdleSettings::from_secs(120, 0.3, 1, 900, false);
-        let payload = idle_status_payload(&settings, true, false, false, false);
+        let payload = idle_status_payload(&settings, true, false, false, false, None);
         assert_eq!(payload["inhibited"], true);
         assert_eq!(payload["dim_secs"], 120u64);
         assert_eq!(payload["lock_secs"], MIN_LOCK_SECS);
         assert_eq!(payload["screen_off_secs"], 0u64);
+        assert!((payload["dim_level"].as_f64().unwrap() - 0.3).abs() < 1e-6);
+        assert_eq!(payload["idle_for"], 0u64);
+        assert_eq!(payload["secs_until_dim"], 120u64);
 
         let settings = IdleSettings::from_secs(0, 0.3, 600, 900, true);
-        let payload = idle_status_payload(&settings, false, false, false, false);
+        let payload = idle_status_payload(
+            &settings,
+            false,
+            false,
+            false,
+            false,
+            Some(Duration::from_secs(100)),
+        );
         assert_eq!(payload["dim_secs"], 0u64);
         assert_eq!(payload["lock_secs"], 600u64);
         assert_eq!(payload["screen_off_secs"], 900u64);
+        assert_eq!(payload["idle_for"], 100u64);
+        assert_eq!(payload["secs_until_dim"], 0u64);
+        assert_eq!(payload["secs_until_lock"], 500u64);
+        assert_eq!(payload["secs_until_screen_off"], 800u64);
     }
 
     #[test]

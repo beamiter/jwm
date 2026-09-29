@@ -137,10 +137,11 @@ impl ScreenCast {
         let want_monitor = types_mask & (SourceType::Monitor as u32) != 0;
         let want_window = types_mask & (SourceType::Window as u32) != 0;
 
-        let (outputs, toplevels) = {
+        let (mut outputs, toplevels) = {
             let snap = self.rt.wayland().lock().expect("wayland snapshot mutex");
             (snap.outputs.clone(), snap.toplevels.clone())
         };
+        crate::ipc::enrich_outputs_with_connectors(&mut outputs);
 
         // Try the restore path first — if the caller handed us a token and the
         // stored sources still resolve, skip the picker entirely.

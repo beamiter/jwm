@@ -46,7 +46,11 @@ pub fn pick_outputs(available: &[OutputInfo], multiple: bool) -> PickerOutcome<O
     if let Ok(name) = std::env::var("JWM_PORTAL_OUTPUT") {
         let filtered: Vec<_> = available
             .iter()
-            .filter(|o| o.name == name || o.description.contains(&name))
+            .filter(|o| {
+                o.name == name
+                    || o.description.contains(&name)
+                    || o.connector.as_deref() == Some(name.as_str())
+            })
             .cloned()
             .collect();
         if !filtered.is_empty() {
@@ -99,10 +103,15 @@ pub fn pick_windows(available: &[ToplevelInfo], multiple: bool) -> PickerOutcome
 /// `available` entries, defending against renamed/closed sources between
 /// list-time and choice-time).
 fn output_label(o: &OutputInfo) -> String {
-    if o.description.is_empty() {
-        format!("[Monitor] {}", o.name)
-    } else {
-        format!("[Monitor] {} ({})", o.name, o.description)
+    let connector = o
+        .connector
+        .as_deref()
+        .filter(|c| !c.is_empty() && *c != o.name.as_str());
+    match (o.description.is_empty(), connector) {
+        (true, None) => format!("[Monitor] {}", o.name),
+        (true, Some(c)) => format!("[Monitor] {} [{c}]", o.name),
+        (false, None) => format!("[Monitor] {} ({})", o.name, o.description),
+        (false, Some(c)) => format!("[Monitor] {} ({}) [{c}]", o.name, o.description),
     }
 }
 

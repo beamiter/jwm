@@ -292,6 +292,10 @@ pub struct Jwm {
     pub(crate) last_battery_poll: Option<std::time::Instant>,
     /// Last time the session's idle clock was read.
     pub(crate) last_idle_poll: Option<std::time::Instant>,
+    /// Last idle duration the policy read (`None` when the clock was missing).
+    /// Fed into `get_idle_status` / `idle/state` for `idle_for` and
+    /// `secs_until_*` without re-probing the backend on every broadcast.
+    pub(crate) last_idle_for: Option<std::time::Duration>,
     /// What the idle policy has already done this idle period.
     pub(crate) idle: crate::jwm::features::idle::IdleTracker,
     /// Caffeine: hold the session awake regardless of the idle clock, until
@@ -1385,6 +1389,7 @@ impl Jwm {
             night_light_override: None,
             last_battery_poll: None,
             last_idle_poll: None,
+            last_idle_for: None,
             idle: crate::jwm::features::idle::IdleTracker::default(),
             idle_inhibited: false,
             system_ui_dirty: false,

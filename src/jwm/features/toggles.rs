@@ -3796,7 +3796,9 @@ impl Jwm {
             return Err("recording selection lost its output path".into());
         };
         if let Err(error) = self.start_recording_region(backend, &output_path, region) {
+            let message = error.to_string();
             self.features.recording.cancel();
+            self.features.recording.note_error(message);
             backend.compositor_force_full_redraw();
             return Err(error);
         }

@@ -95,7 +95,14 @@ pub fn resolve_in(
     let outputs: Vec<OutputInfo> = entry
         .outputs
         .iter()
-        .filter_map(|name| available_outputs.iter().find(|o| &o.name == name).cloned())
+        .filter_map(|key| {
+            available_outputs
+                .iter()
+                .find(|o| {
+                    &o.name == key || o.connector.as_deref() == Some(key.as_str())
+                })
+                .cloned()
+        })
         .collect();
     let toplevels: Vec<ToplevelInfo> = entry
         .toplevels
@@ -111,6 +118,15 @@ pub fn resolve_in(
         return None;
     }
     Some((SourceSelection { outputs, toplevels }, entry.persist_mode))
+}
+
+fn output_restore_key(output: &OutputInfo) -> String {
+    output
+        .connector
+        .as_deref()
+        .filter(|c| !c.is_empty())
+        .unwrap_or(output.name.as_str())
+        .to_string()
 }
 
 /// Look up a token; resolve against the *current* available outputs / toplevels.
@@ -136,7 +152,7 @@ pub fn resolve(
 pub fn save_new(selection: &SourceSelection, persist_mode: u32) -> String {
     let token = new_token();
     let entry = RestoredSelection {
-        outputs: selection.outputs.iter().map(|o| o.name.clone()).collect(),
+        outputs: selection.outputs.iter().map(output_restore_key).collect(),
         toplevels: selection
             .toplevels
             .iter()
@@ -155,7 +171,7 @@ pub fn save_new(selection: &SourceSelection, persist_mode: u32) -> String {
 /// and we just confirmed it; spec says to hand the same token back).
 pub fn touch(token: &str, selection: &SourceSelection, persist_mode: u32) {
     let entry = RestoredSelection {
-        outputs: selection.outputs.iter().map(|o| o.name.clone()).collect(),
+        outputs: selection.outputs.iter().map(output_restore_key).collect(),
         toplevels: selection
             .toplevels
             .iter()
@@ -191,6 +207,14 @@ mod tests {
             width: 1920,
             height: 1080,
             refresh_mhz: 60_000,
+            connector: None,
+        }
+    }
+
+    fn out_with_connector(name: &str, connector: &str) -> OutputInfo {
+        OutputInfo {
+            connector: Some(connector.into()),
+            ..out(name)
         }
     }
 
@@ -271,6 +295,25 @@ mod tests {
             let (_, m) = resolve_in(&e, &outs, &[]).expect("resolves");
             assert_eq!(m, mode);
         }
+    }
+
+    #[test]
+    fn restore_matches_stored_connector_when_wl_name_changed() {
+        let e = entry(&["DP-1"], &[], 1);
+        // wl_output renamed but DRM connector still DP-1.
+        let outs = vec![out_with_connector("WL-1", "DP-1")];
+        let (sel, _) = resolve_in(&e, &outs, &[]).expect("connector match");
+        assert_eq!(sel.outputs[0].name, "WL-1");
+        assert_eq!(sel.outputs[0].connector.as_deref(), Some("DP-1"));
+    }
+
+    #[test]
+    fn output_restore_key_prefers_connector() {
+        assert_eq!(output_restore_key(&out("DP-1")), "DP-1");
+        assert_eq!(
+            output_restore_key(&out_with_connector("WL-1", "DP-1")),
+            "DP-1"
+        );
     }
 
     #[test]

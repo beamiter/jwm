@@ -389,7 +389,9 @@ worker is connected the request is dropped with a log message.
 `get_waterlily_status` reports the last successfully delivered
 `requested_case` / `requested_palette` (verbatim, so `next` / `auto` stay as
 requested — the worker resolves them) beside the existing enabled / frame
-fields.
+fields. When the layer is on screen (`active`), the same values are mirrored
+as `active_case` / `active_palette`; when it is not, those fields are null so
+a bar does not treat a stale request after disable as live.
 
 The following environment variables are read when the integration starts:
 

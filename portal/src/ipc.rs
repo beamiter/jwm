@@ -26,6 +26,17 @@ pub struct WindowInfo {
     pub instance: String,
     #[serde(default)]
     pub tags: u32,
+    #[serde(default)]
+    pub pid: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct MonitorInfo {
+    pub num: i32,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub connector: Option<String>,
 }
 
 /// Mirror of the compositor's per-client IPC buffer ceiling, the cap the
@@ -40,6 +51,15 @@ struct WindowsResponse {
     success: bool,
     #[serde(default)]
     data: Option<Vec<WindowInfo>>,
+    #[serde(default)]
+    error: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MonitorsResponse {
+    success: bool,
+    #[serde(default)]
+    data: Option<Vec<MonitorInfo>>,
     #[serde(default)]
     error: Option<String>,
 }
@@ -153,6 +173,35 @@ pub fn query_windows() -> std::io::Result<Vec<WindowInfo>> {
     query_windows_at(&socket_path(), effective_uid())
 }
 
+/// Best-effort monitor list for connector enrichment. Failure is non-fatal —
+/// pickers keep matching on wl_output name alone.
+pub fn query_monitors() -> std::io::Result<Vec<MonitorInfo>> {
+    query_monitors_at(&socket_path(), effective_uid())
+}
+
+/// Fill [`crate::wayland::OutputInfo::connector`] from jwm `get_monitors`
+/// when the wl_output name (or description) lines up with a monitor row.
+pub fn enrich_outputs_with_connectors(outputs: &mut [crate::wayland::OutputInfo]) {
+    let Ok(monitors) = query_monitors() else {
+        return;
+    };
+    for output in outputs.iter_mut() {
+        if output.connector.is_some() {
+            continue;
+        }
+        let connector = monitors.iter().find_map(|m| {
+            let name_hit = m.name.as_deref() == Some(output.name.as_str());
+            let connector_as_name = m.connector.as_deref() == Some(output.name.as_str());
+            if name_hit || connector_as_name {
+                m.connector.clone().or_else(|| m.name.clone())
+            } else {
+                None
+            }
+        });
+        output.connector = connector;
+    }
+}
+
 fn query_windows_at(socket: &Path, uid: u32) -> io::Result<Vec<WindowInfo>> {
     let mut sock = connect_validated(socket, uid)?;
     sock.set_read_timeout(Some(Duration::from_millis(500)))?;
@@ -163,6 +212,14 @@ fn query_windows_at(socket: &Path, uid: u32) -> io::Result<Vec<WindowInfo>> {
     // The connection stays open after the reply, so read exactly one frame:
     // reading to EOF would always end in the read timeout.
     read_windows_response(BufReader::new(&sock))
+}
+
+fn query_monitors_at(socket: &Path, uid: u32) -> io::Result<Vec<MonitorInfo>> {
+    let mut sock = connect_validated(socket, uid)?;
+    sock.set_read_timeout(Some(Duration::from_millis(500)))?;
+    sock.set_write_timeout(Some(Duration::from_millis(500)))?;
+    sock.write_all(b"{\"query\":\"get_monitors\"}\n")?;
+    read_monitors_response(BufReader::new(&sock))
 }
 
 /// Parse one newline-terminated reply frame into the window list.
@@ -197,6 +254,41 @@ fn read_windows_response<R: BufRead>(reader: R) -> io::Result<Vec<WindowInfo>> {
         io::Error::new(
             io::ErrorKind::InvalidData,
             "jwm answered get_windows without a window list",
+        )
+    })
+}
+
+fn read_monitors_response<R: BufRead>(reader: R) -> io::Result<Vec<MonitorInfo>> {
+    let mut frame = Vec::new();
+    let read = reader
+        .take(MAX_IPC_FRAME_BYTES + 1)
+        .read_until(b'\n', &mut frame)?;
+    if read == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "jwm closed the socket without responding",
+        ));
+    }
+    if frame.last() != Some(&b'\n') && frame.len() as u64 > MAX_IPC_FRAME_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "jwm IPC frame exceeded limit",
+        ));
+    }
+    let response: MonitorsResponse = serde_json::from_slice(&frame)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    if !response.success {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            response
+                .error
+                .unwrap_or_else(|| "jwm rejected get_monitors".to_string()),
+        ));
+    }
+    response.data.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "jwm answered get_monitors without a monitor list",
         )
     })
 }

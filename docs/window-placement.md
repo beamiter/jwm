@@ -209,7 +209,9 @@ resize), `is_dock`, `is_desktop`, `is_drag_floating` (user-promoted float),
 `never_focus`, `skip_taskbar`, `skip_pager`, `no_decorations`,
 `demands_attention` (EWMH demands-attention, distinct from `is_urgent`),
 `has_strut` (contributes a `_NET_WM_STRUT(_PARTIAL)` reservation), and
-`client_fact` (per-window tiled share). Maximize detail: `maximize_promoted`
+`client_fact` (per-window tiled share). When size hints have been fetched,
+optional `size_hints` carries `base_*` / `inc_*` / `min_*` / `max_*` /
+`*_aspect`. Maximize detail: `maximize_promoted`
 (`maximize_restore_tiled`), optional `maximize_restore` `{x,y,w,h}`, and
 `minimized_order`. Swallow edges: optional `swallowing` (parent id this
 child is swallowing) and `swallowed_by` (child id that swallowed this

@@ -134,6 +134,9 @@ pub struct RecordingState {
     pub adjusting_region: bool,
     /// Output path held while the initial interactive selection is in progress.
     pub pending_output_path: Option<String>,
+    /// Last start/stop failure message for `get_recording_status`; cleared on
+    /// a successful start. Mirrors audio recording's `last_error`.
+    pub last_error: Option<String>,
     /// Region restored when an active adjustment is cancelled.
     original_region: Option<Rect>,
     drag: RecordingRegionDrag,
@@ -158,8 +161,14 @@ impl RecordingState {
         self.selecting_region = false;
         self.adjusting_region = false;
         self.pending_output_path = None;
+        self.last_error = None;
         self.original_region = None;
         self.drag = RecordingRegionDrag::None;
+    }
+
+    /// Remember a start/stop failure for status queries.
+    pub fn note_error(&mut self, error: impl Into<String>) {
+        self.last_error = Some(error.into());
     }
 
     /// 停止录制

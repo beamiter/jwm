@@ -499,6 +499,21 @@ pub struct RectIpc {
     pub h: i32,
 }
 
+/// ICCCM / xdg size hints projected over IPC when the client has valid hints.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq)]
+pub struct SizeHintsIpc {
+    pub base_w: i32,
+    pub base_h: i32,
+    pub inc_w: i32,
+    pub inc_h: i32,
+    pub max_w: i32,
+    pub max_h: i32,
+    pub min_w: i32,
+    pub min_h: i32,
+    pub min_aspect: f32,
+    pub max_aspect: f32,
+}
+
 #[derive(Debug, Serialize)]
 pub struct WindowInfo {
     pub id: u64,
@@ -612,6 +627,10 @@ pub struct WindowInfo {
     /// (a parked scratchpad).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub layout: Option<String>,
+    /// Valid ICCCM / xdg size hints when known; omitted when the client has
+    /// none or they have not been fetched yet.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size_hints: Option<SizeHintsIpc>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1253,6 +1272,7 @@ mod tests {
             monitor_name: None,
             scratchpad: Some("term".into()),
             layout: Some("TILE".into()),
+            size_hints: None,
         })
         .expect("serialize WindowInfo");
 
@@ -1290,6 +1310,7 @@ mod tests {
         assert_eq!(value["layout"], "TILE");
         assert_eq!(value["pid"], 1234);
         assert_eq!(value["connector"], "DP-1");
+        assert!(value.get("size_hints").is_none());
 
         let without_pid = serde_json::to_value(WindowInfo {
             id: 1,
@@ -1342,6 +1363,7 @@ mod tests {
             monitor_name: None,
             scratchpad: None,
             layout: None,
+            size_hints: None,
         })
         .expect("serialize");
         assert!(without_pid.get("pid").is_none());
@@ -1407,6 +1429,7 @@ mod tests {
             monitor_name: Some("Dell U2720Q".into()),
             scratchpad: None,
             layout: Some("MONOCLE".into()),
+            size_hints: None,
         })
         .expect("serialize");
         assert_eq!(with_connector["connector"], "HDMI-A-1");
@@ -1465,6 +1488,7 @@ mod tests {
             monitor_name: None,
             scratchpad: None,
             layout: None,
+            size_hints: None,
         })
         .expect("serialize");
         assert!(without.get("connector").is_none());

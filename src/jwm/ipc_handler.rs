@@ -10,7 +10,8 @@ use crate::core::state::WMState;
 use crate::core::types::Rect;
 use crate::ipc::{
     self, CompositorTransitionStatus, IpcEvent, IpcResponse, MonitorInfoIpc, RectIpc, RuntimeCounts,
-    RuntimeFeatureStates, RuntimeHealth, RuntimeStatusV1, TreeNode, WindowInfo, WorkspaceInfo,
+    RuntimeFeatureStates, RuntimeHealth, RuntimeStatusV1, SizeHintsIpc, TreeNode, WindowInfo,
+    WorkspaceInfo,
 };
 use crate::ipc_server::IncomingIpc;
 use crate::jwm::features::recording::RecordingFileIdentity;
@@ -178,6 +179,18 @@ fn client_window_info(
         monitor_name,
         scratchpad,
         layout,
+        size_hints: client.size_hints.hints_valid.then_some(SizeHintsIpc {
+            base_w: client.size_hints.base_w,
+            base_h: client.size_hints.base_h,
+            inc_w: client.size_hints.inc_w,
+            inc_h: client.size_hints.inc_h,
+            max_w: client.size_hints.max_w,
+            max_h: client.size_hints.max_h,
+            min_w: client.size_hints.min_w,
+            min_h: client.size_hints.min_h,
+            min_aspect: client.size_hints.min_aspect,
+            max_aspect: client.size_hints.max_aspect,
+        }),
     }
 }
 
@@ -2382,6 +2395,7 @@ impl Jwm {
                     ))
                 }
                 Err(error) => {
+                    self.features.recording.note_error(error.to_string());
                     self.broadcast_ipc_event(
                         "recording/error",
                         serde_json::json!({"operation": "start", "error": error.to_string()}),
@@ -2655,6 +2669,10 @@ impl Jwm {
                         serde_json::json!({"output_path": output_path.clone()}),
                     );
                 }
+                let capture_stats = backend.compositor_recording_stats();
+                let elapsed_secs = capture_stats
+                    .as_ref()
+                    .map(|stats| (stats.elapsed_secs * 10.0).round() / 10.0);
                 IpcResponse::ok(Some(serde_json::json!({
                     "active": active,
                     "finalized": finalized,
@@ -2673,8 +2691,8 @@ impl Jwm {
                     })),
                     // The compositor is authoritative: a height cap makes the
                     // encoded size differ from the region the WM recorded.
-                    "output_size": backend
-                        .compositor_recording_stats()
+                    "output_size": capture_stats
+                        .as_ref()
                         .map(|stats| stats.output_size)
                         .or(self.features.recording.output_size)
                         .map(|(width, height)| serde_json::json!({
@@ -2686,6 +2704,12 @@ impl Jwm {
                     "pending_output_path": self.features.recording.pending_output_path.clone(),
                     "segments": self.features.recording.segments.clone(),
                     "segment_count": self.features.recording.segment_count(),
+                    // Top-level twins of nested capture timing / interactive
+                    // target / last failure so a bar need not dig into
+                    // `capture` or keep separate error topic state.
+                    "elapsed_secs": elapsed_secs,
+                    "capture_target": self.features.capture.recording.label(),
+                    "last_error": self.features.recording.last_error,
                     // What the recording is actually achieving. A recorder that
                     // silently runs at a third of the requested rate, or that is
                     // discarding frames because the encoder cannot keep up,
@@ -2693,7 +2717,7 @@ impl Jwm {
                     // numbers that say otherwise while it is still running.
                     // `captured_fps` well under `fps` is normal on a static
                     // screen, where unchanged frames are deliberately skipped.
-                    "capture": backend.compositor_recording_stats().map(|stats| serde_json::json!({
+                    "capture": capture_stats.map(|stats| serde_json::json!({
                         "captured_frames": stats.captured,
                         "dropped_frames": stats.dropped,
                         "captured_fps": (stats.effective_fps() * 10.0).round() / 10.0,
@@ -2727,10 +2751,19 @@ impl Jwm {
                 "overview": self.features.overview.active,
                 "expose": self.features.expose_active,
                 "audio_recording": self.features.audio_recording.active,
+                "recording": self.features.recording.active,
+                "selecting_recording": self.features.recording.selecting_region,
+                "selecting_screenshot": self.features.screenshot.active
+                    && !self.features.screenshot.committed,
                 "magnifier": self.features.magnifier.enabled,
                 "magnifier_zoom": self.features.magnifier.zoom_level,
                 "annotation": self.features.annotation_active,
                 "peek": self.features.peek_active,
+                "layout_picker": self.features.system_ui.is_layout_picker(),
+                "tags_overview": self.features.system_ui.is_tags_overview(),
+                "calendar": self.features.system_ui.is_calendar(),
+                "keybindings": self.features.system_ui.is_keybindings(),
+                "monitor_layout": self.features.system_ui.is_monitor_layout(),
                 "corner_radius": cfg.behavior().corner_radius,
                 "shadow_enabled": cfg.behavior().shadow_enabled,
                 "blur_enabled": cfg.behavior().blur_enabled,
@@ -2925,6 +2958,17 @@ impl Jwm {
                     "frame_sequence": status.frame_sequence,
                     "requested_case": status.requested_case,
                     "requested_palette": status.requested_palette,
+                    // When the layer is on screen, mirror the last delivered
+                    // request as `active_*` so a bar can show what is playing
+                    // without treating a stale request after disable as live.
+                    "active_case": status
+                        .active
+                        .then(|| status.requested_case.clone())
+                        .flatten(),
+                    "active_palette": status
+                        .active
+                        .then(|| status.requested_palette.clone())
+                        .flatten(),
                 }))),
                 None => IpcResponse::err("compositor not active".to_string()),
             },

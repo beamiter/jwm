@@ -1,6 +1,6 @@
 //! Match `JWM_PORTAL_WINDOW` against Wayland toplevels, optionally enriched
-//! by jwm's IPC `get_windows` list so class/instance queries are not limited
-//! to the Wayland foreign-toplevel `app_id`.
+//! by jwm's IPC `get_windows` list so class/instance/pid queries are not
+//! limited to the Wayland foreign-toplevel `app_id`.
 
 use crate::ipc::WindowInfo;
 use crate::wayland::ToplevelInfo;
@@ -10,7 +10,7 @@ use crate::wayland::ToplevelInfo;
 /// Lookup order:
 /// 1. Wayland `app_id` / title (existing behaviour).
 /// 2. When that yields nothing and `ipc_windows` is `Some`, match against
-///    jwm `get_windows` class / instance / name and map hits back onto
+///    jwm `get_windows` class / instance / name / pid and map hits back onto
 ///    toplevels by title or app_id ≈ class/instance.
 ///
 /// An empty result means the caller should fall through to the interactive
@@ -25,6 +25,7 @@ pub fn filter_portal_window_spec(
         .iter()
         .filter(|t| match kind {
             "class" | "app_id" => t.app_id == needle,
+            "pid" => false, // pid lives on the IPC window list only
             _ => t.title.contains(needle),
         })
         .cloned()
@@ -36,12 +37,14 @@ pub fn filter_portal_window_spec(
     let Some(windows) = ipc_windows else {
         return Vec::new();
     };
+    let pid_needle = (kind == "pid").then(|| needle.parse::<u32>().ok()).flatten();
     let hits: Vec<&WindowInfo> = windows
         .iter()
         .filter(|w| match kind {
             "class" | "app_id" => {
                 w.class.eq_ignore_ascii_case(needle) || w.instance.eq_ignore_ascii_case(needle)
             }
+            "pid" => pid_needle.is_some_and(|pid| w.pid == Some(pid)),
             _ => w.name.contains(needle),
         })
         .collect();
@@ -88,6 +91,14 @@ mod tests {
             class: class.into(),
             instance: instance.into(),
             tags: 1,
+            pid: None,
+        }
+    }
+
+    fn window_with_pid(class: &str, instance: &str, name: &str, pid: u32) -> WindowInfo {
+        WindowInfo {
+            pid: Some(pid),
+            ..window(class, instance, name)
         }
     }
 
@@ -126,5 +137,16 @@ mod tests {
         let available = vec![toplevel("a", "x", "Hello World")];
         let matched = filter_portal_window_spec("title:World", &available, None);
         assert_eq!(matched.len(), 1);
+    }
+
+    #[test]
+    fn ipc_pid_match_maps_when_wayland_has_no_pid() {
+        let available = vec![toplevel("a", "", "Mozilla Firefox")];
+        let ipc = vec![window_with_pid("firefox", "Navigator", "Mozilla Firefox", 4242)];
+        let matched = filter_portal_window_spec("pid:4242", &available, Some(&ipc));
+        assert_eq!(matched.len(), 1);
+        assert_eq!(matched[0].identifier, "a");
+        let miss = filter_portal_window_spec("pid:9999", &available, Some(&ipc));
+        assert!(miss.is_empty());
     }
 }

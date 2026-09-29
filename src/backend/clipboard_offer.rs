@@ -369,18 +369,20 @@ pub fn preferred_text_mime(mime_types: &[String]) -> Option<String> {
 /// Pick an image offer for history capture.
 ///
 /// Prefers `image/png`, then `image/jpeg`, then `image/webp`, then
-/// `image/gif`, then `image/bmp`. Non-PNG offers are decoded into PNG under
-/// [`MAX_IMAGE_HISTORY_BYTES`] before the history stores them (see
-/// [`image_offer_to_history_png`]). Callers still prefer text when
-/// [`preferred_text_mime`] finds one.
+/// `image/gif`, then `image/bmp`, then `image/tiff`, then `image/avif`.
+/// Non-PNG offers are decoded into PNG under [`MAX_IMAGE_HISTORY_BYTES`]
+/// before the history stores them (see [`image_offer_to_history_png`]).
+/// Callers still prefer text when [`preferred_text_mime`] finds one.
 #[must_use]
 pub fn preferred_image_mime(mime_types: &[String]) -> Option<String> {
-    const PREFERRED: [&str; 5] = [
+    const PREFERRED: [&str; 7] = [
         "image/png",
         "image/jpeg",
         "image/webp",
         "image/gif",
         "image/bmp",
+        "image/tiff",
+        "image/avif",
     ];
     for wanted in PREFERRED {
         if let Some(found) = mime_types
@@ -396,9 +398,9 @@ pub fn preferred_image_mime(mime_types: &[String]) -> Option<String> {
 /// Decode a captured image offer into PNG bytes for the history.
 ///
 /// PNG offers pass through when they fit under [`MAX_IMAGE_HISTORY_BYTES`].
-/// JPEG/WebP/GIF/BMP offers are decoded and re-encoded as PNG; empty,
-/// undecodable, or oversized results are dropped. The history stores and
-/// re-offers PNG only.
+/// JPEG/WebP/GIF/BMP/TIFF/AVIF offers are decoded and re-encoded as PNG;
+/// empty, undecodable, or oversized results are dropped. The history stores
+/// and re-offers PNG only.
 #[must_use]
 pub fn image_offer_to_history_png(bytes: &[u8], mime: &str) -> Option<Vec<u8>> {
     if bytes.is_empty() || bytes.len() > MAX_IMAGE_HISTORY_BYTES {
@@ -413,6 +415,9 @@ pub fn image_offer_to_history_png(bytes: &[u8], mime: &str) -> Option<Vec<u8>> {
         && mime != "image/webp"
         && mime != "image/gif"
         && mime != "image/bmp"
+        && mime != "image/tiff"
+        && mime != "image/tif"
+        && mime != "image/avif"
     {
         return None;
     }
@@ -432,8 +437,8 @@ pub fn image_offer_to_history_png(bytes: &[u8], mime: &str) -> Option<Vec<u8>> {
 
 /// What the history should request from an offer, after secret filtering.
 ///
-/// Policy: text wins when present; otherwise PNG / JPEG / BMP. Everything
-/// else is skipped.
+/// Policy: text wins when present; otherwise PNG / JPEG / WebP / GIF / BMP /
+/// TIFF / AVIF. Everything else is skipped.
 #[must_use]
 pub fn preferred_history_mime(mime_types: &[String]) -> Option<String> {
     preferred_text_mime(mime_types).or_else(|| preferred_image_mime(mime_types))
@@ -507,7 +512,7 @@ mod tests {
     }
 
     #[test]
-    fn image_history_accepts_png_jpeg_webp_gif_and_bmp_mimes() {
+    fn image_history_accepts_png_jpeg_webp_gif_bmp_tiff_and_avif_mimes() {
         assert_eq!(
             preferred_image_mime(&["image/png".to_string()]).as_deref(),
             Some("image/png")
@@ -533,8 +538,16 @@ mod tests {
             Some("image/bmp")
         );
         assert_eq!(
-            preferred_image_mime(&["image/tiff".to_string()]),
-            None
+            preferred_image_mime(&["image/tiff".to_string()]).as_deref(),
+            Some("image/tiff")
+        );
+        assert_eq!(
+            preferred_image_mime(&["image/avif".to_string()]).as_deref(),
+            Some("image/avif")
+        );
+        assert_eq!(
+            preferred_image_mime(&["image/tiff".to_string(), "image/avif".to_string()]).as_deref(),
+            Some("image/tiff")
         );
         // PNG wins over JPEG when both are advertised.
         assert_eq!(
@@ -646,6 +659,47 @@ mod tests {
         };
         let png = image_offer_to_history_png(&gif, "image/gif").expect("gif→png");
         assert!(png.starts_with(b"\x89PNG"));
+    }
+
+    #[test]
+    fn tiff_offer_decodes_to_png_under_the_image_cap() {
+        let tiff = {
+            let img = image::RgbImage::from_pixel(2, 1, image::Rgb([10, 20, 30]));
+            let mut bytes = Vec::new();
+            image::DynamicImage::ImageRgb8(img)
+                .write_to(
+                    &mut std::io::Cursor::new(&mut bytes),
+                    image::ImageFormat::Tiff,
+                )
+                .expect("encode tiff");
+            bytes
+        };
+        let png = image_offer_to_history_png(&tiff, "image/tiff").expect("tiff→png");
+        assert!(png.starts_with(b"\x89PNG"));
+        assert!(png.len() <= MAX_IMAGE_HISTORY_BYTES);
+    }
+
+    #[test]
+    fn avif_mime_is_accepted_and_undecodable_payloads_drop() {
+        // Default `image` builds encode AVIF but need `avif-native` to decode.
+        // A garbage payload must still drop rather than panic; a real decoder
+        // (when present) re-encodes under the image cap like TIFF/JPEG.
+        assert!(image_offer_to_history_png(b"not-avif", "image/avif").is_none());
+        let avif = {
+            let img = image::RgbImage::from_pixel(1, 1, image::Rgb([1, 2, 3]));
+            let mut bytes = Vec::new();
+            let encoded = image::DynamicImage::ImageRgb8(img).write_to(
+                &mut std::io::Cursor::new(&mut bytes),
+                image::ImageFormat::Avif,
+            );
+            match encoded {
+                Ok(()) => Some(bytes),
+                Err(_) => None,
+            }
+        };
+        if let Some(avif) = avif {
+            let _ = image_offer_to_history_png(&avif, "image/avif");
+        }
     }
 
     #[test]

@@ -7,6 +7,25 @@ monorepo use independent Semantic Versions.
 
 ### Added
 
+- `get_recording_status` reports top-level `elapsed_secs`, `capture_target`,
+  and `last_error` beside the existing nested `capture` block and segment
+  fields.
+- `get_idle_status` / `idle/state` report `dim_level`, `idle_for`, and
+  `secs_until_dim` / `secs_until_lock` / `secs_until_screen_off`. See
+  [docs/idle.md](docs/idle.md).
+- Clipboard history decodes TIFF/AVIF offers into PNG under the 4 MiB image
+  cap (after PNG, JPEG, WebP/GIF, BMP). See
+  [docs/clipboard.md](docs/clipboard.md).
+- Portal `pick_outputs` / restore tokens honor DRM connectors (enriched from
+  `get_monitors`); `JWM_PORTAL_WINDOW=pid:<n>` matches via IPC pid. See
+  portal picker docs.
+- `get_effect_status` reports recording / selecting / layout_picker /
+  tags_overview / calendar / keybindings / monitor_layout flags.
+- `get_waterlily_status` reports `active_case` / `active_palette` while the
+  layer is on screen. See [docs/waterlily.md](docs/waterlily.md).
+- `get_windows` / `get_tree` / `window/state` report optional `size_hints`
+  when ICCCM / xdg hints are valid.
+
 - `get_windows` / `get_tree` / `window/state` report `maximize_promoted`,
   optional `maximize_restore` `{x,y,w,h}`, `minimized_order`, optional
   `swallowing` / `swallowed_by` / `transient_for`, and `is_tabbed` /

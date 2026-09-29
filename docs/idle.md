@@ -209,7 +209,9 @@ instead of ending up with neither.
 ```sh
 jwm-tool msg get_idle_status
 # {"inhibited": false, "dimmed": true, "screen_off": false, "locked": false,
-#  "dim_secs": 120, "lock_secs": 600, "screen_off_secs": 900}
+#  "dim_level": 0.35, "idle_for": 180,
+#  "dim_secs": 120, "lock_secs": 600, "screen_off_secs": 900,
+#  "secs_until_dim": 0, "secs_until_lock": 420, "secs_until_screen_off": 720}
 
 jwm-tool msg toggle_idle_inhibit
 ```
@@ -228,10 +230,14 @@ file, so a bar counting down to the lock counts down to the lock that actually
 happens: `lock_secs` reports the 60-second floor when `behavior.idle_lock_secs`
 is set below it, and `screen_off_secs` reports `0` whenever
 `idle_screen_off_command` is empty, however `behavior.idle_screen_off_secs` is
-set. `0` in any of the three means that stage will not fire. The query is
-therefore an answer about behaviour, not a way to read the configuration
-back: a panel that wants the numbers as written has to read the file
-(`jwm --print-config-path`).
+set. `0` in any of the three means that stage will not fire. `dim_level` is the
+validated brightness fraction the dim stage applies; `idle_for` is the last
+backend idle-clock reading in seconds (`0` when the clock is missing);
+`secs_until_dim` / `secs_until_lock` / `secs_until_screen_off` are the
+remaining seconds until each stage (`0` when the stage is off or already due).
+The query is therefore an answer about behaviour, not a way to read the
+configuration back: a panel that wants the numbers as written has to read the
+file (`jwm --print-config-path`).
 
 Every timeout is settable live too:
 

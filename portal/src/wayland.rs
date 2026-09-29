@@ -31,6 +31,10 @@ pub struct OutputInfo {
     pub width: i32,
     pub height: i32,
     pub refresh_mhz: i32,
+    /// DRM / wlr connector when known from jwm `get_monitors` enrichment
+    /// (`MonitorInfoIpc.connector`). Used for restore tokens so a rename of
+    /// the wl_output name does not invalidate a saved selection.
+    pub connector: Option<String>,
 }
 
 #[derive(Debug, Default, Clone)]

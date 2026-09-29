@@ -56,9 +56,9 @@ remember matters as much as what it keeps:
   client cannot ask for every password or screenshot you have copied in one
   request.
 - **Payloads over the caps are ignored.** Text over 256 KiB and PNG (or the
-  PNG produced by decoding a JPEG/WebP/GIF/BMP offer) over 4 MiB are dropped.
-  Other non-PNG image types beyond those four are never captured. Remote
-  clipboard sharing stays text-only.
+  PNG produced by decoding a JPEG/WebP/GIF/BMP/TIFF/AVIF offer) over 4 MiB are
+  dropped. Other non-PNG image types beyond those six are never captured.
+  Remote clipboard sharing stays text-only.
 
 Turn it off entirely with:
 
@@ -73,9 +73,11 @@ With it off, nothing is recorded and the picker refuses to open.
 
 Policy is shared across backends: secret → drop; else preferred text MIME
 wins when present; else `image/png`, then `image/jpeg`, then `image/webp`,
-then `image/gif`, then `image/bmp`. JPEG/WebP/GIF/BMP payloads are decoded
-into PNG under the image history cap before the history stores them (the
-picker still re-offers PNG only).
+then `image/gif`, then `image/bmp`, then `image/tiff`, then `image/avif`.
+JPEG/WebP/GIF/BMP/TIFF/AVIF payloads are decoded into PNG under the image
+history cap before the history stores them (the picker still re-offers PNG
+only). AVIF decode needs a native decoder in the `image` crate build; when
+absent the offer is dropped like any undecodable payload.
 
 On X11 the clipboard is not storage but a protocol: the copying application
 keeps the data and hands it over on request. JWM therefore watches CLIPBOARD

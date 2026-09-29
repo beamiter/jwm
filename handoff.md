@@ -4,7 +4,7 @@
 
 ---
 
-## Evolve backlog（目标 199 轮；已完成 wave 9–145，本地 ahead）
+## Evolve backlog（目标 199 轮；已完成 wave 9–160，本地 ahead）
 
 | # | 选题 | Size |
 | --- | --- | --- |
@@ -29,7 +29,31 @@
 | 126–130 | MonitorInfo name/vendor/serial/VRR；WorkspaceInfo has_fullscreen/is_occupied | ✓ |
 | 131–135 | Session client_fact v10；hand-float；no_decorations；maximize promoted adopt pin | ✓ |
 | 136–145 | Layout picker Home/End/Page/middle；tags wheel；calendar month wheel；MonitorLayout Home/End/Page/middle；Info wheel page | ✓ |
+| 146–155 | Recording elapsed/last_error/capture_target；idle dim_level/idle_for/secs_until_*；clipboard TIFF/AVIF→PNG；portal connector restore + pid match | ✓ |
+| 156–160 | get_effect_status UI flags；waterlily active_*；media player_details（已有）；clipboard count（已有）；WindowInfo size_hints | ✓ |
 | … | 跳过：Annotation/Screenshot CommonLinear、toast Closed(1)、BT withdraw、FS/PiP 自身丢锚点（own-anchor drop）、Recording EncodedOnly、XWayland 单轴 | |
+
+---
+
+## 2026-09-29（五十一）：Recording/idle/clipboard/portal + effect polish
+
+选题 = evolve waves 146–160 / evolve7h。
+
+1. **Wave 146–148**：`get_recording_status` 顶层 `elapsed_secs` /
+   `capture_target` / `last_error`。
+2. **Wave 149–151**：idle `dim_level` / `idle_for` / `secs_until_*`。
+3. **Wave 152**：clipboard TIFF/AVIF→PNG。
+4. **Wave 153–155**：portal pick_outputs/restore connector；`pid:` 匹配。
+5. **Wave 156**：`get_effect_status` recording/selecting/UI flags。
+6. **Wave 157**：waterlily `active_case` / `active_palette`。
+7. **Wave 158–159**：media `player_details` / clipboard `count` 已有，跳过。
+8. **Wave 160**：`WindowInfo.size_hints`。CHANGELOG；idle/clipboard/waterlily docs。
+
+**刻意不做**：跳过表不变；AVIF 解码仍依赖 image 的 native decoder（缺则丢弃）。
+
+**验证**：`scripts/test.sh --lib -- idle_status_reports image_history_accepts tiff_offer window_info_serializes restore_matches_stored_connector ipc_pid_match`。
+
+**下一轮候选**：161–199（handoff backlog 外选题；DRM / EncodedOnly / CommonLinear 等仍跳过）。
 
 ---
 

@@ -1155,6 +1155,7 @@ mod scratchpad_reveal_tests {
             night_light_override: None,
             last_battery_poll: None,
             last_idle_poll: None,
+            last_idle_for: None,
             idle: crate::jwm::features::idle::IdleTracker::default(),
             idle_inhibited: false,
             system_ui_dirty: false,
