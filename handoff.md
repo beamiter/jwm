@@ -4,18 +4,23 @@
 
 ---
 
-## Evolve backlog（目标 100 轮；已完成 wave 9–34，本地 ahead）
+## Evolve backlog（目标 100 轮；已完成 wave 9–36，本地 ahead）
 
 | # | 选题 | Size |
 | --- | --- | --- |
-| 14–34 | ipc/state 全族 + seamless + session maximize + scratchpad + hand-float + closed-placement 落盘 + Wayland PID | S/M ✓ |
+| 14–36 | window/state 全族 + seamless + session max + placement + Wayland PID + WindowInfo.pid | ✓ |
 | … | 跳过：Annotation/Screenshot CommonLinear、toast Closed(1)、BT withdraw、FS/PiP 丢锚点、Recording EncodedOnly、XWayland 单轴 | |
 
-**下一轮候选**（从跳过项与 closed-placement 延伸里挑）：
+---
 
-- Annotation / Screenshot CommonLinear（跳过表）。
-- toast `NotificationClosed(1)` 语义（跳过表）。
-- Recording EncodedOnly / FS·PiP 丢锚点（跳过表，需真机）。
+## 2026-09-29（二十五）：togglebar/setcfact → window/state + WindowInfo.pid
+
+选题 = evolve waves 35–36。
+
+1. **契约**：togglebar / setcfact arrange 后广播；WindowInfo 增 `pid`。
+2. **回归**：sibling pin + window_info_serializes。
+
+**验证**：`scripts/test.sh --lib -- sibling_window_state_paths window_info_serializes`。
 
 ---
 

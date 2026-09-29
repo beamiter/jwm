@@ -248,6 +248,7 @@ impl Jwm {
 
             // Re-arrange all windows on this monitor to fill or vacate the bar space.
             self.arrange(backend, Some(sel_mon_key));
+            self.broadcast_visible_window_states_on_monitor(sel_mon_key);
         }
 
         Ok(())
@@ -295,6 +296,9 @@ impl Jwm {
                 );
             }
             self.arrange(backend, self.state.sel_mon);
+            if let Some(mon) = self.state.sel_mon {
+                self.broadcast_visible_window_states_on_monitor(mon);
+            }
         }
 
         Ok(())

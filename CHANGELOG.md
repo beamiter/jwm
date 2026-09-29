@@ -42,11 +42,14 @@ monorepo use independent Semantic Versions.
   geometry, a tiling reorder (`zoom` / `movestack` / scrolling column move
   or resize), a layout-parameter change (`incnmaster` / `setmfact` /
   `setgaps` / `setlayout`·cycle·last), a tag `view` / `toggleview`
-  that rearranges visible clients, or a scratchpad hide/reveal pushes a
-  `WindowInfo`-shaped payload so subscribers of `window` need not poll
-  `get_windows`. Refused maximize requests and no-op mode changes stay
-  silent. See
+  that rearranges visible clients, a scratchpad hide/reveal, or a
+  `togglebar` / `setcfact` rearrange pushes a `WindowInfo`-shaped payload
+  so subscribers of `window` need not poll `get_windows`. Refused maximize
+  requests and no-op mode changes stay silent. See
   [docs/window-placement.md](docs/window-placement.md#who-may-maximize-what).
+
+- `get_windows` / `get_tree` / `window/state` report `pid` when the backend
+  knows the client process id.
 
 - `get_windows` / `get_tree` / `window/state` report `is_above` and
   `is_below` for `_NET_WM_STATE_ABOVE` / `BELOW`.

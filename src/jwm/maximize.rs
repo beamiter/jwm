@@ -1924,6 +1924,16 @@ mod tests {
                 "pub fn toggleview(",
                 "pub fn toggletag(",
             ),
+            (
+                "togglebar",
+                "pub fn togglebar(",
+                "pub fn setcfact(",
+            ),
+            (
+                "setcfact",
+                "pub fn setcfact(",
+                "pub fn movestack(",
+            ),
         ] {
             let body = nav
                 .split_once(start)
