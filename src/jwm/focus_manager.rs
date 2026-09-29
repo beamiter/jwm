@@ -1095,6 +1095,10 @@ mod scratchpad_reveal_tests {
     // src/config.rs): the developer's own ~/.config/jwm file must not change
     // test behavior. Do not read the host config here; if a test needs a
     // non-default value, set it up explicitly in the test itself.
+    //
+    // Wave 171 pin: empty_jwm fixtures stay XDG-isolated via that static
+    // `#[cfg(test)] Config::default()` gate — never require
+    // `XDG_CONFIG_HOME=/tmp/...` for lib tests that use this helper.
     fn empty_jwm() -> Jwm {
         Jwm {
             state: WMState::new(),
@@ -1184,6 +1188,11 @@ mod scratchpad_reveal_tests {
             hdr_capable: false,
             hdr_metadata: None,
             identity: crate::backend::api::OutputIdentity::connector_only(format!("test-{id}")),
+            physical_width_mm: 0,
+            physical_height_mm: 0,
+            preferred_width: 0,
+            preferred_height: 0,
+            preferred_refresh_mhz: 0,
         }
     }
 

@@ -937,6 +937,11 @@ pub fn build_output_info(
         hdr_capable,
         hdr_metadata,
         identity,
+        physical_width_mm: 0,
+        physical_height_mm: 0,
+        preferred_width: 0,
+        preferred_height: 0,
+        preferred_refresh_mhz: 0,
     }
 }
 

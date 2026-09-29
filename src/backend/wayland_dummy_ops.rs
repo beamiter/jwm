@@ -272,6 +272,11 @@ impl OutputOps for DummyOutputOps {
             hdr_capable: true,
             hdr_metadata: None,
             identity: crate::backend::api::OutputIdentity::connector_only("Virtual-1"),
+            physical_width_mm: 0,
+            physical_height_mm: 0,
+            preferred_width: 0,
+            preferred_height: 0,
+            preferred_refresh_mhz: 0,
         }]
     }
     fn screen_info(&self) -> ScreenInfo {

@@ -664,6 +664,11 @@ impl WaylandWinitBackend {
             hdr_capable: true,
             hdr_metadata: None,
             identity: crate::backend::api::OutputIdentity::connector_only("winit"),
+            physical_width_mm: 0,
+            physical_height_mm: 0,
+            preferred_width: 0,
+            preferred_height: 0,
+            preferred_refresh_mhz: 0,
         };
 
         if emit_events {
@@ -1406,6 +1411,11 @@ impl WaylandWinitBackend {
                                 identity: crate::backend::api::OutputIdentity::connector_only(
                                     "winit",
                                 ),
+                                physical_width_mm: 0,
+                                physical_height_mm: 0,
+                                preferred_width: 0,
+                                preferred_height: 0,
+                                preferred_refresh_mhz: 0,
                             };
                             {
                                 let mut s = shared.lock_safe();

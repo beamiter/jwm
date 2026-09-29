@@ -23,6 +23,9 @@ pub(crate) struct SwitcherEntry {
     pub window: u64,
     pub title: String,
     pub class: String,
+    /// WM_CLASS instance / app_id instance half — icon lookup falls back here
+    /// when `class` alone misses a desktop entry.
+    pub instance: String,
     /// The owning monitor's number, for the "screen N" marker on other heads.
     pub monitor: i32,
     pub on_selected_monitor: bool,
@@ -181,13 +184,33 @@ pub(crate) fn switcher_row(entry: &SwitcherEntry) -> String {
     })
 }
 
-/// One row's icon: the window's class resolved through the shared cached
-/// resolver — the same source the bars draw the focused window's icon from.
-/// A miss is cached there, so a window without a desktop entry costs one
-/// bounded lookup per session, and the row keeps its generic glyph prefix:
-/// no empty hole.
+/// One row's icon: class then instance through the shared cached resolver —
+/// the same source the launcher / bars use. A miss is cached there, so a
+/// window without a desktop entry costs one bounded lookup per session, and
+/// the row keeps its generic glyph prefix: no empty hole.
 pub(crate) fn switcher_row_icon(entry: &SwitcherEntry) -> Option<String> {
-    crate::jwm::features::launcher::resolve_window_icon(&entry.class, "")
+    crate::jwm::features::launcher::resolve_window_icon(&entry.class, &entry.instance)
+}
+
+#[cfg(test)]
+mod switcher_icon_contract {
+    #[test]
+    fn switcher_row_icon_passes_instance_to_the_resolver() {
+        // Pin the call shape: instance must not be dropped as "".
+        const SOURCE: &str = include_str!("switcher.rs");
+        let compact: String = SOURCE.chars().filter(|c| !c.is_whitespace()).collect();
+        let body = compact
+            .split_once("fnswitcher_row_icon(")
+            .expect("switcher_row_icon")
+            .1
+            .split_once("modswitcher_icon_contract")
+            .expect("end of switcher_row_icon before its pin module")
+            .0;
+        assert!(
+            body.contains("resolve_window_icon(&entry.class,&entry.instance)"),
+            "switcher icons must fall back through instance"
+        );
+    }
 }
 
 /// The commit-time state of a snapshotted window, as the live session
@@ -315,6 +338,7 @@ impl Jwm {
                     window: client.win.raw(),
                     title: client.name.clone(),
                     class: client.class.clone(),
+                    instance: client.instance.clone(),
                     monitor: monitor.num,
                     on_selected_monitor: Some(monitor_key) == self.state.sel_mon,
                     minimized: client.state.is_hidden,
@@ -335,6 +359,7 @@ mod tests {
             window,
             title: title.to_string(),
             class: class.to_string(),
+            instance: String::new(),
             monitor: 0,
             on_selected_monitor: true,
             minimized: false,

@@ -3418,6 +3418,90 @@ impl Jwm {
         Ok(())
     }
 
+    /// Jump the overview selection to the first (`to_end == false`) or last
+    /// face — Home / End twin of expose and the tags overview.
+    pub fn jump_overview_edge(
+        &mut self,
+        backend: &mut dyn Backend,
+        to_end: bool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if !self.features.overview.active || self.features.overview.clients.is_empty() {
+            return Ok(());
+        }
+        let _ = self.prune_overview_clients(backend);
+        if !self.features.overview.active || self.features.overview.clients.is_empty() {
+            return Ok(());
+        }
+        let target = if to_end {
+            self.features.overview.clients.len() - 1
+        } else {
+            0
+        };
+        if self.features.overview.index == target {
+            return Ok(());
+        }
+        self.features.overview.jump_to(target);
+        self.refresh_overview_prism(backend)
+    }
+
+    /// Page the overview selection by the visible prism window size (≤6),
+    /// clamping at the ends — Page Up / Down twin of expose.
+    pub fn page_overview(
+        &mut self,
+        backend: &mut dyn Backend,
+        direction: i32,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if !self.features.overview.active || self.features.overview.clients.is_empty() {
+            return Ok(());
+        }
+        let _ = self.prune_overview_clients(backend);
+        if !self.features.overview.active || self.features.overview.clients.is_empty() {
+            return Ok(());
+        }
+        let len = self.features.overview.clients.len();
+        let step = crate::jwm::features::overview_plan::MAX_VISIBLE;
+        let delta = if direction < 0 {
+            -(step as isize)
+        } else {
+            step as isize
+        };
+        let next = (self.features.overview.index as isize + delta).clamp(0, (len - 1) as isize)
+            as usize;
+        if next == self.features.overview.index {
+            return Ok(());
+        }
+        self.features.overview.jump_to(next);
+        self.refresh_overview_prism(backend)
+    }
+
+    /// Re-send the overview prism subset and selection after a jump / page.
+    fn refresh_overview_prism(
+        &mut self,
+        backend: &mut dyn Backend,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let index = self.features.overview.index;
+        let slide = crate::jwm::features::overview_plan::window_start(
+            index,
+            self.features.overview.clients.len(),
+        );
+        self.features.overview.slide_offset = slide;
+        let len = self.features.overview.clients.len();
+        let end = (slide + crate::jwm::features::overview_plan::MAX_VISIBLE).min(len);
+        let subset = self.features.overview.clients[slide..end].to_vec();
+        let selected_in_window = index.saturating_sub(slide);
+        let mut layout = self.build_overview_layout(&subset);
+        for (i, entry) in layout.iter_mut().enumerate() {
+            entry.5 = i == selected_in_window;
+        }
+        backend.compositor_set_overview_mode(true, &layout);
+        if let Some(&ck) = self.features.overview.clients.get(index)
+            && let Some(client) = self.state.clients.get(ck)
+        {
+            backend.compositor_set_overview_selection(client.win);
+        }
+        Ok(())
+    }
+
     /// Drop the overview entries whose window has been unmanaged since the
     /// prism opened. The selection stays on its window when that survived
     /// and otherwise moves to the one that took its place; the overview

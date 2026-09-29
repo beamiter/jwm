@@ -9,9 +9,9 @@ use crate::core::models::{ClientKey, MonitorKey, WMClient, WMMonitor};
 use crate::core::state::WMState;
 use crate::core::types::Rect;
 use crate::ipc::{
-    self, CompositorTransitionStatus, IpcEvent, IpcResponse, MonitorInfoIpc, RectIpc, RuntimeCounts,
-    RuntimeFeatureStates, RuntimeHealth, RuntimeStatusV1, SizeHintsIpc, TreeNode, WindowInfo,
-    WorkspaceInfo,
+    self, CompositorTransitionStatus, IpcEvent, IpcResponse, MonitorInfoIpc, RectIpc,
+    RuntimeCounts, RuntimeFeatureStates, RuntimeHealth, RuntimeStatusV1, SizeHintsIpc, TreeNode,
+    WindowInfo, WorkspaceInfo,
 };
 use crate::ipc_server::IncomingIpc;
 use crate::jwm::features::recording::RecordingFileIdentity;
@@ -191,6 +191,18 @@ fn client_window_info(
             min_aspect: client.size_hints.min_aspect,
             max_aspect: client.size_hints.max_aspect,
         }),
+        float_rect: RectIpc {
+            x: client.geometry.floating_x,
+            y: client.geometry.floating_y,
+            w: client.geometry.floating_w,
+            h: client.geometry.floating_h,
+        },
+        old_geometry: RectIpc {
+            x: client.geometry.old_x,
+            y: client.geometry.old_y,
+            w: client.geometry.old_w,
+            h: client.geometry.old_h,
+        },
     }
 }
 
@@ -2527,7 +2539,7 @@ impl Jwm {
     pub(crate) fn handle_ipc_query(
         &mut self,
         name: &str,
-        _args: &serde_json::Value,
+        args: &serde_json::Value,
         backend: &dyn Backend,
     ) -> IpcResponse {
         let cfg = CONFIG.load();
@@ -2538,7 +2550,7 @@ impl Jwm {
             "get_capabilities" => IpcResponse::ok(Some(
                 serde_json::to_value(ipc::ipc_capabilities()).unwrap_or_default(),
             )),
-            "get_windows" => {
+            "get_windows" | "get_clients" => {
                 let windows = self.query_windows(backend);
                 IpcResponse::ok(Some(serde_json::to_value(windows).unwrap_or_default()))
             }
@@ -2561,34 +2573,7 @@ impl Jwm {
             "get_gesture_status" => IpcResponse::ok(Some(self.query_gesture_status())),
             "get_wayland_status" => IpcResponse::ok(Some(self.query_wayland_status(backend))),
             "get_config_status" => IpcResponse::ok(Some(self.query_config_status())),
-            "get_config" => IpcResponse::ok(Some(serde_json::json!({
-                "border_px": cfg.border_px(),
-                "gap_px": cfg.gap_px(),
-                "snap": cfg.snap(),
-                "m_fact": cfg.m_fact(),
-                "n_master": cfg.n_master(),
-                "tags_length": cfg.tags_length(),
-                "show_bar": cfg.show_bar(),
-                "do_not_disturb": self.do_not_disturb,
-                "screenshot_freeze_enabled": cfg.behavior().screenshot_freeze_enabled,
-                "recording_fps": cfg.behavior().recording_fps,
-                "recording_encoder": cfg.behavior().recording_encoder,
-                "recording_audio_enabled": cfg.behavior().recording_audio_enabled,
-                "recording_audio_device": cfg.behavior().recording_audio_device,
-                "recording_audio_bitrate": cfg.behavior().recording_audio_bitrate,
-                "audio_recording_device": cfg.behavior().audio_recording_device,
-                "audio_recording_backend": cfg.behavior().audio_recording_backend,
-                "audio_recording_format": cfg.behavior().audio_recording_format,
-                "audio_recording_bitrate": cfg.behavior().audio_recording_bitrate,
-                "audio_recording_sample_rate": cfg.behavior().audio_recording_sample_rate,
-                "audio_recording_channels": cfg.behavior().audio_recording_channels,
-                "corner_radius": cfg.behavior().corner_radius,
-                "shadow_enabled": cfg.behavior().shadow_enabled,
-                "blur_enabled": cfg.behavior().blur_enabled,
-                "fading": cfg.behavior().fading,
-                "wobbly_windows": cfg.behavior().wobbly_windows,
-                "motion_trail": cfg.behavior().motion_trail,
-            }))),
+            "get_config" => IpcResponse::ok(Some(self.query_config_subset(args))),
             "get_dnd" => IpcResponse::ok(Some(serde_json::json!({
                 "enabled": self.do_not_disturb,
             }))),
@@ -2728,9 +2713,15 @@ impl Jwm {
             "get_audio_recording_status" => {
                 self.features.audio_recording.refresh();
                 let recording = &self.features.audio_recording;
-                let output_exists = recording.output_path.as_deref().is_some_and(|path| {
-                    std::fs::metadata(path).is_ok_and(|metadata| metadata.len() > 0)
-                });
+                let (output_exists, output_bytes) = recording
+                    .output_path
+                    .as_deref()
+                    .and_then(|path| std::fs::metadata(path).ok())
+                    .map(|metadata| {
+                        let len = metadata.len();
+                        (len > 0, Some(len))
+                    })
+                    .unwrap_or((false, None));
                 IpcResponse::ok(Some(serde_json::json!({
                     "active": recording.active,
                     // A key-stopped recording still writing its file: the
@@ -2738,6 +2729,7 @@ impl Jwm {
                     "finalizing": recording.is_finalizing(),
                     "output_path": recording.output_path,
                     "output_exists": output_exists,
+                    "output_bytes": output_bytes,
                     "elapsed_ms": u64::try_from(recording.elapsed().as_millis()).unwrap_or(u64::MAX),
                     "device": recording.device,
                     "backend": recording.backend,
@@ -3607,6 +3599,11 @@ impl Jwm {
                 peek: self.features.peek_active,
                 expose: self.features.expose_active,
                 annotation: self.features.annotation_active,
+                layout_picker: self.features.system_ui.is_layout_picker(),
+                tags_overview: self.features.system_ui.is_tags_overview(),
+                calendar: self.features.system_ui.is_calendar(),
+                keybindings: self.features.system_ui.is_keybindings(),
+                monitor_layout: self.features.system_ui.is_monitor_layout(),
             },
             compositor_metrics: backend
                 .compositor_get_metrics()
@@ -3771,6 +3768,11 @@ impl Jwm {
         let (vendor, product_code, serial_number, monitor_serial) =
             self.output_edid_ids_for_monitor(backend, mk);
         let (vrr_supported, vrr_enabled) = self.output_vrr_for_monitor(backend, mk);
+        let (physical_width_mm, physical_height_mm) =
+            self.output_physical_mm_for_monitor(backend, mk);
+        let (preferred_width, preferred_height, preferred_refresh_mhz) =
+            self.output_preferred_mode_for_monitor(backend, mk);
+        let hdr_metadata = self.output_hdr_metadata_for_monitor(backend, mk);
         MonitorInfoIpc {
             num: m.num,
             x: m.geometry.m_x,
@@ -3802,6 +3804,12 @@ impl Jwm {
             n_master: m.layout.n_master,
             transform: self.output_transform_for_monitor(backend, mk),
             tab_bar_reserved: self.tab_bar_reserved(mk),
+            hdr_metadata,
+            physical_width_mm,
+            physical_height_mm,
+            preferred_width,
+            preferred_height,
+            preferred_refresh_mhz,
         }
     }
 
@@ -4209,6 +4217,60 @@ impl Jwm {
         })
     }
 
+    /// Full `get_config` snapshot, optionally filtered by `args.keys` (an
+    /// array of field names). Unknown keys are omitted; an empty / missing
+    /// `keys` returns the whole subset.
+    pub(crate) fn query_config_subset(&self, args: &serde_json::Value) -> serde_json::Value {
+        let cfg = CONFIG.load();
+        let full = serde_json::json!({
+            "border_px": cfg.border_px(),
+            "gap_px": cfg.gap_px(),
+            "snap": cfg.snap(),
+            "m_fact": cfg.m_fact(),
+            "n_master": cfg.n_master(),
+            "tags_length": cfg.tags_length(),
+            "show_bar": cfg.show_bar(),
+            "do_not_disturb": self.do_not_disturb,
+            "screenshot_freeze_enabled": cfg.behavior().screenshot_freeze_enabled,
+            "recording_fps": cfg.behavior().recording_fps,
+            "recording_encoder": cfg.behavior().recording_encoder,
+            "recording_audio_enabled": cfg.behavior().recording_audio_enabled,
+            "recording_audio_device": cfg.behavior().recording_audio_device,
+            "recording_audio_bitrate": cfg.behavior().recording_audio_bitrate,
+            "audio_recording_device": cfg.behavior().audio_recording_device,
+            "audio_recording_backend": cfg.behavior().audio_recording_backend,
+            "audio_recording_format": cfg.behavior().audio_recording_format,
+            "audio_recording_bitrate": cfg.behavior().audio_recording_bitrate,
+            "audio_recording_sample_rate": cfg.behavior().audio_recording_sample_rate,
+            "audio_recording_channels": cfg.behavior().audio_recording_channels,
+            "corner_radius": cfg.behavior().corner_radius,
+            "shadow_enabled": cfg.behavior().shadow_enabled,
+            "blur_enabled": cfg.behavior().blur_enabled,
+            "fading": cfg.behavior().fading,
+            "wobbly_windows": cfg.behavior().wobbly_windows,
+            "motion_trail": cfg.behavior().motion_trail,
+            "overview_enabled": cfg.behavior().overview_enabled,
+            "modkey": cfg.modkey(),
+        });
+        let Some(keys) = args.get("keys").and_then(|v| v.as_array()) else {
+            return full;
+        };
+        if keys.is_empty() {
+            return full;
+        }
+        let mut filtered = serde_json::Map::new();
+        let obj = full.as_object().expect("config object");
+        for key in keys {
+            let Some(name) = key.as_str() else {
+                continue;
+            };
+            if let Some(value) = obj.get(name) {
+                filtered.insert(name.to_string(), value.clone());
+            }
+        }
+        serde_json::Value::Object(filtered)
+    }
+
     pub(crate) fn query_tree(&self, backend: &dyn Backend) -> Vec<TreeNode> {
         // `is_focused` means the one window with input focus, exactly as
         // `get_windows` reports it. Each monitor's own selection would mark
@@ -4235,6 +4297,10 @@ impl Jwm {
                     .unwrap_or_default();
                 Some(TreeNode {
                     monitor: self.monitor_info_ipc(backend, mk, m),
+                    window_count: windows.len(),
+                    selected_id: m.sel.and_then(|ck| {
+                        self.state.clients.get(ck).map(|client| client.win.raw())
+                    }),
                     windows,
                 })
             })
@@ -4391,6 +4457,11 @@ mod tests {
             hdr_capable: hdr_metadata.is_some(),
             hdr_metadata,
             identity: OutputIdentity::connector_only("HDMI-A-1"),
+            physical_width_mm: 0,
+            physical_height_mm: 0,
+            preferred_width: 0,
+            preferred_height: 0,
+            preferred_refresh_mhz: 0,
         }
     }
 

@@ -8108,6 +8108,11 @@ mod udev_backend_selection_tests {
             hdr_capable: false,
             hdr_metadata: None,
             identity: crate::backend::api::OutputIdentity::connector_only(name),
+            physical_width_mm: 0,
+            physical_height_mm: 0,
+            preferred_width: 0,
+            preferred_height: 0,
+            preferred_refresh_mhz: 0,
         }
     }
 
@@ -8922,6 +8927,25 @@ fn scan_drm_outputs(dev_id: u64, path: &Path) -> Result<Vec<(u64, OutputInfo)>, 
         let width = mode.size().0 as i32;
         let height = mode.size().1 as i32;
         let refresh_rate = mode.vrefresh().saturating_mul(1000);
+        let preferred = conn
+            .modes()
+            .iter()
+            .find(|m| m.mode_type().contains(ModeTypeFlags::PREFERRED))
+            .map(|m| {
+                (
+                    m.size().0 as i32,
+                    m.size().1 as i32,
+                    m.vrefresh().saturating_mul(1000),
+                )
+            })
+            .unwrap_or((width, height, refresh_rate));
+        let (physical_width_mm, physical_height_mm) = {
+            let size = conn.size();
+            (
+                size.map(|(w, _)| w as i32).unwrap_or(0),
+                size.map(|(_, h)| h as i32).unwrap_or(0),
+            )
+        };
 
         let name = format!("{:?}-{}", conn.interface(), conn.interface_id());
         let key = ((dev_id as u64) << 32) | (u32::from(*conn_handle) as u64);
@@ -8960,6 +8984,11 @@ fn scan_drm_outputs(dev_id: u64, path: &Path) -> Result<Vec<(u64, OutputInfo)>, 
                 hdr_capable: hdr_metadata.is_some(),
                 hdr_metadata,
                 identity,
+                physical_width_mm,
+                physical_height_mm,
+                preferred_width: preferred.0,
+                preferred_height: preferred.1,
+                preferred_refresh_mhz: preferred.2,
             },
         ));
     }

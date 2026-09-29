@@ -43,6 +43,28 @@ impl Jwm {
         Ok(())
     }
 
+    /// Absolute master-count set (`setnmaster` / `set_nmaster`). Clamps to at
+    /// least 0; twin of [`Self::incnmaster`]'s relative step.
+    pub(crate) fn setnmaster(
+        &mut self,
+        backend: &mut dyn Backend,
+        arg: &WMArgEnum,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if let WMArgEnum::Int(i) = *arg {
+            let sel_mon_key = self.state.sel_mon.ok_or("No monitor selected")?;
+            if let Some(monitor) = self.state.monitors.get_mut(sel_mon_key) {
+                let new_n = u32::try_from(i.max(0)).unwrap_or(u32::MAX);
+                monitor.layout.n_master = new_n;
+                monitor.update_current_tag_layout_params();
+                info!("[setnmaster] Updated n_master to {new_n}");
+            }
+            self.mark_layout_dirty();
+            self.arrange(backend, Some(sel_mon_key));
+            self.broadcast_visible_window_states_on_monitor(backend, sel_mon_key);
+        }
+        Ok(())
+    }
+
     /// Check if the current monitor is in scrolling layout
     pub(crate) fn is_scrolling_layout(&self) -> bool {
         self.state

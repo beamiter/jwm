@@ -671,6 +671,11 @@ impl WaylandX11Backend {
             hdr_capable: true,
             hdr_metadata: None,
             identity: crate::backend::api::OutputIdentity::connector_only("x11"),
+            physical_width_mm: 0,
+            physical_height_mm: 0,
+            preferred_width: 0,
+            preferred_height: 0,
+            preferred_refresh_mhz: 0,
         };
 
         if emit_events {
@@ -1559,6 +1564,11 @@ Fallback: run the winit backend instead: `JWM_BACKEND=wayland-winit` (same binar
                                 identity: crate::backend::api::OutputIdentity::connector_only(
                                     "x11",
                                 ),
+                                physical_width_mm: 0,
+                                physical_height_mm: 0,
+                                preferred_width: 0,
+                                preferred_height: 0,
+                                preferred_refresh_mhz: 0,
                             };
                             {
                                 let mut s = shared.lock_safe();

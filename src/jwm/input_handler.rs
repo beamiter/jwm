@@ -3112,6 +3112,20 @@ impl Jwm {
             if keysym == keys::KEY_k && overview_mods == Mods::ALT {
                 return self.cycle_overview(backend, &WMArgEnum::Int(-1));
             }
+            // Home / End jump to the first / last face (tags/expose twin).
+            if keysym == keys::KEY_Home {
+                return self.jump_overview_edge(backend, false);
+            }
+            if keysym == keys::KEY_End {
+                return self.jump_overview_edge(backend, true);
+            }
+            // Page Up / Down step by the visible prism window (≤6 faces).
+            if keysym == keys::KEY_Page_Up {
+                return self.page_overview(backend, -1);
+            }
+            if keysym == keys::KEY_Page_Down {
+                return self.page_overview(backend, 1);
+            }
             // Alt+Ctrl+Tab → confirm (close overview, focus selected)
             if keysym == keys::KEY_Tab
                 && overview_mods.contains(Mods::ALT)
@@ -3474,6 +3488,22 @@ impl Jwm {
                     let hit = backend.compositor_expose_click(rx as f32, ry as f32);
                     return self.apply_expose_action(backend, expose_plan::plan_click(hit));
                 }
+            }
+        }
+
+        // Overview cube: vertical wheel cycles faces like Tab / Shift+Tab.
+        if self.features.overview.active {
+            let button = MouseButton::from_u8(detail_btn);
+            match button {
+                MouseButton::Other(4) => {
+                    self.features.capture.swallow_next_button_release();
+                    return self.cycle_overview(backend, &WMArgEnum::Int(-1));
+                }
+                MouseButton::Other(5) => {
+                    self.features.capture.swallow_next_button_release();
+                    return self.cycle_overview(backend, &WMArgEnum::Int(1));
+                }
+                _ => {}
             }
         }
 
@@ -6592,6 +6622,40 @@ mod tests {
                 "self.jump_expose_selection_edge(backend,keysym==keys::KEY_End);"
             )),
             "expose Home/End must call jump_expose_selection_edge"
+        );
+    }
+
+    /// Overview cube Home/End/Page/wheel must jump or page the prism selection.
+    #[test]
+    fn overview_home_end_page_and_wheel_route_through_helpers() {
+        const SOURCE: &str = include_str!("input_handler.rs");
+        let compact: String = SOURCE.chars().filter(|c| !c.is_whitespace()).collect();
+        let branch = compact
+            .split_once("ifself.features.overview.active{")
+            .expect("the overview key branch")
+            .1
+            .split_once("//Chordstatemachine")
+            .expect("the end of the overview key branch")
+            .0;
+        assert!(
+            branch.contains("jump_overview_edge(backend,false)")
+                && branch.contains("jump_overview_edge(backend,true)"),
+            "overview Home/End must call jump_overview_edge"
+        );
+        assert!(
+            branch.contains("page_overview(backend,-1)")
+                && branch.contains("page_overview(backend,1)"),
+            "overview Page Up/Down must call page_overview"
+        );
+        let press = compact
+            .split_once("fnon_button_press(")
+            .expect("on_button_press")
+            .1;
+        assert!(
+            press.contains("ifself.features.overview.active{")
+                && press.contains("cycle_overview(backend,&WMArgEnum::Int(-1))")
+                && press.contains("cycle_overview(backend,&WMArgEnum::Int(1))"),
+            "overview wheel must cycle faces"
         );
     }
 

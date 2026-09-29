@@ -5617,6 +5617,11 @@ mod unmanage_minimized_tests {
             hdr_capable: false,
             hdr_metadata: None,
             identity: crate::backend::api::OutputIdentity::connector_only("Virtual-2"),
+            physical_width_mm: 0,
+            physical_height_mm: 0,
+            preferred_width: 0,
+            preferred_height: 0,
+            preferred_refresh_mhz: 0,
         }
     }
 

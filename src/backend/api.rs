@@ -151,6 +151,14 @@ pub struct OutputInfo {
     pub hdr_capable: bool,
     pub hdr_metadata: Option<crate::backend::edid::EdidHdrCapabilities>,
     pub identity: OutputIdentity,
+    /// Physical panel size in millimetres. `(0, 0)` when the backend did not
+    /// report one (X11/RandR without EDID size, headless, etc.).
+    pub physical_width_mm: i32,
+    pub physical_height_mm: i32,
+    /// Preferred mode. Zeros mean "unknown / same as the current mode".
+    pub preferred_width: i32,
+    pub preferred_height: i32,
+    pub preferred_refresh_mhz: u32,
 }
 
 #[derive(Clone, Debug)]

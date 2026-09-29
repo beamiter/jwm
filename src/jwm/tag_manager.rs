@@ -621,6 +621,11 @@ mod tests {
             hdr_capable: false,
             hdr_metadata: None,
             identity: OutputIdentity::connector_only("Virtual-2"),
+            physical_width_mm: 0,
+            physical_height_mm: 0,
+            preferred_width: 0,
+            preferred_height: 0,
+            preferred_refresh_mhz: 0,
         });
         let target = jwm.state.monitor_order[1];
         let source_num = jwm.state.monitors[source].num;
@@ -727,6 +732,11 @@ mod tests {
             hdr_capable: false,
             hdr_metadata: None,
             identity: OutputIdentity::connector_only("Right"),
+            physical_width_mm: 0,
+            physical_height_mm: 0,
+            preferred_width: 0,
+            preferred_height: 0,
+            preferred_refresh_mhz: 0,
         });
         jwm.state.monitor_order[1]
     }
@@ -1061,6 +1071,11 @@ mod tests {
             hdr_capable: false,
             hdr_metadata: None,
             identity: OutputIdentity::connector_only("Left"),
+            physical_width_mm: 0,
+            physical_height_mm: 0,
+            preferred_width: 0,
+            preferred_height: 0,
+            preferred_refresh_mhz: 0,
         });
         let target = jwm.state.monitor_order[1];
         let (_, source_work) = jwm.monitor_migration_areas(source).unwrap();
@@ -1193,6 +1208,11 @@ mod tests {
                 hdr_capable: false,
                 hdr_metadata: None,
                 identity: OutputIdentity::connector_only("Moved"),
+                physical_width_mm: 0,
+                physical_height_mm: 0,
+                preferred_width: 0,
+                preferred_height: 0,
+                preferred_refresh_mhz: 0,
             },
         )
         .unwrap();
@@ -1284,6 +1304,11 @@ mod tests {
                 hdr_capable: false,
                 hdr_metadata: None,
                 identity: OutputIdentity::connector_only("Replacement"),
+                physical_width_mm: 0,
+                physical_height_mm: 0,
+                preferred_width: 0,
+                preferred_height: 0,
+                preferred_refresh_mhz: 0,
             },
         )
         .unwrap();
@@ -1345,6 +1370,11 @@ mod tests {
             hdr_capable: false,
             hdr_metadata: None,
             identity: OutputIdentity::connector_only("Survivor"),
+            physical_width_mm: 0,
+            physical_height_mm: 0,
+            preferred_width: 0,
+            preferred_height: 0,
+            preferred_refresh_mhz: 0,
         });
         let survivor = jwm.state.monitor_order[1];
         let (_, source_work) = jwm.monitor_migration_areas(source).unwrap();
@@ -1438,6 +1468,11 @@ mod tests {
                 hdr_capable: false,
                 hdr_metadata: None,
                 identity: OutputIdentity::connector_only("FarLeft"),
+                physical_width_mm: 0,
+                physical_height_mm: 0,
+                preferred_width: 0,
+                preferred_height: 0,
+                preferred_refresh_mhz: 0,
             },
         )
         .unwrap();
@@ -1506,6 +1541,11 @@ mod tests {
                 hdr_capable: false,
                 hdr_metadata: None,
                 identity: OutputIdentity::connector_only("Replacement"),
+                physical_width_mm: 0,
+                physical_height_mm: 0,
+                preferred_width: 0,
+                preferred_height: 0,
+                preferred_refresh_mhz: 0,
             },
         )
         .unwrap();

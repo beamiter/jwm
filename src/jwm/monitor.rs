@@ -1860,6 +1860,11 @@ pub(crate) mod test_support {
             hdr_capable: false,
             hdr_metadata: None,
             identity: OutputIdentity::connector_only(name),
+            physical_width_mm: 0,
+            physical_height_mm: 0,
+            preferred_width: 0,
+            preferred_height: 0,
+            preferred_refresh_mhz: 0,
         }
     }
 
@@ -2483,6 +2488,28 @@ mod tests {
             Some(Rect::new(200, 140, 600, 400)),
             "the restore rect is rebased onto the new work area anyway"
         );
+    }
+
+    #[test]
+    fn oversized_restore_rect_shrinks_to_fit_the_target_work_area() {
+        // A maximize restore that filled a large source output must shrink
+        // (and stay inside) when the window migrates onto a smaller head —
+        // otherwise unmaximize would place content past the work-area edge.
+        let huge = Rect::new(10, 40, 2400, 1300);
+        let target = Rect::new(1920, 30, 1280, 690);
+        let clamped = translate_and_clamp_restore_rect(huge, Some(Rect::new(0, 30, 2560, 1410)), target, 2);
+        assert!(
+            clamped.w + 4 <= target.w,
+            "width must fit with borders: {clamped:?} in {target:?}"
+        );
+        assert!(
+            clamped.h + 4 <= target.h,
+            "height must fit with borders: {clamped:?} in {target:?}"
+        );
+        assert!(clamped.x >= target.x);
+        assert!(clamped.y >= target.y);
+        assert!(clamped.x + clamped.w + 4 <= target.x + target.w);
+        assert!(clamped.y + clamped.h + 4 <= target.y + target.h);
     }
 
     #[test]

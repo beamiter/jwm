@@ -6223,6 +6223,11 @@ mod tests {
             hdr_capable: false,
             hdr_metadata: None,
             identity: crate::backend::api::OutputIdentity::connector_only(format!("test-{id}")),
+            physical_width_mm: 0,
+            physical_height_mm: 0,
+            preferred_width: 0,
+            preferred_height: 0,
+            preferred_refresh_mhz: 0,
         }
     }
 
@@ -6661,6 +6666,11 @@ mod tests {
                 hdr_capable: false,
                 hdr_metadata: None,
                 identity: crate::backend::api::OutputIdentity::connector_only("Virtual-1"),
+                physical_width_mm: 0,
+                physical_height_mm: 0,
+                preferred_width: 0,
+                preferred_height: 0,
+                preferred_refresh_mhz: 0,
             },
         )
         .unwrap();
@@ -7038,6 +7048,11 @@ mod tests {
             hdr_capable: false,
             hdr_metadata: None,
             identity: crate::backend::api::OutputIdentity::connector_only("Virtual-3"),
+            physical_width_mm: 0,
+            physical_height_mm: 0,
+            preferred_width: 0,
+            preferred_height: 0,
+            preferred_refresh_mhz: 0,
         });
 
         let mut nums: Vec<_> = jwm

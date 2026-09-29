@@ -214,10 +214,13 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "scrolling_move_column",
         "scrolling_toggle_attach_mode",
         "session_menu",
+        "set_layout",
+        "set_nmaster",
         "setcfact",
         "setgaps",
         "setlayout",
         "setmfact",
+        "setnmaster",
         "snap_window",
         "spawn",
         "tag",
@@ -296,6 +299,7 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "get_capabilities",
         "get_capture_status",
         "get_clipboard",
+        "get_clients",
         "get_color_management_status",
         "get_config",
         "get_config_status",
@@ -403,6 +407,16 @@ pub struct RuntimeFeatureStates {
     pub peek: bool,
     pub expose: bool,
     pub annotation: bool,
+    /// Shell `layout_picker` panel is up.
+    pub layout_picker: bool,
+    /// Tags overview grid is up.
+    pub tags_overview: bool,
+    /// Calendar panel is up.
+    pub calendar: bool,
+    /// Keybindings Info viewer is up.
+    pub keybindings: bool,
+    /// Monitor layout editor is up.
+    pub monitor_layout: bool,
 }
 
 /// Last runtime compositor hand-off as observed by the WM. This remains
@@ -631,6 +645,13 @@ pub struct WindowInfo {
     /// none or they have not been fetched yet.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub size_hints: Option<SizeHintsIpc>,
+    /// Resting float rectangle (`ClientGeometry::floating_*`). Survives
+    /// maximize / fullscreen / tag park so a script can restore the user's
+    /// last free placement without guessing from live `x`/`y`/`w`/`h`.
+    pub float_rect: RectIpc,
+    /// Previous layout / fullscreen rectangle (`ClientGeometry::old_*`),
+    /// the twin of live `x`/`y`/`w`/`h` that `resizeclient` uses.
+    pub old_geometry: RectIpc,
 }
 
 #[derive(Debug, Serialize)]
@@ -731,12 +752,45 @@ pub struct MonitorInfoIpc {
     /// Pixels reserved at the top of the work area for the window tab bar;
     /// `0` when the strip is not shown on this monitor.
     pub tab_bar_reserved: i32,
+    /// EDID HDR static metadata subset when the live output advertised one;
+    /// omitted when SDR / unknown. Twin of `get_hdr_status` per-output
+    /// `metadata` without the delivery-plan fields.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hdr_metadata: Option<HdrMetadataIpc>,
+    /// Physical panel width in millimetres (`0` when unknown).
+    pub physical_width_mm: i32,
+    /// Physical panel height in millimetres (`0` when unknown).
+    pub physical_height_mm: i32,
+    /// Preferred mode width in pixels (`0` when unknown / same as current).
+    pub preferred_width: i32,
+    /// Preferred mode height in pixels (`0` when unknown / same as current).
+    pub preferred_height: i32,
+    /// Preferred mode refresh in millihertz (`0` when unknown).
+    pub preferred_refresh_mhz: u32,
+}
+
+/// EDID HDR static metadata projected on [`MonitorInfoIpc`] and status queries.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq)]
+pub struct HdrMetadataIpc {
+    pub max_luminance_nits: f32,
+    pub min_luminance_nits: f32,
+    /// `0.0` means the display did not state one (unknown, not zero nits).
+    pub max_frame_average_nits: f32,
+    pub supports_pq: bool,
+    pub supports_hlg: bool,
+    pub supports_bt2020: bool,
 }
 
 #[derive(Debug, Serialize)]
 pub struct TreeNode {
     pub monitor: MonitorInfoIpc,
     pub windows: Vec<WindowInfo>,
+    /// This monitor's selected client window id (`WMMonitor.sel`), when any.
+    /// Distinct from each window's `is_focused` (global input focus).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected_id: Option<u64>,
+    /// `windows.len()` mirror for scripts that only need a count.
+    pub window_count: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -808,6 +862,7 @@ pub fn dispatch_command(name: &str, args: &Value) -> Result<(WMFuncType, WMArgEn
         "setgaps" => Ok((Jwm::setgaps, parse_int_arg(args, 1)?)),
         "setcfact" => Ok((Jwm::setcfact, parse_float_arg(args, 0.0)?)),
         "incnmaster" => Ok((Jwm::incnmaster, parse_int_arg(args, 1)?)),
+        "setnmaster" | "set_nmaster" => Ok((Jwm::setnmaster, parse_int_arg(args, 1)?)),
         "scrolling_toggle_attach_mode" => {
             Ok((Jwm::scrolling_toggle_attach_mode, parse_int_arg(args, 0)?))
         }
@@ -816,7 +871,7 @@ pub fn dispatch_command(name: &str, args: &Value) -> Result<(WMFuncType, WMArgEn
         "scrolling_focus_window" => Ok((Jwm::scrolling_focus_window, parse_int_arg(args, 1)?)),
         "scrolling_consume" => Ok((Jwm::scrolling_consume, parse_int_arg(args, 1)?)),
         "scrolling_expel" => Ok((Jwm::scrolling_expel, parse_int_arg(args, 1)?)),
-        "setlayout" => {
+        "setlayout" | "set_layout" => {
             let layout = parse_layout_arg(args)?;
             Ok((Jwm::setlayout, layout))
         }
@@ -1273,6 +1328,8 @@ mod tests {
             scratchpad: Some("term".into()),
             layout: Some("TILE".into()),
             size_hints: None,
+            float_rect: RectIpc { x: 0, y: 0, w: 100, h: 100 },
+            old_geometry: RectIpc { x: 0, y: 0, w: 100, h: 100 },
         })
         .expect("serialize WindowInfo");
 
@@ -1311,6 +1368,8 @@ mod tests {
         assert_eq!(value["pid"], 1234);
         assert_eq!(value["connector"], "DP-1");
         assert!(value.get("size_hints").is_none());
+        assert_eq!(value["float_rect"]["w"], 100);
+        assert_eq!(value["old_geometry"]["h"], 100);
 
         let without_pid = serde_json::to_value(WindowInfo {
             id: 1,
@@ -1364,6 +1423,8 @@ mod tests {
             scratchpad: None,
             layout: None,
             size_hints: None,
+            float_rect: RectIpc { x: 0, y: 0, w: 100, h: 100 },
+            old_geometry: RectIpc { x: 0, y: 0, w: 100, h: 100 },
         })
         .expect("serialize");
         assert!(without_pid.get("pid").is_none());
@@ -1430,6 +1491,8 @@ mod tests {
             scratchpad: None,
             layout: Some("MONOCLE".into()),
             size_hints: None,
+            float_rect: RectIpc { x: 0, y: 0, w: 100, h: 100 },
+            old_geometry: RectIpc { x: 0, y: 0, w: 100, h: 100 },
         })
         .expect("serialize");
         assert_eq!(with_connector["connector"], "HDMI-A-1");
@@ -1489,6 +1552,8 @@ mod tests {
             scratchpad: None,
             layout: None,
             size_hints: None,
+            float_rect: RectIpc { x: 0, y: 0, w: 100, h: 100 },
+            old_geometry: RectIpc { x: 0, y: 0, w: 100, h: 100 },
         })
         .expect("serialize");
         assert!(without.get("connector").is_none());
@@ -1529,6 +1594,12 @@ mod tests {
             n_master: 1,
             transform: 1,
             tab_bar_reserved: 28,
+            hdr_metadata: None,
+            physical_width_mm: 600,
+            physical_height_mm: 340,
+            preferred_width: 1920,
+            preferred_height: 1080,
+            preferred_refresh_mhz: 60_000,
         })
         .expect("serialize");
         assert_eq!(with_connector["connector"], "DP-1");
@@ -1553,6 +1624,12 @@ mod tests {
         assert_eq!(with_connector["n_master"], 1);
         assert_eq!(with_connector["transform"], 1);
         assert_eq!(with_connector["tab_bar_reserved"], 28);
+        assert!(with_connector.get("hdr_metadata").is_none());
+        assert_eq!(with_connector["physical_width_mm"], 600);
+        assert_eq!(with_connector["physical_height_mm"], 340);
+        assert_eq!(with_connector["preferred_width"], 1920);
+        assert_eq!(with_connector["preferred_height"], 1080);
+        assert_eq!(with_connector["preferred_refresh_mhz"], 60_000);
 
         let without = serde_json::to_value(MonitorInfoIpc {
             num: 1,
@@ -1585,6 +1662,12 @@ mod tests {
             n_master: 1,
             transform: 0,
             tab_bar_reserved: 0,
+            hdr_metadata: None,
+            physical_width_mm: 0,
+            physical_height_mm: 0,
+            preferred_width: 0,
+            preferred_height: 0,
+            preferred_refresh_mhz: 0,
         })
         .expect("serialize");
         assert!(without.get("connector").is_none());
@@ -1600,6 +1683,9 @@ mod tests {
         assert_eq!(without["gap"], 0);
         assert_eq!(without["transform"], 0);
         assert_eq!(without["tab_bar_reserved"], 0);
+        assert!(without.get("hdr_metadata").is_none());
+        assert_eq!(without["physical_width_mm"], 0);
+        assert_eq!(without["preferred_refresh_mhz"], 0);
     }
 
     #[test]
@@ -2113,6 +2199,31 @@ mod tests {
             capabilities
                 .queries
                 .iter()
+                .any(|name| name == "get_clients"),
+            "get_clients aliases get_windows in capabilities"
+        );
+        assert!(
+            capabilities
+                .commands
+                .iter()
+                .any(|name| name == "set_layout")
+        );
+        assert!(
+            capabilities
+                .commands
+                .iter()
+                .any(|name| name == "set_nmaster")
+        );
+        assert!(
+            capabilities
+                .commands
+                .iter()
+                .any(|name| name == "setnmaster")
+        );
+        assert!(
+            capabilities
+                .queries
+                .iter()
                 .any(|name| name == "get_waterlily_status")
         );
         assert!(
@@ -2169,6 +2280,11 @@ mod tests {
                 peek: false,
                 expose: false,
                 annotation: false,
+                layout_picker: false,
+                tags_overview: false,
+                calendar: false,
+                keybindings: false,
+                monitor_layout: false,
             },
             compositor_metrics: None,
         };
@@ -2189,6 +2305,72 @@ mod tests {
         assert_eq!(json["compositor_transition"]["last_success"], true);
         assert!(json["compositor_transition"]["last_error"].is_null());
         assert_eq!(json["features"]["overview"], true);
+        assert_eq!(json["features"]["layout_picker"], false);
+        assert_eq!(json["features"]["tags_overview"], false);
+        assert_eq!(json["features"]["calendar"], false);
+        assert_eq!(json["features"]["keybindings"], false);
+        assert_eq!(json["features"]["monitor_layout"], false);
         assert!(json["compositor_metrics"].is_null());
+    }
+
+    #[test]
+    fn set_layout_and_set_nmaster_dispatch_aliases() {
+        let layout = dispatch_command("set_layout", &serde_json::json!({"layout": "tile"}));
+        assert!(layout.is_ok(), "{layout:?}");
+        let nmaster = dispatch_command("set_nmaster", &serde_json::json!({"value": 2}));
+        assert!(nmaster.is_ok(), "{nmaster:?}");
+        let setn = dispatch_command("setnmaster", &serde_json::json!({"value": 3}));
+        assert!(setn.is_ok(), "{setn:?}");
+    }
+
+    #[test]
+    fn tree_node_serializes_selected_id_and_window_count() {
+        let node = TreeNode {
+            monitor: MonitorInfoIpc {
+                num: 0,
+                x: 0,
+                y: 0,
+                w: 1920,
+                h: 1080,
+                wx: 0,
+                wy: 0,
+                ww: 1920,
+                wh: 1080,
+                active_tags: 1,
+                layout: "TILE".into(),
+                focused: true,
+                locked: false,
+                connector: None,
+                name: None,
+                monitor_name: None,
+                vendor: None,
+                product_code: None,
+                serial_number: None,
+                monitor_serial: None,
+                scale: 1.0,
+                refresh_mhz: 60_000,
+                hdr_capable: false,
+                vrr_supported: false,
+                vrr_enabled: false,
+                gap: 0,
+                m_fact: 0.55,
+                n_master: 1,
+                transform: 0,
+                tab_bar_reserved: 0,
+                hdr_metadata: None,
+                physical_width_mm: 0,
+                physical_height_mm: 0,
+                preferred_width: 0,
+                preferred_height: 0,
+                preferred_refresh_mhz: 0,
+            },
+            windows: Vec::new(),
+            selected_id: Some(42),
+            window_count: 0,
+        };
+        let json = serde_json::to_value(node).unwrap();
+        assert_eq!(json["selected_id"], 42);
+        assert_eq!(json["window_count"], 0);
+        assert!(json["windows"].as_array().unwrap().is_empty());
     }
 }

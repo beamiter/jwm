@@ -1096,6 +1096,54 @@ impl Jwm {
             .unwrap_or(0)
     }
 
+    /// Physical panel size in millimetres for the live output; `(0, 0)` when
+    /// unknown.
+    pub(crate) fn output_physical_mm_for_monitor(
+        &self,
+        backend: &dyn Backend,
+        mon_key: crate::core::models::MonitorKey,
+    ) -> (i32, i32) {
+        self.live_output_info(backend, mon_key)
+            .map(|output| (output.physical_width_mm, output.physical_height_mm))
+            .unwrap_or((0, 0))
+    }
+
+    /// Preferred mode `(w, h, refresh_mhz)` for the live output; zeros when
+    /// unknown.
+    pub(crate) fn output_preferred_mode_for_monitor(
+        &self,
+        backend: &dyn Backend,
+        mon_key: crate::core::models::MonitorKey,
+    ) -> (i32, i32, u32) {
+        self.live_output_info(backend, mon_key)
+            .map(|output| {
+                (
+                    output.preferred_width,
+                    output.preferred_height,
+                    output.preferred_refresh_mhz,
+                )
+            })
+            .unwrap_or((0, 0, 0))
+    }
+
+    /// EDID HDR static metadata subset for the live output, when advertised.
+    pub(crate) fn output_hdr_metadata_for_monitor(
+        &self,
+        backend: &dyn Backend,
+        mon_key: crate::core::models::MonitorKey,
+    ) -> Option<crate::ipc::HdrMetadataIpc> {
+        self.live_output_info(backend, mon_key)
+            .and_then(|output| output.hdr_metadata)
+            .map(|m| crate::ipc::HdrMetadataIpc {
+                max_luminance_nits: m.max_luminance_nits,
+                min_luminance_nits: m.min_luminance_nits,
+                max_frame_average_nits: m.max_frame_average_nits,
+                supports_pq: m.supports_pq,
+                supports_hlg: m.supports_hlg,
+                supports_bt2020: m.supports_bt2020,
+            })
+    }
+
     fn live_output_info(
         &self,
         backend: &dyn Backend,
