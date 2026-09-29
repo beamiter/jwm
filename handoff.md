@@ -4,7 +4,7 @@
 
 ---
 
-## Evolve backlog（目标 100 轮；已完成 wave 9–100，本地 ahead）
+## Evolve backlog（目标 199 轮；已完成 wave 9–105，本地 ahead）
 
 | # | 选题 | Size |
 | --- | --- | --- |
@@ -21,7 +21,28 @@
 | 80–91 | WindowInfo fixed/dock/desktop/drag_float/strut/cfact；MonitorInfo scale/refresh_mhz；switcher Page；tags/expose Home/End；get_magnifier/get_peek | ✓ |
 | 92–95 | never_focus；tags/expose Page；waterlily requested_case/palette | ✓ |
 | 96–100 | skip_taskbar/pager；no_decorations；demands_attention；MonitorInfoIpc.hdr_capable | ✓ |
+| 101–105 | Workspace/Monitor gap；get_layout / get_gaps / get_nmaster | ✓ |
 | … | 跳过：Annotation/Screenshot CommonLinear、toast Closed(1)、BT withdraw、FS/PiP 自身丢锚点（own-anchor drop）、Recording EncodedOnly、XWayland 单轴 | |
+
+---
+
+## 2026-09-29（四十三）：layout gap IPC + get_layout/gaps/nmaster
+
+选题 = evolve waves 101–105 / evolve7h。
+
+1. **Wave 101–102**：`WorkspaceInfo.gap`（per-tag `Pertag.gaps`）+
+   `MonitorInfoIpc.gap`（live `MonitorLayout.gap`）。
+2. **Wave 103–105**：IPC `get_layout` / `get_gaps` / `get_nmaster`
+   （focused monitor live params；可选 `connector`）。
+   Docs monitor-lock / window-placement / compatibility；CHANGELOG；
+   serialize + focused-layout pins。Backlog 目标 100 → 199。
+
+**刻意不做**：跳过表不变；`MonitorInfoIpc.transform`（需扩 `OutputInfo`）。
+
+**验证**：`scripts/test.sh --lib -- workspace_info_serializes monitor_info_serializes focused_layout_queries workspace_layout_state capabilities_include`。
+
+**下一轮候选**：见跳过表；monitor transform；session client_fact；
+其它 topology/state / UI 边角。
 
 ---
 

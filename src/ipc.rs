@@ -301,14 +301,17 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "get_connectivity",
         "get_dnd",
         "get_effect_status",
+        "get_gaps",
         "get_gesture_status",
         "get_hdr_status",
         "get_idle_status",
+        "get_layout",
         "get_magnifier",
         "get_media_status",
         "get_metrics",
         "get_mic_mute",
         "get_monitors",
+        "get_nmaster",
         "get_notifications",
         "get_peek",
         "get_power_status",
@@ -579,6 +582,8 @@ pub struct WorkspaceInfo {
     pub layout: String,
     pub m_fact: f32,
     pub n_master: u32,
+    /// Tiling gap in pixels for this tag (`Pertag.gaps` / `MonitorLayout.gap`).
+    pub gap: i32,
     pub num_clients: usize,
     pub focused: bool,
     /// True when any client on this tag (on this monitor) demands attention
@@ -631,6 +636,8 @@ pub struct MonitorInfoIpc {
     pub refresh_mhz: u32,
     /// Whether the live output advertised HDR capability (`OutputInfo.hdr_capable`).
     pub hdr_capable: bool,
+    /// Current tiling gap in pixels on this monitor (`MonitorLayout.gap`).
+    pub gap: i32,
 }
 
 #[derive(Debug, Serialize)]
@@ -1371,6 +1378,7 @@ mod tests {
             scale: 1.5,
             refresh_mhz: 60_000,
             hdr_capable: true,
+            gap: 8,
         })
         .expect("serialize");
         assert_eq!(with_connector["connector"], "DP-1");
@@ -1383,6 +1391,7 @@ mod tests {
         assert_eq!(with_connector["scale"], 1.5);
         assert_eq!(with_connector["refresh_mhz"], 60_000);
         assert_eq!(with_connector["hdr_capable"], true);
+        assert_eq!(with_connector["gap"], 8);
 
         let without = serde_json::to_value(MonitorInfoIpc {
             num: 1,
@@ -1403,6 +1412,7 @@ mod tests {
             scale: 1.0,
             refresh_mhz: 0,
             hdr_capable: false,
+            gap: 0,
         })
         .expect("serialize");
         assert!(without.get("connector").is_none());
@@ -1415,6 +1425,7 @@ mod tests {
         assert_eq!(without["scale"], 1.0);
         assert_eq!(without["refresh_mhz"], 0);
         assert_eq!(without["hdr_capable"], false);
+        assert_eq!(without["gap"], 0);
     }
 
     #[test]
@@ -1426,6 +1437,7 @@ mod tests {
             layout: "TILE".into(),
             m_fact: 0.55,
             n_master: 1,
+            gap: 12,
             num_clients: 2,
             focused: true,
             is_urgent: true,
@@ -1437,6 +1449,7 @@ mod tests {
         assert_eq!(with_connector["monitor_name"], "Dell U2720Q");
         assert_eq!(with_connector["focused"], true);
         assert_eq!(with_connector["is_urgent"], true);
+        assert_eq!(with_connector["gap"], 12);
 
         let without = serde_json::to_value(WorkspaceInfo {
             tag_mask: 2,
@@ -1445,6 +1458,7 @@ mod tests {
             layout: "MONOCLE".into(),
             m_fact: 0.55,
             n_master: 1,
+            gap: 0,
             num_clients: 0,
             focused: false,
             is_urgent: false,
@@ -1455,6 +1469,7 @@ mod tests {
         assert!(without.get("connector").is_none());
         assert!(without.get("monitor_name").is_none());
         assert_eq!(without["is_urgent"], false);
+        assert_eq!(without["gap"], 0);
     }
 
     #[test]
@@ -1888,6 +1903,24 @@ mod tests {
                 .queries
                 .iter()
                 .any(|name| name == "get_mic_mute")
+        );
+        assert!(
+            capabilities
+                .queries
+                .iter()
+                .any(|name| name == "get_layout")
+        );
+        assert!(
+            capabilities
+                .queries
+                .iter()
+                .any(|name| name == "get_gaps")
+        );
+        assert!(
+            capabilities
+                .queries
+                .iter()
+                .any(|name| name == "get_nmaster")
         );
         assert!(
             capabilities

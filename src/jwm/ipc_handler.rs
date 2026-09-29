@@ -392,13 +392,23 @@ fn parse_required_i32_ipc_arg(
     Err(format!("{command}: '{field}' must be a 32-bit integer"))
 }
 
-fn workspace_layout_state(mon: &WMMonitor, tag_index: usize) -> (String, f32, u32) {
+fn workspace_layout_state(mon: &WMMonitor, tag_index: usize) -> (String, f32, u32, i32) {
     let current_layout = || format!("{:?}", *mon.lt);
     let Some(pertag_index) = tag_index.checked_add(1) else {
-        return (current_layout(), mon.layout.m_fact, mon.layout.n_master);
+        return (
+            current_layout(),
+            mon.layout.m_fact,
+            mon.layout.n_master,
+            mon.layout.gap,
+        );
     };
     let Some(pertag) = mon.pertag.as_ref() else {
-        return (current_layout(), mon.layout.m_fact, mon.layout.n_master);
+        return (
+            current_layout(),
+            mon.layout.m_fact,
+            mon.layout.n_master,
+            mon.layout.gap,
+        );
     };
 
     let layout = pertag
@@ -415,8 +425,13 @@ fn workspace_layout_state(mon: &WMMonitor, tag_index: usize) -> (String, f32, u3
         .get(pertag_index)
         .copied()
         .unwrap_or(mon.layout.n_master);
+    let gap = pertag
+        .gaps
+        .get(pertag_index)
+        .copied()
+        .unwrap_or(mon.layout.gap);
 
-    (layout, m_fact, n_master)
+    (layout, m_fact, n_master, gap)
 }
 
 fn system_time_unix_ms(time: std::time::SystemTime) -> Option<u64> {
@@ -2498,6 +2513,9 @@ impl Jwm {
                 IpcResponse::ok(Some(serde_json::to_value(tree).unwrap_or_default()))
             }
             "get_scrolling_status" => IpcResponse::ok(Some(self.query_scrolling_status())),
+            "get_layout" => IpcResponse::ok(Some(self.query_focused_layout(backend))),
+            "get_gaps" => IpcResponse::ok(Some(self.query_focused_gaps(backend))),
+            "get_nmaster" => IpcResponse::ok(Some(self.query_focused_nmaster(backend))),
             "get_gesture_status" => IpcResponse::ok(Some(self.query_gesture_status())),
             "get_wayland_status" => IpcResponse::ok(Some(self.query_wayland_status(backend))),
             "get_config_status" => IpcResponse::ok(Some(self.query_config_status())),
@@ -3595,7 +3613,7 @@ impl Jwm {
             for i in 0..cfg.tags_length() {
                 let tag_bit = 1u32 << i;
                 let is_active = (active_tags & tag_bit) != 0;
-                let (layout, m_fact, n_master) = workspace_layout_state(mon, i);
+                let (layout, m_fact, n_master, gap) = workspace_layout_state(mon, i);
                 result.push(WorkspaceInfo {
                     tag_mask: tag_bit,
                     tag_index: i,
@@ -3603,6 +3621,7 @@ impl Jwm {
                     layout,
                     m_fact,
                     n_master,
+                    gap,
                     num_clients: tagged_client_count(&self.state, mk, tag_bit),
                     focused: is_active && self.state.sel_mon == Some(mk),
                     is_urgent: (urgent_tags_mask & tag_bit) != 0,
@@ -3659,7 +3678,87 @@ impl Jwm {
             scale,
             refresh_mhz,
             hdr_capable: self.output_hdr_capable_for_monitor(backend, mk),
+            gap: m.layout.gap,
         }
+    }
+
+    /// Focused monitor's live layout parameters (`setlayout` / `setmfact` /
+    /// `incnmaster` / `setgaps` targets).
+    pub(crate) fn query_focused_layout(&self, backend: &dyn Backend) -> serde_json::Value {
+        self.focused_layout_snapshot(backend).unwrap_or_else(|| {
+            serde_json::json!({
+                "monitor": serde_json::Value::Null,
+                "layout": serde_json::Value::Null,
+                "m_fact": serde_json::Value::Null,
+                "n_master": serde_json::Value::Null,
+                "gap": serde_json::Value::Null,
+            })
+        })
+    }
+
+    /// Focused monitor's tiling gap only (same source as [`Self::query_focused_layout`]).
+    pub(crate) fn query_focused_gaps(&self, backend: &dyn Backend) -> serde_json::Value {
+        match self.focused_layout_snapshot(backend) {
+            Some(snapshot) => {
+                let mut value = serde_json::json!({
+                    "monitor": snapshot["monitor"].clone(),
+                    "gap": snapshot["gap"].clone(),
+                });
+                if let Some(connector) = snapshot.get("connector") {
+                    value
+                        .as_object_mut()
+                        .expect("gaps snapshot object")
+                        .insert("connector".into(), connector.clone());
+                }
+                value
+            }
+            None => serde_json::json!({
+                "monitor": serde_json::Value::Null,
+                "gap": serde_json::Value::Null,
+            }),
+        }
+    }
+
+    /// Focused monitor's `n_master` only (same source as [`Self::query_focused_layout`]).
+    pub(crate) fn query_focused_nmaster(&self, backend: &dyn Backend) -> serde_json::Value {
+        match self.focused_layout_snapshot(backend) {
+            Some(snapshot) => {
+                let mut value = serde_json::json!({
+                    "monitor": snapshot["monitor"].clone(),
+                    "n_master": snapshot["n_master"].clone(),
+                });
+                if let Some(connector) = snapshot.get("connector") {
+                    value
+                        .as_object_mut()
+                        .expect("nmaster snapshot object")
+                        .insert("connector".into(), connector.clone());
+                }
+                value
+            }
+            None => serde_json::json!({
+                "monitor": serde_json::Value::Null,
+                "n_master": serde_json::Value::Null,
+            }),
+        }
+    }
+
+    fn focused_layout_snapshot(&self, backend: &dyn Backend) -> Option<serde_json::Value> {
+        let mk = self.state.sel_mon?;
+        let mon = self.state.monitors.get(mk)?;
+        let mut value = serde_json::json!({
+            "monitor": mon.num,
+            "layout": format!("{:?}", *mon.lt),
+            "m_fact": mon.layout.m_fact,
+            "n_master": mon.layout.n_master,
+            "gap": mon.layout.gap,
+        });
+        if let Some(connector) = self.output_key_for_monitor(backend, mk) {
+            value
+                .as_object_mut()
+                .expect("layout snapshot object")
+                .insert("connector".into(), serde_json::Value::String(connector));
+        }
+        Some(value)
     }
 
     pub(crate) fn query_scrolling_status(&self) -> serde_json::Value {
@@ -4398,25 +4497,29 @@ mod tests {
         let mut monitor = WMMonitor::new();
         monitor.layout.m_fact = 0.55;
         monitor.layout.n_master = 1;
+        monitor.layout.gap = 0;
 
         let mut pertag = Pertag::new(true, 2);
         pertag.m_facts[0] = 0.11;
         pertag.n_masters[0] = 9;
+        pertag.gaps[0] = 1;
         pertag.m_facts[1] = 0.61;
         pertag.n_masters[1] = 2;
+        pertag.gaps[1] = 8;
         pertag.lts[1] = Rc::new(LayoutEnum::MONOCLE);
         pertag.m_facts[2] = 0.72;
         pertag.n_masters[2] = 3;
+        pertag.gaps[2] = 16;
         pertag.lts[2] = Rc::new(LayoutEnum::GRID);
         monitor.pertag = Some(pertag);
 
         assert_eq!(
             workspace_layout_state(&monitor, 0),
-            (format!("{:?}", LayoutEnum::MONOCLE), 0.61, 2)
+            (format!("{:?}", LayoutEnum::MONOCLE), 0.61, 2, 8)
         );
         assert_eq!(
             workspace_layout_state(&monitor, 1),
-            (format!("{:?}", LayoutEnum::GRID), 0.72, 3)
+            (format!("{:?}", LayoutEnum::GRID), 0.72, 3, 16)
         );
     }
 
@@ -4426,13 +4529,61 @@ mod tests {
         monitor.lt = Rc::new(LayoutEnum::TILE);
         monitor.layout.m_fact = 0.66;
         monitor.layout.n_master = 4;
-        let current = (format!("{:?}", LayoutEnum::TILE), 0.66, 4);
+        monitor.layout.gap = 12;
+        let current = (format!("{:?}", LayoutEnum::TILE), 0.66, 4, 12);
 
         assert_eq!(workspace_layout_state(&monitor, 0), current);
 
         monitor.pertag = Some(Pertag::new(true, 0));
         assert_eq!(workspace_layout_state(&monitor, 1), current);
         assert_eq!(workspace_layout_state(&monitor, usize::MAX), current);
+    }
+
+    #[test]
+    fn focused_layout_queries_report_live_monitor_params() {
+        let mut backend = PairingIpcBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let mk = jwm.state.sel_mon.expect("selected monitor");
+        {
+            let mon = jwm.state.monitors.get_mut(mk).expect("monitor");
+            mon.layout.m_fact = 0.42;
+            mon.layout.n_master = 3;
+            mon.layout.gap = 14;
+            mon.lt = Rc::new(LayoutEnum::MONOCLE);
+            mon.update_current_tag_layout_params();
+            if let Some(pertag) = mon.pertag.as_mut() {
+                let cur = pertag.clamp_tag(pertag.cur_tag);
+                if let Some(slot) = pertag.lts.get_mut(cur) {
+                    *slot = Rc::new(LayoutEnum::MONOCLE);
+                }
+            }
+        }
+
+        let layout = jwm.query_focused_layout(&backend);
+        assert!((layout["m_fact"].as_f64().unwrap() - 0.42).abs() < 1e-6);
+        assert_eq!(layout["n_master"], 3);
+        assert_eq!(layout["gap"], 14);
+        assert_eq!(layout["layout"], format!("{:?}", LayoutEnum::MONOCLE));
+        assert!(layout["monitor"].as_i64().is_some());
+
+        let gaps = jwm.query_focused_gaps(&backend);
+        assert_eq!(gaps["gap"], 14);
+        assert_eq!(gaps["monitor"], layout["monitor"]);
+
+        let nmaster = jwm.query_focused_nmaster(&backend);
+        assert_eq!(nmaster["n_master"], 3);
+        assert_eq!(nmaster["monitor"], layout["monitor"]);
+
+        let monitors = jwm.query_monitors(&backend);
+        assert_eq!(monitors[0].gap, 14);
+        let workspaces = jwm.query_workspaces(&backend);
+        let focused = workspaces
+            .iter()
+            .find(|ws| ws.focused)
+            .expect("focused workspace");
+        assert_eq!(focused.gap, 14);
+        assert_eq!(focused.n_master, 3);
+        assert!((focused.m_fact as f64 - 0.42).abs() < 1e-6);
     }
 
     #[test]

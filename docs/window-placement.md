@@ -213,7 +213,10 @@ resize), `is_dock`, `is_desktop`, `is_drag_floating` (user-promoted float),
 `get_monitors` / `get_tree` expose the usable work area as `wx` / `wy` /
 `ww` / `wh` beside the full-output `x` / `y` / `w` / `h`, plus `scale`
 (fractional), `refresh_mhz` (mode refresh in millihertz; `60000` is
-60 Hz), and `hdr_capable`.
+60 Hz), `hdr_capable`, and the live tiling `gap`. `get_workspaces` rows
+include per-tag `gap` beside `m_fact` / `n_master`. `get_layout` /
+`get_gaps` / `get_nmaster` query the focused monitor's live layout
+parameters.
 
 A refused request, like one that changes nothing, leaves the window alone:
 JWM republishes the current state and replies with the current geometry, a

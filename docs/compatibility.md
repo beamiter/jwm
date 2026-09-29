@@ -63,7 +63,9 @@ and the managed stack uses `Below < Normal < Above < focused fullscreen < PiP`.
 `skip_taskbar`, `skip_pager`, `no_decorations`, `demands_attention`,
 `has_strut`, `client_fact`).
 `get_monitors` / `get_tree` report the work area as `wx` / `wy` / `ww` /
-`wh`, plus `scale`, `refresh_mhz`, and `hdr_capable`.
+`wh`, plus `scale`, `refresh_mhz`, `hdr_capable`, and tiling `gap`.
+`get_workspaces` includes per-tag `gap`; `get_layout` / `get_gaps` /
+`get_nmaster` return the focused monitor's live layout parameters.
 Layer-shell background/top/overlay surfaces remain compositor-owned layers.
 
 The binary-bundle design currently targets **x86_64 Linux built on Ubuntu

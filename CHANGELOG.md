@@ -7,6 +7,11 @@ monorepo use independent Semantic Versions.
 
 ### Added
 
+- `get_workspaces` / `get_monitors` / `get_tree` report tiling `gap`
+  (pixels). Focused-monitor queries `get_layout` (layout + `m_fact` +
+  `n_master` + `gap`), `get_gaps`, and `get_nmaster` return the selected
+  monitor's live values. See [docs/monitor-lock.md](docs/monitor-lock.md).
+
 - `get_windows` / `get_tree` / `window/state` report `is_fixed`, `is_dock`,
   `is_desktop`, `is_drag_floating`, `never_focus`, `skip_taskbar`,
   `skip_pager`, `no_decorations`, `demands_attention`, `has_strut`, and
