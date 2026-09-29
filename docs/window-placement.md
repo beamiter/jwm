@@ -178,8 +178,9 @@ that actually changes the rectangle, a tiling reorder (`zoom` / `pop`,
 `movestack`, scrolling column move/resize), a layout-parameter change
 (`incnmaster`, `setmfact`, `setgaps`, or `setlayout` / cycle / last via
 `apply_layout_change`), a tag `view` / `toggleview`, and a scratchpad
-hide/reveal, or a `togglebar` / `setcfact` rearrange for every affected
-client. Refused or no-op requests do not emit it; subscribe to `window` or
+hide/reveal, a `togglebar` / `setcfact` rearrange, a maximize work-area
+refit, or a strut / output topology rearrange for every affected client.
+Refused or no-op requests do not emit it; subscribe to `window` or
 `window/state` to follow flips without polling. A title change also emits
 the lighter `window/title` event; focus still emits `window/focus`.
 `get_windows` / `get_tree` / `window/state` also report `pid` when known.

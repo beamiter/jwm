@@ -4,12 +4,24 @@
 
 ---
 
-## Evolve backlog（目标 100 轮；已完成 wave 9–36，本地 ahead）
+## Evolve backlog（目标 100 轮；已完成 wave 9–38，本地 ahead）
 
 | # | 选题 | Size |
 | --- | --- | --- |
-| 14–36 | window/state 全族 + seamless + session max + placement + Wayland PID + WindowInfo.pid | ✓ |
+| 14–38 | window/state 全族含 refit/strut/topology + seamless + session + placement | ✓ |
+| 39 | connector-stable closed placement | M |
 | … | 跳过：Annotation/Screenshot CommonLinear、toast Closed(1)、BT withdraw、FS/PiP 丢锚点、Recording EncodedOnly、XWayland 单轴 | |
+
+---
+
+## 2026-09-29（二十六）：maximize refit + strut/topology → window/state
+
+选题 = evolve waves 37–38。
+
+1. **契约**：`refit_maximized_clients` 几何真变时广播；strut / output add·remove·change arrange 后广播可见窗。
+2. **回归**：maximize_commit_paths + sibling pin。
+
+**验证**：`scripts/test.sh --lib -- maximize_commit_paths sibling_window_state_paths`。
 
 ---
 

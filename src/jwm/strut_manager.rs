@@ -285,6 +285,7 @@ impl Jwm {
         }
         self.apply_strut_reservations();
         self.arrange(backend, None);
+        self.broadcast_visible_window_states_all_monitors();
     }
 
     pub fn check_strut_on_manage(&mut self, backend: &mut dyn Backend, win: WindowId) {
@@ -298,6 +299,7 @@ impl Jwm {
                 self.cache_external_strut(win, strut, host);
                 self.apply_strut_reservations();
                 self.arrange(backend, None);
+                self.broadcast_visible_window_states_all_monitors();
             }
         }
     }
@@ -307,6 +309,7 @@ impl Jwm {
             info!("[strut] Removed strut on unmanage for {:?}", win);
             self.apply_strut_reservations();
             self.arrange(backend, None);
+            self.broadcast_visible_window_states_all_monitors();
         }
     }
 }

@@ -3908,6 +3908,16 @@ impl Jwm {
             }
         }
     }
+
+    /// Like [`Self::broadcast_visible_window_states_on_monitor`] for every
+    /// monitor — used after a global `arrange(None)` from strut / topology
+    /// changes that rewrite work areas on all outputs.
+    pub(crate) fn broadcast_visible_window_states_all_monitors(&mut self) {
+        let monitors: Vec<_> = self.state.monitor_order.clone();
+        for mon in monitors {
+            self.broadcast_visible_window_states_on_monitor(mon);
+        }
+    }
 }
 
 #[cfg(test)]

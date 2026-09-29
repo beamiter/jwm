@@ -272,6 +272,8 @@ impl Jwm {
                 // that this refit must not clobber.
                 if let Err(error) = self.refit_keeping_restore_slot(backend, client_key, target) {
                     warn!("could not refit maximized window {win:?}: {error}");
+                } else {
+                    self.broadcast_window_state_ipc(client_key);
                 }
             }
         }
@@ -1982,6 +1984,11 @@ mod tests {
                 "{name} must broadcast visible clients after arrange"
             );
         }
+        let strut = include_str!("strut_manager.rs");
+        assert!(
+            strut.contains("broadcast_visible_window_states_all_monitors"),
+            "strut work-area changes must broadcast visible clients after arrange"
+        );
         let toggle = include_str!("features/toggles.rs");
         let float = toggle
             .split_once("pub fn togglefloating(")
@@ -2149,6 +2156,12 @@ mod tests {
                 "pub(crate) fn refit_maximized_clients(",
                 false,
             ),
+            (
+                "refit_maximized_clients",
+                "pub(crate) fn refit_maximized_clients(",
+                "pub fn togglemaximize(",
+                false,
+            ),
         ];
         for (name, start, end, gates_on_changed) in changed_paths {
             let body = SOURCE
@@ -2169,6 +2182,17 @@ mod tests {
                 );
             }
         }
+        let refit = SOURCE
+            .split_once("pub(crate) fn refit_maximized_clients(")
+            .expect("refit")
+            .1
+            .split_once("pub fn togglemaximize(")
+            .expect("togglemaximize")
+            .0;
+        assert!(
+            refit.contains("if target != live") && refit.contains(&broadcast),
+            "refit must broadcast only when geometry actually moves"
+        );
         // Rejected / no-op path inside the inner step must not broadcast.
         let inner = SOURCE
             .split_once("fn set_client_maximized_inner(")
