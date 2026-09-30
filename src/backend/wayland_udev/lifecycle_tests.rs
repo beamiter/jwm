@@ -15,10 +15,11 @@ use smithay::reexports::x11rb::rust_connection::RustConnection;
 use smithay::wayland::xdg_activation::{
     XdgActivationHandler, XdgActivationToken, XdgActivationTokenData,
 };
-use smithay::xwayland::X11Wm;
+use smithay::xwayland::{X11Wm, XWayland};
 use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
+use std::process::Stdio;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -636,9 +637,14 @@ fn xdg_maximized_state_rides_the_policy_configure_and_refusals_still_reply() {
 
     // 3. Policy accepts: state and size ride one configure. Stage Tiled*
     //    first so we prove Maximized clears the edge hints in the same send.
-    fixture.state.toplevels.get(&window).expect("toplevel").with_pending_state(|s| {
-        JwmWaylandState::set_toplevel_tiled_state(s, true);
-    });
+    fixture
+        .state
+        .toplevels
+        .get(&window)
+        .expect("toplevel")
+        .with_pending_state(|s| {
+            JwmWaylandState::set_toplevel_tiled_state(s, true);
+        });
     fixture
         .state
         .set_window_maximized(window, MaximizeAxes::BOTH)
@@ -713,7 +719,7 @@ fn xwm_above_below_requests_write_real_properties_and_raise_real_windows() {
     let mut event_loop: EventLoop<'static, JwmWaylandState> =
         EventLoop::try_new().expect("create XWM test event loop");
     let display = Display::<JwmWaylandState>::new().expect("create XWM test Wayland display");
-    let mut display_handle = display.handle();
+    let display_handle = display.handle();
     let pending_events = Arc::new(Mutex::new(VecDeque::new()));
     let (flush_tx, _flush_rx) = channel::channel();
     let (mut state, socket_name) = JwmWaylandState::init(
@@ -729,10 +735,23 @@ fn xwm_above_below_requests_write_real_properties_and_raise_real_windows() {
     .expect("initialize XWM test state");
     assert!(socket_name.is_none());
 
-    let (wl_server, _wl_peer) = UnixStream::pair().expect("create dummy Wayland client");
-    let xwayland_client = display_handle
-        .insert_client(wl_server, Arc::new(JwmClientState::default()))
-        .expect("insert dummy XWayland client");
+    // `X11Wm::start_wm` requires the Wayland client created by
+    // `XWayland::spawn`: Smithay reads its private `XWaylandClientData` to
+    // obtain compositor state and attach the XWM id.  A generic test client
+    // reaches an unconditional unwrap inside Smithay before any X11 event is
+    // handled.  Keep this helper instance alive for the lifetime of the XWM;
+    // the X11 side under test remains the isolated Xvfb connection above.
+    let (_xwayland_client_owner, xwayland_client) = XWayland::spawn(
+        &display_handle,
+        None,
+        std::iter::empty::<(String, String)>(),
+        std::iter::empty::<String>(),
+        false,
+        Stdio::null(),
+        Stdio::null(),
+        |_| {},
+    )
+    .expect("create Smithay XWayland client data for XWM fixture");
     state.x11_wm = Some(
         X11Wm::start_wm(
             event_loop.handle(),
@@ -1441,9 +1460,7 @@ fn every_wayland_property_ops_has_get_window_pid() {
             .split_once(&method)
             .unwrap_or_else(|| panic!("{name}: WaylandPropertyOps must override get_window_pid"))
             .1;
-        let body = body
-            .split_once("\n    fn ")
-            .map_or(body, |(body, _)| body);
+        let body = body.split_once("\n    fn ").map_or(body, |(body, _)| body);
         assert!(
             body.contains(&helper),
             "{name}: get_window_pid must ask JwmWaylandState"

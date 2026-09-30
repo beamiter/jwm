@@ -120,6 +120,9 @@ jobs:
       - name: Test release install lifecycle
         run: bash scripts/test-install-lifecycle.sh
 
+      - name: Test source installer build recovery
+        run: bash scripts/test-install-jwm-build.sh
+
       - name: Build release bundle
         run: bash scripts/package-release.sh --output-dir dist
 

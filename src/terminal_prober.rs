@@ -13,9 +13,10 @@ pub(crate) fn command_exists_in_path(cmd: &str, path: Option<&OsStr>) -> bool {
     if command_path.components().count() > 1 {
         return is_executable(command_path);
     }
-    path.is_some_and(|path| {
-        env::split_paths(path).any(|directory| is_executable(&directory.join(command_path)))
-    })
+    // Linux execvp uses this default when PATH is absent. An explicitly empty
+    // PATH still searches the current directory and must not use the default.
+    let path = path.unwrap_or_else(|| OsStr::new("/bin:/usr/bin"));
+    env::split_paths(path).any(|directory| is_executable(&directory.join(command_path)))
 }
 
 fn is_executable(path: &Path) -> bool {
@@ -535,5 +536,34 @@ mod tests {
             "definitely-not-a-jwm-terminal",
             Some(&search_path)
         ));
+    }
+
+    #[test]
+    fn missing_path_matches_process_launch_default() {
+        let status = std::process::Command::new("sh")
+            .args(["-c", "exit 0"])
+            .env_remove("PATH")
+            .status()
+            .unwrap();
+        assert!(status.success());
+        assert!(command_exists_in_path("sh", None));
+        assert!(!command_exists_in_path(
+            "sh",
+            Some(OsStr::new("/definitely-not-a-jwm-path"))
+        ));
+    }
+
+    #[test]
+    fn explicit_empty_path_does_not_use_default_search() {
+        let executable = std::env::current_exe().unwrap();
+        let name = executable.file_name().unwrap().to_str().unwrap();
+        assert_eq!(
+            command_exists_in_path(name, Some(OsStr::new(""))),
+            is_executable(Path::new(name))
+        );
+        assert_eq!(
+            command_exists_in_path("sh", Some(OsStr::new(""))),
+            is_executable(Path::new("sh"))
+        );
     }
 }

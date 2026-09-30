@@ -199,9 +199,9 @@ pub(crate) fn seed_pertag_from_config(
             Some(connector) => debug!(
                 "[layout] restored {restored} saved tag layouts for {connector} (monitor {mon_index})"
             ),
-            None => debug!(
-                "[layout] restored {restored} saved tag layouts for monitor {mon_index}"
-            ),
+            None => {
+                debug!("[layout] restored {restored} saved tag layouts for monitor {mon_index}")
+            }
         }
     }
     monitor.reload_current_tag_context();
@@ -731,15 +731,9 @@ mod tests {
 
     #[test]
     fn merge_drops_stale_rows_for_a_renumbered_connector() {
-        let existing = vec![
-            entry_on(1, 1, "HDMI-A-1", "monocle"),
-            entry(1, -1, "grid"),
-        ];
+        let existing = vec![entry_on(1, 1, "HDMI-A-1", "monocle"), entry(1, -1, "grid")];
         // HDMI was monitor 1; after hole-fill it is monitor 0.
-        let merged = merge_layout_tag_entries(
-            &existing,
-            vec![entry_on(1, 0, "HDMI-A-1", "deck")],
-        );
+        let merged = merge_layout_tag_entries(&existing, vec![entry_on(1, 0, "HDMI-A-1", "deck")]);
         let summary: Vec<(i32, Option<&str>, &str)> = merged
             .iter()
             .map(|entry| {

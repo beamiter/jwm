@@ -1102,7 +1102,10 @@ mod tests {
         // Needles are assembled at runtime so this cannot match its own text.
         // Avoid `body_of(render_frame)`: the signature's type path contains `{`.
         let source = include_str!("render.rs");
-        let system_ui = format!("self.{}(gl, &projection, tail_draws_linear);", "render_system_ui");
+        let system_ui = format!(
+            "self.{}(gl, &projection, tail_draws_linear);",
+            "render_system_ui"
+        );
         let final_brightness = format!("self.{}(gl, &projection);", "apply_final_brightness");
         let screenshot = format!("// 19. {} capture", "Screenshot");
         let recording = format!("// 21. {} capture", "Recording");
@@ -2370,12 +2373,7 @@ impl WaylandCompositor {
     ///
     /// `target_fbo` must hold encoded sRGB (the scanout target on the encoded
     /// routes).
-    fn apply_brightness_multiply(
-        &self,
-        gl: &ffi::Gles2,
-        projection: &[f32; 16],
-        target_fbo: u32,
-    ) {
+    fn apply_brightness_multiply(&self, gl: &ffi::Gles2, projection: &[f32; 16], target_fbo: u32) {
         if !super::config::final_brightness_is_active(self.brightness) {
             return;
         }
@@ -3632,8 +3630,13 @@ impl WaylandCompositor {
                     // shadow travels with the window instead of staying at
                     // its rest position while the body slides or zooms.
                     let anim = self.window_animation_frame_for(wt);
-                    let ([sx, sy, sw, sh], [size_w, size_h]) =
-                        shadow_quad((x, y, w, h), anim, [ox, oy], spread, self.shadow_bottom_extra);
+                    let ([sx, sy, sw, sh], [size_w, size_h]) = shadow_quad(
+                        (x, y, w, h),
+                        anim,
+                        [ox, oy],
+                        spread,
+                        self.shadow_bottom_extra,
+                    );
 
                     self.set_rect_uniform(gl, self.shadow_uniforms.rect, sx, sy, sw, sh);
                     gl.Uniform2f(self.shadow_uniforms.size, size_w, size_h);
@@ -4067,11 +4070,7 @@ impl WaylandCompositor {
                         // glass_fill_rounded binds its own program; restore the
                         // window path before the bar texture / trail draws.
                         gl.UseProgram(self.program);
-                        self.set_projection_uniform(
-                            gl,
-                            self.win_uniforms.projection,
-                            &projection,
-                        );
+                        self.set_projection_uniform(gl, self.win_uniforms.projection, &projection);
                         gl.Uniform1i(self.win_uniforms.texture, 0);
                         gl.Uniform1i(self.win_uniforms.color_managed, 0);
                         gl.Uniform1i(
@@ -4470,7 +4469,6 @@ impl WaylandCompositor {
 
         self.render_minimized_dock_items(gl, &projection, overlay_scene_linear);
         self.render_dock_preview(gl, &projection, overlay_scene_linear);
-
 
         // End of scissored output_fbo passes. Effect overlays below always run
         // full-screen, and allow_partial already excludes every one of them, so
@@ -5134,8 +5132,7 @@ impl WaylandCompositor {
                 let mic_chip_h = self.render_mic_indicator(gl, &projection, rec_chip_h);
                 let hint_lift =
                     crate::backend::compositor_common::capture_hint::capture_hint_bottom_lift(
-                        rec_chip_h,
-                        mic_chip_h,
+                        rec_chip_h, mic_chip_h,
                     );
                 self.render_capture_hint(gl, &projection, hint_lift);
                 gl.BindFramebuffer(ffi::FRAMEBUFFER, 0);
@@ -5535,7 +5532,18 @@ impl WaylandCompositor {
         // rounded-fill mode. The overlay draws onto the display-encoded
         // output, so scene-linear conversion stays off.
         self.ui_fill_island(
-            gl, projection, ui, cx, cy, cw, ch, radius, radius_top, ui.card, 1.0, scene_linear,
+            gl,
+            projection,
+            ui,
+            cx,
+            cy,
+            cw,
+            ch,
+            radius,
+            radius_top,
+            ui.card,
+            1.0,
+            scene_linear,
         );
         if layout.chip_pill.2 > 0.0 {
             let (px, py, pw, ph) = layout.chip_pill;
@@ -5759,13 +5767,7 @@ impl WaylandCompositor {
         } else {
             self.output_fbo
         };
-        self.blit_fbo(
-            gl,
-            source_fbo,
-            self.scene_fbo,
-            self.screen_w,
-            self.screen_h,
-        );
+        self.blit_fbo(gl, source_fbo, self.scene_fbo, self.screen_w, self.screen_h);
         // Depth comes from the theme, not from the client blur dials: the
         // panels are blurred far past legibility of what is behind them
         // because that is what the material is, and a user who turned
@@ -6136,7 +6138,6 @@ impl WaylandCompositor {
         status_bar_name: &str,
     ) {
         unsafe {
-
             let is_focused = focused == Some(win_id);
             let attention_active_for_win =
                 attention_signal_active(self.attention_animation_enabled, wt.is_urgent);
@@ -6286,14 +6287,7 @@ impl WaylandCompositor {
                 gl.Uniform1f(self.border_uniforms.radius, outer_radius);
                 gl.Uniform1f(self.border_uniforms.radius_top, outer_radius);
                 gl.Uniform2f(self.border_uniforms.size, bdr_w, bdr_h);
-                self.set_rect_uniform(
-                    gl,
-                    self.border_uniforms.rect,
-                    bdr_x,
-                    bdr_y,
-                    bdr_w,
-                    bdr_h,
-                );
+                self.set_rect_uniform(gl, self.border_uniforms.rect, bdr_x, bdr_y, bdr_w, bdr_h);
 
                 self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
             }
@@ -6832,7 +6826,15 @@ impl WaylandCompositor {
                 if let Some(live) = live {
                     // The on-screen tag's cell swaps its wireframes for the
                     // windows' own textures, scaled into the same rectangles.
-                    self.render_tags_grid_live_cell(gl, projection, frame, live, ink, scale, scene_linear);
+                    self.render_tags_grid_live_cell(
+                        gl,
+                        projection,
+                        frame,
+                        live,
+                        ink,
+                        scale,
+                        scene_linear,
+                    );
                 }
                 // The frame's border sits above the cell's content, so a live
                 // thumbnail ends exactly at the frame edge.
@@ -7322,7 +7324,9 @@ impl WaylandCompositor {
             unsafe { self.render_tags_grid(gl, projection, grid, viewport, scene_linear) };
         } else {
             unsafe { self.clear_tags_grid_labels(gl) };
-            unsafe { self.render_system_ui_panel(gl, projection, &overlay, viewport, scene_linear) };
+            unsafe {
+                self.render_system_ui_panel(gl, projection, &overlay, viewport, scene_linear)
+            };
         }
         self.system_ui = Some(overlay);
     }
@@ -7515,7 +7519,17 @@ impl WaylandCompositor {
             // border program's rounded-fill mode. The overlay draws onto the
             // display-encoded output, so scene-linear conversion stays off.
             self.ui_fill_island(
-                gl, projection, ui, x, y, panel_w, panel_h, radius, radius_top, panel_fill, 1.0,
+                gl,
+                projection,
+                ui,
+                x,
+                y,
+                panel_w,
+                panel_h,
+                radius,
+                radius_top,
+                panel_fill,
+                1.0,
                 scene_linear,
             );
 
@@ -7846,7 +7860,12 @@ impl WaylandCompositor {
     /// card, drop shadow, urgency accent stripe, title over dimmer body, an
     /// optional row of action chips, and a fade in/out envelope shared with
     /// the X11 backend.
-    unsafe fn render_toasts(&mut self, gl: &ffi::Gles2, projection: &[f32; 16], scene_linear: bool) {
+    unsafe fn render_toasts(
+        &mut self,
+        gl: &ffi::Gles2,
+        projection: &[f32; 16],
+        scene_linear: bool,
+    ) {
         let now = std::time::Instant::now();
         let mut removed = std::mem::take(&mut self.toast_retired);
         removed.extend(self.toast_stack.prune(now));
@@ -7976,7 +7995,17 @@ impl WaylandCompositor {
                 // No drop shadow: the top edge is flush with the bar, and a
                 // shadow spreading up over it is the seam this removes.
                 self.ui_fill_island(
-                    gl, projection, ui, x, y, card_w, card_h, radius, radius_top, ui.toast, a,
+                    gl,
+                    projection,
+                    ui,
+                    x,
+                    y,
+                    card_w,
+                    card_h,
+                    radius,
+                    radius_top,
+                    ui.toast,
+                    a,
                     scene_linear,
                 );
                 self.sysui_fill_rounded(
@@ -8171,7 +8200,17 @@ impl WaylandCompositor {
             // No drop shadow: the top edge is flush with the bar, and a shadow
             // spreading up over it is exactly the seam the effect removes.
             self.ui_fill_island(
-                gl, projection, ui, x, y, card_w, card_h, radius, radius_top, ui.osd, a,
+                gl,
+                projection,
+                ui,
+                x,
+                y,
+                card_w,
+                card_h,
+                radius,
+                radius_top,
+                ui.osd,
+                a,
                 scene_linear,
             );
 

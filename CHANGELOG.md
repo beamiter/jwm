@@ -5,7 +5,135 @@ monorepo use independent Semantic Versions.
 
 ## [Unreleased]
 
-### Added
+### Changed
+
+- Support queries share one two-second request/response deadline after
+  connection and require complete newline-delimited responses within 4 MiB.
+- Control tools bound Unix-socket connection establishment independently of
+  subsequent I/O: 10 seconds for performance recording, 2 seconds for support
+  queries and 5 seconds for `jwm-tool` requests. CLI request writes also have
+  one 5-second deadline; subscriptions retain their event-waiting policy.
+- Atomic configuration batches validate the final candidate before publishing,
+  including dormant feature settings when a batch enables that feature.
+- Performance fallback resolution uses the full monitor bounding box,
+  independent of coordinate origin. Host-label inputs are bounded to 1 MiB;
+  unusable idle intervals and counter resets produce errors rather than
+  manufactured zero measurements.
+- Performance IPC responses require complete newline-delimited envelopes with
+  a boolean success flag and fit within 4 MiB including the newline. Request
+  writes and response reads share one 10-second deadline after connection.
+- Performance process samples are bounded to 64 KiB. Daemon PID/legacy-lock
+  records, legacy command lines and response files use bounded nonblocking
+  regular-file reads, preserving boot/start-time identity checks.
+- Performance configuration labels and baseline inputs use bounded regular-file
+  reads, reject FIFOs without waiting for a writer, and preserve ordinary
+  symlink inputs. Failed configuration reads produce an unknown fingerprint
+  that the comparison contract refuses.
+- Process ancestry probes bound status input to 256 KiB and stop before invalid
+  PIDs or repeated ancestors. Support-bundle system facts use 4 KiB kernel and
+  64 KiB distribution input limits.
+- The next ten rounds traverse only assigned workspace tag bits, accumulate
+  tree flags while projecting windows, and cache stack positions and swallow
+  relationships within each window/tree query.
+- Scrolling overview preparation indexes column membership once instead of
+  rescanning the strip for each visible client. Cursor selection follows the
+  nearest nominal theme size even when different sizes share pixel dimensions.
+- Notification, configuration and support-bundle writes retry occupied
+  temporary names without deleting another writer's file. Temporary creation
+  and configuration-backup name searches stop after 128 candidates.
+- Ten follow-up rounds batch all six `get_status` window flags, accumulate
+  workspace counts from one client lookup per monitor entry, and reuse
+  monitor/scratchpad/tab projections across window and tree queries.
+- Clipboard filtering normalizes the Unicode query once per panel rebuild.
+  Incoming image offers are checked before raster decoding: at most 16,384
+  pixels per edge and 16 Mi pixels overall, with a 64 MiB decoder allocation
+  budget. PNG passthrough also verifies the detected format.
+- Battery discovery retains only the lexically first 64 directory candidates
+  while preserving battery selection and peripheral-scope behavior.
+- IPC statistics use one client traversal per monitor or workspace and constant
+  time scratchpad/tab lookups. `get_status` counts and window flag summaries
+  read WM state directly instead of rebuilding detailed window, monitor,
+  workspace and tree replies.
+- Launcher, information-panel and clipboard search inputs accept up to 256
+  Unicode characters. Calculator expressions have the same parsing budget.
+- Configuration readers, backups and restores reject special files and payloads
+  over 4 MiB. Backups publish complete synced files without overwriting earlier
+  recovery points; restore uses atomic replacement, preserves dotfile symlinks
+  and existing target permissions, and creates missing targets privately.
+
+### Fixed
+
+- The source installer recovers once from missing generated XCB sources by
+  cleaning only that package's current-profile artifacts. Workspace/bridge
+  artifact lookup follows `CARGO_TARGET_DIR`; native bars use independent
+  caches and their dependency locks. Cargo and log-writing failures retain
+  their respective exit status.
+- Launcher arithmetic applies powers before unary signs, rejects non-finite
+  intermediate values and preserves tiny nonzero results in scientific notation.
+- EDID identity parsing preserves valid names/serials when later descriptors
+  are blank and rejects invalid manufacturer letter codes. VmRSS parsing
+  requires the kernel's `kB` unit and a complete field.
+- Idle tracking recognizes activity when the sampled clock decreases, including
+  delayed polls, and restores dim/off stages independently when live settings
+  disable or postpone them. Calendar navigation stays within renderable years.
+- Invalid spawn argv containing NUL and wrong numeric arguments for
+  `incnmaster`, `focusstack` and `setmfact` warn and skip the affected binding.
+  Existing files continue loading their other valid settings.
+- Repeated scrolling admission preserves existing columns, widths and focus.
+  Window boundary constraints retain wide intermediate sizes including borders,
+  and visibility checks avoid mistaking overflowing visible geometry for a
+  parked window.
+- Notification identifier wraparound skips identifiers still in the bounded
+  history. Launcher history writes accept bare relative paths and never
+  remove released temporary names after a directory-sync failure.
+- Desktop Exec preserves explicit empty arguments. String command parsing
+  rejects internal NUL before launch; terminal probes use the Linux default
+  search path when PATH is absent while honoring explicitly empty PATH.
+- EDID text identity ignores descriptors with nonzero reserved prefix bytes.
+  Performance comparison refuses invalid effective ratio/absolute budgets
+  while preserving the unused-bound semantics of Exact rules.
+- Launcher history rejects control characters in application identifiers,
+  preventing new entries from injecting extra persisted rows. Notification
+  history restores only the newest occurrence of each identifier.
+- Monitor reference navigation counts steps among the other outputs and
+  recovers from invalid reference indices without a repeat-until-match loop.
+- Performance comparison refuses recorded negative or non-finite metrics
+  before applying budgets, so corrupted timings cannot pass as improvements.
+- Monitor picker cycles and display placement/alignment avoid integer overflow,
+  preserving representable results with wide intermediate arithmetic. PNG
+  metadata rejects truncated IHDR chunks and invalid dimensions.
+- Session and closed-placement saves never delete a temporary path reused after
+  a successful rename, including when the final directory sync fails.
+- HUD CPU samples re-establish their counter baseline after resets or unusable
+  intervals instead of displaying a false zero or ratio; aggregate counter
+  overflow is rejected.
+- Launcher and searchable information panels no longer panic on substring
+  matches deep inside long titles. Every substring match ranks above a
+  subsequence match, while substring position ordering remains strict.
+- Notification history accepts bare relative output filenames. Failed commits
+  clean up owned temporaries; directory-sync failures after a successful
+  commit never clean up a released name another writer could have reused.
+- Support-bundle file output now explicitly applies mode `0600` and syncs the
+  destination directory after replacement.
+- Session snapshots omit uninitialized restore geometry, continue reading
+  historical double-zero old-geometry slots, and reject malformed dimensions.
+- Session, closed-window placement and launcher usage saves retry temporary
+  name collisions without deleting another writer's file. Retries are bounded
+  to 128 candidates and leave existing state intact when all are occupied.
+- Session and closed-placement loaders reject FIFOs without waiting for a
+  writer. Native X11 tests use Xvfb's displayfd readiness notification and a
+  retained X11 setup connection instead of a socket-existence timing guess.
+- Session restore retains parking coordinates calculated for the current output
+  topology and clamps minimized/fullscreen restore rectangles to the current
+  monitor work area, preventing stale saved geometry from placing windows off
+  screen.
+- Updated the switcher integration test to exercise horizontal-wheel wraparound
+  and made the control-snapshot test tolerate formatted command aliases.
+- Corrected the XWM integration fixture to provide Smithay's required XWayland
+  client data; audio-device OSD coverage now executes the flush and verifies
+  that confirmed feedback is consumed once.
+- Cleared existing workspace formatting drift and restricted test-only monitor
+  helpers to test builds so the default Clippy warning gate is clean.
 
 ### Added
 

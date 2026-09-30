@@ -3,6 +3,23 @@
 use crate::jwm::features::connectivity::BackgroundJob;
 use crate::jwm::features::launcher::LauncherRow;
 use crate::jwm::features::shell_hub::ShellHubRoute;
+
+/// Longest interactive filter accepted by shell panels.
+///
+/// Every typed character can trigger a complete row filter (and, for the
+/// launcher, ranking plus calculator parsing). Bounding the query keeps a
+/// held key or an input-method burst from growing the compositor's heap and
+/// per-keystroke work without limit. 256 characters is already wider than
+/// any query the single-line panels can display usefully.
+const MAX_SHELL_QUERY_CHARS: usize = 256;
+
+fn push_shell_query(query: &mut String, ch: char) -> bool {
+    if query.chars().count() >= MAX_SHELL_QUERY_CHARS {
+        return false;
+    }
+    query.push(ch);
+    true
+}
 use std::cmp::Reverse;
 use std::collections::HashSet;
 use std::ffi::{CStr, CString, OsStr, c_char, c_int, c_void};
@@ -2031,19 +2048,16 @@ impl SystemUiState {
         history: &crate::jwm::features::ClipboardHistory,
         query: &str,
     ) -> (Vec<ListRow>, Vec<Option<String>>) {
-        use crate::backend::compositor_common::row_icons::{
-            memory_icon_key, register_memory_icon,
-        };
+        use crate::backend::compositor_common::row_icons::{memory_icon_key, register_memory_icon};
         use crate::jwm::features::ClipboardEntry;
         use std::sync::Arc;
 
+        let needle = crate::jwm::features::clipboard::normalize_query(query);
         let mut rows = Vec::new();
         let mut row_icons = Vec::new();
-        for (index, entry) in history
-            .entries()
-            .enumerate()
-            .filter(|(_, entry)| crate::jwm::features::clipboard::matches_query(entry, query))
-        {
+        for (index, entry) in history.entries().enumerate().filter(|(_, entry)| {
+            crate::jwm::features::clipboard::matches_normalized_query(entry, &needle)
+        }) {
             let icon = match entry {
                 ClipboardEntry::Png { bytes, .. } if !bytes.is_empty() => {
                     let key = memory_icon_key(bytes);
@@ -2064,10 +2078,7 @@ impl SystemUiState {
 
     /// Rebuild the open clipboard picker's rows and icons from `history`,
     /// holding the selection on the same history index when it still matches.
-    fn rebuild_clipboard_rows(
-        &mut self,
-        history: &crate::jwm::features::ClipboardHistory,
-    ) {
+    fn rebuild_clipboard_rows(&mut self, history: &crate::jwm::features::ClipboardHistory) {
         let Self::ListPanel {
             kind,
             rows,
@@ -2146,7 +2157,9 @@ impl SystemUiState {
             if *kind != ListKind::Clipboard {
                 return;
             }
-            query.push(ch);
+            if !push_shell_query(query, ch) {
+                return;
+            }
         }
         self.rebuild_clipboard_rows(history);
     }
@@ -3092,12 +3105,16 @@ impl SystemUiState {
         if entries.len() < 2 {
             return;
         }
-        loop {
-            *reference = cycle_index(*reference, entries.len(), delta);
-            if *reference != *selected {
-                break;
-            }
-        }
+        // References cycle through the other outputs; the target never
+        // consumes a step, including when delta skips multiple candidates.
+        let candidates: Vec<usize> = (0..entries.len())
+            .filter(|index| *index != *selected)
+            .collect();
+        let current = candidates
+            .iter()
+            .position(|index| *index == *reference)
+            .unwrap_or(0);
+        *reference = candidates[cycle_index(current, candidates.len(), delta)];
         message.clear();
     }
 
@@ -3119,20 +3136,20 @@ impl SystemUiState {
         };
         match direction {
             MonitorDirection::Left => {
-                target.x = anchor.x - target.width;
+                target.x = anchor.x.saturating_sub(target.width);
                 target.y = anchor.y;
             }
             MonitorDirection::Right => {
-                target.x = anchor.x + anchor.width;
+                target.x = anchor.x.saturating_add(anchor.width);
                 target.y = anchor.y;
             }
             MonitorDirection::Above => {
                 target.x = anchor.x;
-                target.y = anchor.y - target.height;
+                target.y = anchor.y.saturating_sub(target.height);
             }
             MonitorDirection::Below => {
                 target.x = anchor.x;
-                target.y = anchor.y + anchor.height;
+                target.y = anchor.y.saturating_add(anchor.height);
             }
         }
         normalize_monitor_positions(entries);
@@ -3267,7 +3284,11 @@ impl SystemUiState {
 
     pub fn push_char(&mut self, ch: char) {
         match self {
-            Self::Launcher { query, .. } | Self::Info { query, .. } => query.push(ch),
+            Self::Launcher { query, .. } | Self::Info { query, .. } => {
+                if !push_shell_query(query, ch) {
+                    return;
+                }
+            }
             Self::ListPanel {
                 prompt: Some(prompt),
                 message,
@@ -4583,11 +4604,18 @@ impl SystemUiState {
 
 fn cycle_index(index: usize, len: usize, delta: isize) -> usize {
     debug_assert!(len > 0);
+    let index = index % len;
     let distance = delta.unsigned_abs() % len;
     if delta.is_negative() {
-        (index + len - distance) % len
+        if distance > index {
+            len - (distance - index)
+        } else {
+            index - distance
+        }
+    } else if distance >= len - index {
+        distance - (len - index)
     } else {
-        (index + distance) % len
+        index + distance
     }
 }
 
@@ -4598,8 +4626,8 @@ fn normalize_monitor_positions(entries: &mut [MonitorLayoutEntry]) {
         return;
     }
     for entry in entries {
-        entry.x -= min_x;
-        entry.y -= min_y;
+        entry.x = entry.x.saturating_sub(min_x);
+        entry.y = entry.y.saturating_sub(min_y);
     }
 }
 
@@ -4626,15 +4654,12 @@ fn aligned_position(
     target_size: i32,
     alignment: MonitorAlignment,
 ) -> i32 {
-    match alignment {
-        MonitorAlignment::Start => anchor_start,
-        MonitorAlignment::Center => {
-            anchor_start.saturating_add(anchor_size.saturating_sub(target_size) / 2)
-        }
-        MonitorAlignment::End => anchor_start
-            .saturating_add(anchor_size)
-            .saturating_sub(target_size),
-    }
+    let offset = match alignment {
+        MonitorAlignment::Start => 0,
+        MonitorAlignment::Center => (i64::from(anchor_size) - i64::from(target_size)) / 2,
+        MonitorAlignment::End => i64::from(anchor_size) - i64::from(target_size),
+    };
+    (i64::from(anchor_start) + offset).clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
 }
 
 fn monitor_attachment_summary(
@@ -4998,8 +5023,10 @@ fn parse_exec(exec: &str) -> Vec<String> {
     let mut current = String::new();
     let mut quote = None;
     let mut escaped = false;
+    let mut argument_started = false;
     for ch in exec.chars() {
         if escaped {
+            argument_started = true;
             current.push(ch);
             escaped = false;
             continue;
@@ -5009,6 +5036,7 @@ fn parse_exec(exec: &str) -> Vec<String> {
             continue;
         }
         if let Some(q) = quote {
+            argument_started = true;
             if ch == q {
                 quote = None
             } else {
@@ -5021,14 +5049,16 @@ fn parse_exec(exec: &str) -> Vec<String> {
             continue;
         }
         if ch.is_whitespace() {
-            if !current.is_empty() {
+            if argument_started {
                 args.push(std::mem::take(&mut current));
+                argument_started = false;
             }
         } else {
+            argument_started = true;
             current.push(ch);
         }
     }
-    if !current.is_empty() {
+    if argument_started {
         args.push(current);
     }
     args.into_iter()
@@ -6210,6 +6240,21 @@ mod tests {
     }
 
     #[test]
+    fn clipboard_panel_applies_one_unicode_query_to_the_whole_history() {
+        let history = clipboard_history(&["RÉSUMÉ.md", "meeting notes", "résumé final.pdf"]);
+        let mut panel = SystemUiState::clipboard_picker(&history);
+        for ch in "RÉSUMÉ".chars() {
+            panel.push_clipboard_query(ch, &history);
+        }
+
+        let SystemUiState::ListPanel { rows, .. } = &panel else {
+            panic!("the clipboard picker is a list panel");
+        };
+        let positions: Vec<&str> = rows.iter().map(|row| row.key.as_str()).collect();
+        assert_eq!(positions, ["0", "2"]);
+    }
+
+    #[test]
     fn the_selection_holds_on_an_entry_that_still_matches_the_filter() {
         let history = clipboard_history(&["alpha", "beta", "alphabet soup"]);
         let mut panel = SystemUiState::clipboard_picker(&history);
@@ -7388,6 +7433,24 @@ mod tests {
     }
 
     #[test]
+    fn desktop_exec_preserves_explicit_empty_arguments() {
+        assert_eq!(
+            parse_exec("foo --name \"\" --safe '' %U"),
+            ["foo", "--name", "", "--safe", ""]
+        );
+        assert_eq!(parse_exec("foo \"\""), ["foo", ""]);
+        assert_eq!(parse_exec("foo a\"\"b  "), ["foo", "ab"]);
+        assert_eq!(parse_exec("foo \\"), ["foo"]);
+        assert_eq!(parse_exec("foo tail\\"), ["foo", "tail"]);
+        assert_eq!(parse_exec("foo \""), ["foo"]);
+        assert_eq!(parse_exec("foo '"), ["foo"]);
+        assert_eq!(
+            parse_exec(r#"foo two\ words \"quoted\" "a\\b" %f %U --safe"#),
+            ["foo", "two words", "\"quoted\"", "a\\b", "--safe"]
+        );
+    }
+
+    #[test]
     fn desktop_scan_skips_symlink_loops_and_oversized_entries() {
         let root = std::env::temp_dir().join(format!(
             "jwm-desktop-scan-{}-{:016x}",
@@ -7584,6 +7647,30 @@ mod tests {
         };
         state.refresh_matches();
         state
+    }
+
+    #[test]
+    fn shell_queries_stop_at_the_visible_input_budget() {
+        let mut launcher = launcher_with(&[("alpha", false)], "");
+        for _ in 0..MAX_SHELL_QUERY_CHARS + 20 {
+            launcher.push_char('\u{754c}');
+        }
+        let SystemUiState::Launcher { query, .. } = &launcher else {
+            panic!("launcher state");
+        };
+        assert_eq!(query.chars().count(), MAX_SHELL_QUERY_CHARS);
+
+        let history = clipboard_history(&["alpha"]);
+        let mut clipboard = SystemUiState::clipboard_picker(&history);
+        for _ in 0..MAX_SHELL_QUERY_CHARS + 20 {
+            clipboard.push_clipboard_query('\u{754c}', &history);
+        }
+        assert_eq!(
+            clipboard
+                .clipboard_query()
+                .map(|query| query.chars().count()),
+            Some(MAX_SHELL_QUERY_CHARS)
+        );
     }
 
     #[test]
@@ -8299,11 +8386,7 @@ mod tests {
             "{}",
             parts.hint
         );
-        assert!(
-            parts.hint.contains("click clock  today"),
-            "{}",
-            parts.hint
-        );
+        assert!(parts.hint.contains("click clock  today"), "{}", parts.hint);
         assert!(parts.hint.contains("\u{f060}/\u{f061}  month"));
         assert!(parts.hint.contains("t  today"));
         assert!(parts.hint.contains("Esc  close"));
@@ -8659,6 +8742,84 @@ mod tests {
     }
 
     #[test]
+    fn monitor_cycles_handle_integer_extremes_without_overflow() {
+        assert_eq!(cycle_index(usize::MAX - 1, usize::MAX, 2), 1);
+        assert_eq!(cycle_index(usize::MAX - 1, usize::MAX, -1), usize::MAX - 2);
+        assert_eq!(cycle_index(usize::MAX, 3, isize::MIN), 1);
+        assert_eq!(cycle_index(2, 3, isize::MAX), 0);
+        let mut state = SystemUiState::monitor_layout(vec![
+            monitor("one", 0, 0, 100, 100),
+            monitor("two", 100, 0, 100, 100),
+            monitor("three", 200, 0, 100, 100),
+        ]);
+        state.cycle_monitor(isize::MIN);
+        let SystemUiState::MonitorLayout {
+            selected,
+            reference,
+            ..
+        } = state
+        else {
+            panic!("expected monitor layout");
+        };
+        assert_eq!(selected, 1);
+        assert_eq!(reference, 0);
+    }
+
+    #[test]
+    fn monitor_layout_normalizes_extreme_coordinates_without_wrapping() {
+        let state = SystemUiState::monitor_layout(vec![
+            monitor("left", i32::MIN, i32::MIN, 100, 100),
+            monitor("right", i32::MAX, i32::MAX, 100, 100),
+        ]);
+        assert_eq!(
+            state.monitor_layout_xrandr_args().unwrap(),
+            [
+                "--output",
+                "left",
+                "--pos",
+                "0x0",
+                "--output",
+                "right",
+                "--pos",
+                "2147483647x2147483647"
+            ]
+        );
+        assert!(!state.overlay_text().is_empty());
+        for direction in [
+            MonitorDirection::Left,
+            MonitorDirection::Right,
+            MonitorDirection::Above,
+            MonitorDirection::Below,
+        ] {
+            let mut state = SystemUiState::monitor_layout(vec![
+                monitor("target", i32::MIN, i32::MIN, 200, 200),
+                monitor("anchor", i32::MAX, i32::MAX, 100, 100),
+                monitor("origin", i32::MIN, i32::MIN, 100, 100),
+            ]);
+            state.place_monitor(direction);
+            state.align_monitor_start();
+            state.align_monitor_center();
+            state.align_monitor_end();
+            state.fine_tune_monitor(MonitorDirection::Below, i32::MAX);
+            assert!(
+                state
+                    .monitor_layout_xrandr_args()
+                    .unwrap()
+                    .contains(&"0x0".into())
+            );
+            assert!(!state.overlay_text().is_empty());
+        }
+        assert_eq!(
+            aligned_position(i32::MAX, 100, 200, MonitorAlignment::End),
+            i32::MAX - 100
+        );
+        assert_eq!(
+            aligned_position(i32::MAX, 100, 200, MonitorAlignment::Center),
+            i32::MAX - 50
+        );
+    }
+
+    #[test]
     fn monitor_layout_places_target_relative_to_reference() {
         let mut state = SystemUiState::monitor_layout(vec![
             monitor("eDP-1", 0, 0, 1920, 1080),
@@ -8673,6 +8834,32 @@ mod tests {
                 "--output", "eDP-1", "--pos", "0x0", "--output", "HDMI-1", "--pos", "1920x0",
             ]
         );
+    }
+
+    #[test]
+    fn monitor_reference_steps_count_only_other_outputs() {
+        let mut state = SystemUiState::monitor_layout(vec![
+            monitor("one", 0, 0, 100, 100),
+            monitor("two", 100, 0, 100, 100),
+            monitor("three", 200, 0, 100, 100),
+            monitor("four", 300, 0, 100, 100),
+        ]);
+        state.cycle_monitor_reference(3);
+        let SystemUiState::MonitorLayout { reference, .. } = &state else {
+            panic!()
+        };
+        assert_eq!(*reference, 1);
+        state.cycle_monitor_reference(-2);
+        let SystemUiState::MonitorLayout {
+            selected,
+            reference,
+            ..
+        } = &state
+        else {
+            panic!()
+        };
+        assert_eq!(*selected, 0);
+        assert_eq!(*reference, 2);
     }
 
     #[test]
@@ -8841,7 +9028,10 @@ mod tests {
         assert!(panel.is_media_players_picker());
         assert_eq!(panel.selected_media_player(), Some("mpv"));
         let parts = panel.overlay_parts();
-        assert!(parts.items[1].starts_with('\u{f192}'), "active row is marked");
+        assert!(
+            parts.items[1].starts_with('\u{f192}'),
+            "active row is marked"
+        );
         assert!(parts.items[0].starts_with('\u{f10c}'));
         assert!(parts.items[2].starts_with('\u{f10c}'));
         // Keys stay bus suffixes; labels prefer Identity + status cue.

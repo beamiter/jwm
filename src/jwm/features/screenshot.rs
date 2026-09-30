@@ -2806,7 +2806,10 @@ mod tests {
             Jwm::publish_image_path_to_clipboard(input.to_str().unwrap(), Some(image_sender))
                 .expect("sender path must return bytes");
         assert_eq!(png, expected);
-        assert!(offered, "successful send_png must tag offered=true for poll honesty");
+        assert!(
+            offered,
+            "successful send_png must tag offered=true for poll honesty"
+        );
         assert!(!input.exists());
         let crate::backend::clipboard_offer::ClipboardOffer::Png(actual) =
             receive.recv_timeout(Duration::from_secs(1)).unwrap()

@@ -13,14 +13,14 @@ pub mod batch;
 pub mod compositor_delegation;
 /// Transport-free planning of compositor effects for backend events.
 pub mod event_bridge;
+/// Strict codec for JWM's private hand-float exec-restart snapshot.
+pub(crate) mod floating_restore;
 /// Generation-fenced state machine for true ICCCM Iconic transitions.
 pub(crate) mod iconify;
 /// Overflow-safe geometry calculation for interactive X11 moves and resizes.
 pub(crate) mod interactive_resize;
 /// Sequence-aware classification of JWM-owned X11 unmap requests.
 pub(crate) mod managed_unmap;
-/// Strict codec for JWM's private hand-float exec-restart snapshot.
-pub(crate) mod floating_restore;
 /// Strict codec for JWM's private maximize-restore exec-restart snapshot.
 pub(crate) mod maximize_restore;
 /// Strict codec for JWM's private minimized-client exec-restart snapshot.
@@ -1635,12 +1635,7 @@ mod tests {
     fn expand_carries_pager_source_into_the_maximize_request() {
         let win = WindowId::from_raw(7);
         assert_eq!(
-            expand(
-                NetWmAction::Add,
-                VERT,
-                HORZ,
-                EwmhSourceIndication::Pager,
-            ),
+            expand(NetWmAction::Add, VERT, HORZ, EwmhSourceIndication::Pager,),
             vec![Expanded::Maximize(
                 win,
                 NetWmAction::Add,

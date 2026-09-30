@@ -14,7 +14,10 @@ const MIN_RECORDING_SIZE: i32 = 16;
 /// Whether `(x, y)` lands inside `rect` (half-open on the right/bottom edges).
 #[must_use]
 pub(crate) fn rect_contains_point(rect: Rect, x: i32, y: i32) -> bool {
-    x >= rect.x && y >= rect.y && x < rect.x.saturating_add(rect.w) && y < rect.y.saturating_add(rect.h)
+    x >= rect.x
+        && y >= rect.y
+        && x < rect.x.saturating_add(rect.w)
+        && y < rect.y.saturating_add(rect.h)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,11 +94,7 @@ impl CaptureInteractionState {
                 && (x - prev_x).abs() <= CONFIRM_DOUBLE_CLICK_SLOP
                 && (y - prev_y).abs() <= CONFIRM_DOUBLE_CLICK_SLOP
         });
-        self.confirm_press = if hit {
-            None
-        } else {
-            Some((time, x, y))
-        };
+        self.confirm_press = if hit { None } else { Some((time, x, y)) };
         hit
     }
 
@@ -166,7 +165,11 @@ impl Jwm {
 
     /// Monitor whose output rectangle contains the pointer, preferring geometry
     /// over backend output maps so capture probing stays usable under a grab.
-    fn monitor_at_capture_pointer(&self, x: i32, y: i32) -> Option<crate::core::models::MonitorKey> {
+    fn monitor_at_capture_pointer(
+        &self,
+        x: i32,
+        y: i32,
+    ) -> Option<crate::core::models::MonitorKey> {
         for (mon_key, _) in self.state.monitors.iter() {
             let (mx, my, mw, mh) = self.monitor_rect(mon_key);
             let (Ok(mw), Ok(mh)) = (i32::try_from(mw), i32::try_from(mh)) else {
@@ -365,19 +368,14 @@ impl Jwm {
         let probe = probe.as_deref();
 
         if self.features.screenshot.active && !self.features.screenshot.committed {
-            let label = capture_hint_label(
-                true,
-                self.features.capture.screenshot.label(),
-                false,
-                probe,
-            );
+            let label =
+                capture_hint_label(true, self.features.capture.screenshot.label(), false, probe);
             backend.compositor_set_capture_hint(Some(label));
             return;
         }
         if self.features.screenshot.active && self.features.screenshot.committed {
             backend.compositor_set_capture_hint(Some(
-                "Screenshot · Enter / Space save · double-click veil · Ctrl+C copy · Esc"
-                    .into(),
+                "Screenshot · Enter / Space save · double-click veil · Ctrl+C copy · Esc".into(),
             ));
             return;
         }
@@ -437,8 +435,7 @@ impl Jwm {
         use crate::backend::common_define::StdCursorKind;
         use crate::jwm::features::recording::RecordingPointerIntent;
 
-        if !self.features.recording.selecting_region
-            || self.features.recording.is_region_dragging()
+        if !self.features.recording.selecting_region || self.features.recording.is_region_dragging()
         {
             return;
         }

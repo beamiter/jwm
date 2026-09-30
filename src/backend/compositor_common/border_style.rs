@@ -27,7 +27,11 @@ pub(crate) struct BorderStyle {
 /// and drag icons. Counting them would draw a border around the single client
 /// of a tag for as long as the popup is up — e.g. the whole time a user types
 /// Chinese — and drop it again when the popup closes.
-pub(crate) fn counts_for_smart_borders(class_name: &str, status_bar_name: &str, is_or: bool) -> bool {
+pub(crate) fn counts_for_smart_borders(
+    class_name: &str,
+    status_bar_name: &str,
+    is_or: bool,
+) -> bool {
     if is_or {
         return false;
     }
@@ -246,7 +250,10 @@ mod tests {
             focus_highlight_progress: None,
             ..all
         };
-        assert_eq!(window_border_style(&no_pulse).unwrap().color, attention.color);
+        assert_eq!(
+            window_border_style(&no_pulse).unwrap().color,
+            attention.color
+        );
         let pip_only = WindowBorderInputs {
             attention: None,
             ..no_pulse

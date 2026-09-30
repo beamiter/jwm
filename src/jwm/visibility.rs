@@ -16,7 +16,7 @@ pub(super) fn hidden_x_left_of_desktop(desktop_left: i32, total_width: i32) -> i
 }
 
 fn is_fully_left_of_desktop(x: i32, total_width: i32, desktop_left: i32) -> bool {
-    x.saturating_add(total_width.max(1)) <= desktop_left
+    i64::from(x) + i64::from(total_width.max(1)) <= i64::from(desktop_left)
 }
 
 /// Park one geometry without borrowing the layout/fullscreen `old_*` slot.
@@ -297,6 +297,18 @@ mod tests {
     };
     use crate::core::models::ClientGeometry;
     use crate::core::types::Rect;
+
+    #[test]
+    fn visible_geometry_with_overflowing_right_edge_is_not_restored() {
+        let mut geometry = ClientGeometry::default();
+        geometry.x = i32::MAX - 10;
+        geometry.w = 100;
+        geometry.old_x = 20;
+        let before = geometry.clone();
+        assert_eq!(plan_hidden_restore(&geometry, i32::MAX), None);
+        assert_eq!(restore_hidden_geometry(&mut geometry, i32::MAX, 30), None);
+        assert_eq!(geometry, before);
+    }
 
     #[test]
     fn hidden_position_stays_left_of_negative_origin_outputs() {

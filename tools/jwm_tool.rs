@@ -42,6 +42,41 @@ const MAX_CONTROL_COMMAND_BYTES: usize = 4096;
 /// length. The terminating newline does not count toward this limit.
 const MAX_IPC_FRAME_BYTES: usize = 1024 * 1024;
 const IPC_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_DAEMON_PIDFILE_BYTES: usize = 256;
+// A daemon argv is small; reject unexpectedly large procfs input rather than
+// allocating Linux's potentially multi-megabyte maximum argument vector.
+const MAX_DAEMON_CMDLINE_BYTES: usize = 128 * 1024;
+
+fn read_bounded_regular_file(path: &Path, limit: usize) -> io::Result<Vec<u8>> {
+    // Opening a substituted FIFO must never wait for its writer. Check the
+    // opened descriptor, so a path replacement cannot bypass the type check.
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_NONBLOCK)
+        .open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "expected a regular file",
+        ));
+    }
+    let mut bytes = Vec::new();
+    // Procfs reports zero size for cmdline, and ordinary files can grow during
+    // the read, so the actual bytes read enforce the bound.
+    file.take(limit as u64 + 1).read_to_end(&mut bytes)?;
+    if bytes.len() > limit {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "file exceeds read limit",
+        ));
+    }
+    Ok(bytes)
+}
+
+fn read_bounded_text_file(path: &Path, limit: usize) -> io::Result<String> {
+    String::from_utf8(read_bounded_regular_file(path, limit)?)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+}
 
 // --- Runtime directory (XDG_RUNTIME_DIR) ---
 
@@ -216,11 +251,7 @@ fn response_flock_path(control_pipe: &Path) -> PathBuf {
 }
 
 fn read_legacy_response_lock_owner(path: &Path) -> Option<i32> {
-    let mut file = File::open(path).ok()?;
-    let mut record = String::new();
-    Read::take(&mut file, 128)
-        .read_to_string(&mut record)
-        .ok()?;
+    let record = read_bounded_text_file(path, MAX_DAEMON_PIDFILE_BYTES).ok()?;
     parse_legacy_daemon_pidfile(&record)
 }
 
@@ -905,7 +936,11 @@ fn legacy_daemon_metadata_matches(
 /// verification. New daemons always replace the legacy record with v1.
 fn legacy_daemon_identity(pid: i32) -> Option<ProcessIdentity> {
     let before = process_identity(pid)?;
-    let cmdline = fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+    let cmdline = read_bounded_regular_file(
+        Path::new(&format!("/proc/{pid}/cmdline")),
+        MAX_DAEMON_CMDLINE_BYTES,
+    )
+    .ok()?;
     let executable = fs::read_link(format!("/proc/{pid}/exe")).ok()?;
     let current_executable = env::current_exe().ok();
     if !legacy_daemon_metadata_matches(&cmdline, &executable, current_executable.as_deref()) {
@@ -915,7 +950,7 @@ fn legacy_daemon_identity(pid: i32) -> Option<ProcessIdentity> {
 }
 
 fn read_daemon_identity() -> Option<ProcessIdentity> {
-    let content = fs::read_to_string(pidfile_path()).ok()?;
+    let content = read_bounded_text_file(&pidfile_path(), MAX_DAEMON_PIDFILE_BYTES).ok()?;
     if let Some(identity) = parse_daemon_pidfile(&content) {
         return Some(identity);
     }
@@ -1218,7 +1253,7 @@ fn send_command(cmd: &str) -> io::Result<()> {
     let deadline = Instant::now() + DAEMON_RESPONSE_TIMEOUT;
     while Instant::now() < deadline {
         if resp_path.exists() {
-            let content = fs::read_to_string(&resp_path)?;
+            let content = read_bounded_text_file(&resp_path, MAX_IPC_FRAME_BYTES)?;
             let _ = fs::remove_file(&resp_path);
             let response = content.trim();
             println!("响应: {response}");
@@ -1515,7 +1550,7 @@ fn debug_info() {
     ps_grep(&["jwm-tool"]);
 
     println!("\n2. 检查PID文件:");
-    if let Ok(pid) = fs::read_to_string(pidfile_path()) {
+    if let Ok(pid) = read_bounded_text_file(&pidfile_path(), MAX_DAEMON_PIDFILE_BYTES) {
         println!("PID文件存在: {}", pid.trim());
     } else {
         println!("PID文件不存在");
@@ -2833,12 +2868,16 @@ fn run_ipc_msg(name: &str, args_str: &str, subscribe: Option<&str>, raw: bool) -
         ));
     }
 
-    let mut stream = UnixStream::connect(&sock_path)?;
+    let mut stream = jwm::ipc_connection::connect(&sock_path, IPC_RESPONSE_TIMEOUT)?;
 
     let mut line = serde_json::to_string(&request)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
     line.push('\n');
-    stream.write_all(line.as_bytes())?;
+    jwm::ipc_connection::write_all_with_timeout(
+        &mut stream,
+        line.as_bytes(),
+        IPC_RESPONSE_TIMEOUT,
+    )?;
     let mut reader = IpcLineReader::new(stream);
 
     // Handle subscribe mode
@@ -2897,14 +2936,16 @@ fn run_ipc_msg(name: &str, args_str: &str, subscribe: Option<&str>, raw: bool) -
 mod tests {
     use super::{
         Cli, Commands, DEBUG_JWM_PROCESS_GREP_ARGS, InstallPlanEntry, IpcLineReader, JwmManager,
-        MAX_IPC_FRAME_BYTES, SmokeTarget, WaylandStatusCompleteness, WaylandStatusCoverage,
-        acquire_daemon_lock_at, acquire_response_lock, aggregated_wayland_status_data,
-        append_log_with_rotation, capabilities_output_lines, daemon_command_response,
-        ensure_ipc_response_succeeded, grep_command, health_output_lines, ipc_request,
-        jwm_install_plan, legacy_daemon_metadata_matches, mkfifo_safe, parse_boot_id,
-        parse_daemon_pidfile, parse_legacy_daemon_pidfile, parse_linux_proc_stat_identity,
-        parse_msg_args, parse_subscription_topics, parse_v1_daemon_pidfile, process_identity,
-        process_identity_matches, response_data, response_flock_path, response_lock_path,
+        MAX_DAEMON_CMDLINE_BYTES, MAX_DAEMON_PIDFILE_BYTES, MAX_IPC_FRAME_BYTES, SmokeTarget,
+        WaylandStatusCompleteness, WaylandStatusCoverage, acquire_daemon_lock_at,
+        acquire_response_lock, aggregated_wayland_status_data, append_log_with_rotation,
+        capabilities_output_lines, daemon_command_response, ensure_ipc_response_succeeded,
+        grep_command, health_output_lines, ipc_request, jwm_install_plan,
+        legacy_daemon_metadata_matches, mkfifo_safe, parse_boot_id, parse_daemon_pidfile,
+        parse_legacy_daemon_pidfile, parse_linux_proc_stat_identity, parse_msg_args,
+        parse_subscription_topics, parse_v1_daemon_pidfile, process_identity,
+        process_identity_matches, read_bounded_regular_file, read_bounded_text_file,
+        read_legacy_response_lock_owner, response_data, response_flock_path, response_lock_path,
         rotated_log_path, should_attempt_wayland_status_fallback, smoke_artifacts_json,
         smoke_ci_profile_json, smoke_manual_kms_checklist_json, smoke_target_json, split_path_list,
         successful_query_data, validate_daemon_response, validate_ipc_response,
@@ -2940,6 +2981,120 @@ mod tests {
             let written = nix::unistd::write(stream, bytes).unwrap();
             bytes = &bytes[written..];
         }
+    }
+
+    #[test]
+    fn daemon_pidfile_reads_reject_fifo_oversize_and_invalid_text() {
+        let dir = TempLogDir::new("pidfile-input");
+        let path = dir.0.join("pid");
+        let lock_path = dir.0.join("legacy-lock");
+        fs::write(&lock_path, b"123\n").unwrap();
+        assert_eq!(read_legacy_response_lock_owner(&lock_path), Some(123));
+        // A valid owner followed by padding must not be accepted merely
+        // because a truncated prefix still parses as that owner.
+        let mut oversized_owner = b"123".to_vec();
+        oversized_owner.resize(MAX_DAEMON_PIDFILE_BYTES + 1, b' ');
+        fs::write(&lock_path, oversized_owner).unwrap();
+        assert_eq!(read_legacy_response_lock_owner(&lock_path), None);
+        fs::remove_file(&lock_path).unwrap();
+        nix::unistd::mkfifo(
+            &lock_path,
+            nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
+        )
+        .unwrap();
+        assert_eq!(read_legacy_response_lock_owner(&lock_path), None);
+        fs::write(&path, b"v1 123 42\n").unwrap();
+        assert_eq!(
+            read_bounded_text_file(&path, MAX_DAEMON_PIDFILE_BYTES).unwrap(),
+            "v1 123 42\n"
+        );
+        fs::write(&path, vec![b' '; MAX_DAEMON_PIDFILE_BYTES + 1]).unwrap();
+        assert_eq!(
+            read_bounded_text_file(&path, MAX_DAEMON_PIDFILE_BYTES)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::InvalidData
+        );
+        fs::write(&path, [0xff]).unwrap();
+        assert_eq!(
+            read_bounded_text_file(&path, MAX_DAEMON_PIDFILE_BYTES)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::InvalidData
+        );
+        fs::remove_file(&path).unwrap();
+        nix::unistd::mkfifo(
+            &path,
+            nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
+        )
+        .unwrap();
+        assert_eq!(
+            read_bounded_text_file(&path, MAX_DAEMON_PIDFILE_BYTES)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::InvalidData
+        );
+    }
+
+    #[test]
+    fn daemon_cmdline_read_preserves_nuls_and_enforces_actual_byte_limit() {
+        let dir = TempLogDir::new("cmdline-input");
+        let path = dir.0.join("cmdline");
+        let mut argv = b"jwm-tool\0daemon\0".to_vec();
+        argv.resize(MAX_DAEMON_CMDLINE_BYTES, 0);
+        fs::write(&path, &argv).unwrap();
+        assert_eq!(
+            read_bounded_regular_file(&path, MAX_DAEMON_CMDLINE_BYTES).unwrap(),
+            argv
+        );
+        argv.push(0);
+        fs::write(&path, argv).unwrap();
+        assert_eq!(
+            read_bounded_regular_file(&path, MAX_DAEMON_CMDLINE_BYTES)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::InvalidData
+        );
+        // Real procfs cmdline has zero metadata length despite readable bytes.
+        let own = PathBuf::from(format!("/proc/{}/cmdline", std::process::id()));
+        assert_eq!(fs::metadata(&own).unwrap().len(), 0);
+        assert!(
+            !read_bounded_regular_file(&own, MAX_DAEMON_CMDLINE_BYTES)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn daemon_response_file_reads_accept_boundary_and_reject_fifo_or_overflow() {
+        let dir = TempLogDir::new("response-input");
+        let path = dir.0.join("response");
+        fs::write(&path, vec![b'a'; MAX_IPC_FRAME_BYTES]).unwrap();
+        assert_eq!(
+            read_bounded_text_file(&path, MAX_IPC_FRAME_BYTES)
+                .unwrap()
+                .len(),
+            MAX_IPC_FRAME_BYTES
+        );
+        fs::write(&path, vec![b'a'; MAX_IPC_FRAME_BYTES + 1]).unwrap();
+        assert_eq!(
+            read_bounded_text_file(&path, MAX_IPC_FRAME_BYTES)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::InvalidData
+        );
+        fs::remove_file(&path).unwrap();
+        nix::unistd::mkfifo(
+            &path,
+            nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
+        )
+        .unwrap();
+        assert_eq!(
+            read_bounded_text_file(&path, MAX_IPC_FRAME_BYTES)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::InvalidData
+        );
     }
 
     #[test]
@@ -3754,12 +3909,16 @@ fn send_ipc_query(name: &str) -> io::Result<serde_json::Value> {
         ));
     }
 
-    let mut stream = UnixStream::connect(&sock_path)?;
+    let mut stream = jwm::ipc_connection::connect(&sock_path, IPC_RESPONSE_TIMEOUT)?;
 
     let msg = serde_json::json!({ "query": name, "args": serde_json::Value::Null });
     let mut line = serde_json::to_string(&msg).unwrap();
     line.push('\n');
-    stream.write_all(line.as_bytes())?;
+    jwm::ipc_connection::write_all_with_timeout(
+        &mut stream,
+        line.as_bytes(),
+        IPC_RESPONSE_TIMEOUT,
+    )?;
 
     let mut reader = IpcLineReader::new(stream);
     let resp = reader.read_line_until(Instant::now() + IPC_RESPONSE_TIMEOUT)?;

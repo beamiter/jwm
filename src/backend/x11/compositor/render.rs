@@ -6671,9 +6671,7 @@ impl<C: CompositorConnection> Compositor<C> {
                             if let Some(blur_tex) = blur_tex {
                                 let ui_palette =
                                     crate::backend::compositor_common::ui_theme::palette();
-                                if is_statusbar
-                                    && let Some(params) = ui_palette.glass
-                                {
+                                if is_statusbar && let Some(params) = ui_palette.glass {
                                     // Point the chrome glass sampler at this
                                     // window's frost, draw the solid sheet, then
                                     // put the window program back for the pixmap.
@@ -7341,10 +7339,8 @@ impl<C: CompositorConnection> Compositor<C> {
                     self.saturation,
                 );
                 // Idle dim / user brightness is applied after toast/OSD/system UI.
-                self.gl.uniform_1_f32(
-                    self.postprocess_uniforms.brightness.as_ref(),
-                    1.0,
-                );
+                self.gl
+                    .uniform_1_f32(self.postprocess_uniforms.brightness.as_ref(), 1.0);
                 self.gl
                     .uniform_1_f32(self.postprocess_uniforms.contrast.as_ref(), self.contrast);
                 self.gl.uniform_1_i32(
@@ -8168,8 +8164,7 @@ impl<C: CompositorConnection> Compositor<C> {
         let rec_chip_h = self.render_recording_indicator(&proj);
         let mic_chip_h = self.render_mic_indicator(&proj, rec_chip_h);
         let hint_lift = crate::backend::compositor_common::capture_hint::capture_hint_bottom_lift(
-            rec_chip_h,
-            mic_chip_h,
+            rec_chip_h, mic_chip_h,
         );
         self.render_capture_hint(&proj, hint_lift);
 
@@ -8335,12 +8330,11 @@ impl<C: CompositorConnection> Compositor<C> {
 mod tests {
     use super::{
         DirtyRect, PresentedSceneCopyPlan, PresentedSceneStatus, TransitionCapturePlan,
-        blur_sampling_margin, direct_presentation_owner_changed,
-        dirty_below_affects_backdrop, dirty_below_requires_full_blur_redraw,
-        edge_effects_require_composition, intersect_gl_scissors,
-        is_opaque_occluder, minimized_dock_requires_composition, off_scene_damage_is_visible,
-        presented_scene_copy_plan,
-        rect_covers_output, resolve_and_draw_each, screenshot_freeze_change_needed,
+        blur_sampling_margin, direct_presentation_owner_changed, dirty_below_affects_backdrop,
+        dirty_below_requires_full_blur_redraw, edge_effects_require_composition,
+        intersect_gl_scissors, is_opaque_occluder, minimized_dock_requires_composition,
+        off_scene_damage_is_visible, presented_scene_copy_plan, rect_covers_output,
+        resolve_and_draw_each, screenshot_freeze_change_needed,
         screenshot_freeze_requires_composition, tags_grid_label_key,
         tfp_budget_skip_needs_followup_frame, tfp_refresh_is_latency_critical, toast_input_shape,
         transformed_overlays_require_full_redraw, transition_capture_plan, wallpaper_blend_plan,

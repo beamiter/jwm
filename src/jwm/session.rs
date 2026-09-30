@@ -50,6 +50,7 @@
 //! v15 起，可选 `hidden_restore`（最小化/离视图停放几何）一并写入；缺省为 `None`。
 //! v16 起，可选 `old_geometry`（fullscreen/布局返回矩形）一并写入；缺省为 `None`。
 //! v17 起，可选 `hidden_x`（最小化/离视图停放 x）一并写入；缺省为 `None`。
+//! 该坐标依赖输出拓扑，恢复时由当前桌面边界重新计算。
 
 use crate::backend::api::{Backend, MaximizeAxes, NetWmAction, NetWmState};
 use crate::config::CONFIG;
@@ -84,6 +85,7 @@ const SESSION_TEMPORARY_PREFIX: &str = ".session.json.tmp-";
 /// The state directory holds the snapshot and a handful of temporaries at
 /// most; a sweep never walks further than this.
 const MAX_SESSION_SWEEP_ENTRIES: usize = 1024;
+const MAX_SESSION_TEMPORARY_CREATE_ATTEMPTS: usize = 128;
 static SESSION_WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// 单个客户端的会话条目（按 class/instance 匹配，不持久化 WindowId）。
@@ -181,8 +183,8 @@ pub struct SessionEntry {
     /// `None`（恢复时不改写）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub old_geometry: Option<(i32, i32, i32, i32)>,
-    /// v17：最小化 / 离视图停放 x（`hidden_x`）。缺省 / 旧版本为 `None`
-    ///（恢复时不改写）。
+    /// v17：最小化 / 离视图停放 x（`hidden_x`）。缺省 / 旧版本为 `None`。
+    /// 这是捕获时的诊断状态；恢复必须按当前输出拓扑重新计算停放位置。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hidden_x: Option<i32>,
 }
@@ -478,109 +480,137 @@ pub fn migrate_session_json(json: &str) -> Result<SessionSnapshot, String> {
         1 => {
             let v1: SessionSnapshotV1 = serde_json::from_str(json)
                 .map_err(|error| format!("cannot parse version 1 session snapshot: {error}"))?;
-            migrate_snapshot_v16(migrate_snapshot_v15(migrate_snapshot_v14(migrate_snapshot_v13(migrate_snapshot_v12(migrate_snapshot_v11(
-                migrate_snapshot_v10(migrate_snapshot_v9(migrate_snapshot_v8(migrate_snapshot_v7(
-                    migrate_snapshot_v6(migrate_snapshot_v5(migrate_snapshot_v4(
-                        migrate_snapshot_v3(migrate_snapshot_v2(migrate_snapshot_v1(v1))),
+            migrate_snapshot_v16(migrate_snapshot_v15(migrate_snapshot_v14(
+                migrate_snapshot_v13(migrate_snapshot_v12(migrate_snapshot_v11(
+                    migrate_snapshot_v10(migrate_snapshot_v9(migrate_snapshot_v8(
+                        migrate_snapshot_v7(migrate_snapshot_v6(migrate_snapshot_v5(
+                            migrate_snapshot_v4(migrate_snapshot_v3(migrate_snapshot_v2(
+                                migrate_snapshot_v1(v1),
+                            ))),
+                        ))),
                     ))),
-                )))),
-            ))))))
+                ))),
+            )))
         }
         2 => {
             let v2: SessionSnapshotV2 = serde_json::from_str(json)
                 .map_err(|error| format!("cannot parse version 2 session snapshot: {error}"))?;
-            migrate_snapshot_v16(migrate_snapshot_v15(migrate_snapshot_v14(migrate_snapshot_v13(migrate_snapshot_v12(migrate_snapshot_v11(
-                migrate_snapshot_v10(migrate_snapshot_v9(migrate_snapshot_v8(migrate_snapshot_v7(
-                    migrate_snapshot_v6(migrate_snapshot_v5(migrate_snapshot_v4(
-                        migrate_snapshot_v3(migrate_snapshot_v2(v2)),
+            migrate_snapshot_v16(migrate_snapshot_v15(migrate_snapshot_v14(
+                migrate_snapshot_v13(migrate_snapshot_v12(migrate_snapshot_v11(
+                    migrate_snapshot_v10(migrate_snapshot_v9(migrate_snapshot_v8(
+                        migrate_snapshot_v7(migrate_snapshot_v6(migrate_snapshot_v5(
+                            migrate_snapshot_v4(migrate_snapshot_v3(migrate_snapshot_v2(v2))),
+                        ))),
                     ))),
-                )))),
-            ))))))
+                ))),
+            )))
         }
         3 => {
             let v3: SessionSnapshotV3 = serde_json::from_str(json)
                 .map_err(|error| format!("cannot parse version 3 session snapshot: {error}"))?;
-            migrate_snapshot_v16(migrate_snapshot_v15(migrate_snapshot_v14(migrate_snapshot_v13(migrate_snapshot_v12(migrate_snapshot_v11(
-                migrate_snapshot_v10(migrate_snapshot_v9(migrate_snapshot_v8(migrate_snapshot_v7(
-                    migrate_snapshot_v6(migrate_snapshot_v5(migrate_snapshot_v4(
-                        migrate_snapshot_v3(v3),
+            migrate_snapshot_v16(migrate_snapshot_v15(migrate_snapshot_v14(
+                migrate_snapshot_v13(migrate_snapshot_v12(migrate_snapshot_v11(
+                    migrate_snapshot_v10(migrate_snapshot_v9(migrate_snapshot_v8(
+                        migrate_snapshot_v7(migrate_snapshot_v6(migrate_snapshot_v5(
+                            migrate_snapshot_v4(migrate_snapshot_v3(v3)),
+                        ))),
                     ))),
-                )))),
-            ))))))
+                ))),
+            )))
         }
         4 => {
             let v4: SessionSnapshotV4 = serde_json::from_str(json)
                 .map_err(|error| format!("cannot parse version 4 session snapshot: {error}"))?;
-            migrate_snapshot_v16(migrate_snapshot_v15(migrate_snapshot_v14(migrate_snapshot_v13(migrate_snapshot_v12(migrate_snapshot_v11(
-                migrate_snapshot_v10(migrate_snapshot_v9(migrate_snapshot_v8(migrate_snapshot_v7(
-                    migrate_snapshot_v6(migrate_snapshot_v5(migrate_snapshot_v4(v4))),
-                )))),
-            ))))))
+            migrate_snapshot_v16(migrate_snapshot_v15(migrate_snapshot_v14(
+                migrate_snapshot_v13(migrate_snapshot_v12(migrate_snapshot_v11(
+                    migrate_snapshot_v10(migrate_snapshot_v9(migrate_snapshot_v8(
+                        migrate_snapshot_v7(migrate_snapshot_v6(migrate_snapshot_v5(
+                            migrate_snapshot_v4(v4),
+                        ))),
+                    ))),
+                ))),
+            )))
         }
         5 => {
             let v5: SessionSnapshotV5 = serde_json::from_str(json)
                 .map_err(|error| format!("cannot parse version 5 session snapshot: {error}"))?;
-            migrate_snapshot_v16(migrate_snapshot_v15(migrate_snapshot_v14(migrate_snapshot_v13(migrate_snapshot_v12(migrate_snapshot_v11(
-                migrate_snapshot_v10(migrate_snapshot_v9(migrate_snapshot_v8(migrate_snapshot_v7(
-                    migrate_snapshot_v6(migrate_snapshot_v5(v5)),
-                )))),
-            ))))))
+            migrate_snapshot_v16(migrate_snapshot_v15(migrate_snapshot_v14(
+                migrate_snapshot_v13(migrate_snapshot_v12(migrate_snapshot_v11(
+                    migrate_snapshot_v10(migrate_snapshot_v9(migrate_snapshot_v8(
+                        migrate_snapshot_v7(migrate_snapshot_v6(migrate_snapshot_v5(v5))),
+                    ))),
+                ))),
+            )))
         }
         6 => {
             let v6: SessionSnapshotV6 = serde_json::from_str(json)
                 .map_err(|error| format!("cannot parse version 6 session snapshot: {error}"))?;
-            migrate_snapshot_v16(migrate_snapshot_v15(migrate_snapshot_v14(migrate_snapshot_v13(migrate_snapshot_v12(migrate_snapshot_v11(
-                migrate_snapshot_v10(migrate_snapshot_v9(migrate_snapshot_v8(migrate_snapshot_v7(
-                    migrate_snapshot_v6(v6),
-                )))),
-            ))))))
+            migrate_snapshot_v16(migrate_snapshot_v15(migrate_snapshot_v14(
+                migrate_snapshot_v13(migrate_snapshot_v12(migrate_snapshot_v11(
+                    migrate_snapshot_v10(migrate_snapshot_v9(migrate_snapshot_v8(
+                        migrate_snapshot_v7(migrate_snapshot_v6(v6)),
+                    ))),
+                ))),
+            )))
         }
         7 => {
             let v7: SessionSnapshotV7 = serde_json::from_str(json)
                 .map_err(|error| format!("cannot parse version 7 session snapshot: {error}"))?;
-            migrate_snapshot_v16(migrate_snapshot_v15(migrate_snapshot_v14(migrate_snapshot_v13(migrate_snapshot_v12(migrate_snapshot_v11(
-                migrate_snapshot_v10(migrate_snapshot_v9(migrate_snapshot_v8(
-                    migrate_snapshot_v7(v7),
+            migrate_snapshot_v16(migrate_snapshot_v15(migrate_snapshot_v14(
+                migrate_snapshot_v13(migrate_snapshot_v12(migrate_snapshot_v11(
+                    migrate_snapshot_v10(migrate_snapshot_v9(migrate_snapshot_v8(
+                        migrate_snapshot_v7(v7),
+                    ))),
                 ))),
-            ))))))
+            )))
         }
         8 => {
             let v8: SessionSnapshotV8 = serde_json::from_str(json)
                 .map_err(|error| format!("cannot parse version 8 session snapshot: {error}"))?;
-            migrate_snapshot_v16(migrate_snapshot_v15(migrate_snapshot_v14(migrate_snapshot_v13(migrate_snapshot_v12(migrate_snapshot_v11(
-                migrate_snapshot_v10(migrate_snapshot_v9(migrate_snapshot_v8(v8))),
-            ))))))
+            migrate_snapshot_v16(migrate_snapshot_v15(migrate_snapshot_v14(
+                migrate_snapshot_v13(migrate_snapshot_v12(migrate_snapshot_v11(
+                    migrate_snapshot_v10(migrate_snapshot_v9(migrate_snapshot_v8(v8))),
+                ))),
+            )))
         }
         9 => {
             let v9: SessionSnapshotV9 = serde_json::from_str(json)
                 .map_err(|error| format!("cannot parse version 9 session snapshot: {error}"))?;
-            migrate_snapshot_v16(migrate_snapshot_v15(migrate_snapshot_v14(migrate_snapshot_v13(migrate_snapshot_v12(migrate_snapshot_v11(
-                migrate_snapshot_v10(migrate_snapshot_v9(v9)),
-            ))))))
+            migrate_snapshot_v16(migrate_snapshot_v15(migrate_snapshot_v14(
+                migrate_snapshot_v13(migrate_snapshot_v12(migrate_snapshot_v11(
+                    migrate_snapshot_v10(migrate_snapshot_v9(v9)),
+                ))),
+            )))
         }
         10 => {
             let v10: SessionSnapshotV10 = serde_json::from_str(json)
                 .map_err(|error| format!("cannot parse version 10 session snapshot: {error}"))?;
-            migrate_snapshot_v16(migrate_snapshot_v15(migrate_snapshot_v14(migrate_snapshot_v13(migrate_snapshot_v12(
-                migrate_snapshot_v11(migrate_snapshot_v10(v10)),
-            )))))
+            migrate_snapshot_v16(migrate_snapshot_v15(migrate_snapshot_v14(
+                migrate_snapshot_v13(migrate_snapshot_v12(migrate_snapshot_v11(
+                    migrate_snapshot_v10(v10),
+                ))),
+            )))
         }
         11 => {
             let v11: SessionSnapshotV11 = serde_json::from_str(json)
                 .map_err(|error| format!("cannot parse version 11 session snapshot: {error}"))?;
-            migrate_snapshot_v16(migrate_snapshot_v15(migrate_snapshot_v14(migrate_snapshot_v13(migrate_snapshot_v12(
-                migrate_snapshot_v11(v11),
-            )))))
+            migrate_snapshot_v16(migrate_snapshot_v15(migrate_snapshot_v14(
+                migrate_snapshot_v13(migrate_snapshot_v12(migrate_snapshot_v11(v11))),
+            )))
         }
         12 => {
             let v12: SessionSnapshotV12 = serde_json::from_str(json)
                 .map_err(|error| format!("cannot parse version 12 session snapshot: {error}"))?;
-            migrate_snapshot_v16(migrate_snapshot_v15(migrate_snapshot_v14(migrate_snapshot_v13(migrate_snapshot_v12(v12)))))
+            migrate_snapshot_v16(migrate_snapshot_v15(migrate_snapshot_v14(
+                migrate_snapshot_v13(migrate_snapshot_v12(v12)),
+            )))
         }
         13 => {
             let v13: SessionSnapshotV13 = serde_json::from_str(json)
                 .map_err(|error| format!("cannot parse version 13 session snapshot: {error}"))?;
-            migrate_snapshot_v16(migrate_snapshot_v15(migrate_snapshot_v14(migrate_snapshot_v13(v13))))
+            migrate_snapshot_v16(migrate_snapshot_v15(migrate_snapshot_v14(
+                migrate_snapshot_v13(v13),
+            )))
         }
         14 => {
             let v14: SessionSnapshotV14 = serde_json::from_str(json)
@@ -650,10 +680,10 @@ fn migrate_snapshot_v1(v1: SessionSnapshotV1) -> SessionSnapshotV2 {
                 old_state: false,
                 pip_restore_sticky: false,
                 remembers_closed_placement: false,
-            old_border_w: None,
+                old_border_w: None,
                 minimized_order: None,
                 hidden_restore: None,
-            old_geometry: None,
+                old_geometry: None,
                 hidden_x: None,
             }
         })
@@ -840,7 +870,6 @@ struct DetailedRestorePlan {
     minimized_order: Option<u64>,
     hidden_restore: Option<(i32, i32, i32, i32)>,
     old_geometry: Option<(i32, i32, i32, i32)>,
-    hidden_x: Option<i32>,
 }
 
 impl SessionSnapshot {
@@ -879,9 +908,7 @@ impl SessionSnapshot {
                 .as_ref()
                 .is_some_and(|connector| connector.len() > MAX_SESSION_IDENTITY_FIELD_BYTES)
             {
-                return Err(format!(
-                    "session client {index} has an oversized connector"
-                ));
+                return Err(format!("session client {index} has an oversized connector"));
             }
             if let Some((_, _, width, height)) = entry.floating
                 && (width <= 0 || height <= 0)
@@ -909,6 +936,20 @@ impl SessionSnapshot {
                          {width}x{height}"
                     ));
                 }
+            }
+            if let Some((_, _, width, height)) = entry.hidden_restore
+                && (width <= 0 || height <= 0)
+            {
+                return Err(format!(
+                    "session client {index} has invalid hidden restore size {width}x{height}"
+                ));
+            }
+            if let Some((_, _, width, height)) = entry.old_geometry
+                && !((width == 0 && height == 0) || (width > 0 && height > 0))
+            {
+                return Err(format!(
+                    "session client {index} has invalid old geometry size {width}x{height}"
+                ));
             }
         }
         if self.monitor_orders.len() > MAX_SESSION_MONITORS {
@@ -1109,6 +1150,16 @@ fn sweep_orphaned_session_temporaries(parent: &Path) {
 }
 
 fn atomic_write_session(path: &Path, contents: &[u8]) -> io::Result<()> {
+    atomic_write_session_with_sync(path, contents, |parent, _temporary| {
+        fs::File::open(parent)?.sync_all()
+    })
+}
+
+fn atomic_write_session_with_sync(
+    path: &Path,
+    contents: &[u8],
+    sync_directory: impl FnOnce(&Path, &Path) -> io::Result<()>,
+) -> io::Result<()> {
     if contents.len() as u64 > MAX_SESSION_BYTES {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -1126,27 +1177,52 @@ fn atomic_write_session(path: &Path, contents: &[u8]) -> io::Result<()> {
         ));
     }
 
-    let sequence = SESSION_WRITE_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let temporary = parent.join(format!(
-        "{SESSION_TEMPORARY_PREFIX}{}-{sequence}",
-        std::process::id()
-    ));
+    let (temporary, mut file) = create_session_temporary(parent, std::process::id(), || {
+        SESSION_WRITE_COUNTER.fetch_add(1, Ordering::Relaxed)
+    })?;
+    let mut renamed = false;
     let result = (|| {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&temporary)?;
         file.write_all(contents)?;
         file.sync_all()?;
         fs::rename(&temporary, path)?;
-        fs::File::open(parent)?.sync_all()?;
+        renamed = true;
+        sync_directory(parent, &temporary)?;
         Ok(())
     })();
-    if result.is_err() {
+    // After rename this pathname is free for another writer to own.
+    if result.is_err() && !renamed {
         let _ = fs::remove_file(&temporary);
     }
     result
+}
+
+fn create_session_temporary(
+    parent: &Path,
+    pid: u32,
+    mut next_sequence: impl FnMut() -> u64,
+) -> io::Result<(PathBuf, fs::File)> {
+    for _ in 0..MAX_SESSION_TEMPORARY_CREATE_ATTEMPTS {
+        let temporary = parent.join(format!(
+            "{SESSION_TEMPORARY_PREFIX}{pid}-{}",
+            next_sequence()
+        ));
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&temporary)
+        {
+            Ok(file) => return Ok((temporary, file)),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        format!(
+            "could not create a unique session temporary after {MAX_SESSION_TEMPORARY_CREATE_ATTEMPTS} attempts"
+        ),
+    ))
 }
 
 fn load_session_snapshot(path: &Path) -> Result<SessionSnapshot, Box<dyn std::error::Error>> {
@@ -1155,7 +1231,7 @@ fn load_session_snapshot(path: &Path) -> Result<SessionSnapshot, Box<dyn std::er
     // replacement bypass the ownership, mode and size checks below.
     let file = OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NOFOLLOW)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(path)?;
     load_open_session_snapshot(file, path)
 }
@@ -1307,8 +1383,12 @@ pub fn capture_snapshot_excluding(
             old_border_w: Some(c.geometry.old_border_w),
             minimized_order: (c.state.is_hidden && c.state.minimized_order > 0)
                 .then_some(c.state.minimized_order),
-            hidden_restore: c.geometry.hidden_restore_rect.map(|r| (r.x, r.y, r.w, r.h)),
-            old_geometry: Some((
+            hidden_restore: c
+                .geometry
+                .hidden_restore_rect
+                .filter(|rect| rect.w > 0 && rect.h > 0)
+                .map(|r| (r.x, r.y, r.w, r.h)),
+            old_geometry: (c.geometry.old_w > 0 && c.geometry.old_h > 0).then_some((
                 c.geometry.old_x,
                 c.geometry.old_y,
                 c.geometry.old_w,
@@ -1448,8 +1528,9 @@ where
                     old_border_w: e.old_border_w,
                     minimized_order: e.minimized_order,
                     hidden_restore: e.hidden_restore,
-                    old_geometry: e.old_geometry,
-                    hidden_x: e.hidden_x,
+                    old_geometry: e
+                        .old_geometry
+                        .filter(|&(_, _, width, height)| width > 0 && height > 0),
                 },
             ));
         }
@@ -1520,11 +1601,7 @@ impl Jwm {
 
     /// Fill `connector` on every entry / monitor order from the live output
     /// map so a later restore survives hole-fill renumbering.
-    fn attach_session_connectors(
-        &self,
-        backend: &dyn Backend,
-        snapshot: &mut SessionSnapshot,
-    ) {
+    fn attach_session_connectors(&self, backend: &dyn Backend, snapshot: &mut SessionSnapshot) {
         let mut by_num: HashMap<u32, String> = HashMap::new();
         for &mon_key in &self.state.monitor_order {
             let Some(monitor) = self.state.monitors.get(mon_key) else {
@@ -1655,7 +1732,9 @@ impl Jwm {
                 .is_some_and(|client| client.state.is_fullscreen)
                 && let Err(error) = self.setfullscreen(backend, *key, false)
             {
-                log::warn!("session restore could not leave fullscreen for a matched client: {error}");
+                log::warn!(
+                    "session restore could not leave fullscreen for a matched client: {error}"
+                );
             }
             if self
                 .state
@@ -1784,13 +1863,9 @@ impl Jwm {
                     None => hint,
                 }
             });
-            if let Err(error) = self.adopt_client_maximized(
-                backend,
-                *key,
-                axes,
-                restore_hint,
-                maximize.promoted,
-            ) {
+            if let Err(error) =
+                self.adopt_client_maximized(backend, *key, axes, restore_hint, maximize.promoted)
+            {
                 log::warn!("session restore could not re-maximize a matched client: {error}");
             }
         }
@@ -1826,9 +1901,7 @@ impl Jwm {
             } else {
                 (NetWmAction::Remove, NetWmState::Below)
             };
-            if let Err(error) =
-                apply_external_stacking_request(self, backend, *key, action, flag)
-            {
+            if let Err(error) = apply_external_stacking_request(self, backend, *key, action, flag) {
                 log::warn!(
                     "session restore could not re-apply Above/Below for a matched client: {error}"
                 );
@@ -1864,15 +1937,25 @@ impl Jwm {
                 );
             }
             if plan.is_minimized {
+                let hidden_restore = plan.hidden_restore.map(|restore| {
+                    let area = self
+                        .state
+                        .clients
+                        .get(*key)
+                        .and_then(|client| client.mon)
+                        .and_then(|monitor_key| self.monitor_work_area(monitor_key));
+                    area.map_or(restore, |area| clamp_floating_rect(restore, area))
+                });
                 if let Some(order) = plan.minimized_order.filter(|&o| o > 0) {
                     if let Some(c) = self.state.clients.get_mut(*key) {
                         c.state.minimized_order = order;
                     }
                     let _ = super::window_state::observe_minimized_order(order);
                 }
-                if let Some((x, y, w, h)) = plan.hidden_restore {
+                if let Some((x, y, w, h)) = hidden_restore {
                     if let Some(c) = self.state.clients.get_mut(*key) {
-                        c.geometry.hidden_restore_rect = Some(crate::core::types::Rect::new(x, y, w, h));
+                        c.geometry.hidden_restore_rect =
+                            Some(crate::core::types::Rect::new(x, y, w, h));
                     }
                 }
             }
@@ -1882,6 +1965,15 @@ impl Jwm {
         // re-assert the snapshot's urgency / attention / skip_* / fixed /
         // border after the resting geometry pass.
         for (key, plan) in &plans {
+            let old_geometry = plan.old_geometry.map(|restore| {
+                let area = self
+                    .state
+                    .clients
+                    .get(*key)
+                    .and_then(|client| client.mon)
+                    .and_then(|monitor_key| self.monitor_work_area(monitor_key));
+                area.map_or(restore, |area| clamp_floating_rect(restore, area))
+            });
             if let Some(c) = self.state.clients.get_mut(*key) {
                 c.state.is_urgent = plan.is_urgent;
                 c.state.demands_attention = plan.demands_attention;
@@ -1900,14 +1992,11 @@ impl Jwm {
                 if let Some(old_border_w) = plan.old_border_w {
                     c.geometry.old_border_w = old_border_w.max(0);
                 }
-                if let Some((x, y, w, h)) = plan.old_geometry {
+                if let Some((x, y, w, h)) = old_geometry {
                     c.geometry.old_x = x;
                     c.geometry.old_y = y;
                     c.geometry.old_w = w;
                     c.geometry.old_h = h;
-                }
-                if let Some(hidden_x) = plan.hidden_x {
-                    c.geometry.hidden_x = Some(hidden_x);
                 }
             }
         }
@@ -1920,11 +2009,7 @@ impl Jwm {
     /// 保存列表中的窗口按保存序在前（保持相对序），列表外的新窗口按现有
     /// 相对顺序追加；`monitor_clients` 的「平铺组在前、浮动组在后」不变量
     /// 优先于保存顺序——保存后浮动状态发生变化的窗口回到它当前所属的组。
-    fn restore_monitor_client_order(
-        &mut self,
-        backend: &dyn Backend,
-        snapshot: &SessionSnapshot,
-    ) {
+    fn restore_monitor_client_order(&mut self, backend: &dyn Backend, snapshot: &SessionSnapshot) {
         let scratchpads: HashSet<ClientKey> = self.scratchpads.values().copied().collect();
         for saved in &snapshot.monitor_orders {
             let monitor_num = self.resolve_session_monitor_num(
@@ -2074,11 +2159,11 @@ mod tests {
             old_state: false,
             pip_restore_sticky: false,
             remembers_closed_placement: false,
-        old_border_w: None,
+            old_border_w: None,
             minimized_order: None,
-        hidden_restore: None,
-        old_geometry: None,
-                hidden_x: None,
+            hidden_restore: None,
+            old_geometry: None,
+            hidden_x: None,
         }
     }
 
@@ -2100,6 +2185,43 @@ mod tests {
     fn keys(n: usize) -> Vec<ClientKey> {
         let mut sm: SlotMap<ClientKey, ()> = SlotMap::new();
         (0..n).map(|_| sm.insert(())).collect()
+    }
+
+    #[test]
+    fn rename_failure_removes_unpublished_temporary() {
+        let dir = TestDir::new("rename-failure");
+        let destination = dir.0.join("existing-directory");
+        fs::create_dir(&destination).unwrap();
+        assert!(
+            atomic_write_session_with_sync(&destination, b"snapshot", |_, _| {
+                panic!("directory sync must follow a successful rename")
+            })
+            .is_err()
+        );
+        assert!(destination.is_dir());
+        assert!(fs::read_dir(&dir.0).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(SESSION_TEMPORARY_PREFIX)
+        }));
+    }
+
+    #[test]
+    fn directory_sync_failure_preserves_reused_temporary_path() {
+        let dir = TestDir::new("post-rename-sync");
+        let path = dir.0.join("snapshot.json");
+        let mut replacement = None;
+        let error = atomic_write_session_with_sync(&path, b"published", |_parent, temporary| {
+            fs::write(temporary, b"new owner")?;
+            replacement = Some(temporary.to_path_buf());
+            Err(io::Error::other("directory sync failed"))
+        })
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+        assert_eq!(fs::read(&path).unwrap(), b"published");
+        assert_eq!(fs::read(replacement.unwrap()).unwrap(), b"new owner");
     }
 
     #[test]
@@ -2137,15 +2259,15 @@ mod tests {
                     skip_pager: false,
                     is_fixed: false,
                     border_w: Some(3),
-                never_focus: false,
-                old_state: false,
-                pip_restore_sticky: false,
-                remembers_closed_placement: false,
-                old_border_w: None,
+                    never_focus: false,
+                    old_state: false,
+                    pip_restore_sticky: false,
+                    remembers_closed_placement: false,
+                    old_border_w: None,
                     minimized_order: None,
-                hidden_restore: None,
-                old_geometry: None,
-                hidden_x: None,
+                    hidden_restore: None,
+                    old_geometry: None,
+                    hidden_x: None,
                 },
                 entry("Alacritty", "alacritty", 0b1),
             ],
@@ -2186,6 +2308,100 @@ mod tests {
         snapshot.version = SESSION_VERSION;
         snapshot.clients[0].floating = Some((0, 0, -1, 100));
         assert!(snapshot.validate().unwrap_err().contains("floating size"));
+
+        snapshot.clients[0].floating = None;
+        snapshot.clients[0].hidden_restore = Some((10, 20, 0, 100));
+        assert!(
+            snapshot
+                .validate()
+                .unwrap_err()
+                .contains("hidden restore size")
+        );
+
+        snapshot.clients[0].hidden_restore = None;
+        snapshot.clients[0].old_geometry = Some((10, 20, 100, -1));
+        assert!(
+            snapshot
+                .validate()
+                .unwrap_err()
+                .contains("old geometry size")
+        );
+
+        snapshot.clients[0].old_geometry = Some((0, 0, 0, 0));
+        assert!(snapshot.validate().is_ok());
+    }
+
+    #[test]
+    fn capture_and_legacy_zero_old_geometry_round_trip_without_overwriting_live_slots() {
+        let mut state = WMState::new();
+        let mut tiled = WMClient::new(WindowId::from_raw(0x410));
+        tiled.class = "Tiled".into();
+        tiled.instance = "tiled".into();
+        tiled.state.tags = 1;
+        let tiled_key = state.clients.insert(tiled);
+        state.client_order.push(tiled_key);
+
+        let mut floating = WMClient::new(WindowId::from_raw(0x411));
+        floating.class = "Floating".into();
+        floating.instance = "floating".into();
+        floating.state.tags = 1;
+        floating.state.is_floating = true;
+        floating.geometry.floating_x = 40;
+        floating.geometry.floating_y = 50;
+        floating.geometry.floating_w = 600;
+        floating.geometry.floating_h = 400;
+        let floating_key = state.clients.insert(floating);
+        state.client_order.push(floating_key);
+
+        let captured = capture_snapshot(&state, "status-bar");
+        assert!(
+            captured
+                .clients
+                .iter()
+                .all(|entry| entry.old_geometry.is_none())
+        );
+        let loaded = migrate_session_json(&captured.to_json().unwrap()).unwrap();
+        assert!(
+            loaded
+                .clients
+                .iter()
+                .all(|entry| entry.old_geometry.is_none())
+        );
+
+        let mut backend = DisplaySpyBackend::new(vec![output(1, 0, 0, 1920, 1080)]);
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").expect("test jwm");
+        let monitor = jwm.state.monitor_order[0];
+        let mut live = WMClient::new(WindowId::from_raw(0x412));
+        live.class = "Legacy".into();
+        live.instance = "legacy".into();
+        live.state.tags = 1;
+        live.mon = Some(monitor);
+        live.geometry.old_x = 31;
+        live.geometry.old_y = 41;
+        live.geometry.old_w = 701;
+        live.geometry.old_h = 501;
+        live.geometry.x = 31;
+        live.geometry.y = 41;
+        live.geometry.w = 701;
+        live.geometry.h = 501;
+        let live_key = jwm.insert_client(live);
+        jwm.attach_to_monitor(live_key, monitor);
+
+        let mut legacy_entry = entry("Legacy", "legacy", 1);
+        legacy_entry.old_geometry = Some((0, 0, 0, 0));
+        let legacy_json = snapshot_with_clients(vec![legacy_entry]).to_json().unwrap();
+        let legacy = migrate_session_json(&legacy_json).expect("legacy zero slot loads");
+        assert_eq!(jwm.apply_session_snapshot(&mut backend, &legacy), 1);
+        let geometry = &jwm.state.clients[live_key].geometry;
+        assert_eq!(
+            (
+                geometry.old_x,
+                geometry.old_y,
+                geometry.old_w,
+                geometry.old_h
+            ),
+            (31, 41, 701, 501)
+        );
     }
 
     #[test]
@@ -2265,6 +2481,30 @@ mod tests {
         std::os::unix::fs::symlink(&victim, &link).unwrap();
         assert!(atomic_write_session(&link, b"replacement").is_err());
         assert_eq!(fs::read_to_string(victim).unwrap(), "unchanged");
+    }
+
+    #[test]
+    fn session_temporary_collision_keeps_existing_file_and_uses_next_name() {
+        let root = TestDir::new("temporary-collision");
+        let collision = root.0.join(format!("{SESSION_TEMPORARY_PREFIX}4242-7"));
+        fs::write(&collision, "other writer").unwrap();
+        let mut sequences = [7, 8].into_iter();
+
+        let (temporary, file) = create_session_temporary(&root.0, 4242, || {
+            sequences.next().expect("a fresh sequence")
+        })
+        .unwrap();
+        drop(file);
+
+        assert_eq!(fs::read_to_string(&collision).unwrap(), "other writer");
+        assert_eq!(
+            temporary.file_name().and_then(|name| name.to_str()),
+            Some(".session.json.tmp-4242-8")
+        );
+
+        let exhausted = create_session_temporary(&root.0, 4242, || 7).unwrap_err();
+        assert_eq!(exhausted.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read_to_string(collision).unwrap(), "other writer");
     }
 
     #[test]
@@ -2359,6 +2599,19 @@ mod tests {
         fs::write(&invalid, "not JSON").unwrap();
         let error = load_session_snapshot(&invalid).unwrap_err();
         assert!(error.downcast_ref::<io::Error>().is_none());
+    }
+
+    #[test]
+    fn session_loader_rejects_a_fifo_without_waiting_for_a_writer() {
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let root = TestDir::new("fifo-load");
+        let path = root.0.join("session.json");
+        let path_bytes = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(path_bytes.as_ptr(), 0o600) }, 0);
+
+        let error = load_session_snapshot(&path).unwrap_err();
+        assert!(error.to_string().contains("not a regular file"));
     }
 
     #[test]
@@ -2501,7 +2754,10 @@ mod tests {
             vec![identity("Firefox", "Navigator")]
         );
         assert!(
-            snapshot.clients.iter().all(|entry| entry.maximize.is_none()),
+            snapshot
+                .clients
+                .iter()
+                .all(|entry| entry.maximize.is_none()),
             "a v3 file migrates with no maximize state"
         );
         assert!(
@@ -2616,7 +2872,10 @@ mod tests {
         );
         let error = migrate_session_json(&future).unwrap_err();
         assert!(
-            error.contains(&format!("unsupported session version {}", SESSION_VERSION + 1)),
+            error.contains(&format!(
+                "unsupported session version {}",
+                SESSION_VERSION + 1
+            )),
             "{error}"
         );
 
@@ -2662,10 +2921,9 @@ mod tests {
         assert!(error.contains("cannot parse version 10 session snapshot"));
 
         // 当前版本同样严格：缺 monitor_orders 字段直接拒绝。
-        let error = migrate_session_json(&format!(
-            r#"{{"version":{SESSION_VERSION},"clients":[]}}"#
-        ))
-        .unwrap_err();
+        let error =
+            migrate_session_json(&format!(r#"{{"version":{SESSION_VERSION},"clients":[]}}"#))
+                .unwrap_err();
         assert!(error.contains("cannot parse session snapshot"));
     }
 
@@ -2877,13 +3135,8 @@ mod tests {
         let key = jwm.insert_client(tiled);
         jwm.attach_to_monitor(key, monitor);
 
-        jwm.set_client_maximized(
-            &mut backend,
-            key,
-            MaximizeAxes::BOTH,
-            MaximizeOrigin::User,
-        )
-        .expect("promote maximize");
+        jwm.set_client_maximized(&mut backend, key, MaximizeAxes::BOTH, MaximizeOrigin::User)
+            .expect("promote maximize");
         assert!(jwm.state.clients[key].state.maximize_restore_tiled);
 
         let snap = capture_snapshot(&jwm.state, "status-bar");
@@ -2898,13 +3151,8 @@ mod tests {
             "capture must record promoted"
         );
 
-        jwm.set_client_maximized(
-            &mut backend,
-            key,
-            MaximizeAxes::NONE,
-            MaximizeOrigin::User,
-        )
-        .expect("clear maximize");
+        jwm.set_client_maximized(&mut backend, key, MaximizeAxes::NONE, MaximizeOrigin::User)
+            .expect("clear maximize");
         assert!(!jwm.state.clients[key].state.maximize_restore_tiled);
 
         assert_eq!(jwm.apply_session_snapshot(&mut backend, &snap), 1);
@@ -3603,12 +3851,7 @@ mod tests {
 
         // Absolute coords from a previous geometry (e.g. another monitor's
         // origin) that sit entirely off this work area.
-        let off_screen = (
-            work.x + work.w + 500,
-            work.y + work.h + 200,
-            400,
-            300,
-        );
+        let off_screen = (work.x + work.w + 500, work.y + work.h + 200, 400, 300);
         let mut entry = entry("FloatApp", "floatapp", tags);
         entry.is_floating = true;
         entry.floating = Some(off_screen);
@@ -3659,10 +3902,7 @@ mod tests {
         jwm.attach_to_monitor(key, monitor);
 
         let snapshot = capture_snapshot(&jwm.state, "status-bar");
-        assert!(
-            snapshot.clients[0].is_sticky,
-            "capture must record sticky"
-        );
+        assert!(snapshot.clients[0].is_sticky, "capture must record sticky");
 
         jwm.state.clients[key].state.is_sticky = false;
         assert_eq!(jwm.apply_session_snapshot(&mut backend, &snapshot), 1);
@@ -3753,11 +3993,18 @@ mod tests {
             .expect("minimize");
         assert!(jwm.state.clients[key].state.is_hidden);
 
-        let snapshot = capture_snapshot(&jwm.state, "status-bar");
+        let mut snapshot = capture_snapshot(&jwm.state, "status-bar");
         assert!(
             snapshot.clients[0].is_minimized,
             "capture must record minimized"
         );
+
+        // A snapshot can come from a different output topology.  `hidden_x`
+        // is a derived parking coordinate, so this stale value must not
+        // overwrite the coordinate at which restore actually parks the live
+        // window.
+        snapshot.clients[0].hidden_x = Some(-123_456);
+        snapshot.clients[0].hidden_restore = Some((9_000, 8_000, 640, 480));
 
         jwm.set_client_minimized(&mut backend, key, false)
             .expect("unminimize");
@@ -3767,6 +4014,16 @@ mod tests {
             jwm.state.clients[key].state.is_hidden,
             "restore must re-apply minimized through set_client_minimized"
         );
+        let restored = &jwm.state.clients[key].geometry;
+        assert_eq!(restored.hidden_x, Some(restored.x));
+        assert_ne!(restored.hidden_x, snapshot.clients[0].hidden_x);
+        let hidden_restore = restored
+            .hidden_restore_rect
+            .expect("minimized restore geometry");
+        let work = jwm.monitor_work_area(monitor).expect("monitor work area");
+        assert!(hidden_restore.x >= work.x && hidden_restore.y >= work.y);
+        assert!(hidden_restore.x + hidden_restore.w <= work.x + work.w);
+        assert!(hidden_restore.y + hidden_restore.h <= work.y + work.h);
     }
 
     #[test]
@@ -3793,23 +4050,38 @@ mod tests {
             .expect("enter fullscreen");
         assert!(jwm.state.clients[fs_key].state.is_fullscreen);
 
-        let fs_snap = capture_snapshot(&jwm.state, "status-bar");
+        let mut fs_snap = capture_snapshot(&jwm.state, "status-bar");
         assert!(
-            fs_snap.clients.iter().any(|e| e.class == "FsApp" && e.is_fullscreen && !e.is_pip),
+            fs_snap
+                .clients
+                .iter()
+                .any(|e| e.class == "FsApp" && e.is_fullscreen && !e.is_pip),
             "capture must record fullscreen"
         );
+        fs_snap
+            .clients
+            .iter_mut()
+            .find(|entry| entry.class == "FsApp")
+            .expect("FsApp entry")
+            .old_geometry = Some((9_000, 8_000, 640, 480));
 
         jwm.setfullscreen(&mut backend, fs_key, false)
             .expect("leave fullscreen");
         assert!(!jwm.state.clients[fs_key].state.is_fullscreen);
         assert_eq!(jwm.apply_session_snapshot(&mut backend, &fs_snap), 1);
         assert!(
-            jwm.state.clients[fs_key].state.is_fullscreen && !jwm.state.clients[fs_key].state.is_pip,
+            jwm.state.clients[fs_key].state.is_fullscreen
+                && !jwm.state.clients[fs_key].state.is_pip,
             "restore must re-apply fullscreen through setfullscreen"
         );
 
         jwm.setfullscreen(&mut backend, fs_key, false)
             .expect("leave before pip");
+        let restored = &jwm.state.clients[fs_key].geometry;
+        let work = jwm.monitor_work_area(monitor).expect("monitor work area");
+        assert!(restored.x >= work.x && restored.y >= work.y);
+        assert!(restored.x + restored.w <= work.x + work.w);
+        assert!(restored.y + restored.h <= work.y + work.h);
         jwm.set_client_pip(&mut backend, fs_key, true)
             .expect("enter pip");
         assert!(jwm.state.clients[fs_key].state.is_pip);
@@ -3828,7 +4100,8 @@ mod tests {
         assert!(!jwm.state.clients[fs_key].state.is_pip);
         assert_eq!(jwm.apply_session_snapshot(&mut backend, &pip_snap), 1);
         assert!(
-            jwm.state.clients[fs_key].state.is_pip && !jwm.state.clients[fs_key].state.is_fullscreen,
+            jwm.state.clients[fs_key].state.is_pip
+                && !jwm.state.clients[fs_key].state.is_fullscreen,
             "restore must re-apply PiP through set_client_pip"
         );
 
@@ -3845,7 +4118,8 @@ mod tests {
             .expect("clear before both");
         assert_eq!(jwm.apply_session_snapshot(&mut backend, &both), 1);
         assert!(
-            jwm.state.clients[fs_key].state.is_fullscreen && !jwm.state.clients[fs_key].state.is_pip,
+            jwm.state.clients[fs_key].state.is_fullscreen
+                && !jwm.state.clients[fs_key].state.is_pip,
             "Fullscreen must win when both flags are saved"
         );
     }

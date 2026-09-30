@@ -29,10 +29,7 @@ const BAR_HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 /// the host session's `XDG_RUNTIME_DIR` does not fight the host over
 /// `/dev/shm/jwm_bar_mon_{monitor}` and enter the 30s retry loop.
 pub(crate) fn secondary_bar_shared_memory_path(monitor_id: i32) -> String {
-    format!(
-        "/dev/shm/jwm_bar_p{}_mon_{monitor_id}",
-        std::process::id()
-    )
+    format!("/dev/shm/jwm_bar_p{}_mon_{monitor_id}", std::process::id())
 }
 
 /// Pre-PID-isolation path kept only so a compositor can unlink stale flinks.
@@ -256,13 +253,14 @@ impl Jwm {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn createmon(&mut self, show_bar: bool) -> WMMonitor {
         // Test helpers and call sites without an output identity seed by
         // monitor index only.
         self.createmon_seeded(show_bar, None)
     }
 
-    /// Like [`Self::createmon`], but seeds per-tag layouts by the output's
+    /// Construct a monitor and seed per-tag layouts by the output's
     /// `stable_key` / connector when `updategeom` or `add_monitor` knows it.
     pub(super) fn createmon_seeded(
         &mut self,

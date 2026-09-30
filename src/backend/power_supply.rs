@@ -1,5 +1,7 @@
 //! Shared, bounded parsing for compositor power-supply probes.
 
+use std::collections::BinaryHeap;
+use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read};
 use std::os::unix::fs::OpenOptionsExt as _;
@@ -64,10 +66,11 @@ pub(crate) fn parse_percentage(text: &str) -> io::Result<u32> {
 /// desktop whenever the mouse runs low, so device-scoped supplies are
 /// skipped. A missing or unreadable `scope` counts as `System`, like upower.
 pub(crate) fn first_battery_dir(power_supply_root: &Path) -> Option<PathBuf> {
-    let mut entries = fs::read_dir(power_supply_root).ok()?.flatten().collect::<Vec<_>>();
-    entries.sort_by_key(|entry| entry.file_name());
-    for entry in entries.into_iter().take(MAX_POWER_SUPPLY_ENTRIES) {
-        let path = entry.path();
+    let entries = fs::read_dir(power_supply_root)
+        .ok()?
+        .flatten()
+        .map(|entry| (entry.file_name(), entry.path()));
+    for path in bounded_supply_paths(entries) {
         if !path.is_dir() {
             continue;
         }
@@ -79,6 +82,28 @@ pub(crate) fn first_battery_dir(power_supply_root: &Path) -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// Retain the same lexically first candidates as sorting the whole directory,
+/// with at most 64 names/paths in memory. Directory iteration order is not
+/// stable, so truncating the iterator before sorting would change which
+/// battery is selected. Cache each name once rather than allocating it in
+/// every comparison made by the old sort.
+fn bounded_supply_paths(entries: impl Iterator<Item = (OsString, PathBuf)>) -> Vec<PathBuf> {
+    let mut retained = BinaryHeap::with_capacity(MAX_POWER_SUPPLY_ENTRIES);
+    for entry in entries {
+        if retained.len() < MAX_POWER_SUPPLY_ENTRIES {
+            retained.push(entry);
+        } else if retained.peek().is_some_and(|largest| &entry < largest) {
+            retained.pop();
+            retained.push(entry);
+        }
+    }
+    retained
+        .into_sorted_vec()
+        .into_iter()
+        .map(|(_, path)| path)
+        .collect()
 }
 
 /// Whether a power supply powers a peripheral rather than the system.
@@ -178,6 +203,62 @@ mod tests {
         std::fs::write(bat0.join("type"), "Battery\n").unwrap();
 
         assert_eq!(first_battery_dir(&root).as_deref(), Some(bat0.as_path()));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn supply_candidates_match_the_lexical_prefix_in_any_enumeration_order() {
+        use std::os::unix::ffi::OsStringExt as _;
+
+        let entries: Vec<_> = (0..4096)
+            .map(|index| {
+                let name = format!("supply-{index:04}");
+                (OsString::from(&name), PathBuf::from(name))
+            })
+            .collect();
+        let expected: Vec<_> = entries
+            .iter()
+            .take(MAX_POWER_SUPPLY_ENTRIES)
+            .map(|(_, path)| path.clone())
+            .collect();
+
+        assert_eq!(bounded_supply_paths(entries.iter().cloned()), expected);
+        assert_eq!(bounded_supply_paths(entries.into_iter().rev()), expected);
+        assert!(bounded_supply_paths(std::iter::empty()).is_empty());
+
+        let mut byte_names: Vec<_> = (1..=128u8)
+            .map(|index| {
+                let name = OsString::from_vec(vec![0xff, index]);
+                (name.clone(), PathBuf::from(name))
+            })
+            .collect();
+        byte_names.sort_by(|left, right| left.0.cmp(&right.0));
+        let expected: Vec<_> = byte_names
+            .iter()
+            .take(MAX_POWER_SUPPLY_ENTRIES)
+            .map(|(_, path)| path.clone())
+            .collect();
+        assert_eq!(bounded_supply_paths(byte_names.into_iter().rev()), expected);
+    }
+
+    #[test]
+    fn battery_probe_keeps_the_same_directory_cap_and_sorted_priority() {
+        let root = test_directory();
+        for index in 0..MAX_POWER_SUPPLY_ENTRIES + 16 {
+            let directory = root.join(format!("supply-{index:03}"));
+            std::fs::create_dir(&directory).unwrap();
+            std::fs::write(directory.join("type"), "Mains\n").unwrap();
+        }
+        let excluded = root.join("zz-battery");
+        std::fs::create_dir(&excluded).unwrap();
+        std::fs::write(excluded.join("type"), "Battery\n").unwrap();
+        assert_eq!(first_battery_dir(&root), None);
+
+        // This entry is created last but sorts before the retained prefix.
+        let selected = root.join("BAT0");
+        std::fs::create_dir(&selected).unwrap();
+        std::fs::write(selected.join("type"), "Battery\n").unwrap();
+        assert_eq!(first_battery_dir(&root), Some(selected));
         std::fs::remove_dir_all(root).unwrap();
     }
 

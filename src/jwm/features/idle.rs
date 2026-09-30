@@ -172,6 +172,7 @@ impl IdleSettings {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct IdleTracker {
     dimmed: bool,
+    previous_idle: Option<Duration>,
     screen_off: bool,
     lock_asked: bool,
     /// The lock state at the previous poll, so an unlock can be noticed
@@ -214,15 +215,31 @@ impl IdleTracker {
             self.lock_failures = 0;
         }
 
+        // Input resets the backend clock, including after a delayed poll or
+        // resume where the new episode has already crossed its first stage.
+        let restarted = self.previous_idle.is_some_and(|previous| idle < previous);
+        self.previous_idle = Some(idle);
+        let mut actions = if restarted { self.wake() } else { Vec::new() };
+
         let awake = inhibited
             || settings
                 .first_stage()
                 .is_none_or(|first_stage| idle < first_stage);
         if awake {
-            return self.wake();
+            actions.extend(self.wake());
+            return actions;
         }
 
-        let mut actions = Vec::new();
+        // Live configuration changes can disable or postpone one stage while
+        // the other stages stay enabled. Restore that stage independently.
+        if self.screen_off && settings.screen_off_after.is_none_or(|after| idle < after) {
+            self.screen_off = false;
+            actions.push(IdleAction::ScreenOn);
+        }
+        if self.dimmed && settings.dim_after.is_none_or(|after| idle < after) {
+            self.dimmed = false;
+            actions.push(IdleAction::Undim);
+        }
         if let Some(after) = settings.dim_after
             && idle >= after
             && !self.dimmed
@@ -794,6 +811,64 @@ mod tests {
     }
 
     #[test]
+    fn delayed_activity_poll_rearms_all_stages_for_the_new_episode() {
+        let settings = IdleSettings::from_secs(30, 0.35, 60, 90, true);
+        let mut tracker = IdleTracker::default();
+        let now = Instant::now();
+        assert_eq!(
+            tracker.poll(&settings, Duration::from_secs(120), false, false, now),
+            vec![
+                IdleAction::Dim(0.35),
+                IdleAction::Lock,
+                IdleAction::ScreenOff
+            ]
+        );
+        // Activity occurred, but the next poll arrived 40 seconds later.
+        assert_eq!(
+            tracker.poll(&settings, Duration::from_secs(40), false, false, now),
+            vec![
+                IdleAction::ScreenOn,
+                IdleAction::Undim,
+                IdleAction::Dim(0.35)
+            ]
+        );
+        assert_eq!(
+            tracker.poll(&settings, Duration::from_secs(90), false, false, now),
+            vec![IdleAction::Lock, IdleAction::ScreenOff]
+        );
+    }
+
+    #[test]
+    fn changing_one_idle_stage_restores_it_while_lock_stays_enabled() {
+        let mut settings = IdleSettings::from_secs(30, 0.35, 60, 90, true);
+        let mut tracker = IdleTracker::default();
+        let now = Instant::now();
+        tracker.poll(&settings, Duration::from_secs(120), false, false, now);
+        settings.dim_after = None;
+        settings.screen_off_after = Some(Duration::from_secs(300));
+        assert_eq!(
+            tracker.poll(&settings, Duration::from_secs(121), false, false, now),
+            vec![IdleAction::ScreenOn, IdleAction::Undim]
+        );
+        assert!(!tracker.is_dimmed());
+        assert!(!tracker.is_screen_off());
+        assert!(
+            tracker
+                .poll(&settings, Duration::from_secs(122), false, false, now)
+                .is_empty()
+        );
+        assert_eq!(
+            tracker.poll(&settings, Duration::from_secs(300), false, false, now),
+            vec![IdleAction::ScreenOff]
+        );
+        settings.screen_off_after = None;
+        assert_eq!(
+            tracker.poll(&settings, Duration::from_secs(301), false, false, now),
+            vec![IdleAction::ScreenOn]
+        );
+    }
+
+    #[test]
     fn poll_wakeup_is_exact_and_disabled_policy_settles() {
         let now = std::time::Instant::now();
         assert_eq!(idle_poll_wakeup(false, true, false, None, now), None);
@@ -917,16 +992,8 @@ mod tests {
         assert_eq!(payload["secs_until_lock"], 500u64);
         assert_eq!(payload["secs_until_screen_off"], 800u64);
 
-        let recording = idle_status_payload(
-            &settings,
-            false,
-            false,
-            true,
-            false,
-            false,
-            false,
-            None,
-        );
+        let recording =
+            idle_status_payload(&settings, false, false, true, false, false, false, None);
         assert_eq!(recording["inhibited"], true);
         assert_eq!(recording["recording_inhibit"], true);
         assert_eq!(recording["caffeine"], false);

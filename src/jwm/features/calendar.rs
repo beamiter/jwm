@@ -47,14 +47,21 @@ impl CalendarView {
 
     /// Step by whole months, rolling the year over.
     pub fn shift_month(&mut self, delta: i32) {
-        // Work in months-since-year-0 so December + 1 lands on January.
-        let total = self.year * 12 + i32::try_from(self.month).unwrap_or(1) - 1 + delta;
-        self.year = total.div_euclid(12);
+        // Navigation is bounded by the dates chrono can render. Use a wider
+        // month index so even a large step cannot overflow before clamping.
+        let total = i64::from(self.year) * 12 + i64::from(self.month) - 1 + i64::from(delta);
+        let first = i64::from(NaiveDate::MIN.year()) * 12;
+        let last = i64::from(NaiveDate::MAX.year()) * 12 + 11;
+        let total = total.clamp(first, last);
+        self.year = total.div_euclid(12) as i32;
         self.month = (total.rem_euclid(12) + 1) as u32;
     }
 
     pub fn shift_year(&mut self, delta: i32) {
-        self.year += delta;
+        self.year = (i64::from(self.year) + i64::from(delta)).clamp(
+            i64::from(NaiveDate::MIN.year()),
+            i64::from(NaiveDate::MAX.year()),
+        ) as i32;
     }
 
     /// Jump back to the month containing today.
@@ -76,18 +83,19 @@ impl CalendarView {
 /// Days in a month, leap years included.
 #[must_use]
 pub fn days_in_month(year: i32, month: u32) -> u32 {
-    let (next_year, next_month) = if month == 12 {
-        (year + 1, 1)
-    } else {
-        (year, month + 1)
-    };
-    let first = NaiveDate::from_ymd_opt(year, month, 1);
-    let next_first = NaiveDate::from_ymd_opt(next_year, next_month, 1);
-    match (first, next_first) {
-        (Some(first), Some(next)) => {
-            u32::try_from(next.signed_duration_since(first).num_days()).unwrap_or(0)
+    if NaiveDate::from_ymd_opt(year, month, 1).is_none() {
+        return 0;
+    }
+    match month {
+        4 | 6 | 9 | 11 => 30,
+        2 => {
+            if NaiveDate::from_ymd_opt(year, 2, 29).is_some() {
+                29
+            } else {
+                28
+            }
         }
-        _ => 0,
+        _ => 31,
     }
 }
 
@@ -280,6 +288,27 @@ mod tests {
 
     fn date(year: i32, month: u32, day: u32) -> NaiveDate {
         NaiveDate::from_ymd_opt(year, month, day).expect("valid date")
+    }
+
+    #[test]
+    fn navigation_stops_at_renderable_calendar_edges_and_can_return() {
+        let mut view = CalendarView::new(NaiveDate::MAX);
+        view.shift_month(1);
+        assert_eq!((view.year, view.month), (NaiveDate::MAX.year(), 12));
+        assert_eq!(days_in_month(view.year, view.month), 31);
+        assert!(!month_grid(&view).is_empty());
+        view.shift_year(i32::MAX);
+        assert_eq!(view.year, NaiveDate::MAX.year());
+        view.shift_month(-1);
+        assert_eq!(view.month, 11);
+        view.shift_month(i32::MIN);
+        assert_eq!((view.year, view.month), (NaiveDate::MIN.year(), 1));
+        view.shift_year(i32::MIN);
+        assert_eq!(view.year, NaiveDate::MIN.year());
+        view.shift_month(1);
+        assert_eq!(view.month, 2);
+        view.reset();
+        assert_eq!((view.year, view.month), (NaiveDate::MAX.year(), 12));
     }
 
     #[test]
@@ -482,18 +511,9 @@ mod tests {
         assert_eq!(click_action(5, cell_x(0), 12.0, &view), CalendarClick::None);
         // The blank row never answers. The weekday header's middle cell
         // (`Th`) stays inert too.
-        assert_eq!(
-            click_action(1, cell_x(0), 12.0, &view),
-            CalendarClick::None
-        );
-        assert_eq!(
-            click_action(1, cell_x(3), 12.0, &view),
-            CalendarClick::None
-        );
-        assert_eq!(
-            click_action(2, cell_x(3), 12.0, &view),
-            CalendarClick::None
-        );
+        assert_eq!(click_action(1, cell_x(0), 12.0, &view), CalendarClick::None);
+        assert_eq!(click_action(1, cell_x(3), 12.0, &view), CalendarClick::None);
+        assert_eq!(click_action(2, cell_x(3), 12.0, &view), CalendarClick::None);
     }
 
     #[test]
@@ -507,10 +527,7 @@ mod tests {
             click_action(0, cell_x(0), 12.0, &view),
             CalendarClick::Today
         );
-        assert_eq!(
-            click_action(0, cell_x(3), 0.0, &view),
-            CalendarClick::Today
-        );
+        assert_eq!(click_action(0, cell_x(3), 0.0, &view), CalendarClick::Today);
     }
 
     #[test]

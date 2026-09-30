@@ -86,11 +86,7 @@ impl LayoutPickerState {
         if self.layouts.is_empty() {
             return None;
         }
-        let next = if to_end {
-            self.layouts.len() - 1
-        } else {
-            0
-        };
+        let next = if to_end { self.layouts.len() - 1 } else { 0 };
         self.select(next)
     }
 

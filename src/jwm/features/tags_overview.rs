@@ -165,11 +165,7 @@ impl TagsOverviewState {
         if self.cells.is_empty() {
             return false;
         }
-        let next = if to_end {
-            self.cells.len() - 1
-        } else {
-            0
-        };
+        let next = if to_end { self.cells.len() - 1 } else { 0 };
         if self.selected == next {
             return false;
         }
@@ -188,9 +184,7 @@ impl TagsOverviewState {
         let next = if direction < 0 {
             self.selected.saturating_sub(step)
         } else {
-            self.selected
-                .saturating_add(step)
-                .min(self.cells.len() - 1)
+            self.selected.saturating_add(step).min(self.cells.len() - 1)
         };
         if self.selected == next {
             return false;

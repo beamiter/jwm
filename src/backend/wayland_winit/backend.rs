@@ -21,7 +21,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use smithay::backend::input::{
-    AbsolutePositionEvent, Axis, InputTime, Event as InputEventExt, InputBackend, InputEvent,
+    AbsolutePositionEvent, Axis, Event as InputEventExt, InputBackend, InputEvent, InputTime,
     KeyboardKeyEvent, PointerAxisEvent, PointerButtonEvent, PointerMotionEvent,
 };
 use smithay::backend::renderer::damage::OutputDamageTracker;

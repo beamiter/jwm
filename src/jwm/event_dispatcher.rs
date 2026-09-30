@@ -693,26 +693,22 @@ impl WMController for Jwm {
                 // modal selection the pointer is not near. Vertical (4/5)
                 // and horizontal (6/7) wheels both step — layout-picker /
                 // tags-overview twin.
-                4 | 6 if !matches!(
-                    hit,
-                    SystemUiHitTarget::Outside | SystemUiHitTarget::Unavailable
-                ) =>
+                4 | 6
+                    if !matches!(
+                        hit,
+                        SystemUiHitTarget::Outside | SystemUiHitTarget::Unavailable
+                    ) =>
                 {
-                    let shift = backend
-                        .key_ops()
-                        .clean_mods(state)
-                        .contains(Mods::SHIFT);
+                    let shift = backend.key_ops().clean_mods(state).contains(Mods::SHIFT);
                     self.scroll_system_ui_from_pointer(backend, -1, wheel_row, shift);
                 }
-                5 | 7 if !matches!(
-                    hit,
-                    SystemUiHitTarget::Outside | SystemUiHitTarget::Unavailable
-                ) =>
+                5 | 7
+                    if !matches!(
+                        hit,
+                        SystemUiHitTarget::Outside | SystemUiHitTarget::Unavailable
+                    ) =>
                 {
-                    let shift = backend
-                        .key_ops()
-                        .clean_mods(state)
-                        .contains(Mods::SHIFT);
+                    let shift = backend.key_ops().clean_mods(state).contains(Mods::SHIFT);
                     self.scroll_system_ui_from_pointer(backend, 1, wheel_row, shift);
                 }
                 1 => match hit {
@@ -805,19 +801,17 @@ impl WMController for Jwm {
                         self.apply_selected_theme(backend);
                     }
                 }
-                2 if self.features.system_ui.is_wallpaper_picker() => {
-                    match hit {
-                        SystemUiHitTarget::Item(row, _)
-                            if self.features.system_ui.select_visible_row(row).is_some() =>
-                        {
-                            self.apply_selected_wallpaper(backend);
-                        }
-                        SystemUiHitTarget::Preview => {
-                            self.apply_selected_wallpaper(backend);
-                        }
-                        _ => {}
+                2 if self.features.system_ui.is_wallpaper_picker() => match hit {
+                    SystemUiHitTarget::Item(row, _)
+                        if self.features.system_ui.select_visible_row(row).is_some() =>
+                    {
+                        self.apply_selected_wallpaper(backend);
                     }
-                }
+                    SystemUiHitTarget::Preview => {
+                        self.apply_selected_wallpaper(backend);
+                    }
+                    _ => {}
+                },
                 2 if self.features.system_ui.audio_picker_direction().is_some() => {
                     if let SystemUiHitTarget::Item(row, _) = hit
                         && self.features.system_ui.select_visible_row(row).is_some()
@@ -859,8 +853,7 @@ impl WMController for Jwm {
                     use crate::backend::common_define::keys;
                     use crate::jwm::features::ControlKind;
                     if let SystemUiHitTarget::Item(row, _) = hit
-                        && let Some(kind) =
-                            self.features.system_ui.control_at_visible_row(row)
+                        && let Some(kind) = self.features.system_ui.control_at_visible_row(row)
                         && matches!(
                             kind,
                             ControlKind::Volume
@@ -896,12 +889,7 @@ impl WMController for Jwm {
                             ControlKind::Media => keys::KEY_p,
                             _ => keys::KEY_m,
                         };
-                        self.handle_control_center_key(
-                            backend,
-                            kind,
-                            keysym,
-                            Mods::empty(),
-                        );
+                        self.handle_control_center_key(backend, kind, keysym, Mods::empty());
                     }
                 }
                 _ => {}
@@ -3560,8 +3548,7 @@ mod tests {
             "middle-click must never clear-all"
         );
         assert!(
-            !system_ui.contains("clear_notifications")
-                && !system_ui.contains("clear_all"),
+            !system_ui.contains("clear_notifications") && !system_ui.contains("clear_all"),
             "middle-click must not touch notification clear-all"
         );
     }
@@ -3636,8 +3623,8 @@ mod tests {
 
     #[test]
     fn middle_click_dismisses_the_pointed_notification_row() {
-        use crate::jwm::features::notifications::NotificationRequest;
         use crate::jwm::features::NotificationCenter;
+        use crate::jwm::features::notifications::NotificationRequest;
 
         let mut jwm = empty_jwm();
         let mut backend = RenderSpyBackend::new();
@@ -3667,7 +3654,10 @@ mod tests {
         // Newest first: row 0 = newer, row 1 = older. Highlight stays on
         // newest; middle-click the second row — point-who-dismisses.
         assert_eq!(
-            jwm.features.system_ui.selected_notification().map(|(id, _)| id),
+            jwm.features
+                .system_ui
+                .selected_notification()
+                .map(|(id, _)| id),
             Some(newer)
         );
         backend.system_ui_hit = SystemUiHitTarget::Item(1, 0.0);
@@ -3701,8 +3691,8 @@ mod tests {
 
     #[test]
     fn middle_click_on_notification_blank_is_inert() {
-        use crate::jwm::features::notifications::NotificationRequest;
         use crate::jwm::features::NotificationCenter;
+        use crate::jwm::features::notifications::NotificationRequest;
 
         let mut jwm = empty_jwm();
         let mut backend = RenderSpyBackend::new();
@@ -4040,7 +4030,9 @@ mod tests {
         assert!(
             wallpaper_body.contains("select_visible_row(row)")
                 && wallpaper_body.contains("SystemUiHitTarget::Preview")
-                && wallpaper_body.matches(&format!("{}(", "apply_selected_wallpaper")).count()
+                && wallpaper_body
+                    .matches(&format!("{}(", "apply_selected_wallpaper"))
+                    .count()
                     >= 2,
             "Wallpaper middle-click must apply on a list row and on Preview"
         );
@@ -4317,10 +4309,9 @@ mod tests {
         let mut jwm = empty_jwm();
         let mut backend = RenderSpyBackend::new();
         jwm.features.system_ui = SystemUiState::bluetooth_picker("");
-        jwm.features.system_ui.set_bluetooth_devices(&[bonded_bt(
-            "5C:FB:7C:1A:2B:3C",
-            "WH-1000XM4",
-        )]);
+        jwm.features
+            .system_ui
+            .set_bluetooth_devices(&[bonded_bt("5C:FB:7C:1A:2B:3C", "WH-1000XM4")]);
 
         backend.system_ui_hit = SystemUiHitTarget::Item(0, 0.0);
         <Jwm as WMController>::on_button_press(
@@ -4372,10 +4363,9 @@ mod tests {
         let mut jwm = empty_jwm();
         let mut backend = RenderSpyBackend::new();
         jwm.features.system_ui = SystemUiState::bluetooth_picker("");
-        jwm.features.system_ui.set_bluetooth_devices(&[unpaired_bt(
-            "AA:BB:CC:DD:EE:FF",
-            "Beacon",
-        )]);
+        jwm.features
+            .system_ui
+            .set_bluetooth_devices(&[unpaired_bt("AA:BB:CC:DD:EE:FF", "Beacon")]);
 
         backend.system_ui_hit = SystemUiHitTarget::Item(0, 0.0);
         <Jwm as WMController>::on_button_press(
@@ -4414,10 +4404,9 @@ mod tests {
         let mut jwm = empty_jwm();
         let mut backend = RenderSpyBackend::new();
         jwm.features.system_ui = SystemUiState::bluetooth_picker("");
-        jwm.features.system_ui.set_bluetooth_devices(&[bonded_bt(
-            "5C:FB:7C:1A:2B:3C",
-            "WH-1000XM4",
-        )]);
+        jwm.features
+            .system_ui
+            .set_bluetooth_devices(&[bonded_bt("5C:FB:7C:1A:2B:3C", "WH-1000XM4")]);
         jwm.features.system_ui.prompt_bluetooth_pairing(
             &crate::jwm::features::pairing::PairingPrompt::Pin,
             "WH-1000XM4",
@@ -4690,8 +4679,7 @@ mod tests {
         });
         let bluetooth_row = (0..32)
             .find(|row| {
-                jwm.features.system_ui.control_at_visible_row(*row)
-                    == Some(ControlKind::Bluetooth)
+                jwm.features.system_ui.control_at_visible_row(*row) == Some(ControlKind::Bluetooth)
             })
             .expect("Bluetooth row");
         assert_eq!(
@@ -4800,8 +4788,8 @@ mod tests {
     }
 
     fn notification_center_with_chips(jwm: &mut Jwm) -> u32 {
-        use crate::jwm::features::notifications::{NotificationAction, NotificationRequest};
         use crate::jwm::features::NotificationCenter;
+        use crate::jwm::features::notifications::{NotificationAction, NotificationRequest};
 
         jwm.features.notifications = NotificationCenter::new();
         let act = |key: &str, label: &str| NotificationAction {
@@ -8209,8 +8197,8 @@ mod tests {
             Some(0x900)
         );
 
-        // The horizontal wheel is neither a click nor something to browse
-        // with, so it leaves the panel exactly as it was.
+        // The horizontal wheel is the Left/Right twin used by the other
+        // shell panels. Button 6 steps backward and wraps onto the tail.
         <Jwm as WMController>::on_button_press(
             &mut jwm,
             &mut backend,
@@ -8222,7 +8210,7 @@ mod tests {
         assert!(jwm.features.system_ui.is_window_switcher());
         assert_eq!(
             jwm.features.system_ui.selected_switcher_window(),
-            Some(0x900)
+            Some(0x902)
         );
 
         // A scroll away from the card moves nothing, the way it does not on
@@ -8238,7 +8226,7 @@ mod tests {
         );
         assert_eq!(
             jwm.features.system_ui.selected_switcher_window(),
-            Some(0x900)
+            Some(0x902)
         );
 
         // A real click that is not the picking one still cancels.

@@ -118,6 +118,11 @@ carrying a `version` field (currently `1`) and the identifier counter
 alongside the records, written atomically with `0600` permissions. A missing,
 oversized, or malformed file simply starts an empty history rather than
 failing startup.
+When persisted records reuse an identifier, loading keeps the newest occurrence
+in the file's oldest-first order. Closing that identifier therefore cannot
+leave an older duplicate behind.
+Identifier allocation skips both zero and every identifier still in the
+64-record history when the counter wraps, including after restoring a snapshot.
 
 ## Action buttons
 

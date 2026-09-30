@@ -78,6 +78,7 @@ const CLOSED_PLACEMENT_FILE: &str = "closed_placement.json";
 /// or delete without the sweep in `atomic_write_closed_placement`.
 const CLOSED_PLACEMENT_TEMPORARY_PREFIX: &str = ".closed_placement.json.tmp-";
 const MAX_CLOSED_PLACEMENT_SWEEP_ENTRIES: usize = 1024;
+const MAX_CLOSED_PLACEMENT_TEMPORARY_CREATE_ATTEMPTS: usize = 128;
 static CLOSED_PLACEMENT_WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// WM_CLASS identity a placement is remembered under. Exact, case-sensitive.
@@ -225,9 +226,7 @@ impl ClosedPlacementSnapshot {
         let mut next_seq = 0_u64;
         for entry in self.placements {
             next_seq = next_seq.max(entry.seq.saturating_add(1));
-            let connector = entry
-                .connector
-                .filter(|connector| !connector.is_empty());
+            let connector = entry.connector.filter(|connector| !connector.is_empty());
             by_identity.insert(
                 PlacementIdentity {
                     class: entry.class,
@@ -321,6 +320,16 @@ fn sweep_orphaned_closed_placement_temporaries(parent: &Path) {
 }
 
 fn atomic_write_closed_placement(path: &Path, contents: &[u8]) -> io::Result<()> {
+    atomic_write_closed_placement_with_sync(path, contents, |parent, _temporary| {
+        fs::File::open(parent)?.sync_all()
+    })
+}
+
+fn atomic_write_closed_placement_with_sync(
+    path: &Path,
+    contents: &[u8],
+    sync_directory: impl FnOnce(&Path, &Path) -> io::Result<()>,
+) -> io::Result<()> {
     if contents.len() as u64 > MAX_CLOSED_PLACEMENT_BYTES {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -341,27 +350,53 @@ fn atomic_write_closed_placement(path: &Path, contents: &[u8]) -> io::Result<()>
         ));
     }
 
-    let sequence = CLOSED_PLACEMENT_WRITE_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let temporary = parent.join(format!(
-        "{CLOSED_PLACEMENT_TEMPORARY_PREFIX}{}-{sequence}",
-        std::process::id()
-    ));
+    let (temporary, mut file) =
+        create_closed_placement_temporary(parent, std::process::id(), || {
+            CLOSED_PLACEMENT_WRITE_COUNTER.fetch_add(1, Ordering::Relaxed)
+        })?;
+    let mut renamed = false;
     let result = (|| {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&temporary)?;
         file.write_all(contents)?;
         file.sync_all()?;
         fs::rename(&temporary, path)?;
-        fs::File::open(parent)?.sync_all()?;
+        renamed = true;
+        sync_directory(parent, &temporary)?;
         Ok(())
     })();
-    if result.is_err() {
+    // After rename this pathname is free for another writer to own.
+    if result.is_err() && !renamed {
         let _ = fs::remove_file(&temporary);
     }
     result
+}
+
+fn create_closed_placement_temporary(
+    parent: &Path,
+    pid: u32,
+    mut next_sequence: impl FnMut() -> u64,
+) -> io::Result<(PathBuf, fs::File)> {
+    for _ in 0..MAX_CLOSED_PLACEMENT_TEMPORARY_CREATE_ATTEMPTS {
+        let temporary = parent.join(format!(
+            "{CLOSED_PLACEMENT_TEMPORARY_PREFIX}{pid}-{}",
+            next_sequence()
+        ));
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&temporary)
+        {
+            Ok(file) => return Ok((temporary, file)),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        format!(
+            "could not create a unique closed-placement temporary after {MAX_CLOSED_PLACEMENT_TEMPORARY_CREATE_ATTEMPTS} attempts"
+        ),
+    ))
 }
 
 fn load_closed_placement_snapshot(
@@ -369,7 +404,7 @@ fn load_closed_placement_snapshot(
 ) -> Result<ClosedPlacementSnapshot, Box<dyn std::error::Error>> {
     let file = OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NOFOLLOW)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(path)?;
     let metadata = file.metadata()?;
     if !metadata.is_file() {
@@ -798,11 +833,24 @@ pub(crate) fn resolve_memory_against_rule(
 /// Ancestor PIDs from `/proc/<pid>/status`, nearest first. Stops at PID 1,
 /// on a parse failure, or after `MAX_ANCESTRY_DEPTH` steps.
 fn linux_ancestors(pid: u32) -> Vec<u32> {
+    ancestors_with(pid, linux_parent_pid)
+}
+
+fn valid_process_pid(pid: u32) -> bool {
+    pid > 1 && pid <= i32::MAX as u32
+}
+
+fn ancestors_with(pid: u32, mut parent_of: impl FnMut(u32) -> Option<u32>) -> Vec<u32> {
     let mut out = Vec::with_capacity(MAX_ANCESTRY_DEPTH);
+    if !valid_process_pid(pid) {
+        return out;
+    }
     let mut current = pid;
     for _ in 0..MAX_ANCESTRY_DEPTH {
-        match linux_parent_pid(current) {
-            Some(parent) if parent > 1 && parent != current => {
+        match parent_of(current) {
+            Some(parent)
+                if valid_process_pid(parent) && parent != pid && !out.contains(&parent) =>
+            {
                 out.push(parent);
                 current = parent;
             }
@@ -812,12 +860,29 @@ fn linux_ancestors(pid: u32) -> Vec<u32> {
     out
 }
 
-fn linux_parent_pid(pid: u32) -> Option<u32> {
-    let contents = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+const MAX_ANCESTRY_STATUS_BYTES: u64 = 256 * 1024;
+
+fn parent_pid_from_status(input: impl Read) -> Option<u32> {
+    let mut contents = String::new();
+    input
+        .take(MAX_ANCESTRY_STATUS_BYTES + 1)
+        .read_to_string(&mut contents)
+        .ok()?;
+    if contents.len() as u64 > MAX_ANCESTRY_STATUS_BYTES {
+        return None;
+    }
     contents
         .lines()
         .find_map(|line| line.strip_prefix("PPid:"))
         .and_then(|rest| rest.trim().parse().ok())
+        .filter(|&pid| pid <= i32::MAX as u32)
+}
+
+fn linux_parent_pid(pid: u32) -> Option<u32> {
+    if !valid_process_pid(pid) {
+        return None;
+    }
+    parent_pid_from_status(fs::File::open(format!("/proc/{pid}/status")).ok()?)
 }
 
 impl Jwm {
@@ -897,8 +962,7 @@ impl Jwm {
         }
 
         let mut remembered = remembered;
-        remembered.monitor_num =
-            self.resolve_remembered_monitor_num(backend, &remembered);
+        remembered.monitor_num = self.resolve_remembered_monitor_num(backend, &remembered);
 
         let rule = RuleMatcher::find_matching_rule(&name, &class, &instance);
         let placement = resolve_memory_against_rule(&remembered, rule.as_ref(), cfg.tagmask());
@@ -955,11 +1019,7 @@ impl Jwm {
                     .find(|(_, id)| **id == output.id)
                     .map(|(key, _)| key)?;
                 let num = self.state.monitors.get(mon_key)?.num;
-                Some((
-                    num,
-                    output.identity.connector,
-                    output.identity.stable_key,
-                ))
+                Some((num, output.identity.connector, output.identity.stable_key))
             })
             .collect()
     }
@@ -990,14 +1050,15 @@ impl Jwm {
         backend: &dyn Backend,
         mon_key: crate::core::models::MonitorKey,
     ) -> Option<String> {
-        self.live_output_identity(backend, mon_key).and_then(|identity| {
-            let key = if !identity.stable_key.is_empty() {
-                identity.stable_key
-            } else {
-                identity.connector
-            };
-            (!key.is_empty()).then_some(key)
-        })
+        self.live_output_identity(backend, mon_key)
+            .and_then(|identity| {
+                let key = if !identity.stable_key.is_empty() {
+                    identity.stable_key
+                } else {
+                    identity.connector
+                };
+                (!key.is_empty()).then_some(key)
+            })
     }
 
     /// Physical connector name (`OutputIdentity.connector`) for the live
@@ -1052,12 +1113,7 @@ impl Jwm {
         &self,
         backend: &dyn Backend,
         mon_key: crate::core::models::MonitorKey,
-    ) -> (
-        Option<String>,
-        Option<u16>,
-        Option<u32>,
-        Option<String>,
-    ) {
+    ) -> (Option<String>, Option<u16>, Option<u32>, Option<String>) {
         let Some(identity) = self.live_output_identity(backend, mon_key) else {
             return (None, None, None, None);
         };
@@ -1287,12 +1343,10 @@ impl Jwm {
         };
         let connector = self.output_key_for_monitor(backend, mon_key);
         let win = client.win;
-        if self.closed_placements.remember(
-            identity.clone(),
-            monitor_num,
-            connector.clone(),
-            tags,
-        ) {
+        if self
+            .closed_placements
+            .remember(identity.clone(), monitor_num, connector.clone(), tags)
+        {
             match connector.as_deref() {
                 Some(connector) => info!(
                     "[closed-placement] {win:?} ({identity}) closed on {connector} (monitor {monitor_num}) tags {tags:#b}"
@@ -1364,6 +1418,77 @@ mod tests {
                 .map(|(_, start)| *start)
         };
         (ancestors, start_time)
+    }
+
+    #[test]
+    fn ancestry_stops_before_cycles_invalid_pids_and_depth_limit() {
+        assert_eq!(
+            ancestors_with(10, |pid| Some(if pid == 10 { 20 } else { 10 })),
+            vec![20]
+        );
+        assert_eq!(
+            ancestors_with(10, |pid| Some(if pid == 10 { 20 } else { 20 })),
+            vec![20]
+        );
+        assert!(ancestors_with(0, |_| panic!("invalid PID probed")).is_empty());
+        assert!(ancestors_with(1, |_| panic!("PID 1 must not be probed")).is_empty());
+        assert!(ancestors_with(10, |_| Some(0)).is_empty());
+        assert!(ancestors_with(10, |_| Some(1)).is_empty());
+        assert!(ancestors_with(10, |_| Some(u32::MAX)).is_empty());
+        let chain = ancestors_with(100, |pid| Some(pid + 1));
+        assert_eq!(chain.len(), MAX_ANCESTRY_DEPTH);
+        assert_eq!(chain[0], 101);
+    }
+
+    #[test]
+    fn ancestry_status_reader_rejects_oversized_and_invalid_input() {
+        assert_eq!(
+            parent_pid_from_status(&b"Name: app\nPPid: 42\n"[..]),
+            Some(42)
+        );
+        assert_eq!(parent_pid_from_status(&b"PPid: 4294967295\n"[..]), None);
+        assert_eq!(parent_pid_from_status(&b"PPid: -1\n"[..]), None);
+        let mut oversized = b"PPid: 42\n".to_vec();
+        oversized.resize(MAX_ANCESTRY_STATUS_BYTES as usize + 1, b' ');
+        assert_eq!(parent_pid_from_status(oversized.as_slice()), None);
+    }
+
+    #[test]
+    fn rename_failure_removes_unpublished_temporary() {
+        let dir = TestDir::new("rename-failure");
+        let destination = dir.0.join("existing-directory");
+        fs::create_dir(&destination).unwrap();
+        assert!(
+            atomic_write_closed_placement_with_sync(&destination, b"snapshot", |_, _| {
+                panic!("directory sync must follow a successful rename")
+            })
+            .is_err()
+        );
+        assert!(destination.is_dir());
+        assert!(fs::read_dir(&dir.0).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(CLOSED_PLACEMENT_TEMPORARY_PREFIX)
+        }));
+    }
+
+    #[test]
+    fn directory_sync_failure_preserves_reused_temporary_path() {
+        let dir = TestDir::new("post-rename-sync");
+        let path = dir.0.join("snapshot.json");
+        let mut replacement = None;
+        let error =
+            atomic_write_closed_placement_with_sync(&path, b"published", |_parent, temporary| {
+                fs::write(temporary, b"new owner")?;
+                replacement = Some(temporary.to_path_buf());
+                Err(io::Error::other("directory sync failed"))
+            })
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+        assert_eq!(fs::read(&path).unwrap(), b"published");
+        assert_eq!(fs::read(replacement.unwrap()).unwrap(), b"new owner");
     }
 
     #[test]
@@ -1695,12 +1820,7 @@ mod tests {
         let dir = TestDir::new("roundtrip");
         let path = dir.file();
         let mut memory = ClosedPlacementMemory::default();
-        assert!(memory.remember(
-            identity("firefox"),
-            1,
-            Some("HDMI-A-1".into()),
-            0b100
-        ));
+        assert!(memory.remember(identity("firefox"), 1, Some("HDMI-A-1".into()), 0b100));
         assert!(memory.remember(identity("kitty"), 0, Some("DP-1".into()), 0b10));
         memory.save_to_path(&path);
 
@@ -1768,10 +1888,7 @@ mod tests {
         // Closed on HDMI-A-1 when it was monitor 1; after unplugging the
         // left panel, hole-fill renumbered HDMI-A-1 to monitor 0. The stale
         // monitor_num must not win over the connector.
-        let live = [
-            (0, "HDMI-A-1", "HDMI-A-1"),
-            (1, "DP-2", "edid:DEL:1234"),
-        ];
+        let live = [(0, "HDMI-A-1", "HDMI-A-1"), (1, "DP-2", "edid:DEL:1234")];
         assert_eq!(
             resolve_monitor_num_by_connector(1, Some("HDMI-A-1"), &live),
             0,
@@ -1809,12 +1926,7 @@ mod tests {
                 })
                 .collect(),
         };
-        assert!(
-            too_many
-                .validate()
-                .unwrap_err()
-                .contains("limit is")
-        );
+        assert!(too_many.validate().unwrap_err().contains("limit is"));
 
         let empty_tags = ClosedPlacementSnapshot {
             version: CLOSED_PLACEMENT_VERSION,
@@ -1838,12 +1950,7 @@ mod tests {
             version: CLOSED_PLACEMENT_VERSION + 1,
             placements: Vec::new(),
         };
-        assert!(
-            bad_version
-                .validate()
-                .unwrap_err()
-                .contains("unsupported")
-        );
+        assert!(bad_version.validate().unwrap_err().contains("unsupported"));
     }
 
     #[test]
@@ -1886,5 +1993,44 @@ mod tests {
             fs::metadata(&path).unwrap().permissions().mode() & 0o777,
             0o600
         );
+    }
+
+    #[test]
+    fn closed_placement_loader_rejects_a_fifo_without_waiting_for_a_writer() {
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let dir = TestDir::new("fifo-load");
+        let path = dir.file();
+        let path_bytes = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(path_bytes.as_ptr(), 0o600) }, 0);
+
+        let error = load_closed_placement_snapshot(&path).unwrap_err();
+        assert!(error.to_string().contains("not a regular file"));
+    }
+
+    #[test]
+    fn closed_placement_temporary_collision_preserves_the_other_writer() {
+        let dir = TestDir::new("temporary-collision");
+        let collision = dir
+            .0
+            .join(format!("{CLOSED_PLACEMENT_TEMPORARY_PREFIX}4242-11"));
+        fs::write(&collision, "other writer").unwrap();
+        let mut sequences = [11, 12].into_iter();
+
+        let (temporary, file) = create_closed_placement_temporary(&dir.0, 4242, || {
+            sequences.next().expect("a fresh sequence")
+        })
+        .unwrap();
+        drop(file);
+
+        assert_eq!(fs::read_to_string(&collision).unwrap(), "other writer");
+        assert_eq!(
+            temporary.file_name().and_then(|name| name.to_str()),
+            Some(".closed_placement.json.tmp-4242-12")
+        );
+
+        let exhausted = create_closed_placement_temporary(&dir.0, 4242, || 11).unwrap_err();
+        assert_eq!(exhausted.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read_to_string(collision).unwrap(), "other writer");
     }
 }

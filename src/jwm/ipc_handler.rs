@@ -82,6 +82,7 @@ fn resolved_client_monitor_num(
         .map_or(-1, |monitor| monitor.num)
 }
 
+#[cfg(test)]
 fn tagged_client_count(state: &WMState, monitor: MonitorKey, tag_mask: u32) -> usize {
     state.monitor_clients.get(monitor).map_or(0, |clients| {
         clients
@@ -96,8 +97,18 @@ fn tagged_client_count(state: &WMState, monitor: MonitorKey, tag_mask: u32) -> u
     })
 }
 
-#[derive(Clone, Copy, Default)]
+fn active_tag_count(active_tags: u32, tag_count: usize) -> u32 {
+    let tag_mask = if tag_count >= u32::BITS as usize {
+        u32::MAX
+    } else {
+        (1u32 << tag_count) - 1
+    };
+    (active_tags & tag_mask).count_ones()
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct TagClientCounts {
+    total: usize,
     minimized: usize,
     floating: usize,
     sticky: usize,
@@ -125,12 +136,106 @@ struct TagClientCounts {
     status_bar: usize,
 }
 
+#[derive(Clone, Copy, Default)]
+struct WindowFlagCounts {
+    floating: usize,
+    minimized: usize,
+    sticky: usize,
+    urgent: usize,
+    fullscreen: usize,
+    pip: usize,
+    focused: Option<ClientKey>,
+}
+
+#[derive(Default)]
+struct WindowQueryIndex {
+    scratchpads: std::collections::HashMap<ClientKey, String>,
+    tabs: std::collections::HashMap<(MonitorKey, ClientKey), usize>,
+    monitors: std::collections::HashMap<MonitorKey, WindowMonitorProjection>,
+    stack_positions: std::collections::HashMap<(MonitorKey, ClientKey), usize>,
+    swallowed_by: std::collections::HashMap<ClientKey, u64>,
+}
+
+struct WindowMonitorProjection {
+    connector: Option<String>,
+    monitor_name: Option<String>,
+    active_tags: u32,
+    layout: String,
+}
+
+fn accumulate_client_counts(
+    counts: &mut TagClientCounts,
+    client: &WMClient,
+    scratchpad: bool,
+    tabbed: bool,
+    has_strut: bool,
+    is_status_bar: bool,
+    active_tags: u32,
+) {
+    counts.total += 1;
+    counts.minimized += usize::from(client.state.is_hidden);
+    counts.floating += usize::from(client.state.is_floating);
+    counts.sticky += usize::from(client.state.is_sticky);
+    counts.urgent += usize::from(client.state.is_urgent || client.state.demands_attention);
+    counts.fullscreen += usize::from(client.state.is_fullscreen);
+    counts.pip += usize::from(client.state.is_pip);
+    counts.maximized +=
+        usize::from(client.state.is_maximized_vert || client.state.is_maximized_horz);
+    counts.above += usize::from(client.state.is_above);
+    counts.below += usize::from(client.state.is_below);
+    counts.fixed += usize::from(client.state.is_fixed);
+    counts.scratchpad += usize::from(scratchpad);
+    counts.tabbed += usize::from(tabbed);
+    counts.dock += usize::from(client.state.is_dock);
+    counts.desktop += usize::from(client.state.is_desktop);
+    counts.never_focus += usize::from(client.state.never_focus);
+    counts.demands_attention += usize::from(client.state.demands_attention);
+    counts.skip_taskbar += usize::from(client.state.skip_taskbar);
+    counts.skip_pager += usize::from(client.state.skip_pager);
+    counts.no_decorations += usize::from(client.state.no_decorations);
+    counts.drag_float += usize::from(client.state.is_drag_floating);
+    counts.swallowed += usize::from(client.state.is_swallowed);
+    counts.on_view += usize::from(client.state.is_sticky || (client.state.tags & active_tags) != 0);
+    counts.maximize_promoted += usize::from(client.state.maximize_restore_tiled);
+    counts.strut += usize::from(has_strut);
+    counts.status_bar += usize::from(is_status_bar);
+}
+
+fn accumulate_window_counts(counts: &mut TagClientCounts, window: &WindowInfo) {
+    counts.total += 1;
+    counts.floating += usize::from(window.is_floating);
+    counts.minimized += usize::from(window.is_minimized);
+    counts.sticky += usize::from(window.is_sticky);
+    counts.urgent += usize::from(window.is_urgent);
+    counts.fullscreen += usize::from(window.is_fullscreen);
+    counts.pip += usize::from(window.is_pip);
+    counts.maximized += usize::from(window.is_maximized);
+    counts.above += usize::from(window.is_above);
+    counts.below += usize::from(window.is_below);
+    counts.scratchpad += usize::from(window.is_scratchpad);
+    counts.tabbed += usize::from(window.is_tabbed);
+    counts.fixed += usize::from(window.is_fixed);
+    counts.dock += usize::from(window.is_dock);
+    counts.desktop += usize::from(window.is_desktop);
+    counts.never_focus += usize::from(window.never_focus);
+    counts.demands_attention += usize::from(window.demands_attention);
+    counts.skip_taskbar += usize::from(window.skip_taskbar);
+    counts.skip_pager += usize::from(window.skip_pager);
+    counts.no_decorations += usize::from(window.no_decorations);
+    counts.drag_float += usize::from(window.is_drag_floating);
+    counts.swallowed += usize::from(window.is_swallowed);
+    counts.on_view += usize::from(window.is_on_view);
+    counts.maximize_promoted += usize::from(window.maximize_promoted);
+    counts.strut += usize::from(window.has_strut);
+    counts.status_bar += usize::from(window.is_status_bar);
+}
+
 fn tag_client_counts(
     state: &WMState,
     monitor: MonitorKey,
     tag_mask: u32,
-    scratchpads: &[ClientKey],
-    tabbed: &[ClientKey],
+    scratchpads: &std::collections::HashSet<ClientKey>,
+    tabbed: &std::collections::HashSet<ClientKey>,
     strut_wins: &std::collections::HashSet<crate::backend::common_define::WindowId>,
     status_bar_name: &str,
     active_tags: u32,
@@ -143,96 +248,63 @@ fn tag_client_counts(
         let Some(client) = state.clients.get(key) else {
             continue;
         };
-        if client.state.tags & tag_mask == 0 {
+        if tag_mask != u32::MAX && client.state.tags & tag_mask == 0 {
             continue;
         }
-        if client.state.is_hidden {
-            counts.minimized += 1;
-        }
-        if client.state.is_floating {
-            counts.floating += 1;
-        }
-        if client.state.is_sticky {
-            counts.sticky += 1;
-        }
-        if client.state.is_urgent || client.state.demands_attention {
-            counts.urgent += 1;
-        }
-        if client.state.is_fullscreen {
-            counts.fullscreen += 1;
-        }
-        if client.state.is_pip {
-            counts.pip += 1;
-        }
-        if client.state.is_maximized_vert || client.state.is_maximized_horz {
-            counts.maximized += 1;
-        }
-        if client.state.is_above {
-            counts.above += 1;
-        }
-        if client.state.is_below {
-            counts.below += 1;
-        }
-        if client.state.is_fixed {
-            counts.fixed += 1;
-        }
-        if scratchpads.contains(&key) {
-            counts.scratchpad += 1;
-        }
-        if tabbed.contains(&key) {
-            counts.tabbed += 1;
-        }
-        if client.state.is_dock {
-            counts.dock += 1;
-        }
-        if client.state.is_desktop {
-            counts.desktop += 1;
-        }
-        if client.state.never_focus {
-            counts.never_focus += 1;
-        }
-        if client.state.demands_attention {
-            counts.demands_attention += 1;
-        }
-        if client.state.skip_taskbar {
-            counts.skip_taskbar += 1;
-        }
-        if client.state.skip_pager {
-            counts.skip_pager += 1;
-        }
-        if client.state.no_decorations {
-            counts.no_decorations += 1;
-        }
-        if client.state.is_drag_floating {
-            counts.drag_float += 1;
-        }
-        if client.state.is_swallowed {
-            counts.swallowed += 1;
-        }
-        if client.state.is_sticky || (client.state.tags & active_tags) != 0 {
-            counts.on_view += 1;
-        }
-        if client.state.maximize_restore_tiled {
-            counts.maximize_promoted += 1;
-        }
-        if strut_wins.contains(&client.win) {
-            counts.strut += 1;
-        }
-        if client.is_status_bar(status_bar_name) {
-            counts.status_bar += 1;
-        }
+        accumulate_client_counts(
+            &mut counts,
+            client,
+            scratchpads.contains(&key),
+            tabbed.contains(&key),
+            strut_wins.contains(&client.win),
+            client.is_status_bar(status_bar_name),
+            active_tags,
+        );
     }
     counts
 }
 
-fn tag_has_fullscreen(state: &WMState, monitor: MonitorKey, tag_mask: u32) -> bool {
-    state.monitor_clients.get(monitor).is_some_and(|clients| {
-        clients.iter().any(|&key| {
-            state.clients.get(key).is_some_and(|client| {
-                client.state.is_fullscreen && client.state.tags & tag_mask != 0
-            })
-        })
-    })
+fn monitor_tag_client_counts(
+    state: &WMState,
+    monitor: MonitorKey,
+    tag_count: usize,
+    scratchpads: &std::collections::HashSet<ClientKey>,
+    tabbed: &std::collections::HashSet<ClientKey>,
+    strut_wins: &std::collections::HashSet<crate::backend::common_define::WindowId>,
+    status_bar_name: &str,
+    active_tags: u32,
+) -> Vec<TagClientCounts> {
+    let mut counts = vec![TagClientCounts::default(); tag_count];
+    let Some(clients) = state.monitor_clients.get(monitor) else {
+        return counts;
+    };
+    for &key in clients {
+        let Some(client) = state.clients.get(key) else {
+            continue;
+        };
+        let scratchpad = scratchpads.contains(&key);
+        let tabbed = tabbed.contains(&key);
+        let has_strut = strut_wins.contains(&client.win);
+        let is_status_bar = client.is_status_bar(status_bar_name);
+        let mut tags = client.state.tags;
+        while tags != 0 {
+            let tag_index = tags.trailing_zeros() as usize;
+            tags &= tags - 1;
+            let Some(tag_counts) = counts.get_mut(tag_index) else {
+                break;
+            };
+            accumulate_client_counts(
+                tag_counts,
+                client,
+                scratchpad,
+                tabbed,
+                has_strut,
+                is_status_bar,
+                active_tags,
+            );
+        }
+    }
+    counts
 }
 
 fn client_window_info(
@@ -2760,25 +2832,39 @@ impl Jwm {
                 let tree = self.query_tree(backend);
                 IpcResponse::ok(Some(serde_json::to_value(tree).unwrap_or_default()))
             }
-            "get_scrolling_status" | "get_scrolling" => IpcResponse::ok(Some(self.query_scrolling_status())),
+            "get_scrolling_status" | "get_scrolling" => {
+                IpcResponse::ok(Some(self.query_scrolling_status()))
+            }
             "get_layout" | "get_lt" => IpcResponse::ok(Some(self.query_focused_layout(backend))),
             "get_gaps" | "get_gap" => IpcResponse::ok(Some(self.query_focused_gaps(backend))),
             "get_nmaster" | "get_nm" => IpcResponse::ok(Some(self.query_focused_nmaster(backend))),
             "get_mfact" | "get_mf" => IpcResponse::ok(Some(self.query_focused_mfact(backend))),
             "get_cfact" | "get_cf" => IpcResponse::ok(Some(self.query_focused_cfact(backend))),
-            "get_show_bar" | "get_bar" => IpcResponse::ok(Some(self.query_focused_show_bar(backend))),
-            "get_prev_layout" | "get_pl" => IpcResponse::ok(Some(self.query_focused_prev_layout(backend))),
-            "get_selected" | "get_sel" => IpcResponse::ok(Some(self.query_selected_window(backend, false))),
+            "get_show_bar" | "get_bar" => {
+                IpcResponse::ok(Some(self.query_focused_show_bar(backend)))
+            }
+            "get_prev_layout" | "get_pl" => {
+                IpcResponse::ok(Some(self.query_focused_prev_layout(backend)))
+            }
+            "get_selected" | "get_sel" => {
+                IpcResponse::ok(Some(self.query_selected_window(backend, false)))
+            }
             "get_focused_window" | "get_fw" => {
                 IpcResponse::ok(Some(self.query_selected_window(backend, true)))
             }
-            "get_scratchpads" | "get_pads" | "get_scratch" => IpcResponse::ok(Some(self.query_scratchpads())),
+            "get_scratchpads" | "get_pads" | "get_scratch" => {
+                IpcResponse::ok(Some(self.query_scratchpads()))
+            }
             "get_struts" | "get_strut" => IpcResponse::ok(Some(self.query_struts(backend))),
             "get_night_light" | "get_night_light_status" | "get_nl" => {
                 IpcResponse::ok(Some(self.query_night_light()))
             }
-            "get_gesture_status" | "get_gesture" | "get_gest" => IpcResponse::ok(Some(self.query_gesture_status())),
-            "get_wayland_status" | "get_wayland" | "get_wl" => IpcResponse::ok(Some(self.query_wayland_status(backend))),
+            "get_gesture_status" | "get_gesture" | "get_gest" => {
+                IpcResponse::ok(Some(self.query_gesture_status()))
+            }
+            "get_wayland_status" | "get_wayland" | "get_wl" => {
+                IpcResponse::ok(Some(self.query_wayland_status(backend)))
+            }
             "get_config_status" | "get_cfg" => IpcResponse::ok(Some(self.query_config_status())),
             "get_config" | "get_conf" => IpcResponse::ok(Some(self.query_config_subset(args))),
             "get_dnd" | "get_do_not_disturb" => IpcResponse::ok(Some(serde_json::json!({
@@ -2789,7 +2875,9 @@ impl Jwm {
                 "active": self.features.system_ui.is_active(),
                 "kind": self.features.system_ui.panel_kind(),
             }))),
-            "get_tab_bar" | "get_tabs" | "get_tab" => IpcResponse::ok(Some(self.query_focused_tab_bar(backend))),
+            "get_tab_bar" | "get_tabs" | "get_tab" => {
+                IpcResponse::ok(Some(self.query_focused_tab_bar(backend)))
+            }
             "get_media_status" | "get_media" => IpcResponse::ok(Some(self.media_status_json())),
             "get_power_status" | "get_power" => {
                 // Warm the Shell Hub's coalesced snapshot before answering,
@@ -2801,7 +2889,9 @@ impl Jwm {
                 self.ensure_control_snapshot_refresh(std::time::Instant::now());
                 IpcResponse::ok(Some(self.power_status_json()))
             }
-            "get_connectivity" | "get_network" | "get_conn" => IpcResponse::ok(Some(self.connectivity_json())),
+            "get_connectivity" | "get_network" | "get_conn" => {
+                IpcResponse::ok(Some(self.connectivity_json()))
+            }
             "get_bluetooth_pairing" | "get_bluetooth" | "get_bt" | "get_pair" => {
                 IpcResponse::ok(Some(crate::jwm::features::pairing::session_json(
                     self.features.bluetooth_pairing.as_ref(),
@@ -2831,8 +2921,12 @@ impl Jwm {
                         .and_then(|snapshot| snapshot.mic_muted),
                 })))
             }
-            "get_wallpaper_colors" | "get_wallpaper" | "get_wall" | "get_wc" => IpcResponse::ok(Some(self.wallpaper_theme_json())),
-            "get_idle_status" | "get_idle" | "get_idl" => IpcResponse::ok(Some(self.idle_status_json(backend))),
+            "get_wallpaper_colors" | "get_wallpaper" | "get_wall" | "get_wc" => {
+                IpcResponse::ok(Some(self.wallpaper_theme_json()))
+            }
+            "get_idle_status" | "get_idle" | "get_idl" => {
+                IpcResponse::ok(Some(self.idle_status_json(backend)))
+            }
             "get_resources" | "get_res" => IpcResponse::ok(Some(self.resources_json())),
             "get_clipboard" | "get_clip" => IpcResponse::ok(Some(self.clipboard_json())),
             "get_recording_status" | "get_recording" | "get_rec" => {
@@ -2946,62 +3040,64 @@ impl Jwm {
                     "last_error": recording.last_error,
                 })))
             }
-            "get_effect_status" | "get_effects" | "get_fx" => IpcResponse::ok(Some(serde_json::json!({
-                "overview": self.features.overview.active,
-                "expose": self.features.expose_active,
-                "audio_recording": self.features.audio_recording.active,
-                "recording": self.features.recording.active,
-                "selecting_recording": self.features.recording.selecting_region,
-                "selecting_screenshot": self.features.screenshot.active
-                    && !self.features.screenshot.committed,
-                "magnifier": self.features.magnifier.enabled,
-                "magnifier_zoom": self.features.magnifier.zoom_level,
-                "magnifier_radius": self.features.magnifier.radius,
-                "annotation": self.features.annotation_active,
-                "peek": self.features.peek_active,
-                "compositor_active": backend.has_compositor(),
-                "layout_picker": self.features.system_ui.is_layout_picker(),
-                "tags_overview": self.features.system_ui.is_tags_overview(),
-                "calendar": self.features.system_ui.is_calendar(),
-                "keybindings": self.features.system_ui.is_keybindings(),
-                "monitor_layout": self.features.system_ui.is_monitor_layout(),
-                "launcher": self.features.system_ui.is_launcher(),
-                "session_menu": self.features.system_ui.is_session_menu(),
-                "notifications": self.features.system_ui.is_notification_center(),
-                "control_center": self.features.system_ui.is_control_center(),
-                "clipboard_picker": self.features.system_ui.is_clipboard_picker(),
-                "wifi_picker": self.features.system_ui.is_wifi_picker(),
-                "bluetooth_picker": self.features.system_ui.is_bluetooth_picker(),
-                "wallpaper_picker": self.features.system_ui.is_wallpaper_picker(),
-                "theme_picker": self.features.system_ui.is_theme_picker(),
-                "audio_output_picker": self
-                    .features
-                    .system_ui
-                    .audio_picker_direction()
-                    == Some(crate::jwm::features::system_controls::AudioDirection::Output),
-                "audio_input_picker": self
-                    .features
-                    .system_ui
-                    .audio_picker_direction()
-                    == Some(crate::jwm::features::system_controls::AudioDirection::Input),
-                "media_players": self.features.system_ui.is_media_players_picker(),
-                "window_switcher": self.features.system_ui.is_window_switcher(),
-                "session_lock": self.features.system_ui.is_session_lock(),
-                "monitor_lock": self
-                    .features
-                    .system_ui
-                    .lock_scope()
-                    .is_some_and(|scope| {
-                        matches!(scope, crate::jwm::features::LockScope::Monitor(_))
-                    }),
-                "debug_hud": self.debug_hud_on,
-                "corner_radius": cfg.behavior().corner_radius,
-                "shadow_enabled": cfg.behavior().shadow_enabled,
-                "blur_enabled": cfg.behavior().blur_enabled,
-                "fading": cfg.behavior().fading,
-                "wobbly_windows": cfg.behavior().wobbly_windows,
-                "motion_trail": cfg.behavior().motion_trail,
-            }))),
+            "get_effect_status" | "get_effects" | "get_fx" => {
+                IpcResponse::ok(Some(serde_json::json!({
+                    "overview": self.features.overview.active,
+                    "expose": self.features.expose_active,
+                    "audio_recording": self.features.audio_recording.active,
+                    "recording": self.features.recording.active,
+                    "selecting_recording": self.features.recording.selecting_region,
+                    "selecting_screenshot": self.features.screenshot.active
+                        && !self.features.screenshot.committed,
+                    "magnifier": self.features.magnifier.enabled,
+                    "magnifier_zoom": self.features.magnifier.zoom_level,
+                    "magnifier_radius": self.features.magnifier.radius,
+                    "annotation": self.features.annotation_active,
+                    "peek": self.features.peek_active,
+                    "compositor_active": backend.has_compositor(),
+                    "layout_picker": self.features.system_ui.is_layout_picker(),
+                    "tags_overview": self.features.system_ui.is_tags_overview(),
+                    "calendar": self.features.system_ui.is_calendar(),
+                    "keybindings": self.features.system_ui.is_keybindings(),
+                    "monitor_layout": self.features.system_ui.is_monitor_layout(),
+                    "launcher": self.features.system_ui.is_launcher(),
+                    "session_menu": self.features.system_ui.is_session_menu(),
+                    "notifications": self.features.system_ui.is_notification_center(),
+                    "control_center": self.features.system_ui.is_control_center(),
+                    "clipboard_picker": self.features.system_ui.is_clipboard_picker(),
+                    "wifi_picker": self.features.system_ui.is_wifi_picker(),
+                    "bluetooth_picker": self.features.system_ui.is_bluetooth_picker(),
+                    "wallpaper_picker": self.features.system_ui.is_wallpaper_picker(),
+                    "theme_picker": self.features.system_ui.is_theme_picker(),
+                    "audio_output_picker": self
+                        .features
+                        .system_ui
+                        .audio_picker_direction()
+                        == Some(crate::jwm::features::system_controls::AudioDirection::Output),
+                    "audio_input_picker": self
+                        .features
+                        .system_ui
+                        .audio_picker_direction()
+                        == Some(crate::jwm::features::system_controls::AudioDirection::Input),
+                    "media_players": self.features.system_ui.is_media_players_picker(),
+                    "window_switcher": self.features.system_ui.is_window_switcher(),
+                    "session_lock": self.features.system_ui.is_session_lock(),
+                    "monitor_lock": self
+                        .features
+                        .system_ui
+                        .lock_scope()
+                        .is_some_and(|scope| {
+                            matches!(scope, crate::jwm::features::LockScope::Monitor(_))
+                        }),
+                    "debug_hud": self.debug_hud_on,
+                    "corner_radius": cfg.behavior().corner_radius,
+                    "shadow_enabled": cfg.behavior().shadow_enabled,
+                    "blur_enabled": cfg.behavior().blur_enabled,
+                    "fading": cfg.behavior().fading,
+                    "wobbly_windows": cfg.behavior().wobbly_windows,
+                    "motion_trail": cfg.behavior().motion_trail,
+                })))
+            }
             "get_magnifier" | "get_mag" => IpcResponse::ok(Some(serde_json::json!({
                 "enabled": self.features.magnifier.enabled,
                 "zoom": self.features.magnifier.zoom_level,
@@ -3078,10 +3174,12 @@ impl Jwm {
                         .collect::<Vec<_>>(),
                 })))
             }
-            "get_session_lock" | "get_lock" | "get_sess" => IpcResponse::ok(Some(serde_json::json!({
-                "locked": backend.compositor_session_locked(),
-                "lock_surface_count": backend.compositor_session_lock_surface_count(),
-            }))),
+            "get_session_lock" | "get_lock" | "get_sess" => {
+                IpcResponse::ok(Some(serde_json::json!({
+                    "locked": backend.compositor_session_locked(),
+                    "lock_surface_count": backend.compositor_session_lock_surface_count(),
+                })))
+            }
             "get_color_management_status" | "get_color_management" | "get_cm" => {
                 let surfaces = backend.compositor_color_managed_surfaces();
                 let detail: Vec<serde_json::Value> =
@@ -3180,31 +3278,33 @@ impl Jwm {
                 }
                 None => IpcResponse::err("compositor not active".to_string()),
             },
-            "get_waterlily_status" | "get_waterlily" | "get_wly" => match backend.compositor_waterlily_status() {
-                Some(status) => IpcResponse::ok(Some(serde_json::json!({
-                    "enabled": status.enabled,
-                    "active": status.active,
-                    "worker_connected": status.worker_connected,
-                    "frame_width": status.frame_width,
-                    "frame_height": status.frame_height,
-                    "frame_depth": status.frame_depth,
-                    "frame_sequence": status.frame_sequence,
-                    "requested_case": status.requested_case,
-                    "requested_palette": status.requested_palette,
-                    // When the layer is on screen, mirror the last delivered
-                    // request as `active_*` so a bar can show what is playing
-                    // without treating a stale request after disable as live.
-                    "active_case": status
-                        .active
-                        .then(|| status.requested_case.clone())
-                        .flatten(),
-                    "active_palette": status
-                        .active
-                        .then(|| status.requested_palette.clone())
-                        .flatten(),
-                }))),
-                None => IpcResponse::err("compositor not active".to_string()),
-            },
+            "get_waterlily_status" | "get_waterlily" | "get_wly" => {
+                match backend.compositor_waterlily_status() {
+                    Some(status) => IpcResponse::ok(Some(serde_json::json!({
+                        "enabled": status.enabled,
+                        "active": status.active,
+                        "worker_connected": status.worker_connected,
+                        "frame_width": status.frame_width,
+                        "frame_height": status.frame_height,
+                        "frame_depth": status.frame_depth,
+                        "frame_sequence": status.frame_sequence,
+                        "requested_case": status.requested_case,
+                        "requested_palette": status.requested_palette,
+                        // When the layer is on screen, mirror the last delivered
+                        // request as `active_*` so a bar can show what is playing
+                        // without treating a stale request after disable as live.
+                        "active_case": status
+                            .active
+                            .then(|| status.requested_case.clone())
+                            .flatten(),
+                        "active_palette": status
+                            .active
+                            .then(|| status.requested_palette.clone())
+                            .flatten(),
+                    }))),
+                    None => IpcResponse::err("compositor not active".to_string()),
+                }
+            }
             "get_version" | "get_ver" => IpcResponse::ok(Some(serde_json::json!({
                 "version": env!("CARGO_PKG_VERSION"),
                 "name": "jwm",
@@ -3786,9 +3886,9 @@ impl Jwm {
 
     fn query_runtime_status(&self, backend: &dyn Backend) -> RuntimeStatusV1 {
         let config = self.query_config_status();
-        let windows = self.query_windows(backend).len();
-        let monitors = self.query_monitors(backend).len();
-        let workspaces = self.query_workspaces(backend).len();
+        let windows = self.ipc_window_count();
+        let monitors = self.ipc_monitor_count();
+        let workspaces = monitors * CONFIG.load().tags_length();
         let uptime_ms = u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
         let configured_compositor = CONFIG.load().compositor_enabled();
         let compositor_configured = if matches!(self.runtime_backend.as_str(), "x11rb" | "xcb") {
@@ -3796,6 +3896,7 @@ impl Jwm {
         } else {
             configured_compositor
         };
+        let window_flags = self.window_flag_counts();
 
         RuntimeStatusV1 {
             schema_version: 1,
@@ -3859,26 +3960,16 @@ impl Jwm {
                 bluetooth_picker: self.features.system_ui.is_bluetooth_picker(),
                 wallpaper_picker: self.features.system_ui.is_wallpaper_picker(),
                 theme_picker: self.features.system_ui.is_theme_picker(),
-                audio_output_picker: self
-                    .features
-                    .system_ui
-                    .audio_picker_direction()
+                audio_output_picker: self.features.system_ui.audio_picker_direction()
                     == Some(crate::jwm::features::system_controls::AudioDirection::Output),
-                audio_input_picker: self
-                    .features
-                    .system_ui
-                    .audio_picker_direction()
+                audio_input_picker: self.features.system_ui.audio_picker_direction()
                     == Some(crate::jwm::features::system_controls::AudioDirection::Input),
                 media_players: self.features.system_ui.is_media_players_picker(),
                 window_switcher: self.features.system_ui.is_window_switcher(),
                 session_lock: self.features.system_ui.is_session_lock(),
-                monitor_lock: self
-                    .features
-                    .system_ui
-                    .lock_scope()
-                    .is_some_and(|scope| {
-                        matches!(scope, crate::jwm::features::LockScope::Monitor(_))
-                    }),
+                monitor_lock: self.features.system_ui.lock_scope().is_some_and(|scope| {
+                    matches!(scope, crate::jwm::features::LockScope::Monitor(_))
+                }),
                 debug_hud: self.debug_hud_on,
             },
             compositor_metrics: backend
@@ -3921,16 +4012,15 @@ impl Jwm {
             mfact: Some(self.query_focused_mfact(backend)),
             nmaster: Some(self.query_focused_nmaster(backend)),
             show_bar: Some(self.query_focused_show_bar(backend)),
-            metrics: self
-                .query_runtime_status_metrics(backend),
+            metrics: self.query_runtime_status_metrics(backend),
             version_info: Some(serde_json::json!({
                 "version": env!("CARGO_PKG_VERSION"),
                 "backend": self.runtime_backend,
             })),
-            monitors: Some(self.monitors_status_summary(backend)),
-            workspaces: Some(self.workspaces_status_summary(backend)),
-            windows: Some(self.windows_status_summary(backend)),
-            tree: Some(self.tree_status_summary(backend)),
+            monitors: Some(self.monitors_status_summary()),
+            workspaces: Some(self.workspaces_status_summary()),
+            windows: Some(self.windows_status_summary()),
+            tree: Some(self.tree_status_summary()),
             focused: Some(self.query_selected_window(backend, true)),
             cfact: Some(self.query_focused_cfact(backend)),
             prev_layout: Some(self.query_focused_prev_layout(backend)),
@@ -3941,12 +4031,12 @@ impl Jwm {
             ),
             selected: Some(self.query_selected_window(backend, false)),
             bench: Some(self.bench_status_summary(backend)),
-            floating: Some(self.windows_flag_status_summary(backend, "floating")),
-            minimized: Some(self.windows_flag_status_summary(backend, "minimized")),
-            sticky: Some(self.windows_flag_status_summary(backend, "sticky")),
-            urgent: Some(self.windows_flag_status_summary(backend, "urgent")),
-            fullscreen: Some(self.windows_flag_status_summary(backend, "fullscreen")),
-            pip: Some(self.windows_flag_status_summary(backend, "pip")),
+            floating: Some(self.window_flag_status_summary(window_flags, "floating")),
+            minimized: Some(self.window_flag_status_summary(window_flags, "minimized")),
+            sticky: Some(self.window_flag_status_summary(window_flags, "sticky")),
+            urgent: Some(self.window_flag_status_summary(window_flags, "urgent")),
+            fullscreen: Some(self.window_flag_status_summary(window_flags, "fullscreen")),
+            pip: Some(self.window_flag_status_summary(window_flags, "pip")),
         }
     }
 
@@ -3956,44 +4046,86 @@ impl Jwm {
         client_key: ClientKey,
         is_focused: bool,
     ) -> Option<WindowInfo> {
+        self.window_info_indexed(backend, client_key, is_focused, None)
+    }
+
+    fn window_info_indexed(
+        &self,
+        backend: &dyn Backend,
+        client_key: ClientKey,
+        is_focused: bool,
+        index: Option<&WindowQueryIndex>,
+    ) -> Option<WindowInfo> {
         let client = self.state.clients.get(client_key)?;
-        let scratchpad = self
-            .scratchpads
-            .iter()
-            .find(|(_, key)| **key == client_key)
-            .map(|(name, _)| name.clone());
+        let scratchpad = index.map_or_else(
+            || {
+                self.scratchpads
+                    .iter()
+                    .find(|(_, key)| **key == client_key)
+                    .map(|(name, _)| name.clone())
+            },
+            |index| index.scratchpads.get(&client_key).cloned(),
+        );
         let is_scratchpad = scratchpad.is_some();
-        let (connector, monitor_name, is_on_view, layout, is_tabbed, tab_index) =
-            match client.mon {
-                Some(mk) => {
-                    let mon = self.state.monitors.get(mk);
-                    let is_on_view = mon.is_some_and(|monitor| {
-                        client.state.is_sticky
-                            || (client.state.tags & monitor.get_active_tags()) != 0
-                    });
-                    let layout = mon.map(|monitor| format!("{:?}", *monitor.lt));
-                    let group = self.tab_group_clients(mk);
-                    let tab_index = group.iter().position(|&ck| ck == client_key);
-                    let is_tabbed = tab_index.is_some();
-                    (
-                        self.output_key_for_monitor(backend, mk),
-                        self.output_monitor_name_for_monitor(backend, mk),
-                        is_on_view,
-                        layout,
-                        is_tabbed,
-                        tab_index,
-                    )
-                }
-                None => (None, None, false, None, false, None),
-            };
+        let (connector, monitor_name, is_on_view, layout, is_tabbed, tab_index) = match client.mon {
+            Some(mk) => {
+                let cached_monitor = index.and_then(|index| index.monitors.get(&mk));
+                let mon = self.state.monitors.get(mk);
+                let is_on_view = cached_monitor.map_or_else(
+                    || {
+                        mon.is_some_and(|monitor| {
+                            client.state.is_sticky
+                                || (client.state.tags & monitor.get_active_tags()) != 0
+                        })
+                    },
+                    |monitor| {
+                        client.state.is_sticky || (client.state.tags & monitor.active_tags) != 0
+                    },
+                );
+                let layout = cached_monitor
+                    .map(|monitor| monitor.layout.clone())
+                    .or_else(|| mon.map(|monitor| format!("{:?}", *monitor.lt)));
+                let tab_index = if let Some(index) = index {
+                    index.tabs.get(&(mk, client_key)).copied()
+                } else {
+                    self.tab_group_clients(mk)
+                        .iter()
+                        .position(|&ck| ck == client_key)
+                };
+                let is_tabbed = tab_index.is_some();
+                (
+                    cached_monitor.map_or_else(
+                        || self.output_key_for_monitor(backend, mk),
+                        |monitor| monitor.connector.clone(),
+                    ),
+                    cached_monitor.map_or_else(
+                        || self.output_monitor_name_for_monitor(backend, mk),
+                        |monitor| monitor.monitor_name.clone(),
+                    ),
+                    is_on_view,
+                    layout,
+                    is_tabbed,
+                    tab_index,
+                )
+            }
+            None => (None, None, false, None, false, None),
+        };
         let swallowing = client.swallowing.and_then(|parent_key| {
-            self.state.clients.get(parent_key).map(|parent| parent.win.raw())
+            self.state
+                .clients
+                .get(parent_key)
+                .map(|parent| parent.win.raw())
         });
         let swallowed_by = if client.state.is_swallowed {
-            self.state.client_order.iter().find_map(|&ck| {
-                let other = self.state.clients.get(ck)?;
-                (other.swallowing == Some(client_key)).then_some(other.win.raw())
-            })
+            index.map_or_else(
+                || {
+                    self.state.client_order.iter().find_map(|&ck| {
+                        let other = self.state.clients.get(ck)?;
+                        (other.swallowing == Some(client_key)).then_some(other.win.raw())
+                    })
+                },
+                |index| index.swallowed_by.get(&client_key).copied(),
+            )
         } else {
             None
         };
@@ -4002,15 +4134,21 @@ impl Jwm {
             .transient_for(client.win)
             .map(|win| win.raw());
         let has_strut = self.external_struts.contains_key(&client.win);
-        let maximize_restore_anchor = client.state.maximize_restore_anchor.and_then(|anchor| {
-            self.state.clients.get(anchor).map(|c| c.win.raw())
-        });
+        let maximize_restore_anchor = client
+            .state
+            .maximize_restore_anchor
+            .and_then(|anchor| self.state.clients.get(anchor).map(|c| c.win.raw()));
         let is_status_bar = client.is_status_bar(CONFIG.load().status_bar_name());
         let stack_index = client.mon.and_then(|mk| {
-            self.state
-                .monitor_clients
-                .get(mk)
-                .and_then(|clients| clients.iter().position(|&ck| ck == client_key))
+            index.map_or_else(
+                || {
+                    self.state
+                        .monitor_clients
+                        .get(mk)
+                        .and_then(|clients| clients.iter().position(|&ck| ck == client_key))
+                },
+                |index| index.stack_positions.get(&(mk, client_key)).copied(),
+            )
         });
         Some(client_window_info(
             client,
@@ -4036,16 +4174,67 @@ impl Jwm {
 
     pub(crate) fn query_windows(&self, backend: &dyn Backend) -> Vec<WindowInfo> {
         let sel_client = self.get_selected_client_key();
+        let index = self.window_query_index(backend);
         self.state
             .client_order
             .iter()
-            .filter_map(|&ck| self.window_info(backend, ck, sel_client == Some(ck)))
+            .filter_map(|&ck| {
+                self.window_info_indexed(backend, ck, sel_client == Some(ck), Some(&index))
+            })
             .collect()
+    }
+
+    fn window_query_index(&self, backend: &dyn Backend) -> WindowQueryIndex {
+        let mut scratchpads = std::collections::HashMap::new();
+        for (name, &key) in &self.scratchpads {
+            scratchpads.entry(key).or_insert_with(|| name.clone());
+        }
+        let mut tabs = std::collections::HashMap::new();
+        let mut monitors = std::collections::HashMap::new();
+        for (monitor, state) in &self.state.monitors {
+            monitors.insert(
+                monitor,
+                WindowMonitorProjection {
+                    connector: self.output_key_for_monitor(backend, monitor),
+                    monitor_name: self.output_monitor_name_for_monitor(backend, monitor),
+                    active_tags: state.get_active_tags(),
+                    layout: format!("{:?}", *state.lt),
+                },
+            );
+            for (position, client) in self.tab_group_clients(monitor).into_iter().enumerate() {
+                tabs.entry((monitor, client)).or_insert(position);
+            }
+        }
+        let mut stack_positions = std::collections::HashMap::new();
+        for (monitor, clients) in &self.state.monitor_clients {
+            for (position, &client) in clients.iter().enumerate() {
+                stack_positions.entry((monitor, client)).or_insert(position);
+            }
+        }
+        let mut swallowed_by = std::collections::HashMap::new();
+        for &key in &self.state.client_order {
+            if let Some(client) = self.state.clients.get(key)
+                && let Some(parent) = client.swallowing
+            {
+                swallowed_by.entry(parent).or_insert(client.win.raw());
+            }
+        }
+        WindowQueryIndex {
+            scratchpads,
+            tabs,
+            monitors,
+            stack_positions,
+            swallowed_by,
+        }
     }
 
     pub(crate) fn query_workspaces(&self, backend: &dyn Backend) -> Vec<WorkspaceInfo> {
         let cfg = CONFIG.load();
-        let scratchpads: Vec<ClientKey> = self.scratchpads.values().copied().collect();
+        let scratchpads: std::collections::HashSet<ClientKey> =
+            self.scratchpads.values().copied().collect();
+        let strut_wins: std::collections::HashSet<_> =
+            self.external_struts.keys().copied().collect();
+        let status_bar_name = cfg.status_bar_name();
         let mut result = Vec::new();
         for &mk in &self.state.monitor_order {
             let mon = match self.state.monitors.get(mk) {
@@ -4055,7 +4244,18 @@ impl Jwm {
             let connector = self.output_key_for_monitor(backend, mk);
             let monitor_name = self.output_monitor_name_for_monitor(backend, mk);
             let active_tags = mon.get_active_tags();
-            let tabbed = self.tab_group_clients(mk);
+            let tabbed: std::collections::HashSet<_> =
+                self.tab_group_clients(mk).into_iter().collect();
+            let per_tag_counts = monitor_tag_client_counts(
+                &self.state,
+                mk,
+                cfg.tags_length(),
+                &scratchpads,
+                &tabbed,
+                &strut_wins,
+                status_bar_name,
+                active_tags,
+            );
             let (occupied_tags_mask, urgent_tags_mask) = {
                 const EMPTY_CLIENTS: &[ClientKey] = &[];
                 let monitor_clients = self
@@ -4068,25 +4268,12 @@ impl Jwm {
                     monitor_clients,
                 )
             };
-            for i in 0..cfg.tags_length() {
+            for (i, counts) in per_tag_counts.into_iter().enumerate() {
                 let tag_bit = 1u32 << i;
                 let is_active = (active_tags & tag_bit) != 0;
                 let (layout, m_fact, n_master, gap) = workspace_layout_state(mon, i);
                 let (show_bar, prev_layout, selected_id) =
                     workspace_tag_extras(mon, i, &self.state.clients);
-                let strut_wins: std::collections::HashSet<_> =
-                    self.external_struts.keys().copied().collect();
-                let status_bar_name = cfg.status_bar_name();
-                let counts = tag_client_counts(
-                    &self.state,
-                    mk,
-                    tag_bit,
-                    &scratchpads,
-                    &tabbed,
-                    &strut_wins,
-                    status_bar_name,
-                    active_tags,
-                );
                 result.push(WorkspaceInfo {
                     tag_mask: tag_bit,
                     tag_index: i,
@@ -4095,11 +4282,11 @@ impl Jwm {
                     m_fact,
                     n_master,
                     gap,
-                    num_clients: tagged_client_count(&self.state, mk, tag_bit),
+                    num_clients: counts.total,
                     focused: is_active && self.state.sel_mon == Some(mk),
                     is_urgent: (urgent_tags_mask & tag_bit) != 0,
                     is_occupied: (occupied_tags_mask & tag_bit) != 0,
-                    has_fullscreen: tag_has_fullscreen(&self.state, mk, tag_bit),
+                    has_fullscreen: counts.fullscreen != 0,
                     connector: connector.clone(),
                     monitor_name: monitor_name.clone(),
                     show_bar,
@@ -4187,6 +4374,22 @@ impl Jwm {
             .as_ref()
             .map(|p| (p.cur_tag, p.prev_tag))
             .unwrap_or((0, 0));
+        let scratchpads: std::collections::HashSet<_> =
+            self.scratchpads.values().copied().collect();
+        let tabbed: std::collections::HashSet<_> = self.tab_group_clients(mk).into_iter().collect();
+        let strut_wins: std::collections::HashSet<_> =
+            self.external_struts.keys().copied().collect();
+        let cfg = CONFIG.load();
+        let counts = tag_client_counts(
+            &self.state,
+            mk,
+            u32::MAX,
+            &scratchpads,
+            &tabbed,
+            &strut_wins,
+            cfg.status_bar_name(),
+            m.get_active_tags(),
+        );
         MonitorInfoIpc {
             num: m.num,
             x: m.geometry.m_x,
@@ -4240,398 +4443,32 @@ impl Jwm {
             output_connector: self.output_connector_for_monitor(backend, mk),
             lt_symbol: m.lt_symbol.clone(),
             output_id: self.output_id_for_monitor(backend, mk),
-            window_count: self
-                .state
-                .monitor_clients
-                .get(mk)
-                .map(|clients| clients.len())
-                .unwrap_or(0),
-            floating_count: self
-                .state
-                .monitor_clients
-                .get(mk)
-                .map(|clients| {
-                    clients
-                        .iter()
-                        .filter(|&&ck| {
-                            self.state
-                                .clients
-                                .get(ck)
-                                .is_some_and(|c| c.state.is_floating)
-                        })
-                        .count()
-                })
-                .unwrap_or(0),
-            minimized_count: self
-                .state
-                .monitor_clients
-                .get(mk)
-                .map(|clients| {
-                    clients
-                        .iter()
-                        .filter(|&&ck| {
-                            self.state
-                                .clients
-                                .get(ck)
-                                .is_some_and(|c| c.state.is_hidden)
-                        })
-                        .count()
-                })
-                .unwrap_or(0),
-            sticky_count: self
-                .state
-                .monitor_clients
-                .get(mk)
-                .map(|clients| {
-                    clients
-                        .iter()
-                        .filter(|&&ck| {
-                            self.state
-                                .clients
-                                .get(ck)
-                                .is_some_and(|c| c.state.is_sticky)
-                        })
-                        .count()
-                })
-                .unwrap_or(0),
-            urgent_count: self
-                .state
-                .monitor_clients
-                .get(mk)
-                .map(|clients| {
-                    clients
-                        .iter()
-                        .filter(|&&ck| {
-                            self.state.clients.get(ck).is_some_and(|c| {
-                                c.state.is_urgent || c.state.demands_attention
-                            })
-                        })
-                        .count()
-                })
-                .unwrap_or(0),
-            fullscreen_count: self
-                .state
-                .monitor_clients
-                .get(mk)
-                .map(|clients| {
-                    clients
-                        .iter()
-                        .filter(|&&ck| {
-                            self.state
-                                .clients
-                                .get(ck)
-                                .is_some_and(|c| c.state.is_fullscreen)
-                        })
-                        .count()
-                })
-                .unwrap_or(0),
-            pip_count: self
-                .state
-                .monitor_clients
-                .get(mk)
-                .map(|clients| {
-                    clients
-                        .iter()
-                        .filter(|&&ck| {
-                            self.state
-                                .clients
-                                .get(ck)
-                                .is_some_and(|c| c.state.is_pip)
-                        })
-                        .count()
-                })
-                .unwrap_or(0),
-            maximized_count: self
-                .state
-                .monitor_clients
-                .get(mk)
-                .map(|clients| {
-                    clients
-                        .iter()
-                        .filter(|&&ck| {
-                            self.state.clients.get(ck).is_some_and(|c| {
-                                c.state.is_maximized_vert || c.state.is_maximized_horz
-                            })
-                        })
-                        .count()
-                })
-                .unwrap_or(0),
-            above_count: self
-                .state
-                .monitor_clients
-                .get(mk)
-                .map(|clients| {
-                    clients
-                        .iter()
-                        .filter(|&&ck| {
-                            self.state
-                                .clients
-                                .get(ck)
-                                .is_some_and(|c| c.state.is_above)
-                        })
-                        .count()
-                })
-                .unwrap_or(0),
-            below_count: self
-                .state
-                .monitor_clients
-                .get(mk)
-                .map(|clients| {
-                    clients
-                        .iter()
-                        .filter(|&&ck| {
-                            self.state
-                                .clients
-                                .get(ck)
-                                .is_some_and(|c| c.state.is_below)
-                        })
-                        .count()
-                })
-                .unwrap_or(0),
-            fixed_count: self
-                .state
-                .monitor_clients
-                .get(mk)
-                .map(|clients| {
-                    clients
-                        .iter()
-                        .filter(|&&ck| {
-                            self.state
-                                .clients
-                                .get(ck)
-                                .is_some_and(|c| c.state.is_fixed)
-                        })
-                        .count()
-                })
-                .unwrap_or(0),
-            scratchpad_count: {
-                let scratchpads: Vec<ClientKey> = self.scratchpads.values().copied().collect();
-                self.state
-                    .monitor_clients
-                    .get(mk)
-                    .map(|clients| {
-                        clients
-                            .iter()
-                            .filter(|&&ck| scratchpads.contains(&ck))
-                            .count()
-                    })
-                    .unwrap_or(0)
-            },
-            tabbed_count: {
-                let tabbed = self.tab_group_clients(mk);
-                tabbed.len()
-            },
-            dock_count: self
-                .state
-                .monitor_clients
-                .get(mk)
-                .map(|clients| {
-                    clients
-                        .iter()
-                        .filter(|&&ck| {
-                            self.state
-                                .clients
-                                .get(ck)
-                                .is_some_and(|c| c.state.is_dock)
-                        })
-                        .count()
-                })
-                .unwrap_or(0),
-            desktop_count: self
-                .state
-                .monitor_clients
-                .get(mk)
-                .map(|clients| {
-                    clients
-                        .iter()
-                        .filter(|&&ck| {
-                            self.state
-                                .clients
-                                .get(ck)
-                                .is_some_and(|c| c.state.is_desktop)
-                        })
-                        .count()
-                })
-                .unwrap_or(0),
-            never_focus_count: self
-                .state
-                .monitor_clients
-                .get(mk)
-                .map(|clients| {
-                    clients
-                        .iter()
-                        .filter(|&&ck| {
-                            self.state
-                                .clients
-                                .get(ck)
-                                .is_some_and(|c| c.state.never_focus)
-                        })
-                        .count()
-                })
-                .unwrap_or(0),
-            demands_attention_count: self
-                .state
-                .monitor_clients
-                .get(mk)
-                .map(|clients| {
-                    clients
-                        .iter()
-                        .filter(|&&ck| {
-                            self.state
-                                .clients
-                                .get(ck)
-                                .is_some_and(|c| c.state.demands_attention)
-                        })
-                        .count()
-                })
-                .unwrap_or(0),
-            skip_taskbar_count: self
-                .state
-                .monitor_clients
-                .get(mk)
-                .map(|clients| {
-                    clients
-                        .iter()
-                        .filter(|&&ck| {
-                            self.state
-                                .clients
-                                .get(ck)
-                                .is_some_and(|c| c.state.skip_taskbar)
-                        })
-                        .count()
-                })
-                .unwrap_or(0),
-            skip_pager_count: self
-                .state
-                .monitor_clients
-                .get(mk)
-                .map(|clients| {
-                    clients
-                        .iter()
-                        .filter(|&&ck| {
-                            self.state
-                                .clients
-                                .get(ck)
-                                .is_some_and(|c| c.state.skip_pager)
-                        })
-                        .count()
-                })
-                .unwrap_or(0),
-            no_decorations_count: self
-                .state
-                .monitor_clients
-                .get(mk)
-                .map(|clients| {
-                    clients
-                        .iter()
-                        .filter(|&&ck| {
-                            self.state
-                                .clients
-                                .get(ck)
-                                .is_some_and(|c| c.state.no_decorations)
-                        })
-                        .count()
-                })
-                .unwrap_or(0),
-            drag_float_count: self
-                .state
-                .monitor_clients
-                .get(mk)
-                .map(|clients| {
-                    clients
-                        .iter()
-                        .filter(|&&ck| {
-                            self.state
-                                .clients
-                                .get(ck)
-                                .is_some_and(|c| c.state.is_drag_floating)
-                        })
-                        .count()
-                })
-                .unwrap_or(0),
-            swallowed_count: self
-                .state
-                .monitor_clients
-                .get(mk)
-                .map(|clients| {
-                    clients
-                        .iter()
-                        .filter(|&&ck| {
-                            self.state
-                                .clients
-                                .get(ck)
-                                .is_some_and(|c| c.state.is_swallowed)
-                        })
-                        .count()
-                })
-                .unwrap_or(0),
-            on_view_count: {
-                let active = m.get_active_tags();
-                self.state
-                    .monitor_clients
-                    .get(mk)
-                    .map(|clients| {
-                        clients
-                            .iter()
-                            .filter(|&&ck| {
-                                self.state.clients.get(ck).is_some_and(|c| {
-                                    c.state.is_sticky || (c.state.tags & active) != 0
-                                })
-                            })
-                            .count()
-                    })
-                    .unwrap_or(0)
-            },
-            maximize_promoted_count: self
-                .state
-                .monitor_clients
-                .get(mk)
-                .map(|clients| {
-                    clients
-                        .iter()
-                        .filter(|&&ck| {
-                            self.state
-                                .clients
-                                .get(ck)
-                                .is_some_and(|c| c.state.maximize_restore_tiled)
-                        })
-                        .count()
-                })
-                .unwrap_or(0),
-            strut_count: self
-                .state
-                .monitor_clients
-                .get(mk)
-                .map(|clients| {
-                    clients
-                        .iter()
-                        .filter(|&&ck| {
-                            self.state
-                                .clients
-                                .get(ck)
-                                .is_some_and(|c| self.external_struts.contains_key(&c.win))
-                        })
-                        .count()
-                })
-                .unwrap_or(0),
-            status_bar_count: {
-                let bar = CONFIG.load().status_bar_name().to_string();
-                self.state
-                    .monitor_clients
-                    .get(mk)
-                    .map(|clients| {
-                        clients
-                            .iter()
-                            .filter(|&&ck| {
-                                self.state
-                                    .clients
-                                    .get(ck)
-                                    .is_some_and(|c| c.is_status_bar(&bar))
-                            })
-                            .count()
-                    })
-                    .unwrap_or(0)
-            },
+            window_count: counts.total,
+            floating_count: counts.floating,
+            minimized_count: counts.minimized,
+            sticky_count: counts.sticky,
+            urgent_count: counts.urgent,
+            fullscreen_count: counts.fullscreen,
+            pip_count: counts.pip,
+            maximized_count: counts.maximized,
+            above_count: counts.above,
+            below_count: counts.below,
+            fixed_count: counts.fixed,
+            scratchpad_count: counts.scratchpad,
+            tabbed_count: counts.tabbed,
+            dock_count: counts.dock,
+            desktop_count: counts.desktop,
+            never_focus_count: counts.never_focus,
+            demands_attention_count: counts.demands_attention,
+            skip_taskbar_count: counts.skip_taskbar,
+            skip_pager_count: counts.skip_pager,
+            no_decorations_count: counts.no_decorations,
+            drag_float_count: counts.drag_float,
+            swallowed_count: counts.swallowed,
+            on_view_count: counts.on_view,
+            maximize_promoted_count: counts.maximize_promoted,
+            strut_count: counts.strut,
+            status_bar_count: counts.status_bar,
         }
     }
 
@@ -4873,17 +4710,11 @@ impl Jwm {
         };
         if full {
             if let Some(info) = self.window_info(backend, ck, true) {
-                return serde_json::to_value(info).unwrap_or_else(|_| {
-                    serde_json::json!({ "id": serde_json::Value::Null })
-                });
+                return serde_json::to_value(info)
+                    .unwrap_or_else(|_| serde_json::json!({ "id": serde_json::Value::Null }));
             }
         }
-        let id = self
-            .state
-            .clients
-            .get(ck)
-            .map(|c| c.win.raw())
-            .unwrap_or(0);
+        let id = self.state.clients.get(ck).map(|c| c.win.raw()).unwrap_or(0);
         serde_json::json!({ "id": id })
     }
 
@@ -5078,9 +4909,8 @@ impl Jwm {
 
     fn xwayland_status_summary(&self, backend: &dyn Backend) -> serde_json::Value {
         match backend.compositor_xwayland_status() {
-            Some(status) => serde_json::to_value(status).unwrap_or_else(|_| {
-                serde_json::json!({ "available": true })
-            }),
+            Some(status) => serde_json::to_value(status)
+                .unwrap_or_else(|_| serde_json::json!({ "available": true })),
             None => serde_json::json!({ "available": false }),
         }
     }
@@ -5156,7 +4986,6 @@ impl Jwm {
         })
     }
 
-
     fn tabs_status_summary(&self, backend: &dyn Backend) -> serde_json::Value {
         let full = self.query_focused_tab_bar(backend);
         serde_json::json!({
@@ -5188,36 +5017,81 @@ impl Jwm {
         serde_json::json!({ "count": count })
     }
 
-    fn monitors_status_summary(&self, backend: &dyn Backend) -> serde_json::Value {
-        let full = self.query_monitors(backend);
+    fn monitors_status_summary(&self) -> serde_json::Value {
+        let focused = self
+            .state
+            .sel_mon
+            .filter(|key| self.state.monitor_order.contains(key))
+            .and_then(|key| self.state.monitors.get(key).map(|monitor| monitor.num));
         serde_json::json!({
-            "count": full.len(),
-            "focused": full.iter().find(|m| m.focused).map(|m| m.num),
+            "count": self.ipc_monitor_count(),
+            "focused": focused,
         })
     }
 
-    fn workspaces_status_summary(&self, backend: &dyn Backend) -> serde_json::Value {
-        let full = self.query_workspaces(backend);
+    fn workspaces_status_summary(&self) -> serde_json::Value {
+        let tag_count = CONFIG.load().tags_length();
+        let monitor_count = self.ipc_monitor_count();
+        let focused_count = self
+            .state
+            .sel_mon
+            .and_then(|key| self.state.monitors.get(key))
+            .map_or(0, |monitor| {
+                active_tag_count(monitor.get_active_tags(), tag_count) as usize
+                    * self
+                        .state
+                        .monitor_order
+                        .iter()
+                        .filter(|&&key| Some(key) == self.state.sel_mon)
+                        .count()
+            });
         serde_json::json!({
-            "count": full.len(),
-            "focused_count": full.iter().filter(|w| w.focused).count(),
+            "count": monitor_count * tag_count,
+            "focused_count": focused_count,
         })
     }
 
-    fn windows_status_summary(&self, backend: &dyn Backend) -> serde_json::Value {
-        let full = self.query_windows(backend);
+    fn windows_status_summary(&self) -> serde_json::Value {
+        let selected = self
+            .get_selected_client_key()
+            .filter(|key| self.state.client_order.contains(key));
         serde_json::json!({
-            "count": full.len(),
-            "focused_id": full.iter().find(|w| w.is_focused).map(|w| w.id),
+            "count": self.ipc_window_count(),
+            "focused_id": selected.and_then(|key| self.state.clients.get(key)).map(|client| client.win.raw()),
         })
     }
 
-    fn tree_status_summary(&self, backend: &dyn Backend) -> serde_json::Value {
-        let full = self.query_tree(backend);
+    fn tree_status_summary(&self) -> serde_json::Value {
+        let monitor_count = self.ipc_monitor_count();
+        let window_count = self
+            .state
+            .monitor_order
+            .iter()
+            .filter(|key| self.state.monitors.contains_key(**key))
+            .filter_map(|key| self.state.monitor_clients.get(*key))
+            .flatten()
+            .filter(|key| self.state.clients.contains_key(**key))
+            .count();
         serde_json::json!({
-            "monitor_count": full.len(),
-            "window_count": full.iter().map(|n| n.window_count).sum::<usize>(),
+            "monitor_count": monitor_count,
+            "window_count": window_count,
         })
+    }
+
+    fn ipc_monitor_count(&self) -> usize {
+        self.state
+            .monitor_order
+            .iter()
+            .filter(|key| self.state.monitors.contains_key(**key))
+            .count()
+    }
+
+    fn ipc_window_count(&self) -> usize {
+        self.state
+            .client_order
+            .iter()
+            .filter(|key| self.state.clients.contains_key(**key))
+            .count()
     }
 
     fn effects_status_summary(&self) -> serde_json::Value {
@@ -5253,32 +5127,63 @@ impl Jwm {
         }
     }
 
-    fn windows_flag_status_summary(
-        &self,
-        backend: &dyn Backend,
-        flag: &str,
-    ) -> serde_json::Value {
-        let full = self.query_windows(backend);
-        let pred = |w: &crate::ipc::WindowInfo| -> bool {
-            match flag {
-                "floating" => w.is_floating,
-                "minimized" => w.is_minimized,
-                "sticky" => w.is_sticky,
-                "urgent" => w.is_urgent || w.demands_attention,
-                "fullscreen" => w.is_fullscreen,
-                "pip" => w.is_pip,
-                _ => false,
-            }
-        };
-        serde_json::json!({
-            "count": full.iter().filter(|w| pred(w)).count(),
-            "focused_id": full
-                .iter()
-                .find(|w| w.is_focused && pred(w))
-                .map(|w| w.id),
-        })
+    #[cfg(test)]
+    fn windows_flag_status_summary(&self, flag: &str) -> serde_json::Value {
+        self.window_flag_status_summary(self.window_flag_counts(), flag)
     }
 
+    fn window_flag_counts(&self) -> WindowFlagCounts {
+        let focused = self
+            .get_selected_client_key()
+            .filter(|key| self.state.client_order.contains(key));
+        let mut counts = WindowFlagCounts {
+            focused,
+            ..WindowFlagCounts::default()
+        };
+        for client in self
+            .state
+            .client_order
+            .iter()
+            .filter_map(|key| self.state.clients.get(*key))
+        {
+            counts.floating += usize::from(client.state.is_floating);
+            counts.minimized += usize::from(client.state.is_hidden);
+            counts.sticky += usize::from(client.state.is_sticky);
+            counts.urgent += usize::from(client.state.is_urgent || client.state.demands_attention);
+            counts.fullscreen += usize::from(client.state.is_fullscreen);
+            counts.pip += usize::from(client.state.is_pip);
+        }
+        counts
+    }
+
+    fn window_flag_status_summary(
+        &self,
+        counts: WindowFlagCounts,
+        flag: &str,
+    ) -> serde_json::Value {
+        let matches = |client: &WMClient| match flag {
+            "floating" => client.state.is_floating,
+            "minimized" => client.state.is_hidden,
+            "sticky" => client.state.is_sticky,
+            "urgent" => client.state.is_urgent || client.state.demands_attention,
+            "fullscreen" => client.state.is_fullscreen,
+            "pip" => client.state.is_pip,
+            _ => false,
+        };
+        let count = match flag {
+            "floating" => counts.floating,
+            "minimized" => counts.minimized,
+            "sticky" => counts.sticky,
+            "urgent" => counts.urgent,
+            "fullscreen" => counts.fullscreen,
+            "pip" => counts.pip,
+            _ => 0,
+        };
+        serde_json::json!({
+            "count": count,
+            "focused_id": counts.focused.and_then(|key| self.state.clients.get(key)).filter(|client| matches(client)).map(|client| client.win.raw()),
+        })
+    }
 
     fn query_runtime_status_metrics(&self, backend: &dyn Backend) -> Option<serde_json::Value> {
         backend
@@ -5360,18 +5265,14 @@ impl Jwm {
             .and_then(|value| value.as_u64())
             .or_else(|| args.as_u64());
         let Some(id) = id else {
-            return IpcResponse::err(
-                "get_window requires an \"id\" argument (window id as u64)",
-            );
+            return IpcResponse::err("get_window requires an \"id\" argument (window id as u64)");
         };
         match self
             .query_windows(backend)
             .into_iter()
             .find(|window| window.id == id)
         {
-            Some(window) => {
-                IpcResponse::ok(Some(serde_json::to_value(window).unwrap_or_default()))
-            }
+            Some(window) => IpcResponse::ok(Some(serde_json::to_value(window).unwrap_or_default())),
             None => IpcResponse::err(format!("window {id:#x} not found")),
         }
     }
@@ -6068,11 +5969,13 @@ impl Jwm {
         // one window per monitor, and a script looking for "the focused
         // window" in the tree would pick the wrong one.
         let sel_client = self.get_selected_client_key();
+        let index = self.window_query_index(backend);
         self.state
             .monitor_order
             .iter()
             .filter_map(|&mk| {
                 let m = self.state.monitors.get(mk)?;
+                let mut counts = TagClientCounts::default();
                 let windows: Vec<WindowInfo> = self
                     .state
                     .monitor_clients
@@ -6081,48 +5984,49 @@ impl Jwm {
                         clients
                             .iter()
                             .filter_map(|&ck| {
-                                self.window_info(backend, ck, sel_client == Some(ck))
+                                let window = self.window_info_indexed(
+                                    backend,
+                                    ck,
+                                    sel_client == Some(ck),
+                                    Some(&index),
+                                )?;
+                                accumulate_window_counts(&mut counts, &window);
+                                Some(window)
                             })
                             .collect()
                     })
                     .unwrap_or_default();
                 Some(TreeNode {
                     monitor: self.monitor_info_ipc(backend, mk, m),
-                    window_count: windows.len(),
-                    urgent_count: windows.iter().filter(|w| w.is_urgent).count(),
-                    floating_count: windows.iter().filter(|w| w.is_floating).count(),
-                    minimized_count: windows.iter().filter(|w| w.is_minimized).count(),
-                    sticky_count: windows.iter().filter(|w| w.is_sticky).count(),
-                    fullscreen_count: windows.iter().filter(|w| w.is_fullscreen).count(),
-                    pip_count: windows.iter().filter(|w| w.is_pip).count(),
-                    maximized_count: windows.iter().filter(|w| w.is_maximized).count(),
-                    above_count: windows.iter().filter(|w| w.is_above).count(),
-                    below_count: windows.iter().filter(|w| w.is_below).count(),
-                    scratchpad_count: windows.iter().filter(|w| w.is_scratchpad).count(),
-                    tabbed_count: windows.iter().filter(|w| w.is_tabbed).count(),
-                    fixed_count: windows.iter().filter(|w| w.is_fixed).count(),
-                    dock_count: windows.iter().filter(|w| w.is_dock).count(),
-                    desktop_count: windows.iter().filter(|w| w.is_desktop).count(),
-                    never_focus_count: windows.iter().filter(|w| w.never_focus).count(),
-                    demands_attention_count: windows
-                        .iter()
-                        .filter(|w| w.demands_attention)
-                        .count(),
-                    skip_taskbar_count: windows.iter().filter(|w| w.skip_taskbar).count(),
-                    skip_pager_count: windows.iter().filter(|w| w.skip_pager).count(),
-                    no_decorations_count: windows.iter().filter(|w| w.no_decorations).count(),
-                    drag_float_count: windows.iter().filter(|w| w.is_drag_floating).count(),
-                    swallowed_count: windows.iter().filter(|w| w.is_swallowed).count(),
-                    on_view_count: windows.iter().filter(|w| w.is_on_view).count(),
-                    maximize_promoted_count: windows
-                        .iter()
-                        .filter(|w| w.maximize_promoted)
-                        .count(),
-                    strut_count: windows.iter().filter(|w| w.has_strut).count(),
-                    status_bar_count: windows.iter().filter(|w| w.is_status_bar).count(),
-                    selected_id: m.sel.and_then(|ck| {
-                        self.state.clients.get(ck).map(|client| client.win.raw())
-                    }),
+                    window_count: counts.total,
+                    urgent_count: counts.urgent,
+                    floating_count: counts.floating,
+                    minimized_count: counts.minimized,
+                    sticky_count: counts.sticky,
+                    fullscreen_count: counts.fullscreen,
+                    pip_count: counts.pip,
+                    maximized_count: counts.maximized,
+                    above_count: counts.above,
+                    below_count: counts.below,
+                    scratchpad_count: counts.scratchpad,
+                    tabbed_count: counts.tabbed,
+                    fixed_count: counts.fixed,
+                    dock_count: counts.dock,
+                    desktop_count: counts.desktop,
+                    never_focus_count: counts.never_focus,
+                    demands_attention_count: counts.demands_attention,
+                    skip_taskbar_count: counts.skip_taskbar,
+                    skip_pager_count: counts.skip_pager,
+                    no_decorations_count: counts.no_decorations,
+                    drag_float_count: counts.drag_float,
+                    swallowed_count: counts.swallowed,
+                    on_view_count: counts.on_view,
+                    maximize_promoted_count: counts.maximize_promoted,
+                    strut_count: counts.strut,
+                    status_bar_count: counts.status_bar,
+                    selected_id: m
+                        .sel
+                        .and_then(|ck| self.state.clients.get(ck).map(|client| client.win.raw())),
                     windows,
                 })
             })
@@ -6185,10 +6089,7 @@ impl Jwm {
     /// Like [`Self::broadcast_visible_window_states_on_monitor`] for every
     /// monitor — used after a global `arrange(None)` from strut / topology
     /// changes that rewrite work areas on all outputs.
-    pub(crate) fn broadcast_visible_window_states_all_monitors(
-        &mut self,
-        backend: &dyn Backend,
-    ) {
+    pub(crate) fn broadcast_visible_window_states_all_monitors(&mut self, backend: &dyn Backend) {
         let monitors: Vec<_> = self.state.monitor_order.clone();
         for mon in monitors {
             self.broadcast_visible_window_states_on_monitor(backend, mon);
@@ -6200,14 +6101,14 @@ impl Jwm {
 mod tests {
     use super::{
         MAX_COMMAND_BATCH_ENTRIES, MAX_CONFIG_BATCH_CHANGES, MAX_REPORTED_UNKNOWN_TOPICS,
-        cached_power_profiles_answer, client_window_info, color_managed_surface_json,
-        color_session_policy_json, color_surface_summary_json, ffprobe_verdict,
-        fullscreen_screenshot_submission_response, optional_protocol_enabled_from_flags,
-        output_color_policy_json, parse_benchmark_request, parse_command_batch_entries,
-        parse_config_batch_changes, parse_optional_u32_ipc_arg, parse_required_i32_ipc_arg,
-        presented_with_hdr, recording_output_is_valid, render_decisions_json,
-        resolved_client_monitor_num, runtime_health, tagged_client_count,
-        unknown_subscription_topics, workspace_layout_state,
+        active_tag_count, cached_power_profiles_answer, client_window_info,
+        color_managed_surface_json, color_session_policy_json, color_surface_summary_json,
+        ffprobe_verdict, fullscreen_screenshot_submission_response, monitor_tag_client_counts,
+        optional_protocol_enabled_from_flags, output_color_policy_json, parse_benchmark_request,
+        parse_command_batch_entries, parse_config_batch_changes, parse_optional_u32_ipc_arg,
+        parse_required_i32_ipc_arg, presented_with_hdr, recording_output_is_valid,
+        render_decisions_json, resolved_client_monitor_num, runtime_health, tag_client_counts,
+        tagged_client_count, unknown_subscription_topics, workspace_layout_state,
     };
 
     /// A backend with no HDR signalling gate of its own reports no per-output
@@ -6352,6 +6253,102 @@ mod tests {
     }
 
     #[test]
+    fn client_counts_preserve_overlapping_flags_in_one_pass() {
+        let mut state = WMState::new();
+        let monitor_key = state.monitors.insert(WMMonitor::new());
+
+        let mut first = WMClient::new(WindowId::from_raw(1));
+        first.state.tags = 0b0001;
+        first.state.is_hidden = true;
+        first.state.is_floating = true;
+        first.state.is_urgent = true;
+        first.state.is_fullscreen = true;
+        first.state.is_maximized_vert = true;
+        first.state.is_sticky = true;
+        first.state.demands_attention = true;
+        first.state.maximize_restore_tiled = true;
+        let first_key = state.clients.insert(first);
+
+        let mut second = WMClient::new(WindowId::from_raw(2));
+        second.state.tags = 0b0010;
+        second.state.is_pip = true;
+        second.state.is_below = true;
+        second.state.skip_taskbar = true;
+        let second_key = state.clients.insert(second);
+        state
+            .monitor_clients
+            .insert(monitor_key, vec![first_key, second_key]);
+
+        let scratchpads = std::collections::HashSet::from([first_key]);
+        let tabbed = std::collections::HashSet::from([second_key]);
+        let struts = std::collections::HashSet::from([WindowId::from_raw(2)]);
+        let counts = tag_client_counts(
+            &state,
+            monitor_key,
+            u32::MAX,
+            &scratchpads,
+            &tabbed,
+            &struts,
+            "never-a-status-bar",
+            0b0010,
+        );
+
+        assert_eq!(counts.total, 2);
+        assert_eq!(counts.minimized, 1);
+        assert_eq!(counts.floating, 1);
+        assert_eq!(counts.urgent, 1);
+        assert_eq!(counts.fullscreen, 1);
+        assert_eq!(counts.maximized, 1);
+        assert_eq!(counts.scratchpad, 1);
+        assert_eq!(counts.tabbed, 1);
+        assert_eq!(counts.pip, 1);
+        assert_eq!(counts.below, 1);
+        assert_eq!(counts.strut, 1);
+        assert_eq!(counts.on_view, 2);
+        assert_eq!(counts.maximize_promoted, 1);
+        assert_eq!(counts.skip_taskbar, 1);
+
+        let first_tag = tag_client_counts(
+            &state,
+            monitor_key,
+            0b0001,
+            &scratchpads,
+            &tabbed,
+            &struts,
+            "never-a-status-bar",
+            0b0010,
+        );
+        assert_eq!(first_tag.total, 1);
+        assert_eq!(first_tag.scratchpad, 1);
+        assert_eq!(first_tag.tabbed, 0);
+        assert_eq!(first_tag.on_view, 1);
+
+        let batched = monitor_tag_client_counts(
+            &state,
+            monitor_key,
+            2,
+            &scratchpads,
+            &tabbed,
+            &struts,
+            "never-a-status-bar",
+            0b0010,
+        );
+        for (index, actual) in batched.iter().enumerate() {
+            let expected = tag_client_counts(
+                &state,
+                monitor_key,
+                1 << index,
+                &scratchpads,
+                &tabbed,
+                &struts,
+                "never-a-status-bar",
+                0b0010,
+            );
+            assert_eq!(*actual, expected, "tag {index}");
+        }
+    }
+
+    #[test]
     fn window_query_projection_distinguishes_minimized_from_focus() {
         let mut client = WMClient::new(WindowId::from_raw(0x2a));
         client.state.is_hidden = true;
@@ -6361,24 +6358,8 @@ mod tests {
         client.geometry.h = 480;
 
         let info = client_window_info(
-            &client,
-            7,
-            false,
-            false,
-            false,
-            false,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            false,
-            None,
-            None,
-            false,
-            None,
+            &client, 7, false, false, false, false, None, None, None, None, None, None, None,
+            false, None, None, false, None,
         );
         assert_eq!(info.id, 0x2a);
         assert_eq!(info.monitor, 7);
@@ -6747,7 +6728,12 @@ mod tests {
 
         let struts = jwm.query_struts(&backend);
         assert!(struts.as_array().is_some_and(|rows| !rows.is_empty()));
-        assert!(struts[0].get("windows").and_then(|v| v.as_array()).is_some());
+        assert!(
+            struts[0]
+                .get("windows")
+                .and_then(|v| v.as_array())
+                .is_some()
+        );
         assert!(struts[0].get("top").is_some());
 
         let monitors = jwm.query_monitors(&backend);
@@ -8065,11 +8051,11 @@ mod tests {
             .expect("query dispatcher")
             .1;
         let refresh = format!("{}(", "ensure_control_snapshot_refresh");
-        // Every arm of this match starts on its own line at the same indent;
-        // an arm's body ends where the next one begins.
+        // Match the canonical name inside an alias pattern, then stop at the
+        // next arm. Formatting may put the arrow on this line or a later one.
         let arm_of = |query: &str| {
             let arm = queries
-                .split_once(&format!("\"{query}\" =>"))
+                .split_once(&format!("\"{query}\""))
                 .unwrap_or_else(|| panic!("{query} arm"))
                 .1;
             arm.split_once("\n            \"")
@@ -8220,6 +8206,152 @@ mod tests {
             self.clipboard.push(text.to_string());
             true
         }
+    }
+
+    #[test]
+    fn lightweight_status_summaries_match_full_queries_with_sparse_orders() {
+        let mut backend = PairingIpcBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        jwm.state = WMState::new();
+
+        let mut monitor = WMMonitor::new();
+        monitor.num = 7;
+        monitor.tag_set[0] = 0b101;
+        let monitor_key = jwm.state.monitors.insert(monitor);
+        let stale_monitor = jwm.state.monitors.insert(WMMonitor::new());
+        jwm.state.monitors.remove(stale_monitor);
+        jwm.state.monitor_order = vec![monitor_key, stale_monitor, monitor_key];
+        jwm.state.sel_mon = Some(monitor_key);
+
+        let mut focused = WMClient::new(WindowId::from_raw(0x11));
+        focused.mon = Some(monitor_key);
+        focused.state.tags = 0b001;
+        focused.state.is_floating = true;
+        focused.state.is_hidden = true;
+        focused.state.is_sticky = true;
+        focused.state.is_fullscreen = true;
+        focused.state.is_pip = true;
+        let focused_key = jwm.state.clients.insert(focused);
+
+        let mut urgent = WMClient::new(WindowId::from_raw(0x22));
+        urgent.mon = Some(monitor_key);
+        urgent.state.tags = 0b100;
+        urgent.state.demands_attention = true;
+        let urgent_key = jwm.state.clients.insert(urgent);
+        let stale_client = jwm
+            .state
+            .clients
+            .insert(WMClient::new(WindowId::from_raw(0x33)));
+        jwm.state.clients.remove(stale_client);
+        jwm.state.client_order = vec![focused_key, stale_client, urgent_key, focused_key];
+        jwm.state
+            .monitor_clients
+            .insert(monitor_key, vec![focused_key, stale_client, urgent_key]);
+        jwm.state.monitors[monitor_key].sel = Some(focused_key);
+
+        let monitors = jwm.query_monitors(&backend);
+        let monitor_summary = jwm.monitors_status_summary();
+        assert_eq!(monitor_summary["count"], monitors.len());
+        assert_eq!(
+            monitor_summary["focused"],
+            serde_json::json!(
+                monitors
+                    .iter()
+                    .find(|monitor| monitor.focused)
+                    .map(|monitor| monitor.num)
+            )
+        );
+
+        let workspaces = jwm.query_workspaces(&backend);
+        let workspace_summary = jwm.workspaces_status_summary();
+        assert_eq!(workspace_summary["count"], workspaces.len());
+        assert_eq!(
+            workspace_summary["focused_count"],
+            workspaces
+                .iter()
+                .filter(|workspace| workspace.focused)
+                .count()
+        );
+
+        let windows = jwm.query_windows(&backend);
+        let window_summary = jwm.windows_status_summary();
+        assert_eq!(window_summary["count"], windows.len());
+        assert_eq!(
+            window_summary["focused_id"],
+            serde_json::json!(
+                windows
+                    .iter()
+                    .find(|window| window.is_focused)
+                    .map(|window| window.id)
+            )
+        );
+
+        let tree = jwm.query_tree(&backend);
+        let tree_summary = jwm.tree_status_summary();
+        assert_eq!(tree_summary["monitor_count"], tree.len());
+        assert_eq!(
+            tree_summary["window_count"],
+            tree.iter().map(|node| node.window_count).sum::<usize>()
+        );
+
+        for flag in [
+            "floating",
+            "minimized",
+            "sticky",
+            "urgent",
+            "fullscreen",
+            "pip",
+        ] {
+            let summary = jwm.windows_flag_status_summary(flag);
+            let matches = |window: &&crate::ipc::WindowInfo| match flag {
+                "floating" => window.is_floating,
+                "minimized" => window.is_minimized,
+                "sticky" => window.is_sticky,
+                "urgent" => window.is_urgent || window.demands_attention,
+                "fullscreen" => window.is_fullscreen,
+                "pip" => window.is_pip,
+                _ => unreachable!(),
+            };
+            assert_eq!(
+                summary["count"],
+                windows.iter().filter(matches).count(),
+                "{flag}"
+            );
+            assert_eq!(
+                summary["focused_id"],
+                serde_json::json!(
+                    windows
+                        .iter()
+                        .find(|window| window.is_focused && matches(window))
+                        .map(|window| window.id)
+                ),
+                "{flag}"
+            );
+        }
+
+        let runtime = jwm.query_runtime_status(&backend);
+        assert_eq!(runtime.counts.windows, windows.len());
+        assert_eq!(runtime.counts.monitors, monitors.len());
+        assert_eq!(runtime.counts.workspaces, workspaces.len());
+        for (flag, summary) in [
+            ("floating", runtime.floating.as_ref()),
+            ("minimized", runtime.minimized.as_ref()),
+            ("sticky", runtime.sticky.as_ref()),
+            ("urgent", runtime.urgent.as_ref()),
+            ("fullscreen", runtime.fullscreen.as_ref()),
+            ("pip", runtime.pip.as_ref()),
+        ] {
+            let expected = jwm.windows_flag_status_summary(flag);
+            assert_eq!(summary, Some(&expected), "batched runtime flag {flag}");
+        }
+    }
+
+    #[test]
+    fn active_tag_count_handles_empty_and_full_width_safely() {
+        assert_eq!(active_tag_count(u32::MAX, 0), 0);
+        assert_eq!(active_tag_count(0b1011, 3), 2);
+        assert_eq!(active_tag_count(u32::MAX, 32), 32);
+        assert_eq!(active_tag_count(u32::MAX, usize::MAX), 32);
     }
 
     /// A jwm with the Bluetooth picker open and an inbound window armed — the
@@ -8761,6 +8893,243 @@ mod tests {
             "one focused window in the tree"
         );
         assert_eq!(focused_in_tree, focused_in_windows);
+    }
+
+    #[test]
+    fn sparse_tag_counts_preserve_high_bits_and_configured_bounds() {
+        let mut state = WMState::new();
+        let monitor = state.monitors.insert(WMMonitor::new());
+        let mut keys = Vec::new();
+        for tags in [0, 1, 1 << 31, (1 << 31) | 1, u32::MAX] {
+            let mut client = WMClient::new(WindowId::from_raw(keys.len() as u64 + 1));
+            client.state.tags = tags;
+            client.state.demands_attention = true;
+            keys.push(state.clients.insert(client));
+        }
+        let stale = state.clients.insert(WMClient::new(WindowId::from_raw(99)));
+        state.clients.remove(stale);
+        keys.extend([stale, keys[1]]);
+        state.monitor_clients.insert(monitor, keys);
+        let empty = std::collections::HashSet::new();
+        let struts = std::collections::HashSet::new();
+        for tag_count in [0, 1, 9, 32, 35] {
+            let actual = monitor_tag_client_counts(
+                &state, monitor, tag_count, &empty, &empty, &struts, "", 1,
+            );
+            assert_eq!(actual.len(), tag_count);
+            for (index, counts) in actual.iter().enumerate() {
+                if index < 32 {
+                    assert_eq!(
+                        *counts,
+                        tag_client_counts(
+                            &state,
+                            monitor,
+                            1 << index,
+                            &empty,
+                            &empty,
+                            &struts,
+                            "",
+                            1,
+                        )
+                    );
+                } else {
+                    assert_eq!(*counts, super::TagClientCounts::default());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn tree_counts_match_projected_flags_with_duplicates_and_attention() {
+        let mut backend = PairingIpcBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        jwm.state = WMState::new();
+        let monitor = jwm.state.monitors.insert(WMMonitor::new());
+        jwm.state.monitor_order = vec![monitor];
+        let mut client = WMClient::new(WindowId::from_raw(77));
+        client.mon = Some(monitor);
+        client.state.tags = 1;
+        client.state.is_floating = true;
+        client.state.is_hidden = true;
+        client.state.is_sticky = true;
+        client.state.is_fullscreen = true;
+        client.state.is_pip = true;
+        client.state.is_maximized_vert = true;
+        client.state.is_above = true;
+        client.state.is_below = true;
+        client.state.is_fixed = true;
+        client.state.is_dock = true;
+        client.state.is_desktop = true;
+        client.state.never_focus = true;
+        client.state.demands_attention = true;
+        client.state.skip_taskbar = true;
+        client.state.skip_pager = true;
+        client.state.no_decorations = true;
+        client.state.is_drag_floating = true;
+        client.state.is_swallowed = true;
+        client.state.maximize_restore_tiled = true;
+        let key = jwm.state.clients.insert(client);
+        let stale = jwm
+            .state
+            .clients
+            .insert(WMClient::new(WindowId::from_raw(99)));
+        jwm.state.clients.remove(stale);
+        jwm.state.client_order = vec![key];
+        jwm.state
+            .monitor_clients
+            .insert(monitor, vec![key, stale, key]);
+        jwm.scratchpads.insert("scratch".into(), key);
+        let tree = jwm.query_tree(&backend);
+        let node = &tree[0];
+        assert_eq!(node.window_count, 2);
+        assert_eq!(node.urgent_count, 0);
+        assert_eq!(node.demands_attention_count, 2);
+        // A single maximized axis does not make WindowInfo::is_maximized true.
+        assert_eq!(node.maximized_count, 0);
+        let json = serde_json::to_value(node).unwrap();
+        let flags = [
+            ("floating_count", "is_floating"),
+            ("minimized_count", "is_minimized"),
+            ("sticky_count", "is_sticky"),
+            ("urgent_count", "is_urgent"),
+            ("fullscreen_count", "is_fullscreen"),
+            ("pip_count", "is_pip"),
+            ("maximized_count", "is_maximized"),
+            ("above_count", "is_above"),
+            ("below_count", "is_below"),
+            ("scratchpad_count", "is_scratchpad"),
+            ("tabbed_count", "is_tabbed"),
+            ("fixed_count", "is_fixed"),
+            ("dock_count", "is_dock"),
+            ("desktop_count", "is_desktop"),
+            ("never_focus_count", "never_focus"),
+            ("demands_attention_count", "demands_attention"),
+            ("skip_taskbar_count", "skip_taskbar"),
+            ("skip_pager_count", "skip_pager"),
+            ("no_decorations_count", "no_decorations"),
+            ("drag_float_count", "is_drag_floating"),
+            ("swallowed_count", "is_swallowed"),
+            ("on_view_count", "is_on_view"),
+            ("maximize_promoted_count", "maximize_promoted"),
+            ("strut_count", "has_strut"),
+            ("status_bar_count", "is_status_bar"),
+        ];
+        for (count, flag) in flags {
+            let expected = json["windows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|window| window[flag] == true)
+                .count();
+            assert_eq!(json[count], expected, "{count}");
+        }
+    }
+
+    #[test]
+    fn indexed_window_positions_and_swallowers_preserve_first_matches() {
+        let mut backend = PairingIpcBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        jwm.state = WMState::new();
+        let monitor = jwm.state.monitors.insert(WMMonitor::new());
+        let stale_monitor = jwm.state.monitors.insert(WMMonitor::new());
+        jwm.state.monitors.remove(stale_monitor);
+        let mut parent = WMClient::new(WindowId::from_raw(10));
+        parent.mon = Some(stale_monitor);
+        parent.state.is_swallowed = true;
+        let parent = jwm.state.clients.insert(parent);
+        let mut child = WMClient::new(WindowId::from_raw(20));
+        child.mon = Some(monitor);
+        child.swallowing = Some(parent);
+        let first = jwm.state.clients.insert(child.clone());
+        child.win = WindowId::from_raw(30);
+        let second = jwm.state.clients.insert(child);
+        let stale = jwm
+            .state
+            .clients
+            .insert(WMClient::new(WindowId::from_raw(99)));
+        jwm.state.clients.remove(stale);
+        jwm.state.client_order = vec![stale, first, second, first, parent];
+        jwm.state
+            .monitor_clients
+            .insert(monitor, vec![stale, second, first, first]);
+        jwm.state
+            .monitor_clients
+            .insert(stale_monitor, vec![stale, parent, parent]);
+        for order in [
+            vec![stale, first, second, parent],
+            vec![stale, second, first, parent],
+        ] {
+            jwm.state.client_order = order;
+            let index = jwm.window_query_index(&backend);
+            for key in [parent, first, second] {
+                let actual = jwm
+                    .window_info_indexed(&backend, key, false, Some(&index))
+                    .unwrap();
+                let expected = jwm.window_info(&backend, key, false).unwrap();
+                assert_eq!(
+                    serde_json::to_value(actual).unwrap(),
+                    serde_json::to_value(expected).unwrap()
+                );
+            }
+            assert_eq!(
+                jwm.window_info_indexed(&backend, first, false, Some(&index))
+                    .unwrap()
+                    .stack_index,
+                Some(2)
+            );
+            assert_eq!(
+                jwm.window_info_indexed(&backend, parent, false, Some(&index))
+                    .unwrap()
+                    .stack_index,
+                Some(1)
+            );
+        }
+    }
+
+    #[test]
+    fn indexed_window_projection_matches_individual_projection() {
+        let mut backend = PairingIpcBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        jwm.state = WMState::new();
+        let monitor = jwm.state.monitors.insert(WMMonitor::new());
+        jwm.state.monitor_order.push(monitor);
+        let unlisted_monitor = jwm.state.monitors.insert(WMMonitor::new());
+        let mut keys = Vec::new();
+        for raw in [0x41, 0x42] {
+            let mut client = WMClient::new(WindowId::from_raw(raw));
+            client.mon = Some(monitor);
+            client.state.tags = 1;
+            let key = jwm.state.clients.insert(client);
+            jwm.state.client_order.push(key);
+            keys.push(key);
+        }
+        jwm.state.monitor_clients.insert(monitor, keys.clone());
+        let mut unlisted_client = WMClient::new(WindowId::from_raw(0x43));
+        unlisted_client.mon = Some(unlisted_monitor);
+        unlisted_client.state.tags = 1;
+        let unlisted_key = jwm.state.clients.insert(unlisted_client);
+        jwm.state.client_order.push(unlisted_key);
+        jwm.state
+            .monitor_clients
+            .insert(unlisted_monitor, vec![keys[0], unlisted_key]);
+        keys.push(unlisted_key);
+        jwm.state.monitors[monitor].sel = Some(keys[1]);
+        jwm.state.sel_mon = Some(monitor);
+        jwm.scratchpads.insert("terminal".into(), keys[0]);
+        jwm.scratchpads.insert("terminal-alias".into(), keys[0]);
+
+        let index = jwm.window_query_index(&backend);
+        for &key in &keys {
+            let focused = key == keys[1];
+            let individual = jwm.window_info(&backend, key, focused).unwrap();
+            let indexed = jwm
+                .window_info_indexed(&backend, key, focused, Some(&index))
+                .unwrap();
+            assert_eq!(
+                serde_json::to_value(indexed).unwrap(),
+                serde_json::to_value(individual).unwrap()
+            );
+        }
     }
 
     /// A per-test scratch directory, so parallel tests never share a path.
@@ -9492,10 +9861,7 @@ mod tests {
             "hdr:",
             "capture:",
         ] {
-            assert!(
-                status.contains(nest),
-                "get_status must nest {nest}"
-            );
+            assert!(status.contains(nest), "get_status must nest {nest}");
         }
 
         let config = SOURCE
@@ -9664,7 +10030,17 @@ mod tests {
             .split_once("fn window_info")
             .expect("window_info follows")
             .0;
-        for nest in ["waterlily:", "night_light:", "magnifier:", "peek:", "expose:", "gesture:", "wayland:", "dnd:", "session_lock:"] {
+        for nest in [
+            "waterlily:",
+            "night_light:",
+            "magnifier:",
+            "peek:",
+            "expose:",
+            "gesture:",
+            "wayland:",
+            "dnd:",
+            "session_lock:",
+        ] {
             assert!(status.contains(nest), "get_status must nest {nest}");
         }
     }

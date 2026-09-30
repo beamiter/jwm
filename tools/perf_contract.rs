@@ -337,12 +337,40 @@ pub struct CompareReport {
 ///
 /// Refuses (rather than reports) when the results are not comparable at all:
 /// mismatched schema versions, an incomplete label on either side, or labels
-/// that identify different systems or configurations.
+/// that identify different systems or configurations. Recorded metrics must
+/// be finite and nonnegative before any budget is evaluated.
 pub fn compare(
     baseline: &PerfBaselineV1,
     candidate: &PerfBaselineV1,
     budgets: &[BudgetRule],
 ) -> Result<CompareReport, String> {
+    for rule in budgets {
+        if rule.direction == Direction::Exact {
+            // Exact comparisons ignore ratio and absolute bounds by design.
+            continue;
+        }
+        let valid_ratio = rule.ratio.is_finite()
+            && match rule.direction {
+                Direction::LowerIsBetter => rule.ratio >= 1.0,
+                Direction::HigherIsBetter => (0.0..=1.0).contains(&rule.ratio),
+                Direction::Exact => unreachable!(),
+            };
+        if !valid_ratio {
+            return Err(format!(
+                "invalid budget for {}.{}: ratio is outside its supported range",
+                rule.scenario, rule.metric
+            ));
+        }
+        if rule
+            .absolute
+            .is_some_and(|limit| !limit.is_finite() || limit < 0.0)
+        {
+            return Err(format!(
+                "invalid budget for {}.{}: absolute limit must be finite and nonnegative",
+                rule.scenario, rule.metric
+            ));
+        }
+    }
     for (role, snapshot) in [("baseline", baseline), ("candidate", candidate)] {
         if snapshot.schema_version != SCHEMA_VERSION {
             return Err(format!(
@@ -357,6 +385,19 @@ pub fn compare(
                  must never be compared",
                 incomplete.join(", ")
             ));
+        }
+        for (scenario, result) in &snapshot.scenarios {
+            if result.status != ScenarioStatus::Recorded {
+                continue;
+            }
+            for (metric, value) in &result.metrics {
+                if !value.is_finite() || *value < 0.0 {
+                    return Err(format!(
+                        "{role} contains invalid metric {scenario}.{metric}: \
+                         expected a finite nonnegative value"
+                    ));
+                }
+            }
         }
     }
     let differing = baseline.label.differing_fields(&candidate.label);
@@ -630,6 +671,117 @@ mod tests {
             .find(|verdict| verdict.metric == "frame_time_p95_ms")
             .unwrap();
         assert_eq!(violation.outcome, VerdictOutcome::Violation);
+    }
+
+    #[test]
+    fn invalid_recorded_metrics_cannot_masquerade_as_performance_improvements() {
+        let baseline = snapshot(&[(
+            "steady_frame",
+            recorded(&[("frame_time_p95_ms", 2.0), ("fps_avg", 60.0)]),
+        )]);
+        for invalid in [-0.5, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut corrupt = baseline.clone();
+            corrupt
+                .scenarios
+                .get_mut("steady_frame")
+                .unwrap()
+                .metrics
+                .insert("frame_time_p95_ms".into(), invalid);
+            for (base, candidate, role) in [
+                (&baseline, &corrupt, "candidate"),
+                (&corrupt, &baseline, "baseline"),
+            ] {
+                let error = compare(base, candidate, &default_budgets()).unwrap_err();
+                assert!(error.contains(role), "{error}");
+                assert!(error.contains("steady_frame.frame_time_p95_ms"), "{error}");
+            }
+        }
+
+        // A negative value is valid JSON, so malformed files need this gate
+        // even though JSON itself rejects NaN and infinity.
+        let negative = snapshot(&[("steady_frame", recorded(&[("frame_time_p95_ms", -1.0)]))]);
+        let loaded: PerfBaselineV1 =
+            serde_json::from_str(&serde_json::to_string(&negative).unwrap()).unwrap();
+        assert!(compare(&baseline, &loaded, &default_budgets()).is_err());
+        let zero = snapshot(&[("steady_frame", recorded(&[("frame_time_p95_ms", 0.0)]))]);
+        assert!(compare(&baseline, &zero, &default_budgets()).is_ok());
+    }
+
+    #[test]
+    fn invalid_budget_bounds_cannot_silently_disable_the_gate() {
+        let snapshot = snapshot(&[
+            (
+                "steady_frame",
+                recorded(&[("frame_time_p95_ms", 2.0), ("fps_avg", 60.0)]),
+            ),
+            ("multi_monitor", recorded(&[("monitor_count", 2.0)])),
+        ]);
+        let rules = default_budgets();
+        for (direction, metric, invalid_ratios) in [
+            (
+                Direction::LowerIsBetter,
+                "frame_time_p95_ms",
+                vec![0.5, -1.0, f64::NAN, f64::INFINITY],
+            ),
+            (
+                Direction::HigherIsBetter,
+                "fps_avg",
+                vec![1.1, -1.0, f64::NAN, f64::NEG_INFINITY],
+            ),
+        ] {
+            let template = rules.iter().find(|rule| rule.metric == metric).unwrap();
+            for ratio in invalid_ratios {
+                let mut rule = template.clone();
+                rule.direction = direction;
+                rule.ratio = ratio;
+                let error = compare(&snapshot, &snapshot, &[rule]).unwrap_err();
+                assert!(error.contains("invalid budget"), "{error}");
+                assert!(error.contains(metric), "{error}");
+            }
+            for limit in [-1.0, f64::NAN, f64::INFINITY] {
+                let mut rule = template.clone();
+                rule.absolute = Some(limit);
+                assert!(
+                    compare(&snapshot, &snapshot, &[rule])
+                        .unwrap_err()
+                        .contains("absolute limit")
+                );
+            }
+        }
+        assert!(compare(&snapshot, &snapshot, &rules).unwrap().passed);
+
+        for (metric, ratio) in [
+            ("frame_time_p95_ms", 1.0),
+            ("fps_avg", 0.0),
+            ("fps_avg", 1.0),
+        ] {
+            let mut rule = rules
+                .iter()
+                .find(|rule| rule.metric == metric)
+                .unwrap()
+                .clone();
+            rule.ratio = ratio;
+            rule.absolute = None;
+            assert!(
+                compare(&snapshot, &snapshot, &[rule.clone()])
+                    .unwrap()
+                    .passed
+            );
+            rule.absolute = Some(0.0);
+            // Zero is a valid bound; whether it passes is decided by the
+            // metric direction rather than by budget validation.
+            assert!(compare(&snapshot, &snapshot, &[rule]).is_ok());
+        }
+
+        let mut exact = rules
+            .iter()
+            .find(|rule| rule.direction == Direction::Exact)
+            .unwrap()
+            .clone();
+        exact.ratio = f64::NAN;
+        exact.absolute = Some(-1.0);
+        let report = compare(&snapshot, &snapshot, &[exact]).unwrap();
+        assert_eq!(report.verdicts[0].outcome, VerdictOutcome::Pass);
     }
 
     #[test]

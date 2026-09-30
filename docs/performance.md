@@ -36,6 +36,26 @@ jwm-tool perf compare baseline.json candidate.json   # exit 1 on regression
 jwm-tool perf budgets                                # print the budget table
 ```
 
+Configuration labels and baseline files accept regular files up to 4 MiB,
+including symlinks to regular files. FIFOs, oversized files and invalid baseline
+JSON are rejected. An unreadable configuration produces an `unknown` fingerprint,
+so comparisons are refused; a missing configuration keeps the built-in-default
+fingerprint.
+
+IPC connection establishment has its own 10-second deadline, including when
+the compositor's accept queue is full. Once connected, request writes and
+response reads share a separate 10-second deadline; a slowly arriving response
+does not restart the budget.
+Responses must have a newline, a boolean `success`, and fit within 4 MiB
+including the newline.
+Idle process samples are limited to 64 KiB per `/proc` input.
+
+Host-label inputs are limited to 1 MiB; unavailable or blank labels remain
+unknown. Monitor-based resolution fallbacks use the min/max bounding box, so
+negative or translated coordinates do not change the label's size. Idle CPU
+or context-switch counters moving backwards make that sampling window fail
+instead of reporting zero usage.
+
 Recording talks to the live session over the IPC socket and samples
 `/proc/<pid>` for the idle scenario. Record on a quiet desktop: close video
 players and animations, and do not interact with the session during the
@@ -116,7 +136,16 @@ unavailable).
   a different label anyway.
 
 Violating any budget makes `perf compare` exit non-zero, so it can gate a CI
-job or a release checklist. A candidate that lost a measurement the baseline
+job or a release checklist. Recorded metric values must be finite and
+nonnegative; invalid measurements on either side cause comparison to be refused
+before budgets run. Zero remains valid and is evaluated under the usual rules.
+
+Effective budgets are validated before comparison: lower-is-better ratios must
+be finite and at least 1; higher-is-better ratios must be finite in `[0, 1]`;
+absolute bounds must be finite and nonnegative. Exact comparisons ignore ratio
+and absolute bounds as before.
+
+A candidate that lost a measurement the baseline
 recorded — the scenario skipped or absent, or the metric missing — is a
 violation too: it is printed as `[FAIL]` with the candidate's skip reason and
 fails the gate, because a regression that stops the benchmark from running

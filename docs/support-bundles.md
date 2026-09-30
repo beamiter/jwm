@@ -24,6 +24,10 @@ jwm-support --strict --compact --output jwm-support.json
 When `--output` is omitted, JSON is written to stdout. File output is written to
 a temporary sibling first, flushed, and atomically renamed with mode `0600`.
 The destination directory must already exist.
+Occupied temporary names are skipped, up to 128 candidates. Exhaustion leaves
+an existing report intact. A successful file output syncs the containing
+directory; an error from that final sync may occur after the new report has
+already replaced the destination.
 
 ## Report schema
 
@@ -32,10 +36,14 @@ Schema version 1 contains:
 - generator name and JWM package version;
 - generation time and requested backend;
 - operating-system, architecture, kernel-release, and selected `/etc/os-release`
-  fields;
+fields;
 - a small allowlist of desktop-session variables;
 - a support-safe projection of the versioned startup doctor report;
 - optional, redacted `get_status` data and the `get_capabilities` catalog.
+
+Kernel-release input is limited to 4 KiB and `/etc/os-release` to 64 KiB. Ordinary
+file symlinks are supported; special, oversized or invalid UTF-8 sources leave
+the corresponding facts unavailable instead of blocking collection.
 
 For local X11 and Wayland host displays, the embedded doctor also verifies
 that the expected filesystem endpoint exists and is a Unix socket. This catches
@@ -44,9 +52,11 @@ server. Remote X11 transports are reported as uninspectable; a missing local
 X11 filesystem endpoint is only a warning because Linux can use an
 abstract-only socket.
 
-The live queries have a two-second read/write timeout and a four-megabyte
-response limit. A stopped compositor therefore produces a useful report rather
-than leaving the command blocked indefinitely.
+The live queries have a separate two-second connection deadline and one shared
+two-second deadline for request writes and response reads. A trickling response
+does not renew that budget. Responses must be newline-terminated and fit within
+four megabytes including the newline. A stopped compositor or a full accept
+queue produces a useful report instead of leaving a probe waiting indefinitely.
 
 ## Privacy boundary
 

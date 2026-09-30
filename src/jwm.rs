@@ -2824,7 +2824,11 @@ fn keybinding_viewer_lines(
         lines.push(format!("{:<28} {}", shortcut, desc));
     }
 
-    lines.push(format!("{:<28} view tag 1-{}", format!("{modkey}+[1-9]"), tags_len));
+    lines.push(format!(
+        "{:<28} view tag 1-{}",
+        format!("{modkey}+[1-9]"),
+        tags_len
+    ));
     lines.push(format!(
         "{:<28} move to tag 1-{}",
         format!("{modkey}+Shift+[1-9]"),

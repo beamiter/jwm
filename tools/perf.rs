@@ -12,7 +12,8 @@ use crate::perf_contract::{
 };
 use serde_json::Value;
 use std::collections::BTreeMap;
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, Read, Write};
+use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -39,22 +40,67 @@ fn ipc_call(request: &Value) -> Result<Value, String> {
             path.display()
         ));
     }
-    let mut stream = UnixStream::connect(&path)
+    let stream = jwm::ipc_connection::connect(&path, Duration::from_secs(10))
         .map_err(|error| format!("connect {}: {error}", path.display()))?;
-    stream
-        .set_read_timeout(Some(Duration::from_secs(10)))
-        .map_err(|error| error.to_string())?;
-    let mut line = serde_json::to_string(request).map_err(|error| error.to_string())?;
-    line.push('\n');
-    stream
-        .write_all(line.as_bytes())
-        .map_err(|error| error.to_string())?;
-    let mut reader = BufReader::new(stream);
-    let mut response = String::new();
-    reader
-        .read_line(&mut response)
-        .map_err(|error| error.to_string())?;
-    serde_json::from_str(response.trim()).map_err(|error| format!("malformed response: {error}"))
+    ipc_exchange(stream, request, Duration::from_secs(10))
+}
+
+const IPC_RESPONSE_LIMIT: usize = 4 * 1024 * 1024;
+
+fn io_remaining(deadline: Instant) -> Result<Duration, String> {
+    deadline
+        .checked_duration_since(Instant::now())
+        .filter(|remaining| !remaining.is_zero())
+        .ok_or_else(|| "IPC I/O deadline exceeded".into())
+}
+
+fn ipc_exchange(
+    mut stream: UnixStream,
+    request: &Value,
+    budget: Duration,
+) -> Result<Value, String> {
+    let deadline = Instant::now() + budget;
+    let mut line = serde_json::to_vec(request).map_err(|error| error.to_string())?;
+    line.push(b'\n');
+    let mut written = 0;
+    while written < line.len() {
+        stream
+            .set_write_timeout(Some(io_remaining(deadline)?))
+            .map_err(|error| error.to_string())?;
+        match stream.write(&line[written..]) {
+            Ok(0) => return Err("IPC request write returned zero".into()),
+            Ok(count) => written += count,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(format!("IPC request write: {error}")),
+        }
+    }
+    let mut response = Vec::new();
+    let mut chunk = [0u8; 8192];
+    loop {
+        stream
+            .set_read_timeout(Some(io_remaining(deadline)?))
+            .map_err(|error| error.to_string())?;
+        let count = match stream.read(&mut chunk) {
+            Ok(0) => return Err("IPC response ended before newline".into()),
+            Ok(count) => count,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(format!("IPC response read: {error}")),
+        };
+        let newline = chunk[..count].iter().position(|byte| *byte == b'\n');
+        let frame_bytes = newline.map_or(count, |index| index + 1);
+        if response.len() + frame_bytes > IPC_RESPONSE_LIMIT {
+            return Err("IPC response exceeds 4 MiB limit".into());
+        }
+        response.extend_from_slice(&chunk[..frame_bytes]);
+        if newline.is_some() {
+            let value: Value = serde_json::from_slice(&response)
+                .map_err(|error| format!("malformed response: {error}"))?;
+            if value.get("success").and_then(Value::as_bool).is_none() {
+                return Err("malformed response: missing boolean success".into());
+            }
+            return Ok(value);
+        }
+    }
 }
 
 fn ipc_query(name: &str) -> Result<Value, String> {
@@ -161,23 +207,36 @@ fn compositor_metrics(status: &Value, metrics: Result<Value, String>) -> Result<
 // System label
 // ---------------------------------------------------------------------------
 
+const MAX_HOST_LABEL_BYTES: u64 = 1024 * 1024;
+
+fn read_host_label(path: &Path) -> io::Result<String> {
+    let bytes = read_regular_file(path, MAX_HOST_LABEL_BYTES)?;
+    String::from_utf8(bytes).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+}
+
+fn nonempty_label(value: &str) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_string())
+}
+
 fn cpu_model() -> String {
-    std::fs::read_to_string("/proc/cpuinfo")
+    read_host_label(Path::new("/proc/cpuinfo"))
         .ok()
         .and_then(|content| {
             content.lines().find_map(|line| {
                 line.strip_prefix("model name")
                     .and_then(|rest| rest.split(':').nth(1))
-                    .map(|name| name.trim().to_string())
+                    .and_then(nonempty_label)
             })
         })
         .unwrap_or_else(|| "unknown".into())
 }
 
 fn kernel_release() -> String {
-    std::fs::read_to_string("/proc/sys/kernel/osrelease")
-        .map(|value| value.trim().to_string())
-        .unwrap_or_else(|_| "unknown".into())
+    read_host_label(Path::new("/proc/sys/kernel/osrelease"))
+        .ok()
+        .and_then(|value| nonempty_label(&value))
+        .unwrap_or_else(|| "unknown".into())
 }
 
 /// GPU model fallback for runs without a GL-string report (legacy sessions,
@@ -187,11 +246,10 @@ fn kernel_release() -> String {
 fn gpu_fallback() -> Option<String> {
     if let Ok(entries) = glob::glob("/proc/driver/nvidia/gpus/*/information") {
         for path in entries.flatten() {
-            if let Ok(info) = std::fs::read_to_string(&path)
-                && let Some(model) = info.lines().find_map(|line| {
-                    line.strip_prefix("Model:")
-                        .map(|value| value.trim().to_string())
-                })
+            if let Ok(info) = read_host_label(&path)
+                && let Some(model) = info
+                    .lines()
+                    .find_map(|line| line.strip_prefix("Model:").and_then(nonempty_label))
             {
                 return Some(model);
             }
@@ -203,7 +261,7 @@ fn gpu_fallback() -> Option<String> {
 /// Driver identity fallback: the NVIDIA kernel-module version, else the DRM
 /// driver bound to card0.
 fn driver_fallback() -> Option<String> {
-    if let Ok(version) = std::fs::read_to_string("/proc/driver/nvidia/version")
+    if let Ok(version) = read_host_label(Path::new("/proc/driver/nvidia/version"))
         && let Some(line) = version.lines().next()
     {
         let release = line
@@ -230,14 +288,27 @@ fn driver_fallback() -> Option<String> {
 /// form. The report measures the whole screen, not one monitor, so a
 /// multi-monitor machine keeps one label either way.
 fn screen_extent(monitors: &[Value]) -> Option<String> {
-    let mut width = 0_i64;
-    let mut height = 0_i64;
+    let mut bounds: Option<(i64, i64, i64, i64)> = None;
     for monitor in monitors {
         let field = |key: &str| monitor.get(key).and_then(Value::as_i64);
-        width = width.max(field("x")?.saturating_add(field("w")?));
-        height = height.max(field("y")?.saturating_add(field("h")?));
+        let (x, y, w, h) = (field("x")?, field("y")?, field("w")?, field("h")?);
+        if w <= 0 || h <= 0 {
+            return None;
+        }
+        let (right, bottom) = (x.checked_add(w)?, y.checked_add(h)?);
+        bounds = Some(match bounds {
+            Some((left, top, max_right, max_bottom)) => (
+                left.min(x),
+                top.min(y),
+                max_right.max(right),
+                max_bottom.max(bottom),
+            ),
+            None => (x, y, right, bottom),
+        });
     }
-    (width > 0 && height > 0).then(|| format!("{width}x{height}"))
+    let (left, top, right, bottom) = bounds?;
+    let (width, height) = (right.checked_sub(left)?, bottom.checked_sub(top)?);
+    Some(format!("{width}x{height}"))
 }
 
 /// Renderer API from an explicit configuration choice. `auto` resolves at
@@ -245,7 +316,45 @@ fn screen_extent(monitors: &[Value]) -> Option<String> {
 fn renderer_api_from_config(backend: &str) -> Option<String> {
     let choice = backend.parse::<jwm::application::BackendChoice>().ok()?;
     let path = jwm::application::config_path(choice);
-    let content = std::fs::read_to_string(path).ok()?;
+    renderer_api_from_config_path(&path)
+}
+
+const MAX_CONFIG_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_BASELINE_BYTES: u64 = 4 * 1024 * 1024;
+
+/// Inspect the opened descriptor, allowing symlinks to regular files while
+/// rejecting FIFOs before reading. The extra byte also catches file growth.
+fn read_regular_file(path: &Path, limit: u64) -> io::Result<Vec<u8>> {
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "expected a regular file",
+        ));
+    }
+    if metadata.len() > limit {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("file exceeds {limit}-byte limit"),
+        ));
+    }
+    let mut bytes = Vec::new();
+    file.take(limit + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > limit {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("file exceeds {limit}-byte limit"),
+        ));
+    }
+    Ok(bytes)
+}
+
+fn renderer_api_from_config_path(path: &Path) -> Option<String> {
+    let content = String::from_utf8(read_regular_file(path, MAX_CONFIG_BYTES).ok()?).ok()?;
     let parsed: toml::Table = toml::from_str(&content).ok()?;
     let api = parsed
         .get("behavior")
@@ -266,7 +375,16 @@ fn config_fingerprint(backend: &str) -> String {
         return "unknown".into();
     };
     let path = jwm::application::config_path(choice);
-    let bytes = std::fs::read(&path).unwrap_or_default();
+    config_fingerprint_path(&path)
+}
+
+fn config_fingerprint_path(path: &Path) -> String {
+    let bytes = match read_regular_file(path, MAX_CONFIG_BYTES) {
+        Ok(bytes) => bytes,
+        // A missing file selects the built-in defaults, preserving that label.
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
+        Err(_) => return "unknown".into(),
+    };
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for byte in bytes {
         hash ^= u64::from(byte);
@@ -285,8 +403,30 @@ struct ProcSample {
     rss_kb: u64,
 }
 
+// Procfs reports zero metadata length, so enforce the cap on actual reads.
+const PROC_SAMPLE_LIMIT: usize = 64 * 1024;
+
+fn read_proc_sample(mut reader: impl Read) -> io::Result<String> {
+    let mut bytes = Vec::new();
+    reader
+        .by_ref()
+        .take((PROC_SAMPLE_LIMIT + 1) as u64)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > PROC_SAMPLE_LIMIT {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "proc sample exceeds 64 KiB",
+        ));
+    }
+    String::from_utf8(bytes).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+}
+
+fn read_proc_sample_path(path: impl AsRef<Path>) -> io::Result<String> {
+    read_proc_sample(std::fs::File::open(path)?)
+}
+
 fn sample_proc(pid: u32) -> Result<ProcSample, String> {
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat"))
+    let stat = read_proc_sample_path(format!("/proc/{pid}/stat"))
         .map_err(|error| format!("/proc/{pid}/stat: {error}"))?;
     // Fields after the parenthesised comm, which may itself contain spaces.
     let after_comm = stat
@@ -304,7 +444,7 @@ fn sample_proc(pid: u32) -> Result<ProcSample, String> {
         .and_then(|value| value.parse().ok())
         .ok_or("missing stime")?;
 
-    let status = std::fs::read_to_string(format!("/proc/{pid}/status"))
+    let status = read_proc_sample_path(format!("/proc/{pid}/status"))
         .map_err(|error| format!("/proc/{pid}/status: {error}"))?;
     let field = |name: &str| {
         status.lines().find_map(|line| {
@@ -918,18 +1058,32 @@ fn record_idle(pid: u32, seconds: u32) -> Result<BTreeMap<String, f64>, String> 
     let second = sample_proc(pid)?;
     let elapsed = started.elapsed().as_secs_f64();
 
+    idle_metrics(&first, &second, clk_tck, elapsed)
+}
+
+fn idle_metrics(
+    first: &ProcSample,
+    second: &ProcSample,
+    clk_tck: f64,
+    elapsed: f64,
+) -> Result<BTreeMap<String, f64>, String> {
+    if !elapsed.is_finite() || elapsed <= 0.0 || !clk_tck.is_finite() || clk_tck <= 0.0 {
+        return Err("invalid idle sampling interval or clock frequency".into());
+    }
+    let cpu_ticks = second
+        .cpu_ticks
+        .checked_sub(first.cpu_ticks)
+        .ok_or("idle CPU counter decreased during sampling")?;
+    let wakeups = second
+        .voluntary_switches
+        .checked_sub(first.voluntary_switches)
+        .ok_or("idle context-switch counter decreased during sampling")?;
     let mut metrics = BTreeMap::new();
     metrics.insert(
         "cpu_percent_avg".into(),
-        (second.cpu_ticks.saturating_sub(first.cpu_ticks)) as f64 / clk_tck / elapsed * 100.0,
+        cpu_ticks as f64 / clk_tck / elapsed * 100.0,
     );
-    metrics.insert(
-        "wakeups_per_s".into(),
-        (second
-            .voluntary_switches
-            .saturating_sub(first.voluntary_switches)) as f64
-            / elapsed,
-    );
+    metrics.insert("wakeups_per_s".into(), wakeups as f64 / elapsed);
     metrics.insert("rss_mb".into(), second.rss_kb as f64 / 1024.0);
     metrics.insert("sample_seconds".into(), elapsed);
     Ok(metrics)
@@ -940,9 +1094,9 @@ fn record_idle(pid: u32, seconds: u32) -> Result<BTreeMap<String, f64>, String> 
 // ---------------------------------------------------------------------------
 
 fn load_baseline(path: &Path) -> Result<PerfBaselineV1, String> {
-    let content =
-        std::fs::read_to_string(path).map_err(|error| format!("{}: {error}", path.display()))?;
-    serde_json::from_str(&content).map_err(|error| format!("{}: {error}", path.display()))
+    let content = read_regular_file(path, MAX_BASELINE_BYTES)
+        .map_err(|error| format!("{}: {error}", path.display()))?;
+    serde_json::from_slice(&content).map_err(|error| format!("{}: {error}", path.display()))
 }
 
 pub fn run_compare(baseline: &Path, candidate: &Path, json: bool) -> io::Result<()> {
@@ -1049,6 +1203,279 @@ mod tests {
     use super::*;
     use crate::perf_contract::ScenarioStatus;
     use serde_json::json;
+
+    fn socket_response(bytes: Vec<u8>) -> Result<Value, String> {
+        let (client, mut server) = UnixStream::pair().unwrap();
+        let worker = std::thread::spawn(move || {
+            let mut request = [0; 1024];
+            let _ = server.read(&mut request);
+            let _ = server.write_all(&bytes);
+        });
+        let result = ipc_exchange(client, &json!({"query": "status"}), Duration::from_secs(1));
+        worker.join().unwrap();
+        result
+    }
+
+    #[test]
+    fn ipc_response_requires_complete_valid_envelope() {
+        for bytes in [
+            b"".as_slice(),
+            b"\n",
+            b"null\n",
+            b"{}\n",
+            b"{\"success\":1}\n",
+            b"{\"success\":true}",
+            b"invalid\n",
+        ] {
+            assert!(socket_response(bytes.to_vec()).is_err(), "{bytes:?}");
+        }
+        assert_eq!(
+            socket_response(b"{\"success\":true,\"data\":7}\n".to_vec()).unwrap()["data"],
+            7
+        );
+        assert_eq!(
+            socket_response(b"{\"success\":false,\"error\":\"failed\"}\n".to_vec()).unwrap()["success"],
+            false
+        );
+    }
+
+    #[test]
+    fn ipc_response_cap_accepts_boundary_and_rejects_overflow() {
+        let mut frame = b"{\"success\":true}".to_vec();
+        frame.resize(IPC_RESPONSE_LIMIT - 1, b' ');
+        frame.push(b'\n');
+        assert!(socket_response(frame).is_ok());
+        assert!(
+            socket_response(vec![b' '; IPC_RESPONSE_LIMIT + 1])
+                .unwrap_err()
+                .contains("4 MiB")
+        );
+    }
+
+    #[test]
+    fn ipc_absolute_deadline_stops_slow_drip() {
+        let (client, mut server) = UnixStream::pair().unwrap();
+        let worker = std::thread::spawn(move || {
+            let mut request = [0; 1024];
+            let _ = server.read(&mut request);
+            for _ in 0..30 {
+                if server.write_all(b" ").is_err() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        });
+        let start = Instant::now();
+        let error = ipc_exchange(client, &json!({}), Duration::from_millis(40)).unwrap_err();
+        // EOF after the sender finishes would also be an error with an
+        // incorrectly reset per-read timeout. Require the I/O deadline to
+        // stop this exchange while the peer still has an unfinished frame.
+        assert!(
+            error.contains("deadline") || error.contains("IPC response read"),
+            "expected a deadline failure instead of waiting for peer EOF: {error}"
+        );
+        assert!(start.elapsed() < Duration::from_secs(1));
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn ipc_deadline_bounds_blocked_request_write() {
+        let (client, server) = UnixStream::pair().unwrap();
+        let request = json!({"args": "x".repeat(4 * 1024 * 1024)});
+        let start = Instant::now();
+        let error = ipc_exchange(client, &request, Duration::from_millis(40)).unwrap_err();
+        assert!(
+            error.contains("write") || error.contains("deadline"),
+            "{error}"
+        );
+        assert!(start.elapsed() < Duration::from_secs(1));
+        drop(server);
+    }
+
+    #[test]
+    fn proc_sampling_reads_enforce_actual_byte_limit_and_utf8() {
+        assert_eq!(
+            read_proc_sample(&b"VmRSS: 42 kB\n"[..]).unwrap(),
+            "VmRSS: 42 kB\n"
+        );
+        assert_eq!(
+            read_proc_sample(io::repeat(b'a').take(PROC_SAMPLE_LIMIT as u64))
+                .unwrap()
+                .len(),
+            PROC_SAMPLE_LIMIT
+        );
+        let mut endless = io::repeat(b'a');
+        assert_eq!(
+            read_proc_sample(&mut endless).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert_eq!(
+            read_proc_sample(&[0xff][..]).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        let directory = InputDir::new();
+        let path = directory.path("stat");
+        std::fs::write(&path, vec![b' '; PROC_SAMPLE_LIMIT + 1]).unwrap();
+        assert!(read_proc_sample_path(&path).is_err());
+    }
+
+    struct InputDir(PathBuf);
+
+    impl InputDir {
+        fn new() -> Self {
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let path = std::env::temp_dir().join(format!(
+                "jwm-perf-input-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            std::fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+
+        fn path(&self, name: &str) -> PathBuf {
+            self.0.join(name)
+        }
+    }
+
+    impl Drop for InputDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn failed_config_reads_do_not_claim_the_default_fingerprint() {
+        let dir = InputDir::new();
+        let empty = dir.path("empty");
+        std::fs::write(&empty, []).unwrap();
+        assert_eq!(config_fingerprint_path(&empty), "cbf29ce484222325");
+        assert_eq!(
+            config_fingerprint_path(&dir.path("missing")),
+            config_fingerprint_path(&empty)
+        );
+        assert_eq!(config_fingerprint_path(&dir.0), "unknown");
+        let config = dir.path("config");
+        std::fs::write(&config, b"[behavior]\ncompositor_api = 'egl'\n").unwrap();
+        assert_ne!(
+            config_fingerprint_path(&config),
+            config_fingerprint_path(&empty)
+        );
+        let link = dir.path("link");
+        std::os::unix::fs::symlink(&config, &link).unwrap();
+        assert_eq!(
+            config_fingerprint_path(&link),
+            config_fingerprint_path(&config)
+        );
+        let mut session = FakeSession::new(status(false), no_compositor_metrics());
+        let mut baseline = record_baseline(&mut session, &options(false)).unwrap();
+        baseline.label.config_fingerprint = config_fingerprint_path(&dir.0);
+        let error = perf_contract::compare(&baseline, &baseline, &default_budgets()).unwrap_err();
+        assert!(error.contains("config_fingerprint"), "{error}");
+    }
+
+    #[test]
+    fn config_labels_reject_oversized_files_and_fifos() {
+        let dir = InputDir::new();
+        let config = dir.path("config");
+        std::fs::write(&config, b"[behavior]\ncompositor_api = 'glx'\n").unwrap();
+        assert_eq!(
+            renderer_api_from_config_path(&config).as_deref(),
+            Some("glx/opengl")
+        );
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&config)
+            .unwrap()
+            .set_len(MAX_CONFIG_BYTES + 1)
+            .unwrap();
+        assert_eq!(renderer_api_from_config_path(&config), None);
+        assert_eq!(config_fingerprint_path(&config), "unknown");
+        let fifo = dir.path("fifo");
+        nix::unistd::mkfifo(
+            &fifo,
+            nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
+        )
+        .unwrap();
+        // No writer is connected: blocking open would hang this regression.
+        assert_eq!(renderer_api_from_config_path(&fifo), None);
+        assert_eq!(config_fingerprint_path(&fifo), "unknown");
+    }
+
+    #[test]
+    fn baseline_loading_bounds_inputs_and_reports_corruption() {
+        let dir = InputDir::new();
+        let path = dir.path("baseline");
+        let mut session = FakeSession::new(status(false), no_compositor_metrics());
+        let baseline = record_baseline(&mut session, &options(false)).unwrap();
+        std::fs::write(&path, serde_json::to_vec(&baseline).unwrap()).unwrap();
+        assert_eq!(load_baseline(&path).unwrap(), baseline);
+        std::fs::write(&path, b"{corrupt").unwrap();
+        assert!(load_baseline(&path).unwrap_err().contains("baseline"));
+        std::fs::write(&path, [0xff]).unwrap();
+        assert!(load_baseline(&path).is_err());
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len(MAX_BASELINE_BYTES + 1)
+            .unwrap();
+        assert!(load_baseline(&path).unwrap_err().contains("byte limit"));
+        assert!(load_baseline(&dir.0).unwrap_err().contains("regular file"));
+        let fifo = dir.path("fifo");
+        nix::unistd::mkfifo(
+            &fifo,
+            nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
+        )
+        .unwrap();
+        assert!(load_baseline(&fifo).unwrap_err().contains("regular file"));
+    }
+
+    #[test]
+    fn compare_file_entry_rejects_negative_recorded_metrics() {
+        let directory = InputDir::new();
+        let baseline_path = directory.path("baseline.json");
+        let candidate_path = directory.path("candidate.json");
+        let baseline = PerfBaselineV1 {
+            schema_version: perf_contract::SCHEMA_VERSION,
+            recorded_at: "2026-09-30T00:00:00Z".into(),
+            jwm_version: "0.2.0".into(),
+            label: SystemLabel {
+                cpu: "test-cpu".into(),
+                gpu: "test-gpu".into(),
+                driver: "test-driver".into(),
+                kernel: "test-kernel".into(),
+                backend: "xcb".into(),
+                renderer_api: "glx/opengl".into(),
+                resolution: "1920x1080".into(),
+                config_fingerprint: "test-config".into(),
+            },
+            scenarios: BTreeMap::from([(
+                "idle".into(),
+                ScenarioResult::recorded(BTreeMap::from([("cpu_percent_avg".into(), 1.0)])),
+            )]),
+        };
+        assert!(
+            perf_contract::compare(&baseline, &baseline, &default_budgets())
+                .unwrap()
+                .passed
+        );
+        let mut candidate = baseline.clone();
+        candidate
+            .scenarios
+            .get_mut("idle")
+            .unwrap()
+            .metrics
+            .insert("cpu_percent_avg".into(), -1.0);
+        std::fs::write(&baseline_path, serde_json::to_vec(&baseline).unwrap()).unwrap();
+        std::fs::write(&candidate_path, serde_json::to_vec(&candidate).unwrap()).unwrap();
+
+        let error = run_compare(&baseline_path, &candidate_path, true).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        // The CLI prints the detailed refusal as JSON and exposes a stable
+        // generic I/O error to its caller.
+        assert_eq!(error.to_string(), "comparison refused");
+    }
 
     const COMPOSITOR_SCENARIOS: [&str; 5] = [
         "steady_frame",
@@ -1450,6 +1877,95 @@ mod tests {
             .expect("a session without a compositor still yields a baseline");
 
         assert_eq!(baseline.label.resolution, "4480x1440");
+    }
+
+    #[test]
+    fn monitor_extent_is_independent_of_coordinate_origin() {
+        for (x, y) in [(-1920, -1080), (500, 700), (0, 0)] {
+            let monitors = [
+                json!({ "x": x, "y": y, "w": 1920, "h": 1080 }),
+                json!({ "x": x + 1920, "y": y + 360, "w": 2560, "h": 1440 }),
+            ];
+            assert_eq!(screen_extent(&monitors).as_deref(), Some("4480x1800"));
+        }
+        for monitor in [
+            json!({ "x": 0, "y": 0, "w": -1, "h": 1080 }),
+            json!({ "x": i64::MAX, "y": 0, "w": 1, "h": 1080 }),
+        ] {
+            assert_eq!(screen_extent(&[monitor]), None);
+        }
+        assert_eq!(
+            screen_extent(&[
+                json!({ "x": i64::MIN, "y": 0, "w": 1, "h": 1 }),
+                json!({ "x": 0, "y": 0, "w": 1, "h": 1 }),
+            ]),
+            None
+        );
+    }
+
+    #[test]
+    fn host_labels_allow_regular_symlinks_and_reject_invalid_inputs() {
+        let dir = InputDir::new();
+        let label = dir.path("label");
+        std::fs::write(&label, "  Host CPU\n").unwrap();
+        let link = dir.path("link");
+        std::os::unix::fs::symlink(&label, &link).unwrap();
+        assert_eq!(
+            nonempty_label(&read_host_label(&link).unwrap()).as_deref(),
+            Some("Host CPU")
+        );
+        assert_eq!(nonempty_label(" \n\t"), None);
+        assert!(read_host_label(&dir.0).is_err());
+        let fifo = dir.path("fifo");
+        nix::unistd::mkfifo(
+            &fifo,
+            nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
+        )
+        .unwrap();
+        assert!(read_host_label(&fifo).is_err());
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&label)
+            .unwrap()
+            .set_len(MAX_HOST_LABEL_BYTES + 1)
+            .unwrap();
+        assert!(read_host_label(&link).is_err());
+        std::fs::write(&label, [0xff]).unwrap();
+        assert!(read_host_label(&label).is_err());
+    }
+
+    #[test]
+    fn idle_metrics_reject_counter_resets_instead_of_recording_zero() {
+        let first = ProcSample {
+            cpu_ticks: 100,
+            voluntary_switches: 50,
+            rss_kb: 1024,
+        };
+        let mut second = ProcSample {
+            cpu_ticks: 120,
+            voluntary_switches: 54,
+            rss_kb: 2048,
+        };
+        let metrics = idle_metrics(&first, &second, 100.0, 2.0).unwrap();
+        assert_eq!(metrics["cpu_percent_avg"], 10.0);
+        assert_eq!(metrics["wakeups_per_s"], 2.0);
+        assert_eq!(metrics["rss_mb"], 2.0);
+        second.cpu_ticks = 99;
+        assert!(
+            idle_metrics(&first, &second, 100.0, 2.0)
+                .unwrap_err()
+                .contains("CPU counter")
+        );
+        second.cpu_ticks = 120;
+        second.voluntary_switches = 49;
+        assert!(
+            idle_metrics(&first, &second, 100.0, 2.0)
+                .unwrap_err()
+                .contains("context-switch")
+        );
+        for elapsed in [0.0, f64::NAN, f64::INFINITY] {
+            assert!(idle_metrics(&first, &first, 100.0, elapsed).is_err());
+        }
     }
 
     #[test]

@@ -32,6 +32,7 @@ cargo build --locked
 cargo fmt --all -- --check
 scripts/lint-shell.sh
 scripts/test-git-update-all.sh
+scripts/test-install-jwm-build.sh
 cargo check --locked --all-targets
 cargo clippy --locked --lib --bins --tests --no-deps -- -D warnings
 cargo test --locked --lib --bins --tests

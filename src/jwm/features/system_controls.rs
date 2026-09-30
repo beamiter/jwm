@@ -3190,12 +3190,18 @@ Source #51
         feedback.queue_audio_device_osd(false, "Built-in Speakers".into());
         assert_eq!(
             feedback.take_pending_osd(),
-            Some(OsdCorrection::audio_device(false, "Built-in Speakers".into()))
+            Some(OsdCorrection::audio_device(
+                false,
+                "Built-in Speakers".into()
+            ))
         );
         feedback.queue_audio_device_osd(true, "Headset Microphone".into());
         assert_eq!(
             feedback.take_pending_osd(),
-            Some(OsdCorrection::audio_device(true, "Headset Microphone".into()))
+            Some(OsdCorrection::audio_device(
+                true,
+                "Headset Microphone".into()
+            ))
         );
         // Device switches do not owe a card through the level path.
         feedback.owe_osd(ControlDomain::AudioDevice, 1);
@@ -3254,7 +3260,10 @@ Source #51
         feedback.queue_audio_device_osd(true, "Headset Microphone".into());
         assert_eq!(
             feedback.take_pending_osd(),
-            Some(OsdCorrection::audio_device(true, "Headset Microphone".into()))
+            Some(OsdCorrection::audio_device(
+                true,
+                "Headset Microphone".into()
+            ))
         );
         assert_eq!(feedback.take_pending_osd(), None);
     }

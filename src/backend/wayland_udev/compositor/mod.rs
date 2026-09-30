@@ -2751,11 +2751,7 @@ impl WaylandCompositor {
                 hud_program,
                 hud_scene_linear: get_uniform_loc(gl, hud_program, "u_scene_linear"),
                 sysui_text_program,
-                sysui_text_scene_linear: get_uniform_loc(
-                    gl,
-                    sysui_text_program,
-                    "u_scene_linear",
-                ),
+                sysui_text_scene_linear: get_uniform_loc(gl, sysui_text_program, "u_scene_linear"),
                 temporal_blur_mix_program,
                 glass_backdrop: None,
                 glass_backdrop_linear: false,

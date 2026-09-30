@@ -383,13 +383,17 @@ impl Jwm {
                     w: rect.w,
                     h: rect.h,
                 };
-                restore_rect.is_configurable().then_some(MaximizeRestoreState {
-                    restore_rect,
-                    promoted: client.state.maximize_restore_tiled,
-                })
+                restore_rect
+                    .is_configurable()
+                    .then_some(MaximizeRestoreState {
+                        restore_rect,
+                        promoted: client.state.maximize_restore_tiled,
+                    })
             });
         let result = match snapshot {
-            Some(state) => backend.property_ops().set_maximize_restore_state(win, state),
+            Some(state) => backend
+                .property_ops()
+                .set_maximize_restore_state(win, state),
             None => backend.property_ops().clear_maximize_restore_state(win),
         };
         if let Err(error) = result {
@@ -441,7 +445,9 @@ impl Jwm {
             })
             .flatten();
         let result = match snapshot {
-            Some(state) => backend.property_ops().set_floating_restore_state(win, state),
+            Some(state) => backend
+                .property_ops()
+                .set_floating_restore_state(win, state),
             None => backend.property_ops().clear_floating_restore_state(win),
         };
         if let Err(error) = result {
@@ -1618,12 +1624,7 @@ mod tests {
             // neighbour to the tile behind it.
             let clients = jwm.state.monitor_clients[monitor].clone();
             assert_eq!(
-                crate::jwm::maximize::resting_anchor(
-                    &jwm.state,
-                    &clients,
-                    x,
-                    Some(y),
-                ),
+                crate::jwm::maximize::resting_anchor(&jwm.state, &clients, x, Some(y),),
                 Some(z),
                 "chain through promoted neighbour under {case}"
             );
@@ -1637,7 +1638,8 @@ mod tests {
                         jwm.setfullscreen(&mut backend, y, false)
                             .expect("leave fullscreen");
                     } else {
-                        jwm.set_client_pip(&mut backend, y, false).expect("leave pip");
+                        jwm.set_client_pip(&mut backend, y, false)
+                            .expect("leave pip");
                     }
                 }
                 toggle_maximize_of(&mut jwm, &mut backend, key);
@@ -1895,8 +1897,7 @@ mod tests {
             .expect("setclientstate")
             .0;
         assert!(
-            sync_urgent.contains(&broadcast)
-                && sync_urgent.contains("previous_urgent != urgent"),
+            sync_urgent.contains(&broadcast) && sync_urgent.contains("previous_urgent != urgent"),
             "sync_client_urgent_state must broadcast only when is_urgent flips"
         );
         let pip = fullscreen
@@ -1942,8 +1943,7 @@ mod tests {
             .expect("scratchpad_reveal_tests")
             .0;
         assert!(
-            focus_fn.contains(&broadcast)
-                && focus_fn.contains("previous_focus != client_key_opt"),
+            focus_fn.contains(&broadcast) && focus_fn.contains("previous_focus != client_key_opt"),
             "focus must broadcast window/state for previous and new clients only on a real flip"
         );
         let snap = include_str!("layout/drag_attach.rs");
@@ -1982,10 +1982,7 @@ mod tests {
             settle.contains(&broadcast) && settle.contains("if changed"),
             "settle_released_drag must broadcast when an unselected float settles in place"
         );
-        let layout_broadcast = format!(
-            "broadcast_visible_window_{}_on_monitor",
-            "states"
-        );
+        let layout_broadcast = format!("broadcast_visible_window_{}_on_monitor", "states");
         let nav = include_str!("navigation.rs");
         let movestack = nav
             .split_once("pub fn movestack(")
@@ -2030,8 +2027,7 @@ mod tests {
             .expect("scrolling_column_width_rule_for_window")
             .0;
         assert!(
-            scroll_focus.contains(&layout_broadcast)
-                && scroll_focus.contains("self.arrange"),
+            scroll_focus.contains(&layout_broadcast) && scroll_focus.contains("self.arrange"),
             "scrolling_focus_window must broadcast after a column rearrange"
         );
         let focus_mgr = include_str!("focus_manager.rs");
@@ -2043,32 +2039,15 @@ mod tests {
             .expect("focus_none")
             .0;
         assert!(
-            focusstack.contains(&layout_broadcast)
-                && focusstack.contains("is_vstack_layout"),
+            focusstack.contains(&layout_broadcast) && focusstack.contains("is_vstack_layout"),
             "focusstack must broadcast visible clients after a vstack rearrange"
         );
         let nav = include_str!("navigation.rs");
         for (name, start, end) in [
-            (
-                "view",
-                "pub fn view(",
-                "pub fn toggleview(",
-            ),
-            (
-                "toggleview",
-                "pub fn toggleview(",
-                "pub fn toggletag(",
-            ),
-            (
-                "togglebar",
-                "pub fn togglebar(",
-                "pub fn setcfact(",
-            ),
-            (
-                "setcfact",
-                "pub fn setcfact(",
-                "pub fn movestack(",
-            ),
+            ("view", "pub fn view(", "pub fn toggleview("),
+            ("toggleview", "pub fn toggleview(", "pub fn toggletag("),
+            ("togglebar", "pub fn togglebar(", "pub fn setcfact("),
+            ("setcfact", "pub fn setcfact(", "pub fn movestack("),
         ] {
             let body = nav
                 .split_once(start)
@@ -2192,8 +2171,7 @@ mod tests {
             .expect("setclienttagprop")
             .0;
         assert!(
-            sendmon.contains(&broadcast)
-                && sendmon.contains("client.mon == Some(target_mon_key)"),
+            sendmon.contains(&broadcast) && sendmon.contains("client.mon == Some(target_mon_key)"),
             "sendmon must broadcast after a real monitor move"
         );
         let nav = include_str!("navigation.rs");

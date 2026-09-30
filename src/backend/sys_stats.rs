@@ -97,18 +97,28 @@ impl SysStatsSampler {
             .and_then(|s| parse_proc_stat_cpu_total(&s));
 
         if let (Some(pj), Some(tj)) = (proc_j, total_j) {
-            if self.initialized {
-                let dp = pj.saturating_sub(self.last_proc_jiffies);
-                let dt = tj.saturating_sub(self.last_total_jiffies);
-                if dt > 0 {
-                    let ncpu = num_cpus_online().max(1) as f32;
-                    self.cpu_pct = 100.0 * (dp as f32 / dt as f32) * ncpu;
+            self.record_cpu_sample(pj, tj, num_cpus_online());
+        }
+    }
+
+    fn record_cpu_sample(&mut self, proc_jiffies: u64, total_jiffies: u64, cpus: usize) {
+        if self.initialized {
+            // A reset or inconsistent pair cannot describe elapsed CPU time.
+            // Reading the two proc counters separately can also skew their
+            // interval endpoints, yielding dp > dt. Keep the last valid value,
+            // adopt this pair as a baseline, and wait for a coherent interval.
+            if let (Some(dp), Some(dt)) = (
+                proc_jiffies.checked_sub(self.last_proc_jiffies),
+                total_jiffies.checked_sub(self.last_total_jiffies),
+            ) {
+                if dt > 0 && dp <= dt {
+                    self.cpu_pct = 100.0 * (dp as f32 / dt as f32) * cpus.max(1) as f32;
                 }
             }
-            self.last_proc_jiffies = pj;
-            self.last_total_jiffies = tj;
-            self.initialized = true;
         }
+        self.last_proc_jiffies = proc_jiffies;
+        self.last_total_jiffies = total_jiffies;
+        self.initialized = true;
     }
 
     pub fn rss_mib(&self) -> f32 {
@@ -130,11 +140,10 @@ pub(crate) fn parse_vmrss_kib(status: &str) -> Option<u64> {
     for line in status.lines() {
         if let Some(rest) = line.strip_prefix("VmRSS:") {
             let mut parts = rest.split_whitespace();
-            if let Some(num) = parts.next() {
-                if let Ok(v) = num.parse::<u64>() {
-                    return Some(v);
-                }
-            }
+            let value = parts.next()?.parse::<u64>().ok()?;
+            // `/proc/status` reports this field in kB (KiB). A missing or
+            // different unit cannot be interpreted as the same measurement.
+            return (parts.next() == Some("kB") && parts.next().is_none()).then_some(value);
         }
     }
     None
@@ -170,7 +179,7 @@ pub(crate) fn parse_proc_stat_cpu_total(stat: &str) -> Option<u64> {
     let line = stat.lines().find(|l| l.starts_with("cpu "))?;
     let mut total: u64 = 0;
     for tok in line.split_whitespace().skip(1).take(PROC_STAT_TIME_BUCKETS) {
-        total = total.saturating_add(tok.parse::<u64>().ok()?);
+        total = total.checked_add(tok.parse::<u64>().ok()?)?;
     }
     if total == 0 { None } else { Some(total) }
 }
@@ -183,6 +192,30 @@ fn num_cpus_online() -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cpu_counter_resets_and_inconsistent_samples_rebaseline_without_false_readings() {
+        let mut sampler = SysStatsSampler::new();
+        sampler.record_cpu_sample(100, 1000, 4);
+        sampler.record_cpu_sample(110, 1100, 4);
+        assert_eq!(sampler.cpu_pct(), 40.0);
+        for (proc, total) in [(5, 1200), (10, 100), (500, 110), (501, 110)] {
+            sampler.record_cpu_sample(proc, total, 4);
+            assert_eq!(sampler.cpu_pct(), 40.0);
+        }
+        sampler.record_cpu_sample(506, 210, 4);
+        assert_eq!(sampler.cpu_pct(), 20.0);
+        sampler.record_cpu_sample(506, 310, 4);
+        assert_eq!(sampler.cpu_pct(), 0.0);
+    }
+
+    #[test]
+    fn aggregate_cpu_counter_rejects_overflow_instead_of_saturating() {
+        assert_eq!(
+            parse_proc_stat_cpu_total(&format!("cpu {} 1\n", u64::MAX)),
+            None
+        );
+    }
 
     #[test]
     fn proc_readers_enforce_exact_byte_limits_and_stop_after_the_first_line() {
@@ -231,6 +264,14 @@ VmData:\t  100000 kB
     #[test]
     fn vmrss_missing_returns_none() {
         assert_eq!(parse_vmrss_kib("Name:\tjwm\nState:\tR\n"), None);
+    }
+
+    #[test]
+    fn vmrss_requires_the_kernel_unit_and_a_complete_field() {
+        assert_eq!(parse_vmrss_kib("VmRSS:\t0 kB\n"), Some(0));
+        for invalid in ["42", "42 MB", "42 kB extra", "-1 kB", "NaN kB"] {
+            assert_eq!(parse_vmrss_kib(&format!("VmRSS: {invalid}\n")), None);
+        }
     }
 
     #[test]

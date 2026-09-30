@@ -17,6 +17,7 @@ pub mod doctor;
 #[path = "jwm/features/external_command.rs"]
 pub(crate) mod external_command;
 pub mod ipc;
+pub mod ipc_connection;
 pub mod ipc_server;
 pub mod jwm;
 #[cfg(feature = "remote-x11")]

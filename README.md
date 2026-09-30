@@ -118,6 +118,13 @@ configuration unless `--gen-config` is used:
 scripts/install_jwm_scripts.sh --help
 ```
 
+The installer uses `CARGO_TARGET_DIR` when set (relative paths are resolved from
+the project root), otherwise `target/`. Native bar installation uses a separate
+`bar-install/<bar>` cache and the bar's committed dependency lock. If Cargo
+reports a missing generated XCB source such as `out/randr.rs`, the helper cleans
+only XCB artifacts for the selected build profile and retries once. Other build
+failures retain their exit status.
+
 Native bars need only the default bootstrap dependencies. Selecting a Tauri web
 bar also needs the Tauri 2 Linux libraries (`bootstrap_deps.sh --with-tauri`) and
 builds its frontend: React/Solid/Svelte/Vue variants require Node.js plus

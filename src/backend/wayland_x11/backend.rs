@@ -25,7 +25,7 @@ use smithay::backend::allocator::dmabuf::DmabufAllocator;
 use smithay::backend::allocator::gbm::{GbmAllocator, GbmBufferFlags};
 use smithay::backend::egl::{EGLContext, EGLDisplay};
 use smithay::backend::input::{
-    AbsolutePositionEvent, Axis, InputTime, Event as InputEventExt, InputBackend, InputEvent,
+    AbsolutePositionEvent, Axis, Event as InputEventExt, InputBackend, InputEvent, InputTime,
     KeyboardKeyEvent, PointerAxisEvent, PointerButtonEvent, PointerMotionEvent,
 };
 use smithay::backend::renderer::damage::OutputDamageTracker;

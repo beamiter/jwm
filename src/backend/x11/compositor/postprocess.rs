@@ -386,8 +386,7 @@ impl<C: CompositorConnection> Compositor<C> {
         unsafe {
             self.gl.disable(glow::SCISSOR_TEST);
             // Blit the present (default) framebuffer into the staging FBO.
-            self.gl
-                .bind_framebuffer(glow::READ_FRAMEBUFFER, None);
+            self.gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
             self.gl
                 .bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(pp_fbo));
             self.gl.blit_framebuffer(
@@ -434,18 +433,12 @@ impl<C: CompositorConnection> Compositor<C> {
                 .uniform_1_i32(self.postprocess_uniforms.invert.as_ref(), 0);
             self.gl
                 .uniform_1_i32(self.postprocess_uniforms.grayscale.as_ref(), 0);
-            self.gl.uniform_1_i32(
-                self.postprocess_uniforms.hdr_enabled.as_ref(),
-                0,
-            );
-            self.gl.uniform_1_i32(
-                self.magnifier_uniforms.magnifier_enabled.as_ref(),
-                0,
-            );
-            self.gl.uniform_1_i32(
-                self.magnifier_uniforms.colorblind_mode.as_ref(),
-                0,
-            );
+            self.gl
+                .uniform_1_i32(self.postprocess_uniforms.hdr_enabled.as_ref(), 0);
+            self.gl
+                .uniform_1_i32(self.magnifier_uniforms.magnifier_enabled.as_ref(), 0);
+            self.gl
+                .uniform_1_i32(self.magnifier_uniforms.colorblind_mode.as_ref(), 0);
             self.gl.active_texture(glow::TEXTURE0);
             self.gl.bind_texture(glow::TEXTURE_2D, Some(pp_tex));
             self.gl.bind_vertex_array(Some(self.quad_vao));

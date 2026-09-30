@@ -697,16 +697,7 @@ impl WaylandCompositor {
         }
 
         if self.capture_selection_active {
-            self.render_capture_veil(
-                gl,
-                projection,
-                x,
-                y,
-                w,
-                h,
-                self.snap_preview_opacity,
-                false,
-            );
+            self.render_capture_veil(gl, projection, x, y, w, h, self.snap_preview_opacity, false);
             return;
         }
 
@@ -800,13 +791,7 @@ impl WaylandCompositor {
                 gl.Uniform4f(self.border_uniforms.rect, rx, ry, rw, rh);
                 gl.Uniform2f(self.border_uniforms.size, rw, rh);
                 gl.Uniform1f(self.border_uniforms.border_width, rw.max(rh));
-                gl.Uniform4f(
-                    self.border_uniforms.border_color,
-                    sr,
-                    sg,
-                    sb,
-                    scrim_a,
-                );
+                gl.Uniform4f(self.border_uniforms.border_color, sr, sg, sb, scrim_a);
                 self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
             }
 
@@ -815,13 +800,7 @@ impl WaylandCompositor {
             gl.Uniform4f(self.border_uniforms.rect, x, y, width, height);
             gl.Uniform2f(self.border_uniforms.size, width, height);
             gl.Uniform1f(self.border_uniforms.border_width, width.max(height));
-            gl.Uniform4f(
-                self.border_uniforms.border_color,
-                wr,
-                wg,
-                wb,
-                wash_a,
-            );
+            gl.Uniform4f(self.border_uniforms.border_color, wr, wg, wb, wash_a);
             self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
 
             gl.Uniform4f(

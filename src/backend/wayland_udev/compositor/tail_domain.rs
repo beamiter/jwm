@@ -146,9 +146,9 @@ impl TailOverlayClass {
             | Self::Toast
             | Self::Osd
             | Self::SystemUi => TailOverlayDomain::CommonLinearAware,
-            Self::Annotation
-            | Self::ScreenshotToolbar
-            | Self::RecordingRegionOverlay => TailOverlayDomain::EncodedOnly,
+            Self::Annotation | Self::ScreenshotToolbar | Self::RecordingRegionOverlay => {
+                TailOverlayDomain::EncodedOnly
+            }
         }
     }
 
@@ -192,9 +192,9 @@ impl TailOverlayClass {
             | Self::Toast
             | Self::Osd
             | Self::SystemUi => TailOverlayStage::LinearTarget,
-            Self::Annotation
-            | Self::ScreenshotToolbar
-            | Self::RecordingRegionOverlay => TailOverlayStage::PostDelivery,
+            Self::Annotation | Self::ScreenshotToolbar | Self::RecordingRegionOverlay => {
+                TailOverlayStage::PostDelivery
+            }
         }
     }
 
@@ -515,8 +515,7 @@ mod tests {
         // UI are common-linear-aware: visible but absent here.
         assert_eq!(
             blockers.iter().collect::<Vec<_>>(),
-            [TailOverlayClass::RecordingRegionOverlay,
-            ]
+            [TailOverlayClass::RecordingRegionOverlay,]
         );
 
         let all_visible = TailOverlayVisibility {

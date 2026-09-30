@@ -58,12 +58,12 @@ pub fn cursor_candidates(kind: StdCursorKind) -> &'static [&'static str] {
 /// Pick the frame whose nominal size is closest to `target_size`. We don't
 /// animate, so for animated cursors we return the first frame of that size.
 pub fn pick_nearest_image(images: &[Image], target_size: u32) -> Option<&Image> {
-    let nearest = images
-        .iter()
-        .min_by_key(|img| target_size.abs_diff(img.size))?;
+    // min_by_key retains the first minimum, which is already the first
+    // animation frame of the nearest nominal size. Pixel dimensions may be
+    // shared by different nominal sizes and must not select another frame.
     images
         .iter()
-        .find(|img| img.width == nearest.width && img.height == nearest.height)
+        .min_by_key(|img| target_size.abs_diff(img.size))
 }
 
 fn read_xcursor_file(path: &Path) -> Option<Vec<u8>> {
@@ -353,6 +353,20 @@ mod tests {
     fn nearest_image_handles_untrusted_u32_sizes_without_overflow() {
         let images = [image(0x8000_0001, 8), image(2, 2)];
         assert_eq!(pick_nearest_image(&images, 1).unwrap().width, 2);
+    }
+
+    #[test]
+    fn nearest_image_uses_nominal_size_even_when_pixel_dimensions_match() {
+        let images = [image(16, 24), image(32, 24), image(32, 28)];
+        assert!(std::ptr::eq(
+            pick_nearest_image(&images, 32).unwrap(),
+            &images[1]
+        ));
+        assert!(std::ptr::eq(
+            pick_nearest_image(&images, 24).unwrap(),
+            &images[0]
+        ));
+        assert!(pick_nearest_image(&[], 24).is_none());
     }
 
     #[test]

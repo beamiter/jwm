@@ -128,6 +128,15 @@ impl ScrollingState {
     }
 
     pub fn insert_new_client(&mut self, client_key: ClientKey) {
+        // Sync can deliver a repeated key before it rebuilds its membership
+        // snapshot. Admission must preserve the existing column and focus.
+        if self
+            .columns
+            .iter()
+            .any(|column| column.contains(&client_key))
+        {
+            return;
+        }
         self.ensure_column_metadata();
 
         if self.attach_new_windows_to_focused_column {
@@ -176,10 +185,10 @@ impl ScrollingState {
     ) -> Vec<ScrollingOverviewGeometry> {
         let visible: HashSet<ClientKey> = visible_clients.iter().copied().collect();
         let mut seen = HashSet::new();
+        let column_clients: HashSet<ClientKey> = self.columns.iter().flatten().copied().collect();
         let orphan_count = visible_clients
             .iter()
-            .copied()
-            .filter(|key| !self.columns.iter().any(|column| column.contains(key)))
+            .filter(|key| !column_clients.contains(key))
             .count();
         let column_weights = self
             .columns
@@ -570,7 +579,11 @@ impl Pertag {
         if tags < 2 {
             return false;
         }
-        let all = if tags >= 32 { u32::MAX } else { (1u32 << tags) - 1 };
+        let all = if tags >= 32 {
+            u32::MAX
+        } else {
+            (1u32 << tags) - 1
+        };
         mask & all == all
     }
 
@@ -692,7 +705,11 @@ impl WMMonitor {
         self.tag_set[self.sel_tags] = tag_mask;
 
         // 计算新的 cur_tag 索引 (用于 Pertag)
-        let new_cur_tag = if self.pertag.as_ref().is_some_and(|p| p.is_all_tags(tag_mask)) {
+        let new_cur_tag = if self
+            .pertag
+            .as_ref()
+            .is_some_and(|p| p.is_all_tags(tag_mask))
+        {
             // 查看所有标签
             0
         } else {
@@ -1271,6 +1288,25 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
+    fn repeated_scrolling_admission_preserves_columns_and_focus() {
+        let mut keys = slotmap::SlotMap::<ClientKey, ()>::with_key();
+        let a = keys.insert(());
+        let b = keys.insert(());
+        for attach in [false, true] {
+            let mut state = ScrollingState::new();
+            state.insert_new_client(a);
+            state.insert_new_client(b);
+            state.column_width_factors = vec![0.7, 1.3];
+            state.attach_new_windows_to_focused_column = attach;
+            state.insert_new_client(a);
+            assert_eq!(state.columns, vec![vec![a], vec![b]]);
+            assert_eq!(state.column_width_factors, vec![0.7, 1.3]);
+            assert_eq!(state.focused_column_index(), Some(1));
+            assert_eq!(state.target_for_column(1), Some(b));
+        }
+    }
+
+    #[test]
     fn test_scrolling_state_new() {
         let s = ScrollingState::new();
         assert!(s.columns.is_empty());
@@ -1449,6 +1485,54 @@ mod tests {
         assert!(geometry[2].focused_column);
         assert!((geometry[3].x_ratio - 0.75).abs() < 0.0001);
         assert_eq!(geometry[3].column_index, 2);
+    }
+
+    #[test]
+    fn scrolling_overview_keeps_large_strip_and_orphan_order() {
+        let mut keys = slotmap::SlotMap::<ClientKey, ()>::with_key();
+        let clients: Vec<_> = (0..384).map(|_| keys.insert(())).collect();
+        let mut state = ScrollingState::new();
+        state.columns = clients[..256].iter().map(|&key| vec![key]).collect();
+        let visible: Vec<_> = clients.iter().rev().copied().collect();
+        let geometry = state.overview_strip_geometry(&visible);
+        let expected: Vec<_> = clients[..256]
+            .iter()
+            .chain(clients[256..].iter().rev())
+            .copied()
+            .collect();
+        assert_eq!(
+            geometry.iter().map(|g| g.client).collect::<Vec<_>>(),
+            expected
+        );
+        for (index, item) in geometry.iter().enumerate() {
+            assert_eq!(item.column_index, index);
+            assert!((item.x_ratio - index as f32 / 384.0).abs() < 0.0001);
+            assert!((item.width_ratio - 1.0 / 384.0).abs() < 0.0001);
+            assert_eq!(item.height_ratio, 1.0);
+        }
+    }
+
+    #[test]
+    fn scrolling_overview_preserves_hidden_columns_and_duplicate_visible_weights() {
+        let mut keys = slotmap::SlotMap::<ClientKey, ()>::with_key();
+        let hidden = keys.insert(());
+        let visible = keys.insert(());
+        let orphan = keys.insert(());
+        let mut state = ScrollingState::new();
+        state.columns = vec![vec![hidden], vec![visible]];
+        state.column_width_factors = vec![2.0, 1.0];
+
+        // Keep the existing weighting semantics, including duplicate input
+        // identities, while emitting each synthetic column only once.
+        let geometry = state.overview_strip_geometry(&[orphan, visible, orphan]);
+        assert_eq!(geometry.len(), 2);
+        assert_eq!(geometry[0].client, visible);
+        assert_eq!(geometry[0].column_index, 1);
+        assert!((geometry[0].x_ratio - 0.4).abs() < 0.0001);
+        assert!((geometry[0].width_ratio - 0.2).abs() < 0.0001);
+        assert_eq!(geometry[1].client, orphan);
+        assert_eq!(geometry[1].column_index, 2);
+        assert!((geometry[1].x_ratio - 0.6).abs() < 0.0001);
     }
 
     #[test]

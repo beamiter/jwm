@@ -10,6 +10,7 @@ use std::fmt;
 /// Why a command string could not be converted into argv.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CommandLineParseError {
+    NulCharacter,
     TrailingEscape,
     UnterminatedQuote(char),
 }
@@ -17,6 +18,7 @@ pub enum CommandLineParseError {
 impl fmt::Display for CommandLineParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::NulCharacter => f.write_str("command contains a NUL character"),
             Self::TrailingEscape => f.write_str("command ends with an unfinished escape"),
             Self::UnterminatedQuote(quote) => {
                 write!(f, "command has an unterminated {quote} quote")
@@ -27,6 +29,13 @@ impl fmt::Display for CommandLineParseError {
 
 impl std::error::Error for CommandLineParseError {}
 
+/// Check argv before passing it to a process. Empty trailing arguments are valid.
+pub(crate) fn valid_command_argv(argv: &[String]) -> bool {
+    argv.first()
+        .is_some_and(|program| !program.trim().is_empty())
+        && argv.iter().all(|argument| !argument.contains('\0'))
+}
+
 /// Split one command line into argv without invoking or emulating a shell.
 ///
 /// Single and double quotes preserve whitespace; backslashes escape the next
@@ -36,7 +45,8 @@ impl std::error::Error for CommandLineParseError {}
 /// # Errors
 ///
 /// Returns [`CommandLineParseError`] when a quote or trailing escape is left
-/// unfinished.
+/// unfinished, or when an argument contains a NUL that cannot be passed to a
+/// process.
 pub fn split_command_line(input: &str) -> Result<Vec<String>, CommandLineParseError> {
     let mut args = Vec::new();
     let mut current = String::new();
@@ -45,6 +55,9 @@ pub fn split_command_line(input: &str) -> Result<Vec<String>, CommandLineParseEr
     let mut token_started = false;
 
     for ch in input.chars() {
+        if ch == '\0' {
+            return Err(CommandLineParseError::NulCharacter);
+        }
         if escaped {
             current.push(ch);
             escaped = false;
@@ -102,6 +115,26 @@ pub fn split_command_line(input: &str) -> Result<Vec<String>, CommandLineParseEr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nul_characters_are_rejected_before_process_launch() {
+        for command in [
+            "to\0ol",
+            "tool value\0",
+            "tool 'val\0ue'",
+            "tool \"val\0ue\"",
+            "tool \\\0",
+        ] {
+            assert_eq!(
+                split_command_line(command),
+                Err(CommandLineParseError::NulCharacter)
+            );
+        }
+        assert_eq!(
+            CommandLineParseError::NulCharacter.to_string(),
+            "command contains a NUL character"
+        );
+    }
 
     #[test]
     fn quotes_escapes_and_empty_arguments_preserve_argv_boundaries() {

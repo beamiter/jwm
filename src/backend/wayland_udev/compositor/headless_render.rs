@@ -5110,7 +5110,13 @@ fn wayland_tail_overlay_edge_glow_matches_legacy_srgb_scanout() {
         }
         // Far from the mouse edge the glow must leave the background untouched.
         assert_pixel(
-            frame_pixel(&linear, W as usize, H as usize, W as usize - 2, H as usize / 2),
+            frame_pixel(
+                &linear,
+                W as usize,
+                H as usize,
+                W as usize - 2,
+                H as usize / 2,
+            ),
             background,
             1,
             "edge glow must not bleed onto the far edge",
@@ -6939,8 +6945,12 @@ fn magnifier_postprocess_decodes_its_result_for_a_linear_target() {
     const W: i32 = 16;
     const H: i32 = 16;
     let input = [200u8, 100, 50, 255];
-    let prog = link(gl, s::VERTEX_SHADER, s::MAGNIFIER_POSTPROCESS_FRAGMENT_SHADER)
-        .unwrap_or_else(|log| panic!("magnifier postprocess must link:\n{log}"));
+    let prog = link(
+        gl,
+        s::VERTEX_SHADER,
+        s::MAGNIFIER_POSTPROCESS_FRAGMENT_SHADER,
+    )
+    .unwrap_or_else(|log| panic!("magnifier postprocess must link:\n{log}"));
     assert!(
         unsafe { gl.get_uniform_location(prog, "u_scene_linear") }.is_some(),
         "postprocess program optimized out u_scene_linear"
@@ -6981,11 +6991,21 @@ fn magnifier_postprocess_decodes_its_result_for_a_linear_target() {
         if grayscale == 0 {
             assert_pixel(encoded, input, 2, "postprocess identity, encoded");
         } else {
-            assert_pixel(encoded, [118, 118, 118, 255], 2, "postprocess grayscale, encoded");
+            assert_pixel(
+                encoded,
+                [118, 118, 118, 255],
+                2,
+                "postprocess grayscale, encoded",
+            );
         }
         assert_pixel(
             render(grayscale, 1),
-            [decode(encoded[0]), decode(encoded[1]), decode(encoded[2]), 255],
+            [
+                decode(encoded[0]),
+                decode(encoded[1]),
+                decode(encoded[2]),
+                255,
+            ],
             1,
             "postprocess, linear target",
         );
@@ -8316,13 +8336,27 @@ fn wayland_settled_osd_survives_partial_damage_frames_unchanged() {
             render(&mut compositor);
             std::thread::sleep(std::time::Duration::from_millis(8));
         }
+        // The scheduling settle tolerance permits subpixel spring travel.
+        // This fixture compares a static card, so place its motion exactly at
+        // the target before taking the baseline. Later enabled-motion ticks
+        // retain that geometry because both spring velocities are now zero.
+        let target_w = compositor.osd_slot.get().unwrap().card_width();
+        compositor.osd_slot.motion_mut().advance_with_motion(
+            std::time::Instant::now(),
+            target_w,
+            crate::backend::compositor_common::osd::OSD_CARD_HEIGHT,
+            false,
+        );
         compositor.force_full_redraw();
         let settled = render(&mut compositor);
         let card_pixels = settled
             .chunks_exact(4)
             .filter(|px| *px != &settled[..4])
             .count();
-        assert!(card_pixels > 1000, "the OSD card did not draw ({card_pixels} px)");
+        assert!(
+            card_pixels > 1000,
+            "the OSD card did not draw ({card_pixels} px)"
+        );
 
         // Calm frames with damage far from the card (bottom-left corner).
         for _ in 0..6 {
@@ -8336,9 +8370,16 @@ fn wayland_settled_osd_survives_partial_damage_frames_unchanged() {
         let drifted = settled
             .chunks_exact(4)
             .zip(repaired.chunks_exact(4))
-            .filter(|(a, b)| a.iter().zip(b.iter()).any(|(x, y)| (*x as i32 - *y as i32).abs() > 2))
+            .filter(|(a, b)| {
+                a.iter()
+                    .zip(b.iter())
+                    .any(|(x, y)| (*x as i32 - *y as i32).abs() > 2)
+            })
             .count();
-        assert_eq!(drifted, 0, "{drifted} OSD pixels drifted across partial frames");
+        assert_eq!(
+            drifted, 0,
+            "{drifted} OSD pixels drifted across partial frames"
+        );
 
         assert!(compositor.release_gpu_resources(
             &gl,
@@ -8500,7 +8541,7 @@ fn wayland_smart_borders_ring_focused_and_unfocused_windows() {
         }
 
         let render = |compositor: &mut super::WaylandCompositor,
-                          scene: &[(u64, i32, i32, u32, u32)]| {
+                      scene: &[(u64, i32, i32, u32, u32)]| {
             compositor.force_full_redraw();
             compositor.render_frame(&gl, scene, Some(1), false, false, false, None, false);
             read_fbo_frame(&gl, compositor.output_fbo, W, H)
@@ -8512,7 +8553,12 @@ fn wayland_smart_borders_ring_focused_and_unfocused_windows() {
         let reference = render(&mut compositor, &[(1, 20, 20, 40, 30)]);
         compositor.border_enabled = true;
         let lone = render(&mut compositor, &[(1, 20, 20, 40, 30)]);
-        assert_pixel(ring(&lone, 20), ring(&reference, 20), 1, "a lone client has no ring");
+        assert_pixel(
+            ring(&lone, 20),
+            ring(&reference, 20),
+            1,
+            "a lone client has no ring",
+        );
 
         let pair = render(
             &mut compositor,
@@ -8545,10 +8591,7 @@ fn wayland_smart_borders_ring_focused_and_unfocused_windows() {
 
         // Stacking: window 2 floats over window 1's left edge, so window 1's
         // ring there must be covered by window 2's content, not drawn on it.
-        let stacked = render(
-            &mut compositor,
-            &[(1, 20, 20, 40, 30), (2, 10, 25, 40, 30)],
-        );
+        let stacked = render(&mut compositor, &[(1, 20, 20, 40, 30), (2, 10, 25, 40, 30)]);
         // Window 2's (unfocused, so slightly dimmed) green content, not
         // window 1's red ring.
         let covered = ring(&stacked, 20);
@@ -8580,7 +8623,10 @@ fn wayland_benchmark_samples_rendered_frames_to_completion() {
     unsafe {
         let mut compositor = super::WaylandCompositor::new(&gl, 64, 48, false)
             .expect("headless Wayland compositor must initialize");
-        assert!(!compositor.benchmark_start(0, 0), "an empty request is refused");
+        assert!(
+            !compositor.benchmark_start(0, 0),
+            "an empty request is refused"
+        );
         assert!(compositor.benchmark_start(3, 2));
         assert!(compositor.benchmark_report().is_none(), "not complete yet");
 
@@ -8602,7 +8648,9 @@ fn wayland_benchmark_samples_rendered_frames_to_completion() {
             "GL_RENDERER was captured"
         );
         assert!(
-            report["zones"].as_object().is_some_and(|zones| !zones.is_empty()),
+            report["zones"]
+                .as_object()
+                .is_some_and(|zones| !zones.is_empty()),
             "the profiler fed its zones"
         );
 
@@ -8624,7 +8672,10 @@ fn wayland_benchmark_samples_rendered_frames_to_completion() {
             rebuilt.force_full_redraw();
             rebuilt.render_frame(&gl, &[], None, false, false, false, None, false);
         }
-        assert!(rebuilt.benchmark_is_complete(), "samples carried across the rebuild");
+        assert!(
+            rebuilt.benchmark_is_complete(),
+            "samples carried across the rebuild"
+        );
         assert!(rebuilt.release_gpu_resources(
             &gl,
             super::CompositorOutputTextureOwnership::RawCompositor,
@@ -8778,7 +8829,10 @@ fn wayland_lock_shield_hides_the_scene_from_capture_on_the_linear_route() {
                 .chunks_exact(4)
                 .filter(|px| px[1] > 200 && px[0] < 60 && px[2] < 60)
                 .count();
-            assert_eq!(leaked, 0, "{label}: {leaked} client pixels show through the lock");
+            assert_eq!(
+                leaked, 0,
+                "{label}: {leaked} client pixels show through the lock"
+            );
             // A corner, away from the lock card: the themed backdrop, decoded
             // on the way in and re-encoded on the way out.
             assert_pixel(

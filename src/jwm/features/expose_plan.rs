@@ -629,10 +629,7 @@ mod tests {
         assert_eq!(expose_press(1), ExposePress::Commit);
         assert_eq!(expose_press(2), ExposePress::Close);
         assert_eq!(expose_press(3), ExposePress::Commit);
-        assert_eq!(
-            expose_press(4),
-            ExposePress::Browse(ExposeNavDirection::Up)
-        );
+        assert_eq!(expose_press(4), ExposePress::Browse(ExposeNavDirection::Up));
         assert_eq!(
             expose_press(5),
             ExposePress::Browse(ExposeNavDirection::Down)

@@ -53,6 +53,9 @@ jobs:
       - name: Exercise release install lifecycle
         run: bash scripts/test-install-lifecycle.sh
 
+      - name: Exercise source installer build recovery
+        run: bash scripts/test-install-jwm-build.sh
+
       - name: Exercise offline metrics-tool contracts
         run: bash scripts/test-metrics-tools.sh
 

@@ -46,6 +46,19 @@ fn increment_aligned_dimension(size: i32, base: i32, increment: i32) -> i32 {
     clamp_dimension(aligned + base)
 }
 
+// Keep boundary arithmetic wide until the final representable coordinate.
+// Both incoming configure sizes and global output origins are signed i32.
+fn constrain_axis(position: &mut i32, origin: i32, span: i32, total: i64) {
+    let lower = i64::from(origin) - total.max(1) + 1;
+    let upper = i64::from(origin) + i64::from(span) - 1;
+    let constrained = if lower <= upper {
+        i64::from(*position).clamp(lower, upper)
+    } else {
+        lower
+    };
+    *position = constrained.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
+}
+
 /// 几何约束工具 - 纯函数集合
 pub struct GeometryConstraints;
 
@@ -64,35 +77,14 @@ impl GeometryConstraints {
         screen_w: i32,
         screen_h: i32,
     ) {
-        let min_x = -(total_width - 1);
-        let max_x = screen_w - 1;
-        if min_x <= max_x {
-            *x = (*x).clamp(min_x, max_x);
-        } else {
-            log::warn!(
-                "Skip screen X clamp because max_x({}) < min_x({}); total_width={}, screen_w={}",
-                max_x,
-                min_x,
-                total_width,
-                screen_w
-            );
-            *x = min_x;
-        }
-
-        let min_y = -(total_height - 1);
-        let max_y = screen_h - 1;
-        if min_y <= max_y {
-            *y = (*y).clamp(min_y, max_y);
-        } else {
-            log::warn!(
-                "Skip screen Y clamp because max_y({}) < min_y({}); total_height={}, screen_h={}",
-                max_y,
-                min_y,
-                total_height,
-                screen_h
-            );
-            *y = min_y;
-        }
+        Self::constrain_to_screen_wide(
+            x,
+            y,
+            i64::from(total_width),
+            i64::from(total_height),
+            screen_w,
+            screen_h,
+        );
     }
 
     /// 约束坐标到监视器工作区范围内
@@ -108,43 +100,36 @@ impl GeometryConstraints {
         total_height: i32,
         monitor_geometry: &MonitorGeometry,
     ) {
-        let MonitorGeometry {
-            w_x: wx,
-            w_y: wy,
-            w_w: ww,
-            w_h: wh,
-            ..
-        } = *monitor_geometry;
+        Self::constrain_to_monitor_wide(
+            x,
+            y,
+            i64::from(total_width),
+            i64::from(total_height),
+            monitor_geometry,
+        );
+    }
 
-        let min_x = wx - total_width + 1;
-        let max_x = wx + ww - 1;
-        if min_x <= max_x {
-            *x = (*x).clamp(min_x, max_x);
-        } else {
-            log::warn!(
-                "Skip monitor X clamp because max_x({}) < min_x({}); total_width={}, monitor_ww={}",
-                max_x,
-                min_x,
-                total_width,
-                ww
-            );
-            *x = min_x;
-        }
+    pub(crate) fn constrain_to_screen_wide(
+        x: &mut i32,
+        y: &mut i32,
+        total_width: i64,
+        total_height: i64,
+        screen_w: i32,
+        screen_h: i32,
+    ) {
+        constrain_axis(x, 0, screen_w, total_width);
+        constrain_axis(y, 0, screen_h, total_height);
+    }
 
-        let min_y = wy - total_height + 1;
-        let max_y = wy + wh - 1;
-        if min_y <= max_y {
-            *y = (*y).clamp(min_y, max_y);
-        } else {
-            log::warn!(
-                "Skip monitor Y clamp because max_y({}) < min_y({}); total_height={}, monitor_wh={}",
-                max_y,
-                min_y,
-                total_height,
-                wh
-            );
-            *y = min_y;
-        }
+    pub(crate) fn constrain_to_monitor_wide(
+        x: &mut i32,
+        y: &mut i32,
+        total_width: i64,
+        total_height: i64,
+        monitor_geometry: &MonitorGeometry,
+    ) {
+        constrain_axis(x, monitor_geometry.w_x, monitor_geometry.w_w, total_width);
+        constrain_axis(y, monitor_geometry.w_y, monitor_geometry.w_h, total_height);
     }
 
     /// 应用增量约束（用于终端等按字符调整大小的窗口）
@@ -325,6 +310,75 @@ impl GeometryConstraints {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn boundary_constraints_handle_large_borders_and_output_origins() {
+        let total = i64::from(i32::MAX) + 2 * i64::from(i32::MAX);
+        let mut coordinate = i32::MIN;
+        constrain_axis(&mut coordinate, 0, 1920, total);
+        assert_eq!(coordinate, i32::MIN);
+        coordinate = i32::MAX;
+        constrain_axis(&mut coordinate, 0, 1920, total);
+        assert_eq!(coordinate, 1919);
+
+        coordinate = i32::MAX;
+        constrain_axis(&mut coordinate, i32::MAX - 100, 1920, 200);
+        assert_eq!(coordinate, i32::MAX);
+        coordinate = i32::MIN;
+        constrain_axis(&mut coordinate, i32::MIN + 100, 1920, total);
+        assert_eq!(coordinate, i32::MIN);
+    }
+
+    #[test]
+    fn boundary_constraints_keep_one_pixel_visible_at_each_edge() {
+        let mut coordinate = -200;
+        constrain_axis(&mut coordinate, 100, 1920, 200);
+        assert_eq!(coordinate, -99);
+        coordinate = 2500;
+        constrain_axis(&mut coordinate, 100, 1920, 200);
+        assert_eq!(coordinate, 2019);
+        coordinate = 500;
+        constrain_axis(&mut coordinate, 100, 1920, 200);
+        assert_eq!(coordinate, 500);
+    }
+
+    #[test]
+    fn monitor_boundary_entry_points_share_normal_and_extreme_behavior() {
+        for (origin, span, total, input, expected) in [
+            (100, 1920, 200, -200, -99),
+            (100, 1920, 200, 2500, 2019),
+            (i32::MAX - 100, 1920, 200, i32::MAX, i32::MAX),
+            (i32::MIN + 100, 1920, i32::MAX, i32::MIN, i32::MIN),
+        ] {
+            let geometry = MonitorGeometry {
+                w_x: origin,
+                w_y: origin,
+                w_w: span,
+                w_h: span,
+                ..MonitorGeometry::default()
+            };
+            let (mut x, mut y) = (input, input);
+            GeometryConstraints::constrain_to_monitor(&mut x, &mut y, total, total, &geometry);
+            assert_eq!((x, y), (expected, expected));
+            let (mut wide_x, mut wide_y) = (input, input);
+            GeometryConstraints::constrain_to_monitor_wide(
+                &mut wide_x,
+                &mut wide_y,
+                i64::from(total),
+                i64::from(total),
+                &geometry,
+            );
+            assert_eq!((wide_x, wide_y), (x, y));
+        }
+    }
+
+    #[test]
+    fn screen_boundary_wide_entry_accepts_full_border_extent() {
+        let total = 3 * i64::from(i32::MAX);
+        let (mut x, mut y) = (i32::MIN, i32::MAX);
+        GeometryConstraints::constrain_to_screen_wide(&mut x, &mut y, total, total, 1920, 1080);
+        assert_eq!((x, y), (i32::MIN, 1079));
+    }
 
     #[test]
     fn test_constrain_to_screen() {

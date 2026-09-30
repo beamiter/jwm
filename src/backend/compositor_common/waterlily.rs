@@ -175,11 +175,7 @@ impl WaterlilyFrameHeader {
 
     fn slot_bytes(self) -> u64 {
         let color = self.color_bytes();
-        if self.has_material {
-            color * 2
-        } else {
-            color
-        }
+        if self.has_material { color * 2 } else { color }
     }
 
     fn slot_offset(self) -> io::Result<u64> {

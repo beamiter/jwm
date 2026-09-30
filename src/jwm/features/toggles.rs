@@ -2943,13 +2943,12 @@ impl Jwm {
         client_key: ClientKey,
         sticky: bool,
     ) {
-        let Some((win, mon, previous)) = self.state.clients.get(client_key).map(|client| {
-            (
-                client.win,
-                client.mon,
-                client.state.is_sticky,
-            )
-        }) else {
+        let Some((win, mon, previous)) = self
+            .state
+            .clients
+            .get(client_key)
+            .map(|client| (client.win, client.mon, client.state.is_sticky))
+        else {
             return;
         };
         if previous == sticky {
@@ -2964,9 +2963,11 @@ impl Jwm {
                 client.state.tags = tags;
             }
         }
-        let _ = backend
-            .property_ops()
-            .set_net_wm_state_flag(win, crate::backend::api::NetWmState::Sticky, sticky);
+        let _ = backend.property_ops().set_net_wm_state_flag(
+            win,
+            crate::backend::api::NetWmState::Sticky,
+            sticky,
+        );
         let _ = self.setclienttagprop(backend, client_key);
         self.arrange(backend, mon);
         self.broadcast_window_state_ipc(backend, client_key);
@@ -3465,8 +3466,8 @@ impl Jwm {
         } else {
             step as isize
         };
-        let next = (self.features.overview.index as isize + delta).clamp(0, (len - 1) as isize)
-            as usize;
+        let next =
+            (self.features.overview.index as isize + delta).clamp(0, (len - 1) as isize) as usize;
         if next == self.features.overview.index {
             return Ok(());
         }
@@ -4927,8 +4928,9 @@ mod recording_finalization_tests {
 #[cfg(test)]
 mod shell_entry_tests {
     use super::{
-        ShellEntry, control_snapshot_epoch_matches, shell_entry, status_bar_shell_is_mine,
+        ShellEntry, control_snapshot_epoch_matches, shell_entry,
         should_refresh_after_pairing_close, should_start_control_snapshot,
+        status_bar_shell_is_mine,
     };
     use crate::jwm::features::{ShellHubRoute, SystemUiState, system_ui::ControlCenterInputs};
 
@@ -4967,10 +4969,12 @@ mod shell_entry_tests {
     #[test]
     fn status_bar_hub_home_mirrors_alt_f10_ownership() {
         let hub = SystemUiState::control_center(&ControlCenterInputs::default());
-        let calendar = SystemUiState::calendar(chrono::NaiveDate::from_ymd_opt(2026, 9, 13)
-            .unwrap()
-            .and_hms_opt(12, 0, 0)
-            .unwrap());
+        let calendar = SystemUiState::calendar(
+            chrono::NaiveDate::from_ymd_opt(2026, 9, 13)
+                .unwrap()
+                .and_hms_opt(12, 0, 0)
+                .unwrap(),
+        );
         let session = SystemUiState::session_menu();
 
         // Hub home while the hub itself is up — dismiss.
@@ -4984,10 +4988,12 @@ mod shell_entry_tests {
 
     #[test]
     fn status_bar_named_route_matches_only_that_page() {
-        let calendar = SystemUiState::calendar(chrono::NaiveDate::from_ymd_opt(2026, 9, 13)
-            .unwrap()
-            .and_hms_opt(12, 0, 0)
-            .unwrap());
+        let calendar = SystemUiState::calendar(
+            chrono::NaiveDate::from_ymd_opt(2026, 9, 13)
+                .unwrap()
+                .and_hms_opt(12, 0, 0)
+                .unwrap(),
+        );
         let launcher = SystemUiState::open_launcher(std::sync::Arc::from([]), Vec::new(), false);
         let hub = SystemUiState::control_center(&ControlCenterInputs::default());
 
@@ -5256,10 +5262,7 @@ mod shell_entry_tests {
             "config/changed",
             "close_system_ui",
         ] {
-            assert!(
-                apply.contains(needle),
-                "apply_selected_theme lost {needle}"
-            );
+            assert!(apply.contains(needle), "apply_selected_theme lost {needle}");
         }
         assert!(
             !apply.contains("save_to_file"),
@@ -5541,7 +5544,10 @@ mod shell_entry_tests {
             .split_once("fn show_volume_osd")
             .expect("the end of adopt_audio_switch")
             .0;
-        let queue = format!("self.features.control_feedback.{}(", "queue_audio_device_osd");
+        let queue = format!(
+            "self.features.control_feedback.{}(",
+            "queue_audio_device_osd"
+        );
         assert!(
             body.contains(&queue),
             "adopt_audio_switch no longer queues a named audio-device OSD ({queue})"

@@ -117,7 +117,11 @@ include `launcher`, `notif_center`, `screenshot`, `lock`, `layouts`,
 `cycle`, `kill`, `last`, `loop`, `save`, `restore`, `pad`, `ftab`, `fwin`,
 `case`, `palette`, `region`, `attach`, `scol`, `smov`, `swin`, `scons`,
 `sexp`, `twifi`, `tbt`, `clayout`. Session snapshots are at v17
-(`hidden_x`). `get_magnifier` /
+(`hidden_x`). Saved parking coordinates are diagnostic: restore recalculates
+them for the current output topology. Minimized and fullscreen return rectangles
+are clamped to the current monitor work area. New snapshots omit unset geometry;
+historical old-geometry slots with both dimensions zero remain readable as unset,
+while negative or partially zero dimensions are rejected. `get_magnifier` /
 `get_mag` reports `radius`; `get_peek` reports `compositor_active`;
 `get_tab_bar` / `get_tabs` reports `selected_id` when a tab group is focused.
 Layer-shell background/top/overlay surfaces remain compositor-owned layers.

@@ -37,7 +37,9 @@ pub fn filter_portal_window_spec(
     let Some(windows) = ipc_windows else {
         return Vec::new();
     };
-    let pid_needle = (kind == "pid").then(|| needle.parse::<u32>().ok()).flatten();
+    let pid_needle = (kind == "pid")
+        .then(|| needle.parse::<u32>().ok())
+        .flatten();
     let hits: Vec<&WindowInfo> = windows
         .iter()
         .filter(|w| match kind {
@@ -54,7 +56,9 @@ pub fn filter_portal_window_spec(
 
     let mut matched = Vec::new();
     for window in hits {
-        if let Some(toplevel) = available.iter().find(|t| ipc_window_matches_toplevel(window, t))
+        if let Some(toplevel) = available
+            .iter()
+            .find(|t| ipc_window_matches_toplevel(window, t))
             && !matched
                 .iter()
                 .any(|existing: &ToplevelInfo| existing.identifier == toplevel.identifier)
@@ -142,7 +146,12 @@ mod tests {
     #[test]
     fn ipc_pid_match_maps_when_wayland_has_no_pid() {
         let available = vec![toplevel("a", "", "Mozilla Firefox")];
-        let ipc = vec![window_with_pid("firefox", "Navigator", "Mozilla Firefox", 4242)];
+        let ipc = vec![window_with_pid(
+            "firefox",
+            "Navigator",
+            "Mozilla Firefox",
+            4242,
+        )];
         let matched = filter_portal_window_spec("pid:4242", &available, Some(&ipc));
         assert_eq!(matched.len(), 1);
         assert_eq!(matched[0].identifier, "a");

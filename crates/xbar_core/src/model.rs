@@ -2094,10 +2094,7 @@ mod tests {
             ShellRoute::from_key("background"),
             Some(ShellRoute::Wallpaper)
         );
-        assert_eq!(
-            ShellRoute::from_key("ui-theme"),
-            Some(ShellRoute::Theme)
-        );
+        assert_eq!(ShellRoute::from_key("ui-theme"), Some(ShellRoute::Theme));
         assert_eq!(ShellRoute::from_key("nope"), None);
     }
 

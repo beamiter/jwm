@@ -100,8 +100,8 @@ pub(crate) fn capture_hint_layout(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::recording_indicator::{CHIP_MARGIN, CHIP_STACK_GAP};
+    use super::*;
 
     #[test]
     fn labels_name_the_mode_and_primary_actions() {

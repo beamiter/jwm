@@ -371,8 +371,7 @@ pub enum MediaRowClick {
 /// switch zone.
 #[must_use]
 pub fn switch_hint(state: &MediaState) -> Option<String> {
-    next_player(&state.players, &state.player)
-        .map(|player| format!(" \u{b7} p {player}"))
+    next_player(&state.players, &state.player).map(|player| format!(" \u{b7} p {player}"))
 }
 
 /// The trailing Players-picker hint `control_row` appends when `o` has a
@@ -509,11 +508,7 @@ pub fn click_action(
             MediaRowClick::PlayPause
         };
     }
-    let after_transport = format!(
-        "{}{}",
-        parts.prefix,
-        switch_hint(state).unwrap_or_default()
-    );
+    let after_transport = format!("{}{}", parts.prefix, switch_hint(state).unwrap_or_default());
     if let Some(switch) = switch_hint(state) {
         let switch_start = next_end;
         let switch_end = measure(&format!("{}{switch}", parts.prefix)) - TEXT_PAD;
@@ -1122,7 +1117,10 @@ mod tests {
             ],
         }))
         .expect("player parses");
-        assert_eq!(parsed.players, vec!["mpv".to_string(), "spotify".to_string()]);
+        assert_eq!(
+            parsed.players,
+            vec!["mpv".to_string(), "spotify".to_string()]
+        );
         assert_eq!(
             parsed.player_details,
             vec![
@@ -1855,12 +1853,21 @@ mod tests {
         let rich = player_picker_row("spotify", Some(&spotify), true);
         assert!(rich.starts_with('\u{f192}'));
         assert!(rich.contains("Spotify"), "{rich}");
-        assert!(!rich.contains("spotify"), "suffix stays off the label when Identity exists");
+        assert!(
+            !rich.contains("spotify"),
+            "suffix stays off the label when Identity exists"
+        );
         assert!(rich.ends_with('\u{f04b}'), "Playing icon trails: {rich}");
 
         let fallback = player_picker_row("mpv", Some(&mpv), false);
-        assert!(fallback.contains("mpv"), "empty Identity falls back to suffix");
-        assert!(fallback.ends_with('\u{f04c}'), "Paused icon trails: {fallback}");
+        assert!(
+            fallback.contains("mpv"),
+            "empty Identity falls back to suffix"
+        );
+        assert!(
+            fallback.ends_with('\u{f04c}'),
+            "Paused icon trails: {fallback}"
+        );
 
         // Without details the row is byte-identical to the old picker.
         assert_eq!(

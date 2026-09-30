@@ -4,6 +4,310 @@
 
 ---
 
+## 2026-09-30：第七批全面升级 10 轮（第 61–70 轮）
+
+继续由 sol6.1 子代理实施和交叉审查，优先处理用户提供的 release 安装错误，
+保留此前所有工作区改动。
+
+| 轮次 | 实际改动 | 行为回归 |
+| --- | --- | --- |
+| 61 | installer 仅针对明确缺失 XCB 生成源码的编译错误恢复一次 | release/debug 定点清理当前 profile；普通失败、重复缺失不会无限重试 |
+| 62 | JWM/bridge 构建与安装产物位置统一跟随 CARGO_TARGET_DIR | 含空格的绝对/相对目录，失败不安装系统文件 |
+| 63 | native bar 使用独立 bar-install 缓存及 --locked | 默认 bar 目标路径/lock 参数；实际 metadata/tree --locked --offline 通过 |
+| 64 | calculator 幂优先于一元正负号，维持右结合 | -2^2、(-2)^2、负指数及指数右侧一元符号 |
+| 65 | calculator 每步拒绝非有限中间值 | overflow/NaN 不能经后续 ^0 伪装成有效值，有限计算仍成功 |
+| 66 | 小于 1e-10 的非零计算结果使用科学记数法 | 微小正负值不显示成 0，阈值与真正零保持 |
+| 67 | VmRSS 必须含 kB 单位且无多余 token | 正常/零值、错单位、缺单位、尾部垃圾、负数与 NaN |
+| 68 | EDID 后续空白 name/serial descriptor 不擦掉有效身份 | 真实 descriptor 字节序列中合法 name/serial 保留 |
+| 69 | EDID manufacturer 三个字母编码与保留位验证 | 1/26 边界、0/27/31 非法编码、bit15 拒绝 |
+| 70 | support 已连接请求/响应共用 2 秒期限，并要求完整有界 newline frame | 慢速滴流、截断/空 EOF、CRLF、坏 JSON/UTF-8、精确 4 MiB 和超限 |
+
+**安装证据**：本机复现用户相同错误：release XCB `out/randr.rs` 缺失，
+其余生成源码和旧 build fingerprint 仍在。不能据此断言由 bar 安装造成。
+定点 `cargo clean --locked --offline --release -p xcb --target-dir ...`
+删除 31 个 XCB release 文件（16.7 MiB），随后 `randr.rs` 重新生成，
+`cargo build --locked --offline --release` 和对应 bridge release 构建通过。
+清理范围依据 [Cargo package/profile 选项](https://doc.rust-lang.org/cargo/commands/cargo-clean.html)。
+安装脚本只有 Cargo 错误与完整日志共同证明该缺失时才自动修复；`tee` 失败
+不触发修复，Cargo 非零状态优先保留。日志只由持有名称的 EXIT trap 删除一次。
+没有在本次验证中写入系统安装目录；用户可用 `--mode release --skip-bar`
+继续安装已成功构建的 JWM 与 bridge。
+
+**运行边界**：support 建连仍独立 2 秒，已连接 I/O 共用另一个 2 秒；
+4 MiB 上限包含 newline，JSON 解析在传输完成后进行。有效默认配置和
+外部 schema 保持。EDID 身份校验不是完整 checksum/扩展块验证。安装
+脚本显式选择环境变量指定的 target 或仓库 target，覆盖 Cargo 配置文件
+中的 build.target-dir；未增加跨目标编译支持。未测试真实 DRM/KMS 硬件。
+
+**测试夹具修复**：首轮回归中既有 settled OSD 用例出现 1 个像素漂移。
+Spring 的 settled 容差允许残余运动，但 fixture 比较的是静态 card；现在
+在 baseline 前用现有 motion API 精确置目标尺寸并清零速度，后续 render
+仍正常推进。没有放宽任何像素断言、改动生产渲染或禁用并行测试。
+安装脚本的离线回归已接入 CI 与 release 工作流。
+
+**最终验证**：JWM 与 bridge 的 `--locked --offline --release` 构建、默认及
+`--no-default-features` 的 `cargo check --locked --offline --all-targets`、
+`cargo clippy --locked --offline --lib --bins --tests --no-deps -- -D warnings`、
+格式和 `git diff --check` 均通过。按
+`EGL_PLATFORM=surfaceless JWM_REQUIRE_HEADLESS_GL=1` 执行
+`scripts/test.sh --offline --lib --bins --tests`，9 个测试组共
+**4321 passed / 0 failed**（库 4159，工具与集成 162），新增 9 个行为回归。
+安装 build stub 的 7 个场景、updater 离线回归、全脚本 ShellCheck 与 CI/release
+YAML 解析通过；没有残留测试子进程。真实系统安装及 DRM/KMS 硬件未执行。
+
+---
+
+## 2026-09-30：第六批全面升级 10 轮（第 51–60 轮）
+
+本批继续使用 sol6.1 子代理实施和交叉审查，保留此前所有工作区改动。
+
+| 轮次 | 实际改动 | 行为回归 |
+| --- | --- | --- |
+| 51 | idle clock 回退识别新活动周期，重新准备 dim/off/lock 阶段 | 延迟采样时新周期已过 dim 阈值，仍先恢复再按新周期执行 |
+| 52 | live idle 配置单独停用或推迟 dim/off 时恢复对应阶段 | lock 仍启用时 ScreenOn/Undim，避免重复 lock 请求 |
+| 53 | 日历月/年导航使用宽整数并限定 Chrono 可显示年份 | 极大正负步长、两端继续返回、最大年份 December 完整 31 天 |
+| 54 | spawn argv 数组所有参数拒绝 NUL，诊断与转换保持一致 | 键盘/鼠标/chord 无效绑定忽略；合法尾部空参数保留 |
+| 55 | 批量配置在提交前检查最终候选的共同语义诊断 | 启用 dormant 无效 fading 参数拒绝，前面有效变更不部分应用 |
+| 56 | incnmaster/focusstack 要求 Int、setmfact 要求 Float | 三类绑定类型不符给警告且不编译，旧配置其他有效设置仍加载 |
+| 57 | scrolling admission 遇到已在列内的 client key 直接返回 | 两种新窗口附着策略均保留列、宽度与焦点 |
+| 58 | 窗口含边框尺寸及输出边界使用 i64，共享约束实现 | 大边框、极端输出原点、四边一像素可见及公开入口一致 |
+| 59 | hidden visibility 用真实宽整数右边界判断 | i32 MAX 附近仍可见窗口不会误判为 parked 并恢复旧位置 |
+| 60 | 控制工具 Unix socket 建连有绝对期限，CLI 请求写入也有限期 | 满 accept queue 及时退出/排空后恢复、blocking/CLOEXEC、无 reader 写入退出、字节完整 |
+
+**兼容边界**：新增数组 NUL 与数值绑定类型诊断遵循配置兼容约定，以
+warning 提示无效绑定被忽略；旧配置仍可加载，不触发整份默认回退。
+已有字符串命令及非有限参数的错误策略保持。批量配置检查已有语义 error，
+因此不能在无效 dormant 参数未修正时启用相应功能。
+
+**运行边界**：连接期限独立于之后的 I/O：perf 建连 10 秒，已连接请求/响应
+仍共享原有 10 秒；support 建连 2 秒，读/写仍各用既有 2 秒 timeout；
+jwm-tool 建连、请求写入各 5 秒，响应读取策略保持，订阅可长期等待事件。
+支持 Linux 文件路径 Unix socket，不增加 abstract socket 协议。Scrolling
+重复准入检查扫描已有列，不宣称提速；非正输出跨度不保证可见像素，约束
+仅给出可表示的确定结果。终端 slash probe 候选经对照原实现确认无实际
+缺陷，已撤回该候选，没有作为一轮改动计数。未测实机帧率。
+
+**最终验证**：格式、`git diff --check`、默认及 `--no-default-features` 的
+`cargo check --locked --offline --all-targets`、
+`cargo clippy --locked --offline --lib --bins --tests --no-deps -- -D warnings`
+均通过。按 `EGL_PLATFORM=surfaceless JWM_REQUIRE_HEADLESS_GL=1` 执行
+`scripts/test.sh --offline --lib --bins --tests`，9 个测试组共
+**4312 passed / 0 failed**（库 4153，工具与集成 159），新增 19 个行为回归。
+新增旧配置加载测试实际验证 save→load→compile，fixture 显式设置 chord
+timeout，避免启用 chord 时带入既有 0ms 警告。最终无残留测试子进程；
+真实 DRM/KMS 硬件矩阵尚未验证。
+
+---
+
+## 2026-09-30：第五批追加优化 10 轮（第 41–50 轮）
+
+本批继续使用 sol6.1 子代理实施和交叉审查，保留此前所有工作区改动。
+
+| 轮次 | 实际改动 | 行为回归 |
+| --- | --- | --- |
+| 41 | perf fallback resolution 使用真实 monitor min/max bbox | 负坐标/平移不改尺寸，非正尺寸与加法/跨度 overflow 返回 unavailable |
+| 42 | perf CPU/kernel/NVIDIA 标签使用 1 MiB 有界普通文件读取 | symlink、空标签、坏 UTF-8、超限、目录、无 writer FIFO |
+| 43 | idle CPU/上下文计数下降不再伪造零；采样时间/频率必须有效 | 正常差值、counter reset、非正/非有限区间 |
+| 44 | notification ID 回绕跳过 0 与库内全部 ID | 恢复 MAX counter + 连续 64 冲突最多 65 次，记录及替换定位保持 |
+| 45 | launcher usage 支持裸相对目标；rename 后目录 sync 失败不清理释放的名称 | 实际相对保存与 0600；现有 collision/failed-write 门槛保持 |
+| 46 | desktop Exec 保留有效显式空 argv 参数 | 空单双引号、尾部未完成 escape/空 quote 旧行为、真实 escape 与 field-code 过滤 |
+| 47 | 字符串命令 parser 提前拒绝进程不能接收的 NUL | 普通/单双引号/escape 位置均错误，argv quoting 旧测试保持 |
+| 48 | terminal probe PATH 缺失时匹配 Linux 默认 `/bin:/usr/bin` | 实际 env_remove(PATH) 启动 sh，显式空/自定义 PATH 保持 |
+| 49 | EDID FC/FF text descriptor 检查保留字节 4 | 非法后续 descriptor 不覆盖有效 name/serial，vendor 保持 |
+| 50 | compare 在计算预算前验证生效的 ratio/absolute | 非有限/负/方向不符预算拒绝；合法 0/1 边界与实际 Exact 忽略未使用 bounds |
+
+**边界**：host-label 1 MiB 限额可能使异常大输入的标签不可用；idle counter
+无效区间由记录层标为 skipped，既有 sysconf 失败时 100 Hz fallback 未变。
+命令 NUL 校验针对字符串 parser，不是全 argv 入口审计。新预算校验按既有
+方向语义收紧，Exact 仍忽略不用的 bounds；有效默认规则不变。未修改 GPU
+绘制、release profile 或对外 schema，未测实机帧率。
+
+**最终验证**：格式、`git diff --check`、默认及 `--no-default-features` 的
+`cargo check --locked --offline --all-targets`、
+`cargo clippy --locked --offline --lib --bins --tests --no-deps -- -D warnings`
+均通过。按 `EGL_PLATFORM=surfaceless JWM_REQUIRE_HEADLESS_GL=1` 执行
+`scripts/test.sh --offline --lib --bins --tests`，9 个测试组共
+**4293 passed / 0 failed**（库 4134，工具与集成 159），新增 11 个行为回归。
+没有残留测试子进程；真实 DRM/KMS 硬件矩阵尚未验证。
+
+---
+
+## 2026-09-30：第四批追加优化 10 轮（第 31–40 轮）
+
+本批继续由 sol6.1 子代理实施并交叉审查，保留所有前批变更；中断后完成
+剩余验证和记录，没有重新开始一批。
+
+| 轮次 | 实际改动 | 行为回归 |
+| --- | --- | --- |
+| 31 | perf IPC 响应要求完整 newline frame、bool success、4 MiB 总上限 | 真 socketpair：空/截断/坏 envelope、success=false、精确上限与超限 |
+| 32 | 已连接 socket 的请求写和响应读共享 10 秒绝对期限 | 慢速滴流必须由 deadline/read timeout 终止而非等待 EOF；不读请求的 peer 有界退出 |
+| 33 | perf `/proc` 样本实际读取限制 64 KiB，并拒坏 UTF-8 | 无穷 reader 有界、精确边界、真实超限文件及错误 UTF-8 |
+| 34 | launcher usage ID 在 parse/record 时拒绝控制字符 | newline/tab/NUL 等无法注入持久化行，含普通空格名称仍往返 |
+| 35 | 通知历史 duplicate ID 在 oldest-first 恢复时仅留最后记录 | 最新记录可见，close 一次无旧重复残留，其他 ID 保留 |
+| 36 | monitor reference 在排除 target 的候选环上按 delta 导航 | 多步/负步正确计数，避免重复扫描循环 |
+| 37 | daemon PID 与 legacy-lock 文件限 256 B，非阻塞普通文件读取 | 正常内容、截断前缀、坏 UTF-8、无 writer FIFO 和超限拒绝 |
+| 38 | legacy daemon cmdline 实际读取限 128 KiB | NUL 字节保持、边界/超限、procfs metadata=0；仍保留前后完整 identity 检查 |
+| 39 | daemon response 文件实际读取限 1 MiB | 精确边界、超限及 FIFO 拒绝；错误路径由 ResponseLock Drop 释放锁 |
+| 40 | compare 在预算前拒绝双方 Recorded 的负数/非有限 metrics | 内存 NaN/Infinity/负数、有效负 JSON、CLI 文件入口 InvalidData；零值仍有效 |
+
+**边界**：第 32 轮预算覆盖连接建立后的 I/O，`UnixStream::connect` 尚不在
+该预算内。第 34 轮防止新增坏 ID 注入，不清除已经伪造成合法行的旧数据。
+通知去重保持既有 64-record 截断流程。Daemon response 读取失败时坏文件
+可能留到下一请求开头清理，但 sentinel/flock 会释放。新文件上限与 Recorded
+指标验证是明确的输入收紧；未改对外 schema 或 GPU 绘制路径。
+
+**最终验证**：格式、`git diff --check`、默认及 `--no-default-features` 的
+`cargo check --locked --offline --all-targets`、
+`cargo clippy --locked --offline --lib --bins --tests --no-deps -- -D warnings`
+均通过。使用 `EGL_PLATFORM=surfaceless JWM_REQUIRE_HEADLESS_GL=1` 执行
+`scripts/test.sh --offline --lib --bins --tests`，9 个测试组共
+**4282 passed / 0 failed**（库 4127，工具与集成 155），新增 13 个行为回归。
+无残留测试子进程；真实 DRM/KMS 硬件矩阵尚未验证。
+
+---
+
+## 2026-09-30：第三批追加优化 10 轮（第 21–30 轮）
+
+本批继续使用 sol6.1 子代理实施和交叉审查，保留之前的工作区改动。
+
+| 轮次 | 实际改动 | 行为回归 |
+| --- | --- | --- |
+| 21 | perf 配置读取失败标记 unknown fingerprint，不再伪装为空配置 | 实际配置路径读取错误生成的指纹送入 compare 并被拒绝；缺文件保持默认兼容 |
+| 22 | perf 配置标签使用 4 MiB 有界普通文件读取与非阻塞类型检查 | 真实配置/符号链接、超限文件、无 writer FIFO |
+| 23 | perf baseline 加载限制为 4 MiB 并拒绝特殊文件 | 有效基线往返、损坏 JSON、非法 UTF-8、超限文件、目录和 FIFO |
+| 24 | shell 循环索引采用无溢出模运算 | usize/isize 极值与实际 monitor 轮转 |
+| 25 | monitor 规范化/放置采用饱和运算，对齐使用 i64 中间量 | 四方向放置、三种对齐、微调、xrandr 参数和预览，保留可表示的最终坐标 |
+| 26 | PNG 元数据仅读取完整 IHDR，尺寸限制为正 31 位数 | 截断/非法尺寸及历史 picker 标签，测试头补齐 RGBA 属性与 CRC |
+| 27 | session/closed-placement 已 rename 后的同步失败不清理旧临时名 | 同步失败前模拟另一 writer 复用名字并确认其文件保留；rename 失败清理 |
+| 28 | closed-placement ancestry 限制 256 KiB status、非法 PID、循环与深度 | 自环/双节点环、PID 0/1/越界、16 层上限、超长及非法 status |
+| 29 | HUD CPU counter reset/异常区间重建基线，aggregate overflow 拒绝 | 计数回退、零 dt、dp>dt、不一致后的有效样本恢复 |
+| 30 | support 系统事实读取限制 kernel 4 KiB、distribution 64 KiB | 普通 symlink、精确边界、超限、无 writer FIFO、目录、非法 UTF-8 和白名单保持 |
+
+**边界**：缺失 perf 配置保留历史默认指纹；无法读取的配置为 unknown，
+由现有比较契约拒绝。PNG 元数据检查不是完整图片解码验证。极端不可表示的
+monitor 坐标饱和，真实输出配置仍由 backend 判断能否应用。CPU 不一致区间
+可能来自两个 `/proc` 读取的端点偏差；保持上一有效值且重新建立基线，没有
+额外 stale 标记。未修改渲染路径、release profile 或对外 schema。
+
+**最终验证**：格式、`git diff --check`、默认及 `--no-default-features` 的
+`cargo check --locked --offline --all-targets` 与
+`cargo clippy --locked --offline --lib --bins --tests --no-deps -- -D warnings`
+均通过。使用 `EGL_PLATFORM=surfaceless JWM_REQUIRE_HEADLESS_GL=1` 运行
+`scripts/test.sh --offline --lib --bins --tests`，9 个测试组共
+**4269 passed / 0 failed**（库 4124，工具与集成 145），新增 15 个行为回归。
+没有残留测试子进程；真实 DRM/KMS 硬件矩阵尚未验证。
+
+---
+
+## 2026-09-30：第二批追加优化 10 轮（第 11–20 轮）
+
+本批由 sol6.1 子代理并行实施并交叉审查，延续上一批工作区。
+
+| 轮次 | 实际改动 | 行为回归 |
+| --- | --- | --- |
+| 11 | workspace 统计仅遍历客户端 tags 的置位位 | 零标签、最高位、越界配置、重复/失效 key 对照原单 tag 统计 |
+| 12 | tree 的 26 项统计融入 window projection 单遍 | 所有字段对照投影结果；urgent 与 attention 分开，单轴 maximize 语义保留 |
+| 13 | 查询级索引缓存 stack position 与 swallowed_by | 首匹配、重复位置、失效 monitor/client、多个吞并者和重排后完整 JSON 等价 |
+| 14 | notification history 临时创建有界重试且只清理自己文件；支持裸相对路径 | 冲突成功/耗尽、相对路径、失败发布保留旧目标并清理 owned temp |
+| 15 | config 原子保存跳过碰撞临时名，128 次封顶 | 确定性候选成功/耗尽，目标保持，失败发布清理 |
+| 16 | config backup 的临时创建与正式名称发布均有界 | 原始损坏字节保留；128 个正式名称占满时返回错误、保留恢复点且无 temp 遗留 |
+| 17 | scrolling overview 建立一次 column membership 集合 | 384 个客户端稳定顺序/几何；隐藏列及重复 visible 输入权重保持 |
+| 18 | cursor 直接选择最近 nominal size 的首帧 | 同像素尺寸不同 nominal size、等距首帧与空输入 |
+| 19 | fuzzy score 不再下溢，substring 优先且长标题位置仍严格排序 | 10001/20000/Unicode 21000 字节位置、长 subsequence、实际窗口排名 |
+| 20 | support bundle 输出临时名冲突安全重试，显式 0600 与目录 sync | 候选成功/耗尽、旧报告保留、失败 commit 仅清理 owned temp |
+
+**提交边界**：本批改动的配置、通知、备份和报告 writer 在释放临时名称后
+单独同步目录；该同步失败可能发生在新内容已经发布之后，但不会误删后来
+复用名称的文件。Backup 发布仅搜索 base + `.1`–`.127`，全部占用时不会
+生成第 129 个新恢复点；已有更高编号的备份仍可恢复。
+
+**性能边界**：workspace 为每客户端遍历实际设置的位，最多 32 位；tree
+统计消除 25 次额外窗口扫描；stack/swallow 索引占用查询级线性内存。Scrolling
+orphan membership 从逐窗口扫描全部列变为一次建立集合后的查询。以上是
+算法与操作次数改进，未测量实机帧率，未更改 GPU 绘制或 release profile。
+
+**最终验证**：格式、`git diff --check`、默认与 `--no-default-features` 的
+`cargo check --locked --offline --all-targets`、
+`cargo clippy --locked --offline --lib --bins --tests --no-deps -- -D warnings`
+通过。按 `EGL_PLATFORM=surfaceless JWM_REQUIRE_HEADLESS_GL=1` 执行
+`scripts/test.sh --offline --lib --bins --tests`，9 个测试组共
+**4254 passed / 0 failed**（库 4113，工具与集成 141），比上一批新增 16 个
+行为回归；无残留测试子进程。真实 DRM/KMS 硬件矩阵尚未验证。
+
+---
+
+## 2026-09-30：追加优化 10 轮
+
+本次在上一轮工作区上继续实施，未增加 IPC 别名或 schema 字段。
+
+| 轮次 | 实际改动 | 行为回归 |
+| --- | --- | --- |
+| 1 | `get_status` 六类窗口 flags 合并为一次 `client_order` 遍历 | 对照完整 window 查询，覆盖重复/失效 key、focus 与 urgency |
+| 2 | workspace 按 monitor 批量累积所有 tags，客户端只查一次，membership 判断移出 tag 循环 | 全 26 项统计与逐 tag 结果逐字段相等 |
+| 3 | window/tree 查询共享 scratchpad、tab、monitor 投影索引 | 全序列化结果等价，重复 scratchpad 名、跨 monitor 陈旧成员、稀疏 order 保持语义 |
+| 4 | 新快照省略未初始化几何；历史双零 old slot 仍可读，损坏尺寸拒绝；session loader 不阻塞 FIFO | capture→JSON→load→apply，双零不覆写有效槽，FIFO 无 writer 立即拒绝 |
+| 5 | session temp 碰撞换名，仅清理自己创建的文件，最多 128 次 | 预占内容保留，后续候选成功，恒定候选耗尽及时返回 |
+| 6 | closed-placement temp 同样安全重试；loader 不阻塞 FIFO | 预占内容保留、128 次耗尽、FIFO 无 writer 拒绝 |
+| 7 | incoming image offer 限制每边 16384、总 16 Mi pixels；设置 64 MiB decoder budget；PNG passthrough 校验真实格式 | 54 字节却声明 10000×10000 的 BMP 被拒绝，像素边界与 JPEG 冒充 PNG 覆盖 |
+| 8 | clipboard 每次 panel rebuild 只 lowercase 查询一次 | Unicode 大小写、多条匹配与 history 原始 index 保持 |
+| 9 | launcher usage temp 碰撞换名，128 次封顶，未拥有的临时文件不清理 | 候选碰撞后成功；候选全部占用时已有 history 和预占文件均不变 |
+| 10 | battery 探测用有界 heap 保留全目录字典序前 64 项 | 正/反枚举、非 UTF-8 名、超过 64 项的实际目录与 peripheral scope 选择保持 |
+
+**测试环境修复**：第 7 轮完整回归发现既有 XCB 测试的 Xvfb 启动偶发失败。
+fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字节上限），
+完成有界 X11 setup 握手并保留连接至销毁，防止客户端间 server reset；启动
+失败时 RAII kill + wait 本次启动的子进程。不依赖 X11 transport feature，
+不读取/修改用户 DISPLAY。
+
+**性能边界**：第 2 轮仍对客户端与配置 tag 的交集逐项累积，复杂度仍为
+`O(clients × tags)`；第 10 轮仍遍历目录名以保留确定的字典序选择，只有候选
+存储与属性探测数封顶。未修改渲染路径或 release profile。图片解码分配预算的
+内部记账由各格式 decoder 实现，不代表进程 RSS 的绝对上限。
+
+**最终验证**：`cargo fmt --all -- --check`、`git diff --check`、默认及
+`--no-default-features` 的 `cargo check --locked --offline --all-targets`、
+`cargo clippy --locked --offline --lib --bins --tests --no-deps -- -D warnings`
+均通过。按 CI 设置 `EGL_PLATFORM=surfaceless JWM_REQUIRE_HEADLESS_GL=1`
+运行 `scripts/test.sh --offline --lib --bins --tests`，9 个测试组总计
+**4238 passed / 0 failed**（库 4099，工具与集成 139），没有残留测试子进程。
+真实 DRM/KMS 硬件矩阵仍需单独验证。
+
+---
+
+## 2026-09-30：可靠性、IPC 性能与验证基线升级
+
+**已完成**：
+
+- IPC 每个 monitor/workspace 的重叠窗口统计合并为单遍；scratchpad/tab
+  membership 用 HashSet；`get_status` 顶层与嵌套计数直接读状态，避免详细
+  window/monitor/workspace/tree 回复的重复构造。行为测试对照完整查询，覆盖
+  重复/失效 key、重叠 flags、tagless 客户端和 tag 位宽边界。
+- Session v17 保留格式兼容；`hidden_x` 按当前拓扑重新计算，
+  `hidden_restore` / `old_geometry` 写入前按当前 monitor work area 收敛。
+- Launcher / Info / Clipboard 输入上限为 256 Unicode 字符；计算器解析同样
+  限长，覆盖多字节输入和深括号算式。
+- 配置读写拒绝 special file，读取/备份/恢复统一 4 MiB 上限；备份通过
+  synced temp + hard link 原子发布，恢复原子替换且保留 symlink/已有权限。
+  新目标为 0600；原始非 UTF-8/损坏 TOML 仍可备份恢复；并发备份不覆盖。
+  create_new 失败时不删除并非本次创建的临时文件。
+- 修复过时的 switcher 水平滚轮集成预期和 XWM fixture 的 Smithay client-data
+  前置条件；音频设备 OSD 测试改为实际 flush/drain-once 行为验证。
+- 清理现有 Rustfmt 漂移（49 个文件仅格式变化）和仅测试使用的 monitor helper
+  告警。源码语义变化集中在 10 个 Rust 文件，详见 CHANGELOG。
+
+**验证**：`cargo fmt --all -- --check`、`scripts/lint-shell.sh`、
+`scripts/test-test-wrapper.sh`、默认/`--no-default-features` 的
+`cargo check --locked --offline --all-targets`、
+`cargo clippy --locked --offline --lib --bins --tests --no-deps -- -D warnings`
+均通过。使用 `EGL_PLATFORM=surfaceless JWM_REQUIRE_HEADLESS_GL=1`
+运行 `scripts/test.sh --offline --lib --bins --tests`，共 **4225 passed / 0 failed**。
+套接字测试已在沙箱外复验（沙箱内 EPERM 属环境限制），无残留测试子进程。
+
+**缺口**：真实 DRM/KMS、显示器热插拔与多 GPU 硬件矩阵尚未验证；本轮结果
+不替代 `docs/hardware-validation.md` 的发布门槛。
+
+---
+
 ## Evolve backlog（目标 1000 轮；已完成 wave 9–1000，本地 ahead）
 
 | # | 选题 | Size |

@@ -699,11 +699,7 @@ impl Jwm {
             // minimized snapshot carried one; its `promoted` flag re-promotes
             // under a tiling layout so layout membership survives seamless
             // exec (plain Adopt still refuses a plain tiled maximize).
-            let win = self
-                .state
-                .clients
-                .get(client_key)
-                .map(|client| client.win);
+            let win = self.state.clients.get(client_key).map(|client| client.win);
             let maximize_restore = win.and_then(|win| {
                 backend
                     .property_ops()
@@ -2271,7 +2267,7 @@ mod unmanage_minimized_tests {
         BackendDiagnostics, Capabilities, CloseResult, ColorAllocator, CompositorAnnotation,
         CompositorBenchmark, CompositorControl, CompositorMedia, CompositorRect,
         CompositorWindowEffects, CompositorWorkspaceEffects, CursorProvider, DisplayControl,
-        InputOps, KeyOps, FloatingRestoreState, MaximizeRestoreState, MinimizedRestoreRect,
+        FloatingRestoreState, InputOps, KeyOps, MaximizeRestoreState, MinimizedRestoreRect,
         MinimizedRestoreState, MotifWmHints, NormalHints, OutputOps, PropertyOps, RenderScheduler,
         WindowAttributes, WindowOps, WmHints,
     };
@@ -2503,10 +2499,7 @@ mod unmanage_minimized_tests {
             &self,
             _win: WindowId,
         ) -> Result<Option<MaximizeRestoreState>, BackendError> {
-            Ok(*self
-                .maximize_restore
-                .lock()
-                .expect("maximize restore lock"))
+            Ok(*self.maximize_restore.lock().expect("maximize restore lock"))
         }
 
         fn set_maximize_restore_state(
@@ -2514,18 +2507,12 @@ mod unmanage_minimized_tests {
             _win: WindowId,
             state: MaximizeRestoreState,
         ) -> Result<(), BackendError> {
-            *self
-                .maximize_restore
-                .lock()
-                .expect("maximize restore lock") = Some(state);
+            *self.maximize_restore.lock().expect("maximize restore lock") = Some(state);
             Ok(())
         }
 
         fn clear_maximize_restore_state(&self, _win: WindowId) -> Result<(), BackendError> {
-            *self
-                .maximize_restore
-                .lock()
-                .expect("maximize restore lock") = None;
+            *self.maximize_restore.lock().expect("maximize restore lock") = None;
             Ok(())
         }
 
@@ -2533,10 +2520,7 @@ mod unmanage_minimized_tests {
             &self,
             _win: WindowId,
         ) -> Result<Option<FloatingRestoreState>, BackendError> {
-            Ok(*self
-                .floating_restore
-                .lock()
-                .expect("floating restore lock"))
+            Ok(*self.floating_restore.lock().expect("floating restore lock"))
         }
 
         fn set_floating_restore_state(
@@ -2544,18 +2528,12 @@ mod unmanage_minimized_tests {
             _win: WindowId,
             state: FloatingRestoreState,
         ) -> Result<(), BackendError> {
-            *self
-                .floating_restore
-                .lock()
-                .expect("floating restore lock") = Some(state);
+            *self.floating_restore.lock().expect("floating restore lock") = Some(state);
             Ok(())
         }
 
         fn clear_floating_restore_state(&self, _win: WindowId) -> Result<(), BackendError> {
-            *self
-                .floating_restore
-                .lock()
-                .expect("floating restore lock") = None;
+            *self.floating_restore.lock().expect("floating restore lock") = None;
             Ok(())
         }
 

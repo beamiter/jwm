@@ -27,6 +27,11 @@ frames, and they appear only while the frame profiler has samples.
 machine's, which is what the status bar's resource rows show. See
 [resources.md](resources.md).
 
+CPU samples keep the last valid value when a counter resets or the two
+non-atomic `/proc` reads cannot form a reliable interval. The sampler adopts
+the new counters as its next baseline and resumes updating on a valid interval;
+the retained value has no separate stale marker.
+
 ## Styling
 
 The card uses the same tones, radii and elevation as the system-UI launcher,

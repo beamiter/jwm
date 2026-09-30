@@ -133,11 +133,7 @@ impl Jwm {
     }
 
     /// Page Up / Down on an open picker. Returns false when none is open.
-    pub(crate) fn page_layout_picker(
-        &mut self,
-        backend: &mut dyn Backend,
-        direction: i32,
-    ) -> bool {
+    pub(crate) fn page_layout_picker(&mut self, backend: &mut dyn Backend, direction: i32) -> bool {
         let Some(picker) = self.features.system_ui.layout_picker_mut() else {
             return false;
         };

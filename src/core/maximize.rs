@@ -363,10 +363,22 @@ mod tests {
                 "{source:?}"
             );
         }
-        assert_eq!(EwmhSourceIndication::from_raw(0), EwmhSourceIndication::Unspecified);
-        assert_eq!(EwmhSourceIndication::from_raw(1), EwmhSourceIndication::Application);
-        assert_eq!(EwmhSourceIndication::from_raw(2), EwmhSourceIndication::Pager);
-        assert_eq!(EwmhSourceIndication::from_raw(99), EwmhSourceIndication::Unspecified);
+        assert_eq!(
+            EwmhSourceIndication::from_raw(0),
+            EwmhSourceIndication::Unspecified
+        );
+        assert_eq!(
+            EwmhSourceIndication::from_raw(1),
+            EwmhSourceIndication::Application
+        );
+        assert_eq!(
+            EwmhSourceIndication::from_raw(2),
+            EwmhSourceIndication::Pager
+        );
+        assert_eq!(
+            EwmhSourceIndication::from_raw(99),
+            EwmhSourceIndication::Unspecified
+        );
     }
 
     #[test]

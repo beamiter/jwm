@@ -4611,17 +4611,15 @@ mod property_ops {
     use crate::backend::x11::wm::{
         AllowedActionAtoms, NetWmStateAtoms, WindowTypeAtoms, atom_for_allowed_action,
         atom_for_net_wm_state, decode_text_property,
+        floating_restore::{
+            FLOATING_RESTORE_V1_LONG_LENGTH, decode_floating_restore_v1, encode_floating_restore_v1,
+        },
+        maximize_restore::{
+            MAXIMIZE_RESTORE_V1_LONG_LENGTH, decode_maximize_restore_v1, encode_maximize_restore_v1,
+        },
         minimized_restore::{
             MINIMIZED_RESTORE_V1_LONG_LENGTH, decode_minimized_restore_v1,
             encode_minimized_restore_v1,
-        },
-        maximize_restore::{
-            MAXIMIZE_RESTORE_V1_LONG_LENGTH, decode_maximize_restore_v1,
-            encode_maximize_restore_v1,
-        },
-        floating_restore::{
-            FLOATING_RESTORE_V1_LONG_LENGTH, decode_floating_restore_v1,
-            encode_floating_restore_v1,
         },
         net_wm_ping_message, net_wm_sync_request_message, parse_gtk_frame_extents, parse_icon_data,
         parse_motif_hints, parse_normal_hints, parse_opaque_region, parse_strut,

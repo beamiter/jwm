@@ -77,8 +77,7 @@ pub fn pick_windows(available: &[ToplevelInfo], multiple: bool) -> PickerOutcome
         // Prefer Wayland app_id/title; when that misses, enrich from jwm IPC
         // get_windows so class:firefox still works when app_id is empty/wrong.
         let ipc = crate::ipc::query_windows().ok();
-        let filtered =
-            filter_portal_window_spec(&spec, available, ipc.as_deref());
+        let filtered = filter_portal_window_spec(&spec, available, ipc.as_deref());
         if !filtered.is_empty() {
             return PickerOutcome::Picked(filtered);
         }

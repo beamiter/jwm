@@ -565,6 +565,7 @@ fn plan_monitor_output_indices(
         .collect()
 }
 
+#[cfg(test)]
 fn plan_monitor_rects_by_output(
     monitor_outputs: &[Option<OutputId>],
     outputs: &[(OutputId, Rect)],
@@ -1127,7 +1128,8 @@ impl Jwm {
         // source, saved per-tag layouts), not the current slotmap length.
         // Reusing `len()` after a non-tail hot-unplug can collide with a
         // surviving monitor.
-        let num = lowest_unused_monitor_num(self.state.monitors.values().map(|monitor| &monitor.num));
+        let num =
+            lowest_unused_monitor_num(self.state.monitors.values().map(|monitor| &monitor.num));
         let connector = output_identity_seed_key(&info.identity);
         let mut m = self.createmon_numbered(CONFIG.load().show_bar(), num, connector);
 
@@ -2497,7 +2499,8 @@ mod tests {
         // otherwise unmaximize would place content past the work-area edge.
         let huge = Rect::new(10, 40, 2400, 1300);
         let target = Rect::new(1920, 30, 1280, 690);
-        let clamped = translate_and_clamp_restore_rect(huge, Some(Rect::new(0, 30, 2560, 1410)), target, 2);
+        let clamped =
+            translate_and_clamp_restore_rect(huge, Some(Rect::new(0, 30, 2560, 1410)), target, 2);
         assert!(
             clamped.w + 4 <= target.w,
             "width must fit with borders: {clamped:?} in {target:?}"

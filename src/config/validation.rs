@@ -347,6 +347,16 @@ fn validate_spawn_argument(
             }
         },
         ArgumentConfig::StringVec(command)
+            if command.iter().any(|argument| argument.contains('\0')) =>
+        {
+            diagnostics.warning(
+                path,
+                "spawn command array contains a NUL character; this binding will be ignored",
+                Some("remove NUL characters from every argument".into()),
+            );
+            false
+        }
+        ArgumentConfig::StringVec(command)
             if command
                 .first()
                 .is_some_and(|program| !program.trim().is_empty()) =>
@@ -379,6 +389,31 @@ fn validate_finite_argument(
         path,
         format!("floating-point argument {value} is not finite"),
         Some("use a finite numeric value".into()),
+    );
+    false
+}
+
+fn validate_binding_argument_type(
+    diagnostics: &mut ConfigDiagnostics,
+    path: &str,
+    function: &str,
+    argument: &ArgumentConfig,
+) -> bool {
+    if Config::binding_argument_type_is_valid(function, argument) {
+        return true;
+    }
+    let expected = if function == "setmfact" {
+        "floating-point"
+    } else {
+        "signed integer"
+    };
+    let example = if function == "setmfact" { "0.05" } else { "1" };
+    diagnostics.warning(
+        path,
+        format!("{function} requires a {expected} argument; this binding will be ignored"),
+        Some(format!(
+            "set argument = {example} using a {expected} TOML number"
+        )),
     );
     false
 }
@@ -416,6 +451,12 @@ fn validate_binding(
     let argument_is_finite =
         validate_finite_argument(diagnostics, &argument_path, &binding.argument);
     let argument_is_valid = argument_is_finite
+        && validate_binding_argument_type(
+            diagnostics,
+            &argument_path,
+            &binding.function,
+            &binding.argument,
+        )
         && (binding.function != "spawn"
             || validate_spawn_argument(diagnostics, &argument_path, &binding.argument));
 
@@ -1360,6 +1401,12 @@ impl Config {
             let argument_is_finite = validate_finite_argument(
                 &mut diagnostics,
                 &format!("{path}.argument"),
+                &button.argument,
+            );
+            validate_binding_argument_type(
+                &mut diagnostics,
+                &format!("{path}.argument"),
+                &button.function,
                 &button.argument,
             );
             if button.function == "spawn" && argument_is_finite {

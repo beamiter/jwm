@@ -11,16 +11,19 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::env;
 use std::fs::{self, OpenOptions};
-use std::io::{self, BufRead, BufReader, Read, Write};
+use std::io::{self, Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const IPC_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_IPC_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_REPORTED_VALUE_CHARS: usize = 256;
+const MAX_OUTPUT_CREATE_ATTEMPTS: usize = 128;
+const MAX_KERNEL_RELEASE_BYTES: u64 = 4 * 1024;
+const MAX_OS_RELEASE_BYTES: u64 = 64 * 1024;
 const SESSION_ENV_KEYS: &[&str] = &[
     "DISPLAY",
     "WAYLAND_DISPLAY",
@@ -261,16 +264,59 @@ fn run(cli: &Cli) -> Result<bool, Box<dyn std::error::Error>> {
 }
 
 fn collect_system_snapshot() -> SystemSnapshot {
+    collect_system_snapshot_from_paths(
+        Path::new("/proc/sys/kernel/osrelease"),
+        Path::new("/etc/os-release"),
+    )
+}
+
+fn collect_system_snapshot_from_paths(
+    kernel_path: &Path,
+    distribution_path: &Path,
+) -> SystemSnapshot {
     SystemSnapshot {
         os: env::consts::OS,
         architecture: env::consts::ARCH,
         family: env::consts::FAMILY,
-        kernel_release: fs::read_to_string("/proc/sys/kernel/osrelease")
+        kernel_release: read_system_text(kernel_path, MAX_KERNEL_RELEASE_BYTES)
             .ok()
             .map(|value| sanitize_reported_value(value.trim())),
-        distribution: fs::read_to_string("/etc/os-release")
+        distribution: read_system_text(distribution_path, MAX_OS_RELEASE_BYTES)
             .map_or_else(|_| BTreeMap::new(), |content| parse_os_release(&content)),
     }
+}
+
+fn read_system_text(path: &Path, max_bytes: u64) -> io::Result<String> {
+    // /etc/os-release commonly links to /usr/lib/os-release. Follow ordinary
+    // file symlinks, but inspect the opened descriptor so a FIFO replacement
+    // cannot block the diagnostics tool before type/size validation.
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "system information source is not a regular file",
+        ));
+    }
+    if metadata.len() > max_bytes {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "system information source exceeds its byte limit",
+        ));
+    }
+    let mut bytes = Vec::with_capacity(metadata.len().min(4096) as usize);
+    file.take(max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > max_bytes {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "system information source exceeds its byte limit",
+        ));
+    }
+    String::from_utf8(bytes).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
 fn collect_session_environment() -> BTreeMap<String, String> {
@@ -453,45 +499,63 @@ fn query_ipc(socket: &Path, query: &str) -> QueryProbe {
 }
 
 fn query_ipc_value(socket: &Path, query: &str) -> Result<Value, String> {
-    let mut stream = UnixStream::connect(socket)
+    let stream = jwm::ipc_connection::connect(socket, IPC_TIMEOUT)
         .map_err(|error| format!("cannot connect to {}: {error}", socket.display()))?;
-    stream
-        .set_read_timeout(Some(IPC_TIMEOUT))
-        .map_err(|error| format!("cannot set IPC read timeout: {error}"))?;
-    stream
-        .set_write_timeout(Some(IPC_TIMEOUT))
-        .map_err(|error| format!("cannot set IPC write timeout: {error}"))?;
-
     let mut request = serde_json::to_vec(&json!({ "query": query, "args": null }))
         .map_err(|error| format!("cannot encode IPC request: {error}"))?;
     request.push(b'\n');
-    stream
-        .write_all(&request)
-        .map_err(|error| format!("cannot write IPC request: {error}"))?;
-    stream
-        .flush()
-        .map_err(|error| format!("cannot flush IPC request: {error}"))?;
+    ipc_exchange(stream, &request, IPC_TIMEOUT)
+        .map_err(|error| format!("cannot exchange IPC request: {error}"))
+}
 
-    let reader = BufReader::new(stream);
-    let mut limited = reader.take((MAX_IPC_RESPONSE_BYTES + 1) as u64);
+fn ipc_remaining(deadline: Instant) -> io::Result<Duration> {
+    deadline
+        .checked_duration_since(Instant::now())
+        .filter(|remaining| !remaining.is_zero())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::TimedOut, "IPC I/O deadline exceeded"))
+}
+
+// The connection has a separate budget. Once connected, partial request writes
+// and response reads share this deadline; a trickling peer cannot renew it.
+fn ipc_exchange(mut stream: UnixStream, request: &[u8], timeout: Duration) -> io::Result<Value> {
+    let deadline = Instant::now()
+        .checked_add(timeout)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "IPC timeout is too large"))?;
+    jwm::ipc_connection::write_all_with_timeout(&mut stream, request, ipc_remaining(deadline)?)?;
+
     let mut response = Vec::new();
-    let read = limited
-        .read_until(b'\n', &mut response)
-        .map_err(|error| format!("cannot read IPC response: {error}"))?;
-    if read == 0 {
-        return Err("JWM closed the IPC connection without a response".to_string());
-    }
-    if response.len() > MAX_IPC_RESPONSE_BYTES {
-        return Err(format!(
-            "IPC response exceeds the {} byte safety limit",
-            MAX_IPC_RESPONSE_BYTES
-        ));
+    let mut buffer = [0; 8192];
+    loop {
+        stream.set_read_timeout(Some(ipc_remaining(deadline)?))?;
+        let room = (MAX_IPC_RESPONSE_BYTES + 1 - response.len()).min(buffer.len());
+        let count = match stream.read(&mut buffer[..room]) {
+            Ok(0) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "JWM closed the IPC connection before a complete response frame",
+                ));
+            }
+            Ok(count) => count,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        };
+        let newline = buffer[..count].iter().position(|byte| *byte == b'\n');
+        response.extend_from_slice(&buffer[..newline.map_or(count, |index| index + 1)]);
+        if response.len() > MAX_IPC_RESPONSE_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("IPC response exceeds the {MAX_IPC_RESPONSE_BYTES} byte safety limit"),
+            ));
+        }
+        if newline.is_some() {
+            break;
+        }
     }
     while matches!(response.last(), Some(b'\n' | b'\r')) {
         response.pop();
     }
-
-    serde_json::from_slice(&response).map_err(|error| format!("JWM returned invalid JSON: {error}"))
+    serde_json::from_slice(&response)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
 fn normalize_ipc_response(response: Value) -> QueryProbe {
@@ -527,6 +591,16 @@ fn write_output(path: Option<&Path>, json: &[u8]) -> io::Result<()> {
 }
 
 fn write_private_atomic(path: &Path, data: &[u8]) -> io::Result<()> {
+    write_private_atomic_with_suffixes(path, data, std::iter::repeat_with(unique_suffix))
+}
+
+fn write_private_atomic_with_suffixes(
+    path: &Path,
+    data: &[u8],
+    suffixes: impl IntoIterator<Item = u128>,
+) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -543,29 +617,44 @@ fn write_private_atomic(path: &Path, data: &[u8]) -> io::Result<()> {
             "output path must name a regular file",
         )
     })?;
-    let temporary = parent.join(format!(
-        ".{}.{}.{}.tmp",
-        file_name.to_string_lossy(),
-        std::process::id(),
-        unique_suffix()
-    ));
-
-    let result = (|| {
-        let mut file = OpenOptions::new()
+    for suffix in suffixes.into_iter().take(MAX_OUTPUT_CREATE_ATTEMPTS) {
+        let temporary = parent.join(format!(
+            ".{}.{}.{suffix}.tmp",
+            file_name.to_string_lossy(),
+            std::process::id(),
+        ));
+        let mut file = match OpenOptions::new()
             .write(true)
             .create_new(true)
             .mode(0o600)
-            .open(&temporary)?;
-        file.write_all(data)?;
-        file.write_all(b"\n")?;
-        file.sync_all()?;
-        fs::rename(&temporary, path)?;
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary);
+            .open(&temporary)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        };
+        // Cleanup is reached only after create_new proved ownership. An
+        // occupied name can belong to another writer and must remain intact.
+        let result = (|| {
+            file.set_permissions(fs::Permissions::from_mode(0o600))?;
+            file.write_all(data)?;
+            file.write_all(b"\n")?;
+            file.sync_all()?;
+            fs::rename(&temporary, path)?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&temporary);
+            return result;
+        }
+        // The name was released by rename. A durability error must not
+        // unlink a new writer's file that reused the old temporary path.
+        return fs::File::open(parent)?.sync_all();
     }
-    result
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "support bundle temporary namespace is exhausted",
+    ))
 }
 
 fn unique_suffix() -> u128 {
@@ -590,6 +679,96 @@ mod tests {
             .try_get_matches_from(args)
             .expect("the support CLI accepts these arguments");
         Cli::from_arg_matches(&matches).expect("matches convert back into Cli")
+    }
+
+    fn exchange_response(response: Vec<u8>) -> io::Result<Value> {
+        let (client, mut server) = UnixStream::pair().unwrap();
+        server
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        server
+            .set_write_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        let worker = std::thread::spawn(move || -> io::Result<()> {
+            let mut request = [0; 8];
+            server.read_exact(&mut request)?;
+            assert_eq!(&request, b"request\n");
+            server.write_all(&response)
+        });
+        let result = ipc_exchange(client, b"request\n", Duration::from_secs(1));
+        let sent = worker.join().unwrap();
+        if result.is_ok() {
+            sent.unwrap();
+        }
+        result
+    }
+
+    #[test]
+    fn ipc_response_requires_a_complete_frame_and_accepts_crlf() {
+        for incomplete in [Vec::new(), br#"{"success":true}"#.to_vec()] {
+            assert_eq!(
+                exchange_response(incomplete).unwrap_err().kind(),
+                io::ErrorKind::UnexpectedEof
+            );
+        }
+        for invalid in [b"not JSON\n".to_vec(), vec![0xff, b'\n']] {
+            assert_eq!(
+                exchange_response(invalid).unwrap_err().kind(),
+                io::ErrorKind::InvalidData
+            );
+        }
+        let valid =
+            exchange_response(b"{\"success\":true}\r\nignored second frame\n".to_vec()).unwrap();
+        assert_eq!(valid, json!({"success": true}));
+    }
+
+    #[test]
+    fn ipc_response_limit_includes_the_newline() {
+        let mut exact = br#"{"success":true}"#.to_vec();
+        exact.resize(MAX_IPC_RESPONSE_BYTES - 1, b' ');
+        exact.push(b'\n');
+        assert_eq!(exchange_response(exact).unwrap(), json!({"success": true}));
+
+        let mut oversized = br#"{"success":true}"#.to_vec();
+        oversized.resize(MAX_IPC_RESPONSE_BYTES, b' ');
+        oversized.push(b'\n');
+        assert_eq!(
+            exchange_response(oversized).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+    }
+
+    #[test]
+    fn slow_ipc_response_cannot_restart_the_io_deadline() {
+        let (client, mut server) = UnixStream::pair().unwrap();
+        server
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        server
+            .set_write_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        let worker = std::thread::spawn(move || -> io::Result<()> {
+            let mut request = [0; 8];
+            server.read_exact(&mut request)?;
+            for _ in 0..100 {
+                if server.write_all(b" ").is_err() {
+                    return Ok(());
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            server.write_all(b"{\"success\":true}\n")
+        });
+        let started = Instant::now();
+        let result = ipc_exchange(client, b"request\n", Duration::from_millis(70));
+        let elapsed = started.elapsed();
+        // Join before asserting so failures cannot leak a live worker.
+        let _ = worker.join().unwrap();
+        let error = result.unwrap_err();
+        assert!(matches!(
+            error.kind(),
+            io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+        ));
+        assert!(elapsed < Duration::from_secs(1));
     }
 
     #[test]
@@ -791,6 +970,115 @@ SECRET_TOKEN=do-not-copy
             "{\"schema_version\":1}\n"
         );
         assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o077, 0);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn system_information_reads_are_bounded_and_preserve_regular_symlinks() {
+        let directory = env::temp_dir().join(format!(
+            "jwm-support-system-info-{}-{}",
+            std::process::id(),
+            unique_suffix()
+        ));
+        fs::create_dir(&directory).unwrap();
+        let kernel = directory.join("kernel");
+        let release = directory.join("os-release");
+        let link = directory.join("release-link");
+        fs::write(&kernel, "6.1-test\n").unwrap();
+        fs::write(&release, "NAME=JWM Test\nID=jwm-test\nPRIVATE=hidden\n").unwrap();
+        std::os::unix::fs::symlink(&release, &link).unwrap();
+        let snapshot = collect_system_snapshot_from_paths(&kernel, &link);
+        assert_eq!(snapshot.kernel_release.as_deref(), Some("6.1-test"));
+        assert_eq!(snapshot.distribution["ID"], "jwm-test");
+        assert!(!snapshot.distribution.contains_key("PRIVATE"));
+
+        assert_eq!(read_system_text(&kernel, 9).unwrap(), "6.1-test\n");
+        assert_eq!(
+            read_system_text(&kernel, 8).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        fs::File::create(&release)
+            .unwrap()
+            .set_len(MAX_OS_RELEASE_BYTES + 1)
+            .unwrap();
+        assert!(
+            collect_system_snapshot_from_paths(&kernel, &link)
+                .distribution
+                .is_empty()
+        );
+
+        let fifo = directory.join("fifo");
+        nix::unistd::mkfifo(
+            &fifo,
+            nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
+        )
+        .unwrap();
+        assert_eq!(
+            read_system_text(&fifo, 32).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        let unavailable = collect_system_snapshot_from_paths(&fifo, &directory);
+        assert!(unavailable.kernel_release.is_none());
+        assert!(unavailable.distribution.is_empty());
+        fs::write(&kernel, [0xff]).unwrap();
+        assert_eq!(
+            read_system_text(&kernel, 32).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn support_output_retries_occupied_temporaries_without_deleting_them() {
+        let directory = env::temp_dir().join(format!(
+            "jwm-support-collision-{}-{}",
+            std::process::id(),
+            unique_suffix()
+        ));
+        fs::create_dir(&directory).unwrap();
+        let path = directory.join("bundle.json");
+        let occupied = directory.join(format!(".bundle.json.{}.7.tmp", std::process::id()));
+        let available = directory.join(format!(".bundle.json.{}.8.tmp", std::process::id()));
+        fs::write(&path, "previous\n").unwrap();
+        fs::write(&occupied, "other writer").unwrap();
+
+        write_private_atomic_with_suffixes(&path, b"replacement", [7, 8]).unwrap();
+
+        assert_eq!(fs::read_to_string(&occupied).unwrap(), "other writer");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "replacement\n");
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert!(!available.exists());
+
+        let exhausted =
+            write_private_atomic_with_suffixes(&path, b"uncommitted", std::iter::repeat(7))
+                .unwrap_err();
+        assert_eq!(exhausted.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read_to_string(&occupied).unwrap(), "other writer");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "replacement\n");
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn support_output_failed_commit_removes_only_its_owned_temporary() {
+        let directory = env::temp_dir().join(format!(
+            "jwm-support-failed-commit-{}-{}",
+            std::process::id(),
+            unique_suffix()
+        ));
+        fs::create_dir(&directory).unwrap();
+        let path = directory.join("occupied-directory");
+        fs::create_dir(&path).unwrap();
+        let sentinel = path.join("keep");
+        fs::write(&sentinel, "preserved").unwrap();
+        let temporary = directory.join(format!(".occupied-directory.{}.9.tmp", std::process::id()));
+
+        assert!(write_private_atomic_with_suffixes(&path, b"uncommitted", [9]).is_err());
+
+        assert_eq!(fs::read_to_string(sentinel).unwrap(), "preserved");
+        assert!(!temporary.exists());
         fs::remove_dir_all(directory).unwrap();
     }
 }

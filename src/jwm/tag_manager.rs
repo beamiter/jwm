@@ -776,7 +776,12 @@ mod tests {
         let client = &jwm.state.clients[key];
         assert_eq!(client.mon, Some(target));
         assert_eq!(
-            (client.geometry.x, client.geometry.y, client.geometry.w, client.geometry.h),
+            (
+                client.geometry.x,
+                client.geometry.y,
+                client.geometry.w,
+                client.geometry.h
+            ),
             (target_work.x + 100, target_work.y + 80, 500, 300),
             "the window lands on the target, not a pixel inside its edge"
         );
@@ -804,7 +809,12 @@ mod tests {
 
         let client = &jwm.state.clients[key];
         assert_eq!(
-            (client.geometry.x, client.geometry.y, client.geometry.w, client.geometry.h),
+            (
+                client.geometry.x,
+                client.geometry.y,
+                client.geometry.w,
+                client.geometry.h
+            ),
             (dropped.x, dropped.y, dropped.w, dropped.h),
             "a drop is not shifted by the distance between the work areas again"
         );
@@ -845,7 +855,8 @@ mod tests {
         }
         backend.window_ops.configurations.lock().unwrap().clear();
 
-        jwm.handle_output_removed(&mut backend, OutputId(2)).unwrap();
+        jwm.handle_output_removed(&mut backend, OutputId(2))
+            .unwrap();
 
         let client = &jwm.state.clients[parked];
         let moved = client.geometry.hidden_restore_rect.expect("still parked");
@@ -892,8 +903,18 @@ mod tests {
             let client = &jwm.state.clients[key];
             assert!(client.state.is_fullscreen);
             assert_eq!(
-                (client.geometry.x, client.geometry.y, client.geometry.w, client.geometry.h),
-                (target_monitor.x, target_monitor.y, target_monitor.w, target_monitor.h),
+                (
+                    client.geometry.x,
+                    client.geometry.y,
+                    client.geometry.w,
+                    client.geometry.h
+                ),
+                (
+                    target_monitor.x,
+                    target_monitor.y,
+                    target_monitor.w,
+                    target_monitor.h
+                ),
                 "fullscreen fills the output it moved to"
             );
         }
@@ -901,7 +922,12 @@ mod tests {
         jwm.setfullscreen(&mut backend, key, false).unwrap();
         let client = &jwm.state.clients[key];
         assert_eq!(
-            (client.geometry.x, client.geometry.y, client.geometry.w, client.geometry.h),
+            (
+                client.geometry.x,
+                client.geometry.y,
+                client.geometry.w,
+                client.geometry.h
+            ),
             (target_work.x + 60, target_work.y + 40, 400, 250),
             "leaving fullscreen returns to the translated pre-fullscreen rect, \
              not a monitor-sized window on the old output"
@@ -925,8 +951,11 @@ mod tests {
         // The second video lives on tag 2, which is not being viewed.
         jwm.state.clients[away].state.tags = 0b10;
 
-        jwm.setlayout(&mut backend, &WMArgEnum::Layout(Rc::new(LayoutEnum::MONOCLE)))
-            .unwrap();
+        jwm.setlayout(
+            &mut backend,
+            &WMArgEnum::Layout(Rc::new(LayoutEnum::MONOCLE)),
+        )
+        .unwrap();
 
         assert!(
             !jwm.state.clients[here].state.is_fullscreen,
@@ -951,11 +980,15 @@ mod tests {
         jwm.focus(&mut backend, Some(key)).unwrap();
         let before = jwm.state.clients[key].geometry.clone();
 
-        jwm.togglefloating(&mut backend, &WMArgEnum::Int(0)).unwrap();
+        jwm.togglefloating(&mut backend, &WMArgEnum::Int(0))
+            .unwrap();
 
         let client = &jwm.state.clients[key];
         assert!(client.state.is_fullscreen);
-        assert!(client.state.is_floating, "fullscreen keeps owning is_floating");
+        assert!(
+            client.state.is_floating,
+            "fullscreen keeps owning is_floating"
+        );
         assert_eq!(client.geometry.floating_w, before.floating_w);
         assert_eq!(client.geometry.floating_h, before.floating_h);
     }

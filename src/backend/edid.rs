@@ -74,13 +74,20 @@ pub fn parse_edid_identity_from_bytes(edid: &[u8]) -> Option<EdidIdentity> {
     }
 
     let vendor_raw = u16::from_be_bytes([edid[8], edid[9]]);
-    let vendor = [
-        (((vendor_raw >> 10) & 0x1F) as u8 + b'A' - 1) as char,
-        (((vendor_raw >> 5) & 0x1F) as u8 + b'A' - 1) as char,
-        ((vendor_raw & 0x1F) as u8 + b'A' - 1) as char,
-    ]
-    .iter()
-    .collect::<String>();
+    let vendor_codes = [
+        ((vendor_raw >> 10) & 0x1F) as u8,
+        ((vendor_raw >> 5) & 0x1F) as u8,
+        (vendor_raw & 0x1F) as u8,
+    ];
+    // Manufacturer codes encode exactly three letters, with bit 15 reserved.
+    // Invalid codes must not become punctuation in a persistent identity.
+    if vendor_raw & 0x8000 != 0 || vendor_codes.iter().any(|code| !(1..=26).contains(code)) {
+        return None;
+    }
+    let vendor = vendor_codes
+        .into_iter()
+        .map(|code| (code + b'A' - 1) as char)
+        .collect::<String>();
 
     let product_code = u16::from_le_bytes([edid[10], edid[11]]);
     let serial_number = u32::from_le_bytes([edid[12], edid[13], edid[14], edid[15]]);
@@ -88,13 +95,17 @@ pub fn parse_edid_identity_from_bytes(edid: &[u8]) -> Option<EdidIdentity> {
     let mut monitor_serial = None;
 
     for descriptor in edid[54..126].chunks_exact(18) {
-        if descriptor[0..3] != [0, 0, 0] {
+        // Display name and serial descriptors require zero in all reserved
+        // prefix bytes, including byte 4 (E-EDID section 3.10.3).
+        if descriptor[0..3] != [0, 0, 0] || descriptor[4] != 0 {
             continue;
         }
-        let text = parse_descriptor_text(&descriptor[5..18]);
+        let Some(text) = parse_descriptor_text(&descriptor[5..18]) else {
+            continue;
+        };
         match descriptor[3] {
-            0xFC => monitor_name = text,
-            0xFF => monitor_serial = text,
+            0xFC => monitor_name = Some(text),
+            0xFF => monitor_serial = Some(text),
             _ => {}
         }
     }
@@ -296,6 +307,70 @@ mod tests {
             | (((bytes[1] - b'A' + 1) as u16) << 5)
             | ((bytes[2] - b'A' + 1) as u16);
         raw.to_be_bytes()
+    }
+
+    #[test]
+    fn malformed_text_descriptors_do_not_replace_valid_identity() {
+        let mut edid = vec![0u8; 128];
+        edid[..8].copy_from_slice(&[0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0]);
+        edid[8..10].copy_from_slice(&encode_vendor("JWM"));
+        for (offset, tag, text, reserved) in [
+            (54, 0xfc, b"Valid name".as_slice(), 0),
+            (72, 0xff, b"Valid serial".as_slice(), 0),
+            (90, 0xfc, b"Wrong name".as_slice(), 1),
+            (108, 0xff, b"Wrong serial".as_slice(), 1),
+        ] {
+            edid[offset + 3] = tag;
+            edid[offset + 4] = reserved;
+            edid[offset + 5..offset + 5 + text.len()].copy_from_slice(text);
+        }
+        let identity = parse_edid_identity_from_bytes(&edid).unwrap();
+        assert_eq!(identity.monitor_name.as_deref(), Some("Valid name"));
+        assert_eq!(identity.monitor_serial.as_deref(), Some("Valid serial"));
+
+        edid[58] = 1;
+        edid[76] = 1;
+        let identity = parse_edid_identity_from_bytes(&edid).unwrap();
+        assert_eq!(identity.monitor_name, None);
+        assert_eq!(identity.monitor_serial, None);
+        assert_eq!(identity.vendor, "JWM");
+    }
+
+    #[test]
+    fn empty_duplicate_descriptors_preserve_the_stated_identity() {
+        let mut edid = vec![0u8; 128];
+        edid[..8].copy_from_slice(&[0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0]);
+        edid[8..10].copy_from_slice(&encode_vendor("JWM"));
+        for (offset, tag, text) in [
+            (54, 0xfc, b"Display".as_slice()),
+            (72, 0xff, b"Serial".as_slice()),
+            (90, 0xfc, b"  \n".as_slice()),
+            (108, 0xff, b"\n".as_slice()),
+        ] {
+            edid[offset + 3] = tag;
+            edid[offset + 5..offset + 5 + text.len()].copy_from_slice(text);
+        }
+        let identity = parse_edid_identity_from_bytes(&edid).unwrap();
+        assert_eq!(identity.monitor_name.as_deref(), Some("Display"));
+        assert_eq!(identity.monitor_serial.as_deref(), Some("Serial"));
+    }
+
+    #[test]
+    fn identity_rejects_non_letter_vendor_codes_and_reserved_bit() {
+        let mut edid = vec![0u8; 128];
+        edid[..8].copy_from_slice(&[0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0]);
+        let valid = u16::from_be_bytes(encode_vendor("AZA"));
+        edid[8..10].copy_from_slice(&valid.to_be_bytes());
+        assert_eq!(parse_edid_identity_from_bytes(&edid).unwrap().vendor, "AZA");
+        for shift in [0, 5, 10] {
+            for code in [0, 27, 31] {
+                let invalid = (valid & !(31 << shift)) | (code << shift);
+                edid[8..10].copy_from_slice(&invalid.to_be_bytes());
+                assert!(parse_edid_identity_from_bytes(&edid).is_none());
+            }
+        }
+        edid[8..10].copy_from_slice(&(valid | 0x8000).to_be_bytes());
+        assert!(parse_edid_identity_from_bytes(&edid).is_none());
     }
 
     #[test]

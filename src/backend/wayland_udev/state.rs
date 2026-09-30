@@ -1065,7 +1065,12 @@ impl JwmWaylandState {
         {
             return false;
         }
-        if self.window_is_fullscreen.get(&win).copied().unwrap_or(false) {
+        if self
+            .window_is_fullscreen
+            .get(&win)
+            .copied()
+            .unwrap_or(false)
+        {
             return false;
         }
         true
@@ -2017,10 +2022,7 @@ fn xdg_resize_edge_direction(edge: xdg_toplevel::ResizeEdge) -> Option<u32> {
 /// Accept an xdg interactive move/resize only when the seat still holds the
 /// serial's pointer (or touch) grab — the protocol requires a button press that
 /// the compositor owns, and a forged serial must not start a drag.
-fn xdg_seat_has_interactive_grab(
-    seat: &Seat<JwmWaylandState>,
-    serial: Serial,
-) -> Option<u32> {
+fn xdg_seat_has_interactive_grab(seat: &Seat<JwmWaylandState>, serial: Serial) -> Option<u32> {
     if let Some(pointer) = seat.get_pointer() {
         if pointer.has_grab(serial) {
             return Some(0);
@@ -5147,7 +5149,11 @@ impl XdgShellHandler for JwmWaylandState {
         let Some(button) = xdg_seat_has_interactive_grab(&seat, serial) else {
             return;
         };
-        let Some(window) = self.surface_to_window.get(&surface.wl_surface().id()).copied() else {
+        let Some(window) = self
+            .surface_to_window
+            .get(&surface.wl_surface().id())
+            .copied()
+        else {
             return;
         };
         // Same shared drag pipeline as XWayland / `_NET_WM_MOVERESIZE`: a
@@ -5175,7 +5181,11 @@ impl XdgShellHandler for JwmWaylandState {
         let Some(direction) = xdg_resize_edge_direction(edges) else {
             return;
         };
-        let Some(window) = self.surface_to_window.get(&surface.wl_surface().id()).copied() else {
+        let Some(window) = self
+            .surface_to_window
+            .get(&surface.wl_surface().id())
+            .copied()
+        else {
             return;
         };
         self.push_event(BackendEvent::MoveResizeRequest {
@@ -5622,8 +5632,7 @@ mod xwayland_moveresize_tests {
             .nth(1)
             .expect("XdgShellHandler impl");
         assert!(
-            xdg_impl.contains("direction: 8")
-                && xdg_impl.contains("xdg_resize_edge_direction"),
+            xdg_impl.contains("direction: 8") && xdg_impl.contains("xdg_resize_edge_direction"),
             "XdgShellHandler must not keep empty move/resize defaults"
         );
     }

@@ -39,16 +39,16 @@ use crate::backend::x11::wm::{
     EwmhFeatureAtoms, NetWmStateAtoms, PropertyKindAtoms, ProtocolErrorClass,
     SUPPORTED_EWMH_FEATURES, SigchldBlockedForSpawns, WindowTypeAtoms, atom_for_allowed_action,
     atom_for_ewmh_feature, atom_for_net_wm_state, build_output_info, classify_client_message,
-    decode_text_property, expand_net_wm_state_requests, fallback_output, forwards_property_notify,
-    lock_modifier_combinations,
-    minimized_restore::{
-        MINIMIZED_RESTORE_V1_LONG_LENGTH, decode_minimized_restore_v1, encode_minimized_restore_v1,
+    decode_text_property, expand_net_wm_state_requests, fallback_output,
+    floating_restore::{
+        FLOATING_RESTORE_V1_LONG_LENGTH, decode_floating_restore_v1, encode_floating_restore_v1,
     },
+    forwards_property_notify, lock_modifier_combinations,
     maximize_restore::{
         MAXIMIZE_RESTORE_V1_LONG_LENGTH, decode_maximize_restore_v1, encode_maximize_restore_v1,
     },
-    floating_restore::{
-        FLOATING_RESTORE_V1_LONG_LENGTH, decode_floating_restore_v1, encode_floating_restore_v1,
+    minimized_restore::{
+        MINIMIZED_RESTORE_V1_LONG_LENGTH, decode_minimized_restore_v1, encode_minimized_restore_v1,
     },
     net_wm_ping_message, net_wm_state_from_atom, net_wm_sync_request_message, output_at,
     parse_gtk_frame_extents, parse_icon_data, parse_motif_hints, parse_normal_hints,

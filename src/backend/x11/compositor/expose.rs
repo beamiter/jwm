@@ -588,8 +588,10 @@ impl<C: CompositorConnection> Compositor<C> {
                 .uniform_2_f32(self.border_uniforms.size.as_ref(), width, height);
             self.gl
                 .uniform_4_f32(self.border_uniforms.rect.as_ref(), x, y, width, height);
-            self.gl
-                .uniform_1_f32(self.border_uniforms.border_width.as_ref(), width.max(height));
+            self.gl.uniform_1_f32(
+                self.border_uniforms.border_width.as_ref(),
+                width.max(height),
+            );
             self.gl.uniform_4_f32(
                 self.border_uniforms.border_color.as_ref(),
                 wr,
@@ -623,8 +625,11 @@ impl<C: CompositorConnection> Compositor<C> {
                     (x + width * 0.5, y + height),
                     (x + width, y + height),
                 ] {
-                    self.gl
-                        .uniform_2_f32(self.border_uniforms.size.as_ref(), handle_size, handle_size);
+                    self.gl.uniform_2_f32(
+                        self.border_uniforms.size.as_ref(),
+                        handle_size,
+                        handle_size,
+                    );
                     self.gl.uniform_4_f32(
                         self.border_uniforms.rect.as_ref(),
                         handle_x - handle_size * 0.5,

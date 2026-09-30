@@ -423,13 +423,18 @@ impl NotificationCenter {
     }
 
     /// Allocate the next identifier. Zero is reserved by the specification for
-    /// "not a notification", so the counter skips it on wrap.
+    /// "not a notification", so the counter skips it on wrap, as well as
+    /// identifiers still present in the bounded history.
     fn allocate_id(&mut self) -> u32 {
-        self.next_id = self.next_id.wrapping_add(1);
-        if self.next_id == 0 {
-            self.next_id = 1;
+        loop {
+            self.next_id = self.next_id.wrapping_add(1);
+            if self.next_id == 0 {
+                self.next_id = 1;
+            }
+            if !self.records.iter().any(|record| record.id == self.next_id) {
+                return self.next_id;
+            }
         }
-        self.next_id
     }
 
     /// Record a notification and return its identifier.
@@ -789,6 +794,9 @@ pub fn parse_history(text: &str) -> Option<NotificationCenter> {
         record.body = sanitize(&record.body);
         record.urgency = record.urgency.min(2);
         record.actions = sanitize_actions(&record.actions);
+        // A restored identifier names exactly one notification. Keep the
+        // newest occurrence, matching the on-disk oldest-first order.
+        records.retain(|existing: &NotificationRecord| existing.id != record.id);
         records.push_back(record);
     }
     Some(NotificationCenter {
@@ -835,35 +843,70 @@ fn read_history(path: &Path) -> io::Result<String> {
     String::from_utf8(bytes).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
-fn atomic_write_history(path: &Path, contents: &[u8]) -> io::Result<()> {
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    fs::create_dir_all(parent)?;
-    let sequence = HISTORY_WRITE_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let temporary = parent.join(format!(
-        ".{HISTORY_FILE}.tmp-{}-{sequence}",
-        std::process::id()
-    ));
-
-    let result = (|| {
-        let mut file = OpenOptions::new()
+fn create_history_temporary(
+    mut candidate: impl FnMut() -> std::path::PathBuf,
+) -> io::Result<(std::path::PathBuf, fs::File)> {
+    for _ in 0..128 {
+        let path = candidate();
+        match OpenOptions::new()
             .write(true)
             .create_new(true)
             .mode(0o600)
-            .open(&temporary)?;
+            .open(&path)
+        {
+            Ok(file) => return Ok((path, file)),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "notification history temporary candidates exhausted",
+    ))
+}
+
+fn atomic_write_history(path: &Path, contents: &[u8]) -> io::Result<()> {
+    atomic_write_history_with_sequence(path, contents, || {
+        HISTORY_WRITE_COUNTER.fetch_add(1, Ordering::Relaxed)
+    })
+}
+
+fn atomic_write_history_with_sequence(
+    path: &Path,
+    contents: &[u8],
+    mut next_sequence: impl FnMut() -> u64,
+) -> io::Result<()> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent)?;
+    let (temporary, mut file) = create_history_temporary(|| {
+        let sequence = next_sequence();
+        parent.join(format!(
+            ".{HISTORY_FILE}.tmp-{}-{sequence}",
+            std::process::id()
+        ))
+    })?;
+
+    let result: io::Result<()> = (|| {
         // `mode` is still filtered through the process umask. Set the final
         // private mode explicitly before the inode becomes visible at `path`.
         file.set_permissions(fs::Permissions::from_mode(0o600))?;
         file.write_all(contents)?;
         file.sync_all()?;
         fs::rename(&temporary, path)?;
-        fs::File::open(parent)?.sync_all()?;
         Ok(())
     })();
 
     if result.is_err() {
         let _ = fs::remove_file(&temporary);
     }
-    result
+    // Once rename publishes the inode, this invocation no longer owns the
+    // temporary pathname. A later directory-sync error must not remove a
+    // different writer's newly created file at the same pathname.
+    result?;
+    fs::File::open(parent)?.sync_all()
 }
 
 /// Longest a change waits to reach the disk. Changes inside one window share
@@ -1610,6 +1653,24 @@ mod tests {
     }
 
     #[test]
+    fn restored_identifier_wrap_preserves_existing_records() {
+        let mut original = NotificationCenter::new();
+        for index in 0..MAX_HISTORY {
+            original.push(&request(&format!("old{index}")), 1_000, false);
+        }
+        let mut center = parse_history(&serialize_history(&original.records, u32::MAX)).unwrap();
+        let id = center.push(&request("new"), 2_000, false);
+        assert_eq!(id, MAX_HISTORY as u32 + 1);
+        assert_eq!(center.get(id).unwrap().summary, "new");
+        assert_eq!(center.get(2).unwrap().summary, "old1");
+        let mut replacement = request("updated");
+        replacement.replaces_id = id;
+        assert_eq!(center.push(&replacement, 3_000, false), id);
+        assert_eq!(center.get(id).unwrap().summary, "updated");
+        assert_eq!(center.len(), MAX_HISTORY);
+    }
+
+    #[test]
     fn replaces_in_place_without_growing_history() {
         let mut center = NotificationCenter::new();
         let first = center.push(&request("copying 1%"), 1_000, false);
@@ -1782,6 +1843,22 @@ mod tests {
         ));
         fs::create_dir_all(&root).unwrap();
         root
+    }
+
+    #[test]
+    fn history_duplicate_ids_keep_newest_and_close_once() {
+        let mut original = NotificationCenter::new();
+        original.push(&request("old"), 1_000, false);
+        original.push(&request("other"), 2_000, false);
+        original.push(&request("new"), 3_000, false);
+        original.records.back_mut().unwrap().id = 1;
+        let text = serialize_history(&original.records, original.next_id);
+        let mut restored = parse_history(&text).unwrap();
+        assert_eq!(restored.len(), 2);
+        assert_eq!(restored.get(1).unwrap().summary, "new");
+        restored.close(1);
+        assert!(restored.get(1).is_none());
+        assert!(restored.get(2).is_some());
     }
 
     #[test]
@@ -1964,6 +2041,76 @@ mod tests {
         )
         .unwrap();
         assert!(NotificationCenter::load_from_path(&path).is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn history_write_supports_a_bare_relative_filename() {
+        struct RemoveFile(std::path::PathBuf);
+        impl Drop for RemoveFile {
+            fn drop(&mut self) {
+                let _ = fs::remove_file(&self.0);
+            }
+        }
+        let sequence = HISTORY_WRITE_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = std::path::PathBuf::from(format!(
+            ".jwm-history-relative-test-{}-{sequence}",
+            std::process::id()
+        ));
+        // Claim a unique filename without changing the process working directory.
+        let file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        let _cleanup = RemoveFile(path.clone());
+        drop(file);
+        atomic_write_history(&path, b"relative history").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"relative history");
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[test]
+    fn failed_history_publish_preserves_destination_and_removes_owned_temporary() {
+        let root = history_temp_root("failed-publish");
+        let path = root.join(HISTORY_FILE);
+        fs::create_dir(&path).unwrap();
+        fs::write(path.join("marker"), b"unchanged").unwrap();
+        assert!(atomic_write_history_with_sequence(&path, b"replacement", || 0).is_err());
+        assert_eq!(fs::read(path.join("marker")).unwrap(), b"unchanged");
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn history_write_retries_collisions_without_removing_another_writers_file() {
+        let root = history_temp_root("collision");
+        let path = root.join(HISTORY_FILE);
+        fs::write(&path, b"old").unwrap();
+        let occupied = root.join(format!(".{HISTORY_FILE}.tmp-{}-0", std::process::id()));
+        fs::write(&occupied, b"other writer").unwrap();
+        let mut sequence = 0;
+        atomic_write_history_with_sequence(&path, b"new", || {
+            let value = sequence;
+            sequence += 1;
+            value
+        })
+        .unwrap();
+        assert_eq!(sequence, 2);
+        assert_eq!(fs::read(&path).unwrap(), b"new");
+        let mut attempts = 0;
+        let error = atomic_write_history_with_sequence(&path, b"lost", || {
+            attempts += 1;
+            0
+        })
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(attempts, 128);
+        assert_eq!(fs::read(&occupied).unwrap(), b"other writer");
+        assert_eq!(fs::read(&path).unwrap(), b"new");
         fs::remove_dir_all(root).unwrap();
     }
 

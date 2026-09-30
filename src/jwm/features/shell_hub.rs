@@ -156,7 +156,10 @@ mod tests {
             );
         }
         assert_eq!(ShellHubRoute::from_shortcut('x'), None);
-        assert_eq!(ShellHubRoute::from_shortcut('t'), Some(ShellHubRoute::Theme));
+        assert_eq!(
+            ShellHubRoute::from_shortcut('t'),
+            Some(ShellHubRoute::Theme)
+        );
     }
 
     #[test]

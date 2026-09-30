@@ -2802,9 +2802,9 @@ mod tests {
         RetainedColorGenerationAction, RetainedColorPlanContext, RetainedOutputColorContext,
         WindowRetirement, XDG_POPUP_WINDOW_ID_PREFIX, apply_expose_terminal_cleanup,
         clear_immediate_restore_collections, collect_absent_auxiliary_window_ids,
-        disabled_genie_action, is_auxiliary_window_id, legacy_retained_placement_changed,
-        legacy_retained_preview_placement_changed, mouse_position_requires_render,
-        postprocess_is_active, final_brightness_is_active, retained_color_generation_action,
+        disabled_genie_action, final_brightness_is_active, is_auxiliary_window_id,
+        legacy_retained_placement_changed, legacy_retained_preview_placement_changed,
+        mouse_position_requires_render, postprocess_is_active, retained_color_generation_action,
         retained_color_plan_context_changed, retained_color_plan_geometry,
         retained_output_profiles_compatible, retirement_uses_genie,
         should_request_static_minimized_capture, tab_hover_for_pointer,
@@ -3031,8 +3031,7 @@ mod tests {
         let neutral = (0.0, 1.0, 1.0, false, false, false, 0, false);
 
         assert!(!postprocess_is_active(
-            neutral.0, neutral.1, neutral.2, neutral.3, neutral.4, neutral.5, neutral.6,
-            neutral.7,
+            neutral.0, neutral.1, neutral.2, neutral.3, neutral.4, neutral.5, neutral.6, neutral.7,
         ));
         assert!(postprocess_is_active(
             0.1, neutral.1, neutral.2, neutral.3, neutral.4, neutral.5, neutral.6, neutral.7,
@@ -3042,8 +3041,7 @@ mod tests {
         ));
         // Brightness alone does not arm mid-frame postprocess.
         assert!(!postprocess_is_active(
-            neutral.0, neutral.1, neutral.2, neutral.3, neutral.4, neutral.5, neutral.6,
-            neutral.7,
+            neutral.0, neutral.1, neutral.2, neutral.3, neutral.4, neutral.5, neutral.6, neutral.7,
         ));
         assert!(final_brightness_is_active(0.9));
         assert!(!final_brightness_is_active(1.0));

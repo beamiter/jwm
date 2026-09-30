@@ -43,10 +43,25 @@ jwm --backend wayland --check-config
 jwm --gen-config
 ```
 
-`--gen-config` writes both templates. An existing file is copied to the matching
-`*.toml.backup` path before replacement. Writes use a same-directory atomic
+`--gen-config` writes both templates. An existing file is backed up to the matching
+`*.toml.backup` path before replacement, with numbered suffixes when earlier
+backups exist. A backup is published only after its complete contents are synced.
+Writes use a same-directory atomic
 replace, preserve an existing configuration symlink, and sync the new file
 before returning.
+
+Temporary-file collisions are retried up to 128 times without deleting another
+writer's file. Backup publication checks the base `*.toml.backup` name and
+suffixes `.1` through `.127`; if all are occupied, generation returns an error
+and preserves the configuration and existing backups. Older backups with higher
+suffixes remain readable.
+
+Configuration reads, backups and restores accept regular files up to 4 MiB;
+special files such as FIFOs are rejected without waiting for a writer. Backups
+preserve the original bytes even when an interrupted edit left invalid TOML or
+UTF-8. Restore atomically replaces the resolved target, preserves existing
+permissions and configuration symlinks, and creates missing targets with mode
+`0600`.
 
 `--check-config` validates both TOML structure and runtime semantics without
 constructing a backend. It reports unreachable shortcut collisions, unknown

@@ -1334,7 +1334,7 @@ pub struct MonitorInfoIpc {
     pub skip_pager_count: usize,
     /// How many of those clients asked for no decorations.
     pub no_decorations_count: usize,
-        /// How many of those clients are hand-floated (`is_drag_floating`).
+    /// How many of those clients are hand-floated (`is_drag_floating`).
     pub drag_float_count: usize,
     /// How many of those clients are swallowed.
     pub swallowed_count: usize,
@@ -1429,39 +1429,58 @@ pub struct TreeNode {
 pub fn dispatch_command(name: &str, args: &Value) -> Result<(WMFuncType, WMArgEnum), String> {
     match name {
         // --- Window management ---
-        "focusstack" | "focus_stack" => Ok((Jwm::focusstack as WMFuncType, parse_int_arg(args, 1)?)),
+        "focusstack" | "focus_stack" => {
+            Ok((Jwm::focusstack as WMFuncType, parse_int_arg(args, 1)?))
+        }
         "app_launcher" | "launcher" => Ok((Jwm::app_launcher as WMFuncType, WMArgEnum::Int(0))),
         "control_center" | "hub" => Ok((Jwm::control_center as WMFuncType, WMArgEnum::Int(0))),
         "notification_center" | "notif_center" => {
             Ok((Jwm::notification_center as WMFuncType, WMArgEnum::Int(0)))
-        }        "media_play_pause" | "play" => Ok((Jwm::media_play_pause as WMFuncType, WMArgEnum::Int(0))),
+        }
+        "media_play_pause" | "play" => Ok((Jwm::media_play_pause as WMFuncType, WMArgEnum::Int(0))),
         "media_next" | "next" => Ok((Jwm::media_next as WMFuncType, WMArgEnum::Int(0))),
         "media_previous" | "prev" => Ok((Jwm::media_previous as WMFuncType, WMArgEnum::Int(0))),
         "media_stop" | "stop" => Ok((Jwm::media_stop as WMFuncType, WMArgEnum::Int(0))),
         "session_menu" | "session" => Ok((Jwm::session_menu as WMFuncType, WMArgEnum::Int(0))),
-        "toggle_night_light" | "night" => Ok((Jwm::toggle_night_light as WMFuncType, WMArgEnum::Int(0))),
+        "toggle_night_light" | "night" => {
+            Ok((Jwm::toggle_night_light as WMFuncType, WMArgEnum::Int(0)))
+        }
         "toggle_wifi" | "twifi" => Ok((Jwm::toggle_wifi as WMFuncType, WMArgEnum::Int(0))),
         "wifi_picker" | "wifi" => Ok((Jwm::wifi_picker as WMFuncType, WMArgEnum::Int(0))),
-        "audio_output_picker" | "aout" => Ok((Jwm::audio_output_picker as WMFuncType, WMArgEnum::Int(0))),
-        "audio_input_picker" | "ain" => Ok((Jwm::audio_input_picker as WMFuncType, WMArgEnum::Int(0))),
+        "audio_output_picker" | "aout" => {
+            Ok((Jwm::audio_output_picker as WMFuncType, WMArgEnum::Int(0)))
+        }
+        "audio_input_picker" | "ain" => {
+            Ok((Jwm::audio_input_picker as WMFuncType, WMArgEnum::Int(0)))
+        }
         "bluetooth_picker" | "bt" => Ok((Jwm::bluetooth_picker as WMFuncType, WMArgEnum::Int(0))),
         "calendar" | "cal" => Ok((Jwm::calendar as WMFuncType, WMArgEnum::Int(0))),
         "clipboard_picker" | "clip" => Ok((Jwm::clipboard_picker as WMFuncType, WMArgEnum::Int(0))),
         "wallpaper_picker" | "wall" => Ok((Jwm::wallpaper_picker as WMFuncType, WMArgEnum::Int(0))),
         "toggle_bluetooth" | "tbt" => Ok((Jwm::toggle_bluetooth as WMFuncType, WMArgEnum::Int(0))),
-        "monitor_layout" | "monlayout" => Ok((Jwm::monitor_layout as WMFuncType, WMArgEnum::Int(0))),
+        "monitor_layout" | "monlayout" => {
+            Ok((Jwm::monitor_layout as WMFuncType, WMArgEnum::Int(0)))
+        }
         "lock_screen" | "lock" => Ok((Jwm::lock_screen as WMFuncType, WMArgEnum::Int(0))),
         // `-1` — the default — is the monitor in use for `lock_monitor`, and
         // the most recently locked one for `unlock_monitor`.
         "lock_monitor" => Ok((Jwm::lock_monitor as WMFuncType, parse_int_arg(args, -1)?)),
-        "unlock_monitor" | "unlock" => Ok((Jwm::unlock_monitor as WMFuncType, parse_int_arg(args, -1)?)),
+        "unlock_monitor" | "unlock" => {
+            Ok((Jwm::unlock_monitor as WMFuncType, parse_int_arg(args, -1)?))
+        }
         "killclient" | "kill_client" | "kill" => Ok((Jwm::killclient, parse_int_arg(args, 0)?)),
         "minimize" | "minimize_window" => Ok((Jwm::minimize, parse_int_arg(args, 0)?)),
         "zoom" | "zoom_master" => Ok((Jwm::zoom, parse_int_arg(args, 0)?)),
-        "togglefloating" | "toggle_floating" | "floating" => Ok((Jwm::togglefloating, parse_int_arg(args, 0)?)),
-        "togglesticky" | "toggle_sticky" | "sticky" => Ok((Jwm::togglesticky, parse_int_arg(args, 0)?)),
+        "togglefloating" | "toggle_floating" | "floating" => {
+            Ok((Jwm::togglefloating, parse_int_arg(args, 0)?))
+        }
+        "togglesticky" | "toggle_sticky" | "sticky" => {
+            Ok((Jwm::togglesticky, parse_int_arg(args, 0)?))
+        }
         "togglepip" | "toggle_pip" | "pip" => Ok((Jwm::togglepip, parse_int_arg(args, 0)?)),
-        "togglemaximize" | "toggle_maximize" | "maximize" => Ok((Jwm::togglemaximize, parse_int_arg(args, 0)?)),
+        "togglemaximize" | "toggle_maximize" | "maximize" => {
+            Ok((Jwm::togglemaximize, parse_int_arg(args, 0)?))
+        }
         "togglescratchpad" | "toggle_scratchpad" | "pad" => {
             let cmd = if argument_is_omitted(args) {
                 vec!["term".to_string()]
@@ -1496,9 +1515,15 @@ pub fn dispatch_command(name: &str, args: &Value) -> Result<(WMFuncType, WMArgEn
         "scrolling_toggle_attach_mode" | "attach" => {
             Ok((Jwm::scrolling_toggle_attach_mode, parse_int_arg(args, 0)?))
         }
-        "scrolling_focus_column" | "scol" => Ok((Jwm::scrolling_focus_column, parse_int_arg(args, 1)?)),
-        "scrolling_move_column" | "smov" => Ok((Jwm::scrolling_move_column, parse_int_arg(args, 1)?)),
-        "scrolling_focus_window" | "swin" => Ok((Jwm::scrolling_focus_window, parse_int_arg(args, 1)?)),
+        "scrolling_focus_column" | "scol" => {
+            Ok((Jwm::scrolling_focus_column, parse_int_arg(args, 1)?))
+        }
+        "scrolling_move_column" | "smov" => {
+            Ok((Jwm::scrolling_move_column, parse_int_arg(args, 1)?))
+        }
+        "scrolling_focus_window" | "swin" => {
+            Ok((Jwm::scrolling_focus_window, parse_int_arg(args, 1)?))
+        }
         "scrolling_consume" | "scons" => Ok((Jwm::scrolling_consume, parse_int_arg(args, 1)?)),
         "scrolling_expel" | "sexp" => Ok((Jwm::scrolling_expel, parse_int_arg(args, 1)?)),
         "setlayout" | "set_layout" => {
@@ -1506,7 +1531,9 @@ pub fn dispatch_command(name: &str, args: &Value) -> Result<(WMFuncType, WMArgEn
             Ok((Jwm::setlayout, layout))
         }
         "lastlayout" | "last_layout" | "last" => Ok((Jwm::lastlayout, parse_int_arg(args, 0)?)),
-        "cyclelayout" | "cycle_layout" | "clayout" => Ok((Jwm::cyclelayout, parse_int_arg(args, 1)?)),
+        "cyclelayout" | "cycle_layout" | "clayout" => {
+            Ok((Jwm::cyclelayout, parse_int_arg(args, 1)?))
+        }
         "layout_picker" | "layouts" => Ok((Jwm::layout_picker, parse_int_arg(args, 0)?)),
         "togglebar" | "toggle_bar" | "bar" => Ok((Jwm::togglebar, parse_int_arg(args, 0)?)),
 
@@ -1540,7 +1567,9 @@ pub fn dispatch_command(name: &str, args: &Value) -> Result<(WMFuncType, WMArgEn
         // a bar asks the compositor that owns the screen to run its own
         // capture, instead of shelling out to whatever external grabber
         // happens to be installed.
-        "take_screenshot" | "screenshot" => Ok((Jwm::take_screenshot as WMFuncType, WMArgEnum::Int(0))),
+        "take_screenshot" | "screenshot" => {
+            Ok((Jwm::take_screenshot as WMFuncType, WMArgEnum::Int(0)))
+        }
         "take_screenshot_fullscreen" | "screenshot_fullscreen" => Ok((
             Jwm::take_screenshot_fullscreen as WMFuncType,
             WMArgEnum::Int(0),
@@ -1584,14 +1613,24 @@ pub fn dispatch_command(name: &str, args: &Value) -> Result<(WMFuncType, WMArgEn
         "toggle_peek" | "peek" => Ok((Jwm::toggle_peek, parse_int_arg(args, 0)?)),
         "toggle_annotation" | "annotate" => Ok((Jwm::toggle_annotation, parse_int_arg(args, 0)?)),
         "toggle_recording" | "record" => Ok((Jwm::toggle_recording, parse_int_arg(args, 0)?)),
-        "adjust_recording_region" | "region" => Ok((Jwm::adjust_recording_region, parse_int_arg(args, 0)?)),
-        "toggle_audio_recording" | "arecord" => Ok((Jwm::toggle_audio_recording, parse_int_arg(args, 0)?)),
+        "adjust_recording_region" | "region" => {
+            Ok((Jwm::adjust_recording_region, parse_int_arg(args, 0)?))
+        }
+        "toggle_audio_recording" | "arecord" => {
+            Ok((Jwm::toggle_audio_recording, parse_int_arg(args, 0)?))
+        }
         "toggle_dnd" | "toggle_do_not_disturb" => Ok((Jwm::toggle_dnd, parse_int_arg(args, 0)?)),
-        "toggle_idle_inhibit" | "caffeine" => Ok((Jwm::toggle_idle_inhibit, parse_int_arg(args, 0)?)),
+        "toggle_idle_inhibit" | "caffeine" => {
+            Ok((Jwm::toggle_idle_inhibit, parse_int_arg(args, 0)?))
+        }
 
         // --- Session ---
-        "save_session" | "persist_session" | "save" => Ok((Jwm::save_session, parse_int_arg(args, 0)?)),
-        "restore_session" | "load_session" | "restore" => Ok((Jwm::restore_session, parse_int_arg(args, 0)?)),
+        "save_session" | "persist_session" | "save" => {
+            Ok((Jwm::save_session, parse_int_arg(args, 0)?))
+        }
+        "restore_session" | "load_session" | "restore" => {
+            Ok((Jwm::restore_session, parse_int_arg(args, 0)?))
+        }
 
         _ => Err(format!("unknown command: {name}")),
     }
@@ -1962,8 +2001,18 @@ mod tests {
             scratchpad: Some("term".into()),
             layout: Some("TILE".into()),
             size_hints: None,
-            float_rect: RectIpc { x: 0, y: 0, w: 100, h: 100 },
-            old_geometry: RectIpc { x: 0, y: 0, w: 100, h: 100 },
+            float_rect: RectIpc {
+                x: 0,
+                y: 0,
+                w: 100,
+                h: 100,
+            },
+            old_geometry: RectIpc {
+                x: 0,
+                y: 0,
+                w: 100,
+                h: 100,
+            },
             old_border_w: 0,
             hidden_restore: None,
             maximize_restore_anchor: None,
@@ -2087,8 +2136,18 @@ mod tests {
             scratchpad: None,
             layout: None,
             size_hints: None,
-            float_rect: RectIpc { x: 0, y: 0, w: 100, h: 100 },
-            old_geometry: RectIpc { x: 0, y: 0, w: 100, h: 100 },
+            float_rect: RectIpc {
+                x: 0,
+                y: 0,
+                w: 100,
+                h: 100,
+            },
+            old_geometry: RectIpc {
+                x: 0,
+                y: 0,
+                w: 100,
+                h: 100,
+            },
             old_border_w: 0,
             hidden_restore: None,
             maximize_restore_anchor: None,
@@ -2173,8 +2232,18 @@ mod tests {
             scratchpad: None,
             layout: Some("MONOCLE".into()),
             size_hints: None,
-            float_rect: RectIpc { x: 0, y: 0, w: 100, h: 100 },
-            old_geometry: RectIpc { x: 0, y: 0, w: 100, h: 100 },
+            float_rect: RectIpc {
+                x: 0,
+                y: 0,
+                w: 100,
+                h: 100,
+            },
+            old_geometry: RectIpc {
+                x: 0,
+                y: 0,
+                w: 100,
+                h: 100,
+            },
             old_border_w: 0,
             hidden_restore: None,
             maximize_restore_anchor: None,
@@ -2252,8 +2321,18 @@ mod tests {
             scratchpad: None,
             layout: None,
             size_hints: None,
-            float_rect: RectIpc { x: 0, y: 0, w: 100, h: 100 },
-            old_geometry: RectIpc { x: 0, y: 0, w: 100, h: 100 },
+            float_rect: RectIpc {
+                x: 0,
+                y: 0,
+                w: 100,
+                h: 100,
+            },
+            old_geometry: RectIpc {
+                x: 0,
+                y: 0,
+                w: 100,
+                h: 100,
+            },
             old_border_w: 0,
             hidden_restore: None,
             maximize_restore_anchor: None,
@@ -3052,18 +3131,8 @@ mod tests {
                 .iter()
                 .any(|name| name == "get_mic_mute")
         );
-        assert!(
-            capabilities
-                .queries
-                .iter()
-                .any(|name| name == "get_layout")
-        );
-        assert!(
-            capabilities
-                .queries
-                .iter()
-                .any(|name| name == "get_gaps")
-        );
+        assert!(capabilities.queries.iter().any(|name| name == "get_layout"));
+        assert!(capabilities.queries.iter().any(|name| name == "get_gaps"));
         assert!(
             capabilities
                 .queries
@@ -3071,10 +3140,7 @@ mod tests {
                 .any(|name| name == "get_nmaster")
         );
         assert!(
-            capabilities
-                .queries
-                .iter()
-                .any(|name| name == "get_mfact"),
+            capabilities.queries.iter().any(|name| name == "get_mfact"),
             "get_mfact twins get_gaps/get_nmaster in capabilities"
         );
         assert!(
@@ -3092,10 +3158,7 @@ mod tests {
             "get_outputs aliases get_monitors in capabilities"
         );
         assert!(
-            capabilities
-                .queries
-                .iter()
-                .any(|name| name == "get_tags"),
+            capabilities.queries.iter().any(|name| name == "get_tags"),
             "get_tags aliases get_workspaces in capabilities"
         );
         assert!(
@@ -3123,18 +3186,8 @@ mod tests {
                 .iter()
                 .any(|name| name == "get_scratchpads")
         );
-        assert!(
-            capabilities
-                .queries
-                .iter()
-                .any(|name| name == "get_struts")
-        );
-        assert!(
-            capabilities
-                .queries
-                .iter()
-                .any(|name| name == "get_window")
-        );
+        assert!(capabilities.queries.iter().any(|name| name == "get_struts"));
+        assert!(capabilities.queries.iter().any(|name| name == "get_window"));
         assert!(
             capabilities
                 .commands
@@ -3154,24 +3207,15 @@ mod tests {
                 .any(|name| name == "setnmaster")
         );
         assert!(
-            capabilities
-                .commands
-                .iter()
-                .any(|name| name == "set_mfact"),
+            capabilities.commands.iter().any(|name| name == "set_mfact"),
             "set_mfact aliases setmfact in capabilities"
         );
         assert!(
-            capabilities
-                .commands
-                .iter()
-                .any(|name| name == "set_gaps"),
+            capabilities.commands.iter().any(|name| name == "set_gaps"),
             "set_gaps aliases setgaps in capabilities"
         );
         assert!(
-            capabilities
-                .commands
-                .iter()
-                .any(|name| name == "set_cfact"),
+            capabilities.commands.iter().any(|name| name == "set_cfact"),
             "set_cfact aliases setcfact in capabilities"
         );
         assert!(
@@ -3189,10 +3233,7 @@ mod tests {
             "kill_client aliases killclient"
         );
         assert!(
-            capabilities
-                .queries
-                .iter()
-                .any(|name| name == "get_cfact"),
+            capabilities.queries.iter().any(|name| name == "get_cfact"),
             "get_cfact twins get_mfact in capabilities"
         );
         assert!(
@@ -3539,28 +3580,28 @@ mod tests {
                 floating_count: 0,
                 minimized_count: 0,
                 sticky_count: 0,
-            urgent_count: 0,
-            fullscreen_count: 0,
-            pip_count: 0,
-            maximized_count: 0,
-            above_count: 0,
-            below_count: 0,
-            fixed_count: 0,
-            scratchpad_count: 0,
-            tabbed_count: 0,
-            dock_count: 0,
-            desktop_count: 0,
-            never_focus_count: 0,
-            demands_attention_count: 0,
-            skip_taskbar_count: 0,
-            skip_pager_count: 0,
-            no_decorations_count: 0,
-            drag_float_count: 0,
-            swallowed_count: 0,
-            on_view_count: 0,
-            maximize_promoted_count: 0,
-            strut_count: 0,
-            status_bar_count: 0,
+                urgent_count: 0,
+                fullscreen_count: 0,
+                pip_count: 0,
+                maximized_count: 0,
+                above_count: 0,
+                below_count: 0,
+                fixed_count: 0,
+                scratchpad_count: 0,
+                tabbed_count: 0,
+                dock_count: 0,
+                desktop_count: 0,
+                never_focus_count: 0,
+                demands_attention_count: 0,
+                skip_taskbar_count: 0,
+                skip_pager_count: 0,
+                no_decorations_count: 0,
+                drag_float_count: 0,
+                swallowed_count: 0,
+                on_view_count: 0,
+                maximize_promoted_count: 0,
+                strut_count: 0,
+                status_bar_count: 0,
             },
             windows: Vec::new(),
             selected_id: Some(42),
@@ -3659,28 +3700,28 @@ mod tests {
                 floating_count: 0,
                 minimized_count: 0,
                 sticky_count: 0,
-            urgent_count: 0,
-            fullscreen_count: 0,
-            pip_count: 0,
-            maximized_count: 0,
-            above_count: 0,
-            below_count: 0,
-            fixed_count: 0,
-            scratchpad_count: 0,
-            tabbed_count: 0,
-            dock_count: 0,
-            desktop_count: 0,
-            never_focus_count: 0,
-            demands_attention_count: 0,
-            skip_taskbar_count: 0,
-            skip_pager_count: 0,
-            no_decorations_count: 0,
-            drag_float_count: 0,
-            swallowed_count: 0,
-            on_view_count: 0,
-            maximize_promoted_count: 0,
-            strut_count: 0,
-            status_bar_count: 0,
+                urgent_count: 0,
+                fullscreen_count: 0,
+                pip_count: 0,
+                maximized_count: 0,
+                above_count: 0,
+                below_count: 0,
+                fixed_count: 0,
+                scratchpad_count: 0,
+                tabbed_count: 0,
+                dock_count: 0,
+                desktop_count: 0,
+                never_focus_count: 0,
+                demands_attention_count: 0,
+                skip_taskbar_count: 0,
+                skip_pager_count: 0,
+                no_decorations_count: 0,
+                drag_float_count: 0,
+                swallowed_count: 0,
+                on_view_count: 0,
+                maximize_promoted_count: 0,
+                strut_count: 0,
+                status_bar_count: 0,
             },
             windows: Vec::new(),
             selected_id: None,

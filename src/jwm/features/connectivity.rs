@@ -2043,8 +2043,9 @@ impl crate::jwm::Jwm {
         let bluetooth = self.features.connectivity.bluetooth;
         let wifi_scanning =
             crate::jwm::features::connectivity::job_in_flight(self.features.wifi_scan.as_ref());
-        let bluetooth_scanning =
-            crate::jwm::features::connectivity::job_in_flight(self.features.bluetooth_scan.as_ref());
+        let bluetooth_scanning = crate::jwm::features::connectivity::job_in_flight(
+            self.features.bluetooth_scan.as_ref(),
+        );
         let network = match &self.features.connectivity.network {
             Some(state) => serde_json::json!({
                 "present": true,

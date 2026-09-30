@@ -105,8 +105,8 @@ impl Jwm {
         let (client_total_width, client_total_height, mon_key) =
             if let Some(client) = self.state.clients.get(client_key) {
                 (
-                    *w + 2 * client.geometry.border_w,
-                    *h + 2 * client.geometry.border_w,
+                    i64::from(*w) + 2 * i64::from(client.geometry.border_w),
+                    i64::from(*h) + 2 * i64::from(client.geometry.border_w),
                     client.mon,
                 )
             } else {
@@ -136,10 +136,10 @@ impl Jwm {
         &self,
         x: &mut i32,
         y: &mut i32,
-        total_width: i32,
-        total_height: i32,
+        total_width: i64,
+        total_height: i64,
     ) {
-        GeometryConstraints::constrain_to_screen(
+        GeometryConstraints::constrain_to_screen_wide(
             x,
             y,
             total_width,
@@ -153,11 +153,11 @@ impl Jwm {
         &self,
         x: &mut i32,
         y: &mut i32,
-        total_width: i32,
-        total_height: i32,
+        total_width: i64,
+        total_height: i64,
         monitor_geometry: &MonitorGeometry,
     ) {
-        GeometryConstraints::constrain_to_monitor(
+        GeometryConstraints::constrain_to_monitor_wide(
             x,
             y,
             total_width,

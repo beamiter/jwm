@@ -985,10 +985,7 @@ impl WaylandCompositor {
                 projection.as_ptr(),
             );
             gl.Uniform1f(self.particle_uniforms.point_size, 8.0);
-            gl.Uniform1i(
-                self.particle_uniforms.scene_linear,
-                i32::from(scene_linear),
-            );
+            gl.Uniform1i(self.particle_uniforms.scene_linear, i32::from(scene_linear));
 
             // Build vertex data: [x, y, r, g, b, a, normalized life].
             self.scratch_particle_data.clear();

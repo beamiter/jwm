@@ -313,12 +313,14 @@ impl Jwm {
                 // A confirmed device switch queues a named card (description
                 // + direction glyph) from `adopt_audio_switch` when the
                 // re-read says it took — never on queue / "Switching…".
-                ControlDomain::AudioDevice => correction.name.map(|name| {
-                    crate::backend::api::OsdKind::AudioDevice {
-                        input: correction.input,
-                        name,
-                    }
-                }),
+                ControlDomain::AudioDevice => {
+                    correction
+                        .name
+                        .map(|name| crate::backend::api::OsdKind::AudioDevice {
+                            input: correction.input,
+                            name,
+                        })
+                }
                 // A profile switch whose re-read contradicted the live card:
                 // the card is refreshed with the profile really in effect.
                 ControlDomain::PowerProfile => correction
@@ -1049,10 +1051,8 @@ impl Jwm {
                             // truth — the radio may be hard-blocked and
                             // refuse to come back on. The OSD mirrors the
                             // key-bound toggle so Hub Left/Right is not silent.
-                            backend.compositor_show_osd(
-                                crate::backend::api::OsdKind::Wifi(true),
-                                0,
-                            );
+                            backend
+                                .compositor_show_osd(crate::backend::api::OsdKind::Wifi(true), 0);
                             self.request_radio_set(connectivity::RadioKind::Wifi, true);
                         }
                         NetworkRowAction::SetRadio(enabled) => {
@@ -1104,10 +1104,7 @@ impl Jwm {
                                     crate::backend::api::OsdKind::Bluetooth(false),
                                     0,
                                 );
-                                self.request_radio_set(
-                                    connectivity::RadioKind::Bluetooth,
-                                    false,
-                                );
+                                self.request_radio_set(connectivity::RadioKind::Bluetooth, false);
                             }
                         }
                         BluetoothRowAction::SetPower(true) => {
@@ -1124,9 +1121,7 @@ impl Jwm {
                     // Input's `m` mirrors Volume's sink mute: only while this
                     // row is selected, so Volume keeps its own `m`.
                     if control == ControlKind::AudioInput && keysym == keys::KEY_m {
-                        if let Err(error) =
-                            self.toggle_mic_mute(backend, &WMArgEnum::Int(0))
-                        {
+                        if let Err(error) = self.toggle_mic_mute(backend, &WMArgEnum::Int(0)) {
                             log::debug!("control center mic mute: {error}");
                         }
                     } else if activate {
@@ -1420,10 +1415,7 @@ impl Jwm {
             .and_then(|mk| self.state.monitors.get(mk))
             .map(|m| (m.geometry.m_w as f32, m.geometry.m_h as f32))
             .unwrap_or((1920.0, 1080.0));
-        let n = candidates
-            .iter()
-            .filter(|c| c.3 > 0 && c.4 > 0)
-            .count();
+        let n = candidates.iter().filter(|c| c.3 > 0 && c.4 > 0).count();
         let cols = crate::backend::compositor_common::expose::expose_grid_cols(n, sw, sh);
         let Some(window) = expose_plan::page_window(&candidates, selected, cols, direction) else {
             return;
@@ -1936,8 +1928,7 @@ impl Jwm {
                 use crate::jwm::features::media::MediaRowClick;
                 let config = CONFIG.load();
                 let description = config.system_ui_font();
-                let pixel_size =
-                    crate::backend::compositor_font::ui_font_pixel_size(description);
+                let pixel_size = crate::backend::compositor_font::ui_font_pixel_size(description);
                 let measure = |text: &str| {
                     crate::backend::compositor_font::measure_ui_text_width(
                         text,
@@ -1959,20 +1950,18 @@ impl Jwm {
                         return Ok(());
                     }
                     MediaRowClick::Previous => {
-                        let _ = self.send_media_command(
-                            crate::jwm::features::MediaCommand::Previous,
-                        );
+                        let _ =
+                            self.send_media_command(crate::jwm::features::MediaCommand::Previous);
                         return Ok(());
                     }
                     MediaRowClick::Next => {
-                        let _ = self
-                            .send_media_command(crate::jwm::features::MediaCommand::Next);
+                        let _ = self.send_media_command(crate::jwm::features::MediaCommand::Next);
                         return Ok(());
                     }
                     MediaRowClick::Seek(position_us) => {
-                        let _ = self.send_media_command(
-                            crate::jwm::features::MediaCommand::Seek(position_us),
-                        );
+                        let _ = self.send_media_command(crate::jwm::features::MediaCommand::Seek(
+                            position_us,
+                        ));
                         return Ok(());
                     }
                     MediaRowClick::PlayPause => {}
@@ -1990,8 +1979,7 @@ impl Jwm {
                     .and_then(|snapshot| snapshot.mic_muted);
                 let config = CONFIG.load();
                 let description = config.system_ui_font();
-                let pixel_size =
-                    crate::backend::compositor_font::ui_font_pixel_size(description);
+                let pixel_size = crate::backend::compositor_font::ui_font_pixel_size(description);
                 let measure = |text: &str| {
                     crate::backend::compositor_font::measure_ui_text_width(
                         text,
@@ -2003,9 +1991,7 @@ impl Jwm {
                     text_x, measure, mic_muted,
                 ) == AudioInputClick::ToggleMute
                 {
-                    if let Err(error) =
-                        self.toggle_mic_mute(backend, &WMArgEnum::Int(0))
-                    {
+                    if let Err(error) = self.toggle_mic_mute(backend, &WMArgEnum::Int(0)) {
                         log::debug!("control center mic mute: {error}");
                     }
                     return Ok(());
@@ -3024,8 +3010,9 @@ impl Jwm {
                     backend,
                     crate::backend::api::ToastNotification {
                         title: "\u{f030}  Pick a screenshot source".into(),
-                        body: "Hover a window and click, or drag a region, then Enter/Space to save"
-                            .into(),
+                        body:
+                            "Hover a window and click, or drag a region, then Enter/Space to save"
+                                .into(),
                         urgency: 1,
                         timeout_ms: 4000,
                         ..Default::default()
@@ -4469,32 +4456,36 @@ mod tests {
     }
 
     /// The pending audio-device OSD from a confirmed picker switch must ride
-    /// `flush_system_ui` — poll has no backend. Needles are built at runtime
-    /// so this cannot match its own source.
+    /// `flush_system_ui` — poll has no backend — and be consumed exactly once.
     #[test]
     fn flush_system_ui_raises_the_named_audio_device_osd() {
-        const SOURCE: &str = include_str!("input_handler.rs");
-        let body = SOURCE
-            .split_once(&format!("fn {}(", "flush_system_ui"))
-            .expect("flush_system_ui")
-            .1
-            .split_once("ControlDomain::AudioDevice =>")
-            .expect("the AudioDevice pending-OSD arm")
-            .1
-            .split_once("};")
-            .expect("the end of the kind match")
-            .0;
-        assert!(
-            body.contains("OsdKind::AudioDevice"),
-            "flush_system_ui no longer raises a named AudioDevice OSD"
+        let mut backend = ConfigureReplyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        backend.osd_log.lock().expect("osd log lock").clear();
+
+        // `adopt_audio_switch` fills this slot only after the worker's re-read
+        // confirms that the requested default device actually took.
+        jwm.features
+            .control_feedback
+            .queue_audio_device_osd(true, "Headset Microphone".into());
+
+        jwm.flush_system_ui(&mut backend);
+        assert_eq!(
+            *backend.osd_log.lock().expect("osd log lock"),
+            [(
+                crate::backend::api::OsdKind::AudioDevice {
+                    input: true,
+                    name: "Headset Microphone".into(),
+                },
+                0,
+            )]
         );
-        assert!(
-            body.contains("correction.name"),
-            "the AudioDevice arm must carry the confirmed description"
-        );
-        assert!(
-            !body.trim_start().starts_with("None"),
-            "ControlDomain::AudioDevice must not stay a silent None arm"
+
+        jwm.flush_system_ui(&mut backend);
+        assert_eq!(
+            backend.osd_log.lock().expect("osd log lock").len(),
+            1,
+            "a confirmed switch must be drained after one flush"
         );
     }
 

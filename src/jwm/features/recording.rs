@@ -588,14 +588,8 @@ mod tests {
             state.pointer_intent(100, 100),
             RecordingPointerIntent::Resize(EDGE_LEFT | EDGE_TOP)
         );
-        assert_eq!(
-            state.pointer_intent(200, 175),
-            RecordingPointerIntent::Move
-        );
-        assert_eq!(
-            state.pointer_intent(10, 10),
-            RecordingPointerIntent::New
-        );
+        assert_eq!(state.pointer_intent(200, 175), RecordingPointerIntent::Move);
+        assert_eq!(state.pointer_intent(10, 10), RecordingPointerIntent::New);
         assert_eq!(
             RecordingPointerIntent::Move.cursor(),
             crate::backend::common_define::StdCursorKind::Fleur

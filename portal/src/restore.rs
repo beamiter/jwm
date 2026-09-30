@@ -98,9 +98,7 @@ pub fn resolve_in(
         .filter_map(|key| {
             available_outputs
                 .iter()
-                .find(|o| {
-                    &o.name == key || o.connector.as_deref() == Some(key.as_str())
-                })
+                .find(|o| &o.name == key || o.connector.as_deref() == Some(key.as_str()))
                 .cloned()
         })
         .collect();

@@ -21,6 +21,14 @@ pub const MAX_TEXT_BYTES: usize = 256 * 1024;
 /// desktop captures would still be a memory liability.
 pub const MAX_IMAGE_HISTORY_BYTES: usize = 4 * 1024 * 1024;
 
+/// Largest decoded image admitted to clipboard history. Encoded byte size is
+/// not a memory bound: a mostly solid image can be only a few KiB on the wire
+/// and expand into hundreds of MiB. Sixteen megapixels covers 4K captures
+/// with room for cropping while keeping one RGBA decode near 64 MiB.
+const MAX_IMAGE_HISTORY_PIXELS: u64 = 16 * 1024 * 1024;
+const MAX_IMAGE_HISTORY_DIMENSION: u32 = 16 * 1024;
+const MAX_IMAGE_DECODE_BYTES: u64 = MAX_IMAGE_HISTORY_PIXELS * 4;
+
 /// One clipboard payload a backend captured for the history to adopt.
 ///
 /// Remote clipboard sharing remains text-only; PNG variants are filtered
@@ -114,7 +122,54 @@ pub(crate) static X11_CLIPBOARD_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mut
 pub(crate) struct IsolatedXvfb {
     _lock: std::sync::MutexGuard<'static, ()>,
     child: std::process::Child,
+    /// Completed X11 setup connection kept open for the fixture lifetime.
+    _probe: std::os::unix::net::UnixStream,
     display: String,
+}
+
+#[cfg(all(
+    test,
+    any(
+        feature = "backend-x11rb",
+        feature = "backend-xcb",
+        feature = "wayland-backends"
+    )
+))]
+struct XvfbStartupGuard(Option<std::process::Child>);
+
+#[cfg(all(
+    test,
+    any(
+        feature = "backend-x11rb",
+        feature = "backend-xcb",
+        feature = "wayland-backends"
+    )
+))]
+impl XvfbStartupGuard {
+    fn child_mut(&mut self) -> &mut std::process::Child {
+        self.0.as_mut().expect("Xvfb startup child")
+    }
+
+    fn finish(mut self) -> std::process::Child {
+        self.0.take().expect("Xvfb startup child")
+    }
+}
+
+#[cfg(all(
+    test,
+    any(
+        feature = "backend-x11rb",
+        feature = "backend-xcb",
+        feature = "wayland-backends"
+    )
+))]
+impl Drop for XvfbStartupGuard {
+    fn drop(&mut self) {
+        if let Some(child) = self.0.as_mut() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
 }
 
 #[cfg(all(
@@ -127,63 +182,132 @@ pub(crate) struct IsolatedXvfb {
 ))]
 impl IsolatedXvfb {
     pub(crate) fn acquire() -> Self {
+        use std::io::{Read as _, Write as _};
+        use std::process::Stdio;
+
         let lock = X11_CLIPBOARD_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // `-displayfd` asks Xvfb itself to choose and bind an unused display,
+        // then print its number only after the listener is ready. This cannot
+        // mistake a stale socket (or somebody else's live display) for the
+        // child launched here. Stdout is a private inherited pipe, so fd 1 is
+        // a portable displayfd without manual descriptor manipulation.
+        let child = match std::process::Command::new("Xvfb")
+            .args([
+                "-displayfd",
+                "1",
+                "-screen",
+                "0",
+                "1280x720x24",
+                "-nolisten",
+                "tcp",
+                "-ac",
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            Ok(child) => child,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                panic!("Xvfb is required for native X11 clipboard tests; install the xvfb package");
+            }
+            Err(error) => panic!("spawn Xvfb: {error}"),
+        };
+        // Until a complete X11 setup succeeds, every early return or panic
+        // must reap the private server rather than leak it into later tests.
+        let mut startup = XvfbStartupGuard(Some(child));
 
-        for display_number in 90..200 {
-            let display = format!(":{display_number}");
-            let mut child = match std::process::Command::new("Xvfb")
-                .args([
-                    display.as_str(),
-                    "-screen",
-                    "0",
-                    "1280x720x24",
-                    "-nolisten",
-                    "tcp",
-                    "-ac",
-                ])
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn()
-            {
-                Ok(child) => child,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    panic!(
-                        "Xvfb is required for native X11 clipboard tests; install the xvfb package"
-                    );
+        let mut stdout = startup
+            .child_mut()
+            .stdout
+            .take()
+            .expect("piped Xvfb displayfd");
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        let reader = std::thread::spawn(move || {
+            let mut line = Vec::new();
+            let result = loop {
+                let mut byte = [0u8; 1];
+                match stdout.read(&mut byte) {
+                    Ok(0) => break Err("Xvfb closed displayfd before reporting readiness".into()),
+                    Ok(_) if byte[0] == b'\n' => break Ok(line),
+                    Ok(_) if line.len() < 16 => line.push(byte[0]),
+                    Ok(_) => break Err("Xvfb display number exceeded 16 bytes".into()),
+                    Err(error) => break Err(format!("read Xvfb displayfd: {error}")),
                 }
-                Err(error) => panic!("spawn Xvfb: {error}"),
             };
-
-            let socket = std::path::PathBuf::from(format!("/tmp/.X11-unix/X{display_number}"));
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-            let mut ready = false;
-            while std::time::Instant::now() < deadline {
-                if let Ok(Some(_)) = child.try_wait() {
-                    break;
-                }
-                if socket.exists() {
-                    ready = true;
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(5));
-            }
-            if ready {
-                // Give the server a beat to accept connections after the
-                // socket appears.
-                std::thread::sleep(std::time::Duration::from_millis(20));
-                return Self {
-                    _lock: lock,
-                    child,
-                    display,
-                };
-            }
-            let _ = child.kill();
-            let _ = child.wait();
+            let _ = sender.send(result);
+        });
+        let reported = receiver.recv_timeout(std::time::Duration::from_secs(3));
+        if !matches!(reported, Ok(Ok(_))) {
+            let _ = startup.child_mut().kill();
         }
-        panic!("could not start an isolated Xvfb for clipboard tests");
+        let _ = reader.join();
+        let display_number = match reported {
+            Ok(Ok(number)) => number,
+            Ok(Err(error)) => {
+                let _ = startup.child_mut().wait();
+                panic!("Xvfb displayfd failed: {error}");
+            }
+            Err(error) => {
+                let _ = startup.child_mut().wait();
+                panic!("Xvfb did not report a display within 3 seconds: {error}");
+            }
+        };
+        let display_number = std::str::from_utf8(&display_number)
+            .expect("Xvfb display number is UTF-8")
+            .trim()
+            .parse::<u32>()
+            .expect("Xvfb display number is numeric");
+        assert!(
+            startup
+                .child_mut()
+                .try_wait()
+                .expect("query Xvfb child")
+                .is_none()
+        );
+
+        let display = format!(":{display_number}");
+        let socket = format!("/tmp/.X11-unix/X{display_number}");
+        let mut probe = std::os::unix::net::UnixStream::connect(&socket)
+            .unwrap_or_else(|error| panic!("connect to Xvfb {display}: {error}"));
+        probe
+            .set_read_timeout(Some(std::time::Duration::from_secs(3)))
+            .expect("set X11 setup timeout");
+        probe
+            .set_write_timeout(Some(std::time::Duration::from_secs(3)))
+            .expect("set X11 setup timeout");
+        // X11 connection setup: little-endian byte order, protocol 11.0, no
+        // authentication (the fixture starts Xvfb with -ac).
+        probe
+            .write_all(&[b'l', 0, 11, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+            .expect("write X11 setup request");
+        let mut prefix = [0u8; 8];
+        probe
+            .read_exact(&mut prefix)
+            .expect("read X11 setup response");
+        assert_eq!(prefix[0], 1, "Xvfb rejected X11 setup on {display}");
+        let remaining = usize::from(u16::from_le_bytes([prefix[6], prefix[7]])) * 4;
+        let mut setup = vec![0u8; remaining];
+        probe
+            .read_exact(&mut setup)
+            .expect("read complete X11 setup");
+        assert!(
+            startup
+                .child_mut()
+                .try_wait()
+                .expect("query Xvfb child")
+                .is_none()
+        );
+        let child = startup.finish();
+
+        Self {
+            _lock: lock,
+            child,
+            _probe: probe,
+            display,
+        }
     }
 
     pub(crate) fn name(&self) -> &str {
@@ -401,7 +525,8 @@ pub fn preferred_image_mime(mime_types: &[String]) -> Option<String> {
 
 /// Decode a captured image offer into PNG bytes for the history.
 ///
-/// PNG offers pass through when they fit under [`MAX_IMAGE_HISTORY_BYTES`].
+/// PNG offers pass through when they fit the encoded-byte and decoded-pixel
+/// budgets. Their dimensions are inspected without allocating the raster.
 /// JPEG/WebP/GIF/BMP/TIFF/AVIF offers are decoded and re-encoded as PNG;
 /// empty, undecodable, or oversized results are dropped. The history stores
 /// and re-offers PNG only.
@@ -411,10 +536,8 @@ pub fn image_offer_to_history_png(bytes: &[u8], mime: &str) -> Option<Vec<u8>> {
         return None;
     }
     let mime = mime.to_ascii_lowercase();
-    if mime == "image/png" {
-        return Some(bytes.to_vec());
-    }
-    if mime != "image/jpeg"
+    if mime != "image/png"
+        && mime != "image/jpeg"
         && mime != "image/jpg"
         && mime != "image/webp"
         && mime != "image/gif"
@@ -425,18 +548,50 @@ pub fn image_offer_to_history_png(bytes: &[u8], mime: &str) -> Option<Vec<u8>> {
     {
         return None;
     }
-    let image = image::load_from_memory(bytes).ok()?;
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?;
+    let actual_format = reader.format();
+    let limits = image_history_decode_limits();
+    reader.limits(limits.clone());
+    let (width, height) = reader.into_dimensions().ok()?;
+    if !image_dimensions_fit_history(width, height) {
+        return None;
+    }
+    if mime == "image/png" {
+        return (actual_format == Some(image::ImageFormat::Png)).then(|| bytes.to_vec());
+    }
+
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?;
+    // The dimension reader consumed its decoder, so apply the same limits to
+    // the fresh reader that performs the allocation.
+    reader.limits(limits);
+    let image = reader.decode().ok()?;
     let mut png = Vec::new();
     {
         let mut cursor = std::io::Cursor::new(&mut png);
-        image
-            .write_to(&mut cursor, image::ImageFormat::Png)
-            .ok()?;
+        image.write_to(&mut cursor, image::ImageFormat::Png).ok()?;
     }
     if png.is_empty() || png.len() > MAX_IMAGE_HISTORY_BYTES {
         return None;
     }
     Some(png)
+}
+
+fn image_history_decode_limits() -> image::Limits {
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(MAX_IMAGE_HISTORY_DIMENSION);
+    limits.max_image_height = Some(MAX_IMAGE_HISTORY_DIMENSION);
+    limits.max_alloc = Some(MAX_IMAGE_DECODE_BYTES);
+    limits
+}
+
+fn image_dimensions_fit_history(width: u32, height: u32) -> bool {
+    width <= MAX_IMAGE_HISTORY_DIMENSION
+        && height <= MAX_IMAGE_HISTORY_DIMENSION
+        && u64::from(width).saturating_mul(u64::from(height)) <= MAX_IMAGE_HISTORY_PIXELS
 }
 
 /// What the history should request from an offer, after secret filtering.
@@ -627,6 +782,48 @@ mod tests {
     }
 
     #[test]
+    fn png_passthrough_requires_png_bytes() {
+        let png = {
+            let img = image::RgbaImage::from_pixel(2, 2, image::Rgba([1, 2, 3, 255]));
+            let mut bytes = Vec::new();
+            image::DynamicImage::ImageRgba8(img)
+                .write_to(
+                    &mut std::io::Cursor::new(&mut bytes),
+                    image::ImageFormat::Png,
+                )
+                .unwrap();
+            bytes
+        };
+        assert_eq!(image_offer_to_history_png(&png, "image/png"), Some(png));
+
+        let jpeg = {
+            let img = image::RgbImage::from_pixel(1, 1, image::Rgb([4, 5, 6]));
+            let mut bytes = Vec::new();
+            image::DynamicImage::ImageRgb8(img)
+                .write_to(
+                    &mut std::io::Cursor::new(&mut bytes),
+                    image::ImageFormat::Jpeg,
+                )
+                .unwrap();
+            bytes
+        };
+        assert!(image_offer_to_history_png(&jpeg, "image/png").is_none());
+    }
+
+    #[test]
+    fn image_dimension_budget_includes_its_edges() {
+        assert!(image_dimensions_fit_history(
+            MAX_IMAGE_HISTORY_DIMENSION,
+            (MAX_IMAGE_HISTORY_PIXELS / u64::from(MAX_IMAGE_HISTORY_DIMENSION)) as u32,
+        ));
+        assert!(!image_dimensions_fit_history(
+            MAX_IMAGE_HISTORY_DIMENSION + 1,
+            1
+        ));
+        assert!(!image_dimensions_fit_history(4097, 4097));
+    }
+
+    #[test]
     fn bmp_offer_decodes_to_png_under_the_image_cap() {
         let bmp = {
             let img = image::RgbImage::from_pixel(2, 2, image::Rgb([0, 128, 255]));
@@ -725,6 +922,31 @@ mod tests {
         let huge = vec![0u8; MAX_IMAGE_HISTORY_BYTES + 1];
         assert!(image_offer_to_history_png(&huge, "image/png").is_none());
         assert!(image_offer_to_history_png(b"not-an-image", "image/jpeg").is_none());
+    }
+
+    #[test]
+    fn compressed_image_dimensions_cannot_exceed_the_decode_budget() {
+        // A BMP header can advertise a huge, mostly absent raster in only 54
+        // bytes. Dimension inspection must reject it before decode allocates
+        // the advertised 100-million-pixel output buffer.
+        let mut bmp = vec![0u8; 54];
+        bmp[0..2].copy_from_slice(b"BM");
+        bmp[2..6].copy_from_slice(&54u32.to_le_bytes());
+        bmp[10..14].copy_from_slice(&54u32.to_le_bytes());
+        bmp[14..18].copy_from_slice(&40u32.to_le_bytes());
+        bmp[18..22].copy_from_slice(&10_000i32.to_le_bytes());
+        bmp[22..26].copy_from_slice(&10_000i32.to_le_bytes());
+        bmp[26..28].copy_from_slice(&1u16.to_le_bytes());
+        bmp[28..30].copy_from_slice(&24u16.to_le_bytes());
+
+        assert!(bmp.len() < 100);
+        let dimensions = image::ImageReader::new(std::io::Cursor::new(&bmp))
+            .with_guessed_format()
+            .unwrap()
+            .into_dimensions()
+            .unwrap();
+        assert_eq!(dimensions, (10_000, 10_000));
+        assert!(image_offer_to_history_png(&bmp, "image/bmp").is_none());
     }
 
     #[test]

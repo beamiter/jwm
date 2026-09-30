@@ -24,6 +24,8 @@ press arms, second deletes — the pointer twin of `d`).
 The filter bar mirrors the launcher's, caret included, and starts empty on
 every open. Row numbers keep their history positions, so a filtered list
 shows gaps; with nothing matching, the panel says so instead of going blank.
+The filter accepts up to 256 Unicode characters; remove characters to enter
+more after reaching the limit. Clipboard payload limits are separate.
 
 Each text row shows its position, how much was copied (`31c` for a single
 line of 31 characters, `3L` for three lines), and a one-line preview with
@@ -58,6 +60,12 @@ remember matters as much as what it keeps:
   PNG produced by decoding a JPEG/WebP/GIF/BMP/TIFF/AVIF offer) over 4 MiB are
   dropped. Other non-PNG image types beyond those six are never captured.
   Remote clipboard sharing stays text-only.
+- **Incoming image dimensions are bounded before decoding.** Each edge may be
+  at most 16,384 pixels and the total may be at most 16,777,216 pixels. The
+  decoder also receives a 64 MiB allocation budget; decoder-internal memory
+  accounting depends on the format implementation. PNG offers must actually
+  identify as PNG to pass through unchanged. These checks prevent a small
+  compressed offer from requesting an enormous raster.
 
 Turn it off entirely with:
 

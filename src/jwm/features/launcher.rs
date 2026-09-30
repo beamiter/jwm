@@ -75,34 +75,70 @@ fn read_usage(path: &Path) -> io::Result<String> {
 }
 
 fn atomic_write_usage(path: &Path, contents: &[u8]) -> io::Result<()> {
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent)?;
-    let sequence = USAGE_WRITE_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let temporary = parent.join(format!(
-        ".{USAGE_FILE}.tmp-{}-{sequence}",
-        std::process::id()
-    ));
+    let candidates = std::iter::repeat_with(|| {
+        let sequence = USAGE_WRITE_COUNTER.fetch_add(1, Ordering::Relaxed);
+        parent.join(format!(
+            ".{USAGE_FILE}.tmp-{}-{sequence}",
+            std::process::id()
+        ))
+    })
+    .take(128);
+    atomic_write_usage_with_candidates(path, contents, candidates)
+}
 
-    let result = (|| {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&temporary)?;
+fn atomic_write_usage_with_candidates(
+    path: &Path,
+    contents: &[u8],
+    candidates: impl IntoIterator<Item = std::path::PathBuf>,
+) -> io::Result<()> {
+    for temporary in candidates {
+        match atomic_write_usage_candidate(path, contents, &temporary) {
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            result => return result,
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "launcher usage temporary namespace is exhausted",
+    ))
+}
+
+/// Try one caller-selected temporary name. Cleanup begins only after
+/// `create_new` proves this invocation owns the inode; an existing path may
+/// belong to another live writer and must never be removed on collision.
+fn atomic_write_usage_candidate(path: &Path, contents: &[u8], temporary: &Path) -> io::Result<()> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(temporary)?;
+
+    let result: io::Result<()> = (|| {
         // `mode` is still filtered through the process umask. Set the final
         // private mode explicitly before the inode becomes visible at `path`.
         file.set_permissions(fs::Permissions::from_mode(0o600))?;
         file.write_all(contents)?;
         file.sync_all()?;
-        fs::rename(&temporary, path)?;
-        fs::File::open(parent)?.sync_all()?;
+        fs::rename(temporary, path)?;
         Ok(())
     })();
 
     if result.is_err() {
-        let _ = fs::remove_file(&temporary);
+        let _ = fs::remove_file(temporary);
     }
-    result
+    // Rename ends our ownership of the temporary pathname. Directory sync
+    // failure must not remove a new writer's file at that name.
+    result?;
+    fs::File::open(parent)?.sync_all()
 }
 
 // -------------------------------------------------------------------------
@@ -143,7 +179,7 @@ impl UsageStore {
             };
             // The id is last precisely because application names contain
             // spaces; everything after the second field is the id.
-            if id.is_empty() || id.len() > MAX_USAGE_ID_BYTES {
+            if id.is_empty() || id.len() > MAX_USAGE_ID_BYTES || id.chars().any(char::is_control) {
                 continue;
             }
             let usage = Usage { count, last_used };
@@ -179,7 +215,7 @@ impl UsageStore {
 
     /// Note that `id` was just launched.
     pub fn record(&mut self, id: &str, now: u64) {
-        if id.is_empty() || id.len() > MAX_USAGE_ID_BYTES {
+        if id.is_empty() || id.len() > MAX_USAGE_ID_BYTES || id.chars().any(char::is_control) {
             return;
         }
         if let Some(usage) = self.entries.get_mut(id) {
@@ -291,6 +327,11 @@ pub fn now_seconds() -> u64 {
 // Arithmetic
 // -------------------------------------------------------------------------
 
+/// Longest expression the single-line launcher calculator will parse.
+/// This also bounds parser recursion from unary operators, parentheses, and
+/// right-associative powers for callers outside the interactive panel.
+const MAX_EXPRESSION_CHARS: usize = 256;
+
 /// Evaluate `query` as arithmetic, or return `None` if it is not.
 ///
 /// An operator is required: a query of `42` is somebody looking for an
@@ -299,7 +340,10 @@ pub fn now_seconds() -> u64 {
 #[must_use]
 pub fn evaluate(query: &str) -> Option<f64> {
     let trimmed = query.trim().trim_start_matches('=').trim();
-    if trimmed.is_empty() || !trimmed.contains(['+', '-', '*', '/', '%', '^']) {
+    if trimmed.is_empty()
+        || trimmed.chars().nth(MAX_EXPRESSION_CHARS).is_some()
+        || !trimmed.contains(['+', '-', '*', '/', '%', '^'])
+    {
         return None;
     }
     let tokens = tokenize(trimmed)?;
@@ -317,6 +361,16 @@ pub fn evaluate(query: &str) -> Option<f64> {
 pub fn format_result(value: f64) -> String {
     if value == value.trunc() && value.abs() < 1e15 {
         return format!("{}", value as i64);
+    }
+    // Fixed decimal places erase small nonzero answers. Scientific notation
+    // preserves their magnitude while still hiding floating point noise.
+    if value != 0.0 && value.abs() < 1e-10 {
+        let scientific = format!("{value:.10e}");
+        let (mantissa, exponent) = scientific.split_once('e').expect("scientific notation");
+        return format!(
+            "{}e{exponent}",
+            mantissa.trim_end_matches('0').trim_end_matches('.')
+        );
     }
     let rounded = format!("{value:.10}");
     let trimmed = rounded.trim_end_matches('0').trim_end_matches('.');
@@ -587,14 +641,18 @@ pub fn fuzzy_score(haystack: &str, needle: &str) -> Option<usize> {
         return Some(0);
     }
     if let Some(pos) = haystack.find(needle) {
-        return Some(10_000 - pos);
+        // Rust strings cannot exceed isize::MAX bytes, so this keeps every
+        // substring above the bounded subsequence range without underflow.
+        // Unlike a saturating positional penalty, it preserves strict order
+        // even for matches deep inside client-provided titles.
+        return Some(usize::MAX - pos);
     }
     let mut at = 0;
     let mut score = 0;
     for ch in needle.chars() {
         let rel = haystack[at..].find(ch)?;
         at += rel + ch.len_utf8();
-        score += 100usize.saturating_sub(rel);
+        score = (score + 100usize.saturating_sub(rel)).min(9_999);
     }
     Some(score)
 }
@@ -773,6 +831,11 @@ impl Parser {
                 Token::Caret => left.powf(right),
                 _ => return None,
             };
+            // Invalid intermediates must not become plausible answers through
+            // a later operation such as infinity^0 or NaN^0.
+            if !left.is_finite() {
+                return None;
+            }
         }
         Some(left)
     }
@@ -781,16 +844,16 @@ impl Parser {
         match self.tokens.get(self.at) {
             Some(Token::Minus) => {
                 self.at += 1;
-                Some(-self.unary()?)
+                Some(-self.expression(3)?)
             }
             Some(Token::Plus) => {
                 self.at += 1;
-                self.unary()
+                self.expression(3)
             }
             Some(Token::Number(value)) => {
                 let value = *value;
                 self.at += 1;
-                Some(value)
+                value.is_finite().then_some(value)
             }
             Some(Token::Open) => {
                 self.at += 1;
@@ -962,6 +1025,25 @@ mod tests {
     }
 
     #[test]
+    fn usage_ids_cannot_inject_persisted_rows() {
+        let mut store = UsageStore::default();
+        for id in [
+            "bad\n99 123 injected",
+            "bad\rname",
+            "bad\tname",
+            "bad\0name",
+        ] {
+            store.record(id, NOW);
+        }
+        store.record("Text Editor", NOW);
+        let restored = UsageStore::parse(&store.serialize(NOW));
+        assert_eq!(restored.len(), 1);
+        assert!(restored.score("Text Editor", NOW) > 0);
+        assert_eq!(restored.score("injected", NOW), 0);
+        assert!(UsageStore::parse("1 123 bad\tname\n").is_empty());
+    }
+
+    #[test]
     fn usage_parse_bounds_unique_entries_and_identifier_size() {
         let mut text = (0..MAX_TRACKED + 20)
             .map(|index| format!("1 {NOW} app{index:04}\n"))
@@ -1035,6 +1117,34 @@ mod tests {
     }
 
     #[test]
+    fn usage_save_accepts_a_bare_relative_filename() {
+        struct RemoveFile(std::path::PathBuf);
+        impl Drop for RemoveFile {
+            fn drop(&mut self) {
+                let _ = fs::remove_file(&self.0);
+            }
+        }
+        let sequence = USAGE_WRITE_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = std::path::PathBuf::from(format!(
+            ".jwm-usage-relative-test-{}-{sequence}",
+            std::process::id()
+        ));
+        let file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        let _cleanup = RemoveFile(path.clone());
+        drop(file);
+        atomic_write_usage(&path, b"3 1800000000 firefox\n").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"3 1800000000 firefox\n");
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[test]
     fn usage_save_replaces_a_symlink_without_touching_its_target() {
         let sequence = USAGE_WRITE_COUNTER.fetch_add(1, Ordering::Relaxed);
         let root = std::env::temp_dir().join(format!(
@@ -1055,6 +1165,72 @@ mod tests {
         assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
         assert_eq!(fs::read_to_string(&path).unwrap(), "3 1800000000 firefox\n");
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn usage_temp_collision_never_removes_an_unowned_file() {
+        let root = std::env::temp_dir().join(format!(
+            "jwm-launcher-collision-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join(USAGE_FILE);
+        let occupied = root.join("occupied.tmp");
+        let available = root.join("available.tmp");
+        fs::write(&occupied, b"other writer").unwrap();
+
+        atomic_write_usage_with_candidates(&path, b"ours", [occupied.clone(), available.clone()])
+            .unwrap();
+        assert_eq!(fs::read(&occupied).unwrap(), b"other writer");
+        assert_eq!(fs::read(&path).unwrap(), b"ours");
+        assert!(!available.exists());
+
+        let occupied_two = root.join("occupied-two.tmp");
+        fs::write(&occupied_two, b"second writer").unwrap();
+        let error = atomic_write_usage_with_candidates(
+            &path,
+            b"replacement",
+            [occupied.clone(), occupied_two.clone()],
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(&path).unwrap(), b"ours");
+        assert_eq!(fs::read(&occupied).unwrap(), b"other writer");
+        assert_eq!(fs::read(&occupied_two).unwrap(), b"second writer");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn fuzzy_ranking_handles_long_titles_and_keeps_substrings_above_subsequences() {
+        let late = format!("{}needle", "x".repeat(20_000));
+        let long_query = "a".repeat(200);
+        let subsequence = "ab".repeat(200);
+        let late_score = fuzzy_score(&late, "needle").unwrap();
+        let subsequence_score = fuzzy_score(&subsequence, &long_query).unwrap();
+        assert!(late_score > subsequence_score);
+        assert!(fuzzy_score("needle", "needle").unwrap() > late_score);
+        assert!(fuzzy_score(&long_query, &long_query).unwrap() > subsequence_score);
+
+        let earlier = format!("{}needle", "x".repeat(10_001));
+        let unicode_late = format!("{}needle", "界".repeat(7_000));
+        assert!(fuzzy_score(&earlier, "needle").unwrap() > late_score);
+        assert!(late_score > fuzzy_score(&unicode_late, "needle").unwrap());
+        let windows = [
+            window(1, &unicode_late, ""),
+            window(2, &late, ""),
+            window(3, &earlier, ""),
+            window(4, "n e e d l e", ""),
+        ];
+        assert_eq!(
+            rank_rows(&parse_query("needle"), &[], &windows),
+            vec![
+                LauncherRow::Window(2),
+                LauncherRow::Window(1),
+                LauncherRow::Window(0),
+                LauncherRow::Window(3),
+            ]
+        );
     }
 
     fn window(id: u64, title: &str, class: &str) -> WindowEntry {
@@ -1391,6 +1567,34 @@ mod tests {
     }
 
     #[test]
+    fn powers_bind_before_unary_signs_on_either_side() {
+        assert_eq!(evaluate("-2^2"), Some(-4.0));
+        assert_eq!(evaluate("(-2)^2"), Some(4.0));
+        assert_eq!(evaluate("2^-2"), Some(0.25));
+        assert_eq!(evaluate("2^-2^2"), Some(0.0625));
+        assert_eq!(evaluate("-2^2*3"), Some(-12.0));
+        assert_eq!(evaluate("--2^2"), Some(4.0));
+    }
+
+    #[test]
+    fn invalid_intermediates_cannot_be_hidden_by_a_zero_power() {
+        assert_eq!(evaluate("(10^200*10^200)^0"), None);
+        assert_eq!(evaluate("((-1)^0.5)^0"), None);
+        assert_eq!(evaluate("(10^200/10^200)^0"), Some(1.0));
+    }
+
+    #[test]
+    fn calculator_rejects_inputs_beyond_its_recursion_budget() {
+        let exact = format!("{}10+4{}", "(".repeat(126), ")".repeat(126));
+        assert_eq!(exact.chars().count(), MAX_EXPRESSION_CHARS);
+        assert_eq!(evaluate(&exact), Some(14.0));
+
+        let oversized = format!("{}10+4{}", "(".repeat(127), ")".repeat(127));
+        assert_eq!(oversized.chars().count(), MAX_EXPRESSION_CHARS + 2);
+        assert_eq!(evaluate(&oversized), None);
+    }
+
+    #[test]
     fn a_query_without_an_operator_is_not_arithmetic() {
         // Otherwise every application name that happens to be a number would
         // vanish behind a calculator row.
@@ -1429,6 +1633,17 @@ mod tests {
             format_result(evaluate("10/3").expect("value")),
             "3.3333333333"
         );
+    }
+
+    #[test]
+    fn tiny_calculator_answers_keep_their_nonzero_magnitude() {
+        assert_eq!(
+            format_result(evaluate("1/100000000000").expect("value")),
+            "1e-11"
+        );
+        assert_eq!(format_result(-2.5e-20), "-2.5e-20");
+        assert_eq!(format_result(1e-10), "0.0000000001");
+        assert_eq!(format_result(0.0), "0");
     }
 
     /// A managed bar (DOCK) or desktop icon layer (DESKTOP) carries every

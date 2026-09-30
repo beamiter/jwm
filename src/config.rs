@@ -1,7 +1,7 @@
 use arc_swap::ArcSwap;
 use serde::{Deserialize, Serialize};
 use std::ffi::OsStr;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
@@ -48,9 +48,22 @@ pub(crate) const fn scene_linear_render_path_requested(
 static CONFIG_WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
 const MAX_CONFIG_FILE_BYTES: u64 = 4 * 1024 * 1024;
 
-fn read_config_text(path: &Path) -> std::io::Result<String> {
-    let file = File::open(path)?;
-    let declared_len = file.metadata()?.len();
+fn read_config_bytes(path: &Path) -> std::io::Result<(Vec<u8>, fs::Permissions)> {
+    // A FIFO can block at open(), before any size check or reload debounce.
+    // Open nonblocking and inspect the descriptor so symlinks to ordinary
+    // dotfiles still work while special files cannot stall the WM thread.
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("configuration must be a regular file: {}", path.display()),
+        ));
+    }
+    let declared_len = metadata.len();
     if declared_len > MAX_CONFIG_FILE_BYTES {
         return Err(config_file_too_large(path));
     }
@@ -66,6 +79,11 @@ fn read_config_text(path: &Path) -> std::io::Result<String> {
         return Err(config_file_too_large(path));
     }
 
+    Ok((bytes, metadata.permissions()))
+}
+
+fn read_config_text(path: &Path) -> std::io::Result<String> {
+    let (bytes, _) = read_config_bytes(path)?;
     String::from_utf8(bytes).map_err(|error| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidData,
@@ -311,46 +329,80 @@ fn is_toml_table_header(line: &str, array: bool, name: &[&str]) -> bool {
         && segments.iter().map(String::as_str).eq(name.iter().copied())
 }
 
+const MAX_CONFIG_WRITE_ATTEMPTS: usize = 128;
+
+fn create_config_temporary(
+    mut candidate: impl FnMut() -> std::path::PathBuf,
+) -> std::io::Result<(std::path::PathBuf, fs::File)> {
+    for _ in 0..MAX_CONFIG_WRITE_ATTEMPTS {
+        let path = candidate();
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+        {
+            Ok(file) => return Ok((path, file)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "configuration temporary candidates exhausted",
+    ))
+}
+
 fn atomic_write(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    atomic_write_with_sequence(path, contents, || {
+        CONFIG_WRITE_COUNTER.fetch_add(1, Ordering::Relaxed)
+    })
+}
+
+fn atomic_write_with_sequence(
+    path: &Path,
+    contents: &[u8],
+    mut next_sequence: impl FnMut() -> u64,
+) -> std::io::Result<()> {
     // Preserve symlink-based dotfile setups. Renaming over `path` itself would
     // replace the link; resolving the complete chain lets us atomically
     // replace its target while leaving every user-managed link intact. The
     // lexical walk also supports a final target that does not exist yet.
     let destination = resolve_write_destination(path)?;
-    let parent = destination.parent().unwrap_or_else(|| Path::new("."));
+    let parent = destination
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent)?;
 
     let file_name = destination
         .file_name()
         .map_or_else(|| "config".into(), |name| name.to_string_lossy());
-    let sequence = CONFIG_WRITE_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let temporary = parent.join(format!(
-        ".{file_name}.tmp-{}-{sequence}",
-        std::process::id()
-    ));
-
-    let result = (|| {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&temporary)?;
+    let (temporary, mut file) = create_config_temporary(|| {
+        let sequence = next_sequence();
+        parent.join(format!(
+            ".{file_name}.tmp-{}-{sequence}",
+            std::process::id()
+        ))
+    })?;
+    let result: std::io::Result<()> = (|| {
         if let Ok(metadata) = fs::metadata(&destination) {
             file.set_permissions(metadata.permissions())?;
         }
         file.write_all(contents)?;
         file.sync_all()?;
         fs::rename(&temporary, &destination)?;
-        // Persist the directory entry as well as the file contents so a
-        // successful return survives a sudden power loss on local filesystems.
-        fs::File::open(parent)?.sync_all()?;
         Ok(())
     })();
 
     if result.is_err() {
         let _ = fs::remove_file(&temporary);
     }
-    result
+    // Once rename publishes the inode, this invocation no longer owns the
+    // temporary pathname. A later directory-sync error must not remove a
+    // different writer's newly created file at the same pathname.
+    result?;
+    fs::File::open(parent)?.sync_all()
 }
 
 // ---------------------------------------------------------------------------
@@ -3695,11 +3747,23 @@ impl Config {
         }
     }
 
+    /// Required argument shapes for actions that otherwise silently do nothing.
+    fn binding_argument_type_is_valid(function: &str, argument: &ArgumentConfig) -> bool {
+        match function {
+            "incnmaster" | "focusstack" => matches!(argument, ArgumentConfig::Int(_)),
+            "setmfact" => matches!(argument, ArgumentConfig::Float(_)),
+            _ => true,
+        }
+    }
+
     fn convert_binding_argument(
         &self,
         function_name: &str,
         argument: &ArgumentConfig,
     ) -> Option<jwm::WMArgEnum> {
+        if !Self::binding_argument_type_is_valid(function_name, argument) {
+            return None;
+        }
         let argument = if function_name == "spawn" {
             let command = match argument {
                 ArgumentConfig::String(command) => {
@@ -3708,10 +3772,7 @@ impl Config {
                 ArgumentConfig::StringVec(command) => command.clone(),
                 _ => return None,
             };
-            if command
-                .first()
-                .is_none_or(|program| program.trim().is_empty())
-            {
+            if !crate::command_line::valid_command_argv(&command) {
                 return None;
             }
             jwm::WMArgEnum::StringVec(command)
@@ -3833,10 +3894,7 @@ impl Config {
     ///
     /// Returns the file's new modification time, which the caller records so
     /// the config watcher does not treat JWM's own write as an edit to reload.
-    pub fn persist_ui_theme(
-        &self,
-        theme: &str,
-    ) -> Result<std::time::SystemTime, ConfigError> {
+    pub fn persist_ui_theme(&self, theme: &str) -> Result<std::time::SystemTime, ConfigError> {
         self.persist_ui_theme_to(Self::resolve_load_path(), theme)
     }
 
@@ -4136,15 +4194,8 @@ impl Config {
             out.push_str("[[layout.tags]]\n");
             out.push_str(&format!("tag = {}\n", entry.tag));
             out.push_str(&format!("monitor = {}\n", entry.monitor));
-            if let Some(connector) = entry
-                .connector
-                .as_deref()
-                .filter(|value| !value.is_empty())
-            {
-                out.push_str(&format!(
-                    "connector = {}\n",
-                    toml_string_literal(connector)
-                ));
+            if let Some(connector) = entry.connector.as_deref().filter(|value| !value.is_empty()) {
+                out.push_str(&format!("connector = {}\n", toml_string_literal(connector)));
             }
             if !entry.layout.is_empty() {
                 out.push_str(&format!(
@@ -4251,7 +4302,15 @@ impl Config {
     pub fn backup_config<P: AsRef<Path>>(
         original_path: P,
     ) -> Result<std::path::PathBuf, ConfigError> {
-        let original = original_path.as_ref();
+        Self::backup_config_with_sequence(original_path.as_ref(), || {
+            CONFIG_WRITE_COUNTER.fetch_add(1, Ordering::Relaxed)
+        })
+    }
+
+    fn backup_config_with_sequence(
+        original: &Path,
+        mut next_sequence: impl FnMut() -> u64,
+    ) -> Result<std::path::PathBuf, ConfigError> {
         let first_backup = original.with_extension("toml.backup");
 
         // Keep the historical return value when there is nothing to back up.
@@ -4261,48 +4320,67 @@ impl Config {
             return Ok(first_backup);
         }
 
-        let mut source = fs::File::open(original)?;
-        let permissions = source.metadata()?.permissions();
+        // Read the bounded payload before creating a recovery point. Keep
+        // malformed TOML and non-UTF-8 bytes intact: template generation must
+        // be able to back up a broken configuration before replacing it.
+        let (contents, permissions) = read_config_bytes(original)?;
 
-        // Never truncate an earlier recovery point. `create_new` also closes
-        // the check-then-create race when two invocations run concurrently.
-        for suffix in 0u64.. {
-            let backup_path = if suffix == 0 {
-                first_backup.clone()
-            } else {
-                let mut name = first_backup.as_os_str().to_os_string();
-                name.push(format!(".{suffix}"));
-                std::path::PathBuf::from(name)
-            };
-            let mut backup = match OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .open(&backup_path)
-            {
-                Ok(file) => file,
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                Err(error) => return Err(error.into()),
-            };
+        let parent = first_backup
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let (temporary, mut backup) = create_config_temporary(|| {
+            let sequence = next_sequence();
+            parent.join(format!(
+                ".config-backup.tmp-{}-{sequence}",
+                std::process::id()
+            ))
+        })?;
+        let result = (|| {
+            backup.write_all(&contents)?;
+            backup.set_permissions(permissions)?;
+            backup.sync_all()?;
+            drop(backup);
 
-            let copy_result = (|| {
-                std::io::copy(&mut source, &mut backup)?;
-                backup.set_permissions(permissions.clone())?;
-                backup.sync_all()
-            })();
-            if let Err(error) = copy_result {
-                // A failed copy is not a usable recovery point and should not
-                // consume a numbered slot on the next attempt.
-                drop(backup);
-                let _ = fs::remove_file(&backup_path);
-                return Err(error.into());
+            // Publish only complete, synced backups. Creating a hard link
+            // in the same directory atomically claims an unused name without
+            // replacing another writer's recovery point. A crash before this
+            // step can leave a temporary file, never a truncated .backup.
+            for suffix in 0..MAX_CONFIG_WRITE_ATTEMPTS {
+                let backup_path = if suffix == 0 {
+                    first_backup.clone()
+                } else {
+                    let mut name = first_backup.as_os_str().to_os_string();
+                    name.push(format!(".{suffix}"));
+                    std::path::PathBuf::from(name)
+                };
+                match fs::hard_link(&temporary, &backup_path) {
+                    Ok(()) => {
+                        fs::remove_file(&temporary)?;
+                        return Ok(backup_path);
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                    Err(error) => return Err(error),
+                }
             }
-            return Ok(backup_path);
+            Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "configuration backup candidates exhausted",
+            ))
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&temporary);
         }
-
-        unreachable!("u64 backup suffix space exhausted")
+        let backup_path = result?;
+        // The temporary name has been released. Directory-sync failure must
+        // not clean up a pathname another writer may now own.
+        fs::File::open(parent)?.sync_all()?;
+        Ok(backup_path)
     }
 
+    /// Restore the exact backup bytes through the same atomic writer used for
+    /// configuration saves. Existing target permissions and dotfile symlinks
+    /// are preserved; unreadable, special or oversized sources leave it intact.
     pub fn restore_from_backup<P: AsRef<Path>>(
         backup_path: P,
         target_path: P,
@@ -4310,14 +4388,8 @@ impl Config {
         let backup = backup_path.as_ref();
         let target = target_path.as_ref();
 
-        if !backup.exists() {
-            return Err(ConfigError::Io(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "Backup file not found",
-            )));
-        }
-
-        fs::copy(backup, target)?;
+        let (contents, _) = read_config_bytes(backup)?;
+        atomic_write(target, &contents)?;
         Ok(())
     }
 
@@ -4594,6 +4666,10 @@ impl Config {
         let mut candidate = self.clone();
         for (key, value) in changes {
             candidate.set_value(key, value)?;
+        }
+        let diagnostics = candidate.diagnostics();
+        if diagnostics.has_errors() {
+            return Err(diagnostics.to_string());
         }
         *self = candidate;
         Ok(())
@@ -5990,6 +6066,111 @@ border_px = 3
     }
 
     #[test]
+    fn failed_config_publish_preserves_destination_and_removes_owned_temporary() {
+        let directory = temporary_config_path("failed-publish");
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("config.toml");
+        std::fs::create_dir(&path).unwrap();
+        std::fs::write(path.join("marker"), b"unchanged").unwrap();
+        assert!(super::atomic_write_with_sequence(&path, b"replacement", || 0).is_err());
+        assert_eq!(std::fs::read(path.join("marker")).unwrap(), b"unchanged");
+        assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 1);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn atomic_config_write_retries_collisions_and_bounds_exhaustion() {
+        let directory = temporary_config_path("write-collision");
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("config.toml");
+        std::fs::write(&path, b"old").unwrap();
+        let occupied = directory.join(format!(".config.toml.tmp-{}-0", std::process::id()));
+        std::fs::write(&occupied, b"other writer").unwrap();
+        let mut sequence = 0;
+        super::atomic_write_with_sequence(&path, b"new", || {
+            let value = sequence;
+            sequence += 1;
+            value
+        })
+        .unwrap();
+        assert_eq!(sequence, 2);
+        assert_eq!(std::fs::read(&path).unwrap(), b"new");
+        let mut attempts = 0;
+        let error = super::atomic_write_with_sequence(&path, b"lost", || {
+            attempts += 1;
+            0
+        })
+        .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(attempts, 128);
+        assert_eq!(std::fs::read(&occupied).unwrap(), b"other writer");
+        assert_eq!(std::fs::read(&path).unwrap(), b"new");
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn backup_temporary_collisions_retry_and_exhaust_without_touching_existing_files() {
+        let directory = temporary_config_path("backup-temp-collision");
+        std::fs::create_dir_all(&directory).unwrap();
+        let source = directory.join("config.toml");
+        std::fs::write(&source, [0xff, 0x00]).unwrap();
+        let occupied = directory.join(format!(".config-backup.tmp-{}-0", std::process::id()));
+        std::fs::write(&occupied, b"other writer").unwrap();
+        let mut sequence = 0;
+        let backup = Config::backup_config_with_sequence(&source, || {
+            let value = sequence;
+            sequence += 1;
+            value
+        })
+        .unwrap();
+        assert_eq!(sequence, 2);
+        assert_eq!(std::fs::read(&backup).unwrap(), [0xff, 0x00]);
+        let mut attempts = 0;
+        let error = Config::backup_config_with_sequence(&source, || {
+            attempts += 1;
+            0
+        })
+        .unwrap_err();
+        assert!(
+            matches!(error, ConfigError::Io(error) if error.kind() == std::io::ErrorKind::AlreadyExists)
+        );
+        assert_eq!(attempts, 128);
+        assert_eq!(std::fs::read(&occupied).unwrap(), b"other writer");
+        assert_eq!(std::fs::read(&backup).unwrap(), [0xff, 0x00]);
+        assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 3);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn backup_suffix_exhaustion_preserves_existing_recovery_points_and_cleans_temporary() {
+        let directory = temporary_config_path("backup-exhaustion");
+        std::fs::create_dir_all(&directory).unwrap();
+        let source = directory.join("config.toml");
+        std::fs::write(&source, [0xff, 0x00]).unwrap();
+        for suffix in 0..128 {
+            let name = if suffix == 0 {
+                "config.toml.backup".to_string()
+            } else {
+                format!("config.toml.backup.{suffix}")
+            };
+            std::fs::write(directory.join(name), b"recovery point").unwrap();
+        }
+        let error = Config::backup_config(&source).unwrap_err();
+        assert!(
+            matches!(error, ConfigError::Io(error) if error.kind() == std::io::ErrorKind::AlreadyExists)
+        );
+        assert_eq!(std::fs::read(&source).unwrap(), [0xff, 0x00]);
+        assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 129);
+        for entry in std::fs::read_dir(&directory).unwrap() {
+            let entry = entry.unwrap();
+            if entry.path() != source {
+                assert_eq!(std::fs::read(entry.path()).unwrap(), b"recovery point");
+            }
+        }
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn saved_configuration_roundtrips_through_atomic_writer() {
         let path = temporary_config_path("atomic-config");
         std::fs::write(&path, "incomplete = ").unwrap();
@@ -6101,6 +6282,181 @@ border_px = 3
         assert_eq!(std::fs::read_to_string(first).unwrap(), "generation = 1\n");
         assert_eq!(std::fs::read_to_string(second).unwrap(), "generation = 2\n");
         assert_eq!(std::fs::read_to_string(third).unwrap(), "generation = 3\n");
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn config_backup_and_restore_preserve_malformed_bytes() {
+        let directory = temporary_config_path("raw-config-backup");
+        std::fs::create_dir(&directory).unwrap();
+        let original = directory.join("config.toml");
+        let contents = b"# unfinished edit\nkey = \xff\xfe\n";
+        std::fs::write(&original, contents).unwrap();
+
+        let backup = Config::backup_config(&original).unwrap();
+        std::fs::write(&original, "replacement\n").unwrap();
+        Config::restore_from_backup(&backup, &original).unwrap();
+
+        assert_eq!(std::fs::read(&original).unwrap(), contents);
+        assert_eq!(std::fs::read(&backup).unwrap(), contents);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn config_restore_preserves_symlinks_permissions_and_other_hardlinks() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let directory = temporary_config_path("atomic-config-restore");
+        std::fs::create_dir(&directory).unwrap();
+        let backup = directory.join("config.backup");
+        let target = directory.join("real.toml");
+        let link = directory.join("config.toml");
+        let hardlink = directory.join("previous.toml");
+        std::fs::write(&backup, "restored\n").unwrap();
+        std::fs::set_permissions(&backup, std::fs::Permissions::from_mode(0o666)).unwrap();
+        std::fs::write(&target, "previous\n").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o640)).unwrap();
+        std::fs::hard_link(&target, &hardlink).unwrap();
+        symlink("real.toml", &link).unwrap();
+
+        Config::restore_from_backup(&backup, &link).unwrap();
+
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(std::fs::read(&target).unwrap(), b"restored\n");
+        assert_eq!(std::fs::read(&hardlink).unwrap(), b"previous\n");
+        assert_eq!(
+            std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn config_restore_can_use_the_target_as_its_own_source() {
+        let path = temporary_config_path("same-config-restore");
+        std::fs::write(&path, "preserved\n").unwrap();
+
+        Config::restore_from_backup(&path, &path).unwrap();
+
+        assert_eq!(std::fs::read(&path).unwrap(), b"preserved\n");
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn config_restore_creates_private_targets_through_dangling_symlinks() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let directory = temporary_config_path("new-config-restore");
+        std::fs::create_dir(&directory).unwrap();
+        let backup = directory.join("config.backup");
+        let target = directory.join("new.toml");
+        let link = directory.join("config.toml");
+        std::fs::write(&backup, "restored\n").unwrap();
+        std::fs::set_permissions(&backup, std::fs::Permissions::from_mode(0o666)).unwrap();
+        symlink("new.toml", &link).unwrap();
+
+        Config::restore_from_backup(&backup, &link).unwrap();
+
+        assert_eq!(std::fs::read(&target).unwrap(), b"restored\n");
+        assert_eq!(
+            std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn concurrent_config_backups_publish_distinct_complete_recovery_points() {
+        let directory = temporary_config_path("concurrent-config-backup");
+        std::fs::create_dir(&directory).unwrap();
+        let original = directory.join("config.toml");
+        let contents = vec![b'x'; 64 * 1024];
+        std::fs::write(&original, &contents).unwrap();
+
+        let paths = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..8)
+                .map(|_| scope.spawn(|| Config::backup_config(&original).unwrap()))
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+
+        let unique: std::collections::HashSet<_> = paths.iter().collect();
+        assert_eq!(unique.len(), paths.len());
+        for path in paths {
+            assert_eq!(std::fs::read(path).unwrap(), contents);
+        }
+        // Source plus eight published backups; temporary files are removed.
+        assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 9);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn config_operations_reject_fifos_without_consuming_or_replacing_them() {
+        use nix::sys::stat::Mode;
+
+        let directory = temporary_config_path("fifo-config");
+        std::fs::create_dir(&directory).unwrap();
+        let fifo = directory.join("config.toml");
+        let target = directory.join("target.toml");
+        nix::unistd::mkfifo(&fifo, Mode::S_IRUSR | Mode::S_IWUSR).unwrap();
+        std::fs::write(&target, "preserved\n").unwrap();
+
+        // No writer opens the FIFO: a blocking open would hang these calls.
+        let load_error = Config::load_from_file(&fifo)
+            .err()
+            .expect("FIFO must not load");
+        for error in [
+            load_error,
+            Config::validate_config_file(&fifo).unwrap_err(),
+            Config::backup_config(&fifo).unwrap_err(),
+            Config::restore_from_backup(&fifo, &target).unwrap_err(),
+        ] {
+            let ConfigError::Io(error) = error else {
+                panic!("unexpected error: {error}");
+            };
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+            assert!(error.to_string().contains("regular file"), "{error}");
+        }
+        assert_eq!(std::fs::read(&target).unwrap(), b"preserved\n");
+        assert!(!fifo.with_extension("toml.backup").exists());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn oversized_config_backups_leave_the_existing_target_and_recovery_points_intact() {
+        let directory = temporary_config_path("oversized-config-backup");
+        std::fs::create_dir(&directory).unwrap();
+        let source = directory.join("oversized.toml");
+        let target = directory.join("config.toml");
+        let file = std::fs::File::create(&source).unwrap();
+        file.set_len(MAX_CONFIG_FILE_BYTES + 1).unwrap();
+        std::fs::write(&target, "preserved\n").unwrap();
+
+        for error in [
+            Config::backup_config(&source).unwrap_err(),
+            Config::restore_from_backup(&source, &target).unwrap_err(),
+        ] {
+            let ConfigError::Io(error) = error else {
+                panic!("unexpected error: {error}");
+            };
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        }
+        assert_eq!(std::fs::read(&target).unwrap(), b"preserved\n");
+        assert!(!source.with_extension("toml.backup").exists());
         std::fs::remove_dir_all(directory).unwrap();
     }
 
@@ -6366,6 +6722,216 @@ border_px = 3
     }
 
     #[test]
+    fn batch_enable_rejects_invalid_dormant_fade_without_partial_apply() {
+        let mut cfg = Config::default();
+        cfg.inner.behavior.fading = false;
+        cfg.inner.behavior.fade_in_step = 0.0;
+        assert!(!cfg.diagnostics().has_errors());
+        let gap = cfg.gap_px();
+        let error = cfg
+            .set_values(&[
+                ("appearance.gap_px".into(), serde_json::json!(12)),
+                ("behavior.fading".into(), serde_json::json!(true)),
+            ])
+            .unwrap_err();
+        assert!(error.contains("behavior.fade_in_step"));
+        assert_eq!(cfg.gap_px(), gap);
+        assert!(!cfg.behavior().fading);
+    }
+
+    #[test]
+    fn spawn_argv_nul_is_rejected_by_diagnostics_and_conversion() {
+        let mut cfg = Config::default();
+        for argument in [vec!["tr\0ue".into()], vec!["true".into(), "value\0".into()]] {
+            let binding = KeyConfig {
+                modifier: vec![],
+                key: "a".into(),
+                function: "spawn".into(),
+                argument: ArgumentConfig::StringVec(argument),
+            };
+            assert!(cfg.convert_key_config(&binding).is_none());
+            let button = ButtonConfig {
+                click_type: "ClkRootWin".into(),
+                modifier: vec![],
+                button: 3,
+                function: "spawn".into(),
+                argument: binding.argument.clone(),
+            };
+            assert!(cfg.convert_button_config(&button).is_none());
+            cfg.inner.keybindings.chord.leader_key = "F9".into();
+            cfg.inner.keybindings.chord.bindings = vec![binding.clone()];
+            assert!(cfg.compile_chord().unwrap().bindings.is_empty());
+            cfg.inner.keybindings.keys = vec![binding];
+            cfg.inner.mouse_bindings.buttons = vec![button];
+            let diagnostics = cfg.diagnostics();
+            assert!(!diagnostics.has_errors(), "{diagnostics}");
+            assert!(
+                diagnostics
+                    .issues()
+                    .iter()
+                    .all(|issue| issue.level == ConfigDiagnosticLevel::Warning)
+            );
+            assert!(diagnostics.issues().iter().any(
+                |issue| issue.path.starts_with("keybindings") && issue.message.contains("NUL")
+            ));
+            assert!(
+                diagnostics
+                    .issues()
+                    .iter()
+                    .any(|issue| issue.path.starts_with("mouse_bindings")
+                        && issue.message.contains("NUL"))
+            );
+        }
+        assert!(crate::command_line::valid_command_argv(&[
+            "true".into(),
+            String::new()
+        ]));
+    }
+
+    #[test]
+    fn numeric_action_bindings_reject_silent_noop_argument_types() {
+        let mut cfg = Config::default();
+        for (function, valid, invalid) in [
+            (
+                "incnmaster",
+                ArgumentConfig::Int(1),
+                ArgumentConfig::Float(1.0),
+            ),
+            (
+                "focusstack",
+                ArgumentConfig::Int(-1),
+                ArgumentConfig::String("next".into()),
+            ),
+            (
+                "setmfact",
+                ArgumentConfig::Float(0.05),
+                ArgumentConfig::Int(1),
+            ),
+        ] {
+            let mut binding = KeyConfig {
+                modifier: vec![],
+                key: "a".into(),
+                function: function.into(),
+                argument: valid,
+            };
+            assert!(cfg.convert_key_config(&binding).is_some());
+            binding.argument = invalid;
+            assert!(cfg.convert_key_config(&binding).is_none());
+            cfg.inner.keybindings.keys = vec![binding.clone()];
+            cfg.inner.keybindings.chord.leader_key = "F9".into();
+            cfg.inner.keybindings.chord.bindings = vec![binding.clone()];
+            assert!(cfg.compile_chord().unwrap().bindings.is_empty());
+            let button = ButtonConfig {
+                click_type: "ClkRootWin".into(),
+                modifier: vec![],
+                button: 3,
+                function: function.into(),
+                argument: binding.argument,
+            };
+            assert!(cfg.convert_button_config(&button).is_none());
+            cfg.inner.mouse_bindings.buttons = vec![button];
+            let diagnostics = cfg.diagnostics();
+            assert!(!diagnostics.has_errors(), "{diagnostics}");
+            assert!(
+                diagnostics
+                    .issues()
+                    .iter()
+                    .all(|issue| issue.level == ConfigDiagnosticLevel::Warning)
+            );
+            for path in [
+                "keybindings.keys[0].argument",
+                "keybindings.chord.bindings[0].argument",
+                "mouse_bindings.buttons[0].argument",
+            ] {
+                assert!(
+                    diagnostics
+                        .issues()
+                        .iter()
+                        .any(|issue| issue.path == path && issue.message.contains("requires"))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn saved_legacy_invalid_bindings_load_with_warnings_and_preserve_valid_settings() {
+        let path = temporary_config_path("legacy-invalid-bindings");
+        let mut cfg = Config::default();
+        cfg.inner.appearance.gap_px = 23;
+        cfg.inner.keybindings.keys = vec![
+            KeyConfig {
+                modifier: vec![],
+                key: "a".into(),
+                function: "spawn".into(),
+                argument: ArgumentConfig::StringVec(vec!["true".into(), "bad\0arg".into()]),
+            },
+            KeyConfig {
+                modifier: vec![],
+                key: "b".into(),
+                function: "setmfact".into(),
+                argument: ArgumentConfig::Int(1),
+            },
+        ];
+        cfg.inner.keybindings.chord.leader_key = "F9".into();
+        cfg.inner.keybindings.chord.timeout_ms = super::default_chord_timeout();
+        cfg.inner.keybindings.chord.bindings = cfg.inner.keybindings.keys.clone();
+        cfg.inner.mouse_bindings.buttons = cfg
+            .inner
+            .keybindings
+            .keys
+            .iter()
+            .enumerate()
+            .map(|(index, binding)| ButtonConfig {
+                click_type: "ClkRootWin".into(),
+                modifier: vec![],
+                button: index as u8 + 1,
+                function: binding.function.clone(),
+                argument: binding.argument.clone(),
+            })
+            .collect();
+        cfg.save_to_file(&path).unwrap();
+        let loaded = Config::load_from_file(&path).unwrap();
+        assert_eq!(loaded.gap_px(), 23);
+        assert_eq!(loaded.inner.keybindings.keys.len(), 2);
+        let diagnostics = loaded.diagnostics();
+        assert!(!diagnostics.has_errors(), "{diagnostics}");
+        for path in [
+            "keybindings.keys[0].argument",
+            "keybindings.keys[1].argument",
+            "keybindings.chord.bindings[0].argument",
+            "keybindings.chord.bindings[1].argument",
+            "mouse_bindings.buttons[0].argument",
+            "mouse_bindings.buttons[1].argument",
+        ] {
+            assert_eq!(
+                diagnostics
+                    .issues()
+                    .iter()
+                    .filter(
+                        |issue| issue.path == path && issue.level == ConfigDiagnosticLevel::Warning
+                    )
+                    .count(),
+                1,
+                "{diagnostics}"
+            );
+        }
+        assert!(diagnostics.issues().iter().all(|issue| {
+            issue.message.contains("this binding will be ignored") && issue.hint.is_some()
+        }));
+        assert!(
+            loaded
+                .inner
+                .keybindings
+                .keys
+                .iter()
+                .all(|binding| loaded.convert_key_config(binding).is_none())
+        );
+        assert!(loaded.get_buttons().is_empty());
+        assert!(loaded.compile_chord().unwrap().bindings.is_empty());
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn set_values_applies_valid_batch_atomically() {
         let mut cfg = Config::default();
         let changes = vec![
@@ -6595,7 +7161,10 @@ border_px = 3
                 "paper",
             ]
         );
-        assert_eq!(super::normalize_ui_theme("Tokyo_Night"), Some("tokyo-night"));
+        assert_eq!(
+            super::normalize_ui_theme("Tokyo_Night"),
+            Some("tokyo-night")
+        );
         assert_eq!(super::normalize_ui_theme("neumorphic"), None);
 
         cfg.set_value("appearance.ui_theme", &serde_json::json!("Material"))

@@ -1515,7 +1515,10 @@ pub enum OsdKind {
     /// the asked device took. `input` picks the mic glyph; otherwise the
     /// speaker/headphones glyph the Hub Output row already uses. The label is
     /// the device description (truncated like Media).
-    AudioDevice { input: bool, name: String },
+    AudioDevice {
+        input: bool,
+        name: String,
+    },
 }
 
 /// One keyboard navigation step in Expose / Mission Control, in the grid the

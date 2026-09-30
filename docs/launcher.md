@@ -6,6 +6,9 @@
 close. Direct Unicode keysyms are accepted, so an international keyboard can
 search with the characters it produces.
 
+Search and command input accept up to 256 Unicode characters. Further typing
+is ignored until characters are removed; multibyte characters count as one.
+
 With a pointer, hover previews the row that a click will use, left-click or
 middle-click opens it (the same Enter path), the vertical or horizontal wheel
 browses the result list, and clicking outside the card closes the launcher. Keyboard selection
@@ -57,6 +60,14 @@ written on each launch rather than on exit, so an abrupt end to the session does
 not lose it, and it is capped at 500 entries — the least useful go first.
 Deleting the file resets the ranking; a corrupt line costs that line and nothing
 else.
+Application identifiers containing control characters are not recorded, so an
+embedded newline cannot inject additional entries into the history format.
+
+Usage saves atomically replace the history with a private file. An occupied
+temporary name is skipped without removing another writer's file; after 128
+occupied candidates, the save fails and leaves the previous history intact.
+Bare relative history paths are supported; a directory-sync error after the
+replacement does not clean up a temporary name another writer could have reused.
 
 ## Arithmetic
 
@@ -69,6 +80,13 @@ A query containing an operator is treated as a question rather than a search:
 `Enter` copies the result to the clipboard (and to the [clipboard
 history](clipboard.md)). `+ - * / % ^` work, with parentheses, unary minus, and
 the usual precedence; `^` associates to the right, so `2^3^2` is 512.
+Powers bind before unary signs: `-2^2` is -4, `(-2)^2` is 4, and `2^-2` is
+0.25. Non-finite intermediate results are rejected even when a later operation
+could hide them. Nonzero answers below `1e-10` use scientific notation rather
+than rounding to a displayed zero.
+
+Calculator expressions are limited to 256 characters, including parentheses
+and operators, to bound recursive parsing work.
 
 An operator is **required** — a query of `42` is somebody looking for an
 application, not asking what 42 is. Queries that merely contain an operator
@@ -100,6 +118,13 @@ application search stays a search. The explicit prefix lifts the two-word
 rule — `> xterm` runs — and is also the only way to start one with an
 absolute path, because a leading `/` means window search: `> /opt/tool/bin/run
 --flag`.
+
+Search ranking gives every contiguous substring match priority over scattered
+letter matches. Earlier substring positions rank higher even in very long
+window titles; an unusually long title cannot overflow the score.
+
+Desktop-entry commands preserve explicitly quoted empty arguments, so
+`tool --name "" --safe` keeps the empty name separate from the following option.
 
 ## Open windows
 

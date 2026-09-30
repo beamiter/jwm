@@ -265,14 +265,14 @@ pub fn png_preview_label(bytes: usize, width: Option<u32>, height: Option<u32>) 
 /// Read width/height from a PNG IHDR when the leading bytes look valid.
 #[must_use]
 pub fn png_dimensions(bytes: &[u8]) -> (Option<u32>, Option<u32>) {
-    // signature(8) + length(4) + type(4) + width(4) + height(4)
+    // Require the complete IHDR chunk: signature(8), framing(8), data(13), CRC(4).
     const IHDR_PREFIX: &[u8] = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR";
-    if bytes.len() < 24 || !bytes.starts_with(IHDR_PREFIX) {
+    if bytes.len() < 33 || !bytes.starts_with(IHDR_PREFIX) {
         return (None, None);
     }
     let width = u32::from_be_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]);
     let height = u32::from_be_bytes([bytes[20], bytes[21], bytes[22], bytes[23]]);
-    if width == 0 || height == 0 {
+    if width == 0 || height == 0 || width > i32::MAX as u32 || height > i32::MAX as u32 {
         return (None, None);
     }
     (Some(width), Some(height))
@@ -318,12 +318,25 @@ pub fn picker_row(entry: &ClipboardEntry, index: usize) -> String {
 /// dimension tokens). An empty query matches everything.
 #[must_use]
 pub fn matches_query(entry: &ClipboardEntry, query: &str) -> bool {
-    if query.is_empty() {
+    let needle = normalize_query(query);
+    matches_normalized_query(entry, &needle)
+}
+
+/// Normalize a picker query once before walking the bounded history. The
+/// panel rebuild calls the matcher for every entry on every keystroke, so
+/// lowercasing inside each call repeated the same Unicode allocation up to
+/// [`MAX_ENTRIES`] times.
+pub(crate) fn normalize_query(query: &str) -> String {
+    query.to_lowercase()
+}
+
+#[must_use]
+pub(crate) fn matches_normalized_query(entry: &ClipboardEntry, needle: &str) -> bool {
+    if needle.is_empty() {
         return true;
     }
-    let needle = query.to_lowercase();
     match entry {
-        ClipboardEntry::Text { text, .. } => text.to_lowercase().contains(&needle),
+        ClipboardEntry::Text { text, .. } => text.to_lowercase().contains(needle),
         ClipboardEntry::Png { width, height, .. } => {
             let mut haystack = String::from("png image");
             if let (Some(w), Some(h)) = (*width, *height) {
@@ -336,7 +349,7 @@ pub fn matches_query(entry: &ClipboardEntry, query: &str) -> bool {
                 haystack.push(' ');
                 haystack.push_str(&format!("{w}\u{00d7}{h}"));
             }
-            haystack.to_lowercase().contains(&needle)
+            haystack.to_lowercase().contains(needle)
         }
     }
 }
@@ -489,13 +502,28 @@ mod tests {
     }
 
     fn sample_png(width: u32, height: u32, pad: usize) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(24 + pad);
+        let mut bytes = Vec::with_capacity(33 + pad);
         bytes.extend_from_slice(b"\x89PNG\r\n\x1a\n");
         bytes.extend_from_slice(&13u32.to_be_bytes());
         bytes.extend_from_slice(b"IHDR");
         bytes.extend_from_slice(&width.to_be_bytes());
         bytes.extend_from_slice(&height.to_be_bytes());
-        bytes.resize(24 + pad, 0);
+        bytes.extend_from_slice(&[8, 6, 0, 0, 0]);
+        // CRC covers the chunk type and its complete IHDR data. This fixture
+        // intentionally omits image chunks; these tests only inspect metadata.
+        let mut crc = u32::MAX;
+        for byte in &bytes[12..] {
+            crc ^= u32::from(*byte);
+            for _ in 0..8 {
+                crc = if crc & 1 == 1 {
+                    (crc >> 1) ^ 0xedb8_8320
+                } else {
+                    crc >> 1
+                };
+            }
+        }
+        bytes.extend_from_slice(&(!crc).to_be_bytes());
+        bytes.resize(33 + pad, 0);
         bytes
     }
 
@@ -831,6 +859,26 @@ mod tests {
         let png = sample_png(1280, 720, 0);
         assert_eq!(png_dimensions(&png), (Some(1280), Some(720)));
         assert_eq!(png_dimensions(&[0, 1, 2]), (None, None));
+    }
+
+    #[test]
+    fn png_metadata_rejects_truncated_chunks_and_invalid_dimensions() {
+        let valid = sample_png(1280, 720, 0);
+        for length in 24..33 {
+            assert_eq!(png_dimensions(&valid[..length]), (None, None));
+        }
+        for (width, height) in [(0, 1), (1, 0), (u32::MAX, 1), (1, 0x8000_0000)] {
+            let png = sample_png(width, height, 0);
+            assert_eq!(png_dimensions(&png), (None, None));
+            let mut history = ClipboardHistory::new();
+            assert!(history.record_png(&png, 1_000));
+            let entry = history.entries().next().expect("PNG entry was recorded");
+            assert!(!picker_row(entry, 0).contains('×'));
+        }
+        assert_eq!(
+            png_dimensions(&sample_png(i32::MAX as u32, 1, 0)),
+            (Some(i32::MAX as u32), Some(1))
+        );
     }
 
     #[test]

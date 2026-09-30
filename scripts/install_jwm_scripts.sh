@@ -39,6 +39,41 @@ err()   { echo -e "${RED}[ERROR]${NC} $*"; }
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 BARS_DIR="$PROJECT_ROOT/bars"
+JWM_TARGET_DIR="${CARGO_TARGET_DIR:-$PROJECT_ROOT/target}"
+if [[ "$JWM_TARGET_DIR" != /* ]]; then
+    JWM_TARGET_DIR="$PROJECT_ROOT/$JWM_TARGET_DIR"
+fi
+
+# Recover only a missing generated XCB source, preserving other build failures.
+build_workspace() (
+    local log status
+    local -a build_status
+    log=$(mktemp "${TMPDIR:-/tmp}/jwm-build.XXXXXXXX")
+    trap 'rm -f -- "$log"' EXIT
+    # Capture both statuses immediately, including when the pipeline fails.
+    # shellcheck disable=SC2086
+    if cargo build --locked --target-dir "$JWM_TARGET_DIR" $CARGO_BUILD_MODE_FLAG $CARGO_JOBS "$@" 2>&1 | tee "$log"; then
+        build_status=("${PIPESTATUS[@]}")
+    else
+        build_status=("${PIPESTATUS[@]}")
+    fi
+    status=${build_status[0]}
+    ((status != 0)) || status=${build_status[1]}
+    # The diagnostic contains literal Rust crate-name backticks.
+    # shellcheck disable=SC2016
+    if ((build_status[0] != 0 && build_status[1] == 0)) &&
+        grep -Eq "couldn't read .*[/]build/xcb-[^/]+/out/[^/]+[.]rs.*(No such file|os error 2)" "$log" &&
+        grep -Fq 'could not compile `xcb`' "$log"; then
+        warn "XCB 生成文件缺失，清理当前模式的 XCB 缓存并重试一次..."
+        local clean_profile=(--release)
+        [[ "$BUILD_MODE" == release ]] || clean_profile=(--profile dev)
+        cargo clean -p xcb "${clean_profile[@]}" --target-dir "$JWM_TARGET_DIR" || return $?
+        # shellcheck disable=SC2086
+        cargo build --locked --target-dir "$JWM_TARGET_DIR" $CARGO_BUILD_MODE_FLAG $CARGO_JOBS "$@"
+        return $?
+    fi
+    return "$status"
+)
 
 # ============================================================
 # 所有支持的 bar（monorepo 内 bars/ 目录下的独立实现）
@@ -454,7 +489,7 @@ build_bar() {
 
     info "安装 $bar（$BUILD_MODE 模式）..."
     # shellcheck disable=SC2086
-    cargo install --path "$bar_dir" --force $CARGO_INSTALL_MODE_FLAG $CARGO_JOBS --root "$(cargo_install_root)"
+    cargo install --locked --target-dir "$JWM_TARGET_DIR/bar-install/$bar" --path "$bar_dir" --force $CARGO_INSTALL_MODE_FLAG $CARGO_JOBS --root "$(cargo_install_root)"
 
     ok "$bar 安装完成: $(cargo_bin_dir)"
 }
@@ -562,9 +597,9 @@ build_and_install_bridge() {
 
     info "编译 jwm-bridge（$BUILD_MODE 模式）..."
     # shellcheck disable=SC2086
-    (cd "$PROJECT_ROOT" && cargo build --locked -p jwm-bridge $CARGO_BUILD_MODE_FLAG $CARGO_JOBS)
+    (cd "$PROJECT_ROOT" && build_workspace -p jwm-bridge)
 
-    local bridge_target="$PROJECT_ROOT/target"
+    local bridge_target="$JWM_TARGET_DIR"
     if [[ "$BUILD_MODE" == "release" ]]; then
         bridge_target="$bridge_target/release"
     else
@@ -596,9 +631,9 @@ build_and_install_jwm() {
 
     # JWM 不使用 cargo install，避免把 jwm/jwm-tool/jwm-support/jwm-remote 写入 cargo bin。
     # shellcheck disable=SC2086
-    cargo build --locked $CARGO_BUILD_MODE_FLAG $CARGO_JOBS
+    build_workspace
 
-    local target_dir="$PROJECT_ROOT/target"
+    local target_dir="$JWM_TARGET_DIR"
     if [[ "$BUILD_MODE" == "release" ]]; then
         target_dir="$target_dir/release"
     else
@@ -632,7 +667,7 @@ regenerate_config() {
     info "重新生成 JWM 配置文件..."
     local jwm_bin="/usr/local/bin/jwm"
     if [[ ! -x "$jwm_bin" ]]; then
-        jwm_bin="$PROJECT_ROOT/target/$BUILD_MODE/jwm"
+        jwm_bin="$JWM_TARGET_DIR/$BUILD_MODE/jwm"
     fi
     if "$jwm_bin" --gen-config; then
         ok "配置文件已重新生成"
