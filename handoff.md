@@ -617,9 +617,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 301 | README occupancy 含 closed_placement_count | ✓ |
 | 302 | tools/README occupancy 含 closed_placement_count | ✓ |
 | 303 | window-tabs occupancy 含 closed_placement_count | ✓ |
+| 304 | TagClientCounts 累计 closed_placement | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 304 — TagClientCounts accumulates closed_placement
+
+选题 = evolve8h wave 304。标签客户端计数累计记得关闭落位的窗口。
 
 ## 2026-10-03：evolve8h wave 303 — window-tabs occupancy names closed_placement_count
 

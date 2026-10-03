@@ -331,6 +331,7 @@ monorepo use independent Semantic Versions.
 - README occupancy JSON names `closed_placement_count`.
 - `tools/README.md` occupancy JSON names `closed_placement_count`.
 - Window-tabs docs name occupancy `closed_placement_count`.
+- Tag client counts accumulate `closed_placement`.
 
 ### Changed
 

@@ -134,6 +134,7 @@ struct TagClientCounts {
     maximize_promoted: usize,
     strut: usize,
     status_bar: usize,
+    closed_placement: usize,
     owns_output: usize,
 }
 
@@ -200,6 +201,7 @@ fn accumulate_client_counts(
     counts.maximize_promoted += usize::from(client.state.maximize_restore_tiled);
     counts.strut += usize::from(has_strut);
     counts.status_bar += usize::from(is_status_bar);
+    counts.closed_placement += usize::from(client.state.remembers_closed_placement);
     counts.owns_output += usize::from(
         client.state.is_fullscreen
             && !client.state.is_hidden
@@ -235,6 +237,7 @@ fn accumulate_window_counts(counts: &mut TagClientCounts, window: &WindowInfo) {
     counts.maximize_promoted += usize::from(window.maximize_promoted);
     counts.strut += usize::from(window.has_strut);
     counts.status_bar += usize::from(window.is_status_bar);
+    counts.closed_placement += usize::from(window.remembers_closed_placement);
     counts.owns_output += usize::from(window.owns_output);
 }
 
@@ -14212,5 +14215,31 @@ mod tests {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
         assert!(TABS.contains("`closed_placement_count` / `prev_layout`"));
         assert!(DOCS.contains("Window-tabs docs also name `closed_placement_count`"));
+    }
+
+    #[test]
+    fn evolve8h_wave_304_tag_client_counts_accumulate_closed_placement() {
+        const SOURCE: &str = include_str!("ipc_handler.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        let accumulate = SOURCE
+            .split_once("fn accumulate_client_counts(")
+            .expect("accumulate_client_counts")
+            .1
+            .split_once("fn accumulate_window_counts(")
+            .expect("accumulate_window_counts follows")
+            .0;
+        assert!(accumulate.contains("counts.closed_placement += usize::from(client.state.remembers_closed_placement)"));
+        let windows = SOURCE
+            .split_once("fn accumulate_window_counts(")
+            .expect("accumulate_window_counts")
+            .1
+            .split_once("fn tag_client_counts(")
+            .expect("tag_client_counts follows")
+            .0;
+        assert!(windows.contains(
+            "counts.closed_placement += usize::from(window.remembers_closed_placement)"
+        ));
+        assert!(SOURCE.contains("closed_placement: usize,"));
+        assert!(DOCS.contains("Tag client counts accumulate `closed_placement`"));
     }
 }
