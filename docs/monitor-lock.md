@@ -177,8 +177,9 @@ strut reservations, `selected_id`, dual-tagset `sel_tags` /
 per-tag `minimized_count` / `floating_count` / `sticky_count`. Focused-monitor
 convenience queries `get_layout`
 (layout symbol + `m_fact` + `n_master` + `gap`), `get_gaps`, `get_mfact`,
-`get_nmaster`, `get_show_bar`, and `get_prev_layout` return the selected
-monitor's live values (optional `connector` when known). `get_show_bar`
+`get_nmaster`, `get_show_bar`, `get_prev_layout`, and `get_closed_placement`
+return the selected monitor's live values (optional `connector` when known).
+`get_show_bar`
 also reports `bar_visible`, `has_visible_fullscreen` and
 `owns_output_count` (`get_bar` /
 `get_bar_visible` / `get_owns_output` / `get_visible_fullscreen` /
@@ -479,3 +480,4 @@ README control examples include `get_cp`.
 `tools/README.md` control examples include `get_cp`.
 Compatibility docs name `get_cp` among short query aliases.
 Window-placement docs name `get_closed_placement` / `get_cp`.
+Focused layout-knob query docs name `get_closed_placement`.

@@ -14806,4 +14806,13 @@ mod tests {
         assert!(PLACEMENT.contains("`get_cp` return the focused monitor's"));
         assert!(DOCS.contains("Window-placement docs name `get_closed_placement` / `get_cp`"));
     }
+
+    #[test]
+    fn evolve8h_wave_345_focused_layout_knob_docs_name_get_closed_placement() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains(
+            "`get_nmaster`, `get_show_bar`, `get_prev_layout`, and `get_closed_placement`"
+        ));
+        assert!(DOCS.contains("Focused layout-knob query docs name `get_closed_placement`"));
+    }
 }
