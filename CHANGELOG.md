@@ -324,6 +324,7 @@ monorepo use independent Semantic Versions.
 - `setcfact` emits `monitor/bar`.
 - External strut property updates emit `monitor/bar`.
 - External strut rehosts emit `monitor/bar`.
+- Window-tab reorders emit `monitor/bar`.
 
 ### Changed
 

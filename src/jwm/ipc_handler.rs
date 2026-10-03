@@ -14123,4 +14123,19 @@ mod tests {
         assert!(rehost.contains("broadcast_monitor_bar_all_monitors(backend)"));
         assert!(DOCS.contains("External strut rehosts emit `monitor/bar`"));
     }
+
+    #[test]
+    fn evolve8h_wave_297_window_tab_reorders_broadcast_monitor_bar() {
+        const SOURCE: &str = include_str!("window_tabs.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        let reorder = SOURCE
+            .split_once("pub(crate) fn commit_window_tab_reorder(")
+            .expect("commit_window_tab_reorder")
+            .1
+            .split_once("fn tab_reorder_target(")
+            .expect("tab_reorder_target follows")
+            .0;
+        assert!(reorder.contains("broadcast_monitor_bar_ipc(backend, mon_key)"));
+        assert!(DOCS.contains("Window-tab reorders emit `monitor/bar`"));
+    }
 }

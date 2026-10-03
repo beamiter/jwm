@@ -610,9 +610,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 294 | setcfact 发出 monitor/bar | ✓ |
 | 295 | strut 属性更新发出 monitor/bar | ✓ |
 | 296 | strut 换屏发出 monitor/bar | ✓ |
+| 297 | window-tab 重排发出 monitor/bar | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 297 — window-tab reorders broadcast monitor/bar
+
+选题 = evolve8h wave 297。窗口标签条拖拽重排后发出 `monitor/bar`。
 
 ## 2026-10-03：evolve8h wave 296 — strut rehosts broadcast monitor/bar
 

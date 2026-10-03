@@ -287,6 +287,7 @@ impl Jwm {
             drag.client, slot, mon_key, drag.mon
         );
         self.arrange(backend, Some(mon_key));
+        self.broadcast_monitor_bar_ipc(backend, mon_key);
         Ok(())
     }
 
