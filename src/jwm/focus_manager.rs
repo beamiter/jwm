@@ -102,6 +102,7 @@ impl Jwm {
                             "monitor": num,
                         }),
                     );
+                    self.broadcast_monitor_bar_ipc(backend, target_mon_key);
                 }
             }
         }

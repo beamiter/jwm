@@ -10849,4 +10849,13 @@ mod tests {
         assert!(sendmon.contains("broadcast_monitor_bar_ipc(backend, target_mon_key)"));
         assert!(DOCS.contains("both monitors"));
     }
+
+    #[test]
+    fn evolve8h_wave_27_focusmon_broadcasts_monitor_bar() {
+        const FOCUS: &str = include_str!("focus_manager.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(FOCUS.contains("\"monitor/focus\""));
+        assert!(FOCUS.contains("broadcast_monitor_bar_ipc(backend, target_mon_key)"));
+        assert!(DOCS.contains("`focusmon`"));
+    }
 }

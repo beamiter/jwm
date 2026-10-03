@@ -46,6 +46,7 @@ monorepo use independent Semantic Versions.
 - Swallowing or unswallowing a terminal emits `monitor/bar` for its
   monitor.
 - Moving a fullscreen client between outputs emits `monitor/bar` on both.
+- `focusmon` emits `monitor/bar` for the newly focused output.
 
 ### Changed
 
