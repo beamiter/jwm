@@ -411,7 +411,16 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 95 | README occupancy 含 selected_id | ✓ |
 | 96 | tools/README occupancy 含 selected_id | ✓ |
 | 97 | window-tabs occupancy 含 selected_id | ✓ |
+| 98 | get_show_bar occupancy 含 sel_tags | ✓ |
 | … | 进行中 | |
+
+---
+
+## 2026-10-03：evolve8h wave 98 — occupancy snapshot includes sel_tags
+
+选题 = evolve8h wave 98。`get_show_bar` / `monitor/bar` 带上 dual-tagset 索引。
+
+**验证**：`scripts/test.sh --lib --` 聚焦 evolve8h_wave_98。
 
 ---
 
