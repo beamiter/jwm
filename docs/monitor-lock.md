@@ -281,6 +281,7 @@ README occupancy JSON also names `floating_count`.
 README occupancy JSON also names `minimized_count`.
 README occupancy JSON also names `sticky_count`.
 `tools/README.md` also names `minimized_count`.
+`tools/README.md` also names `sticky_count`.
 `tools/README.md` also names `floating_count`.
 `tools/README.md` also names `on_view_count`.
 `tools/README.md` also names `window_count`.

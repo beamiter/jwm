@@ -167,6 +167,7 @@ monorepo use independent Semantic Versions.
 - Toggling sticky emits `monitor/bar` even when the client was not fullscreen.
 - `get_status.show_bar` rustdoc names `sticky_count`.
 - README occupancy JSON names `sticky_count`.
+- `tools/README.md` occupancy JSON names `sticky_count`.
 
 ### Changed
 
