@@ -14891,4 +14891,15 @@ mod tests {
             "`jwm-tool capabilities` text lists `get_cp -> get_closed_placement`"
         ));
     }
+
+    #[test]
+    fn evolve8h_wave_352_health_prints_compact_closed_placement() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("closed_placement: monitor={monitor} count={count}"));
+        assert!(TOOL.contains("\"closed_placement: monitor=0 count=2 connector=DP-1\""));
+        assert!(DOCS.contains(
+            "`jwm-tool health` prints compact `closed_placement` beside occupancy"
+        ));
+    }
 }

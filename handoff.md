@@ -665,9 +665,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 349 | foreign-toplevel 激活发出 monitor/bar | ✓ |
 | 350 | cube-effects 文档点名 overview 确认 monitor/bar | ✓ |
 | 351 | capabilities 文本列出 get_cp -> get_closed_placement | ✓ |
+| 352 | health 打印 compact closed_placement | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 352 — health prints compact closed_placement
+
+选题 = evolve8h wave 352。`jwm-tool health` 打印 compact `closed_placement` 行。
 
 ## 2026-10-03：evolve8h wave 351 — capabilities text lists get_cp alias
 

@@ -3361,6 +3361,25 @@ mod tests {
         assert!(bar_lines.iter().any(|line| {
             line == "show_bar: monitor=0 tag=1 prev_tag=2 selected=42 sel_tags=0 previous_tags=0x2 active_tags=0x1 windows=3 on_view=2 floating=1 minimized=1 sticky=1 urgent=1 fullscreen_count=1 pip=1 maximized=1 above=1 below=1 scratchpad=1 tabbed=2 dock=1 desktop=1 never_focus=1 skip_taskbar=1 skip_pager=1 no_decorations=1 drag_float=1 swallowed=1 demands_attention=1 fixed=1 strut=1 maximize_promoted=1 status_bar=1 closed_placement=1 layout=[]= prev_layout=||| gap=6 mfact=0.55 nmaster=1 preference=true visible=false fullscreen=true owns_output=1 connector=DP-1"
         }));
+        assert!(!bar_lines
+            .iter()
+            .any(|line| line.starts_with("closed_placement: monitor=")));
+
+        let with_compact_cp = serde_json::json!({
+            "health": {"status": "healthy", "reasons": []},
+            "counts": {"windows": 0, "monitors": 1, "workspaces": 1},
+            "config": {"path": "/tmp/config.toml", "diagnostics": {"error_count": 0, "warning_count": 0}},
+            "features": {},
+            "closed_placement": {
+                "monitor": 0,
+                "closed_placement_count": 2,
+                "connector": "DP-1"
+            }
+        });
+        let cp_lines = health_output_lines(&with_compact_cp);
+        assert!(cp_lines.iter().any(|line| {
+            line == "closed_placement: monitor=0 count=2 connector=DP-1"
+        }));
 
         let capabilities = serde_json::json!({
             "schema_version": 1,
@@ -4301,6 +4320,27 @@ fn health_output_lines(status: &serde_json::Value) -> Vec<String> {
                 line.push_str(&format!(" connector={connector}"));
             }
         }
+    }
+
+    if let Some(cp) = status
+        .get("closed_placement")
+        .and_then(serde_json::Value::as_object)
+    {
+        let monitor = cp
+            .get("monitor")
+            .and_then(|v| v.as_u64().or_else(|| v.as_i64().map(|n| n as u64)))
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".into());
+        let count = cp
+            .get("closed_placement_count")
+            .and_then(serde_json::Value::as_u64)
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".into());
+        let mut line = format!("closed_placement: monitor={monitor} count={count}");
+        if let Some(connector) = cp.get("connector").and_then(serde_json::Value::as_str) {
+            line.push_str(&format!(" connector={connector}"));
+        }
+        lines.push(line);
     }
 
     if let Some(reasons) = status["health"]["reasons"].as_array() {
