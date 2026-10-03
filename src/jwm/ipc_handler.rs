@@ -14051,4 +14051,12 @@ mod tests {
         assert!(TOOLS.contains("It also includes `prev_layout`."));
         assert!(DOCS.contains("`tools/README.md` also names `prev_layout`"));
     }
+
+    #[test]
+    fn evolve8h_wave_292_window_tabs_occupancy_names_prev_layout() {
+        const TABS: &str = include_str!("../../docs/window-tabs.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TABS.contains("`status_bar_count` / `prev_layout`"));
+        assert!(DOCS.contains("Window-tabs docs also name `prev_layout`"));
+    }
 }

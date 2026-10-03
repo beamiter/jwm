@@ -421,6 +421,7 @@ Window-tabs docs also name `fixed_count`.
 Window-tabs docs also name `strut_count`.
 Window-tabs docs also name `maximize_promoted_count`.
 Window-tabs docs also name `status_bar_count`.
+Window-tabs docs also name `prev_layout`.
 `toggletag` on a fullscreen client emits `monitor/bar`, as does `tag`
 and sticky.
 `get_workspaces` / `get_tree` also report pip / maximized / above / below /

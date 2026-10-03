@@ -319,6 +319,7 @@ monorepo use independent Semantic Versions.
 - `get_status.show_bar` rustdoc names `prev_layout`.
 - README occupancy JSON names `prev_layout`.
 - `tools/README.md` occupancy JSON names `prev_layout`.
+- Window-tabs docs name occupancy `prev_layout`.
 
 ### Changed
 
