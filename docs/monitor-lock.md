@@ -343,6 +343,7 @@ Window-tabs docs also name `maximized_count`.
 Window-tabs docs also name `above_count`.
 Window-tabs docs also name `below_count`.
 Window-tabs docs also name `scratchpad_count`.
+Window-tabs docs also name `tabbed_count`.
 `toggletag` on a fullscreen client emits `monitor/bar`, as does `tag`
 and sticky.
 `get_workspaces` / `get_tree` also report pip / maximized / above / below /
