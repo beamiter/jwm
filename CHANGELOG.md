@@ -238,6 +238,7 @@ monorepo use independent Semantic Versions.
 - README occupancy JSON names `desktop_count`.
 - `tools/README.md` occupancy JSON names `desktop_count`.
 - Window-tabs docs name occupancy `desktop_count`.
+- `get_show_bar` occupancy snapshots include `never_focus_count`.
 
 ### Changed
 
