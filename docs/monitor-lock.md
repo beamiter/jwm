@@ -283,6 +283,7 @@ README occupancy JSON also names `floating_count`.
 `previous_tags` / `active_tags`.
 Window-tabs docs also name `window_count`.
 Window-tabs docs also name `on_view_count`.
+Window-tabs docs also name `floating_count`.
 `toggletag` on a fullscreen client emits `monitor/bar`, as does `tag`
 and sticky.
 `get_workspaces` / `get_tree` also report pip / maximized / above / below /

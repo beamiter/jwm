@@ -12012,4 +12012,12 @@ mod tests {
         assert!(TOOLS.contains("It also includes `floating_count`."));
         assert!(DOCS.contains("`tools/README.md` also names `floating_count`"));
     }
+
+    #[test]
+    fn evolve8h_wave_129_window_tabs_occupancy_names_floating_count() {
+        const TABS: &str = include_str!("../../docs/window-tabs.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TABS.contains("`on_view_count` / `floating_count`"));
+        assert!(DOCS.contains("Window-tabs docs also name `floating_count`"));
+    }
 }

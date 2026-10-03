@@ -154,6 +154,7 @@ monorepo use independent Semantic Versions.
 - `get_status.show_bar` rustdoc names `floating_count`.
 - README occupancy JSON names `floating_count`.
 - `tools/README.md` occupancy JSON names `floating_count`.
+- Window-tabs docs name occupancy `floating_count`.
 
 ### Changed
 
