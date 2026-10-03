@@ -14035,4 +14035,12 @@ mod tests {
         assert!(IPC.contains("Also `prev_layout`."));
         assert!(DOCS.contains("`get_status.show_bar` rustdoc also names `prev_layout`"));
     }
+
+    #[test]
+    fn evolve8h_wave_290_readme_occupancy_names_prev_layout() {
+        const README: &str = include_str!("../../README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(README.contains("It also includes `prev_layout`."));
+        assert!(DOCS.contains("README occupancy JSON also names `prev_layout`"));
+    }
 }
