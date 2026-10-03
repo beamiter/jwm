@@ -13469,4 +13469,19 @@ mod tests {
         assert!(TABS.contains("`no_decorations_count` / `drag_float_count`"));
         assert!(DOCS.contains("Window-tabs docs also name `drag_float_count`"));
     }
+
+    #[test]
+    fn evolve8h_wave_246_drag_start_floating_broadcasts_monitor_bar() {
+        const SOURCE: &str = include_str!("../jwm.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        let enable = SOURCE
+            .split_once("fn enable_floating_keep_geometry(")
+            .expect("enable_floating_keep_geometry")
+            .1
+            .split_once("fn debug_drag_enabled(")
+            .expect("debug_drag_enabled follows")
+            .0;
+        assert!(enable.contains("broadcast_monitor_bar_ipc(backend, sel_mon_key)"));
+        assert!(DOCS.contains("Drag-start floating emits `monitor/bar`"));
+    }
 }

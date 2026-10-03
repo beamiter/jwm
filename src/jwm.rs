@@ -950,6 +950,7 @@ impl Jwm {
         self.reorder_client_in_monitor_groups(client_key);
 
         self.arrange(backend, Some(sel_mon_key));
+        self.broadcast_monitor_bar_ipc(backend, sel_mon_key);
         Ok(())
     }
     fn debug_drag_enabled() -> bool {
