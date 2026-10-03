@@ -11159,4 +11159,12 @@ mod tests {
         assert!(TOOL.contains("get_bar_visible, get_bar"));
         assert!(DOCS.contains("`get_bar`."));
     }
+
+    #[test]
+    fn evolve8h_wave_57_readme_control_example_get_vf() {
+        const README: &str = include_str!("../../README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(README.contains("jwm-tool msg get_vf"));
+        assert!(DOCS.contains("`get_show_bar` and `get_vf`"));
+    }
 }

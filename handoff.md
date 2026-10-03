@@ -370,7 +370,16 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 54 | jwm-tool 帮助列出 get_visible_fullscreen | ✓ |
 | 55 | jwm-tool 帮助列出 get_bar_visible | ✓ |
 | 56 | jwm-tool 帮助列出 get_bar | ✓ |
+| 57 | README 控制示例含 get_vf | ✓ |
 | … | 进行中 | |
+
+---
+
+## 2026-10-03：evolve8h wave 57 — README get_vf example
+
+选题 = evolve8h wave 57。README 控制示例加上 occupancy 短查询。
+
+**验证**：`scripts/test.sh --lib --` 聚焦 evolve8h_wave_57。
 
 ---
 
