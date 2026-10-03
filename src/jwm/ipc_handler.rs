@@ -13022,4 +13022,12 @@ mod tests {
         assert!(TOOL.contains("desktop={desktop}"));
         assert!(DOCS.contains("and `desktop_count`"));
     }
+
+    #[test]
+    fn evolve8h_wave_209_get_status_show_bar_rustdoc_names_desktop_count() {
+        const IPC: &str = include_str!("../ipc.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(IPC.contains("Also `desktop_count`."));
+        assert!(DOCS.contains("`get_status.show_bar` rustdoc also names `desktop_count`"));
+    }
 }

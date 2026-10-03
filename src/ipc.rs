@@ -810,6 +810,7 @@ pub struct RuntimeStatusV1 {
     /// Also `scratchpad_count`.
     /// Also `tabbed_count`.
     /// Also `dock_count`.
+    /// Also `desktop_count`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub show_bar: Option<Value>,
     /// Compact twin of `get_metrics` / `get_perf` (renderer metrics when any).
