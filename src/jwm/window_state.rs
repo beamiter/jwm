@@ -1691,6 +1691,7 @@ impl Jwm {
         let previous_urgent = client.state.is_urgent;
         let win = client.win;
         let monitor = client.mon;
+        let was_fullscreen = client.state.is_fullscreen;
         let was_selected = self.is_client_selected(client_key);
         let previous_selected_monitor = self.state.sel_mon;
         let previous_target_selection = monitor
@@ -1998,6 +1999,11 @@ impl Jwm {
             self.clear_hidden_client_park_retry(client_key);
         }
         self.broadcast_window_state_ipc(backend, client_key);
+        if was_fullscreen {
+            if let Some(mon_key) = monitor {
+                self.broadcast_monitor_bar_ipc(backend, mon_key);
+            }
+        }
         Ok(true)
     }
 }

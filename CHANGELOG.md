@@ -41,6 +41,7 @@ monorepo use independent Semantic Versions.
 - `toggleview` emits `monitor/bar` after arrange.
 - Fullscreen layout enter/leave emits `monitor/bar` after the bar window
   is parked or restored.
+- Minimizing or restoring a fullscreen client emits `monitor/bar`.
 
 ### Changed
 
