@@ -181,7 +181,7 @@ convenience queries `get_layout`
 monitor's live values (optional `connector` when known). `get_show_bar`
 also reports `bar_visible`, `has_visible_fullscreen` and
 `owns_output_count` (`get_bar` /
-`get_bar_visible` alias the same snapshot). `get_cfact` /
+`get_bar_visible` / `get_owns_output` alias the same snapshot). `get_cfact` /
 `get_selected` / `get_focused_window` twin the focused client. IPC `setgaps` /
 `set_gaps`, `setmfact` / `set_mfact`, and `setcfact` / `set_cfact` adjust the
 focused monitor or client. Each monitor also reports `tab_bar_reserved` (pixels

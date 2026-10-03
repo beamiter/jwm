@@ -460,6 +460,7 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "get_notif",
         "get_notifications",
         "get_outputs",
+        "get_owns_output",
         "get_pads",
         "get_pair",
         "get_peek",

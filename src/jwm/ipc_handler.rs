@@ -2852,7 +2852,7 @@ impl Jwm {
             "get_nmaster" | "get_nm" => IpcResponse::ok(Some(self.query_focused_nmaster(backend))),
             "get_mfact" | "get_mf" => IpcResponse::ok(Some(self.query_focused_mfact(backend))),
             "get_cfact" | "get_cf" => IpcResponse::ok(Some(self.query_focused_cfact(backend))),
-            "get_show_bar" | "get_bar" | "get_bar_visible" => {
+            "get_show_bar" | "get_bar" | "get_bar_visible" | "get_owns_output" => {
                 IpcResponse::ok(Some(self.query_focused_show_bar(backend)))
             }
             "get_prev_layout" | "get_pl" => {
@@ -10660,5 +10660,15 @@ mod tests {
             .0;
         assert!(accumulate.contains("!client.state.is_swallowed"));
         assert!(DOCS.contains("tag counts skip swallowed terminals"));
+    }
+
+    #[test]
+    fn evolve8h_wave_15_get_owns_output_aliases_show_bar() {
+        const IPC: &str = include_str!("../ipc.rs");
+        const SOURCE: &str = include_str!("ipc_handler.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(IPC.contains("\"get_owns_output\""));
+        assert!(SOURCE.contains("\"get_owns_output\""));
+        assert!(DOCS.contains("`get_owns_output`"));
     }
 }

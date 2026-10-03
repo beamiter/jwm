@@ -30,6 +30,7 @@ monorepo use independent Semantic Versions.
 - `get_tree` monitor nodes use the same hide-bar `owns_output_count`.
 - `WindowInfo.owns_output` is false for swallowed terminals.
 - Tag client counts exclude swallowed terminals from `owns_output`.
+- `get_owns_output` aliases `get_show_bar`.
 
 ### Changed
 
