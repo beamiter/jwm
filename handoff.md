@@ -555,9 +555,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 239 | 装饰 hint 调和发出 monitor/bar | ✓ |
 | 240 | get_show_bar occupancy 含 drag_float_count | ✓ |
 | 241 | jwm-tool health occupancy 含 drag_float | ✓ |
+| 242 | get_status.show_bar rustdoc 含 drag_float_count | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 242 — get_status.show_bar rustdoc names drag_float_count
+
+选题 = evolve8h wave 242。`get_status.show_bar` rustdoc 带上 drag_float_count。
 
 ## 2026-10-03：evolve8h wave 241 — health occupancy includes drag_float_count
 
