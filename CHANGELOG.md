@@ -164,6 +164,7 @@ monorepo use independent Semantic Versions.
 - Window-tabs docs name occupancy `minimized_count`.
 - `get_show_bar` occupancy snapshots include `sticky_count`.
 - `jwm-tool health` occupancy line includes sticky_count.
+- Toggling sticky emits `monitor/bar` even when the client was not fullscreen.
 
 ### Changed
 

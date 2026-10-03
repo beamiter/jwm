@@ -12152,4 +12152,20 @@ mod tests {
         assert!(TOOL.contains("sticky={sticky}"));
         assert!(DOCS.contains("and `sticky_count`"));
     }
+
+    #[test]
+    fn evolve8h_wave_139_sticky_always_broadcasts_monitor_bar() {
+        const TOGGLES: &str = include_str!("features/toggles.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        let sticky = TOGGLES
+            .split_once("pub(crate) fn set_client_sticky(")
+            .expect("set_client_sticky")
+            .1
+            .split_once("pub(crate) fn prepare_for_compositor_disable(")
+            .expect("prepare_for_compositor_disable follows")
+            .0;
+        assert!(sticky.contains("let _ = was_fullscreen"));
+        assert!(sticky.contains("broadcast_monitor_bar_ipc(backend, mk)"));
+        assert!(DOCS.contains("Toggling sticky emits `monitor/bar` even when the client was not fullscreen"));
+    }
 }

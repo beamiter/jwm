@@ -2979,10 +2979,9 @@ impl Jwm {
         let _ = self.setclienttagprop(backend, client_key);
         self.arrange(backend, mon);
         self.broadcast_window_state_ipc(backend, client_key);
-        if was_fullscreen {
-            if let Some(mk) = mon {
-                self.broadcast_monitor_bar_ipc(backend, mk);
-            }
+        let _ = was_fullscreen;
+        if let Some(mk) = mon {
+            self.broadcast_monitor_bar_ipc(backend, mk);
         }
     }
 

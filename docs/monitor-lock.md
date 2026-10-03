@@ -199,6 +199,7 @@ They also include `on_view_count`.
 They also include `floating_count`.
 They also include `minimized_count`.
 They also include `sticky_count`.
+Toggling sticky emits `monitor/bar` even when the client was not fullscreen.
 `togglefloating` emits `monitor/bar`.
 Minimizing or restoring a client emits `monitor/bar` even when it was not fullscreen.
 Managing a client emits `monitor/bar`.
