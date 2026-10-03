@@ -15272,4 +15272,13 @@ mod tests {
             "`jwm-tool health` prints compact `scratchpads` beside occupancy"
         ));
     }
+
+    #[test]
+    fn evolve8h_wave_394_readme_health_names_compact_scratchpads() {
+        const README: &str = include_str!("../../README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(README.contains("compact `scratchpads` line"));
+        assert!(README.contains("get_status.scratchpads"));
+        assert!(DOCS.contains("README health text names compact `scratchpads`"));
+    }
 }

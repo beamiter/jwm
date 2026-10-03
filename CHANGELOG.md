@@ -423,6 +423,7 @@ monorepo use independent Semantic Versions.
 - `tools/README.md` health text names compact `struts`.
 - `jwm-tool capabilities` text lists `get_strut -> get_struts`.
 - `jwm-tool health` prints compact `scratchpads` beside occupancy.
+- README health text names compact `scratchpads`.
 
 ### Changed
 
