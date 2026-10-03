@@ -11575,4 +11575,19 @@ mod tests {
         assert!(focus.contains("broadcast_monitor_bar_ipc(backend, mon_key)"));
         assert!(DOCS.contains("in-column focus emits `monitor/bar`"));
     }
+
+    #[test]
+    fn evolve8h_wave_92_focus_none_broadcasts_monitor_bar() {
+        const FOCUS: &str = include_str!("focus_manager.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        let focus_none = FOCUS
+            .split_once("pub fn focus_none(")
+            .expect("focus_none")
+            .1
+            .split_once("pub fn focus_window(")
+            .expect("focus_window follows")
+            .0;
+        assert!(focus_none.contains("broadcast_monitor_bar_ipc(backend, mk)"));
+        assert!(DOCS.contains("`focus_none` emits `monitor/bar`"));
+    }
 }

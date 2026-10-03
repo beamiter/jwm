@@ -251,6 +251,9 @@ impl Jwm {
         // kept showing the window that no longer has focus.
         self.mark_bar_update_needed_if_visible(monitor_num);
         self.flush_pending_bar_updates();
+        if let Some(mk) = self.state.sel_mon {
+            self.broadcast_monitor_bar_ipc(backend, mk);
+        }
         Ok(())
     }
 
