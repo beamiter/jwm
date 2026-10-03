@@ -14542,4 +14542,11 @@ mod tests {
         assert!(DOCS.contains("`get_monitors` also reports `closed_placement_count`"));
         assert!(DOCS.contains("Monitor rows report `closed_placement_count`"));
     }
+
+    #[test]
+    fn evolve8h_wave_325_get_tree_docs_name_closed_placement_count() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("`get_tree` also reports `closed_placement_count`"));
+        assert!(DOCS.contains("Tree nodes report `closed_placement_count`"));
+    }
 }

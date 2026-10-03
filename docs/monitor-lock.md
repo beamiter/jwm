@@ -459,3 +459,4 @@ fixed (and tree scratchpad / tabbed) counts; monitors report
 optional `stack_index`.
 `get_workspaces` also reports `closed_placement_count`.
 `get_monitors` also reports `closed_placement_count`.
+`get_tree` also reports `closed_placement_count`.

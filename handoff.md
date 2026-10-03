@@ -638,9 +638,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 322 | transient-for 起浮发出 monitor/bar | ✓ |
 | 323 | get_workspaces 文档含 closed_placement_count | ✓ |
 | 324 | get_monitors 文档含 closed_placement_count | ✓ |
+| 325 | get_tree 文档含 closed_placement_count | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 325 — get_tree docs name closed_placement_count
+
+选题 = evolve8h wave 325。`get_tree` 文档点名 closed_placement_count。
 
 ## 2026-10-03：evolve8h wave 324 — get_monitors docs name closed_placement_count
 
