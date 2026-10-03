@@ -177,6 +177,7 @@ monorepo use independent Semantic Versions.
 - README occupancy JSON names `urgent_count`.
 - `tools/README.md` occupancy JSON names `urgent_count`.
 - Window-tabs docs name occupancy `urgent_count`.
+- `get_show_bar` occupancy snapshots include `fullscreen_count`.
 
 ### Changed
 

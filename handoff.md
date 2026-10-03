@@ -465,7 +465,16 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 149 | README occupancy 含 urgent_count | ✓ |
 | 150 | tools/README occupancy 含 urgent_count | ✓ |
 | 151 | window-tabs occupancy 含 urgent_count | ✓ |
+| 152 | get_show_bar occupancy 含 fullscreen_count | ✓ |
 | … | 进行中 | |
+
+---
+
+## 2026-10-03：evolve8h wave 152 — occupancy snapshot includes fullscreen_count
+
+选题 = evolve8h wave 152。`get_show_bar` / `monitor/bar` 带上附着的 fullscreen 窗口数（与 `has_visible_fullscreen` 布尔并存）。
+
+**验证**：`scripts/test.sh --lib --` 聚焦 evolve8h_wave_152 evolve8h_wave_144。
 
 ---
 

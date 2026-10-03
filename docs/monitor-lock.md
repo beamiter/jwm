@@ -200,6 +200,7 @@ They also include `floating_count`.
 They also include `minimized_count`.
 They also include `sticky_count`.
 They also include `urgent_count`.
+They also include `fullscreen_count`.
 Urgency changes emit `monitor/bar`.
 Demands-attention changes emit `monitor/bar`.
 Toggling sticky emits `monitor/bar` even when the client was not fullscreen.
