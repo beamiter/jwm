@@ -211,6 +211,7 @@ They also include `dock_count`.
 They also include `desktop_count`.
 They also include `never_focus_count`.
 They also include `skip_taskbar_count`.
+They also include `skip_pager_count`.
 Hiding a scratchpad emits `monitor/bar`.
 Showing a scratchpad emits `monitor/bar`.
 Keep-above and keep-below changes emit `monitor/bar`.

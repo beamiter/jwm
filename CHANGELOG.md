@@ -250,6 +250,7 @@ monorepo use independent Semantic Versions.
 - README occupancy JSON names `skip_taskbar_count`.
 - `tools/README.md` occupancy JSON names `skip_taskbar_count`.
 - Window-tabs docs name occupancy `skip_taskbar_count`.
+- `get_show_bar` occupancy snapshots include `skip_pager_count`.
 
 ### Changed
 
