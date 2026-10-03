@@ -14797,4 +14797,13 @@ mod tests {
         assert!(COMPAT.contains("`get_cp`"));
         assert!(DOCS.contains("Compatibility docs name `get_cp` among short query aliases"));
     }
+
+    #[test]
+    fn evolve8h_wave_344_window_placement_docs_name_get_closed_placement() {
+        const PLACEMENT: &str = include_str!("../../docs/window-placement.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(PLACEMENT.contains("`get_closed_placement` /"));
+        assert!(PLACEMENT.contains("`get_cp` return the focused monitor's"));
+        assert!(DOCS.contains("Window-placement docs name `get_closed_placement` / `get_cp`"));
+    }
 }

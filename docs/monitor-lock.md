@@ -478,3 +478,4 @@ Capabilities list `get_closed_placement` and `get_cp`.
 README control examples include `get_cp`.
 `tools/README.md` control examples include `get_cp`.
 Compatibility docs name `get_cp` among short query aliases.
+Window-placement docs name `get_closed_placement` / `get_cp`.

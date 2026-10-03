@@ -657,9 +657,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 341 | README 控制示例含 get_cp | ✓ |
 | 342 | tools/README 控制示例含 get_cp | ✓ |
 | 343 | compatibility 文档点名 get_cp | ✓ |
+| 344 | window-placement 文档点名 get_closed_placement | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 344 — window-placement docs name get_closed_placement
+
+选题 = evolve8h wave 344。window-placement 文档点名 `get_closed_placement` / `get_cp`。
 
 ## 2026-10-03：evolve8h wave 343 — compatibility docs name get_cp
 

@@ -372,6 +372,7 @@ monorepo use independent Semantic Versions.
 - README control examples include `get_cp`.
 - `tools/README.md` control examples include `get_cp`.
 - Compatibility docs name `get_cp` among short query aliases.
+- Window-placement docs name `get_closed_placement` / `get_cp`.
 
 ### Changed
 

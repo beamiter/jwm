@@ -228,9 +228,10 @@ optional `maximize_restore_anchor`, `pip_restore_sticky`, `old_state`,
 60 Hz), `hdr_capable`, live tiling `gap` / `m_fact` / `n_master`, and
 `transform` (`wl_output` 0..=7). `get_workspaces` rows include per-tag
 `gap` beside `m_fact` / `n_master`. `get_workspaces` / `get_monitors` /
-`get_tree` also report `closed_placement_count`. `get_layout` / `get_gaps` /
-`get_nmaster` query the focused monitor's live layout parameters;
-`setgaps` is an IPC command.
+`get_tree` also report `closed_placement_count`. `get_closed_placement` /
+`get_cp` return the focused monitor's `closed_placement_count`.
+`get_layout` / `get_gaps` / `get_nmaster` query the focused monitor's live
+layout parameters; `setgaps` is an IPC command.
 
 A refused request, like one that changes nothing, leaves the window alone:
 JWM republishes the current state and replies with the current geometry, a
