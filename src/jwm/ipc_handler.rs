@@ -14881,4 +14881,14 @@ mod tests {
         assert!(CUBE.contains("selected_id"));
         assert!(DOCS.contains("Cube-effects docs name `monitor/bar` on overview confirm"));
     }
+
+    #[test]
+    fn evolve8h_wave_351_capabilities_text_lists_get_cp_alias() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("query aliases: get_cp -> get_closed_placement"));
+        assert!(DOCS.contains(
+            "`jwm-tool capabilities` text lists `get_cp -> get_closed_placement`"
+        ));
+    }
 }
