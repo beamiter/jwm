@@ -107,7 +107,7 @@ summaries alongside earlier nests. `get_effect_status` /
 `get_cf`, `get_sel`, `get_fw`, `get_pl`, `get_bar`, `get_tr`, `get_win`,
 `get_conn`, `get_st`, `get_fx`, `get_mute`, `get_cli`, `get_wc`, `get_th`,
 `get_pair`, `get_pk`, `get_bm`, `get_conf`, `get_rec`, `get_arec`,
-`get_cap`, `get_xw`, `get_wly`, `get_idl`. Command aliases
+`get_cap`, `get_xw`, `get_wly`, `get_idl`, `get_cp`. Command aliases
 include `launcher`, `notif_center`, `screenshot`, `lock`, `layouts`,
 `load_session`, `toggle_do_not_disturb`, `hub`, `switcher`, `tags`,
 `overview`, `peek`, `mag`, `annotate`, `lily`, `night`, `caffeine`, `wifi`,

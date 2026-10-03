@@ -371,6 +371,7 @@ monorepo use independent Semantic Versions.
 - `jwm-tool msg` after-help examples include `get_cp`.
 - README control examples include `get_cp`.
 - `tools/README.md` control examples include `get_cp`.
+- Compatibility docs name `get_cp` among short query aliases.
 
 ### Changed
 

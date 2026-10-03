@@ -14789,4 +14789,12 @@ mod tests {
         assert!(TOOLS.contains("jwm-tool msg get_cp"));
         assert!(DOCS.contains("`tools/README.md` control examples include `get_cp`"));
     }
+
+    #[test]
+    fn evolve8h_wave_343_compatibility_docs_name_get_cp() {
+        const COMPAT: &str = include_str!("../../docs/compatibility.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(COMPAT.contains("`get_cp`"));
+        assert!(DOCS.contains("Compatibility docs name `get_cp` among short query aliases"));
+    }
 }

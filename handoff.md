@@ -656,9 +656,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 340 | jwm-tool 示例含 get_cp | ✓ |
 | 341 | README 控制示例含 get_cp | ✓ |
 | 342 | tools/README 控制示例含 get_cp | ✓ |
+| 343 | compatibility 文档点名 get_cp | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 343 — compatibility docs name get_cp
+
+选题 = evolve8h wave 343。compatibility 文档短查询别名列表含 `get_cp`。
 
 ## 2026-10-03：evolve8h wave 342 — tools/README control examples include get_cp
 
