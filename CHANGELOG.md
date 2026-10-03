@@ -31,6 +31,8 @@ monorepo use independent Semantic Versions.
 - `WindowInfo.owns_output` is false for swallowed terminals.
 - Tag client counts exclude swallowed terminals from `owns_output`.
 - `get_owns_output` aliases `get_show_bar`.
+- Show-bar IPC snapshots can be built for any monitor, not only the focused
+  one.
 
 ### Changed
 

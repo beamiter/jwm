@@ -4662,35 +4662,48 @@ impl Jwm {
         value
     }
 
+    /// Status-bar preference and occupancy for one monitor.
+    pub(crate) fn query_show_bar_for_monitor(
+        &self,
+        backend: &dyn Backend,
+        mk: MonitorKey,
+    ) -> serde_json::Value {
+        let Some(mon) = self.state.monitors.get(mk) else {
+            return serde_json::json!({
+                "monitor": serde_json::Value::Null,
+                "show_bar": serde_json::Value::Null,
+                "bar_visible": serde_json::Value::Null,
+                "has_visible_fullscreen": serde_json::Value::Null,
+                "owns_output_count": serde_json::Value::Null,
+            });
+        };
+        let show_bar = mon
+            .pertag
+            .as_ref()
+            .and_then(|p| p.show_bars.get(p.cur_tag).copied())
+            .unwrap_or(true);
+        let mut value = serde_json::json!({
+            "monitor": mon.num,
+            "show_bar": show_bar,
+            "bar_visible": self.monitor_shows_status_bar(mk),
+            "has_visible_fullscreen": self.monitor_has_visible_fullscreen(mk),
+            "owns_output_count": self.monitor_owns_output_count(mk),
+        });
+        if let Some(connector) = self.output_key_for_monitor(backend, mk) {
+            value
+                .as_object_mut()
+                .expect("show_bar snapshot object")
+                .insert("connector".into(), serde_json::Value::String(connector));
+        }
+        value
+    }
+
     /// Focused monitor's status-bar preference and whether the bar window
     /// currently occupies the output (`bar_visible` is false during F11
     /// fullscreen even when `show_bar` stays true).
     pub(crate) fn query_focused_show_bar(&self, backend: &dyn Backend) -> serde_json::Value {
-        match self.state.sel_mon.and_then(|mk| {
-            let mon = self.state.monitors.get(mk)?;
-            let show_bar = mon
-                .pertag
-                .as_ref()
-                .and_then(|p| p.show_bars.get(p.cur_tag).copied())
-                .unwrap_or(true);
-            Some((mk, mon.num, show_bar))
-        }) {
-            Some((mk, num, show_bar)) => {
-                let mut value = serde_json::json!({
-                    "monitor": num,
-                    "show_bar": show_bar,
-                    "bar_visible": self.monitor_shows_status_bar(mk),
-                    "has_visible_fullscreen": self.monitor_has_visible_fullscreen(mk),
-                    "owns_output_count": self.monitor_owns_output_count(mk),
-                });
-                if let Some(connector) = self.output_key_for_monitor(backend, mk) {
-                    value
-                        .as_object_mut()
-                        .expect("show_bar snapshot object")
-                        .insert("connector".into(), serde_json::Value::String(connector));
-                }
-                value
-            }
+        match self.state.sel_mon {
+            Some(mk) => self.query_show_bar_for_monitor(backend, mk),
             None => serde_json::json!({
                 "monitor": serde_json::Value::Null,
                 "show_bar": serde_json::Value::Null,
@@ -10491,11 +10504,11 @@ mod tests {
         const SOURCE: &str = include_str!("ipc_handler.rs");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
         let query = SOURCE
-            .split_once("fn query_focused_show_bar(")
-            .expect("query_focused_show_bar")
+            .split_once("fn query_show_bar_for_monitor(")
+            .expect("query_show_bar_for_monitor")
             .1
-            .split_once("fn query_focused_prev_layout(")
-            .expect("prev_layout follows")
+            .split_once("fn query_focused_show_bar(")
+            .expect("focused follows")
             .0;
         assert!(query.contains("\"bar_visible\""));
         assert!(query.contains("monitor_shows_status_bar(mk)"));
@@ -10521,11 +10534,11 @@ mod tests {
         const SOURCE: &str = include_str!("ipc_handler.rs");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
         let query = SOURCE
-            .split_once("fn query_focused_show_bar(")
-            .expect("query_focused_show_bar")
+            .split_once("fn query_show_bar_for_monitor(")
+            .expect("query_show_bar_for_monitor")
             .1
-            .split_once("fn query_focused_prev_layout(")
-            .expect("prev_layout follows")
+            .split_once("fn query_focused_show_bar(")
+            .expect("focused follows")
             .0;
         assert!(query.contains("\"has_visible_fullscreen\""));
         assert!(query.contains("monitor_has_visible_fullscreen(mk)"));
@@ -10579,16 +10592,17 @@ mod tests {
         const CORE: &str = include_str!("../jwm.rs");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
         let query = SOURCE
-            .split_once("fn query_focused_show_bar(")
-            .expect("query_focused_show_bar")
+            .split_once("fn query_show_bar_for_monitor(")
+            .expect("query_show_bar_for_monitor")
             .1
-            .split_once("fn query_focused_prev_layout(")
-            .expect("prev_layout follows")
+            .split_once("fn query_focused_show_bar(")
+            .expect("focused follows")
             .0;
         assert!(query.contains("\"owns_output_count\""));
         assert!(query.contains("monitor_owns_output_count(mk)"));
         assert!(CORE.contains("fn monitor_owns_output_count"));
         assert!(DOCS.contains("`owns_output_count`"));
+        assert!(SOURCE.contains("self.query_show_bar_for_monitor(backend, mk)"));
     }
 
     #[test]
@@ -10670,5 +10684,14 @@ mod tests {
         assert!(IPC.contains("\"get_owns_output\""));
         assert!(SOURCE.contains("\"get_owns_output\""));
         assert!(DOCS.contains("`get_owns_output`"));
+    }
+
+    #[test]
+    fn evolve8h_wave_16_show_bar_snapshot_is_per_monitor() {
+        const SOURCE: &str = include_str!("ipc_handler.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(SOURCE.contains("fn query_show_bar_for_monitor"));
+        assert!(SOURCE.contains("self.query_show_bar_for_monitor(backend, mk)"));
+        assert!(DOCS.contains("per-monitor show-bar snapshot"));
     }
 }
