@@ -194,7 +194,7 @@ focused output. Pointer crossings emit `monitor/focus` and
 output. External strut apply/remove does the same. Output hotplug
 does too. Subscribe topic `bar` aliases `monitor/bar` (occupancy
 only). `jwm-tool msg --subscribe bar` is the occupancy-only listener
-(README example stores it as `monitor/bar`).
+(README and `tools/README.md` examples store it as `monitor/bar`).
 `get_cfact` /
 `get_selected` / `get_focused_window` twin the focused client. IPC `setgaps` /
 `set_gaps`, `setmfact` / `set_mfact`, and `setcfact` / `set_cfact` adjust the

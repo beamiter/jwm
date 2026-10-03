@@ -55,7 +55,7 @@ jwm-tool daemon-restart   # 重启守护进程
 ```bash
 jwm-tool msg get_windows
 jwm-tool health --json
-jwm-tool msg '' --subscribe 'window,tag,layout' --raw
+jwm-tool msg '' --subscribe 'window,tag,layout,bar' --raw
 ```
 
 IPC 使用换行分隔的 JSON。工具按块读取并保留同一批到达的后续消息，

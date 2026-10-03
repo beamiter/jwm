@@ -348,7 +348,16 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 32 | subscribe bar 别名 monitor/bar | ✓ |
 | 33 | jwm-tool --subscribe bar 帮助 | ✓ |
 | 34 | README subscribe 示例含 bar | ✓ |
+| 35 | tools/README subscribe 示例含 bar | ✓ |
 | … | 进行中 | |
+
+---
+
+## 2026-10-03：evolve8h wave 35 — tools README subscribe bar
+
+选题 = evolve8h wave 35。tools/README 订阅示例与主 README 对齐。
+
+**验证**：`scripts/test.sh --lib --` 聚焦 evolve8h_wave_35。
 
 ---
 

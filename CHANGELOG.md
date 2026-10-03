@@ -56,6 +56,7 @@ monorepo use independent Semantic Versions.
 - `jwm-tool msg --subscribe bar` is documented as occupancy-only.
 - README subscription example includes `bar`; the ack stores it as
   `monitor/bar`.
+- `tools/README.md` subscribe example includes `bar`.
 
 ### Changed
 
