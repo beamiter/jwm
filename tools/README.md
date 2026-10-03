@@ -71,6 +71,7 @@ It also includes `sticky_count`.
 It also includes `urgent_count`.
 It also includes `fullscreen_count`.
 It also includes `pip_count`.
+It also includes `maximized_count`.
 
 IPC 使用换行分隔的 JSON。工具按块读取并保留同一批到达的后续消息，
 每条响应的正文上限为 1 MiB。普通响应和订阅确认须在开始读取后 5 秒内

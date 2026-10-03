@@ -485,7 +485,16 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 169 | reinstate maximize snapshot emit monitor/bar | ✓ |
 | 170 | get_status.show_bar rustdoc 含 maximized_count | ✓ |
 | 171 | README occupancy 含 maximized_count | ✓ |
+| 172 | tools/README occupancy 含 maximized_count | ✓ |
 | … | 进行中 | |
+
+---
+
+## 2026-10-03：evolve8h wave 172 — tools/README occupancy names maximized_count
+
+选题 = evolve8h wave 172。`tools/README.md` occupancy JSON 点名 `maximized_count`。
+
+**验证**：`scripts/test.sh --lib --` 聚焦 evolve8h_wave_172 evolve8h_wave_163。
 
 ---
 

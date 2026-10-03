@@ -197,6 +197,7 @@ monorepo use independent Semantic Versions.
 - Reinstating a maximize snapshot emits `monitor/bar`.
 - `get_status.show_bar` rustdoc names `maximized_count`.
 - README occupancy JSON names `maximized_count`.
+- `tools/README.md` occupancy JSON names `maximized_count`.
 
 ### Changed
 
