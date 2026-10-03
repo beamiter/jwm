@@ -112,6 +112,7 @@ monorepo use independent Semantic Versions.
 - `get_status.show_bar` rustdoc names tag / prev_tag / layout / gap / mfact / nmaster.
 - README names occupancy `tag` / `prev_tag` / `layout` / `gap` / `mfact` / `nmaster`.
 - `tools/README.md` names the same occupancy keys.
+- Window-tabs docs name occupancy `tag` / `layout` / `gap` / `mfact` / `nmaster`.
 
 ### Changed
 
