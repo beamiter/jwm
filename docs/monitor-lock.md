@@ -309,6 +309,7 @@ README occupancy JSON also names `pip_count`.
 README occupancy JSON also names `maximized_count`.
 README occupancy JSON also names `above_count`.
 README occupancy JSON also names `below_count`.
+README occupancy JSON also names `scratchpad_count`.
 `tools/README.md` also names `minimized_count`.
 `tools/README.md` also names `sticky_count`.
 `tools/README.md` also names `urgent_count`.
