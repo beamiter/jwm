@@ -709,9 +709,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 393 | health 打印 compact scratchpads | ✓ |
 | 394 | README health 点名 compact scratchpads | ✓ |
 | 395 | tools/README health 点名 compact scratchpads | ✓ |
+| 396 | capabilities 文本列出 get_pads,get_scratch -> get_scratchpads | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 396 — capabilities text lists scratchpad aliases
+
+选题 = evolve8h wave 396。`jwm-tool capabilities` 文本列出 `get_pads,get_scratch -> get_scratchpads`。
 
 ## 2026-10-03：evolve8h wave 395 — tools/README health names compact scratchpads
 
