@@ -253,6 +253,7 @@ monorepo use independent Semantic Versions.
 - `get_show_bar` occupancy snapshots include `skip_pager_count`.
 - `jwm-tool health` occupancy line includes skip_pager_count.
 - `get_status.show_bar` rustdoc names `skip_pager_count`.
+- README occupancy JSON names `skip_pager_count`.
 
 ### Changed
 
