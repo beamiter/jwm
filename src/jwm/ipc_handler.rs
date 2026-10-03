@@ -15329,4 +15329,14 @@ mod tests {
         assert!(TOOLS.contains("get_status.focused"));
         assert!(DOCS.contains("`tools/README.md` health text names compact `focused`"));
     }
+
+    #[test]
+    fn evolve8h_wave_400_capabilities_text_lists_get_fw_alias() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("query aliases: get_fw -> get_focused_window"));
+        assert!(DOCS.contains(
+            "`jwm-tool capabilities` text lists `get_fw -> get_focused_window`"
+        ));
+    }
 }
