@@ -330,7 +330,16 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 14 | TagClientCounts.owns_output 排除 swallowed | ✓ |
 | 15 | get_owns_output 短查询别名 | ✓ |
 | 16 | query_show_bar_for_monitor 任意输出 | ✓ |
+| 17 | F11 发射 monitor/bar 事件 | ✓ |
 | … | 进行中 | |
+
+---
+
+## 2026-10-03：evolve8h wave 17 — monitor/bar on fullscreen
+
+选题 = evolve8h wave 17。客户端全屏切换后广播 `monitor/bar`，订阅 `monitor` 的条无需轮询。
+
+**验证**：`scripts/test.sh --lib --` 聚焦 evolve8h_wave_17 client_fullscreen_hides。
 
 ---
 

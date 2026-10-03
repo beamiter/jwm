@@ -33,6 +33,7 @@ monorepo use independent Semantic Versions.
 - `get_owns_output` aliases `get_show_bar`.
 - Show-bar IPC snapshots can be built for any monitor, not only the focused
   one.
+- F11 fullscreen flips emit `monitor/bar` with the same occupancy snapshot.
 
 ### Changed
 

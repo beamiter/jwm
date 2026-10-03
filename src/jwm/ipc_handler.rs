@@ -10694,4 +10694,13 @@ mod tests {
         assert!(SOURCE.contains("self.query_show_bar_for_monitor(backend, mk)"));
         assert!(DOCS.contains("per-monitor show-bar snapshot"));
     }
+
+    #[test]
+    fn evolve8h_wave_17_fullscreen_broadcasts_monitor_bar() {
+        const STATE: &str = include_str!("window_state.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(STATE.contains("\"monitor/bar\""));
+        assert!(STATE.contains("query_show_bar_for_monitor(backend, mon_key)"));
+        assert!(DOCS.contains("`monitor/bar`"));
+    }
 }
