@@ -292,6 +292,7 @@ monorepo use independent Semantic Versions.
 - `tools/README.md` occupancy JSON names `fixed_count`.
 - Window-tabs docs name occupancy `fixed_count`.
 - `get_show_bar` occupancy snapshots include `strut_count`.
+- `jwm-tool health` occupancy line includes strut_count.
 
 ### Changed
 

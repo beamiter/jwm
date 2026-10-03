@@ -13741,4 +13741,12 @@ mod tests {
         assert!(query.contains("self.external_struts.contains_key(&c.win)"));
         assert!(DOCS.contains("also include `strut_count`"));
     }
+
+    #[test]
+    fn evolve8h_wave_266_health_occupancy_includes_strut_count() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("strut={strut}"));
+        assert!(DOCS.contains("and `strut_count`"));
+    }
 }
