@@ -15134,4 +15134,13 @@ mod tests {
         assert!(TOOL.contains("query aliases: get_lt -> get_layout"));
         assert!(DOCS.contains("`jwm-tool capabilities` text lists `get_lt -> get_layout`"));
     }
+
+    #[test]
+    fn evolve8h_wave_379_readme_health_names_compact_layout() {
+        const README: &str = include_str!("../../README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(README.contains("compact `layout` line"));
+        assert!(README.contains("get_status.layout"));
+        assert!(DOCS.contains("README health text names compact `layout`"));
+    }
 }
