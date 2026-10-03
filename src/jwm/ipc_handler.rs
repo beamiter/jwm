@@ -11491,4 +11491,12 @@ mod tests {
         assert!(IPC.contains("Nested object also carries `tag`, `prev_tag`"));
         assert!(DOCS.contains("plus `tag` / `prev_tag`"));
     }
+
+    #[test]
+    fn evolve8h_wave_85_readme_names_occupancy_layout_knobs() {
+        const README: &str = include_str!("../../README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(README.contains("occupancy JSON includes `tag`, `prev_tag`"));
+        assert!(DOCS.contains("README names occupancy `tag`"));
+    }
 }
