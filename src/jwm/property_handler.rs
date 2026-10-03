@@ -445,6 +445,9 @@ impl Jwm {
             log::warn!("could not refresh frame extents for {win:?}: {error}");
         }
         backend.compositor_force_full_redraw();
+        if let Some(mk) = monitor {
+            self.broadcast_monitor_bar_ipc(backend, mk);
+        }
         Ok(())
     }
 

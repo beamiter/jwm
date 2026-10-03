@@ -13380,4 +13380,19 @@ mod tests {
         assert!(TABS.contains("`skip_pager_count` / `no_decorations_count`"));
         assert!(DOCS.contains("Window-tabs docs also name `no_decorations_count`"));
     }
+
+    #[test]
+    fn evolve8h_wave_239_reconcile_decoration_hints_broadcasts_monitor_bar() {
+        const SOURCE: &str = include_str!("property_handler.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        let reconcile = SOURCE
+            .split_once("fn reconcile_client_decoration_hints(")
+            .expect("reconcile_client_decoration_hints")
+            .1
+            .split_once("pub(crate) fn apply_motif_hints(")
+            .expect("apply_motif_hints follows")
+            .0;
+        assert!(reconcile.contains("broadcast_monitor_bar_ipc(backend, mk)"));
+        assert!(DOCS.contains("Reconciling decoration hints emits `monitor/bar`"));
+    }
 }

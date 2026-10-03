@@ -264,6 +264,7 @@ monorepo use independent Semantic Versions.
 - README occupancy JSON names `no_decorations_count`.
 - `tools/README.md` occupancy JSON names `no_decorations_count`.
 - Window-tabs docs name occupancy `no_decorations_count`.
+- Reconciling decoration hints emits `monitor/bar`.
 
 ### Changed
 
