@@ -347,7 +347,16 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 31 | 热插拔全输出 monitor/bar | ✓ |
 | 32 | subscribe bar 别名 monitor/bar | ✓ |
 | 33 | jwm-tool --subscribe bar 帮助 | ✓ |
+| 34 | README subscribe 示例含 bar | ✓ |
 | … | 进行中 | |
+
+---
+
+## 2026-10-03：evolve8h wave 34 — README subscribe bar
+
+选题 = evolve8h wave 34。README 订阅示例带上 `bar`，并写明 ack 存成 `monitor/bar`。
+
+**验证**：`scripts/test.sh --lib --` 聚焦 evolve8h_wave_34。
 
 ---
 

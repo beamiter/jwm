@@ -54,6 +54,8 @@ monorepo use independent Semantic Versions.
 - Subscribe topic `bar` aliases `monitor/bar` (occupancy only, not
   `monitor/focus`).
 - `jwm-tool msg --subscribe bar` is documented as occupancy-only.
+- README subscription example includes `bar`; the ack stores it as
+  `monitor/bar`.
 
 ### Changed
 

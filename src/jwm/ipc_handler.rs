@@ -10932,4 +10932,13 @@ mod tests {
         assert!(TOOL.contains("--subscribe 'bar'"));
         assert!(DOCS.contains("`jwm-tool msg --subscribe bar`"));
     }
+
+    #[test]
+    fn evolve8h_wave_34_readme_subscribe_example_includes_bar() {
+        const README: &str = include_str!("../../README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(README.contains("--subscribe 'window,tag,layout,bar'"));
+        assert!(README.contains("`bar` is stored as `monitor/bar`"));
+        assert!(DOCS.contains("stores it as `monitor/bar`"));
+    }
 }

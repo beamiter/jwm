@@ -141,7 +141,7 @@ jwm-tool msg get_windows
 jwm-tool msg view --args '{"tag":2}'
 jwm-tool msg setlayout --args '{"layout":"scrolling"}'
 jwm-tool msg spawn --args '{"cmd":["alacritty"]}'
-jwm-tool msg '' --subscribe 'window,tag,layout'
+jwm-tool msg '' --subscribe 'window,tag,layout,bar'
 jwm-tool health
 jwm-tool health --json
 jwm-tool capabilities --json
@@ -159,7 +159,8 @@ unaffected. `unknown_topics` lists up to 16 requested topics whose first `/`
 segment is not a registered subscription topic (see `subscription_topics` in
 `get_capabilities`), such as a mistyped `windows`: they are kept, but no event
 can ever match them. `subscribed` is the list the server stored, trimmed and
-deduplicated, in request order. `dropped` names up to 16 topics it did not
+deduplicated, in request order (`bar` is stored as `monitor/bar`,
+`workspace` as `tag`). `dropped` names up to 16 topics it did not
 store as `{"topic": ..., "reason": ...}` entries, the reason being `empty`,
 `too_long` (over 128 bytes), `duplicate` or `limit` (past 64 topics), and
 `dropped_total` counts every dropped topic, including those past the first 16.
