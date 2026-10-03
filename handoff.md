@@ -333,7 +333,16 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 17 | F11 发射 monitor/bar 事件 | ✓ |
 | 18 | togglebar 发射 monitor/bar | ✓ |
 | 19 | broadcast_monitor_bar_ipc 共用辅助 | ✓ |
+| 20 | view 发射 monitor/bar | ✓ |
 | … | 进行中 | |
+
+---
+
+## 2026-10-03：evolve8h wave 20 — view emits monitor/bar
+
+选题 = evolve8h wave 20。切 tag 后广播 occupancy，因 pertag.show_bars 与可见全屏都会变。
+
+**验证**：`scripts/test.sh --lib --` 聚焦 evolve8h_wave_20。
 
 ---
 

@@ -185,7 +185,7 @@ also reports `bar_visible`, `has_visible_fullscreen` and
 per-monitor show-bar snapshot is available for any output, not only the
 focused one. Client fullscreen flips emit `monitor/bar` with that
 snapshot. `togglebar` emits the same event after arrange (shared
-`monitor/bar` helper).
+`monitor/bar` helper). Tag `view` emits it after arrange as well.
 `get_cfact` /
 `get_selected` / `get_focused_window` twin the focused client. IPC `setgaps` /
 `set_gaps`, `setmfact` / `set_mfact`, and `setcfact` / `set_cfact` adjust the

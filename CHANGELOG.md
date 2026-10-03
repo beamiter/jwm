@@ -36,6 +36,8 @@ monorepo use independent Semantic Versions.
 - F11 fullscreen flips emit `monitor/bar` with the same occupancy snapshot.
 - `togglebar` emits `monitor/bar` after the layout and bar window settle.
 - F11 and `togglebar` share one `broadcast_monitor_bar_ipc` helper.
+- Tag `view` emits `monitor/bar` because per-tag `show_bar` and visible
+  fullscreen occupancy can both change.
 
 ### Changed
 

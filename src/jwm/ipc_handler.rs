@@ -10732,4 +10732,19 @@ mod tests {
                 || DOCS.contains("shared\n`monitor/bar` helper")
         );
     }
+
+    #[test]
+    fn evolve8h_wave_20_view_broadcasts_monitor_bar() {
+        const NAV: &str = include_str!("navigation.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        let view = NAV
+            .split_once("pub fn view(")
+            .expect("view")
+            .1
+            .split_once("pub fn toggleview(")
+            .expect("toggleview follows")
+            .0;
+        assert!(view.contains("broadcast_monitor_bar_ipc(backend, sel_mon_key)"));
+        assert!(DOCS.contains("Tag `view` emits it"));
+    }
 }
