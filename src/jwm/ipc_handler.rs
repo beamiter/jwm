@@ -14643,4 +14643,13 @@ mod tests {
         assert!(EXPOSE.contains("selected_id"));
         assert!(DOCS.contains("Expose docs name `monitor/bar` on focused exit"));
     }
+
+    #[test]
+    fn evolve8h_wave_333_tags_overview_docs_name_monitor_bar_on_confirm() {
+        const OVERVIEW: &str = include_str!("../../docs/tags-overview.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(OVERVIEW.contains("emits `monitor/bar`"));
+        assert!(OVERVIEW.contains("ordinary `view` path"));
+        assert!(DOCS.contains("Tags-overview docs name `monitor/bar` on confirm"));
+    }
 }

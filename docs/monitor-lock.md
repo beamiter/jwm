@@ -467,3 +467,4 @@ Window-placement docs name `closed_placement_count`.
 WM setup emits `monitor/bar`.
 `focus_tab` emits `monitor/bar`.
 Expose docs name `monitor/bar` on focused exit.
+Tags-overview docs name `monitor/bar` on confirm.

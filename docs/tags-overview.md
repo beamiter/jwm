@@ -133,6 +133,9 @@ describing a screen you are not looking at.
   primary (lowest) tag, and every other cell identifies windows by position
   and shape, not by content.
 
+Confirming a tag runs the ordinary `view` path, which emits `monitor/bar`
+so occupancy subscribers see the new tag, layout knobs, and counts.
+
 ## Related surfaces
 
 - [Expose](expose.md) (`Alt+E`) spreads the *current* tag's windows into a
