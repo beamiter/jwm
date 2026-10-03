@@ -15013,4 +15013,12 @@ mod tests {
         assert!(TOOL.contains("jwm-tool msg get_pl"));
         assert!(DOCS.contains("`jwm-tool msg` after-help examples include `get_pl`"));
     }
+
+    #[test]
+    fn evolve8h_wave_365_readme_control_examples_include_get_pl() {
+        const README: &str = include_str!("../../README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(README.contains("jwm-tool msg get_pl"));
+        assert!(DOCS.contains("README control examples include `get_pl`"));
+    }
 }
