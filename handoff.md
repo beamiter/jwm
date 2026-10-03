@@ -566,9 +566,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 250 | README occupancy 含 swallowed_count | ✓ |
 | 251 | tools/README occupancy 含 swallowed_count | ✓ |
 | 252 | window-tabs occupancy 含 swallowed_count | ✓ |
+| 253 | get_show_bar occupancy 含 demands_attention_count | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 253 — occupancy snapshot includes demands_attention_count
+
+选题 = evolve8h wave 253。`get_show_bar` / `monitor/bar` 带上 EWMH demands-attention 窗口数（与 urgent_count 的 OR 不同）。
 
 ## 2026-10-03：evolve8h wave 252 — window-tabs occupancy names swallowed_count
 
