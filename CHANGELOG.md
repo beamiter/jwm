@@ -161,6 +161,7 @@ monorepo use independent Semantic Versions.
 - `get_status.show_bar` rustdoc names `minimized_count`.
 - README occupancy JSON names `minimized_count`.
 - `tools/README.md` occupancy JSON names `minimized_count`.
+- Window-tabs docs name occupancy `minimized_count`.
 
 ### Changed
 
