@@ -11417,4 +11417,12 @@ mod tests {
         assert!(query.contains("\"nmaster\": mon.layout.n_master"));
         assert!(DOCS.contains("also include `nmaster`"));
     }
+
+    #[test]
+    fn evolve8h_wave_79_health_occupancy_includes_nmaster() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("nmaster={nmaster}"));
+        assert!(DOCS.contains("and `nmaster`"));
+    }
 }
