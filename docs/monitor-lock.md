@@ -326,6 +326,7 @@ Window-tabs docs also name `urgent_count`.
 Window-tabs docs also name `fullscreen_count`.
 Window-tabs docs also name `pip_count`.
 Window-tabs docs also name `maximized_count`.
+Window-tabs docs also name `above_count`.
 `toggletag` on a fullscreen client emits `monitor/bar`, as does `tag`
 and sticky.
 `get_workspaces` / `get_tree` also report pip / maximized / above / below /

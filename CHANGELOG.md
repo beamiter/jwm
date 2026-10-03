@@ -205,6 +205,7 @@ monorepo use independent Semantic Versions.
 - `get_status.show_bar` rustdoc names `above_count`.
 - README occupancy JSON names `above_count`.
 - `tools/README.md` occupancy JSON names `above_count`.
+- Window-tabs docs name occupancy `above_count`.
 
 ### Changed
 
