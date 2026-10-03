@@ -11003,4 +11003,12 @@ mod tests {
         assert!(prod.contains("`bar` stores as `monitor/bar`"));
         assert!(DOCS.contains("Subscribe topic `bar`"));
     }
+
+    #[test]
+    fn evolve8h_wave_41_get_status_show_bar_occupancy_rustdoc() {
+        const IPC: &str = include_str!("../ipc.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(IPC.contains("Compact twin of `get_show_bar` / `get_bar`"));
+        assert!(DOCS.contains("`get_status.show_bar` is the same occupancy snapshot"));
+    }
 }

@@ -63,6 +63,7 @@ monorepo use independent Semantic Versions.
 - `MonitorInfoIpc.owns_output_count` rustdoc excludes swallowed terminals.
 - `query_show_bar_for_monitor` rustdoc lists the occupancy JSON keys.
 - `broadcast_monitor_bar_ipc` rustdoc names the `bar` subscribe alias.
+- `get_status.show_bar` rustdoc twins the occupancy snapshot aliases.
 
 ### Changed
 
