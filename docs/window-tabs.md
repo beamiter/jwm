@@ -20,6 +20,8 @@ window joining an already-shown strip eases its cell the same way;
 disappearing stays instant, as everywhere in the shell, and with
 animations disabled the first frame is full strength. The ease is a draw
 multiplier only: geometry and hit-testing never see it.
+`get_closed_placement` / `get_cp` return the focused monitor's
+`closed_placement_count` without the full occupancy object.
 
 ## Configuration
 

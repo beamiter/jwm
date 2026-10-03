@@ -14939,4 +14939,12 @@ mod tests {
         assert!(TOOLS.contains("get_status.closed_placement"));
         assert!(DOCS.contains("`tools/README.md` health text names compact `closed_placement`"));
     }
+
+    #[test]
+    fn evolve8h_wave_357_window_tabs_docs_name_get_closed_placement() {
+        const TABS: &str = include_str!("../../docs/window-tabs.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TABS.contains("`get_closed_placement` / `get_cp` return the focused monitor's"));
+        assert!(DOCS.contains("Window-tabs docs name `get_closed_placement` / `get_cp`"));
+    }
 }

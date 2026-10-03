@@ -492,3 +492,4 @@ Cube-effects docs name `monitor/bar` on overview confirm.
 Minimized-dock docs name `monitor/bar` on restore.
 README health text names compact `closed_placement`.
 `tools/README.md` health text names compact `closed_placement`.
+Window-tabs docs name `get_closed_placement` / `get_cp`.
