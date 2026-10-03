@@ -525,7 +525,16 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 209 | get_status.show_bar rustdoc 含 desktop_count | ✓ |
 | 210 | README occupancy 含 desktop_count | ✓ |
 | 211 | tools/README occupancy 含 desktop_count | ✓ |
+| 212 | window-tabs occupancy 含 desktop_count | ✓ |
 | … | 进行中 | |
+
+---
+
+## 2026-10-03：evolve8h wave 212 — window-tabs occupancy names desktop_count
+
+选题 = evolve8h wave 212。window-tabs 文档 occupancy 列表带上 `desktop_count`。
+
+**验证**：`scripts/test.sh --lib --` 聚焦 evolve8h_wave_212 evolve8h_wave_206。
 
 ---
 
