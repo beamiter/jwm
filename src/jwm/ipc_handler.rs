@@ -12271,4 +12271,12 @@ mod tests {
         assert!(attention.contains("broadcast_monitor_bar_ipc(backend, mk)"));
         assert!(DOCS.contains("Demands-attention changes emit `monitor/bar`"));
     }
+
+    #[test]
+    fn evolve8h_wave_148_get_status_show_bar_rustdoc_names_urgent_count() {
+        const IPC: &str = include_str!("../ipc.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(IPC.contains("Also `urgent_count`."));
+        assert!(DOCS.contains("`get_status.show_bar` rustdoc also names `urgent_count`"));
+    }
 }
