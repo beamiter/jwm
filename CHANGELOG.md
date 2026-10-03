@@ -251,6 +251,7 @@ monorepo use independent Semantic Versions.
 - `tools/README.md` occupancy JSON names `skip_taskbar_count`.
 - Window-tabs docs name occupancy `skip_taskbar_count`.
 - `get_show_bar` occupancy snapshots include `skip_pager_count`.
+- `jwm-tool health` occupancy line includes skip_pager_count.
 
 ### Changed
 

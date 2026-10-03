@@ -13236,4 +13236,12 @@ mod tests {
         assert!(query.contains("c.state.skip_pager"));
         assert!(DOCS.contains("also include `skip_pager_count`"));
     }
+
+    #[test]
+    fn evolve8h_wave_226_health_occupancy_includes_skip_pager_count() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("skip_pager={skip_pager}"));
+        assert!(DOCS.contains("and `skip_pager_count`"));
+    }
 }
