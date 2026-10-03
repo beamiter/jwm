@@ -14856,4 +14856,20 @@ mod tests {
         assert!(active.contains("broadcast_monitor_bar_ipc(backend, mk)"));
         assert!(DOCS.contains("`_NET_ACTIVE_WINDOW` activation emits `monitor/bar`"));
     }
+
+    #[test]
+    fn evolve8h_wave_349_foreign_toplevel_activate_broadcasts_monitor_bar() {
+        const SOURCE: &str = include_str!("event_dispatcher.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        let foreign = SOURCE
+            .split_once("BackendEvent::ForeignToplevelActivate(win)")
+            .expect("ForeignToplevelActivate")
+            .1
+            .split_once("BackendEvent::ForeignToplevelClose(win)")
+            .expect("ForeignToplevelClose follows")
+            .0;
+        assert!(foreign.contains("reveal_and_focus(backend, win)"));
+        assert!(foreign.contains("broadcast_monitor_bar_ipc(backend, mk)"));
+        assert!(DOCS.contains("Foreign-toplevel activate emits `monitor/bar`"));
+    }
 }

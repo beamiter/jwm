@@ -10204,8 +10204,16 @@ impl EventHandler for Jwm {
 
             // Foreign toplevel management actions (taskbar → WM)
             BackendEvent::ForeignToplevelActivate(win) => {
-                if let Err(error) = self.reveal_and_focus(backend, win) {
-                    error!("Error activating foreign toplevel {win:?}: {error:?}");
+                match self.reveal_and_focus(backend, win) {
+                    Ok(true) => {
+                        if let Some(mk) = self.state.sel_mon {
+                            self.broadcast_monitor_bar_ipc(backend, mk);
+                        }
+                    }
+                    Ok(false) => {}
+                    Err(error) => {
+                        error!("Error activating foreign toplevel {win:?}: {error:?}");
+                    }
                 }
             }
             BackendEvent::ForeignToplevelClose(win) => {
