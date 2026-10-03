@@ -1369,7 +1369,8 @@ pub struct MonitorInfoIpc {
     /// How many of those clients are the status bar.
     pub status_bar_count: usize,
     /// How many of those clients currently own the output (visible fullscreen
-    /// on the current view).
+    /// on the current view, swallowed terminals excluded — the hide-bar
+    /// occupancy).
     pub owns_output_count: usize,
 }
 

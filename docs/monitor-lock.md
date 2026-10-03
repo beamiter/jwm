@@ -209,7 +209,8 @@ monitor's strip membership; `get_system_ui` reports the open shell panel
 client on that tag demands attention), matching the status-bar urgent mask,
 plus `is_occupied` (status-bar occupied mask) and `has_fullscreen` /
 `has_visible_fullscreen` / `owns_output_count` (monitor rows count with
-the same visibility as the status-bar hide; workspace rows report that
+the same visibility as the status-bar hide, swallowed terminals
+excluded; workspace rows report that
 count only on the active tag; tag counts skip swallowed terminals;
 workspace `owns_output_count` is zero off-view).
 `get_tree` uses the same hide-bar `owns_output_count` on each monitor node

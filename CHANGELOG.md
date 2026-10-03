@@ -60,6 +60,7 @@ monorepo use independent Semantic Versions.
 - `WorkspaceInfo.owns_output_count` rustdoc names the hide-bar occupancy
   rule (zero off-view).
 - `TreeNode.owns_output_count` rustdoc names hide-bar occupancy.
+- `MonitorInfoIpc.owns_output_count` rustdoc excludes swallowed terminals.
 
 ### Changed
 
