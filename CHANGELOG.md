@@ -66,6 +66,7 @@ monorepo use independent Semantic Versions.
 - `get_status.show_bar` rustdoc twins the occupancy snapshot aliases.
 - `toggletag` on a fullscreen client emits `monitor/bar`.
 - Moving a fullscreen client to another tag emits `monitor/bar`.
+- Toggling sticky on a fullscreen client emits `monitor/bar`.
 
 ### Changed
 

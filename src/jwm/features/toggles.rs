@@ -2943,11 +2943,18 @@ impl Jwm {
         client_key: ClientKey,
         sticky: bool,
     ) {
-        let Some((win, mon, previous)) = self
+        let Some((win, mon, previous, was_fullscreen)) = self
             .state
             .clients
             .get(client_key)
-            .map(|client| (client.win, client.mon, client.state.is_sticky))
+            .map(|client| {
+                (
+                    client.win,
+                    client.mon,
+                    client.state.is_sticky,
+                    client.state.is_fullscreen,
+                )
+            })
         else {
             return;
         };
@@ -2971,6 +2978,11 @@ impl Jwm {
         let _ = self.setclienttagprop(backend, client_key);
         self.arrange(backend, mon);
         self.broadcast_window_state_ipc(backend, client_key);
+        if was_fullscreen {
+            if let Some(mk) = mon {
+                self.broadcast_monitor_bar_ipc(backend, mk);
+            }
+        }
     }
 
     /// Close compositor-owned modal work before the X11 tree becomes native.

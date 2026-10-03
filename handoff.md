@@ -357,7 +357,16 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 41 | get_status.show_bar rustdoc 含 occupancy 别名 | ✓ |
 | 42 | toggletag 全屏客户发射 monitor/bar | ✓ |
 | 43 | tag/move_client_to_tag 全屏发射 monitor/bar | ✓ |
+| 44 | togglesticky 全屏发射 monitor/bar | ✓ |
 | … | 进行中 | |
+
+---
+
+## 2026-10-03：evolve8h wave 44 — sticky fullscreen emits monitor/bar
+
+选题 = evolve8h wave 44。全屏客户 sticky 翻转后广播 occupancy。
+
+**验证**：`scripts/test.sh --lib --` 聚焦 evolve8h_wave_44。
 
 ---
 

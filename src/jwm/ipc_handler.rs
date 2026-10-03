@@ -11043,4 +11043,20 @@ mod tests {
         assert!(move_to_tag.contains("broadcast_monitor_bar_ipc(backend, mk)"));
         assert!(DOCS.contains("as does `tag`"));
     }
+
+    #[test]
+    fn evolve8h_wave_44_sticky_fullscreen_broadcasts_monitor_bar() {
+        const TOGGLES: &str = include_str!("features/toggles.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        let sticky = TOGGLES
+            .split_once("pub(crate) fn set_client_sticky(")
+            .expect("set_client_sticky")
+            .1
+            .split_once("pub(crate) fn prepare_for_compositor_disable(")
+            .expect("prepare_for_compositor_disable follows")
+            .0;
+        assert!(sticky.contains("was_fullscreen"));
+        assert!(sticky.contains("broadcast_monitor_bar_ipc(backend, mk)"));
+        assert!(DOCS.contains("and sticky"));
+    }
 }
