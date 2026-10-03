@@ -15163,4 +15163,13 @@ mod tests {
         assert!(TOOL.contains("\"tabs: monitor=0 reserved=28 windows=3 selected=42\""));
         assert!(DOCS.contains("`jwm-tool health` prints compact `tabs` beside occupancy"));
     }
+
+    #[test]
+    fn evolve8h_wave_382_readme_health_names_compact_tabs() {
+        const README: &str = include_str!("../../README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(README.contains("compact `tabs` line"));
+        assert!(README.contains("get_status.tabs"));
+        assert!(DOCS.contains("README health text names compact `tabs`"));
+    }
 }

@@ -517,3 +517,4 @@ README health text names compact `cfact` / `gaps` / `mfact` / `nmaster`.
 README health text names compact `layout`.
 `tools/README.md` health text names compact `layout`.
 `jwm-tool health` prints compact `tabs` beside occupancy.
+README health text names compact `tabs`.
