@@ -11111,4 +11111,12 @@ mod tests {
         assert!(TOOL.contains("get_show_bar, get_vf"));
         assert!(DOCS.contains("`jwm-tool msg` help lists `get_show_bar`"));
     }
+
+    #[test]
+    fn evolve8h_wave_51_readme_control_example_get_show_bar() {
+        const README: &str = include_str!("../../README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(README.contains("jwm-tool msg get_show_bar"));
+        assert!(DOCS.contains("README control examples include `get_show_bar`"));
+    }
 }
