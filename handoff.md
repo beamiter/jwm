@@ -645,9 +645,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 329 | window-placement 文档含 closed_placement_count | ✓ |
 | 330 | WM setup 发出 monitor/bar | ✓ |
 | 331 | focus_tab 发出 monitor/bar | ✓ |
+| 332 | expose 文档点名 monitor/bar 聚焦退出 | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 332 — expose docs name monitor/bar on focused exit
+
+选题 = evolve8h wave 332。expose 文档点名聚焦退出时发出 `monitor/bar`。
 
 ## 2026-10-03：evolve8h wave 331 — focus_tab broadcasts monitor/bar
 

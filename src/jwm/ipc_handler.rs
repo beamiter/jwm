@@ -14634,4 +14634,13 @@ mod tests {
         assert!(focus_tab.contains("broadcast_monitor_bar_ipc(backend, mk)"));
         assert!(DOCS.contains("`focus_tab` emits `monitor/bar`"));
     }
+
+    #[test]
+    fn evolve8h_wave_332_expose_docs_name_monitor_bar_on_focused_exit() {
+        const EXPOSE: &str = include_str!("../../docs/expose.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(EXPOSE.contains("emits `monitor/bar`"));
+        assert!(EXPOSE.contains("selected_id"));
+        assert!(DOCS.contains("Expose docs name `monitor/bar` on focused exit"));
+    }
 }

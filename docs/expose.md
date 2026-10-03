@@ -88,6 +88,9 @@ commits or cancels.
 While expose is up, the keyboard and the pointer's buttons are grabbed, so
 a stray keystroke does not leak to a window behind the grid.
 
+Exiting with a focused thumbnail emits `monitor/bar` so occupancy
+subscribers see the new `selected_id` without polling.
+
 ## Related surfaces
 
 - The [window switcher](window-switcher.md) (`Alt+Tab`) is the
