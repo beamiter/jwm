@@ -13890,4 +13890,12 @@ mod tests {
         assert!(query.contains("c.is_status_bar(&status_bar_name)"));
         assert!(DOCS.contains("also include `status_bar_count`"));
     }
+
+    #[test]
+    fn evolve8h_wave_278_health_occupancy_includes_status_bar_count() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("status_bar={status_bar}"));
+        assert!(DOCS.contains("and `status_bar_count`"));
+    }
 }
