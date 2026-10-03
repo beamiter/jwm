@@ -539,3 +539,4 @@ README health text names compact `focused`.
 `jwm-tool health` prints compact `monitors` beside occupancy.
 README health text names compact `monitors`.
 `tools/README.md` health text names compact `monitors`.
+`jwm-tool capabilities` text lists `get_mons,get_outputs -> get_monitors`.

@@ -15366,4 +15366,16 @@ mod tests {
         assert!(TOOLS.contains("get_status.monitors"));
         assert!(DOCS.contains("`tools/README.md` health text names compact `monitors`"));
     }
+
+    #[test]
+    fn evolve8h_wave_404_capabilities_text_lists_monitor_aliases() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains(
+            "query aliases: get_mons,get_outputs -> get_monitors"
+        ));
+        assert!(DOCS.contains(
+            "`jwm-tool capabilities` text lists `get_mons,get_outputs -> get_monitors`"
+        ));
+    }
 }

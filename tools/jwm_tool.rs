@@ -4787,6 +4787,7 @@ fn capabilities_output_lines(capabilities: &serde_json::Value) -> Vec<String> {
         "query aliases: get_strut -> get_struts".to_string(),
         "query aliases: get_pads,get_scratch -> get_scratchpads".to_string(),
         "query aliases: get_fw -> get_focused_window".to_string(),
+        "query aliases: get_mons,get_outputs -> get_monitors".to_string(),
     ]
 }
 
