@@ -181,6 +181,7 @@ monorepo use independent Semantic Versions.
 - `jwm-tool health` occupancy line includes fullscreen_count.
 - `get_status.show_bar` rustdoc names `fullscreen_count`.
 - README occupancy JSON names `fullscreen_count`.
+- `tools/README.md` occupancy JSON names `fullscreen_count`.
 
 ### Changed
 
