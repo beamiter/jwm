@@ -11854,4 +11854,12 @@ mod tests {
         assert!(TOOLS.contains("It also includes `window_count`."));
         assert!(DOCS.contains("`tools/README.md` also names `window_count`"));
     }
+
+    #[test]
+    fn evolve8h_wave_116_window_tabs_occupancy_names_window_count() {
+        const TABS: &str = include_str!("../../docs/window-tabs.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TABS.contains("`active_tags` / `window_count`"));
+        assert!(DOCS.contains("Window-tabs docs also name `window_count`"));
+    }
 }
