@@ -11425,4 +11425,19 @@ mod tests {
         assert!(TOOL.contains("nmaster={nmaster}"));
         assert!(DOCS.contains("and `nmaster`"));
     }
+
+    #[test]
+    fn evolve8h_wave_80_setnmaster_broadcasts_monitor_bar() {
+        const LAYOUT: &str = include_str!("layout/state.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        let setnmaster = LAYOUT
+            .split_once("pub(crate) fn setnmaster(")
+            .expect("setnmaster")
+            .1
+            .split_once("fn is_scrolling_layout(")
+            .expect("is_scrolling_layout follows")
+            .0;
+        assert!(setnmaster.contains("broadcast_monitor_bar_ipc(backend, sel_mon_key)"));
+        assert!(DOCS.contains("`setnmaster` emits `monitor/bar`"));
+    }
 }
