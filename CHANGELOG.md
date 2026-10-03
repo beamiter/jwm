@@ -171,6 +171,7 @@ monorepo use independent Semantic Versions.
 - Window-tabs docs name occupancy `sticky_count`.
 - `get_show_bar` occupancy snapshots include `urgent_count`.
 - `jwm-tool health` occupancy line includes urgent_count.
+- Urgency changes emit `monitor/bar`.
 
 ### Changed
 

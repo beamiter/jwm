@@ -12241,4 +12241,19 @@ mod tests {
         assert!(TOOL.contains("urgent={urgent}"));
         assert!(DOCS.contains("and `urgent_count`"));
     }
+
+    #[test]
+    fn evolve8h_wave_146_urgency_changes_broadcast_monitor_bar() {
+        const SOURCE: &str = include_str!("window_state.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        let urgent = SOURCE
+            .split_once("fn sync_client_urgent_state(")
+            .expect("sync_client_urgent_state")
+            .1
+            .split_once("pub(super) fn setclientstate(")
+            .expect("setclientstate follows")
+            .0;
+        assert!(urgent.contains("broadcast_monitor_bar_ipc(backend, mk)"));
+        assert!(DOCS.contains("Urgency changes emit `monitor/bar`"));
+    }
 }
