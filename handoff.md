@@ -576,9 +576,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 260 | jwm-tool health occupancy 含 fixed | ✓ |
 | 261 | get_status.show_bar rustdoc 含 fixed_count | ✓ |
 | 262 | README occupancy 含 fixed_count | ✓ |
+| 263 | tools/README occupancy 含 fixed_count | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 263 — tools/README occupancy names fixed_count
+
+选题 = evolve8h wave 263。tools/README occupancy JSON 带上 fixed_count。
 
 ## 2026-10-03：evolve8h wave 262 — README occupancy names fixed_count
 
