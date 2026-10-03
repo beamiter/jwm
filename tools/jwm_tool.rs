@@ -566,6 +566,7 @@ enum Commands {
                       jwm-tool msg get_show_bar                         # 查询栏偏好与 occupancy\n  \
                       jwm-tool msg get_vf                               # 查询栏 occupancy\n  \
                       jwm-tool msg get_cp                               # 查询 closed_placement_count\n  \
+                      jwm-tool msg get_pl                               # 查询 prev_layout\n  \
                       jwm-tool msg get_windows --raw                    # 原始 JSON 输出\n  \
                       jwm-tool msg reload_config                        # 重新加载配置\n  \
                       jwm-tool msg set_config --args '{\"key\":\"appearance.gap_px\",\"value\":8}'\n  \

@@ -15005,4 +15005,12 @@ mod tests {
             "`jwm-tool msg` help lists `get_prev_layout` and `get_pl`"
         ));
     }
+
+    #[test]
+    fn evolve8h_wave_364_jwm_tool_examples_include_get_pl() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("jwm-tool msg get_pl"));
+        assert!(DOCS.contains("`jwm-tool msg` after-help examples include `get_pl`"));
+    }
 }
