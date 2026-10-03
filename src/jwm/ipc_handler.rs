@@ -14661,4 +14661,13 @@ mod tests {
         assert!(SWITCHER.contains("selected_id"));
         assert!(DOCS.contains("Window-switcher docs name `monitor/bar` on commit"));
     }
+
+    #[test]
+    fn evolve8h_wave_335_layout_picker_docs_name_monitor_bar_on_live_apply() {
+        const PICKER: &str = include_str!("../../docs/layout-picker.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(PICKER.contains("emits `monitor/bar`"));
+        assert!(PICKER.contains("apply_layout_change"));
+        assert!(DOCS.contains("Layout-picker docs name `monitor/bar` on live apply"));
+    }
 }

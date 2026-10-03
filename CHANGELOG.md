@@ -362,6 +362,7 @@ monorepo use independent Semantic Versions.
 - Expose docs name `monitor/bar` on focused exit.
 - Tags-overview docs name `monitor/bar` on confirm.
 - Window-switcher docs name `monitor/bar` on commit.
+- Layout-picker docs name `monitor/bar` on live apply.
 
 ### Changed
 

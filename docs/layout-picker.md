@@ -98,6 +98,10 @@ argument = 0
 jwm-tool msg layout_picker --args 0
 ```
 
+Every live apply (and cancel restore) goes through `apply_layout_change`,
+which emits `monitor/bar` so occupancy subscribers see `layout` /
+`prev_layout` without polling.
+
 ## Where it lives
 
 - `core/layout.rs` — `preview_frames`, the thumbnails, from the layout

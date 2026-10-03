@@ -648,9 +648,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 332 | expose 文档点名 monitor/bar 聚焦退出 | ✓ |
 | 333 | tags-overview 文档点名 monitor/bar 确认 | ✓ |
 | 334 | window-switcher 文档点名 monitor/bar 确认 | ✓ |
+| 335 | layout-picker 文档点名 monitor/bar 实时应用 | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 335 — layout-picker docs name monitor/bar on live apply
+
+选题 = evolve8h wave 335。layout-picker 文档点名实时应用经 `apply_layout_change` 发出 `monitor/bar`。
 
 ## 2026-10-03：evolve8h wave 334 — window-switcher docs name monitor/bar on commit
 
