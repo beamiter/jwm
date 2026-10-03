@@ -168,6 +168,7 @@ monorepo use independent Semantic Versions.
 - `get_status.show_bar` rustdoc names `sticky_count`.
 - README occupancy JSON names `sticky_count`.
 - `tools/README.md` occupancy JSON names `sticky_count`.
+- Window-tabs docs name occupancy `sticky_count`.
 
 ### Changed
 
