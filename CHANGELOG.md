@@ -366,6 +366,7 @@ monorepo use independent Semantic Versions.
 - `get_closed_placement` / `get_cp` return the focused monitor's
   `closed_placement_count`.
 - Capabilities list `get_closed_placement` and `get_cp`.
+- `get_status` nests compact `closed_placement` beside `prev_layout`.
 
 ### Changed
 

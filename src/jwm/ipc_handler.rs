@@ -4043,6 +4043,7 @@ impl Jwm {
             focused: Some(self.query_selected_window(backend, true)),
             cfact: Some(self.query_focused_cfact(backend)),
             prev_layout: Some(self.query_focused_prev_layout(backend)),
+            closed_placement: Some(self.query_focused_closed_placement(backend)),
             effects: Some(self.effects_status_summary()),
             mic: Some(self.mic_status_summary()),
             capabilities: Some(
@@ -14739,5 +14740,19 @@ mod tests {
         assert!(IPC.contains("\"get_closed_placement\""));
         assert!(IPC.contains("\"get_cp\""));
         assert!(DOCS.contains("Capabilities list `get_closed_placement` and `get_cp`"));
+    }
+
+    #[test]
+    fn evolve8h_wave_338_get_status_nests_compact_closed_placement() {
+        const SOURCE: &str = include_str!("ipc_handler.rs");
+        const IPC: &str = include_str!("../ipc.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(IPC.contains("pub closed_placement: Option<Value>"));
+        assert!(SOURCE.contains(
+            "closed_placement: Some(self.query_focused_closed_placement(backend))"
+        ));
+        assert!(DOCS.contains(
+            "`get_status` nests compact `closed_placement` beside `prev_layout`"
+        ));
     }
 }

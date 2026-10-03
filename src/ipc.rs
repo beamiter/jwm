@@ -855,6 +855,9 @@ pub struct RuntimeStatusV1 {
     /// Compact twin of `get_prev_layout` / `get_pl`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prev_layout: Option<Value>,
+    /// Compact twin of `get_closed_placement` / `get_cp`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub closed_placement: Option<Value>,
     /// Compact twin of `get_effect_status` / `get_fx`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub effects: Option<Value>,
@@ -3500,6 +3503,7 @@ mod tests {
             focused: None,
             cfact: None,
             prev_layout: None,
+            closed_placement: None,
             effects: None,
             mic: None,
             capabilities: None,
