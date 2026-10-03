@@ -14986,4 +14986,13 @@ mod tests {
             "`jwm-tool capabilities` text lists `get_pl -> get_prev_layout`"
         ));
     }
+
+    #[test]
+    fn evolve8h_wave_362_window_tabs_docs_name_monitor_bar_on_focus_reorder() {
+        const TABS: &str = include_str!("../../docs/window-tabs.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TABS.contains("emits `monitor/bar`"));
+        assert!(TABS.contains("`focus_tab`"));
+        assert!(DOCS.contains("Window-tabs docs name `monitor/bar` on focus / reorder"));
+    }
 }

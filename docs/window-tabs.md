@@ -43,9 +43,11 @@ of question marks.
 | --- | --- |
 | hover | highlights the inactive cell under the pointer at half strength |
 | rest ~500 ms on a cell whose title is ellipsized | floats the full title in a chip above the strip — below it when the strip hugs the screen's top edge |
-| left-click | focuses the window (and raises it) |
+| left-click | focuses the window (and raises it); emits `monitor/bar` |
 | middle-click | closes the window, through the same path as `killclient` |
-| left-drag past `behavior.drag_threshold_px` (default 12 px), then release | moves the window to the dropped slot in that monitor's tiling order |
+| left-drag past `behavior.drag_threshold_px` (default 12 px), then release | moves the window to the dropped slot in that monitor's tiling order; emits `monitor/bar` |
+
+`focus_tab` (IPC / keybinding twin of a left-click) also emits `monitor/bar`.
 
 The drag is a reorder, not a move: there is no live preview while it is
 active, and releasing over another monitor's strip cancels rather than
