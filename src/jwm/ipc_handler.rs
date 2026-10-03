@@ -12442,4 +12442,12 @@ mod tests {
         assert!(IPC.contains("Also `pip_count`."));
         assert!(DOCS.contains("`get_status.show_bar` rustdoc also names `pip_count`"));
     }
+
+    #[test]
+    fn evolve8h_wave_162_readme_occupancy_names_pip_count() {
+        const README: &str = include_str!("../../README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(README.contains("It also includes `pip_count`."));
+        assert!(DOCS.contains("README occupancy JSON also names `pip_count`"));
+    }
 }

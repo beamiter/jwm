@@ -187,6 +187,7 @@ monorepo use independent Semantic Versions.
 - `jwm-tool health` occupancy line includes pip_count.
 - Toggling picture-in-picture emits `monitor/bar`.
 - `get_status.show_bar` rustdoc names `pip_count`.
+- README occupancy JSON names `pip_count`.
 
 ### Changed
 

@@ -475,7 +475,16 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 159 | jwm-tool health occupancy 含 pip | ✓ |
 | 160 | pip 切换 emit monitor/bar | ✓ |
 | 161 | get_status.show_bar rustdoc 含 pip_count | ✓ |
+| 162 | README occupancy 含 pip_count | ✓ |
 | … | 进行中 | |
+
+---
+
+## 2026-10-03：evolve8h wave 162 — README occupancy names pip_count
+
+选题 = evolve8h wave 162。README occupancy JSON 点名 `pip_count`。
+
+**验证**：`scripts/test.sh --lib --` 聚焦 evolve8h_wave_162 evolve8h_wave_155。
 
 ---
 
