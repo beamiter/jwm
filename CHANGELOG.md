@@ -249,6 +249,7 @@ monorepo use independent Semantic Versions.
 - `get_status.show_bar` rustdoc names `skip_taskbar_count`.
 - README occupancy JSON names `skip_taskbar_count`.
 - `tools/README.md` occupancy JSON names `skip_taskbar_count`.
+- Window-tabs docs name occupancy `skip_taskbar_count`.
 
 ### Changed
 

@@ -13194,4 +13194,12 @@ mod tests {
         assert!(TOOLS.contains("It also includes `skip_taskbar_count`."));
         assert!(DOCS.contains("`tools/README.md` also names `skip_taskbar_count`"));
     }
+
+    #[test]
+    fn evolve8h_wave_224_window_tabs_occupancy_names_skip_taskbar_count() {
+        const TABS: &str = include_str!("../../docs/window-tabs.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TABS.contains("`never_focus_count` / `skip_taskbar_count`"));
+        assert!(DOCS.contains("Window-tabs docs also name `skip_taskbar_count`"));
+    }
 }
