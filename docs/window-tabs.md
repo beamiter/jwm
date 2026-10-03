@@ -12,7 +12,7 @@ while it owns the output (`WindowInfo.owns_output` / monitor
 `bar_visible` / `has_visible_fullscreen` on IPC; subscribe `bar` for
 `monitor/bar` occupancy, including `tag` / `layout` / `gap` / `mfact` /
 `nmaster` / `selected_id` / `sel_tags` / `previous_tags` /
-`active_tags` / `window_count` / `on_view_count` / `floating_count` / `minimized_count` / `sticky_count` / `urgent_count` / `fullscreen_count` / `pip_count` / `maximized_count` / `above_count` / `below_count` / `scratchpad_count` / `tabbed_count` / `dock_count` / `desktop_count` / `never_focus_count` / `skip_taskbar_count` / `skip_pager_count` / `no_decorations_count` / `drag_float_count` / `swallowed_count` / `demands_attention_count` / `fixed_count` / `strut_count`), and the strip's pixels
+`active_tags` / `window_count` / `on_view_count` / `floating_count` / `minimized_count` / `sticky_count` / `urgent_count` / `fullscreen_count` / `pip_count` / `maximized_count` / `above_count` / `below_count` / `scratchpad_count` / `tabbed_count` / `dock_count` / `desktop_count` / `never_focus_count` / `skip_taskbar_count` / `skip_pager_count` / `no_decorations_count` / `drag_float_count` / `swallowed_count` / `demands_attention_count` / `fixed_count` / `strut_count` / `maximize_promoted_count`), and the strip's pixels
 are reserved out of the
 work area, so no window ever slides underneath it. Appearing eases in over
 120 ms — alpha only, a clamped ease-out quad, so no overshoot — and a
