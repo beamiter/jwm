@@ -236,6 +236,7 @@ monorepo use independent Semantic Versions.
 - `jwm-tool health` occupancy line includes desktop_count.
 - `get_status.show_bar` rustdoc names `desktop_count`.
 - README occupancy JSON names `desktop_count`.
+- `tools/README.md` occupancy JSON names `desktop_count`.
 
 ### Changed
 

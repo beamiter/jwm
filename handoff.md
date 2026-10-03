@@ -524,7 +524,16 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 208 | jwm-tool health occupancy 含 desktop | ✓ |
 | 209 | get_status.show_bar rustdoc 含 desktop_count | ✓ |
 | 210 | README occupancy 含 desktop_count | ✓ |
+| 211 | tools/README occupancy 含 desktop_count | ✓ |
 | … | 进行中 | |
+
+---
+
+## 2026-10-03：evolve8h wave 211 — tools/README occupancy names desktop_count
+
+选题 = evolve8h wave 211。`tools/README.md` occupancy JSON 点名 `desktop_count`。
+
+**验证**：`scripts/test.sh --lib --` 聚焦 evolve8h_wave_211 evolve8h_wave_205。
 
 ---
 
