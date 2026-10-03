@@ -188,6 +188,7 @@ monorepo use independent Semantic Versions.
 - Toggling picture-in-picture emits `monitor/bar`.
 - `get_status.show_bar` rustdoc names `pip_count`.
 - README occupancy JSON names `pip_count`.
+- `tools/README.md` occupancy JSON names `pip_count`.
 
 ### Changed
 

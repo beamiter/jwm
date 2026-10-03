@@ -296,6 +296,7 @@ README occupancy JSON also names `pip_count`.
 `tools/README.md` also names `sticky_count`.
 `tools/README.md` also names `urgent_count`.
 `tools/README.md` also names `fullscreen_count`.
+`tools/README.md` also names `pip_count`.
 `tools/README.md` also names `floating_count`.
 `tools/README.md` also names `on_view_count`.
 `tools/README.md` also names `window_count`.
