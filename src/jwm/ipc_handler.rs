@@ -4327,7 +4327,11 @@ impl Jwm {
                     maximize_promoted_count: counts.maximize_promoted,
                     strut_count: counts.strut,
                     status_bar_count: counts.status_bar,
-                    owns_output_count: counts.owns_output,
+                    owns_output_count: if is_active {
+                        self.monitor_owns_output_count(mk)
+                    } else {
+                        0
+                    },
                 });
             }
         }
@@ -10595,5 +10599,21 @@ mod tests {
             .0;
         assert!(monitor_info.contains("owns_output_count: self.monitor_owns_output_count(mk)"));
         assert!(DOCS.contains("same visibility as the status-bar hide"));
+    }
+
+    #[test]
+    fn evolve8h_wave_11_workspace_owns_output_count_on_active_tag() {
+        const SOURCE: &str = include_str!("ipc_handler.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        let workspaces = SOURCE
+            .split_once("fn query_workspaces(")
+            .expect("query_workspaces")
+            .1
+            .split_once("fn query_monitors(")
+            .expect("query_monitors follows")
+            .0;
+        assert!(workspaces.contains("owns_output_count: if is_active"));
+        assert!(workspaces.contains("self.monitor_owns_output_count(mk)"));
+        assert!(DOCS.contains("workspace rows report that\ncount only on the active tag"));
     }
 }

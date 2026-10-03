@@ -324,7 +324,16 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 8 | Monitor/Workspace/Tree owns_output_count | ✓ |
 | 9 | get_show_bar 返回 owns_output_count | ✓ |
 | 10 | MonitorInfoIpc.owns_output_count 用藏栏谓词 | ✓ |
+| 11 | WorkspaceInfo.owns_output_count 仅活跃 tag | ✓ |
 | … | 进行中 | |
+
+---
+
+## 2026-10-03：evolve8h wave 11 — workspace owns_output_count on active tag
+
+选题 = evolve8h wave 11。工作区行仅在该 tag 在 view 上报告 monitor 藏栏计数。
+
+**验证**：`scripts/test.sh --lib --` 聚焦 evolve8h_wave_11。
 
 ---
 

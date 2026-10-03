@@ -25,6 +25,8 @@ monorepo use independent Semantic Versions.
 - `get_show_bar` also reports `owns_output_count`.
 - `get_monitors` `owns_output_count` uses the same hide-bar visibility
   predicate as `get_show_bar`.
+- `get_workspaces` `owns_output_count` is the monitor hide-bar count on the
+  active tag and `0` off-view.
 
 ### Changed
 

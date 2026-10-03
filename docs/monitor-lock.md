@@ -195,7 +195,8 @@ monitor's strip membership; `get_system_ui` reports the open shell panel
 client on that tag demands attention), matching the status-bar urgent mask,
 plus `is_occupied` (status-bar occupied mask) and `has_fullscreen` /
 `has_visible_fullscreen` / `owns_output_count` (monitor rows count with
-the same visibility as the status-bar hide).
+the same visibility as the status-bar hide; workspace rows report that
+count only on the active tag).
 `get_windows` / `get_tree` / `window/state` also report `is_swallowed` and
 `is_on_view` (tag intersection with the monitor's active tags, or sticky),
 plus chrome / size-hint fields (`is_fixed`, `is_dock`, `is_desktop`,
