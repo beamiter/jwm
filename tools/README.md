@@ -64,6 +64,7 @@ jwm-tool msg '' --subscribe 'window,tag,layout,bar' --raw
 `mfact`, `nmaster`, and `selected_id`.
 It also includes `sel_tags`, `previous_tags`, and `active_tags`.
 It also includes `window_count`.
+It also includes `on_view_count`.
 
 IPC 使用换行分隔的 JSON。工具按块读取并保留同一批到达的后续消息，
 每条响应的正文上限为 1 MiB。普通响应和订阅确认须在开始读取后 5 秒内
