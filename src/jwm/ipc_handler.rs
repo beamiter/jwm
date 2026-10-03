@@ -438,7 +438,10 @@ fn client_window_info(
         total_w: client.total_width(),
         total_h: client.total_height(),
         stack_index,
-        owns_output: client.state.is_fullscreen && is_on_view && !client.state.is_hidden,
+        owns_output: client.state.is_fullscreen
+            && is_on_view
+            && !client.state.is_hidden
+            && !client.state.is_swallowed,
     }
 }
 
@@ -10630,5 +10633,15 @@ mod tests {
             .0;
         assert!(tree.contains("owns_output_count: self.monitor_owns_output_count(mk)"));
         assert!(DOCS.contains("`get_tree` uses the same hide-bar"));
+    }
+
+    #[test]
+    fn evolve8h_wave_13_window_owns_output_excludes_swallowed() {
+        const SOURCE: &str = include_str!("ipc_handler.rs");
+        const IPC: &str = include_str!("../ipc.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(SOURCE.contains("!client.state.is_swallowed"));
+        assert!(IPC.contains("Swallowed\n    /// terminals never own the output"));
+        assert!(DOCS.contains("swallowed terminals never own it"));
     }
 }

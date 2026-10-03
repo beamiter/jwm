@@ -204,7 +204,7 @@ plus chrome / size-hint fields (`is_fixed`, `is_dock`, `is_desktop`,
 `is_drag_floating`, `never_focus`, `skip_taskbar`, `skip_pager`,
 `no_decorations`, `demands_attention`, `has_strut`, `client_fact`) and
 `owns_output` when a visible fullscreen client currently covers the
-output.
+output (swallowed terminals never own it).
 `get_status` nests compact `resources` / `connectivity` / `power` / `media` /
 `notifications` / `blur` / `hdr` / `capture` / `idle` / `recording` /
 `audio_recording` / `clipboard` / `waterlily` / `night_light` / `magnifier` /

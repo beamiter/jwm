@@ -28,6 +28,7 @@ monorepo use independent Semantic Versions.
 - `get_workspaces` `owns_output_count` is the monitor hide-bar count on the
   active tag and `0` off-view.
 - `get_tree` monitor nodes use the same hide-bar `owns_output_count`.
+- `WindowInfo.owns_output` is false for swallowed terminals.
 
 ### Changed
 

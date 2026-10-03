@@ -1085,7 +1085,8 @@ pub struct WindowInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stack_index: Option<usize>,
     /// True when this window is a visible fullscreen client on the current
-    /// view — it owns the output and tucks the status bar.
+    /// view — it owns the output and tucks the status bar. Swallowed
+    /// terminals never own the output.
     pub owns_output: bool,
 }
 

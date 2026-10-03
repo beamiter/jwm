@@ -326,7 +326,16 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 10 | MonitorInfoIpc.owns_output_count 用藏栏谓词 | ✓ |
 | 11 | WorkspaceInfo.owns_output_count 仅活跃 tag | ✓ |
 | 12 | TreeNode.owns_output_count 用藏栏谓词 | ✓ |
+| 13 | WindowInfo.owns_output 排除 swallowed | ✓ |
 | … | 进行中 | |
+
+---
+
+## 2026-10-03：evolve8h wave 13 — WindowInfo.owns_output excludes swallowed
+
+选题 = evolve8h wave 13。被吞的终端不算占住输出，与 `is_client_visible_on_monitor` 对齐。
+
+**验证**：`scripts/test.sh --lib --` 聚焦 evolve8h_wave_13。
 
 ---
 
