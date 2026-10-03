@@ -12337,4 +12337,12 @@ mod tests {
         assert!(query.contains("c.state.is_fullscreen"));
         assert!(DOCS.contains("also include `fullscreen_count`"));
     }
+
+    #[test]
+    fn evolve8h_wave_153_health_occupancy_includes_fullscreen_count() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("fullscreen_count={fullscreen_count}"));
+        assert!(DOCS.contains("and `fullscreen_count`"));
+    }
 }

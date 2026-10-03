@@ -466,7 +466,16 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 150 | tools/README occupancy 含 urgent_count | ✓ |
 | 151 | window-tabs occupancy 含 urgent_count | ✓ |
 | 152 | get_show_bar occupancy 含 fullscreen_count | ✓ |
+| 153 | jwm-tool health occupancy 含 fullscreen_count | ✓ |
 | … | 进行中 | |
+
+---
+
+## 2026-10-03：evolve8h wave 153 — health occupancy includes fullscreen_count
+
+选题 = evolve8h wave 153。health occupancy 行带上 fullscreen_count。
+
+**验证**：`scripts/test.sh --lib --bins --` 聚焦 evolve8h_wave_153 insight_output。
 
 ---
 
