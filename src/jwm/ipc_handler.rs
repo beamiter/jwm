@@ -15191,4 +15191,13 @@ mod tests {
             "`jwm-tool capabilities` text lists `get_tab,get_tabs -> get_tab_bar`"
         ));
     }
+
+    #[test]
+    fn evolve8h_wave_385_health_prints_compact_selected() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("selected: id={id}"));
+        assert!(TOOL.contains("\"selected: id=99\""));
+        assert!(DOCS.contains("`jwm-tool health` prints compact `selected` beside occupancy"));
+    }
 }
