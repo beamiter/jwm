@@ -532,3 +532,4 @@ README health text names compact `struts`.
 README health text names compact `scratchpads`.
 `tools/README.md` health text names compact `scratchpads`.
 `jwm-tool capabilities` text lists `get_pads,get_scratch -> get_scratchpads`.
+`jwm-tool health` prints compact `focused` beside occupancy.

@@ -15302,4 +15302,13 @@ mod tests {
             "`jwm-tool capabilities` text lists `get_pads,get_scratch -> get_scratchpads`"
         ));
     }
+
+    #[test]
+    fn evolve8h_wave_397_health_prints_compact_focused() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("focused: id={id}"));
+        assert!(TOOL.contains("\"focused: id=77\""));
+        assert!(DOCS.contains("`jwm-tool health` prints compact `focused` beside occupancy"));
+    }
 }

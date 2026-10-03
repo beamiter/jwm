@@ -3546,6 +3546,21 @@ mod tests {
         assert!(scratchpads_lines
             .iter()
             .any(|line| line == "scratchpads: count=4"));
+        assert!(!scratchpads_lines
+            .iter()
+            .any(|line| line.starts_with("focused:")));
+
+        let with_compact_focused = serde_json::json!({
+            "health": {"status": "healthy", "reasons": []},
+            "counts": {"windows": 0, "monitors": 1, "workspaces": 1},
+            "config": {"path": "/tmp/config.toml", "diagnostics": {"error_count": 0, "warning_count": 0}},
+            "features": {},
+            "focused": {
+                "id": 77
+            }
+        });
+        let focused_lines = health_output_lines(&with_compact_focused);
+        assert!(focused_lines.iter().any(|line| line == "focused: id=77"));
 
         let capabilities = serde_json::json!({
             "schema_version": 1,
@@ -4671,6 +4686,21 @@ fn health_output_lines(status: &serde_json::Value) -> Vec<String> {
             .map(|value| value.to_string())
             .unwrap_or_else(|| "-".into());
         lines.push(format!("scratchpads: count={count}"));
+    }
+
+    if let Some(focused) = status.get("focused").and_then(serde_json::Value::as_object) {
+        let id = focused
+            .get("id")
+            .and_then(|v| {
+                if v.is_null() {
+                    None
+                } else {
+                    v.as_u64().or_else(|| v.as_i64().map(|n| n as u64))
+                }
+            })
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".into());
+        lines.push(format!("focused: id={id}"));
     }
 
     if let Some(reasons) = status["health"]["reasons"].as_array() {
