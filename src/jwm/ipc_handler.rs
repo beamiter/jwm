@@ -15339,4 +15339,13 @@ mod tests {
             "`jwm-tool capabilities` text lists `get_fw -> get_focused_window`"
         ));
     }
+
+    #[test]
+    fn evolve8h_wave_401_health_prints_compact_monitors() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("monitors: count={count} focused={focused}"));
+        assert!(TOOL.contains("\"monitors: count=2 focused=1\""));
+        assert!(DOCS.contains("`jwm-tool health` prints compact `monitors` beside occupancy"));
+    }
 }

@@ -3561,6 +3561,24 @@ mod tests {
         });
         let focused_lines = health_output_lines(&with_compact_focused);
         assert!(focused_lines.iter().any(|line| line == "focused: id=77"));
+        assert!(!focused_lines
+            .iter()
+            .any(|line| line.starts_with("monitors:")));
+
+        let with_compact_monitors = serde_json::json!({
+            "health": {"status": "healthy", "reasons": []},
+            "counts": {"windows": 0, "monitors": 1, "workspaces": 1},
+            "config": {"path": "/tmp/config.toml", "diagnostics": {"error_count": 0, "warning_count": 0}},
+            "features": {},
+            "monitors": {
+                "count": 2,
+                "focused": 1
+            }
+        });
+        let monitors_lines = health_output_lines(&with_compact_monitors);
+        assert!(monitors_lines
+            .iter()
+            .any(|line| line == "monitors: count=2 focused=1"));
 
         let capabilities = serde_json::json!({
             "schema_version": 1,
@@ -4701,6 +4719,26 @@ fn health_output_lines(status: &serde_json::Value) -> Vec<String> {
             .map(|value| value.to_string())
             .unwrap_or_else(|| "-".into());
         lines.push(format!("focused: id={id}"));
+    }
+
+    if let Some(monitors) = status.get("monitors").and_then(serde_json::Value::as_object) {
+        let count = monitors
+            .get("count")
+            .and_then(|v| v.as_u64().or_else(|| v.as_i64().map(|n| n as u64)))
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".into());
+        let focused = monitors
+            .get("focused")
+            .and_then(|v| {
+                if v.is_null() {
+                    None
+                } else {
+                    v.as_u64().or_else(|| v.as_i64().map(|n| n as u64))
+                }
+            })
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".into());
+        lines.push(format!("monitors: count={count} focused={focused}"));
     }
 
     if let Some(reasons) = status["health"]["reasons"].as_array() {
