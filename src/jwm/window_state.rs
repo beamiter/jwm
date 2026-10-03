@@ -1999,10 +1999,9 @@ impl Jwm {
             self.clear_hidden_client_park_retry(client_key);
         }
         self.broadcast_window_state_ipc(backend, client_key);
-        if was_fullscreen {
-            if let Some(mon_key) = monitor {
-                self.broadcast_monitor_bar_ipc(backend, mon_key);
-            }
+        let _ = was_fullscreen;
+        if let Some(mon_key) = monitor {
+            self.broadcast_monitor_bar_ipc(backend, mon_key);
         }
         Ok(true)
     }

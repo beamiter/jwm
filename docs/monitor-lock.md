@@ -199,6 +199,7 @@ They also include `on_view_count`.
 They also include `floating_count`.
 They also include `minimized_count`.
 `togglefloating` emits `monitor/bar`.
+Minimizing or restoring a client emits `monitor/bar` even when it was not fullscreen.
 Managing a client emits `monitor/bar`.
 Unmanaging a client emits `monitor/bar` even when it was not fullscreen.
 `zoom` emits `monitor/bar`.

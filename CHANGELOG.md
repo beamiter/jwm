@@ -157,6 +157,7 @@ monorepo use independent Semantic Versions.
 - Window-tabs docs name occupancy `floating_count`.
 - `get_show_bar` occupancy snapshots include `minimized_count`.
 - `jwm-tool health` occupancy line includes minimized_count.
+- Minimizing or restoring a client emits `monitor/bar` even when it was not fullscreen.
 
 ### Changed
 

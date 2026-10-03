@@ -12062,4 +12062,20 @@ mod tests {
         assert!(TOOL.contains("minimized={minimized}"));
         assert!(DOCS.contains("and `minimized_count`"));
     }
+
+    #[test]
+    fn evolve8h_wave_132_minimize_always_broadcasts_monitor_bar() {
+        const STATE: &str = include_str!("window_state.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        let minimize = STATE
+            .split_once("pub(crate) fn set_client_minimized(")
+            .expect("set_client_minimized")
+            .1
+            .split_once("mod restore_rect_tests")
+            .expect("restore tests follow")
+            .0;
+        assert!(minimize.contains("let _ = was_fullscreen"));
+        assert!(minimize.contains("broadcast_monitor_bar_ipc(backend, mon_key)"));
+        assert!(DOCS.contains("Minimizing or restoring a client emits `monitor/bar` even when it was not fullscreen"));
+    }
 }
