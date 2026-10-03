@@ -15065,4 +15065,14 @@ mod tests {
         assert!(TOOL.contains("\"nmaster: monitor=0 n_master=2 connector=DP-1\""));
         assert!(DOCS.contains("`jwm-tool health` prints compact `nmaster` beside occupancy"));
     }
+
+    #[test]
+    fn evolve8h_wave_371_readme_health_names_compact_layout_knobs() {
+        const README: &str = include_str!("../../README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(README.contains("compact `cfact` / `gaps` / `mfact` / `nmaster`"));
+        assert!(DOCS.contains(
+            "README health text names compact `cfact` / `gaps` / `mfact` / `nmaster`"
+        ));
+    }
 }

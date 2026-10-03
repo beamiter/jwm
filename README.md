@@ -186,6 +186,8 @@ It also includes `closed_placement_count`.
 `get_status.closed_placement` (`get_cp`).
 It also prints a compact `prev_layout` line from `get_status.prev_layout`
 (`get_pl`).
+It also prints compact `cfact` / `gaps` / `mfact` / `nmaster` lines from the
+matching `get_status` nests.
 
 Malformed JSON, invalid argument types, overflow, empty spawn commands, unknown
 commands, and `{ "success": false }` responses produce a non-zero exit status,
