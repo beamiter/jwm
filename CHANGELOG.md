@@ -266,6 +266,7 @@ monorepo use independent Semantic Versions.
 - Window-tabs docs name occupancy `no_decorations_count`.
 - Reconciling decoration hints emits `monitor/bar`.
 - `get_show_bar` occupancy snapshots include `drag_float_count`.
+- `jwm-tool health` occupancy line includes drag_float_count.
 
 ### Changed
 

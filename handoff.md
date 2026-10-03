@@ -554,9 +554,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 238 | window-tabs occupancy 含 no_decorations_count | ✓ |
 | 239 | 装饰 hint 调和发出 monitor/bar | ✓ |
 | 240 | get_show_bar occupancy 含 drag_float_count | ✓ |
+| 241 | jwm-tool health occupancy 含 drag_float | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 241 — health occupancy includes drag_float_count
+
+选题 = evolve8h wave 241。health occupancy 行带上 drag_float_count。
 
 ## 2026-10-03：evolve8h wave 240 — occupancy snapshot includes drag_float_count
 

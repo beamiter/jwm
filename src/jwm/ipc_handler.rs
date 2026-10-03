@@ -13429,4 +13429,12 @@ mod tests {
         assert!(query.contains("c.state.is_drag_floating"));
         assert!(DOCS.contains("also include `drag_float_count`"));
     }
+
+    #[test]
+    fn evolve8h_wave_241_health_occupancy_includes_drag_float_count() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("drag_float={drag_float}"));
+        assert!(DOCS.contains("and `drag_float_count`"));
+    }
 }
