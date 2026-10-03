@@ -14619,4 +14619,19 @@ mod tests {
         assert!(setup.contains("broadcast_monitor_bar_all_monitors(backend)"));
         assert!(DOCS.contains("WM setup emits `monitor/bar`"));
     }
+
+    #[test]
+    fn evolve8h_wave_331_focus_tab_broadcasts_monitor_bar() {
+        const SOURCE: &str = include_str!("focus_manager.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        let focus_tab = SOURCE
+            .split_once("pub fn focus_tab(")
+            .expect("focus_tab")
+            .1
+            .split_once("pub fn refocus(")
+            .expect("refocus follows")
+            .0;
+        assert!(focus_tab.contains("broadcast_monitor_bar_ipc(backend, mk)"));
+        assert!(DOCS.contains("`focus_tab` emits `monitor/bar`"));
+    }
 }
