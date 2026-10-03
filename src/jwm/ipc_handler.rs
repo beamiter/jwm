@@ -13839,4 +13839,12 @@ mod tests {
         assert!(README.contains("It also includes `maximize_promoted_count`."));
         assert!(DOCS.contains("README occupancy JSON also names `maximize_promoted_count`"));
     }
+
+    #[test]
+    fn evolve8h_wave_275_tools_readme_occupancy_names_maximize_promoted_count() {
+        const TOOLS: &str = include_str!("../../tools/README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOLS.contains("It also includes `maximize_promoted_count`."));
+        assert!(DOCS.contains("`tools/README.md` also names `maximize_promoted_count`"));
+    }
 }
