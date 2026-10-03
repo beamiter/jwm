@@ -13593,4 +13593,12 @@ mod tests {
         assert!(query.contains(".is_some_and(|c| c.state.demands_attention)"));
         assert!(DOCS.contains("also include `demands_attention_count`"));
     }
+
+    #[test]
+    fn evolve8h_wave_254_health_occupancy_includes_demands_attention_count() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("demands_attention={demands_attention}"));
+        assert!(DOCS.contains("and `demands_attention_count`"));
+    }
 }

@@ -280,6 +280,7 @@ monorepo use independent Semantic Versions.
 - `tools/README.md` occupancy JSON names `swallowed_count`.
 - Window-tabs docs name occupancy `swallowed_count`.
 - `get_show_bar` occupancy snapshots include `demands_attention_count`.
+- `jwm-tool health` occupancy line includes demands_attention_count.
 
 ### Changed
 
