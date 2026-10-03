@@ -220,6 +220,7 @@ monorepo use independent Semantic Versions.
 - README occupancy JSON names `scratchpad_count`.
 - `tools/README.md` occupancy JSON names `scratchpad_count`.
 - Window-tabs docs name occupancy `scratchpad_count`.
+- `get_show_bar` occupancy snapshots include `tabbed_count`.
 
 ### Changed
 

@@ -4689,6 +4689,7 @@ impl Jwm {
     /// Also `above_count` (attached keep-above clients).
     /// Also `below_count` (attached keep-below clients).
     /// Also `scratchpad_count` (attached scratchpad-bound clients).
+    /// Also `tabbed_count` (clients in the monitor's window-tab strip).
     pub(crate) fn query_show_bar_for_monitor(
         &self,
         backend: &dyn Backend,
@@ -4719,6 +4720,7 @@ impl Jwm {
                 "above_count": serde_json::Value::Null,
                 "below_count": serde_json::Value::Null,
                 "scratchpad_count": serde_json::Value::Null,
+                "tabbed_count": serde_json::Value::Null,
                 "show_bar": serde_json::Value::Null,
                 "bar_visible": serde_json::Value::Null,
                 "has_visible_fullscreen": serde_json::Value::Null,
@@ -4906,6 +4908,7 @@ impl Jwm {
                         .count()
                 })
                 .unwrap_or(0),
+            "tabbed_count": self.tab_group_clients(mk).len(),
             "show_bar": show_bar,
             "bar_visible": self.monitor_shows_status_bar(mk),
             "has_visible_fullscreen": self.monitor_has_visible_fullscreen(mk),
@@ -4950,6 +4953,7 @@ impl Jwm {
                 "above_count": serde_json::Value::Null,
                 "below_count": serde_json::Value::Null,
                 "scratchpad_count": serde_json::Value::Null,
+                "tabbed_count": serde_json::Value::Null,
                 "show_bar": serde_json::Value::Null,
                 "bar_visible": serde_json::Value::Null,
                 "has_visible_fullscreen": serde_json::Value::Null,
@@ -12845,5 +12849,21 @@ mod tests {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
         assert!(TABS.contains("`below_count` / `scratchpad_count`"));
         assert!(DOCS.contains("Window-tabs docs also name `scratchpad_count`"));
+    }
+
+    #[test]
+    fn evolve8h_wave_195_occupancy_snapshot_includes_tabbed_count() {
+        const SOURCE: &str = include_str!("ipc_handler.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        let query = SOURCE
+            .split_once("fn query_show_bar_for_monitor(")
+            .expect("query_show_bar_for_monitor")
+            .1
+            .split_once("fn query_focused_show_bar(")
+            .expect("focused follows")
+            .0;
+        assert!(query.contains("\"tabbed_count\":"));
+        assert!(query.contains("self.tab_group_clients(mk)"));
+        assert!(DOCS.contains("also include `tabbed_count`"));
     }
 }
