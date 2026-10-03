@@ -389,6 +389,7 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "get_audio_recording",
         "get_audio_recording_status",
         "get_bar",
+        "get_bar_visible",
         "get_bench",
         "get_bluetooth",
         "get_bluetooth_pairing",

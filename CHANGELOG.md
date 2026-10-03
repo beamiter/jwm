@@ -16,6 +16,7 @@ monorepo use independent Semantic Versions.
   for a non-hidden fullscreen client on the current view, the same predicate
   that hides the status bar.
 - `get_show_bar` also reports `has_visible_fullscreen` beside `bar_visible`.
+- `get_bar_visible` aliases `get_show_bar`.
 
 ### Changed
 
