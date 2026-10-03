@@ -15200,4 +15200,13 @@ mod tests {
         assert!(TOOL.contains("\"selected: id=99\""));
         assert!(DOCS.contains("`jwm-tool health` prints compact `selected` beside occupancy"));
     }
+
+    #[test]
+    fn evolve8h_wave_386_readme_health_names_compact_selected() {
+        const README: &str = include_str!("../../README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(README.contains("compact `selected` line"));
+        assert!(README.contains("get_status.selected"));
+        assert!(DOCS.contains("README health text names compact `selected`"));
+    }
 }
