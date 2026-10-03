@@ -14331,4 +14331,19 @@ mod tests {
         assert!(window.contains("pub remembers_closed_placement: bool,"));
         assert!(DOCS.contains("Portal window rows deserialize `remembers_closed_placement`"));
     }
+
+    #[test]
+    fn evolve8h_wave_310_incnmaster_broadcasts_monitor_bar() {
+        const SOURCE: &str = include_str!("layout/state.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        let inc = SOURCE
+            .split_once("pub(crate) fn incnmaster(")
+            .expect("incnmaster")
+            .1
+            .split_once("pub(crate) fn setnmaster(")
+            .expect("setnmaster follows")
+            .0;
+        assert!(inc.contains("broadcast_monitor_bar_ipc(backend, sel_mon_key)"));
+        assert!(DOCS.contains("`incnmaster` emits `monitor/bar`"));
+    }
 }

@@ -337,6 +337,7 @@ monorepo use independent Semantic Versions.
 - Tree nodes report `closed_placement_count`.
 - Portal monitor rows deserialize `closed_placement_count`.
 - Portal window rows deserialize `remembers_closed_placement`.
+- `incnmaster` emits `monitor/bar`.
 
 ### Changed
 

@@ -623,9 +623,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 307 | TreeNode 含 closed_placement_count | ✓ |
 | 308 | portal MonitorInfo 含 closed_placement_count | ✓ |
 | 309 | portal WindowInfo 含 remembers_closed_placement | ✓ |
+| 310 | incnmaster 发出 monitor/bar | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 310 — incnmaster broadcasts monitor/bar
+
+选题 = evolve8h wave 310。`incnmaster` 调整 nmaster 后发出 `monitor/bar`。
 
 ## 2026-10-03：evolve8h wave 309 — portal WindowInfo remembers_closed_placement
 
