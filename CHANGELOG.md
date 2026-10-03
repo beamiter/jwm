@@ -243,6 +243,7 @@ monorepo use independent Semantic Versions.
 - `get_status.show_bar` rustdoc names `never_focus_count`.
 - README occupancy JSON names `never_focus_count`.
 - `tools/README.md` occupancy JSON names `never_focus_count`.
+- Window-tabs docs name occupancy `never_focus_count`.
 
 ### Changed
 
