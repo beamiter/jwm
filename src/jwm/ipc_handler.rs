@@ -13461,4 +13461,12 @@ mod tests {
         assert!(TOOLS.contains("It also includes `drag_float_count`."));
         assert!(DOCS.contains("`tools/README.md` also names `drag_float_count`"));
     }
+
+    #[test]
+    fn evolve8h_wave_245_window_tabs_occupancy_names_drag_float_count() {
+        const TABS: &str = include_str!("../../docs/window-tabs.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TABS.contains("`no_decorations_count` / `drag_float_count`"));
+        assert!(DOCS.contains("Window-tabs docs also name `drag_float_count`"));
+    }
 }
