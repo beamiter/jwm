@@ -3283,6 +3283,7 @@ impl Jwm {
                     self.move_to_front(client_key);
                     self.focus(backend, Some(client_key))?;
                     self.arrange(backend, Some(mon_key));
+                    self.broadcast_monitor_bar_ipc(backend, mon_key);
                 } else {
                     self.focus(backend, Some(client_key))?;
                 }

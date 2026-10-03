@@ -14549,4 +14549,19 @@ mod tests {
         assert!(DOCS.contains("`get_tree` also reports `closed_placement_count`"));
         assert!(DOCS.contains("Tree nodes report `closed_placement_count`"));
     }
+
+    #[test]
+    fn evolve8h_wave_326_overview_confirm_broadcasts_monitor_bar() {
+        const SOURCE: &str = include_str!("features/toggles.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        let overview = SOURCE
+            .split_once("pub fn toggle_overview(")
+            .expect("toggle_overview")
+            .1
+            .split_once("// Start overview: collect visible windows on current monitor")
+            .expect("start overview arm")
+            .0;
+        assert!(overview.contains("broadcast_monitor_bar_ipc(backend, mon_key)"));
+        assert!(DOCS.contains("Overview confirm emits `monitor/bar`"));
+    }
 }

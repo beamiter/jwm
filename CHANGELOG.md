@@ -353,6 +353,7 @@ monorepo use independent Semantic Versions.
 - `get_workspaces` docs name `closed_placement_count`.
 - `get_monitors` docs name `closed_placement_count`.
 - `get_tree` docs name `closed_placement_count`.
+- Overview confirm emits `monitor/bar`.
 
 ### Changed
 
