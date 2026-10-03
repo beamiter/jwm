@@ -13823,4 +13823,12 @@ mod tests {
         assert!(TOOL.contains("maximize_promoted={maximize_promoted}"));
         assert!(DOCS.contains("and `maximize_promoted_count`"));
     }
+
+    #[test]
+    fn evolve8h_wave_273_get_status_show_bar_rustdoc_names_maximize_promoted_count() {
+        const IPC: &str = include_str!("../ipc.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(IPC.contains("Also `maximize_promoted_count`."));
+        assert!(DOCS.contains("`get_status.show_bar` rustdoc also names `maximize_promoted_count`"));
+    }
 }
