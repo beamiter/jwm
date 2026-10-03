@@ -367,6 +367,7 @@ monorepo use independent Semantic Versions.
   `closed_placement_count`.
 - Capabilities list `get_closed_placement` and `get_cp`.
 - `get_status` nests compact `closed_placement` beside `prev_layout`.
+- `jwm-tool msg` help lists `get_closed_placement` and `get_cp`.
 
 ### Changed
 

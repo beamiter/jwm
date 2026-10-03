@@ -652,9 +652,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 336 | get_closed_placement / get_cp 短查询 | ✓ |
 | 337 | capabilities 列出 get_closed_placement / get_cp | ✓ |
 | 338 | get_status 嵌套 compact closed_placement | ✓ |
+| 339 | jwm-tool 帮助列出 get_closed_placement / get_cp | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 339 — jwm-tool help lists get_closed_placement
+
+选题 = evolve8h wave 339。`jwm-tool msg` 帮助列出 `get_closed_placement` / `get_cp`。
 
 ## 2026-10-03：evolve8h wave 338 — get_status nests compact closed_placement
 

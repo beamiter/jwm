@@ -545,7 +545,7 @@ enum Commands {
                       \x1b[1m可用查询:\x1b[0m\n  \
                       get_status, get_capabilities, get_windows, get_workspaces, get_monitors, get_tree,\n  \
                       get_config, get_config_status, get_version, get_show_bar, get_vf, get_owns_output,\n  \
-                      get_visible_fullscreen, get_bar_visible, get_bar\n  \
+                      get_visible_fullscreen, get_bar_visible, get_bar, get_closed_placement, get_cp\n  \
                       完整列表: jwm-tool capabilities\n\n\
                       \x1b[1m可用布局:\x1b[0m\n  \
                       tile, float, monocle, fibonacci, centered_master, bstack,\n  \

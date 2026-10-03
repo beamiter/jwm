@@ -14755,4 +14755,14 @@ mod tests {
             "`get_status` nests compact `closed_placement` beside `prev_layout`"
         ));
     }
+
+    #[test]
+    fn evolve8h_wave_339_jwm_tool_help_lists_get_closed_placement() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("get_closed_placement, get_cp"));
+        assert!(DOCS.contains(
+            "`jwm-tool msg` help lists `get_closed_placement` and `get_cp`"
+        ));
+    }
 }
