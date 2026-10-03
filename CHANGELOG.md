@@ -248,6 +248,7 @@ monorepo use independent Semantic Versions.
 - `jwm-tool health` occupancy line includes skip_taskbar_count.
 - `get_status.show_bar` rustdoc names `skip_taskbar_count`.
 - README occupancy JSON names `skip_taskbar_count`.
+- `tools/README.md` occupancy JSON names `skip_taskbar_count`.
 
 ### Changed
 
