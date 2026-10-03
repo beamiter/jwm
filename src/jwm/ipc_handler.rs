@@ -11103,4 +11103,12 @@ mod tests {
         assert!(IPC.contains("`get_visible_fullscreen` / `get_vf` (preference,"));
         assert!(DOCS.contains("`get_visible_fullscreen` / `get_vf`"));
     }
+
+    #[test]
+    fn evolve8h_wave_50_jwm_tool_help_lists_occupancy_queries() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("get_show_bar, get_vf"));
+        assert!(DOCS.contains("`jwm-tool msg` help lists `get_show_bar`"));
+    }
 }

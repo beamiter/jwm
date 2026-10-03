@@ -231,6 +231,7 @@ output (swallowed terminals never own it).
 beside feature flags for shell pickers, monitor lock, and the debug HUD.
 `get_status.show_bar` is the same occupancy snapshot as `get_show_bar`
 (including `get_visible_fullscreen` / `get_vf`).
+`jwm-tool msg` help lists `get_show_bar` and `get_vf`.
 `toggletag` on a fullscreen client emits `monitor/bar`, as does `tag`
 and sticky.
 `get_workspaces` / `get_tree` also report pip / maximized / above / below /

@@ -72,6 +72,7 @@ monorepo use independent Semantic Versions.
 - `get_status.show_bar` rustdoc includes `get_visible_fullscreen`.
 - `get_vf` aliases `get_visible_fullscreen`.
 - `get_status.show_bar` rustdoc includes `get_vf`.
+- `jwm-tool msg` help lists `get_show_bar` and `get_vf`.
 
 ### Changed
 
