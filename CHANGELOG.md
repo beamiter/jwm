@@ -216,6 +216,7 @@ monorepo use independent Semantic Versions.
 - `jwm-tool health` occupancy line includes scratchpad_count.
 - Hiding a scratchpad emits `monitor/bar`.
 - Showing a scratchpad emits `monitor/bar`.
+- `get_status.show_bar` rustdoc names `scratchpad_count`.
 
 ### Changed
 

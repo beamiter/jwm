@@ -12814,4 +12814,12 @@ mod tests {
         assert!(show.contains("broadcast_monitor_bar_ipc(backend, mk)"));
         assert!(DOCS.contains("Showing a scratchpad emits `monitor/bar`"));
     }
+
+    #[test]
+    fn evolve8h_wave_191_get_status_show_bar_rustdoc_names_scratchpad_count() {
+        const IPC: &str = include_str!("../ipc.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(IPC.contains("Also `scratchpad_count`."));
+        assert!(DOCS.contains("`get_status.show_bar` rustdoc also names `scratchpad_count`"));
+    }
 }
