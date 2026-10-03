@@ -4703,6 +4703,7 @@ impl Jwm {
     /// Also `strut_count` (attached clients with an external strut).
     /// Also `maximize_promoted_count` (attached maximize-promoted tiled clients).
     /// Also `status_bar_count` (attached configured status-bar clients).
+    /// Also `prev_layout` (previous layout symbol for the current tag).
     pub(crate) fn query_show_bar_for_monitor(
         &self,
         backend: &dyn Backend,
@@ -4713,6 +4714,7 @@ impl Jwm {
                 "monitor": serde_json::Value::Null,
                 "tag": serde_json::Value::Null,
                 "layout": serde_json::Value::Null,
+                "prev_layout": serde_json::Value::Null,
                 "gap": serde_json::Value::Null,
                 "mfact": serde_json::Value::Null,
                 "nmaster": serde_json::Value::Null,
@@ -4763,11 +4765,17 @@ impl Jwm {
             .as_ref()
             .and_then(|p| p.show_bars.get(p.cur_tag).copied())
             .unwrap_or(true);
+        let prev_layout = mon
+            .pertag
+            .as_ref()
+            .and_then(|p| p.prev_lts.get(p.cur_tag).map(|layout| format!("{:?}", **layout)))
+            .unwrap_or_else(|| format!("{:?}", *mon.prev_lt));
         let status_bar_name = CONFIG.load().status_bar_name().to_string();
         let mut value = serde_json::json!({
             "monitor": mon.num,
             "tag": tag,
             "layout": mon.lt_symbol,
+            "prev_layout": prev_layout,
             "gap": mon.layout.gap,
             "mfact": mon.layout.m_fact,
             "nmaster": mon.layout.n_master,
@@ -5155,6 +5163,7 @@ impl Jwm {
                 "monitor": serde_json::Value::Null,
                 "tag": serde_json::Value::Null,
                 "layout": serde_json::Value::Null,
+                "prev_layout": serde_json::Value::Null,
                 "gap": serde_json::Value::Null,
                 "mfact": serde_json::Value::Null,
                 "nmaster": serde_json::Value::Null,
@@ -13991,5 +14000,23 @@ mod tests {
         assert!(update.contains("broadcast_monitor_bar_ipc(backend, mk)"));
         assert!(update.contains("previous_never_focus != never_focus"));
         assert!(DOCS.contains("WM_HINTS never-focus changes emit `monitor/bar`"));
+    }
+
+    #[test]
+    fn evolve8h_wave_287_occupancy_snapshot_includes_prev_layout() {
+        const SOURCE: &str = include_str!("ipc_handler.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        let query = SOURCE
+            .split_once("fn query_show_bar_for_monitor(")
+            .expect("query_show_bar_for_monitor")
+            .1
+            .split_once("fn query_focused_show_bar(")
+            .expect("focused follows")
+            .0;
+        assert!(query.contains("\"prev_layout\":"));
+        assert!(query.contains("p.prev_lts.get(p.cur_tag)"));
+        assert!(DOCS.contains("also include `prev_layout`"));
+        const LIB: &str = include_str!("../lib.rs");
+        assert!(LIB.contains("#![recursion_limit = \"512\"]"));
     }
 }

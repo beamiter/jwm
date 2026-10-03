@@ -220,6 +220,7 @@ They also include `fixed_count`.
 They also include `strut_count`.
 They also include `maximize_promoted_count`.
 They also include `status_bar_count`.
+They also include `prev_layout`.
 Hiding a scratchpad emits `monitor/bar`.
 Showing a scratchpad emits `monitor/bar`.
 `_NET_WM_STATE_SKIP_TASKBAR` emits `monitor/bar`.

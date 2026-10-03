@@ -313,6 +313,8 @@ monorepo use independent Semantic Versions.
 - Size-hint fixed-state changes emit `monitor/bar`.
 - Window-type dock/desktop updates emit `monitor/bar`.
 - WM_HINTS never-focus changes emit `monitor/bar`.
+- `get_show_bar` occupancy snapshots include `prev_layout`.
+- Library crate raises the serde_json fixture recursion limit to 512.
 
 ### Changed
 

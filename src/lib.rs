@@ -6,6 +6,7 @@
 // down (doctor.rs already does).
 #![deny(clippy::correctness, clippy::suspicious, clippy::perf)]
 #![allow(clippy::style, clippy::complexity, clippy::pedantic)]
+#![recursion_limit = "512"]
 
 pub mod alloc_counter;
 pub mod application;
