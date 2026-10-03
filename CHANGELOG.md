@@ -184,6 +184,7 @@ monorepo use independent Semantic Versions.
 - `tools/README.md` occupancy JSON names `fullscreen_count`.
 - Window-tabs docs name occupancy `fullscreen_count`.
 - `get_show_bar` occupancy snapshots include `pip_count`.
+- `jwm-tool health` occupancy line includes pip_count.
 
 ### Changed
 

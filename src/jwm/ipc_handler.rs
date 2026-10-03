@@ -12411,4 +12411,12 @@ mod tests {
         assert!(query.contains("c.state.is_pip"));
         assert!(DOCS.contains("also include `pip_count`"));
     }
+
+    #[test]
+    fn evolve8h_wave_159_health_occupancy_includes_pip_count() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("pip={pip}"));
+        assert!(DOCS.contains("and `pip_count`"));
+    }
 }
