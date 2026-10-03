@@ -376,7 +376,16 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 60 | jwm-tool 示例含 get_show_bar | ✓ |
 | 61 | capabilities 文本列出订阅别名 | ✓ |
 | 62 | capabilities 文本列出 occupancy 查询别名 | ✓ |
+| 63 | jwm-tool health 打印 occupancy | ✓ |
 | … | 进行中 | |
+
+---
+
+## 2026-10-03：evolve8h wave 63 — health prints occupancy
+
+选题 = evolve8h wave 63。`jwm-tool health` 在有 `show_bar` 嵌套时打印偏好、可见性与 owns_output。
+
+**验证**：`scripts/test.sh --lib --` 聚焦 evolve8h_wave_63。
 
 ---
 

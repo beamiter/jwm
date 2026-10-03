@@ -87,6 +87,8 @@ monorepo use independent Semantic Versions.
   `workspace->tag` aliases.
 - `jwm-tool capabilities` text lists occupancy query aliases of
   `get_show_bar`.
+- `jwm-tool health` prints focused-bar preference, visibility and
+  `owns_output` count when `get_status.show_bar` is present.
 
 ### Changed
 

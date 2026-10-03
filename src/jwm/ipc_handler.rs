@@ -11210,4 +11210,13 @@ mod tests {
         assert!(TOOL.contains("query aliases: get_bar,get_bar_visible"));
         assert!(DOCS.contains("occupancy\nquery aliases") || DOCS.contains("occupancy query aliases"));
     }
+
+    #[test]
+    fn evolve8h_wave_63_health_prints_occupancy() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("show_bar: preference="));
+        assert!(TOOL.contains("owns_output={owns}"));
+        assert!(DOCS.contains("`jwm-tool health` prints focused-bar occupancy"));
+    }
 }

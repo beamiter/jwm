@@ -3301,6 +3301,23 @@ mod tests {
                 .iter()
                 .any(|line| line == "reason: no monitors are available")
         );
+        assert!(!lines.iter().any(|line| line.starts_with("show_bar:")));
+
+        let with_bar = serde_json::json!({
+            "health": {"status": "healthy", "reasons": []},
+            "counts": {"windows": 0, "monitors": 1, "workspaces": 1},
+            "config": {"path": "/tmp/config.toml", "diagnostics": {"error_count": 0, "warning_count": 0}},
+            "features": {},
+            "show_bar": {
+                "show_bar": true,
+                "bar_visible": false,
+                "owns_output_count": 1
+            }
+        });
+        let bar_lines = health_output_lines(&with_bar);
+        assert!(bar_lines.iter().any(|line| {
+            line == "show_bar: preference=true visible=false owns_output=1"
+        }));
 
         let capabilities = serde_json::json!({
             "schema_version": 1,
@@ -4015,6 +4032,27 @@ fn health_output_lines(status: &serde_json::Value) -> Vec<String> {
                 "compositor: fps={fps:.1} input_p95_ms={input_p95:.2}"
             ));
         }
+    }
+
+    if let Some(bar) = status.get("show_bar").and_then(serde_json::Value::as_object) {
+        let preference = bar
+            .get("show_bar")
+            .and_then(serde_json::Value::as_bool)
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".into());
+        let visible = bar
+            .get("bar_visible")
+            .and_then(serde_json::Value::as_bool)
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".into());
+        let owns = bar
+            .get("owns_output_count")
+            .and_then(serde_json::Value::as_u64)
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".into());
+        lines.push(format!(
+            "show_bar: preference={preference} visible={visible} owns_output={owns}"
+        ));
     }
 
     if let Some(reasons) = status["health"]["reasons"].as_array() {

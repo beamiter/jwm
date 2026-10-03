@@ -236,6 +236,7 @@ and `get_visible_fullscreen` / `get_bar_visible` / `get_bar`.
 `jwm-tool msg` after-help examples include `get_vf` and `get_show_bar`.
 `jwm-tool capabilities` text lists `bar->monitor/bar` and occupancy
 query aliases of `get_show_bar`.
+`jwm-tool health` prints focused-bar occupancy when nested.
 README control examples include `get_show_bar` and `get_vf`, as does
 `tools/README.md`.
 `toggletag` on a fullscreen client emits `monitor/bar`, as does `tag`
