@@ -187,6 +187,7 @@ per-monitor show-bar snapshot is available for any output, not only the
 focused one (JSON keys `monitor` / `tag` / `show_bar` / `bar_visible` /
 `has_visible_fullscreen` / `owns_output_count` / optional `connector`).
 They also include `layout` (`lt_symbol`). They also include `gap`.
+They also include `mfact`.
 `setgaps` emits `monitor/bar`. Layout changes emit
 `monitor/bar` after `layout/set`. Client fullscreen flips emit `monitor/bar` with that
 snapshot. `togglebar` emits the same event after arrange (shared
