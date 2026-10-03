@@ -218,6 +218,7 @@ monorepo use independent Semantic Versions.
 - Showing a scratchpad emits `monitor/bar`.
 - `get_status.show_bar` rustdoc names `scratchpad_count`.
 - README occupancy JSON names `scratchpad_count`.
+- `tools/README.md` occupancy JSON names `scratchpad_count`.
 
 ### Changed
 
