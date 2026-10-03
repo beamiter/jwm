@@ -99,6 +99,7 @@ monorepo use independent Semantic Versions.
 - `jwm-tool health` occupancy line includes the current layout.
 - `get_show_bar` occupancy snapshots include `gap`.
 - `jwm-tool health` occupancy line includes the current gap.
+- `setgaps` emits `monitor/bar` after arrange.
 
 ### Changed
 

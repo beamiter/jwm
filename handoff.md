@@ -387,7 +387,16 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 71 | jwm-tool health occupancy 含 layout | ✓ |
 | 72 | get_show_bar occupancy 含 gap | ✓ |
 | 73 | jwm-tool health occupancy 含 gap | ✓ |
+| 74 | setgaps emit monitor/bar | ✓ |
 | … | 进行中 | |
+
+---
+
+## 2026-10-03：evolve8h wave 74 — setgaps emits monitor/bar
+
+选题 = evolve8h wave 74。`setgaps` 在 arrange 后发 occupancy，因为 snapshot 已含 gap。
+
+**验证**：`scripts/test.sh --lib --` 聚焦 evolve8h_wave_74。
 
 ---
 

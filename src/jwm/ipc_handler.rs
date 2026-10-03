@@ -11341,4 +11341,19 @@ mod tests {
         assert!(TOOL.contains("gap={gap}"));
         assert!(DOCS.contains("and `gap`"));
     }
+
+    #[test]
+    fn evolve8h_wave_74_setgaps_broadcasts_monitor_bar() {
+        const LAYOUT: &str = include_str!("layout/state.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        let setgaps = LAYOUT
+            .split_once("pub(crate) fn setgaps(")
+            .expect("setgaps")
+            .1
+            .split_once("fn exit_fullscreen_on_monitor(")
+            .expect("exit fullscreen follows")
+            .0;
+        assert!(setgaps.contains("broadcast_monitor_bar_ipc(backend, sel_mon_key)"));
+        assert!(DOCS.contains("`setgaps` emits `monitor/bar`"));
+    }
 }
