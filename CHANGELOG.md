@@ -287,6 +287,7 @@ monorepo use independent Semantic Versions.
 - Window-tabs docs name occupancy `demands_attention_count`.
 - `get_show_bar` occupancy snapshots include `fixed_count`.
 - `jwm-tool health` occupancy line includes fixed_count.
+- `get_status.show_bar` rustdoc names `fixed_count`.
 
 ### Changed
 
