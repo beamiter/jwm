@@ -232,7 +232,7 @@ beside feature flags for shell pickers, monitor lock, and the debug HUD.
 `get_status.show_bar` is the same occupancy snapshot as `get_show_bar`
 (including `get_visible_fullscreen` / `get_vf`).
 `jwm-tool msg` help lists `get_show_bar`, `get_vf`, `get_owns_output`
-and `get_visible_fullscreen`.
+and `get_visible_fullscreen` / `get_bar_visible`.
 README control examples include `get_show_bar`, as does `tools/README.md`.
 `toggletag` on a fullscreen client emits `monitor/bar`, as does `tag`
 and sticky.
