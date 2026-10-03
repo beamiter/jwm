@@ -13551,4 +13551,12 @@ mod tests {
         assert!(TOOLS.contains("It also includes `swallowed_count`."));
         assert!(DOCS.contains("`tools/README.md` also names `swallowed_count`"));
     }
+
+    #[test]
+    fn evolve8h_wave_252_window_tabs_occupancy_names_swallowed_count() {
+        const TABS: &str = include_str!("../../docs/window-tabs.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TABS.contains("`drag_float_count` / `swallowed_count`"));
+        assert!(DOCS.contains("Window-tabs docs also name `swallowed_count`"));
+    }
 }

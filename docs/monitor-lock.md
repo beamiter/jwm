@@ -387,6 +387,7 @@ Window-tabs docs also name `skip_taskbar_count`.
 Window-tabs docs also name `skip_pager_count`.
 Window-tabs docs also name `no_decorations_count`.
 Window-tabs docs also name `drag_float_count`.
+Window-tabs docs also name `swallowed_count`.
 `toggletag` on a fullscreen client emits `monitor/bar`, as does `tag`
 and sticky.
 `get_workspaces` / `get_tree` also report pip / maximized / above / below /

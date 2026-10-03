@@ -278,6 +278,7 @@ monorepo use independent Semantic Versions.
 - `get_status.show_bar` rustdoc names `swallowed_count`.
 - README occupancy JSON names `swallowed_count`.
 - `tools/README.md` occupancy JSON names `swallowed_count`.
+- Window-tabs docs name occupancy `swallowed_count`.
 
 ### Changed
 
