@@ -6139,6 +6139,13 @@ impl Jwm {
             self.broadcast_visible_window_states_on_monitor(backend, mon);
         }
     }
+
+    /// Occupancy snapshot for one output (`show_bar` / `bar_visible` /
+    /// `has_visible_fullscreen` / `owns_output_count`). Subscribers of
+    /// `monitor` / `monitor/bar` / `*` see F11 and togglebar without polling.
+    pub(crate) fn broadcast_monitor_bar_ipc(&mut self, backend: &dyn Backend, mk: MonitorKey) {
+        self.broadcast_ipc_event("monitor/bar", self.query_show_bar_for_monitor(backend, mk));
+    }
 }
 
 #[cfg(test)]
@@ -10699,8 +10706,7 @@ mod tests {
     fn evolve8h_wave_17_fullscreen_broadcasts_monitor_bar() {
         const STATE: &str = include_str!("window_state.rs");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(STATE.contains("\"monitor/bar\""));
-        assert!(STATE.contains("query_show_bar_for_monitor(backend, mon_key)"));
+        assert!(STATE.contains("broadcast_monitor_bar_ipc(backend, mon_key)"));
         assert!(DOCS.contains("`monitor/bar`"));
     }
 
@@ -10708,8 +10714,22 @@ mod tests {
     fn evolve8h_wave_18_togglebar_broadcasts_monitor_bar() {
         const NAV: &str = include_str!("navigation.rs");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(NAV.contains("\"monitor/bar\""));
-        assert!(NAV.contains("query_show_bar_for_monitor(backend, sel_mon_key)"));
+        assert!(NAV.contains("broadcast_monitor_bar_ipc(backend, sel_mon_key)"));
         assert!(DOCS.contains("`togglebar` emits the same event"));
+    }
+
+    #[test]
+    fn evolve8h_wave_19_broadcast_monitor_bar_helper() {
+        const SOURCE: &str = include_str!("ipc_handler.rs");
+        const STATE: &str = include_str!("window_state.rs");
+        const NAV: &str = include_str!("navigation.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(SOURCE.contains("fn broadcast_monitor_bar_ipc"));
+        assert!(STATE.contains("broadcast_monitor_bar_ipc(backend, mon_key)"));
+        assert!(NAV.contains("broadcast_monitor_bar_ipc(backend, sel_mon_key)"));
+        assert!(
+            DOCS.contains("shared `monitor/bar` helper")
+                || DOCS.contains("shared\n`monitor/bar` helper")
+        );
     }
 }

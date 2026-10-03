@@ -332,7 +332,16 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 16 | query_show_bar_for_monitor 任意输出 | ✓ |
 | 17 | F11 发射 monitor/bar 事件 | ✓ |
 | 18 | togglebar 发射 monitor/bar | ✓ |
+| 19 | broadcast_monitor_bar_ipc 共用辅助 | ✓ |
 | … | 进行中 | |
+
+---
+
+## 2026-10-03：evolve8h wave 19 — shared monitor/bar helper
+
+选题 = evolve8h wave 19。F11 与 togglebar 共用 `broadcast_monitor_bar_ipc`。
+
+**验证**：`scripts/test.sh --lib --` 聚焦 evolve8h_wave_19。
 
 ---
 

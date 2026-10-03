@@ -918,10 +918,7 @@ impl Jwm {
                     }
                 }
                 self.sync_secondary_bar_position(backend, mon_key);
-                self.broadcast_ipc_event(
-                    "monitor/bar",
-                    self.query_show_bar_for_monitor(backend, mon_key),
-                );
+                self.broadcast_monitor_bar_ipc(backend, mon_key);
             }
         }
         self.sync_floating_restore_property(backend, client_key);
