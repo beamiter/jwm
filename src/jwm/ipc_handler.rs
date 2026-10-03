@@ -14483,4 +14483,19 @@ mod tests {
         assert!(movestack.contains("broadcast_monitor_bar_ipc(backend, mon)"));
         assert!(DOCS.contains("`movestack` emits `monitor/bar`"));
     }
+
+    #[test]
+    fn evolve8h_wave_320_closed_placement_settle_broadcasts_monitor_bar() {
+        const SOURCE: &str = include_str!("closed_placement.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        let settle = SOURCE
+            .split_once("pub(crate) fn settle_remembered_placement_elsewhere(")
+            .expect("settle_remembered_placement_elsewhere")
+            .1
+            .split_once("pub(crate) fn remember_closed_placement(")
+            .expect("remember_closed_placement follows")
+            .0;
+        assert!(settle.contains("broadcast_monitor_bar_ipc(backend, mon_key)"));
+        assert!(DOCS.contains("Closed-placement settle emits `monitor/bar`"));
+    }
 }

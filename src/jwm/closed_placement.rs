@@ -1289,6 +1289,7 @@ impl Jwm {
             monitor.set_selected_client_for_tag_mask(tags, Some(client_key));
         }
         self.arrange(backend, Some(mon_key));
+        self.broadcast_monitor_bar_ipc(backend, mon_key);
         if self.do_not_disturb {
             debug!(
                 "[closed-placement] {win:?} landed away from the focused view; DND keeps it quiet"

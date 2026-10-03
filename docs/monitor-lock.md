@@ -238,6 +238,7 @@ Title status-bar identity flips emit `monitor/bar`.
 Config reload emits `monitor/bar`.
 Scrolling column focus emits `monitor/bar`.
 `movestack` emits `monitor/bar`.
+Closed-placement settle emits `monitor/bar`.
 Hiding a scratchpad emits `monitor/bar`.
 Showing a scratchpad emits `monitor/bar`.
 `_NET_WM_STATE_SKIP_TASKBAR` emits `monitor/bar`.
