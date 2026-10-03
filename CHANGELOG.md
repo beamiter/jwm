@@ -300,6 +300,7 @@ monorepo use independent Semantic Versions.
 - `get_show_bar` occupancy snapshots include `maximize_promoted_count`.
 - `jwm-tool health` occupancy line includes maximize_promoted_count.
 - `get_status.show_bar` rustdoc names `maximize_promoted_count`.
+- README occupancy JSON names `maximize_promoted_count`.
 
 ### Changed
 

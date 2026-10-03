@@ -352,6 +352,7 @@ README occupancy JSON also names `swallowed_count`.
 README occupancy JSON also names `demands_attention_count`.
 README occupancy JSON also names `fixed_count`.
 README occupancy JSON also names `strut_count`.
+README occupancy JSON also names `maximize_promoted_count`.
 `tools/README.md` also names `minimized_count`.
 `tools/README.md` also names `sticky_count`.
 `tools/README.md` also names `urgent_count`.
