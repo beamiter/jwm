@@ -1735,6 +1735,9 @@ impl WMController for Jwm {
                         self.reconcile_minimized_dock_eligibility(backend, ck, was_dock_eligible);
                     }
                     self.mark_bar_update_needed_if_visible(monitor_num);
+                    if let Some(mk) = monitor {
+                        self.broadcast_monitor_bar_ipc(backend, mk);
+                    }
                 }
                 NetWmState::SkipPager => {
                     if let Some(c) = self.state.clients.get_mut(ck) {

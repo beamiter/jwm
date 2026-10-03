@@ -13276,4 +13276,19 @@ mod tests {
         assert!(TABS.contains("`skip_taskbar_count` / `skip_pager_count`"));
         assert!(DOCS.contains("Window-tabs docs also name `skip_pager_count`"));
     }
+
+    #[test]
+    fn evolve8h_wave_231_skip_taskbar_ewmh_broadcasts_monitor_bar() {
+        const SOURCE: &str = include_str!("event_dispatcher.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        let skip = SOURCE
+            .split_once("NetWmState::SkipTaskbar => {")
+            .expect("SkipTaskbar")
+            .1
+            .split_once("NetWmState::SkipPager => {")
+            .expect("SkipPager follows")
+            .0;
+        assert!(skip.contains("broadcast_monitor_bar_ipc(backend, mk)"));
+        assert!(DOCS.contains("`_NET_WM_STATE_SKIP_TASKBAR` emits `monitor/bar`"));
+    }
 }
