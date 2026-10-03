@@ -13609,4 +13609,12 @@ mod tests {
         assert!(IPC.contains("Also `demands_attention_count`."));
         assert!(DOCS.contains("`get_status.show_bar` rustdoc also names `demands_attention_count`"));
     }
+
+    #[test]
+    fn evolve8h_wave_256_readme_occupancy_names_demands_attention_count() {
+        const README: &str = include_str!("../../README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(README.contains("It also includes `demands_attention_count`."));
+        assert!(DOCS.contains("README occupancy JSON also names `demands_attention_count`"));
+    }
 }
