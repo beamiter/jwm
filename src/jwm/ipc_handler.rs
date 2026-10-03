@@ -11475,4 +11475,12 @@ mod tests {
         assert!(query.contains("\"prev_tag\": prev_tag"));
         assert!(DOCS.contains("also include `prev_tag`"));
     }
+
+    #[test]
+    fn evolve8h_wave_83_health_occupancy_includes_prev_tag() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("prev_tag={prev_tag}"));
+        assert!(DOCS.contains("and `prev_tag`"));
+    }
 }
