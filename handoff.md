@@ -402,7 +402,16 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 86 | tools/README occupancy layout knobs | ✓ |
 | 87 | window-tabs occupancy layout knobs | ✓ |
 | 88 | get_show_bar occupancy 含 selected_id | ✓ |
+| 89 | jwm-tool health occupancy 含 selected | ✓ |
 | … | 进行中 | |
+
+---
+
+## 2026-10-03：evolve8h wave 89 — health occupancy includes selected
+
+选题 = evolve8h wave 89。health occupancy 行带上 selected_id。
+
+**验证**：`scripts/test.sh --lib --bins --` 聚焦 evolve8h_wave_89 insight_output。
 
 ---
 

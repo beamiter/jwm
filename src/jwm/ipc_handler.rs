@@ -11537,4 +11537,12 @@ mod tests {
         assert!(query.contains("\"selected_id\": selected_id"));
         assert!(DOCS.contains("also include `selected_id`"));
     }
+
+    #[test]
+    fn evolve8h_wave_89_health_occupancy_includes_selected_id() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("selected={selected}"));
+        assert!(DOCS.contains("and `selected_id`"));
+    }
 }
