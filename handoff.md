@@ -594,9 +594,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 278 | jwm-tool health occupancy 含 status_bar | ✓ |
 | 279 | get_status.show_bar rustdoc 含 status_bar_count | ✓ |
 | 280 | README occupancy 含 status_bar_count | ✓ |
+| 281 | tools/README occupancy 含 status_bar_count | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 281 — tools/README occupancy names status_bar_count
+
+选题 = evolve8h wave 281。tools/README occupancy JSON 带上 status_bar_count。
 
 ## 2026-10-03：evolve8h wave 280 — README occupancy names status_bar_count
 

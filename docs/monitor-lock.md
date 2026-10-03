@@ -378,6 +378,7 @@ README occupancy JSON also names `status_bar_count`.
 `tools/README.md` also names `fixed_count`.
 `tools/README.md` also names `strut_count`.
 `tools/README.md` also names `maximize_promoted_count`.
+`tools/README.md` also names `status_bar_count`.
 `tools/README.md` also names `floating_count`.
 `tools/README.md` also names `on_view_count`.
 `tools/README.md` also names `window_count`.

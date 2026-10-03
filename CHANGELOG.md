@@ -307,6 +307,7 @@ monorepo use independent Semantic Versions.
 - `jwm-tool health` occupancy line includes status_bar_count.
 - `get_status.show_bar` rustdoc names `status_bar_count`.
 - README occupancy JSON names `status_bar_count`.
+- `tools/README.md` occupancy JSON names `status_bar_count`.
 
 ### Changed
 

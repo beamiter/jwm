@@ -13914,4 +13914,12 @@ mod tests {
         assert!(README.contains("It also includes `status_bar_count`."));
         assert!(DOCS.contains("README occupancy JSON also names `status_bar_count`"));
     }
+
+    #[test]
+    fn evolve8h_wave_281_tools_readme_occupancy_names_status_bar_count() {
+        const TOOLS: &str = include_str!("../../tools/README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOLS.contains("It also includes `status_bar_count`."));
+        assert!(DOCS.contains("`tools/README.md` also names `status_bar_count`"));
+    }
 }
