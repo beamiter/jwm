@@ -262,6 +262,7 @@ monorepo use independent Semantic Versions.
 - `jwm-tool health` occupancy line includes no_decorations_count.
 - `get_status.show_bar` rustdoc names `no_decorations_count`.
 - README occupancy JSON names `no_decorations_count`.
+- `tools/README.md` occupancy JSON names `no_decorations_count`.
 
 ### Changed
 
