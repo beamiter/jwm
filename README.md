@@ -191,6 +191,7 @@ matching `get_status` nests.
 It also prints a compact `layout` line from `get_status.layout` (`get_lt`).
 It also prints a compact `tabs` line from `get_status.tabs` (`get_tab`).
 It also prints a compact `selected` line from `get_status.selected` (`get_sel`).
+It also prints a compact `struts` line from `get_status.struts` (`get_strut`).
 
 Malformed JSON, invalid argument types, overflow, empty spawn commands, unknown
 commands, and `{ "success": false }` responses produce a non-zero exit status,
