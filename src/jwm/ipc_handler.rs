@@ -12626,4 +12626,19 @@ mod tests {
         assert!(TOOL.contains("above={above}"));
         assert!(DOCS.contains("and `above_count`"));
     }
+
+    #[test]
+    fn evolve8h_wave_176_stacking_flags_broadcast_monitor_bar() {
+        const SOURCE: &str = include_str!("event_dispatcher.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        let stacking = SOURCE
+            .split_once("pub(crate) fn apply_external_stacking_request(")
+            .expect("apply_external_stacking_request")
+            .1
+            .split_once("fn requested_attention_state(")
+            .expect("attention follows")
+            .0;
+        assert!(stacking.contains("broadcast_monitor_bar_ipc(backend, mk)"));
+        assert!(DOCS.contains("Keep-above and keep-below changes emit `monitor/bar`"));
+    }
 }

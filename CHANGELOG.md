@@ -201,6 +201,7 @@ monorepo use independent Semantic Versions.
 - Window-tabs docs name occupancy `maximized_count`.
 - `get_show_bar` occupancy snapshots include `above_count`.
 - `jwm-tool health` occupancy line includes above_count.
+- Keep-above and keep-below changes emit `monitor/bar`.
 
 ### Changed
 

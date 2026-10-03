@@ -489,7 +489,16 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 173 | window-tabs occupancy 含 maximized_count | ✓ |
 | 174 | get_show_bar occupancy 含 above_count | ✓ |
 | 175 | jwm-tool health occupancy 含 above | ✓ |
+| 176 | above/below 切换 emit monitor/bar | ✓ |
 | … | 进行中 | |
+
+---
+
+## 2026-10-03：evolve8h wave 176 — stacking flags emit monitor/bar
+
+选题 = evolve8h wave 176。`apply_external_stacking_request` 在 above/below 变化时刷新 occupancy。
+
+**验证**：`scripts/test.sh --lib --` 聚焦 evolve8h_wave_176。
 
 ---
 

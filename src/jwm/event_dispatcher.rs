@@ -187,6 +187,9 @@ pub(crate) fn apply_external_stacking_request(
     }
     if previous != next {
         wm.broadcast_window_state_ipc(backend, client_key);
+        if let Some(mk) = monitor {
+            wm.broadcast_monitor_bar_ipc(backend, mk);
+        }
     }
     Ok(())
 }
