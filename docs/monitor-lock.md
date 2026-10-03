@@ -190,6 +190,7 @@ They also include `layout` (`lt_symbol`). They also include `gap`.
 They also include `mfact`.
 They also include `nmaster`.
 They also include `prev_tag`.
+They also include `selected_id`.
 `setnmaster` emits `monitor/bar`.
 Scrolling `setmfact` (column width) emits `monitor/bar`.
 `setmfact` emits `monitor/bar`.

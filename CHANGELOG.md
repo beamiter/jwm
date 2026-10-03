@@ -113,6 +113,7 @@ monorepo use independent Semantic Versions.
 - README names occupancy `tag` / `prev_tag` / `layout` / `gap` / `mfact` / `nmaster`.
 - `tools/README.md` names the same occupancy keys.
 - Window-tabs docs name occupancy `tag` / `layout` / `gap` / `mfact` / `nmaster`.
+- `get_show_bar` occupancy snapshots include `selected_id`.
 
 ### Changed
 
