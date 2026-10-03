@@ -704,6 +704,9 @@ impl Jwm {
                 self.last_stacking.remove(mon_key);
             }
             let _ = self.restack(backend, self.state.sel_mon);
+            if let Some(mon_key) = self.state.sel_mon {
+                self.broadcast_monitor_bar_ipc(backend, mon_key);
+            }
         }
         Ok(())
     }

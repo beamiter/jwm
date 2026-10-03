@@ -462,3 +462,4 @@ optional `stack_index`.
 `get_tree` also reports `closed_placement_count`.
 Overview confirm emits `monitor/bar`.
 Expose exit emits `monitor/bar`.
+Window-switcher commit emits `monitor/bar`.

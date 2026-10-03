@@ -14580,4 +14580,19 @@ mod tests {
         assert!(expose.contains("broadcast_monitor_bar_ipc(backend, mon_key)"));
         assert!(DOCS.contains("Expose exit emits `monitor/bar`"));
     }
+
+    #[test]
+    fn evolve8h_wave_328_window_switcher_commit_broadcasts_monitor_bar() {
+        const SOURCE: &str = include_str!("navigation.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        let commit = SOURCE
+            .split_once("pub(crate) fn commit_window_switcher(")
+            .expect("commit_window_switcher")
+            .1
+            .split_once("pub(crate) fn cancel_window_switcher(")
+            .expect("cancel_window_switcher follows")
+            .0;
+        assert!(commit.contains("broadcast_monitor_bar_ipc(backend, mon_key)"));
+        assert!(DOCS.contains("Window-switcher commit emits `monitor/bar`"));
+    }
 }
