@@ -1601,6 +1601,7 @@ impl WMController for Jwm {
                         );
                         self.apply_strut_reservations();
                         self.arrange(backend, None);
+                        self.broadcast_monitor_bar_all_monitors(backend);
                     }
                 } else {
                     // All edges zero — remove
@@ -1608,12 +1609,14 @@ impl WMController for Jwm {
                         info!("[strut] Removed external strut for {:?}", win);
                         self.apply_strut_reservations();
                         self.arrange(backend, None);
+                        self.broadcast_monitor_bar_all_monitors(backend);
                     }
                 }
             } else if self.external_struts.remove(&win).is_some() {
                 info!("[strut] Property deleted for {:?}", win);
                 self.apply_strut_reservations();
                 self.arrange(backend, None);
+                self.broadcast_monitor_bar_all_monitors(backend);
             }
         }
 

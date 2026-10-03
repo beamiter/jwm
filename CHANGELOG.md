@@ -322,6 +322,7 @@ monorepo use independent Semantic Versions.
 - Window-tabs docs name occupancy `prev_layout`.
 - Drag-snap drops emit `monitor/bar`.
 - `setcfact` emits `monitor/bar`.
+- External strut property updates emit `monitor/bar`.
 
 ### Changed
 

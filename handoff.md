@@ -608,9 +608,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 292 | window-tabs occupancy 含 prev_layout | ✓ |
 | 293 | drag-snap drop 发出 monitor/bar | ✓ |
 | 294 | setcfact 发出 monitor/bar | ✓ |
+| 295 | strut 属性更新发出 monitor/bar | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 295 — strut property updates broadcast monitor/bar
+
+选题 = evolve8h wave 295。`_NET_WM_STRUT(_PARTIAL)` 变化后发出 `monitor/bar`。
 
 ## 2026-10-03：evolve8h wave 294 — setcfact broadcasts monitor/bar
 

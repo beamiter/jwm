@@ -14089,4 +14089,23 @@ mod tests {
         assert!(setcfact.contains("broadcast_monitor_bar_ipc(backend, mon)"));
         assert!(DOCS.contains("`setcfact` emits `monitor/bar`"));
     }
+
+    #[test]
+    fn evolve8h_wave_295_strut_property_updates_broadcast_monitor_bar() {
+        const SOURCE: &str = include_str!("event_dispatcher.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        let strut = SOURCE
+            .split_once("if kind == PropertyKind::Strut {")
+            .expect("PropertyKind::Strut")
+            .1
+            .split_once("if let Some(client_key) = self.wintoclient(win) {")
+            .expect("managed property handling follows")
+            .0;
+        assert!(strut.contains("broadcast_monitor_bar_all_monitors(backend)"));
+        assert_eq!(
+            strut.matches("broadcast_monitor_bar_all_monitors(backend)").count(),
+            3
+        );
+        assert!(DOCS.contains("External strut property updates emit `monitor/bar`"));
+    }
 }
