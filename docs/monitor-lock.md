@@ -192,6 +192,7 @@ They also include `nmaster`.
 They also include `prev_tag`.
 They also include `selected_id`.
 `focusstack` emits `monitor/bar`.
+Scrolling in-column focus emits `monitor/bar`.
 `setnmaster` emits `monitor/bar`.
 Scrolling `setmfact` (column width) emits `monitor/bar`.
 `setmfact` emits `monitor/bar`.

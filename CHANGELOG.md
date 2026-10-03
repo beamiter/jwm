@@ -116,6 +116,7 @@ monorepo use independent Semantic Versions.
 - `get_show_bar` occupancy snapshots include `selected_id`.
 - `jwm-tool health` occupancy line includes selected_id.
 - `focusstack` emits `monitor/bar` after the selection changes.
+- Scrolling in-column focus emits `monitor/bar` after arrange.
 
 ### Changed
 

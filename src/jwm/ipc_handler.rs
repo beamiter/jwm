@@ -11560,4 +11560,19 @@ mod tests {
         assert!(focusstack.contains("broadcast_monitor_bar_ipc(backend, mk)"));
         assert!(DOCS.contains("`focusstack` emits `monitor/bar`"));
     }
+
+    #[test]
+    fn evolve8h_wave_91_scrolling_focus_broadcasts_monitor_bar() {
+        const SCROLL: &str = include_str!("layout/scrolling.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        let focus = SCROLL
+            .split_once("fn scrolling_focus_window(")
+            .expect("scrolling_focus_window")
+            .1
+            .split_once("fn scrolling_column_width_rule_for_window(")
+            .expect("column width rule follows")
+            .0;
+        assert!(focus.contains("broadcast_monitor_bar_ipc(backend, mon_key)"));
+        assert!(DOCS.contains("in-column focus emits `monitor/bar`"));
+    }
 }

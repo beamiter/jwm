@@ -402,6 +402,7 @@ impl Jwm {
             // Column focus rearrange moves sibling geometries; focus() only
             // emits focus flips, so broadcast the new rects here.
             self.broadcast_visible_window_states_on_monitor(backend, mon_key);
+            self.broadcast_monitor_bar_ipc(backend, mon_key);
         }
         Ok(())
     }
