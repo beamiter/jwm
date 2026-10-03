@@ -11735,4 +11735,12 @@ mod tests {
         assert!(README.contains("`sel_tags`, `previous_tags`, and `active_tags`"));
         assert!(DOCS.contains("README occupancy JSON also names `sel_tags`"));
     }
+
+    #[test]
+    fn evolve8h_wave_106_tools_readme_occupancy_names_tagset_masks() {
+        const TOOLS: &str = include_str!("../../tools/README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOLS.contains("`sel_tags`, `previous_tags`, and `active_tags`"));
+        assert!(DOCS.contains("`tools/README.md` also names `sel_tags`"));
+    }
 }

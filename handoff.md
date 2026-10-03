@@ -419,7 +419,16 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 103 | jwm-tool health occupancy 含 active_tags | ✓ |
 | 104 | get_status.show_bar rustdoc 含 tagset masks | ✓ |
 | 105 | README occupancy 含 tagset masks | ✓ |
+| 106 | tools/README occupancy 含 tagset masks | ✓ |
 | … | 进行中 | |
+
+---
+
+## 2026-10-03：evolve8h wave 106 — tools README occupancy names tagset masks
+
+选题 = evolve8h wave 106。`tools/README.md` occupancy JSON 列出 tagset masks。
+
+**验证**：`scripts/test.sh --lib --` 聚焦 evolve8h_wave_106 evolve8h_wave_96。
 
 ---
 
