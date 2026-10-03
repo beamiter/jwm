@@ -13030,4 +13030,12 @@ mod tests {
         assert!(IPC.contains("Also `desktop_count`."));
         assert!(DOCS.contains("`get_status.show_bar` rustdoc also names `desktop_count`"));
     }
+
+    #[test]
+    fn evolve8h_wave_210_readme_occupancy_names_desktop_count() {
+        const README: &str = include_str!("../../README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(README.contains("It also includes `desktop_count`."));
+        assert!(DOCS.contains("README occupancy JSON also names `desktop_count`"));
+    }
 }
