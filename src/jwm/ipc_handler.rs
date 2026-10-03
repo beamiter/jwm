@@ -11711,4 +11711,12 @@ mod tests {
         assert!(query.contains("\"active_tags\": mon.tag_set[mon.sel_tags & 1]"));
         assert!(DOCS.contains("also include `active_tags`"));
     }
+
+    #[test]
+    fn evolve8h_wave_103_health_occupancy_includes_active_tags() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("active_tags={active_tags}"));
+        assert!(DOCS.contains("and `active_tags`"));
+    }
 }
