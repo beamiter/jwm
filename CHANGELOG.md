@@ -290,6 +290,7 @@ monorepo use independent Semantic Versions.
 - `get_status.show_bar` rustdoc names `fixed_count`.
 - README occupancy JSON names `fixed_count`.
 - `tools/README.md` occupancy JSON names `fixed_count`.
+- Window-tabs docs name occupancy `fixed_count`.
 
 ### Changed
 

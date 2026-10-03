@@ -13699,4 +13699,12 @@ mod tests {
         assert!(TOOLS.contains("It also includes `fixed_count`."));
         assert!(DOCS.contains("`tools/README.md` also names `fixed_count`"));
     }
+
+    #[test]
+    fn evolve8h_wave_264_window_tabs_occupancy_names_fixed_count() {
+        const TABS: &str = include_str!("../../docs/window-tabs.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TABS.contains("`demands_attention_count` / `fixed_count`"));
+        assert!(DOCS.contains("Window-tabs docs also name `fixed_count`"));
+    }
 }
