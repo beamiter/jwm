@@ -246,6 +246,7 @@ monorepo use independent Semantic Versions.
 - Window-tabs docs name occupancy `never_focus_count`.
 - `get_show_bar` occupancy snapshots include `skip_taskbar_count`.
 - `jwm-tool health` occupancy line includes skip_taskbar_count.
+- `get_status.show_bar` rustdoc names `skip_taskbar_count`.
 
 ### Changed
 

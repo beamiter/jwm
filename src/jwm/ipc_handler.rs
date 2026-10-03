@@ -13170,4 +13170,12 @@ mod tests {
         assert!(TOOL.contains("skip_taskbar={skip_taskbar}"));
         assert!(DOCS.contains("and `skip_taskbar_count`"));
     }
+
+    #[test]
+    fn evolve8h_wave_221_get_status_show_bar_rustdoc_names_skip_taskbar_count() {
+        const IPC: &str = include_str!("../ipc.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(IPC.contains("Also `skip_taskbar_count`."));
+        assert!(DOCS.contains("`get_status.show_bar` rustdoc also names `skip_taskbar_count`"));
+    }
 }
