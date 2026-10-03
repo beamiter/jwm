@@ -224,6 +224,7 @@ monorepo use independent Semantic Versions.
 - `jwm-tool health` occupancy line includes tabbed_count.
 - `get_status.show_bar` rustdoc names `tabbed_count`.
 - README occupancy JSON names `tabbed_count`.
+- `tools/README.md` occupancy JSON names `tabbed_count`.
 
 ### Changed
 
