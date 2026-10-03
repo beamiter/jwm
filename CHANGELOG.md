@@ -148,6 +148,7 @@ monorepo use independent Semantic Versions.
 - README occupancy JSON names `on_view_count`.
 - `tools/README.md` occupancy JSON names `on_view_count`.
 - Window-tabs docs name occupancy `on_view_count`.
+- `get_show_bar` occupancy snapshots include `floating_count`.
 
 ### Changed
 
