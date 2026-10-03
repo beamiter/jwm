@@ -179,7 +179,7 @@ convenience queries `get_layout`
 (layout symbol + `m_fact` + `n_master` + `gap`), `get_gaps`, `get_mfact`,
 `get_nmaster`, `get_show_bar`, and `get_prev_layout` return the selected
 monitor's live values (optional `connector` when known). `get_show_bar`
-also reports `bar_visible`. `get_cfact` /
+also reports `bar_visible` and `has_visible_fullscreen`. `get_cfact` /
 `get_selected` / `get_focused_window` twin the focused client. IPC `setgaps` /
 `set_gaps`, `setmfact` / `set_mfact`, and `setcfact` / `set_cfact` adjust the
 focused monitor or client. Each monitor also reports `tab_bar_reserved` (pixels
