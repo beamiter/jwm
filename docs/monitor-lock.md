@@ -496,3 +496,4 @@ Window-tabs docs name `get_closed_placement` / `get_cp`.
 `jwm-tool health` prints compact `prev_layout` beside occupancy.
 README health text names compact `prev_layout`.
 `tools/README.md` health text names compact `prev_layout`.
+`jwm-tool capabilities` text lists `get_pl -> get_prev_layout`.

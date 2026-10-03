@@ -4417,6 +4417,7 @@ fn capabilities_output_lines(capabilities: &serde_json::Value) -> Vec<String> {
         "aliases: bar->monitor/bar, workspace->tag".to_string(),
         "query aliases: get_bar,get_bar_visible,get_owns_output,get_vf,get_visible_fullscreen -> get_show_bar".to_string(),
         "query aliases: get_cp -> get_closed_placement".to_string(),
+        "query aliases: get_pl -> get_prev_layout".to_string(),
     ]
 }
 
