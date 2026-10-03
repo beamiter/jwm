@@ -10793,4 +10793,20 @@ mod tests {
         assert!(minimize.contains("broadcast_monitor_bar_ipc(backend, mon_key)"));
         assert!(DOCS.contains("minimizing a\nfullscreen client") || DOCS.contains("minimizing a fullscreen client"));
     }
+
+    #[test]
+    fn evolve8h_wave_24_unmanage_fullscreen_broadcasts_monitor_bar() {
+        const CLIENT: &str = include_str!("client.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        let unmanage = CLIENT
+            .split_once("pub(crate) fn unmanage(")
+            .expect("unmanage")
+            .1
+            .split_once("pub(crate) fn is_popup_like(")
+            .expect("is_popup_like follows")
+            .0;
+        assert!(unmanage.contains("c.state.is_fullscreen"));
+        assert!(unmanage.contains("broadcast_monitor_bar_ipc(backend, mon_key)"));
+        assert!(DOCS.contains("`window/close`"));
+    }
 }

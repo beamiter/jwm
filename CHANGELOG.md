@@ -42,6 +42,7 @@ monorepo use independent Semantic Versions.
 - Fullscreen layout enter/leave emits `monitor/bar` after the bar window
   is parked or restored.
 - Minimizing or restoring a fullscreen client emits `monitor/bar`.
+- Unmanaging a fullscreen client emits `monitor/bar` after `window/close`.
 
 ### Changed
 

@@ -1666,12 +1666,15 @@ impl Jwm {
         self.remove_strut_on_unmanage(backend, win);
 
         // Broadcast window/close event before removing the client
-        let close_event_data = self
-            .state
-            .clients
-            .get(client_key)
-            .map(|c| (c.win.raw(), c.name.clone()));
-        if let Some((id, name)) = close_event_data {
+        let close_event_data = self.state.clients.get(client_key).map(|c| {
+            (
+                c.win.raw(),
+                c.name.clone(),
+                c.mon,
+                c.state.is_fullscreen,
+            )
+        });
+        if let Some((id, name, _, _)) = &close_event_data {
             self.broadcast_ipc_event(
                 "window/close",
                 serde_json::json!({
@@ -1681,6 +1684,9 @@ impl Jwm {
         }
 
         self.unmanage_regular_client(backend, client_key, destroyed)?;
+        if let Some((_, _, Some(mon_key), true)) = close_event_data {
+            self.broadcast_monitor_bar_ipc(backend, mon_key);
+        }
         Ok(())
     }
 

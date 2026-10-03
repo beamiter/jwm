@@ -337,7 +337,16 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 21 | toggleview 发射 monitor/bar | ✓ |
 | 22 | 全屏布局切换发射 monitor/bar | ✓ |
 | 23 | 最小化全屏客户发射 monitor/bar | ✓ |
+| 24 | 关闭全屏客户发射 monitor/bar | ✓ |
 | … | 进行中 | |
+
+---
+
+## 2026-10-03：evolve8h wave 24 — unmanage fullscreen emits monitor/bar
+
+选题 = evolve8h wave 24。关闭占住输出的全屏客户后广播 occupancy。
+
+**验证**：`scripts/test.sh --lib --` 聚焦 evolve8h_wave_24。
 
 ---
 
