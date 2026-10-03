@@ -125,6 +125,7 @@ monorepo use independent Semantic Versions.
 - Window-tabs docs name occupancy `selected_id`.
 - `get_show_bar` occupancy snapshots include `sel_tags`.
 - `get_show_bar` occupancy snapshots include `previous_tags`.
+- `jwm-tool health` occupancy line includes sel_tags.
 
 ### Changed
 
