@@ -344,6 +344,7 @@ monorepo use independent Semantic Versions.
 - Output geometry changes emit `monitor/bar`.
 - WM_CLASS status-bar identity flips emit `monitor/bar`.
 - Title status-bar identity flips emit `monitor/bar`.
+- Config reload emits `monitor/bar`.
 
 ### Changed
 

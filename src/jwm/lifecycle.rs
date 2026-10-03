@@ -1585,6 +1585,7 @@ impl Jwm {
         for mk in &mon_keys {
             self.arrange(backend, Some(*mk));
         }
+        self.broadcast_monitor_bar_all_monitors(backend);
         // The tag count may have moved, and the sync above may have moved a
         // monitor's view with it. The compositor's per-tag state (the
         // ext-workspace groups taskbars bind, per-tag wallpapers) and the

@@ -14438,4 +14438,19 @@ mod tests {
         assert!(title.contains("broadcast_monitor_bar_ipc(backend, mk)"));
         assert!(DOCS.contains("Title status-bar identity flips emit `monitor/bar`"));
     }
+
+    #[test]
+    fn evolve8h_wave_317_config_reload_broadcasts_monitor_bar() {
+        const SOURCE: &str = include_str!("lifecycle.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        let apply = SOURCE
+            .split_once("pub(crate) fn apply_config_changes(")
+            .expect("apply_config_changes")
+            .1
+            .split_once("fn apply_config_changes_resizes_pertag_when_tags_length_moves(")
+            .expect("pertag resize test follows")
+            .0;
+        assert!(apply.contains("broadcast_monitor_bar_all_monitors(backend)"));
+        assert!(DOCS.contains("Config reload emits `monitor/bar`"));
+    }
 }
