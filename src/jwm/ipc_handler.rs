@@ -12295,4 +12295,12 @@ mod tests {
         assert!(TOOLS.contains("It also includes `urgent_count`."));
         assert!(DOCS.contains("`tools/README.md` also names `urgent_count`"));
     }
+
+    #[test]
+    fn evolve8h_wave_151_window_tabs_occupancy_names_urgent_count() {
+        const TABS: &str = include_str!("../../docs/window-tabs.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TABS.contains("`sticky_count` / `urgent_count`"));
+        assert!(DOCS.contains("Window-tabs docs also name `urgent_count`"));
+    }
 }
