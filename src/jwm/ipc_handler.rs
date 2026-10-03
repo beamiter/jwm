@@ -12537,4 +12537,19 @@ mod tests {
         assert!(unmax.contains("broadcast_monitor_bar_ipc(backend, mk)"));
         assert!(DOCS.contains("Unmaximize-in-place emits `monitor/bar`"));
     }
+
+    #[test]
+    fn evolve8h_wave_169_reinstate_maximize_broadcasts_monitor_bar() {
+        const SOURCE: &str = include_str!("maximize.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        let reinstate = SOURCE
+            .split_once("pub(crate) fn reinstate_maximize_snapshot(")
+            .expect("reinstate_maximize_snapshot")
+            .1
+            .split_once("pub(crate) fn refit_maximized_clients(")
+            .expect("refit follows")
+            .0;
+        assert!(reinstate.contains("broadcast_monitor_bar_ipc(backend, mk)"));
+        assert!(DOCS.contains("Reinstating a maximize snapshot emits `monitor/bar`"));
+    }
 }

@@ -205,6 +205,7 @@ They also include `pip_count`.
 They also include `maximized_count`.
 Toggling maximize emits `monitor/bar`.
 Unmaximize-in-place emits `monitor/bar`.
+Reinstating a maximize snapshot emits `monitor/bar`.
 Toggling picture-in-picture emits `monitor/bar`.
 Urgency changes emit `monitor/bar`.
 Demands-attention changes emit `monitor/bar`.

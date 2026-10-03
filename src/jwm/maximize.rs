@@ -190,6 +190,9 @@ impl Jwm {
         })?;
         self.sync_maximize_restore_property(backend, client_key);
         self.broadcast_window_state_ipc(backend, client_key);
+        if let Some(mk) = self.state.clients.get(client_key).and_then(|c| c.mon) {
+            self.broadcast_monitor_bar_ipc(backend, mk);
+        }
         Ok(())
     }
 
