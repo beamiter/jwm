@@ -382,7 +382,16 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 66 | jwm-tool health occupancy 含 monitor | ✓ |
 | 67 | get_show_bar occupancy 含 tag | ✓ |
 | 68 | jwm-tool health occupancy 含 tag | ✓ |
+| 69 | get_show_bar occupancy 含 layout | ✓ |
 | … | 进行中 | |
+
+---
+
+## 2026-10-03：evolve8h wave 69 — occupancy snapshot includes layout
+
+选题 = evolve8h wave 69。`get_show_bar` / `monitor/bar` 带上当前 `lt_symbol`。
+
+**验证**：`scripts/test.sh --lib --` 聚焦 evolve8h_wave_69。
 
 ---
 

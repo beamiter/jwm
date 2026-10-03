@@ -4668,6 +4668,7 @@ impl Jwm {
     /// Object keys: `monitor`, `show_bar`, `bar_visible`,
     /// `has_visible_fullscreen`, `owns_output_count`, optional `connector`.
     /// Also `tag` (`Pertag.cur_tag`) because `show_bar` is per-tag.
+    /// Also `layout` (`WMMonitor.lt_symbol`).
     pub(crate) fn query_show_bar_for_monitor(
         &self,
         backend: &dyn Backend,
@@ -4677,6 +4678,7 @@ impl Jwm {
             return serde_json::json!({
                 "monitor": serde_json::Value::Null,
                 "tag": serde_json::Value::Null,
+                "layout": serde_json::Value::Null,
                 "show_bar": serde_json::Value::Null,
                 "bar_visible": serde_json::Value::Null,
                 "has_visible_fullscreen": serde_json::Value::Null,
@@ -4692,6 +4694,7 @@ impl Jwm {
         let mut value = serde_json::json!({
             "monitor": mon.num,
             "tag": tag,
+            "layout": mon.lt_symbol,
             "show_bar": show_bar,
             "bar_visible": self.monitor_shows_status_bar(mk),
             "has_visible_fullscreen": self.monitor_has_visible_fullscreen(mk),
@@ -4715,6 +4718,7 @@ impl Jwm {
             None => serde_json::json!({
                 "monitor": serde_json::Value::Null,
                 "tag": serde_json::Value::Null,
+                "layout": serde_json::Value::Null,
                 "show_bar": serde_json::Value::Null,
                 "bar_visible": serde_json::Value::Null,
                 "has_visible_fullscreen": serde_json::Value::Null,
@@ -11271,5 +11275,20 @@ mod tests {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
         assert!(TOOL.contains("tag={tag}"));
         assert!(DOCS.contains("and the current `tag`"));
+    }
+
+    #[test]
+    fn evolve8h_wave_69_occupancy_snapshot_includes_layout() {
+        const SOURCE: &str = include_str!("ipc_handler.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        let query = SOURCE
+            .split_once("fn query_show_bar_for_monitor(")
+            .expect("query_show_bar_for_monitor")
+            .1
+            .split_once("fn query_focused_show_bar(")
+            .expect("focused follows")
+            .0;
+        assert!(query.contains("\"layout\": mon.lt_symbol"));
+        assert!(DOCS.contains("also include `layout`"));
     }
 }
