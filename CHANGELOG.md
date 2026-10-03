@@ -198,6 +198,7 @@ monorepo use independent Semantic Versions.
 - `get_status.show_bar` rustdoc names `maximized_count`.
 - README occupancy JSON names `maximized_count`.
 - `tools/README.md` occupancy JSON names `maximized_count`.
+- Window-tabs docs name occupancy `maximized_count`.
 
 ### Changed
 
