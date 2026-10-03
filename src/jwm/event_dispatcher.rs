@@ -2103,6 +2103,9 @@ impl Jwm {
         if previous_urgent != urgent {
             self.broadcast_window_state_ipc(backend, client_key);
         }
+        if let Some(mk) = monitor {
+            self.broadcast_monitor_bar_ipc(backend, mk);
+        }
     }
 }
 

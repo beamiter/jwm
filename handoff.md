@@ -460,7 +460,16 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 144 | get_show_bar occupancy 含 urgent_count | ✓ |
 | 145 | jwm-tool health occupancy 含 urgent | ✓ |
 | 146 | urgency 变化 emit monitor/bar | ✓ |
+| 147 | demands-attention 变化 emit monitor/bar | ✓ |
 | … | 进行中 | |
+
+---
+
+## 2026-10-03：evolve8h wave 147 — demands-attention changes emit monitor/bar
+
+选题 = evolve8h wave 147。`set_client_demands_attention` 刷新 occupancy，因为 `urgent_count` 把 EWMH attention 算进去。
+
+**验证**：`scripts/test.sh --lib --` 聚焦 evolve8h_wave_147。
 
 ---
 

@@ -172,6 +172,7 @@ monorepo use independent Semantic Versions.
 - `get_show_bar` occupancy snapshots include `urgent_count`.
 - `jwm-tool health` occupancy line includes urgent_count.
 - Urgency changes emit `monitor/bar`.
+- Demands-attention changes emit `monitor/bar`.
 
 ### Changed
 

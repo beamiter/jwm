@@ -12256,4 +12256,19 @@ mod tests {
         assert!(urgent.contains("broadcast_monitor_bar_ipc(backend, mk)"));
         assert!(DOCS.contains("Urgency changes emit `monitor/bar`"));
     }
+
+    #[test]
+    fn evolve8h_wave_147_demands_attention_broadcasts_monitor_bar() {
+        const SOURCE: &str = include_str!("event_dispatcher.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        let attention = SOURCE
+            .split_once("pub(super) fn set_client_demands_attention(")
+            .expect("set_client_demands_attention")
+            .1
+            .split_once("mod tests {")
+            .expect("tests follow")
+            .0;
+        assert!(attention.contains("broadcast_monitor_bar_ipc(backend, mk)"));
+        assert!(DOCS.contains("Demands-attention changes emit `monitor/bar`"));
+    }
 }
