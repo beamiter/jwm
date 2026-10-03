@@ -203,6 +203,7 @@ They also include `urgent_count`.
 They also include `fullscreen_count`.
 They also include `pip_count`.
 They also include `maximized_count`.
+They also include `above_count`.
 Toggling maximize emits `monitor/bar`.
 Unmaximize-in-place emits `monitor/bar`.
 Reinstating a maximize snapshot emits `monitor/bar`.

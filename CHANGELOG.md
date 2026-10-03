@@ -199,6 +199,7 @@ monorepo use independent Semantic Versions.
 - README occupancy JSON names `maximized_count`.
 - `tools/README.md` occupancy JSON names `maximized_count`.
 - Window-tabs docs name occupancy `maximized_count`.
+- `get_show_bar` occupancy snapshots include `above_count`.
 
 ### Changed
 
