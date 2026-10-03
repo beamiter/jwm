@@ -490,3 +490,4 @@ Cube-effects docs name `monitor/bar` on overview confirm.
 `jwm-tool health` prints compact `closed_placement` beside occupancy.
 `get_status.closed_placement` rustdoc names `get_closed_placement` / `get_cp`.
 Minimized-dock docs name `monitor/bar` on restore.
+README health text names compact `closed_placement`.
