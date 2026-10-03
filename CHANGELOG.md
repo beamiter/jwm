@@ -412,6 +412,7 @@ monorepo use independent Semantic Versions.
 - `tools/README.md` health text names compact `layout`.
 - `jwm-tool health` prints compact `tabs` beside occupancy.
 - README health text names compact `tabs`.
+- `tools/README.md` health text names compact `tabs`.
 
 ### Changed
 
