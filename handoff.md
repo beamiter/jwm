@@ -516,7 +516,16 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 200 | window-tabs occupancy 含 tabbed_count | ✓ |
 | 201 | get_show_bar occupancy 含 dock_count | ✓ |
 | 202 | jwm-tool health occupancy 含 dock | ✓ |
+| 203 | get_status.show_bar rustdoc 含 dock_count | ✓ |
 | … | 进行中 | |
+
+---
+
+## 2026-10-03：evolve8h wave 203 — get_status.show_bar rustdoc names dock_count
+
+选题 = evolve8h wave 203。`RuntimeStatusV1.show_bar` rustdoc 点名 occupancy 的 `dock_count`。
+
+**验证**：`scripts/test.sh --lib --` 聚焦 evolve8h_wave_203 evolve8h_wave_197。
 
 ---
 

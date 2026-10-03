@@ -228,6 +228,7 @@ monorepo use independent Semantic Versions.
 - Window-tabs docs name occupancy `tabbed_count`.
 - `get_show_bar` occupancy snapshots include `dock_count`.
 - `jwm-tool health` occupancy line includes dock_count.
+- `get_status.show_bar` rustdoc names `dock_count`.
 
 ### Changed
 

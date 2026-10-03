@@ -12948,4 +12948,12 @@ mod tests {
         assert!(TOOL.contains("dock={dock}"));
         assert!(DOCS.contains("and `dock_count`"));
     }
+
+    #[test]
+    fn evolve8h_wave_203_get_status_show_bar_rustdoc_names_dock_count() {
+        const IPC: &str = include_str!("../ipc.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(IPC.contains("Also `dock_count`."));
+        assert!(DOCS.contains("`get_status.show_bar` rustdoc also names `dock_count`"));
+    }
 }
