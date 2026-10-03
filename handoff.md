@@ -501,7 +501,16 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 185 | tools/README occupancy 含 below_count | ✓ |
 | 186 | window-tabs occupancy 含 below_count | ✓ |
 | 187 | get_show_bar occupancy 含 scratchpad_count | ✓ |
+| 188 | jwm-tool health occupancy 含 scratchpad | ✓ |
 | … | 进行中 | |
+
+---
+
+## 2026-10-03：evolve8h wave 188 — health occupancy includes scratchpad_count
+
+选题 = evolve8h wave 188。health occupancy 行带上 scratchpad_count。
+
+**验证**：`scripts/test.sh --lib --bins --` 聚焦 evolve8h_wave_188 insight_output。
 
 ---
 

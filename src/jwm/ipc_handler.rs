@@ -12776,4 +12776,12 @@ mod tests {
         assert!(query.contains("self.scratchpads.values()"));
         assert!(DOCS.contains("also include `scratchpad_count`"));
     }
+
+    #[test]
+    fn evolve8h_wave_188_health_occupancy_includes_scratchpad_count() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("scratchpad={scratchpad}"));
+        assert!(DOCS.contains("and `scratchpad_count`"));
+    }
 }
