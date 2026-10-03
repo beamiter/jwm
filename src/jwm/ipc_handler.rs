@@ -14189,4 +14189,12 @@ mod tests {
         assert!(IPC.contains("Also `closed_placement_count`."));
         assert!(DOCS.contains("`get_status.show_bar` rustdoc also names `closed_placement_count`"));
     }
+
+    #[test]
+    fn evolve8h_wave_301_readme_occupancy_names_closed_placement_count() {
+        const README: &str = include_str!("../../README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(README.contains("It also includes `closed_placement_count`."));
+        assert!(DOCS.contains("README occupancy JSON also names `closed_placement_count`"));
+    }
 }

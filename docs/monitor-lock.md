@@ -370,6 +370,7 @@ README occupancy JSON also names `strut_count`.
 README occupancy JSON also names `maximize_promoted_count`.
 README occupancy JSON also names `status_bar_count`.
 README occupancy JSON also names `prev_layout`.
+README occupancy JSON also names `closed_placement_count`.
 `tools/README.md` also names `minimized_count`.
 `tools/README.md` also names `sticky_count`.
 `tools/README.md` also names `urgent_count`.
