@@ -13667,4 +13667,12 @@ mod tests {
         assert!(query.contains("c.state.is_fixed"));
         assert!(DOCS.contains("also include `fixed_count`"));
     }
+
+    #[test]
+    fn evolve8h_wave_260_health_occupancy_includes_fixed_count() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("fixed={fixed}"));
+        assert!(DOCS.contains("and `fixed_count`"));
+    }
 }

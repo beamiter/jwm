@@ -286,6 +286,7 @@ monorepo use independent Semantic Versions.
 - `tools/README.md` occupancy JSON names `demands_attention_count`.
 - Window-tabs docs name occupancy `demands_attention_count`.
 - `get_show_bar` occupancy snapshots include `fixed_count`.
+- `jwm-tool health` occupancy line includes fixed_count.
 
 ### Changed
 
