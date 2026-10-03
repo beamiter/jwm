@@ -492,7 +492,16 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 176 | above/below 切换 emit monitor/bar | ✓ |
 | 177 | get_status.show_bar rustdoc 含 above_count | ✓ |
 | 178 | README occupancy 含 above_count | ✓ |
+| 179 | tools/README occupancy 含 above_count | ✓ |
 | … | 进行中 | |
+
+---
+
+## 2026-10-03：evolve8h wave 179 — tools/README occupancy names above_count
+
+选题 = evolve8h wave 179。`tools/README.md` occupancy JSON 点名 `above_count`。
+
+**验证**：`scripts/test.sh --lib --` 聚焦 evolve8h_wave_179 evolve8h_wave_172。
 
 ---
 

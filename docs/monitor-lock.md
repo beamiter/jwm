@@ -308,6 +308,7 @@ README occupancy JSON also names `above_count`.
 `tools/README.md` also names `fullscreen_count`.
 `tools/README.md` also names `pip_count`.
 `tools/README.md` also names `maximized_count`.
+`tools/README.md` also names `above_count`.
 `tools/README.md` also names `floating_count`.
 `tools/README.md` also names `on_view_count`.
 `tools/README.md` also names `window_count`.

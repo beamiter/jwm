@@ -204,6 +204,7 @@ monorepo use independent Semantic Versions.
 - Keep-above and keep-below changes emit `monitor/bar`.
 - `get_status.show_bar` rustdoc names `above_count`.
 - README occupancy JSON names `above_count`.
+- `tools/README.md` occupancy JSON names `above_count`.
 
 ### Changed
 
