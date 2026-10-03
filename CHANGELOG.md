@@ -312,6 +312,7 @@ monorepo use independent Semantic Versions.
 - Cancelling a pointer drag emits `monitor/bar`.
 - Size-hint fixed-state changes emit `monitor/bar`.
 - Window-type dock/desktop updates emit `monitor/bar`.
+- WM_HINTS never-focus changes emit `monitor/bar`.
 
 ### Changed
 

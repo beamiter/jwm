@@ -1622,8 +1622,8 @@ impl Jwm {
     }
 
     pub(super) fn updatewmhints(&mut self, backend: &mut dyn Backend, client_key: ClientKey) {
-        let win = match self.state.clients.get(client_key) {
-            Some(c) => c.win,
+        let (win, previous_never_focus, monitor) = match self.state.clients.get(client_key) {
+            Some(c) => (c.win, c.state.never_focus, c.mon),
             None => return,
         };
         if let Some(hints) = backend.property_ops().get_wm_hints(win) {
@@ -1656,6 +1656,17 @@ impl Jwm {
             } else {
                 if let Some(c) = self.state.clients.get_mut(client_key) {
                     c.state.never_focus = false;
+                }
+            }
+            let never_focus = self
+                .state
+                .clients
+                .get(client_key)
+                .map(|client| client.state.never_focus)
+                .unwrap_or(previous_never_focus);
+            if previous_never_focus != never_focus {
+                if let Some(mk) = monitor {
+                    self.broadcast_monitor_bar_ipc(backend, mk);
                 }
             }
         }

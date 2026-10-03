@@ -599,9 +599,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 283 | 取消指针拖动发出 monitor/bar | ✓ |
 | 284 | size-hint fixed 变化发出 monitor/bar | ✓ |
 | 285 | window type dock/desktop 发出 monitor/bar | ✓ |
+| 286 | WM_HINTS never_focus 发出 monitor/bar | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 286 — WM_HINTS never-focus changes broadcast monitor/bar
+
+选题 = evolve8h wave 286。`WM_HINTS` input 位导致 never_focus 变化时发出 `monitor/bar`。
 
 ## 2026-10-03：evolve8h wave 285 — window-type dock/desktop updates broadcast monitor/bar
 

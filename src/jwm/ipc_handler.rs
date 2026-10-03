@@ -13976,4 +13976,20 @@ mod tests {
         assert!(update.contains("broadcast_monitor_bar_ipc(backend, mk)"));
         assert!(DOCS.contains("Window-type dock/desktop updates emit `monitor/bar`"));
     }
+
+    #[test]
+    fn evolve8h_wave_286_wm_hints_never_focus_broadcasts_monitor_bar() {
+        const SOURCE: &str = include_str!("window_state.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        let update = SOURCE
+            .split_once("pub(super) fn updatewmhints(")
+            .expect("updatewmhints")
+            .1
+            .split_once("pub(crate) fn set_client_minimized(")
+            .expect("set_client_minimized follows")
+            .0;
+        assert!(update.contains("broadcast_monitor_bar_ipc(backend, mk)"));
+        assert!(update.contains("previous_never_focus != never_focus"));
+        assert!(DOCS.contains("WM_HINTS never-focus changes emit `monitor/bar`"));
+    }
 }
