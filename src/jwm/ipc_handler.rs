@@ -15311,4 +15311,13 @@ mod tests {
         assert!(TOOL.contains("\"focused: id=77\""));
         assert!(DOCS.contains("`jwm-tool health` prints compact `focused` beside occupancy"));
     }
+
+    #[test]
+    fn evolve8h_wave_398_readme_health_names_compact_focused() {
+        const README: &str = include_str!("../../README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(README.contains("compact `focused` line"));
+        assert!(README.contains("get_status.focused"));
+        assert!(DOCS.contains("README health text names compact `focused`"));
+    }
 }
