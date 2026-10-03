@@ -627,6 +627,9 @@ impl Jwm {
                 }
             }
         }
+        if let Some(mk) = self.state.clients.get(drag_key).and_then(|c| c.mon) {
+            self.broadcast_monitor_bar_ipc(backend, mk);
+        }
     }
 
     /// Defensive: drag activation already unmaximizes in place, but a drop

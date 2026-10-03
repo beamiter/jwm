@@ -231,6 +231,7 @@ Cancelling a pointer drag emits `monitor/bar`.
 Size-hint fixed-state changes emit `monitor/bar`.
 Window-type dock/desktop updates emit `monitor/bar`.
 WM_HINTS never-focus changes emit `monitor/bar`.
+Drag-snap drops emit `monitor/bar`.
 Keep-above and keep-below changes emit `monitor/bar`.
 Toggling maximize emits `monitor/bar`.
 Unmaximize-in-place emits `monitor/bar`.

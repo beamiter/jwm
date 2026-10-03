@@ -320,6 +320,7 @@ monorepo use independent Semantic Versions.
 - README occupancy JSON names `prev_layout`.
 - `tools/README.md` occupancy JSON names `prev_layout`.
 - Window-tabs docs name occupancy `prev_layout`.
+- Drag-snap drops emit `monitor/bar`.
 
 ### Changed
 

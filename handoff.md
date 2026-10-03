@@ -606,9 +606,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 290 | README occupancy 含 prev_layout | ✓ |
 | 291 | tools/README occupancy 含 prev_layout | ✓ |
 | 292 | window-tabs occupancy 含 prev_layout | ✓ |
+| 293 | drag-snap drop 发出 monitor/bar | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 293 — drag-snap drops broadcast monitor/bar
+
+选题 = evolve8h wave 293。拖放吸附（float/maximize/attach）后发出 `monitor/bar`。
 
 ## 2026-10-03：evolve8h wave 292 — window-tabs occupancy names prev_layout
 

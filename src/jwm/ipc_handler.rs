@@ -14059,4 +14059,19 @@ mod tests {
         assert!(TABS.contains("`status_bar_count` / `prev_layout`"));
         assert!(DOCS.contains("Window-tabs docs also name `prev_layout`"));
     }
+
+    #[test]
+    fn evolve8h_wave_293_drag_snap_broadcasts_monitor_bar() {
+        const SOURCE: &str = include_str!("layout/drag_attach.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        let snap = SOURCE
+            .split_once("pub(crate) fn apply_drag_snap(")
+            .expect("apply_drag_snap")
+            .1
+            .split_once("fn unmaximize_dropped_client(")
+            .expect("unmaximize_dropped_client follows")
+            .0;
+        assert!(snap.contains("broadcast_monitor_bar_ipc(backend, mk)"));
+        assert!(DOCS.contains("Drag-snap drops emit `monitor/bar`"));
+    }
 }
