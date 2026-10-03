@@ -814,6 +814,7 @@ pub struct RuntimeStatusV1 {
     /// Also `never_focus_count`.
     /// Also `skip_taskbar_count`.
     /// Also `skip_pager_count`.
+    /// Also `no_decorations_count`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub show_bar: Option<Value>,
     /// Compact twin of `get_metrics` / `get_perf` (renderer metrics when any).
