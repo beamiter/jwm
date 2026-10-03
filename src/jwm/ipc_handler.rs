@@ -4682,6 +4682,7 @@ impl Jwm {
     /// Also `floating_count` (attached floating clients).
     /// Also `minimized_count` (attached hidden clients).
     /// Also `sticky_count` (attached sticky clients).
+    /// Also `urgent_count` (attached urgent or demands-attention clients).
     pub(crate) fn query_show_bar_for_monitor(
         &self,
         backend: &dyn Backend,
@@ -4705,6 +4706,7 @@ impl Jwm {
                 "floating_count": serde_json::Value::Null,
                 "minimized_count": serde_json::Value::Null,
                 "sticky_count": serde_json::Value::Null,
+                "urgent_count": serde_json::Value::Null,
                 "show_bar": serde_json::Value::Null,
                 "bar_visible": serde_json::Value::Null,
                 "has_visible_fullscreen": serde_json::Value::Null,
@@ -4794,6 +4796,20 @@ impl Jwm {
                         .count()
                 })
                 .unwrap_or(0),
+            "urgent_count": self
+                .state
+                .monitor_clients
+                .get(mk)
+                .map(|keys| {
+                    keys.iter()
+                        .filter(|&&ck| {
+                            self.state.clients.get(ck).is_some_and(|c| {
+                                c.state.is_urgent || c.state.demands_attention
+                            })
+                        })
+                        .count()
+                })
+                .unwrap_or(0),
             "show_bar": show_bar,
             "bar_visible": self.monitor_shows_status_bar(mk),
             "has_visible_fullscreen": self.monitor_has_visible_fullscreen(mk),
@@ -4831,6 +4847,7 @@ impl Jwm {
                 "floating_count": serde_json::Value::Null,
                 "minimized_count": serde_json::Value::Null,
                 "sticky_count": serde_json::Value::Null,
+                "urgent_count": serde_json::Value::Null,
                 "show_bar": serde_json::Value::Null,
                 "bar_visible": serde_json::Value::Null,
                 "has_visible_fullscreen": serde_json::Value::Null,
@@ -12199,5 +12216,21 @@ mod tests {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
         assert!(TABS.contains("`minimized_count` / `sticky_count`"));
         assert!(DOCS.contains("Window-tabs docs also name `sticky_count`"));
+    }
+
+    #[test]
+    fn evolve8h_wave_144_occupancy_snapshot_includes_urgent_count() {
+        const SOURCE: &str = include_str!("ipc_handler.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        let query = SOURCE
+            .split_once("fn query_show_bar_for_monitor(")
+            .expect("query_show_bar_for_monitor")
+            .1
+            .split_once("fn query_focused_show_bar(")
+            .expect("focused follows")
+            .0;
+        assert!(query.contains("\"urgent_count\":"));
+        assert!(query.contains("c.state.demands_attention"));
+        assert!(DOCS.contains("also include `urgent_count`"));
     }
 }
