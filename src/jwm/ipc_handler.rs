@@ -14781,4 +14781,12 @@ mod tests {
         assert!(README.contains("jwm-tool msg get_cp"));
         assert!(DOCS.contains("README control examples include `get_cp`"));
     }
+
+    #[test]
+    fn evolve8h_wave_342_tools_readme_control_examples_include_get_cp() {
+        const TOOLS: &str = include_str!("../../tools/README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOLS.contains("jwm-tool msg get_cp"));
+        assert!(DOCS.contains("`tools/README.md` control examples include `get_cp`"));
+    }
 }

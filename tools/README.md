@@ -56,6 +56,7 @@ jwm-tool daemon-restart   # 重启守护进程
 jwm-tool msg get_windows
 jwm-tool msg get_show_bar
 jwm-tool msg get_vf
+jwm-tool msg get_cp
 jwm-tool health --json
 jwm-tool msg '' --subscribe 'window,tag,layout,bar' --raw
 ```

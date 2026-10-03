@@ -370,6 +370,7 @@ monorepo use independent Semantic Versions.
 - `jwm-tool msg` help lists `get_closed_placement` and `get_cp`.
 - `jwm-tool msg` after-help examples include `get_cp`.
 - README control examples include `get_cp`.
+- `tools/README.md` control examples include `get_cp`.
 
 ### Changed
 
