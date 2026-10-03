@@ -152,6 +152,7 @@ monorepo use independent Semantic Versions.
 - `jwm-tool health` occupancy line includes floating_count.
 - `togglefloating` emits `monitor/bar` after arrange.
 - `get_status.show_bar` rustdoc names `floating_count`.
+- README occupancy JSON names `floating_count`.
 
 ### Changed
 

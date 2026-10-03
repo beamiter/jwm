@@ -154,6 +154,7 @@ jwm-tool capabilities --json
 It also includes `sel_tags`, `previous_tags`, and `active_tags`.
 It also includes `window_count`.
 It also includes `on_view_count`.
+It also includes `floating_count`.
 
 Malformed JSON, invalid argument types, overflow, empty spawn commands, unknown
 commands, and `{ "success": false }` responses produce a non-zero exit status,
