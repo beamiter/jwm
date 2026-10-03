@@ -327,6 +327,7 @@ monorepo use independent Semantic Versions.
 - Window-tab reorders emit `monitor/bar`.
 - `get_show_bar` occupancy snapshots include `closed_placement_count`.
 - `jwm-tool health` occupancy line includes closed_placement_count.
+- `get_status.show_bar` rustdoc names `closed_placement_count`.
 
 ### Changed
 

@@ -14181,4 +14181,12 @@ mod tests {
         assert!(TOOL.contains("closed_placement_count"));
         assert!(DOCS.contains("and `closed_placement_count`"));
     }
+
+    #[test]
+    fn evolve8h_wave_300_get_status_show_bar_rustdoc_names_closed_placement_count() {
+        const IPC: &str = include_str!("../ipc.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(IPC.contains("Also `closed_placement_count`."));
+        assert!(DOCS.contains("`get_status.show_bar` rustdoc also names `closed_placement_count`"));
+    }
 }
