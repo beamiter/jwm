@@ -698,12 +698,16 @@ fn normalize_subscriptions(topics: Vec<String>) -> SubscriptionOutcome {
 }
 
 /// `workspace` is an alias for the `tag` event family (sway-style naming).
+/// `bar` is an alias for the `monitor/bar` occupancy event.
 fn normalize_subscription_topic(topic: &str) -> String {
     if topic == "workspace" {
         return "tag".to_string();
     }
     if let Some(rest) = topic.strip_prefix("workspace/") {
         return format!("tag/{rest}");
+    }
+    if topic == "bar" {
+        return "monitor/bar".to_string();
     }
     topic.to_string()
 }
@@ -1904,6 +1908,11 @@ mod tests {
 
         client.subscriptions = normalize_subscriptions(vec!["*".into()]).subscribed;
         assert!(client.is_subscribed("monitor/new"));
+
+        client.subscriptions = normalize_subscriptions(vec!["bar".into()]).subscribed;
+        assert!(client.is_subscribed("monitor/bar"));
+        assert!(!client.is_subscribed("monitor/focus"));
+        assert!(!client.is_subscribed("monitor/new"));
     }
 
     #[test]

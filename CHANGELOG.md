@@ -51,6 +51,8 @@ monorepo use independent Semantic Versions.
 - Session restore emits `monitor/bar` for every output.
 - External strut apply/remove emits `monitor/bar` for every output.
 - Output hotplug emits `monitor/bar` for every remaining output.
+- Subscribe topic `bar` aliases `monitor/bar` (occupancy only, not
+  `monitor/focus`).
 
 ### Changed
 

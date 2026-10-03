@@ -525,6 +525,7 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "*",
         "audio",
         "audio_recording",
+        "bar",
         "bluetooth",
         "clipboard",
         "config",
@@ -3327,6 +3328,13 @@ mod tests {
                 .iter()
                 .any(|name| name == "workspace"),
             "workspace aliases tag in subscription topics"
+        );
+        assert!(
+            capabilities
+                .subscription_topics
+                .iter()
+                .any(|name| name == "bar"),
+            "bar aliases monitor/bar in subscription topics"
         );
         assert!(is_supported_query("benchmark_report"));
         assert!(!is_supported_query("not_a_query"));

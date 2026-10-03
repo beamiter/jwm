@@ -10912,4 +10912,15 @@ mod tests {
         assert!(MONITOR.contains("broadcast_monitor_bar_all_monitors(backend)"));
         assert!(DOCS.contains("Output hotplug"));
     }
+
+    #[test]
+    fn evolve8h_wave_32_bar_subscription_aliases_monitor_bar() {
+        const IPC: &str = include_str!("../ipc.rs");
+        const SERVER: &str = include_str!("../ipc_server.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(IPC.contains("\"bar\""));
+        assert!(SERVER.contains("if topic == \"bar\""));
+        assert!(SERVER.contains("return \"monitor/bar\".to_string()"));
+        assert!(DOCS.contains("Subscribe topic `bar`"));
+    }
 }
