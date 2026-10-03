@@ -4680,6 +4680,7 @@ impl Jwm {
     /// Also `window_count` (clients attached to this monitor).
     /// Also `on_view_count` (clients visible on the current tagset).
     /// Also `floating_count` (attached floating clients).
+    /// Also `minimized_count` (attached hidden clients).
     pub(crate) fn query_show_bar_for_monitor(
         &self,
         backend: &dyn Backend,
@@ -4701,6 +4702,7 @@ impl Jwm {
                 "window_count": serde_json::Value::Null,
                 "on_view_count": serde_json::Value::Null,
                 "floating_count": serde_json::Value::Null,
+                "minimized_count": serde_json::Value::Null,
                 "show_bar": serde_json::Value::Null,
                 "bar_visible": serde_json::Value::Null,
                 "has_visible_fullscreen": serde_json::Value::Null,
@@ -4760,6 +4762,21 @@ impl Jwm {
                         .count()
                 })
                 .unwrap_or(0),
+            "minimized_count": self
+                .state
+                .monitor_clients
+                .get(mk)
+                .map(|keys| {
+                    keys.iter()
+                        .filter(|&&ck| {
+                            self.state
+                                .clients
+                                .get(ck)
+                                .is_some_and(|c| c.state.is_hidden)
+                        })
+                        .count()
+                })
+                .unwrap_or(0),
             "show_bar": show_bar,
             "bar_visible": self.monitor_shows_status_bar(mk),
             "has_visible_fullscreen": self.monitor_has_visible_fullscreen(mk),
@@ -4795,6 +4812,7 @@ impl Jwm {
                 "window_count": serde_json::Value::Null,
                 "on_view_count": serde_json::Value::Null,
                 "floating_count": serde_json::Value::Null,
+                "minimized_count": serde_json::Value::Null,
                 "show_bar": serde_json::Value::Null,
                 "bar_visible": serde_json::Value::Null,
                 "has_visible_fullscreen": serde_json::Value::Null,
@@ -12019,5 +12037,21 @@ mod tests {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
         assert!(TABS.contains("`on_view_count` / `floating_count`"));
         assert!(DOCS.contains("Window-tabs docs also name `floating_count`"));
+    }
+
+    #[test]
+    fn evolve8h_wave_130_occupancy_snapshot_includes_minimized_count() {
+        const SOURCE: &str = include_str!("ipc_handler.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        let query = SOURCE
+            .split_once("fn query_show_bar_for_monitor(")
+            .expect("query_show_bar_for_monitor")
+            .1
+            .split_once("fn query_focused_show_bar(")
+            .expect("focused follows")
+            .0;
+        assert!(query.contains("\"minimized_count\":"));
+        assert!(query.contains("c.state.is_hidden"));
+        assert!(DOCS.contains("also include `minimized_count`"));
     }
 }
