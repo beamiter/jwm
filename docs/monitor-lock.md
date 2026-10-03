@@ -510,3 +510,4 @@ README health text names compact `cfact` / `gaps` / `mfact` / `nmaster`.
 `tools/README.md` health text names compact `cfact` / `gaps` / `mfact` / `nmaster`.
 `jwm-tool capabilities` text lists `get_cf -> get_cfact`.
 `jwm-tool capabilities` text lists `get_gap -> get_gaps`.
+`jwm-tool capabilities` text lists `get_mf -> get_mfact`.

@@ -404,6 +404,7 @@ monorepo use independent Semantic Versions.
   `nmaster`.
 - `jwm-tool capabilities` text lists `get_cf -> get_cfact`.
 - `jwm-tool capabilities` text lists `get_gap -> get_gaps`.
+- `jwm-tool capabilities` text lists `get_mf -> get_mfact`.
 
 ### Changed
 
