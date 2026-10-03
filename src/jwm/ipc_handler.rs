@@ -13922,4 +13922,12 @@ mod tests {
         assert!(TOOLS.contains("It also includes `status_bar_count`."));
         assert!(DOCS.contains("`tools/README.md` also names `status_bar_count`"));
     }
+
+    #[test]
+    fn evolve8h_wave_282_window_tabs_occupancy_names_status_bar_count() {
+        const TABS: &str = include_str!("../../docs/window-tabs.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TABS.contains("`maximize_promoted_count` / `status_bar_count`"));
+        assert!(DOCS.contains("Window-tabs docs also name `status_bar_count`"));
+    }
 }
