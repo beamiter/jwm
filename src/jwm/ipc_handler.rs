@@ -14765,4 +14765,12 @@ mod tests {
             "`jwm-tool msg` help lists `get_closed_placement` and `get_cp`"
         ));
     }
+
+    #[test]
+    fn evolve8h_wave_340_jwm_tool_examples_include_get_cp() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("jwm-tool msg get_cp"));
+        assert!(DOCS.contains("`jwm-tool msg` after-help examples include `get_cp`"));
+    }
 }
