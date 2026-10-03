@@ -176,6 +176,8 @@ pub struct MonitorInfo {
     #[serde(default)]
     pub status_bar_count: usize,
     #[serde(default)]
+    pub closed_placement_count: usize,
+    #[serde(default)]
     pub scale: f32,
     #[serde(default)]
     pub refresh_mhz: u32,

@@ -621,9 +621,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 305 | WorkspaceInfo 含 closed_placement_count | ✓ |
 | 306 | MonitorInfoIpc 含 closed_placement_count | ✓ |
 | 307 | TreeNode 含 closed_placement_count | ✓ |
+| 308 | portal MonitorInfo 含 closed_placement_count | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 308 — portal MonitorInfo closed_placement_count
+
+选题 = evolve8h wave 308。portal 监视器行反序列化 closed_placement_count。
 
 ## 2026-10-03：evolve8h wave 307 — TreeNode closed_placement_count
 

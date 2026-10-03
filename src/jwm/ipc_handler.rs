@@ -14301,4 +14301,19 @@ mod tests {
         assert!(query.contains("closed_placement_count: counts.closed_placement,"));
         assert!(DOCS.contains("Tree nodes report `closed_placement_count`"));
     }
+
+    #[test]
+    fn evolve8h_wave_308_portal_monitor_info_closed_placement_count() {
+        const PORTAL: &str = include_str!("../../portal/src/ipc.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        let monitor = PORTAL
+            .split_once("pub struct MonitorInfo {")
+            .expect("portal MonitorInfo")
+            .1
+            .split_once("const MAX_IPC_FRAME_BYTES")
+            .expect("frame cap follows")
+            .0;
+        assert!(monitor.contains("pub closed_placement_count: usize,"));
+        assert!(DOCS.contains("Portal monitor rows deserialize `closed_placement_count`"));
+    }
 }

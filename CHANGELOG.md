@@ -335,6 +335,7 @@ monorepo use independent Semantic Versions.
 - Workspace rows report `closed_placement_count`.
 - Monitor rows report `closed_placement_count`.
 - Tree nodes report `closed_placement_count`.
+- Portal monitor rows deserialize `closed_placement_count`.
 
 ### Changed
 
