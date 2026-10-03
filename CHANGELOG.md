@@ -318,6 +318,7 @@ monorepo use independent Semantic Versions.
 - `jwm-tool health` occupancy line includes prev_layout.
 - `get_status.show_bar` rustdoc names `prev_layout`.
 - README occupancy JSON names `prev_layout`.
+- `tools/README.md` occupancy JSON names `prev_layout`.
 
 ### Changed
 

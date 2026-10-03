@@ -604,9 +604,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 288 | jwm-tool health occupancy 含 prev_layout | ✓ |
 | 289 | get_status.show_bar rustdoc 含 prev_layout | ✓ |
 | 290 | README occupancy 含 prev_layout | ✓ |
+| 291 | tools/README occupancy 含 prev_layout | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 291 — tools/README occupancy names prev_layout
+
+选题 = evolve8h wave 291。tools/README occupancy JSON 带上 prev_layout。
 
 ## 2026-10-03：evolve8h wave 290 — README occupancy names prev_layout
 

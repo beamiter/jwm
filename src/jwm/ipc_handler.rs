@@ -14043,4 +14043,12 @@ mod tests {
         assert!(README.contains("It also includes `prev_layout`."));
         assert!(DOCS.contains("README occupancy JSON also names `prev_layout`"));
     }
+
+    #[test]
+    fn evolve8h_wave_291_tools_readme_occupancy_names_prev_layout() {
+        const TOOLS: &str = include_str!("../../tools/README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOLS.contains("It also includes `prev_layout`."));
+        assert!(DOCS.contains("`tools/README.md` also names `prev_layout`"));
+    }
 }
