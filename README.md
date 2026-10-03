@@ -177,6 +177,7 @@ It also includes `demands_attention_count`.
 It also includes `fixed_count`.
 It also includes `strut_count`.
 It also includes `maximize_promoted_count`.
+It also includes `status_bar_count`.
 
 Malformed JSON, invalid argument types, overflow, empty spawn commands, unknown
 commands, and `{ "success": false }` responses produce a non-zero exit status,
