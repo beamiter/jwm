@@ -11178,4 +11178,12 @@ mod tests {
         assert!(TOOLS.contains("jwm-tool msg get_vf"));
         assert!(DOCS.contains("`get_show_bar` and `get_vf`"));
     }
+
+    #[test]
+    fn evolve8h_wave_59_jwm_tool_after_help_example_get_vf() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("jwm-tool msg get_vf"));
+        assert!(DOCS.contains("after-help examples include `get_vf`"));
+    }
 }
