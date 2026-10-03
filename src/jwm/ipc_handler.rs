@@ -11440,4 +11440,19 @@ mod tests {
         assert!(setnmaster.contains("broadcast_monitor_bar_ipc(backend, sel_mon_key)"));
         assert!(DOCS.contains("`setnmaster` emits `monitor/bar`"));
     }
+
+    #[test]
+    fn evolve8h_wave_81_scrolling_column_width_broadcasts_monitor_bar() {
+        const SCROLL: &str = include_str!("layout/scrolling.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        let set_width = SCROLL
+            .split_once("fn scrolling_set_column_width(")
+            .expect("scrolling_set_column_width")
+            .1
+            .split_once("fn scrolling_toggle_attach_mode(")
+            .expect("attach mode follows")
+            .0;
+        assert!(set_width.contains("broadcast_monitor_bar_ipc(backend, mon_key)"));
+        assert!(DOCS.contains("column width) emits `monitor/bar`") || DOCS.contains("column-width `setmfact` emits"));
+    }
 }
