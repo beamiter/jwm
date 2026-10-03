@@ -294,6 +294,13 @@ impl Jwm {
         if inst.is_empty() && cls.is_empty() {
             return Ok(());
         }
+        let status_bar_name = CONFIG.load().status_bar_name().to_string();
+        let previous_is_status_bar = self
+            .state
+            .clients
+            .get(client_key)
+            .is_some_and(|client| client.is_status_bar(&status_bar_name));
+        let previous_mon = self.state.clients.get(client_key).and_then(|client| client.mon);
         let changed = self
             .state
             .clients
@@ -336,6 +343,16 @@ impl Jwm {
             .map(|monitor| monitor.num);
         if monitor_id.is_some() {
             self.mark_bar_update_needed_if_visible(monitor_id);
+        }
+        let is_status_bar = self
+            .state
+            .clients
+            .get(client_key)
+            .is_some_and(|client| client.is_status_bar(&status_bar_name));
+        if previous_is_status_bar != is_status_bar {
+            if let Some(mk) = previous_mon {
+                self.broadcast_monitor_bar_ipc(backend, mk);
+            }
         }
         self.broadcast_window_state_ipc(backend, client_key);
         Ok(())

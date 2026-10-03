@@ -14406,4 +14406,20 @@ mod tests {
         assert!(changed.contains("broadcast_monitor_bar_ipc(backend, mon_key)"));
         assert!(DOCS.contains("Output geometry changes emit `monitor/bar`"));
     }
+
+    #[test]
+    fn evolve8h_wave_315_wm_class_status_bar_flips_broadcast_monitor_bar() {
+        const SOURCE: &str = include_str!("property_handler.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        let class = SOURCE
+            .split_once("pub(crate) fn handle_class_change(")
+            .expect("handle_class_change")
+            .1
+            .split_once("pub(crate) fn handle_motif_hints_change(")
+            .expect("motif follows")
+            .0;
+        assert!(class.contains("previous_is_status_bar != is_status_bar"));
+        assert!(class.contains("broadcast_monitor_bar_ipc(backend, mk)"));
+        assert!(DOCS.contains("WM_CLASS status-bar identity flips emit `monitor/bar`"));
+    }
 }
