@@ -196,6 +196,7 @@ They also include `previous_tags`.
 They also include `active_tags`.
 They also include `window_count`.
 Managing a client emits `monitor/bar`.
+Unmanaging a client emits `monitor/bar` even when it was not fullscreen.
 `zoom` emits `monitor/bar`.
 `focusstack` emits `monitor/bar`.
 Scrolling in-column focus emits `monitor/bar`.

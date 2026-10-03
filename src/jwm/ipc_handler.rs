@@ -11814,4 +11814,20 @@ mod tests {
         assert!(manage.contains("broadcast_monitor_bar_ipc(backend, mk)"));
         assert!(DOCS.contains("Managing a client emits `monitor/bar`"));
     }
+
+    #[test]
+    fn evolve8h_wave_112_unmanage_always_broadcasts_monitor_bar() {
+        const CLIENT: &str = include_str!("client.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        let unmanage = CLIENT
+            .split_once("pub(crate) fn unmanage(")
+            .expect("unmanage")
+            .1
+            .split_once("pub(crate) fn is_popup_like(")
+            .expect("is_popup_like follows")
+            .0;
+        assert!(unmanage.contains("Some((_, _, Some(mon_key), _))"));
+        assert!(unmanage.contains("broadcast_monitor_bar_ipc(backend, mon_key)"));
+        assert!(DOCS.contains("even when it was not fullscreen"));
+    }
 }

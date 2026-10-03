@@ -1694,7 +1694,7 @@ impl Jwm {
         }
 
         self.unmanage_regular_client(backend, client_key, destroyed)?;
-        if let Some((_, _, Some(mon_key), true)) = close_event_data {
+        if let Some((_, _, Some(mon_key), _)) = close_event_data {
             self.broadcast_monitor_bar_ipc(backend, mon_key);
         }
         Ok(())
