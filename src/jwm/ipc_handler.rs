@@ -13268,4 +13268,12 @@ mod tests {
         assert!(TOOLS.contains("It also includes `skip_pager_count`."));
         assert!(DOCS.contains("`tools/README.md` also names `skip_pager_count`"));
     }
+
+    #[test]
+    fn evolve8h_wave_230_window_tabs_occupancy_names_skip_pager_count() {
+        const TABS: &str = include_str!("../../docs/window-tabs.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TABS.contains("`skip_taskbar_count` / `skip_pager_count`"));
+        assert!(DOCS.contains("Window-tabs docs also name `skip_pager_count`"));
+    }
 }
