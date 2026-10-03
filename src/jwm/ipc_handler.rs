@@ -12094,4 +12094,12 @@ mod tests {
         assert!(README.contains("It also includes `minimized_count`."));
         assert!(DOCS.contains("README occupancy JSON also names `minimized_count`"));
     }
+
+    #[test]
+    fn evolve8h_wave_135_tools_readme_occupancy_names_minimized_count() {
+        const TOOLS: &str = include_str!("../../tools/README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOLS.contains("It also includes `minimized_count`."));
+        assert!(DOCS.contains("`tools/README.md` also names `minimized_count`"));
+    }
 }

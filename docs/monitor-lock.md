@@ -276,6 +276,7 @@ README control examples include `get_show_bar` and `get_vf`, as does
 `window_count`. README occupancy JSON also names `on_view_count`.
 README occupancy JSON also names `floating_count`.
 README occupancy JSON also names `minimized_count`.
+`tools/README.md` also names `minimized_count`.
 `tools/README.md` also names `floating_count`.
 `tools/README.md` also names `on_view_count`.
 `tools/README.md` also names `window_count`.

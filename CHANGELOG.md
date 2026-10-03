@@ -160,6 +160,7 @@ monorepo use independent Semantic Versions.
 - Minimizing or restoring a client emits `monitor/bar` even when it was not fullscreen.
 - `get_status.show_bar` rustdoc names `minimized_count`.
 - README occupancy JSON names `minimized_count`.
+- `tools/README.md` occupancy JSON names `minimized_count`.
 
 ### Changed
 
