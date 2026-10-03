@@ -10904,4 +10904,12 @@ mod tests {
         );
         assert!(DOCS.contains("External strut"));
     }
+
+    #[test]
+    fn evolve8h_wave_31_output_hotplug_broadcasts_all_monitor_bars() {
+        const MONITOR: &str = include_str!("monitor.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(MONITOR.contains("broadcast_monitor_bar_all_monitors(backend)"));
+        assert!(DOCS.contains("Output hotplug"));
+    }
 }
