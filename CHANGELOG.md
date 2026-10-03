@@ -276,6 +276,7 @@ monorepo use independent Semantic Versions.
 - `jwm-tool health` occupancy line includes swallowed_count.
 - `jwm-tool` raises the serde_json fixture recursion limit to 512.
 - `get_status.show_bar` rustdoc names `swallowed_count`.
+- README occupancy JSON names `swallowed_count`.
 
 ### Changed
 

@@ -13535,4 +13535,12 @@ mod tests {
         assert!(IPC.contains("Also `swallowed_count`."));
         assert!(DOCS.contains("`get_status.show_bar` rustdoc also names `swallowed_count`"));
     }
+
+    #[test]
+    fn evolve8h_wave_250_readme_occupancy_names_swallowed_count() {
+        const README: &str = include_str!("../../README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(README.contains("It also includes `swallowed_count`."));
+        assert!(DOCS.contains("README occupancy JSON also names `swallowed_count`"));
+    }
 }
