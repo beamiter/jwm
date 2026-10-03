@@ -12552,4 +12552,12 @@ mod tests {
         assert!(reinstate.contains("broadcast_monitor_bar_ipc(backend, mk)"));
         assert!(DOCS.contains("Reinstating a maximize snapshot emits `monitor/bar`"));
     }
+
+    #[test]
+    fn evolve8h_wave_170_get_status_show_bar_rustdoc_names_maximized_count() {
+        const IPC: &str = include_str!("../ipc.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(IPC.contains("Also `maximized_count`."));
+        assert!(DOCS.contains("`get_status.show_bar` rustdoc also names `maximized_count`"));
+    }
 }
