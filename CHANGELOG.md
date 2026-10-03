@@ -296,6 +296,7 @@ monorepo use independent Semantic Versions.
 - `get_status.show_bar` rustdoc names `strut_count`.
 - README occupancy JSON names `strut_count`.
 - `tools/README.md` occupancy JSON names `strut_count`.
+- Window-tabs docs name occupancy `strut_count`.
 
 ### Changed
 

@@ -13773,4 +13773,12 @@ mod tests {
         assert!(TOOLS.contains("It also includes `strut_count`."));
         assert!(DOCS.contains("`tools/README.md` also names `strut_count`"));
     }
+
+    #[test]
+    fn evolve8h_wave_270_window_tabs_occupancy_names_strut_count() {
+        const TABS: &str = include_str!("../../docs/window-tabs.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TABS.contains("`fixed_count` / `strut_count`"));
+        assert!(DOCS.contains("Window-tabs docs also name `strut_count`"));
+    }
 }
