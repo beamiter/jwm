@@ -676,9 +676,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 360 | tools/README health 点名 compact prev_layout | ✓ |
 | 361 | capabilities 文本列出 get_pl -> get_prev_layout | ✓ |
 | 362 | window-tabs 文档点名 focus/reorder monitor/bar | ✓ |
+| 363 | jwm-tool 帮助列出 get_prev_layout / get_pl | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 363 — jwm-tool help lists get_prev_layout
+
+选题 = evolve8h wave 363。`jwm-tool msg` 帮助列出 `get_prev_layout` / `get_pl`。
 
 ## 2026-10-03：evolve8h wave 362 — window-tabs docs name monitor/bar on focus/reorder
 

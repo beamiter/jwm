@@ -14995,4 +14995,14 @@ mod tests {
         assert!(TABS.contains("`focus_tab`"));
         assert!(DOCS.contains("Window-tabs docs name `monitor/bar` on focus / reorder"));
     }
+
+    #[test]
+    fn evolve8h_wave_363_jwm_tool_help_lists_get_prev_layout() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("get_prev_layout, get_pl"));
+        assert!(DOCS.contains(
+            "`jwm-tool msg` help lists `get_prev_layout` and `get_pl`"
+        ));
+    }
 }
