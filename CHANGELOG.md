@@ -378,6 +378,7 @@ monorepo use independent Semantic Versions.
 - Launcher docs name `monitor/bar` on window activation.
 - `_NET_ACTIVE_WINDOW` activation emits `monitor/bar`.
 - Foreign-toplevel activate emits `monitor/bar`.
+- Cube-effects docs name `monitor/bar` on overview confirm.
 
 ### Changed
 

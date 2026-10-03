@@ -74,6 +74,8 @@ first / last face, `Page Up` / `Page Down` page by the visible prism window
 (≤6), and the vertical / horizontal wheel cycles like Tab (and Left/Right).
 `Enter` or a second
 `Alt+Ctrl+Tab` confirms; `Esc` cancels.
+Confirming emits `monitor/bar` so occupancy subscribers see the new
+`selected_id` without polling.
 
 The X11 switcher animates continuously (twinkling sky, sheening caps), so it
 asks for frames until it closes. Wayland's stars, light pool, caps and reflection

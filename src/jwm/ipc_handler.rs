@@ -14872,4 +14872,13 @@ mod tests {
         assert!(foreign.contains("broadcast_monitor_bar_ipc(backend, mk)"));
         assert!(DOCS.contains("Foreign-toplevel activate emits `monitor/bar`"));
     }
+
+    #[test]
+    fn evolve8h_wave_350_cube_effects_docs_name_overview_monitor_bar() {
+        const CUBE: &str = include_str!("../../docs/cube-effects.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(CUBE.contains("emits `monitor/bar`"));
+        assert!(CUBE.contains("selected_id"));
+        assert!(DOCS.contains("Cube-effects docs name `monitor/bar` on overview confirm"));
+    }
 }
