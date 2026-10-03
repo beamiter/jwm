@@ -14731,4 +14731,13 @@ mod tests {
             "`get_closed_placement` / `get_cp` return the focused monitor's closed-placement count"
         ));
     }
+
+    #[test]
+    fn evolve8h_wave_337_capabilities_list_get_closed_placement() {
+        const IPC: &str = include_str!("../ipc.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(IPC.contains("\"get_closed_placement\""));
+        assert!(IPC.contains("\"get_cp\""));
+        assert!(DOCS.contains("Capabilities list `get_closed_placement` and `get_cp`"));
+    }
 }

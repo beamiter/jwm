@@ -365,6 +365,7 @@ monorepo use independent Semantic Versions.
 - Layout-picker docs name `monitor/bar` on live apply.
 - `get_closed_placement` / `get_cp` return the focused monitor's
   `closed_placement_count`.
+- Capabilities list `get_closed_placement` and `get_cp`.
 
 ### Changed
 

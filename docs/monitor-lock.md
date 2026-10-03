@@ -471,3 +471,4 @@ Tags-overview docs name `monitor/bar` on confirm.
 Window-switcher docs name `monitor/bar` on commit.
 Layout-picker docs name `monitor/bar` on live apply.
 `get_closed_placement` / `get_cp` return the focused monitor's closed-placement count.
+Capabilities list `get_closed_placement` and `get_cp`.
