@@ -4482,7 +4482,7 @@ impl Jwm {
             maximize_promoted_count: counts.maximize_promoted,
             strut_count: counts.strut,
             status_bar_count: counts.status_bar,
-            owns_output_count: counts.owns_output,
+            owns_output_count: self.monitor_owns_output_count(mk),
         }
     }
 
@@ -10580,5 +10580,20 @@ mod tests {
         assert!(query.contains("monitor_owns_output_count(mk)"));
         assert!(CORE.contains("fn monitor_owns_output_count"));
         assert!(DOCS.contains("`owns_output_count`"));
+    }
+
+    #[test]
+    fn evolve8h_wave_10_monitor_owns_output_count_uses_hide_bar_predicate() {
+        const SOURCE: &str = include_str!("ipc_handler.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        let monitor_info = SOURCE
+            .split_once("fn monitor_info_ipc(")
+            .expect("monitor_info_ipc")
+            .1
+            .split_once("fn query_focused_tab_bar(")
+            .expect("tab bar follows")
+            .0;
+        assert!(monitor_info.contains("owns_output_count: self.monitor_owns_output_count(mk)"));
+        assert!(DOCS.contains("same visibility as the status-bar hide"));
     }
 }

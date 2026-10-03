@@ -323,7 +323,16 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 7 | WindowInfo.owns_output | ✓ |
 | 8 | Monitor/Workspace/Tree owns_output_count | ✓ |
 | 9 | get_show_bar 返回 owns_output_count | ✓ |
+| 10 | MonitorInfoIpc.owns_output_count 用藏栏谓词 | ✓ |
 | … | 进行中 | |
+
+---
+
+## 2026-10-03：evolve8h wave 10 — monitor owns_output_count hide-bar predicate
+
+选题 = evolve8h wave 10。monitor 行计数走 `monitor_owns_output_count`，与 F11 藏栏一致（含 swallowed）。
+
+**验证**：`scripts/test.sh --lib --` 聚焦 evolve8h_wave_10。
 
 ---
 

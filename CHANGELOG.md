@@ -23,6 +23,8 @@ monorepo use independent Semantic Versions.
   visible fullscreen client currently covers the monitor.
 - Monitor, workspace and tree rows report `owns_output_count`.
 - `get_show_bar` also reports `owns_output_count`.
+- `get_monitors` `owns_output_count` uses the same hide-bar visibility
+  predicate as `get_show_bar`.
 
 ### Changed
 
