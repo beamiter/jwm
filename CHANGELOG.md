@@ -59,6 +59,7 @@ monorepo use independent Semantic Versions.
 - `tools/README.md` subscribe example includes `bar`.
 - `WorkspaceInfo.owns_output_count` rustdoc names the hide-bar occupancy
   rule (zero off-view).
+- `TreeNode.owns_output_count` rustdoc names hide-bar occupancy.
 
 ### Changed
 

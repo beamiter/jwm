@@ -1445,7 +1445,8 @@ pub struct TreeNode {
     pub strut_count: usize,
     /// How many of `windows` report `is_status_bar`.
     pub status_bar_count: usize,
-    /// How many of `windows` report `owns_output`.
+    /// How many of `windows` currently own the output (visible fullscreen
+    /// on the current view, hide-bar occupancy).
     pub owns_output_count: usize,
 }
 
