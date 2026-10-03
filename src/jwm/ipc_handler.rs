@@ -6050,7 +6050,7 @@ impl Jwm {
                     maximize_promoted_count: counts.maximize_promoted,
                     strut_count: counts.strut,
                     status_bar_count: counts.status_bar,
-                    owns_output_count: counts.owns_output,
+                    owns_output_count: self.monitor_owns_output_count(mk),
                     selected_id: m
                         .sel
                         .and_then(|ck| self.state.clients.get(ck).map(|client| client.win.raw())),
@@ -10565,7 +10565,7 @@ mod tests {
         const SOURCE: &str = include_str!("ipc_handler.rs");
         assert!(IPC.contains("pub owns_output_count: usize"));
         assert!(SOURCE.contains("counts.owns_output"));
-        assert!(SOURCE.contains("owns_output_count: counts.owns_output"));
+        assert!(SOURCE.contains("owns_output_count:"));
     }
 
     #[test]
@@ -10615,5 +10615,20 @@ mod tests {
         assert!(workspaces.contains("owns_output_count: if is_active"));
         assert!(workspaces.contains("self.monitor_owns_output_count(mk)"));
         assert!(DOCS.contains("workspace rows report that\ncount only on the active tag"));
+    }
+
+    #[test]
+    fn evolve8h_wave_12_tree_owns_output_count_uses_hide_bar_predicate() {
+        const SOURCE: &str = include_str!("ipc_handler.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        let tree = SOURCE
+            .split_once("fn query_tree(")
+            .expect("query_tree")
+            .1
+            .split_once("fn broadcast_ipc_event(")
+            .expect("broadcast follows")
+            .0;
+        assert!(tree.contains("owns_output_count: self.monitor_owns_output_count(mk)"));
+        assert!(DOCS.contains("`get_tree` uses the same hide-bar"));
     }
 }

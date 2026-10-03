@@ -197,6 +197,7 @@ plus `is_occupied` (status-bar occupied mask) and `has_fullscreen` /
 `has_visible_fullscreen` / `owns_output_count` (monitor rows count with
 the same visibility as the status-bar hide; workspace rows report that
 count only on the active tag).
+`get_tree` uses the same hide-bar `owns_output_count` on each monitor node.
 `get_windows` / `get_tree` / `window/state` also report `is_swallowed` and
 `is_on_view` (tag intersection with the monitor's active tags, or sticky),
 plus chrome / size-hint fields (`is_fixed`, `is_dock`, `is_desktop`,
