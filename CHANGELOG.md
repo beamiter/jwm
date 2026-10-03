@@ -159,6 +159,7 @@ monorepo use independent Semantic Versions.
 - `jwm-tool health` occupancy line includes minimized_count.
 - Minimizing or restoring a client emits `monitor/bar` even when it was not fullscreen.
 - `get_status.show_bar` rustdoc names `minimized_count`.
+- README occupancy JSON names `minimized_count`.
 
 ### Changed
 

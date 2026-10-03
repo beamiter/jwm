@@ -12086,4 +12086,12 @@ mod tests {
         assert!(IPC.contains("Also `minimized_count`."));
         assert!(DOCS.contains("`floating_count` / `minimized_count`"));
     }
+
+    #[test]
+    fn evolve8h_wave_134_readme_occupancy_names_minimized_count() {
+        const README: &str = include_str!("../../README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(README.contains("It also includes `minimized_count`."));
+        assert!(DOCS.contains("README occupancy JSON also names `minimized_count`"));
+    }
 }
