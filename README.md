@@ -171,6 +171,7 @@ It also includes `never_focus_count`.
 It also includes `skip_taskbar_count`.
 It also includes `skip_pager_count`.
 It also includes `no_decorations_count`.
+It also includes `drag_float_count`.
 
 Malformed JSON, invalid argument types, overflow, empty spawn commands, unknown
 commands, and `{ "success": false }` responses produce a non-zero exit status,

@@ -13445,4 +13445,12 @@ mod tests {
         assert!(IPC.contains("Also `drag_float_count`."));
         assert!(DOCS.contains("`get_status.show_bar` rustdoc also names `drag_float_count`"));
     }
+
+    #[test]
+    fn evolve8h_wave_243_readme_occupancy_names_drag_float_count() {
+        const README: &str = include_str!("../../README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(README.contains("It also includes `drag_float_count`."));
+        assert!(DOCS.contains("README occupancy JSON also names `drag_float_count`"));
+    }
 }
