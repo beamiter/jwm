@@ -118,6 +118,7 @@ monorepo use independent Semantic Versions.
 - `focusstack` emits `monitor/bar` after the selection changes.
 - Scrolling in-column focus emits `monitor/bar` after arrange.
 - `focus_none` emits `monitor/bar` after dropping selection.
+- `focus_window` emits `monitor/bar` after a successful reveal.
 
 ### Changed
 

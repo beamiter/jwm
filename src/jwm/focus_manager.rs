@@ -271,6 +271,9 @@ impl Jwm {
         if !self.reveal_and_focus(backend, WindowId::from_raw(win_id))? {
             return Err(format!("window {win_id} not found").into());
         }
+        if let Some(mk) = self.state.sel_mon {
+            self.broadcast_monitor_bar_ipc(backend, mk);
+        }
         Ok(())
     }
 

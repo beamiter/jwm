@@ -194,6 +194,7 @@ They also include `selected_id`.
 `focusstack` emits `monitor/bar`.
 Scrolling in-column focus emits `monitor/bar`.
 `focus_none` emits `monitor/bar`.
+`focus_window` emits `monitor/bar`.
 `setnmaster` emits `monitor/bar`.
 Scrolling `setmfact` (column width) emits `monitor/bar`.
 `setmfact` emits `monitor/bar`.

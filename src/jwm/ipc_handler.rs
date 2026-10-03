@@ -11590,4 +11590,19 @@ mod tests {
         assert!(focus_none.contains("broadcast_monitor_bar_ipc(backend, mk)"));
         assert!(DOCS.contains("`focus_none` emits `monitor/bar`"));
     }
+
+    #[test]
+    fn evolve8h_wave_93_focus_window_broadcasts_monitor_bar() {
+        const FOCUS: &str = include_str!("focus_manager.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        let focus_window = FOCUS
+            .split_once("pub fn focus_window(")
+            .expect("focus_window")
+            .1
+            .split_once("fn capture_reveal_navigation(")
+            .expect("capture_reveal_navigation follows")
+            .0;
+        assert!(focus_window.contains("broadcast_monitor_bar_ipc(backend, mk)"));
+        assert!(DOCS.contains("`focus_window` emits `monitor/bar`"));
+    }
 }
