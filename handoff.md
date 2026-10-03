@@ -704,9 +704,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 388 | capabilities 文本列出 get_sel -> get_selected | ✓ |
 | 389 | health 打印 compact struts | ✓ |
 | 390 | README health 点名 compact struts | ✓ |
+| 391 | tools/README health 点名 compact struts | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 391 — tools/README health names compact struts
+
+选题 = evolve8h wave 391。tools/README health 文本点名 compact `struts`。
 
 ## 2026-10-03：evolve8h wave 390 — README health names compact struts
 

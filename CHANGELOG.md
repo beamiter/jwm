@@ -420,6 +420,7 @@ monorepo use independent Semantic Versions.
 - `jwm-tool capabilities` text lists `get_sel -> get_selected`.
 - `jwm-tool health` prints compact `struts` beside occupancy.
 - README health text names compact `struts`.
+- `tools/README.md` health text names compact `struts`.
 
 ### Changed
 
