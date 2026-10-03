@@ -14652,4 +14652,13 @@ mod tests {
         assert!(OVERVIEW.contains("ordinary `view` path"));
         assert!(DOCS.contains("Tags-overview docs name `monitor/bar` on confirm"));
     }
+
+    #[test]
+    fn evolve8h_wave_334_window_switcher_docs_name_monitor_bar_on_commit() {
+        const SWITCHER: &str = include_str!("../../docs/window-switcher.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(SWITCHER.contains("emits `monitor/bar`"));
+        assert!(SWITCHER.contains("selected_id"));
+        assert!(DOCS.contains("Window-switcher docs name `monitor/bar` on commit"));
+    }
 }

@@ -361,6 +361,7 @@ monorepo use independent Semantic Versions.
 - `focus_tab` emits `monitor/bar`.
 - Expose docs name `monitor/bar` on focused exit.
 - Tags-overview docs name `monitor/bar` on confirm.
+- Window-switcher docs name `monitor/bar` on commit.
 
 ### Changed
 

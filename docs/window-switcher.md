@@ -113,6 +113,9 @@ so the panel opens keyboard-only and a click then behaves as it did before
 the grab existed (on X11 the server may deliver it to the window under the
 panel).
 
+Committing a row emits `monitor/bar` so occupancy subscribers see the new
+`selected_id` (and any restore-from-minimized count flips) without polling.
+
 ## Where it lives
 
 `src/jwm/features/switcher.rs` carries the gesture's pure logic —
