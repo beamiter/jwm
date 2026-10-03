@@ -97,6 +97,7 @@ monorepo use independent Semantic Versions.
 - `get_show_bar` occupancy snapshots include `layout` (`lt_symbol`).
 - Layout changes emit `monitor/bar` after `layout/set`.
 - `jwm-tool health` occupancy line includes the current layout.
+- `get_show_bar` occupancy snapshots include `gap`.
 
 ### Changed
 
