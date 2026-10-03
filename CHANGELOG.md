@@ -130,6 +130,7 @@ monorepo use independent Semantic Versions.
 - `get_show_bar` occupancy snapshots include `active_tags`.
 - `jwm-tool health` occupancy line includes active_tags.
 - `get_status.show_bar` rustdoc names sel_tags / previous_tags / active_tags.
+- README occupancy JSON names sel_tags / previous_tags / active_tags.
 
 ### Changed
 

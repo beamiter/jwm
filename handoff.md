@@ -418,7 +418,16 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 102 | get_show_bar occupancy 含 active_tags | ✓ |
 | 103 | jwm-tool health occupancy 含 active_tags | ✓ |
 | 104 | get_status.show_bar rustdoc 含 tagset masks | ✓ |
+| 105 | README occupancy 含 tagset masks | ✓ |
 | … | 进行中 | |
+
+---
+
+## 2026-10-03：evolve8h wave 105 — README occupancy names tagset masks
+
+选题 = evolve8h wave 105。README occupancy JSON 列出 sel_tags / previous_tags / active_tags。
+
+**验证**：`scripts/test.sh --lib --` 聚焦 evolve8h_wave_105 evolve8h_wave_95。
 
 ---
 

@@ -11727,4 +11727,12 @@ mod tests {
         assert!(IPC.contains("`sel_tags`, `previous_tags`"));
         assert!(DOCS.contains("`previous_tags` / `active_tags`"));
     }
+
+    #[test]
+    fn evolve8h_wave_105_readme_occupancy_names_tagset_masks() {
+        const README: &str = include_str!("../../README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(README.contains("`sel_tags`, `previous_tags`, and `active_tags`"));
+        assert!(DOCS.contains("README occupancy JSON also names `sel_tags`"));
+    }
 }
