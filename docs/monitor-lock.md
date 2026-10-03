@@ -527,3 +527,4 @@ README health text names compact `selected`.
 `jwm-tool health` prints compact `struts` beside occupancy.
 README health text names compact `struts`.
 `tools/README.md` health text names compact `struts`.
+`jwm-tool capabilities` text lists `get_strut -> get_struts`.

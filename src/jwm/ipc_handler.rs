@@ -15253,4 +15253,12 @@ mod tests {
         assert!(TOOLS.contains("get_status.struts"));
         assert!(DOCS.contains("`tools/README.md` health text names compact `struts`"));
     }
+
+    #[test]
+    fn evolve8h_wave_392_capabilities_text_lists_get_strut_alias() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("query aliases: get_strut -> get_struts"));
+        assert!(DOCS.contains("`jwm-tool capabilities` text lists `get_strut -> get_struts`"));
+    }
 }
