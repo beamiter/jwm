@@ -619,9 +619,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 303 | window-tabs occupancy 含 closed_placement_count | ✓ |
 | 304 | TagClientCounts 累计 closed_placement | ✓ |
 | 305 | WorkspaceInfo 含 closed_placement_count | ✓ |
+| 306 | MonitorInfoIpc 含 closed_placement_count | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 306 — MonitorInfoIpc closed_placement_count
+
+选题 = evolve8h wave 306。监视器行报告记得关闭落位的窗口数。
 
 ## 2026-10-03：evolve8h wave 305 — WorkspaceInfo closed_placement_count
 

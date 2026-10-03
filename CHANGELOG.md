@@ -333,6 +333,7 @@ monorepo use independent Semantic Versions.
 - Window-tabs docs name occupancy `closed_placement_count`.
 - Tag client counts accumulate `closed_placement`.
 - Workspace rows report `closed_placement_count`.
+- Monitor rows report `closed_placement_count`.
 
 ### Changed
 

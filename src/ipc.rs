@@ -1405,6 +1405,8 @@ pub struct MonitorInfoIpc {
     pub strut_count: usize,
     /// How many of those clients are the status bar.
     pub status_bar_count: usize,
+    /// How many of those clients remember closed placement.
+    pub closed_placement_count: usize,
     /// How many of those clients currently own the output (visible fullscreen
     /// on the current view, swallowed terminals excluded — the hide-bar
     /// occupancy).
@@ -2512,6 +2514,7 @@ mod tests {
             maximize_promoted_count: 0,
             strut_count: 0,
             status_bar_count: 0,
+            closed_placement_count: 0,
             owns_output_count: 0,
         })
         .expect("serialize");
@@ -2638,6 +2641,7 @@ mod tests {
             maximize_promoted_count: 0,
             strut_count: 0,
             status_bar_count: 0,
+            closed_placement_count: 0,
             owns_output_count: 0,
         })
         .expect("serialize");
@@ -3697,6 +3701,7 @@ mod tests {
                 maximize_promoted_count: 0,
                 strut_count: 0,
                 status_bar_count: 0,
+                closed_placement_count: 0,
                 owns_output_count: 0,
             },
             windows: Vec::new(),
@@ -3821,6 +3826,7 @@ mod tests {
                 maximize_promoted_count: 0,
                 strut_count: 0,
                 status_bar_count: 0,
+                closed_placement_count: 0,
                 owns_output_count: 0,
             },
             windows: Vec::new(),

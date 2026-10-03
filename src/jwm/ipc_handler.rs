@@ -4495,6 +4495,7 @@ impl Jwm {
             maximize_promoted_count: counts.maximize_promoted,
             strut_count: counts.strut,
             status_bar_count: counts.status_bar,
+            closed_placement_count: counts.closed_placement,
             owns_output_count: self.monitor_owns_output_count(mk),
         }
     }
@@ -14259,5 +14260,20 @@ mod tests {
         assert!(workspace.contains("pub closed_placement_count: usize,"));
         assert!(SOURCE.contains("closed_placement_count: counts.closed_placement,"));
         assert!(DOCS.contains("Workspace rows report `closed_placement_count`"));
+    }
+
+    #[test]
+    fn evolve8h_wave_306_monitor_info_closed_placement_count() {
+        const IPC: &str = include_str!("../ipc.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        let monitor = IPC
+            .split_once("pub struct MonitorInfoIpc {")
+            .expect("MonitorInfoIpc")
+            .1
+            .split_once("pub struct HdrMetadataIpc {")
+            .expect("HdrMetadataIpc follows")
+            .0;
+        assert!(monitor.contains("pub closed_placement_count: usize,"));
+        assert!(DOCS.contains("Monitor rows report `closed_placement_count`"));
     }
 }
