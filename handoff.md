@@ -546,9 +546,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 230 | window-tabs occupancy 含 skip_pager_count | ✓ |
 | 231 | SkipTaskbar EWMH 发出 monitor/bar | ✓ |
 | 232 | SkipPager EWMH 发出 monitor/bar | ✓ |
+| 233 | get_show_bar occupancy 含 no_decorations_count | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 233 — occupancy snapshot includes no_decorations_count
+
+选题 = evolve8h wave 233。`get_show_bar` / `monitor/bar` 带上附着的无装饰窗口数。
 
 ## 2026-10-03：evolve8h wave 232 — SkipPager EWMH broadcasts monitor/bar
 

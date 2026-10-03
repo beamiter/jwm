@@ -4695,6 +4695,7 @@ impl Jwm {
     /// Also `never_focus_count` (attached never-focus clients).
     /// Also `skip_taskbar_count` (attached skip-taskbar clients).
     /// Also `skip_pager_count` (attached skip-pager clients).
+    /// Also `no_decorations_count` (attached borderless / no-decorations clients).
     pub(crate) fn query_show_bar_for_monitor(
         &self,
         backend: &dyn Backend,
@@ -4731,6 +4732,7 @@ impl Jwm {
                 "never_focus_count": serde_json::Value::Null,
                 "skip_taskbar_count": serde_json::Value::Null,
                 "skip_pager_count": serde_json::Value::Null,
+                "no_decorations_count": serde_json::Value::Null,
                 "show_bar": serde_json::Value::Null,
                 "bar_visible": serde_json::Value::Null,
                 "has_visible_fullscreen": serde_json::Value::Null,
@@ -4994,6 +4996,21 @@ impl Jwm {
                         .count()
                 })
                 .unwrap_or(0),
+            "no_decorations_count": self
+                .state
+                .monitor_clients
+                .get(mk)
+                .map(|keys| {
+                    keys.iter()
+                        .filter(|&&ck| {
+                            self.state
+                                .clients
+                                .get(ck)
+                                .is_some_and(|c| c.state.no_decorations)
+                        })
+                        .count()
+                })
+                .unwrap_or(0),
             "show_bar": show_bar,
             "bar_visible": self.monitor_shows_status_bar(mk),
             "has_visible_fullscreen": self.monitor_has_visible_fullscreen(mk),
@@ -5044,6 +5061,7 @@ impl Jwm {
                 "never_focus_count": serde_json::Value::Null,
                 "skip_taskbar_count": serde_json::Value::Null,
                 "skip_pager_count": serde_json::Value::Null,
+                "no_decorations_count": serde_json::Value::Null,
                 "show_bar": serde_json::Value::Null,
                 "bar_visible": serde_json::Value::Null,
                 "has_visible_fullscreen": serde_json::Value::Null,
@@ -13305,5 +13323,21 @@ mod tests {
             .0;
         assert!(skip.contains("broadcast_monitor_bar_ipc(backend, mk)"));
         assert!(DOCS.contains("`_NET_WM_STATE_SKIP_PAGER` emits `monitor/bar`"));
+    }
+
+    #[test]
+    fn evolve8h_wave_233_occupancy_snapshot_includes_no_decorations_count() {
+        const SOURCE: &str = include_str!("ipc_handler.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        let query = SOURCE
+            .split_once("fn query_show_bar_for_monitor(")
+            .expect("query_show_bar_for_monitor")
+            .1
+            .split_once("fn query_focused_show_bar(")
+            .expect("focused follows")
+            .0;
+        assert!(query.contains("\"no_decorations_count\":"));
+        assert!(query.contains("c.state.no_decorations"));
+        assert!(DOCS.contains("also include `no_decorations_count`"));
     }
 }

@@ -212,6 +212,7 @@ They also include `desktop_count`.
 They also include `never_focus_count`.
 They also include `skip_taskbar_count`.
 They also include `skip_pager_count`.
+They also include `no_decorations_count`.
 Hiding a scratchpad emits `monitor/bar`.
 Showing a scratchpad emits `monitor/bar`.
 `_NET_WM_STATE_SKIP_TASKBAR` emits `monitor/bar`.

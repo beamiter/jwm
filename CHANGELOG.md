@@ -258,6 +258,7 @@ monorepo use independent Semantic Versions.
 - Window-tabs docs name occupancy `skip_pager_count`.
 - `_NET_WM_STATE_SKIP_TASKBAR` emits `monitor/bar`.
 - `_NET_WM_STATE_SKIP_PAGER` emits `monitor/bar`.
+- `get_show_bar` occupancy snapshots include `no_decorations_count`.
 
 ### Changed
 
