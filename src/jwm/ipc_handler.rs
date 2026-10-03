@@ -11923,4 +11923,12 @@ mod tests {
         assert!(TOOLS.contains("It also includes `on_view_count`."));
         assert!(DOCS.contains("`tools/README.md` also names `on_view_count`"));
     }
+
+    #[test]
+    fn evolve8h_wave_122_window_tabs_occupancy_names_on_view_count() {
+        const TABS: &str = include_str!("../../docs/window-tabs.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TABS.contains("`window_count` / `on_view_count`"));
+        assert!(DOCS.contains("Window-tabs docs also name `on_view_count`"));
+    }
 }

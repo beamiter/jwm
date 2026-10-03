@@ -277,6 +277,7 @@ README control examples include `get_show_bar` and `get_vf`, as does
 `nmaster` / `selected_id`. Window-tabs docs also name `sel_tags` /
 `previous_tags` / `active_tags`.
 Window-tabs docs also name `window_count`.
+Window-tabs docs also name `on_view_count`.
 `toggletag` on a fullscreen client emits `monitor/bar`, as does `tag`
 and sticky.
 `get_workspaces` / `get_tree` also report pip / maximized / above / below /
