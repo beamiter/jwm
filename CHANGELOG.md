@@ -115,6 +115,7 @@ monorepo use independent Semantic Versions.
 - Window-tabs docs name occupancy `tag` / `layout` / `gap` / `mfact` / `nmaster`.
 - `get_show_bar` occupancy snapshots include `selected_id`.
 - `jwm-tool health` occupancy line includes selected_id.
+- `focusstack` emits `monitor/bar` after the selection changes.
 
 ### Changed
 

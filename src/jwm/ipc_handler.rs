@@ -11545,4 +11545,19 @@ mod tests {
         assert!(TOOL.contains("selected={selected}"));
         assert!(DOCS.contains("and `selected_id`"));
     }
+
+    #[test]
+    fn evolve8h_wave_90_focusstack_broadcasts_monitor_bar() {
+        const FOCUS: &str = include_str!("focus_manager.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        let focusstack = FOCUS
+            .split_once("pub fn focusstack(")
+            .expect("focusstack")
+            .1
+            .split_once("pub fn focus_none(")
+            .expect("focus_none follows")
+            .0;
+        assert!(focusstack.contains("broadcast_monitor_bar_ipc(backend, mk)"));
+        assert!(DOCS.contains("`focusstack` emits `monitor/bar`"));
+    }
 }

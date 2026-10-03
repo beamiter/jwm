@@ -220,6 +220,9 @@ impl Jwm {
 
             self.suppress_mouse_focus_until =
                 Some(std::time::Instant::now() + std::time::Duration::from_millis(200));
+            if let Some(mk) = self.state.sel_mon {
+                self.broadcast_monitor_bar_ipc(backend, mk);
+            }
         }
         Ok(())
     }
