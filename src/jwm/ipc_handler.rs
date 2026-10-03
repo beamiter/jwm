@@ -11291,4 +11291,19 @@ mod tests {
         assert!(query.contains("\"layout\": mon.lt_symbol"));
         assert!(DOCS.contains("also include `layout`"));
     }
+
+    #[test]
+    fn evolve8h_wave_70_layout_change_broadcasts_monitor_bar() {
+        const LAYOUT: &str = include_str!("layout/state.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        let apply = LAYOUT
+            .split_once("fn apply_layout_change<F>(")
+            .expect("apply_layout_change")
+            .1
+            .split_once("pub(crate) fn setlayout(")
+            .expect("setlayout follows")
+            .0;
+        assert!(apply.contains("broadcast_monitor_bar_ipc(backend, sel_mon_key)"));
+        assert!(DOCS.contains("Layout changes emit\n`monitor/bar` after `layout/set`") || DOCS.contains("Layout changes emit `monitor/bar` after `layout/set`"));
+    }
 }

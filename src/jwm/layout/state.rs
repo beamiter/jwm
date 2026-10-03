@@ -243,6 +243,7 @@ impl Jwm {
                 "layout": format!("{:?}", *new_layout),
             }),
         );
+        self.broadcast_monitor_bar_ipc(backend, sel_mon_key);
 
         // Every path that changes which layout a tag is on — `setlayout`, the
         // cycle, the film-strip picker — comes through here, so this is the

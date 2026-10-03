@@ -95,6 +95,7 @@ monorepo use independent Semantic Versions.
 - `get_show_bar` occupancy snapshots include `tag` (`Pertag.cur_tag`).
 - `jwm-tool health` occupancy line includes the current tag.
 - `get_show_bar` occupancy snapshots include `layout` (`lt_symbol`).
+- Layout changes emit `monitor/bar` after `layout/set`.
 
 ### Changed
 
