@@ -4671,6 +4671,7 @@ impl Jwm {
     /// Also `layout` (`WMMonitor.lt_symbol`).
     /// Also `gap` (`MonitorLayout.gap`).
     /// Also `mfact` (`MonitorLayout.m_fact`).
+    /// Also `nmaster` (`MonitorLayout.n_master`).
     pub(crate) fn query_show_bar_for_monitor(
         &self,
         backend: &dyn Backend,
@@ -4683,6 +4684,7 @@ impl Jwm {
                 "layout": serde_json::Value::Null,
                 "gap": serde_json::Value::Null,
                 "mfact": serde_json::Value::Null,
+                "nmaster": serde_json::Value::Null,
                 "show_bar": serde_json::Value::Null,
                 "bar_visible": serde_json::Value::Null,
                 "has_visible_fullscreen": serde_json::Value::Null,
@@ -4701,6 +4703,7 @@ impl Jwm {
             "layout": mon.lt_symbol,
             "gap": mon.layout.gap,
             "mfact": mon.layout.m_fact,
+            "nmaster": mon.layout.n_master,
             "show_bar": show_bar,
             "bar_visible": self.monitor_shows_status_bar(mk),
             "has_visible_fullscreen": self.monitor_has_visible_fullscreen(mk),
@@ -4727,6 +4730,7 @@ impl Jwm {
                 "layout": serde_json::Value::Null,
                 "gap": serde_json::Value::Null,
                 "mfact": serde_json::Value::Null,
+                "nmaster": serde_json::Value::Null,
                 "show_bar": serde_json::Value::Null,
                 "bar_visible": serde_json::Value::Null,
                 "has_visible_fullscreen": serde_json::Value::Null,
@@ -11397,5 +11401,20 @@ mod tests {
             .0;
         assert!(setmfact.contains("broadcast_monitor_bar_ipc(backend, sel_mon_key)"));
         assert!(DOCS.contains("`setmfact` emits `monitor/bar`"));
+    }
+
+    #[test]
+    fn evolve8h_wave_78_occupancy_snapshot_includes_nmaster() {
+        const SOURCE: &str = include_str!("ipc_handler.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        let query = SOURCE
+            .split_once("fn query_show_bar_for_monitor(")
+            .expect("query_show_bar_for_monitor")
+            .1
+            .split_once("fn query_focused_show_bar(")
+            .expect("focused follows")
+            .0;
+        assert!(query.contains("\"nmaster\": mon.layout.n_master"));
+        assert!(DOCS.contains("also include `nmaster`"));
     }
 }

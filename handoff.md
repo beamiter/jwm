@@ -391,7 +391,16 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 75 | get_show_bar occupancy 含 mfact | ✓ |
 | 76 | jwm-tool health occupancy 含 mfact | ✓ |
 | 77 | setmfact emit monitor/bar | ✓ |
+| 78 | get_show_bar occupancy 含 nmaster | ✓ |
 | … | 进行中 | |
+
+---
+
+## 2026-10-03：evolve8h wave 78 — occupancy snapshot includes nmaster
+
+选题 = evolve8h wave 78。`get_show_bar` / `monitor/bar` 带上当前 n_master。
+
+**验证**：`scripts/test.sh --lib --` 聚焦 evolve8h_wave_78。
 
 ---
 
