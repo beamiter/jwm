@@ -529,7 +529,16 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 213 | get_show_bar occupancy 含 never_focus_count | ✓ |
 | 214 | jwm-tool health occupancy 含 never_focus | ✓ |
 | 215 | get_status.show_bar rustdoc 含 never_focus_count | ✓ |
+| 216 | README occupancy 含 never_focus_count | ✓ |
 | … | 进行中 | |
+
+---
+
+## 2026-10-03：evolve8h wave 216 — README occupancy names never_focus_count
+
+选题 = evolve8h wave 216。README occupancy JSON 点名 `never_focus_count`。
+
+**验证**：`scripts/test.sh --lib --` 聚焦 evolve8h_wave_216 evolve8h_wave_210。
 
 ---
 

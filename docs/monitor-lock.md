@@ -321,6 +321,7 @@ README occupancy JSON also names `scratchpad_count`.
 README occupancy JSON also names `tabbed_count`.
 README occupancy JSON also names `dock_count`.
 README occupancy JSON also names `desktop_count`.
+README occupancy JSON also names `never_focus_count`.
 `tools/README.md` also names `minimized_count`.
 `tools/README.md` also names `sticky_count`.
 `tools/README.md` also names `urgent_count`.
