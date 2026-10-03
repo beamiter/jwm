@@ -210,6 +210,7 @@ monorepo use independent Semantic Versions.
 - `jwm-tool health` occupancy line includes below_count.
 - `get_status.show_bar` rustdoc names `below_count`.
 - README occupancy JSON names `below_count`.
+- `tools/README.md` occupancy JSON names `below_count`.
 
 ### Changed
 
