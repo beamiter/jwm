@@ -481,3 +481,4 @@ README control examples include `get_cp`.
 Compatibility docs name `get_cp` among short query aliases.
 Window-placement docs name `get_closed_placement` / `get_cp`.
 Focused layout-knob query docs name `get_closed_placement`.
+Launcher window activation emits `monitor/bar`.

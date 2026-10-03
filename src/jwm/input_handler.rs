@@ -1827,6 +1827,10 @@ impl Jwm {
             ) {
                 log::warn!("Launcher: could not focus window: {error}");
             }
+            // reveal_and_focus may restore + retarget selected_id; occupancy needs bar.
+            if let Some(mk) = self.state.sel_mon {
+                self.broadcast_monitor_bar_ipc(backend, mk);
+            }
             return Ok(true);
         }
         if let Some(command) = direct_command_from_launcher(&self.features.system_ui) {

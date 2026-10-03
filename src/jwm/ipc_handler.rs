@@ -14815,4 +14815,20 @@ mod tests {
         ));
         assert!(DOCS.contains("Focused layout-knob query docs name `get_closed_placement`"));
     }
+
+    #[test]
+    fn evolve8h_wave_346_launcher_window_activation_broadcasts_monitor_bar() {
+        const SOURCE: &str = include_str!("input_handler.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        let activate = SOURCE
+            .split_once("fn activate_launcher_selection(")
+            .expect("activate_launcher_selection")
+            .1
+            .split_once("fn activate_system_ui_pointer_row(")
+            .expect("activate_system_ui_pointer_row follows")
+            .0;
+        assert!(activate.contains("selected_window()"));
+        assert!(activate.contains("broadcast_monitor_bar_ipc(backend, mk)"));
+        assert!(DOCS.contains("Launcher window activation emits `monitor/bar`"));
+    }
 }
