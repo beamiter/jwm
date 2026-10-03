@@ -12345,4 +12345,12 @@ mod tests {
         assert!(TOOL.contains("fullscreen_count={fullscreen_count}"));
         assert!(DOCS.contains("and `fullscreen_count`"));
     }
+
+    #[test]
+    fn evolve8h_wave_154_get_status_show_bar_rustdoc_names_fullscreen_count() {
+        const IPC: &str = include_str!("../ipc.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(IPC.contains("Also `fullscreen_count`."));
+        assert!(DOCS.contains("`get_status.show_bar` rustdoc also names `fullscreen_count`"));
+    }
 }
