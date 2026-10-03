@@ -611,9 +611,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 295 | strut 属性更新发出 monitor/bar | ✓ |
 | 296 | strut 换屏发出 monitor/bar | ✓ |
 | 297 | window-tab 重排发出 monitor/bar | ✓ |
+| 298 | get_show_bar occupancy 含 closed_placement_count | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 298 — occupancy snapshot includes closed_placement_count
+
+选题 = evolve8h wave 298。`get_show_bar` / `monitor/bar` 带上记得关闭落位的窗口数。
 
 ## 2026-10-03：evolve8h wave 297 — window-tab reorders broadcast monitor/bar
 

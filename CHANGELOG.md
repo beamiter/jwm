@@ -325,6 +325,7 @@ monorepo use independent Semantic Versions.
 - External strut property updates emit `monitor/bar`.
 - External strut rehosts emit `monitor/bar`.
 - Window-tab reorders emit `monitor/bar`.
+- `get_show_bar` occupancy snapshots include `closed_placement_count`.
 
 ### Changed
 

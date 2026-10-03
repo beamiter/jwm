@@ -4704,6 +4704,7 @@ impl Jwm {
     /// Also `maximize_promoted_count` (attached maximize-promoted tiled clients).
     /// Also `status_bar_count` (attached configured status-bar clients).
     /// Also `prev_layout` (previous layout symbol for the current tag).
+    /// Also `closed_placement_count` (attached clients that remember closed placement).
     pub(crate) fn query_show_bar_for_monitor(
         &self,
         backend: &dyn Backend,
@@ -4749,6 +4750,7 @@ impl Jwm {
                 "strut_count": serde_json::Value::Null,
                 "maximize_promoted_count": serde_json::Value::Null,
                 "status_bar_count": serde_json::Value::Null,
+                "closed_placement_count": serde_json::Value::Null,
                 "show_bar": serde_json::Value::Null,
                 "bar_visible": serde_json::Value::Null,
                 "has_visible_fullscreen": serde_json::Value::Null,
@@ -5139,6 +5141,21 @@ impl Jwm {
                         .count()
                 })
                 .unwrap_or(0),
+            "closed_placement_count": self
+                .state
+                .monitor_clients
+                .get(mk)
+                .map(|keys| {
+                    keys.iter()
+                        .filter(|&&ck| {
+                            self.state
+                                .clients
+                                .get(ck)
+                                .is_some_and(|c| c.state.remembers_closed_placement)
+                        })
+                        .count()
+                })
+                .unwrap_or(0),
             "show_bar": show_bar,
             "bar_visible": self.monitor_shows_status_bar(mk),
             "has_visible_fullscreen": self.monitor_has_visible_fullscreen(mk),
@@ -5198,6 +5215,7 @@ impl Jwm {
                 "strut_count": serde_json::Value::Null,
                 "maximize_promoted_count": serde_json::Value::Null,
                 "status_bar_count": serde_json::Value::Null,
+                "closed_placement_count": serde_json::Value::Null,
                 "show_bar": serde_json::Value::Null,
                 "bar_visible": serde_json::Value::Null,
                 "has_visible_fullscreen": serde_json::Value::Null,
@@ -14137,5 +14155,21 @@ mod tests {
             .0;
         assert!(reorder.contains("broadcast_monitor_bar_ipc(backend, mon_key)"));
         assert!(DOCS.contains("Window-tab reorders emit `monitor/bar`"));
+    }
+
+    #[test]
+    fn evolve8h_wave_298_occupancy_snapshot_includes_closed_placement_count() {
+        const SOURCE: &str = include_str!("ipc_handler.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        let query = SOURCE
+            .split_once("fn query_show_bar_for_monitor(")
+            .expect("query_show_bar_for_monitor")
+            .1
+            .split_once("fn query_focused_show_bar(")
+            .expect("focused follows")
+            .0;
+        assert!(query.contains("\"closed_placement_count\":"));
+        assert!(query.contains("c.state.remembers_closed_placement"));
+        assert!(DOCS.contains("also include `closed_placement_count`"));
     }
 }
