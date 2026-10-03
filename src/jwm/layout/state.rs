@@ -426,6 +426,7 @@ impl Jwm {
         // pixels; the bar window itself has to move. The caller's arrange()
         // would also do this, but it is skipped when the tag has no selection.
         self.sync_secondary_bar_position(backend, mon_key);
+        self.broadcast_monitor_bar_ipc(backend, mon_key);
 
         Ok(())
     }

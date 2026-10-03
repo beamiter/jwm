@@ -335,7 +335,16 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 19 | broadcast_monitor_bar_ipc 共用辅助 | ✓ |
 | 20 | view 发射 monitor/bar | ✓ |
 | 21 | toggleview 发射 monitor/bar | ✓ |
+| 22 | 全屏布局切换发射 monitor/bar | ✓ |
 | … | 进行中 | |
+
+---
+
+## 2026-10-03：evolve8h wave 22 — fullscreen layout emits monitor/bar
+
+选题 = evolve8h wave 22。FULLSCREEN 布局进出会改 pertag.show_bars，广播 occupancy。
+
+**验证**：`scripts/test.sh --lib --` 聚焦 evolve8h_wave_22。
 
 ---
 

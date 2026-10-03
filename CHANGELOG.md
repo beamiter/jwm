@@ -39,6 +39,8 @@ monorepo use independent Semantic Versions.
 - Tag `view` emits `monitor/bar` because per-tag `show_bar` and visible
   fullscreen occupancy can both change.
 - `toggleview` emits `monitor/bar` after arrange.
+- Fullscreen layout enter/leave emits `monitor/bar` after the bar window
+  is parked or restored.
 
 ### Changed
 

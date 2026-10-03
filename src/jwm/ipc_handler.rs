@@ -10762,4 +10762,19 @@ mod tests {
         assert!(toggleview.contains("broadcast_monitor_bar_ipc(backend, sel_mon_key)"));
         assert!(DOCS.contains("`toggleview`"));
     }
+
+    #[test]
+    fn evolve8h_wave_22_fullscreen_layout_broadcasts_monitor_bar() {
+        const LAYOUT: &str = include_str!("layout/state.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        let transition = LAYOUT
+            .split_once("fn handle_fullscreen_layout_transition(")
+            .expect("fullscreen layout transition")
+            .1
+            .split_once("pub(crate) fn set_new_layout(")
+            .expect("set_new_layout follows")
+            .0;
+        assert!(transition.contains("broadcast_monitor_bar_ipc(backend, mon_key)"));
+        assert!(DOCS.contains("Fullscreen layout enter/leave"));
+    }
 }
