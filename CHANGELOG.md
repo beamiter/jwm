@@ -431,6 +431,7 @@ monorepo use independent Semantic Versions.
 - `tools/README.md` health text names compact `focused`.
 - `jwm-tool capabilities` text lists `get_fw -> get_focused_window`.
 - `jwm-tool health` prints compact `monitors` beside occupancy.
+- README health text names compact `monitors`.
 
 ### Changed
 

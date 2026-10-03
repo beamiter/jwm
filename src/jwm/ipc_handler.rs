@@ -15348,4 +15348,13 @@ mod tests {
         assert!(TOOL.contains("\"monitors: count=2 focused=1\""));
         assert!(DOCS.contains("`jwm-tool health` prints compact `monitors` beside occupancy"));
     }
+
+    #[test]
+    fn evolve8h_wave_402_readme_health_names_compact_monitors() {
+        const README: &str = include_str!("../../README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(README.contains("compact `monitors` line"));
+        assert!(README.contains("get_status.monitors"));
+        assert!(DOCS.contains("README health text names compact `monitors`"));
+    }
 }
