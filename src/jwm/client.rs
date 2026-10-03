@@ -1635,9 +1635,16 @@ impl Jwm {
         self.focus(backend, None)?;
 
         if let Some(monitor_key) = new_monitor_key {
-            if let Some(monitor) = self.state.monitors.get(monitor_key) {
-                debug!("Switched to monitor {} via mouse motion", monitor.num);
+            if let Some(num) = self.state.monitors.get(monitor_key).map(|monitor| monitor.num) {
+                debug!("Switched to monitor {num} via mouse motion");
+                self.broadcast_ipc_event(
+                    "monitor/focus",
+                    serde_json::json!({
+                        "monitor": num,
+                    }),
+                );
             }
+            self.broadcast_monitor_bar_ipc(backend, monitor_key);
         }
 
         Ok(())

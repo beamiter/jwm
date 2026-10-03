@@ -189,7 +189,8 @@ snapshot. `togglebar` emits the same event after arrange (shared
 fullscreen client. Closing one emits it after `window/close`. Swallowing a terminal
 emits it for that monitor. Sending a fullscreen client to another
 output emits it on both monitors. `focusmon` emits it for the newly
-focused output.
+focused output. Pointer crossings emit `monitor/focus` and
+`monitor/bar` as well.
 `get_cfact` /
 `get_selected` / `get_focused_window` twin the focused client. IPC `setgaps` /
 `set_gaps`, `setmfact` / `set_mfact`, and `setcfact` / `set_cfact` adjust the

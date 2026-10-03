@@ -10858,4 +10858,20 @@ mod tests {
         assert!(FOCUS.contains("broadcast_monitor_bar_ipc(backend, target_mon_key)"));
         assert!(DOCS.contains("`focusmon`"));
     }
+
+    #[test]
+    fn evolve8h_wave_28_pointer_switch_broadcasts_monitor_focus_and_bar() {
+        const CLIENT: &str = include_str!("client.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        let switch = CLIENT
+            .split_once("pub(crate) fn handle_monitor_switch_by_key(")
+            .expect("handle_monitor_switch_by_key")
+            .1
+            .split_once("pub(crate) fn unmanage(")
+            .expect("unmanage follows")
+            .0;
+        assert!(switch.contains("\"monitor/focus\""));
+        assert!(switch.contains("broadcast_monitor_bar_ipc(backend, monitor_key)"));
+        assert!(DOCS.contains("Pointer crossings"));
+    }
 }

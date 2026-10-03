@@ -341,7 +341,16 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 25 | swallow/unswallow 发射 monitor/bar | ✓ |
 | 26 | sendmon 全屏客户两边 monitor/bar | ✓ |
 | 27 | focusmon 发射 monitor/bar | ✓ |
+| 28 | 指针切屏发射 monitor/focus 与 monitor/bar | ✓ |
 | … | 进行中 | |
+
+---
+
+## 2026-10-03：evolve8h wave 28 — pointer switch emits monitor/focus and monitor/bar
+
+选题 = evolve8h wave 28。鼠标切屏与 focusmon 对齐，广播焦点与 occupancy。
+
+**验证**：`scripts/test.sh --lib --` 聚焦 evolve8h_wave_28。
 
 ---
 
