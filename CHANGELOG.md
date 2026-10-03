@@ -330,6 +330,7 @@ monorepo use independent Semantic Versions.
 - `get_status.show_bar` rustdoc names `closed_placement_count`.
 - README occupancy JSON names `closed_placement_count`.
 - `tools/README.md` occupancy JSON names `closed_placement_count`.
+- Window-tabs docs name occupancy `closed_placement_count`.
 
 ### Changed
 

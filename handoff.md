@@ -616,9 +616,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 300 | get_status.show_bar rustdoc 含 closed_placement_count | ✓ |
 | 301 | README occupancy 含 closed_placement_count | ✓ |
 | 302 | tools/README occupancy 含 closed_placement_count | ✓ |
+| 303 | window-tabs occupancy 含 closed_placement_count | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 303 — window-tabs occupancy names closed_placement_count
+
+选题 = evolve8h wave 303。window-tabs occupancy JSON 带上 closed_placement_count。
 
 ## 2026-10-03：evolve8h wave 302 — tools/README occupancy names closed_placement_count
 
