@@ -346,6 +346,7 @@ monorepo use independent Semantic Versions.
 - Title status-bar identity flips emit `monitor/bar`.
 - Config reload emits `monitor/bar`.
 - Scrolling column focus emits `monitor/bar`.
+- `movestack` emits `monitor/bar`.
 
 ### Changed
 

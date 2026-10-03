@@ -337,6 +337,7 @@ impl Jwm {
                 self.arrange(backend, self.state.sel_mon);
                 if let Some(mon) = self.state.sel_mon {
                     self.broadcast_visible_window_states_on_monitor(backend, mon);
+                    self.broadcast_monitor_bar_ipc(backend, mon);
                 }
 
                 self.suppress_mouse_focus_until =

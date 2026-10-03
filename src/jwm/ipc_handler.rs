@@ -14468,4 +14468,19 @@ mod tests {
         assert!(focus.contains("broadcast_monitor_bar_ipc(backend, mon_key)"));
         assert!(DOCS.contains("Scrolling column focus emits `monitor/bar`"));
     }
+
+    #[test]
+    fn evolve8h_wave_319_movestack_broadcasts_monitor_bar() {
+        const SOURCE: &str = include_str!("navigation.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        let movestack = SOURCE
+            .split_once("pub fn movestack(")
+            .expect("movestack")
+            .1
+            .split_once("pub(crate) fn is_tiled_and_visible(")
+            .expect("is_tiled_and_visible follows")
+            .0;
+        assert!(movestack.contains("broadcast_monitor_bar_ipc(backend, mon)"));
+        assert!(DOCS.contains("`movestack` emits `monitor/bar`"));
+    }
 }
