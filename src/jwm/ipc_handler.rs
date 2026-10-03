@@ -15056,4 +15056,13 @@ mod tests {
         assert!(TOOL.contains("\"mfact: monitor=0 m_fact=0.55 connector=DP-1\""));
         assert!(DOCS.contains("`jwm-tool health` prints compact `mfact` beside occupancy"));
     }
+
+    #[test]
+    fn evolve8h_wave_370_health_prints_compact_nmaster() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("nmaster: monitor={monitor} n_master={n_master}"));
+        assert!(TOOL.contains("\"nmaster: monitor=0 n_master=2 connector=DP-1\""));
+        assert!(DOCS.contains("`jwm-tool health` prints compact `nmaster` beside occupancy"));
+    }
 }

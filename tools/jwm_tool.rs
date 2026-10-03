@@ -3452,6 +3452,23 @@ mod tests {
         assert!(mfact_lines.iter().any(|line| {
             line == "mfact: monitor=0 m_fact=0.55 connector=DP-1"
         }));
+        assert!(!mfact_lines.iter().any(|line| line.starts_with("nmaster:")));
+
+        let with_compact_nmaster = serde_json::json!({
+            "health": {"status": "healthy", "reasons": []},
+            "counts": {"windows": 0, "monitors": 1, "workspaces": 1},
+            "config": {"path": "/tmp/config.toml", "diagnostics": {"error_count": 0, "warning_count": 0}},
+            "features": {},
+            "nmaster": {
+                "monitor": 0,
+                "n_master": 2,
+                "connector": "DP-1"
+            }
+        });
+        let nmaster_lines = health_output_lines(&with_compact_nmaster);
+        assert!(nmaster_lines.iter().any(|line| {
+            line == "nmaster: monitor=0 n_master=2 connector=DP-1"
+        }));
 
         let capabilities = serde_json::json!({
             "schema_version": 1,
@@ -4484,6 +4501,24 @@ fn health_output_lines(status: &serde_json::Value) -> Vec<String> {
             .unwrap_or_else(|| "-".into());
         let mut line = format!("mfact: monitor={monitor} m_fact={m_fact}");
         if let Some(connector) = mfact.get("connector").and_then(serde_json::Value::as_str) {
+            line.push_str(&format!(" connector={connector}"));
+        }
+        lines.push(line);
+    }
+
+    if let Some(nmaster) = status.get("nmaster").and_then(serde_json::Value::as_object) {
+        let monitor = nmaster
+            .get("monitor")
+            .and_then(|v| v.as_u64().or_else(|| v.as_i64().map(|n| n as u64)))
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".into());
+        let n_master = nmaster
+            .get("n_master")
+            .and_then(|v| v.as_u64().or_else(|| v.as_i64().map(|n| n as u64)))
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".into());
+        let mut line = format!("nmaster: monitor={monitor} n_master={n_master}");
+        if let Some(connector) = nmaster.get("connector").and_then(serde_json::Value::as_str) {
             line.push_str(&format!(" connector={connector}"));
         }
         lines.push(line);

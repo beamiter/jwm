@@ -398,6 +398,7 @@ monorepo use independent Semantic Versions.
 - `jwm-tool health` prints compact `cfact` beside occupancy.
 - `jwm-tool health` prints compact `gaps` beside occupancy.
 - `jwm-tool health` prints compact `mfact` beside occupancy.
+- `jwm-tool health` prints compact `nmaster` beside occupancy.
 
 ### Changed
 
