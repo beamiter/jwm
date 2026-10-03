@@ -689,9 +689,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 373 | capabilities 文本列出 get_cf -> get_cfact | ✓ |
 | 374 | capabilities 文本列出 get_gap -> get_gaps | ✓ |
 | 375 | capabilities 文本列出 get_mf -> get_mfact | ✓ |
+| 376 | capabilities 文本列出 get_nm -> get_nmaster | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 376 — capabilities text lists get_nm alias
+
+选题 = evolve8h wave 376。`jwm-tool capabilities` 文本列出 `get_nm -> get_nmaster`。
 
 ## 2026-10-03：evolve8h wave 375 — capabilities text lists get_mf alias
 

@@ -15109,4 +15109,12 @@ mod tests {
         assert!(TOOL.contains("query aliases: get_mf -> get_mfact"));
         assert!(DOCS.contains("`jwm-tool capabilities` text lists `get_mf -> get_mfact`"));
     }
+
+    #[test]
+    fn evolve8h_wave_376_capabilities_text_lists_get_nm_alias() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("query aliases: get_nm -> get_nmaster"));
+        assert!(DOCS.contains("`jwm-tool capabilities` text lists `get_nm -> get_nmaster`"));
+    }
 }
