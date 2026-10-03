@@ -349,6 +349,7 @@ monorepo use independent Semantic Versions.
 - `movestack` emits `monitor/bar`.
 - Closed-placement settle emits `monitor/bar`.
 - `pop` emits `monitor/bar`.
+- Transient-for floating emits `monitor/bar`.
 
 ### Changed
 

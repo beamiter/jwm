@@ -14513,4 +14513,19 @@ mod tests {
         assert!(pop.contains("broadcast_monitor_bar_ipc(backend, mon_key)"));
         assert!(DOCS.contains("`pop` emits `monitor/bar`"));
     }
+
+    #[test]
+    fn evolve8h_wave_322_transient_for_floating_broadcasts_monitor_bar() {
+        const SOURCE: &str = include_str!("property_handler.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        let transient = SOURCE
+            .split_once("pub(crate) fn handle_transient_for_change(")
+            .expect("handle_transient_for_change")
+            .1
+            .split_once("pub(crate) fn handle_normal_hints_change(")
+            .expect("normal hints follows")
+            .0;
+        assert!(transient.contains("broadcast_monitor_bar_ipc(backend, mk)"));
+        assert!(DOCS.contains("Transient-for floating emits `monitor/bar`"));
+    }
 }

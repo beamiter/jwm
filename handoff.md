@@ -635,9 +635,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 319 | movestack 发出 monitor/bar | ✓ |
 | 320 | closed-placement settle 发出 monitor/bar | ✓ |
 | 321 | pop 发出 monitor/bar | ✓ |
+| 322 | transient-for 起浮发出 monitor/bar | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 322 — transient-for floating broadcasts monitor/bar
+
+选题 = evolve8h wave 322。`WM_TRANSIENT_FOR` 导致起浮后发出 `monitor/bar`。
 
 ## 2026-10-03：evolve8h wave 321 — pop broadcasts monitor/bar
 

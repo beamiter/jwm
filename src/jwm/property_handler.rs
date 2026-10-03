@@ -77,6 +77,9 @@ impl Jwm {
 
                     let mon_key = self.state.clients.get(client_key).and_then(|c| c.mon);
                     self.arrange(backend, mon_key);
+                    if let Some(mk) = mon_key {
+                        self.broadcast_monitor_bar_ipc(backend, mk);
+                    }
                     if self
                         .state
                         .clients
