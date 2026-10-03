@@ -13088,4 +13088,12 @@ mod tests {
         assert!(query.contains("c.state.never_focus"));
         assert!(DOCS.contains("also include `never_focus_count`"));
     }
+
+    #[test]
+    fn evolve8h_wave_214_health_occupancy_includes_never_focus_count() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("never_focus={never_focus}"));
+        assert!(DOCS.contains("and `never_focus_count`"));
+    }
 }

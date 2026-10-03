@@ -527,7 +527,16 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 211 | tools/README occupancy 含 desktop_count | ✓ |
 | 212 | window-tabs occupancy 含 desktop_count | ✓ |
 | 213 | get_show_bar occupancy 含 never_focus_count | ✓ |
+| 214 | jwm-tool health occupancy 含 never_focus | ✓ |
 | … | 进行中 | |
+
+---
+
+## 2026-10-03：evolve8h wave 214 — health occupancy includes never_focus_count
+
+选题 = evolve8h wave 214。health occupancy 行带上 never_focus_count。
+
+**验证**：`scripts/test.sh --lib --bins --` 聚焦 evolve8h_wave_214 insight_output。
 
 ---
 
