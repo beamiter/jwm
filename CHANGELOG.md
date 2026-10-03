@@ -61,6 +61,7 @@ monorepo use independent Semantic Versions.
   rule (zero off-view).
 - `TreeNode.owns_output_count` rustdoc names hide-bar occupancy.
 - `MonitorInfoIpc.owns_output_count` rustdoc excludes swallowed terminals.
+- `query_show_bar_for_monitor` rustdoc lists the occupancy JSON keys.
 
 ### Changed
 

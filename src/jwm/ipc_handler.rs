@@ -4663,6 +4663,9 @@ impl Jwm {
     }
 
     /// Status-bar preference and occupancy for one monitor.
+    ///
+    /// Object keys: `monitor`, `show_bar`, `bar_visible`,
+    /// `has_visible_fullscreen`, `owns_output_count`, optional `connector`.
     pub(crate) fn query_show_bar_for_monitor(
         &self,
         backend: &dyn Backend,
@@ -10979,5 +10982,15 @@ mod tests {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
         assert!(IPC.contains("swallowed terminals excluded"));
         assert!(DOCS.contains("swallowed terminals\nexcluded") || DOCS.contains("swallowed terminals excluded"));
+    }
+
+    #[test]
+    fn evolve8h_wave_39_show_bar_snapshot_json_keys_documented() {
+        const SOURCE: &str = include_str!("ipc_handler.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        let prod = SOURCE.split_once("mod tests {").expect("tests module").0;
+        assert!(prod.contains("Object keys: `monitor`, `show_bar`, `bar_visible`"));
+        assert!(prod.contains("optional `connector`."));
+        assert!(DOCS.contains("JSON keys `monitor`"));
     }
 }

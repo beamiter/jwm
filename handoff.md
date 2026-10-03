@@ -352,7 +352,16 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 36 | WorkspaceInfo.owns_output_count rustdoc | ✓ |
 | 37 | TreeNode.owns_output_count rustdoc | ✓ |
 | 38 | MonitorInfoIpc.owns_output_count rustdoc | ✓ |
+| 39 | query_show_bar_for_monitor JSON 键 rustdoc | ✓ |
 | … | 进行中 | |
+
+---
+
+## 2026-10-03：evolve8h wave 39 — show-bar snapshot JSON keys
+
+选题 = evolve8h wave 39。`query_show_bar_for_monitor` 注释列出 occupancy JSON 键。
+
+**验证**：`scripts/test.sh --lib --` 聚焦 evolve8h_wave_39。
 
 ---
 
