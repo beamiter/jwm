@@ -1485,6 +1485,8 @@ pub struct TreeNode {
     pub strut_count: usize,
     /// How many of `windows` report `is_status_bar`.
     pub status_bar_count: usize,
+    /// How many of `windows` report `remembers_closed_placement`.
+    pub closed_placement_count: usize,
     /// How many of `windows` currently own the output (visible fullscreen
     /// on the current view, hide-bar occupancy).
     pub owns_output_count: usize,
@@ -3732,6 +3734,7 @@ mod tests {
             maximize_promoted_count: 0,
             strut_count: 0,
             status_bar_count: 0,
+            closed_placement_count: 0,
             owns_output_count: 0,
         };
         let json = serde_json::to_value(node).unwrap();
@@ -3857,6 +3860,7 @@ mod tests {
             maximize_promoted_count: 0,
             strut_count: 0,
             status_bar_count: 0,
+            closed_placement_count: 0,
             owns_output_count: 0,
         };
         let json = serde_json::to_value(node).unwrap();

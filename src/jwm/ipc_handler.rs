@@ -6582,6 +6582,7 @@ impl Jwm {
                     maximize_promoted_count: counts.maximize_promoted,
                     strut_count: counts.strut,
                     status_bar_count: counts.status_bar,
+                    closed_placement_count: counts.closed_placement,
                     owns_output_count: self.monitor_owns_output_count(mk),
                     selected_id: m
                         .sel
@@ -14275,5 +14276,29 @@ mod tests {
             .0;
         assert!(monitor.contains("pub closed_placement_count: usize,"));
         assert!(DOCS.contains("Monitor rows report `closed_placement_count`"));
+    }
+
+    #[test]
+    fn evolve8h_wave_307_tree_node_closed_placement_count() {
+        const IPC: &str = include_str!("../ipc.rs");
+        const SOURCE: &str = include_str!("ipc_handler.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        let tree = IPC
+            .split_once("pub struct TreeNode {")
+            .expect("TreeNode")
+            .1
+            .split_once("// ---------------------------------------------------------------------------")
+            .expect("command dispatch follows")
+            .0;
+        assert!(tree.contains("pub closed_placement_count: usize,"));
+        let query = SOURCE
+            .split_once("pub(crate) fn query_tree(")
+            .expect("query_tree")
+            .1
+            .split_once("pub(crate) fn broadcast_monitor_bar_ipc(")
+            .expect("broadcast follows")
+            .0;
+        assert!(query.contains("closed_placement_count: counts.closed_placement,"));
+        assert!(DOCS.contains("Tree nodes report `closed_placement_count`"));
     }
 }
