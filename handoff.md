@@ -697,9 +697,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 381 | health 打印 compact tabs | ✓ |
 | 382 | README health 点名 compact tabs | ✓ |
 | 383 | tools/README health 点名 compact tabs | ✓ |
+| 384 | capabilities 文本列出 get_tab,get_tabs -> get_tab_bar | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 384 — capabilities text lists get_tab aliases
+
+选题 = evolve8h wave 384。`jwm-tool capabilities` 文本列出 `get_tab,get_tabs -> get_tab_bar`。
 
 ## 2026-10-03：evolve8h wave 383 — tools/README health names compact tabs
 

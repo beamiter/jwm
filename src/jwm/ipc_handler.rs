@@ -15181,4 +15181,14 @@ mod tests {
         assert!(TOOLS.contains("get_status.tabs"));
         assert!(DOCS.contains("`tools/README.md` health text names compact `tabs`"));
     }
+
+    #[test]
+    fn evolve8h_wave_384_capabilities_text_lists_get_tab_aliases() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("query aliases: get_tab,get_tabs -> get_tab_bar"));
+        assert!(DOCS.contains(
+            "`jwm-tool capabilities` text lists `get_tab,get_tabs -> get_tab_bar`"
+        ));
+    }
 }

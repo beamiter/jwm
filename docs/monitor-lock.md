@@ -519,3 +519,4 @@ README health text names compact `layout`.
 `jwm-tool health` prints compact `tabs` beside occupancy.
 README health text names compact `tabs`.
 `tools/README.md` health text names compact `tabs`.
+`jwm-tool capabilities` text lists `get_tab,get_tabs -> get_tab_bar`.
