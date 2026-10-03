@@ -282,6 +282,7 @@ impl Jwm {
         state.retain_non_empty_columns();
 
         self.arrange(backend, Some(mon_key));
+        self.broadcast_monitor_bar_ipc(backend, mon_key);
         Ok(())
     }
 

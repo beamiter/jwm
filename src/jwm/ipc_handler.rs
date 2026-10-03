@@ -14361,4 +14361,19 @@ mod tests {
         assert!(move_col.contains("broadcast_monitor_bar_ipc(backend, mon_key)"));
         assert!(DOCS.contains("Scrolling column moves emit `monitor/bar`"));
     }
+
+    #[test]
+    fn evolve8h_wave_312_scrolling_consume_broadcasts_monitor_bar() {
+        const SOURCE: &str = include_str!("layout/scrolling.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        let consume = SOURCE
+            .split_once("pub(crate) fn scrolling_consume(")
+            .expect("scrolling_consume")
+            .1
+            .split_once("pub(crate) fn scrolling_expel(")
+            .expect("scrolling_expel follows")
+            .0;
+        assert!(consume.contains("broadcast_monitor_bar_ipc(backend, mon_key)"));
+        assert!(DOCS.contains("Scrolling consume emits `monitor/bar`"));
+    }
 }

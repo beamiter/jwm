@@ -339,6 +339,7 @@ monorepo use independent Semantic Versions.
 - Portal window rows deserialize `remembers_closed_placement`.
 - `incnmaster` emits `monitor/bar`.
 - Scrolling column moves emit `monitor/bar`.
+- Scrolling consume emits `monitor/bar`.
 
 ### Changed
 
