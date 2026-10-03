@@ -338,6 +338,7 @@ monorepo use independent Semantic Versions.
 - Portal monitor rows deserialize `closed_placement_count`.
 - Portal window rows deserialize `remembers_closed_placement`.
 - `incnmaster` emits `monitor/bar`.
+- Scrolling column moves emit `monitor/bar`.
 
 ### Changed
 

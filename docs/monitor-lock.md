@@ -229,6 +229,7 @@ Tree nodes report `closed_placement_count`.
 Portal monitor rows deserialize `closed_placement_count`.
 Portal window rows deserialize `remembers_closed_placement`.
 `incnmaster` emits `monitor/bar`.
+Scrolling column moves emit `monitor/bar`.
 Hiding a scratchpad emits `monitor/bar`.
 Showing a scratchpad emits `monitor/bar`.
 `_NET_WM_STATE_SKIP_TASKBAR` emits `monitor/bar`.

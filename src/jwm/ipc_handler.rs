@@ -14346,4 +14346,19 @@ mod tests {
         assert!(inc.contains("broadcast_monitor_bar_ipc(backend, sel_mon_key)"));
         assert!(DOCS.contains("`incnmaster` emits `monitor/bar`"));
     }
+
+    #[test]
+    fn evolve8h_wave_311_scrolling_move_column_broadcasts_monitor_bar() {
+        const SOURCE: &str = include_str!("layout/scrolling.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        let move_col = SOURCE
+            .split_once("pub(crate) fn scrolling_move_column(")
+            .expect("scrolling_move_column")
+            .1
+            .split_once("pub(crate) fn scrolling_set_column_width(")
+            .expect("set_column_width follows")
+            .0;
+        assert!(move_col.contains("broadcast_monitor_bar_ipc(backend, mon_key)"));
+        assert!(DOCS.contains("Scrolling column moves emit `monitor/bar`"));
+    }
 }
