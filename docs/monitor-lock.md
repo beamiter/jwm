@@ -234,6 +234,7 @@ WM_HINTS never-focus changes emit `monitor/bar`.
 Drag-snap drops emit `monitor/bar`.
 `setcfact` emits `monitor/bar`.
 External strut property updates emit `monitor/bar`.
+External strut rehosts emit `monitor/bar`.
 Keep-above and keep-below changes emit `monitor/bar`.
 Toggling maximize emits `monitor/bar`.
 Unmaximize-in-place emits `monitor/bar`.

@@ -323,6 +323,7 @@ monorepo use independent Semantic Versions.
 - Drag-snap drops emit `monitor/bar`.
 - `setcfact` emits `monitor/bar`.
 - External strut property updates emit `monitor/bar`.
+- External strut rehosts emit `monitor/bar`.
 
 ### Changed
 

@@ -14108,4 +14108,19 @@ mod tests {
         );
         assert!(DOCS.contains("External strut property updates emit `monitor/bar`"));
     }
+
+    #[test]
+    fn evolve8h_wave_296_strut_rehosts_broadcast_monitor_bar() {
+        const SOURCE: &str = include_str!("event_dispatcher.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        let rehost = SOURCE
+            .split_once("refresh_external_strut_host_from_geometry(")
+            .expect("strut rehost")
+            .1
+            .split_once("if self.override_redirect_windows.contains(&win) {")
+            .expect("OR geom cache follows")
+            .0;
+        assert!(rehost.contains("broadcast_monitor_bar_all_monitors(backend)"));
+        assert!(DOCS.contains("External strut rehosts emit `monitor/bar`"));
+    }
 }

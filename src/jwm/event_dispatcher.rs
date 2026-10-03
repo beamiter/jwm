@@ -435,6 +435,7 @@ impl WMController for Jwm {
             info!("[strut] Rehosted external strut for {win:?} after ConfigureNotify");
             self.apply_strut_reservations();
             self.arrange(backend, None);
+            self.broadcast_monitor_bar_all_monitors(backend);
         }
 
         // Keep the OR geometry cache up to date so build_compositor_scene
