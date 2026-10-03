@@ -12784,4 +12784,19 @@ mod tests {
         assert!(TOOL.contains("scratchpad={scratchpad}"));
         assert!(DOCS.contains("and `scratchpad_count`"));
     }
+
+    #[test]
+    fn evolve8h_wave_189_hiding_scratchpad_broadcasts_monitor_bar() {
+        const SOURCE: &str = include_str!("features/toggles.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        let hide = SOURCE
+            .split_once("pub fn togglescratchpad(")
+            .expect("togglescratchpad")
+            .1
+            .split_once("let was_minimized = self")
+            .expect("show path follows")
+            .0;
+        assert!(hide.contains("broadcast_monitor_bar_ipc(backend, mk)"));
+        assert!(DOCS.contains("Hiding a scratchpad emits `monitor/bar`"));
+    }
 }

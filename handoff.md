@@ -502,7 +502,16 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 186 | window-tabs occupancy 含 below_count | ✓ |
 | 187 | get_show_bar occupancy 含 scratchpad_count | ✓ |
 | 188 | jwm-tool health occupancy 含 scratchpad | ✓ |
+| 189 | 隐藏 scratchpad emit monitor/bar | ✓ |
 | … | 进行中 | |
+
+---
+
+## 2026-10-03：evolve8h wave 189 — hiding a scratchpad emits monitor/bar
+
+选题 = evolve8h wave 189。`togglescratchpad` 隐藏路径刷新 occupancy，因为 `scratchpad_count` / `on_view_count` 会变。
+
+**验证**：`scripts/test.sh --lib --` 聚焦 evolve8h_wave_189。
 
 ---
 
