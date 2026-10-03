@@ -193,6 +193,7 @@ They also include `prev_tag`.
 They also include `selected_id`.
 They also include `sel_tags`.
 They also include `previous_tags`.
+They also include `active_tags`.
 `focusstack` emits `monitor/bar`.
 Scrolling in-column focus emits `monitor/bar`.
 `focus_none` emits `monitor/bar`.
