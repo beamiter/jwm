@@ -15226,4 +15226,13 @@ mod tests {
         assert!(TOOL.contains("query aliases: get_sel -> get_selected"));
         assert!(DOCS.contains("`jwm-tool capabilities` text lists `get_sel -> get_selected`"));
     }
+
+    #[test]
+    fn evolve8h_wave_389_health_prints_compact_struts() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("struts: monitors={monitor_count}"));
+        assert!(TOOL.contains("\"struts: monitors=2\""));
+        assert!(DOCS.contains("`jwm-tool health` prints compact `struts` beside occupancy"));
+    }
 }

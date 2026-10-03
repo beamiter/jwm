@@ -3518,6 +3518,19 @@ mod tests {
         });
         let selected_lines = health_output_lines(&with_compact_selected);
         assert!(selected_lines.iter().any(|line| line == "selected: id=99"));
+        assert!(!selected_lines.iter().any(|line| line.starts_with("struts:")));
+
+        let with_compact_struts = serde_json::json!({
+            "health": {"status": "healthy", "reasons": []},
+            "counts": {"windows": 0, "monitors": 1, "workspaces": 1},
+            "config": {"path": "/tmp/config.toml", "diagnostics": {"error_count": 0, "warning_count": 0}},
+            "features": {},
+            "struts": {
+                "monitor_count": 2
+            }
+        });
+        let struts_lines = health_output_lines(&with_compact_struts);
+        assert!(struts_lines.iter().any(|line| line == "struts: monitors=2"));
 
         let capabilities = serde_json::json!({
             "schema_version": 1,
@@ -4625,6 +4638,15 @@ fn health_output_lines(status: &serde_json::Value) -> Vec<String> {
             .map(|value| value.to_string())
             .unwrap_or_else(|| "-".into());
         lines.push(format!("selected: id={id}"));
+    }
+
+    if let Some(struts) = status.get("struts").and_then(serde_json::Value::as_object) {
+        let monitor_count = struts
+            .get("monitor_count")
+            .and_then(|v| v.as_u64().or_else(|| v.as_i64().map(|n| n as u64)))
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".into());
+        lines.push(format!("struts: monitors={monitor_count}"));
     }
 
     if let Some(reasons) = status["health"]["reasons"].as_array() {
