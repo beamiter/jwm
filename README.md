@@ -140,6 +140,7 @@ front and prints the exact install command for anything missing.
 jwm-tool msg get_windows
 jwm-tool msg get_show_bar
 jwm-tool msg get_vf
+jwm-tool msg get_cp
 jwm-tool msg view --args '{"tag":2}'
 jwm-tool msg setlayout --args '{"layout":"scrolling"}'
 jwm-tool msg spawn --args '{"cmd":["alacritty"]}'
