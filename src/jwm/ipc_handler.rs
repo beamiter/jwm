@@ -11135,4 +11135,12 @@ mod tests {
         assert!(TOOL.contains("get_owns_output"));
         assert!(DOCS.contains("`get_owns_output`"));
     }
+
+    #[test]
+    fn evolve8h_wave_54_jwm_tool_help_lists_get_visible_fullscreen() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("get_visible_fullscreen"));
+        assert!(DOCS.contains("`get_visible_fullscreen`"));
+    }
 }
