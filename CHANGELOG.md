@@ -303,6 +303,7 @@ monorepo use independent Semantic Versions.
 - README occupancy JSON names `maximize_promoted_count`.
 - `tools/README.md` occupancy JSON names `maximize_promoted_count`.
 - Window-tabs docs name occupancy `maximize_promoted_count`.
+- `get_show_bar` occupancy snapshots include `status_bar_count`.
 
 ### Changed
 
