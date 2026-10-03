@@ -11965,4 +11965,12 @@ mod tests {
         assert!(query.contains("c.state.is_floating"));
         assert!(DOCS.contains("also include `floating_count`"));
     }
+
+    #[test]
+    fn evolve8h_wave_124_health_occupancy_includes_floating_count() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("floating={floating}"));
+        assert!(DOCS.contains("and `floating_count`"));
+    }
 }
