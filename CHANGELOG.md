@@ -284,6 +284,7 @@ monorepo use independent Semantic Versions.
 - `get_status.show_bar` rustdoc names `demands_attention_count`.
 - README occupancy JSON names `demands_attention_count`.
 - `tools/README.md` occupancy JSON names `demands_attention_count`.
+- Window-tabs docs name occupancy `demands_attention_count`.
 
 ### Changed
 

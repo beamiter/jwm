@@ -13625,4 +13625,12 @@ mod tests {
         assert!(TOOLS.contains("It also includes `demands_attention_count`."));
         assert!(DOCS.contains("`tools/README.md` also names `demands_attention_count`"));
     }
+
+    #[test]
+    fn evolve8h_wave_258_window_tabs_occupancy_names_demands_attention_count() {
+        const TABS: &str = include_str!("../../docs/window-tabs.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TABS.contains("`swallowed_count` / `demands_attention_count`"));
+        assert!(DOCS.contains("Window-tabs docs also name `demands_attention_count`"));
+    }
 }
