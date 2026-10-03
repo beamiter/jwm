@@ -12233,4 +12233,12 @@ mod tests {
         assert!(query.contains("c.state.demands_attention"));
         assert!(DOCS.contains("also include `urgent_count`"));
     }
+
+    #[test]
+    fn evolve8h_wave_145_health_occupancy_includes_urgent_count() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("urgent={urgent}"));
+        assert!(DOCS.contains("and `urgent_count`"));
+    }
 }
