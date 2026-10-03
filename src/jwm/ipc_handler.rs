@@ -13340,4 +13340,12 @@ mod tests {
         assert!(query.contains("c.state.no_decorations"));
         assert!(DOCS.contains("also include `no_decorations_count`"));
     }
+
+    #[test]
+    fn evolve8h_wave_234_health_occupancy_includes_no_decorations_count() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("no_decorations={no_decorations}"));
+        assert!(DOCS.contains("and `no_decorations_count`"));
+    }
 }

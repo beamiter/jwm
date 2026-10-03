@@ -259,6 +259,7 @@ monorepo use independent Semantic Versions.
 - `_NET_WM_STATE_SKIP_TASKBAR` emits `monitor/bar`.
 - `_NET_WM_STATE_SKIP_PAGER` emits `monitor/bar`.
 - `get_show_bar` occupancy snapshots include `no_decorations_count`.
+- `jwm-tool health` occupancy line includes no_decorations_count.
 
 ### Changed
 

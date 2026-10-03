@@ -547,9 +547,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 231 | SkipTaskbar EWMH 发出 monitor/bar | ✓ |
 | 232 | SkipPager EWMH 发出 monitor/bar | ✓ |
 | 233 | get_show_bar occupancy 含 no_decorations_count | ✓ |
+| 234 | jwm-tool health occupancy 含 no_decorations | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 234 — health occupancy includes no_decorations_count
+
+选题 = evolve8h wave 234。health occupancy 行带上 no_decorations_count。
 
 ## 2026-10-03：evolve8h wave 233 — occupancy snapshot includes no_decorations_count
 
