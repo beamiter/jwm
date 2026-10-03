@@ -12078,4 +12078,12 @@ mod tests {
         assert!(minimize.contains("broadcast_monitor_bar_ipc(backend, mon_key)"));
         assert!(DOCS.contains("Minimizing or restoring a client emits `monitor/bar` even when it was not fullscreen"));
     }
+
+    #[test]
+    fn evolve8h_wave_133_get_status_show_bar_rustdoc_names_minimized_count() {
+        const IPC: &str = include_str!("../ipc.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(IPC.contains("Also `minimized_count`."));
+        assert!(DOCS.contains("`floating_count` / `minimized_count`"));
+    }
 }
