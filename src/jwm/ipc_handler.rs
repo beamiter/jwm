@@ -14074,4 +14074,19 @@ mod tests {
         assert!(snap.contains("broadcast_monitor_bar_ipc(backend, mk)"));
         assert!(DOCS.contains("Drag-snap drops emit `monitor/bar`"));
     }
+
+    #[test]
+    fn evolve8h_wave_294_setcfact_broadcasts_monitor_bar() {
+        const SOURCE: &str = include_str!("navigation.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        let setcfact = SOURCE
+            .split_once("pub fn setcfact(")
+            .expect("setcfact")
+            .1
+            .split_once("pub fn movestack(")
+            .expect("movestack follows")
+            .0;
+        assert!(setcfact.contains("broadcast_monitor_bar_ipc(backend, mon)"));
+        assert!(DOCS.contains("`setcfact` emits `monitor/bar`"));
+    }
 }
