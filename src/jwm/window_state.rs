@@ -900,6 +900,25 @@ impl Jwm {
         }
         if previous_client.state.is_fullscreen != fullscreen {
             self.broadcast_window_state_ipc(backend, client_key);
+            // Entering client fullscreen does not `arrange`, so the bar has
+            // to be tucked off-screen here. Leaving already arranges (which
+            // re-syncs the bar); an extra pass is cheap and covers the case
+            // where another fullscreen client is still covering the output.
+            if let Some(mon_key) = self
+                .state
+                .clients
+                .get(client_key)
+                .and_then(|client| client.mon)
+            {
+                if fullscreen && self.monitor_has_visible_fullscreen(mon_key) {
+                    if let Some(monitor_num) =
+                        self.state.monitors.get(mon_key).map(|monitor| monitor.num)
+                    {
+                        self.clear_minimized_dock_for_monitor(backend, monitor_num);
+                    }
+                }
+                self.sync_secondary_bar_position(backend, mon_key);
+            }
         }
         self.sync_floating_restore_property(backend, client_key);
         Ok(())
@@ -2277,16 +2296,20 @@ mod tests {
     use crate::backend::wayland_dummy_ops::{
         DummyColorAllocator, DummyCursorProvider, DummyInputOps, DummyKeyOps, DummyOutputOps,
     };
+    use crate::config::CONFIG;
     use crate::core::layout::LayoutEnum;
     use crate::core::maximize::{
         MaximizeOrigin, MaximizeSnapshot, initial_restore_rect, maximize_target,
     };
     use crate::core::models::WMClient;
-    use crate::jwm::types::WMArgEnum;
+    use crate::jwm::types::{SecondaryBarInstance, WMArgEnum};
     use std::any::Any;
+    use std::process::Command;
     use std::rc::Rc;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+    use std::time::{Instant, SystemTime, UNIX_EPOCH};
+    use xbar_core::shared_structures::SharedRingBufferOptions;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum ModeEvent {
@@ -3010,6 +3033,64 @@ mod tests {
         (monitor, client_key)
     }
 
+    fn attach_status_bar(
+        jwm: &mut Jwm,
+        backend: &mut MinimizeSpyBackend,
+        window: WindowId,
+    ) -> ClientKey {
+        let monitor = jwm.state.monitor_order[0];
+        let monitor_id = jwm.state.monitors[monitor].num;
+        let (mx, my, mw) = {
+            let geometry = &jwm.state.monitors[monitor].geometry;
+            (geometry.m_x, geometry.m_y, geometry.m_w)
+        };
+        let mut client = WMClient::new(window);
+        client.mon = Some(monitor);
+        client.state.tags = CONFIG.load().tagmask();
+        client.state.is_floating = true;
+        client.state.is_dock = true;
+        client.geometry.x = mx;
+        client.geometry.y = my;
+        client.geometry.w = mw;
+        client.geometry.h = CONFIG.load().status_bar_height();
+        client.geometry.border_w = 0;
+        let client_key = jwm.insert_client(client);
+        jwm.attach_to_monitor(client_key, monitor);
+
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let path = format!("/tmp/jwm-fullscreen-bar-{}-{nonce}", std::process::id());
+        let ring = std::sync::Arc::new(
+            SharedRingBufferOptions::new()
+                .create(&path)
+                .expect("create test status-bar ring"),
+        );
+        let mut child = Command::new("/bin/true")
+            .spawn()
+            .expect("spawn inert child");
+        child.wait().expect("reap inert child");
+        jwm.secondary_bars.insert(
+            monitor_id,
+            SecondaryBarInstance {
+                monitor_id,
+                shmem: ring,
+                command_notifier: None,
+                pid: child.id(),
+                child,
+                client_key: Some(client_key),
+                window: Some(window),
+                has_focus: false,
+                last_spawn: Instant::now(),
+                next_health_check: Instant::now() + std::time::Duration::from_secs(1),
+            },
+        );
+        jwm.position_secondary_bar_on_monitor(backend, client_key, window, monitor_id)
+            .expect("place status bar");
+        client_key
+    }
+
     fn add_restart_hidden_client(
         jwm: &mut Jwm,
         backend: &MinimizeSpyBackend,
@@ -3057,6 +3138,91 @@ mod tests {
             .force_unmapped
             .store(true, Ordering::Relaxed);
         client_key
+    }
+
+    fn tag_wants_bar(jwm: &Jwm, monitor: crate::core::models::MonitorKey) -> bool {
+        jwm.state.monitors[monitor]
+            .pertag
+            .as_ref()
+            .and_then(|pertag| pertag.show_bars.get(pertag.cur_tag).copied())
+            .unwrap_or(true)
+    }
+
+    fn bar_is_parked_off_monitor(jwm: &Jwm, bar_key: ClientKey) -> bool {
+        let bar = &jwm.state.clients[bar_key];
+        let monitor = bar.mon.expect("bar monitor");
+        let (mx, my) = {
+            let geometry = &jwm.state.monitors[monitor].geometry;
+            (geometry.m_x, geometry.m_y)
+        };
+        let height = CONFIG.load().status_bar_height();
+        bar.geometry.x == mx && bar.geometry.y == my - height
+    }
+
+    fn bar_is_on_monitor(jwm: &Jwm, bar_key: ClientKey) -> bool {
+        let bar = &jwm.state.clients[bar_key];
+        let monitor = bar.mon.expect("bar monitor");
+        let (mx, my) = {
+            let geometry = &jwm.state.monitors[monitor].geometry;
+            (geometry.m_x, geometry.m_y)
+        };
+        let pad = CONFIG.load().status_bar_padding();
+        bar.geometry.x == mx + pad && bar.geometry.y == my + pad
+    }
+
+    #[test]
+    fn client_fullscreen_hides_the_status_bar_without_toggling_the_tag() {
+        let mut backend = MinimizeSpyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let monitor = jwm.state.monitor_order[0];
+        let area = jwm.monitor_work_area(monitor).expect("monitor work area");
+        let source = Rect::new(area.x + 80, area.y + 70, 640, 480);
+        let bar_key = attach_status_bar(&mut jwm, &mut backend, WindowId::from_raw(0x51b0));
+        let (_, client_key) =
+            add_mode_client(&mut jwm, WindowId::from_raw(0x51b1), source, false, false);
+
+        assert!(bar_is_on_monitor(&jwm, bar_key));
+        assert!(jwm.monitor_shows_status_bar(monitor));
+        assert!(tag_wants_bar(&jwm, monitor));
+
+        jwm.setfullscreen(&mut backend, client_key, true).unwrap();
+        assert!(jwm.state.clients[client_key].state.is_fullscreen);
+        assert!(
+            bar_is_parked_off_monitor(&jwm, bar_key),
+            "F11 fullscreen must move the status bar off the output"
+        );
+        assert!(!jwm.monitor_shows_status_bar(monitor));
+        assert!(
+            tag_wants_bar(&jwm, monitor),
+            "client fullscreen must not persist as togglebar"
+        );
+
+        jwm.setfullscreen(&mut backend, client_key, false).unwrap();
+        assert!(bar_is_on_monitor(&jwm, bar_key));
+        assert!(jwm.monitor_shows_status_bar(monitor));
+        assert!(tag_wants_bar(&jwm, monitor));
+    }
+
+    #[test]
+    fn hidden_fullscreen_leaves_the_status_bar_on_the_output() {
+        let mut backend = MinimizeSpyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let monitor = jwm.state.monitor_order[0];
+        let area = jwm.monitor_work_area(monitor).expect("monitor work area");
+        let source = Rect::new(area.x + 40, area.y + 50, 500, 400);
+        let bar_key = attach_status_bar(&mut jwm, &mut backend, WindowId::from_raw(0x51b2));
+        let (_, client_key) =
+            add_mode_client(&mut jwm, WindowId::from_raw(0x51b3), source, false, false);
+        assert!(
+            jwm.set_client_minimized(&mut backend, client_key, true)
+                .unwrap()
+        );
+
+        jwm.setfullscreen(&mut backend, client_key, true).unwrap();
+        assert!(jwm.state.clients[client_key].state.is_fullscreen);
+        assert!(jwm.state.clients[client_key].state.is_hidden);
+        assert!(bar_is_on_monitor(&jwm, bar_key));
+        assert!(jwm.monitor_shows_status_bar(monitor));
     }
 
     #[test]

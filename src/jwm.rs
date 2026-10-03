@@ -1679,15 +1679,46 @@ impl Jwm {
         Ok(())
     }
 
+    /// A visible fullscreen client owns the output the way the fullscreen
+    /// layout does: the tab strip already stands down for it, and the status
+    /// bar has to follow or it remains painted over F11 video.
+    pub(crate) fn monitor_has_visible_fullscreen(&self, mon_key: MonitorKey) -> bool {
+        self.state
+            .monitor_clients
+            .get(mon_key)
+            .into_iter()
+            .flatten()
+            .copied()
+            .any(|client_key| {
+                self.state
+                    .clients
+                    .get(client_key)
+                    .is_some_and(|client| client.state.is_fullscreen)
+                    && self.is_client_visible_on_monitor(client_key, mon_key)
+            })
+    }
+
+    /// Whether this monitor's status bar should occupy the screen.
+    ///
+    /// `Pertag.show_bars` is the user's per-tag preference (`togglebar`, the
+    /// fullscreen layout). A client going fullscreen with F11 must not
+    /// persist as that preference: hide the bar only while a visible
+    /// fullscreen client owns the output, then restore whatever the tag
+    /// still wants.
+    pub(crate) fn monitor_shows_status_bar(&self, mon_key: MonitorKey) -> bool {
+        let Some(monitor) = self.state.monitors.get(mon_key) else {
+            return true;
+        };
+        let wants = monitor
+            .pertag
+            .as_ref()
+            .and_then(|pertag| pertag.show_bars.get(pertag.cur_tag).copied())
+            .unwrap_or(true);
+        wants && !self.monitor_has_visible_fullscreen(mon_key)
+    }
+
     fn is_bar_visible_on_mon(&self, mon_key: MonitorKey) -> bool {
-        if let Some(m) = self.state.monitors.get(mon_key) {
-            if let Some(p) = m.pertag.as_ref() {
-                if let Some(&show) = p.show_bars.get(p.cur_tag) {
-                    return show;
-                }
-            }
-        }
-        true
+        self.monitor_shows_status_bar(mon_key)
     }
     fn mark_bar_update_needed_if_visible(&mut self, monitor_id: Option<i32>) {
         match monitor_id {

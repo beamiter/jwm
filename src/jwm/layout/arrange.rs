@@ -56,8 +56,9 @@ impl Jwm {
         }
 
         // show_bar is per-tag but the bar window is not: switching to a tag
-        // that hides it (the fullscreen layout, or a toggled-off bar) has to
-        // physically move the bar, not just stop reserving its pixels.
+        // that hides it (the fullscreen layout, a toggled-off bar, or a
+        // client that went fullscreen with F11) has to physically move the
+        // bar, not just stop reserving its pixels.
         for &mon_key in &monitors_to_process {
             self.sync_secondary_bar_position(backend, mon_key);
         }

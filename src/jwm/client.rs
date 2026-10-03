@@ -1390,12 +1390,7 @@ impl Jwm {
             None => return Ok(()),
         };
 
-        let show_bar = monitor
-            .pertag
-            .as_ref()
-            .and_then(|p| p.show_bars.get(p.cur_tag))
-            .copied()
-            .unwrap_or(true);
+        let show_bar = self.monitor_shows_status_bar(mon_key);
 
         let cfg = CONFIG.load();
         let actual_bar_height = cfg.status_bar_height();
@@ -1480,11 +1475,13 @@ impl Jwm {
         Ok(())
     }
 
-    /// Bring `mon_key`'s status-bar window in line with the current tag's
-    /// show_bar flag. The flag is per-tag but the bar window is not, so every
-    /// path that changes the effective flag — togglebar, entering or leaving
-    /// the fullscreen layout, switching to a tag that remembers either — funnels
-    /// through here; a bar already in place returns without touching the backend.
+    /// Bring `mon_key`'s status-bar window in line with whether it should
+    /// occupy the screen. The per-tag `show_bar` flag is only half of that:
+    /// a visible fullscreen client (F11) hides the bar without flipping the
+    /// preference, just as the fullscreen layout and `togglebar` do by
+    /// moving the window. Every path that changes the effective answer
+    /// funnels through here; a bar already in place returns without
+    /// touching the backend.
     pub(crate) fn sync_secondary_bar_position(
         &mut self,
         backend: &mut dyn Backend,
