@@ -223,6 +223,7 @@ They also include `status_bar_count`.
 They also include `prev_layout`.
 They also include `closed_placement_count`.
 Tag client counts accumulate `closed_placement`.
+Workspace rows report `closed_placement_count`.
 Hiding a scratchpad emits `monitor/bar`.
 Showing a scratchpad emits `monitor/bar`.
 `_NET_WM_STATE_SKIP_TASKBAR` emits `monitor/bar`.
