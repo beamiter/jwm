@@ -11235,4 +11235,12 @@ mod tests {
         assert!(TOOL.contains("connector={connector}"));
         assert!(DOCS.contains("appends `connector` when known"));
     }
+
+    #[test]
+    fn evolve8h_wave_66_health_occupancy_includes_monitor_number() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("monitor={monitor}"));
+        assert!(DOCS.contains("includes the monitor\nnumber") || DOCS.contains("includes the monitor number"));
+    }
 }

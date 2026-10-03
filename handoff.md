@@ -379,7 +379,16 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 63 | jwm-tool health 打印 occupancy | ✓ |
 | 64 | jwm-tool health occupancy 含 fullscreen | ✓ |
 | 65 | jwm-tool health occupancy 含 connector | ✓ |
+| 66 | jwm-tool health occupancy 含 monitor | ✓ |
 | … | 进行中 | |
+
+---
+
+## 2026-10-03：evolve8h wave 66 — health occupancy includes monitor
+
+选题 = evolve8h wave 66。health occupancy 行带上 monitor 编号。
+
+**验证**：`scripts/test.sh --lib --bins --` 聚焦 evolve8h_wave_66 insight_output。
 
 ---
 

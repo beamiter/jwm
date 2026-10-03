@@ -91,6 +91,7 @@ monorepo use independent Semantic Versions.
   `owns_output` count when `get_status.show_bar` is present.
 - `jwm-tool health` occupancy line includes `has_visible_fullscreen`.
 - `jwm-tool health` occupancy line appends `connector` when known.
+- `jwm-tool health` occupancy line includes the monitor number.
 
 ### Changed
 
