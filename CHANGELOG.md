@@ -45,6 +45,7 @@ monorepo use independent Semantic Versions.
 - Unmanaging a fullscreen client emits `monitor/bar` after `window/close`.
 - Swallowing or unswallowing a terminal emits `monitor/bar` for its
   monitor.
+- Moving a fullscreen client between outputs emits `monitor/bar` on both.
 
 ### Changed
 

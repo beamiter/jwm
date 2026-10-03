@@ -10832,4 +10832,21 @@ mod tests {
         assert!(try_unswallow.contains("broadcast_monitor_bar_ipc"));
         assert!(DOCS.contains("Swallowing a terminal"));
     }
+
+    #[test]
+    fn evolve8h_wave_26_sendmon_fullscreen_broadcasts_monitor_bar() {
+        const TAGS: &str = include_str!("tag_manager.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        let sendmon = TAGS
+            .split_once("pub(crate) fn sendmon(")
+            .expect("sendmon")
+            .1
+            .split_once("pub(crate) fn setclienttagprop(")
+            .expect("setclienttagprop follows")
+            .0;
+        assert!(sendmon.contains("was_fullscreen"));
+        assert!(sendmon.contains("broadcast_monitor_bar_ipc(backend, mon_key)"));
+        assert!(sendmon.contains("broadcast_monitor_bar_ipc(backend, target_mon_key)"));
+        assert!(DOCS.contains("both monitors"));
+    }
 }

@@ -339,7 +339,16 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 23 | 最小化全屏客户发射 monitor/bar | ✓ |
 | 24 | 关闭全屏客户发射 monitor/bar | ✓ |
 | 25 | swallow/unswallow 发射 monitor/bar | ✓ |
+| 26 | sendmon 全屏客户两边 monitor/bar | ✓ |
 | … | 进行中 | |
+
+---
+
+## 2026-10-03：evolve8h wave 26 — sendmon fullscreen emits monitor/bar
+
+选题 = evolve8h wave 26。全屏客户跨屏时两端 occupancy 都广播。
+
+**验证**：`scripts/test.sh --lib --` 聚焦 evolve8h_wave_26。
 
 ---
 

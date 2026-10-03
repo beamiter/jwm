@@ -114,7 +114,7 @@ impl Jwm {
             return;
         };
 
-        let (source_mon, win, is_hidden, dock_eligible) =
+        let (source_mon, win, is_hidden, dock_eligible, was_fullscreen) =
             if let Some(client) = self.state.clients.get(client_key) {
                 if client.mon == Some(target_mon_key) {
                     return;
@@ -124,6 +124,7 @@ impl Jwm {
                     client.win,
                     client.state.is_hidden,
                     StatusBarBuilder::is_minimized_dock_eligible(client),
+                    client.state.is_fullscreen,
                 )
             } else {
                 return;
@@ -222,6 +223,12 @@ impl Jwm {
             warn!("could not refresh minimized restore state after sendmon: {error}");
         }
         self.broadcast_window_state_ipc(backend, client_key);
+        if was_fullscreen {
+            if let Some(mon_key) = source_mon {
+                self.broadcast_monitor_bar_ipc(backend, mon_key);
+            }
+            self.broadcast_monitor_bar_ipc(backend, target_mon_key);
+        }
     }
 
     /// 设置窗口的标签属性（EWMH）
