@@ -12499,4 +12499,12 @@ mod tests {
         assert!(query.contains("c.state.is_maximized_horz"));
         assert!(DOCS.contains("also include `maximized_count`"));
     }
+
+    #[test]
+    fn evolve8h_wave_166_health_occupancy_includes_maximized_count() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("maximized={maximized}"));
+        assert!(DOCS.contains("and `maximized_count`"));
+    }
 }
