@@ -10703,4 +10703,13 @@ mod tests {
         assert!(STATE.contains("query_show_bar_for_monitor(backend, mon_key)"));
         assert!(DOCS.contains("`monitor/bar`"));
     }
+
+    #[test]
+    fn evolve8h_wave_18_togglebar_broadcasts_monitor_bar() {
+        const NAV: &str = include_str!("navigation.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(NAV.contains("\"monitor/bar\""));
+        assert!(NAV.contains("query_show_bar_for_monitor(backend, sel_mon_key)"));
+        assert!(DOCS.contains("`togglebar` emits the same event"));
+    }
 }

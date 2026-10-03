@@ -331,7 +331,16 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 15 | get_owns_output 短查询别名 | ✓ |
 | 16 | query_show_bar_for_monitor 任意输出 | ✓ |
 | 17 | F11 发射 monitor/bar 事件 | ✓ |
+| 18 | togglebar 发射 monitor/bar | ✓ |
 | … | 进行中 | |
+
+---
+
+## 2026-10-03：evolve8h wave 18 — togglebar emits monitor/bar
+
+选题 = evolve8h wave 18。用户 togglebar 后广播同一 occupancy 快照。
+
+**验证**：`scripts/test.sh --lib --` 聚焦 evolve8h_wave_18。
 
 ---
 

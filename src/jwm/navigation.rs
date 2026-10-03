@@ -250,6 +250,10 @@ impl Jwm {
             // Re-arrange all windows on this monitor to fill or vacate the bar space.
             self.arrange(backend, Some(sel_mon_key));
             self.broadcast_visible_window_states_on_monitor(backend, sel_mon_key);
+            self.broadcast_ipc_event(
+                "monitor/bar",
+                self.query_show_bar_for_monitor(backend, sel_mon_key),
+            );
         }
 
         Ok(())

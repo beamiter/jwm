@@ -34,6 +34,7 @@ monorepo use independent Semantic Versions.
 - Show-bar IPC snapshots can be built for any monitor, not only the focused
   one.
 - F11 fullscreen flips emit `monitor/bar` with the same occupancy snapshot.
+- `togglebar` emits `monitor/bar` after the layout and bar window settle.
 
 ### Changed
 
