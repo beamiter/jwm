@@ -219,6 +219,7 @@ monorepo use independent Semantic Versions.
 - `get_status.show_bar` rustdoc names `scratchpad_count`.
 - README occupancy JSON names `scratchpad_count`.
 - `tools/README.md` occupancy JSON names `scratchpad_count`.
+- Window-tabs docs name occupancy `scratchpad_count`.
 
 ### Changed
 
