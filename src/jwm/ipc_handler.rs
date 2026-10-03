@@ -14947,4 +14947,15 @@ mod tests {
         assert!(TABS.contains("`get_closed_placement` / `get_cp` return the focused monitor's"));
         assert!(DOCS.contains("Window-tabs docs name `get_closed_placement` / `get_cp`"));
     }
+
+    #[test]
+    fn evolve8h_wave_358_health_prints_compact_prev_layout() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("prev_layout: monitor={monitor} layout={prev_layout}"));
+        assert!(TOOL.contains("\"prev_layout: monitor=0 layout=||| connector=DP-1\""));
+        assert!(DOCS.contains(
+            "`jwm-tool health` prints compact `prev_layout` beside occupancy"
+        ));
+    }
 }

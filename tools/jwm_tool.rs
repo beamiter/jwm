@@ -3380,6 +3380,25 @@ mod tests {
         assert!(cp_lines.iter().any(|line| {
             line == "closed_placement: monitor=0 count=2 connector=DP-1"
         }));
+        assert!(!cp_lines
+            .iter()
+            .any(|line| line.starts_with("prev_layout: monitor=")));
+
+        let with_compact_prev = serde_json::json!({
+            "health": {"status": "healthy", "reasons": []},
+            "counts": {"windows": 0, "monitors": 1, "workspaces": 1},
+            "config": {"path": "/tmp/config.toml", "diagnostics": {"error_count": 0, "warning_count": 0}},
+            "features": {},
+            "prev_layout": {
+                "monitor": 0,
+                "prev_layout": "|||",
+                "connector": "DP-1"
+            }
+        });
+        let prev_lines = health_output_lines(&with_compact_prev);
+        assert!(prev_lines.iter().any(|line| {
+            line == "prev_layout: monitor=0 layout=||| connector=DP-1"
+        }));
 
         let capabilities = serde_json::json!({
             "schema_version": 1,
@@ -4338,6 +4357,26 @@ fn health_output_lines(status: &serde_json::Value) -> Vec<String> {
             .unwrap_or_else(|| "-".into());
         let mut line = format!("closed_placement: monitor={monitor} count={count}");
         if let Some(connector) = cp.get("connector").and_then(serde_json::Value::as_str) {
+            line.push_str(&format!(" connector={connector}"));
+        }
+        lines.push(line);
+    }
+
+    if let Some(prev) = status
+        .get("prev_layout")
+        .and_then(serde_json::Value::as_object)
+    {
+        let monitor = prev
+            .get("monitor")
+            .and_then(|v| v.as_u64().or_else(|| v.as_i64().map(|n| n as u64)))
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".into());
+        let prev_layout = prev
+            .get("prev_layout")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("-");
+        let mut line = format!("prev_layout: monitor={monitor} layout={prev_layout}");
+        if let Some(connector) = prev.get("connector").and_then(serde_json::Value::as_str) {
             line.push_str(&format!(" connector={connector}"));
         }
         lines.push(line);
