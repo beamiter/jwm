@@ -272,6 +272,7 @@ monorepo use independent Semantic Versions.
 - `tools/README.md` occupancy JSON names `drag_float_count`.
 - Window-tabs docs name occupancy `drag_float_count`.
 - Drag-start floating emits `monitor/bar`.
+- `get_show_bar` occupancy snapshots include `swallowed_count`.
 
 ### Changed
 
