@@ -4287,6 +4287,8 @@ impl Jwm {
                     is_urgent: (urgent_tags_mask & tag_bit) != 0,
                     is_occupied: (occupied_tags_mask & tag_bit) != 0,
                     has_fullscreen: counts.fullscreen != 0,
+                    has_visible_fullscreen: is_active
+                        && self.monitor_has_visible_fullscreen(mk),
                     connector: connector.clone(),
                     monitor_name: monitor_name.clone(),
                     show_bar,
@@ -10516,5 +10518,15 @@ mod tests {
         assert!(IPC.contains("\"get_bar_visible\""));
         assert!(SOURCE.contains("\"get_bar_visible\""));
         assert!(DOCS.contains("`get_bar_visible`"));
+    }
+
+    #[test]
+    fn evolve8h_wave_6_workspace_has_visible_fullscreen() {
+        const IPC: &str = include_str!("../ipc.rs");
+        const SOURCE: &str = include_str!("ipc_handler.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(IPC.contains("pub has_visible_fullscreen: bool"));
+        assert!(SOURCE.contains("has_visible_fullscreen: is_active"));
+        assert!(DOCS.contains("`has_visible_fullscreen`"));
     }
 }

@@ -192,7 +192,8 @@ monitor's strip membership; `get_system_ui` reports the open shell panel
 `monitor_name` on each workspace and window row (omitted when unknown).
 `get_workspaces` also reports `is_urgent` per tag (true when any non-sticky
 client on that tag demands attention), matching the status-bar urgent mask,
-plus `is_occupied` (status-bar occupied mask) and `has_fullscreen`.
+plus `is_occupied` (status-bar occupied mask) and `has_fullscreen` /
+`has_visible_fullscreen`.
 `get_windows` / `get_tree` / `window/state` also report `is_swallowed` and
 `is_on_view` (tag intersection with the monitor's active tags, or sticky),
 plus chrome / size-hint fields (`is_fixed`, `is_dock`, `is_desktop`,

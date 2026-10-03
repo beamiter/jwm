@@ -17,6 +17,8 @@ monorepo use independent Semantic Versions.
   that hides the status bar.
 - `get_show_bar` also reports `has_visible_fullscreen` beside `bar_visible`.
 - `get_bar_visible` aliases `get_show_bar`.
+- `get_workspaces` reports `has_visible_fullscreen` per tag: true only when
+  that tag is on view and a live fullscreen client owns the output.
 
 ### Changed
 

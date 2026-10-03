@@ -1107,6 +1107,9 @@ pub struct WorkspaceInfo {
     pub is_occupied: bool,
     /// True when any client on this tag on this monitor is fullscreen.
     pub has_fullscreen: bool,
+    /// True when a non-hidden fullscreen client on this tag is on the
+    /// current view (same predicate that hides the status bar).
+    pub has_visible_fullscreen: bool,
     /// Output connector / `OutputIdentity.stable_key` for this workspace's
     /// monitor when known; omitted when the live output map has no identity.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2611,6 +2614,7 @@ mod tests {
             is_urgent: true,
             is_occupied: false,
             has_fullscreen: false,
+            has_visible_fullscreen: false,
             connector: Some("DP-1".into()),
             monitor_name: Some("Dell U2720Q".into()),
             show_bar: true,
@@ -2649,6 +2653,7 @@ mod tests {
         assert_eq!(with_connector["is_urgent"], true);
         assert_eq!(with_connector["is_occupied"], false);
         assert_eq!(with_connector["has_fullscreen"], false);
+        assert_eq!(with_connector["has_visible_fullscreen"], false);
         assert_eq!(with_connector["gap"], 12);
         assert_eq!(with_connector["show_bar"], true);
         assert_eq!(with_connector["prev_layout"], "TILE");
@@ -2670,6 +2675,7 @@ mod tests {
             is_urgent: false,
             is_occupied: false,
             has_fullscreen: false,
+            has_visible_fullscreen: false,
             connector: None,
             monitor_name: None,
             show_bar: true,
