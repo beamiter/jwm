@@ -193,6 +193,7 @@ monorepo use independent Semantic Versions.
 - `get_show_bar` occupancy snapshots include `maximized_count`.
 - `jwm-tool health` occupancy line includes maximized_count.
 - Toggling maximize emits `monitor/bar`.
+- Unmaximize-in-place emits `monitor/bar`.
 
 ### Changed
 

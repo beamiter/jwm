@@ -481,7 +481,16 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 165 | get_show_bar occupancy 含 maximized_count | ✓ |
 | 166 | jwm-tool health occupancy 含 maximized | ✓ |
 | 167 | maximize 切换 emit monitor/bar | ✓ |
+| 168 | unmaximize-in-place emit monitor/bar | ✓ |
 | … | 进行中 | |
+
+---
+
+## 2026-10-03：evolve8h wave 168 — unmaximize-in-place emits monitor/bar
+
+选题 = evolve8h wave 168。`unmaximize_in_place` 提交后刷新 occupancy。
+
+**验证**：`scripts/test.sh --lib --` 聚焦 evolve8h_wave_168 maximize_commit_paths。
 
 ---
 

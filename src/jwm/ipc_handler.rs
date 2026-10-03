@@ -12522,4 +12522,19 @@ mod tests {
         assert!(tx.contains("broadcast_monitor_bar_ipc(backend, mk)"));
         assert!(DOCS.contains("Toggling maximize emits `monitor/bar`"));
     }
+
+    #[test]
+    fn evolve8h_wave_168_unmaximize_in_place_broadcasts_monitor_bar() {
+        const SOURCE: &str = include_str!("maximize.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        let unmax = SOURCE
+            .split_once("pub(crate) fn unmaximize_in_place(")
+            .expect("unmaximize_in_place")
+            .1
+            .split_once("pub(crate) fn maximize_snapshot(")
+            .expect("snapshot follows")
+            .0;
+        assert!(unmax.contains("broadcast_monitor_bar_ipc(backend, mk)"));
+        assert!(DOCS.contains("Unmaximize-in-place emits `monitor/bar`"));
+    }
 }
