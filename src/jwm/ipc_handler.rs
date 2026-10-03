@@ -12507,4 +12507,19 @@ mod tests {
         assert!(TOOL.contains("maximized={maximized}"));
         assert!(DOCS.contains("and `maximized_count`"));
     }
+
+    #[test]
+    fn evolve8h_wave_167_maximize_broadcasts_monitor_bar() {
+        const SOURCE: &str = include_str!("maximize.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        let tx = SOURCE
+            .split_once("fn maximize_transaction(")
+            .expect("maximize_transaction")
+            .1
+            .split_once("fn sync_maximize_restore_property(")
+            .expect("sync follows")
+            .0;
+        assert!(tx.contains("broadcast_monitor_bar_ipc(backend, mk)"));
+        assert!(DOCS.contains("Toggling maximize emits `monitor/bar`"));
+    }
 }

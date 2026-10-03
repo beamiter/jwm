@@ -192,6 +192,7 @@ monorepo use independent Semantic Versions.
 - Window-tabs docs name occupancy `pip_count`.
 - `get_show_bar` occupancy snapshots include `maximized_count`.
 - `jwm-tool health` occupancy line includes maximized_count.
+- Toggling maximize emits `monitor/bar`.
 
 ### Changed
 
