@@ -491,3 +491,4 @@ Cube-effects docs name `monitor/bar` on overview confirm.
 `get_status.closed_placement` rustdoc names `get_closed_placement` / `get_cp`.
 Minimized-dock docs name `monitor/bar` on restore.
 README health text names compact `closed_placement`.
+`tools/README.md` health text names compact `closed_placement`.
