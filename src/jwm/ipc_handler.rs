@@ -14498,4 +14498,19 @@ mod tests {
         assert!(settle.contains("broadcast_monitor_bar_ipc(backend, mon_key)"));
         assert!(DOCS.contains("Closed-placement settle emits `monitor/bar`"));
     }
+
+    #[test]
+    fn evolve8h_wave_321_pop_broadcasts_monitor_bar() {
+        const SOURCE: &str = include_str!("stacking.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        let pop = SOURCE
+            .split_once("pub(crate) fn pop(")
+            .expect("pop")
+            .1
+            .split_once("pub(crate) fn restack(")
+            .expect("restack follows")
+            .0;
+        assert!(pop.contains("broadcast_monitor_bar_ipc(backend, mon_key)"));
+        assert!(DOCS.contains("`pop` emits `monitor/bar`"));
+    }
 }

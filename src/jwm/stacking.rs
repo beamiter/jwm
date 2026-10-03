@@ -137,6 +137,7 @@ impl Jwm {
         if let Some(mon_key) = mon_key {
             self.arrange(backend, Some(mon_key));
             self.broadcast_visible_window_states_on_monitor(backend, mon_key);
+            self.broadcast_monitor_bar_ipc(backend, mon_key);
         }
     }
 
