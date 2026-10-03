@@ -65,6 +65,7 @@ monorepo use independent Semantic Versions.
 - `broadcast_monitor_bar_ipc` rustdoc names the `bar` subscribe alias.
 - `get_status.show_bar` rustdoc twins the occupancy snapshot aliases.
 - `toggletag` on a fullscreen client emits `monitor/bar`.
+- Moving a fullscreen client to another tag emits `monitor/bar`.
 
 ### Changed
 

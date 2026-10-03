@@ -42,14 +42,14 @@ impl Jwm {
         if target_tag == 0 {
             return Ok(());
         }
-        let previous = self
-            .state
-            .clients
-            .get(client_key)
-            .map(|client| client.state.tags);
-        if previous == Some(target_tag) {
+        let previous = self.state.clients.get(client_key).map(|client| {
+            (client.state.tags, client.state.is_fullscreen, client.mon)
+        });
+        if previous.map(|(tags, _, _)| tags) == Some(target_tag) {
             return Ok(());
         }
+        let was_fullscreen = previous.map(|(_, fs, _)| fs).unwrap_or(false);
+        let client_mon = previous.and_then(|(_, _, mon)| mon);
         if let Some(client) = self.state.clients.get_mut(client_key) {
             client.state.tags = target_tag;
         }
@@ -58,6 +58,11 @@ impl Jwm {
         self.focus(backend, None)?;
         self.arrange(backend, self.state.sel_mon);
         self.broadcast_window_state_ipc(backend, client_key);
+        if was_fullscreen {
+            if let Some(mk) = client_mon.or(self.state.sel_mon) {
+                self.broadcast_monitor_bar_ipc(backend, mk);
+            }
+        }
         Ok(())
     }
 

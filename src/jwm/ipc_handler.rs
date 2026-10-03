@@ -11027,4 +11027,20 @@ mod tests {
         assert!(toggletag.contains("broadcast_monitor_bar_ipc(backend, mk)"));
         assert!(DOCS.contains("`toggletag` on a fullscreen client"));
     }
+
+    #[test]
+    fn evolve8h_wave_43_tag_move_fullscreen_broadcasts_monitor_bar() {
+        const TAGS: &str = include_str!("tag_manager.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        let move_to_tag = TAGS
+            .split_once("pub(crate) fn move_client_to_tag(")
+            .expect("move_client_to_tag")
+            .1
+            .split_once("pub fn tagmon(")
+            .expect("tagmon follows")
+            .0;
+        assert!(move_to_tag.contains("was_fullscreen"));
+        assert!(move_to_tag.contains("broadcast_monitor_bar_ipc(backend, mk)"));
+        assert!(DOCS.contains("as does `tag`"));
+    }
 }

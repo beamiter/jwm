@@ -229,7 +229,7 @@ output (swallowed terminals never own it).
 `peek` / `expose` / `gesture` / `wayland` / `dnd` / `session_lock` summaries
 beside feature flags for shell pickers, monitor lock, and the debug HUD.
 `get_status.show_bar` is the same occupancy snapshot as `get_show_bar`.
-`toggletag` on a fullscreen client emits `monitor/bar`.
+`toggletag` on a fullscreen client emits `monitor/bar`, as does `tag`.
 `get_workspaces` / `get_tree` also report pip / maximized / above / below /
 fixed (and tree scratchpad / tabbed) counts; monitors report
 `window_count` / floating / minimized / sticky counts; windows report
