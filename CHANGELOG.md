@@ -281,6 +281,7 @@ monorepo use independent Semantic Versions.
 - Window-tabs docs name occupancy `swallowed_count`.
 - `get_show_bar` occupancy snapshots include `demands_attention_count`.
 - `jwm-tool health` occupancy line includes demands_attention_count.
+- `get_status.show_bar` rustdoc names `demands_attention_count`.
 
 ### Changed
 

@@ -568,9 +568,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 252 | window-tabs occupancy 含 swallowed_count | ✓ |
 | 253 | get_show_bar occupancy 含 demands_attention_count | ✓ |
 | 254 | jwm-tool health occupancy 含 demands_attention | ✓ |
+| 255 | get_status.show_bar rustdoc 含 demands_attention_count | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 255 — get_status.show_bar rustdoc names demands_attention_count
+
+选题 = evolve8h wave 255。`get_status.show_bar` rustdoc 带上 demands_attention_count。
 
 ## 2026-10-03：evolve8h wave 254 — health occupancy includes demands_attention_count
 

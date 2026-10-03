@@ -13601,4 +13601,12 @@ mod tests {
         assert!(TOOL.contains("demands_attention={demands_attention}"));
         assert!(DOCS.contains("and `demands_attention_count`"));
     }
+
+    #[test]
+    fn evolve8h_wave_255_get_status_show_bar_rustdoc_names_demands_attention_count() {
+        const IPC: &str = include_str!("../ipc.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(IPC.contains("Also `demands_attention_count`."));
+        assert!(DOCS.contains("`get_status.show_bar` rustdoc also names `demands_attention_count`"));
+    }
 }

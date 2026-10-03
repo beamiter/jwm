@@ -309,6 +309,7 @@ beside feature flags for shell pickers, monitor lock, and the debug HUD.
 `get_status.show_bar` rustdoc also names `no_decorations_count`.
 `get_status.show_bar` rustdoc also names `drag_float_count`.
 `get_status.show_bar` rustdoc also names `swallowed_count`.
+`get_status.show_bar` rustdoc also names `demands_attention_count`.
 `jwm-tool msg` help lists `get_show_bar`, `get_vf`, `get_owns_output`
 and `get_visible_fullscreen` / `get_bar_visible` / `get_bar`.
 `jwm-tool msg` after-help examples include `get_vf` and `get_show_bar`.

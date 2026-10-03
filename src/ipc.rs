@@ -817,6 +817,7 @@ pub struct RuntimeStatusV1 {
     /// Also `no_decorations_count`.
     /// Also `drag_float_count`.
     /// Also `swallowed_count`.
+    /// Also `demands_attention_count`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub show_bar: Option<Value>,
     /// Compact twin of `get_metrics` / `get_perf` (renderer metrics when any).
