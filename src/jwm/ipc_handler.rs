@@ -11621,4 +11621,12 @@ mod tests {
         assert!(README.contains("`nmaster`, and `selected_id`"));
         assert!(DOCS.contains("README occupancy JSON also names\n`selected_id`") || DOCS.contains("README occupancy JSON also names `selected_id`"));
     }
+
+    #[test]
+    fn evolve8h_wave_96_tools_readme_occupancy_names_selected_id() {
+        const TOOLS: &str = include_str!("../../tools/README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOLS.contains("`nmaster`, and `selected_id`"));
+        assert!(DOCS.contains("including `selected_id`"));
+    }
 }
