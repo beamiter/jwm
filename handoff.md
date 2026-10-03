@@ -327,7 +327,16 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 11 | WorkspaceInfo.owns_output_count 仅活跃 tag | ✓ |
 | 12 | TreeNode.owns_output_count 用藏栏谓词 | ✓ |
 | 13 | WindowInfo.owns_output 排除 swallowed | ✓ |
+| 14 | TagClientCounts.owns_output 排除 swallowed | ✓ |
 | … | 进行中 | |
+
+---
+
+## 2026-10-03：evolve8h wave 14 — TagClientCounts.owns_output excludes swallowed
+
+选题 = evolve8h wave 14。累计计数与窗口行 / 藏栏谓词对齐，被吞终端不计 owns_output。
+
+**验证**：`scripts/test.sh --lib --` 聚焦 evolve8h_wave_14 client_counts_preserve。
 
 ---
 

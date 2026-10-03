@@ -203,6 +203,7 @@ fn accumulate_client_counts(
     counts.owns_output += usize::from(
         client.state.is_fullscreen
             && !client.state.is_hidden
+            && !client.state.is_swallowed
             && (client.state.is_sticky || (client.state.tags & active_tags) != 0),
     );
 }
@@ -6337,6 +6338,7 @@ mod tests {
         assert_eq!(counts.on_view, 2);
         assert_eq!(counts.maximize_promoted, 1);
         assert_eq!(counts.skip_taskbar, 1);
+        assert_eq!(counts.owns_output, 0);
 
         let first_tag = tag_client_counts(
             &state,
@@ -10643,5 +10645,20 @@ mod tests {
         assert!(SOURCE.contains("!client.state.is_swallowed"));
         assert!(IPC.contains("Swallowed\n    /// terminals never own the output"));
         assert!(DOCS.contains("swallowed terminals never own it"));
+    }
+
+    #[test]
+    fn evolve8h_wave_14_tag_counts_owns_output_excludes_swallowed() {
+        const SOURCE: &str = include_str!("ipc_handler.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        let accumulate = SOURCE
+            .split_once("fn accumulate_client_counts(")
+            .expect("accumulate_client_counts")
+            .1
+            .split_once("fn accumulate_window_counts(")
+            .expect("window counts follow")
+            .0;
+        assert!(accumulate.contains("!client.state.is_swallowed"));
+        assert!(DOCS.contains("tag counts skip swallowed terminals"));
     }
 }
