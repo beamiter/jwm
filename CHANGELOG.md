@@ -180,6 +180,7 @@ monorepo use independent Semantic Versions.
 - `get_show_bar` occupancy snapshots include `fullscreen_count`.
 - `jwm-tool health` occupancy line includes fullscreen_count.
 - `get_status.show_bar` rustdoc names `fullscreen_count`.
+- README occupancy JSON names `fullscreen_count`.
 
 ### Changed
 
