@@ -1547,12 +1547,20 @@ impl Jwm {
             return;
         };
 
-        let was_floating = self
+        let (was_floating, was_dock, was_desktop, was_never_focus, monitor) = self
             .state
             .clients
             .get(client_key)
-            .map(|client| client.state.is_floating)
-            .unwrap_or(false);
+            .map(|client| {
+                (
+                    client.state.is_floating,
+                    client.state.is_dock,
+                    client.state.is_desktop,
+                    client.state.never_focus,
+                    client.mon,
+                )
+            })
+            .unwrap_or((false, false, false, false, None));
 
         if backend.property_ops().is_fullscreen(win) {
             let _ = self.setfullscreen(backend, client_key, true);
@@ -1593,14 +1601,23 @@ impl Jwm {
             }
         }
 
-        let is_floating_now = self
+        let (is_floating_now, never_focus_now) = self
             .state
             .clients
             .get(client_key)
-            .map(|client| client.state.is_floating)
-            .unwrap_or(was_floating);
+            .map(|client| (client.state.is_floating, client.state.never_focus))
+            .unwrap_or((was_floating, was_never_focus));
         if is_floating_now != was_floating {
             self.reorder_client_in_monitor_groups(client_key);
+        }
+        if is_floating_now != was_floating
+            || is_dock != was_dock
+            || is_desktop != was_desktop
+            || never_focus_now != was_never_focus
+        {
+            if let Some(mk) = monitor {
+                self.broadcast_monitor_bar_ipc(backend, mk);
+            }
         }
     }
 

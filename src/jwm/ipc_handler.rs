@@ -13961,4 +13961,19 @@ mod tests {
         assert!(update.contains("previous_fixed != fixed"));
         assert!(DOCS.contains("Size-hint fixed-state changes emit `monitor/bar`"));
     }
+
+    #[test]
+    fn evolve8h_wave_285_window_type_updates_broadcast_monitor_bar() {
+        const SOURCE: &str = include_str!("window_state.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        let update = SOURCE
+            .split_once("pub(super) fn updatewindowtype(")
+            .expect("updatewindowtype")
+            .1
+            .split_once("pub(super) fn updatewmhints(")
+            .expect("updatewmhints follows")
+            .0;
+        assert!(update.contains("broadcast_monitor_bar_ipc(backend, mk)"));
+        assert!(DOCS.contains("Window-type dock/desktop updates emit `monitor/bar`"));
+    }
 }

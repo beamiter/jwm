@@ -311,6 +311,7 @@ monorepo use independent Semantic Versions.
 - Window-tabs docs name occupancy `status_bar_count`.
 - Cancelling a pointer drag emits `monitor/bar`.
 - Size-hint fixed-state changes emit `monitor/bar`.
+- Window-type dock/desktop updates emit `monitor/bar`.
 
 ### Changed
 
