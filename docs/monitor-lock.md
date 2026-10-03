@@ -232,6 +232,7 @@ Portal window rows deserialize `remembers_closed_placement`.
 Scrolling column moves emit `monitor/bar`.
 Scrolling consume emits `monitor/bar`.
 Scrolling expel emits `monitor/bar`.
+Output geometry changes emit `monitor/bar`.
 Hiding a scratchpad emits `monitor/bar`.
 Showing a scratchpad emits `monitor/bar`.
 `_NET_WM_STATE_SKIP_TASKBAR` emits `monitor/bar`.

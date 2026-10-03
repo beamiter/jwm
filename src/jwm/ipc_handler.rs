@@ -14391,4 +14391,19 @@ mod tests {
         assert!(expel.contains("broadcast_monitor_bar_ipc(backend, mon_key)"));
         assert!(DOCS.contains("Scrolling expel emits `monitor/bar`"));
     }
+
+    #[test]
+    fn evolve8h_wave_314_output_geometry_changes_broadcast_monitor_bar() {
+        const SOURCE: &str = include_str!("monitor.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        let changed = SOURCE
+            .split_once("pub(crate) fn handle_output_changed(")
+            .expect("handle_output_changed")
+            .1
+            .split_once("/// Carry every client a monitor owns across a change")
+            .expect("migrate helper follows")
+            .0;
+        assert!(changed.contains("broadcast_monitor_bar_ipc(backend, mon_key)"));
+        assert!(DOCS.contains("Output geometry changes emit `monitor/bar`"));
+    }
 }

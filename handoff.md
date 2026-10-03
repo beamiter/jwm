@@ -627,9 +627,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 311 | scrolling 挪列发出 monitor/bar | ✓ |
 | 312 | scrolling consume 发出 monitor/bar | ✓ |
 | 313 | scrolling expel 发出 monitor/bar | ✓ |
+| 314 | 输出几何变化发出 monitor/bar | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 314 — output geometry changes broadcast monitor/bar
+
+选题 = evolve8h wave 314。`OutputChanged` 迁移后发出 `monitor/bar`。
 
 ## 2026-10-03：evolve8h wave 313 — scrolling expel broadcasts monitor/bar
 

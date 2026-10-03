@@ -1349,6 +1349,7 @@ impl Jwm {
             self.repark_all_hidden_clients(backend);
             self.arrange(backend, Some(mon_key));
             self.broadcast_visible_window_states_on_monitor(backend, mon_key);
+            self.broadcast_monitor_bar_ipc(backend, mon_key);
             self.refresh_migrated_client_properties(backend, &migrated);
             self.mark_bar_update_needed_if_visible(monitor_num);
             // A mode or scale change resizes the output under its shade.

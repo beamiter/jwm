@@ -341,6 +341,7 @@ monorepo use independent Semantic Versions.
 - Scrolling column moves emit `monitor/bar`.
 - Scrolling consume emits `monitor/bar`.
 - Scrolling expel emits `monitor/bar`.
+- Output geometry changes emit `monitor/bar`.
 
 ### Changed
 
