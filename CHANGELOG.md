@@ -273,6 +273,8 @@ monorepo use independent Semantic Versions.
 - Window-tabs docs name occupancy `drag_float_count`.
 - Drag-start floating emits `monitor/bar`.
 - `get_show_bar` occupancy snapshots include `swallowed_count`.
+- `jwm-tool health` occupancy line includes swallowed_count.
+- `jwm-tool` raises the serde_json fixture recursion limit to 512.
 
 ### Changed
 
