@@ -14316,4 +14316,19 @@ mod tests {
         assert!(monitor.contains("pub closed_placement_count: usize,"));
         assert!(DOCS.contains("Portal monitor rows deserialize `closed_placement_count`"));
     }
+
+    #[test]
+    fn evolve8h_wave_309_portal_window_info_remembers_closed_placement() {
+        const PORTAL: &str = include_str!("../../portal/src/ipc.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        let window = PORTAL
+            .split_once("pub struct WindowInfo {")
+            .expect("portal WindowInfo")
+            .1
+            .split_once("pub struct MonitorInfo {")
+            .expect("MonitorInfo follows")
+            .0;
+        assert!(window.contains("pub remembers_closed_placement: bool,"));
+        assert!(DOCS.contains("Portal window rows deserialize `remembers_closed_placement`"));
+    }
 }

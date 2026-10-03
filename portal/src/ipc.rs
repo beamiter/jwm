@@ -88,6 +88,8 @@ pub struct WindowInfo {
     #[serde(default)]
     pub is_status_bar: bool,
     #[serde(default)]
+    pub remembers_closed_placement: bool,
+    #[serde(default)]
     pub is_swallowed: bool,
     #[serde(default)]
     pub maximize_promoted: bool,
