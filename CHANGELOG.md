@@ -309,6 +309,7 @@ monorepo use independent Semantic Versions.
 - README occupancy JSON names `status_bar_count`.
 - `tools/README.md` occupancy JSON names `status_bar_count`.
 - Window-tabs docs name occupancy `status_bar_count`.
+- Cancelling a pointer drag emits `monitor/bar`.
 
 ### Changed
 

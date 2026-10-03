@@ -295,6 +295,9 @@ impl Jwm {
                         ctl.win, e
                     );
                 }
+                if let Some(mk) = ctl.mon {
+                    self.broadcast_monitor_bar_ipc(backend, mk);
+                }
             }
         }
     }

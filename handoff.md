@@ -596,9 +596,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 280 | README occupancy 含 status_bar_count | ✓ |
 | 281 | tools/README occupancy 含 status_bar_count | ✓ |
 | 282 | window-tabs occupancy 含 status_bar_count | ✓ |
+| 283 | 取消指针拖动发出 monitor/bar | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 283 — cancelling a pointer drag broadcasts monitor/bar
+
+选题 = evolve8h wave 283。取消指针拖动后发出 `monitor/bar`。
 
 ## 2026-10-03：evolve8h wave 282 — window-tabs occupancy names status_bar_count
 

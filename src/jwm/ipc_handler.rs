@@ -13930,4 +13930,19 @@ mod tests {
         assert!(TABS.contains("`maximize_promoted_count` / `status_bar_count`"));
         assert!(DOCS.contains("Window-tabs docs also name `status_bar_count`"));
     }
+
+    #[test]
+    fn evolve8h_wave_283_cancel_pointer_drag_broadcasts_monitor_bar() {
+        const SOURCE: &str = include_str!("mouse_handler.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        let cancel = SOURCE
+            .split_once("pub(crate) fn cancel_pointer_drag(")
+            .expect("cancel_pointer_drag")
+            .1
+            .split_once("pub(crate) fn check_monitor_consistency(")
+            .expect("check_monitor_consistency follows")
+            .0;
+        assert!(cancel.contains("broadcast_monitor_bar_ipc(backend, mk)"));
+        assert!(DOCS.contains("Cancelling a pointer drag emits `monitor/bar`"));
+    }
 }
