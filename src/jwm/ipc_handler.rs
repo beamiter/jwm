@@ -15320,4 +15320,13 @@ mod tests {
         assert!(README.contains("get_status.focused"));
         assert!(DOCS.contains("README health text names compact `focused`"));
     }
+
+    #[test]
+    fn evolve8h_wave_399_tools_readme_health_names_compact_focused() {
+        const TOOLS: &str = include_str!("../../tools/README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOLS.contains("compact `focused` line"));
+        assert!(TOOLS.contains("get_status.focused"));
+        assert!(DOCS.contains("`tools/README.md` health text names compact `focused`"));
+    }
 }
