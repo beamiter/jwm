@@ -12739,4 +12739,12 @@ mod tests {
         assert!(TOOLS.contains("It also includes `below_count`."));
         assert!(DOCS.contains("`tools/README.md` also names `below_count`"));
     }
+
+    #[test]
+    fn evolve8h_wave_186_window_tabs_occupancy_names_below_count() {
+        const TABS: &str = include_str!("../../docs/window-tabs.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TABS.contains("`above_count` / `below_count`"));
+        assert!(DOCS.contains("Window-tabs docs also name `below_count`"));
+    }
 }
