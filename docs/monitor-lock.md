@@ -198,6 +198,7 @@ They also include `window_count`.
 They also include `on_view_count`.
 They also include `floating_count`.
 They also include `minimized_count`.
+They also include `sticky_count`.
 `togglefloating` emits `monitor/bar`.
 Minimizing or restoring a client emits `monitor/bar` even when it was not fullscreen.
 Managing a client emits `monitor/bar`.

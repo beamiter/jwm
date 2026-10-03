@@ -162,6 +162,7 @@ monorepo use independent Semantic Versions.
 - README occupancy JSON names `minimized_count`.
 - `tools/README.md` occupancy JSON names `minimized_count`.
 - Window-tabs docs name occupancy `minimized_count`.
+- `get_show_bar` occupancy snapshots include `sticky_count`.
 
 ### Changed
 
