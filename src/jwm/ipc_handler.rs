@@ -12419,4 +12419,19 @@ mod tests {
         assert!(TOOL.contains("pip={pip}"));
         assert!(DOCS.contains("and `pip_count`"));
     }
+
+    #[test]
+    fn evolve8h_wave_160_pip_changes_broadcast_monitor_bar() {
+        const SOURCE: &str = include_str!("window_state.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        let pip = SOURCE
+            .split_once("pub(super) fn set_client_pip(")
+            .expect("set_client_pip")
+            .1
+            .split_once("fn set_client_pip_inner(")
+            .expect("inner follows")
+            .0;
+        assert!(pip.contains("broadcast_monitor_bar_ipc(backend, mk)"));
+        assert!(DOCS.contains("Toggling picture-in-picture emits `monitor/bar`"));
+    }
 }

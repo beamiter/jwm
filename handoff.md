@@ -473,7 +473,16 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 157 | window-tabs occupancy 含 fullscreen_count | ✓ |
 | 158 | get_show_bar occupancy 含 pip_count | ✓ |
 | 159 | jwm-tool health occupancy 含 pip | ✓ |
+| 160 | pip 切换 emit monitor/bar | ✓ |
 | … | 进行中 | |
+
+---
+
+## 2026-10-03：evolve8h wave 160 — picture-in-picture emits monitor/bar
+
+选题 = evolve8h wave 160。`set_client_pip` 在状态变化时刷新 occupancy，因为 snapshot 已含 `pip_count`。
+
+**验证**：`scripts/test.sh --lib --` 聚焦 evolve8h_wave_160。
 
 ---
 

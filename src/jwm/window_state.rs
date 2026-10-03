@@ -1164,6 +1164,9 @@ impl Jwm {
             Ok(changed) => {
                 if changed {
                     self.broadcast_window_state_ipc(backend, client_key);
+                    if let Some(mk) = self.state.clients.get(client_key).and_then(|c| c.mon) {
+                        self.broadcast_monitor_bar_ipc(backend, mk);
+                    }
                 }
                 self.sync_floating_restore_property(backend, client_key);
                 Ok(changed)

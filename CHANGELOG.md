@@ -185,6 +185,7 @@ monorepo use independent Semantic Versions.
 - Window-tabs docs name occupancy `fullscreen_count`.
 - `get_show_bar` occupancy snapshots include `pip_count`.
 - `jwm-tool health` occupancy line includes pip_count.
+- Toggling picture-in-picture emits `monitor/bar`.
 
 ### Changed
 
