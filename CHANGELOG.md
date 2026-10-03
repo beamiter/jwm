@@ -269,6 +269,7 @@ monorepo use independent Semantic Versions.
 - `jwm-tool health` occupancy line includes drag_float_count.
 - `get_status.show_bar` rustdoc names `drag_float_count`.
 - README occupancy JSON names `drag_float_count`.
+- `tools/README.md` occupancy JSON names `drag_float_count`.
 
 ### Changed
 
