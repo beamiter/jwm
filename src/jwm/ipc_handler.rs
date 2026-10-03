@@ -14564,4 +14564,20 @@ mod tests {
         assert!(overview.contains("broadcast_monitor_bar_ipc(backend, mon_key)"));
         assert!(DOCS.contains("Overview confirm emits `monitor/bar`"));
     }
+
+    #[test]
+    fn evolve8h_wave_327_expose_exit_broadcasts_monitor_bar() {
+        const SOURCE: &str = include_str!("features/toggles.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        let expose = SOURCE
+            .split_once("pub(crate) fn apply_expose_action(")
+            .expect("apply_expose_action")
+            .1
+            .split_once("pub(crate) fn update_sticky_tags(")
+            .expect("update_sticky_tags follows")
+            .0;
+        assert!(expose.contains("ExposeAction::Exit"));
+        assert!(expose.contains("broadcast_monitor_bar_ipc(backend, mon_key)"));
+        assert!(DOCS.contains("Expose exit emits `monitor/bar`"));
+    }
 }

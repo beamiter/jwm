@@ -461,3 +461,4 @@ optional `stack_index`.
 `get_monitors` also reports `closed_placement_count`.
 `get_tree` also reports `closed_placement_count`.
 Overview confirm emits `monitor/bar`.
+Expose exit emits `monitor/bar`.

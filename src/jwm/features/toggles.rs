@@ -4584,6 +4584,7 @@ impl Jwm {
                     self.focus(backend, Some(ck))?;
                     if let Some(mon_key) = self.state.sel_mon {
                         let _ = self.restack(backend, Some(mon_key));
+                        self.broadcast_monitor_bar_ipc(backend, mon_key);
                     }
                 }
             }
