@@ -182,6 +182,10 @@ scratchpad's own logic) and a terminal that has been
 [swallowed](../README.md) by its child, which is standing in for that child
 rather than being a window of its own.
 
+Activating a window row emits `monitor/bar` after `reveal_and_focus` settles,
+so occupancy subscribers see the new `selected_id` (and any restore-from-
+minimized count flips) without polling.
+
 ## Terminal applications
 
 A desktop entry with `Terminal=true` — an editor, a system monitor, a package

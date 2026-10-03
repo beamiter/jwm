@@ -14831,4 +14831,13 @@ mod tests {
         assert!(activate.contains("broadcast_monitor_bar_ipc(backend, mk)"));
         assert!(DOCS.contains("Launcher window activation emits `monitor/bar`"));
     }
+
+    #[test]
+    fn evolve8h_wave_347_launcher_docs_name_monitor_bar_on_window_activation() {
+        const LAUNCHER: &str = include_str!("../../docs/launcher.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(LAUNCHER.contains("emits `monitor/bar`"));
+        assert!(LAUNCHER.contains("reveal_and_focus"));
+        assert!(DOCS.contains("Launcher docs name `monitor/bar` on window activation"));
+    }
 }

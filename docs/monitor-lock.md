@@ -482,3 +482,4 @@ Compatibility docs name `get_cp` among short query aliases.
 Window-placement docs name `get_closed_placement` / `get_cp`.
 Focused layout-knob query docs name `get_closed_placement`.
 Launcher window activation emits `monitor/bar`.
+Launcher docs name `monitor/bar` on window activation.

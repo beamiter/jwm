@@ -660,9 +660,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 344 | window-placement 文档点名 get_closed_placement | ✓ |
 | 345 | 焦点 layout-knob 查询文档点名 get_closed_placement | ✓ |
 | 346 | launcher 聚焦窗口发出 monitor/bar | ✓ |
+| 347 | launcher 文档点名 monitor/bar 窗口激活 | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 347 — launcher docs name monitor/bar on window activation
+
+选题 = evolve8h wave 347。launcher 文档点名窗口激活时发出 `monitor/bar`。
 
 ## 2026-10-03：evolve8h wave 346 — launcher window activation broadcasts monitor/bar
 
