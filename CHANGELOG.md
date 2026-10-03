@@ -357,6 +357,7 @@ monorepo use independent Semantic Versions.
 - Expose exit emits `monitor/bar`.
 - Window-switcher commit emits `monitor/bar`.
 - Window-placement docs name `closed_placement_count`.
+- WM setup emits `monitor/bar`.
 
 ### Changed
 

@@ -1052,6 +1052,7 @@ impl Jwm {
         self.setup_initial_windows(backend)?;
 
         self.arrange(backend, None);
+        self.broadcast_monitor_bar_all_monitors(backend);
         let _ = self.restack(backend, self.state.sel_mon);
         let _ = self.focus(backend, None);
         let _ = self.update_ewmh_desktop(backend);

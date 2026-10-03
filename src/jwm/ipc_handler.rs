@@ -14604,4 +14604,19 @@ mod tests {
         assert!(PLACEMENT.contains("`get_workspaces` / `get_monitors` /"));
         assert!(DOCS.contains("Window-placement docs name `closed_placement_count`"));
     }
+
+    #[test]
+    fn evolve8h_wave_330_setup_broadcasts_monitor_bar() {
+        const SOURCE: &str = include_str!("navigation.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        let setup = SOURCE
+            .split_once("pub fn setup(")
+            .expect("setup")
+            .1
+            .split_once("Theme from the wallpaper the session starts on")
+            .expect("wallpaper theme comment follows")
+            .0;
+        assert!(setup.contains("broadcast_monitor_bar_all_monitors(backend)"));
+        assert!(DOCS.contains("WM setup emits `monitor/bar`"));
+    }
 }
