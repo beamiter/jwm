@@ -5,6 +5,12 @@ monorepo use independent Semantic Versions.
 
 ## [Unreleased]
 
+### Added
+
+- `get_monitors` / `get_tree` monitor rows report `bar_visible`: whether the
+  status-bar window currently occupies that output. Distinct from `show_bar`,
+  which remains the per-tag preference and stays true during F11 fullscreen.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

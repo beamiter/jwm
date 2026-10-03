@@ -1264,8 +1264,14 @@ pub struct MonitorInfoIpc {
     pub vrr_max_hz: u32,
     /// Previous layout symbol on this monitor (`WMMonitor.prev_lt`).
     pub prev_layout: String,
-    /// Whether the status bar is shown for the current tag.
+    /// Whether the status bar is shown for the current tag
+    /// (`Pertag.show_bars`). Preference only: a visible fullscreen client
+    /// can still hide the bar window without flipping this bit.
     pub show_bar: bool,
+    /// Whether the status-bar window currently occupies this output.
+    /// False while a visible fullscreen client owns the monitor even if
+    /// [`Self::show_bar`] is still true.
+    pub bar_visible: bool,
     /// External strut reservation on this monitor (top/bottom/left/right).
     pub strut_top: i32,
     pub strut_bottom: i32,
@@ -2401,6 +2407,7 @@ mod tests {
             vrr_max_hz: 0,
             prev_layout: "TILE".into(),
             show_bar: true,
+            bar_visible: true,
             strut_top: 0,
             strut_bottom: 0,
             strut_left: 0,
@@ -2473,6 +2480,7 @@ mod tests {
         assert_eq!(with_connector["vrr_max_hz"], 0);
         assert_eq!(with_connector["prev_layout"], "TILE");
         assert_eq!(with_connector["show_bar"], true);
+        assert_eq!(with_connector["bar_visible"], true);
         assert_eq!(with_connector["strut_top"], 0);
         assert!(with_connector.get("selected_id").is_none());
         assert_eq!(with_connector["sel_tags"], 0);
@@ -2522,6 +2530,7 @@ mod tests {
             vrr_max_hz: 0,
             prev_layout: "TILE".into(),
             show_bar: true,
+            bar_visible: true,
             strut_top: 0,
             strut_bottom: 0,
             strut_left: 0,
@@ -3564,6 +3573,7 @@ mod tests {
                 vrr_max_hz: 0,
                 prev_layout: "TILE".into(),
                 show_bar: true,
+                bar_visible: true,
                 strut_top: 0,
                 strut_bottom: 0,
                 strut_left: 0,
@@ -3684,6 +3694,7 @@ mod tests {
                 vrr_max_hz: 0,
                 prev_layout: "TILE".into(),
                 show_bar: true,
+                bar_visible: true,
                 strut_top: 0,
                 strut_bottom: 0,
                 strut_left: 0,

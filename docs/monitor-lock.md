@@ -164,6 +164,8 @@ monitor row also reports the live tiling `gap` (pixels), `m_fact`,
 `n_master`, and `transform` (`wl_output` 0..=7 from the live output; `0`
 when unknown). Optional `hdr_metadata`, physical size (`physical_*_mm`),
 preferred mode, `vrr_min_hz` / `vrr_max_hz`, `prev_layout`, `show_bar`,
+`bar_visible` (the bar window actually occupying the output; false during
+client fullscreen even when `show_bar` is still the tag preference),
 strut reservations, `selected_id`, dual-tagset `sel_tags` /
 `previous_tags`, pertag `cur_tag` / `prev_tag`, and optional
 `output_connector` (raw `OutputIdentity.connector`, which may differ from

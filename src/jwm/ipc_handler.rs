@@ -4431,6 +4431,7 @@ impl Jwm {
             vrr_max_hz,
             prev_layout: format!("{:?}", *m.prev_lt),
             show_bar,
+            bar_visible: self.monitor_shows_status_bar(mk),
             strut_top,
             strut_bottom,
             strut_left,
@@ -10439,5 +10440,18 @@ mod tests {
         ] {
             assert!(status.contains(nest), "get_status must nest {nest}");
         }
+    }
+
+    #[test]
+    fn evolve8h_wave_1_monitor_bar_visible_is_distinct_from_show_bar() {
+        const IPC: &str = include_str!("../ipc.rs");
+        const SOURCE: &str = include_str!("ipc_handler.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(IPC.contains("pub bar_visible: bool"));
+        assert!(SOURCE.contains("bar_visible: self.monitor_shows_status_bar(mk)"));
+        assert!(
+            DOCS.contains("`bar_visible`"),
+            "monitor IPC docs must name bar_visible beside show_bar"
+        );
     }
 }

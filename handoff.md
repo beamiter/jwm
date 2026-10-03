@@ -308,7 +308,27 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 
 ---
 
-## Evolve backlog（目标 1000 轮；已完成 wave 9–1000，本地 ahead）
+## Evolve backlog（evolve8h 目标 1000 轮；每轮独立 commit+push）
+
+上一轮 evolve7h 已完成 wave 9–1000。本表从 1 重新计数。
+
+| # | 选题 | Size |
+| --- | --- | --- |
+| 1 | MonitorInfoIpc.bar_visible（有效栏可见性，与 show_bar 偏好分离） | ✓ |
+| … | 进行中 | |
+
+---
+
+## 2026-10-03：evolve8h wave 1 — MonitorInfoIpc.bar_visible
+
+选题 = evolve8h wave 1。`show_bar` 仍是 tag 偏好；F11 全屏把栏移出屏幕时
+`bar_visible` 为 false，脚本不必猜窗口几何。
+
+**验证**：`scripts/test.sh --lib --` 聚焦 bar_visible / evolve8h_wave_1。
+
+---
+
+## Evolve backlog（evolve7h 目标 1000 轮；已完成 wave 9–1000）
 
 | # | 选题 | Size |
 | --- | --- | --- |
