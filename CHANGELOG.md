@@ -343,6 +343,7 @@ monorepo use independent Semantic Versions.
 - Scrolling expel emits `monitor/bar`.
 - Output geometry changes emit `monitor/bar`.
 - WM_CLASS status-bar identity flips emit `monitor/bar`.
+- Title status-bar identity flips emit `monitor/bar`.
 
 ### Changed
 

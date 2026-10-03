@@ -629,9 +629,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 313 | scrolling expel 发出 monitor/bar | ✓ |
 | 314 | 输出几何变化发出 monitor/bar | ✓ |
 | 315 | WM_CLASS status-bar 身份翻转发出 monitor/bar | ✓ |
+| 316 | 标题 status-bar 身份翻转发出 monitor/bar | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 316 — title status-bar flips broadcast monitor/bar
+
+选题 = evolve8h wave 316。窗口标题导致 status-bar 身份变化时发出 `monitor/bar`。
 
 ## 2026-10-03：evolve8h wave 315 — WM_CLASS status-bar flips broadcast monitor/bar
 

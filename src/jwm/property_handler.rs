@@ -140,6 +140,13 @@ impl Jwm {
             return;
         };
         let new_title = self.fetch_window_title(backend, win);
+        let status_bar_name = CONFIG.load().status_bar_name().to_string();
+        let previous_is_status_bar = self
+            .state
+            .clients
+            .get(client_key)
+            .is_some_and(|client| client.is_status_bar(&status_bar_name));
+        let previous_mon = self.state.clients.get(client_key).and_then(|client| client.mon);
         let title_for_event;
         if let Some(client) = self.state.clients.get_mut(client_key) {
             if client.name == new_title {
@@ -150,6 +157,16 @@ impl Jwm {
             debug!("Updated title for window {:?}: '{}'", win, client.name);
         } else {
             return;
+        }
+        let is_status_bar = self
+            .state
+            .clients
+            .get(client_key)
+            .is_some_and(|client| client.is_status_bar(&status_bar_name));
+        if previous_is_status_bar != is_status_bar {
+            if let Some(mk) = previous_mon {
+                self.broadcast_monitor_bar_ipc(backend, mk);
+            }
         }
         // Dedicated title topic for lightweight subscribers; full WindowInfo
         // on window/state so get_windows polls are not required after a rename.

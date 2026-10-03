@@ -234,6 +234,7 @@ Scrolling consume emits `monitor/bar`.
 Scrolling expel emits `monitor/bar`.
 Output geometry changes emit `monitor/bar`.
 WM_CLASS status-bar identity flips emit `monitor/bar`.
+Title status-bar identity flips emit `monitor/bar`.
 Hiding a scratchpad emits `monitor/bar`.
 Showing a scratchpad emits `monitor/bar`.
 `_NET_WM_STATE_SKIP_TASKBAR` emits `monitor/bar`.

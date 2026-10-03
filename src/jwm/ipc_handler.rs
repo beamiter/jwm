@@ -14422,4 +14422,20 @@ mod tests {
         assert!(class.contains("broadcast_monitor_bar_ipc(backend, mk)"));
         assert!(DOCS.contains("WM_CLASS status-bar identity flips emit `monitor/bar`"));
     }
+
+    #[test]
+    fn evolve8h_wave_316_title_status_bar_flips_broadcast_monitor_bar() {
+        const SOURCE: &str = include_str!("property_handler.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        let title = SOURCE
+            .split_once("pub(crate) fn updatetitle_by_key(")
+            .expect("updatetitle_by_key")
+            .1
+            .split_once("fn truncate_chars(")
+            .expect("truncate_chars follows")
+            .0;
+        assert!(title.contains("previous_is_status_bar != is_status_bar"));
+        assert!(title.contains("broadcast_monitor_bar_ipc(backend, mk)"));
+        assert!(DOCS.contains("Title status-bar identity flips emit `monitor/bar`"));
+    }
 }
