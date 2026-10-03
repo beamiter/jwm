@@ -11838,4 +11838,12 @@ mod tests {
         assert!(IPC.contains("Also `window_count`."));
         assert!(DOCS.contains("`active_tags` / `window_count`"));
     }
+
+    #[test]
+    fn evolve8h_wave_114_readme_occupancy_names_window_count() {
+        const README: &str = include_str!("../../README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(README.contains("It also includes `window_count`."));
+        assert!(DOCS.contains("README occupancy JSON also names\n`window_count`") || DOCS.contains("README occupancy JSON also names `window_count`"));
+    }
 }

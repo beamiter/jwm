@@ -266,7 +266,8 @@ README control examples include `get_show_bar` and `get_vf`, as does
 `tools/README.md`. README names occupancy `tag` / `prev_tag` / `layout` /
 `gap` / `mfact` / `nmaster`. README occupancy JSON also names
 `selected_id`. README occupancy JSON also names `sel_tags` /
-`previous_tags` / `active_tags`. `tools/README.md` names the same occupancy
+`previous_tags` / `active_tags`. README occupancy JSON also names
+`window_count`. `tools/README.md` names the same occupancy
 keys, including `selected_id`. `tools/README.md` also names `sel_tags` /
 `previous_tags` / `active_tags`. Window-tabs docs name occupancy `tag` / `layout` / `gap` / `mfact` /
 `nmaster` / `selected_id`. Window-tabs docs also name `sel_tags` /

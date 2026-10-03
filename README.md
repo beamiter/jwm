@@ -152,6 +152,7 @@ jwm-tool capabilities --json
 `get_show_bar` occupancy JSON includes `tag`, `prev_tag`, `layout`, `gap`,
 `mfact`, `nmaster`, and `selected_id`.
 It also includes `sel_tags`, `previous_tags`, and `active_tags`.
+It also includes `window_count`.
 
 Malformed JSON, invalid argument types, overflow, empty spawn commands, unknown
 commands, and `{ "success": false }` responses produce a non-zero exit status,

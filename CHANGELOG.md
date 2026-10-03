@@ -139,6 +139,7 @@ monorepo use independent Semantic Versions.
 - Managing a client emits `monitor/bar` after `window/new`.
 - Unmanaging a client emits `monitor/bar` even when it was not fullscreen.
 - `get_status.show_bar` rustdoc names `window_count`.
+- README occupancy JSON names `window_count`.
 
 ### Changed
 
