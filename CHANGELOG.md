@@ -209,6 +209,7 @@ monorepo use independent Semantic Versions.
 - `get_show_bar` occupancy snapshots include `below_count`.
 - `jwm-tool health` occupancy line includes below_count.
 - `get_status.show_bar` rustdoc names `below_count`.
+- README occupancy JSON names `below_count`.
 
 ### Changed
 

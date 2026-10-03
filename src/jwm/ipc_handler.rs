@@ -12723,4 +12723,12 @@ mod tests {
         assert!(IPC.contains("Also `below_count`."));
         assert!(DOCS.contains("`get_status.show_bar` rustdoc also names `below_count`"));
     }
+
+    #[test]
+    fn evolve8h_wave_184_readme_occupancy_names_below_count() {
+        const README: &str = include_str!("../../README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(README.contains("It also includes `below_count`."));
+        assert!(DOCS.contains("README occupancy JSON also names `below_count`"));
+    }
 }
