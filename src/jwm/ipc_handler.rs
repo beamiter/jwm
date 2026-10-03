@@ -11907,4 +11907,12 @@ mod tests {
         assert!(IPC.contains("Also `on_view_count`."));
         assert!(DOCS.contains("`window_count` / `on_view_count`"));
     }
+
+    #[test]
+    fn evolve8h_wave_120_readme_occupancy_names_on_view_count() {
+        const README: &str = include_str!("../../README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(README.contains("It also includes `on_view_count`."));
+        assert!(DOCS.contains("README occupancy JSON also names `on_view_count`"));
+    }
 }

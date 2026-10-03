@@ -145,6 +145,7 @@ monorepo use independent Semantic Versions.
 - `get_show_bar` occupancy snapshots include `on_view_count`.
 - `jwm-tool health` occupancy line includes on_view_count.
 - `get_status.show_bar` rustdoc names `on_view_count`.
+- README occupancy JSON names `on_view_count`.
 
 ### Changed
 
