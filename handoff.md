@@ -338,7 +338,16 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 22 | 全屏布局切换发射 monitor/bar | ✓ |
 | 23 | 最小化全屏客户发射 monitor/bar | ✓ |
 | 24 | 关闭全屏客户发射 monitor/bar | ✓ |
+| 25 | swallow/unswallow 发射 monitor/bar | ✓ |
 | … | 进行中 | |
+
+---
+
+## 2026-10-03：evolve8h wave 25 — swallow emits monitor/bar
+
+选题 = evolve8h wave 25。吞/吐终端会改可见全屏谓词，广播 occupancy。
+
+**验证**：`scripts/test.sh --lib --` 聚焦 evolve8h_wave_25 swallow_and_unswallow。
 
 ---
 

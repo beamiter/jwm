@@ -324,6 +324,9 @@ impl Jwm {
         }
         self.reconcile_minimized_dock_eligibility(backend, parent_key, was_dock_eligible);
         self.broadcast_window_state_ipc(backend, parent_key);
+        if let Some(mon_key) = self.state.clients.get(parent_key).and_then(|c| c.mon) {
+            self.broadcast_monitor_bar_ipc(backend, mon_key);
+        }
         log::info!(
             "[swallow] '{}' swallowed by '{}'",
             self.state
@@ -361,6 +364,9 @@ impl Jwm {
         }
         self.reconcile_minimized_dock_eligibility(backend, parent_key, was_dock_eligible);
         self.broadcast_window_state_ipc(backend, parent_key);
+        if let Some(mon_key) = self.state.clients.get(parent_key).and_then(|c| c.mon) {
+            self.broadcast_monitor_bar_ipc(backend, mon_key);
+        }
     }
 }
 

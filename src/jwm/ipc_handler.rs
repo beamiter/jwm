@@ -10809,4 +10809,27 @@ mod tests {
         assert!(unmanage.contains("broadcast_monitor_bar_ipc(backend, mon_key)"));
         assert!(DOCS.contains("`window/close`"));
     }
+
+    #[test]
+    fn evolve8h_wave_25_swallow_broadcasts_monitor_bar() {
+        const SWALLOW: &str = include_str!("swallowing.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        let try_swallow = SWALLOW
+            .split_once("pub(crate) fn try_swallow(")
+            .expect("try_swallow")
+            .1
+            .split_once("pub(crate) fn try_unswallow(")
+            .expect("try_unswallow")
+            .0;
+        let try_unswallow = SWALLOW
+            .split_once("pub(crate) fn try_unswallow(")
+            .expect("try_unswallow")
+            .1
+            .split_once("fn can_enter_swallowed_state(")
+            .expect("can_enter_swallowed_state")
+            .0;
+        assert!(try_swallow.contains("broadcast_monitor_bar_ipc"));
+        assert!(try_unswallow.contains("broadcast_monitor_bar_ipc"));
+        assert!(DOCS.contains("Swallowing a terminal"));
+    }
 }

@@ -43,6 +43,8 @@ monorepo use independent Semantic Versions.
   is parked or restored.
 - Minimizing or restoring a fullscreen client emits `monitor/bar`.
 - Unmanaging a fullscreen client emits `monitor/bar` after `window/close`.
+- Swallowing or unswallowing a terminal emits `monitor/bar` for its
+  monitor.
 
 ### Changed
 
