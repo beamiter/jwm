@@ -11082,7 +11082,7 @@ mod tests {
     fn evolve8h_wave_47_get_status_show_bar_names_visible_fullscreen_alias() {
         const IPC: &str = include_str!("../ipc.rs");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(IPC.contains("`get_visible_fullscreen` (preference, occupancy,"));
+        assert!(IPC.contains("`get_visible_fullscreen` / `get_vf` (preference,") || IPC.contains("`get_visible_fullscreen` (preference, occupancy,"));
         assert!(DOCS.contains("including `get_visible_fullscreen`"));
     }
 
@@ -11094,5 +11094,13 @@ mod tests {
         assert!(IPC.contains("\"get_vf\""));
         assert!(SOURCE.contains("\"get_vf\""));
         assert!(DOCS.contains("`get_vf`"));
+    }
+
+    #[test]
+    fn evolve8h_wave_49_get_status_show_bar_names_get_vf() {
+        const IPC: &str = include_str!("../ipc.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(IPC.contains("`get_visible_fullscreen` / `get_vf` (preference,"));
+        assert!(DOCS.contains("`get_visible_fullscreen` / `get_vf`"));
     }
 }

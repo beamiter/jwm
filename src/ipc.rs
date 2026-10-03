@@ -791,8 +791,8 @@ pub struct RuntimeStatusV1 {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nmaster: Option<Value>,
     /// Compact twin of `get_show_bar` / `get_bar` / `get_bar_visible` /
-    /// `get_owns_output` / `get_visible_fullscreen` (preference, occupancy,
-    /// visible-fullscreen count).
+    /// `get_owns_output` / `get_visible_fullscreen` / `get_vf` (preference,
+    /// occupancy, visible-fullscreen count).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub show_bar: Option<Value>,
     /// Compact twin of `get_metrics` / `get_perf` (renderer metrics when any).
