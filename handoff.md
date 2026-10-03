@@ -682,9 +682,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 366 | tools/README 控制示例含 get_pl | ✓ |
 | 367 | health 打印 compact cfact | ✓ |
 | 368 | health 打印 compact gaps | ✓ |
+| 369 | health 打印 compact mfact | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 369 — health prints compact mfact
+
+选题 = evolve8h wave 369。`jwm-tool health` 打印 compact `mfact` 行。
 
 ## 2026-10-03：evolve8h wave 368 — health prints compact gaps
 
