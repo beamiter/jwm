@@ -13617,4 +13617,12 @@ mod tests {
         assert!(README.contains("It also includes `demands_attention_count`."));
         assert!(DOCS.contains("README occupancy JSON also names `demands_attention_count`"));
     }
+
+    #[test]
+    fn evolve8h_wave_257_tools_readme_occupancy_names_demands_attention_count() {
+        const TOOLS: &str = include_str!("../../tools/README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOLS.contains("It also includes `demands_attention_count`."));
+        assert!(DOCS.contains("`tools/README.md` also names `demands_attention_count`"));
+    }
 }

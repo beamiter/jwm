@@ -362,6 +362,7 @@ README occupancy JSON also names `demands_attention_count`.
 `tools/README.md` also names `no_decorations_count`.
 `tools/README.md` also names `drag_float_count`.
 `tools/README.md` also names `swallowed_count`.
+`tools/README.md` also names `demands_attention_count`.
 `tools/README.md` also names `floating_count`.
 `tools/README.md` also names `on_view_count`.
 `tools/README.md` also names `window_count`.

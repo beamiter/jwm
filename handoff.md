@@ -570,9 +570,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 254 | jwm-tool health occupancy 含 demands_attention | ✓ |
 | 255 | get_status.show_bar rustdoc 含 demands_attention_count | ✓ |
 | 256 | README occupancy 含 demands_attention_count | ✓ |
+| 257 | tools/README occupancy 含 demands_attention_count | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 257 — tools/README occupancy names demands_attention_count
+
+选题 = evolve8h wave 257。tools/README occupancy JSON 带上 demands_attention_count。
 
 ## 2026-10-03：evolve8h wave 256 — README occupancy names demands_attention_count
 
