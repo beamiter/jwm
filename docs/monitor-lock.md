@@ -326,6 +326,7 @@ README occupancy JSON also names `dock_count`.
 `tools/README.md` also names `below_count`.
 `tools/README.md` also names `scratchpad_count`.
 `tools/README.md` also names `tabbed_count`.
+`tools/README.md` also names `dock_count`.
 `tools/README.md` also names `floating_count`.
 `tools/README.md` also names `on_view_count`.
 `tools/README.md` also names `window_count`.
