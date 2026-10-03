@@ -12618,4 +12618,12 @@ mod tests {
         assert!(query.contains("c.state.is_above"));
         assert!(DOCS.contains("also include `above_count`"));
     }
+
+    #[test]
+    fn evolve8h_wave_175_health_occupancy_includes_above_count() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("above={above}"));
+        assert!(DOCS.contains("and `above_count`"));
+    }
 }

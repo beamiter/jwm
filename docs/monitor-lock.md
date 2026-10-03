@@ -285,7 +285,7 @@ and `get_visible_fullscreen` / `get_bar_visible` / `get_bar`.
 query aliases of `get_show_bar`.
 `jwm-tool health` prints focused-bar occupancy when nested, including
 `has_visible_fullscreen`. The line appends `connector` when known and includes the monitor
-number and the current `tag` and `layout` and `gap` and `mfact` and `nmaster` and `prev_tag` and `selected_id` and `sel_tags` and `previous_tags` and `active_tags` and `window_count` and `on_view_count` and `floating_count` and `minimized_count` and `sticky_count` and `urgent_count` and `fullscreen_count` and `pip_count` and `maximized_count`.
+number and the current `tag` and `layout` and `gap` and `mfact` and `nmaster` and `prev_tag` and `selected_id` and `sel_tags` and `previous_tags` and `active_tags` and `window_count` and `on_view_count` and `floating_count` and `minimized_count` and `sticky_count` and `urgent_count` and `fullscreen_count` and `pip_count` and `maximized_count` and `above_count`.
 README control examples include `get_show_bar` and `get_vf`, as does
 `tools/README.md`. README names occupancy `tag` / `prev_tag` / `layout` /
 `gap` / `mfact` / `nmaster`. README occupancy JSON also names
