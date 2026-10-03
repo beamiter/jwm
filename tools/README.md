@@ -60,6 +60,9 @@ jwm-tool health --json
 jwm-tool msg '' --subscribe 'window,tag,layout,bar' --raw
 ```
 
+`get_show_bar` occupancy JSON includes `tag`, `prev_tag`, `layout`, `gap`,
+`mfact`, and `nmaster`.
+
 IPC 使用换行分隔的 JSON。工具按块读取并保留同一批到达的后续消息，
 每条响应的正文上限为 1 MiB。普通响应和订阅确认须在开始读取后 5 秒内
 完整到达；订阅可以长期空闲，但一条事件从收到首批字节起也须在 5 秒内

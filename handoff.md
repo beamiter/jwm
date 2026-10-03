@@ -399,7 +399,16 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 83 | jwm-tool health occupancy 含 prev_tag | ✓ |
 | 84 | get_status.show_bar rustdoc 含 layout knobs | ✓ |
 | 85 | README occupancy layout knobs | ✓ |
+| 86 | tools/README occupancy layout knobs | ✓ |
 | … | 进行中 | |
+
+---
+
+## 2026-10-03：evolve8h wave 86 — tools README names occupancy layout knobs
+
+选题 = evolve8h wave 86。`tools/README.md` 列出 occupancy JSON 的 layout knobs。
+
+**验证**：`scripts/test.sh --lib --` 聚焦 evolve8h_wave_86 evolve8h_wave_52。
 
 ---
 

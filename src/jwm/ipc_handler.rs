@@ -11499,4 +11499,12 @@ mod tests {
         assert!(README.contains("occupancy JSON includes `tag`, `prev_tag`"));
         assert!(DOCS.contains("README names occupancy `tag`"));
     }
+
+    #[test]
+    fn evolve8h_wave_86_tools_readme_names_occupancy_layout_knobs() {
+        const TOOLS: &str = include_str!("../../tools/README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOLS.contains("occupancy JSON includes `tag`, `prev_tag`"));
+        assert!(DOCS.contains("`tools/README.md` names the same occupancy"));
+    }
 }

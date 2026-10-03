@@ -111,6 +111,7 @@ monorepo use independent Semantic Versions.
 - `jwm-tool health` occupancy line includes prev_tag.
 - `get_status.show_bar` rustdoc names tag / prev_tag / layout / gap / mfact / nmaster.
 - README names occupancy `tag` / `prev_tag` / `layout` / `gap` / `mfact` / `nmaster`.
+- `tools/README.md` names the same occupancy keys.
 
 ### Changed
 
