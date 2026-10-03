@@ -294,6 +294,7 @@ monorepo use independent Semantic Versions.
 - `get_show_bar` occupancy snapshots include `strut_count`.
 - `jwm-tool health` occupancy line includes strut_count.
 - `get_status.show_bar` rustdoc names `strut_count`.
+- README occupancy JSON names `strut_count`.
 
 ### Changed
 
