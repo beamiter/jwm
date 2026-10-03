@@ -1184,7 +1184,8 @@ pub struct WorkspaceInfo {
     pub strut_count: usize,
     /// How many clients on this tag on this monitor are the status bar.
     pub status_bar_count: usize,
-    /// How many clients on this tag currently own the output.
+    /// How many visible fullscreen clients own this tag's output. Zero when
+    /// the tag is off-view; otherwise the hide-bar occupancy count.
     pub owns_output_count: usize,
 }
 

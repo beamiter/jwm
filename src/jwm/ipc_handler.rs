@@ -10955,4 +10955,13 @@ mod tests {
         assert!(TOOLS.contains("--subscribe 'window,tag,layout,bar'"));
         assert!(DOCS.contains("`tools/README.md`"));
     }
+
+    #[test]
+    fn evolve8h_wave_36_workspace_owns_output_count_rustdoc() {
+        const IPC: &str = include_str!("../ipc.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(IPC.contains("Zero when"));
+        assert!(IPC.contains("the tag is off-view"));
+        assert!(DOCS.contains("workspace `owns_output_count` is zero off-view"));
+    }
 }

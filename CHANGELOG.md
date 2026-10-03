@@ -57,6 +57,8 @@ monorepo use independent Semantic Versions.
 - README subscription example includes `bar`; the ack stores it as
   `monitor/bar`.
 - `tools/README.md` subscribe example includes `bar`.
+- `WorkspaceInfo.owns_output_count` rustdoc names the hide-bar occupancy
+  rule (zero off-view).
 
 ### Changed
 
