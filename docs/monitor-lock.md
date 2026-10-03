@@ -332,6 +332,7 @@ README occupancy JSON also names `desktop_count`.
 README occupancy JSON also names `never_focus_count`.
 README occupancy JSON also names `skip_taskbar_count`.
 README occupancy JSON also names `skip_pager_count`.
+README occupancy JSON also names `no_decorations_count`.
 `tools/README.md` also names `minimized_count`.
 `tools/README.md` also names `sticky_count`.
 `tools/README.md` also names `urgent_count`.
