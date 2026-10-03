@@ -673,9 +673,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 357 | window-tabs 文档点名 get_closed_placement / get_cp | ✓ |
 | 358 | health 打印 compact prev_layout | ✓ |
 | 359 | README health 点名 compact prev_layout | ✓ |
+| 360 | tools/README health 点名 compact prev_layout | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 360 — tools/README health names compact prev_layout
+
+选题 = evolve8h wave 360。tools/README health 文本点名 compact `prev_layout`。
 
 ## 2026-10-03：evolve8h wave 359 — README health names compact prev_layout
 

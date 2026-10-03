@@ -94,6 +94,8 @@ It also includes `prev_layout`.
 It also includes `closed_placement_count`.
 `jwm-tool health` also prints a compact `closed_placement` line from
 `get_status.closed_placement` (`get_cp`).
+It also prints a compact `prev_layout` line from `get_status.prev_layout`
+(`get_pl`).
 
 IPC 使用换行分隔的 JSON。工具按块读取并保留同一批到达的后续消息，
 每条响应的正文上限为 1 MiB。普通响应和订阅确认须在开始读取后 5 秒内
