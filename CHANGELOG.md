@@ -189,6 +189,7 @@ monorepo use independent Semantic Versions.
 - `get_status.show_bar` rustdoc names `pip_count`.
 - README occupancy JSON names `pip_count`.
 - `tools/README.md` occupancy JSON names `pip_count`.
+- Window-tabs docs name occupancy `pip_count`.
 
 ### Changed
 

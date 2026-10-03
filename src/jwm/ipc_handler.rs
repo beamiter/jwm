@@ -12458,4 +12458,12 @@ mod tests {
         assert!(TOOLS.contains("It also includes `pip_count`."));
         assert!(DOCS.contains("`tools/README.md` also names `pip_count`"));
     }
+
+    #[test]
+    fn evolve8h_wave_164_window_tabs_occupancy_names_pip_count() {
+        const TABS: &str = include_str!("../../docs/window-tabs.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TABS.contains("`fullscreen_count` / `pip_count`"));
+        assert!(DOCS.contains("Window-tabs docs also name `pip_count`"));
+    }
 }
