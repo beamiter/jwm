@@ -494,3 +494,4 @@ README health text names compact `closed_placement`.
 `tools/README.md` health text names compact `closed_placement`.
 Window-tabs docs name `get_closed_placement` / `get_cp`.
 `jwm-tool health` prints compact `prev_layout` beside occupancy.
+README health text names compact `prev_layout`.

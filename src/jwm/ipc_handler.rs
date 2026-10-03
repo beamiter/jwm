@@ -14958,4 +14958,13 @@ mod tests {
             "`jwm-tool health` prints compact `prev_layout` beside occupancy"
         ));
     }
+
+    #[test]
+    fn evolve8h_wave_359_readme_health_names_compact_prev_layout() {
+        const README: &str = include_str!("../../README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(README.contains("compact `prev_layout` line"));
+        assert!(README.contains("get_status.prev_layout"));
+        assert!(DOCS.contains("README health text names compact `prev_layout`"));
+    }
 }
