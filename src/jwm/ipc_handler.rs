@@ -15117,4 +15117,13 @@ mod tests {
         assert!(TOOL.contains("query aliases: get_nm -> get_nmaster"));
         assert!(DOCS.contains("`jwm-tool capabilities` text lists `get_nm -> get_nmaster`"));
     }
+
+    #[test]
+    fn evolve8h_wave_377_health_prints_compact_layout() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("layout: monitor={monitor} layout={symbol}"));
+        assert!(TOOL.contains("\"layout: monitor=0 layout=[]=\""));
+        assert!(DOCS.contains("`jwm-tool health` prints compact `layout` beside occupancy"));
+    }
 }
