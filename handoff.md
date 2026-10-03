@@ -667,9 +667,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 351 | capabilities 文本列出 get_cp -> get_closed_placement | ✓ |
 | 352 | health 打印 compact closed_placement | ✓ |
 | 353 | get_status.closed_placement rustdoc 点名别名 | ✓ |
+| 354 | minimized-dock 文档点名 restore monitor/bar | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 354 — minimized-dock docs name monitor/bar on restore
+
+选题 = evolve8h wave 354。minimized-dock 文档点名恢复时发出 `monitor/bar`。
 
 ## 2026-10-03：evolve8h wave 353 — get_status.closed_placement rustdoc names aliases
 

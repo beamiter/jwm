@@ -43,6 +43,8 @@ JWM's own window textures and renderer-neutral bar primitives.
    generation that produced the item, and its current anchor.
    JWM uses `reveal_and_focus`, which selects the correct monitor and tag before
    starting the reverse Genie. It never restores by title matching.
+   A successful restore emits `monitor/bar` (via the shared deiconify path) so
+   occupancy subscribers see `minimized_count` and `selected_id` update.
 
 All rectangle commands use global physical pixels. The bar derives them from
 the monitor origin in the JWM snapshot plus its local logical layout and output

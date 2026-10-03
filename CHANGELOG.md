@@ -382,6 +382,7 @@ monorepo use independent Semantic Versions.
 - `jwm-tool capabilities` text lists `get_cp -> get_closed_placement`.
 - `jwm-tool health` prints compact `closed_placement` beside occupancy.
 - `get_status.closed_placement` rustdoc names `get_closed_placement` / `get_cp`.
+- Minimized-dock docs name `monitor/bar` on restore.
 
 ### Changed
 

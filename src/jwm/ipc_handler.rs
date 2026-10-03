@@ -14912,4 +14912,13 @@ mod tests {
             "`get_status.closed_placement` rustdoc names `get_closed_placement` / `get_cp`"
         ));
     }
+
+    #[test]
+    fn evolve8h_wave_354_minimized_dock_docs_name_monitor_bar_on_restore() {
+        const DOCK: &str = include_str!("../../docs/minimized-dock.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCK.contains("emits `monitor/bar`"));
+        assert!(DOCK.contains("minimized_count"));
+        assert!(DOCS.contains("Minimized-dock docs name `monitor/bar` on restore"));
+    }
 }
