@@ -182,6 +182,7 @@ monorepo use independent Semantic Versions.
 - `get_status.show_bar` rustdoc names `fullscreen_count`.
 - README occupancy JSON names `fullscreen_count`.
 - `tools/README.md` occupancy JSON names `fullscreen_count`.
+- Window-tabs docs name occupancy `fullscreen_count`.
 
 ### Changed
 

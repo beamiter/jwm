@@ -12369,4 +12369,12 @@ mod tests {
         assert!(TOOLS.contains("It also includes `fullscreen_count`."));
         assert!(DOCS.contains("`tools/README.md` also names `fullscreen_count`"));
     }
+
+    #[test]
+    fn evolve8h_wave_157_window_tabs_occupancy_names_fullscreen_count() {
+        const TABS: &str = include_str!("../../docs/window-tabs.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TABS.contains("`urgent_count` / `fullscreen_count`"));
+        assert!(DOCS.contains("Window-tabs docs also name `fullscreen_count`"));
+    }
 }

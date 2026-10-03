@@ -470,7 +470,16 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 154 | get_status.show_bar rustdoc 含 fullscreen_count | ✓ |
 | 155 | README occupancy 含 fullscreen_count | ✓ |
 | 156 | tools/README occupancy 含 fullscreen_count | ✓ |
+| 157 | window-tabs occupancy 含 fullscreen_count | ✓ |
 | … | 进行中 | |
+
+---
+
+## 2026-10-03：evolve8h wave 157 — window-tabs occupancy names fullscreen_count
+
+选题 = evolve8h wave 157。window-tabs 文档 occupancy 列表带上 `fullscreen_count`。
+
+**验证**：`scripts/test.sh --lib --` 聚焦 evolve8h_wave_157 evolve8h_wave_151。
 
 ---
 
