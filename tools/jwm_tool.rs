@@ -3487,6 +3487,24 @@ mod tests {
         assert!(layout_lines.iter().any(|line| {
             line == "layout: monitor=0 layout=[]="
         }));
+        assert!(!layout_lines.iter().any(|line| line.starts_with("tabs:")));
+
+        let with_compact_tabs = serde_json::json!({
+            "health": {"status": "healthy", "reasons": []},
+            "counts": {"windows": 0, "monitors": 1, "workspaces": 1},
+            "config": {"path": "/tmp/config.toml", "diagnostics": {"error_count": 0, "warning_count": 0}},
+            "features": {},
+            "tabs": {
+                "monitor": 0,
+                "reserved": 28,
+                "window_count": 3,
+                "selected_id": 42
+            }
+        });
+        let tabs_lines = health_output_lines(&with_compact_tabs);
+        assert!(tabs_lines.iter().any(|line| {
+            line == "tabs: monitor=0 reserved=28 windows=3 selected=42"
+        }));
 
         let capabilities = serde_json::json!({
             "schema_version": 1,
@@ -4553,6 +4571,32 @@ fn health_output_lines(status: &serde_json::Value) -> Vec<String> {
             .and_then(serde_json::Value::as_str)
             .unwrap_or("-");
         lines.push(format!("layout: monitor={monitor} layout={symbol}"));
+    }
+
+    if let Some(tabs) = status.get("tabs").and_then(serde_json::Value::as_object) {
+        let monitor = tabs
+            .get("monitor")
+            .and_then(|v| v.as_u64().or_else(|| v.as_i64().map(|n| n as u64)))
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".into());
+        let reserved = tabs
+            .get("reserved")
+            .and_then(|v| v.as_u64().or_else(|| v.as_i64().map(|n| n as u64)))
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".into());
+        let window_count = tabs
+            .get("window_count")
+            .and_then(serde_json::Value::as_u64)
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".into());
+        let selected_id = tabs
+            .get("selected_id")
+            .and_then(|v| v.as_u64().or_else(|| v.as_i64().map(|n| n as u64)))
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".into());
+        lines.push(format!(
+            "tabs: monitor={monitor} reserved={reserved} windows={window_count} selected={selected_id}"
+        ));
     }
 
     if let Some(reasons) = status["health"]["reasons"].as_array() {

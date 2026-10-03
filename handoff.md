@@ -694,9 +694,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 378 | capabilities 文本列出 get_lt -> get_layout | ✓ |
 | 379 | README health 点名 compact layout | ✓ |
 | 380 | tools/README health 点名 compact layout | ✓ |
+| 381 | health 打印 compact tabs | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 381 — health prints compact tabs
+
+选题 = evolve8h wave 381。`jwm-tool health` 打印 compact `tabs` 行。
 
 ## 2026-10-03：evolve8h wave 380 — tools/README health names compact layout
 
