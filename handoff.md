@@ -666,9 +666,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 350 | cube-effects 文档点名 overview 确认 monitor/bar | ✓ |
 | 351 | capabilities 文本列出 get_cp -> get_closed_placement | ✓ |
 | 352 | health 打印 compact closed_placement | ✓ |
+| 353 | get_status.closed_placement rustdoc 点名别名 | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 353 — get_status.closed_placement rustdoc names aliases
+
+选题 = evolve8h wave 353。`get_status.closed_placement` rustdoc 点名 `get_closed_placement` / `get_cp`。
 
 ## 2026-10-03：evolve8h wave 352 — health prints compact closed_placement
 

@@ -14902,4 +14902,14 @@ mod tests {
             "`jwm-tool health` prints compact `closed_placement` beside occupancy"
         ));
     }
+
+    #[test]
+    fn evolve8h_wave_353_get_status_closed_placement_rustdoc_names_aliases() {
+        const IPC: &str = include_str!("../ipc.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(IPC.contains("Compact twin of `get_closed_placement` / `get_cp`."));
+        assert!(DOCS.contains(
+            "`get_status.closed_placement` rustdoc names `get_closed_placement` / `get_cp`"
+        ));
+    }
 }

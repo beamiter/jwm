@@ -488,3 +488,4 @@ Foreign-toplevel activate emits `monitor/bar`.
 Cube-effects docs name `monitor/bar` on overview confirm.
 `jwm-tool capabilities` text lists `get_cp -> get_closed_placement`.
 `jwm-tool health` prints compact `closed_placement` beside occupancy.
+`get_status.closed_placement` rustdoc names `get_closed_placement` / `get_cp`.
