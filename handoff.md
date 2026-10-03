@@ -353,7 +353,16 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 37 | TreeNode.owns_output_count rustdoc | ✓ |
 | 38 | MonitorInfoIpc.owns_output_count rustdoc | ✓ |
 | 39 | query_show_bar_for_monitor JSON 键 rustdoc | ✓ |
+| 40 | broadcast_monitor_bar_ipc 写明 bar 别名 | ✓ |
 | … | 进行中 | |
+
+---
+
+## 2026-10-03：evolve8h wave 40 — broadcast rustdoc names bar alias
+
+选题 = evolve8h wave 40。广播辅助注释写明 `bar` 订阅别名。
+
+**验证**：`scripts/test.sh --lib --` 聚焦 evolve8h_wave_40。
 
 ---
 

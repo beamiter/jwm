@@ -6145,7 +6145,8 @@ impl Jwm {
 
     /// Occupancy snapshot for one output (`show_bar` / `bar_visible` /
     /// `has_visible_fullscreen` / `owns_output_count`). Subscribers of
-    /// `monitor` / `monitor/bar` / `*` see F11 and togglebar without polling.
+    /// `monitor` / `monitor/bar` / `bar` / `*` see F11 and togglebar without
+    /// polling (`bar` stores as `monitor/bar`).
     pub(crate) fn broadcast_monitor_bar_ipc(&mut self, backend: &dyn Backend, mk: MonitorKey) {
         self.broadcast_ipc_event("monitor/bar", self.query_show_bar_for_monitor(backend, mk));
     }
@@ -10992,5 +10993,14 @@ mod tests {
         assert!(prod.contains("Object keys: `monitor`, `show_bar`, `bar_visible`"));
         assert!(prod.contains("optional `connector`."));
         assert!(DOCS.contains("JSON keys `monitor`"));
+    }
+
+    #[test]
+    fn evolve8h_wave_40_broadcast_rustdoc_names_bar_alias() {
+        const SOURCE: &str = include_str!("ipc_handler.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        let prod = SOURCE.split_once("mod tests {").expect("tests module").0;
+        assert!(prod.contains("`bar` stores as `monitor/bar`"));
+        assert!(DOCS.contains("Subscribe topic `bar`"));
     }
 }
