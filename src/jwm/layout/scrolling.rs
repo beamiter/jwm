@@ -89,6 +89,7 @@ impl Jwm {
             }
             self.focus(backend, Some(target))?;
             self.arrange(backend, Some(mon_key));
+            self.broadcast_monitor_bar_ipc(backend, mon_key);
         }
         Ok(())
     }
