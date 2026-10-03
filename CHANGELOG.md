@@ -19,6 +19,8 @@ monorepo use independent Semantic Versions.
 - `get_bar_visible` aliases `get_show_bar`.
 - `get_workspaces` reports `has_visible_fullscreen` per tag: true only when
   that tag is on view and a live fullscreen client owns the output.
+- `get_windows` / `get_tree` / `window/state` report `owns_output` when a
+  visible fullscreen client currently covers the monitor.
 
 ### Changed
 

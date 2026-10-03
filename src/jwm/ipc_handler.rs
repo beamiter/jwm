@@ -431,6 +431,7 @@ fn client_window_info(
         total_w: client.total_width(),
         total_h: client.total_height(),
         stack_index,
+        owns_output: client.state.is_fullscreen && is_on_view && !client.state.is_hidden,
     }
 }
 
@@ -10528,5 +10529,17 @@ mod tests {
         assert!(IPC.contains("pub has_visible_fullscreen: bool"));
         assert!(SOURCE.contains("has_visible_fullscreen: is_active"));
         assert!(DOCS.contains("`has_visible_fullscreen`"));
+    }
+
+    #[test]
+    fn evolve8h_wave_7_window_owns_output() {
+        const IPC: &str = include_str!("../ipc.rs");
+        const SOURCE: &str = include_str!("ipc_handler.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        const TABS: &str = include_str!("../../docs/window-tabs.md");
+        assert!(IPC.contains("pub owns_output: bool"));
+        assert!(SOURCE.contains("owns_output: client.state.is_fullscreen && is_on_view"));
+        assert!(DOCS.contains("`owns_output`"));
+        assert!(TABS.contains("owns_output"));
     }
 }

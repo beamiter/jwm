@@ -1084,6 +1084,9 @@ pub struct WindowInfo {
     /// when the window has no monitor (parked scratchpad).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stack_index: Option<usize>,
+    /// True when this window is a visible fullscreen client on the current
+    /// view — it owns the output and tucks the status bar.
+    pub owns_output: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -2044,11 +2047,13 @@ mod tests {
             total_w: 800,
             total_h: 600,
             stack_index: None,
+            owns_output: false,
         })
         .expect("serialize WindowInfo");
 
         assert_eq!(value["is_minimized"], true);
         assert!(value.get("is_hidden").is_none());
+        assert_eq!(value["owns_output"], false);
         assert_eq!(value["is_maximized"], false);
         assert_eq!(value["is_maximized_vert"], true);
         assert_eq!(value["is_maximized_horz"], false);
@@ -2179,6 +2184,7 @@ mod tests {
             total_w: 800,
             total_h: 600,
             stack_index: None,
+            owns_output: false,
         })
         .expect("serialize");
         assert!(without_pid.get("pid").is_none());
@@ -2275,6 +2281,7 @@ mod tests {
             total_w: 800,
             total_h: 600,
             stack_index: None,
+            owns_output: false,
         })
         .expect("serialize");
         assert_eq!(with_connector["connector"], "HDMI-A-1");
@@ -2364,6 +2371,7 @@ mod tests {
             total_w: 800,
             total_h: 600,
             stack_index: None,
+            owns_output: false,
         })
         .expect("serialize");
         assert!(without.get("connector").is_none());

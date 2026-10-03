@@ -8,7 +8,9 @@ as a mouse control surface: focus, close, and reorder.
 The strip is drawn only when there is something to choose between — two or
 more visible tiled windows. Floating windows get no cell, a fullscreen
 window (or the fullscreen layout) takes the strip down with the status bar
-while it owns the output, and the strip's pixels are reserved out of the
+while it owns the output (`WindowInfo.owns_output` / monitor
+`bar_visible` / `has_visible_fullscreen` on IPC), and the strip's pixels
+are reserved out of the
 work area, so no window ever slides underneath it. Appearing eases in over
 120 ms — alpha only, a clamped ease-out quad, so no overshoot — and a
 window joining an already-shown strip eases its cell the same way;
