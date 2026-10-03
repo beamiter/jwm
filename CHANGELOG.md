@@ -49,6 +49,7 @@ monorepo use independent Semantic Versions.
 - `focusmon` emits `monitor/bar` for the newly focused output.
 - Pointer monitor switches emit `monitor/focus` and `monitor/bar`.
 - Session restore emits `monitor/bar` for every output.
+- External strut apply/remove emits `monitor/bar` for every output.
 
 ### Changed
 

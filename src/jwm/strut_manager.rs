@@ -286,6 +286,7 @@ impl Jwm {
         self.apply_strut_reservations();
         self.arrange(backend, None);
         self.broadcast_visible_window_states_all_monitors(backend);
+        self.broadcast_monitor_bar_all_monitors(backend);
     }
 
     pub fn check_strut_on_manage(&mut self, backend: &mut dyn Backend, win: WindowId) {
@@ -300,6 +301,7 @@ impl Jwm {
                 self.apply_strut_reservations();
                 self.arrange(backend, None);
                 self.broadcast_visible_window_states_all_monitors(backend);
+                self.broadcast_monitor_bar_all_monitors(backend);
             }
         }
     }
@@ -310,6 +312,7 @@ impl Jwm {
             self.apply_strut_reservations();
             self.arrange(backend, None);
             self.broadcast_visible_window_states_all_monitors(backend);
+            self.broadcast_monitor_bar_all_monitors(backend);
         }
     }
 }

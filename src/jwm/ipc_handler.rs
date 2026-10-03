@@ -10893,4 +10893,15 @@ mod tests {
         assert!(SESSION.contains("broadcast_monitor_bar_all_monitors(backend)"));
         assert!(DOCS.contains("Session restore emits"));
     }
+
+    #[test]
+    fn evolve8h_wave_30_strut_changes_broadcast_all_monitor_bars() {
+        const STRUT: &str = include_str!("strut_manager.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert_eq!(
+            STRUT.matches("broadcast_monitor_bar_all_monitors(backend)").count(),
+            3
+        );
+        assert!(DOCS.contains("External strut"));
+    }
 }
