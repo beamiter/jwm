@@ -11719,4 +11719,12 @@ mod tests {
         assert!(TOOL.contains("active_tags={active_tags}"));
         assert!(DOCS.contains("and `active_tags`"));
     }
+
+    #[test]
+    fn evolve8h_wave_104_get_status_show_bar_rustdoc_names_tagset_masks() {
+        const IPC: &str = include_str!("../ipc.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(IPC.contains("`sel_tags`, `previous_tags`"));
+        assert!(DOCS.contains("`previous_tags` / `active_tags`"));
+    }
 }
