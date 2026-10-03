@@ -15261,4 +15261,15 @@ mod tests {
         assert!(TOOL.contains("query aliases: get_strut -> get_struts"));
         assert!(DOCS.contains("`jwm-tool capabilities` text lists `get_strut -> get_struts`"));
     }
+
+    #[test]
+    fn evolve8h_wave_393_health_prints_compact_scratchpads() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("scratchpads: count={count}"));
+        assert!(TOOL.contains("\"scratchpads: count=4\""));
+        assert!(DOCS.contains(
+            "`jwm-tool health` prints compact `scratchpads` beside occupancy"
+        ));
+    }
 }
