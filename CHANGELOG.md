@@ -136,6 +136,7 @@ monorepo use independent Semantic Versions.
 - `zoom` emits `monitor/bar` after promoting a client.
 - `get_show_bar` occupancy snapshots include `window_count`.
 - `jwm-tool health` occupancy line includes window_count.
+- Managing a client emits `monitor/bar` after `window/new`.
 
 ### Changed
 

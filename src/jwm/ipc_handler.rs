@@ -11799,4 +11799,19 @@ mod tests {
         assert!(TOOL.contains("windows={windows}"));
         assert!(DOCS.contains("and `window_count`"));
     }
+
+    #[test]
+    fn evolve8h_wave_111_manage_broadcasts_monitor_bar() {
+        const CLIENT: &str = include_str!("client.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        let manage = CLIENT
+            .split_once("pub(crate) fn manage(")
+            .expect("manage")
+            .1
+            .split_once("pub(crate) fn setup_client_window(")
+            .expect("setup_client_window follows")
+            .0;
+        assert!(manage.contains("broadcast_monitor_bar_ipc(backend, mk)"));
+        assert!(DOCS.contains("Managing a client emits `monitor/bar`"));
+    }
 }

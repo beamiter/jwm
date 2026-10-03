@@ -249,6 +249,9 @@ impl Jwm {
                 }),
             );
         }
+        if let Some(mk) = self.state.clients.get(client_key).and_then(|c| c.mon) {
+            self.broadcast_monitor_bar_ipc(backend, mk);
+        }
 
         // Appear animation for new windows
         {
