@@ -12940,4 +12940,12 @@ mod tests {
         assert!(query.contains("c.state.is_dock"));
         assert!(DOCS.contains("also include `dock_count`"));
     }
+
+    #[test]
+    fn evolve8h_wave_202_health_occupancy_includes_dock_count() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("dock={dock}"));
+        assert!(DOCS.contains("and `dock_count`"));
+    }
 }
