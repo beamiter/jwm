@@ -1650,8 +1650,17 @@ impl WMController for Jwm {
         // `focus` deliberately falls back to another client when its target is
         // hidden, on another tag, or on another monitor.  Activation means the
         // opposite: reveal this exact window, then focus and raise it.
-        if let Err(error) = self.reveal_and_focus(backend, win) {
-            error!("Error activating client on _NET_ACTIVE_WINDOW: {error:?}");
+        match self.reveal_and_focus(backend, win) {
+            Ok(true) => {
+                if let Some(mk) = self.state.sel_mon {
+                    // Same-tag visible activations skip view/minimize bar emits.
+                    self.broadcast_monitor_bar_ipc(backend, mk);
+                }
+            }
+            Ok(false) => {}
+            Err(error) => {
+                error!("Error activating client on _NET_ACTIVE_WINDOW: {error:?}");
+            }
         }
     }
 

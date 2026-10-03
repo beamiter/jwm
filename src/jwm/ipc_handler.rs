@@ -14840,4 +14840,20 @@ mod tests {
         assert!(LAUNCHER.contains("reveal_and_focus"));
         assert!(DOCS.contains("Launcher docs name `monitor/bar` on window activation"));
     }
+
+    #[test]
+    fn evolve8h_wave_348_net_active_window_activation_broadcasts_monitor_bar() {
+        const SOURCE: &str = include_str!("event_dispatcher.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        let active = SOURCE
+            .split_once("fn on_client_message(")
+            .expect("on_client_message")
+            .1
+            .split_once("fn on_window_state_request(")
+            .expect("on_window_state_request follows")
+            .0;
+        assert!(active.contains("reveal_and_focus(backend, win)"));
+        assert!(active.contains("broadcast_monitor_bar_ipc(backend, mk)"));
+        assert!(DOCS.contains("`_NET_ACTIVE_WINDOW` activation emits `monitor/bar`"));
+    }
 }
