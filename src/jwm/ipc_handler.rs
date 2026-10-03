@@ -134,6 +134,7 @@ struct TagClientCounts {
     maximize_promoted: usize,
     strut: usize,
     status_bar: usize,
+    owns_output: usize,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -199,6 +200,11 @@ fn accumulate_client_counts(
     counts.maximize_promoted += usize::from(client.state.maximize_restore_tiled);
     counts.strut += usize::from(has_strut);
     counts.status_bar += usize::from(is_status_bar);
+    counts.owns_output += usize::from(
+        client.state.is_fullscreen
+            && !client.state.is_hidden
+            && (client.state.is_sticky || (client.state.tags & active_tags) != 0),
+    );
 }
 
 fn accumulate_window_counts(counts: &mut TagClientCounts, window: &WindowInfo) {
@@ -228,6 +234,7 @@ fn accumulate_window_counts(counts: &mut TagClientCounts, window: &WindowInfo) {
     counts.maximize_promoted += usize::from(window.maximize_promoted);
     counts.strut += usize::from(window.has_strut);
     counts.status_bar += usize::from(window.is_status_bar);
+    counts.owns_output += usize::from(window.owns_output);
 }
 
 fn tag_client_counts(
@@ -4320,6 +4327,7 @@ impl Jwm {
                     maximize_promoted_count: counts.maximize_promoted,
                     strut_count: counts.strut,
                     status_bar_count: counts.status_bar,
+                    owns_output_count: counts.owns_output,
                 });
             }
         }
@@ -4474,6 +4482,7 @@ impl Jwm {
             maximize_promoted_count: counts.maximize_promoted,
             strut_count: counts.strut,
             status_bar_count: counts.status_bar,
+            owns_output_count: counts.owns_output,
         }
     }
 
@@ -6035,6 +6044,7 @@ impl Jwm {
                     maximize_promoted_count: counts.maximize_promoted,
                     strut_count: counts.strut,
                     status_bar_count: counts.status_bar,
+                    owns_output_count: counts.owns_output,
                     selected_id: m
                         .sel
                         .and_then(|ck| self.state.clients.get(ck).map(|client| client.win.raw())),
@@ -10541,5 +10551,14 @@ mod tests {
         assert!(SOURCE.contains("owns_output: client.state.is_fullscreen && is_on_view"));
         assert!(DOCS.contains("`owns_output`"));
         assert!(TABS.contains("owns_output"));
+    }
+
+    #[test]
+    fn evolve8h_wave_8_owns_output_count_symmetry() {
+        const IPC: &str = include_str!("../ipc.rs");
+        const SOURCE: &str = include_str!("ipc_handler.rs");
+        assert!(IPC.contains("pub owns_output_count: usize"));
+        assert!(SOURCE.contains("counts.owns_output"));
+        assert!(SOURCE.contains("owns_output_count: counts.owns_output"));
     }
 }

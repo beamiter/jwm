@@ -321,7 +321,16 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 5 | get_bar_visible 短查询别名 | ✓ |
 | 6 | WorkspaceInfo.has_visible_fullscreen | ✓ |
 | 7 | WindowInfo.owns_output | ✓ |
+| 8 | Monitor/Workspace/Tree owns_output_count | ✓ |
 | … | 进行中 | |
+
+---
+
+## 2026-10-03：evolve8h wave 8 — owns_output_count symmetry
+
+选题 = evolve8h wave 8。Monitor / Workspace / Tree 计数与 `owns_output` 对齐。
+
+**验证**：`scripts/test.sh --lib --` 聚焦 evolve8h_wave_8。
 
 ---
 

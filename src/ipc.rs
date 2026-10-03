@@ -1181,6 +1181,8 @@ pub struct WorkspaceInfo {
     pub strut_count: usize,
     /// How many clients on this tag on this monitor are the status bar.
     pub status_bar_count: usize,
+    /// How many clients on this tag currently own the output.
+    pub owns_output_count: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -1362,6 +1364,9 @@ pub struct MonitorInfoIpc {
     pub strut_count: usize,
     /// How many of those clients are the status bar.
     pub status_bar_count: usize,
+    /// How many of those clients currently own the output (visible fullscreen
+    /// on the current view).
+    pub owns_output_count: usize,
 }
 
 /// EDID HDR static metadata projected on [`MonitorInfoIpc`] and status queries.
@@ -1436,6 +1441,8 @@ pub struct TreeNode {
     pub strut_count: usize,
     /// How many of `windows` report `is_status_bar`.
     pub status_bar_count: usize,
+    /// How many of `windows` report `owns_output`.
+    pub owns_output_count: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -2462,6 +2469,7 @@ mod tests {
             maximize_promoted_count: 0,
             strut_count: 0,
             status_bar_count: 0,
+            owns_output_count: 0,
         })
         .expect("serialize");
         assert_eq!(with_connector["connector"], "DP-1");
@@ -2587,6 +2595,7 @@ mod tests {
             maximize_promoted_count: 0,
             strut_count: 0,
             status_bar_count: 0,
+            owns_output_count: 0,
         })
         .expect("serialize");
         assert!(without.get("connector").is_none());
@@ -2653,6 +2662,7 @@ mod tests {
             maximize_promoted_count: 0,
             strut_count: 0,
             status_bar_count: 0,
+            owns_output_count: 0,
         })
         .expect("serialize");
         assert_eq!(with_connector["connector"], "DP-1");
@@ -2714,6 +2724,7 @@ mod tests {
             maximize_promoted_count: 0,
             strut_count: 0,
             status_bar_count: 0,
+            owns_output_count: 0,
         })
         .expect("serialize");
         assert!(without.get("connector").is_none());
@@ -3634,6 +3645,7 @@ mod tests {
                 maximize_promoted_count: 0,
                 strut_count: 0,
                 status_bar_count: 0,
+                owns_output_count: 0,
             },
             windows: Vec::new(),
             selected_id: Some(42),
@@ -3663,6 +3675,7 @@ mod tests {
             maximize_promoted_count: 0,
             strut_count: 0,
             status_bar_count: 0,
+            owns_output_count: 0,
         };
         let json = serde_json::to_value(node).unwrap();
         assert_eq!(json["selected_id"], 42);
@@ -3756,6 +3769,7 @@ mod tests {
                 maximize_promoted_count: 0,
                 strut_count: 0,
                 status_bar_count: 0,
+                owns_output_count: 0,
             },
             windows: Vec::new(),
             selected_id: None,
@@ -3785,6 +3799,7 @@ mod tests {
             maximize_promoted_count: 0,
             strut_count: 0,
             status_bar_count: 0,
+            owns_output_count: 0,
         };
         let json = serde_json::to_value(node).unwrap();
         assert_eq!(json["window_count"], 3);

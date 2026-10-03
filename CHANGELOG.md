@@ -21,6 +21,7 @@ monorepo use independent Semantic Versions.
   that tag is on view and a live fullscreen client owns the output.
 - `get_windows` / `get_tree` / `window/state` report `owns_output` when a
   visible fullscreen client currently covers the monitor.
+- Monitor, workspace and tree rows report `owns_output_count`.
 
 ### Changed
 
