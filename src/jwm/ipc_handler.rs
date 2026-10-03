@@ -12707,4 +12707,12 @@ mod tests {
         assert!(query.contains("c.state.is_below"));
         assert!(DOCS.contains("also include `below_count`"));
     }
+
+    #[test]
+    fn evolve8h_wave_182_health_occupancy_includes_below_count() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("below={below}"));
+        assert!(DOCS.contains("and `below_count`"));
+    }
 }
