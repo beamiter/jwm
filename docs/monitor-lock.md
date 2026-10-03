@@ -181,7 +181,8 @@ convenience queries `get_layout`
 monitor's live values (optional `connector` when known). `get_show_bar`
 also reports `bar_visible`, `has_visible_fullscreen` and
 `owns_output_count` (`get_bar` /
-`get_bar_visible` / `get_owns_output` / `get_visible_fullscreen` alias the same snapshot). A
+`get_bar_visible` / `get_owns_output` / `get_visible_fullscreen` /
+`get_vf` alias the same snapshot). A
 per-monitor show-bar snapshot is available for any output, not only the
 focused one (JSON keys `monitor` / `show_bar` / `bar_visible` /
 `has_visible_fullscreen` / `owns_output_count` / optional `connector`). Client fullscreen flips emit `monitor/bar` with that

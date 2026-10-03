@@ -2853,7 +2853,7 @@ impl Jwm {
             "get_mfact" | "get_mf" => IpcResponse::ok(Some(self.query_focused_mfact(backend))),
             "get_cfact" | "get_cf" => IpcResponse::ok(Some(self.query_focused_cfact(backend))),
             "get_show_bar" | "get_bar" | "get_bar_visible" | "get_owns_output"
-            | "get_visible_fullscreen" => {
+            | "get_visible_fullscreen" | "get_vf" => {
                 IpcResponse::ok(Some(self.query_focused_show_bar(backend)))
             }
             "get_prev_layout" | "get_pl" => {
@@ -11084,5 +11084,15 @@ mod tests {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
         assert!(IPC.contains("`get_visible_fullscreen` (preference, occupancy,"));
         assert!(DOCS.contains("including `get_visible_fullscreen`"));
+    }
+
+    #[test]
+    fn evolve8h_wave_48_get_vf_aliases_visible_fullscreen() {
+        const IPC: &str = include_str!("../ipc.rs");
+        const SOURCE: &str = include_str!("ipc_handler.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(IPC.contains("\"get_vf\""));
+        assert!(SOURCE.contains("\"get_vf\""));
+        assert!(DOCS.contains("`get_vf`"));
     }
 }

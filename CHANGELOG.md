@@ -70,6 +70,7 @@ monorepo use independent Semantic Versions.
 - Window-tabs docs name the `bar` occupancy subscription.
 - `get_visible_fullscreen` aliases `get_show_bar`.
 - `get_status.show_bar` rustdoc includes `get_visible_fullscreen`.
+- `get_vf` aliases `get_visible_fullscreen`.
 
 ### Changed
 
