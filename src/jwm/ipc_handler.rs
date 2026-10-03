@@ -14528,4 +14528,11 @@ mod tests {
         assert!(transient.contains("broadcast_monitor_bar_ipc(backend, mk)"));
         assert!(DOCS.contains("Transient-for floating emits `monitor/bar`"));
     }
+
+    #[test]
+    fn evolve8h_wave_323_get_workspaces_docs_name_closed_placement_count() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("`get_workspaces` also reports `closed_placement_count`"));
+        assert!(DOCS.contains("Workspace rows report `closed_placement_count`"));
+    }
 }

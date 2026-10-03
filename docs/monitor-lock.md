@@ -457,3 +457,4 @@ and sticky.
 fixed (and tree scratchpad / tabbed) counts; monitors report
 `window_count` / floating / minimized / sticky counts; windows report
 optional `stack_index`.
+`get_workspaces` also reports `closed_placement_count`.
