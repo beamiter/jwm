@@ -189,6 +189,7 @@ focused one (JSON keys `monitor` / `tag` / `show_bar` / `bar_visible` /
 They also include `layout` (`lt_symbol`). They also include `gap`.
 They also include `mfact`.
 They also include `nmaster`.
+They also include `prev_tag`.
 `setnmaster` emits `monitor/bar`.
 Scrolling `setmfact` (column width) emits `monitor/bar`.
 `setmfact` emits `monitor/bar`.

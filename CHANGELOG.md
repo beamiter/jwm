@@ -107,6 +107,7 @@ monorepo use independent Semantic Versions.
 - `jwm-tool health` occupancy line includes the current nmaster.
 - `setnmaster` emits `monitor/bar` after arrange.
 - Scrolling column-width `setmfact` emits `monitor/bar` after arrange.
+- `get_show_bar` occupancy snapshots include `prev_tag`.
 
 ### Changed
 
