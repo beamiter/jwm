@@ -329,6 +329,7 @@ monorepo use independent Semantic Versions.
 - `jwm-tool health` occupancy line includes closed_placement_count.
 - `get_status.show_bar` rustdoc names `closed_placement_count`.
 - README occupancy JSON names `closed_placement_count`.
+- `tools/README.md` occupancy JSON names `closed_placement_count`.
 
 ### Changed
 
