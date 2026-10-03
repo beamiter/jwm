@@ -4432,6 +4432,7 @@ impl Jwm {
             prev_layout: format!("{:?}", *m.prev_lt),
             show_bar,
             bar_visible: self.monitor_shows_status_bar(mk),
+            has_visible_fullscreen: self.monitor_has_visible_fullscreen(mk),
             strut_top,
             strut_bottom,
             strut_left,
@@ -10477,5 +10478,15 @@ mod tests {
                 || DOCS.contains("also reports `bar_visible`"),
             "get_show_bar docs must mention bar_visible"
         );
+    }
+
+    #[test]
+    fn evolve8h_wave_3_monitor_has_visible_fullscreen() {
+        const IPC: &str = include_str!("../ipc.rs");
+        const SOURCE: &str = include_str!("ipc_handler.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(IPC.contains("pub has_visible_fullscreen: bool"));
+        assert!(SOURCE.contains("has_visible_fullscreen: self.monitor_has_visible_fullscreen(mk)"));
+        assert!(DOCS.contains("`has_visible_fullscreen`"));
     }
 }

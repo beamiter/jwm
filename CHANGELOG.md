@@ -12,6 +12,9 @@ monorepo use independent Semantic Versions.
   which remains the per-tag preference and stays true during F11 fullscreen.
 - `get_show_bar` includes `bar_visible` beside the per-tag `show_bar`
   preference, matching monitor rows.
+- `get_monitors` / `get_tree` monitor rows report `has_visible_fullscreen`
+  for a non-hidden fullscreen client on the current view, the same predicate
+  that hides the status bar.
 
 ### Changed
 

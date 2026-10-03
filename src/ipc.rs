@@ -1272,6 +1272,9 @@ pub struct MonitorInfoIpc {
     /// False while a visible fullscreen client owns the monitor even if
     /// [`Self::show_bar`] is still true.
     pub bar_visible: bool,
+    /// True when a non-hidden client on this monitor is fullscreen and on
+    /// the current view — the same predicate that tucks the status bar.
+    pub has_visible_fullscreen: bool,
     /// External strut reservation on this monitor (top/bottom/left/right).
     pub strut_top: i32,
     pub strut_bottom: i32,
@@ -2408,6 +2411,7 @@ mod tests {
             prev_layout: "TILE".into(),
             show_bar: true,
             bar_visible: true,
+            has_visible_fullscreen: false,
             strut_top: 0,
             strut_bottom: 0,
             strut_left: 0,
@@ -2481,6 +2485,7 @@ mod tests {
         assert_eq!(with_connector["prev_layout"], "TILE");
         assert_eq!(with_connector["show_bar"], true);
         assert_eq!(with_connector["bar_visible"], true);
+        assert_eq!(with_connector["has_visible_fullscreen"], false);
         assert_eq!(with_connector["strut_top"], 0);
         assert!(with_connector.get("selected_id").is_none());
         assert_eq!(with_connector["sel_tags"], 0);
@@ -2531,6 +2536,7 @@ mod tests {
             prev_layout: "TILE".into(),
             show_bar: true,
             bar_visible: true,
+            has_visible_fullscreen: false,
             strut_top: 0,
             strut_bottom: 0,
             strut_left: 0,
@@ -3574,6 +3580,7 @@ mod tests {
                 prev_layout: "TILE".into(),
                 show_bar: true,
                 bar_visible: true,
+                has_visible_fullscreen: false,
                 strut_top: 0,
                 strut_bottom: 0,
                 strut_left: 0,
@@ -3695,6 +3702,7 @@ mod tests {
                 prev_layout: "TILE".into(),
                 show_bar: true,
                 bar_visible: true,
+                has_visible_fullscreen: false,
                 strut_top: 0,
                 strut_bottom: 0,
                 strut_left: 0,

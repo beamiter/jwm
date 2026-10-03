@@ -166,6 +166,8 @@ when unknown). Optional `hdr_metadata`, physical size (`physical_*_mm`),
 preferred mode, `vrr_min_hz` / `vrr_max_hz`, `prev_layout`, `show_bar`,
 `bar_visible` (the bar window actually occupying the output; false during
 client fullscreen even when `show_bar` is still the tag preference),
+`has_visible_fullscreen` (a non-hidden fullscreen client on the current
+view),
 strut reservations, `selected_id`, dual-tagset `sel_tags` /
 `previous_tags`, pertag `cur_tag` / `prev_tag`, and optional
 `output_connector` (raw `OutputIdentity.connector`, which may differ from
