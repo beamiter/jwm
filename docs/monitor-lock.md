@@ -370,6 +370,7 @@ README occupancy JSON also names `strut_count`.
 `tools/README.md` also names `swallowed_count`.
 `tools/README.md` also names `demands_attention_count`.
 `tools/README.md` also names `fixed_count`.
+`tools/README.md` also names `strut_count`.
 `tools/README.md` also names `floating_count`.
 `tools/README.md` also names `on_view_count`.
 `tools/README.md` also names `window_count`.

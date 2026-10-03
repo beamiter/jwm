@@ -295,6 +295,7 @@ monorepo use independent Semantic Versions.
 - `jwm-tool health` occupancy line includes strut_count.
 - `get_status.show_bar` rustdoc names `strut_count`.
 - README occupancy JSON names `strut_count`.
+- `tools/README.md` occupancy JSON names `strut_count`.
 
 ### Changed
 
