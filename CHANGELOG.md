@@ -120,6 +120,7 @@ monorepo use independent Semantic Versions.
 - `focus_none` emits `monitor/bar` after dropping selection.
 - `focus_window` emits `monitor/bar` after a successful reveal.
 - `get_status.show_bar` rustdoc names `selected_id`.
+- README occupancy JSON names `selected_id`.
 
 ### Changed
 

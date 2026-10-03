@@ -150,7 +150,7 @@ jwm-tool capabilities --json
 ```
 
 `get_show_bar` occupancy JSON includes `tag`, `prev_tag`, `layout`, `gap`,
-`mfact`, and `nmaster`.
+`mfact`, `nmaster`, and `selected_id`.
 
 Malformed JSON, invalid argument types, overflow, empty spawn commands, unknown
 commands, and `{ "success": false }` responses produce a non-zero exit status,

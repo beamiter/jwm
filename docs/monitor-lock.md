@@ -256,7 +256,8 @@ query aliases of `get_show_bar`.
 number and the current `tag` and `layout` and `gap` and `mfact` and `nmaster` and `prev_tag` and `selected_id`.
 README control examples include `get_show_bar` and `get_vf`, as does
 `tools/README.md`. README names occupancy `tag` / `prev_tag` / `layout` /
-`gap` / `mfact` / `nmaster`. `tools/README.md` names the same occupancy
+`gap` / `mfact` / `nmaster`. README occupancy JSON also names
+`selected_id`. `tools/README.md` names the same occupancy
 keys. Window-tabs docs name occupancy `tag` / `layout` / `gap` / `mfact` /
 `nmaster`.
 `toggletag` on a fullscreen client emits `monitor/bar`, as does `tag`

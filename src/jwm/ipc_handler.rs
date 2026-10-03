@@ -11613,4 +11613,12 @@ mod tests {
         assert!(IPC.contains("`nmaster`, and `selected_id`"));
         assert!(DOCS.contains("`nmaster` / `selected_id`"));
     }
+
+    #[test]
+    fn evolve8h_wave_95_readme_occupancy_names_selected_id() {
+        const README: &str = include_str!("../../README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(README.contains("`nmaster`, and `selected_id`"));
+        assert!(DOCS.contains("README occupancy JSON also names\n`selected_id`") || DOCS.contains("README occupancy JSON also names `selected_id`"));
+    }
 }
