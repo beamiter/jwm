@@ -490,7 +490,16 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 174 | get_show_bar occupancy 含 above_count | ✓ |
 | 175 | jwm-tool health occupancy 含 above | ✓ |
 | 176 | above/below 切换 emit monitor/bar | ✓ |
+| 177 | get_status.show_bar rustdoc 含 above_count | ✓ |
 | … | 进行中 | |
+
+---
+
+## 2026-10-03：evolve8h wave 177 — get_status.show_bar rustdoc names above_count
+
+选题 = evolve8h wave 177。`RuntimeStatusV1.show_bar` rustdoc 点名 occupancy 的 `above_count`。
+
+**验证**：`scripts/test.sh --lib --` 聚焦 evolve8h_wave_177 evolve8h_wave_170。
 
 ---
 
