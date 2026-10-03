@@ -15093,4 +15093,12 @@ mod tests {
         assert!(TOOL.contains("query aliases: get_cf -> get_cfact"));
         assert!(DOCS.contains("`jwm-tool capabilities` text lists `get_cf -> get_cfact`"));
     }
+
+    #[test]
+    fn evolve8h_wave_374_capabilities_text_lists_get_gap_alias() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("query aliases: get_gap -> get_gaps"));
+        assert!(DOCS.contains("`jwm-tool capabilities` text lists `get_gap -> get_gaps`"));
+    }
 }
