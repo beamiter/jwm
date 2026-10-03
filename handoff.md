@@ -578,9 +578,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 262 | README occupancy 含 fixed_count | ✓ |
 | 263 | tools/README occupancy 含 fixed_count | ✓ |
 | 264 | window-tabs occupancy 含 fixed_count | ✓ |
+| 265 | get_show_bar occupancy 含 strut_count | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 265 — occupancy snapshot includes strut_count
+
+选题 = evolve8h wave 265。`get_show_bar` / `monitor/bar` 带上附着的 strut 窗口数。
 
 ## 2026-10-03：evolve8h wave 264 — window-tabs occupancy names fixed_count
 
