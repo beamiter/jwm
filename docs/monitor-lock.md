@@ -228,7 +228,8 @@ output (swallowed terminals never own it).
 `audio_recording` / `clipboard` / `waterlily` / `night_light` / `magnifier` /
 `peek` / `expose` / `gesture` / `wayland` / `dnd` / `session_lock` summaries
 beside feature flags for shell pickers, monitor lock, and the debug HUD.
-`get_status.show_bar` is the same occupancy snapshot as `get_show_bar`.
+`get_status.show_bar` is the same occupancy snapshot as `get_show_bar`
+(including `get_visible_fullscreen`).
 `toggletag` on a fullscreen client emits `monitor/bar`, as does `tag`
 and sticky.
 `get_workspaces` / `get_tree` also report pip / maximized / above / below /

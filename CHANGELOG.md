@@ -69,6 +69,7 @@ monorepo use independent Semantic Versions.
 - Toggling sticky on a fullscreen client emits `monitor/bar`.
 - Window-tabs docs name the `bar` occupancy subscription.
 - `get_visible_fullscreen` aliases `get_show_bar`.
+- `get_status.show_bar` rustdoc includes `get_visible_fullscreen`.
 
 ### Changed
 
