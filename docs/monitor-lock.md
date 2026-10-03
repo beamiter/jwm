@@ -216,6 +216,7 @@ They also include `no_decorations_count`.
 They also include `drag_float_count`.
 They also include `swallowed_count`.
 They also include `demands_attention_count`.
+They also include `fixed_count`.
 Hiding a scratchpad emits `monitor/bar`.
 Showing a scratchpad emits `monitor/bar`.
 `_NET_WM_STATE_SKIP_TASKBAR` emits `monitor/bar`.

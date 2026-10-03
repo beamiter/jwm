@@ -4699,6 +4699,7 @@ impl Jwm {
     /// Also `drag_float_count` (attached drag-floating clients).
     /// Also `swallowed_count` (attached swallowed clients).
     /// Also `demands_attention_count` (attached EWMH demands-attention clients).
+    /// Also `fixed_count` (attached size-fixed clients).
     pub(crate) fn query_show_bar_for_monitor(
         &self,
         backend: &dyn Backend,
@@ -4739,6 +4740,7 @@ impl Jwm {
                 "drag_float_count": serde_json::Value::Null,
                 "swallowed_count": serde_json::Value::Null,
                 "demands_attention_count": serde_json::Value::Null,
+                "fixed_count": serde_json::Value::Null,
                 "show_bar": serde_json::Value::Null,
                 "bar_visible": serde_json::Value::Null,
                 "has_visible_fullscreen": serde_json::Value::Null,
@@ -5062,6 +5064,21 @@ impl Jwm {
                         .count()
                 })
                 .unwrap_or(0),
+            "fixed_count": self
+                .state
+                .monitor_clients
+                .get(mk)
+                .map(|keys| {
+                    keys.iter()
+                        .filter(|&&ck| {
+                            self.state
+                                .clients
+                                .get(ck)
+                                .is_some_and(|c| c.state.is_fixed)
+                        })
+                        .count()
+                })
+                .unwrap_or(0),
             "show_bar": show_bar,
             "bar_visible": self.monitor_shows_status_bar(mk),
             "has_visible_fullscreen": self.monitor_has_visible_fullscreen(mk),
@@ -5116,6 +5133,7 @@ impl Jwm {
                 "drag_float_count": serde_json::Value::Null,
                 "swallowed_count": serde_json::Value::Null,
                 "demands_attention_count": serde_json::Value::Null,
+                "fixed_count": serde_json::Value::Null,
                 "show_bar": serde_json::Value::Null,
                 "bar_visible": serde_json::Value::Null,
                 "has_visible_fullscreen": serde_json::Value::Null,
@@ -13632,5 +13650,21 @@ mod tests {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
         assert!(TABS.contains("`swallowed_count` / `demands_attention_count`"));
         assert!(DOCS.contains("Window-tabs docs also name `demands_attention_count`"));
+    }
+
+    #[test]
+    fn evolve8h_wave_259_occupancy_snapshot_includes_fixed_count() {
+        const SOURCE: &str = include_str!("ipc_handler.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        let query = SOURCE
+            .split_once("fn query_show_bar_for_monitor(")
+            .expect("query_show_bar_for_monitor")
+            .1
+            .split_once("fn query_focused_show_bar(")
+            .expect("focused follows")
+            .0;
+        assert!(query.contains("\"fixed_count\":"));
+        assert!(query.contains("c.state.is_fixed"));
+        assert!(DOCS.contains("also include `fixed_count`"));
     }
 }

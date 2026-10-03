@@ -572,9 +572,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 256 | README occupancy 含 demands_attention_count | ✓ |
 | 257 | tools/README occupancy 含 demands_attention_count | ✓ |
 | 258 | window-tabs occupancy 含 demands_attention_count | ✓ |
+| 259 | get_show_bar occupancy 含 fixed_count | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 259 — occupancy snapshot includes fixed_count
+
+选题 = evolve8h wave 259。`get_show_bar` / `monitor/bar` 带上附着的 size-fixed 窗口数。
 
 ## 2026-10-03：evolve8h wave 258 — window-tabs occupancy names demands_attention_count
 
