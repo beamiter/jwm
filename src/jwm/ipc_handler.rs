@@ -11899,4 +11899,12 @@ mod tests {
         assert!(TOOL.contains("on_view={on_view}"));
         assert!(DOCS.contains("and `on_view_count`"));
     }
+
+    #[test]
+    fn evolve8h_wave_119_get_status_show_bar_rustdoc_names_on_view_count() {
+        const IPC: &str = include_str!("../ipc.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(IPC.contains("Also `on_view_count`."));
+        assert!(DOCS.contains("`window_count` / `on_view_count`"));
+    }
 }
