@@ -196,6 +196,7 @@ monorepo use independent Semantic Versions.
 - Unmaximize-in-place emits `monitor/bar`.
 - Reinstating a maximize snapshot emits `monitor/bar`.
 - `get_status.show_bar` rustdoc names `maximized_count`.
+- README occupancy JSON names `maximized_count`.
 
 ### Changed
 

@@ -160,6 +160,7 @@ It also includes `sticky_count`.
 It also includes `urgent_count`.
 It also includes `fullscreen_count`.
 It also includes `pip_count`.
+It also includes `maximized_count`.
 
 Malformed JSON, invalid argument types, overflow, empty spawn commands, unknown
 commands, and `{ "success": false }` responses produce a non-zero exit status,
