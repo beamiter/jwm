@@ -245,6 +245,7 @@ monorepo use independent Semantic Versions.
 - `tools/README.md` occupancy JSON names `never_focus_count`.
 - Window-tabs docs name occupancy `never_focus_count`.
 - `get_show_bar` occupancy snapshots include `skip_taskbar_count`.
+- `jwm-tool health` occupancy line includes skip_taskbar_count.
 
 ### Changed
 

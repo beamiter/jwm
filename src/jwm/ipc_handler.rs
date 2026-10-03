@@ -13162,4 +13162,12 @@ mod tests {
         assert!(query.contains("c.state.skip_taskbar"));
         assert!(DOCS.contains("also include `skip_taskbar_count`"));
     }
+
+    #[test]
+    fn evolve8h_wave_220_health_occupancy_includes_skip_taskbar_count() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("skip_taskbar={skip_taskbar}"));
+        assert!(DOCS.contains("and `skip_taskbar_count`"));
+    }
 }
