@@ -203,6 +203,7 @@ monorepo use independent Semantic Versions.
 - `jwm-tool health` occupancy line includes above_count.
 - Keep-above and keep-below changes emit `monitor/bar`.
 - `get_status.show_bar` rustdoc names `above_count`.
+- README occupancy JSON names `above_count`.
 
 ### Changed
 
