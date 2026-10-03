@@ -124,6 +124,7 @@ monorepo use independent Semantic Versions.
 - `tools/README.md` occupancy JSON names `selected_id`.
 - Window-tabs docs name occupancy `selected_id`.
 - `get_show_bar` occupancy snapshots include `sel_tags`.
+- `get_show_bar` occupancy snapshots include `previous_tags`.
 
 ### Changed
 

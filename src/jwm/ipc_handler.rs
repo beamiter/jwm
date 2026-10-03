@@ -4675,6 +4675,7 @@ impl Jwm {
     /// Also `prev_tag` (`Pertag.prev_tag`).
     /// Also `selected_id` (`WMMonitor.sel` window id).
     /// Also `sel_tags` (`WMMonitor.sel_tags` dual-tagset index).
+    /// Also `previous_tags` (inactive tagset mask).
     pub(crate) fn query_show_bar_for_monitor(
         &self,
         backend: &dyn Backend,
@@ -4691,6 +4692,7 @@ impl Jwm {
                 "prev_tag": serde_json::Value::Null,
                 "selected_id": serde_json::Value::Null,
                 "sel_tags": serde_json::Value::Null,
+                "previous_tags": serde_json::Value::Null,
                 "show_bar": serde_json::Value::Null,
                 "bar_visible": serde_json::Value::Null,
                 "has_visible_fullscreen": serde_json::Value::Null,
@@ -4717,6 +4719,7 @@ impl Jwm {
             "prev_tag": prev_tag,
             "selected_id": selected_id,
             "sel_tags": mon.sel_tags & 1,
+            "previous_tags": mon.tag_set[1 - (mon.sel_tags & 1)],
             "show_bar": show_bar,
             "bar_visible": self.monitor_shows_status_bar(mk),
             "has_visible_fullscreen": self.monitor_has_visible_fullscreen(mk),
@@ -4747,6 +4750,7 @@ impl Jwm {
                 "prev_tag": serde_json::Value::Null,
                 "selected_id": serde_json::Value::Null,
                 "sel_tags": serde_json::Value::Null,
+                "previous_tags": serde_json::Value::Null,
                 "show_bar": serde_json::Value::Null,
                 "bar_visible": serde_json::Value::Null,
                 "has_visible_fullscreen": serde_json::Value::Null,
@@ -11656,5 +11660,20 @@ mod tests {
             .0;
         assert!(query.contains("\"sel_tags\": mon.sel_tags & 1"));
         assert!(DOCS.contains("also include `sel_tags`"));
+    }
+
+    #[test]
+    fn evolve8h_wave_99_occupancy_snapshot_includes_previous_tags() {
+        const SOURCE: &str = include_str!("ipc_handler.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        let query = SOURCE
+            .split_once("fn query_show_bar_for_monitor(")
+            .expect("query_show_bar_for_monitor")
+            .1
+            .split_once("fn query_focused_show_bar(")
+            .expect("focused follows")
+            .0;
+        assert!(query.contains("\"previous_tags\": mon.tag_set[1 - (mon.sel_tags & 1)]"));
+        assert!(DOCS.contains("also include `previous_tags`"));
     }
 }
