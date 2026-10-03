@@ -83,6 +83,8 @@ monorepo use independent Semantic Versions.
 - `tools/README.md` control examples include `get_vf`.
 - `jwm-tool msg` after-help examples include `get_vf`.
 - `jwm-tool msg` after-help examples include `get_show_bar`.
+- `jwm-tool capabilities` text lists `bar->monitor/bar` and
+  `workspace->tag` aliases.
 
 ### Changed
 

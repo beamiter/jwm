@@ -11194,4 +11194,12 @@ mod tests {
         assert!(TOOL.contains("jwm-tool msg get_show_bar"));
         assert!(DOCS.contains("and `get_show_bar`"));
     }
+
+    #[test]
+    fn evolve8h_wave_61_capabilities_text_lists_subscribe_aliases() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("bar->monitor/bar, workspace->tag"));
+        assert!(DOCS.contains("`bar->monitor/bar`"));
+    }
 }

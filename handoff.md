@@ -374,7 +374,16 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 58 | tools/README 控制示例含 get_vf | ✓ |
 | 59 | jwm-tool 示例含 get_vf | ✓ |
 | 60 | jwm-tool 示例含 get_show_bar | ✓ |
+| 61 | capabilities 文本列出订阅别名 | ✓ |
 | … | 进行中 | |
+
+---
+
+## 2026-10-03：evolve8h wave 61 — capabilities text names subscribe aliases
+
+选题 = evolve8h wave 61。`jwm-tool capabilities` 纯文本列出 `bar->monitor/bar`。
+
+**验证**：`scripts/test.sh --lib --` 聚焦 evolve8h_wave_61。
 
 ---
 

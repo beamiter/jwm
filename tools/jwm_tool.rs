@@ -3311,6 +3311,7 @@ mod tests {
         let lines = capabilities_output_lines(&capabilities);
         assert!(lines[1].contains("reload_config"));
         assert!(lines[2].contains("get_status"));
+        assert!(lines.iter().any(|line| line.contains("bar->monitor/bar")));
 
         assert!(
             successful_query_data(
@@ -4047,6 +4048,7 @@ fn capabilities_output_lines(capabilities: &serde_json::Value) -> Vec<String> {
         format!("commands: {}", names("commands")),
         format!("queries: {}", names("queries")),
         format!("subscription_topics: {}", names("subscription_topics")),
+        "aliases: bar->monitor/bar, workspace->tag".to_string(),
     ]
 }
 
