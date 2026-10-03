@@ -463,3 +463,4 @@ optional `stack_index`.
 Overview confirm emits `monitor/bar`.
 Expose exit emits `monitor/bar`.
 Window-switcher commit emits `monitor/bar`.
+Window-placement docs name `closed_placement_count`.

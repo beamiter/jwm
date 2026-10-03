@@ -227,7 +227,8 @@ optional `maximize_restore_anchor`, `pip_restore_sticky`, `old_state`,
 (fractional), `refresh_mhz` (mode refresh in millihertz; `60000` is
 60 Hz), `hdr_capable`, live tiling `gap` / `m_fact` / `n_master`, and
 `transform` (`wl_output` 0..=7). `get_workspaces` rows include per-tag
-`gap` beside `m_fact` / `n_master`. `get_layout` / `get_gaps` /
+`gap` beside `m_fact` / `n_master`. `get_workspaces` / `get_monitors` /
+`get_tree` also report `closed_placement_count`. `get_layout` / `get_gaps` /
 `get_nmaster` query the focused monitor's live layout parameters;
 `setgaps` is an IPC command.
 

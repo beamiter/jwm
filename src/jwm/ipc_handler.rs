@@ -14595,4 +14595,13 @@ mod tests {
         assert!(commit.contains("broadcast_monitor_bar_ipc(backend, mon_key)"));
         assert!(DOCS.contains("Window-switcher commit emits `monitor/bar`"));
     }
+
+    #[test]
+    fn evolve8h_wave_329_window_placement_docs_name_closed_placement_count() {
+        const PLACEMENT: &str = include_str!("../../docs/window-placement.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(PLACEMENT.contains("`closed_placement_count`"));
+        assert!(PLACEMENT.contains("`get_workspaces` / `get_monitors` /"));
+        assert!(DOCS.contains("Window-placement docs name `closed_placement_count`"));
+    }
 }

@@ -642,9 +642,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 326 | overview 确认发出 monitor/bar | ✓ |
 | 327 | expose 退出发出 monitor/bar | ✓ |
 | 328 | window-switcher 确认发出 monitor/bar | ✓ |
+| 329 | window-placement 文档含 closed_placement_count | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 329 — window-placement docs name closed_placement_count
+
+选题 = evolve8h wave 329。window-placement 文档点名 closed_placement_count。
 
 ## 2026-10-03：evolve8h wave 328 — window-switcher commit broadcasts monitor/bar
 
