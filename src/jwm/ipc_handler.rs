@@ -4641,7 +4641,9 @@ impl Jwm {
         value
     }
 
-    /// Focused monitor's status-bar visibility for the current tag.
+    /// Focused monitor's status-bar preference and whether the bar window
+    /// currently occupies the output (`bar_visible` is false during F11
+    /// fullscreen even when `show_bar` stays true).
     pub(crate) fn query_focused_show_bar(&self, backend: &dyn Backend) -> serde_json::Value {
         match self.state.sel_mon.and_then(|mk| {
             let mon = self.state.monitors.get(mk)?;
@@ -4656,6 +4658,7 @@ impl Jwm {
                 let mut value = serde_json::json!({
                     "monitor": num,
                     "show_bar": show_bar,
+                    "bar_visible": self.monitor_shows_status_bar(mk),
                 });
                 if let Some(connector) = self.output_key_for_monitor(backend, mk) {
                     value
@@ -4668,6 +4671,7 @@ impl Jwm {
             None => serde_json::json!({
                 "monitor": serde_json::Value::Null,
                 "show_bar": serde_json::Value::Null,
+                "bar_visible": serde_json::Value::Null,
             }),
         }
     }
@@ -10452,6 +10456,26 @@ mod tests {
         assert!(
             DOCS.contains("`bar_visible`"),
             "monitor IPC docs must name bar_visible beside show_bar"
+        );
+    }
+
+    #[test]
+    fn evolve8h_wave_2_get_show_bar_reports_bar_visible() {
+        const SOURCE: &str = include_str!("ipc_handler.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        let query = SOURCE
+            .split_once("fn query_focused_show_bar(")
+            .expect("query_focused_show_bar")
+            .1
+            .split_once("fn query_focused_prev_layout(")
+            .expect("prev_layout follows")
+            .0;
+        assert!(query.contains("\"bar_visible\""));
+        assert!(query.contains("monitor_shows_status_bar(mk)"));
+        assert!(
+            DOCS.contains("`get_show_bar`\nalso reports `bar_visible`")
+                || DOCS.contains("also reports `bar_visible`"),
+            "get_show_bar docs must mention bar_visible"
         );
     }
 }

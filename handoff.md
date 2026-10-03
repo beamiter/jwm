@@ -315,7 +315,17 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | # | 选题 | Size |
 | --- | --- | --- |
 | 1 | MonitorInfoIpc.bar_visible（有效栏可见性，与 show_bar 偏好分离） | ✓ |
+| 2 | get_show_bar / get_bar 返回 bar_visible | ✓ |
 | … | 进行中 | |
+
+---
+
+## 2026-10-03：evolve8h wave 2 — get_show_bar.bar_visible
+
+选题 = evolve8h wave 2。`get_show_bar` / `get_bar` 与 monitor 行对齐，带上
+有效 `bar_visible`。
+
+**验证**：`scripts/test.sh --lib --` 聚焦 evolve8h_wave_2。
 
 ---
 

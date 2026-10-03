@@ -10,6 +10,8 @@ monorepo use independent Semantic Versions.
 - `get_monitors` / `get_tree` monitor rows report `bar_visible`: whether the
   status-bar window currently occupies that output. Distinct from `show_bar`,
   which remains the per-tag preference and stays true during F11 fullscreen.
+- `get_show_bar` includes `bar_visible` beside the per-tag `show_bar`
+  preference, matching monitor rows.
 
 ### Changed
 
