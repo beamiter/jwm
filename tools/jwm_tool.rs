@@ -3312,6 +3312,7 @@ mod tests {
         assert!(lines[1].contains("reload_config"));
         assert!(lines[2].contains("get_status"));
         assert!(lines.iter().any(|line| line.contains("bar->monitor/bar")));
+        assert!(lines.iter().any(|line| line.contains("query aliases:")));
 
         assert!(
             successful_query_data(
@@ -4049,6 +4050,7 @@ fn capabilities_output_lines(capabilities: &serde_json::Value) -> Vec<String> {
         format!("queries: {}", names("queries")),
         format!("subscription_topics: {}", names("subscription_topics")),
         "aliases: bar->monitor/bar, workspace->tag".to_string(),
+        "query aliases: get_bar,get_bar_visible,get_owns_output,get_vf,get_visible_fullscreen -> get_show_bar".to_string(),
     ]
 }
 

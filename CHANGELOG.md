@@ -85,6 +85,8 @@ monorepo use independent Semantic Versions.
 - `jwm-tool msg` after-help examples include `get_show_bar`.
 - `jwm-tool capabilities` text lists `bar->monitor/bar` and
   `workspace->tag` aliases.
+- `jwm-tool capabilities` text lists occupancy query aliases of
+  `get_show_bar`.
 
 ### Changed
 

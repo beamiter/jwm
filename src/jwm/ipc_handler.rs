@@ -11202,4 +11202,12 @@ mod tests {
         assert!(TOOL.contains("bar->monitor/bar, workspace->tag"));
         assert!(DOCS.contains("`bar->monitor/bar`"));
     }
+
+    #[test]
+    fn evolve8h_wave_62_capabilities_text_lists_occupancy_query_aliases() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("query aliases: get_bar,get_bar_visible"));
+        assert!(DOCS.contains("occupancy\nquery aliases") || DOCS.contains("occupancy query aliases"));
+    }
 }
