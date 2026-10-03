@@ -4673,6 +4673,7 @@ impl Jwm {
                     "show_bar": show_bar,
                     "bar_visible": self.monitor_shows_status_bar(mk),
                     "has_visible_fullscreen": self.monitor_has_visible_fullscreen(mk),
+                    "owns_output_count": self.monitor_owns_output_count(mk),
                 });
                 if let Some(connector) = self.output_key_for_monitor(backend, mk) {
                     value
@@ -4687,6 +4688,7 @@ impl Jwm {
                 "show_bar": serde_json::Value::Null,
                 "bar_visible": serde_json::Value::Null,
                 "has_visible_fullscreen": serde_json::Value::Null,
+                "owns_output_count": serde_json::Value::Null,
             }),
         }
     }
@@ -10560,5 +10562,23 @@ mod tests {
         assert!(IPC.contains("pub owns_output_count: usize"));
         assert!(SOURCE.contains("counts.owns_output"));
         assert!(SOURCE.contains("owns_output_count: counts.owns_output"));
+    }
+
+    #[test]
+    fn evolve8h_wave_9_get_show_bar_reports_owns_output_count() {
+        const SOURCE: &str = include_str!("ipc_handler.rs");
+        const CORE: &str = include_str!("../jwm.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        let query = SOURCE
+            .split_once("fn query_focused_show_bar(")
+            .expect("query_focused_show_bar")
+            .1
+            .split_once("fn query_focused_prev_layout(")
+            .expect("prev_layout follows")
+            .0;
+        assert!(query.contains("\"owns_output_count\""));
+        assert!(query.contains("monitor_owns_output_count(mk)"));
+        assert!(CORE.contains("fn monitor_owns_output_count"));
+        assert!(DOCS.contains("`owns_output_count`"));
     }
 }

@@ -1683,19 +1683,25 @@ impl Jwm {
     /// layout does: the tab strip already stands down for it, and the status
     /// bar has to follow or it remains painted over F11 video.
     pub(crate) fn monitor_has_visible_fullscreen(&self, mon_key: MonitorKey) -> bool {
+        self.monitor_owns_output_count(mon_key) > 0
+    }
+
+    /// How many visible fullscreen clients currently cover this output.
+    pub(crate) fn monitor_owns_output_count(&self, mon_key: MonitorKey) -> usize {
         self.state
             .monitor_clients
             .get(mon_key)
             .into_iter()
             .flatten()
             .copied()
-            .any(|client_key| {
+            .filter(|&client_key| {
                 self.state
                     .clients
                     .get(client_key)
                     .is_some_and(|client| client.state.is_fullscreen)
                     && self.is_client_visible_on_monitor(client_key, mon_key)
             })
+            .count()
     }
 
     /// Whether this monitor's status bar should occupy the screen.

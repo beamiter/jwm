@@ -22,6 +22,7 @@ monorepo use independent Semantic Versions.
 - `get_windows` / `get_tree` / `window/state` report `owns_output` when a
   visible fullscreen client currently covers the monitor.
 - Monitor, workspace and tree rows report `owns_output_count`.
+- `get_show_bar` also reports `owns_output_count`.
 
 ### Changed
 
