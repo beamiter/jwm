@@ -422,7 +422,16 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 106 | tools/README occupancy 含 tagset masks | ✓ |
 | 107 | window-tabs occupancy 含 tagset masks | ✓ |
 | 108 | zoom emit monitor/bar | ✓ |
+| 109 | get_show_bar occupancy 含 window_count | ✓ |
 | … | 进行中 | |
+
+---
+
+## 2026-10-03：evolve8h wave 109 — occupancy snapshot includes window_count
+
+选题 = evolve8h wave 109。`get_show_bar` / `monitor/bar` 带上该 monitor 附着的窗口数。
+
+**验证**：`scripts/test.sh --lib --` 聚焦 evolve8h_wave_109。
 
 ---
 

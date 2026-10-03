@@ -194,6 +194,7 @@ They also include `selected_id`.
 They also include `sel_tags`.
 They also include `previous_tags`.
 They also include `active_tags`.
+They also include `window_count`.
 `zoom` emits `monitor/bar`.
 `focusstack` emits `monitor/bar`.
 Scrolling in-column focus emits `monitor/bar`.
