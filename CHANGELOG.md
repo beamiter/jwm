@@ -417,6 +417,7 @@ monorepo use independent Semantic Versions.
 - `jwm-tool health` prints compact `selected` beside occupancy.
 - README health text names compact `selected`.
 - `tools/README.md` health text names compact `selected`.
+- `jwm-tool capabilities` text lists `get_sel -> get_selected`.
 
 ### Changed
 

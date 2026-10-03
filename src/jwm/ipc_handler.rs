@@ -15218,4 +15218,12 @@ mod tests {
         assert!(TOOLS.contains("get_status.selected"));
         assert!(DOCS.contains("`tools/README.md` health text names compact `selected`"));
     }
+
+    #[test]
+    fn evolve8h_wave_388_capabilities_text_lists_get_sel_alias() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("query aliases: get_sel -> get_selected"));
+        assert!(DOCS.contains("`jwm-tool capabilities` text lists `get_sel -> get_selected`"));
+    }
 }
