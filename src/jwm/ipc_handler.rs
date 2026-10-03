@@ -11059,4 +11059,11 @@ mod tests {
         assert!(sticky.contains("broadcast_monitor_bar_ipc(backend, mk)"));
         assert!(DOCS.contains("and sticky"));
     }
+
+    #[test]
+    fn evolve8h_wave_45_window_tabs_docs_name_bar_subscription() {
+        const TABS: &str = include_str!("../../docs/window-tabs.md");
+        assert!(TABS.contains("subscribe `bar`"));
+        assert!(TABS.contains("`monitor/bar` occupancy"));
+    }
 }
