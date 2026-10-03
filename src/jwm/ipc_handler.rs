@@ -12866,4 +12866,12 @@ mod tests {
         assert!(query.contains("self.tab_group_clients(mk)"));
         assert!(DOCS.contains("also include `tabbed_count`"));
     }
+
+    #[test]
+    fn evolve8h_wave_196_health_occupancy_includes_tabbed_count() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("tabbed={tabbed}"));
+        assert!(DOCS.contains("and `tabbed_count`"));
+    }
 }
