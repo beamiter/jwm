@@ -75,6 +75,7 @@ monorepo use independent Semantic Versions.
 - `jwm-tool msg` help lists `get_show_bar` and `get_vf`.
 - README control examples include `get_show_bar`.
 - `tools/README.md` control examples include `get_show_bar`.
+- `jwm-tool msg` help lists `get_owns_output`.
 
 ### Changed
 
