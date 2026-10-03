@@ -11988,4 +11988,12 @@ mod tests {
         assert!(togglefloating.contains("broadcast_monitor_bar_ipc(backend, sel_mon_key)"));
         assert!(DOCS.contains("`togglefloating` emits `monitor/bar`"));
     }
+
+    #[test]
+    fn evolve8h_wave_126_get_status_show_bar_rustdoc_names_floating_count() {
+        const IPC: &str = include_str!("../ipc.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(IPC.contains("Also `floating_count`."));
+        assert!(DOCS.contains("`on_view_count` /\n`floating_count`") || DOCS.contains("`on_view_count` / `floating_count`"));
+    }
 }

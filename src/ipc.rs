@@ -798,6 +798,7 @@ pub struct RuntimeStatusV1 {
     /// Also `sel_tags`, `previous_tags`, and `active_tags`.
     /// Also `window_count`.
     /// Also `on_view_count`.
+    /// Also `floating_count`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub show_bar: Option<Value>,
     /// Compact twin of `get_metrics` / `get_perf` (renderer metrics when any).
