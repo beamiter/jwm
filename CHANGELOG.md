@@ -351,6 +351,7 @@ monorepo use independent Semantic Versions.
 - `pop` emits `monitor/bar`.
 - Transient-for floating emits `monitor/bar`.
 - `get_workspaces` docs name `closed_placement_count`.
+- `get_monitors` docs name `closed_placement_count`.
 
 ### Changed
 
