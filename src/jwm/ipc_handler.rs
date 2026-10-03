@@ -15075,4 +15075,14 @@ mod tests {
             "README health text names compact `cfact` / `gaps` / `mfact` / `nmaster`"
         ));
     }
+
+    #[test]
+    fn evolve8h_wave_372_tools_readme_health_names_compact_layout_knobs() {
+        const TOOLS: &str = include_str!("../../tools/README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOLS.contains("compact `cfact` / `gaps` / `mfact` / `nmaster`"));
+        assert!(DOCS.contains(
+            "`tools/README.md` health text names compact `cfact` / `gaps` / `mfact` / `nmaster`"
+        ));
+    }
 }

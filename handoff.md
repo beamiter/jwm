@@ -685,9 +685,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 369 | health 打印 compact mfact | ✓ |
 | 370 | health 打印 compact nmaster | ✓ |
 | 371 | README health 点名 compact layout knobs | ✓ |
+| 372 | tools/README health 点名 compact layout knobs | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 372 — tools/README health names compact layout knobs
+
+选题 = evolve8h wave 372。tools/README health 文本点名 compact `cfact` / `gaps` / `mfact` / `nmaster`。
 
 ## 2026-10-03：evolve8h wave 371 — README health names compact layout knobs
 
