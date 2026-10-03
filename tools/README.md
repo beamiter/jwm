@@ -103,6 +103,7 @@ It also prints a compact `layout` line from `get_status.layout` (`get_lt`).
 It also prints a compact `tabs` line from `get_status.tabs` (`get_tab`).
 It also prints a compact `selected` line from `get_status.selected` (`get_sel`).
 It also prints a compact `struts` line from `get_status.struts` (`get_strut`).
+It also prints a compact `scratchpads` line from `get_status.scratchpads` (`get_pads`).
 
 IPC 使用换行分隔的 JSON。工具按块读取并保留同一批到达的后续消息，
 每条响应的正文上限为 1 MiB。普通响应和订阅确认须在开始读取后 5 秒内
