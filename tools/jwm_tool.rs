@@ -3312,12 +3312,13 @@ mod tests {
                 "show_bar": true,
                 "bar_visible": false,
                 "has_visible_fullscreen": true,
-                "owns_output_count": 1
+                "owns_output_count": 1,
+                "connector": "DP-1"
             }
         });
         let bar_lines = health_output_lines(&with_bar);
         assert!(bar_lines.iter().any(|line| {
-            line == "show_bar: preference=true visible=false fullscreen=true owns_output=1"
+            line == "show_bar: preference=true visible=false fullscreen=true owns_output=1 connector=DP-1"
         }));
 
         let capabilities = serde_json::json!({
@@ -4059,6 +4060,11 @@ fn health_output_lines(status: &serde_json::Value) -> Vec<String> {
         lines.push(format!(
             "show_bar: preference={preference} visible={visible} fullscreen={fullscreen} owns_output={owns}"
         ));
+        if let Some(connector) = bar.get("connector").and_then(serde_json::Value::as_str) {
+            if let Some(line) = lines.last_mut() {
+                line.push_str(&format!(" connector={connector}"));
+            }
+        }
     }
 
     if let Some(reasons) = status["health"]["reasons"].as_array() {

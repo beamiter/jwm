@@ -90,6 +90,7 @@ monorepo use independent Semantic Versions.
 - `jwm-tool health` prints focused-bar preference, visibility and
   `owns_output` count when `get_status.show_bar` is present.
 - `jwm-tool health` occupancy line includes `has_visible_fullscreen`.
+- `jwm-tool health` occupancy line appends `connector` when known.
 
 ### Changed
 

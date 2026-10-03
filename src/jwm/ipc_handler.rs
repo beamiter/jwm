@@ -11227,4 +11227,12 @@ mod tests {
         assert!(TOOL.contains("fullscreen={fullscreen}"));
         assert!(DOCS.contains("`has_visible_fullscreen`"));
     }
+
+    #[test]
+    fn evolve8h_wave_65_health_occupancy_includes_connector() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("connector={connector}"));
+        assert!(DOCS.contains("appends `connector` when known"));
+    }
 }
