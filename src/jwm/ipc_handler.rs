@@ -11375,4 +11375,12 @@ mod tests {
         assert!(query.contains("\"mfact\": mon.layout.m_fact"));
         assert!(DOCS.contains("also include `mfact`"));
     }
+
+    #[test]
+    fn evolve8h_wave_76_health_occupancy_includes_mfact() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("mfact={mfact}"));
+        assert!(DOCS.contains("and `mfact`"));
+    }
 }
