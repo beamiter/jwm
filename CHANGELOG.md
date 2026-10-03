@@ -153,6 +153,7 @@ monorepo use independent Semantic Versions.
 - `togglefloating` emits `monitor/bar` after arrange.
 - `get_status.show_bar` rustdoc names `floating_count`.
 - README occupancy JSON names `floating_count`.
+- `tools/README.md` occupancy JSON names `floating_count`.
 
 ### Changed
 

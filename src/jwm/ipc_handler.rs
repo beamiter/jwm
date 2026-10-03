@@ -12004,4 +12004,12 @@ mod tests {
         assert!(README.contains("It also includes `floating_count`."));
         assert!(DOCS.contains("README occupancy JSON also names `floating_count`"));
     }
+
+    #[test]
+    fn evolve8h_wave_128_tools_readme_occupancy_names_floating_count() {
+        const TOOLS: &str = include_str!("../../tools/README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOLS.contains("It also includes `floating_count`."));
+        assert!(DOCS.contains("`tools/README.md` also names `floating_count`"));
+    }
 }

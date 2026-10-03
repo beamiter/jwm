@@ -441,7 +441,16 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 125 | togglefloating emit monitor/bar | ✓ |
 | 126 | get_status.show_bar rustdoc 含 floating_count | ✓ |
 | 127 | README occupancy 含 floating_count | ✓ |
+| 128 | tools/README occupancy 含 floating_count | ✓ |
 | … | 进行中 | |
+
+---
+
+## 2026-10-03：evolve8h wave 128 — tools README occupancy names floating_count
+
+选题 = evolve8h wave 128。`tools/README.md` occupancy JSON 列出 `floating_count`。
+
+**验证**：`scripts/test.sh --lib --` 聚焦 evolve8h_wave_128 evolve8h_wave_121。
 
 ---
 
