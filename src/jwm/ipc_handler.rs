@@ -13291,4 +13291,19 @@ mod tests {
         assert!(skip.contains("broadcast_monitor_bar_ipc(backend, mk)"));
         assert!(DOCS.contains("`_NET_WM_STATE_SKIP_TASKBAR` emits `monitor/bar`"));
     }
+
+    #[test]
+    fn evolve8h_wave_232_skip_pager_ewmh_broadcasts_monitor_bar() {
+        const SOURCE: &str = include_str!("event_dispatcher.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        let skip = SOURCE
+            .split_once("NetWmState::SkipPager => {")
+            .expect("SkipPager")
+            .1
+            .split_once("NetWmState::Hidden => {")
+            .expect("Hidden follows")
+            .0;
+        assert!(skip.contains("broadcast_monitor_bar_ipc(backend, mk)"));
+        assert!(DOCS.contains("`_NET_WM_STATE_SKIP_PAGER` emits `monitor/bar`"));
+    }
 }

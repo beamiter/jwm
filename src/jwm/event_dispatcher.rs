@@ -1740,7 +1740,7 @@ impl WMController for Jwm {
                     }
                 }
                 NetWmState::SkipPager => {
-                    if let Some(c) = self.state.clients.get_mut(ck) {
+                    let monitor = if let Some(c) = self.state.clients.get_mut(ck) {
                         let on = match action {
                             NetWmAction::Add => true,
                             NetWmAction::Remove => false,
@@ -1752,6 +1752,12 @@ impl WMController for Jwm {
                             NetWmState::SkipPager,
                             on,
                         );
+                        c.mon
+                    } else {
+                        None
+                    };
+                    if let Some(mk) = monitor {
+                        self.broadcast_monitor_bar_ipc(backend, mk);
                     }
                 }
                 NetWmState::Hidden => {
