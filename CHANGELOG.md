@@ -316,6 +316,7 @@ monorepo use independent Semantic Versions.
 - `get_show_bar` occupancy snapshots include `prev_layout`.
 - Library crate raises the serde_json fixture recursion limit to 512.
 - `jwm-tool health` occupancy line includes prev_layout.
+- `get_status.show_bar` rustdoc names `prev_layout`.
 
 ### Changed
 
