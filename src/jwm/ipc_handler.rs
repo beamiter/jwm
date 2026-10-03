@@ -11891,4 +11891,12 @@ mod tests {
         assert!(query.contains("is_client_visible_on_monitor(ck, mk)"));
         assert!(DOCS.contains("also include `on_view_count`"));
     }
+
+    #[test]
+    fn evolve8h_wave_118_health_occupancy_includes_on_view_count() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("on_view={on_view}"));
+        assert!(DOCS.contains("and `on_view_count`"));
+    }
 }
