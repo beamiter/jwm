@@ -15029,4 +15029,13 @@ mod tests {
         assert!(TOOLS.contains("jwm-tool msg get_pl"));
         assert!(DOCS.contains("`tools/README.md` control examples include `get_pl`"));
     }
+
+    #[test]
+    fn evolve8h_wave_367_health_prints_compact_cfact() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("cfact: id={id} client_fact={client_fact}"));
+        assert!(TOOL.contains("\"cfact: id=42 client_fact=1.25 connector=DP-1\""));
+        assert!(DOCS.contains("`jwm-tool health` prints compact `cfact` beside occupancy"));
+    }
 }

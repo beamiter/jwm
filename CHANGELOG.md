@@ -395,6 +395,7 @@ monorepo use independent Semantic Versions.
 - `jwm-tool msg` after-help examples include `get_pl`.
 - README control examples include `get_pl`.
 - `tools/README.md` control examples include `get_pl`.
+- `jwm-tool health` prints compact `cfact` beside occupancy.
 
 ### Changed
 

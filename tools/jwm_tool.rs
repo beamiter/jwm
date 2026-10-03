@@ -3401,6 +3401,23 @@ mod tests {
         assert!(prev_lines.iter().any(|line| {
             line == "prev_layout: monitor=0 layout=||| connector=DP-1"
         }));
+        assert!(!prev_lines.iter().any(|line| line.starts_with("cfact:")));
+
+        let with_compact_cfact = serde_json::json!({
+            "health": {"status": "healthy", "reasons": []},
+            "counts": {"windows": 0, "monitors": 1, "workspaces": 1},
+            "config": {"path": "/tmp/config.toml", "diagnostics": {"error_count": 0, "warning_count": 0}},
+            "features": {},
+            "cfact": {
+                "id": 42,
+                "client_fact": 1.25,
+                "connector": "DP-1"
+            }
+        });
+        let cfact_lines = health_output_lines(&with_compact_cfact);
+        assert!(cfact_lines.iter().any(|line| {
+            line == "cfact: id=42 client_fact=1.25 connector=DP-1"
+        }));
 
         let capabilities = serde_json::json!({
             "schema_version": 1,
@@ -4379,6 +4396,24 @@ fn health_output_lines(status: &serde_json::Value) -> Vec<String> {
             .unwrap_or("-");
         let mut line = format!("prev_layout: monitor={monitor} layout={prev_layout}");
         if let Some(connector) = prev.get("connector").and_then(serde_json::Value::as_str) {
+            line.push_str(&format!(" connector={connector}"));
+        }
+        lines.push(line);
+    }
+
+    if let Some(cfact) = status.get("cfact").and_then(serde_json::Value::as_object) {
+        let id = cfact
+            .get("id")
+            .and_then(|v| v.as_u64().or_else(|| v.as_i64().map(|n| n as u64)))
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".into());
+        let client_fact = cfact
+            .get("client_fact")
+            .and_then(serde_json::Value::as_f64)
+            .map(|value| format!("{value}"))
+            .unwrap_or_else(|| "-".into());
+        let mut line = format!("cfact: id={id} client_fact={client_fact}");
+        if let Some(connector) = cfact.get("connector").and_then(serde_json::Value::as_str) {
             line.push_str(&format!(" connector={connector}"));
         }
         lines.push(line);
