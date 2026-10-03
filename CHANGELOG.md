@@ -78,6 +78,7 @@ monorepo use independent Semantic Versions.
 - `jwm-tool msg` help lists `get_owns_output`.
 - `jwm-tool msg` help lists `get_visible_fullscreen`.
 - `jwm-tool msg` help lists `get_bar_visible`.
+- `jwm-tool msg` help lists `get_bar`.
 
 ### Changed
 

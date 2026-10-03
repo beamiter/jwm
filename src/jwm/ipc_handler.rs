@@ -11151,4 +11151,12 @@ mod tests {
         assert!(TOOL.contains("get_bar_visible"));
         assert!(DOCS.contains("`get_bar_visible`"));
     }
+
+    #[test]
+    fn evolve8h_wave_56_jwm_tool_help_lists_get_bar() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("get_bar_visible, get_bar"));
+        assert!(DOCS.contains("`get_bar`."));
+    }
 }

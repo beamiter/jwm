@@ -369,7 +369,16 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 53 | jwm-tool 帮助列出 get_owns_output | ✓ |
 | 54 | jwm-tool 帮助列出 get_visible_fullscreen | ✓ |
 | 55 | jwm-tool 帮助列出 get_bar_visible | ✓ |
+| 56 | jwm-tool 帮助列出 get_bar | ✓ |
 | … | 进行中 | |
+
+---
+
+## 2026-10-03：evolve8h wave 56 — jwm-tool help lists get_bar
+
+选题 = evolve8h wave 56。CLI 查询帮助列出 `get_bar`。
+
+**验证**：`scripts/test.sh --lib --` 聚焦 evolve8h_wave_56。
 
 ---
 
