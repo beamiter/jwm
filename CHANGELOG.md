@@ -109,6 +109,7 @@ monorepo use independent Semantic Versions.
 - Scrolling column-width `setmfact` emits `monitor/bar` after arrange.
 - `get_show_bar` occupancy snapshots include `prev_tag`.
 - `jwm-tool health` occupancy line includes prev_tag.
+- `get_status.show_bar` rustdoc names tag / prev_tag / layout / gap / mfact / nmaster.
 
 ### Changed
 

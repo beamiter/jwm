@@ -397,7 +397,16 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 81 | scrolling column width emit monitor/bar | ✓ |
 | 82 | get_show_bar occupancy 含 prev_tag | ✓ |
 | 83 | jwm-tool health occupancy 含 prev_tag | ✓ |
+| 84 | get_status.show_bar rustdoc 含 layout knobs | ✓ |
 | … | 进行中 | |
+
+---
+
+## 2026-10-03：evolve8h wave 84 — get_status show_bar rustdoc names layout knobs
+
+选题 = evolve8h wave 84。`RuntimeStatusV1.show_bar` rustdoc 列出 tag/layout/gap/mfact/nmaster/prev_tag。
+
+**验证**：`scripts/test.sh --lib --` 聚焦 evolve8h_wave_84 evolve8h_wave_41。
 
 ---
 

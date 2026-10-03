@@ -793,6 +793,8 @@ pub struct RuntimeStatusV1 {
     /// Compact twin of `get_show_bar` / `get_bar` / `get_bar_visible` /
     /// `get_owns_output` / `get_visible_fullscreen` / `get_vf` (preference,
     /// occupancy, visible-fullscreen count).
+    /// Nested object also carries `tag`, `prev_tag`, `layout`, `gap`,
+    /// `mfact`, and `nmaster`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub show_bar: Option<Value>,
     /// Compact twin of `get_metrics` / `get_perf` (renderer metrics when any).

@@ -239,7 +239,8 @@ output (swallowed terminals never own it).
 `peek` / `expose` / `gesture` / `wayland` / `dnd` / `session_lock` summaries
 beside feature flags for shell pickers, monitor lock, and the debug HUD.
 `get_status.show_bar` is the same occupancy snapshot as `get_show_bar`
-(including `get_visible_fullscreen` / `get_vf`).
+(including `get_visible_fullscreen` / `get_vf`), plus `tag` / `prev_tag` /
+`layout` / `gap` / `mfact` / `nmaster`.
 `jwm-tool msg` help lists `get_show_bar`, `get_vf`, `get_owns_output`
 and `get_visible_fullscreen` / `get_bar_visible` / `get_bar`.
 `jwm-tool msg` after-help examples include `get_vf` and `get_show_bar`.

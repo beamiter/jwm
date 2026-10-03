@@ -11483,4 +11483,12 @@ mod tests {
         assert!(TOOL.contains("prev_tag={prev_tag}"));
         assert!(DOCS.contains("and `prev_tag`"));
     }
+
+    #[test]
+    fn evolve8h_wave_84_get_status_show_bar_rustdoc_names_layout_knobs() {
+        const IPC: &str = include_str!("../ipc.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(IPC.contains("Nested object also carries `tag`, `prev_tag`"));
+        assert!(DOCS.contains("plus `tag` / `prev_tag`"));
+    }
 }
