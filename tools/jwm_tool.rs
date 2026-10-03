@@ -3311,12 +3311,13 @@ mod tests {
             "show_bar": {
                 "show_bar": true,
                 "bar_visible": false,
+                "has_visible_fullscreen": true,
                 "owns_output_count": 1
             }
         });
         let bar_lines = health_output_lines(&with_bar);
         assert!(bar_lines.iter().any(|line| {
-            line == "show_bar: preference=true visible=false owns_output=1"
+            line == "show_bar: preference=true visible=false fullscreen=true owns_output=1"
         }));
 
         let capabilities = serde_json::json!({
@@ -4050,8 +4051,13 @@ fn health_output_lines(status: &serde_json::Value) -> Vec<String> {
             .and_then(serde_json::Value::as_u64)
             .map(|value| value.to_string())
             .unwrap_or_else(|| "-".into());
+        let fullscreen = bar
+            .get("has_visible_fullscreen")
+            .and_then(serde_json::Value::as_bool)
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".into());
         lines.push(format!(
-            "show_bar: preference={preference} visible={visible} owns_output={owns}"
+            "show_bar: preference={preference} visible={visible} fullscreen={fullscreen} owns_output={owns}"
         ));
     }
 

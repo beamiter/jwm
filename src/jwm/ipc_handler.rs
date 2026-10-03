@@ -11219,4 +11219,12 @@ mod tests {
         assert!(TOOL.contains("owns_output={owns}"));
         assert!(DOCS.contains("`jwm-tool health` prints focused-bar occupancy"));
     }
+
+    #[test]
+    fn evolve8h_wave_64_health_occupancy_includes_fullscreen() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("fullscreen={fullscreen}"));
+        assert!(DOCS.contains("`has_visible_fullscreen`"));
+    }
 }
