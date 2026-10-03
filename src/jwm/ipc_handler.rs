@@ -11605,4 +11605,12 @@ mod tests {
         assert!(focus_window.contains("broadcast_monitor_bar_ipc(backend, mk)"));
         assert!(DOCS.contains("`focus_window` emits `monitor/bar`"));
     }
+
+    #[test]
+    fn evolve8h_wave_94_get_status_show_bar_rustdoc_names_selected_id() {
+        const IPC: &str = include_str!("../ipc.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(IPC.contains("`nmaster`, and `selected_id`"));
+        assert!(DOCS.contains("`nmaster` / `selected_id`"));
+    }
 }
