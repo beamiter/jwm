@@ -423,7 +423,16 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 107 | window-tabs occupancy 含 tagset masks | ✓ |
 | 108 | zoom emit monitor/bar | ✓ |
 | 109 | get_show_bar occupancy 含 window_count | ✓ |
+| 110 | jwm-tool health occupancy 含 windows | ✓ |
 | … | 进行中 | |
+
+---
+
+## 2026-10-03：evolve8h wave 110 — health occupancy includes window_count
+
+选题 = evolve8h wave 110。health occupancy 行带上 window_count。
+
+**验证**：`scripts/test.sh --lib --bins --` 聚焦 evolve8h_wave_110 insight_output。
 
 ---
 

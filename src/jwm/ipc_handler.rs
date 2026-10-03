@@ -11791,4 +11791,12 @@ mod tests {
         assert!(query.contains("monitor_clients"));
         assert!(DOCS.contains("also include `window_count`"));
     }
+
+    #[test]
+    fn evolve8h_wave_110_health_occupancy_includes_window_count() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("windows={windows}"));
+        assert!(DOCS.contains("and `window_count`"));
+    }
 }

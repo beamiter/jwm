@@ -135,6 +135,7 @@ monorepo use independent Semantic Versions.
 - Window-tabs docs name occupancy sel_tags / previous_tags / active_tags.
 - `zoom` emits `monitor/bar` after promoting a client.
 - `get_show_bar` occupancy snapshots include `window_count`.
+- `jwm-tool health` occupancy line includes window_count.
 
 ### Changed
 

@@ -3316,6 +3316,7 @@ mod tests {
                 "sel_tags": 0,
                 "previous_tags": 2,
                 "active_tags": 1,
+                "window_count": 3,
                 "layout": "[]=",
                 "gap": 6,
                 "mfact": 0.55,
@@ -3329,7 +3330,7 @@ mod tests {
         });
         let bar_lines = health_output_lines(&with_bar);
         assert!(bar_lines.iter().any(|line| {
-            line == "show_bar: monitor=0 tag=1 prev_tag=2 selected=42 sel_tags=0 previous_tags=0x2 active_tags=0x1 layout=[]= gap=6 mfact=0.55 nmaster=1 preference=true visible=false fullscreen=true owns_output=1 connector=DP-1"
+            line == "show_bar: monitor=0 tag=1 prev_tag=2 selected=42 sel_tags=0 previous_tags=0x2 active_tags=0x1 windows=3 layout=[]= gap=6 mfact=0.55 nmaster=1 preference=true visible=false fullscreen=true owns_output=1 connector=DP-1"
         }));
 
         let capabilities = serde_json::json!({
@@ -4118,13 +4119,18 @@ fn health_output_lines(status: &serde_json::Value) -> Vec<String> {
             .and_then(serde_json::Value::as_u64)
             .map(|value| format!("0x{value:x}"))
             .unwrap_or_else(|| "-".into());
+        let windows = bar
+            .get("window_count")
+            .and_then(serde_json::Value::as_u64)
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".into());
         let monitor = bar
             .get("monitor")
             .and_then(serde_json::Value::as_i64)
             .map(|value| value.to_string())
             .unwrap_or_else(|| "-".into());
         lines.push(format!(
-            "show_bar: monitor={monitor} tag={tag} prev_tag={prev_tag} selected={selected} sel_tags={sel_tags} previous_tags={previous_tags} active_tags={active_tags} layout={layout} gap={gap} mfact={mfact} nmaster={nmaster} preference={preference} visible={visible} fullscreen={fullscreen} owns_output={owns}"
+            "show_bar: monitor={monitor} tag={tag} prev_tag={prev_tag} selected={selected} sel_tags={sel_tags} previous_tags={previous_tags} active_tags={active_tags} windows={windows} layout={layout} gap={gap} mfact={mfact} nmaster={nmaster} preference={preference} visible={visible} fullscreen={fullscreen} owns_output={owns}"
         ));
         if let Some(connector) = bar.get("connector").and_then(serde_json::Value::as_str) {
             if let Some(line) = lines.last_mut() {
