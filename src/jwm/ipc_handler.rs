@@ -12799,4 +12799,19 @@ mod tests {
         assert!(hide.contains("broadcast_monitor_bar_ipc(backend, mk)"));
         assert!(DOCS.contains("Hiding a scratchpad emits `monitor/bar`"));
     }
+
+    #[test]
+    fn evolve8h_wave_190_showing_scratchpad_broadcasts_monitor_bar() {
+        const SOURCE: &str = include_str!("features/toggles.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        let show = SOURCE
+            .split_once("let was_minimized = self")
+            .expect("show path")
+            .1
+            .split_once("pub fn togglepip(")
+            .expect("togglepip follows")
+            .0;
+        assert!(show.contains("broadcast_monitor_bar_ipc(backend, mk)"));
+        assert!(DOCS.contains("Showing a scratchpad emits `monitor/bar`"));
+    }
 }

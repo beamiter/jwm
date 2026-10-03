@@ -207,6 +207,7 @@ They also include `above_count`.
 They also include `below_count`.
 They also include `scratchpad_count`.
 Hiding a scratchpad emits `monitor/bar`.
+Showing a scratchpad emits `monitor/bar`.
 Keep-above and keep-below changes emit `monitor/bar`.
 Toggling maximize emits `monitor/bar`.
 Unmaximize-in-place emits `monitor/bar`.

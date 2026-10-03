@@ -215,6 +215,7 @@ monorepo use independent Semantic Versions.
 - `get_show_bar` occupancy snapshots include `scratchpad_count`.
 - `jwm-tool health` occupancy line includes scratchpad_count.
 - Hiding a scratchpad emits `monitor/bar`.
+- Showing a scratchpad emits `monitor/bar`.
 
 ### Changed
 

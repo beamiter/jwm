@@ -4714,6 +4714,9 @@ impl Jwm {
                     return Err("scratchpad disappeared before reveal".into());
                 }
                 self.broadcast_window_state_ipc(backend, sp_key);
+                if let Some(mk) = self.state.clients.get(sp_key).and_then(|c| c.mon) {
+                    self.broadcast_monitor_bar_ipc(backend, mk);
+                }
 
                 // A minimized scratchpad already has the compositor's reverse
                 // Genie. Starting the scratchpad Appear animation as well would
