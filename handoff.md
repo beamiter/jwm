@@ -342,7 +342,16 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 26 | sendmon 全屏客户两边 monitor/bar | ✓ |
 | 27 | focusmon 发射 monitor/bar | ✓ |
 | 28 | 指针切屏发射 monitor/focus 与 monitor/bar | ✓ |
+| 29 | session restore 全输出 monitor/bar | ✓ |
 | … | 进行中 | |
+
+---
+
+## 2026-10-03：evolve8h wave 29 — session restore emits monitor/bar
+
+选题 = evolve8h wave 29。会话恢复后每个输出广播 occupancy。
+
+**验证**：`scripts/test.sh --lib --` 聚焦 evolve8h_wave_29。
 
 ---
 

@@ -1664,6 +1664,7 @@ impl Jwm {
         };
         let matched = self.apply_session_snapshot(backend, &snapshot);
         log::info!("session restored: {matched} clients matched");
+        self.broadcast_monitor_bar_all_monitors(backend);
         Ok(())
     }
 

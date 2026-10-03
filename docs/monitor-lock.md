@@ -190,7 +190,8 @@ fullscreen client. Closing one emits it after `window/close`. Swallowing a termi
 emits it for that monitor. Sending a fullscreen client to another
 output emits it on both monitors. `focusmon` emits it for the newly
 focused output. Pointer crossings emit `monitor/focus` and
-`monitor/bar` as well.
+`monitor/bar` as well. Session restore emits `monitor/bar` for every
+output.
 `get_cfact` /
 `get_selected` / `get_focused_window` twin the focused client. IPC `setgaps` /
 `set_gaps`, `setmfact` / `set_mfact`, and `setcfact` / `set_cfact` adjust the

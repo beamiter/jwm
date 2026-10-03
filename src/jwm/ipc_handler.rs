@@ -6146,6 +6146,15 @@ impl Jwm {
     pub(crate) fn broadcast_monitor_bar_ipc(&mut self, backend: &dyn Backend, mk: MonitorKey) {
         self.broadcast_ipc_event("monitor/bar", self.query_show_bar_for_monitor(backend, mk));
     }
+
+    /// Occupancy snapshot for every output after a global rearrange (session
+    /// restore, struts, topology).
+    pub(crate) fn broadcast_monitor_bar_all_monitors(&mut self, backend: &dyn Backend) {
+        let monitors: Vec<_> = self.state.monitor_order.clone();
+        for mk in monitors {
+            self.broadcast_monitor_bar_ipc(backend, mk);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -10873,5 +10882,15 @@ mod tests {
         assert!(switch.contains("\"monitor/focus\""));
         assert!(switch.contains("broadcast_monitor_bar_ipc(backend, monitor_key)"));
         assert!(DOCS.contains("Pointer crossings"));
+    }
+
+    #[test]
+    fn evolve8h_wave_29_session_restore_broadcasts_all_monitor_bars() {
+        const SOURCE: &str = include_str!("ipc_handler.rs");
+        const SESSION: &str = include_str!("session.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(SOURCE.contains("fn broadcast_monitor_bar_all_monitors"));
+        assert!(SESSION.contains("broadcast_monitor_bar_all_monitors(backend)"));
+        assert!(DOCS.contains("Session restore emits"));
     }
 }

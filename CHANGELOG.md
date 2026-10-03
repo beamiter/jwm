@@ -48,6 +48,7 @@ monorepo use independent Semantic Versions.
 - Moving a fullscreen client between outputs emits `monitor/bar` on both.
 - `focusmon` emits `monitor/bar` for the newly focused output.
 - Pointer monitor switches emit `monitor/focus` and `monitor/bar`.
+- Session restore emits `monitor/bar` for every output.
 
 ### Changed
 
