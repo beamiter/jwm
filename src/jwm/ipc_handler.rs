@@ -12874,4 +12874,12 @@ mod tests {
         assert!(TOOL.contains("tabbed={tabbed}"));
         assert!(DOCS.contains("and `tabbed_count`"));
     }
+
+    #[test]
+    fn evolve8h_wave_197_get_status_show_bar_rustdoc_names_tabbed_count() {
+        const IPC: &str = include_str!("../ipc.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(IPC.contains("Also `tabbed_count`."));
+        assert!(DOCS.contains("`get_status.show_bar` rustdoc also names `tabbed_count`"));
+    }
 }

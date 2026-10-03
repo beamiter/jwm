@@ -808,6 +808,7 @@ pub struct RuntimeStatusV1 {
     /// Also `above_count`.
     /// Also `below_count`.
     /// Also `scratchpad_count`.
+    /// Also `tabbed_count`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub show_bar: Option<Value>,
     /// Compact twin of `get_metrics` / `get_perf` (renderer metrics when any).
