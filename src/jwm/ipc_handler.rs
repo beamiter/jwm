@@ -11333,4 +11333,12 @@ mod tests {
         assert!(query.contains("\"gap\": mon.layout.gap"));
         assert!(DOCS.contains("also include `gap`"));
     }
+
+    #[test]
+    fn evolve8h_wave_73_health_occupancy_includes_gap() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("gap={gap}"));
+        assert!(DOCS.contains("and `gap`"));
+    }
 }
