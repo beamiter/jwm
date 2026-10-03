@@ -11,7 +11,8 @@ window (or the fullscreen layout) takes the strip down with the status bar
 while it owns the output (`WindowInfo.owns_output` / monitor
 `bar_visible` / `has_visible_fullscreen` on IPC; subscribe `bar` for
 `monitor/bar` occupancy, including `tag` / `layout` / `gap` / `mfact` /
-`nmaster` / `selected_id`), and the strip's pixels
+`nmaster` / `selected_id` / `sel_tags` / `previous_tags` /
+`active_tags`), and the strip's pixels
 are reserved out of the
 work area, so no window ever slides underneath it. Appearing eases in over
 120 ms — alpha only, a clamped ease-out quad, so no overshoot — and a

@@ -11743,4 +11743,12 @@ mod tests {
         assert!(TOOLS.contains("`sel_tags`, `previous_tags`, and `active_tags`"));
         assert!(DOCS.contains("`tools/README.md` also names `sel_tags`"));
     }
+
+    #[test]
+    fn evolve8h_wave_107_window_tabs_occupancy_names_tagset_masks() {
+        const TABS: &str = include_str!("../../docs/window-tabs.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TABS.contains("`sel_tags` / `previous_tags`"));
+        assert!(DOCS.contains("Window-tabs docs also name `sel_tags`"));
+    }
 }
