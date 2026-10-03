@@ -12956,4 +12956,12 @@ mod tests {
         assert!(IPC.contains("Also `dock_count`."));
         assert!(DOCS.contains("`get_status.show_bar` rustdoc also names `dock_count`"));
     }
+
+    #[test]
+    fn evolve8h_wave_204_readme_occupancy_names_dock_count() {
+        const README: &str = include_str!("../../README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(README.contains("It also includes `dock_count`."));
+        assert!(DOCS.contains("README occupancy JSON also names `dock_count`"));
+    }
 }

@@ -165,6 +165,7 @@ It also includes `above_count`.
 It also includes `below_count`.
 It also includes `scratchpad_count`.
 It also includes `tabbed_count`.
+It also includes `dock_count`.
 
 Malformed JSON, invalid argument types, overflow, empty spawn commands, unknown
 commands, and `{ "success": false }` responses produce a non-zero exit status,

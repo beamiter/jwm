@@ -229,6 +229,7 @@ monorepo use independent Semantic Versions.
 - `get_show_bar` occupancy snapshots include `dock_count`.
 - `jwm-tool health` occupancy line includes dock_count.
 - `get_status.show_bar` rustdoc names `dock_count`.
+- README occupancy JSON names `dock_count`.
 
 ### Changed
 
