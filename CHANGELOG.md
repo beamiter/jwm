@@ -340,6 +340,7 @@ monorepo use independent Semantic Versions.
 - `incnmaster` emits `monitor/bar`.
 - Scrolling column moves emit `monitor/bar`.
 - Scrolling consume emits `monitor/bar`.
+- Scrolling expel emits `monitor/bar`.
 
 ### Changed
 
