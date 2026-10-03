@@ -935,6 +935,7 @@ impl Jwm {
         self.arrange(backend, Some(sel_mon_key));
         self.suppress_layout_animation = false;
         self.broadcast_visible_window_states_on_monitor(backend, sel_mon_key);
+        self.broadcast_monitor_bar_ipc(backend, sel_mon_key);
         self.update_ewmh_desktop(backend)?;
         if old_tag_mask != new_tag_mask {
             self.refresh_compositor_monitors(backend);

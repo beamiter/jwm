@@ -38,6 +38,7 @@ monorepo use independent Semantic Versions.
 - F11 and `togglebar` share one `broadcast_monitor_bar_ipc` helper.
 - Tag `view` emits `monitor/bar` because per-tag `show_bar` and visible
   fullscreen occupancy can both change.
+- `toggleview` emits `monitor/bar` after arrange.
 
 ### Changed
 
