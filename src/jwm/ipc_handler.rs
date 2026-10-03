@@ -13945,4 +13945,20 @@ mod tests {
         assert!(cancel.contains("broadcast_monitor_bar_ipc(backend, mk)"));
         assert!(DOCS.contains("Cancelling a pointer drag emits `monitor/bar`"));
     }
+
+    #[test]
+    fn evolve8h_wave_284_size_hint_fixed_changes_broadcast_monitor_bar() {
+        const SOURCE: &str = include_str!("constraints.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        let update = SOURCE
+            .split_once("pub(crate) fn updatesizehints(")
+            .expect("updatesizehints")
+            .1
+            .split_once("#[cfg(test)]")
+            .expect("tests follow")
+            .0;
+        assert!(update.contains("broadcast_monitor_bar_ipc(backend, mk)"));
+        assert!(update.contains("previous_fixed != fixed"));
+        assert!(DOCS.contains("Size-hint fixed-state changes emit `monitor/bar`"));
+    }
 }

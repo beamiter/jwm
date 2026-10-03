@@ -597,9 +597,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 281 | tools/README occupancy 含 status_bar_count | ✓ |
 | 282 | window-tabs occupancy 含 status_bar_count | ✓ |
 | 283 | 取消指针拖动发出 monitor/bar | ✓ |
+| 284 | size-hint fixed 变化发出 monitor/bar | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 284 — size-hint fixed-state changes broadcast monitor/bar
+
+选题 = evolve8h wave 284。`WM_NORMAL_HINTS` 导致 `is_fixed` 变化时发出 `monitor/bar`。
 
 ## 2026-10-03：evolve8h wave 283 — cancelling a pointer drag broadcasts monitor/bar
 

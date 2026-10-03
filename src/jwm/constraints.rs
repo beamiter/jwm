@@ -232,12 +232,29 @@ impl Jwm {
         backend: &mut dyn Backend,
         client_key: ClientKey,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        let (previous_fixed, monitor) = self
+            .state
+            .clients
+            .get(client_key)
+            .map(|client| (client.state.is_fixed, client.mon))
+            .ok_or("Client not found")?;
         let client = self
             .state
             .clients
             .get_mut(client_key)
             .ok_or("Client not found")?;
         refresh_client_size_hints(client, |win| backend.property_ops().fetch_normal_hints(win))?;
+        let fixed = self
+            .state
+            .clients
+            .get(client_key)
+            .map(|client| client.state.is_fixed)
+            .unwrap_or(previous_fixed);
+        if previous_fixed != fixed {
+            if let Some(mk) = monitor {
+                self.broadcast_monitor_bar_ipc(backend, mk);
+            }
+        }
         Ok(())
     }
 }
