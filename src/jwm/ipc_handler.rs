@@ -13527,4 +13527,12 @@ mod tests {
         assert!(TOOL.contains("#![recursion_limit = \"512\"]"));
         assert!(DOCS.contains("and `swallowed_count`"));
     }
+
+    #[test]
+    fn evolve8h_wave_249_get_status_show_bar_rustdoc_names_swallowed_count() {
+        const IPC: &str = include_str!("../ipc.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(IPC.contains("Also `swallowed_count`."));
+        assert!(DOCS.contains("`get_status.show_bar` rustdoc also names `swallowed_count`"));
+    }
 }
