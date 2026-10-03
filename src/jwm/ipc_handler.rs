@@ -4688,6 +4688,7 @@ impl Jwm {
     /// Also `maximized_count` (attached vert- or horz-maximized clients).
     /// Also `above_count` (attached keep-above clients).
     /// Also `below_count` (attached keep-below clients).
+    /// Also `scratchpad_count` (attached scratchpad-bound clients).
     pub(crate) fn query_show_bar_for_monitor(
         &self,
         backend: &dyn Backend,
@@ -4717,6 +4718,7 @@ impl Jwm {
                 "maximized_count": serde_json::Value::Null,
                 "above_count": serde_json::Value::Null,
                 "below_count": serde_json::Value::Null,
+                "scratchpad_count": serde_json::Value::Null,
                 "show_bar": serde_json::Value::Null,
                 "bar_visible": serde_json::Value::Null,
                 "has_visible_fullscreen": serde_json::Value::Null,
@@ -4894,6 +4896,16 @@ impl Jwm {
                         .count()
                 })
                 .unwrap_or(0),
+            "scratchpad_count": self
+                .state
+                .monitor_clients
+                .get(mk)
+                .map(|keys| {
+                    keys.iter()
+                        .filter(|&&ck| self.scratchpads.values().any(|&pad| pad == ck))
+                        .count()
+                })
+                .unwrap_or(0),
             "show_bar": show_bar,
             "bar_visible": self.monitor_shows_status_bar(mk),
             "has_visible_fullscreen": self.monitor_has_visible_fullscreen(mk),
@@ -4937,6 +4949,7 @@ impl Jwm {
                 "maximized_count": serde_json::Value::Null,
                 "above_count": serde_json::Value::Null,
                 "below_count": serde_json::Value::Null,
+                "scratchpad_count": serde_json::Value::Null,
                 "show_bar": serde_json::Value::Null,
                 "bar_visible": serde_json::Value::Null,
                 "has_visible_fullscreen": serde_json::Value::Null,
@@ -12746,5 +12759,21 @@ mod tests {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
         assert!(TABS.contains("`above_count` / `below_count`"));
         assert!(DOCS.contains("Window-tabs docs also name `below_count`"));
+    }
+
+    #[test]
+    fn evolve8h_wave_187_occupancy_snapshot_includes_scratchpad_count() {
+        const SOURCE: &str = include_str!("ipc_handler.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        let query = SOURCE
+            .split_once("fn query_show_bar_for_monitor(")
+            .expect("query_show_bar_for_monitor")
+            .1
+            .split_once("fn query_focused_show_bar(")
+            .expect("focused follows")
+            .0;
+        assert!(query.contains("\"scratchpad_count\":"));
+        assert!(query.contains("self.scratchpads.values()"));
+        assert!(DOCS.contains("also include `scratchpad_count`"));
     }
 }
