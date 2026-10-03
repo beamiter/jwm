@@ -168,6 +168,7 @@ It also includes `tabbed_count`.
 It also includes `dock_count`.
 It also includes `desktop_count`.
 It also includes `never_focus_count`.
+It also includes `skip_taskbar_count`.
 
 Malformed JSON, invalid argument types, overflow, empty spawn commands, unknown
 commands, and `{ "success": false }` responses produce a non-zero exit status,
