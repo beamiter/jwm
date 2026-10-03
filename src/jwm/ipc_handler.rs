@@ -2862,6 +2862,9 @@ impl Jwm {
             "get_prev_layout" | "get_pl" => {
                 IpcResponse::ok(Some(self.query_focused_prev_layout(backend)))
             }
+            "get_closed_placement" | "get_cp" => {
+                IpcResponse::ok(Some(self.query_focused_closed_placement(backend)))
+            }
             "get_selected" | "get_sel" => {
                 IpcResponse::ok(Some(self.query_selected_window(backend, false)))
             }
@@ -5251,6 +5254,53 @@ impl Jwm {
             None => serde_json::json!({
                 "monitor": serde_json::Value::Null,
                 "prev_layout": serde_json::Value::Null,
+            }),
+        }
+    }
+
+    /// Focused monitor's count of clients that remember closed placement.
+    pub(crate) fn query_focused_closed_placement(
+        &self,
+        backend: &dyn Backend,
+    ) -> serde_json::Value {
+        match self.state.sel_mon {
+            Some(mk) => {
+                let num = self
+                    .state
+                    .monitors
+                    .get(mk)
+                    .map(|mon| mon.num)
+                    .unwrap_or(0);
+                let closed_placement_count = self
+                    .state
+                    .monitor_clients
+                    .get(mk)
+                    .map(|keys| {
+                        keys.iter()
+                            .filter(|&&ck| {
+                                self.state
+                                    .clients
+                                    .get(ck)
+                                    .is_some_and(|c| c.state.remembers_closed_placement)
+                            })
+                            .count()
+                    })
+                    .unwrap_or(0);
+                let mut value = serde_json::json!({
+                    "monitor": num,
+                    "closed_placement_count": closed_placement_count,
+                });
+                if let Some(connector) = self.output_key_for_monitor(backend, mk) {
+                    value
+                        .as_object_mut()
+                        .expect("closed_placement snapshot object")
+                        .insert("connector".into(), serde_json::Value::String(connector));
+                }
+                value
+            }
+            None => serde_json::json!({
+                "monitor": serde_json::Value::Null,
+                "closed_placement_count": serde_json::Value::Null,
             }),
         }
     }
@@ -14669,5 +14719,16 @@ mod tests {
         assert!(PICKER.contains("emits `monitor/bar`"));
         assert!(PICKER.contains("apply_layout_change"));
         assert!(DOCS.contains("Layout-picker docs name `monitor/bar` on live apply"));
+    }
+
+    #[test]
+    fn evolve8h_wave_336_get_closed_placement_short_query() {
+        const SOURCE: &str = include_str!("ipc_handler.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(SOURCE.contains("fn query_focused_closed_placement"));
+        assert!(SOURCE.contains("\"get_closed_placement\" | \"get_cp\""));
+        assert!(DOCS.contains(
+            "`get_closed_placement` / `get_cp` return the focused monitor's closed-placement count"
+        ));
     }
 }

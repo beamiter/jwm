@@ -649,9 +649,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 333 | tags-overview 文档点名 monitor/bar 确认 | ✓ |
 | 334 | window-switcher 文档点名 monitor/bar 确认 | ✓ |
 | 335 | layout-picker 文档点名 monitor/bar 实时应用 | ✓ |
+| 336 | get_closed_placement / get_cp 短查询 | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 336 — get_closed_placement short query
+
+选题 = evolve8h wave 336。`get_closed_placement` / `get_cp` 返回焦点输出记得关闭落位的窗口数。
 
 ## 2026-10-03：evolve8h wave 335 — layout-picker docs name monitor/bar on live apply
 
