@@ -131,6 +131,7 @@ impl Jwm {
             self.mark_layout_dirty();
             self.arrange(backend, Some(sel_mon_key));
             self.broadcast_visible_window_states_on_monitor(backend, sel_mon_key);
+            self.broadcast_monitor_bar_ipc(backend, sel_mon_key);
         }
         Ok(())
     }

@@ -11383,4 +11383,19 @@ mod tests {
         assert!(TOOL.contains("mfact={mfact}"));
         assert!(DOCS.contains("and `mfact`"));
     }
+
+    #[test]
+    fn evolve8h_wave_77_setmfact_broadcasts_monitor_bar() {
+        const LAYOUT: &str = include_str!("layout/state.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        let setmfact = LAYOUT
+            .split_once("pub(crate) fn setmfact(")
+            .expect("setmfact")
+            .1
+            .split_once("pub(crate) fn setgaps(")
+            .expect("setgaps follows")
+            .0;
+        assert!(setmfact.contains("broadcast_monitor_bar_ipc(backend, sel_mon_key)"));
+        assert!(DOCS.contains("`setmfact` emits `monitor/bar`"));
+    }
 }

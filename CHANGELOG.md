@@ -102,6 +102,7 @@ monorepo use independent Semantic Versions.
 - `setgaps` emits `monitor/bar` after arrange.
 - `get_show_bar` occupancy snapshots include `mfact`.
 - `jwm-tool health` occupancy line includes the current mfact.
+- `setmfact` emits `monitor/bar` after arrange.
 
 ### Changed
 
