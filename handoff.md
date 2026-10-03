@@ -453,7 +453,16 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 137 | get_show_bar occupancy 含 sticky_count | ✓ |
 | 138 | jwm-tool health occupancy 含 sticky | ✓ |
 | 139 | sticky 非全屏也 emit monitor/bar | ✓ |
+| 140 | get_status.show_bar rustdoc 含 sticky_count | ✓ |
 | … | 进行中 | |
+
+---
+
+## 2026-10-03：evolve8h wave 140 — get_status.show_bar rustdoc names sticky_count
+
+选题 = evolve8h wave 140。`RuntimeStatusV1.show_bar` rustdoc 点名 occupancy 的 `sticky_count`。
+
+**验证**：`scripts/test.sh --lib --` 聚焦 evolve8h_wave_140 evolve8h_wave_133。
 
 ---
 

@@ -165,6 +165,7 @@ monorepo use independent Semantic Versions.
 - `get_show_bar` occupancy snapshots include `sticky_count`.
 - `jwm-tool health` occupancy line includes sticky_count.
 - Toggling sticky emits `monitor/bar` even when the client was not fullscreen.
+- `get_status.show_bar` rustdoc names `sticky_count`.
 
 ### Changed
 

@@ -262,6 +262,7 @@ beside feature flags for shell pickers, monitor lock, and the debug HUD.
 `layout` / `gap` / `mfact` / `nmaster` / `selected_id` / `sel_tags` /
 `previous_tags` / `active_tags` / `window_count` / `on_view_count` /
 `floating_count` / `minimized_count`.
+`get_status.show_bar` rustdoc also names `sticky_count`.
 `jwm-tool msg` help lists `get_show_bar`, `get_vf`, `get_owns_output`
 and `get_visible_fullscreen` / `get_bar_visible` / `get_bar`.
 `jwm-tool msg` after-help examples include `get_vf` and `get_show_bar`.
