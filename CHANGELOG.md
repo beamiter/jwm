@@ -74,6 +74,7 @@ monorepo use independent Semantic Versions.
 - `get_status.show_bar` rustdoc includes `get_vf`.
 - `jwm-tool msg` help lists `get_show_bar` and `get_vf`.
 - README control examples include `get_show_bar`.
+- `tools/README.md` control examples include `get_show_bar`.
 
 ### Changed
 
