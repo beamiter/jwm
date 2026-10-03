@@ -138,6 +138,7 @@ monorepo use independent Semantic Versions.
 - `jwm-tool health` occupancy line includes window_count.
 - Managing a client emits `monitor/bar` after `window/new`.
 - Unmanaging a client emits `monitor/bar` even when it was not fullscreen.
+- `get_status.show_bar` rustdoc names `window_count`.
 
 ### Changed
 

@@ -426,7 +426,16 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 110 | jwm-tool health occupancy 含 windows | ✓ |
 | 111 | manage emit monitor/bar | ✓ |
 | 112 | unmanage 非全屏也 emit monitor/bar | ✓ |
+| 113 | get_status.show_bar rustdoc 含 window_count | ✓ |
 | … | 进行中 | |
+
+---
+
+## 2026-10-03：evolve8h wave 113 — get_status show_bar rustdoc names window_count
+
+选题 = evolve8h wave 113。`RuntimeStatusV1.show_bar` rustdoc 列出 `window_count`。
+
+**验证**：`scripts/test.sh --lib --` 聚焦 evolve8h_wave_113 evolve8h_wave_104。
 
 ---
 

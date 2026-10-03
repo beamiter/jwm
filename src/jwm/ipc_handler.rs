@@ -11830,4 +11830,12 @@ mod tests {
         assert!(unmanage.contains("broadcast_monitor_bar_ipc(backend, mon_key)"));
         assert!(DOCS.contains("even when it was not fullscreen"));
     }
+
+    #[test]
+    fn evolve8h_wave_113_get_status_show_bar_rustdoc_names_window_count() {
+        const IPC: &str = include_str!("../ipc.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(IPC.contains("Also `window_count`."));
+        assert!(DOCS.contains("`active_tags` / `window_count`"));
+    }
 }
