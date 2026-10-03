@@ -133,6 +133,7 @@ monorepo use independent Semantic Versions.
 - README occupancy JSON names sel_tags / previous_tags / active_tags.
 - `tools/README.md` occupancy JSON names sel_tags / previous_tags / active_tags.
 - Window-tabs docs name occupancy sel_tags / previous_tags / active_tags.
+- `zoom` emits `monitor/bar` after promoting a client.
 
 ### Changed
 

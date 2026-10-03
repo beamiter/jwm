@@ -11751,4 +11751,19 @@ mod tests {
         assert!(TABS.contains("`sel_tags` / `previous_tags`"));
         assert!(DOCS.contains("Window-tabs docs also name `sel_tags`"));
     }
+
+    #[test]
+    fn evolve8h_wave_108_zoom_broadcasts_monitor_bar() {
+        const NAV: &str = include_str!("navigation.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        let zoom = NAV
+            .split_once("pub fn zoom(")
+            .expect("zoom")
+            .1
+            .split_once("pub fn loopview(")
+            .expect("loopview follows")
+            .0;
+        assert!(zoom.contains("broadcast_monitor_bar_ipc(backend, sel_mon_key)"));
+        assert!(DOCS.contains("`zoom` emits `monitor/bar`"));
+    }
 }

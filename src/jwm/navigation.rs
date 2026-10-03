@@ -494,6 +494,7 @@ impl Jwm {
         if let Some(client_key) = target_client_key {
             self.pop(backend, client_key);
         }
+        self.broadcast_monitor_bar_ipc(backend, sel_mon_key);
 
         Ok(())
     }
