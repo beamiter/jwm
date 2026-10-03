@@ -233,7 +233,7 @@ beside feature flags for shell pickers, monitor lock, and the debug HUD.
 (including `get_visible_fullscreen` / `get_vf`).
 `jwm-tool msg` help lists `get_show_bar`, `get_vf`, `get_owns_output`
 and `get_visible_fullscreen` / `get_bar_visible` / `get_bar`.
-`jwm-tool msg` after-help examples include `get_vf`.
+`jwm-tool msg` after-help examples include `get_vf` and `get_show_bar`.
 README control examples include `get_show_bar` and `get_vf`, as does
 `tools/README.md`.
 `toggletag` on a fullscreen client emits `monitor/bar`, as does `tag`

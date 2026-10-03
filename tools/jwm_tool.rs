@@ -561,6 +561,7 @@ enum Commands {
                       jwm-tool msg spawn --args '{\"cmd\":[\"alacritty\"]}' # 启动终端\n  \
                       jwm-tool msg killclient                           # 关闭当前窗口\n  \
                       jwm-tool msg get_windows                          # 查询所有窗口\n  \
+                      jwm-tool msg get_show_bar                         # 查询栏偏好与 occupancy\n  \
                       jwm-tool msg get_vf                               # 查询栏 occupancy\n  \
                       jwm-tool msg get_windows --raw                    # 原始 JSON 输出\n  \
                       jwm-tool msg reload_config                        # 重新加载配置\n  \
