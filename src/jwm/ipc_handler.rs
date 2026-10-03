@@ -15038,4 +15038,13 @@ mod tests {
         assert!(TOOL.contains("\"cfact: id=42 client_fact=1.25 connector=DP-1\""));
         assert!(DOCS.contains("`jwm-tool health` prints compact `cfact` beside occupancy"));
     }
+
+    #[test]
+    fn evolve8h_wave_368_health_prints_compact_gaps() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("gaps: monitor={monitor} gap={gap}"));
+        assert!(TOOL.contains("\"gaps: monitor=0 gap=8 connector=DP-1\""));
+        assert!(DOCS.contains("`jwm-tool health` prints compact `gaps` beside occupancy"));
+    }
 }
