@@ -206,6 +206,7 @@ monorepo use independent Semantic Versions.
 - README occupancy JSON names `above_count`.
 - `tools/README.md` occupancy JSON names `above_count`.
 - Window-tabs docs name occupancy `above_count`.
+- `get_show_bar` occupancy snapshots include `below_count`.
 
 ### Changed
 

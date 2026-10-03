@@ -4687,6 +4687,7 @@ impl Jwm {
     /// Also `pip_count` (attached picture-in-picture clients).
     /// Also `maximized_count` (attached vert- or horz-maximized clients).
     /// Also `above_count` (attached keep-above clients).
+    /// Also `below_count` (attached keep-below clients).
     pub(crate) fn query_show_bar_for_monitor(
         &self,
         backend: &dyn Backend,
@@ -4715,6 +4716,7 @@ impl Jwm {
                 "pip_count": serde_json::Value::Null,
                 "maximized_count": serde_json::Value::Null,
                 "above_count": serde_json::Value::Null,
+                "below_count": serde_json::Value::Null,
                 "show_bar": serde_json::Value::Null,
                 "bar_visible": serde_json::Value::Null,
                 "has_visible_fullscreen": serde_json::Value::Null,
@@ -4877,6 +4879,21 @@ impl Jwm {
                         .count()
                 })
                 .unwrap_or(0),
+            "below_count": self
+                .state
+                .monitor_clients
+                .get(mk)
+                .map(|keys| {
+                    keys.iter()
+                        .filter(|&&ck| {
+                            self.state
+                                .clients
+                                .get(ck)
+                                .is_some_and(|c| c.state.is_below)
+                        })
+                        .count()
+                })
+                .unwrap_or(0),
             "show_bar": show_bar,
             "bar_visible": self.monitor_shows_status_bar(mk),
             "has_visible_fullscreen": self.monitor_has_visible_fullscreen(mk),
@@ -4919,6 +4936,7 @@ impl Jwm {
                 "pip_count": serde_json::Value::Null,
                 "maximized_count": serde_json::Value::Null,
                 "above_count": serde_json::Value::Null,
+                "below_count": serde_json::Value::Null,
                 "show_bar": serde_json::Value::Null,
                 "bar_visible": serde_json::Value::Null,
                 "has_visible_fullscreen": serde_json::Value::Null,
@@ -12672,5 +12690,21 @@ mod tests {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
         assert!(TABS.contains("`maximized_count` / `above_count`"));
         assert!(DOCS.contains("Window-tabs docs also name `above_count`"));
+    }
+
+    #[test]
+    fn evolve8h_wave_181_occupancy_snapshot_includes_below_count() {
+        const SOURCE: &str = include_str!("ipc_handler.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        let query = SOURCE
+            .split_once("fn query_show_bar_for_monitor(")
+            .expect("query_show_bar_for_monitor")
+            .1
+            .split_once("fn query_focused_show_bar(")
+            .expect("focused follows")
+            .0;
+        assert!(query.contains("\"below_count\":"));
+        assert!(query.contains("c.state.is_below"));
+        assert!(DOCS.contains("also include `below_count`"));
     }
 }

@@ -204,6 +204,7 @@ They also include `fullscreen_count`.
 They also include `pip_count`.
 They also include `maximized_count`.
 They also include `above_count`.
+They also include `below_count`.
 Keep-above and keep-below changes emit `monitor/bar`.
 Toggling maximize emits `monitor/bar`.
 Unmaximize-in-place emits `monitor/bar`.
