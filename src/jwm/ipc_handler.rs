@@ -14172,4 +14172,13 @@ mod tests {
         assert!(query.contains("c.state.remembers_closed_placement"));
         assert!(DOCS.contains("also include `closed_placement_count`"));
     }
+
+    #[test]
+    fn evolve8h_wave_299_health_occupancy_includes_closed_placement_count() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("closed_placement={closed_placement}"));
+        assert!(TOOL.contains("closed_placement_count"));
+        assert!(DOCS.contains("and `closed_placement_count`"));
+    }
 }
