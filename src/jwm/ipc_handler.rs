@@ -15357,4 +15357,13 @@ mod tests {
         assert!(README.contains("get_status.monitors"));
         assert!(DOCS.contains("README health text names compact `monitors`"));
     }
+
+    #[test]
+    fn evolve8h_wave_403_tools_readme_health_names_compact_monitors() {
+        const TOOLS: &str = include_str!("../../tools/README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOLS.contains("compact `monitors` line"));
+        assert!(TOOLS.contains("get_status.monitors"));
+        assert!(DOCS.contains("`tools/README.md` health text names compact `monitors`"));
+    }
 }
