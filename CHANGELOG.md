@@ -288,6 +288,7 @@ monorepo use independent Semantic Versions.
 - `get_show_bar` occupancy snapshots include `fixed_count`.
 - `jwm-tool health` occupancy line includes fixed_count.
 - `get_status.show_bar` rustdoc names `fixed_count`.
+- README occupancy JSON names `fixed_count`.
 
 ### Changed
 

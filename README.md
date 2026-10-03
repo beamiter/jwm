@@ -174,6 +174,7 @@ It also includes `no_decorations_count`.
 It also includes `drag_float_count`.
 It also includes `swallowed_count`.
 It also includes `demands_attention_count`.
+It also includes `fixed_count`.
 
 Malformed JSON, invalid argument types, overflow, empty spawn commands, unknown
 commands, and `{ "success": false }` responses produce a non-zero exit status,
