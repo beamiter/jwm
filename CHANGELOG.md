@@ -242,6 +242,7 @@ monorepo use independent Semantic Versions.
 - `jwm-tool health` occupancy line includes never_focus_count.
 - `get_status.show_bar` rustdoc names `never_focus_count`.
 - README occupancy JSON names `never_focus_count`.
+- `tools/README.md` occupancy JSON names `never_focus_count`.
 
 ### Changed
 

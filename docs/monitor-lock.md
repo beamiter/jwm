@@ -334,6 +334,7 @@ README occupancy JSON also names `never_focus_count`.
 `tools/README.md` also names `tabbed_count`.
 `tools/README.md` also names `dock_count`.
 `tools/README.md` also names `desktop_count`.
+`tools/README.md` also names `never_focus_count`.
 `tools/README.md` also names `floating_count`.
 `tools/README.md` also names `on_view_count`.
 `tools/README.md` also names `window_count`.
