@@ -438,7 +438,16 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 122 | window-tabs occupancy 含 on_view_count | ✓ |
 | 123 | get_show_bar occupancy 含 floating_count | ✓ |
 | 124 | jwm-tool health occupancy 含 floating | ✓ |
+| 125 | togglefloating emit monitor/bar | ✓ |
 | … | 进行中 | |
+
+---
+
+## 2026-10-03：evolve8h wave 125 — togglefloating emits monitor/bar
+
+选题 = evolve8h wave 125。`togglefloating` 在 arrange 后发 occupancy，因为 snapshot 已含 `floating_count`。
+
+**验证**：`scripts/test.sh --lib --` 聚焦 evolve8h_wave_125。
 
 ---
 

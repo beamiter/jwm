@@ -150,6 +150,7 @@ monorepo use independent Semantic Versions.
 - Window-tabs docs name occupancy `on_view_count`.
 - `get_show_bar` occupancy snapshots include `floating_count`.
 - `jwm-tool health` occupancy line includes floating_count.
+- `togglefloating` emits `monitor/bar` after arrange.
 
 ### Changed
 

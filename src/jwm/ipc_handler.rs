@@ -11973,4 +11973,19 @@ mod tests {
         assert!(TOOL.contains("floating={floating}"));
         assert!(DOCS.contains("and `floating_count`"));
     }
+
+    #[test]
+    fn evolve8h_wave_125_togglefloating_broadcasts_monitor_bar() {
+        const TOGGLES: &str = include_str!("features/toggles.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        let togglefloating = TOGGLES
+            .split_once("pub fn togglefloating(")
+            .expect("togglefloating")
+            .1
+            .split_once("pub fn togglesticky(")
+            .expect("togglesticky follows")
+            .0;
+        assert!(togglefloating.contains("broadcast_monitor_bar_ipc(backend, sel_mon_key)"));
+        assert!(DOCS.contains("`togglefloating` emits `monitor/bar`"));
+    }
 }

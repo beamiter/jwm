@@ -2905,6 +2905,7 @@ impl Jwm {
         self.arrange(backend, Some(sel_mon_key));
         self.broadcast_window_state_ipc(backend, sel_client_key);
         self.sync_floating_restore_property(backend, sel_client_key);
+        self.broadcast_monitor_bar_ipc(backend, sel_mon_key);
         Ok(())
     }
 
