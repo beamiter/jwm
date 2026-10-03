@@ -11125,7 +11125,10 @@ mod tests {
         const TOOLS: &str = include_str!("../../tools/README.md");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
         assert!(TOOLS.contains("jwm-tool msg get_show_bar"));
-        assert!(DOCS.contains("as does `tools/README.md`"));
+        assert!(
+            DOCS.contains("as does `tools/README.md`")
+                || DOCS.contains("as does\n`tools/README.md`")
+        );
     }
 
     #[test]
@@ -11165,6 +11168,14 @@ mod tests {
         const README: &str = include_str!("../../README.md");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
         assert!(README.contains("jwm-tool msg get_vf"));
+        assert!(DOCS.contains("`get_show_bar` and `get_vf`"));
+    }
+
+    #[test]
+    fn evolve8h_wave_58_tools_readme_control_example_get_vf() {
+        const TOOLS: &str = include_str!("../../tools/README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOLS.contains("jwm-tool msg get_vf"));
         assert!(DOCS.contains("`get_show_bar` and `get_vf`"));
     }
 }
