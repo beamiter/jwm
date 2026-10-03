@@ -11629,4 +11629,13 @@ mod tests {
         assert!(TOOLS.contains("`nmaster`, and `selected_id`"));
         assert!(DOCS.contains("including `selected_id`"));
     }
+
+    #[test]
+    fn evolve8h_wave_97_window_tabs_occupancy_names_selected_id() {
+        const TABS: &str = include_str!("../../docs/window-tabs.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TABS.contains("`nmaster` / `selected_id`"));
+        assert!(DOCS.contains("Window-tabs docs name occupancy `tag`"));
+        assert!(DOCS.contains("`nmaster` / `selected_id`"));
+    }
 }

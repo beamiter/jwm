@@ -259,7 +259,7 @@ README control examples include `get_show_bar` and `get_vf`, as does
 `gap` / `mfact` / `nmaster`. README occupancy JSON also names
 `selected_id`. `tools/README.md` names the same occupancy
 keys, including `selected_id`. Window-tabs docs name occupancy `tag` / `layout` / `gap` / `mfact` /
-`nmaster`.
+`nmaster` / `selected_id`.
 `toggletag` on a fullscreen client emits `monitor/bar`, as does `tag`
 and sticky.
 `get_workspaces` / `get_tree` also report pip / maximized / above / below /

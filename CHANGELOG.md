@@ -122,6 +122,7 @@ monorepo use independent Semantic Versions.
 - `get_status.show_bar` rustdoc names `selected_id`.
 - README occupancy JSON names `selected_id`.
 - `tools/README.md` occupancy JSON names `selected_id`.
+- Window-tabs docs name occupancy `selected_id`.
 
 ### Changed
 
