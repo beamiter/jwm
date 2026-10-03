@@ -263,6 +263,7 @@ monorepo use independent Semantic Versions.
 - `get_status.show_bar` rustdoc names `no_decorations_count`.
 - README occupancy JSON names `no_decorations_count`.
 - `tools/README.md` occupancy JSON names `no_decorations_count`.
+- Window-tabs docs name occupancy `no_decorations_count`.
 
 ### Changed
 
