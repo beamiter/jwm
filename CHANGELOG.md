@@ -53,6 +53,7 @@ monorepo use independent Semantic Versions.
 - Output hotplug emits `monitor/bar` for every remaining output.
 - Subscribe topic `bar` aliases `monitor/bar` (occupancy only, not
   `monitor/focus`).
+- `jwm-tool msg --subscribe bar` is documented as occupancy-only.
 
 ### Changed
 

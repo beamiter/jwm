@@ -551,7 +551,7 @@ enum Commands {
                       \x1b[1m事件主题 (--subscribe):\x1b[0m\n  \
                       window (window/new, window/close, window/focus, window/title, window/state)\n  \
                       tag (tag/view), layout (layout/set), monitor (monitor/focus)\n  \
-                      config (config/reload), * (订阅全部)",
+                      bar (monitor/bar occupancy), config (config/reload), * (订阅全部)",
         after_help = "\x1b[1m示例:\x1b[0m\n  \
                       jwm-tool msg view --args '{\"tag\":2}'              # 切换到标签 2\n  \
                       jwm-tool msg focusstack --args '{\"value\":-1}'     # 聚焦上一个窗口\n  \
@@ -566,6 +566,7 @@ enum Commands {
                       jwm-tool msg set_config_batch --args '{\"values\":{\"appearance.gap_px\":8,\"status_bar.show_bar\":false}}'\n  \
                       jwm-tool msg command_batch --args '{\"commands\":[{\"command\":\"view\",\"args\":{\"tag\":1}},{\"command\":\"focusstack\",\"args\":{\"value\":1}}]}'\n  \
                       jwm-tool msg \"\" --subscribe 'window,tag'          # 订阅事件流\n  \
+                      jwm-tool msg \"\" --subscribe 'bar'                 # 只订阅栏 occupancy\n  \
                       jwm-tool msg \"\" --subscribe '*'                   # 订阅全部事件"
     )]
     Msg {

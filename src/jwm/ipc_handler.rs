@@ -10923,4 +10923,13 @@ mod tests {
         assert!(SERVER.contains("return \"monitor/bar\".to_string()"));
         assert!(DOCS.contains("Subscribe topic `bar`"));
     }
+
+    #[test]
+    fn evolve8h_wave_33_jwm_tool_documents_bar_subscription() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("bar (monitor/bar occupancy)"));
+        assert!(TOOL.contains("--subscribe 'bar'"));
+        assert!(DOCS.contains("`jwm-tool msg --subscribe bar`"));
+    }
 }
