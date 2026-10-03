@@ -501,6 +501,7 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "get_ui",
         "get_ver",
         "get_version",
+        "get_visible_fullscreen",
         "get_wall",
         "get_wallpaper",
         "get_wallpaper_colors",

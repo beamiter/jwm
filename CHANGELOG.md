@@ -68,6 +68,7 @@ monorepo use independent Semantic Versions.
 - Moving a fullscreen client to another tag emits `monitor/bar`.
 - Toggling sticky on a fullscreen client emits `monitor/bar`.
 - Window-tabs docs name the `bar` occupancy subscription.
+- `get_visible_fullscreen` aliases `get_show_bar`.
 
 ### Changed
 

@@ -2852,7 +2852,8 @@ impl Jwm {
             "get_nmaster" | "get_nm" => IpcResponse::ok(Some(self.query_focused_nmaster(backend))),
             "get_mfact" | "get_mf" => IpcResponse::ok(Some(self.query_focused_mfact(backend))),
             "get_cfact" | "get_cf" => IpcResponse::ok(Some(self.query_focused_cfact(backend))),
-            "get_show_bar" | "get_bar" | "get_bar_visible" | "get_owns_output" => {
+            "get_show_bar" | "get_bar" | "get_bar_visible" | "get_owns_output"
+            | "get_visible_fullscreen" => {
                 IpcResponse::ok(Some(self.query_focused_show_bar(backend)))
             }
             "get_prev_layout" | "get_pl" => {
@@ -11065,5 +11066,15 @@ mod tests {
         const TABS: &str = include_str!("../../docs/window-tabs.md");
         assert!(TABS.contains("subscribe `bar`"));
         assert!(TABS.contains("`monitor/bar` occupancy"));
+    }
+
+    #[test]
+    fn evolve8h_wave_46_get_visible_fullscreen_aliases_show_bar() {
+        const IPC: &str = include_str!("../ipc.rs");
+        const SOURCE: &str = include_str!("ipc_handler.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(IPC.contains("\"get_visible_fullscreen\""));
+        assert!(SOURCE.contains("\"get_visible_fullscreen\""));
+        assert!(DOCS.contains("`get_visible_fullscreen`"));
     }
 }
