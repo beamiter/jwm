@@ -3310,6 +3310,7 @@ mod tests {
             "features": {},
             "show_bar": {
                 "monitor": 0,
+                "tag": 1,
                 "show_bar": true,
                 "bar_visible": false,
                 "has_visible_fullscreen": true,
@@ -3319,7 +3320,7 @@ mod tests {
         });
         let bar_lines = health_output_lines(&with_bar);
         assert!(bar_lines.iter().any(|line| {
-            line == "show_bar: monitor=0 preference=true visible=false fullscreen=true owns_output=1 connector=DP-1"
+            line == "show_bar: monitor=0 tag=1 preference=true visible=false fullscreen=true owns_output=1 connector=DP-1"
         }));
 
         let capabilities = serde_json::json!({
@@ -4058,13 +4059,18 @@ fn health_output_lines(status: &serde_json::Value) -> Vec<String> {
             .and_then(serde_json::Value::as_bool)
             .map(|value| value.to_string())
             .unwrap_or_else(|| "-".into());
+        let tag = bar
+            .get("tag")
+            .and_then(serde_json::Value::as_u64)
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".into());
         let monitor = bar
             .get("monitor")
             .and_then(serde_json::Value::as_i64)
             .map(|value| value.to_string())
             .unwrap_or_else(|| "-".into());
         lines.push(format!(
-            "show_bar: monitor={monitor} preference={preference} visible={visible} fullscreen={fullscreen} owns_output={owns}"
+            "show_bar: monitor={monitor} tag={tag} preference={preference} visible={visible} fullscreen={fullscreen} owns_output={owns}"
         ));
         if let Some(connector) = bar.get("connector").and_then(serde_json::Value::as_str) {
             if let Some(line) = lines.last_mut() {

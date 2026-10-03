@@ -11264,4 +11264,12 @@ mod tests {
         assert!(query.contains("p.cur_tag"));
         assert!(DOCS.contains("`tag` / `show_bar`") || DOCS.contains("/ `tag` / `show_bar`"));
     }
+
+    #[test]
+    fn evolve8h_wave_68_health_occupancy_includes_tag() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("tag={tag}"));
+        assert!(DOCS.contains("and the current `tag`"));
+    }
 }
