@@ -11011,4 +11011,20 @@ mod tests {
         assert!(IPC.contains("Compact twin of `get_show_bar` / `get_bar`"));
         assert!(DOCS.contains("`get_status.show_bar` is the same occupancy snapshot"));
     }
+
+    #[test]
+    fn evolve8h_wave_42_toggletag_fullscreen_broadcasts_monitor_bar() {
+        const NAV: &str = include_str!("navigation.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        let toggletag = NAV
+            .split_once("pub fn toggletag(")
+            .expect("toggletag")
+            .1
+            .split_once("pub fn quit(")
+            .expect("quit follows")
+            .0;
+        assert!(toggletag.contains("was_fullscreen"));
+        assert!(toggletag.contains("broadcast_monitor_bar_ipc(backend, mk)"));
+        assert!(DOCS.contains("`toggletag` on a fullscreen client"));
+    }
 }

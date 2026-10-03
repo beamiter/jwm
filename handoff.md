@@ -355,7 +355,16 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 39 | query_show_bar_for_monitor JSON 键 rustdoc | ✓ |
 | 40 | broadcast_monitor_bar_ipc 写明 bar 别名 | ✓ |
 | 41 | get_status.show_bar rustdoc 含 occupancy 别名 | ✓ |
+| 42 | toggletag 全屏客户发射 monitor/bar | ✓ |
 | … | 进行中 | |
+
+---
+
+## 2026-10-03：evolve8h wave 42 — toggletag fullscreen emits monitor/bar
+
+选题 = evolve8h wave 42。全屏客户改 tag 后 occupancy 可能变化，广播 monitor/bar。
+
+**验证**：`scripts/test.sh --lib --` 聚焦 evolve8h_wave_42。
 
 ---
 

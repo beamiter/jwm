@@ -967,12 +967,13 @@ impl Jwm {
         };
 
         if let WMArgEnum::UInt(ui) = *arg {
-            let current_tags = if let Some(client) = self.state.clients.get(sel_client_key) {
-                client.state.tags
-            } else {
-                warn!("[toggletag] Selected client {:?} not found", sel_client_key);
-                return Ok(());
-            };
+            let (current_tags, was_fullscreen) =
+                if let Some(client) = self.state.clients.get(sel_client_key) {
+                    (client.state.tags, client.state.is_fullscreen)
+                } else {
+                    warn!("[toggletag] Selected client {:?} not found", sel_client_key);
+                    return Ok(());
+                };
 
             let newtags = current_tags ^ (ui & CONFIG.load().tagmask());
 
@@ -991,6 +992,11 @@ impl Jwm {
                 self.focus(backend, None)?;
                 self.arrange(backend, self.state.sel_mon);
                 self.broadcast_window_state_ipc(backend, sel_client_key);
+                if was_fullscreen {
+                    if let Some(mk) = self.state.sel_mon {
+                        self.broadcast_monitor_bar_ipc(backend, mk);
+                    }
+                }
             }
         }
 
