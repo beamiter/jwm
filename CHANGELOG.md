@@ -126,6 +126,7 @@ monorepo use independent Semantic Versions.
 - `get_show_bar` occupancy snapshots include `sel_tags`.
 - `get_show_bar` occupancy snapshots include `previous_tags`.
 - `jwm-tool health` occupancy line includes sel_tags.
+- `jwm-tool health` occupancy line includes previous_tags.
 
 ### Changed
 

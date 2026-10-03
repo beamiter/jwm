@@ -11684,4 +11684,12 @@ mod tests {
         assert!(TOOL.contains("sel_tags={sel_tags}"));
         assert!(DOCS.contains("and `sel_tags`"));
     }
+
+    #[test]
+    fn evolve8h_wave_101_health_occupancy_includes_previous_tags() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("previous_tags={previous_tags}"));
+        assert!(DOCS.contains("and `previous_tags`"));
+    }
 }
