@@ -821,6 +821,7 @@ pub struct RuntimeStatusV1 {
     /// Also `fixed_count`.
     /// Also `strut_count`.
     /// Also `maximize_promoted_count`.
+    /// Also `status_bar_count`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub show_bar: Option<Value>,
     /// Compact twin of `get_metrics` / `get_perf` (renderer metrics when any).

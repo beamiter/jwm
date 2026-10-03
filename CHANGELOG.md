@@ -305,6 +305,7 @@ monorepo use independent Semantic Versions.
 - Window-tabs docs name occupancy `maximize_promoted_count`.
 - `get_show_bar` occupancy snapshots include `status_bar_count`.
 - `jwm-tool health` occupancy line includes status_bar_count.
+- `get_status.show_bar` rustdoc names `status_bar_count`.
 
 ### Changed
 

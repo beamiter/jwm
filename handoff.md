@@ -592,9 +592,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 276 | window-tabs occupancy 含 maximize_promoted_count | ✓ |
 | 277 | get_show_bar occupancy 含 status_bar_count | ✓ |
 | 278 | jwm-tool health occupancy 含 status_bar | ✓ |
+| 279 | get_status.show_bar rustdoc 含 status_bar_count | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 279 — get_status.show_bar rustdoc names status_bar_count
+
+选题 = evolve8h wave 279。`get_status.show_bar` rustdoc 带上 status_bar_count。
 
 ## 2026-10-03：evolve8h wave 278 — health occupancy includes status_bar_count
 
