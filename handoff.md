@@ -380,7 +380,16 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 64 | jwm-tool health occupancy 含 fullscreen | ✓ |
 | 65 | jwm-tool health occupancy 含 connector | ✓ |
 | 66 | jwm-tool health occupancy 含 monitor | ✓ |
+| 67 | get_show_bar occupancy 含 tag | ✓ |
 | … | 进行中 | |
+
+---
+
+## 2026-10-03：evolve8h wave 67 — occupancy snapshot includes tag
+
+选题 = evolve8h wave 67。`get_show_bar` / `monitor/bar` 带上当前 pertag 索引，因为 `show_bar` 是 per-tag 偏好。
+
+**验证**：`scripts/test.sh --lib --` 聚焦 evolve8h_wave_67。
 
 ---
 

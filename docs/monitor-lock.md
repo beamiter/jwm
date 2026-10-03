@@ -184,7 +184,7 @@ also reports `bar_visible`, `has_visible_fullscreen` and
 `get_bar_visible` / `get_owns_output` / `get_visible_fullscreen` /
 `get_vf` alias the same snapshot). A
 per-monitor show-bar snapshot is available for any output, not only the
-focused one (JSON keys `monitor` / `show_bar` / `bar_visible` /
+focused one (JSON keys `monitor` / `tag` / `show_bar` / `bar_visible` /
 `has_visible_fullscreen` / `owns_output_count` / optional `connector`). Client fullscreen flips emit `monitor/bar` with that
 snapshot. `togglebar` emits the same event after arrange (shared
 `monitor/bar` helper). Tag `view` emits it after arrange as well, as does `toggleview`. Fullscreen layout enter/leave emits it too, as does minimizing a

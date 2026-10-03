@@ -4667,6 +4667,7 @@ impl Jwm {
     ///
     /// Object keys: `monitor`, `show_bar`, `bar_visible`,
     /// `has_visible_fullscreen`, `owns_output_count`, optional `connector`.
+    /// Also `tag` (`Pertag.cur_tag`) because `show_bar` is per-tag.
     pub(crate) fn query_show_bar_for_monitor(
         &self,
         backend: &dyn Backend,
@@ -4675,12 +4676,14 @@ impl Jwm {
         let Some(mon) = self.state.monitors.get(mk) else {
             return serde_json::json!({
                 "monitor": serde_json::Value::Null,
+                "tag": serde_json::Value::Null,
                 "show_bar": serde_json::Value::Null,
                 "bar_visible": serde_json::Value::Null,
                 "has_visible_fullscreen": serde_json::Value::Null,
                 "owns_output_count": serde_json::Value::Null,
             });
         };
+        let tag = mon.pertag.as_ref().map(|p| p.cur_tag);
         let show_bar = mon
             .pertag
             .as_ref()
@@ -4688,6 +4691,7 @@ impl Jwm {
             .unwrap_or(true);
         let mut value = serde_json::json!({
             "monitor": mon.num,
+            "tag": tag,
             "show_bar": show_bar,
             "bar_visible": self.monitor_shows_status_bar(mk),
             "has_visible_fullscreen": self.monitor_has_visible_fullscreen(mk),
@@ -4710,6 +4714,7 @@ impl Jwm {
             Some(mk) => self.query_show_bar_for_monitor(backend, mk),
             None => serde_json::json!({
                 "monitor": serde_json::Value::Null,
+                "tag": serde_json::Value::Null,
                 "show_bar": serde_json::Value::Null,
                 "bar_visible": serde_json::Value::Null,
                 "has_visible_fullscreen": serde_json::Value::Null,
@@ -11242,5 +11247,21 @@ mod tests {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
         assert!(TOOL.contains("monitor={monitor}"));
         assert!(DOCS.contains("includes the monitor\nnumber") || DOCS.contains("includes the monitor number"));
+    }
+
+    #[test]
+    fn evolve8h_wave_67_occupancy_snapshot_includes_tag() {
+        const SOURCE: &str = include_str!("ipc_handler.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        let query = SOURCE
+            .split_once("fn query_show_bar_for_monitor(")
+            .expect("query_show_bar_for_monitor")
+            .1
+            .split_once("fn query_focused_show_bar(")
+            .expect("focused follows")
+            .0;
+        assert!(query.contains("\"tag\": tag"));
+        assert!(query.contains("p.cur_tag"));
+        assert!(DOCS.contains("`tag` / `show_bar`") || DOCS.contains("/ `tag` / `show_bar`"));
     }
 }
