@@ -4595,6 +4595,7 @@ fn capabilities_output_lines(capabilities: &serde_json::Value) -> Vec<String> {
         "query aliases: get_gap -> get_gaps".to_string(),
         "query aliases: get_mf -> get_mfact".to_string(),
         "query aliases: get_nm -> get_nmaster".to_string(),
+        "query aliases: get_lt -> get_layout".to_string(),
     ]
 }
 

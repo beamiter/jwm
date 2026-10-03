@@ -15126,4 +15126,12 @@ mod tests {
         assert!(TOOL.contains("\"layout: monitor=0 layout=[]=\""));
         assert!(DOCS.contains("`jwm-tool health` prints compact `layout` beside occupancy"));
     }
+
+    #[test]
+    fn evolve8h_wave_378_capabilities_text_lists_get_lt_alias() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("query aliases: get_lt -> get_layout"));
+        assert!(DOCS.contains("`jwm-tool capabilities` text lists `get_lt -> get_layout`"));
+    }
 }

@@ -407,6 +407,7 @@ monorepo use independent Semantic Versions.
 - `jwm-tool capabilities` text lists `get_mf -> get_mfact`.
 - `jwm-tool capabilities` text lists `get_nm -> get_nmaster`.
 - `jwm-tool health` prints compact `layout` beside occupancy.
+- `jwm-tool capabilities` text lists `get_lt -> get_layout`.
 
 ### Changed
 

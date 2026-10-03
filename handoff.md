@@ -691,9 +691,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 375 | capabilities 文本列出 get_mf -> get_mfact | ✓ |
 | 376 | capabilities 文本列出 get_nm -> get_nmaster | ✓ |
 | 377 | health 打印 compact layout | ✓ |
+| 378 | capabilities 文本列出 get_lt -> get_layout | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 378 — capabilities text lists get_lt alias
+
+选题 = evolve8h wave 378。`jwm-tool capabilities` 文本列出 `get_lt -> get_layout`。
 
 ## 2026-10-03：evolve8h wave 377 — health prints compact layout
 
