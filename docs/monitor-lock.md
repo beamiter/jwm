@@ -202,6 +202,7 @@ They also include `sticky_count`.
 They also include `urgent_count`.
 They also include `fullscreen_count`.
 They also include `pip_count`.
+They also include `maximized_count`.
 Toggling picture-in-picture emits `monitor/bar`.
 Urgency changes emit `monitor/bar`.
 Demands-attention changes emit `monitor/bar`.

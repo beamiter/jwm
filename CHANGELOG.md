@@ -190,6 +190,7 @@ monorepo use independent Semantic Versions.
 - README occupancy JSON names `pip_count`.
 - `tools/README.md` occupancy JSON names `pip_count`.
 - Window-tabs docs name occupancy `pip_count`.
+- `get_show_bar` occupancy snapshots include `maximized_count`.
 
 ### Changed
 
