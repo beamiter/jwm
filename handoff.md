@@ -384,7 +384,16 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 68 | jwm-tool health occupancy 含 tag | ✓ |
 | 69 | get_show_bar occupancy 含 layout | ✓ |
 | 70 | setlayout 路径 emit monitor/bar | ✓ |
+| 71 | jwm-tool health occupancy 含 layout | ✓ |
 | … | 进行中 | |
+
+---
+
+## 2026-10-03：evolve8h wave 71 — health occupancy includes layout
+
+选题 = evolve8h wave 71。health occupancy 行带上 `layout`。
+
+**验证**：`scripts/test.sh --lib --bins --` 聚焦 evolve8h_wave_71 insight_output。
 
 ---
 

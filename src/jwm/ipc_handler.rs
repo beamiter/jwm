@@ -11306,4 +11306,12 @@ mod tests {
         assert!(apply.contains("broadcast_monitor_bar_ipc(backend, sel_mon_key)"));
         assert!(DOCS.contains("Layout changes emit\n`monitor/bar` after `layout/set`") || DOCS.contains("Layout changes emit `monitor/bar` after `layout/set`"));
     }
+
+    #[test]
+    fn evolve8h_wave_71_health_occupancy_includes_layout() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("layout={layout}"));
+        assert!(DOCS.contains("and `layout`") || DOCS.contains("and the current `tag` and `layout`"));
+    }
 }
