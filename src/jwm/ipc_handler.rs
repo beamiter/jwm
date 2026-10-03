@@ -15085,4 +15085,12 @@ mod tests {
             "`tools/README.md` health text names compact `cfact` / `gaps` / `mfact` / `nmaster`"
         ));
     }
+
+    #[test]
+    fn evolve8h_wave_373_capabilities_text_lists_get_cf_alias() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("query aliases: get_cf -> get_cfact"));
+        assert!(DOCS.contains("`jwm-tool capabilities` text lists `get_cf -> get_cfact`"));
+    }
 }

@@ -402,6 +402,7 @@ monorepo use independent Semantic Versions.
 - README health text names compact `cfact` / `gaps` / `mfact` / `nmaster`.
 - `tools/README.md` health text names compact `cfact` / `gaps` / `mfact` /
   `nmaster`.
+- `jwm-tool capabilities` text lists `get_cf -> get_cfact`.
 
 ### Changed
 

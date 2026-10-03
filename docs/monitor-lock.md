@@ -508,3 +508,4 @@ README control examples include `get_pl`.
 `jwm-tool health` prints compact `nmaster` beside occupancy.
 README health text names compact `cfact` / `gaps` / `mfact` / `nmaster`.
 `tools/README.md` health text names compact `cfact` / `gaps` / `mfact` / `nmaster`.
+`jwm-tool capabilities` text lists `get_cf -> get_cfact`.
