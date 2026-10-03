@@ -14019,4 +14019,12 @@ mod tests {
         const LIB: &str = include_str!("../lib.rs");
         assert!(LIB.contains("#![recursion_limit = \"512\"]"));
     }
+
+    #[test]
+    fn evolve8h_wave_288_health_occupancy_includes_prev_layout() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("prev_layout={prev_layout}"));
+        assert!(DOCS.contains("and `prev_layout`"));
+    }
 }
