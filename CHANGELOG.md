@@ -174,6 +174,7 @@ monorepo use independent Semantic Versions.
 - Urgency changes emit `monitor/bar`.
 - Demands-attention changes emit `monitor/bar`.
 - `get_status.show_bar` rustdoc names `urgent_count`.
+- README occupancy JSON names `urgent_count`.
 
 ### Changed
 
