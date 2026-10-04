@@ -1844,6 +1844,8 @@ monorepo use independent Semantic Versions.
 
 - evolve9h wave 150: Upgrade notes keep `tearing` beside occupancy on the health page.
 
+- evolve9h wave 151: Upgrade notes keep `xwayland` beside occupancy on the health page.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

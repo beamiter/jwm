@@ -20737,4 +20737,10 @@ mod tests {
         assert!(COMPAT.contains("evolve9h wave 150: Upgrade notes keep `tearing` beside occupancy on the health page."));
     }
 
+    #[test]
+    fn evolve9h_wave_151_compat_unique_pin_xwayland() {
+        const COMPAT: &str = include_str!("../../docs/compatibility.md");
+        assert!(COMPAT.contains("evolve9h wave 151: Upgrade notes keep `xwayland` beside occupancy on the health page."));
+    }
+
 }
