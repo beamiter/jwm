@@ -261,3 +261,4 @@ evolve9h wave 37: Health compact `audio` is diagnosable through `jwm-tool health
 evolve9h wave 38: Health compact `wallpaper` is diagnosable through `jwm-tool health`.
 evolve9h wave 39: Health compact `bluetooth` is diagnosable through `jwm-tool health`.
 evolve9h wave 40: Health compact `resources` is diagnosable through `jwm-tool health`.
+evolve9h wave 41: Health compact `connectivity` is diagnosable through `jwm-tool health`.
