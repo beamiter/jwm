@@ -3927,6 +3927,25 @@ mod tests {
         assert!(session_lock_lines.iter().any(|line| {
             line == "session_lock: locked=true surfaces=2"
         }));
+        assert!(!session_lock_lines
+            .iter()
+            .any(|line| line.starts_with("tearing:")));
+
+        let with_compact_tearing = serde_json::json!({
+            "health": {"status": "healthy", "reasons": []},
+            "counts": {"windows": 0, "monitors": 1, "workspaces": 1},
+            "config": {"path": "/tmp/config.toml", "diagnostics": {"error_count": 0, "warning_count": 0}},
+            "features": {},
+            "tearing": {
+                "active_surface_count": 1,
+                "tearing_outputs": 1,
+                "outputs": 2
+            }
+        });
+        let tearing_lines = health_output_lines(&with_compact_tearing);
+        assert!(tearing_lines.iter().any(|line| {
+            line == "tearing: active_surfaces=1 tearing_outputs=1 outputs=2"
+        }));
 
         let capabilities = serde_json::json!({
             "schema_version": 1,
@@ -5471,6 +5490,27 @@ fn health_output_lines(status: &serde_json::Value) -> Vec<String> {
             .unwrap_or_else(|| "-".into());
         lines.push(format!(
             "session_lock: locked={locked} surfaces={lock_surface_count}"
+        ));
+    }
+
+    if let Some(tearing) = status.get("tearing").and_then(serde_json::Value::as_object) {
+        let active_surfaces = tearing
+            .get("active_surface_count")
+            .and_then(|v| v.as_u64().or_else(|| v.as_i64().map(|n| n as u64)))
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".into());
+        let tearing_outputs = tearing
+            .get("tearing_outputs")
+            .and_then(|v| v.as_u64().or_else(|| v.as_i64().map(|n| n as u64)))
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".into());
+        let outputs = tearing
+            .get("outputs")
+            .and_then(|v| v.as_u64().or_else(|| v.as_i64().map(|n| n as u64)))
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".into());
+        lines.push(format!(
+            "tearing: active_surfaces={active_surfaces} tearing_outputs={tearing_outputs} outputs={outputs}"
         ));
     }
 

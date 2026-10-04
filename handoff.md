@@ -785,9 +785,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 469 | README health 点名 compact session_lock | ✓ |
 | 470 | tools/README health 点名 compact session_lock | ✓ |
 | 471 | capabilities 文本列出 get_lock,get_sess -> get_session_lock | ✓ |
+| 472 | health 打印 compact tearing | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 472 — health prints compact tearing
+
+选题 = evolve8h wave 472。`jwm-tool health` 打印 compact `tearing` 行。
 
 ## 2026-10-03：evolve8h wave 471 — capabilities text lists session_lock aliases
 

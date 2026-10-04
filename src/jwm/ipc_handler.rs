@@ -16030,4 +16030,17 @@ mod tests {
             "`jwm-tool capabilities` text lists `get_lock,get_sess -> get_session_lock`"
         ));
     }
+
+    #[test]
+    fn evolve8h_wave_472_health_prints_compact_tearing() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains(
+            "tearing: active_surfaces={active_surfaces} tearing_outputs={tearing_outputs} outputs={outputs}"
+        ));
+        assert!(TOOL.contains(
+            "\"tearing: active_surfaces=1 tearing_outputs=1 outputs=2\""
+        ));
+        assert!(DOCS.contains("`jwm-tool health` prints compact `tearing` beside occupancy"));
+    }
 }
