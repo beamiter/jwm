@@ -19304,4 +19304,10 @@ mod tests {
         assert!(DOCS.contains("Wave 923: Upgrade notes keep health compact `monitors` beside `get_mons`."));
     }
 
+    #[test]
+    fn evolve8h_wave_924_monitor_lock_unique_pin_workspaces() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 924: Upgrade notes keep health compact `workspaces` beside `get_ws`."));
+    }
+
 }
