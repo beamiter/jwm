@@ -499,9 +499,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 183 | compatibility 唯一 pin wave 183 scrolling | ✓ |
 | 184 | compatibility 唯一 pin wave 184 night_light | ✓ |
 | 185 | compatibility 唯一 pin wave 185 magnifier | ✓ |
+| 186 | compatibility 唯一 pin wave 186 peek | ✓ |
 | … | evolve9h 进行中 |
 
 ---
+
+## 2026-10-04：evolve9h wave 186 — compatibility pin wave 186 peek
+
+选题 = evolve9h wave 186。compatibility 唯一句子 wave 186 `peek`。
 
 ## 2026-10-04：evolve9h wave 185 — compatibility pin wave 185 magnifier
 

@@ -20947,4 +20947,10 @@ mod tests {
         assert!(COMPAT.contains("evolve9h wave 185: Health compact `magnifier` is diagnosable through `jwm-tool health`."));
     }
 
+    #[test]
+    fn evolve9h_wave_186_compat_unique_pin_peek() {
+        const COMPAT: &str = include_str!("../../docs/compatibility.md");
+        assert!(COMPAT.contains("evolve9h wave 186: Health compact `peek` is diagnosable through `jwm-tool health`."));
+    }
+
 }

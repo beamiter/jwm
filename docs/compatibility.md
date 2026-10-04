@@ -406,3 +406,4 @@ evolve9h wave 182: Health compact `xwayland` is diagnosable through `jwm-tool he
 evolve9h wave 183: Health compact `scrolling` is diagnosable through `jwm-tool health`.
 evolve9h wave 184: Health compact `night_light` is diagnosable through `jwm-tool health`.
 evolve9h wave 185: Health compact `magnifier` is diagnosable through `jwm-tool health`.
+evolve9h wave 186: Health compact `peek` is diagnosable through `jwm-tool health`.
