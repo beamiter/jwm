@@ -820,6 +820,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 638: Health compact `recording` is the operator twin of `get_rec`.
 
+- Wave 639: Health compact `audio_recording` is the operator twin of `get_arec`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

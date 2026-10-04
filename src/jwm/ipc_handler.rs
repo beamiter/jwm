@@ -17594,4 +17594,10 @@ mod tests {
         assert!(DOCS.contains("Wave 638: Health compact `recording` is the operator twin of `get_rec`."));
     }
 
+    #[test]
+    fn evolve8h_wave_639_monitor_lock_unique_pin_audio_recording() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 639: Health compact `audio_recording` is the operator twin of `get_arec`."));
+    }
+
 }
