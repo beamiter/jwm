@@ -19634,4 +19634,10 @@ mod tests {
         assert!(DOCS.contains("Wave 978: Compatibility tables name `get_wins` with health compact `windows`."));
     }
 
+    #[test]
+    fn evolve8h_wave_979_monitor_lock_unique_pin_effects() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 979: Compatibility tables name `get_fx` with health compact `effects`."));
+    }
+
 }
