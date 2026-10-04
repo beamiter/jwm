@@ -4294,6 +4294,24 @@ mod tests {
             line == "connectivity: wifi=true bt_powered=false"
         }));
 
+        assert!(!connectivity_lines
+            .iter()
+            .any(|line| line.starts_with("power:")));
+
+        let with_compact_power = serde_json::json!({
+            "health": {"status": "healthy", "reasons": []},
+            "counts": {"windows": 0, "monitors": 1, "workspaces": 1},
+            "config": {"path": "/tmp/config.toml", "diagnostics": {"error_count": 0, "warning_count": 0}},
+            "features": {},
+            "power": {
+                "battery": {"present": true, "percent": 88}
+            }
+        });
+        let power_lines = health_output_lines(&with_compact_power);
+        assert!(power_lines.iter().any(|line| {
+            line == "power: battery_present=true percent=88"
+        }));
+
         let capabilities = serde_json::json!({
             "schema_version": 1,
             "commands": ["focusstack", "reload_config"],
@@ -6194,6 +6212,23 @@ fn health_output_lines(status: &serde_json::Value) -> Vec<String> {
             .unwrap_or_else(|| "-".into());
         lines.push(format!(
             "connectivity: wifi={wifi} bt_powered={bt_powered}"
+        ));
+    }
+
+    if let Some(power) = status.get("power").and_then(serde_json::Value::as_object) {
+        let battery = power.get("battery").and_then(|v| v.as_object());
+        let battery_present = battery
+            .and_then(|b| b.get("present"))
+            .and_then(serde_json::Value::as_bool)
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".into());
+        let percent = battery
+            .and_then(|b| b.get("percent"))
+            .and_then(|v| v.as_u64().or_else(|| v.as_i64().map(|n| n as u64)).or_else(|| v.as_f64().map(|n| n as u64)))
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".into());
+        lines.push(format!(
+            "power: battery_present={battery_present} percent={percent}"
         ));
     }
 

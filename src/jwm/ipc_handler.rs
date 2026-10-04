@@ -16822,4 +16822,17 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn evolve8h_wave_548_health_prints_compact_power() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains(
+            "power: battery_present={battery_present} percent={percent}"
+        ));
+        assert!(TOOL.contains(
+            "\"power: battery_present=true percent=88\""
+        ));
+        assert!(DOCS.contains("`jwm-tool health` prints compact `power` beside occupancy"));
+    }
+
 }
