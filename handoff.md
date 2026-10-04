@@ -1669,9 +1669,15 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 920 | monitor-lock 唯一 pin wave 920 struts | ✓ |
 | 921 | monitor-lock 唯一 pin wave 921 scratchpads | ✓ |
 | 921 | monitor-lock 唯一 pin wave 921 scratchpads | ✓ |
+| 922 | monitor-lock 唯一 pin wave 922 focused | ✓ |
+| 922 | monitor-lock 唯一 pin wave 922 focused | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 922 — monitor-lock pin wave 922 focused
+
+选题 = evolve8h wave 922。monitor-lock 唯一句子 wave 922 `focused`。
 
 ## 2026-10-03：evolve8h wave 921 — monitor-lock pin wave 921 scratchpads
 

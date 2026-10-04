@@ -19292,4 +19292,10 @@ mod tests {
         assert!(DOCS.contains("Wave 921: Upgrade notes keep health compact `scratchpads` beside `get_pads`."));
     }
 
+    #[test]
+    fn evolve8h_wave_922_monitor_lock_unique_pin_focused() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 922: Upgrade notes keep health compact `focused` beside `get_fw`."));
+    }
+
 }
