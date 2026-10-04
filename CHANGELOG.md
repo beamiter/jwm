@@ -808,6 +808,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 632: Health compact `color_management` is the operator twin of `get_cm`.
 
+- Wave 633: Health compact `night_light` is the operator twin of `get_nl`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
