@@ -1376,6 +1376,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 916: Upgrade notes keep health compact `system_ui` beside `get_ui`.
 
+- Wave 917: Upgrade notes keep health compact `layout` beside `get_lt`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

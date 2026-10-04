@@ -1053,3 +1053,4 @@ Wave 913: Upgrade notes keep health compact `idle` beside `get_idl`.
 Wave 914: Upgrade notes keep health compact `notifications` beside `get_notif`.
 Wave 915: Upgrade notes keep health compact `dnd` beside `get_dnd`.
 Wave 916: Upgrade notes keep health compact `system_ui` beside `get_ui`.
+Wave 917: Upgrade notes keep health compact `layout` beside `get_lt`.

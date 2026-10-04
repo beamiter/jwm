@@ -19262,4 +19262,10 @@ mod tests {
         assert!(DOCS.contains("Wave 916: Upgrade notes keep health compact `system_ui` beside `get_ui`."));
     }
 
+    #[test]
+    fn evolve8h_wave_917_monitor_lock_unique_pin_layout() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 917: Upgrade notes keep health compact `layout` beside `get_lt`."));
+    }
+
 }
