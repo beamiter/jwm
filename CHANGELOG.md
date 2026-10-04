@@ -848,6 +848,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 652: Health compact `layout` is the operator twin of `get_lt`.
 
+- Wave 653: Health compact `tabs` is the operator twin of `get_tab`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
