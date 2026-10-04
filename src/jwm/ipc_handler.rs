@@ -19358,4 +19358,10 @@ mod tests {
         assert!(DOCS.contains("Wave 932: Upgrade notes keep health compact `gaps` beside `get_gap`."));
     }
 
+    #[test]
+    fn evolve8h_wave_933_monitor_lock_unique_pin_mfact() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 933: Upgrade notes keep health compact `mfact` beside `get_mf`."));
+    }
+
 }
