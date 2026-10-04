@@ -1410,6 +1410,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 933: Upgrade notes keep health compact `mfact` beside `get_mf`.
 
+- Wave 934: Upgrade notes keep health compact `nmaster` beside `get_nm`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

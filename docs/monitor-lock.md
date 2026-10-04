@@ -1070,3 +1070,4 @@ Wave 930: Upgrade notes keep health compact `prev_layout` beside `get_pl`.
 Wave 931: Upgrade notes keep health compact `cfact` beside `get_cf`.
 Wave 932: Upgrade notes keep health compact `gaps` beside `get_gap`.
 Wave 933: Upgrade notes keep health compact `mfact` beside `get_mf`.
+Wave 934: Upgrade notes keep health compact `nmaster` beside `get_nm`.
