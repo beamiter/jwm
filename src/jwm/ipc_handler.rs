@@ -17750,4 +17750,10 @@ mod tests {
         assert!(DOCS.contains("Wave 664: Health compact `closed_placement` is the operator twin of `get_cp`."));
     }
 
+    #[test]
+    fn evolve8h_wave_665_monitor_lock_unique_pin_prev_layout() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 665: Health compact `prev_layout` is the operator twin of `get_pl`."));
+    }
+
 }

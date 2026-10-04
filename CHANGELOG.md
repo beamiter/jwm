@@ -872,6 +872,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 664: Health compact `closed_placement` is the operator twin of `get_cp`.
 
+- Wave 665: Health compact `prev_layout` is the operator twin of `get_pl`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
