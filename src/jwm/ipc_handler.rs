@@ -19316,4 +19316,10 @@ mod tests {
         assert!(DOCS.contains("Wave 925: Upgrade notes keep health compact `windows` beside `get_wins`."));
     }
 
+    #[test]
+    fn evolve8h_wave_926_monitor_lock_unique_pin_effects() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 926: Upgrade notes keep health compact `effects` beside `get_fx`."));
+    }
+
 }
