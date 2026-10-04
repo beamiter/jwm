@@ -394,3 +394,4 @@ evolve9h wave 170: Upgrade notes keep `notifications` beside occupancy on the he
 evolve9h wave 171: Upgrade notes keep `dnd` beside occupancy on the health page.
 evolve9h wave 172: Upgrade notes keep `system_ui` beside occupancy on the health page.
 evolve9h wave 173: Health compact `version_info` is diagnosable through `jwm-tool health`.
+evolve9h wave 174: Health compact `metrics` is diagnosable through `jwm-tool health`.
