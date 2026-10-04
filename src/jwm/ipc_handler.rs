@@ -20833,4 +20833,10 @@ mod tests {
         assert!(COMPAT.contains("evolve9h wave 166: Upgrade notes keep `power` beside occupancy on the health page."));
     }
 
+    #[test]
+    fn evolve9h_wave_167_compat_unique_pin_media() {
+        const COMPAT: &str = include_str!("../../docs/compatibility.md");
+        assert!(COMPAT.contains("evolve9h wave 167: Upgrade notes keep `media` beside occupancy on the health page."));
+    }
+
 }

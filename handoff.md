@@ -480,9 +480,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 164 | compatibility 唯一 pin wave 164 resources | ✓ |
 | 165 | compatibility 唯一 pin wave 165 connectivity | ✓ |
 | 166 | compatibility 唯一 pin wave 166 power | ✓ |
+| 167 | compatibility 唯一 pin wave 167 media | ✓ |
 | … | evolve9h 进行中 |
 
 ---
+
+## 2026-10-04：evolve9h wave 167 — compatibility pin wave 167 media
+
+选题 = evolve9h wave 167。compatibility 唯一句子 wave 167 `media`。
 
 ## 2026-10-04：evolve9h wave 166 — compatibility pin wave 166 power
 
