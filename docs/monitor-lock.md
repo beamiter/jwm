@@ -741,3 +741,4 @@ README health text names `get_wl` beside compact `wayland`.
 README health text names `get_rec` beside compact `recording`.
 README health text names `get_arec` beside compact `audio_recording`.
 README health text names `get_cap` beside compact `capture`.
+README health text names `get_wly` beside compact `waterlily`.

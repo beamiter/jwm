@@ -17321,4 +17321,13 @@ mod tests {
         assert!(DOCS.contains("README health text names `get_cap` beside compact `capture`"));
     }
 
+    #[test]
+    fn evolve8h_wave_605_readme_health_names_get_wly_for_waterlily() {
+        const README: &str = include_str!("../../README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(README.contains("`get_wly`"));
+        assert!(README.contains("compact `waterlily` line"));
+        assert!(DOCS.contains("README health text names `get_wly` beside compact `waterlily`"));
+    }
+
 }
