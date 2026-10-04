@@ -1366,6 +1366,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 911: Upgrade notes keep health compact `connectivity` beside `get_conn`.
 
+- Wave 912: Upgrade notes keep health compact `clipboard` beside `get_clip`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
