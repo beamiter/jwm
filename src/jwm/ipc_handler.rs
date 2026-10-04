@@ -18614,4 +18614,10 @@ mod tests {
         assert!(DOCS.contains("Wave 808: Support triage reads health compact `notifications` before `get_notif` dumps."));
     }
 
+    #[test]
+    fn evolve8h_wave_809_monitor_lock_unique_pin_dnd() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 809: Support triage reads health compact `dnd` before `get_dnd` dumps."));
+    }
+
 }
