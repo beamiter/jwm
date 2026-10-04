@@ -20257,4 +20257,10 @@ mod tests {
         assert!(COMPAT.contains("evolve9h wave 70: `jwm-tool capabilities` remains the catalog for `bluetooth` query aliases."));
     }
 
+    #[test]
+    fn evolve9h_wave_71_compat_unique_pin_resources() {
+        const COMPAT: &str = include_str!("../../docs/compatibility.md");
+        assert!(COMPAT.contains("evolve9h wave 71: `jwm-tool capabilities` remains the catalog for `resources` query aliases."));
+    }
+
 }
