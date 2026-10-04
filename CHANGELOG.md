@@ -1868,6 +1868,8 @@ monorepo use independent Semantic Versions.
 
 - evolve9h wave 162: Upgrade notes keep `wallpaper` beside occupancy on the health page.
 
+- evolve9h wave 163: Upgrade notes keep `bluetooth` beside occupancy on the health page.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
