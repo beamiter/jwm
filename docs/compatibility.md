@@ -550,3 +550,4 @@ evolve9h wave 326: Upgrade notes keep `dnd` beside occupancy on the health page.
 evolve9h wave 327: Upgrade notes keep `system_ui` beside occupancy on the health page.
 evolve9h wave 328: Health compact `version_info` is diagnosable through `jwm-tool health`.
 evolve9h wave 329: Health compact `metrics` is diagnosable through `jwm-tool health`.
+evolve9h wave 330: Health compact `ipc_caps` is diagnosable through `jwm-tool health`.

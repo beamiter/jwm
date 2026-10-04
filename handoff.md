@@ -643,9 +643,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 327 | compatibility 唯一 pin wave 327 system_ui | ✓ |
 | 328 | compatibility 唯一 pin wave 328 version_info | ✓ |
 | 329 | compatibility 唯一 pin wave 329 metrics | ✓ |
+| 330 | compatibility 唯一 pin wave 330 ipc_caps | ✓ |
 | … | evolve9h 进行中 |
 
 ---
+
+## 2026-10-04：evolve9h wave 330 — compatibility pin wave 330 ipc_caps
+
+选题 = evolve9h wave 330。compatibility 唯一句子 wave 330 `ipc_caps`。
 
 ## 2026-10-04：evolve9h wave 329 — compatibility pin wave 329 metrics
 
