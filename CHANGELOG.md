@@ -1830,6 +1830,8 @@ monorepo use independent Semantic Versions.
 
 - evolve9h wave 143: Upgrade notes keep `metrics` beside occupancy on the health page.
 
+- evolve9h wave 144: Upgrade notes keep `ipc_caps` beside occupancy on the health page.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
