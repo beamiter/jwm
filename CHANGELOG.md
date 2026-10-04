@@ -1874,6 +1874,8 @@ monorepo use independent Semantic Versions.
 
 - evolve9h wave 165: Upgrade notes keep `connectivity` beside occupancy on the health page.
 
+- evolve9h wave 166: Upgrade notes keep `power` beside occupancy on the health page.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
