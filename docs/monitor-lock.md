@@ -1132,3 +1132,4 @@ Wave 992: Compatibility tables name `get_status.fullscreen` with health compact 
 Wave 993: Compatibility tables name `get_status.pip` with health compact `pip`.
 Wave 994: Compatibility tables name `get_status.blur` with health compact `blur`.
 Wave 995: Compatibility tables name `get_status.hdr` with health compact `hdr`.
+Wave 996: Compatibility tables name `get_status.expose` with health compact `expose`.

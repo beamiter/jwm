@@ -1534,6 +1534,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 995: Compatibility tables name `get_status.hdr` with health compact `hdr`.
 
+- Wave 996: Compatibility tables name `get_status.expose` with health compact `expose`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
