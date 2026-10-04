@@ -310,3 +310,4 @@ evolve9h wave 86: Support bundles should include `window` when health is degrade
 evolve9h wave 87: Support bundles should include `session_lock` when health is degraded.
 evolve9h wave 88: Support bundles should include `tearing` when health is degraded.
 evolve9h wave 89: Support bundles should include `xwayland` when health is degraded.
+evolve9h wave 90: Support bundles should include `scrolling` when health is degraded.
