@@ -19208,4 +19208,10 @@ mod tests {
         assert!(DOCS.contains("Wave 907: Upgrade notes keep health compact `audio` beside `get_devices`."));
     }
 
+    #[test]
+    fn evolve8h_wave_908_monitor_lock_unique_pin_wallpaper() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 908: Upgrade notes keep health compact `wallpaper` beside `get_wall`."));
+    }
+
 }

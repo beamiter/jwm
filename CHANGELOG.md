@@ -1358,6 +1358,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 907: Upgrade notes keep health compact `audio` beside `get_devices`.
 
+- Wave 908: Upgrade notes keep health compact `wallpaper` beside `get_wall`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
