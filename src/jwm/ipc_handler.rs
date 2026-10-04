@@ -19334,4 +19334,10 @@ mod tests {
         assert!(DOCS.contains("Wave 928: Upgrade notes keep health compact `bench` beside `get_bm`."));
     }
 
+    #[test]
+    fn evolve8h_wave_929_monitor_lock_unique_pin_closed_placement() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 929: Upgrade notes keep health compact `closed_placement` beside `get_cp`."));
+    }
+
 }
