@@ -20185,4 +20185,10 @@ mod tests {
         assert!(COMPAT.contains("evolve9h wave 58: `jwm-tool capabilities` remains the catalog for `xwayland` query aliases."));
     }
 
+    #[test]
+    fn evolve9h_wave_59_compat_unique_pin_scrolling() {
+        const COMPAT: &str = include_str!("../../docs/compatibility.md");
+        assert!(COMPAT.contains("evolve9h wave 59: `jwm-tool capabilities` remains the catalog for `scrolling` query aliases."));
+    }
+
 }
