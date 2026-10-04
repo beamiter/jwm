@@ -407,3 +407,4 @@ evolve9h wave 183: Health compact `scrolling` is diagnosable through `jwm-tool h
 evolve9h wave 184: Health compact `night_light` is diagnosable through `jwm-tool health`.
 evolve9h wave 185: Health compact `magnifier` is diagnosable through `jwm-tool health`.
 evolve9h wave 186: Health compact `peek` is diagnosable through `jwm-tool health`.
+evolve9h wave 187: Health compact `gesture` is diagnosable through `jwm-tool health`.
