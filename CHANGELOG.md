@@ -748,6 +748,8 @@ monorepo use independent Semantic Versions.
 
 - README health text names `get_rec` beside compact `recording`.
 
+- README health text names `get_arec` beside compact `audio_recording`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

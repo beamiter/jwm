@@ -226,7 +226,7 @@ It also prints a compact `expose` line from `get_status.expose`.
 It also prints a compact `gesture` line from `get_status.gesture` (`get_gest`).
 It also prints a compact `wayland` line from `get_status.wayland` (`get_wl`).
 It also prints a compact `recording` line from `get_status.recording` (`get_rec`).
-It also prints a compact `audio_recording` line from `get_status.audio_recording`.
+It also prints a compact `audio_recording` line from `get_status.audio_recording` (`get_arec`).
 It also prints a compact `capture` line from `get_status.capture`.
 It also prints a compact `waterlily` line from `get_status.waterlily`.
 It also prints a compact `audio` line from `get_status.audio`.
