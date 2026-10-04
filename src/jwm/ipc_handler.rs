@@ -19779,4 +19779,13 @@ mod tests {
         assert!(DOCS.contains("`jwm-tool health` prints compact `version_info` beside occupancy"));
     }
 
+    #[test]
+    fn evolve9h_wave_2_readme_health_names_compact_version_info() {
+        const README: &str = include_str!("../../README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(README.contains("compact `version_info` line"));
+        assert!(README.contains("get_status.version_info"));
+        assert!(DOCS.contains("README health text names compact `version_info`"));
+    }
+
 }

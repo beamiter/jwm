@@ -1138,3 +1138,4 @@ Wave 998: Compatibility tables name `get_power` with health compact `power`.
 Wave 999: Bar occupancy sits beside health compact `session_lock` (`get_lock`).
 Wave 1000: Bar occupancy sits beside health compact `tearing` (`get_th`).
 `jwm-tool health` prints compact `version_info` beside occupancy.
+README health text names compact `version_info`.

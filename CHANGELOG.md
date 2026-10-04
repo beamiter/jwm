@@ -1546,6 +1546,8 @@ monorepo use independent Semantic Versions.
 
 - `jwm-tool health` prints compact `version_info` beside occupancy.
 
+- README health text names compact `version_info`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

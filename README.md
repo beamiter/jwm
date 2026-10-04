@@ -236,6 +236,7 @@ It also prints a compact `resources` line from `get_status.resources` (`get_res`
 It also prints a compact `connectivity` line from `get_status.connectivity` (`get_conn`).
 It also prints a compact `power` line from `get_status.power`.
 It also prints a compact `media` line from `get_status.media`.
+It also prints a compact `version_info` line from `get_status.version_info`.
 
 Malformed JSON, invalid argument types, overflow, empty spawn commands, unknown
 commands, and `{ "success": false }` responses produce a non-zero exit status,
