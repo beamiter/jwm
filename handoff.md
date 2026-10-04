@@ -1699,9 +1699,15 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 935 | monitor-lock 唯一 pin wave 935 floating | ✓ |
 | 936 | monitor-lock 唯一 pin wave 936 minimized | ✓ |
 | 936 | monitor-lock 唯一 pin wave 936 minimized | ✓ |
+| 937 | monitor-lock 唯一 pin wave 937 sticky | ✓ |
+| 937 | monitor-lock 唯一 pin wave 937 sticky | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 937 — monitor-lock pin wave 937 sticky
+
+选题 = evolve8h wave 937。monitor-lock 唯一句子 wave 937 `sticky`。
 
 ## 2026-10-03：evolve8h wave 936 — monitor-lock pin wave 936 minimized
 
