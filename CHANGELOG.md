@@ -1080,6 +1080,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 768: Doctor bundles include health compact `mic` from `get_mute`.
 
+- Wave 769: Doctor bundles include health compact `bench` from `get_bm`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
