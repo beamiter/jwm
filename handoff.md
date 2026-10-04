@@ -430,9 +430,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 114 | compatibility 唯一 pin wave 114 config | ✓ |
 | 115 | compatibility 唯一 pin wave 115 status | ✓ |
 | 116 | compatibility 唯一 pin wave 116 tree | ✓ |
+| 117 | compatibility 唯一 pin wave 117 window | ✓ |
 | … | evolve9h 进行中 |
 
 ---
+
+## 2026-10-04：evolve9h wave 117 — compatibility pin wave 117 window
+
+选题 = evolve9h wave 117。compatibility 唯一句子 wave 117 `window`。
 
 ## 2026-10-04：evolve9h wave 116 — compatibility pin wave 116 tree
 
