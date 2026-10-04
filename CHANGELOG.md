@@ -2020,6 +2020,8 @@ monorepo use independent Semantic Versions.
 
 - evolve9h wave 238: Support bundles should include `config` when health is degraded.
 
+- evolve9h wave 239: Support bundles should include `status` when health is degraded.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

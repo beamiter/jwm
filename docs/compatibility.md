@@ -459,3 +459,4 @@ evolve9h wave 235: Support bundles should include `version_info` when health is 
 evolve9h wave 236: Support bundles should include `metrics` when health is degraded.
 evolve9h wave 237: Support bundles should include `ipc_caps` when health is degraded.
 evolve9h wave 238: Support bundles should include `config` when health is degraded.
+evolve9h wave 239: Support bundles should include `status` when health is degraded.
