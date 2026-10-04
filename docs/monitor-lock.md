@@ -874,3 +874,4 @@ Wave 734: Doctor bundles include health compact `session_lock` from `get_lock`.
 Wave 735: Doctor bundles include health compact `tearing` from `get_th`.
 Wave 736: Doctor bundles include health compact `xwayland` from `get_xw`.
 Wave 737: Doctor bundles include health compact `scrolling` from `get_scroll`.
+Wave 738: Doctor bundles include health compact `color_management` from `get_cm`.

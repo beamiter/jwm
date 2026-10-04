@@ -1018,6 +1018,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 737: Doctor bundles include health compact `scrolling` from `get_scroll`.
 
+- Wave 738: Doctor bundles include health compact `color_management` from `get_cm`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
