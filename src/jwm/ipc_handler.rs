@@ -18320,4 +18320,10 @@ mod tests {
         assert!(DOCS.contains("Wave 759: Doctor bundles include health compact `tabs` from `get_tab`."));
     }
 
+    #[test]
+    fn evolve8h_wave_760_monitor_lock_unique_pin_selected() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 760: Doctor bundles include health compact `selected` from `get_sel`."));
+    }
+
 }

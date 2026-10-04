@@ -1062,6 +1062,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 759: Doctor bundles include health compact `tabs` from `get_tab`.
 
+- Wave 760: Doctor bundles include health compact `selected` from `get_sel`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
