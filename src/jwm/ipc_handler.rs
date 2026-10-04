@@ -18632,4 +18632,10 @@ mod tests {
         assert!(DOCS.contains("Wave 811: Support triage reads health compact `layout` before `get_lt` dumps."));
     }
 
+    #[test]
+    fn evolve8h_wave_812_monitor_lock_unique_pin_tabs() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 812: Support triage reads health compact `tabs` before `get_tab` dumps."));
+    }
+
 }

@@ -1166,6 +1166,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 811: Support triage reads health compact `layout` before `get_lt` dumps.
 
+- Wave 812: Support triage reads health compact `tabs` before `get_tab` dumps.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
