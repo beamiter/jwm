@@ -19196,4 +19196,10 @@ mod tests {
         assert!(DOCS.contains("Wave 905: Upgrade notes keep health compact `capture` beside `get_cap`."));
     }
 
+    #[test]
+    fn evolve8h_wave_906_monitor_lock_unique_pin_waterlily() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 906: Upgrade notes keep health compact `waterlily` beside `get_wly`."));
+    }
+
 }

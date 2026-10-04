@@ -1042,3 +1042,4 @@ Wave 902: Upgrade notes keep health compact `wayland` beside `get_wl`.
 Wave 903: Upgrade notes keep health compact `recording` beside `get_rec`.
 Wave 904: Upgrade notes keep health compact `audio_recording` beside `get_arec`.
 Wave 905: Upgrade notes keep health compact `capture` beside `get_cap`.
+Wave 906: Upgrade notes keep health compact `waterlily` beside `get_wly`.
