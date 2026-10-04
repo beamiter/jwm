@@ -1452,6 +1452,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 954: Compatibility tables name `get_gest` with health compact `gesture`.
 
+- Wave 955: Compatibility tables name `get_wl` with health compact `wayland`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

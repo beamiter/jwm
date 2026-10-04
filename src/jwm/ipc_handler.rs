@@ -19490,4 +19490,10 @@ mod tests {
         assert!(DOCS.contains("Wave 954: Compatibility tables name `get_gest` with health compact `gesture`."));
     }
 
+    #[test]
+    fn evolve8h_wave_955_monitor_lock_unique_pin_wayland() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 955: Compatibility tables name `get_wl` with health compact `wayland`."));
+    }
+
 }

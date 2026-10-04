@@ -1735,9 +1735,15 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 953 | monitor-lock 唯一 pin wave 953 peek | ✓ |
 | 954 | monitor-lock 唯一 pin wave 954 gesture | ✓ |
 | 954 | monitor-lock 唯一 pin wave 954 gesture | ✓ |
+| 955 | monitor-lock 唯一 pin wave 955 wayland | ✓ |
+| 955 | monitor-lock 唯一 pin wave 955 wayland | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 955 — monitor-lock pin wave 955 wayland
+
+选题 = evolve8h wave 955。monitor-lock 唯一句子 wave 955 `wayland`。
 
 ## 2026-10-03：evolve8h wave 954 — monitor-lock pin wave 954 gesture
 
