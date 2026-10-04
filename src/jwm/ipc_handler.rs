@@ -15537,4 +15537,13 @@ mod tests {
         assert!(TOOL.contains("\"mic: muted=true\""));
         assert!(DOCS.contains("`jwm-tool health` prints compact `mic` beside occupancy"));
     }
+
+    #[test]
+    fn evolve8h_wave_421_readme_health_names_compact_mic() {
+        const README: &str = include_str!("../../README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(README.contains("compact `mic` line"));
+        assert!(README.contains("get_status.mic"));
+        assert!(DOCS.contains("README health text names compact `mic`"));
+    }
 }
