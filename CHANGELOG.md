@@ -1490,6 +1490,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 973: Compatibility tables name `get_strut` with health compact `struts`.
 
+- Wave 974: Compatibility tables name `get_pads` with health compact `scratchpads`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

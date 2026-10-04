@@ -19604,4 +19604,10 @@ mod tests {
         assert!(DOCS.contains("Wave 973: Compatibility tables name `get_strut` with health compact `struts`."));
     }
 
+    #[test]
+    fn evolve8h_wave_974_monitor_lock_unique_pin_scratchpads() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 974: Compatibility tables name `get_pads` with health compact `scratchpads`."));
+    }
+
 }
