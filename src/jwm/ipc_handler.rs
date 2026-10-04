@@ -19532,4 +19532,10 @@ mod tests {
         assert!(DOCS.contains("Wave 961: Compatibility tables name `get_wall` with health compact `wallpaper`."));
     }
 
+    #[test]
+    fn evolve8h_wave_962_monitor_lock_unique_pin_bluetooth() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 962: Compatibility tables name `get_bt` with health compact `bluetooth`."));
+    }
+
 }

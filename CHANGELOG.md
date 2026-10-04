@@ -1466,6 +1466,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 961: Compatibility tables name `get_wall` with health compact `wallpaper`.
 
+- Wave 962: Compatibility tables name `get_bt` with health compact `bluetooth`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
