@@ -207,7 +207,7 @@ It also prints a compact `sticky` line from `get_status.sticky`.
 It also prints a compact `urgent` line from `get_status.urgent`.
 It also prints a compact `fullscreen` line from `get_status.fullscreen`.
 It also prints a compact `pip` line from `get_status.pip`.
-It also prints a compact `notifications` line from `get_status.notifications`.
+It also prints a compact `notifications` line from `get_status.notifications` (`get_notif`).
 It also prints a compact `blur` line from `get_status.blur`.
 It also prints a compact `hdr` line from `get_status.hdr`.
 It also prints a compact `dnd` line from `get_status.dnd`.

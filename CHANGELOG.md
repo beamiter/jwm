@@ -768,6 +768,8 @@ monorepo use independent Semantic Versions.
 
 - README health text names `get_idl` beside compact `idle`.
 
+- README health text names `get_notif` beside compact `notifications`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

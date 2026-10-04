@@ -749,3 +749,4 @@ README health text names `get_res` beside compact `resources`.
 README health text names `get_conn` beside compact `connectivity`.
 README health text names `get_clip` beside compact `clipboard`.
 README health text names `get_idl` beside compact `idle`.
+README health text names `get_notif` beside compact `notifications`.
