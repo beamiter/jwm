@@ -16516,4 +16516,13 @@ mod tests {
         assert!(DOCS.contains("README health text names compact `audio_recording`"));
     }
 
+    #[test]
+    fn evolve8h_wave_518_tools_readme_health_names_compact_audio_recording() {
+        const TOOLS: &str = include_str!("../../tools/README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOLS.contains("compact `audio_recording` line"));
+        assert!(TOOLS.contains("get_status.audio_recording"));
+        assert!(DOCS.contains("`tools/README.md` health text names compact `audio_recording`"));
+    }
+
 }

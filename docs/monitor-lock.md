@@ -654,3 +654,4 @@ README health text names compact `recording`.
 `jwm-tool capabilities` text lists `get_rec -> get_recording`.
 `jwm-tool health` prints compact `audio_recording` beside occupancy.
 README health text names compact `audio_recording`.
+`tools/README.md` health text names compact `audio_recording`.
