@@ -18734,4 +18734,10 @@ mod tests {
         assert!(DOCS.contains("Wave 828: Support triage reads health compact `nmaster` before `get_nm` dumps."));
     }
 
+    #[test]
+    fn evolve8h_wave_829_monitor_lock_unique_pin_floating() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 829: Support triage reads health compact `floating` before `get_status.floating` dumps."));
+    }
+
 }
