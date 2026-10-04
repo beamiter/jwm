@@ -1522,6 +1522,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 989: Compatibility tables name `get_status.minimized` with health compact `minimized`.
 
+- Wave 990: Compatibility tables name `get_status.sticky` with health compact `sticky`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
