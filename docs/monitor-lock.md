@@ -989,3 +989,4 @@ Wave 849: Nested smoke checks health compact `wayland` after `get_wl`.
 Wave 850: Nested smoke checks health compact `recording` after `get_rec`.
 Wave 851: Nested smoke checks health compact `audio_recording` after `get_arec`.
 Wave 852: Nested smoke checks health compact `capture` after `get_cap`.
+Wave 853: Nested smoke checks health compact `waterlily` after `get_wly`.

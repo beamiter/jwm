@@ -18878,4 +18878,10 @@ mod tests {
         assert!(DOCS.contains("Wave 852: Nested smoke checks health compact `capture` after `get_cap`."));
     }
 
+    #[test]
+    fn evolve8h_wave_853_monitor_lock_unique_pin_waterlily() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 853: Nested smoke checks health compact `waterlily` after `get_wly`."));
+    }
+
 }

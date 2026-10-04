@@ -1248,6 +1248,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 852: Nested smoke checks health compact `capture` after `get_cap`.
 
+- Wave 853: Nested smoke checks health compact `waterlily` after `get_wly`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
