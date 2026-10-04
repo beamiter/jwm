@@ -1622,6 +1622,8 @@ monorepo use independent Semantic Versions.
 
 - evolve9h wave 39: Health compact `bluetooth` is diagnosable through `jwm-tool health`.
 
+- evolve9h wave 40: Health compact `resources` is diagnosable through `jwm-tool health`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
