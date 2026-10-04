@@ -868,6 +868,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 662: Health compact `mic` is the operator twin of `get_mute`.
 
+- Wave 663: Health compact `bench` is the operator twin of `get_bm`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
