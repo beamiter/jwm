@@ -616,6 +616,8 @@ monorepo use independent Semantic Versions.
 
 - `jwm-tool health` prints compact `bluetooth` beside occupancy.
 
+- README health text names compact `bluetooth`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

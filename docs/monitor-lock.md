@@ -673,3 +673,4 @@ README health text names compact `wallpaper`.
 `tools/README.md` health text names compact `wallpaper`.
 `jwm-tool capabilities` text lists `get_wall -> get_wallpaper`.
 `jwm-tool health` prints compact `bluetooth` beside occupancy.
+README health text names compact `bluetooth`.

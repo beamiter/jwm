@@ -231,6 +231,7 @@ It also prints a compact `capture` line from `get_status.capture`.
 It also prints a compact `waterlily` line from `get_status.waterlily`.
 It also prints a compact `audio` line from `get_status.audio`.
 It also prints a compact `wallpaper` line from `get_status.wallpaper`.
+It also prints a compact `bluetooth` line from `get_status.bluetooth`.
 
 Malformed JSON, invalid argument types, overflow, empty spawn commands, unknown
 commands, and `{ "success": false }` responses produce a non-zero exit status,
