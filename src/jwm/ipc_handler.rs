@@ -19676,4 +19676,10 @@ mod tests {
         assert!(DOCS.contains("Wave 985: Compatibility tables name `get_gap` with health compact `gaps`."));
     }
 
+    #[test]
+    fn evolve8h_wave_986_monitor_lock_unique_pin_mfact() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 986: Compatibility tables name `get_mf` with health compact `mfact`."));
+    }
+
 }

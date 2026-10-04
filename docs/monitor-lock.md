@@ -1122,3 +1122,4 @@ Wave 982: Compatibility tables name `get_cp` with health compact `closed_placeme
 Wave 983: Compatibility tables name `get_pl` with health compact `prev_layout`.
 Wave 984: Compatibility tables name `get_cf` with health compact `cfact`.
 Wave 985: Compatibility tables name `get_gap` with health compact `gaps`.
+Wave 986: Compatibility tables name `get_mf` with health compact `mfact`.
