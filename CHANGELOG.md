@@ -892,6 +892,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 674: Health compact `fullscreen` is the operator twin of `get_status.fullscreen`.
 
+- Wave 675: Health compact `pip` is the operator twin of `get_status.pip`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

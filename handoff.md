@@ -1175,9 +1175,15 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 673 | monitor-lock 唯一 pin wave 673 urgent | ✓ |
 | 674 | monitor-lock 唯一 pin wave 674 fullscreen | ✓ |
 | 674 | monitor-lock 唯一 pin wave 674 fullscreen | ✓ |
+| 675 | monitor-lock 唯一 pin wave 675 pip | ✓ |
+| 675 | monitor-lock 唯一 pin wave 675 pip | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 675 — monitor-lock pin wave 675 pip
+
+选题 = evolve8h wave 675。monitor-lock 唯一句子 wave 675 `pip`。
 
 ## 2026-10-03：evolve8h wave 674 — monitor-lock pin wave 674 fullscreen
 
