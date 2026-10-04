@@ -17744,4 +17744,10 @@ mod tests {
         assert!(DOCS.contains("Wave 663: Health compact `bench` is the operator twin of `get_bm`."));
     }
 
+    #[test]
+    fn evolve8h_wave_664_monitor_lock_unique_pin_closed_placement() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 664: Health compact `closed_placement` is the operator twin of `get_cp`."));
+    }
+
 }

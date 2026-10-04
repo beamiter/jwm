@@ -870,6 +870,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 663: Health compact `bench` is the operator twin of `get_bm`.
 
+- Wave 664: Health compact `closed_placement` is the operator twin of `get_cp`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

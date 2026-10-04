@@ -800,3 +800,4 @@ Wave 660: Health compact `windows` is the operator twin of `get_wins`.
 Wave 661: Health compact `effects` is the operator twin of `get_fx`.
 Wave 662: Health compact `mic` is the operator twin of `get_mute`.
 Wave 663: Health compact `bench` is the operator twin of `get_bm`.
+Wave 664: Health compact `closed_placement` is the operator twin of `get_cp`.
