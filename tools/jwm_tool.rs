@@ -5406,6 +5406,7 @@ fn capabilities_output_lines(capabilities: &serde_json::Value) -> Vec<String> {
         "query aliases: get_fx,get_effects -> get_effect_status".to_string(),
         "query aliases: get_mic,get_mute -> get_mic_mute".to_string(),
         "query aliases: get_bench,get_bm -> benchmark_report".to_string(),
+        "query aliases: get_ui -> get_system_ui".to_string(),
     ]
 }
 

@@ -774,9 +774,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 458 | health 打印 compact system_ui | ✓ |
 | 459 | README health 点名 compact system_ui | ✓ |
 | 460 | tools/README health 点名 compact system_ui | ✓ |
+| 461 | capabilities 文本列出 get_ui -> get_system_ui | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 461 — capabilities text lists get_ui alias
+
+选题 = evolve8h wave 461。`jwm-tool capabilities` 文本列出 `get_ui -> get_system_ui`。
 
 ## 2026-10-03：evolve8h wave 460 — tools/README health names compact system_ui
 
