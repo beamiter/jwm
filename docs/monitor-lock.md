@@ -1055,3 +1055,4 @@ Wave 915: Upgrade notes keep health compact `dnd` beside `get_dnd`.
 Wave 916: Upgrade notes keep health compact `system_ui` beside `get_ui`.
 Wave 917: Upgrade notes keep health compact `layout` beside `get_lt`.
 Wave 918: Upgrade notes keep health compact `tabs` beside `get_tab`.
+Wave 919: Upgrade notes keep health compact `selected` beside `get_sel`.
