@@ -20851,4 +20851,10 @@ mod tests {
         assert!(COMPAT.contains("evolve9h wave 169: Upgrade notes keep `idle` beside occupancy on the health page."));
     }
 
+    #[test]
+    fn evolve9h_wave_170_compat_unique_pin_notifications() {
+        const COMPAT: &str = include_str!("../../docs/compatibility.md");
+        assert!(COMPAT.contains("evolve9h wave 170: Upgrade notes keep `notifications` beside occupancy on the health page."));
+    }
+
 }
