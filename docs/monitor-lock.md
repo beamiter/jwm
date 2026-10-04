@@ -942,3 +942,4 @@ Wave 802: Support triage reads health compact `wallpaper` before `get_wall` dump
 Wave 803: Support triage reads health compact `bluetooth` before `get_bt` dumps.
 Wave 804: Support triage reads health compact `resources` before `get_res` dumps.
 Wave 805: Support triage reads health compact `connectivity` before `get_conn` dumps.
+Wave 806: Support triage reads health compact `clipboard` before `get_clip` dumps.

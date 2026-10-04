@@ -1154,6 +1154,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 805: Support triage reads health compact `connectivity` before `get_conn` dumps.
 
+- Wave 806: Support triage reads health compact `clipboard` before `get_clip` dumps.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
