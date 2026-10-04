@@ -19238,4 +19238,10 @@ mod tests {
         assert!(DOCS.contains("Wave 912: Upgrade notes keep health compact `clipboard` beside `get_clip`."));
     }
 
+    #[test]
+    fn evolve8h_wave_913_monitor_lock_unique_pin_idle() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 913: Upgrade notes keep health compact `idle` beside `get_idl`."));
+    }
+
 }

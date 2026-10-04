@@ -1368,6 +1368,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 912: Upgrade notes keep health compact `clipboard` beside `get_clip`.
 
+- Wave 913: Upgrade notes keep health compact `idle` beside `get_idl`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
