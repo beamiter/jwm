@@ -140,6 +140,7 @@ It also prints a compact `recording` line from `get_status.recording`.
 It also prints a compact `audio_recording` line from `get_status.audio_recording`.
 It also prints a compact `capture` line from `get_status.capture`.
 It also prints a compact `waterlily` line from `get_status.waterlily`.
+It also prints a compact `audio` line from `get_status.audio`.
 
 IPC 使用换行分隔的 JSON。工具按块读取并保留同一批到达的后续消息，
 每条响应的正文上限为 1 MiB。普通响应和订阅确认须在开始读取后 5 秒内
