@@ -1352,6 +1352,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 904: Upgrade notes keep health compact `audio_recording` beside `get_arec`.
 
+- Wave 905: Upgrade notes keep health compact `capture` beside `get_cap`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
