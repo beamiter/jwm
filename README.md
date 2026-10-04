@@ -204,6 +204,7 @@ It also prints a compact `bench` line from `get_status.bench` (`get_bench`).
 It also prints a compact `floating` line from `get_status.floating`.
 It also prints a compact `minimized` line from `get_status.minimized`.
 It also prints a compact `sticky` line from `get_status.sticky`.
+It also prints a compact `urgent` line from `get_status.urgent`.
 
 Malformed JSON, invalid argument types, overflow, empty spawn commands, unknown
 commands, and `{ "success": false }` responses produce a non-zero exit status,

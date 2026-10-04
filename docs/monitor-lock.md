@@ -573,3 +573,4 @@ README health text names compact `minimized`.
 README health text names compact `sticky`.
 `tools/README.md` health text names compact `sticky`.
 `jwm-tool health` prints compact `urgent` beside occupancy.
+README health text names compact `urgent`.

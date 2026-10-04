@@ -15694,4 +15694,13 @@ mod tests {
         assert!(TOOL.contains("\"urgent: count=4 focused=44\""));
         assert!(DOCS.contains("`jwm-tool health` prints compact `urgent` beside occupancy"));
     }
+
+    #[test]
+    fn evolve8h_wave_438_readme_health_names_compact_urgent() {
+        const README: &str = include_str!("../../README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(README.contains("compact `urgent` line"));
+        assert!(README.contains("get_status.urgent"));
+        assert!(DOCS.contains("README health text names compact `urgent`"));
+    }
 }
