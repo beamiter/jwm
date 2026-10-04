@@ -1150,3 +1150,4 @@ README health text names compact `ipc_caps`.
 `tools/README.md` health text names compact `ipc_caps`.
 `jwm-tool capabilities` text lists `get_caps -> get_capabilities`.
 `jwm-tool capabilities` text lists `get_cfg -> get_config_status`.
+`jwm-tool capabilities` text lists `get_conf -> get_config`.
