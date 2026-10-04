@@ -17918,4 +17918,10 @@ mod tests {
         assert!(DOCS.contains("Wave 692: `get_arec` and health compact `audio_recording` share one Status nest."));
     }
 
+    #[test]
+    fn evolve8h_wave_693_monitor_lock_unique_pin_capture() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 693: `get_cap` and health compact `capture` share one Status nest."));
+    }
+
 }

@@ -928,6 +928,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 692: `get_arec` and health compact `audio_recording` share one Status nest.
 
+- Wave 693: `get_cap` and health compact `capture` share one Status nest.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
