@@ -1412,6 +1412,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 934: Upgrade notes keep health compact `nmaster` beside `get_nm`.
 
+- Wave 935: Upgrade notes keep health compact `floating` beside `get_status.floating`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
