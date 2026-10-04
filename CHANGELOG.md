@@ -560,6 +560,8 @@ monorepo use independent Semantic Versions.
 
 - `jwm-tool health` prints compact `wayland` beside occupancy.
 
+- README health text names compact `wayland`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

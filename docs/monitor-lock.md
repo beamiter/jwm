@@ -645,3 +645,4 @@ README health text names compact `gesture`.
 `tools/README.md` health text names compact `gesture`.
 `jwm-tool capabilities` text lists `get_gest -> get_gesture`.
 `jwm-tool health` prints compact `wayland` beside occupancy.
+README health text names compact `wayland`.

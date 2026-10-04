@@ -224,6 +224,7 @@ It also prints a compact `magnifier` line from `get_status.magnifier`.
 It also prints a compact `peek` line from `get_status.peek`.
 It also prints a compact `expose` line from `get_status.expose`.
 It also prints a compact `gesture` line from `get_status.gesture`.
+It also prints a compact `wayland` line from `get_status.wayland`.
 
 Malformed JSON, invalid argument types, overflow, empty spawn commands, unknown
 commands, and `{ "success": false }` responses produce a non-zero exit status,
