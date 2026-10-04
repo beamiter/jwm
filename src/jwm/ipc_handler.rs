@@ -15528,4 +15528,13 @@ mod tests {
             "`jwm-tool capabilities` text lists `get_fx,get_effects -> get_effect_status`"
         ));
     }
+
+    #[test]
+    fn evolve8h_wave_420_health_prints_compact_mic() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("mic: muted={muted}"));
+        assert!(TOOL.contains("\"mic: muted=true\""));
+        assert!(DOCS.contains("`jwm-tool health` prints compact `mic` beside occupancy"));
+    }
 }

@@ -3652,6 +3652,19 @@ mod tests {
         assert!(effects_lines.iter().any(|line| {
             line == "effects: overview=false expose=true magnifier=false peek=false annotation=false layout_picker=false debug_hud=true"
         }));
+        assert!(!effects_lines.iter().any(|line| line.starts_with("mic:")));
+
+        let with_compact_mic = serde_json::json!({
+            "health": {"status": "healthy", "reasons": []},
+            "counts": {"windows": 0, "monitors": 1, "workspaces": 1},
+            "config": {"path": "/tmp/config.toml", "diagnostics": {"error_count": 0, "warning_count": 0}},
+            "features": {},
+            "mic": {
+                "muted": true
+            }
+        });
+        let mic_lines = health_output_lines(&with_compact_mic);
+        assert!(mic_lines.iter().any(|line| line == "mic: muted=true"));
 
         let capabilities = serde_json::json!({
             "schema_version": 1,
@@ -4884,6 +4897,15 @@ fn health_output_lines(status: &serde_json::Value) -> Vec<String> {
             flag("layout_picker"),
             flag("debug_hud")
         ));
+    }
+
+    if let Some(mic) = status.get("mic").and_then(serde_json::Value::as_object) {
+        let muted = mic
+            .get("muted")
+            .and_then(serde_json::Value::as_bool)
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".into());
+        lines.push(format!("mic: muted={muted}"));
     }
 
     if let Some(reasons) = status["health"]["reasons"].as_array() {
