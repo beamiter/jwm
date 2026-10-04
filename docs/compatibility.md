@@ -517,3 +517,4 @@ evolve9h wave 293: Nested smoke treats `idle` as a read-only IPC probe.
 evolve9h wave 294: Nested smoke treats `notifications` as a read-only IPC probe.
 evolve9h wave 295: Nested smoke treats `dnd` as a read-only IPC probe.
 evolve9h wave 296: Nested smoke treats `system_ui` as a read-only IPC probe.
+evolve9h wave 297: Upgrade notes keep `version_info` beside occupancy on the health page.
