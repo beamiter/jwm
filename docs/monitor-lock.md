@@ -660,3 +660,4 @@ README health text names compact `audio_recording`.
 README health text names compact `capture`.
 `tools/README.md` health text names compact `capture`.
 `jwm-tool capabilities` text lists `get_cap -> get_capture`.
+`jwm-tool health` prints compact `waterlily` beside occupancy.

@@ -590,6 +590,8 @@ monorepo use independent Semantic Versions.
 
 - `jwm-tool capabilities` text lists `get_cap -> get_capture`.
 
+- `jwm-tool health` prints compact `waterlily` beside occupancy.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

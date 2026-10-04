@@ -16576,4 +16576,17 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn evolve8h_wave_524_health_prints_compact_waterlily() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains(
+            "waterlily: enabled={} active={} worker={}"
+        ));
+        assert!(TOOL.contains(
+            "\"waterlily: enabled=true active=true worker=false\""
+        ));
+        assert!(DOCS.contains("`jwm-tool health` prints compact `waterlily` beside occupancy"));
+    }
+
 }

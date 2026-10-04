@@ -4179,6 +4179,26 @@ mod tests {
             line == "capture: screencopy=true image_copy=false dmabuf=true"
         }));
 
+        assert!(!capture_lines
+            .iter()
+            .any(|line| line.starts_with("waterlily:")));
+
+        let with_compact_waterlily = serde_json::json!({
+            "health": {"status": "healthy", "reasons": []},
+            "counts": {"windows": 0, "monitors": 1, "workspaces": 1},
+            "config": {"path": "/tmp/config.toml", "diagnostics": {"error_count": 0, "warning_count": 0}},
+            "features": {},
+            "waterlily": {
+                "enabled": true,
+                "active": true,
+                "worker_connected": false
+            }
+        });
+        let waterlily_lines = health_output_lines(&with_compact_waterlily);
+        assert!(waterlily_lines.iter().any(|line| {
+            line == "waterlily: enabled=true active=true worker=false"
+        }));
+
         let capabilities = serde_json::json!({
             "schema_version": 1,
             "commands": ["focusstack", "reload_config"],
@@ -5979,6 +5999,22 @@ fn health_output_lines(status: &serde_json::Value) -> Vec<String> {
             flag("screencopy_enabled"),
             flag("image_copy_capture_enabled"),
             flag("dmabuf_advertised")
+        ));
+    }
+
+    if let Some(waterlily) = status.get("waterlily").and_then(serde_json::Value::as_object) {
+        let flag = |name: &str| {
+            waterlily
+                .get(name)
+                .and_then(serde_json::Value::as_bool)
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "-".into())
+        };
+        lines.push(format!(
+            "waterlily: enabled={} active={} worker={}",
+            flag("enabled"),
+            flag("active"),
+            flag("worker_connected")
         ));
     }
 
