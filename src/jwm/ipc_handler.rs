@@ -15592,4 +15592,16 @@ mod tests {
         assert!(TOOLS.contains("get_status.bench"));
         assert!(DOCS.contains("`tools/README.md` health text names compact `bench`"));
     }
+
+    #[test]
+    fn evolve8h_wave_427_capabilities_text_lists_bench_aliases() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains(
+            "query aliases: get_bench,get_bm -> benchmark_report"
+        ));
+        assert!(DOCS.contains(
+            "`jwm-tool capabilities` text lists `get_bench,get_bm -> benchmark_report`"
+        ));
+    }
 }

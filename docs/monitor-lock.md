@@ -562,3 +562,4 @@ README health text names compact `mic`.
 `jwm-tool health` prints compact `bench` beside occupancy.
 README health text names compact `bench`.
 `tools/README.md` health text names compact `bench`.
+`jwm-tool capabilities` text lists `get_bench,get_bm -> benchmark_report`.
