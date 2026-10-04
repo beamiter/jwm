@@ -864,6 +864,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 660: Health compact `windows` is the operator twin of `get_wins`.
 
+- Wave 661: Health compact `effects` is the operator twin of `get_fx`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
