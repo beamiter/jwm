@@ -17828,4 +17828,10 @@ mod tests {
         assert!(DOCS.contains("Wave 677: Health compact `hdr` is the operator twin of `get_status.hdr`."));
     }
 
+    #[test]
+    fn evolve8h_wave_678_monitor_lock_unique_pin_expose() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 678: Health compact `expose` is the operator twin of `get_status.expose`."));
+    }
+
 }

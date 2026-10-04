@@ -898,6 +898,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 677: Health compact `hdr` is the operator twin of `get_status.hdr`.
 
+- Wave 678: Health compact `expose` is the operator twin of `get_status.expose`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
