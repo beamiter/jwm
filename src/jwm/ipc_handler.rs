@@ -19406,4 +19406,10 @@ mod tests {
         assert!(DOCS.contains("Wave 940: Upgrade notes keep health compact `pip` beside `get_status.pip`."));
     }
 
+    #[test]
+    fn evolve8h_wave_941_monitor_lock_unique_pin_blur() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 941: Upgrade notes keep health compact `blur` beside `get_status.blur`."));
+    }
+
 }

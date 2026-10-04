@@ -1424,6 +1424,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 940: Upgrade notes keep health compact `pip` beside `get_status.pip`.
 
+- Wave 941: Upgrade notes keep health compact `blur` beside `get_status.blur`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
