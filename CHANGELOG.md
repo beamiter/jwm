@@ -1504,6 +1504,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 980: Compatibility tables name `get_mute` with health compact `mic`.
 
+- Wave 981: Compatibility tables name `get_bm` with health compact `bench`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

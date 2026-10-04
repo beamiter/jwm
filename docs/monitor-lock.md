@@ -1117,3 +1117,4 @@ Wave 977: Compatibility tables name `get_ws` with health compact `workspaces`.
 Wave 978: Compatibility tables name `get_wins` with health compact `windows`.
 Wave 979: Compatibility tables name `get_fx` with health compact `effects`.
 Wave 980: Compatibility tables name `get_mute` with health compact `mic`.
+Wave 981: Compatibility tables name `get_bm` with health compact `bench`.

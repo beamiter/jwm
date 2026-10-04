@@ -19646,4 +19646,10 @@ mod tests {
         assert!(DOCS.contains("Wave 980: Compatibility tables name `get_mute` with health compact `mic`."));
     }
 
+    #[test]
+    fn evolve8h_wave_981_monitor_lock_unique_pin_bench() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 981: Compatibility tables name `get_bm` with health compact `bench`."));
+    }
+
 }
