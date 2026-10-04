@@ -856,6 +856,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 656: Health compact `scratchpads` is the operator twin of `get_pads`.
 
+- Wave 657: Health compact `focused` is the operator twin of `get_fw`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

@@ -17702,4 +17702,10 @@ mod tests {
         assert!(DOCS.contains("Wave 656: Health compact `scratchpads` is the operator twin of `get_pads`."));
     }
 
+    #[test]
+    fn evolve8h_wave_657_monitor_lock_unique_pin_focused() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 657: Health compact `focused` is the operator twin of `get_fw`."));
+    }
+
 }
