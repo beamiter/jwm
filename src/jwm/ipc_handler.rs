@@ -17267,4 +17267,13 @@ mod tests {
         assert!(DOCS.contains("README health text names `get_mag` beside compact `magnifier`"));
     }
 
+    #[test]
+    fn evolve8h_wave_599_readme_health_names_get_pk_for_peek() {
+        const README: &str = include_str!("../../README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(README.contains("`get_pk`"));
+        assert!(README.contains("compact `peek` line"));
+        assert!(DOCS.contains("README health text names `get_pk` beside compact `peek`"));
+    }
+
 }

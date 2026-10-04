@@ -221,7 +221,7 @@ It also prints a compact `scrolling` line from `get_status.scrolling` (`get_scro
 It also prints a compact `color_management` line from `get_status.color_management` (`get_cm`).
 It also prints a compact `night_light` line from `get_status.night_light` (`get_nl`).
 It also prints a compact `magnifier` line from `get_status.magnifier` (`get_mag`).
-It also prints a compact `peek` line from `get_status.peek`.
+It also prints a compact `peek` line from `get_status.peek` (`get_pk`).
 It also prints a compact `expose` line from `get_status.expose`.
 It also prints a compact `gesture` line from `get_status.gesture`.
 It also prints a compact `wayland` line from `get_status.wayland`.

@@ -740,6 +740,8 @@ monorepo use independent Semantic Versions.
 
 - README health text names `get_mag` beside compact `magnifier`.
 
+- README health text names `get_pk` beside compact `peek`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
