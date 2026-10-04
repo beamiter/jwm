@@ -538,9 +538,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 222 | compatibility 唯一 pin wave 222 waterlily | ✓ |
 | 223 | compatibility 唯一 pin wave 223 audio | ✓ |
 | 224 | compatibility 唯一 pin wave 224 wallpaper | ✓ |
+| 225 | compatibility 唯一 pin wave 225 bluetooth | ✓ |
 | … | evolve9h 进行中 |
 
 ---
+
+## 2026-10-04：evolve9h wave 225 — compatibility pin wave 225 bluetooth
+
+选题 = evolve9h wave 225。compatibility 唯一句子 wave 225 `bluetooth`。
 
 ## 2026-10-04：evolve9h wave 224 — compatibility pin wave 224 wallpaper
 
