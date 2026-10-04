@@ -17540,4 +17540,10 @@ mod tests {
         assert!(DOCS.contains("Wave 629: Health compact `tearing` is the operator twin of `get_th`."));
     }
 
+    #[test]
+    fn evolve8h_wave_630_monitor_lock_unique_pin_xwayland() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 630: Health compact `xwayland` is the operator twin of `get_xw`."));
+    }
+
 }
