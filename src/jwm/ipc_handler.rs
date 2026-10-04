@@ -19688,4 +19688,10 @@ mod tests {
         assert!(DOCS.contains("Wave 987: Compatibility tables name `get_nm` with health compact `nmaster`."));
     }
 
+    #[test]
+    fn evolve8h_wave_988_monitor_lock_unique_pin_floating() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 988: Compatibility tables name `get_status.floating` with health compact `floating`."));
+    }
+
 }

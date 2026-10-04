@@ -1124,3 +1124,4 @@ Wave 984: Compatibility tables name `get_cf` with health compact `cfact`.
 Wave 985: Compatibility tables name `get_gap` with health compact `gaps`.
 Wave 986: Compatibility tables name `get_mf` with health compact `mfact`.
 Wave 987: Compatibility tables name `get_nm` with health compact `nmaster`.
+Wave 988: Compatibility tables name `get_status.floating` with health compact `floating`.
