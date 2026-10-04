@@ -379,9 +379,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 63 | compatibility 唯一 pin wave 63 gesture | ✓ |
 | 64 | compatibility 唯一 pin wave 64 wayland | ✓ |
 | 65 | compatibility 唯一 pin wave 65 recording | ✓ |
+| 66 | compatibility 唯一 pin wave 66 capture | ✓ |
 | … | evolve9h 进行中 |
 
 ---
+
+## 2026-10-04：evolve9h wave 66 — compatibility pin wave 66 capture
+
+选题 = evolve9h wave 66。compatibility 唯一句子 wave 66 `capture`。
 
 ## 2026-10-04：evolve9h wave 65 — compatibility pin wave 65 recording
 
