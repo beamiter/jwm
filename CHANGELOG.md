@@ -852,6 +852,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 654: Health compact `selected` is the operator twin of `get_sel`.
 
+- Wave 655: Health compact `struts` is the operator twin of `get_strut`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

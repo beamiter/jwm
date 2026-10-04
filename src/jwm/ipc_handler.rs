@@ -17690,4 +17690,10 @@ mod tests {
         assert!(DOCS.contains("Wave 654: Health compact `selected` is the operator twin of `get_sel`."));
     }
 
+    #[test]
+    fn evolve8h_wave_655_monitor_lock_unique_pin_struts() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 655: Health compact `struts` is the operator twin of `get_strut`."));
+    }
+
 }
