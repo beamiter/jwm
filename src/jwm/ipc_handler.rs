@@ -19022,4 +19022,10 @@ mod tests {
         assert!(DOCS.contains("Wave 876: Nested smoke checks health compact `closed_placement` after `get_cp`."));
     }
 
+    #[test]
+    fn evolve8h_wave_877_monitor_lock_unique_pin_prev_layout() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 877: Nested smoke checks health compact `prev_layout` after `get_pl`."));
+    }
+
 }

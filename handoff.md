@@ -1579,9 +1579,15 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 875 | monitor-lock 唯一 pin wave 875 bench | ✓ |
 | 876 | monitor-lock 唯一 pin wave 876 closed_placement | ✓ |
 | 876 | monitor-lock 唯一 pin wave 876 closed_placement | ✓ |
+| 877 | monitor-lock 唯一 pin wave 877 prev_layout | ✓ |
+| 877 | monitor-lock 唯一 pin wave 877 prev_layout | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 877 — monitor-lock pin wave 877 prev_layout
+
+选题 = evolve8h wave 877。monitor-lock 唯一句子 wave 877 `prev_layout`。
 
 ## 2026-10-03：evolve8h wave 876 — monitor-lock pin wave 876 closed_placement
 
