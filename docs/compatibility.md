@@ -515,3 +515,4 @@ evolve9h wave 291: Nested smoke treats `media` as a read-only IPC probe.
 evolve9h wave 292: Nested smoke treats `clipboard` as a read-only IPC probe.
 evolve9h wave 293: Nested smoke treats `idle` as a read-only IPC probe.
 evolve9h wave 294: Nested smoke treats `notifications` as a read-only IPC probe.
+evolve9h wave 295: Nested smoke treats `dnd` as a read-only IPC probe.
