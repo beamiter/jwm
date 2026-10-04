@@ -17684,4 +17684,10 @@ mod tests {
         assert!(DOCS.contains("Wave 653: Health compact `tabs` is the operator twin of `get_tab`."));
     }
 
+    #[test]
+    fn evolve8h_wave_654_monitor_lock_unique_pin_selected() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 654: Health compact `selected` is the operator twin of `get_sel`."));
+    }
+
 }

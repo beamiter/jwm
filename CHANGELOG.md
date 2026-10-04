@@ -850,6 +850,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 653: Health compact `tabs` is the operator twin of `get_tab`.
 
+- Wave 654: Health compact `selected` is the operator twin of `get_sel`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
