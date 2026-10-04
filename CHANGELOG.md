@@ -1422,6 +1422,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 939: Upgrade notes keep health compact `fullscreen` beside `get_status.fullscreen`.
 
+- Wave 940: Upgrade notes keep health compact `pip` beside `get_status.pip`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

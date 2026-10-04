@@ -1076,3 +1076,4 @@ Wave 936: Upgrade notes keep health compact `minimized` beside `get_status.minim
 Wave 937: Upgrade notes keep health compact `sticky` beside `get_status.sticky`.
 Wave 938: Upgrade notes keep health compact `urgent` beside `get_status.urgent`.
 Wave 939: Upgrade notes keep health compact `fullscreen` beside `get_status.fullscreen`.
+Wave 940: Upgrade notes keep health compact `pip` beside `get_status.pip`.

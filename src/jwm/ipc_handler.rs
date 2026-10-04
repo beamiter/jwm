@@ -19400,4 +19400,10 @@ mod tests {
         assert!(DOCS.contains("Wave 939: Upgrade notes keep health compact `fullscreen` beside `get_status.fullscreen`."));
     }
 
+    #[test]
+    fn evolve8h_wave_940_monitor_lock_unique_pin_pip() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 940: Upgrade notes keep health compact `pip` beside `get_status.pip`."));
+    }
+
 }
