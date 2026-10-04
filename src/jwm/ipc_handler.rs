@@ -16340,4 +16340,17 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn evolve8h_wave_501_health_prints_compact_expose() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains(
+            "expose: active={active}"
+        ));
+        assert!(TOOL.contains(
+            "\"expose: active=true\""
+        ));
+        assert!(DOCS.contains("`jwm-tool health` prints compact `expose` beside occupancy"));
+    }
+
 }

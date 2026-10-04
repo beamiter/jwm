@@ -4063,6 +4063,24 @@ mod tests {
             line == "peek: active=true compositor=true"
         }));
 
+        assert!(!peek_lines
+            .iter()
+            .any(|line| line.starts_with("expose:")));
+
+        let with_compact_expose = serde_json::json!({
+            "health": {"status": "healthy", "reasons": []},
+            "counts": {"windows": 0, "monitors": 1, "workspaces": 1},
+            "config": {"path": "/tmp/config.toml", "diagnostics": {"error_count": 0, "warning_count": 0}},
+            "features": {},
+            "expose": {
+                "active": true
+            }
+        });
+        let expose_lines = health_output_lines(&with_compact_expose);
+        assert!(expose_lines.iter().any(|line| {
+            line == "expose: active=true"
+        }));
+
         let capabilities = serde_json::json!({
             "schema_version": 1,
             "commands": ["focusstack", "reload_config"],
@@ -5759,6 +5777,15 @@ fn health_output_lines(status: &serde_json::Value) -> Vec<String> {
             flag("active"),
             flag("compositor_active")
         ));
+    }
+
+    if let Some(expose) = status.get("expose").and_then(serde_json::Value::as_object) {
+        let active = expose
+            .get("active")
+            .and_then(serde_json::Value::as_bool)
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".into());
+        lines.push(format!("expose: active={active}"));
     }
 
     if let Some(reasons) = status["health"]["reasons"].as_array() {
