@@ -1540,6 +1540,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 998: Compatibility tables name `get_power` with health compact `power`.
 
+- Wave 999: Bar occupancy sits beside health compact `session_lock` (`get_lock`).
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

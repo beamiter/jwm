@@ -19754,4 +19754,10 @@ mod tests {
         assert!(DOCS.contains("Wave 998: Compatibility tables name `get_power` with health compact `power`."));
     }
 
+    #[test]
+    fn evolve8h_wave_999_monitor_lock_unique_pin_session_lock() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 999: Bar occupancy sits beside health compact `session_lock` (`get_lock`)."));
+    }
+
 }
