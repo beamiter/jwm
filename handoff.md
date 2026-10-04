@@ -863,9 +863,15 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 517 | README health 点名 compact audio_recording | ✓ |
 | 518 | tools/README health 点名 compact audio_recording | ✓ |
 | 518 | tools/README health 点名 compact audio_recording | ✓ |
+| 519 | capabilities 文本列出 get_arec -> get_audio_recording | ✓ |
+| 519 | capabilities 文本列出 get_arec -> get_audio_recording | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 519 — capabilities text lists audio_recording alias
+
+选题 = evolve8h wave 519。`jwm-tool capabilities` 文本列出 `get_arec -> get_audio_recording`。
 
 ## 2026-10-03：evolve8h wave 518 — tools/README health names compact audio_recording
 

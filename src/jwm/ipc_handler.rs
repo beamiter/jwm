@@ -16525,4 +16525,14 @@ mod tests {
         assert!(DOCS.contains("`tools/README.md` health text names compact `audio_recording`"));
     }
 
+    #[test]
+    fn evolve8h_wave_519_capabilities_text_lists_audio_recording_alias() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("query aliases: get_arec -> get_audio_recording"));
+        assert!(DOCS.contains(
+            "`jwm-tool capabilities` text lists `get_arec -> get_audio_recording`"
+        ));
+    }
+
 }
