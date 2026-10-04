@@ -1864,6 +1864,8 @@ monorepo use independent Semantic Versions.
 
 - evolve9h wave 160: Upgrade notes keep `waterlily` beside occupancy on the health page.
 
+- evolve9h wave 161: Upgrade notes keep `audio` beside occupancy on the health page.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
