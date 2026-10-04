@@ -18488,4 +18488,10 @@ mod tests {
         assert!(DOCS.contains("Wave 787: Support triage reads health compact `session_lock` before `get_lock` dumps."));
     }
 
+    #[test]
+    fn evolve8h_wave_788_monitor_lock_unique_pin_tearing() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 788: Support triage reads health compact `tearing` before `get_th` dumps."));
+    }
+
 }

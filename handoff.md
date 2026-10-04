@@ -1401,9 +1401,15 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 786 | monitor-lock 唯一 pin wave 786 power | ✓ |
 | 787 | monitor-lock 唯一 pin wave 787 session_lock | ✓ |
 | 787 | monitor-lock 唯一 pin wave 787 session_lock | ✓ |
+| 788 | monitor-lock 唯一 pin wave 788 tearing | ✓ |
+| 788 | monitor-lock 唯一 pin wave 788 tearing | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 788 — monitor-lock pin wave 788 tearing
+
+选题 = evolve8h wave 788。monitor-lock 唯一句子 wave 788 `tearing`。
 
 ## 2026-10-03：evolve8h wave 787 — monitor-lock pin wave 787 session_lock
 
