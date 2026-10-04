@@ -1680,6 +1680,8 @@ monorepo use independent Semantic Versions.
 
 - evolve9h wave 68: `jwm-tool capabilities` remains the catalog for `audio` query aliases.
 
+- evolve9h wave 69: `jwm-tool capabilities` remains the catalog for `wallpaper` query aliases.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
