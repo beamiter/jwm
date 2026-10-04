@@ -900,6 +900,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 678: Health compact `expose` is the operator twin of `get_status.expose`.
 
+- Wave 679: Health compact `media` is the operator twin of `get_media`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
