@@ -18050,4 +18050,10 @@ mod tests {
         assert!(DOCS.contains("Wave 714: `get_fx` and health compact `effects` share one Status nest."));
     }
 
+    #[test]
+    fn evolve8h_wave_715_monitor_lock_unique_pin_mic() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 715: `get_mute` and health compact `mic` share one Status nest."));
+    }
+
 }

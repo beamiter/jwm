@@ -972,6 +972,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 714: `get_fx` and health compact `effects` share one Status nest.
 
+- Wave 715: `get_mute` and health compact `mic` share one Status nest.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
