@@ -16730,4 +16730,14 @@ mod tests {
         assert!(DOCS.contains("`tools/README.md` health text names compact `bluetooth`"));
     }
 
+    #[test]
+    fn evolve8h_wave_539_capabilities_text_lists_bluetooth_alias() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("query aliases: get_bt -> get_bluetooth"));
+        assert!(DOCS.contains(
+            "`jwm-tool capabilities` text lists `get_bt -> get_bluetooth`"
+        ));
+    }
+
 }

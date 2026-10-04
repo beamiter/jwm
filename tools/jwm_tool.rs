@@ -6189,6 +6189,7 @@ fn capabilities_output_lines(capabilities: &serde_json::Value) -> Vec<String> {
         "query aliases: get_wly -> get_waterlily".to_string(),
         "query aliases: get_devices -> get_audio".to_string(),
         "query aliases: get_wall -> get_wallpaper".to_string(),
+        "query aliases: get_bt -> get_bluetooth".to_string(),
     ]
 }
 

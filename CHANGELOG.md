@@ -620,6 +620,8 @@ monorepo use independent Semantic Versions.
 
 - `tools/README.md` health text names compact `bluetooth`.
 
+- `jwm-tool capabilities` text lists `get_bt -> get_bluetooth`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
