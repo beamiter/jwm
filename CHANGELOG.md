@@ -816,6 +816,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 636: Health compact `gesture` is the operator twin of `get_gest`.
 
+- Wave 637: Health compact `wayland` is the operator twin of `get_wl`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

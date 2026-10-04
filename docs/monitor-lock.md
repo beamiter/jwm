@@ -773,3 +773,4 @@ Wave 633: Health compact `night_light` is the operator twin of `get_nl`.
 Wave 634: Health compact `magnifier` is the operator twin of `get_mag`.
 Wave 635: Health compact `peek` is the operator twin of `get_pk`.
 Wave 636: Health compact `gesture` is the operator twin of `get_gest`.
+Wave 637: Health compact `wayland` is the operator twin of `get_wl`.
