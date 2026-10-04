@@ -19616,4 +19616,10 @@ mod tests {
         assert!(DOCS.contains("Wave 975: Compatibility tables name `get_fw` with health compact `focused`."));
     }
 
+    #[test]
+    fn evolve8h_wave_976_monitor_lock_unique_pin_monitors() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 976: Compatibility tables name `get_mons` with health compact `monitors`."));
+    }
+
 }
