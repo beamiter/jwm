@@ -1346,6 +1346,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 901: Upgrade notes keep health compact `gesture` beside `get_gest`.
 
+- Wave 902: Upgrade notes keep health compact `wayland` beside `get_wl`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

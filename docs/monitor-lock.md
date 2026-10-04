@@ -1038,3 +1038,4 @@ Wave 898: Upgrade notes keep health compact `night_light` beside `get_nl`.
 Wave 899: Upgrade notes keep health compact `magnifier` beside `get_mag`.
 Wave 900: Upgrade notes keep health compact `peek` beside `get_pk`.
 Wave 901: Upgrade notes keep health compact `gesture` beside `get_gest`.
+Wave 902: Upgrade notes keep health compact `wayland` beside `get_wl`.
