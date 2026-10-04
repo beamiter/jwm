@@ -15712,4 +15712,15 @@ mod tests {
         assert!(TOOLS.contains("get_status.urgent"));
         assert!(DOCS.contains("`tools/README.md` health text names compact `urgent`"));
     }
+
+    #[test]
+    fn evolve8h_wave_440_health_prints_compact_fullscreen() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("fullscreen: count={count} focused={focused_id}"));
+        assert!(TOOL.contains("\"fullscreen: count=1 focused=55\""));
+        assert!(DOCS.contains(
+            "`jwm-tool health` prints compact `fullscreen` beside occupancy"
+        ));
+    }
 }
