@@ -15640,4 +15640,13 @@ mod tests {
         assert!(TOOL.contains("\"minimized: count=2 focused=22\""));
         assert!(DOCS.contains("`jwm-tool health` prints compact `minimized` beside occupancy"));
     }
+
+    #[test]
+    fn evolve8h_wave_432_readme_health_names_compact_minimized() {
+        const README: &str = include_str!("../../README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(README.contains("compact `minimized` line"));
+        assert!(README.contains("get_status.minimized"));
+        assert!(DOCS.contains("README health text names compact `minimized`"));
+    }
 }

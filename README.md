@@ -202,6 +202,7 @@ It also prints a compact `effects` line from `get_status.effects` (`get_fx`).
 It also prints a compact `mic` line from `get_status.mic` (`get_mute`).
 It also prints a compact `bench` line from `get_status.bench` (`get_bench`).
 It also prints a compact `floating` line from `get_status.floating`.
+It also prints a compact `minimized` line from `get_status.minimized`.
 
 Malformed JSON, invalid argument types, overflow, empty spawn commands, unknown
 commands, and `{ "success": false }` responses produce a non-zero exit status,
