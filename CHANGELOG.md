@@ -1640,6 +1640,8 @@ monorepo use independent Semantic Versions.
 
 - evolve9h wave 48: Health compact `system_ui` is diagnosable through `jwm-tool health`.
 
+- evolve9h wave 49: `jwm-tool capabilities` remains the catalog for `version_info` query aliases.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

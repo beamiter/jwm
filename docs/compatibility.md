@@ -269,3 +269,4 @@ evolve9h wave 45: Health compact `idle` is diagnosable through `jwm-tool health`
 evolve9h wave 46: Health compact `notifications` is diagnosable through `jwm-tool health`.
 evolve9h wave 47: Health compact `dnd` is diagnosable through `jwm-tool health`.
 evolve9h wave 48: Health compact `system_ui` is diagnosable through `jwm-tool health`.
+evolve9h wave 49: `jwm-tool capabilities` remains the catalog for `version_info` query aliases.
