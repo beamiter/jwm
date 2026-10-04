@@ -21679,4 +21679,10 @@ mod tests {
         assert!(COMPAT.contains("evolve9h wave 307: Upgrade notes keep `scrolling` beside occupancy on the health page."));
     }
 
+    #[test]
+    fn evolve9h_wave_308_compat_unique_pin_night_light() {
+        const COMPAT: &str = include_str!("../../docs/compatibility.md");
+        assert!(COMPAT.contains("evolve9h wave 308: Upgrade notes keep `night_light` beside occupancy on the health page."));
+    }
+
 }
