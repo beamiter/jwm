@@ -1309,9 +1309,15 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 740 | monitor-lock 唯一 pin wave 740 magnifier | ✓ |
 | 741 | monitor-lock 唯一 pin wave 741 peek | ✓ |
 | 741 | monitor-lock 唯一 pin wave 741 peek | ✓ |
+| 742 | monitor-lock 唯一 pin wave 742 gesture | ✓ |
+| 742 | monitor-lock 唯一 pin wave 742 gesture | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 742 — monitor-lock pin wave 742 gesture
+
+选题 = evolve8h wave 742。monitor-lock 唯一句子 wave 742 `gesture`。
 
 ## 2026-10-03：evolve8h wave 741 — monitor-lock pin wave 741 peek
 
