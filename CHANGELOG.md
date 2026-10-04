@@ -1010,6 +1010,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 733: `get_power` and health compact `power` share one Status nest.
 
+- Wave 734: Doctor bundles include health compact `session_lock` from `get_lock`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

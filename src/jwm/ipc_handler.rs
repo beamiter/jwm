@@ -18164,4 +18164,10 @@ mod tests {
         assert!(DOCS.contains("Wave 733: `get_power` and health compact `power` share one Status nest."));
     }
 
+    #[test]
+    fn evolve8h_wave_734_monitor_lock_unique_pin_session_lock() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 734: Doctor bundles include health compact `session_lock` from `get_lock`."));
+    }
+
 }
