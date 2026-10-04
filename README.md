@@ -235,6 +235,7 @@ It also prints a compact `bluetooth` line from `get_status.bluetooth`.
 It also prints a compact `resources` line from `get_status.resources`.
 It also prints a compact `connectivity` line from `get_status.connectivity`.
 It also prints a compact `power` line from `get_status.power`.
+It also prints a compact `media` line from `get_status.media`.
 
 Malformed JSON, invalid argument types, overflow, empty spawn commands, unknown
 commands, and `{ "success": false }` responses produce a non-zero exit status,
