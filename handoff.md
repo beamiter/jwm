@@ -411,9 +411,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 95 | compatibility 唯一 pin wave 95 wayland | ✓ |
 | 96 | compatibility 唯一 pin wave 96 recording | ✓ |
 | 97 | compatibility 唯一 pin wave 97 capture | ✓ |
+| 98 | compatibility 唯一 pin wave 98 waterlily | ✓ |
 | … | evolve9h 进行中 |
 
 ---
+
+## 2026-10-04：evolve9h wave 98 — compatibility pin wave 98 waterlily
+
+选题 = evolve9h wave 98。compatibility 唯一句子 wave 98 `waterlily`。
 
 ## 2026-10-04：evolve9h wave 97 — compatibility pin wave 97 capture
 

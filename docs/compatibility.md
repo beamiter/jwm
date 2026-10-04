@@ -318,3 +318,4 @@ evolve9h wave 94: Support bundles should include `gesture` when health is degrad
 evolve9h wave 95: Support bundles should include `wayland` when health is degraded.
 evolve9h wave 96: Support bundles should include `recording` when health is degraded.
 evolve9h wave 97: Support bundles should include `capture` when health is degraded.
+evolve9h wave 98: Support bundles should include `waterlily` when health is degraded.
