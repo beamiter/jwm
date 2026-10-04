@@ -17960,4 +17960,10 @@ mod tests {
         assert!(DOCS.contains("Wave 699: `get_conn` and health compact `connectivity` share one Status nest."));
     }
 
+    #[test]
+    fn evolve8h_wave_700_monitor_lock_unique_pin_clipboard() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 700: `get_clip` and health compact `clipboard` share one Status nest."));
+    }
+
 }

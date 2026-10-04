@@ -942,6 +942,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 699: `get_conn` and health compact `connectivity` share one Status nest.
 
+- Wave 700: `get_clip` and health compact `clipboard` share one Status nest.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

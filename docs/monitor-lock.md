@@ -836,3 +836,4 @@ Wave 696: `get_wall` and health compact `wallpaper` share one Status nest.
 Wave 697: `get_bt` and health compact `bluetooth` share one Status nest.
 Wave 698: `get_res` and health compact `resources` share one Status nest.
 Wave 699: `get_conn` and health compact `connectivity` share one Status nest.
+Wave 700: `get_clip` and health compact `clipboard` share one Status nest.
