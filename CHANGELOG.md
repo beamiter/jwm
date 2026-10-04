@@ -1222,6 +1222,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 839: Support triage reads health compact `power` before `get_power` dumps.
 
+- Wave 840: Nested smoke checks health compact `session_lock` after `get_lock`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

@@ -976,3 +976,4 @@ Wave 836: Support triage reads health compact `hdr` before `get_status.hdr` dump
 Wave 837: Support triage reads health compact `expose` before `get_status.expose` dumps.
 Wave 838: Support triage reads health compact `media` before `get_media` dumps.
 Wave 839: Support triage reads health compact `power` before `get_power` dumps.
+Wave 840: Nested smoke checks health compact `session_lock` after `get_lock`.

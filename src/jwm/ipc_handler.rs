@@ -18800,4 +18800,10 @@ mod tests {
         assert!(DOCS.contains("Wave 839: Support triage reads health compact `power` before `get_power` dumps."));
     }
 
+    #[test]
+    fn evolve8h_wave_840_monitor_lock_unique_pin_session_lock() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 840: Nested smoke checks health compact `session_lock` after `get_lock`."));
+    }
+
 }
