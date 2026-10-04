@@ -1059,3 +1059,4 @@ Wave 919: Upgrade notes keep health compact `selected` beside `get_sel`.
 Wave 920: Upgrade notes keep health compact `struts` beside `get_strut`.
 Wave 921: Upgrade notes keep health compact `scratchpads` beside `get_pads`.
 Wave 922: Upgrade notes keep health compact `focused` beside `get_fw`.
+Wave 923: Upgrade notes keep health compact `monitors` beside `get_mons`.
