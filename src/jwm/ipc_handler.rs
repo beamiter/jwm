@@ -21259,4 +21259,10 @@ mod tests {
         assert!(COMPAT.contains("evolve9h wave 237: Support bundles should include `ipc_caps` when health is degraded."));
     }
 
+    #[test]
+    fn evolve9h_wave_238_compat_unique_pin_config() {
+        const COMPAT: &str = include_str!("../../docs/compatibility.md");
+        assert!(COMPAT.contains("evolve9h wave 238: Support bundles should include `config` when health is degraded."));
+    }
+
 }
