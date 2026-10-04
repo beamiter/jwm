@@ -4100,6 +4100,25 @@ mod tests {
             line == "gesture: bindings=4 scrolling=2"
         }));
 
+        assert!(!gesture_lines
+            .iter()
+            .any(|line| line.starts_with("wayland:")));
+
+        let with_compact_wayland = serde_json::json!({
+            "health": {"status": "healthy", "reasons": []},
+            "counts": {"windows": 0, "monitors": 1, "workspaces": 1},
+            "config": {"path": "/tmp/config.toml", "diagnostics": {"error_count": 0, "warning_count": 0}},
+            "features": {},
+            "wayland": {
+                "backend_family": "wayland-udev",
+                "outputs": 2
+            }
+        });
+        let wayland_lines = health_output_lines(&with_compact_wayland);
+        assert!(wayland_lines.iter().any(|line| {
+            line == "wayland: family=wayland-udev outputs=2"
+        }));
+
         let capabilities = serde_json::json!({
             "schema_version": 1,
             "commands": ["focusstack", "reload_config"],
@@ -5820,6 +5839,27 @@ fn health_output_lines(status: &serde_json::Value) -> Vec<String> {
             .unwrap_or_else(|| "-".into());
         lines.push(format!(
             "gesture: bindings={binding_count} scrolling={scrolling_binding_count}"
+        ));
+    }
+
+    if let Some(wayland) = status.get("wayland").and_then(serde_json::Value::as_object) {
+        let backend_family = wayland
+            .get("backend_family")
+            .and_then(|v| {
+                if v.is_null() {
+                    None
+                } else {
+                    v.as_str()
+                }
+            })
+            .unwrap_or("-");
+        let outputs = wayland
+            .get("outputs")
+            .and_then(|v| v.as_u64().or_else(|| v.as_i64().map(|n| n as u64)))
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".into());
+        lines.push(format!(
+            "wayland: family={backend_family} outputs={outputs}"
         ));
     }
 

@@ -558,6 +558,8 @@ monorepo use independent Semantic Versions.
 
 - `jwm-tool capabilities` text lists `get_gest -> get_gesture`.
 
+- `jwm-tool health` prints compact `wayland` beside occupancy.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
