@@ -17092,4 +17092,12 @@ mod tests {
         assert!(DOCS.contains("`docs/resources.md` names compact `resources` beside health"));
     }
 
+    #[test]
+    fn evolve8h_wave_578_doc_media_controls_names_compact_media() {
+        const FEATURE: &str = include_str!("../../docs/media-controls.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(FEATURE.contains("compact `media`"));
+        assert!(DOCS.contains("`docs/media-controls.md` names compact `media` beside health"));
+    }
+
 }

@@ -981,9 +981,15 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 576 | docs/hdr.md 点名 compact hdr | ✓ |
 | 577 | docs/resources.md 点名 compact resources | ✓ |
 | 577 | docs/resources.md 点名 compact resources | ✓ |
+| 578 | docs/media-controls.md 点名 compact media | ✓ |
+| 578 | docs/media-controls.md 点名 compact media | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 578 — docs/media-controls.md names compact media
+
+选题 = evolve8h wave 578。`docs/media-controls.md` 点名 health compact `media`。
 
 ## 2026-10-03：evolve8h wave 577 — docs/resources.md names compact resources
 

@@ -180,3 +180,5 @@ picked up by a 3-second sweep.
 Bars can subscribe to `media/status` for a now-playing widget without talking
 to MPRIS themselves. See [notifications](notifications.md) for building and
 installing `jwm-bridge`, which serves both features from one process.
+
+`jwm-tool health` prints compact `media` for media controls operators.

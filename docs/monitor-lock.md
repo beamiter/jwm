@@ -714,3 +714,4 @@ README health text names compact `media`.
 `docs/waterlily.md` names compact `waterlily` beside health.
 `docs/hdr.md` names compact `hdr` beside health.
 `docs/resources.md` names compact `resources` beside health.
+`docs/media-controls.md` names compact `media` beside health.
