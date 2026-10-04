@@ -18476,4 +18476,10 @@ mod tests {
         assert!(DOCS.contains("Wave 785: Doctor bundles include health compact `media` from `get_media`."));
     }
 
+    #[test]
+    fn evolve8h_wave_786_monitor_lock_unique_pin_power() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 786: Doctor bundles include health compact `power` from `get_power`."));
+    }
+
 }
