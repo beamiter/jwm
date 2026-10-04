@@ -18590,4 +18590,10 @@ mod tests {
         assert!(DOCS.contains("Wave 804: Support triage reads health compact `resources` before `get_res` dumps."));
     }
 
+    #[test]
+    fn evolve8h_wave_805_monitor_lock_unique_pin_connectivity() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 805: Support triage reads health compact `connectivity` before `get_conn` dumps."));
+    }
+
 }
