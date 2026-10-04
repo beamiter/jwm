@@ -1780,6 +1780,8 @@ monorepo use independent Semantic Versions.
 
 - evolve9h wave 118: Nested smoke treats `session_lock` as a read-only IPC probe.
 
+- evolve9h wave 119: Nested smoke treats `tearing` as a read-only IPC probe.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
