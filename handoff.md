@@ -490,9 +490,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 174 | compatibility 唯一 pin wave 174 metrics | ✓ |
 | 175 | compatibility 唯一 pin wave 175 ipc_caps | ✓ |
 | 176 | compatibility 唯一 pin wave 176 config | ✓ |
+| 177 | compatibility 唯一 pin wave 177 status | ✓ |
 | … | evolve9h 进行中 |
 
 ---
+
+## 2026-10-04：evolve9h wave 177 — compatibility pin wave 177 status
+
+选题 = evolve9h wave 177。compatibility 唯一句子 wave 177 `status`。
 
 ## 2026-10-04：evolve9h wave 176 — compatibility pin wave 176 config
 
