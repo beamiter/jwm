@@ -1108,6 +1108,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 782: Doctor bundles include health compact `blur` from `get_status.blur`.
 
+- Wave 783: Doctor bundles include health compact `hdr` from `get_status.hdr`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
