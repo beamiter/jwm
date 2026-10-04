@@ -836,6 +836,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 646: Health compact `connectivity` is the operator twin of `get_conn`.
 
+- Wave 647: Health compact `clipboard` is the operator twin of `get_clip`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

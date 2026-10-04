@@ -17642,4 +17642,10 @@ mod tests {
         assert!(DOCS.contains("Wave 646: Health compact `connectivity` is the operator twin of `get_conn`."));
     }
 
+    #[test]
+    fn evolve8h_wave_647_monitor_lock_unique_pin_clipboard() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 647: Health compact `clipboard` is the operator twin of `get_clip`."));
+    }
+
 }
