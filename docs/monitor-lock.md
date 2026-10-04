@@ -1033,3 +1033,4 @@ Wave 893: Upgrade notes keep health compact `session_lock` beside `get_lock`.
 Wave 894: Upgrade notes keep health compact `tearing` beside `get_th`.
 Wave 895: Upgrade notes keep health compact `xwayland` beside `get_xw`.
 Wave 896: Upgrade notes keep health compact `scrolling` beside `get_scroll`.
+Wave 897: Upgrade notes keep health compact `color_management` beside `get_cm`.

@@ -1336,6 +1336,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 896: Upgrade notes keep health compact `scrolling` beside `get_scroll`.
 
+- Wave 897: Upgrade notes keep health compact `color_management` beside `get_cm`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
