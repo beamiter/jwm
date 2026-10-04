@@ -951,9 +951,15 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 561 | capabilities 文本列出 get_media -> get_media_status | ✓ |
 | 562 | docs/expose.md 点名 compact expose | ✓ |
 | 562 | docs/expose.md 点名 compact expose | ✓ |
+| 563 | docs/tags-overview.md 点名 compact tabs | ✓ |
+| 563 | docs/tags-overview.md 点名 compact tabs | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 563 — docs/tags-overview.md names compact tabs
+
+选题 = evolve8h wave 563。`docs/tags-overview.md` 点名 health compact `tabs`。
 
 ## 2026-10-03：evolve8h wave 562 — docs/expose.md names compact expose
 

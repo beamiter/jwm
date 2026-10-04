@@ -668,6 +668,8 @@ monorepo use independent Semantic Versions.
 
 - `docs/expose.md` names compact `expose` beside health.
 
+- `docs/tags-overview.md` names compact `tabs` beside health.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

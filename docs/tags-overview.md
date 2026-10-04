@@ -156,3 +156,5 @@ so occupancy subscribers see the new tag, layout knobs, and counts.
   wireframe hit-test and the urgency badge anchor shared by both
   compositors, so a cell, its outlines and its marker are exactly where the
   WM thinks they are.
+
+`jwm-tool health` prints compact `tabs` for tags overview operators.

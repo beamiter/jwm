@@ -16972,4 +16972,12 @@ mod tests {
         assert!(DOCS.contains("`docs/expose.md` names compact `expose` beside health"));
     }
 
+    #[test]
+    fn evolve8h_wave_563_doc_tags_overview_names_compact_tabs() {
+        const FEATURE: &str = include_str!("../../docs/tags-overview.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(FEATURE.contains("compact `tabs`"));
+        assert!(DOCS.contains("`docs/tags-overview.md` names compact `tabs` beside health"));
+    }
+
 }
