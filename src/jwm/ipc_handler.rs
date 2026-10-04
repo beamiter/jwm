@@ -18020,4 +18020,10 @@ mod tests {
         assert!(DOCS.contains("Wave 709: `get_pads` and health compact `scratchpads` share one Status nest."));
     }
 
+    #[test]
+    fn evolve8h_wave_710_monitor_lock_unique_pin_focused() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 710: `get_fw` and health compact `focused` share one Status nest."));
+    }
+
 }
