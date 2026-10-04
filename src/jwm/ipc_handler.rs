@@ -21379,4 +21379,10 @@ mod tests {
         assert!(COMPAT.contains("evolve9h wave 257: Support bundles should include `resources` when health is degraded."));
     }
 
+    #[test]
+    fn evolve9h_wave_258_compat_unique_pin_connectivity() {
+        const COMPAT: &str = include_str!("../../docs/compatibility.md");
+        assert!(COMPAT.contains("evolve9h wave 258: Support bundles should include `connectivity` when health is degraded."));
+    }
+
 }
