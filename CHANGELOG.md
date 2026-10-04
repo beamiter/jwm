@@ -920,6 +920,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 688: `get_pk` and health compact `peek` share one Status nest.
 
+- Wave 689: `get_gest` and health compact `gesture` share one Status nest.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
