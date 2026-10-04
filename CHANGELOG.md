@@ -834,6 +834,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 645: Health compact `resources` is the operator twin of `get_res`.
 
+- Wave 646: Health compact `connectivity` is the operator twin of `get_conn`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
