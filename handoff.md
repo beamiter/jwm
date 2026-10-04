@@ -402,9 +402,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 86 | compatibility 唯一 pin wave 86 window | ✓ |
 | 87 | compatibility 唯一 pin wave 87 session_lock | ✓ |
 | 88 | compatibility 唯一 pin wave 88 tearing | ✓ |
+| 89 | compatibility 唯一 pin wave 89 xwayland | ✓ |
 | … | evolve9h 进行中 |
 
 ---
+
+## 2026-10-04：evolve9h wave 89 — compatibility pin wave 89 xwayland
+
+选题 = evolve9h wave 89。compatibility 唯一句子 wave 89 `xwayland`。
 
 ## 2026-10-04：evolve9h wave 88 — compatibility pin wave 88 tearing
 
