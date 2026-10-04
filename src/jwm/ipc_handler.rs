@@ -19987,4 +19987,10 @@ mod tests {
         assert!(COMPAT.contains("evolve9h wave 25: Health compact `session_lock` is diagnosable through `jwm-tool health`."));
     }
 
+    #[test]
+    fn evolve9h_wave_26_compat_unique_pin_tearing() {
+        const COMPAT: &str = include_str!("../../docs/compatibility.md");
+        assert!(COMPAT.contains("evolve9h wave 26: Health compact `tearing` is diagnosable through `jwm-tool health`."));
+    }
+
 }

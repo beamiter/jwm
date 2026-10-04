@@ -339,9 +339,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 23 | compatibility 唯一 pin wave 23 tree | ✓ |
 | 24 | compatibility 唯一 pin wave 24 window | ✓ |
 | 25 | compatibility 唯一 pin wave 25 session_lock | ✓ |
+| 26 | compatibility 唯一 pin wave 26 tearing | ✓ |
 | … | evolve9h 进行中 |
 
 ---
+
+## 2026-10-04：evolve9h wave 26 — compatibility pin wave 26 tearing
+
+选题 = evolve9h wave 26。compatibility 唯一句子 wave 26 `tearing`。
 
 ## 2026-10-04：evolve9h wave 25 — compatibility pin wave 25 session_lock
 
