@@ -18848,4 +18848,10 @@ mod tests {
         assert!(DOCS.contains("Wave 847: Nested smoke checks health compact `peek` after `get_pk`."));
     }
 
+    #[test]
+    fn evolve8h_wave_848_monitor_lock_unique_pin_gesture() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 848: Nested smoke checks health compact `gesture` after `get_gest`."));
+    }
+
 }
