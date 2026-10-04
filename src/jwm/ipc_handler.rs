@@ -18170,4 +18170,10 @@ mod tests {
         assert!(DOCS.contains("Wave 734: Doctor bundles include health compact `session_lock` from `get_lock`."));
     }
 
+    #[test]
+    fn evolve8h_wave_735_monitor_lock_unique_pin_tearing() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 735: Doctor bundles include health compact `tearing` from `get_th`."));
+    }
+
 }
