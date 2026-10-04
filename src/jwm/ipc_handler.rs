@@ -19544,4 +19544,10 @@ mod tests {
         assert!(DOCS.contains("Wave 963: Compatibility tables name `get_res` with health compact `resources`."));
     }
 
+    #[test]
+    fn evolve8h_wave_964_monitor_lock_unique_pin_connectivity() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 964: Compatibility tables name `get_conn` with health compact `connectivity`."));
+    }
+
 }

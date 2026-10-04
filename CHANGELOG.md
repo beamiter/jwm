@@ -1470,6 +1470,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 963: Compatibility tables name `get_res` with health compact `resources`.
 
+- Wave 964: Compatibility tables name `get_conn` with health compact `connectivity`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
