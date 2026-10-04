@@ -844,3 +844,4 @@ Wave 704: `get_ui` and health compact `system_ui` share one Status nest.
 Wave 705: `get_lt` and health compact `layout` share one Status nest.
 Wave 706: `get_tab` and health compact `tabs` share one Status nest.
 Wave 707: `get_sel` and health compact `selected` share one Status nest.
+Wave 708: `get_strut` and health compact `struts` share one Status nest.

@@ -1241,9 +1241,15 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 706 | monitor-lock 唯一 pin wave 706 tabs | ✓ |
 | 707 | monitor-lock 唯一 pin wave 707 selected | ✓ |
 | 707 | monitor-lock 唯一 pin wave 707 selected | ✓ |
+| 708 | monitor-lock 唯一 pin wave 708 struts | ✓ |
+| 708 | monitor-lock 唯一 pin wave 708 struts | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 708 — monitor-lock pin wave 708 struts
+
+选题 = evolve8h wave 708。monitor-lock 唯一句子 wave 708 `struts`。
 
 ## 2026-10-03：evolve8h wave 707 — monitor-lock pin wave 707 selected
 
