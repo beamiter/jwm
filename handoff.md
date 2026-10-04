@@ -1769,9 +1769,15 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 970 | monitor-lock 唯一 pin wave 970 layout | ✓ |
 | 971 | monitor-lock 唯一 pin wave 971 tabs | ✓ |
 | 971 | monitor-lock 唯一 pin wave 971 tabs | ✓ |
+| 972 | monitor-lock 唯一 pin wave 972 selected | ✓ |
+| 972 | monitor-lock 唯一 pin wave 972 selected | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 972 — monitor-lock pin wave 972 selected
+
+选题 = evolve8h wave 972。monitor-lock 唯一句子 wave 972 `selected`。
 
 ## 2026-10-03：evolve8h wave 971 — monitor-lock pin wave 971 tabs
 

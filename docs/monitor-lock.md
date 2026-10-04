@@ -1108,3 +1108,4 @@ Wave 968: Compatibility tables name `get_dnd` with health compact `dnd`.
 Wave 969: Compatibility tables name `get_ui` with health compact `system_ui`.
 Wave 970: Compatibility tables name `get_lt` with health compact `layout`.
 Wave 971: Compatibility tables name `get_tab` with health compact `tabs`.
+Wave 972: Compatibility tables name `get_sel` with health compact `selected`.
