@@ -18200,4 +18200,10 @@ mod tests {
         assert!(DOCS.contains("Wave 739: Doctor bundles include health compact `night_light` from `get_nl`."));
     }
 
+    #[test]
+    fn evolve8h_wave_740_monitor_lock_unique_pin_magnifier() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 740: Doctor bundles include health compact `magnifier` from `get_mag`."));
+    }
+
 }
