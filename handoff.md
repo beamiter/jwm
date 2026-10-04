@@ -927,9 +927,15 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 549 | README health 点名 compact power | ✓ |
 | 550 | tools/README health 点名 compact power | ✓ |
 | 550 | tools/README health 点名 compact power | ✓ |
+| 551 | health 打印 compact media | ✓ |
+| 551 | health 打印 compact media | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 551 — health prints compact media
+
+选题 = evolve8h wave 551。`jwm-tool health` 打印 compact `media` 行。
 
 ## 2026-10-03：evolve8h wave 550 — tools/README health names compact power
 

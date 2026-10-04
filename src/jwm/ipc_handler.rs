@@ -16853,4 +16853,17 @@ mod tests {
         assert!(DOCS.contains("`tools/README.md` health text names compact `power`"));
     }
 
+    #[test]
+    fn evolve8h_wave_551_health_prints_compact_media() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains(
+            "media: active={active}"
+        ));
+        assert!(TOOL.contains(
+            "\"media: active=true\""
+        ));
+        assert!(DOCS.contains("`jwm-tool health` prints compact `media` beside occupancy"));
+    }
+
 }

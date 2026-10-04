@@ -4312,6 +4312,24 @@ mod tests {
             line == "power: battery_present=true percent=88"
         }));
 
+        assert!(!power_lines
+            .iter()
+            .any(|line| line.starts_with("media:")));
+
+        let with_compact_media = serde_json::json!({
+            "health": {"status": "healthy", "reasons": []},
+            "counts": {"windows": 0, "monitors": 1, "workspaces": 1},
+            "config": {"path": "/tmp/config.toml", "diagnostics": {"error_count": 0, "warning_count": 0}},
+            "features": {},
+            "media": {
+                "active": true
+            }
+        });
+        let media_lines = health_output_lines(&with_compact_media);
+        assert!(media_lines.iter().any(|line| {
+            line == "media: active=true"
+        }));
+
         let capabilities = serde_json::json!({
             "schema_version": 1,
             "commands": ["focusstack", "reload_config"],
@@ -6230,6 +6248,15 @@ fn health_output_lines(status: &serde_json::Value) -> Vec<String> {
         lines.push(format!(
             "power: battery_present={battery_present} percent={percent}"
         ));
+    }
+
+    if let Some(media) = status.get("media").and_then(serde_json::Value::as_object) {
+        let active = media
+            .get("active")
+            .and_then(serde_json::Value::as_bool)
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".into());
+        lines.push(format!("media: active={active}"));
     }
 
     if let Some(reasons) = status["health"]["reasons"].as_array() {

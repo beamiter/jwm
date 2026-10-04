@@ -687,3 +687,4 @@ README health text names compact `connectivity`.
 `jwm-tool health` prints compact `power` beside occupancy.
 README health text names compact `power`.
 `tools/README.md` health text names compact `power`.
+`jwm-tool health` prints compact `media` beside occupancy.
