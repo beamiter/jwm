@@ -911,9 +911,15 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 541 | README health 点名 compact resources | ✓ |
 | 542 | tools/README health 点名 compact resources | ✓ |
 | 542 | tools/README health 点名 compact resources | ✓ |
+| 543 | capabilities 文本列出 get_res -> get_resources | ✓ |
+| 543 | capabilities 文本列出 get_res -> get_resources | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 543 — capabilities text lists resources alias
+
+选题 = evolve8h wave 543。`jwm-tool capabilities` 文本列出 `get_res -> get_resources`。
 
 ## 2026-10-03：evolve8h wave 542 — tools/README health names compact resources
 
