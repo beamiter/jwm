@@ -1148,6 +1148,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 802: Support triage reads health compact `wallpaper` before `get_wall` dumps.
 
+- Wave 803: Support triage reads health compact `bluetooth` before `get_bt` dumps.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
