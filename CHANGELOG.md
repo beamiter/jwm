@@ -503,6 +503,7 @@ monorepo use independent Semantic Versions.
 - `jwm-tool capabilities` text lists `get_lock,get_sess -> get_session_lock`.
 - `jwm-tool health` prints compact `tearing` beside occupancy.
 - README health text names compact `tearing`.
+- `tools/README.md` health text names compact `tearing`.
 
 ### Changed
 
