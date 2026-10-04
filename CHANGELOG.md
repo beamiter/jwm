@@ -954,6 +954,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 705: `get_lt` and health compact `layout` share one Status nest.
 
+- Wave 706: `get_tab` and health compact `tabs` share one Status nest.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

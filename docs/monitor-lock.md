@@ -842,3 +842,4 @@ Wave 702: `get_notif` and health compact `notifications` share one Status nest.
 Wave 703: `get_dnd` and health compact `dnd` share one Status nest.
 Wave 704: `get_ui` and health compact `system_ui` share one Status nest.
 Wave 705: `get_lt` and health compact `layout` share one Status nest.
+Wave 706: `get_tab` and health compact `tabs` share one Status nest.
