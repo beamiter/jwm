@@ -17588,4 +17588,10 @@ mod tests {
         assert!(DOCS.contains("Wave 637: Health compact `wayland` is the operator twin of `get_wl`."));
     }
 
+    #[test]
+    fn evolve8h_wave_638_monitor_lock_unique_pin_recording() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 638: Health compact `recording` is the operator twin of `get_rec`."));
+    }
+
 }
