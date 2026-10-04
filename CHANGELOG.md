@@ -1272,6 +1272,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 864: Nested smoke checks health compact `layout` after `get_lt`.
 
+- Wave 865: Nested smoke checks health compact `tabs` after `get_tab`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
