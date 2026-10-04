@@ -19376,4 +19376,10 @@ mod tests {
         assert!(DOCS.contains("Wave 935: Upgrade notes keep health compact `floating` beside `get_status.floating`."));
     }
 
+    #[test]
+    fn evolve8h_wave_936_monitor_lock_unique_pin_minimized() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 936: Upgrade notes keep health compact `minimized` beside `get_status.minimized`."));
+    }
+
 }
