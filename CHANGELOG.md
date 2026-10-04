@@ -1168,6 +1168,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 812: Support triage reads health compact `tabs` before `get_tab` dumps.
 
+- Wave 813: Support triage reads health compact `selected` before `get_sel` dumps.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
