@@ -848,3 +848,4 @@ Wave 708: `get_strut` and health compact `struts` share one Status nest.
 Wave 709: `get_pads` and health compact `scratchpads` share one Status nest.
 Wave 710: `get_fw` and health compact `focused` share one Status nest.
 Wave 711: `get_mons` and health compact `monitors` share one Status nest.
+Wave 712: `get_ws` and health compact `workspaces` share one Status nest.

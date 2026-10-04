@@ -966,6 +966,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 711: `get_mons` and health compact `monitors` share one Status nest.
 
+- Wave 712: `get_ws` and health compact `workspaces` share one Status nest.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
