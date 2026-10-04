@@ -20551,4 +20551,10 @@ mod tests {
         assert!(COMPAT.contains("evolve9h wave 119: Nested smoke treats `tearing` as a read-only IPC probe."));
     }
 
+    #[test]
+    fn evolve9h_wave_120_compat_unique_pin_xwayland() {
+        const COMPAT: &str = include_str!("../../docs/compatibility.md");
+        assert!(COMPAT.contains("evolve9h wave 120: Nested smoke treats `xwayland` as a read-only IPC probe."));
+    }
+
 }

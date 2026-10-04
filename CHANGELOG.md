@@ -1782,6 +1782,8 @@ monorepo use independent Semantic Versions.
 
 - evolve9h wave 119: Nested smoke treats `tearing` as a read-only IPC probe.
 
+- evolve9h wave 120: Nested smoke treats `xwayland` as a read-only IPC probe.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
