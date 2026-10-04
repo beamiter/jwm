@@ -1332,6 +1332,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 894: Upgrade notes keep health compact `tearing` beside `get_th`.
 
+- Wave 895: Upgrade notes keep health compact `xwayland` beside `get_xw`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
