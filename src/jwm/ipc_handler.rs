@@ -17882,4 +17882,10 @@ mod tests {
         assert!(DOCS.contains("Wave 686: `get_nl` and health compact `night_light` share one Status nest."));
     }
 
+    #[test]
+    fn evolve8h_wave_687_monitor_lock_unique_pin_magnifier() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 687: `get_mag` and health compact `magnifier` share one Status nest."));
+    }
+
 }
