@@ -16535,4 +16535,17 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn evolve8h_wave_520_health_prints_compact_capture() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains(
+            "capture: screencopy={} image_copy={} dmabuf={}"
+        ));
+        assert!(TOOL.contains(
+            "\"capture: screencopy=true image_copy=false dmabuf=true\""
+        ));
+        assert!(DOCS.contains("`jwm-tool health` prints compact `capture` beside occupancy"));
+    }
+
 }

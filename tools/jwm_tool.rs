@@ -4159,6 +4159,26 @@ mod tests {
             line == "audio_recording: active=true finalizing=false elapsed_ms=900"
         }));
 
+        assert!(!audio_recording_lines
+            .iter()
+            .any(|line| line.starts_with("capture:")));
+
+        let with_compact_capture = serde_json::json!({
+            "health": {"status": "healthy", "reasons": []},
+            "counts": {"windows": 0, "monitors": 1, "workspaces": 1},
+            "config": {"path": "/tmp/config.toml", "diagnostics": {"error_count": 0, "warning_count": 0}},
+            "features": {},
+            "capture": {
+                "screencopy_enabled": true,
+                "image_copy_capture_enabled": false,
+                "dmabuf_advertised": true
+            }
+        });
+        let capture_lines = health_output_lines(&with_compact_capture);
+        assert!(capture_lines.iter().any(|line| {
+            line == "capture: screencopy=true image_copy=false dmabuf=true"
+        }));
+
         let capabilities = serde_json::json!({
             "schema_version": 1,
             "commands": ["focusstack", "reload_config"],
@@ -5943,6 +5963,22 @@ fn health_output_lines(status: &serde_json::Value) -> Vec<String> {
             "audio_recording: active={} finalizing={} elapsed_ms={elapsed_ms}",
             flag("active"),
             flag("finalizing")
+        ));
+    }
+
+    if let Some(capture) = status.get("capture").and_then(serde_json::Value::as_object) {
+        let flag = |name: &str| {
+            capture
+                .get(name)
+                .and_then(serde_json::Value::as_bool)
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "-".into())
+        };
+        lines.push(format!(
+            "capture: screencopy={} image_copy={} dmabuf={}",
+            flag("screencopy_enabled"),
+            flag("image_copy_capture_enabled"),
+            flag("dmabuf_advertised")
         ));
     }
 
