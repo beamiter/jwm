@@ -19472,4 +19472,10 @@ mod tests {
         assert!(DOCS.contains("Wave 951: Compatibility tables name `get_nl` with health compact `night_light`."));
     }
 
+    #[test]
+    fn evolve8h_wave_952_monitor_lock_unique_pin_magnifier() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 952: Compatibility tables name `get_mag` with health compact `magnifier`."));
+    }
+
 }

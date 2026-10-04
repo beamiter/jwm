@@ -1446,6 +1446,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 951: Compatibility tables name `get_nl` with health compact `night_light`.
 
+- Wave 952: Compatibility tables name `get_mag` with health compact `magnifier`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
