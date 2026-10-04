@@ -1383,9 +1383,15 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 777 | monitor-lock 唯一 pin wave 777 minimized | ✓ |
 | 778 | monitor-lock 唯一 pin wave 778 sticky | ✓ |
 | 778 | monitor-lock 唯一 pin wave 778 sticky | ✓ |
+| 779 | monitor-lock 唯一 pin wave 779 urgent | ✓ |
+| 779 | monitor-lock 唯一 pin wave 779 urgent | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 779 — monitor-lock pin wave 779 urgent
+
+选题 = evolve8h wave 779。monitor-lock 唯一句子 wave 779 `urgent`。
 
 ## 2026-10-03：evolve8h wave 778 — monitor-lock pin wave 778 sticky
 

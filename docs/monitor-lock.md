@@ -915,3 +915,4 @@ Wave 775: Doctor bundles include health compact `nmaster` from `get_nm`.
 Wave 776: Doctor bundles include health compact `floating` from `get_status.floating`.
 Wave 777: Doctor bundles include health compact `minimized` from `get_status.minimized`.
 Wave 778: Doctor bundles include health compact `sticky` from `get_status.sticky`.
+Wave 779: Doctor bundles include health compact `urgent` from `get_status.urgent`.
