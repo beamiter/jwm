@@ -19286,4 +19286,10 @@ mod tests {
         assert!(DOCS.contains("Wave 920: Upgrade notes keep health compact `struts` beside `get_strut`."));
     }
 
+    #[test]
+    fn evolve8h_wave_921_monitor_lock_unique_pin_scratchpads() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 921: Upgrade notes keep health compact `scratchpads` beside `get_pads`."));
+    }
+
 }
