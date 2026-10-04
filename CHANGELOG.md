@@ -1652,6 +1652,8 @@ monorepo use independent Semantic Versions.
 
 - evolve9h wave 54: `jwm-tool capabilities` remains the catalog for `tree` query aliases.
 
+- evolve9h wave 55: `jwm-tool capabilities` remains the catalog for `window` query aliases.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
