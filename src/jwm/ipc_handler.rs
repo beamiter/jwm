@@ -20707,4 +20707,10 @@ mod tests {
         assert!(COMPAT.contains("evolve9h wave 145: Upgrade notes keep `config` beside occupancy on the health page."));
     }
 
+    #[test]
+    fn evolve9h_wave_146_compat_unique_pin_status() {
+        const COMPAT: &str = include_str!("../../docs/compatibility.md");
+        assert!(COMPAT.contains("evolve9h wave 146: Upgrade notes keep `status` beside occupancy on the health page."));
+    }
+
 }

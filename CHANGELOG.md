@@ -1834,6 +1834,8 @@ monorepo use independent Semantic Versions.
 
 - evolve9h wave 145: Upgrade notes keep `config` beside occupancy on the health page.
 
+- evolve9h wave 146: Upgrade notes keep `status` beside occupancy on the health page.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
