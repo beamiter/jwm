@@ -1966,6 +1966,8 @@ monorepo use independent Semantic Versions.
 
 - evolve9h wave 211: `jwm-tool capabilities` remains the catalog for `session_lock` query aliases.
 
+- evolve9h wave 212: `jwm-tool capabilities` remains the catalog for `tearing` query aliases.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
