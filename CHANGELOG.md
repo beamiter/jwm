@@ -1754,6 +1754,8 @@ monorepo use independent Semantic Versions.
 
 - evolve9h wave 105: Support bundles should include `media` when health is degraded.
 
+- evolve9h wave 106: Support bundles should include `clipboard` when health is degraded.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
