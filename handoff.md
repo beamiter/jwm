@@ -316,9 +316,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | --- | --- | --- |
 | 1 | health 打印 compact version_info | ✓ |
 | 2 | README health 点名 compact version_info | ✓ |
+| 3 | tools/README health 点名 compact version_info | ✓ |
 | … | evolve9h 进行中 |
 
 ---
+
+## 2026-10-04：evolve9h wave 3 — tools/README health names compact version_info
+
+选题 = evolve9h wave 3。tools/README health 文本点名 compact `version_info`。
 
 ## 2026-10-04：evolve9h wave 2 — README health names compact version_info
 

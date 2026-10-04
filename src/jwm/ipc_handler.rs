@@ -19788,4 +19788,13 @@ mod tests {
         assert!(DOCS.contains("README health text names compact `version_info`"));
     }
 
+    #[test]
+    fn evolve9h_wave_3_tools_readme_health_names_compact_version_info() {
+        const TOOLS: &str = include_str!("../../tools/README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOLS.contains("compact `version_info` line"));
+        assert!(TOOLS.contains("get_status.version_info"));
+        assert!(DOCS.contains("`tools/README.md` health text names compact `version_info`"));
+    }
+
 }
