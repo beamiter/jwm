@@ -19484,4 +19484,10 @@ mod tests {
         assert!(DOCS.contains("Wave 953: Compatibility tables name `get_pk` with health compact `peek`."));
     }
 
+    #[test]
+    fn evolve8h_wave_954_monitor_lock_unique_pin_gesture() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 954: Compatibility tables name `get_gest` with health compact `gesture`."));
+    }
+
 }

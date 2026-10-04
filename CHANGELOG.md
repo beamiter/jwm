@@ -1450,6 +1450,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 953: Compatibility tables name `get_pk` with health compact `peek`.
 
+- Wave 954: Compatibility tables name `get_gest` with health compact `gesture`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
