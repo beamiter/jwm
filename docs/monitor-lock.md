@@ -690,3 +690,4 @@ README health text names compact `power`.
 `jwm-tool health` prints compact `media` beside occupancy.
 README health text names compact `media`.
 `tools/README.md` health text names compact `media`.
+`jwm-tool capabilities` text lists `get_clip -> get_clipboard`.

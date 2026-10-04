@@ -650,6 +650,8 @@ monorepo use independent Semantic Versions.
 
 - `tools/README.md` health text names compact `media`.
 
+- `jwm-tool capabilities` text lists `get_clip -> get_clipboard`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
