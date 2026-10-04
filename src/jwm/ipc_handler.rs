@@ -17456,4 +17456,13 @@ mod tests {
         assert!(DOCS.contains("README health text names `get_strut` beside compact `struts`"));
     }
 
+    #[test]
+    fn evolve8h_wave_620_readme_health_names_get_pads_for_scratchpads() {
+        const README: &str = include_str!("../../README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(README.contains("`get_pads`"));
+        assert!(README.contains("compact `scratchpads` line"));
+        assert!(DOCS.contains("README health text names `get_pads` beside compact `scratchpads`"));
+    }
+
 }

@@ -1065,9 +1065,15 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 618 | README health 点名 get_sel beside compact selected | ✓ |
 | 619 | README health 点名 get_strut beside compact struts | ✓ |
 | 619 | README health 点名 get_strut beside compact struts | ✓ |
+| 620 | README health 点名 get_pads beside compact scratchpads | ✓ |
+| 620 | README health 点名 get_pads beside compact scratchpads | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 620 — README health names get_pads for scratchpads
+
+选题 = evolve8h wave 620。README health 文本点名 `get_pads` beside compact `scratchpads`。
 
 ## 2026-10-03：evolve8h wave 619 — README health names get_strut for struts
 

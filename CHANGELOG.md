@@ -782,6 +782,8 @@ monorepo use independent Semantic Versions.
 
 - README health text names `get_strut` beside compact `struts`.
 
+- README health text names `get_pads` beside compact `scratchpads`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
