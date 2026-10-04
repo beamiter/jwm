@@ -17339,4 +17339,13 @@ mod tests {
         assert!(DOCS.contains("README health text names `get_devices` beside compact `audio`"));
     }
 
+    #[test]
+    fn evolve8h_wave_607_readme_health_names_get_wall_for_wallpaper() {
+        const README: &str = include_str!("../../README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(README.contains("`get_wall`"));
+        assert!(README.contains("compact `wallpaper` line"));
+        assert!(DOCS.contains("README health text names `get_wall` beside compact `wallpaper`"));
+    }
+
 }

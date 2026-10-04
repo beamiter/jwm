@@ -756,6 +756,8 @@ monorepo use independent Semantic Versions.
 
 - README health text names `get_devices` beside compact `audio`.
 
+- README health text names `get_wall` beside compact `wallpaper`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

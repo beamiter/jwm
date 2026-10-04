@@ -1039,9 +1039,15 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 605 | README health 点名 get_wly beside compact waterlily | ✓ |
 | 606 | README health 点名 get_devices beside compact audio | ✓ |
 | 606 | README health 点名 get_devices beside compact audio | ✓ |
+| 607 | README health 点名 get_wall beside compact wallpaper | ✓ |
+| 607 | README health 点名 get_wall beside compact wallpaper | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 607 — README health names get_wall for wallpaper
+
+选题 = evolve8h wave 607。README health 文本点名 `get_wall` beside compact `wallpaper`。
 
 ## 2026-10-03：evolve8h wave 606 — README health names get_devices for audio
 
