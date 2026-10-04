@@ -451,6 +451,7 @@ monorepo use independent Semantic Versions.
 - `jwm-tool capabilities` text lists `get_fx,get_effects -> get_effect_status`.
 - `jwm-tool health` prints compact `mic` beside occupancy.
 - README health text names compact `mic`.
+- `tools/README.md` health text names compact `mic`.
 
 ### Changed
 

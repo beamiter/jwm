@@ -15546,4 +15546,13 @@ mod tests {
         assert!(README.contains("get_status.mic"));
         assert!(DOCS.contains("README health text names compact `mic`"));
     }
+
+    #[test]
+    fn evolve8h_wave_422_tools_readme_health_names_compact_mic() {
+        const TOOLS: &str = include_str!("../../tools/README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOLS.contains("compact `mic` line"));
+        assert!(TOOLS.contains("get_status.mic"));
+        assert!(DOCS.contains("`tools/README.md` health text names compact `mic`"));
+    }
 }
