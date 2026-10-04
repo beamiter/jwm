@@ -1338,6 +1338,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 897: Upgrade notes keep health compact `color_management` beside `get_cm`.
 
+- Wave 898: Upgrade notes keep health compact `night_light` beside `get_nl`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

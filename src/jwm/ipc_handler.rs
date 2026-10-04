@@ -19148,4 +19148,10 @@ mod tests {
         assert!(DOCS.contains("Wave 897: Upgrade notes keep health compact `color_management` beside `get_cm`."));
     }
 
+    #[test]
+    fn evolve8h_wave_898_monitor_lock_unique_pin_night_light() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 898: Upgrade notes keep health compact `night_light` beside `get_nl`."));
+    }
+
 }
