@@ -858,3 +858,4 @@ Wave 718: `get_pl` and health compact `prev_layout` share one Status nest.
 Wave 719: `get_cf` and health compact `cfact` share one Status nest.
 Wave 720: `get_gap` and health compact `gaps` share one Status nest.
 Wave 721: `get_mf` and health compact `mfact` share one Status nest.
+Wave 722: `get_nm` and health compact `nmaster` share one Status nest.
