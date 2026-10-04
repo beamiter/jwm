@@ -19448,4 +19448,10 @@ mod tests {
         assert!(DOCS.contains("Wave 947: Compatibility tables name `get_th` with health compact `tearing`."));
     }
 
+    #[test]
+    fn evolve8h_wave_948_monitor_lock_unique_pin_xwayland() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 948: Compatibility tables name `get_xw` with health compact `xwayland`."));
+    }
+
 }

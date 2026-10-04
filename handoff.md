@@ -1721,9 +1721,15 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 946 | monitor-lock 唯一 pin wave 946 session_lock | ✓ |
 | 947 | monitor-lock 唯一 pin wave 947 tearing | ✓ |
 | 947 | monitor-lock 唯一 pin wave 947 tearing | ✓ |
+| 948 | monitor-lock 唯一 pin wave 948 xwayland | ✓ |
+| 948 | monitor-lock 唯一 pin wave 948 xwayland | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 948 — monitor-lock pin wave 948 xwayland
+
+选题 = evolve8h wave 948。monitor-lock 唯一句子 wave 948 `xwayland`。
 
 ## 2026-10-03：evolve8h wave 947 — monitor-lock pin wave 947 tearing
 

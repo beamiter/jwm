@@ -1438,6 +1438,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 947: Compatibility tables name `get_th` with health compact `tearing`.
 
+- Wave 948: Compatibility tables name `get_xw` with health compact `xwayland`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
