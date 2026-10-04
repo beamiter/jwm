@@ -18956,4 +18956,10 @@ mod tests {
         assert!(DOCS.contains("Wave 865: Nested smoke checks health compact `tabs` after `get_tab`."));
     }
 
+    #[test]
+    fn evolve8h_wave_866_monitor_lock_unique_pin_selected() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 866: Nested smoke checks health compact `selected` after `get_sel`."));
+    }
+
 }
