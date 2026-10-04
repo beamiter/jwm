@@ -463,9 +463,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 147 | compatibility 唯一 pin wave 147 tree | ✓ |
 | 148 | compatibility 唯一 pin wave 148 window | ✓ |
 | 149 | compatibility 唯一 pin wave 149 session_lock | ✓ |
+| 150 | compatibility 唯一 pin wave 150 tearing | ✓ |
 | … | evolve9h 进行中 |
 
 ---
+
+## 2026-10-04：evolve9h wave 150 — compatibility pin wave 150 tearing
+
+选题 = evolve9h wave 150。compatibility 唯一句子 wave 150 `tearing`。
 
 ## 2026-10-04：evolve9h wave 149 — compatibility pin wave 149 session_lock
 

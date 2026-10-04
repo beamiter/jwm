@@ -370,3 +370,4 @@ evolve9h wave 146: Upgrade notes keep `status` beside occupancy on the health pa
 evolve9h wave 147: Upgrade notes keep `tree` beside occupancy on the health page.
 evolve9h wave 148: Upgrade notes keep `window` beside occupancy on the health page.
 evolve9h wave 149: Upgrade notes keep `session_lock` beside occupancy on the health page.
+evolve9h wave 150: Upgrade notes keep `tearing` beside occupancy on the health page.
