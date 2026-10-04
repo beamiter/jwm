@@ -560,9 +560,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 244 | compatibility 唯一 pin wave 244 xwayland | ✓ |
 | 245 | compatibility 唯一 pin wave 245 scrolling | ✓ |
 | 246 | compatibility 唯一 pin wave 246 night_light | ✓ |
+| 247 | compatibility 唯一 pin wave 247 magnifier | ✓ |
 | … | evolve9h 进行中 |
 
 ---
+
+## 2026-10-04：evolve9h wave 247 — compatibility pin wave 247 magnifier
+
+选题 = evolve9h wave 247。compatibility 唯一句子 wave 247 `magnifier`。
 
 ## 2026-10-04：evolve9h wave 246 — compatibility pin wave 246 night_light
 

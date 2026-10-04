@@ -21313,4 +21313,10 @@ mod tests {
         assert!(COMPAT.contains("evolve9h wave 246: Support bundles should include `night_light` when health is degraded."));
     }
 
+    #[test]
+    fn evolve9h_wave_247_compat_unique_pin_magnifier() {
+        const COMPAT: &str = include_str!("../../docs/compatibility.md");
+        assert!(COMPAT.contains("evolve9h wave 247: Support bundles should include `magnifier` when health is degraded."));
+    }
+
 }

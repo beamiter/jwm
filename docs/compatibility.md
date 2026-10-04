@@ -467,3 +467,4 @@ evolve9h wave 243: Support bundles should include `tearing` when health is degra
 evolve9h wave 244: Support bundles should include `xwayland` when health is degraded.
 evolve9h wave 245: Support bundles should include `scrolling` when health is degraded.
 evolve9h wave 246: Support bundles should include `night_light` when health is degraded.
+evolve9h wave 247: Support bundles should include `magnifier` when health is degraded.
