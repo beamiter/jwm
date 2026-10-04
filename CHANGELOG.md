@@ -550,6 +550,8 @@ monorepo use independent Semantic Versions.
 
 - `tools/README.md` health text names compact `expose`.
 
+- `jwm-tool health` prints compact `gesture` beside occupancy.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

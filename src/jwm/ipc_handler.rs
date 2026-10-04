@@ -16371,4 +16371,17 @@ mod tests {
         assert!(DOCS.contains("`tools/README.md` health text names compact `expose`"));
     }
 
+    #[test]
+    fn evolve8h_wave_504_health_prints_compact_gesture() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains(
+            "gesture: bindings={binding_count} scrolling={scrolling_binding_count}"
+        ));
+        assert!(TOOL.contains(
+            "\"gesture: bindings=4 scrolling=2\""
+        ));
+        assert!(DOCS.contains("`jwm-tool health` prints compact `gesture` beside occupancy"));
+    }
+
 }
