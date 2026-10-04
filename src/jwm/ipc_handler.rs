@@ -16996,4 +16996,12 @@ mod tests {
         assert!(DOCS.contains("`docs/layout-picker.md` names compact `layout` beside health"));
     }
 
+    #[test]
+    fn evolve8h_wave_566_doc_launcher_names_compact_system_ui() {
+        const FEATURE: &str = include_str!("../../docs/launcher.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(FEATURE.contains("compact `system_ui`"));
+        assert!(DOCS.contains("`docs/launcher.md` names compact `system_ui` beside health"));
+    }
+
 }

@@ -674,6 +674,8 @@ monorepo use independent Semantic Versions.
 
 - `docs/layout-picker.md` names compact `layout` beside health.
 
+- `docs/launcher.md` names compact `system_ui` beside health.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

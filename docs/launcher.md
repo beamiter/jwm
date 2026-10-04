@@ -218,3 +218,5 @@ terminal commands remain allowed because JWM cannot infer their process model.
 An executable found on `PATH` rather than in a desktop entry declares nothing
 about whether it needs a terminal, so it is launched as-is rather than guessed
 at.
+
+`jwm-tool health` prints compact `system_ui` for launcher operators.

@@ -957,9 +957,15 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 564 | docs/window-switcher.md 点名 compact selected | ✓ |
 | 565 | docs/layout-picker.md 点名 compact layout | ✓ |
 | 565 | docs/layout-picker.md 点名 compact layout | ✓ |
+| 566 | docs/launcher.md 点名 compact system_ui | ✓ |
+| 566 | docs/launcher.md 点名 compact system_ui | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 566 — docs/launcher.md names compact system_ui
+
+选题 = evolve8h wave 566。`docs/launcher.md` 点名 health compact `system_ui`。
 
 ## 2026-10-03：evolve8h wave 565 — docs/layout-picker.md names compact layout
 
