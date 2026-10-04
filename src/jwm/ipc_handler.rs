@@ -20743,4 +20743,10 @@ mod tests {
         assert!(COMPAT.contains("evolve9h wave 151: Upgrade notes keep `xwayland` beside occupancy on the health page."));
     }
 
+    #[test]
+    fn evolve9h_wave_152_compat_unique_pin_scrolling() {
+        const COMPAT: &str = include_str!("../../docs/compatibility.md");
+        assert!(COMPAT.contains("evolve9h wave 152: Upgrade notes keep `scrolling` beside occupancy on the health page."));
+    }
+
 }
