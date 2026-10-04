@@ -1698,6 +1698,8 @@ monorepo use independent Semantic Versions.
 
 - evolve9h wave 77: `jwm-tool capabilities` remains the catalog for `notifications` query aliases.
 
+- evolve9h wave 78: `jwm-tool capabilities` remains the catalog for `dnd` query aliases.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
