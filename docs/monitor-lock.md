@@ -708,3 +708,4 @@ README health text names compact `media`.
 `docs/window-tabs.md` names compact `tabs` beside health.
 `docs/clipboard.md` names compact `clipboard` beside health.
 `docs/idle.md` names compact `idle` beside health.
+`docs/notifications.md` names compact `notifications` beside health.

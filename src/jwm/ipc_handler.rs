@@ -17044,4 +17044,12 @@ mod tests {
         assert!(DOCS.contains("`docs/idle.md` names compact `idle` beside health"));
     }
 
+    #[test]
+    fn evolve8h_wave_572_doc_notifications_names_compact_notifications() {
+        const FEATURE: &str = include_str!("../../docs/notifications.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(FEATURE.contains("compact `notifications`"));
+        assert!(DOCS.contains("`docs/notifications.md` names compact `notifications` beside health"));
+    }
+
 }

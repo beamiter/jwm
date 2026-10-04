@@ -686,6 +686,8 @@ monorepo use independent Semantic Versions.
 
 - `docs/idle.md` names compact `idle` beside health.
 
+- `docs/notifications.md` names compact `notifications` beside health.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

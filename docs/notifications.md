@@ -292,3 +292,5 @@ JWM posts its own toasts for a few state changes:
   recorder is actually running), and its failures (critical, so they break
   through Do Not Disturb) — see
   [audio recording](audio-recording.md).
+
+`jwm-tool health` prints compact `notifications` for notifications operators.
