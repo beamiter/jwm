@@ -962,3 +962,4 @@ Wave 822: Support triage reads health compact `bench` before `get_bm` dumps.
 Wave 823: Support triage reads health compact `closed_placement` before `get_cp` dumps.
 Wave 824: Support triage reads health compact `prev_layout` before `get_pl` dumps.
 Wave 825: Support triage reads health compact `cfact` before `get_cf` dumps.
+Wave 826: Support triage reads health compact `gaps` before `get_gap` dumps.
