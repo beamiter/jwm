@@ -18506,4 +18506,10 @@ mod tests {
         assert!(DOCS.contains("Wave 790: Support triage reads health compact `scrolling` before `get_scroll` dumps."));
     }
 
+    #[test]
+    fn evolve8h_wave_791_monitor_lock_unique_pin_color_management() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 791: Support triage reads health compact `color_management` before `get_cm` dumps."));
+    }
+
 }
