@@ -188,3 +188,5 @@ entries are re-offered as PNG; `get_clipboard` still returns metadata only.
 history; callers are responsible for dropping secret-marked offers before
 calling it. The `clipboard` subscription topic carries `clipboard/changed`
 whenever the history actually changed.
+
+`jwm-tool health` prints compact `clipboard` for clipboard operators.

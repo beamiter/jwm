@@ -965,9 +965,15 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 568 | docs/minimized-dock.md 点名 compact minimized | ✓ |
 | 569 | docs/window-tabs.md 点名 compact tabs | ✓ |
 | 569 | docs/window-tabs.md 点名 compact tabs | ✓ |
+| 570 | docs/clipboard.md 点名 compact clipboard | ✓ |
+| 570 | docs/clipboard.md 点名 compact clipboard | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 570 — docs/clipboard.md names compact clipboard
+
+选题 = evolve8h wave 570。`docs/clipboard.md` 点名 health compact `clipboard`。
 
 ## 2026-10-03：evolve8h wave 569 — docs/window-tabs.md names compact tabs
 

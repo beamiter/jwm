@@ -17028,4 +17028,12 @@ mod tests {
         assert!(DOCS.contains("`docs/window-tabs.md` names compact `tabs` beside health"));
     }
 
+    #[test]
+    fn evolve8h_wave_570_doc_clipboard_names_compact_clipboard() {
+        const FEATURE: &str = include_str!("../../docs/clipboard.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(FEATURE.contains("compact `clipboard`"));
+        assert!(DOCS.contains("`docs/clipboard.md` names compact `clipboard` beside health"));
+    }
+
 }

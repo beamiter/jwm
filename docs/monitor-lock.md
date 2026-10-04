@@ -706,3 +706,4 @@ README health text names compact `media`.
 `docs/cube-effects.md` names compact `effects` beside health.
 `docs/minimized-dock.md` names compact `minimized` beside health.
 `docs/window-tabs.md` names compact `tabs` beside health.
+`docs/clipboard.md` names compact `clipboard` beside health.

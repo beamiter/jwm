@@ -682,6 +682,8 @@ monorepo use independent Semantic Versions.
 
 - `docs/window-tabs.md` names compact `tabs` beside health.
 
+- `docs/clipboard.md` names compact `clipboard` beside health.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
