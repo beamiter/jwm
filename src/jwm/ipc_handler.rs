@@ -17447,4 +17447,13 @@ mod tests {
         assert!(DOCS.contains("README health text names `get_sel` beside compact `selected`"));
     }
 
+    #[test]
+    fn evolve8h_wave_619_readme_health_names_get_strut_for_struts() {
+        const README: &str = include_str!("../../README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(README.contains("`get_strut`"));
+        assert!(README.contains("compact `struts` line"));
+        assert!(DOCS.contains("README health text names `get_strut` beside compact `struts`"));
+    }
+
 }
