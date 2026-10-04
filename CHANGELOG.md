@@ -730,6 +730,8 @@ monorepo use independent Semantic Versions.
 
 - README health text names `get_th` beside compact `tearing`.
 
+- README health text names `get_xw` beside compact `xwayland`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

@@ -17222,4 +17222,13 @@ mod tests {
         assert!(DOCS.contains("README health text names `get_th` beside compact `tearing`"));
     }
 
+    #[test]
+    fn evolve8h_wave_594_readme_health_names_get_xw_for_xwayland() {
+        const README: &str = include_str!("../../README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(README.contains("`get_xw`"));
+        assert!(README.contains("compact `xwayland` line"));
+        assert!(DOCS.contains("README health text names `get_xw` beside compact `xwayland`"));
+    }
+
 }

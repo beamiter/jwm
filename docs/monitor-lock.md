@@ -730,3 +730,4 @@ README health text names compact `media`.
 `docs/architecture.md` names compact `tree` beside health.
 README health text names `get_lock` beside compact `session_lock`.
 README health text names `get_th` beside compact `tearing`.
+README health text names `get_xw` beside compact `xwayland`.
