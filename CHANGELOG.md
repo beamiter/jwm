@@ -1888,6 +1888,8 @@ monorepo use independent Semantic Versions.
 
 - evolve9h wave 172: Upgrade notes keep `system_ui` beside occupancy on the health page.
 
+- evolve9h wave 173: Health compact `version_info` is diagnosable through `jwm-tool health`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

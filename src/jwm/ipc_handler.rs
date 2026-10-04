@@ -20869,4 +20869,10 @@ mod tests {
         assert!(COMPAT.contains("evolve9h wave 172: Upgrade notes keep `system_ui` beside occupancy on the health page."));
     }
 
+    #[test]
+    fn evolve9h_wave_173_compat_unique_pin_version_info() {
+        const COMPAT: &str = include_str!("../../docs/compatibility.md");
+        assert!(COMPAT.contains("evolve9h wave 173: Health compact `version_info` is diagnosable through `jwm-tool health`."));
+    }
+
 }
