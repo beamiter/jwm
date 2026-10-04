@@ -1802,6 +1802,8 @@ monorepo use independent Semantic Versions.
 
 - evolve9h wave 129: Nested smoke treats `waterlily` as a read-only IPC probe.
 
+- evolve9h wave 130: Nested smoke treats `audio` as a read-only IPC probe.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
