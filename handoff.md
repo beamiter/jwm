@@ -1757,9 +1757,15 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 964 | monitor-lock 唯一 pin wave 964 connectivity | ✓ |
 | 965 | monitor-lock 唯一 pin wave 965 clipboard | ✓ |
 | 965 | monitor-lock 唯一 pin wave 965 clipboard | ✓ |
+| 966 | monitor-lock 唯一 pin wave 966 idle | ✓ |
+| 966 | monitor-lock 唯一 pin wave 966 idle | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 966 — monitor-lock pin wave 966 idle
+
+选题 = evolve8h wave 966。monitor-lock 唯一句子 wave 966 `idle`。
 
 ## 2026-10-03：evolve8h wave 965 — monitor-lock pin wave 965 clipboard
 

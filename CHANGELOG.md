@@ -1474,6 +1474,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 965: Compatibility tables name `get_clip` with health compact `clipboard`.
 
+- Wave 966: Compatibility tables name `get_idl` with health compact `idle`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

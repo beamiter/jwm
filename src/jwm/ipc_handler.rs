@@ -19556,4 +19556,10 @@ mod tests {
         assert!(DOCS.contains("Wave 965: Compatibility tables name `get_clip` with health compact `clipboard`."));
     }
 
+    #[test]
+    fn evolve8h_wave_966_monitor_lock_unique_pin_idle() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 966: Compatibility tables name `get_idl` with health compact `idle`."));
+    }
+
 }
