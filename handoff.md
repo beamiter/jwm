@@ -341,9 +341,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 25 | compatibility 唯一 pin wave 25 session_lock | ✓ |
 | 26 | compatibility 唯一 pin wave 26 tearing | ✓ |
 | 27 | compatibility 唯一 pin wave 27 xwayland | ✓ |
+| 28 | compatibility 唯一 pin wave 28 scrolling | ✓ |
 | … | evolve9h 进行中 |
 
 ---
+
+## 2026-10-04：evolve9h wave 28 — compatibility pin wave 28 scrolling
+
+选题 = evolve9h wave 28。compatibility 唯一句子 wave 28 `scrolling`。
 
 ## 2026-10-04：evolve9h wave 27 — compatibility pin wave 27 xwayland
 
