@@ -18086,4 +18086,10 @@ mod tests {
         assert!(DOCS.contains("Wave 720: `get_gap` and health compact `gaps` share one Status nest."));
     }
 
+    #[test]
+    fn evolve8h_wave_721_monitor_lock_unique_pin_mfact() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 721: `get_mf` and health compact `mfact` share one Status nest."));
+    }
+
 }

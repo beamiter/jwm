@@ -984,6 +984,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 720: `get_gap` and health compact `gaps` share one Status nest.
 
+- Wave 721: `get_mf` and health compact `mfact` share one Status nest.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
