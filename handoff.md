@@ -623,9 +623,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 307 | compatibility 唯一 pin wave 307 scrolling | ✓ |
 | 308 | compatibility 唯一 pin wave 308 night_light | ✓ |
 | 309 | compatibility 唯一 pin wave 309 magnifier | ✓ |
+| 310 | compatibility 唯一 pin wave 310 peek | ✓ |
 | … | evolve9h 进行中 |
 
 ---
+
+## 2026-10-04：evolve9h wave 310 — compatibility pin wave 310 peek
+
+选题 = evolve9h wave 310。compatibility 唯一句子 wave 310 `peek`。
 
 ## 2026-10-04：evolve9h wave 309 — compatibility pin wave 309 magnifier
 

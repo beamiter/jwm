@@ -530,3 +530,4 @@ evolve9h wave 306: Upgrade notes keep `xwayland` beside occupancy on the health 
 evolve9h wave 307: Upgrade notes keep `scrolling` beside occupancy on the health page.
 evolve9h wave 308: Upgrade notes keep `night_light` beside occupancy on the health page.
 evolve9h wave 309: Upgrade notes keep `magnifier` beside occupancy on the health page.
+evolve9h wave 310: Upgrade notes keep `peek` beside occupancy on the health page.

@@ -21691,4 +21691,10 @@ mod tests {
         assert!(COMPAT.contains("evolve9h wave 309: Upgrade notes keep `magnifier` beside occupancy on the health page."));
     }
 
+    #[test]
+    fn evolve9h_wave_310_compat_unique_pin_peek() {
+        const COMPAT: &str = include_str!("../../docs/compatibility.md");
+        assert!(COMPAT.contains("evolve9h wave 310: Upgrade notes keep `peek` beside occupancy on the health page."));
+    }
+
 }
