@@ -6268,6 +6268,7 @@ fn capabilities_output_lines(capabilities: &serde_json::Value) -> Vec<String> {
         "query aliases: get_wall -> get_wallpaper".to_string(),
         "query aliases: get_bt -> get_bluetooth".to_string(),
         "query aliases: get_res -> get_resources".to_string(),
+        "query aliases: get_network -> get_connectivity".to_string(),
     ]
 }
 

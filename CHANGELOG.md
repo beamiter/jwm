@@ -636,6 +636,8 @@ monorepo use independent Semantic Versions.
 
 - `tools/README.md` health text names compact `connectivity`.
 
+- `jwm-tool capabilities` text lists `get_network -> get_connectivity`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
