@@ -19514,4 +19514,10 @@ mod tests {
         assert!(DOCS.contains("Wave 958: Compatibility tables name `get_cap` with health compact `capture`."));
     }
 
+    #[test]
+    fn evolve8h_wave_959_monitor_lock_unique_pin_waterlily() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 959: Compatibility tables name `get_wly` with health compact `waterlily`."));
+    }
+
 }

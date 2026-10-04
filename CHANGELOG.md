@@ -1460,6 +1460,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 958: Compatibility tables name `get_cap` with health compact `capture`.
 
+- Wave 959: Compatibility tables name `get_wly` with health compact `waterlily`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
