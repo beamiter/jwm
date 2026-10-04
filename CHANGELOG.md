@@ -1442,6 +1442,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 949: Compatibility tables name `get_scroll` with health compact `scrolling`.
 
+- Wave 950: Compatibility tables name `get_cm` with health compact `color_management`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

@@ -19460,4 +19460,10 @@ mod tests {
         assert!(DOCS.contains("Wave 949: Compatibility tables name `get_scroll` with health compact `scrolling`."));
     }
 
+    #[test]
+    fn evolve8h_wave_950_monitor_lock_unique_pin_color_management() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 950: Compatibility tables name `get_cm` with health compact `color_management`."));
+    }
+
 }
