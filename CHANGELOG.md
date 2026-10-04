@@ -960,6 +960,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 708: `get_strut` and health compact `struts` share one Status nest.
 
+- Wave 709: `get_pads` and health compact `scratchpads` share one Status nest.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

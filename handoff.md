@@ -1243,9 +1243,15 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 707 | monitor-lock 唯一 pin wave 707 selected | ✓ |
 | 708 | monitor-lock 唯一 pin wave 708 struts | ✓ |
 | 708 | monitor-lock 唯一 pin wave 708 struts | ✓ |
+| 709 | monitor-lock 唯一 pin wave 709 scratchpads | ✓ |
+| 709 | monitor-lock 唯一 pin wave 709 scratchpads | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 709 — monitor-lock pin wave 709 scratchpads
+
+选题 = evolve8h wave 709。monitor-lock 唯一句子 wave 709 `scratchpads`。
 
 ## 2026-10-03：evolve8h wave 708 — monitor-lock pin wave 708 struts
 

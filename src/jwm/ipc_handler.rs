@@ -18014,4 +18014,10 @@ mod tests {
         assert!(DOCS.contains("Wave 708: `get_strut` and health compact `struts` share one Status nest."));
     }
 
+    #[test]
+    fn evolve8h_wave_709_monitor_lock_unique_pin_scratchpads() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 709: `get_pads` and health compact `scratchpads` share one Status nest."));
+    }
+
 }
