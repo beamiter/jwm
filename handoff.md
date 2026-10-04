@@ -1235,9 +1235,15 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 703 | monitor-lock 唯一 pin wave 703 dnd | ✓ |
 | 704 | monitor-lock 唯一 pin wave 704 system_ui | ✓ |
 | 704 | monitor-lock 唯一 pin wave 704 system_ui | ✓ |
+| 705 | monitor-lock 唯一 pin wave 705 layout | ✓ |
+| 705 | monitor-lock 唯一 pin wave 705 layout | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 705 — monitor-lock pin wave 705 layout
+
+选题 = evolve8h wave 705。monitor-lock 唯一句子 wave 705 `layout`。
 
 ## 2026-10-03：evolve8h wave 704 — monitor-lock pin wave 704 system_ui
 
