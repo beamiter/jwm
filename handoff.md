@@ -632,9 +632,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 316 | compatibility 唯一 pin wave 316 audio | ✓ |
 | 317 | compatibility 唯一 pin wave 317 wallpaper | ✓ |
 | 318 | compatibility 唯一 pin wave 318 bluetooth | ✓ |
+| 319 | compatibility 唯一 pin wave 319 resources | ✓ |
 | … | evolve9h 进行中 |
 
 ---
+
+## 2026-10-04：evolve9h wave 319 — compatibility pin wave 319 resources
+
+选题 = evolve9h wave 319。compatibility 唯一句子 wave 319 `resources`。
 
 ## 2026-10-04：evolve9h wave 318 — compatibility pin wave 318 bluetooth
 

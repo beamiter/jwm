@@ -539,3 +539,4 @@ evolve9h wave 315: Upgrade notes keep `waterlily` beside occupancy on the health
 evolve9h wave 316: Upgrade notes keep `audio` beside occupancy on the health page.
 evolve9h wave 317: Upgrade notes keep `wallpaper` beside occupancy on the health page.
 evolve9h wave 318: Upgrade notes keep `bluetooth` beside occupancy on the health page.
+evolve9h wave 319: Upgrade notes keep `resources` beside occupancy on the health page.
