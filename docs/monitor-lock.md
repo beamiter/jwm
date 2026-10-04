@@ -717,3 +717,4 @@ README health text names compact `media`.
 `docs/media-controls.md` names compact `media` beside health.
 `docs/control-center.md` names compact `system_ui` beside health.
 `docs/session-menu.md` names compact `session_lock` beside health.
+`docs/window-placement.md` names compact `closed_placement` beside health.

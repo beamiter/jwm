@@ -987,9 +987,15 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 579 | docs/control-center.md 点名 compact system_ui | ✓ |
 | 580 | docs/session-menu.md 点名 compact session_lock | ✓ |
 | 580 | docs/session-menu.md 点名 compact session_lock | ✓ |
+| 581 | docs/window-placement.md 点名 compact closed_placement | ✓ |
+| 581 | docs/window-placement.md 点名 compact closed_placement | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 581 — docs/window-placement.md names compact closed_placement
+
+选题 = evolve8h wave 581。`docs/window-placement.md` 点名 health compact `closed_placement`。
 
 ## 2026-10-03：evolve8h wave 580 — docs/session-menu.md names compact session_lock
 

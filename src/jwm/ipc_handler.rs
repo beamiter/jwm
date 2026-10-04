@@ -17116,4 +17116,12 @@ mod tests {
         assert!(DOCS.contains("`docs/session-menu.md` names compact `session_lock` beside health"));
     }
 
+    #[test]
+    fn evolve8h_wave_581_doc_window_placement_names_compact_closed_placement() {
+        const FEATURE: &str = include_str!("../../docs/window-placement.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(FEATURE.contains("compact `closed_placement`"));
+        assert!(DOCS.contains("`docs/window-placement.md` names compact `closed_placement` beside health"));
+    }
+
 }

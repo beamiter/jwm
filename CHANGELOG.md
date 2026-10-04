@@ -704,6 +704,8 @@ monorepo use independent Semantic Versions.
 
 - `docs/session-menu.md` names compact `session_lock` beside health.
 
+- `docs/window-placement.md` names compact `closed_placement` beside health.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

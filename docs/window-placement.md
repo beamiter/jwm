@@ -376,3 +376,5 @@ A minimized window keeps its resting floating state through its restore
 snapshot, and a floating one outside PiP also keeps its exact pre-maximize
 rectangle. A minimized promoted window is saved tiled, the state it rests
 in, so it comes back like a visible one.
+
+`jwm-tool health` prints compact `closed_placement` for window placement operators.
