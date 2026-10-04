@@ -894,6 +894,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 675: Health compact `pip` is the operator twin of `get_status.pip`.
 
+- Wave 676: Health compact `blur` is the operator twin of `get_status.blur`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
