@@ -1119,3 +1119,4 @@ Wave 979: Compatibility tables name `get_fx` with health compact `effects`.
 Wave 980: Compatibility tables name `get_mute` with health compact `mic`.
 Wave 981: Compatibility tables name `get_bm` with health compact `bench`.
 Wave 982: Compatibility tables name `get_cp` with health compact `closed_placement`.
+Wave 983: Compatibility tables name `get_pl` with health compact `prev_layout`.

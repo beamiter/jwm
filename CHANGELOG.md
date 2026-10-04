@@ -1508,6 +1508,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 982: Compatibility tables name `get_cp` with health compact `closed_placement`.
 
+- Wave 983: Compatibility tables name `get_pl` with health compact `prev_layout`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
