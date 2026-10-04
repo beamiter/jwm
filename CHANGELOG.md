@@ -778,6 +778,8 @@ monorepo use independent Semantic Versions.
 
 - README health text names `get_tab` beside compact `tabs`.
 
+- README health text names `get_sel` beside compact `selected`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

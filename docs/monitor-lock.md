@@ -754,3 +754,4 @@ README health text names `get_dnd` beside compact `dnd`.
 README health text names `get_ui` beside compact `system_ui`.
 README health text names `get_lt` beside compact `layout`.
 README health text names `get_tab` beside compact `tabs`.
+README health text names `get_sel` beside compact `selected`.
