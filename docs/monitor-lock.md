@@ -978,3 +978,4 @@ Wave 838: Support triage reads health compact `media` before `get_media` dumps.
 Wave 839: Support triage reads health compact `power` before `get_power` dumps.
 Wave 840: Nested smoke checks health compact `session_lock` after `get_lock`.
 Wave 841: Nested smoke checks health compact `tearing` after `get_th`.
+Wave 842: Nested smoke checks health compact `xwayland` after `get_xw`.
