@@ -1015,3 +1015,4 @@ Wave 875: Nested smoke checks health compact `bench` after `get_bm`.
 Wave 876: Nested smoke checks health compact `closed_placement` after `get_cp`.
 Wave 877: Nested smoke checks health compact `prev_layout` after `get_pl`.
 Wave 878: Nested smoke checks health compact `cfact` after `get_cf`.
+Wave 879: Nested smoke checks health compact `gaps` after `get_gap`.
