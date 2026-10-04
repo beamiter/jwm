@@ -3852,6 +3852,24 @@ mod tests {
         });
         let dnd_lines = health_output_lines(&with_compact_dnd);
         assert!(dnd_lines.iter().any(|line| line == "dnd: enabled=true"));
+        assert!(!dnd_lines
+            .iter()
+            .any(|line| line.starts_with("system_ui:")));
+
+        let with_compact_system_ui = serde_json::json!({
+            "health": {"status": "healthy", "reasons": []},
+            "counts": {"windows": 0, "monitors": 1, "workspaces": 1},
+            "config": {"path": "/tmp/config.toml", "diagnostics": {"error_count": 0, "warning_count": 0}},
+            "features": {},
+            "system_ui": {
+                "active": true,
+                "kind": "launcher"
+            }
+        });
+        let system_ui_lines = health_output_lines(&with_compact_system_ui);
+        assert!(system_ui_lines
+            .iter()
+            .any(|line| line == "system_ui: active=true kind=launcher"));
 
         let capabilities = serde_json::json!({
             "schema_version": 1,
@@ -5315,6 +5333,25 @@ fn health_output_lines(status: &serde_json::Value) -> Vec<String> {
             .map(|value| value.to_string())
             .unwrap_or_else(|| "-".into());
         lines.push(format!("dnd: enabled={enabled}"));
+    }
+
+    if let Some(system_ui) = status.get("system_ui").and_then(serde_json::Value::as_object) {
+        let active = system_ui
+            .get("active")
+            .and_then(serde_json::Value::as_bool)
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".into());
+        let kind = system_ui
+            .get("kind")
+            .and_then(|v| {
+                if v.is_null() {
+                    None
+                } else {
+                    v.as_str()
+                }
+            })
+            .unwrap_or("-");
+        lines.push(format!("system_ui: active={active} kind={kind}"));
     }
 
     if let Some(reasons) = status["health"]["reasons"].as_array() {

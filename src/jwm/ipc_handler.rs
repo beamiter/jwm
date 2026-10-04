@@ -15890,4 +15890,15 @@ mod tests {
         assert!(TOOLS.contains("get_status.dnd"));
         assert!(DOCS.contains("`tools/README.md` health text names compact `dnd`"));
     }
+
+    #[test]
+    fn evolve8h_wave_458_health_prints_compact_system_ui() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("system_ui: active={active} kind={kind}"));
+        assert!(TOOL.contains("\"system_ui: active=true kind=launcher\""));
+        assert!(DOCS.contains(
+            "`jwm-tool health` prints compact `system_ui` beside occupancy"
+        ));
+    }
 }
