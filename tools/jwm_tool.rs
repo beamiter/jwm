@@ -3631,6 +3631,27 @@ mod tests {
         assert!(tree_lines
             .iter()
             .any(|line| line == "tree: monitors=2 windows=7"));
+        assert!(!tree_lines.iter().any(|line| line.starts_with("effects:")));
+
+        let with_compact_effects = serde_json::json!({
+            "health": {"status": "healthy", "reasons": []},
+            "counts": {"windows": 0, "monitors": 1, "workspaces": 1},
+            "config": {"path": "/tmp/config.toml", "diagnostics": {"error_count": 0, "warning_count": 0}},
+            "features": {},
+            "effects": {
+                "overview": false,
+                "expose": true,
+                "magnifier": false,
+                "peek": false,
+                "annotation": false,
+                "layout_picker": false,
+                "debug_hud": true
+            }
+        });
+        let effects_lines = health_output_lines(&with_compact_effects);
+        assert!(effects_lines.iter().any(|line| {
+            line == "effects: overview=false expose=true magnifier=false peek=false annotation=false layout_picker=false debug_hud=true"
+        }));
 
         let capabilities = serde_json::json!({
             "schema_version": 1,
@@ -4842,6 +4863,26 @@ fn health_output_lines(status: &serde_json::Value) -> Vec<String> {
             .unwrap_or_else(|| "-".into());
         lines.push(format!(
             "tree: monitors={monitor_count} windows={window_count}"
+        ));
+    }
+
+    if let Some(effects) = status.get("effects").and_then(serde_json::Value::as_object) {
+        let flag = |name: &str| {
+            effects
+                .get(name)
+                .and_then(serde_json::Value::as_bool)
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "-".into())
+        };
+        lines.push(format!(
+            "effects: overview={} expose={} magnifier={} peek={} annotation={} layout_picker={} debug_hud={}",
+            flag("overview"),
+            flag("expose"),
+            flag("magnifier"),
+            flag("peek"),
+            flag("annotation"),
+            flag("layout_picker"),
+            flag("debug_hud")
         ));
     }
 

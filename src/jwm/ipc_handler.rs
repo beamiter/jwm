@@ -15485,4 +15485,17 @@ mod tests {
         assert!(TOOLS.contains("get_status.tree"));
         assert!(DOCS.contains("`tools/README.md` health text names compact `tree`"));
     }
+
+    #[test]
+    fn evolve8h_wave_416_health_prints_compact_effects() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains(
+            "effects: overview={} expose={} magnifier={} peek={} annotation={} layout_picker={} debug_hud={}"
+        ));
+        assert!(TOOL.contains(
+            "\"effects: overview=false expose=true magnifier=false peek=false annotation=false layout_picker=false debug_hud=true\""
+        ));
+        assert!(DOCS.contains("`jwm-tool health` prints compact `effects` beside occupancy"));
+    }
 }
