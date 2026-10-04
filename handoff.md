@@ -1163,9 +1163,15 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 667 | monitor-lock 唯一 pin wave 667 gaps | ✓ |
 | 668 | monitor-lock 唯一 pin wave 668 mfact | ✓ |
 | 668 | monitor-lock 唯一 pin wave 668 mfact | ✓ |
+| 669 | monitor-lock 唯一 pin wave 669 nmaster | ✓ |
+| 669 | monitor-lock 唯一 pin wave 669 nmaster | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 669 — monitor-lock pin wave 669 nmaster
+
+选题 = evolve8h wave 669。monitor-lock 唯一句子 wave 669 `nmaster`。
 
 ## 2026-10-03：evolve8h wave 668 — monitor-lock pin wave 668 mfact
 

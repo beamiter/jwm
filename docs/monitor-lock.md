@@ -805,3 +805,4 @@ Wave 665: Health compact `prev_layout` is the operator twin of `get_pl`.
 Wave 666: Health compact `cfact` is the operator twin of `get_cf`.
 Wave 667: Health compact `gaps` is the operator twin of `get_gap`.
 Wave 668: Health compact `mfact` is the operator twin of `get_mf`.
+Wave 669: Health compact `nmaster` is the operator twin of `get_nm`.
