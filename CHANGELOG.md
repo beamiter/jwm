@@ -712,6 +712,8 @@ monorepo use independent Semantic Versions.
 
 - `docs/output-layout.md` names compact `monitors` beside health.
 
+- `docs/calendar.md` names compact `system_ui` beside health.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

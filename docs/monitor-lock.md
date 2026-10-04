@@ -721,3 +721,4 @@ README health text names compact `media`.
 `docs/performance.md` names compact `bench` beside health.
 `docs/debug-hud.md` names compact `wayland` beside health.
 `docs/output-layout.md` names compact `monitors` beside health.
+`docs/calendar.md` names compact `system_ui` beside health.

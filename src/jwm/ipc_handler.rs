@@ -17148,4 +17148,12 @@ mod tests {
         assert!(DOCS.contains("`docs/output-layout.md` names compact `monitors` beside health"));
     }
 
+    #[test]
+    fn evolve8h_wave_585_doc_calendar_names_compact_system_ui() {
+        const FEATURE: &str = include_str!("../../docs/calendar.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(FEATURE.contains("compact `system_ui`"));
+        assert!(DOCS.contains("`docs/calendar.md` names compact `system_ui` beside health"));
+    }
+
 }

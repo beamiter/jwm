@@ -37,3 +37,5 @@ month lengths, leap years (including the 1900/2000 century rule), the weekday
 the first falls on, the year rollover at December, and the mapping from a
 clicked grid cell to its month flip are unit tested against fixed dates
 rather than whatever "today" happens to be.
+
+`jwm-tool health` prints compact `system_ui` for calendar operators.
