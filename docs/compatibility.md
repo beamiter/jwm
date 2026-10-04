@@ -297,3 +297,4 @@ evolve9h wave 73: `jwm-tool capabilities` remains the catalog for `power` query 
 evolve9h wave 74: `jwm-tool capabilities` remains the catalog for `media` query aliases.
 evolve9h wave 75: `jwm-tool capabilities` remains the catalog for `clipboard` query aliases.
 evolve9h wave 76: `jwm-tool capabilities` remains the catalog for `idle` query aliases.
+evolve9h wave 77: `jwm-tool capabilities` remains the catalog for `notifications` query aliases.
