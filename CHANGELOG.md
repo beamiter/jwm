@@ -1544,6 +1544,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 1000: Bar occupancy sits beside health compact `tearing` (`get_th`).
 
+- `jwm-tool health` prints compact `version_info` beside occupancy.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

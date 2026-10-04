@@ -19766,4 +19766,17 @@ mod tests {
         assert!(DOCS.contains("Wave 1000: Bar occupancy sits beside health compact `tearing` (`get_th`)."));
     }
 
+    #[test]
+    fn evolve9h_wave_1_health_prints_compact_version_info() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains(
+            "version_info: version={version} backend={backend}"
+        ));
+        assert!(TOOL.contains(
+            "\"version_info: version=0.2.0 backend=wayland-udev\""
+        ));
+        assert!(DOCS.contains("`jwm-tool health` prints compact `version_info` beside occupancy"));
+    }
+
 }

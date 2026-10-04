@@ -308,6 +308,21 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 
 ---
 
+## Evolve backlog（evolve9h 目标 1000 轮；每轮独立 commit+push）
+
+上一轮 evolve8h 已完成 wave 1–1000。本表从 1 重新计数。
+
+| # | 选题 | Size |
+| --- | --- | --- |
+| 1 | health 打印 compact version_info | ✓ |
+| … | evolve9h 进行中 |
+
+---
+
+## 2026-10-04：evolve9h wave 1 — health prints compact version_info
+
+选题 = evolve9h wave 1。`jwm-tool health` 打印 compact `version_info` 行。
+
 ## Evolve backlog（evolve8h 目标 1000 轮；每轮独立 commit+push）
 
 上一轮 evolve7h 已完成 wave 9–1000。本表从 1 重新计数。

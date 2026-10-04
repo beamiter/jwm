@@ -4330,6 +4330,25 @@ mod tests {
             line == "media: active=true"
         }));
 
+        assert!(!media_lines
+            .iter()
+            .any(|line| line.starts_with("version_info:")));
+
+        let with_compact_version_info = serde_json::json!({
+            "health": {"status": "healthy", "reasons": []},
+            "counts": {"windows": 0, "monitors": 1, "workspaces": 1},
+            "config": {"path": "/tmp/config.toml", "diagnostics": {"error_count": 0, "warning_count": 0}},
+            "features": {},
+            "version_info": {
+                "version": "0.2.0",
+                "backend": "wayland-udev"
+            }
+        });
+        let version_info_lines = health_output_lines(&with_compact_version_info);
+        assert!(version_info_lines.iter().any(|line| {
+            line == "version_info: version=0.2.0 backend=wayland-udev"
+        }));
+
         let capabilities = serde_json::json!({
             "schema_version": 1,
             "commands": ["focusstack", "reload_config"],
@@ -6257,6 +6276,30 @@ fn health_output_lines(status: &serde_json::Value) -> Vec<String> {
             .map(|value| value.to_string())
             .unwrap_or_else(|| "-".into());
         lines.push(format!("media: active={active}"));
+    }
+
+    if let Some(version_info) = status.get("version_info").and_then(serde_json::Value::as_object) {
+        let version = version_info
+            .get("version")
+            .and_then(|v| {
+                if v.is_null() {
+                    None
+                } else {
+                    v.as_str()
+                }
+            })
+            .unwrap_or("-");
+        let backend = version_info
+            .get("backend")
+            .and_then(|v| {
+                if v.is_null() {
+                    None
+                } else {
+                    v.as_str()
+                }
+            })
+            .unwrap_or("-");
+        lines.push(format!("version_info: version={version} backend={backend}"));
     }
 
     if let Some(reasons) = status["health"]["reasons"].as_array() {
