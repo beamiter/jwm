@@ -17672,4 +17672,10 @@ mod tests {
         assert!(DOCS.contains("Wave 651: Health compact `system_ui` is the operator twin of `get_ui`."));
     }
 
+    #[test]
+    fn evolve8h_wave_652_monitor_lock_unique_pin_layout() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 652: Health compact `layout` is the operator twin of `get_lt`."));
+    }
+
 }

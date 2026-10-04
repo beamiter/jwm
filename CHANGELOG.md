@@ -846,6 +846,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 651: Health compact `system_ui` is the operator twin of `get_ui`.
 
+- Wave 652: Health compact `layout` is the operator twin of `get_lt`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
