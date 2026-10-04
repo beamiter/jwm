@@ -691,3 +691,4 @@ README health text names compact `power`.
 README health text names compact `media`.
 `tools/README.md` health text names compact `media`.
 `jwm-tool capabilities` text lists `get_clip -> get_clipboard`.
+`jwm-tool capabilities` text lists `get_idl -> get_idle`.

@@ -652,6 +652,8 @@ monorepo use independent Semantic Versions.
 
 - `jwm-tool capabilities` text lists `get_clip -> get_clipboard`.
 
+- `jwm-tool capabilities` text lists `get_idl -> get_idle`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
