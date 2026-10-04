@@ -1217,9 +1217,15 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 694 | monitor-lock 唯一 pin wave 694 waterlily | ✓ |
 | 695 | monitor-lock 唯一 pin wave 695 audio | ✓ |
 | 695 | monitor-lock 唯一 pin wave 695 audio | ✓ |
+| 696 | monitor-lock 唯一 pin wave 696 wallpaper | ✓ |
+| 696 | monitor-lock 唯一 pin wave 696 wallpaper | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 696 — monitor-lock pin wave 696 wallpaper
+
+选题 = evolve8h wave 696。monitor-lock 唯一句子 wave 696 `wallpaper`。
 
 ## 2026-10-03：evolve8h wave 695 — monitor-lock pin wave 695 audio
 

@@ -17936,4 +17936,10 @@ mod tests {
         assert!(DOCS.contains("Wave 695: `get_devices` and health compact `audio` share one Status nest."));
     }
 
+    #[test]
+    fn evolve8h_wave_696_monitor_lock_unique_pin_wallpaper() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 696: `get_wall` and health compact `wallpaper` share one Status nest."));
+    }
+
 }
