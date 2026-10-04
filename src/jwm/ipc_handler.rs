@@ -16280,4 +16280,13 @@ mod tests {
         assert!(DOCS.contains("README health text names compact `magnifier`"));
     }
 
+    #[test]
+    fn evolve8h_wave_495_tools_readme_health_names_compact_magnifier() {
+        const TOOLS: &str = include_str!("../../tools/README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOLS.contains("compact `magnifier` line"));
+        assert!(TOOLS.contains("get_status.magnifier"));
+        assert!(DOCS.contains("`tools/README.md` health text names compact `magnifier`"));
+    }
+
 }
