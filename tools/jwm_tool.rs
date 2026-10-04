@@ -5660,7 +5660,7 @@ fn capabilities_output_lines(capabilities: &serde_json::Value) -> Vec<String> {
         "query aliases: get_lock,get_sess -> get_session_lock".to_string(),
         "query aliases: get_tearing,get_th -> get_tearing_hints".to_string(),
         "query aliases: get_xwayland,get_xw -> get_xwayland_status".to_string(),
-        "query aliases: get_scrolling -> get_scrolling_status".to_string(),
+        "query aliases: get_scrolling,get_scroll -> get_scrolling_status".to_string(),
     ]
 }
 

@@ -99,7 +99,7 @@ summaries alongside earlier nests. `get_effect_status` /
 `get_effects` reports shell picker flags, magnifier radius, and
 `compositor_active`; short query aliases include `get_notif`, `get_ui`,
 `get_lock`, `get_tabs`, `get_clip`, `get_network`, `get_tearing`,
-`get_scrolling`, `get_xwayland`, `get_do_not_disturb`, `get_caps`,
+`get_scrolling`, `get_scroll`, `get_xwayland`, `get_do_not_disturb`, `get_caps`,
 `get_pads`, `get_mag`, `get_perf`, `get_res`, `get_wins`, `get_devices`,
 `get_cfg`, `get_ver`, `get_bt`, `get_wl`, `get_nl`, `get_cm`, `get_sess`,
 `get_strut`, `get_scratch`, `get_mons`, `get_ws`, `get_gap`, `get_nm`,

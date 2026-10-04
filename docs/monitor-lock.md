@@ -619,3 +619,5 @@ README health text names compact `xwayland`.
 README health text names compact `scrolling`.
 `tools/README.md` health text names compact `scrolling`.
 `jwm-tool capabilities` text lists `get_scrolling -> get_scrolling_status`.
+IPC short query alias `get_scroll` reaches `get_scrolling_status`.
+`jwm-tool capabilities` text lists `get_scrolling,get_scroll -> get_scrolling_status`.

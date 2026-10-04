@@ -2847,7 +2847,7 @@ impl Jwm {
                 let tree = self.query_tree(backend);
                 IpcResponse::ok(Some(serde_json::to_value(tree).unwrap_or_default()))
             }
-            "get_scrolling_status" | "get_scrolling" => {
+            "get_scrolling_status" | "get_scrolling" | "get_scroll" => {
                 IpcResponse::ok(Some(self.query_scrolling_status()))
             }
             "get_layout" | "get_lt" => IpcResponse::ok(Some(self.query_focused_layout(backend))),
@@ -16148,9 +16148,30 @@ mod tests {
     fn evolve8h_wave_483_capabilities_text_lists_scrolling_alias() {
         const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(TOOL.contains("query aliases: get_scrolling -> get_scrolling_status"));
+        assert!(TOOL.contains("query aliases: get_scrolling,get_scroll -> get_scrolling_status")
+            || TOOL.contains("query aliases: get_scrolling -> get_scrolling_status"));
         assert!(DOCS.contains(
             "`jwm-tool capabilities` text lists `get_scrolling -> get_scrolling_status`"
         ));
+    }
+
+    #[test]
+    fn evolve8h_wave_484_get_scroll_short_query() {
+        const SOURCE: &str = include_str!("ipc_handler.rs");
+        const IPC: &str = include_str!("../ipc.rs");
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        const COMPAT: &str = include_str!("../../docs/compatibility.md");
+        assert!(SOURCE.contains(
+            "\"get_scrolling_status\" | \"get_scrolling\" | \"get_scroll\""
+        ));
+        assert!(IPC.contains("\"get_scroll\""));
+        assert!(TOOL.contains(
+            "query aliases: get_scrolling,get_scroll -> get_scrolling_status"
+        ));
+        assert!(DOCS.contains(
+            "IPC short query alias `get_scroll` reaches `get_scrolling_status`"
+        ));
+        assert!(COMPAT.contains("`get_scroll`"));
     }
 }

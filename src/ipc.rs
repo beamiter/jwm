@@ -479,6 +479,7 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "get_resources",
         "get_scratch",
         "get_scratchpads",
+        "get_scroll",
         "get_scrolling",
         "get_scrolling_status",
         "get_sel",
