@@ -17180,4 +17180,12 @@ mod tests {
         assert!(DOCS.contains("`docs/support-bundles.md` names compact `bench` beside health"));
     }
 
+    #[test]
+    fn evolve8h_wave_589_doc_ui_theme_names_compact_blur() {
+        const FEATURE: &str = include_str!("../../docs/ui-theme.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(FEATURE.contains("compact `blur`"));
+        assert!(DOCS.contains("`docs/ui-theme.md` names compact `blur` beside health"));
+    }
+
 }

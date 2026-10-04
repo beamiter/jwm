@@ -202,3 +202,5 @@ The modal card's geometry lives beside it in `system_ui_panel.rs` and its
 motion in `dynamic_island.rs` — both pure arithmetic with no GL, so the layout
 and the springs are unit-tested without a context and neither backend can drift
 from the other on where a row goes.
+
+`jwm-tool health` prints compact `blur` for ui theme operators.

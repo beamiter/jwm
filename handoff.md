@@ -1003,9 +1003,15 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 587 | docs/startup.md 点名 compact wayland | ✓ |
 | 588 | docs/support-bundles.md 点名 compact bench | ✓ |
 | 588 | docs/support-bundles.md 点名 compact bench | ✓ |
+| 589 | docs/ui-theme.md 点名 compact blur | ✓ |
+| 589 | docs/ui-theme.md 点名 compact blur | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 589 — docs/ui-theme.md names compact blur
+
+选题 = evolve8h wave 589。`docs/ui-theme.md` 点名 health compact `blur`。
 
 ## 2026-10-03：evolve8h wave 588 — docs/support-bundles.md names compact bench
 

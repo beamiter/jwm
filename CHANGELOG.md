@@ -720,6 +720,8 @@ monorepo use independent Semantic Versions.
 
 - `docs/support-bundles.md` names compact `bench` beside health.
 
+- `docs/ui-theme.md` names compact `blur` beside health.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
