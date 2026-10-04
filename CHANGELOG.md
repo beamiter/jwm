@@ -570,6 +570,8 @@ monorepo use independent Semantic Versions.
 
 - README health text names compact `recording`.
 
+- `tools/README.md` health text names compact `recording`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
