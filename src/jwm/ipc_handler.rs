@@ -21853,4 +21853,10 @@ mod tests {
         assert!(COMPAT.contains("evolve9h wave 336: Health compact `tearing` is diagnosable through `jwm-tool health`."));
     }
 
+    #[test]
+    fn evolve9h_wave_337_compat_unique_pin_xwayland() {
+        const COMPAT: &str = include_str!("../../docs/compatibility.md");
+        assert!(COMPAT.contains("evolve9h wave 337: Health compact `xwayland` is diagnosable through `jwm-tool health`."));
+    }
+
 }
