@@ -722,6 +722,8 @@ monorepo use independent Semantic Versions.
 
 - `docs/ui-theme.md` names compact `blur` beside health.
 
+- `docs/daily-drive.md` names compact `idle` beside health.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

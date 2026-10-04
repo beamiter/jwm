@@ -17188,4 +17188,12 @@ mod tests {
         assert!(DOCS.contains("`docs/ui-theme.md` names compact `blur` beside health"));
     }
 
+    #[test]
+    fn evolve8h_wave_590_doc_daily_drive_names_compact_idle() {
+        const FEATURE: &str = include_str!("../../docs/daily-drive.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(FEATURE.contains("compact `idle`"));
+        assert!(DOCS.contains("`docs/daily-drive.md` names compact `idle` beside health"));
+    }
+
 }

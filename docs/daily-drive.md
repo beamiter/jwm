@@ -36,3 +36,5 @@ jwm-tool perf record --out baseline.json     # labeled only
 ```
 
 A build that cannot explain what it supports is not daily-drive ready.
+
+`jwm-tool health` prints compact `idle` for daily drive operators.
