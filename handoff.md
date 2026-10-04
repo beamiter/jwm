@@ -603,9 +603,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 287 | compatibility 唯一 pin wave 287 bluetooth | ✓ |
 | 288 | compatibility 唯一 pin wave 288 resources | ✓ |
 | 289 | compatibility 唯一 pin wave 289 connectivity | ✓ |
+| 290 | compatibility 唯一 pin wave 290 power | ✓ |
 | … | evolve9h 进行中 |
 
 ---
+
+## 2026-10-04：evolve9h wave 290 — compatibility pin wave 290 power
+
+选题 = evolve9h wave 290。compatibility 唯一句子 wave 290 `power`。
 
 ## 2026-10-04：evolve9h wave 289 — compatibility pin wave 289 connectivity
 
