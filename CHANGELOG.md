@@ -459,6 +459,7 @@ monorepo use independent Semantic Versions.
 - `jwm-tool capabilities` text lists `get_bench,get_bm -> benchmark_report`.
 - `jwm-tool health` prints compact `floating` beside occupancy.
 - README health text names compact `floating`.
+- `tools/README.md` health text names compact `floating`.
 
 ### Changed
 
