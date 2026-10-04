@@ -20815,4 +20815,10 @@ mod tests {
         assert!(COMPAT.contains("evolve9h wave 163: Upgrade notes keep `bluetooth` beside occupancy on the health page."));
     }
 
+    #[test]
+    fn evolve9h_wave_164_compat_unique_pin_resources() {
+        const COMPAT: &str = include_str!("../../docs/compatibility.md");
+        assert!(COMPAT.contains("evolve9h wave 164: Upgrade notes keep `resources` beside occupancy on the health page."));
+    }
+
 }
