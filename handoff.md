@@ -1575,9 +1575,15 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 873 | monitor-lock 唯一 pin wave 873 effects | ✓ |
 | 874 | monitor-lock 唯一 pin wave 874 mic | ✓ |
 | 874 | monitor-lock 唯一 pin wave 874 mic | ✓ |
+| 875 | monitor-lock 唯一 pin wave 875 bench | ✓ |
+| 875 | monitor-lock 唯一 pin wave 875 bench | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 875 — monitor-lock pin wave 875 bench
+
+选题 = evolve8h wave 875。monitor-lock 唯一句子 wave 875 `bench`。
 
 ## 2026-10-03：evolve8h wave 874 — monitor-lock pin wave 874 mic
 

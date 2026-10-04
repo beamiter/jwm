@@ -1011,3 +1011,4 @@ Wave 871: Nested smoke checks health compact `workspaces` after `get_ws`.
 Wave 872: Nested smoke checks health compact `windows` after `get_wins`.
 Wave 873: Nested smoke checks health compact `effects` after `get_fx`.
 Wave 874: Nested smoke checks health compact `mic` after `get_mute`.
+Wave 875: Nested smoke checks health compact `bench` after `get_bm`.
