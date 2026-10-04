@@ -1110,6 +1110,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 783: Doctor bundles include health compact `hdr` from `get_status.hdr`.
 
+- Wave 784: Doctor bundles include health compact `expose` from `get_status.expose`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
