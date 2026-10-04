@@ -512,6 +512,7 @@ monorepo use independent Semantic Versions.
 - `jwm-tool health` prints compact `scrolling` beside occupancy.
 - README health text names compact `scrolling`.
 - `tools/README.md` health text names compact `scrolling`.
+- `jwm-tool capabilities` text lists `get_scrolling -> get_scrolling_status`.
 
 ### Changed
 
