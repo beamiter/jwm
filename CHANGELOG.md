@@ -522,6 +522,8 @@ monorepo use independent Semantic Versions.
 
 - `jwm-tool health` prints compact `night_light` beside occupancy.
 
+- README health text names compact `night_light`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
