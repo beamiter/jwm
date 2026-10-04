@@ -1312,6 +1312,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 884: Nested smoke checks health compact `sticky` after `get_status.sticky`.
 
+- Wave 885: Nested smoke checks health compact `urgent` after `get_status.urgent`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

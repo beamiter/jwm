@@ -19070,4 +19070,10 @@ mod tests {
         assert!(DOCS.contains("Wave 884: Nested smoke checks health compact `sticky` after `get_status.sticky`."));
     }
 
+    #[test]
+    fn evolve8h_wave_885_monitor_lock_unique_pin_urgent() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 885: Nested smoke checks health compact `urgent` after `get_status.urgent`."));
+    }
+
 }

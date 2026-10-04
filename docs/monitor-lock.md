@@ -1021,3 +1021,4 @@ Wave 881: Nested smoke checks health compact `nmaster` after `get_nm`.
 Wave 882: Nested smoke checks health compact `floating` after `get_status.floating`.
 Wave 883: Nested smoke checks health compact `minimized` after `get_status.minimized`.
 Wave 884: Nested smoke checks health compact `sticky` after `get_status.sticky`.
+Wave 885: Nested smoke checks health compact `urgent` after `get_status.urgent`.
