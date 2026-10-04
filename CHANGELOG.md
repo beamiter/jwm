@@ -1398,6 +1398,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 927: Upgrade notes keep health compact `mic` beside `get_mute`.
 
+- Wave 928: Upgrade notes keep health compact `bench` beside `get_bm`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

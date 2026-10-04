@@ -19328,4 +19328,10 @@ mod tests {
         assert!(DOCS.contains("Wave 927: Upgrade notes keep health compact `mic` beside `get_mute`."));
     }
 
+    #[test]
+    fn evolve8h_wave_928_monitor_lock_unique_pin_bench() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 928: Upgrade notes keep health compact `bench` beside `get_bm`."));
+    }
+
 }
