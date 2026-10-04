@@ -1960,6 +1960,8 @@ monorepo use independent Semantic Versions.
 
 - evolve9h wave 208: `jwm-tool capabilities` remains the catalog for `status` query aliases.
 
+- evolve9h wave 209: `jwm-tool capabilities` remains the catalog for `tree` query aliases.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

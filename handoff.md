@@ -522,9 +522,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 206 | compatibility 唯一 pin wave 206 ipc_caps | ✓ |
 | 207 | compatibility 唯一 pin wave 207 config | ✓ |
 | 208 | compatibility 唯一 pin wave 208 status | ✓ |
+| 209 | compatibility 唯一 pin wave 209 tree | ✓ |
 | … | evolve9h 进行中 |
 
 ---
+
+## 2026-10-04：evolve9h wave 209 — compatibility pin wave 209 tree
+
+选题 = evolve9h wave 209。compatibility 唯一句子 wave 209 `tree`。
 
 ## 2026-10-04：evolve9h wave 208 — compatibility pin wave 208 status
 
