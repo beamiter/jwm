@@ -555,9 +555,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 239 | compatibility 唯一 pin wave 239 status | ✓ |
 | 240 | compatibility 唯一 pin wave 240 tree | ✓ |
 | 241 | compatibility 唯一 pin wave 241 window | ✓ |
+| 242 | compatibility 唯一 pin wave 242 session_lock | ✓ |
 | … | evolve9h 进行中 |
 
 ---
+
+## 2026-10-04：evolve9h wave 242 — compatibility pin wave 242 session_lock
+
+选题 = evolve9h wave 242。compatibility 唯一句子 wave 242 `session_lock`。
 
 ## 2026-10-04：evolve9h wave 241 — compatibility pin wave 241 window
 
