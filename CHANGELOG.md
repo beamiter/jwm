@@ -688,6 +688,8 @@ monorepo use independent Semantic Versions.
 
 - `docs/notifications.md` names compact `notifications` beside health.
 
+- `docs/audio-recording.md` names compact `audio_recording` beside health.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

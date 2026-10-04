@@ -971,9 +971,15 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 571 | docs/idle.md 点名 compact idle | ✓ |
 | 572 | docs/notifications.md 点名 compact notifications | ✓ |
 | 572 | docs/notifications.md 点名 compact notifications | ✓ |
+| 573 | docs/audio-recording.md 点名 compact audio_recording | ✓ |
+| 573 | docs/audio-recording.md 点名 compact audio_recording | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 573 — docs/audio-recording.md names compact audio_recording
+
+选题 = evolve8h wave 573。`docs/audio-recording.md` 点名 health compact `audio_recording`。
 
 ## 2026-10-03：evolve8h wave 572 — docs/notifications.md names compact notifications
 

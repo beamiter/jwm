@@ -172,3 +172,5 @@ jwm-tool msg set_recording_region \
   --args '{"x":320,"y":180,"width":960,"height":540}'
 jwm-tool msg get_recording_status
 ```
+
+`jwm-tool health` prints compact `audio_recording` for audio recording operators.

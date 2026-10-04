@@ -709,3 +709,4 @@ README health text names compact `media`.
 `docs/clipboard.md` names compact `clipboard` beside health.
 `docs/idle.md` names compact `idle` beside health.
 `docs/notifications.md` names compact `notifications` beside health.
+`docs/audio-recording.md` names compact `audio_recording` beside health.

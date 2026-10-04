@@ -17052,4 +17052,12 @@ mod tests {
         assert!(DOCS.contains("`docs/notifications.md` names compact `notifications` beside health"));
     }
 
+    #[test]
+    fn evolve8h_wave_573_doc_audio_recording_names_compact_audio_recording() {
+        const FEATURE: &str = include_str!("../../docs/audio-recording.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(FEATURE.contains("compact `audio_recording`"));
+        assert!(DOCS.contains("`docs/audio-recording.md` names compact `audio_recording` beside health"));
+    }
+
 }
