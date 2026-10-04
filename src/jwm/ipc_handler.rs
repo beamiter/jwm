@@ -21919,4 +21919,10 @@ mod tests {
         assert!(COMPAT.contains("evolve9h wave 347: Health compact `audio` is diagnosable through `jwm-tool health`."));
     }
 
+    #[test]
+    fn evolve9h_wave_348_compat_unique_pin_wallpaper() {
+        const COMPAT: &str = include_str!("../../docs/compatibility.md");
+        assert!(COMPAT.contains("evolve9h wave 348: Health compact `wallpaper` is diagnosable through `jwm-tool health`."));
+    }
+
 }
