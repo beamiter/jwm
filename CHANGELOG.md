@@ -1646,6 +1646,8 @@ monorepo use independent Semantic Versions.
 
 - evolve9h wave 51: `jwm-tool capabilities` remains the catalog for `ipc_caps` query aliases.
 
+- evolve9h wave 52: `jwm-tool capabilities` remains the catalog for `config` query aliases.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

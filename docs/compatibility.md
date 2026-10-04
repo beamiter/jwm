@@ -272,3 +272,4 @@ evolve9h wave 48: Health compact `system_ui` is diagnosable through `jwm-tool he
 evolve9h wave 49: `jwm-tool capabilities` remains the catalog for `version_info` query aliases.
 evolve9h wave 50: `jwm-tool capabilities` remains the catalog for `metrics` query aliases.
 evolve9h wave 51: `jwm-tool capabilities` remains the catalog for `ipc_caps` query aliases.
+evolve9h wave 52: `jwm-tool capabilities` remains the catalog for `config` query aliases.
