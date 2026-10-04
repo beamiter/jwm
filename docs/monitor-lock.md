@@ -608,3 +608,4 @@ README health text names compact `session_lock`.
 `tools/README.md` health text names compact `session_lock`.
 `jwm-tool capabilities` text lists `get_lock,get_sess -> get_session_lock`.
 `jwm-tool health` prints compact `tearing` beside occupancy.
+README health text names compact `tearing`.
