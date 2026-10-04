@@ -335,3 +335,4 @@ evolve9h wave 111: Nested smoke treats `version_info` as a read-only IPC probe.
 evolve9h wave 112: Nested smoke treats `metrics` as a read-only IPC probe.
 evolve9h wave 113: Nested smoke treats `ipc_caps` as a read-only IPC probe.
 evolve9h wave 114: Nested smoke treats `config` as a read-only IPC probe.
+evolve9h wave 115: Nested smoke treats `status` as a read-only IPC probe.
