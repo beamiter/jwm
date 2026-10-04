@@ -1572,6 +1572,8 @@ monorepo use independent Semantic Versions.
 
 - `jwm-tool capabilities` text lists `get_conf -> get_config`.
 
+- `jwm-tool capabilities` text lists `get_st -> get_status`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
