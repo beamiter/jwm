@@ -16794,4 +16794,13 @@ mod tests {
         assert!(DOCS.contains("`jwm-tool health` prints compact `connectivity` beside occupancy"));
     }
 
+    #[test]
+    fn evolve8h_wave_545_readme_health_names_compact_connectivity() {
+        const README: &str = include_str!("../../README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(README.contains("compact `connectivity` line"));
+        assert!(README.contains("get_status.connectivity"));
+        assert!(DOCS.contains("README health text names compact `connectivity`"));
+    }
+
 }
