@@ -745,3 +745,4 @@ README health text names `get_wly` beside compact `waterlily`.
 README health text names `get_devices` beside compact `audio`.
 README health text names `get_wall` beside compact `wallpaper`.
 README health text names `get_bt` beside compact `bluetooth`.
+README health text names `get_res` beside compact `resources`.

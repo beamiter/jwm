@@ -232,7 +232,7 @@ It also prints a compact `waterlily` line from `get_status.waterlily` (`get_wly`
 It also prints a compact `audio` line from `get_status.audio` (`get_devices`).
 It also prints a compact `wallpaper` line from `get_status.wallpaper` (`get_wall`).
 It also prints a compact `bluetooth` line from `get_status.bluetooth` (`get_bt`).
-It also prints a compact `resources` line from `get_status.resources`.
+It also prints a compact `resources` line from `get_status.resources` (`get_res`).
 It also prints a compact `connectivity` line from `get_status.connectivity`.
 It also prints a compact `power` line from `get_status.power`.
 It also prints a compact `media` line from `get_status.media`.

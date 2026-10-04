@@ -760,6 +760,8 @@ monorepo use independent Semantic Versions.
 
 - README health text names `get_bt` beside compact `bluetooth`.
 
+- README health text names `get_res` beside compact `resources`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
