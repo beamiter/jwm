@@ -15516,4 +15516,16 @@ mod tests {
         assert!(TOOLS.contains("get_status.effects"));
         assert!(DOCS.contains("`tools/README.md` health text names compact `effects`"));
     }
+
+    #[test]
+    fn evolve8h_wave_419_capabilities_text_lists_effect_aliases() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains(
+            "query aliases: get_fx,get_effects -> get_effect_status"
+        ));
+        assert!(DOCS.contains(
+            "`jwm-tool capabilities` text lists `get_fx,get_effects -> get_effect_status`"
+        ));
+    }
 }

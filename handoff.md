@@ -732,9 +732,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 416 | health 打印 compact effects | ✓ |
 | 417 | README health 点名 compact effects | ✓ |
 | 418 | tools/README health 点名 compact effects | ✓ |
+| 419 | capabilities 文本列出 get_fx,get_effects -> get_effect_status | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 419 — capabilities text lists effect aliases
+
+选题 = evolve8h wave 419。`jwm-tool capabilities` 文本列出 `get_fx,get_effects -> get_effect_status`。
 
 ## 2026-10-03：evolve8h wave 418 — tools/README health names compact effects
 
