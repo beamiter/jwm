@@ -18206,4 +18206,10 @@ mod tests {
         assert!(DOCS.contains("Wave 740: Doctor bundles include health compact `magnifier` from `get_mag`."));
     }
 
+    #[test]
+    fn evolve8h_wave_741_monitor_lock_unique_pin_peek() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 741: Doctor bundles include health compact `peek` from `get_pk`."));
+    }
+
 }

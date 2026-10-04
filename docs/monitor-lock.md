@@ -877,3 +877,4 @@ Wave 737: Doctor bundles include health compact `scrolling` from `get_scroll`.
 Wave 738: Doctor bundles include health compact `color_management` from `get_cm`.
 Wave 739: Doctor bundles include health compact `night_light` from `get_nl`.
 Wave 740: Doctor bundles include health compact `magnifier` from `get_mag`.
+Wave 741: Doctor bundles include health compact `peek` from `get_pk`.
