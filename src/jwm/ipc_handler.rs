@@ -18698,4 +18698,10 @@ mod tests {
         assert!(DOCS.contains("Wave 822: Support triage reads health compact `bench` before `get_bm` dumps."));
     }
 
+    #[test]
+    fn evolve8h_wave_823_monitor_lock_unique_pin_closed_placement() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 823: Support triage reads health compact `closed_placement` before `get_cp` dumps."));
+    }
+
 }

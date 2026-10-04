@@ -959,3 +959,4 @@ Wave 819: Support triage reads health compact `windows` before `get_wins` dumps.
 Wave 820: Support triage reads health compact `effects` before `get_fx` dumps.
 Wave 821: Support triage reads health compact `mic` before `get_mute` dumps.
 Wave 822: Support triage reads health compact `bench` before `get_bm` dumps.
+Wave 823: Support triage reads health compact `closed_placement` before `get_cp` dumps.
