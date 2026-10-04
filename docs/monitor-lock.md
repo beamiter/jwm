@@ -757,3 +757,4 @@ README health text names `get_tab` beside compact `tabs`.
 README health text names `get_sel` beside compact `selected`.
 README health text names `get_strut` beside compact `struts`.
 README health text names `get_pads` beside compact `scratchpads`.
+README health text names `get_fw` beside compact `focused`.

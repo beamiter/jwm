@@ -17465,4 +17465,13 @@ mod tests {
         assert!(DOCS.contains("README health text names `get_pads` beside compact `scratchpads`"));
     }
 
+    #[test]
+    fn evolve8h_wave_621_readme_health_names_get_fw_for_focused() {
+        const README: &str = include_str!("../../README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(README.contains("`get_fw`"));
+        assert!(README.contains("compact `focused` line"));
+        assert!(DOCS.contains("README health text names `get_fw` beside compact `focused`"));
+    }
+
 }

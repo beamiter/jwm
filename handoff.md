@@ -1067,9 +1067,15 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 619 | README health 点名 get_strut beside compact struts | ✓ |
 | 620 | README health 点名 get_pads beside compact scratchpads | ✓ |
 | 620 | README health 点名 get_pads beside compact scratchpads | ✓ |
+| 621 | README health 点名 get_fw beside compact focused | ✓ |
+| 621 | README health 点名 get_fw beside compact focused | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 621 — README health names get_fw for focused
+
+选题 = evolve8h wave 621。README health 文本点名 `get_fw` beside compact `focused`。
 
 ## 2026-10-03：evolve8h wave 620 — README health names get_pads for scratchpads
 
