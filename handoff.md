@@ -400,9 +400,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 84 | compatibility 唯一 pin wave 84 status | ✓ |
 | 85 | compatibility 唯一 pin wave 85 tree | ✓ |
 | 86 | compatibility 唯一 pin wave 86 window | ✓ |
+| 87 | compatibility 唯一 pin wave 87 session_lock | ✓ |
 | … | evolve9h 进行中 |
 
 ---
+
+## 2026-10-04：evolve9h wave 87 — compatibility pin wave 87 session_lock
+
+选题 = evolve9h wave 87。compatibility 唯一句子 wave 87 `session_lock`。
 
 ## 2026-10-04：evolve9h wave 86 — compatibility pin wave 86 window
 

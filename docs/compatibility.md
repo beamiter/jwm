@@ -307,3 +307,4 @@ evolve9h wave 83: Support bundles should include `config` when health is degrade
 evolve9h wave 84: Support bundles should include `status` when health is degraded.
 evolve9h wave 85: Support bundles should include `tree` when health is degraded.
 evolve9h wave 86: Support bundles should include `window` when health is degraded.
+evolve9h wave 87: Support bundles should include `session_lock` when health is degraded.
