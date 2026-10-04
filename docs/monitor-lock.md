@@ -1036,3 +1036,4 @@ Wave 896: Upgrade notes keep health compact `scrolling` beside `get_scroll`.
 Wave 897: Upgrade notes keep health compact `color_management` beside `get_cm`.
 Wave 898: Upgrade notes keep health compact `night_light` beside `get_nl`.
 Wave 899: Upgrade notes keep health compact `magnifier` beside `get_mag`.
+Wave 900: Upgrade notes keep health compact `peek` beside `get_pk`.

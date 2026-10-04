@@ -1342,6 +1342,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 899: Upgrade notes keep health compact `magnifier` beside `get_mag`.
 
+- Wave 900: Upgrade notes keep health compact `peek` beside `get_pk`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
