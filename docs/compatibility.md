@@ -396,3 +396,4 @@ evolve9h wave 172: Upgrade notes keep `system_ui` beside occupancy on the health
 evolve9h wave 173: Health compact `version_info` is diagnosable through `jwm-tool health`.
 evolve9h wave 174: Health compact `metrics` is diagnosable through `jwm-tool health`.
 evolve9h wave 175: Health compact `ipc_caps` is diagnosable through `jwm-tool health`.
+evolve9h wave 176: Health compact `config` is diagnosable through `jwm-tool health`.
