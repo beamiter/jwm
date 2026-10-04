@@ -880,3 +880,4 @@ Wave 740: Doctor bundles include health compact `magnifier` from `get_mag`.
 Wave 741: Doctor bundles include health compact `peek` from `get_pk`.
 Wave 742: Doctor bundles include health compact `gesture` from `get_gest`.
 Wave 743: Doctor bundles include health compact `wayland` from `get_wl`.
+Wave 744: Doctor bundles include health compact `recording` from `get_rec`.
