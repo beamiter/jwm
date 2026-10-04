@@ -15980,4 +15980,13 @@ mod tests {
         assert!(README.contains("get_status.clipboard"));
         assert!(DOCS.contains("README health text names compact `clipboard`"));
     }
+
+    #[test]
+    fn evolve8h_wave_467_tools_readme_health_names_compact_clipboard() {
+        const TOOLS: &str = include_str!("../../tools/README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOLS.contains("compact `clipboard` line"));
+        assert!(TOOLS.contains("get_status.clipboard"));
+        assert!(DOCS.contains("`tools/README.md` health text names compact `clipboard`"));
+    }
 }
