@@ -18326,4 +18326,10 @@ mod tests {
         assert!(DOCS.contains("Wave 760: Doctor bundles include health compact `selected` from `get_sel`."));
     }
 
+    #[test]
+    fn evolve8h_wave_761_monitor_lock_unique_pin_struts() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 761: Doctor bundles include health compact `struts` from `get_strut`."));
+    }
+
 }
