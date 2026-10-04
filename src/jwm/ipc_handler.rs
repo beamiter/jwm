@@ -15723,4 +15723,13 @@ mod tests {
             "`jwm-tool health` prints compact `fullscreen` beside occupancy"
         ));
     }
+
+    #[test]
+    fn evolve8h_wave_441_readme_health_names_compact_fullscreen() {
+        const README: &str = include_str!("../../README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(README.contains("compact `fullscreen` line"));
+        assert!(README.contains("get_status.fullscreen"));
+        assert!(DOCS.contains("README health text names compact `fullscreen`"));
+    }
 }
