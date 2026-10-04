@@ -588,3 +588,4 @@ README health text names compact `notifications`.
 README health text names compact `blur`.
 `tools/README.md` health text names compact `blur`.
 `jwm-tool health` prints compact `hdr` beside occupancy.
+README health text names compact `hdr`.

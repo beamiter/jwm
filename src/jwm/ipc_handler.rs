@@ -15845,4 +15845,13 @@ mod tests {
         ));
         assert!(DOCS.contains("`jwm-tool health` prints compact `hdr` beside occupancy"));
     }
+
+    #[test]
+    fn evolve8h_wave_453_readme_health_names_compact_hdr() {
+        const README: &str = include_str!("../../README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(README.contains("compact `hdr` line"));
+        assert!(README.contains("get_status.hdr"));
+        assert!(DOCS.contains("README health text names compact `hdr`"));
+    }
 }
