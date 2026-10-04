@@ -3597,6 +3597,24 @@ mod tests {
         assert!(workspaces_lines
             .iter()
             .any(|line| line == "workspaces: count=9 focused=1"));
+        assert!(!workspaces_lines
+            .iter()
+            .any(|line| line.starts_with("windows: count=")));
+
+        let with_compact_windows = serde_json::json!({
+            "health": {"status": "healthy", "reasons": []},
+            "counts": {"windows": 0, "monitors": 1, "workspaces": 1},
+            "config": {"path": "/tmp/config.toml", "diagnostics": {"error_count": 0, "warning_count": 0}},
+            "features": {},
+            "windows": {
+                "count": 5,
+                "focused_id": 42
+            }
+        });
+        let windows_lines = health_output_lines(&with_compact_windows);
+        assert!(windows_lines
+            .iter()
+            .any(|line| line == "windows: count=5 focused=42"));
 
         let capabilities = serde_json::json!({
             "schema_version": 1,
@@ -4773,6 +4791,26 @@ fn health_output_lines(status: &serde_json::Value) -> Vec<String> {
         lines.push(format!(
             "workspaces: count={count} focused={focused_count}"
         ));
+    }
+
+    if let Some(windows) = status.get("windows").and_then(serde_json::Value::as_object) {
+        let count = windows
+            .get("count")
+            .and_then(|v| v.as_u64().or_else(|| v.as_i64().map(|n| n as u64)))
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".into());
+        let focused_id = windows
+            .get("focused_id")
+            .and_then(|v| {
+                if v.is_null() {
+                    None
+                } else {
+                    v.as_u64().or_else(|| v.as_i64().map(|n| n as u64))
+                }
+            })
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".into());
+        lines.push(format!("windows: count={count} focused={focused_id}"));
     }
 
     if let Some(reasons) = status["health"]["reasons"].as_array() {

@@ -15419,4 +15419,13 @@ mod tests {
             "`jwm-tool capabilities` text lists `get_ws,get_tags,get_desktops -> get_workspaces`"
         ));
     }
+
+    #[test]
+    fn evolve8h_wave_409_health_prints_compact_windows() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("windows: count={count} focused={focused_id}"));
+        assert!(TOOL.contains("\"windows: count=5 focused=42\""));
+        assert!(DOCS.contains("`jwm-tool health` prints compact `windows` beside occupancy"));
+    }
 }
