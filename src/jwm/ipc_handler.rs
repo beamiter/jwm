@@ -21421,4 +21421,10 @@ mod tests {
         assert!(COMPAT.contains("evolve9h wave 264: Support bundles should include `dnd` when health is degraded."));
     }
 
+    #[test]
+    fn evolve9h_wave_265_compat_unique_pin_system_ui() {
+        const COMPAT: &str = include_str!("../../docs/compatibility.md");
+        assert!(COMPAT.contains("evolve9h wave 265: Support bundles should include `system_ui` when health is degraded."));
+    }
+
 }

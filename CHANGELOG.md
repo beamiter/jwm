@@ -2072,6 +2072,8 @@ monorepo use independent Semantic Versions.
 
 - evolve9h wave 264: Support bundles should include `dnd` when health is degraded.
 
+- evolve9h wave 265: Support bundles should include `system_ui` when health is degraded.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
