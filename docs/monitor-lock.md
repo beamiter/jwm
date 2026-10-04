@@ -947,3 +947,4 @@ Wave 807: Support triage reads health compact `idle` before `get_idl` dumps.
 Wave 808: Support triage reads health compact `notifications` before `get_notif` dumps.
 Wave 809: Support triage reads health compact `dnd` before `get_dnd` dumps.
 Wave 810: Support triage reads health compact `system_ui` before `get_ui` dumps.
+Wave 811: Support triage reads health compact `layout` before `get_lt` dumps.

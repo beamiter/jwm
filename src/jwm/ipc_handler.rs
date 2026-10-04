@@ -18626,4 +18626,10 @@ mod tests {
         assert!(DOCS.contains("Wave 810: Support triage reads health compact `system_ui` before `get_ui` dumps."));
     }
 
+    #[test]
+    fn evolve8h_wave_811_monitor_lock_unique_pin_layout() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 811: Support triage reads health compact `layout` before `get_lt` dumps."));
+    }
+
 }
