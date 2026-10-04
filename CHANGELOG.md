@@ -1174,6 +1174,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 815: Support triage reads health compact `scratchpads` before `get_pads` dumps.
 
+- Wave 816: Support triage reads health compact `focused` before `get_fw` dumps.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
