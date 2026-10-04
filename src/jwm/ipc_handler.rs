@@ -16248,4 +16248,14 @@ mod tests {
         assert!(DOCS.contains("`tools/README.md` health text names compact `night_light`"));
     }
 
+    #[test]
+    fn evolve8h_wave_492_capabilities_text_lists_night_light_alias() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("query aliases: get_nl -> get_night_light"));
+        assert!(DOCS.contains(
+            "`jwm-tool capabilities` text lists `get_nl -> get_night_light`"
+        ));
+    }
+
 }
