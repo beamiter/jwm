@@ -1520,6 +1520,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 988: Compatibility tables name `get_status.floating` with health compact `floating`.
 
+- Wave 989: Compatibility tables name `get_status.minimized` with health compact `minimized`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

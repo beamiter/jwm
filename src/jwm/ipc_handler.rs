@@ -19694,4 +19694,10 @@ mod tests {
         assert!(DOCS.contains("Wave 988: Compatibility tables name `get_status.floating` with health compact `floating`."));
     }
 
+    #[test]
+    fn evolve8h_wave_989_monitor_lock_unique_pin_minimized() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 989: Compatibility tables name `get_status.minimized` with health compact `minimized`."));
+    }
+
 }

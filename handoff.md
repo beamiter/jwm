@@ -1803,9 +1803,15 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 987 | monitor-lock 唯一 pin wave 987 nmaster | ✓ |
 | 988 | monitor-lock 唯一 pin wave 988 floating | ✓ |
 | 988 | monitor-lock 唯一 pin wave 988 floating | ✓ |
+| 989 | monitor-lock 唯一 pin wave 989 minimized | ✓ |
+| 989 | monitor-lock 唯一 pin wave 989 minimized | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 989 — monitor-lock pin wave 989 minimized
+
+选题 = evolve8h wave 989。monitor-lock 唯一句子 wave 989 `minimized`。
 
 ## 2026-10-03：evolve8h wave 988 — monitor-lock pin wave 988 floating
 
