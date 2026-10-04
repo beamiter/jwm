@@ -814,6 +814,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 635: Health compact `peek` is the operator twin of `get_pk`.
 
+- Wave 636: Health compact `gesture` is the operator twin of `get_gest`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
