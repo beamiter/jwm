@@ -2134,6 +2134,8 @@ monorepo use independent Semantic Versions.
 
 - evolve9h wave 295: Nested smoke treats `dnd` as a read-only IPC probe.
 
+- evolve9h wave 296: Nested smoke treats `system_ui` as a read-only IPC probe.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
