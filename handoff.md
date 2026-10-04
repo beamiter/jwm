@@ -607,9 +607,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 291 | compatibility 唯一 pin wave 291 media | ✓ |
 | 292 | compatibility 唯一 pin wave 292 clipboard | ✓ |
 | 293 | compatibility 唯一 pin wave 293 idle | ✓ |
+| 294 | compatibility 唯一 pin wave 294 notifications | ✓ |
 | … | evolve9h 进行中 |
 
 ---
+
+## 2026-10-04：evolve9h wave 294 — compatibility pin wave 294 notifications
+
+选题 = evolve9h wave 294。compatibility 唯一句子 wave 294 `notifications`。
 
 ## 2026-10-04：evolve9h wave 293 — compatibility pin wave 293 idle
 
