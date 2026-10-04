@@ -21361,4 +21361,10 @@ mod tests {
         assert!(COMPAT.contains("evolve9h wave 254: Support bundles should include `audio` when health is degraded."));
     }
 
+    #[test]
+    fn evolve9h_wave_255_compat_unique_pin_wallpaper() {
+        const COMPAT: &str = include_str!("../../docs/compatibility.md");
+        assert!(COMPAT.contains("evolve9h wave 255: Support bundles should include `wallpaper` when health is degraded."));
+    }
+
 }
