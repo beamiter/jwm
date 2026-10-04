@@ -16934,4 +16934,14 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn evolve8h_wave_559_capabilities_text_lists_connectivity_alias() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("query aliases: get_conn -> get_connectivity"));
+        assert!(DOCS.contains(
+            "`jwm-tool capabilities` text lists `get_conn -> get_connectivity`"
+        ));
+    }
+
 }

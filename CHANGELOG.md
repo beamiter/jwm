@@ -660,6 +660,8 @@ monorepo use independent Semantic Versions.
 
 - `jwm-tool capabilities` text lists `get_pair -> get_bluetooth`.
 
+- `jwm-tool capabilities` text lists `get_conn -> get_connectivity`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
