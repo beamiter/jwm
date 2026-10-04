@@ -15901,4 +15901,13 @@ mod tests {
             "`jwm-tool health` prints compact `system_ui` beside occupancy"
         ));
     }
+
+    #[test]
+    fn evolve8h_wave_459_readme_health_names_compact_system_ui() {
+        const README: &str = include_str!("../../README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(README.contains("compact `system_ui` line"));
+        assert!(README.contains("get_status.system_ui"));
+        assert!(DOCS.contains("README health text names compact `system_ui`"));
+    }
 }
