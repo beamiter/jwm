@@ -1141,9 +1141,15 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 656 | monitor-lock 唯一 pin wave 656 scratchpads | ✓ |
 | 657 | monitor-lock 唯一 pin wave 657 focused | ✓ |
 | 657 | monitor-lock 唯一 pin wave 657 focused | ✓ |
+| 658 | monitor-lock 唯一 pin wave 658 monitors | ✓ |
+| 658 | monitor-lock 唯一 pin wave 658 monitors | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 658 — monitor-lock pin wave 658 monitors
+
+选题 = evolve8h wave 658。monitor-lock 唯一句子 wave 658 `monitors`。
 
 ## 2026-10-03：evolve8h wave 657 — monitor-lock pin wave 657 focused
 

@@ -858,6 +858,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 657: Health compact `focused` is the operator twin of `get_fw`.
 
+- Wave 658: Health compact `monitors` is the operator twin of `get_mons`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
