@@ -940,6 +940,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 698: `get_res` and health compact `resources` share one Status nest.
 
+- Wave 699: `get_conn` and health compact `connectivity` share one Status nest.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
