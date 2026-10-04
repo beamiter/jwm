@@ -1074,6 +1074,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 765: Doctor bundles include health compact `workspaces` from `get_ws`.
 
+- Wave 766: Doctor bundles include health compact `windows` from `get_wins`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
