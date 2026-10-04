@@ -862,3 +862,4 @@ Wave 722: `get_nm` and health compact `nmaster` share one Status nest.
 Wave 723: `get_status.floating` and health compact `floating` share one Status nest.
 Wave 724: `get_status.minimized` and health compact `minimized` share one Status nest.
 Wave 725: `get_status.sticky` and health compact `sticky` share one Status nest.
+Wave 726: `get_status.urgent` and health compact `urgent` share one Status nest.

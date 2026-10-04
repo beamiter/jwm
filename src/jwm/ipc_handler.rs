@@ -18116,4 +18116,10 @@ mod tests {
         assert!(DOCS.contains("Wave 725: `get_status.sticky` and health compact `sticky` share one Status nest."));
     }
 
+    #[test]
+    fn evolve8h_wave_726_monitor_lock_unique_pin_urgent() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 726: `get_status.urgent` and health compact `urgent` share one Status nest."));
+    }
+
 }
