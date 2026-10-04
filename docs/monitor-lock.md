@@ -1140,3 +1140,4 @@ Wave 1000: Bar occupancy sits beside health compact `tearing` (`get_th`).
 `jwm-tool health` prints compact `version_info` beside occupancy.
 README health text names compact `version_info`.
 `tools/README.md` health text names compact `version_info`.
+`jwm-tool capabilities` text lists `get_ver -> get_version`.

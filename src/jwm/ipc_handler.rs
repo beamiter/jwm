@@ -19797,4 +19797,14 @@ mod tests {
         assert!(DOCS.contains("`tools/README.md` health text names compact `version_info`"));
     }
 
+    #[test]
+    fn evolve9h_wave_4_capabilities_text_lists_version_info_alias() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("query aliases: get_ver -> get_version"));
+        assert!(DOCS.contains(
+            "`jwm-tool capabilities` text lists `get_ver -> get_version`"
+        ));
+    }
+
 }
