@@ -21331,4 +21331,10 @@ mod tests {
         assert!(COMPAT.contains("evolve9h wave 249: Support bundles should include `gesture` when health is degraded."));
     }
 
+    #[test]
+    fn evolve9h_wave_250_compat_unique_pin_wayland() {
+        const COMPAT: &str = include_str!("../../docs/compatibility.md");
+        assert!(COMPAT.contains("evolve9h wave 250: Support bundles should include `wayland` when health is degraded."));
+    }
+
 }

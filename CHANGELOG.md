@@ -2042,6 +2042,8 @@ monorepo use independent Semantic Versions.
 
 - evolve9h wave 249: Support bundles should include `gesture` when health is degraded.
 
+- evolve9h wave 250: Support bundles should include `wayland` when health is degraded.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

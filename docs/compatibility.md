@@ -470,3 +470,4 @@ evolve9h wave 246: Support bundles should include `night_light` when health is d
 evolve9h wave 247: Support bundles should include `magnifier` when health is degraded.
 evolve9h wave 248: Support bundles should include `peek` when health is degraded.
 evolve9h wave 249: Support bundles should include `gesture` when health is degraded.
+evolve9h wave 250: Support bundles should include `wayland` when health is degraded.
