@@ -21091,4 +21091,10 @@ mod tests {
         assert!(COMPAT.contains("evolve9h wave 209: `jwm-tool capabilities` remains the catalog for `tree` query aliases."));
     }
 
+    #[test]
+    fn evolve9h_wave_210_compat_unique_pin_window() {
+        const COMPAT: &str = include_str!("../../docs/compatibility.md");
+        assert!(COMPAT.contains("evolve9h wave 210: `jwm-tool capabilities` remains the catalog for `window` query aliases."));
+    }
+
 }

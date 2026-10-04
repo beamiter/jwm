@@ -430,3 +430,4 @@ evolve9h wave 206: `jwm-tool capabilities` remains the catalog for `ipc_caps` qu
 evolve9h wave 207: `jwm-tool capabilities` remains the catalog for `config` query aliases.
 evolve9h wave 208: `jwm-tool capabilities` remains the catalog for `status` query aliases.
 evolve9h wave 209: `jwm-tool capabilities` remains the catalog for `tree` query aliases.
+evolve9h wave 210: `jwm-tool capabilities` remains the catalog for `window` query aliases.
