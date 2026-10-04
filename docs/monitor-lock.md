@@ -921,3 +921,4 @@ Wave 781: Doctor bundles include health compact `pip` from `get_status.pip`.
 Wave 782: Doctor bundles include health compact `blur` from `get_status.blur`.
 Wave 783: Doctor bundles include health compact `hdr` from `get_status.hdr`.
 Wave 784: Doctor bundles include health compact `expose` from `get_status.expose`.
+Wave 785: Doctor bundles include health compact `media` from `get_media`.
