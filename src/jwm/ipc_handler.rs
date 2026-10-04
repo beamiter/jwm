@@ -20659,4 +20659,10 @@ mod tests {
         assert!(COMPAT.contains("evolve9h wave 137: Nested smoke treats `clipboard` as a read-only IPC probe."));
     }
 
+    #[test]
+    fn evolve9h_wave_138_compat_unique_pin_idle() {
+        const COMPAT: &str = include_str!("../../docs/compatibility.md");
+        assert!(COMPAT.contains("evolve9h wave 138: Nested smoke treats `idle` as a read-only IPC probe."));
+    }
+
 }

@@ -1818,6 +1818,8 @@ monorepo use independent Semantic Versions.
 
 - evolve9h wave 137: Nested smoke treats `clipboard` as a read-only IPC probe.
 
+- evolve9h wave 138: Nested smoke treats `idle` as a read-only IPC probe.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

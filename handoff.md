@@ -451,9 +451,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 135 | compatibility 唯一 pin wave 135 power | ✓ |
 | 136 | compatibility 唯一 pin wave 136 media | ✓ |
 | 137 | compatibility 唯一 pin wave 137 clipboard | ✓ |
+| 138 | compatibility 唯一 pin wave 138 idle | ✓ |
 | … | evolve9h 进行中 |
 
 ---
+
+## 2026-10-04：evolve9h wave 138 — compatibility pin wave 138 idle
+
+选题 = evolve9h wave 138。compatibility 唯一句子 wave 138 `idle`。
 
 ## 2026-10-04：evolve9h wave 137 — compatibility pin wave 137 clipboard
 
