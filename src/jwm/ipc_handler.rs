@@ -20929,4 +20929,10 @@ mod tests {
         assert!(COMPAT.contains("evolve9h wave 182: Health compact `xwayland` is diagnosable through `jwm-tool health`."));
     }
 
+    #[test]
+    fn evolve9h_wave_183_compat_unique_pin_scrolling() {
+        const COMPAT: &str = include_str!("../../docs/compatibility.md");
+        assert!(COMPAT.contains("evolve9h wave 183: Health compact `scrolling` is diagnosable through `jwm-tool health`."));
+    }
+
 }

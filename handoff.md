@@ -496,9 +496,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 180 | compatibility 唯一 pin wave 180 session_lock | ✓ |
 | 181 | compatibility 唯一 pin wave 181 tearing | ✓ |
 | 182 | compatibility 唯一 pin wave 182 xwayland | ✓ |
+| 183 | compatibility 唯一 pin wave 183 scrolling | ✓ |
 | … | evolve9h 进行中 |
 
 ---
+
+## 2026-10-04：evolve9h wave 183 — compatibility pin wave 183 scrolling
+
+选题 = evolve9h wave 183。compatibility 唯一句子 wave 183 `scrolling`。
 
 ## 2026-10-04：evolve9h wave 182 — compatibility pin wave 182 xwayland
 
