@@ -486,3 +486,4 @@ evolve9h wave 262: Support bundles should include `idle` when health is degraded
 evolve9h wave 263: Support bundles should include `notifications` when health is degraded.
 evolve9h wave 264: Support bundles should include `dnd` when health is degraded.
 evolve9h wave 265: Support bundles should include `system_ui` when health is degraded.
+evolve9h wave 266: Nested smoke treats `version_info` as a read-only IPC probe.
