@@ -1150,6 +1150,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 803: Support triage reads health compact `bluetooth` before `get_bt` dumps.
 
+- Wave 804: Support triage reads health compact `resources` before `get_res` dumps.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

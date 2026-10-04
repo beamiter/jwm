@@ -18584,4 +18584,10 @@ mod tests {
         assert!(DOCS.contains("Wave 803: Support triage reads health compact `bluetooth` before `get_bt` dumps."));
     }
 
+    #[test]
+    fn evolve8h_wave_804_monitor_lock_unique_pin_resources() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 804: Support triage reads health compact `resources` before `get_res` dumps."));
+    }
+
 }
