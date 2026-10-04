@@ -882,6 +882,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 669: Health compact `nmaster` is the operator twin of `get_nm`.
 
+- Wave 670: Health compact `floating` is the operator twin of `get_status.floating`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

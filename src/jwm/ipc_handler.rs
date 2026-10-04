@@ -17780,4 +17780,10 @@ mod tests {
         assert!(DOCS.contains("Wave 669: Health compact `nmaster` is the operator twin of `get_nm`."));
     }
 
+    #[test]
+    fn evolve8h_wave_670_monitor_lock_unique_pin_floating() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 670: Health compact `floating` is the operator twin of `get_status.floating`."));
+    }
+
 }
