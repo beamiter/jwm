@@ -471,6 +471,7 @@ monorepo use independent Semantic Versions.
 - `tools/README.md` health text names compact `urgent`.
 - `jwm-tool health` prints compact `fullscreen` beside occupancy.
 - README health text names compact `fullscreen`.
+- `tools/README.md` health text names compact `fullscreen`.
 
 ### Changed
 
