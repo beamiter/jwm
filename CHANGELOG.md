@@ -622,6 +622,8 @@ monorepo use independent Semantic Versions.
 
 - `jwm-tool capabilities` text lists `get_bt -> get_bluetooth`.
 
+- `jwm-tool health` prints compact `resources` beside occupancy.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

@@ -16740,4 +16740,17 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn evolve8h_wave_540_health_prints_compact_resources() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains(
+            "resources: cpu_present={cpu_present} cpu_percent={cpu_percent}"
+        ));
+        assert!(TOOL.contains(
+            "\"resources: cpu_present=true cpu_percent=12.5\""
+        ));
+        assert!(DOCS.contains("`jwm-tool health` prints compact `resources` beside occupancy"));
+    }
+
 }

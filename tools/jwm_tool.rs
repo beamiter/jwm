@@ -4256,6 +4256,25 @@ mod tests {
             line == "bluetooth: active=true"
         }));
 
+        assert!(!bluetooth_lines
+            .iter()
+            .any(|line| line.starts_with("resources:")));
+
+        let with_compact_resources = serde_json::json!({
+            "health": {"status": "healthy", "reasons": []},
+            "counts": {"windows": 0, "monitors": 1, "workspaces": 1},
+            "config": {"path": "/tmp/config.toml", "diagnostics": {"error_count": 0, "warning_count": 0}},
+            "features": {},
+            "resources": {
+                "cpu_present": true,
+                "cpu_percent": 12.5
+            }
+        });
+        let resources_lines = health_output_lines(&with_compact_resources);
+        assert!(resources_lines.iter().any(|line| {
+            line == "resources: cpu_present=true cpu_percent=12.5"
+        }));
+
         let capabilities = serde_json::json!({
             "schema_version": 1,
             "commands": ["focusstack", "reload_config"],
@@ -6118,6 +6137,22 @@ fn health_output_lines(status: &serde_json::Value) -> Vec<String> {
             .map(|value| value.to_string())
             .unwrap_or_else(|| "-".into());
         lines.push(format!("bluetooth: active={active}"));
+    }
+
+    if let Some(resources) = status.get("resources").and_then(serde_json::Value::as_object) {
+        let cpu_present = resources
+            .get("cpu_present")
+            .and_then(serde_json::Value::as_bool)
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".into());
+        let cpu_percent = resources
+            .get("cpu_percent")
+            .and_then(|v| v.as_f64())
+            .map(|value| format!("{value}"))
+            .unwrap_or_else(|| "-".into());
+        lines.push(format!(
+            "resources: cpu_present={cpu_present} cpu_percent={cpu_percent}"
+        ));
     }
 
     if let Some(reasons) = status["health"]["reasons"].as_array() {
