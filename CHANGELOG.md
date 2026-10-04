@@ -489,6 +489,7 @@ monorepo use independent Semantic Versions.
 - `tools/README.md` health text names compact `dnd`.
 - `jwm-tool health` prints compact `system_ui` beside occupancy.
 - README health text names compact `system_ui`.
+- `tools/README.md` health text names compact `system_ui`.
 
 ### Changed
 
