@@ -21565,4 +21565,10 @@ mod tests {
         assert!(COMPAT.contains("evolve9h wave 288: Nested smoke treats `resources` as a read-only IPC probe."));
     }
 
+    #[test]
+    fn evolve9h_wave_289_compat_unique_pin_connectivity() {
+        const COMPAT: &str = include_str!("../../docs/compatibility.md");
+        assert!(COMPAT.contains("evolve9h wave 289: Nested smoke treats `connectivity` as a read-only IPC probe."));
+    }
+
 }
