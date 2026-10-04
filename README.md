@@ -214,6 +214,7 @@ It also prints a compact `dnd` line from `get_status.dnd`.
 It also prints a compact `system_ui` line from `get_status.system_ui` (`get_ui`).
 It also prints a compact `idle` line from `get_status.idle`.
 It also prints a compact `clipboard` line from `get_status.clipboard`.
+It also prints a compact `session_lock` line from `get_status.session_lock`.
 
 Malformed JSON, invalid argument types, overflow, empty spawn commands, unknown
 commands, and `{ "success": false }` responses produce a non-zero exit status,

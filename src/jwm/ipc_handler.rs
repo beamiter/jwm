@@ -16002,4 +16002,13 @@ mod tests {
             "`jwm-tool health` prints compact `session_lock` beside occupancy"
         ));
     }
+
+    #[test]
+    fn evolve8h_wave_469_readme_health_names_compact_session_lock() {
+        const README: &str = include_str!("../../README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(README.contains("compact `session_lock` line"));
+        assert!(README.contains("get_status.session_lock"));
+        assert!(DOCS.contains("README health text names compact `session_lock`"));
+    }
 }

@@ -604,3 +604,4 @@ README health text names compact `idle`.
 README health text names compact `clipboard`.
 `tools/README.md` health text names compact `clipboard`.
 `jwm-tool health` prints compact `session_lock` beside occupancy.
+README health text names compact `session_lock`.
