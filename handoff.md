@@ -1633,9 +1633,15 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 902 | monitor-lock 唯一 pin wave 902 wayland | ✓ |
 | 903 | monitor-lock 唯一 pin wave 903 recording | ✓ |
 | 903 | monitor-lock 唯一 pin wave 903 recording | ✓ |
+| 904 | monitor-lock 唯一 pin wave 904 audio_recording | ✓ |
+| 904 | monitor-lock 唯一 pin wave 904 audio_recording | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 904 — monitor-lock pin wave 904 audio_recording
+
+选题 = evolve8h wave 904。monitor-lock 唯一句子 wave 904 `audio_recording`。
 
 ## 2026-10-03：evolve8h wave 903 — monitor-lock pin wave 903 recording
 
