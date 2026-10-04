@@ -1206,6 +1206,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 831: Support triage reads health compact `sticky` before `get_status.sticky` dumps.
 
+- Wave 832: Support triage reads health compact `urgent` before `get_status.urgent` dumps.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
