@@ -439,6 +439,7 @@ monorepo use independent Semantic Versions.
 - `tools/README.md` health text names compact `workspaces`.
 - `jwm-tool capabilities` text lists `get_ws,get_tags,get_desktops -> get_workspaces`.
 - `jwm-tool health` prints compact `windows` beside occupancy.
+- README health text names compact `windows`.
 
 ### Changed
 

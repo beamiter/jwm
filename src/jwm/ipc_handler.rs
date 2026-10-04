@@ -15428,4 +15428,13 @@ mod tests {
         assert!(TOOL.contains("\"windows: count=5 focused=42\""));
         assert!(DOCS.contains("`jwm-tool health` prints compact `windows` beside occupancy"));
     }
+
+    #[test]
+    fn evolve8h_wave_410_readme_health_names_compact_windows() {
+        const README: &str = include_str!("../../README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(README.contains("compact `windows` line"));
+        assert!(README.contains("get_status.windows"));
+        assert!(DOCS.contains("README health text names compact `windows`"));
+    }
 }

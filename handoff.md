@@ -723,9 +723,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 407 | tools/README health 点名 compact workspaces | ✓ |
 | 408 | capabilities 文本列出 get_ws,get_tags,get_desktops -> get_workspaces | ✓ |
 | 409 | health 打印 compact windows | ✓ |
+| 410 | README health 点名 compact windows | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 410 — README health names compact windows
+
+选题 = evolve8h wave 410。README health 文本点名 compact `windows`。
 
 ## 2026-10-03：evolve8h wave 409 — health prints compact windows
 
