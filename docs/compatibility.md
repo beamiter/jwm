@@ -313,3 +313,4 @@ evolve9h wave 89: Support bundles should include `xwayland` when health is degra
 evolve9h wave 90: Support bundles should include `scrolling` when health is degraded.
 evolve9h wave 91: Support bundles should include `night_light` when health is degraded.
 evolve9h wave 92: Support bundles should include `magnifier` when health is degraded.
+evolve9h wave 93: Support bundles should include `peek` when health is degraded.
