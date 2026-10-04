@@ -761,9 +761,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 445 | tools/README health 点名 compact pip | ✓ |
 | 446 | health 打印 compact notifications | ✓ |
 | 447 | README health 点名 compact notifications | ✓ |
+| 448 | tools/README health 点名 compact notifications | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 448 — tools/README health names compact notifications
+
+选题 = evolve8h wave 448。tools/README health 文本点名 compact `notifications`。
 
 ## 2026-10-03：evolve8h wave 447 — README health names compact notifications
 

@@ -583,3 +583,4 @@ README health text names compact `pip`.
 `tools/README.md` health text names compact `pip`.
 `jwm-tool health` prints compact `notifications` beside occupancy.
 README health text names compact `notifications`.
+`tools/README.md` health text names compact `notifications`.
