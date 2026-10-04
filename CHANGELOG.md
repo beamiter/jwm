@@ -844,6 +844,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 650: Health compact `dnd` is the operator twin of `get_dnd`.
 
+- Wave 651: Health compact `system_ui` is the operator twin of `get_ui`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

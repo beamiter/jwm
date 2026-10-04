@@ -787,3 +787,4 @@ Wave 647: Health compact `clipboard` is the operator twin of `get_clip`.
 Wave 648: Health compact `idle` is the operator twin of `get_idl`.
 Wave 649: Health compact `notifications` is the operator twin of `get_notif`.
 Wave 650: Health compact `dnd` is the operator twin of `get_dnd`.
+Wave 651: Health compact `system_ui` is the operator twin of `get_ui`.

@@ -1127,9 +1127,15 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 649 | monitor-lock 唯一 pin wave 649 notifications | ✓ |
 | 650 | monitor-lock 唯一 pin wave 650 dnd | ✓ |
 | 650 | monitor-lock 唯一 pin wave 650 dnd | ✓ |
+| 651 | monitor-lock 唯一 pin wave 651 system_ui | ✓ |
+| 651 | monitor-lock 唯一 pin wave 651 system_ui | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 651 — monitor-lock pin wave 651 system_ui
+
+选题 = evolve8h wave 651。monitor-lock 唯一句子 wave 651 `system_ui`。
 
 ## 2026-10-03：evolve8h wave 650 — monitor-lock pin wave 650 dnd
 
