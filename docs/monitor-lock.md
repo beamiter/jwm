@@ -781,3 +781,4 @@ Wave 641: Health compact `waterlily` is the operator twin of `get_wly`.
 Wave 642: Health compact `audio` is the operator twin of `get_devices`.
 Wave 643: Health compact `wallpaper` is the operator twin of `get_wall`.
 Wave 644: Health compact `bluetooth` is the operator twin of `get_bt`.
+Wave 645: Health compact `resources` is the operator twin of `get_res`.

@@ -17630,4 +17630,10 @@ mod tests {
         assert!(DOCS.contains("Wave 644: Health compact `bluetooth` is the operator twin of `get_bt`."));
     }
 
+    #[test]
+    fn evolve8h_wave_645_monitor_lock_unique_pin_resources() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 645: Health compact `resources` is the operator twin of `get_res`."));
+    }
+
 }
