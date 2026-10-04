@@ -505,3 +505,4 @@ evolve9h wave 281: Nested smoke treats `wayland` as a read-only IPC probe.
 evolve9h wave 282: Nested smoke treats `recording` as a read-only IPC probe.
 evolve9h wave 283: Nested smoke treats `capture` as a read-only IPC probe.
 evolve9h wave 284: Nested smoke treats `waterlily` as a read-only IPC probe.
+evolve9h wave 285: Nested smoke treats `audio` as a read-only IPC probe.

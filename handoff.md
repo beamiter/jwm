@@ -598,9 +598,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 282 | compatibility 唯一 pin wave 282 recording | ✓ |
 | 283 | compatibility 唯一 pin wave 283 capture | ✓ |
 | 284 | compatibility 唯一 pin wave 284 waterlily | ✓ |
+| 285 | compatibility 唯一 pin wave 285 audio | ✓ |
 | … | evolve9h 进行中 |
 
 ---
+
+## 2026-10-04：evolve9h wave 285 — compatibility pin wave 285 audio
+
+选题 = evolve9h wave 285。compatibility 唯一句子 wave 285 `audio`。
 
 ## 2026-10-04：evolve9h wave 284 — compatibility pin wave 284 waterlily
 
