@@ -19820,4 +19820,13 @@ mod tests {
         assert!(DOCS.contains("`jwm-tool health` prints compact `metrics` beside occupancy"));
     }
 
+    #[test]
+    fn evolve9h_wave_6_readme_health_names_compact_metrics() {
+        const README: &str = include_str!("../../README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(README.contains("compact `metrics` line"));
+        assert!(README.contains("get_status.metrics"));
+        assert!(DOCS.contains("README health text names compact `metrics`"));
+    }
+
 }

@@ -1554,6 +1554,8 @@ monorepo use independent Semantic Versions.
 
 - `jwm-tool health` prints compact `metrics` beside occupancy.
 
+- README health text names compact `metrics`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

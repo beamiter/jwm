@@ -319,9 +319,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 3 | tools/README health 点名 compact version_info | ✓ |
 | 4 | capabilities 文本列出 get_ver -> get_version | ✓ |
 | 5 | health 打印 compact metrics | ✓ |
+| 6 | README health 点名 compact metrics | ✓ |
 | … | evolve9h 进行中 |
 
 ---
+
+## 2026-10-04：evolve9h wave 6 — README health names compact metrics
+
+选题 = evolve9h wave 6。README health 文本点名 compact `metrics`。
 
 ## 2026-10-04：evolve9h wave 5 — health prints compact metrics
 
