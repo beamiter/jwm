@@ -1032,6 +1032,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 744: Doctor bundles include health compact `recording` from `get_rec`.
 
+- Wave 745: Doctor bundles include health compact `audio_recording` from `get_arec`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

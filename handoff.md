@@ -1315,9 +1315,15 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 743 | monitor-lock 唯一 pin wave 743 wayland | ✓ |
 | 744 | monitor-lock 唯一 pin wave 744 recording | ✓ |
 | 744 | monitor-lock 唯一 pin wave 744 recording | ✓ |
+| 745 | monitor-lock 唯一 pin wave 745 audio_recording | ✓ |
+| 745 | monitor-lock 唯一 pin wave 745 audio_recording | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 745 — monitor-lock pin wave 745 audio_recording
+
+选题 = evolve8h wave 745。monitor-lock 唯一句子 wave 745 `audio_recording`。
 
 ## 2026-10-03：evolve8h wave 744 — monitor-lock pin wave 744 recording
 
