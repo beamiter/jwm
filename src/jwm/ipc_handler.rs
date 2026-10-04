@@ -21049,4 +21049,10 @@ mod tests {
         assert!(COMPAT.contains("evolve9h wave 202: Health compact `dnd` is diagnosable through `jwm-tool health`."));
     }
 
+    #[test]
+    fn evolve9h_wave_203_compat_unique_pin_system_ui() {
+        const COMPAT: &str = include_str!("../../docs/compatibility.md");
+        assert!(COMPAT.contains("evolve9h wave 203: Health compact `system_ui` is diagnosable through `jwm-tool health`."));
+    }
+
 }

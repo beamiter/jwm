@@ -1948,6 +1948,8 @@ monorepo use independent Semantic Versions.
 
 - evolve9h wave 202: Health compact `dnd` is diagnosable through `jwm-tool health`.
 
+- evolve9h wave 203: Health compact `system_ui` is diagnosable through `jwm-tool health`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
