@@ -18368,4 +18368,10 @@ mod tests {
         assert!(DOCS.contains("Wave 767: Doctor bundles include health compact `effects` from `get_fx`."));
     }
 
+    #[test]
+    fn evolve8h_wave_768_monitor_lock_unique_pin_mic() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 768: Doctor bundles include health compact `mic` from `get_mute`."));
+    }
+
 }
