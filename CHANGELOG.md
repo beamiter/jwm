@@ -1630,6 +1630,8 @@ monorepo use independent Semantic Versions.
 
 - evolve9h wave 43: Health compact `media` is diagnosable through `jwm-tool health`.
 
+- evolve9h wave 44: Health compact `clipboard` is diagnosable through `jwm-tool health`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
