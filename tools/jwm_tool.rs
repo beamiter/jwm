@@ -3579,6 +3579,24 @@ mod tests {
         assert!(monitors_lines
             .iter()
             .any(|line| line == "monitors: count=2 focused=1"));
+        assert!(!monitors_lines
+            .iter()
+            .any(|line| line.starts_with("workspaces:")));
+
+        let with_compact_workspaces = serde_json::json!({
+            "health": {"status": "healthy", "reasons": []},
+            "counts": {"windows": 0, "monitors": 1, "workspaces": 1},
+            "config": {"path": "/tmp/config.toml", "diagnostics": {"error_count": 0, "warning_count": 0}},
+            "features": {},
+            "workspaces": {
+                "count": 9,
+                "focused_count": 1
+            }
+        });
+        let workspaces_lines = health_output_lines(&with_compact_workspaces);
+        assert!(workspaces_lines
+            .iter()
+            .any(|line| line == "workspaces: count=9 focused=1"));
 
         let capabilities = serde_json::json!({
             "schema_version": 1,
@@ -4739,6 +4757,22 @@ fn health_output_lines(status: &serde_json::Value) -> Vec<String> {
             .map(|value| value.to_string())
             .unwrap_or_else(|| "-".into());
         lines.push(format!("monitors: count={count} focused={focused}"));
+    }
+
+    if let Some(workspaces) = status.get("workspaces").and_then(serde_json::Value::as_object) {
+        let count = workspaces
+            .get("count")
+            .and_then(|v| v.as_u64().or_else(|| v.as_i64().map(|n| n as u64)))
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".into());
+        let focused_count = workspaces
+            .get("focused_count")
+            .and_then(|v| v.as_u64().or_else(|| v.as_i64().map(|n| n as u64)))
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".into());
+        lines.push(format!(
+            "workspaces: count={count} focused={focused_count}"
+        ));
     }
 
     if let Some(reasons) = status["health"]["reasons"].as_array() {

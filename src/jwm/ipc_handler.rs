@@ -15378,4 +15378,15 @@ mod tests {
             "`jwm-tool capabilities` text lists `get_mons,get_outputs -> get_monitors`"
         ));
     }
+
+    #[test]
+    fn evolve8h_wave_405_health_prints_compact_workspaces() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("workspaces: count={count} focused={focused_count}"));
+        assert!(TOOL.contains("\"workspaces: count=9 focused=1\""));
+        assert!(DOCS.contains(
+            "`jwm-tool health` prints compact `workspaces` beside occupancy"
+        ));
+    }
 }
