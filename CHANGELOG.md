@@ -1236,6 +1236,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 846: Nested smoke checks health compact `magnifier` after `get_mag`.
 
+- Wave 847: Nested smoke checks health compact `peek` after `get_pk`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
