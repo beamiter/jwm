@@ -4367,6 +4367,26 @@ mod tests {
             line == "metrics: available=true"
         }));
 
+        assert!(!metrics_lines
+            .iter()
+            .any(|line| line.starts_with("ipc_caps:")));
+
+        let with_compact_ipc_caps = serde_json::json!({
+            "health": {"status": "healthy", "reasons": []},
+            "counts": {"windows": 0, "monitors": 1, "workspaces": 1},
+            "config": {"path": "/tmp/config.toml", "diagnostics": {"error_count": 0, "warning_count": 0}},
+            "features": {},
+            "capabilities": {
+                "schema_version": 1,
+                "queries": ["a", "b", "c"],
+                "commands": ["x", "y"]
+            }
+        });
+        let ipc_caps_lines = health_output_lines(&with_compact_ipc_caps);
+        assert!(ipc_caps_lines.iter().any(|line| {
+            line == "ipc_caps: schema=1 queries=3 commands=2"
+        }));
+
         let capabilities = serde_json::json!({
             "schema_version": 1,
             "commands": ["focusstack", "reload_config"],
@@ -6327,6 +6347,27 @@ fn health_output_lines(status: &serde_json::Value) -> Vec<String> {
             .map(|value| value.to_string())
             .unwrap_or_else(|| "-".into());
         lines.push(format!("metrics: available={available}"));
+    }
+
+    if let Some(ipc_caps) = status.get("capabilities").and_then(serde_json::Value::as_object) {
+        let schema_version = ipc_caps
+            .get("schema_version")
+            .and_then(|v| v.as_u64().or_else(|| v.as_i64().map(|n| n as u64)))
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".into());
+        let queries = ipc_caps
+            .get("queries")
+            .and_then(|v| v.as_array())
+            .map(|a| a.len().to_string())
+            .unwrap_or_else(|| "-".into());
+        let commands = ipc_caps
+            .get("commands")
+            .and_then(|v| v.as_array())
+            .map(|a| a.len().to_string())
+            .unwrap_or_else(|| "-".into());
+        lines.push(format!(
+            "ipc_caps: schema={schema_version} queries={queries} commands={commands}"
+        ));
     }
 
     if let Some(reasons) = status["health"]["reasons"].as_array() {

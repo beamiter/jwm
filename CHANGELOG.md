@@ -1560,6 +1560,8 @@ monorepo use independent Semantic Versions.
 
 - `jwm-tool capabilities` text lists `get_perf -> get_metrics`.
 
+- `jwm-tool health` prints compact `ipc_caps` beside occupancy.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

@@ -19848,4 +19848,17 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn evolve9h_wave_9_health_prints_compact_ipc_caps() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains(
+            "ipc_caps: schema={schema_version} queries={queries} commands={commands}"
+        ));
+        assert!(TOOL.contains(
+            "\"ipc_caps: schema=1 queries=3 commands=2\""
+        ));
+        assert!(DOCS.contains("`jwm-tool health` prints compact `ipc_caps` beside occupancy"));
+    }
+
 }
