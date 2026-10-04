@@ -635,9 +635,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 319 | compatibility 唯一 pin wave 319 resources | ✓ |
 | 320 | compatibility 唯一 pin wave 320 connectivity | ✓ |
 | 321 | compatibility 唯一 pin wave 321 power | ✓ |
+| 322 | compatibility 唯一 pin wave 322 media | ✓ |
 | … | evolve9h 进行中 |
 
 ---
+
+## 2026-10-04：evolve9h wave 322 — compatibility pin wave 322 media
+
+选题 = evolve9h wave 322。compatibility 唯一句子 wave 322 `media`。
 
 ## 2026-10-04：evolve9h wave 321 — compatibility pin wave 321 power
 
