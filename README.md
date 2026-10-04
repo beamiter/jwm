@@ -197,6 +197,7 @@ It also prints a compact `focused` line from `get_status.focused` (`get_fw`).
 It also prints a compact `monitors` line from `get_status.monitors` (`get_mons`).
 It also prints a compact `workspaces` line from `get_status.workspaces` (`get_ws`).
 It also prints a compact `windows` line from `get_status.windows` (`get_wins`).
+It also prints a compact `tree` line from `get_status.tree` (`get_tree`).
 
 Malformed JSON, invalid argument types, overflow, empty spawn commands, unknown
 commands, and `{ "success": false }` responses produce a non-zero exit status,

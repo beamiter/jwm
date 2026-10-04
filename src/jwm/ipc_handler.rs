@@ -15467,4 +15467,13 @@ mod tests {
         assert!(TOOL.contains("\"tree: monitors=2 windows=7\""));
         assert!(DOCS.contains("`jwm-tool health` prints compact `tree` beside occupancy"));
     }
+
+    #[test]
+    fn evolve8h_wave_414_readme_health_names_compact_tree() {
+        const README: &str = include_str!("../../README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(README.contains("compact `tree` line"));
+        assert!(README.contains("get_status.tree"));
+        assert!(DOCS.contains("README health text names compact `tree`"));
+    }
 }
