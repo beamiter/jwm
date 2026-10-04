@@ -988,6 +988,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 722: `get_nm` and health compact `nmaster` share one Status nest.
 
+- Wave 723: `get_status.floating` and health compact `floating` share one Status nest.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

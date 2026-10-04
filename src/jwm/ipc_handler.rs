@@ -18098,4 +18098,10 @@ mod tests {
         assert!(DOCS.contains("Wave 722: `get_nm` and health compact `nmaster` share one Status nest."));
     }
 
+    #[test]
+    fn evolve8h_wave_723_monitor_lock_unique_pin_floating() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 723: `get_status.floating` and health compact `floating` share one Status nest."));
+    }
+
 }
