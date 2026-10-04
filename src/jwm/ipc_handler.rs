@@ -18746,4 +18746,10 @@ mod tests {
         assert!(DOCS.contains("Wave 830: Support triage reads health compact `minimized` before `get_status.minimized` dumps."));
     }
 
+    #[test]
+    fn evolve8h_wave_831_monitor_lock_unique_pin_sticky() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 831: Support triage reads health compact `sticky` before `get_status.sticky` dumps."));
+    }
+
 }
