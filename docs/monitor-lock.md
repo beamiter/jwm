@@ -982,3 +982,4 @@ Wave 842: Nested smoke checks health compact `xwayland` after `get_xw`.
 Wave 843: Nested smoke checks health compact `scrolling` after `get_scroll`.
 Wave 844: Nested smoke checks health compact `color_management` after `get_cm`.
 Wave 845: Nested smoke checks health compact `night_light` after `get_nl`.
+Wave 846: Nested smoke checks health compact `magnifier` after `get_mag`.
