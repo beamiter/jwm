@@ -680,6 +680,8 @@ monorepo use independent Semantic Versions.
 
 - `docs/minimized-dock.md` names compact `minimized` beside health.
 
+- `docs/window-tabs.md` names compact `tabs` beside health.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

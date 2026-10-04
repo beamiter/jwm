@@ -17020,4 +17020,12 @@ mod tests {
         assert!(DOCS.contains("`docs/minimized-dock.md` names compact `minimized` beside health"));
     }
 
+    #[test]
+    fn evolve8h_wave_569_doc_window_tabs_names_compact_tabs() {
+        const FEATURE: &str = include_str!("../../docs/window-tabs.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(FEATURE.contains("compact `tabs`"));
+        assert!(DOCS.contains("`docs/window-tabs.md` names compact `tabs` beside health"));
+    }
+
 }

@@ -963,9 +963,15 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 567 | docs/cube-effects.md 点名 compact effects | ✓ |
 | 568 | docs/minimized-dock.md 点名 compact minimized | ✓ |
 | 568 | docs/minimized-dock.md 点名 compact minimized | ✓ |
+| 569 | docs/window-tabs.md 点名 compact tabs | ✓ |
+| 569 | docs/window-tabs.md 点名 compact tabs | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 569 — docs/window-tabs.md names compact tabs
+
+选题 = evolve8h wave 569。`docs/window-tabs.md` 点名 health compact `tabs`。
 
 ## 2026-10-03：evolve8h wave 568 — docs/minimized-dock.md names compact minimized
 

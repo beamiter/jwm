@@ -93,3 +93,5 @@ clamped.
   hit-testing and both backends stay in agreement.
   Hover state lives in the compositor rather than the window manager, so
   pointer motion never triggers a title-texture rebuild.
+
+`jwm-tool health` prints compact `tabs` for window tabs operators.
