@@ -240,3 +240,4 @@ GPU, driver, and renderer. Review support bundles before sharing them; use the
 private process in [SECURITY.md](../SECURITY.md) for sensitive failures.
 evolve9h wave 18: Health compact `version_info` is diagnosable through `jwm-tool health`.
 evolve9h wave 19: Health compact `metrics` is diagnosable through `jwm-tool health`.
+evolve9h wave 20: Health compact `ipc_caps` is diagnosable through `jwm-tool health`.
