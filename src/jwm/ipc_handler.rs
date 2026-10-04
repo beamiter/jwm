@@ -18512,4 +18512,10 @@ mod tests {
         assert!(DOCS.contains("Wave 791: Support triage reads health compact `color_management` before `get_cm` dumps."));
     }
 
+    #[test]
+    fn evolve8h_wave_792_monitor_lock_unique_pin_night_light() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 792: Support triage reads health compact `night_light` before `get_nl` dumps."));
+    }
+
 }

@@ -1126,6 +1126,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 791: Support triage reads health compact `color_management` before `get_cm` dumps.
 
+- Wave 792: Support triage reads health compact `night_light` before `get_nl` dumps.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

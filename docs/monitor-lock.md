@@ -928,3 +928,4 @@ Wave 788: Support triage reads health compact `tearing` before `get_th` dumps.
 Wave 789: Support triage reads health compact `xwayland` before `get_xw` dumps.
 Wave 790: Support triage reads health compact `scrolling` before `get_scroll` dumps.
 Wave 791: Support triage reads health compact `color_management` before `get_cm` dumps.
+Wave 792: Support triage reads health compact `night_light` before `get_nl` dumps.
