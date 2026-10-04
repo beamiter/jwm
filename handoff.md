@@ -1259,9 +1259,15 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 715 | monitor-lock 唯一 pin wave 715 mic | ✓ |
 | 716 | monitor-lock 唯一 pin wave 716 bench | ✓ |
 | 716 | monitor-lock 唯一 pin wave 716 bench | ✓ |
+| 717 | monitor-lock 唯一 pin wave 717 closed_placement | ✓ |
+| 717 | monitor-lock 唯一 pin wave 717 closed_placement | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 717 — monitor-lock pin wave 717 closed_placement
+
+选题 = evolve8h wave 717。monitor-lock 唯一句子 wave 717 `closed_placement`。
 
 ## 2026-10-03：evolve8h wave 716 — monitor-lock pin wave 716 bench
 

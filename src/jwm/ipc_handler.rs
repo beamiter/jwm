@@ -18062,4 +18062,10 @@ mod tests {
         assert!(DOCS.contains("Wave 716: `get_bm` and health compact `bench` share one Status nest."));
     }
 
+    #[test]
+    fn evolve8h_wave_717_monitor_lock_unique_pin_closed_placement() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 717: `get_cp` and health compact `closed_placement` share one Status nest."));
+    }
+
 }

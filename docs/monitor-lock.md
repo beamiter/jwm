@@ -853,3 +853,4 @@ Wave 713: `get_wins` and health compact `windows` share one Status nest.
 Wave 714: `get_fx` and health compact `effects` share one Status nest.
 Wave 715: `get_mute` and health compact `mic` share one Status nest.
 Wave 716: `get_bm` and health compact `bench` share one Status nest.
+Wave 717: `get_cp` and health compact `closed_placement` share one Status nest.
