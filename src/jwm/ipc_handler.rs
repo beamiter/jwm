@@ -19861,4 +19861,13 @@ mod tests {
         assert!(DOCS.contains("`jwm-tool health` prints compact `ipc_caps` beside occupancy"));
     }
 
+    #[test]
+    fn evolve9h_wave_10_readme_health_names_compact_ipc_caps() {
+        const README: &str = include_str!("../../README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(README.contains("compact `ipc_caps` line"));
+        assert!(README.contains("get_status.capabilities"));
+        assert!(DOCS.contains("README health text names compact `ipc_caps`"));
+    }
+
 }

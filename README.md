@@ -238,6 +238,7 @@ It also prints a compact `power` line from `get_status.power`.
 It also prints a compact `media` line from `get_status.media`.
 It also prints a compact `version_info` line from `get_status.version_info`.
 It also prints a compact `metrics` line from `get_status.metrics`.
+It also prints a compact `ipc_caps` line from `get_status.capabilities`.
 
 Malformed JSON, invalid argument types, overflow, empty spawn commands, unknown
 commands, and `{ "success": false }` responses produce a non-zero exit status,

@@ -1562,6 +1562,8 @@ monorepo use independent Semantic Versions.
 
 - `jwm-tool health` prints compact `ipc_caps` beside occupancy.
 
+- README health text names compact `ipc_caps`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
