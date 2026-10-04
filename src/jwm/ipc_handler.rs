@@ -17762,4 +17762,10 @@ mod tests {
         assert!(DOCS.contains("Wave 666: Health compact `cfact` is the operator twin of `get_cf`."));
     }
 
+    #[test]
+    fn evolve8h_wave_667_monitor_lock_unique_pin_gaps() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 667: Health compact `gaps` is the operator twin of `get_gap`."));
+    }
+
 }

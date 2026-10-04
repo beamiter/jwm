@@ -876,6 +876,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 666: Health compact `cfact` is the operator twin of `get_cf`.
 
+- Wave 667: Health compact `gaps` is the operator twin of `get_gap`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
