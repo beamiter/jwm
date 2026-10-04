@@ -4119,6 +4119,26 @@ mod tests {
             line == "wayland: family=wayland-udev outputs=2"
         }));
 
+        assert!(!wayland_lines
+            .iter()
+            .any(|line| line.starts_with("recording:")));
+
+        let with_compact_recording = serde_json::json!({
+            "health": {"status": "healthy", "reasons": []},
+            "counts": {"windows": 0, "monitors": 1, "workspaces": 1},
+            "config": {"path": "/tmp/config.toml", "diagnostics": {"error_count": 0, "warning_count": 0}},
+            "features": {},
+            "recording": {
+                "active": true,
+                "selecting_region": false,
+                "elapsed_secs": 12.5
+            }
+        });
+        let recording_lines = health_output_lines(&with_compact_recording);
+        assert!(recording_lines.iter().any(|line| {
+            line == "recording: active=true selecting=false elapsed=12.5"
+        }));
+
         let capabilities = serde_json::json!({
             "schema_version": 1,
             "commands": ["focusstack", "reload_config"],
@@ -5860,6 +5880,26 @@ fn health_output_lines(status: &serde_json::Value) -> Vec<String> {
             .unwrap_or_else(|| "-".into());
         lines.push(format!(
             "wayland: family={backend_family} outputs={outputs}"
+        ));
+    }
+
+    if let Some(recording) = status.get("recording").and_then(serde_json::Value::as_object) {
+        let flag = |name: &str| {
+            recording
+                .get(name)
+                .and_then(serde_json::Value::as_bool)
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "-".into())
+        };
+        let elapsed_secs = recording
+            .get("elapsed_secs")
+            .and_then(|v| v.as_f64())
+            .map(|value| format!("{value}"))
+            .unwrap_or_else(|| "-".into());
+        lines.push(format!(
+            "recording: active={} selecting={} elapsed={elapsed_secs}",
+            flag("active"),
+            flag("selecting_region")
         ));
     }
 

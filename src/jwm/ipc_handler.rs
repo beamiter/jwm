@@ -16453,4 +16453,17 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn evolve8h_wave_512_health_prints_compact_recording() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains(
+            "recording: active={} selecting={} elapsed={elapsed_secs}"
+        ));
+        assert!(TOOL.contains(
+            "\"recording: active=true selecting=false elapsed=12.5\""
+        ));
+        assert!(DOCS.contains("`jwm-tool health` prints compact `recording` beside occupancy"));
+    }
+
 }
