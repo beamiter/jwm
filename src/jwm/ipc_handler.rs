@@ -17258,4 +17258,13 @@ mod tests {
         assert!(DOCS.contains("README health text names `get_nl` beside compact `night_light`"));
     }
 
+    #[test]
+    fn evolve8h_wave_598_readme_health_names_get_mag_for_magnifier() {
+        const README: &str = include_str!("../../README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(README.contains("`get_mag`"));
+        assert!(README.contains("compact `magnifier` line"));
+        assert!(DOCS.contains("README health text names `get_mag` beside compact `magnifier`"));
+    }
+
 }
