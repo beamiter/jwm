@@ -18038,4 +18038,10 @@ mod tests {
         assert!(DOCS.contains("Wave 712: `get_ws` and health compact `workspaces` share one Status nest."));
     }
 
+    #[test]
+    fn evolve8h_wave_713_monitor_lock_unique_pin_windows() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 713: `get_wins` and health compact `windows` share one Status nest."));
+    }
+
 }
