@@ -436,3 +436,4 @@ evolve9h wave 212: `jwm-tool capabilities` remains the catalog for `tearing` que
 evolve9h wave 213: `jwm-tool capabilities` remains the catalog for `xwayland` query aliases.
 evolve9h wave 214: `jwm-tool capabilities` remains the catalog for `scrolling` query aliases.
 evolve9h wave 215: `jwm-tool capabilities` remains the catalog for `night_light` query aliases.
+evolve9h wave 216: `jwm-tool capabilities` remains the catalog for `magnifier` query aliases.

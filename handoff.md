@@ -529,9 +529,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 213 | compatibility 唯一 pin wave 213 xwayland | ✓ |
 | 214 | compatibility 唯一 pin wave 214 scrolling | ✓ |
 | 215 | compatibility 唯一 pin wave 215 night_light | ✓ |
+| 216 | compatibility 唯一 pin wave 216 magnifier | ✓ |
 | … | evolve9h 进行中 |
 
 ---
+
+## 2026-10-04：evolve9h wave 216 — compatibility pin wave 216 magnifier
+
+选题 = evolve9h wave 216。compatibility 唯一句子 wave 216 `magnifier`。
 
 ## 2026-10-04：evolve9h wave 215 — compatibility pin wave 215 night_light
 
