@@ -20563,4 +20563,10 @@ mod tests {
         assert!(COMPAT.contains("evolve9h wave 121: Nested smoke treats `scrolling` as a read-only IPC probe."));
     }
 
+    #[test]
+    fn evolve9h_wave_122_compat_unique_pin_night_light() {
+        const COMPAT: &str = include_str!("../../docs/compatibility.md");
+        assert!(COMPAT.contains("evolve9h wave 122: Nested smoke treats `night_light` as a read-only IPC probe."));
+    }
+
 }
