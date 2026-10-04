@@ -19870,4 +19870,13 @@ mod tests {
         assert!(DOCS.contains("README health text names compact `ipc_caps`"));
     }
 
+    #[test]
+    fn evolve9h_wave_11_tools_readme_health_names_compact_ipc_caps() {
+        const TOOLS: &str = include_str!("../../tools/README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOLS.contains("compact `ipc_caps` line"));
+        assert!(TOOLS.contains("get_status.capabilities"));
+        assert!(DOCS.contains("`tools/README.md` health text names compact `ipc_caps`"));
+    }
+
 }

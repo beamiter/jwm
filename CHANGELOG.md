@@ -1564,6 +1564,8 @@ monorepo use independent Semantic Versions.
 
 - README health text names compact `ipc_caps`.
 
+- `tools/README.md` health text names compact `ipc_caps`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
