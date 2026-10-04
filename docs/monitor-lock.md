@@ -834,3 +834,4 @@ Wave 694: `get_wly` and health compact `waterlily` share one Status nest.
 Wave 695: `get_devices` and health compact `audio` share one Status nest.
 Wave 696: `get_wall` and health compact `wallpaper` share one Status nest.
 Wave 697: `get_bt` and health compact `bluetooth` share one Status nest.
+Wave 698: `get_res` and health compact `resources` share one Status nest.

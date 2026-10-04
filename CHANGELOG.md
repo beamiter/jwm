@@ -938,6 +938,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 697: `get_bt` and health compact `bluetooth` share one Status nest.
 
+- Wave 698: `get_res` and health compact `resources` share one Status nest.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
