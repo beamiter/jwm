@@ -978,6 +978,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 717: `get_cp` and health compact `closed_placement` share one Status nest.
 
+- Wave 718: `get_pl` and health compact `prev_layout` share one Status nest.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
