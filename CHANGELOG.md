@@ -2080,6 +2080,8 @@ monorepo use independent Semantic Versions.
 
 - evolve9h wave 268: Nested smoke treats `ipc_caps` as a read-only IPC probe.
 
+- evolve9h wave 269: Nested smoke treats `config` as a read-only IPC probe.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

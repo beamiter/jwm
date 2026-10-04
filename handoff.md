@@ -582,9 +582,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 266 | compatibility 唯一 pin wave 266 version_info | ✓ |
 | 267 | compatibility 唯一 pin wave 267 metrics | ✓ |
 | 268 | compatibility 唯一 pin wave 268 ipc_caps | ✓ |
+| 269 | compatibility 唯一 pin wave 269 config | ✓ |
 | … | evolve9h 进行中 |
 
 ---
+
+## 2026-10-04：evolve9h wave 269 — compatibility pin wave 269 config
+
+选题 = evolve9h wave 269。compatibility 唯一句子 wave 269 `config`。
 
 ## 2026-10-04：evolve9h wave 268 — compatibility pin wave 268 ipc_caps
 

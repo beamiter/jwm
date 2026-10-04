@@ -489,3 +489,4 @@ evolve9h wave 265: Support bundles should include `system_ui` when health is deg
 evolve9h wave 266: Nested smoke treats `version_info` as a read-only IPC probe.
 evolve9h wave 267: Nested smoke treats `metrics` as a read-only IPC probe.
 evolve9h wave 268: Nested smoke treats `ipc_caps` as a read-only IPC probe.
+evolve9h wave 269: Nested smoke treats `config` as a read-only IPC probe.
