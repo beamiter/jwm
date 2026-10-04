@@ -113,6 +113,7 @@ It also prints a compact `effects` line from `get_status.effects` (`get_fx`).
 It also prints a compact `mic` line from `get_status.mic` (`get_mute`).
 It also prints a compact `bench` line from `get_status.bench` (`get_bench`).
 It also prints a compact `floating` line from `get_status.floating`.
+It also prints a compact `minimized` line from `get_status.minimized`.
 
 IPC 使用换行分隔的 JSON。工具按块读取并保留同一批到达的后续消息，
 每条响应的正文上限为 1 MiB。普通响应和订阅确认须在开始读取后 5 秒内
