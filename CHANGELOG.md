@@ -1028,6 +1028,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 742: Doctor bundles include health compact `gesture` from `get_gest`.
 
+- Wave 743: Doctor bundles include health compact `wayland` from `get_wl`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

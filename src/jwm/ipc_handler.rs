@@ -18218,4 +18218,10 @@ mod tests {
         assert!(DOCS.contains("Wave 742: Doctor bundles include health compact `gesture` from `get_gest`."));
     }
 
+    #[test]
+    fn evolve8h_wave_743_monitor_lock_unique_pin_wayland() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 743: Doctor bundles include health compact `wayland` from `get_wl`."));
+    }
+
 }
