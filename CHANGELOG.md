@@ -1004,6 +1004,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 730: `get_status.hdr` and health compact `hdr` share one Status nest.
 
+- Wave 731: `get_status.expose` and health compact `expose` share one Status nest.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

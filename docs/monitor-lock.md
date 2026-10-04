@@ -867,3 +867,4 @@ Wave 727: `get_status.fullscreen` and health compact `fullscreen` share one Stat
 Wave 728: `get_status.pip` and health compact `pip` share one Status nest.
 Wave 729: `get_status.blur` and health compact `blur` share one Status nest.
 Wave 730: `get_status.hdr` and health compact `hdr` share one Status nest.
+Wave 731: `get_status.expose` and health compact `expose` share one Status nest.
