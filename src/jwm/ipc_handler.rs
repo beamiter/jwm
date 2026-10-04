@@ -17528,4 +17528,10 @@ mod tests {
         assert!(DOCS.contains("README health text names `get_bm` beside compact `bench`"));
     }
 
+    #[test]
+    fn evolve8h_wave_628_monitor_lock_unique_pin_session_lock() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 628: Health compact `session_lock` is the operator twin of `get_lock`."));
+    }
+
 }

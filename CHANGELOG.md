@@ -798,6 +798,8 @@ monorepo use independent Semantic Versions.
 
 - README health text names `get_bm` beside compact `bench`.
 
+- Wave 628: Health compact `session_lock` is the operator twin of `get_lock`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
