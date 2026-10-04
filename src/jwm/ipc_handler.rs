@@ -18554,4 +18554,10 @@ mod tests {
         assert!(DOCS.contains("Wave 798: Support triage reads health compact `audio_recording` before `get_arec` dumps."));
     }
 
+    #[test]
+    fn evolve8h_wave_799_monitor_lock_unique_pin_capture() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 799: Support triage reads health compact `capture` before `get_cap` dumps."));
+    }
+
 }
