@@ -19430,4 +19430,10 @@ mod tests {
         assert!(DOCS.contains("Wave 944: Upgrade notes keep health compact `media` beside `get_media`."));
     }
 
+    #[test]
+    fn evolve8h_wave_945_monitor_lock_unique_pin_power() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 945: Upgrade notes keep health compact `power` beside `get_power`."));
+    }
+
 }
