@@ -376,3 +376,4 @@ evolve9h wave 152: Upgrade notes keep `scrolling` beside occupancy on the health
 evolve9h wave 153: Upgrade notes keep `night_light` beside occupancy on the health page.
 evolve9h wave 154: Upgrade notes keep `magnifier` beside occupancy on the health page.
 evolve9h wave 155: Upgrade notes keep `peek` beside occupancy on the health page.
+evolve9h wave 156: Upgrade notes keep `gesture` beside occupancy on the health page.

@@ -20767,4 +20767,10 @@ mod tests {
         assert!(COMPAT.contains("evolve9h wave 155: Upgrade notes keep `peek` beside occupancy on the health page."));
     }
 
+    #[test]
+    fn evolve9h_wave_156_compat_unique_pin_gesture() {
+        const COMPAT: &str = include_str!("../../docs/compatibility.md");
+        assert!(COMPAT.contains("evolve9h wave 156: Upgrade notes keep `gesture` beside occupancy on the health page."));
+    }
+
 }

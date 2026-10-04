@@ -1854,6 +1854,8 @@ monorepo use independent Semantic Versions.
 
 - evolve9h wave 155: Upgrade notes keep `peek` beside occupancy on the health page.
 
+- evolve9h wave 156: Upgrade notes keep `gesture` beside occupancy on the health page.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
