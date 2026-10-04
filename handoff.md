@@ -961,9 +961,15 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 566 | docs/launcher.md 点名 compact system_ui | ✓ |
 | 567 | docs/cube-effects.md 点名 compact effects | ✓ |
 | 567 | docs/cube-effects.md 点名 compact effects | ✓ |
+| 568 | docs/minimized-dock.md 点名 compact minimized | ✓ |
+| 568 | docs/minimized-dock.md 点名 compact minimized | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 568 — docs/minimized-dock.md names compact minimized
+
+选题 = evolve8h wave 568。`docs/minimized-dock.md` 点名 health compact `minimized`。
 
 ## 2026-10-03：evolve8h wave 567 — docs/cube-effects.md names compact effects
 

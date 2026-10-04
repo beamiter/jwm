@@ -17012,4 +17012,12 @@ mod tests {
         assert!(DOCS.contains("`docs/cube-effects.md` names compact `effects` beside health"));
     }
 
+    #[test]
+    fn evolve8h_wave_568_doc_minimized_dock_names_compact_minimized() {
+        const FEATURE: &str = include_str!("../../docs/minimized-dock.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(FEATURE.contains("compact `minimized`"));
+        assert!(DOCS.contains("`docs/minimized-dock.md` names compact `minimized` beside health"));
+    }
+
 }

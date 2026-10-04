@@ -262,3 +262,5 @@ queue.
   and malformed, stale, reused-PID, or ordinary-startup payloads are rejected.
   A launcher that forks into a different daemon PID is intentionally not
   guessed by title or class: its pending entry expires and can be retried.
+
+`jwm-tool health` prints compact `minimized` for minimized dock operators.

@@ -704,3 +704,4 @@ README health text names compact `media`.
 `docs/layout-picker.md` names compact `layout` beside health.
 `docs/launcher.md` names compact `system_ui` beside health.
 `docs/cube-effects.md` names compact `effects` beside health.
+`docs/minimized-dock.md` names compact `minimized` beside health.

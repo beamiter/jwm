@@ -678,6 +678,8 @@ monorepo use independent Semantic Versions.
 
 - `docs/cube-effects.md` names compact `effects` beside health.
 
+- `docs/minimized-dock.md` names compact `minimized` beside health.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
