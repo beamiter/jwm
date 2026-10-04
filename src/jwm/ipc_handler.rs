@@ -18536,4 +18536,10 @@ mod tests {
         assert!(DOCS.contains("Wave 795: Support triage reads health compact `gesture` before `get_gest` dumps."));
     }
 
+    #[test]
+    fn evolve8h_wave_796_monitor_lock_unique_pin_wayland() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 796: Support triage reads health compact `wayland` before `get_wl` dumps."));
+    }
+
 }

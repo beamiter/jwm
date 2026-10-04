@@ -932,3 +932,4 @@ Wave 792: Support triage reads health compact `night_light` before `get_nl` dump
 Wave 793: Support triage reads health compact `magnifier` before `get_mag` dumps.
 Wave 794: Support triage reads health compact `peek` before `get_pk` dumps.
 Wave 795: Support triage reads health compact `gesture` before `get_gest` dumps.
+Wave 796: Support triage reads health compact `wayland` before `get_wl` dumps.

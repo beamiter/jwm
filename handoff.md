@@ -1417,9 +1417,15 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 794 | monitor-lock 唯一 pin wave 794 peek | ✓ |
 | 795 | monitor-lock 唯一 pin wave 795 gesture | ✓ |
 | 795 | monitor-lock 唯一 pin wave 795 gesture | ✓ |
+| 796 | monitor-lock 唯一 pin wave 796 wayland | ✓ |
+| 796 | monitor-lock 唯一 pin wave 796 wayland | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 796 — monitor-lock pin wave 796 wayland
+
+选题 = evolve8h wave 796。monitor-lock 唯一句子 wave 796 `wayland`。
 
 ## 2026-10-03：evolve8h wave 795 — monitor-lock pin wave 795 gesture
 
