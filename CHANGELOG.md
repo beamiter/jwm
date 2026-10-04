@@ -924,6 +924,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 690: `get_wl` and health compact `wayland` share one Status nest.
 
+- Wave 691: `get_rec` and health compact `recording` share one Status nest.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
