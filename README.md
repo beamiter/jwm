@@ -210,7 +210,7 @@ It also prints a compact `pip` line from `get_status.pip`.
 It also prints a compact `notifications` line from `get_status.notifications` (`get_notif`).
 It also prints a compact `blur` line from `get_status.blur`.
 It also prints a compact `hdr` line from `get_status.hdr`.
-It also prints a compact `dnd` line from `get_status.dnd`.
+It also prints a compact `dnd` line from `get_status.dnd` (`get_dnd`).
 It also prints a compact `system_ui` line from `get_status.system_ui` (`get_ui`).
 It also prints a compact `idle` line from `get_status.idle` (`get_idl`).
 It also prints a compact `clipboard` line from `get_status.clipboard` (`get_clip`).

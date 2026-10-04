@@ -17402,4 +17402,13 @@ mod tests {
         assert!(DOCS.contains("README health text names `get_notif` beside compact `notifications`"));
     }
 
+    #[test]
+    fn evolve8h_wave_614_readme_health_names_get_dnd_for_dnd() {
+        const README: &str = include_str!("../../README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(README.contains("`get_dnd`"));
+        assert!(README.contains("compact `dnd` line"));
+        assert!(DOCS.contains("README health text names `get_dnd` beside compact `dnd`"));
+    }
+
 }
