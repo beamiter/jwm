@@ -15832,4 +15832,17 @@ mod tests {
         assert!(TOOLS.contains("get_status.blur"));
         assert!(DOCS.contains("`tools/README.md` health text names compact `blur`"));
     }
+
+    #[test]
+    fn evolve8h_wave_452_health_prints_compact_hdr() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains(
+            "hdr: enabled={config_enabled} peak_nits={config_peak_nits} outputs={outputs_total} capable={outputs_capable}"
+        ));
+        assert!(TOOL.contains(
+            "\"hdr: enabled=true peak_nits=1000 outputs=2 capable=1\""
+        ));
+        assert!(DOCS.contains("`jwm-tool health` prints compact `hdr` beside occupancy"));
+    }
 }

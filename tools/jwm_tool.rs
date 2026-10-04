@@ -3821,6 +3821,24 @@ mod tests {
         assert!(blur_lines.iter().any(|line| {
             line == "blur: enabled=true strength=0.5 temporal=false frosted=true"
         }));
+        assert!(!blur_lines.iter().any(|line| line.starts_with("hdr:")));
+
+        let with_compact_hdr = serde_json::json!({
+            "health": {"status": "healthy", "reasons": []},
+            "counts": {"windows": 0, "monitors": 1, "workspaces": 1},
+            "config": {"path": "/tmp/config.toml", "diagnostics": {"error_count": 0, "warning_count": 0}},
+            "features": {},
+            "hdr": {
+                "config_enabled": true,
+                "config_peak_nits": 1000,
+                "outputs_total": 2,
+                "outputs_capable": 1
+            }
+        });
+        let hdr_lines = health_output_lines(&with_compact_hdr);
+        assert!(hdr_lines.iter().any(|line| {
+            line == "hdr: enabled=true peak_nits=1000 outputs=2 capable=1"
+        }));
 
         let capabilities = serde_json::json!({
             "schema_version": 1,
@@ -5248,6 +5266,32 @@ fn health_output_lines(status: &serde_json::Value) -> Vec<String> {
             .unwrap_or_else(|| "-".into());
         lines.push(format!(
             "blur: enabled={config_enabled} strength={current_strength} temporal={temporal_enabled} frosted={status_bar_frosted}"
+        ));
+    }
+
+    if let Some(hdr) = status.get("hdr").and_then(serde_json::Value::as_object) {
+        let config_enabled = hdr
+            .get("config_enabled")
+            .and_then(serde_json::Value::as_bool)
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".into());
+        let config_peak_nits = hdr
+            .get("config_peak_nits")
+            .and_then(|v| v.as_u64().or_else(|| v.as_i64().map(|n| n as u64)))
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".into());
+        let outputs_total = hdr
+            .get("outputs_total")
+            .and_then(|v| v.as_u64().or_else(|| v.as_i64().map(|n| n as u64)))
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".into());
+        let outputs_capable = hdr
+            .get("outputs_capable")
+            .and_then(|v| v.as_u64().or_else(|| v.as_i64().map(|n| n as u64)))
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".into());
+        lines.push(format!(
+            "hdr: enabled={config_enabled} peak_nits={config_peak_nits} outputs={outputs_total} capable={outputs_capable}"
         ));
     }
 
