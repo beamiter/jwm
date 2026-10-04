@@ -552,3 +552,4 @@ README health text names compact `windows`.
 README health text names compact `tree`.
 `tools/README.md` health text names compact `tree`.
 `jwm-tool health` prints compact `effects` beside occupancy.
+README health text names compact `effects`.
