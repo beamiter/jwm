@@ -574,6 +574,8 @@ monorepo use independent Semantic Versions.
 
 - `jwm-tool capabilities` text lists `get_rec -> get_recording`.
 
+- `jwm-tool health` prints compact `audio_recording` beside occupancy.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

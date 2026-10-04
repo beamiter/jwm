@@ -857,9 +857,15 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 514 | tools/README health 点名 compact recording | ✓ |
 | 515 | capabilities 文本列出 get_rec -> get_recording | ✓ |
 | 515 | capabilities 文本列出 get_rec -> get_recording | ✓ |
+| 516 | health 打印 compact audio_recording | ✓ |
+| 516 | health 打印 compact audio_recording | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 516 — health prints compact audio_recording
+
+选题 = evolve8h wave 516。`jwm-tool health` 打印 compact `audio_recording` 行。
 
 ## 2026-10-03：evolve8h wave 515 — capabilities text lists recording alias
 

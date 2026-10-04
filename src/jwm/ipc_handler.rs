@@ -16494,4 +16494,17 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn evolve8h_wave_516_health_prints_compact_audio_recording() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains(
+            "audio_recording: active={} finalizing={} elapsed_ms={elapsed_ms}"
+        ));
+        assert!(TOOL.contains(
+            "\"audio_recording: active=true finalizing=false elapsed_ms=900\""
+        ));
+        assert!(DOCS.contains("`jwm-tool health` prints compact `audio_recording` beside occupancy"));
+    }
+
 }

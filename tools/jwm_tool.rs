@@ -4139,6 +4139,26 @@ mod tests {
             line == "recording: active=true selecting=false elapsed=12.5"
         }));
 
+        assert!(!recording_lines
+            .iter()
+            .any(|line| line.starts_with("audio_recording:")));
+
+        let with_compact_audio_recording = serde_json::json!({
+            "health": {"status": "healthy", "reasons": []},
+            "counts": {"windows": 0, "monitors": 1, "workspaces": 1},
+            "config": {"path": "/tmp/config.toml", "diagnostics": {"error_count": 0, "warning_count": 0}},
+            "features": {},
+            "audio_recording": {
+                "active": true,
+                "finalizing": false,
+                "elapsed_ms": 900
+            }
+        });
+        let audio_recording_lines = health_output_lines(&with_compact_audio_recording);
+        assert!(audio_recording_lines.iter().any(|line| {
+            line == "audio_recording: active=true finalizing=false elapsed_ms=900"
+        }));
+
         let capabilities = serde_json::json!({
             "schema_version": 1,
             "commands": ["focusstack", "reload_config"],
@@ -5900,6 +5920,29 @@ fn health_output_lines(status: &serde_json::Value) -> Vec<String> {
             "recording: active={} selecting={} elapsed={elapsed_secs}",
             flag("active"),
             flag("selecting_region")
+        ));
+    }
+
+    if let Some(audio_recording) = status
+        .get("audio_recording")
+        .and_then(serde_json::Value::as_object)
+    {
+        let flag = |name: &str| {
+            audio_recording
+                .get(name)
+                .and_then(serde_json::Value::as_bool)
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "-".into())
+        };
+        let elapsed_ms = audio_recording
+            .get("elapsed_ms")
+            .and_then(|v| v.as_u64().or_else(|| v.as_i64().map(|n| n as u64)))
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".into());
+        lines.push(format!(
+            "audio_recording: active={} finalizing={} elapsed_ms={elapsed_ms}",
+            flag("active"),
+            flag("finalizing")
         ));
     }
 
