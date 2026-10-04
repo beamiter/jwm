@@ -1014,6 +1014,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 735: Doctor bundles include health compact `tearing` from `get_th`.
 
+- Wave 736: Doctor bundles include health compact `xwayland` from `get_xw`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

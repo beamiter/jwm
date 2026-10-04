@@ -18176,4 +18176,10 @@ mod tests {
         assert!(DOCS.contains("Wave 735: Doctor bundles include health compact `tearing` from `get_th`."));
     }
 
+    #[test]
+    fn evolve8h_wave_736_monitor_lock_unique_pin_xwayland() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 736: Doctor bundles include health compact `xwayland` from `get_xw`."));
+    }
+
 }
