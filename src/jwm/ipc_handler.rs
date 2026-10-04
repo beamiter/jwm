@@ -19466,4 +19466,10 @@ mod tests {
         assert!(DOCS.contains("Wave 950: Compatibility tables name `get_cm` with health compact `color_management`."));
     }
 
+    #[test]
+    fn evolve8h_wave_951_monitor_lock_unique_pin_night_light() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 951: Compatibility tables name `get_nl` with health compact `night_light`."));
+    }
+
 }

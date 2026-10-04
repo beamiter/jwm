@@ -1087,3 +1087,4 @@ Wave 947: Compatibility tables name `get_th` with health compact `tearing`.
 Wave 948: Compatibility tables name `get_xw` with health compact `xwayland`.
 Wave 949: Compatibility tables name `get_scroll` with health compact `scrolling`.
 Wave 950: Compatibility tables name `get_cm` with health compact `color_management`.
+Wave 951: Compatibility tables name `get_nl` with health compact `night_light`.

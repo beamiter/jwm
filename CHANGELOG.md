@@ -1444,6 +1444,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 950: Compatibility tables name `get_cm` with health compact `color_management`.
 
+- Wave 951: Compatibility tables name `get_nl` with health compact `night_light`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
