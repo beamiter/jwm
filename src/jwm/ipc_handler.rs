@@ -17720,4 +17720,10 @@ mod tests {
         assert!(DOCS.contains("Wave 659: Health compact `workspaces` is the operator twin of `get_ws`."));
     }
 
+    #[test]
+    fn evolve8h_wave_660_monitor_lock_unique_pin_windows() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 660: Health compact `windows` is the operator twin of `get_wins`."));
+    }
+
 }

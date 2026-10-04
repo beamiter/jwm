@@ -1145,9 +1145,15 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 658 | monitor-lock 唯一 pin wave 658 monitors | ✓ |
 | 659 | monitor-lock 唯一 pin wave 659 workspaces | ✓ |
 | 659 | monitor-lock 唯一 pin wave 659 workspaces | ✓ |
+| 660 | monitor-lock 唯一 pin wave 660 windows | ✓ |
+| 660 | monitor-lock 唯一 pin wave 660 windows | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 660 — monitor-lock pin wave 660 windows
+
+选题 = evolve8h wave 660。monitor-lock 唯一句子 wave 660 `windows`。
 
 ## 2026-10-03：evolve8h wave 659 — monitor-lock pin wave 659 workspaces
 
