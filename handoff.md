@@ -414,9 +414,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 98 | compatibility 唯一 pin wave 98 waterlily | ✓ |
 | 99 | compatibility 唯一 pin wave 99 audio | ✓ |
 | 100 | compatibility 唯一 pin wave 100 wallpaper | ✓ |
+| 101 | compatibility 唯一 pin wave 101 bluetooth | ✓ |
 | … | evolve9h 进行中 |
 
 ---
+
+## 2026-10-04：evolve9h wave 101 — compatibility pin wave 101 bluetooth
+
+选题 = evolve9h wave 101。compatibility 唯一句子 wave 101 `bluetooth`。
 
 ## 2026-10-04：evolve9h wave 100 — compatibility pin wave 100 wallpaper
 

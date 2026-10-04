@@ -20437,4 +20437,10 @@ mod tests {
         assert!(COMPAT.contains("evolve9h wave 100: Support bundles should include `wallpaper` when health is degraded."));
     }
 
+    #[test]
+    fn evolve9h_wave_101_compat_unique_pin_bluetooth() {
+        const COMPAT: &str = include_str!("../../docs/compatibility.md");
+        assert!(COMPAT.contains("evolve9h wave 101: Support bundles should include `bluetooth` when health is degraded."));
+    }
+
 }
