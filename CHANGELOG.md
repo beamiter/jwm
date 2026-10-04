@@ -1664,6 +1664,8 @@ monorepo use independent Semantic Versions.
 
 - evolve9h wave 60: `jwm-tool capabilities` remains the catalog for `night_light` query aliases.
 
+- evolve9h wave 61: `jwm-tool capabilities` remains the catalog for `magnifier` query aliases.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
