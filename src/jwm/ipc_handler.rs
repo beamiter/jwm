@@ -18248,4 +18248,10 @@ mod tests {
         assert!(DOCS.contains("Wave 747: Doctor bundles include health compact `waterlily` from `get_wly`."));
     }
 
+    #[test]
+    fn evolve8h_wave_748_monitor_lock_unique_pin_audio() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 748: Doctor bundles include health compact `audio` from `get_devices`."));
+    }
+
 }

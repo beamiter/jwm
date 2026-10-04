@@ -884,3 +884,4 @@ Wave 744: Doctor bundles include health compact `recording` from `get_rec`.
 Wave 745: Doctor bundles include health compact `audio_recording` from `get_arec`.
 Wave 746: Doctor bundles include health compact `capture` from `get_cap`.
 Wave 747: Doctor bundles include health compact `waterlily` from `get_wly`.
+Wave 748: Doctor bundles include health compact `audio` from `get_devices`.

@@ -1038,6 +1038,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 747: Doctor bundles include health compact `waterlily` from `get_wly`.
 
+- Wave 748: Doctor bundles include health compact `audio` from `get_devices`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
