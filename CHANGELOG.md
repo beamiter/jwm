@@ -998,6 +998,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 727: `get_status.fullscreen` and health compact `fullscreen` share one Status nest.
 
+- Wave 728: `get_status.pip` and health compact `pip` share one Status nest.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

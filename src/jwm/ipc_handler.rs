@@ -18128,4 +18128,10 @@ mod tests {
         assert!(DOCS.contains("Wave 727: `get_status.fullscreen` and health compact `fullscreen` share one Status nest."));
     }
 
+    #[test]
+    fn evolve8h_wave_728_monitor_lock_unique_pin_pip() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 728: `get_status.pip` and health compact `pip` share one Status nest."));
+    }
+
 }
