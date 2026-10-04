@@ -1588,6 +1588,8 @@ monorepo use independent Semantic Versions.
 
 - evolve9h wave 22: Health compact `status` is diagnosable through `jwm-tool health`.
 
+- evolve9h wave 23: Health compact `tree` is diagnosable through `jwm-tool health`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
