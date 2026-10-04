@@ -1191,9 +1191,15 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 681 | monitor-lock 唯一 pin wave 681 session_lock | ✓ |
 | 682 | monitor-lock 唯一 pin wave 682 tearing | ✓ |
 | 682 | monitor-lock 唯一 pin wave 682 tearing | ✓ |
+| 683 | monitor-lock 唯一 pin wave 683 xwayland | ✓ |
+| 683 | monitor-lock 唯一 pin wave 683 xwayland | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 683 — monitor-lock pin wave 683 xwayland
+
+选题 = evolve8h wave 683。monitor-lock 唯一句子 wave 683 `xwayland`。
 
 ## 2026-10-03：evolve8h wave 682 — monitor-lock pin wave 682 tearing
 

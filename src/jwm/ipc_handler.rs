@@ -17858,4 +17858,10 @@ mod tests {
         assert!(DOCS.contains("Wave 682: `get_th` and health compact `tearing` share one Status nest."));
     }
 
+    #[test]
+    fn evolve8h_wave_683_monitor_lock_unique_pin_xwayland() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 683: `get_xw` and health compact `xwayland` share one Status nest."));
+    }
+
 }

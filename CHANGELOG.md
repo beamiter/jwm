@@ -908,6 +908,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 682: `get_th` and health compact `tearing` share one Status nest.
 
+- Wave 683: `get_xw` and health compact `xwayland` share one Status nest.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
