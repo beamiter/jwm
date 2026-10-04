@@ -18422,4 +18422,10 @@ mod tests {
         assert!(DOCS.contains("Wave 776: Doctor bundles include health compact `floating` from `get_status.floating`."));
     }
 
+    #[test]
+    fn evolve8h_wave_777_monitor_lock_unique_pin_minimized() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 777: Doctor bundles include health compact `minimized` from `get_status.minimized`."));
+    }
+
 }

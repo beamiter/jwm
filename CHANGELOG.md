@@ -1096,6 +1096,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 776: Doctor bundles include health compact `floating` from `get_status.floating`.
 
+- Wave 777: Doctor bundles include health compact `minimized` from `get_status.minimized`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
