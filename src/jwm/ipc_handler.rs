@@ -15407,4 +15407,16 @@ mod tests {
         assert!(TOOLS.contains("get_status.workspaces"));
         assert!(DOCS.contains("`tools/README.md` health text names compact `workspaces`"));
     }
+
+    #[test]
+    fn evolve8h_wave_408_capabilities_text_lists_workspace_aliases() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains(
+            "query aliases: get_ws,get_tags,get_desktops -> get_workspaces"
+        ));
+        assert!(DOCS.contains(
+            "`jwm-tool capabilities` text lists `get_ws,get_tags,get_desktops -> get_workspaces`"
+        ));
+    }
 }
