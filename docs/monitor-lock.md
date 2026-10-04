@@ -715,3 +715,4 @@ README health text names compact `media`.
 `docs/hdr.md` names compact `hdr` beside health.
 `docs/resources.md` names compact `resources` beside health.
 `docs/media-controls.md` names compact `media` beside health.
+`docs/control-center.md` names compact `system_ui` beside health.

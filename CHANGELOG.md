@@ -700,6 +700,8 @@ monorepo use independent Semantic Versions.
 
 - `docs/media-controls.md` names compact `media` beside health.
 
+- `docs/control-center.md` names compact `system_ui` beside health.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

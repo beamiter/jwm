@@ -17100,4 +17100,12 @@ mod tests {
         assert!(DOCS.contains("`docs/media-controls.md` names compact `media` beside health"));
     }
 
+    #[test]
+    fn evolve8h_wave_579_doc_control_center_names_compact_system_ui() {
+        const FEATURE: &str = include_str!("../../docs/control-center.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(FEATURE.contains("compact `system_ui`"));
+        assert!(DOCS.contains("`docs/control-center.md` names compact `system_ui` beside health"));
+    }
+
 }

@@ -652,3 +652,5 @@ each payload carries a marker that resolves it:
 
 A consumer that reads an empty answer as "absent" will be wrong on a cold
 start; one poll later it is right.
+
+`jwm-tool health` prints compact `system_ui` for control center operators.
