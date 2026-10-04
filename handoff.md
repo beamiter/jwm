@@ -1593,9 +1593,15 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 882 | monitor-lock 唯一 pin wave 882 floating | ✓ |
 | 883 | monitor-lock 唯一 pin wave 883 minimized | ✓ |
 | 883 | monitor-lock 唯一 pin wave 883 minimized | ✓ |
+| 884 | monitor-lock 唯一 pin wave 884 sticky | ✓ |
+| 884 | monitor-lock 唯一 pin wave 884 sticky | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 884 — monitor-lock pin wave 884 sticky
+
+选题 = evolve8h wave 884。monitor-lock 唯一句子 wave 884 `sticky`。
 
 ## 2026-10-03：evolve8h wave 883 — monitor-lock pin wave 883 minimized
 
