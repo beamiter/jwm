@@ -15476,4 +15476,13 @@ mod tests {
         assert!(README.contains("get_status.tree"));
         assert!(DOCS.contains("README health text names compact `tree`"));
     }
+
+    #[test]
+    fn evolve8h_wave_415_tools_readme_health_names_compact_tree() {
+        const TOOLS: &str = include_str!("../../tools/README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOLS.contains("compact `tree` line"));
+        assert!(TOOLS.contains("get_status.tree"));
+        assert!(DOCS.contains("`tools/README.md` health text names compact `tree`"));
+    }
 }
