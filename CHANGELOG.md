@@ -1860,6 +1860,8 @@ monorepo use independent Semantic Versions.
 
 - evolve9h wave 158: Upgrade notes keep `recording` beside occupancy on the health page.
 
+- evolve9h wave 159: Upgrade notes keep `capture` beside occupancy on the health page.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

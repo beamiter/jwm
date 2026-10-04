@@ -20785,4 +20785,10 @@ mod tests {
         assert!(COMPAT.contains("evolve9h wave 158: Upgrade notes keep `recording` beside occupancy on the health page."));
     }
 
+    #[test]
+    fn evolve9h_wave_159_compat_unique_pin_capture() {
+        const COMPAT: &str = include_str!("../../docs/compatibility.md");
+        assert!(COMPAT.contains("evolve9h wave 159: Upgrade notes keep `capture` beside occupancy on the health page."));
+    }
+
 }
