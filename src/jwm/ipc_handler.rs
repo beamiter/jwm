@@ -21019,4 +21019,10 @@ mod tests {
         assert!(COMPAT.contains("evolve9h wave 197: Health compact `power` is diagnosable through `jwm-tool health`."));
     }
 
+    #[test]
+    fn evolve9h_wave_198_compat_unique_pin_media() {
+        const COMPAT: &str = include_str!("../../docs/compatibility.md");
+        assert!(COMPAT.contains("evolve9h wave 198: Health compact `media` is diagnosable through `jwm-tool health`."));
+    }
+
 }
