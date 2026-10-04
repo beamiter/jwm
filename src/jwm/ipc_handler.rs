@@ -19478,4 +19478,10 @@ mod tests {
         assert!(DOCS.contains("Wave 952: Compatibility tables name `get_mag` with health compact `magnifier`."));
     }
 
+    #[test]
+    fn evolve8h_wave_953_monitor_lock_unique_pin_peek() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 953: Compatibility tables name `get_pk` with health compact `peek`."));
+    }
+
 }

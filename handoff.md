@@ -1731,9 +1731,15 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 951 | monitor-lock 唯一 pin wave 951 night_light | ✓ |
 | 952 | monitor-lock 唯一 pin wave 952 magnifier | ✓ |
 | 952 | monitor-lock 唯一 pin wave 952 magnifier | ✓ |
+| 953 | monitor-lock 唯一 pin wave 953 peek | ✓ |
+| 953 | monitor-lock 唯一 pin wave 953 peek | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 953 — monitor-lock pin wave 953 peek
+
+选题 = evolve8h wave 953。monitor-lock 唯一句子 wave 953 `peek`。
 
 ## 2026-10-03：evolve8h wave 952 — monitor-lock pin wave 952 magnifier
 
