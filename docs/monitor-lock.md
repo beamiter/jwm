@@ -1121,3 +1121,4 @@ Wave 981: Compatibility tables name `get_bm` with health compact `bench`.
 Wave 982: Compatibility tables name `get_cp` with health compact `closed_placement`.
 Wave 983: Compatibility tables name `get_pl` with health compact `prev_layout`.
 Wave 984: Compatibility tables name `get_cf` with health compact `cfact`.
+Wave 985: Compatibility tables name `get_gap` with health compact `gaps`.

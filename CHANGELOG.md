@@ -1512,6 +1512,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 984: Compatibility tables name `get_cf` with health compact `cfact`.
 
+- Wave 985: Compatibility tables name `get_gap` with health compact `gaps`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
