@@ -434,3 +434,4 @@ evolve9h wave 210: `jwm-tool capabilities` remains the catalog for `window` quer
 evolve9h wave 211: `jwm-tool capabilities` remains the catalog for `session_lock` query aliases.
 evolve9h wave 212: `jwm-tool capabilities` remains the catalog for `tearing` query aliases.
 evolve9h wave 213: `jwm-tool capabilities` remains the catalog for `xwayland` query aliases.
+evolve9h wave 214: `jwm-tool capabilities` remains the catalog for `scrolling` query aliases.
