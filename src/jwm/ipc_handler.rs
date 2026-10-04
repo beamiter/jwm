@@ -18974,4 +18974,10 @@ mod tests {
         assert!(DOCS.contains("Wave 868: Nested smoke checks health compact `scratchpads` after `get_pads`."));
     }
 
+    #[test]
+    fn evolve8h_wave_869_monitor_lock_unique_pin_focused() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 869: Nested smoke checks health compact `focused` after `get_fw`."));
+    }
+
 }
