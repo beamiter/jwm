@@ -483,3 +483,4 @@ evolve9h wave 259: Support bundles should include `power` when health is degrade
 evolve9h wave 260: Support bundles should include `media` when health is degraded.
 evolve9h wave 261: Support bundles should include `clipboard` when health is degraded.
 evolve9h wave 262: Support bundles should include `idle` when health is degraded.
+evolve9h wave 263: Support bundles should include `notifications` when health is degraded.
