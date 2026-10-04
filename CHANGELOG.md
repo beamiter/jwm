@@ -1458,6 +1458,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 957: Compatibility tables name `get_arec` with health compact `audio_recording`.
 
+- Wave 958: Compatibility tables name `get_cap` with health compact `capture`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

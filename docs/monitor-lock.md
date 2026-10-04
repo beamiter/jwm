@@ -1094,3 +1094,4 @@ Wave 954: Compatibility tables name `get_gest` with health compact `gesture`.
 Wave 955: Compatibility tables name `get_wl` with health compact `wayland`.
 Wave 956: Compatibility tables name `get_rec` with health compact `recording`.
 Wave 957: Compatibility tables name `get_arec` with health compact `audio_recording`.
+Wave 958: Compatibility tables name `get_cap` with health compact `capture`.
