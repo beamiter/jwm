@@ -610,6 +610,8 @@ monorepo use independent Semantic Versions.
 
 - README health text names compact `wallpaper`.
 
+- `tools/README.md` health text names compact `wallpaper`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
