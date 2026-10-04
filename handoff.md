@@ -897,9 +897,15 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 534 | tools/README health 点名 compact wallpaper | ✓ |
 | 535 | capabilities 文本列出 get_wall -> get_wallpaper | ✓ |
 | 535 | capabilities 文本列出 get_wall -> get_wallpaper | ✓ |
+| 536 | health 打印 compact bluetooth | ✓ |
+| 536 | health 打印 compact bluetooth | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 536 — health prints compact bluetooth
+
+选题 = evolve8h wave 536。`jwm-tool health` 打印 compact `bluetooth` 行。
 
 ## 2026-10-03：evolve8h wave 535 — capabilities text lists wallpaper alias
 

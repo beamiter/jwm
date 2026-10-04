@@ -614,6 +614,8 @@ monorepo use independent Semantic Versions.
 
 - `jwm-tool capabilities` text lists `get_wall -> get_wallpaper`.
 
+- `jwm-tool health` prints compact `bluetooth` beside occupancy.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

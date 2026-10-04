@@ -4238,6 +4238,24 @@ mod tests {
             line == "wallpaper: enabled=true pending=false"
         }));
 
+        assert!(!wallpaper_lines
+            .iter()
+            .any(|line| line.starts_with("bluetooth:")));
+
+        let with_compact_bluetooth = serde_json::json!({
+            "health": {"status": "healthy", "reasons": []},
+            "counts": {"windows": 0, "monitors": 1, "workspaces": 1},
+            "config": {"path": "/tmp/config.toml", "diagnostics": {"error_count": 0, "warning_count": 0}},
+            "features": {},
+            "bluetooth": {
+                "active": true
+            }
+        });
+        let bluetooth_lines = health_output_lines(&with_compact_bluetooth);
+        assert!(bluetooth_lines.iter().any(|line| {
+            line == "bluetooth: active=true"
+        }));
+
         let capabilities = serde_json::json!({
             "schema_version": 1,
             "commands": ["focusstack", "reload_config"],
@@ -6091,6 +6109,15 @@ fn health_output_lines(status: &serde_json::Value) -> Vec<String> {
             flag("enabled"),
             flag("pending")
         ));
+    }
+
+    if let Some(bluetooth) = status.get("bluetooth").and_then(serde_json::Value::as_object) {
+        let active = bluetooth
+            .get("active")
+            .and_then(serde_json::Value::as_bool)
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".into());
+        lines.push(format!("bluetooth: active={active}"));
     }
 
     if let Some(reasons) = status["health"]["reasons"].as_array() {
