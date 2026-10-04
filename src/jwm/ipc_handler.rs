@@ -16084,4 +16084,13 @@ mod tests {
         ));
         assert!(DOCS.contains("`jwm-tool health` prints compact `xwayland` beside occupancy"));
     }
+
+    #[test]
+    fn evolve8h_wave_477_readme_health_names_compact_xwayland() {
+        const README: &str = include_str!("../../README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(README.contains("compact `xwayland` line"));
+        assert!(README.contains("get_status.xwayland"));
+        assert!(DOCS.contains("README health text names compact `xwayland`"));
+    }
 }

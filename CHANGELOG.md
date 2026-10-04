@@ -506,6 +506,7 @@ monorepo use independent Semantic Versions.
 - `tools/README.md` health text names compact `tearing`.
 - `jwm-tool capabilities` text lists `get_tearing,get_th -> get_tearing_hints`.
 - `jwm-tool health` prints compact `xwayland` beside occupancy.
+- README health text names compact `xwayland`.
 
 ### Changed
 
