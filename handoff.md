@@ -429,9 +429,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 113 | compatibility 唯一 pin wave 113 ipc_caps | ✓ |
 | 114 | compatibility 唯一 pin wave 114 config | ✓ |
 | 115 | compatibility 唯一 pin wave 115 status | ✓ |
+| 116 | compatibility 唯一 pin wave 116 tree | ✓ |
 | … | evolve9h 进行中 |
 
 ---
+
+## 2026-10-04：evolve9h wave 116 — compatibility pin wave 116 tree
+
+选题 = evolve9h wave 116。compatibility 唯一句子 wave 116 `tree`。
 
 ## 2026-10-04：evolve9h wave 115 — compatibility pin wave 115 status
 
