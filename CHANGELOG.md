@@ -1608,6 +1608,8 @@ monorepo use independent Semantic Versions.
 
 - evolve9h wave 32: Health compact `gesture` is diagnosable through `jwm-tool health`.
 
+- evolve9h wave 33: Health compact `wayland` is diagnosable through `jwm-tool health`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
