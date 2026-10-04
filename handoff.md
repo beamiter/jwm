@@ -1253,9 +1253,15 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 712 | monitor-lock 唯一 pin wave 712 workspaces | ✓ |
 | 713 | monitor-lock 唯一 pin wave 713 windows | ✓ |
 | 713 | monitor-lock 唯一 pin wave 713 windows | ✓ |
+| 714 | monitor-lock 唯一 pin wave 714 effects | ✓ |
+| 714 | monitor-lock 唯一 pin wave 714 effects | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 714 — monitor-lock pin wave 714 effects
+
+选题 = evolve8h wave 714。monitor-lock 唯一句子 wave 714 `effects`。
 
 ## 2026-10-03：evolve8h wave 713 — monitor-lock pin wave 713 windows
 

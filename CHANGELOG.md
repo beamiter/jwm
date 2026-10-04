@@ -970,6 +970,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 713: `get_wins` and health compact `windows` share one Status nest.
 
+- Wave 714: `get_fx` and health compact `effects` share one Status nest.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

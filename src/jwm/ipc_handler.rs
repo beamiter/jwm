@@ -18044,4 +18044,10 @@ mod tests {
         assert!(DOCS.contains("Wave 713: `get_wins` and health compact `windows` share one Status nest."));
     }
 
+    #[test]
+    fn evolve8h_wave_714_monitor_lock_unique_pin_effects() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 714: `get_fx` and health compact `effects` share one Status nest."));
+    }
+
 }
