@@ -806,6 +806,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 631: Health compact `scrolling` is the operator twin of `get_scroll`.
 
+- Wave 632: Health compact `color_management` is the operator twin of `get_cm`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

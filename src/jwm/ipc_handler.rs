@@ -17552,4 +17552,10 @@ mod tests {
         assert!(DOCS.contains("Wave 631: Health compact `scrolling` is the operator twin of `get_scroll`."));
     }
 
+    #[test]
+    fn evolve8h_wave_632_monitor_lock_unique_pin_color_management() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 632: Health compact `color_management` is the operator twin of `get_cm`."));
+    }
+
 }

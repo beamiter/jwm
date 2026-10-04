@@ -1089,9 +1089,15 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 630 | monitor-lock 唯一 pin wave 630 xwayland | ✓ |
 | 631 | monitor-lock 唯一 pin wave 631 scrolling | ✓ |
 | 631 | monitor-lock 唯一 pin wave 631 scrolling | ✓ |
+| 632 | monitor-lock 唯一 pin wave 632 color_management | ✓ |
+| 632 | monitor-lock 唯一 pin wave 632 color_management | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 632 — monitor-lock pin wave 632 color_management
+
+选题 = evolve8h wave 632。monitor-lock 唯一句子 wave 632 `color_management`。
 
 ## 2026-10-03：evolve8h wave 631 — monitor-lock pin wave 631 scrolling
 
