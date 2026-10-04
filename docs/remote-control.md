@@ -676,3 +676,5 @@ once, by a line that had long since scrolled away.
 These boundaries keep the first end-to-end path small and observable. A future
 version can replace JPEG/TCP with a hardware video path and encrypted transport
 without exposing JWM's local IPC or moving network waits into the compositor.
+
+`jwm-tool health` prints compact `session_lock` for remote control operators.

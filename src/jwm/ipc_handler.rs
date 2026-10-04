@@ -17156,4 +17156,12 @@ mod tests {
         assert!(DOCS.contains("`docs/calendar.md` names compact `system_ui` beside health"));
     }
 
+    #[test]
+    fn evolve8h_wave_586_doc_remote_control_names_compact_session_lock() {
+        const FEATURE: &str = include_str!("../../docs/remote-control.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(FEATURE.contains("compact `session_lock`"));
+        assert!(DOCS.contains("`docs/remote-control.md` names compact `session_lock` beside health"));
+    }
+
 }

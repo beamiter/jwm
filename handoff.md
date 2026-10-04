@@ -997,9 +997,15 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 584 | docs/output-layout.md 点名 compact monitors | ✓ |
 | 585 | docs/calendar.md 点名 compact system_ui | ✓ |
 | 585 | docs/calendar.md 点名 compact system_ui | ✓ |
+| 586 | docs/remote-control.md 点名 compact session_lock | ✓ |
+| 586 | docs/remote-control.md 点名 compact session_lock | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 586 — docs/remote-control.md names compact session_lock
+
+选题 = evolve8h wave 586。`docs/remote-control.md` 点名 health compact `session_lock`。
 
 ## 2026-10-03：evolve8h wave 585 — docs/calendar.md names compact system_ui
 

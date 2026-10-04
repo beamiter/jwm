@@ -714,6 +714,8 @@ monorepo use independent Semantic Versions.
 
 - `docs/calendar.md` names compact `system_ui` beside health.
 
+- `docs/remote-control.md` names compact `session_lock` beside health.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
