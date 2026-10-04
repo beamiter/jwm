@@ -660,9 +660,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 344 | compatibility 唯一 pin wave 344 recording | ✓ |
 | 345 | compatibility 唯一 pin wave 345 capture | ✓ |
 | 346 | compatibility 唯一 pin wave 346 waterlily | ✓ |
+| 347 | compatibility 唯一 pin wave 347 audio | ✓ |
 | … | evolve9h 进行中 |
 
 ---
+
+## 2026-10-04：evolve9h wave 347 — compatibility pin wave 347 audio
+
+选题 = evolve9h wave 347。compatibility 唯一句子 wave 347 `audio`。
 
 ## 2026-10-04：evolve9h wave 346 — compatibility pin wave 346 waterlily
 
