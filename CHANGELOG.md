@@ -1808,6 +1808,8 @@ monorepo use independent Semantic Versions.
 
 - evolve9h wave 132: Nested smoke treats `bluetooth` as a read-only IPC probe.
 
+- evolve9h wave 133: Nested smoke treats `resources` as a read-only IPC probe.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
