@@ -1382,6 +1382,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 919: Upgrade notes keep health compact `selected` beside `get_sel`.
 
+- Wave 920: Upgrade notes keep health compact `struts` beside `get_strut`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

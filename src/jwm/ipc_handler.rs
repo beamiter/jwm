@@ -19280,4 +19280,10 @@ mod tests {
         assert!(DOCS.contains("Wave 919: Upgrade notes keep health compact `selected` beside `get_sel`."));
     }
 
+    #[test]
+    fn evolve8h_wave_920_monitor_lock_unique_pin_struts() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 920: Upgrade notes keep health compact `struts` beside `get_strut`."));
+    }
+
 }
