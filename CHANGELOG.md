@@ -1256,6 +1256,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 856: Nested smoke checks health compact `bluetooth` after `get_bt`.
 
+- Wave 857: Nested smoke checks health compact `resources` after `get_res`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
