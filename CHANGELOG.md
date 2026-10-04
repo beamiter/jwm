@@ -1392,6 +1392,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 924: Upgrade notes keep health compact `workspaces` beside `get_ws`.
 
+- Wave 925: Upgrade notes keep health compact `windows` beside `get_wins`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

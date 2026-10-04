@@ -1061,3 +1061,4 @@ Wave 921: Upgrade notes keep health compact `scratchpads` beside `get_pads`.
 Wave 922: Upgrade notes keep health compact `focused` beside `get_fw`.
 Wave 923: Upgrade notes keep health compact `monitors` beside `get_mons`.
 Wave 924: Upgrade notes keep health compact `workspaces` beside `get_ws`.
+Wave 925: Upgrade notes keep health compact `windows` beside `get_wins`.
