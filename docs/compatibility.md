@@ -333,3 +333,4 @@ evolve9h wave 109: Support bundles should include `dnd` when health is degraded.
 evolve9h wave 110: Support bundles should include `system_ui` when health is degraded.
 evolve9h wave 111: Nested smoke treats `version_info` as a read-only IPC probe.
 evolve9h wave 112: Nested smoke treats `metrics` as a read-only IPC probe.
+evolve9h wave 113: Nested smoke treats `ipc_caps` as a read-only IPC probe.

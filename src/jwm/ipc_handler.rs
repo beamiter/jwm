@@ -20509,4 +20509,10 @@ mod tests {
         assert!(COMPAT.contains("evolve9h wave 112: Nested smoke treats `metrics` as a read-only IPC probe."));
     }
 
+    #[test]
+    fn evolve9h_wave_113_compat_unique_pin_ipc_caps() {
+        const COMPAT: &str = include_str!("../../docs/compatibility.md");
+        assert!(COMPAT.contains("evolve9h wave 113: Nested smoke treats `ipc_caps` as a read-only IPC probe."));
+    }
+
 }
