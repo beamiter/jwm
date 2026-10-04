@@ -20779,4 +20779,10 @@ mod tests {
         assert!(COMPAT.contains("evolve9h wave 157: Upgrade notes keep `wayland` beside occupancy on the health page."));
     }
 
+    #[test]
+    fn evolve9h_wave_158_compat_unique_pin_recording() {
+        const COMPAT: &str = include_str!("../../docs/compatibility.md");
+        assert!(COMPAT.contains("evolve9h wave 158: Upgrade notes keep `recording` beside occupancy on the health page."));
+    }
+
 }
