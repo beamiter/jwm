@@ -323,3 +323,4 @@ evolve9h wave 99: Support bundles should include `audio` when health is degraded
 evolve9h wave 100: Support bundles should include `wallpaper` when health is degraded.
 evolve9h wave 101: Support bundles should include `bluetooth` when health is degraded.
 evolve9h wave 102: Support bundles should include `resources` when health is degraded.
+evolve9h wave 103: Support bundles should include `connectivity` when health is degraded.

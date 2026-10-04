@@ -1748,6 +1748,8 @@ monorepo use independent Semantic Versions.
 
 - evolve9h wave 102: Support bundles should include `resources` when health is degraded.
 
+- evolve9h wave 103: Support bundles should include `connectivity` when health is degraded.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
