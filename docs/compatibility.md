@@ -421,3 +421,4 @@ evolve9h wave 197: Health compact `power` is diagnosable through `jwm-tool healt
 evolve9h wave 198: Health compact `media` is diagnosable through `jwm-tool health`.
 evolve9h wave 199: Health compact `clipboard` is diagnosable through `jwm-tool health`.
 evolve9h wave 200: Health compact `idle` is diagnosable through `jwm-tool health`.
+evolve9h wave 201: Health compact `notifications` is diagnosable through `jwm-tool health`.
