@@ -18110,4 +18110,10 @@ mod tests {
         assert!(DOCS.contains("Wave 724: `get_status.minimized` and health compact `minimized` share one Status nest."));
     }
 
+    #[test]
+    fn evolve8h_wave_725_monitor_lock_unique_pin_sticky() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 725: `get_status.sticky` and health compact `sticky` share one Status nest."));
+    }
+
 }

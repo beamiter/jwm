@@ -992,6 +992,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 724: `get_status.minimized` and health compact `minimized` share one Status nest.
 
+- Wave 725: `get_status.sticky` and health compact `sticky` share one Status nest.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
