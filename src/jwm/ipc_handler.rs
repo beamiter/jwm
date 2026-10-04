@@ -19226,4 +19226,10 @@ mod tests {
         assert!(DOCS.contains("Wave 910: Upgrade notes keep health compact `resources` beside `get_res`."));
     }
 
+    #[test]
+    fn evolve8h_wave_911_monitor_lock_unique_pin_connectivity() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 911: Upgrade notes keep health compact `connectivity` beside `get_conn`."));
+    }
+
 }
