@@ -6333,6 +6333,7 @@ fn capabilities_output_lines(capabilities: &serde_json::Value) -> Vec<String> {
         "query aliases: get_network -> get_connectivity".to_string(),
         "query aliases: get_clip -> get_clipboard".to_string(),
         "query aliases: get_idl -> get_idle".to_string(),
+        "query aliases: get_notif -> get_notifications".to_string(),
     ]
 }
 

@@ -654,6 +654,8 @@ monorepo use independent Semantic Versions.
 
 - `jwm-tool capabilities` text lists `get_idl -> get_idle`.
 
+- `jwm-tool capabilities` text lists `get_notif -> get_notifications`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
