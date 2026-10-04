@@ -1552,6 +1552,8 @@ monorepo use independent Semantic Versions.
 
 - `jwm-tool capabilities` text lists `get_ver -> get_version`.
 
+- `jwm-tool health` prints compact `metrics` beside occupancy.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

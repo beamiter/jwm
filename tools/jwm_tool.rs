@@ -4349,6 +4349,24 @@ mod tests {
             line == "version_info: version=0.2.0 backend=wayland-udev"
         }));
 
+        assert!(!version_info_lines
+            .iter()
+            .any(|line| line.starts_with("metrics:")));
+
+        let with_compact_metrics = serde_json::json!({
+            "health": {"status": "healthy", "reasons": []},
+            "counts": {"windows": 0, "monitors": 1, "workspaces": 1},
+            "config": {"path": "/tmp/config.toml", "diagnostics": {"error_count": 0, "warning_count": 0}},
+            "features": {},
+            "metrics": {
+                "available": true
+            }
+        });
+        let metrics_lines = health_output_lines(&with_compact_metrics);
+        assert!(metrics_lines.iter().any(|line| {
+            line == "metrics: available=true"
+        }));
+
         let capabilities = serde_json::json!({
             "schema_version": 1,
             "commands": ["focusstack", "reload_config"],
@@ -6300,6 +6318,15 @@ fn health_output_lines(status: &serde_json::Value) -> Vec<String> {
             })
             .unwrap_or("-");
         lines.push(format!("version_info: version={version} backend={backend}"));
+    }
+
+    if let Some(metrics) = status.get("metrics").and_then(serde_json::Value::as_object) {
+        let available = metrics
+            .get("available")
+            .and_then(serde_json::Value::as_bool)
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".into());
+        lines.push(format!("metrics: available={available}"));
     }
 
     if let Some(reasons) = status["health"]["reasons"].as_array() {

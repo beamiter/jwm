@@ -19807,4 +19807,17 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn evolve9h_wave_5_health_prints_compact_metrics() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains(
+            "metrics: available={available}"
+        ));
+        assert!(TOOL.contains(
+            "\"metrics: available=true\""
+        ));
+        assert!(DOCS.contains("`jwm-tool health` prints compact `metrics` beside occupancy"));
+    }
+
 }
