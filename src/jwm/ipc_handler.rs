@@ -18830,4 +18830,10 @@ mod tests {
         assert!(DOCS.contains("Wave 844: Nested smoke checks health compact `color_management` after `get_cm`."));
     }
 
+    #[test]
+    fn evolve8h_wave_845_monitor_lock_unique_pin_night_light() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 845: Nested smoke checks health compact `night_light` after `get_nl`."));
+    }
+
 }
