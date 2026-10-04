@@ -966,3 +966,4 @@ Wave 826: Support triage reads health compact `gaps` before `get_gap` dumps.
 Wave 827: Support triage reads health compact `mfact` before `get_mf` dumps.
 Wave 828: Support triage reads health compact `nmaster` before `get_nm` dumps.
 Wave 829: Support triage reads health compact `floating` before `get_status.floating` dumps.
+Wave 830: Support triage reads health compact `minimized` before `get_status.minimized` dumps.

@@ -1202,6 +1202,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 829: Support triage reads health compact `floating` before `get_status.floating` dumps.
 
+- Wave 830: Support triage reads health compact `minimized` before `get_status.minimized` dumps.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
