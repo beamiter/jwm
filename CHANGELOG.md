@@ -946,6 +946,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 701: `get_idl` and health compact `idle` share one Status nest.
 
+- Wave 702: `get_notif` and health compact `notifications` share one Status nest.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
