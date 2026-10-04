@@ -772,6 +772,8 @@ monorepo use independent Semantic Versions.
 
 - README health text names `get_dnd` beside compact `dnd`.
 
+- README health text names `get_ui` beside compact `system_ui`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

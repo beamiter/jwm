@@ -751,3 +751,4 @@ README health text names `get_clip` beside compact `clipboard`.
 README health text names `get_idl` beside compact `idle`.
 README health text names `get_notif` beside compact `notifications`.
 README health text names `get_dnd` beside compact `dnd`.
+README health text names `get_ui` beside compact `system_ui`.

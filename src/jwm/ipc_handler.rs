@@ -17411,4 +17411,13 @@ mod tests {
         assert!(DOCS.contains("README health text names `get_dnd` beside compact `dnd`"));
     }
 
+    #[test]
+    fn evolve8h_wave_615_readme_health_names_get_ui_for_system_ui() {
+        const README: &str = include_str!("../../README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(README.contains("`get_ui`"));
+        assert!(README.contains("compact `system_ui` line"));
+        assert!(DOCS.contains("README health text names `get_ui` beside compact `system_ui`"));
+    }
+
 }
