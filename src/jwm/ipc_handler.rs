@@ -17624,4 +17624,10 @@ mod tests {
         assert!(DOCS.contains("Wave 643: Health compact `wallpaper` is the operator twin of `get_wall`."));
     }
 
+    #[test]
+    fn evolve8h_wave_644_monitor_lock_unique_pin_bluetooth() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 644: Health compact `bluetooth` is the operator twin of `get_bt`."));
+    }
+
 }

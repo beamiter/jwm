@@ -830,6 +830,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 643: Health compact `wallpaper` is the operator twin of `get_wall`.
 
+- Wave 644: Health compact `bluetooth` is the operator twin of `get_bt`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
