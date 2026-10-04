@@ -1047,9 +1047,15 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 609 | README health 点名 get_res beside compact resources | ✓ |
 | 610 | README health 点名 get_conn beside compact connectivity | ✓ |
 | 610 | README health 点名 get_conn beside compact connectivity | ✓ |
+| 611 | README health 点名 get_clip beside compact clipboard | ✓ |
+| 611 | README health 点名 get_clip beside compact clipboard | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 611 — README health names get_clip for clipboard
+
+选题 = evolve8h wave 611。README health 文本点名 `get_clip` beside compact `clipboard`。
 
 ## 2026-10-03：evolve8h wave 610 — README health names get_conn for connectivity
 

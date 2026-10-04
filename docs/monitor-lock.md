@@ -747,3 +747,4 @@ README health text names `get_wall` beside compact `wallpaper`.
 README health text names `get_bt` beside compact `bluetooth`.
 README health text names `get_res` beside compact `resources`.
 README health text names `get_conn` beside compact `connectivity`.
+README health text names `get_clip` beside compact `clipboard`.

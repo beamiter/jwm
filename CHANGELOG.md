@@ -764,6 +764,8 @@ monorepo use independent Semantic Versions.
 
 - README health text names `get_conn` beside compact `connectivity`.
 
+- README health text names `get_clip` beside compact `clipboard`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

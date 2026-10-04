@@ -17375,4 +17375,13 @@ mod tests {
         assert!(DOCS.contains("README health text names `get_conn` beside compact `connectivity`"));
     }
 
+    #[test]
+    fn evolve8h_wave_611_readme_health_names_get_clip_for_clipboard() {
+        const README: &str = include_str!("../../README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(README.contains("`get_clip`"));
+        assert!(README.contains("compact `clipboard` line"));
+        assert!(DOCS.contains("README health text names `get_clip` beside compact `clipboard`"));
+    }
+
 }
