@@ -15949,4 +15949,13 @@ mod tests {
         assert!(README.contains("get_status.idle"));
         assert!(DOCS.contains("README health text names compact `idle`"));
     }
+
+    #[test]
+    fn evolve8h_wave_464_tools_readme_health_names_compact_idle() {
+        const TOOLS: &str = include_str!("../../tools/README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOLS.contains("compact `idle` line"));
+        assert!(TOOLS.contains("get_status.idle"));
+        assert!(DOCS.contains("`tools/README.md` health text names compact `idle`"));
+    }
 }
