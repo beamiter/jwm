@@ -1372,6 +1372,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 914: Upgrade notes keep health compact `notifications` beside `get_notif`.
 
+- Wave 915: Upgrade notes keep health compact `dnd` beside `get_dnd`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
