@@ -20179,4 +20179,10 @@ mod tests {
         assert!(COMPAT.contains("evolve9h wave 57: `jwm-tool capabilities` remains the catalog for `tearing` query aliases."));
     }
 
+    #[test]
+    fn evolve9h_wave_58_compat_unique_pin_xwayland() {
+        const COMPAT: &str = include_str!("../../docs/compatibility.md");
+        assert!(COMPAT.contains("evolve9h wave 58: `jwm-tool capabilities` remains the catalog for `xwayland` query aliases."));
+    }
+
 }
