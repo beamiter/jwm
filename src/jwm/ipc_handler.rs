@@ -17942,4 +17942,10 @@ mod tests {
         assert!(DOCS.contains("Wave 696: `get_wall` and health compact `wallpaper` share one Status nest."));
     }
 
+    #[test]
+    fn evolve8h_wave_697_monitor_lock_unique_pin_bluetooth() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 697: `get_bt` and health compact `bluetooth` share one Status nest."));
+    }
+
 }

@@ -936,6 +936,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 696: `get_wall` and health compact `wallpaper` share one Status nest.
 
+- Wave 697: `get_bt` and health compact `bluetooth` share one Status nest.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
