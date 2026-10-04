@@ -812,6 +812,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 634: Health compact `magnifier` is the operator twin of `get_mag`.
 
+- Wave 635: Health compact `peek` is the operator twin of `get_pk`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

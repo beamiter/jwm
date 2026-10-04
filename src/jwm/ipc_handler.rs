@@ -17570,4 +17570,10 @@ mod tests {
         assert!(DOCS.contains("Wave 634: Health compact `magnifier` is the operator twin of `get_mag`."));
     }
 
+    #[test]
+    fn evolve8h_wave_635_monitor_lock_unique_pin_peek() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 635: Health compact `peek` is the operator twin of `get_pk`."));
+    }
+
 }

@@ -1095,9 +1095,15 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 633 | monitor-lock 唯一 pin wave 633 night_light | ✓ |
 | 634 | monitor-lock 唯一 pin wave 634 magnifier | ✓ |
 | 634 | monitor-lock 唯一 pin wave 634 magnifier | ✓ |
+| 635 | monitor-lock 唯一 pin wave 635 peek | ✓ |
+| 635 | monitor-lock 唯一 pin wave 635 peek | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 635 — monitor-lock pin wave 635 peek
+
+选题 = evolve8h wave 635。monitor-lock 唯一句子 wave 635 `peek`。
 
 ## 2026-10-03：evolve8h wave 634 — monitor-lock pin wave 634 magnifier
 
