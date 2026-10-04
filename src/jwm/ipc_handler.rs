@@ -15741,4 +15741,13 @@ mod tests {
         assert!(TOOLS.contains("get_status.fullscreen"));
         assert!(DOCS.contains("`tools/README.md` health text names compact `fullscreen`"));
     }
+
+    #[test]
+    fn evolve8h_wave_443_health_prints_compact_pip() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("pip: count={count} focused={focused_id}"));
+        assert!(TOOL.contains("\"pip: count=1 focused=66\""));
+        assert!(DOCS.contains("`jwm-tool health` prints compact `pip` beside occupancy"));
+    }
 }
