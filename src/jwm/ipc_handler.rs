@@ -20107,4 +20107,10 @@ mod tests {
         assert!(COMPAT.contains("evolve9h wave 45: Health compact `idle` is diagnosable through `jwm-tool health`."));
     }
 
+    #[test]
+    fn evolve9h_wave_46_compat_unique_pin_notifications() {
+        const COMPAT: &str = include_str!("../../docs/compatibility.md");
+        assert!(COMPAT.contains("evolve9h wave 46: Health compact `notifications` is diagnosable through `jwm-tool health`."));
+    }
+
 }

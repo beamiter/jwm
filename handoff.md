@@ -359,9 +359,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 43 | compatibility 唯一 pin wave 43 media | ✓ |
 | 44 | compatibility 唯一 pin wave 44 clipboard | ✓ |
 | 45 | compatibility 唯一 pin wave 45 idle | ✓ |
+| 46 | compatibility 唯一 pin wave 46 notifications | ✓ |
 | … | evolve9h 进行中 |
 
 ---
+
+## 2026-10-04：evolve9h wave 46 — compatibility pin wave 46 notifications
+
+选题 = evolve9h wave 46。compatibility 唯一句子 wave 46 `notifications`。
 
 ## 2026-10-04：evolve9h wave 45 — compatibility pin wave 45 idle
 
