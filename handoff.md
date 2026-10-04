@@ -616,9 +616,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 300 | compatibility 唯一 pin wave 300 config | ✓ |
 | 301 | compatibility 唯一 pin wave 301 status | ✓ |
 | 302 | compatibility 唯一 pin wave 302 tree | ✓ |
+| 303 | compatibility 唯一 pin wave 303 window | ✓ |
 | … | evolve9h 进行中 |
 
 ---
+
+## 2026-10-04：evolve9h wave 303 — compatibility pin wave 303 window
+
+选题 = evolve9h wave 303。compatibility 唯一句子 wave 303 `window`。
 
 ## 2026-10-04：evolve9h wave 302 — compatibility pin wave 302 tree
 
