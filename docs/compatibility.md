@@ -320,3 +320,4 @@ evolve9h wave 96: Support bundles should include `recording` when health is degr
 evolve9h wave 97: Support bundles should include `capture` when health is degraded.
 evolve9h wave 98: Support bundles should include `waterlily` when health is degraded.
 evolve9h wave 99: Support bundles should include `audio` when health is degraded.
+evolve9h wave 100: Support bundles should include `wallpaper` when health is degraded.
