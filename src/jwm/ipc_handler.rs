@@ -19724,4 +19724,10 @@ mod tests {
         assert!(DOCS.contains("Wave 993: Compatibility tables name `get_status.pip` with health compact `pip`."));
     }
 
+    #[test]
+    fn evolve8h_wave_994_monitor_lock_unique_pin_blur() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 994: Compatibility tables name `get_status.blur` with health compact `blur`."));
+    }
+
 }

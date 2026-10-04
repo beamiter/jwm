@@ -1530,6 +1530,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 993: Compatibility tables name `get_status.pip` with health compact `pip`.
 
+- Wave 994: Compatibility tables name `get_status.blur` with health compact `blur`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

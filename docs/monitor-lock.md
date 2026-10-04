@@ -1130,3 +1130,4 @@ Wave 990: Compatibility tables name `get_status.sticky` with health compact `sti
 Wave 991: Compatibility tables name `get_status.urgent` with health compact `urgent`.
 Wave 992: Compatibility tables name `get_status.fullscreen` with health compact `fullscreen`.
 Wave 993: Compatibility tables name `get_status.pip` with health compact `pip`.
+Wave 994: Compatibility tables name `get_status.blur` with health compact `blur`.
