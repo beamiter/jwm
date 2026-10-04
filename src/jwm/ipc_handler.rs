@@ -21559,4 +21559,10 @@ mod tests {
         assert!(COMPAT.contains("evolve9h wave 287: Nested smoke treats `bluetooth` as a read-only IPC probe."));
     }
 
+    #[test]
+    fn evolve9h_wave_288_compat_unique_pin_resources() {
+        const COMPAT: &str = include_str!("../../docs/compatibility.md");
+        assert!(COMPAT.contains("evolve9h wave 288: Nested smoke treats `resources` as a read-only IPC probe."));
+    }
+
 }
