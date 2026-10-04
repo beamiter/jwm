@@ -1826,6 +1826,8 @@ monorepo use independent Semantic Versions.
 
 - evolve9h wave 141: Nested smoke treats `system_ui` as a read-only IPC probe.
 
+- evolve9h wave 142: Upgrade notes keep `version_info` beside occupancy on the health page.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
