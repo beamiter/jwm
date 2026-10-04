@@ -566,3 +566,4 @@ README health text names compact `bench`.
 `jwm-tool health` prints compact `floating` beside occupancy.
 README health text names compact `floating`.
 `tools/README.md` health text names compact `floating`.
+`jwm-tool health` prints compact `minimized` beside occupancy.

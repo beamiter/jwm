@@ -15631,4 +15631,13 @@ mod tests {
         assert!(TOOLS.contains("get_status.floating"));
         assert!(DOCS.contains("`tools/README.md` health text names compact `floating`"));
     }
+
+    #[test]
+    fn evolve8h_wave_431_health_prints_compact_minimized() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("minimized: count={count} focused={focused_id}"));
+        assert!(TOOL.contains("\"minimized: count=2 focused=22\""));
+        assert!(DOCS.contains("`jwm-tool health` prints compact `minimized` beside occupancy"));
+    }
 }
