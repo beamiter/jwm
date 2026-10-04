@@ -1170,6 +1170,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 813: Support triage reads health compact `selected` before `get_sel` dumps.
 
+- Wave 814: Support triage reads health compact `struts` before `get_strut` dumps.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

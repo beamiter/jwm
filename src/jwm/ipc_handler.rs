@@ -18644,4 +18644,10 @@ mod tests {
         assert!(DOCS.contains("Wave 813: Support triage reads health compact `selected` before `get_sel` dumps."));
     }
 
+    #[test]
+    fn evolve8h_wave_814_monitor_lock_unique_pin_struts() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 814: Support triage reads health compact `struts` before `get_strut` dumps."));
+    }
+
 }
