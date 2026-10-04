@@ -584,6 +584,8 @@ monorepo use independent Semantic Versions.
 
 - `jwm-tool health` prints compact `capture` beside occupancy.
 
+- README health text names compact `capture`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
