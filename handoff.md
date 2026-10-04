@@ -562,9 +562,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 246 | compatibility 唯一 pin wave 246 night_light | ✓ |
 | 247 | compatibility 唯一 pin wave 247 magnifier | ✓ |
 | 248 | compatibility 唯一 pin wave 248 peek | ✓ |
+| 249 | compatibility 唯一 pin wave 249 gesture | ✓ |
 | … | evolve9h 进行中 |
 
 ---
+
+## 2026-10-04：evolve9h wave 249 — compatibility pin wave 249 gesture
+
+选题 = evolve9h wave 249。compatibility 唯一句子 wave 249 `gesture`。
 
 ## 2026-10-04：evolve9h wave 248 — compatibility pin wave 248 peek
 
