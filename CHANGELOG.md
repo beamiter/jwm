@@ -974,6 +974,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 715: `get_mute` and health compact `mic` share one Status nest.
 
+- Wave 716: `get_bm` and health compact `bench` share one Status nest.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

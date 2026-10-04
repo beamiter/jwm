@@ -18056,4 +18056,10 @@ mod tests {
         assert!(DOCS.contains("Wave 715: `get_mute` and health compact `mic` share one Status nest."));
     }
 
+    #[test]
+    fn evolve8h_wave_716_monitor_lock_unique_pin_bench() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 716: `get_bm` and health compact `bench` share one Status nest."));
+    }
+
 }
