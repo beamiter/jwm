@@ -1478,6 +1478,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 967: Compatibility tables name `get_notif` with health compact `notifications`.
 
+- Wave 968: Compatibility tables name `get_dnd` with health compact `dnd`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

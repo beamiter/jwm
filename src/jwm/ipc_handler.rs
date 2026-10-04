@@ -19568,4 +19568,10 @@ mod tests {
         assert!(DOCS.contains("Wave 967: Compatibility tables name `get_notif` with health compact `notifications`."));
     }
 
+    #[test]
+    fn evolve8h_wave_968_monitor_lock_unique_pin_dnd() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 968: Compatibility tables name `get_dnd` with health compact `dnd`."));
+    }
+
 }
