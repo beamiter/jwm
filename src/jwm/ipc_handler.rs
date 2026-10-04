@@ -18296,4 +18296,10 @@ mod tests {
         assert!(DOCS.contains("Wave 755: Doctor bundles include health compact `notifications` from `get_notif`."));
     }
 
+    #[test]
+    fn evolve8h_wave_756_monitor_lock_unique_pin_dnd() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 756: Doctor bundles include health compact `dnd` from `get_dnd`."));
+    }
+
 }

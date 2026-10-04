@@ -1054,6 +1054,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 755: Doctor bundles include health compact `notifications` from `get_notif`.
 
+- Wave 756: Doctor bundles include health compact `dnd` from `get_dnd`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
