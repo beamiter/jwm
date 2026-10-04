@@ -810,3 +810,4 @@ Wave 670: Health compact `floating` is the operator twin of `get_status.floating
 Wave 671: Health compact `minimized` is the operator twin of `get_status.minimized`.
 Wave 672: Health compact `sticky` is the operator twin of `get_status.sticky`.
 Wave 673: Health compact `urgent` is the operator twin of `get_status.urgent`.
+Wave 674: Health compact `fullscreen` is the operator twin of `get_status.fullscreen`.

@@ -890,6 +890,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 673: Health compact `urgent` is the operator twin of `get_status.urgent`.
 
+- Wave 674: Health compact `fullscreen` is the operator twin of `get_status.fullscreen`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

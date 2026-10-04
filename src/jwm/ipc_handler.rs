@@ -17804,4 +17804,10 @@ mod tests {
         assert!(DOCS.contains("Wave 673: Health compact `urgent` is the operator twin of `get_status.urgent`."));
     }
 
+    #[test]
+    fn evolve8h_wave_674_monitor_lock_unique_pin_fullscreen() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 674: Health compact `fullscreen` is the operator twin of `get_status.fullscreen`."));
+    }
+
 }
