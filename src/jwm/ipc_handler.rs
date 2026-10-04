@@ -17840,4 +17840,10 @@ mod tests {
         assert!(DOCS.contains("Wave 679: Health compact `media` is the operator twin of `get_media`."));
     }
 
+    #[test]
+    fn evolve8h_wave_680_monitor_lock_unique_pin_power() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 680: Health compact `power` is the operator twin of `get_power`."));
+    }
+
 }

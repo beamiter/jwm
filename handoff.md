@@ -1185,9 +1185,15 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 678 | monitor-lock 唯一 pin wave 678 expose | ✓ |
 | 679 | monitor-lock 唯一 pin wave 679 media | ✓ |
 | 679 | monitor-lock 唯一 pin wave 679 media | ✓ |
+| 680 | monitor-lock 唯一 pin wave 680 power | ✓ |
+| 680 | monitor-lock 唯一 pin wave 680 power | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 680 — monitor-lock pin wave 680 power
+
+选题 = evolve8h wave 680。monitor-lock 唯一句子 wave 680 `power`。
 
 ## 2026-10-03：evolve8h wave 679 — monitor-lock pin wave 679 media
 

@@ -902,6 +902,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 679: Health compact `media` is the operator twin of `get_media`.
 
+- Wave 680: Health compact `power` is the operator twin of `get_power`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
