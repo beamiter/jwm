@@ -20803,4 +20803,10 @@ mod tests {
         assert!(COMPAT.contains("evolve9h wave 161: Upgrade notes keep `audio` beside occupancy on the health page."));
     }
 
+    #[test]
+    fn evolve9h_wave_162_compat_unique_pin_wallpaper() {
+        const COMPAT: &str = include_str!("../../docs/compatibility.md");
+        assert!(COMPAT.contains("evolve9h wave 162: Upgrade notes keep `wallpaper` beside occupancy on the health page."));
+    }
+
 }

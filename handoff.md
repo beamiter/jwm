@@ -475,9 +475,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 159 | compatibility 唯一 pin wave 159 capture | ✓ |
 | 160 | compatibility 唯一 pin wave 160 waterlily | ✓ |
 | 161 | compatibility 唯一 pin wave 161 audio | ✓ |
+| 162 | compatibility 唯一 pin wave 162 wallpaper | ✓ |
 | … | evolve9h 进行中 |
 
 ---
+
+## 2026-10-04：evolve9h wave 162 — compatibility pin wave 162 wallpaper
+
+选题 = evolve9h wave 162。compatibility 唯一句子 wave 162 `wallpaper`。
 
 ## 2026-10-04：evolve9h wave 161 — compatibility pin wave 161 audio
 
