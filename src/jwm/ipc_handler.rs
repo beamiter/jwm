@@ -15613,4 +15613,13 @@ mod tests {
         assert!(TOOL.contains("\"floating: count=3 focused=11\""));
         assert!(DOCS.contains("`jwm-tool health` prints compact `floating` beside occupancy"));
     }
+
+    #[test]
+    fn evolve8h_wave_429_readme_health_names_compact_floating() {
+        const README: &str = include_str!("../../README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(README.contains("compact `floating` line"));
+        assert!(README.contains("get_status.floating"));
+        assert!(DOCS.contains("README health text names compact `floating`"));
+    }
 }
