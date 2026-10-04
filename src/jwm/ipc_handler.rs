@@ -17870,4 +17870,10 @@ mod tests {
         assert!(DOCS.contains("Wave 684: `get_scroll` and health compact `scrolling` share one Status nest."));
     }
 
+    #[test]
+    fn evolve8h_wave_685_monitor_lock_unique_pin_color_management() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 685: `get_cm` and health compact `color_management` share one Status nest."));
+    }
+
 }
