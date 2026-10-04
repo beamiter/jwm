@@ -909,3 +909,4 @@ Wave 769: Doctor bundles include health compact `bench` from `get_bm`.
 Wave 770: Doctor bundles include health compact `closed_placement` from `get_cp`.
 Wave 771: Doctor bundles include health compact `prev_layout` from `get_pl`.
 Wave 772: Doctor bundles include health compact `cfact` from `get_cf`.
+Wave 773: Doctor bundles include health compact `gaps` from `get_gap`.

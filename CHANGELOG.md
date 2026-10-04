@@ -1088,6 +1088,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 772: Doctor bundles include health compact `cfact` from `get_cf`.
 
+- Wave 773: Doctor bundles include health compact `gaps` from `get_gap`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
