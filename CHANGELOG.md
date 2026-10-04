@@ -1972,6 +1972,8 @@ monorepo use independent Semantic Versions.
 
 - evolve9h wave 214: `jwm-tool capabilities` remains the catalog for `scrolling` query aliases.
 
+- evolve9h wave 215: `jwm-tool capabilities` remains the catalog for `night_light` query aliases.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
