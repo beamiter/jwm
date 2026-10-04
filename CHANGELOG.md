@@ -746,6 +746,8 @@ monorepo use independent Semantic Versions.
 
 - README health text names `get_wl` beside compact `wayland`.
 
+- README health text names `get_rec` beside compact `recording`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
