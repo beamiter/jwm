@@ -20233,4 +20233,10 @@ mod tests {
         assert!(COMPAT.contains("evolve9h wave 66: `jwm-tool capabilities` remains the catalog for `capture` query aliases."));
     }
 
+    #[test]
+    fn evolve9h_wave_67_compat_unique_pin_waterlily() {
+        const COMPAT: &str = include_str!("../../docs/compatibility.md");
+        assert!(COMPAT.contains("evolve9h wave 67: `jwm-tool capabilities` remains the catalog for `waterlily` query aliases."));
+    }
+
 }
