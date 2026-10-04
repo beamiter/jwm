@@ -18818,4 +18818,10 @@ mod tests {
         assert!(DOCS.contains("Wave 842: Nested smoke checks health compact `xwayland` after `get_xw`."));
     }
 
+    #[test]
+    fn evolve8h_wave_843_monitor_lock_unique_pin_scrolling() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 843: Nested smoke checks health compact `scrolling` after `get_scroll`."));
+    }
+
 }

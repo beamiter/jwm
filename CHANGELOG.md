@@ -1228,6 +1228,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 842: Nested smoke checks health compact `xwayland` after `get_xw`.
 
+- Wave 843: Nested smoke checks health compact `scrolling` after `get_scroll`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
