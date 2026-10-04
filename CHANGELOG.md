@@ -1430,6 +1430,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 943: Upgrade notes keep health compact `expose` beside `get_status.expose`.
 
+- Wave 944: Upgrade notes keep health compact `media` beside `get_media`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
