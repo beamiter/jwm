@@ -1158,6 +1158,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 807: Support triage reads health compact `idle` before `get_idl` dumps.
 
+- Wave 808: Support triage reads health compact `notifications` before `get_notif` dumps.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

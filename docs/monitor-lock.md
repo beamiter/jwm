@@ -944,3 +944,4 @@ Wave 804: Support triage reads health compact `resources` before `get_res` dumps
 Wave 805: Support triage reads health compact `connectivity` before `get_conn` dumps.
 Wave 806: Support triage reads health compact `clipboard` before `get_clip` dumps.
 Wave 807: Support triage reads health compact `idle` before `get_idl` dumps.
+Wave 808: Support triage reads health compact `notifications` before `get_notif` dumps.
