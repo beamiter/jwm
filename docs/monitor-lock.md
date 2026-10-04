@@ -736,3 +736,4 @@ README health text names `get_cm` beside compact `color_management`.
 README health text names `get_nl` beside compact `night_light`.
 README health text names `get_mag` beside compact `magnifier`.
 README health text names `get_pk` beside compact `peek`.
+README health text names `get_gest` beside compact `gesture`.

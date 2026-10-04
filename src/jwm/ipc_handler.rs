@@ -17276,4 +17276,13 @@ mod tests {
         assert!(DOCS.contains("README health text names `get_pk` beside compact `peek`"));
     }
 
+    #[test]
+    fn evolve8h_wave_600_readme_health_names_get_gest_for_gesture() {
+        const README: &str = include_str!("../../README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(README.contains("`get_gest`"));
+        assert!(README.contains("compact `gesture` line"));
+        assert!(DOCS.contains("README health text names `get_gest` beside compact `gesture`"));
+    }
+
 }

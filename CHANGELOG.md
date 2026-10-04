@@ -742,6 +742,8 @@ monorepo use independent Semantic Versions.
 
 - README health text names `get_pk` beside compact `peek`.
 
+- README health text names `get_gest` beside compact `gesture`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
