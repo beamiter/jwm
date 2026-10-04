@@ -3839,6 +3839,19 @@ mod tests {
         assert!(hdr_lines.iter().any(|line| {
             line == "hdr: enabled=true peak_nits=1000 outputs=2 capable=1"
         }));
+        assert!(!hdr_lines.iter().any(|line| line.starts_with("dnd:")));
+
+        let with_compact_dnd = serde_json::json!({
+            "health": {"status": "healthy", "reasons": []},
+            "counts": {"windows": 0, "monitors": 1, "workspaces": 1},
+            "config": {"path": "/tmp/config.toml", "diagnostics": {"error_count": 0, "warning_count": 0}},
+            "features": {},
+            "dnd": {
+                "enabled": true
+            }
+        });
+        let dnd_lines = health_output_lines(&with_compact_dnd);
+        assert!(dnd_lines.iter().any(|line| line == "dnd: enabled=true"));
 
         let capabilities = serde_json::json!({
             "schema_version": 1,
@@ -5293,6 +5306,15 @@ fn health_output_lines(status: &serde_json::Value) -> Vec<String> {
         lines.push(format!(
             "hdr: enabled={config_enabled} peak_nits={config_peak_nits} outputs={outputs_total} capable={outputs_capable}"
         ));
+    }
+
+    if let Some(dnd) = status.get("dnd").and_then(serde_json::Value::as_object) {
+        let enabled = dnd
+            .get("enabled")
+            .and_then(serde_json::Value::as_bool)
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".into());
+        lines.push(format!("dnd: enabled={enabled}"));
     }
 
     if let Some(reasons) = status["health"]["reasons"].as_array() {

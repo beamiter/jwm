@@ -15863,4 +15863,13 @@ mod tests {
         assert!(TOOLS.contains("get_status.hdr"));
         assert!(DOCS.contains("`tools/README.md` health text names compact `hdr`"));
     }
+
+    #[test]
+    fn evolve8h_wave_455_health_prints_compact_dnd() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("dnd: enabled={enabled}"));
+        assert!(TOOL.contains("\"dnd: enabled=true\""));
+        assert!(DOCS.contains("`jwm-tool health` prints compact `dnd` beside occupancy"));
+    }
 }
