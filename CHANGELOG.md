@@ -1258,6 +1258,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 857: Nested smoke checks health compact `resources` after `get_res`.
 
+- Wave 858: Nested smoke checks health compact `connectivity` after `get_conn`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

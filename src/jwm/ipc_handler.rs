@@ -18908,4 +18908,10 @@ mod tests {
         assert!(DOCS.contains("Wave 857: Nested smoke checks health compact `resources` after `get_res`."));
     }
 
+    #[test]
+    fn evolve8h_wave_858_monitor_lock_unique_pin_connectivity() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 858: Nested smoke checks health compact `connectivity` after `get_conn`."));
+    }
+
 }
