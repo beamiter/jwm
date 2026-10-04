@@ -18392,4 +18392,10 @@ mod tests {
         assert!(DOCS.contains("Wave 771: Doctor bundles include health compact `prev_layout` from `get_pl`."));
     }
 
+    #[test]
+    fn evolve8h_wave_772_monitor_lock_unique_pin_cfact() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 772: Doctor bundles include health compact `cfact` from `get_cf`."));
+    }
+
 }
