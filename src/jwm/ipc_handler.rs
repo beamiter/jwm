@@ -16964,4 +16964,12 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn evolve8h_wave_562_doc_expose_names_compact_expose() {
+        const FEATURE: &str = include_str!("../../docs/expose.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(FEATURE.contains("compact `expose`"));
+        assert!(DOCS.contains("`docs/expose.md` names compact `expose` beside health"));
+    }
+
 }

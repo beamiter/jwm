@@ -108,3 +108,5 @@ subscribers see the new `selected_id` without polling.
 - `src/backend/compositor_common/expose.rs` — the grid layout and the
   highlight movement (edge clamping included), shared by both compositors,
   so a cell is exactly where the click test thinks it is.
+
+`jwm-tool health` prints compact `expose` for expose operators.

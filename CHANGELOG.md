@@ -666,6 +666,8 @@ monorepo use independent Semantic Versions.
 
 - `jwm-tool capabilities` text lists `get_media -> get_media_status`.
 
+- `docs/expose.md` names compact `expose` beside health.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
