@@ -898,3 +898,4 @@ Wave 758: Doctor bundles include health compact `layout` from `get_lt`.
 Wave 759: Doctor bundles include health compact `tabs` from `get_tab`.
 Wave 760: Doctor bundles include health compact `selected` from `get_sel`.
 Wave 761: Doctor bundles include health compact `struts` from `get_strut`.
+Wave 762: Doctor bundles include health compact `scratchpads` from `get_pads`.
