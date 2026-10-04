@@ -19502,4 +19502,10 @@ mod tests {
         assert!(DOCS.contains("Wave 956: Compatibility tables name `get_rec` with health compact `recording`."));
     }
 
+    #[test]
+    fn evolve8h_wave_957_monitor_lock_unique_pin_audio_recording() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 957: Compatibility tables name `get_arec` with health compact `audio_recording`."));
+    }
+
 }
