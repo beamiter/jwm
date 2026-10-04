@@ -625,9 +625,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 309 | compatibility 唯一 pin wave 309 magnifier | ✓ |
 | 310 | compatibility 唯一 pin wave 310 peek | ✓ |
 | 311 | compatibility 唯一 pin wave 311 gesture | ✓ |
+| 312 | compatibility 唯一 pin wave 312 wayland | ✓ |
 | … | evolve9h 进行中 |
 
 ---
+
+## 2026-10-04：evolve9h wave 312 — compatibility pin wave 312 wayland
+
+选题 = evolve9h wave 312。compatibility 唯一句子 wave 312 `wayland`。
 
 ## 2026-10-04：evolve9h wave 311 — compatibility pin wave 311 gesture
 

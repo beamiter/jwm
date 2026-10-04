@@ -21703,4 +21703,10 @@ mod tests {
         assert!(COMPAT.contains("evolve9h wave 311: Upgrade notes keep `gesture` beside occupancy on the health page."));
     }
 
+    #[test]
+    fn evolve9h_wave_312_compat_unique_pin_wayland() {
+        const COMPAT: &str = include_str!("../../docs/compatibility.md");
+        assert!(COMPAT.contains("evolve9h wave 312: Upgrade notes keep `wayland` beside occupancy on the health page."));
+    }
+
 }
