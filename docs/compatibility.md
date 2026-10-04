@@ -288,3 +288,4 @@ evolve9h wave 64: `jwm-tool capabilities` remains the catalog for `wayland` quer
 evolve9h wave 65: `jwm-tool capabilities` remains the catalog for `recording` query aliases.
 evolve9h wave 66: `jwm-tool capabilities` remains the catalog for `capture` query aliases.
 evolve9h wave 67: `jwm-tool capabilities` remains the catalog for `waterlily` query aliases.
+evolve9h wave 68: `jwm-tool capabilities` remains the catalog for `audio` query aliases.
