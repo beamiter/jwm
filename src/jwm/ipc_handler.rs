@@ -16217,4 +16217,17 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn evolve8h_wave_489_health_prints_compact_night_light() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains(
+            "night_light: active={active} override={override_v} temp={temp}"
+        ));
+        assert!(TOOL.contains(
+            "\"night_light: active=true override=on temp=4500\""
+        ));
+        assert!(DOCS.contains("`jwm-tool health` prints compact `night_light` beside occupancy"));
+    }
+
 }

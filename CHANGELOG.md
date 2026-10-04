@@ -520,6 +520,8 @@ monorepo use independent Semantic Versions.
 
 - `jwm-tool capabilities` text lists `get_cm -> get_color_management_status`.
 
+- `jwm-tool health` prints compact `night_light` beside occupancy.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

@@ -4004,6 +4004,26 @@ mod tests {
             line == "color_management: surfaces=4 hdr_surfaces=1"
         }));
 
+        assert!(!color_management_lines
+            .iter()
+            .any(|line| line.starts_with("night_light:")));
+
+        let with_compact_night_light = serde_json::json!({
+            "health": {"status": "healthy", "reasons": []},
+            "counts": {"windows": 0, "monitors": 1, "workspaces": 1},
+            "config": {"path": "/tmp/config.toml", "diagnostics": {"error_count": 0, "warning_count": 0}},
+            "features": {},
+            "night_light": {
+                "active": true,
+                "override": "on",
+                "temp": 4500
+            }
+        });
+        let night_light_lines = health_output_lines(&with_compact_night_light);
+        assert!(night_light_lines.iter().any(|line| {
+            line == "night_light: active=true override=on temp=4500"
+        }));
+
         let capabilities = serde_json::json!({
             "schema_version": 1,
             "commands": ["focusstack", "reload_config"],
@@ -5638,6 +5658,32 @@ fn health_output_lines(status: &serde_json::Value) -> Vec<String> {
             .unwrap_or_else(|| "-".into());
         lines.push(format!(
             "color_management: surfaces={surfaces} hdr_surfaces={hdr_surfaces}"
+        ));
+    }
+
+    if let Some(night_light) = status.get("night_light").and_then(serde_json::Value::as_object) {
+        let active = night_light
+            .get("active")
+            .and_then(serde_json::Value::as_bool)
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".into());
+        let override_v = night_light
+            .get("override")
+            .and_then(|v| {
+                if v.is_null() {
+                    None
+                } else {
+                    v.as_str()
+                }
+            })
+            .unwrap_or("-");
+        let temp = night_light
+            .get("temp")
+            .and_then(|v| v.as_u64().or_else(|| v.as_i64().map(|n| n as u64)))
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".into());
+        lines.push(format!(
+            "night_light: active={active} override={override_v} temp={temp}"
         ));
     }
 

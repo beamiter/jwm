@@ -803,9 +803,15 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 487 | tools/README health 点名 compact color_management | ✓ |
 | 488 | capabilities 文本列出 get_cm -> get_color_management_status | ✓ |
 | 488 | capabilities 文本列出 get_cm -> get_color_management_status | ✓ |
+| 489 | health 打印 compact night_light | ✓ |
+| 489 | health 打印 compact night_light | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 489 — health prints compact night_light
+
+选题 = evolve8h wave 489。`jwm-tool health` 打印 compact `night_light` 行。
 
 ## 2026-10-03：evolve8h wave 488 — capabilities text lists color_management alias
 
