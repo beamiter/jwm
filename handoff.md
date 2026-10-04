@@ -1533,9 +1533,15 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 852 | monitor-lock 唯一 pin wave 852 capture | ✓ |
 | 853 | monitor-lock 唯一 pin wave 853 waterlily | ✓ |
 | 853 | monitor-lock 唯一 pin wave 853 waterlily | ✓ |
+| 854 | monitor-lock 唯一 pin wave 854 audio | ✓ |
+| 854 | monitor-lock 唯一 pin wave 854 audio | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 854 — monitor-lock pin wave 854 audio
+
+选题 = evolve8h wave 854。monitor-lock 唯一句子 wave 854 `audio`。
 
 ## 2026-10-03：evolve8h wave 853 — monitor-lock pin wave 853 waterlily
 
