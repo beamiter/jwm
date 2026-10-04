@@ -918,6 +918,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 687: `get_mag` and health compact `magnifier` share one Status nest.
 
+- Wave 688: `get_pk` and health compact `peek` share one Status nest.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

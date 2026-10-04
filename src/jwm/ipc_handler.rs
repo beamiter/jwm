@@ -17888,4 +17888,10 @@ mod tests {
         assert!(DOCS.contains("Wave 687: `get_mag` and health compact `magnifier` share one Status nest."));
     }
 
+    #[test]
+    fn evolve8h_wave_688_monitor_lock_unique_pin_peek() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 688: `get_pk` and health compact `peek` share one Status nest."));
+    }
+
 }

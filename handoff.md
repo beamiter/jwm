@@ -1201,9 +1201,15 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 686 | monitor-lock 唯一 pin wave 686 night_light | ✓ |
 | 687 | monitor-lock 唯一 pin wave 687 magnifier | ✓ |
 | 687 | monitor-lock 唯一 pin wave 687 magnifier | ✓ |
+| 688 | monitor-lock 唯一 pin wave 688 peek | ✓ |
+| 688 | monitor-lock 唯一 pin wave 688 peek | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 688 — monitor-lock pin wave 688 peek
+
+选题 = evolve8h wave 688。monitor-lock 唯一句子 wave 688 `peek`。
 
 ## 2026-10-03：evolve8h wave 687 — monitor-lock pin wave 687 magnifier
 
