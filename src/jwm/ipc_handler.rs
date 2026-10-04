@@ -20479,4 +20479,10 @@ mod tests {
         assert!(COMPAT.contains("evolve9h wave 107: Support bundles should include `idle` when health is degraded."));
     }
 
+    #[test]
+    fn evolve9h_wave_108_compat_unique_pin_notifications() {
+        const COMPAT: &str = include_str!("../../docs/compatibility.md");
+        assert!(COMPAT.contains("evolve9h wave 108: Support bundles should include `notifications` when health is degraded."));
+    }
+
 }
