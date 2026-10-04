@@ -5925,6 +5925,7 @@ fn capabilities_output_lines(capabilities: &serde_json::Value) -> Vec<String> {
         "query aliases: get_mag -> get_magnifier".to_string(),
         "query aliases: get_pk -> get_peek".to_string(),
         "query aliases: get_gest -> get_gesture".to_string(),
+        "query aliases: get_wl -> get_wayland".to_string(),
     ]
 }
 

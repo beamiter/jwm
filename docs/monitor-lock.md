@@ -647,3 +647,4 @@ README health text names compact `gesture`.
 `jwm-tool health` prints compact `wayland` beside occupancy.
 README health text names compact `wayland`.
 `tools/README.md` health text names compact `wayland`.
+`jwm-tool capabilities` text lists `get_wl -> get_wayland`.
