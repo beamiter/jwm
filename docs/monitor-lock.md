@@ -891,3 +891,4 @@ Wave 751: Doctor bundles include health compact `resources` from `get_res`.
 Wave 752: Doctor bundles include health compact `connectivity` from `get_conn`.
 Wave 753: Doctor bundles include health compact `clipboard` from `get_clip`.
 Wave 754: Doctor bundles include health compact `idle` from `get_idl`.
+Wave 755: Doctor bundles include health compact `notifications` from `get_notif`.

@@ -1052,6 +1052,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 754: Doctor bundles include health compact `idle` from `get_idl`.
 
+- Wave 755: Doctor bundles include health compact `notifications` from `get_notif`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
