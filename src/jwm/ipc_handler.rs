@@ -20965,4 +20965,10 @@ mod tests {
         assert!(COMPAT.contains("evolve9h wave 188: Health compact `wayland` is diagnosable through `jwm-tool health`."));
     }
 
+    #[test]
+    fn evolve9h_wave_189_compat_unique_pin_recording() {
+        const COMPAT: &str = include_str!("../../docs/compatibility.md");
+        assert!(COMPAT.contains("evolve9h wave 189: Health compact `recording` is diagnosable through `jwm-tool health`."));
+    }
+
 }

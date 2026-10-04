@@ -502,9 +502,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 186 | compatibility 唯一 pin wave 186 peek | ✓ |
 | 187 | compatibility 唯一 pin wave 187 gesture | ✓ |
 | 188 | compatibility 唯一 pin wave 188 wayland | ✓ |
+| 189 | compatibility 唯一 pin wave 189 recording | ✓ |
 | … | evolve9h 进行中 |
 
 ---
+
+## 2026-10-04：evolve9h wave 189 — compatibility pin wave 189 recording
+
+选题 = evolve9h wave 189。compatibility 唯一句子 wave 189 `recording`。
 
 ## 2026-10-04：evolve9h wave 188 — compatibility pin wave 188 wayland
 

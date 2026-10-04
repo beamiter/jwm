@@ -409,3 +409,4 @@ evolve9h wave 185: Health compact `magnifier` is diagnosable through `jwm-tool h
 evolve9h wave 186: Health compact `peek` is diagnosable through `jwm-tool health`.
 evolve9h wave 187: Health compact `gesture` is diagnosable through `jwm-tool health`.
 evolve9h wave 188: Health compact `wayland` is diagnosable through `jwm-tool health`.
+evolve9h wave 189: Health compact `recording` is diagnosable through `jwm-tool health`.
