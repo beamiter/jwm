@@ -16589,4 +16589,13 @@ mod tests {
         assert!(DOCS.contains("`jwm-tool health` prints compact `waterlily` beside occupancy"));
     }
 
+    #[test]
+    fn evolve8h_wave_525_readme_health_names_compact_waterlily() {
+        const README: &str = include_str!("../../README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(README.contains("compact `waterlily` line"));
+        assert!(README.contains("get_status.waterlily"));
+        assert!(DOCS.contains("README health text names compact `waterlily`"));
+    }
+
 }
