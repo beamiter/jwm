@@ -15446,4 +15446,16 @@ mod tests {
         assert!(TOOLS.contains("get_status.windows"));
         assert!(DOCS.contains("`tools/README.md` health text names compact `windows`"));
     }
+
+    #[test]
+    fn evolve8h_wave_412_capabilities_text_lists_window_aliases() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains(
+            "query aliases: get_wins,get_clients,get_cli -> get_windows"
+        ));
+        assert!(DOCS.contains(
+            "`jwm-tool capabilities` text lists `get_wins,get_clients,get_cli -> get_windows`"
+        ));
+    }
 }

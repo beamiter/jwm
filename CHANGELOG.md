@@ -441,6 +441,7 @@ monorepo use independent Semantic Versions.
 - `jwm-tool health` prints compact `windows` beside occupancy.
 - README health text names compact `windows`.
 - `tools/README.md` health text names compact `windows`.
+- `jwm-tool capabilities` text lists `get_wins,get_clients,get_cli -> get_windows`.
 
 ### Changed
 

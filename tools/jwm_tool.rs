@@ -4861,6 +4861,7 @@ fn capabilities_output_lines(capabilities: &serde_json::Value) -> Vec<String> {
         "query aliases: get_fw -> get_focused_window".to_string(),
         "query aliases: get_mons,get_outputs -> get_monitors".to_string(),
         "query aliases: get_ws,get_tags,get_desktops -> get_workspaces".to_string(),
+        "query aliases: get_wins,get_clients,get_cli -> get_windows".to_string(),
     ]
 }
 
