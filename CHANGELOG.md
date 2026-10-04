@@ -1498,6 +1498,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 977: Compatibility tables name `get_ws` with health compact `workspaces`.
 
+- Wave 978: Compatibility tables name `get_wins` with health compact `windows`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

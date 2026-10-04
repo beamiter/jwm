@@ -1114,3 +1114,4 @@ Wave 974: Compatibility tables name `get_pads` with health compact `scratchpads`
 Wave 975: Compatibility tables name `get_fw` with health compact `focused`.
 Wave 976: Compatibility tables name `get_mons` with health compact `monitors`.
 Wave 977: Compatibility tables name `get_ws` with health compact `workspaces`.
+Wave 978: Compatibility tables name `get_wins` with health compact `windows`.
