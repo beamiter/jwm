@@ -1290,6 +1290,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 873: Nested smoke checks health compact `effects` after `get_fx`.
 
+- Wave 874: Nested smoke checks health compact `mic` after `get_mute`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

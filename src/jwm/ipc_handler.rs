@@ -19004,4 +19004,10 @@ mod tests {
         assert!(DOCS.contains("Wave 873: Nested smoke checks health compact `effects` after `get_fx`."));
     }
 
+    #[test]
+    fn evolve8h_wave_874_monitor_lock_unique_pin_mic() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 874: Nested smoke checks health compact `mic` after `get_mute`."));
+    }
+
 }
