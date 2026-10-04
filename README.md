@@ -91,6 +91,9 @@ session as production-ready. See [hardware validation](docs/hardware-validation.
 
 ## Configure and run
 
+To update a directory of projects from GitHub or an SSH host, see
+[the repository updater](docs/git-update-all.md).
+
 X11 and Wayland use separate files under `~/.config/jwm`. Prefer a Wayland
 session for day-to-day use:
 

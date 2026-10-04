@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 一键更新目录下所有 git 仓库，并按各自的方式重新编译已知项目。
-# 默认行为：fetch --prune 后把当前分支 rebase 到 upstream；本地领先时自动 push；
+# 默认只 fetch GitHub origin，再把当前分支 rebase 到该源；本地领先时自动 push；
 # 更新完成后，对本次真的有新提交（或产物缺失）的已知项目跑一次 release 构建。
 set -uo pipefail
 
@@ -16,6 +16,11 @@ BUILD=1          # 更新后是否编译
 BUILD_ALL=0      # 1 = 已知项目全部编译，不管有没有更新
 BUILD_JOBS=1     # 同时编译几个项目；cargo 内部已经并行，默认串行
 ONLY=""          # 逗号分隔的项目名白名单
+SOURCE_MODE="github"
+SOURCE_HOST=""
+HOST_ROOT="projects"
+SOURCE_REMOTE=""
+PUSH_EXPLICIT=0
 MAX_PARALLEL_JOBS=64
 
 # 名字必须与扫描到的仓库 basename 一致。LifeAI 是给命令行使用的便捷别名，
@@ -133,13 +138,20 @@ usage() {
 
 更新选项:
   -j N          并发数 (默认 4)
-  -r            用 git pull --rebase（默认行为，保留此选项以兼容旧用法）
+  -r            rebase 到所选来源（默认行为）
   -f            只允许 fast-forward；分叉时跳过
-  -m            用 git pull --no-rebase 代替 fast-forward (允许产生 merge commit)
+  -m            merge 所选来源 (允许产生 merge commit)
   -s            工作区有改动时自动 stash，更新后再 stash pop
   -n            dry-run: 只 fetch 和汇报，不改动工作区也不编译
   -P            不加 --prune
-  -u            自动 push 到 upstream（默认行为，保留此选项以兼容旧用法）
+  -u            自动 push 到所选来源（GitHub/remote/upstream 模式默认开启）
+  -g, --github  只从 origin 拉取（默认），不连接其他 remote
+  -H, --host 主机  从指定 SSH 主机拉取，如 192.168.0.78 或 ubuntu@192.168.0.78
+                优先复用匹配的 remote；否则使用 主机:projects/仓库名
+  -R, --host-root 路径  未找到匹配 remote 时使用的仓库父目录（默认 projects）
+  -O, --remote 名称  只使用指定的已配置 remote，如 box78
+  -U, --upstream  只使用当前分支的 upstream remote
+  -p, --no-push  只拉取，不推送；host 模式默认不推送，-u 可显式开启
   -q            只输出汇总表
 
 构建选项 (只作用于已知项目: jagent jsh jterm_core anvil ember frost forge jwm cplus LifeAI.jl):
@@ -189,7 +201,37 @@ LifeAI.jl 的 Julia 预编译缓存没有稳定的仓库内路径，因此只在
 EOF
 }
 
-while getopts ":j:J:T:rfmsnPuqBNh" opt; do
+# Translate long options without changing support for bundled short options.
+args=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --github) args+=(-g); shift ;;
+        --upstream) args+=(-U); shift ;;
+        --no-push) args+=(-p); shift ;;
+        --host|--host-root|--remote|--source)
+            if [ $# -lt 2 ] || [ -z "$2" ]; then echo "$1 需要参数" >&2; exit 2; fi
+            option="$1"; value="$2"; shift 2
+            case "$option" in
+                --host) args+=(-H "$value") ;;
+                --host-root) args+=(-R "$value") ;;
+                --remote) args+=(-O "$value") ;;
+                --source)
+                    case "$value" in
+                        github) args+=(-g) ;;
+                        upstream) args+=(-U) ;;
+                        *) echo "--source 需要 github 或 upstream" >&2; exit 2 ;;
+                    esac ;;
+            esac ;;
+        --host=*|--host-root=*|--remote=*|--source=*)
+            option="${1%%=*}"; value="${1#*=}"; shift
+            set -- "$option" "$value" "$@" ;;
+        --) args+=("$@"); break ;;
+        --*) echo "未知选项: $(sanitize_text "$1")" >&2; exit 2 ;;
+        *) args+=("$1"); shift ;;
+    esac
+done
+set -- "${args[@]}"
+while getopts ":j:J:T:H:R:O:grfmsnPuqBNhpU" opt; do
     case "$opt" in
         j) JOBS="$OPTARG" ;;
         r) MODE="rebase" ;;
@@ -198,7 +240,13 @@ while getopts ":j:J:T:rfmsnPuqBNh" opt; do
         s) STASH=1 ;;
         n) DRY_RUN=1 ;;
         P) PRUNE=0 ;;
-        u) PUSH=1 ;;
+        u) PUSH=1; PUSH_EXPLICIT=1 ;;
+        p) PUSH=0; PUSH_EXPLICIT=1 ;;
+        g) SOURCE_MODE="github" ;;
+        H) SOURCE_MODE="host"; SOURCE_HOST="$OPTARG" ;;
+        R) HOST_ROOT="$OPTARG" ;;
+        O) SOURCE_MODE="remote"; SOURCE_REMOTE="$OPTARG" ;;
+        U) SOURCE_MODE="upstream" ;;
         q) QUIET=1 ;;
         B) BUILD_ALL=1; BUILD=1 ;;
         N) BUILD=0 ;;
@@ -242,6 +290,18 @@ if [ "$BUILD_JOBS" -lt 1 ] || [ "$BUILD_JOBS" -gt "$MAX_PARALLEL_JOBS" ]; then
     exit 2
 fi
 normalize_only || exit 2
+if [ "$SOURCE_MODE" = host ]; then
+    if [[ ! "$SOURCE_HOST" =~ ^([A-Za-z0-9_][A-Za-z0-9_.-]*@)?[A-Za-z0-9][A-Za-z0-9.-]*$ ]]; then
+        echo "--host 需要有效的 SSH 主机名或 user@host" >&2; exit 2
+    fi
+    if [ -z "$HOST_ROOT" ] || [[ "$HOST_ROOT" = -* || "$HOST_ROOT" = *[$'\r\n\t ']* ]]; then
+        echo "--host-root 需要不含空白的仓库父目录" >&2; exit 2
+    fi
+    [ "$PUSH_EXPLICIT" -eq 1 ] || PUSH=0
+fi
+if [ "$SOURCE_MODE" = remote ] && [[ ! "$SOURCE_REMOTE" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]]; then
+    echo "--remote 需要有效的 remote 名称" >&2; exit 2
+fi
 
 # dry-run 只汇报，不碰工作区，自然也不编译
 [ "$DRY_RUN" -eq 1 ] && BUILD=0
@@ -268,6 +328,21 @@ trap 'rm -rf "$WORKDIR"' EXIT
 is_git_repo() {
     [ -e "$1/.git" ] || return 1
     git -C "$1" rev-parse --git-dir >/dev/null 2>&1
+}
+
+# Only SSH URLs can match a requested host. Do not mistake a GitHub HTTPS
+# remote or a local path containing a colon for an SSH endpoint.
+ssh_endpoint() {
+    local url="$1" authority
+    case "$url" in
+        ssh://*) authority="${url#ssh://}"; authority="${authority%%/*}"
+            printf '%s\n' "${authority%%:*}" ;;
+        *://*|/*|./*|../*) return 1 ;;
+        *:*) authority="${url%%:*}"
+            [[ "$authority" =~ ^([A-Za-z0-9_][A-Za-z0-9_.-]*@)?[A-Za-z0-9][A-Za-z0-9.-]*$ ]] || return 1
+            printf '%s\n' "$authority" ;;
+        *) return 1 ;;
+    esac
 }
 
 # 收集仓库：ROOT 本身若是仓库也算上，外加一层子目录
@@ -346,30 +421,64 @@ update_one() {
     fi
     branch_display="$(sanitize_text "$branch")"
 
-    if [ -z "$(git -C "$repo" remote)" ]; then
+    if [ "$SOURCE_MODE" != host ] && [ -z "$(git -C "$repo" remote)" ]; then
         say "${C_DIM}没有配置 remote，跳过${C_RST}"
         report SKIP "无 remote"; return
     fi
 
-    # fetch
+    local fetch_source tracking_remote source_branch merge_ref remote url endpoint
+    local -a matching_remotes=()
+    tracking_remote="$(git -C "$repo" config --get "branch.$branch.remote" || true)"
+    merge_ref="$(git -C "$repo" config --get "branch.$branch.merge" || true)"
+    source_branch="$branch"
+    [[ "$merge_ref" = refs/heads/* ]] && source_branch="${merge_ref#refs/heads/}"
+    case "$SOURCE_MODE" in
+        github) fetch_source=origin ;;
+        remote) fetch_source="$SOURCE_REMOTE" ;;
+        upstream)
+            if [ -z "$tracking_remote" ] || [ "$tracking_remote" = . ]; then
+                report SKIP "$branch 无远程 upstream"; return
+            fi
+            fetch_source="$tracking_remote" ;;
+        host)
+            while IFS= read -r remote; do
+                url="$(git -C "$repo" config --get "remote.$remote.url" 2>/dev/null || true)"
+                endpoint="$(ssh_endpoint "$url" || true)"
+                [ -n "$endpoint" ] || continue
+                if [ "$endpoint" = "$SOURCE_HOST" ] || {
+                    [[ "$SOURCE_HOST" != *@* ]] && [ "${endpoint##*@}" = "$SOURCE_HOST" ];
+                }; then
+                    matching_remotes+=("$remote")
+                fi
+            done < <(git -C "$repo" remote)
+            if [ ${#matching_remotes[@]} -gt 1 ]; then
+                report FAIL "多个 remote 匹配 $SOURCE_HOST，请用 --remote 指定"; return
+            elif [ ${#matching_remotes[@]} -eq 1 ]; then
+                fetch_source="${matching_remotes[0]}"
+            else
+                fetch_source="$SOURCE_HOST:${HOST_ROOT%/}/$(basename "$repo")"
+            fi ;;
+    esac
+    if [ "$SOURCE_MODE" != host ] && ! git -C "$repo" remote get-url "$fetch_source" >/dev/null 2>&1; then
+        report SKIP "无 remote $fetch_source"; return
+    fi
+    upstream_display="$(sanitize_text "$fetch_source/$source_branch")"
+    say "更新源: $upstream_display"
+
+    # Fetch one source and branch. FETCH_HEAD is immutable for this worker
+    # after the fetch; integrating its commit avoids a second pull fetching
+    # from an unrelated configured upstream.
     local fetch_args=(--tags --quiet)
     [ "$PRUNE" -eq 1 ] && fetch_args+=(--prune)
-    if ! run_git_logged fetch "${fetch_args[@]}" --all; then
+    if ! run_git_logged fetch "${fetch_args[@]}" -- "$fetch_source" "refs/heads/$source_branch"; then
         say "${C_RED}fetch 失败${C_RST}"
         report FAIL "fetch 失败"; return
     fi
 
-    local upstream
-    upstream="$(git -C "$repo" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null || true)"
-    if [ -z "$upstream" ]; then
-        say "${C_YLW}分支 $branch_display 没有 upstream，跳过${C_RST}"
-        report SKIP "$branch 无 upstream"; return
-    fi
-    upstream_display="$(sanitize_text "$upstream")"
-
     local local_sha remote_sha
     local_sha="$(git -C "$repo" rev-parse HEAD)"
-    remote_sha="$(git -C "$repo" rev-parse "$upstream")"
+    remote_sha="$(git -C "$repo" rev-parse --verify 'FETCH_HEAD^{commit}')" || {
+        report FAIL "无法解析更新源提交"; return; }
 
     if [ "$local_sha" = "$remote_sha" ]; then
         say "${C_DIM}已是最新 ($branch_display)${C_RST}"
@@ -377,7 +486,8 @@ update_one() {
     fi
 
     local ahead behind counts
-    counts="$(git -C "$repo" rev-list --left-right --count "$upstream...HEAD" 2>/dev/null || echo "0	0")"
+    counts="$(git -C "$repo" rev-list --left-right --count "$remote_sha...HEAD" 2>/dev/null)" || {
+        report FAIL "无法比较更新源历史"; return; }
     behind="${counts%%	*}"; ahead="${counts##*	}"
 
     if [ "$DRY_RUN" -eq 1 ]; then
@@ -421,9 +531,9 @@ update_one() {
     if [ "$need_pull" -eq 1 ]; then
         local rc=0
         case "$MODE" in
-            ff)     run_git_logged merge --ff-only "$upstream" || rc=$? ;;
-            rebase) run_git_logged pull --rebase --quiet || rc=$? ;;
-            merge)  run_git_logged pull --no-rebase --quiet || rc=$? ;;
+            ff)     run_git_logged merge --ff-only "$remote_sha" || rc=$? ;;
+            rebase) run_git_logged rebase --quiet "$remote_sha" || rc=$? ;;
+            merge)  run_git_logged merge --quiet "$remote_sha" || rc=$? ;;
         esac
 
         if [ "$rc" -ne 0 ]; then
@@ -461,9 +571,9 @@ update_one() {
     # 双向更新：拉取/rebase 完成后，如本地仍领先 upstream 则 push 上去。
     if [ "$PUSH" -eq 1 ]; then
         local push_ahead
-        push_ahead="$(git -C "$repo" rev-list --count "${upstream}..HEAD" 2>/dev/null || echo 0)"
+        push_ahead="$(git -C "$repo" rev-list --count "${remote_sha}..HEAD" 2>/dev/null || echo 0)"
         if [ "$push_ahead" -gt 0 ]; then
-            if run_git_logged push; then
+            if run_git_logged push -- "$fetch_source" "HEAD:refs/heads/$source_branch"; then
                 say "${C_GRN}已推送 $push_ahead 个提交到 $upstream_display${C_RST}"
                 if [ -n "$pull_msg" ]; then
                     report SYNC "${pull_msg}；推送 ${push_ahead} 个提交"
@@ -486,7 +596,7 @@ update_one() {
     if [ -n "$pull_msg" ]; then
         report UPD "$pull_msg"
     elif [ "$ahead" -gt 0 ]; then
-        say "${C_DIM}本地领先 $ahead 个提交，未推送（加 -u 可自动 push）${C_RST}"
+        say "${C_DIM}本地领先 $ahead 个提交，未推送（-u 可开启）${C_RST}"
         report SKIP "本地领先 $ahead，未推送"
     else
         say "${C_DIM}已是最新 ($branch_display)${C_RST}"
@@ -734,7 +844,7 @@ for i in "${!repos[@]}"; do
     [ "$QUIET" -eq 0 ] && [ -s "$WORKDIR/$i.log" ] && cat "$WORKDIR/$i.log"
     line="$(cat "$WORKDIR/$i.status" 2>/dev/null || printf 'FAIL|%s|无结果\n' "$(sanitize_text "$(basename "${repos[$i]}")")")"
     summary+=("$line")
-    git_st[$i]="${line%%|*}"
+    git_st[i]="${line%%|*}"
     case "${line%%|*}" in
         OK)   n_ok=$((n_ok+1)) ;;
         UPD)  n_upd=$((n_upd+1)) ;;
@@ -805,7 +915,7 @@ if [ "$BUILD" -eq 1 ]; then
         fi
         [ -n "$reason" ] || continue
 
-        build_reason[$i]="$reason"
+        build_reason[i]="$reason"
         run_idx+=("$i")
     done
 

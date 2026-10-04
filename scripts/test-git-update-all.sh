@@ -259,4 +259,76 @@ assert_contains "$TEST_ROOT/default-sync.out" "已推送 1 个提交"
 [ "$(git -C "$SYNC_ROOT/jagent" rev-list --count --merges HEAD)" -eq 0 ] \
     || fail "default sync created a merge commit instead of rebasing"
 
+# Source selection is independent of branch tracking and never contacts an
+# unrelated remote. SSH-looking URLs are rewritten to local bare repositories
+# so every host test is deterministic and entirely offline.
+SOURCE_ROOT="$TEST_ROOT/sources"
+git init -q --bare "$SOURCE_ROOT/github.git"
+init_repo "$SOURCE_ROOT/seed"
+git -C "$SOURCE_ROOT/seed" remote add origin "$SOURCE_ROOT/github.git"
+git -C "$SOURCE_ROOT/seed" push -q -u origin HEAD
+git clone -q --bare "$SOURCE_ROOT/github.git" "$SOURCE_ROOT/host.git"
+git clone -q "$SOURCE_ROOT/github.git" "$SOURCE_ROOT/jagent"
+git -C "$SOURCE_ROOT/jagent" config user.name updater-test
+git -C "$SOURCE_ROOT/jagent" config user.email updater-test@example.invalid
+git -C "$SOURCE_ROOT/jagent" remote add broken "$SOURCE_ROOT/absent.git"
+git -C "$SOURCE_ROOT/jagent" remote add box78 ubuntu@192.168.0.78:projects/jagent
+git -C "$SOURCE_ROOT/jagent" config url."$SOURCE_ROOT/host.git".insteadOf ubuntu@192.168.0.78:projects/jagent
+branch="$(git -C "$SOURCE_ROOT/jagent" branch --show-current)"
+git -C "$SOURCE_ROOT/jagent" config "branch.$branch.remote" broken
+
+# Default GitHub mode must work even with an unavailable upstream/other remote.
+/bin/bash "$UPDATER" -N -T jagent "$SOURCE_ROOT" >"$TEST_ROOT/github-source.out"
+assert_contains "$TEST_ROOT/github-source.out" "更新源: origin/$branch"
+assert_contains "$TEST_ROOT/github-source.out" "失败 0"
+
+printf 'host-only\n' >"$SOURCE_ROOT/seed/host.txt"
+git -C "$SOURCE_ROOT/seed" add host.txt
+git -C "$SOURCE_ROOT/seed" commit -q -m host-only
+git -C "$SOURCE_ROOT/seed" push -q "$SOURCE_ROOT/host.git" HEAD
+before="$(git -C "$SOURCE_ROOT/jagent" rev-parse HEAD)"
+/bin/bash "$UPDATER" -nN --host=192.168.0.78 -T jagent "$SOURCE_ROOT" >"$TEST_ROOT/host-dry.out"
+[ "$(git -C "$SOURCE_ROOT/jagent" rev-parse HEAD)" = "$before" ] || fail "host dry-run changed HEAD"
+assert_contains "$TEST_ROOT/host-dry.out" "更新源: box78/$branch"
+/bin/bash "$UPDATER" -N --host ubuntu@192.168.0.78 -T jagent "$SOURCE_ROOT" >"$TEST_ROOT/host-source.out"
+[ -f "$SOURCE_ROOT/jagent/host.txt" ] || fail "host commit was not pulled"
+[ "$(git -C "$SOURCE_ROOT/jagent" config "branch.$branch.remote")" = broken ] || fail "source changed upstream"
+[ "$(git --git-dir="$SOURCE_ROOT/github.git" rev-list --count HEAD)" -eq 1 ] || fail "host mode pushed to GitHub"
+
+printf 'local-only\n' >"$SOURCE_ROOT/jagent/local.txt"
+git -C "$SOURCE_ROOT/jagent" add local.txt
+git -C "$SOURCE_ROOT/jagent" commit -q -m local-only
+/bin/bash "$UPDATER" -N --host 192.168.0.78 -T jagent "$SOURCE_ROOT" >"$TEST_ROOT/host-ahead.out"
+[ "$(git --git-dir="$SOURCE_ROOT/host.git" rev-list --count HEAD)" -eq 2 ] || fail "host mode pushed by default"
+/bin/bash "$UPDATER" -Nu --host 192.168.0.78 -T jagent "$SOURCE_ROOT" >"$TEST_ROOT/host-push.out"
+[ "$(git --git-dir="$SOURCE_ROOT/host.git" rev-list --count HEAD)" -eq 3 ] || fail "explicit host push used the wrong source"
+
+git -C "$SOURCE_ROOT/jagent" remote add second-host ssh://ubuntu@192.168.0.78:2222/projects/jagent
+if /bin/bash "$UPDATER" -N --host 192.168.0.78 -T jagent "$SOURCE_ROOT" >"$TEST_ROOT/host-ambiguous.out" 2>&1; then
+    fail "ambiguous host remotes were accepted"
+fi
+assert_contains "$TEST_ROOT/host-ambiguous.out" "多个 remote 匹配"
+git -C "$SOURCE_ROOT/jagent" remote remove second-host
+
+# No remote needs to be added to use an arbitrary SSH host/path.
+git -C "$SOURCE_ROOT/jagent" remote remove box78
+git -C "$SOURCE_ROOT/jagent" config url."$SOURCE_ROOT/host.git".insteadOf worker@example.test:/srv/repos/jagent
+/bin/bash "$UPDATER" -N --host worker@example.test --host-root /srv/repos -T jagent "$SOURCE_ROOT" >"$TEST_ROOT/host-direct.out"
+assert_contains "$TEST_ROOT/host-direct.out" "worker@example.test:/srv/repos/jagent/$branch"
+assert_contains "$TEST_ROOT/host-direct.out" "失败 0"
+
+# A plain repository with no configured remote can use the direct host URL.
+git -C "$SOURCE_ROOT/jagent" remote remove origin
+git -C "$SOURCE_ROOT/jagent" remote remove broken
+/bin/bash "$UPDATER" -N --host worker@example.test --host-root /srv/repos -T jagent "$SOURCE_ROOT" >"$TEST_ROOT/host-without-remotes.out"
+assert_contains "$TEST_ROOT/host-without-remotes.out" "失败 0"
+git -C "$SOURCE_ROOT/jagent" remote add origin "$SOURCE_ROOT/github.git"
+/bin/bash "$UPDATER" -N --remote origin --no-push -T jagent "$SOURCE_ROOT" >"$TEST_ROOT/remote-no-push.out"
+[ "$(git --git-dir="$SOURCE_ROOT/github.git" rev-list --count HEAD)" -eq 1 ] || fail "--no-push was ignored"
+
+for invalid_host in -bad 'name with space' 'ssh://host' 'host;command'; do
+    if /bin/bash "$UPDATER" --host "$invalid_host" "$TEST_ROOT/empty" >"$TEST_ROOT/host-invalid.out" 2>&1; then
+        fail "invalid host was accepted: $invalid_host"
+    fi
+done
 printf 'test-git-update-all: ok\n'
