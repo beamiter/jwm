@@ -16196,4 +16196,15 @@ mod tests {
         assert!(README.contains("get_status.color_management"));
         assert!(DOCS.contains("README health text names compact `color_management`"));
     }
+
+    #[test]
+    fn evolve8h_wave_487_tools_readme_health_names_compact_color_management() {
+        const TOOLS: &str = include_str!("../../tools/README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOLS.contains("compact `color_management` line"));
+        assert!(TOOLS.contains("get_status.color_management"));
+        assert!(DOCS.contains(
+            "`tools/README.md` health text names compact `color_management`"
+        ));
+    }
 }
