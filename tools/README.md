@@ -135,6 +135,7 @@ It also prints a compact `magnifier` line from `get_status.magnifier`.
 It also prints a compact `peek` line from `get_status.peek`.
 It also prints a compact `expose` line from `get_status.expose`.
 It also prints a compact `gesture` line from `get_status.gesture`.
+It also prints a compact `wayland` line from `get_status.wayland`.
 
 IPC 使用换行分隔的 JSON。工具按块读取并保留同一批到达的后续消息，
 每条响应的正文上限为 1 MiB。普通响应和订阅确认须在开始读取后 5 秒内

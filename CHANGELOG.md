@@ -562,6 +562,8 @@ monorepo use independent Semantic Versions.
 
 - README health text names compact `wayland`.
 
+- `tools/README.md` health text names compact `wayland`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
