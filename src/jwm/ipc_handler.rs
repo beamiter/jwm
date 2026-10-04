@@ -15574,4 +15574,13 @@ mod tests {
         assert!(TOOL.contains("\"bench: ready=false\""));
         assert!(DOCS.contains("`jwm-tool health` prints compact `bench` beside occupancy"));
     }
+
+    #[test]
+    fn evolve8h_wave_425_readme_health_names_compact_bench() {
+        const README: &str = include_str!("../../README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(README.contains("compact `bench` line"));
+        assert!(README.contains("get_status.bench"));
+        assert!(DOCS.contains("README health text names compact `bench`"));
+    }
 }
