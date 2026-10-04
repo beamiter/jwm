@@ -210,6 +210,7 @@ It also prints a compact `pip` line from `get_status.pip`.
 It also prints a compact `notifications` line from `get_status.notifications`.
 It also prints a compact `blur` line from `get_status.blur`.
 It also prints a compact `hdr` line from `get_status.hdr`.
+It also prints a compact `dnd` line from `get_status.dnd`.
 
 Malformed JSON, invalid argument types, overflow, empty spawn commands, unknown
 commands, and `{ "success": false }` responses produce a non-zero exit status,
