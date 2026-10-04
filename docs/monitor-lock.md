@@ -951,3 +951,4 @@ Wave 811: Support triage reads health compact `layout` before `get_lt` dumps.
 Wave 812: Support triage reads health compact `tabs` before `get_tab` dumps.
 Wave 813: Support triage reads health compact `selected` before `get_sel` dumps.
 Wave 814: Support triage reads health compact `struts` before `get_strut` dumps.
+Wave 815: Support triage reads health compact `scratchpads` before `get_pads` dumps.

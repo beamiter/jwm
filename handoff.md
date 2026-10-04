@@ -1455,9 +1455,15 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 813 | monitor-lock 唯一 pin wave 813 selected | ✓ |
 | 814 | monitor-lock 唯一 pin wave 814 struts | ✓ |
 | 814 | monitor-lock 唯一 pin wave 814 struts | ✓ |
+| 815 | monitor-lock 唯一 pin wave 815 scratchpads | ✓ |
+| 815 | monitor-lock 唯一 pin wave 815 scratchpads | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 815 — monitor-lock pin wave 815 scratchpads
+
+选题 = evolve8h wave 815。monitor-lock 唯一句子 wave 815 `scratchpads`。
 
 ## 2026-10-03：evolve8h wave 814 — monitor-lock pin wave 814 struts
 

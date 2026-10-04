@@ -18650,4 +18650,10 @@ mod tests {
         assert!(DOCS.contains("Wave 814: Support triage reads health compact `struts` before `get_strut` dumps."));
     }
 
+    #[test]
+    fn evolve8h_wave_815_monitor_lock_unique_pin_scratchpads() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 815: Support triage reads health compact `scratchpads` before `get_pads` dumps."));
+    }
+
 }
