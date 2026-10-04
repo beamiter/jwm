@@ -373,3 +373,4 @@ evolve9h wave 149: Upgrade notes keep `session_lock` beside occupancy on the hea
 evolve9h wave 150: Upgrade notes keep `tearing` beside occupancy on the health page.
 evolve9h wave 151: Upgrade notes keep `xwayland` beside occupancy on the health page.
 evolve9h wave 152: Upgrade notes keep `scrolling` beside occupancy on the health page.
+evolve9h wave 153: Upgrade notes keep `night_light` beside occupancy on the health page.
