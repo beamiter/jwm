@@ -17068,4 +17068,12 @@ mod tests {
         assert!(DOCS.contains("`docs/wallpaper.md` names compact `wallpaper` beside health"));
     }
 
+    #[test]
+    fn evolve8h_wave_575_doc_waterlily_names_compact_waterlily() {
+        const FEATURE: &str = include_str!("../../docs/waterlily.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(FEATURE.contains("compact `waterlily`"));
+        assert!(DOCS.contains("`docs/waterlily.md` names compact `waterlily` beside health"));
+    }
+
 }

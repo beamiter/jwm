@@ -692,6 +692,8 @@ monorepo use independent Semantic Versions.
 
 - `docs/wallpaper.md` names compact `wallpaper` beside health.
 
+- `docs/waterlily.md` names compact `waterlily` beside health.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

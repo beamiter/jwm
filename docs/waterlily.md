@@ -533,3 +533,5 @@ deprecated alias for `toggle_waterlily` and logs a migration warning. It is not
 advertised by `get_capabilities`, is not used by the default key binding, and
 must not be used in new configuration. The former Python tracker/demo tools and
 their `JWM_SLIME_*` tuning variables are no longer supported.
+
+`jwm-tool health` prints compact `waterlily` for waterlily operators.
