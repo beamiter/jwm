@@ -19178,4 +19178,10 @@ mod tests {
         assert!(DOCS.contains("Wave 902: Upgrade notes keep health compact `wayland` beside `get_wl`."));
     }
 
+    #[test]
+    fn evolve8h_wave_903_monitor_lock_unique_pin_recording() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 903: Upgrade notes keep health compact `recording` beside `get_rec`."));
+    }
+
 }
