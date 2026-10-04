@@ -643,3 +643,4 @@ README health text names compact `expose`.
 `jwm-tool health` prints compact `gesture` beside occupancy.
 README health text names compact `gesture`.
 `tools/README.md` health text names compact `gesture`.
+`jwm-tool capabilities` text lists `get_gest -> get_gesture`.

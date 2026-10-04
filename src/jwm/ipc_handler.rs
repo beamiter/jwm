@@ -16402,4 +16402,14 @@ mod tests {
         assert!(DOCS.contains("`tools/README.md` health text names compact `gesture`"));
     }
 
+    #[test]
+    fn evolve8h_wave_507_capabilities_text_lists_gesture_alias() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("query aliases: get_gest -> get_gesture"));
+        assert!(DOCS.contains(
+            "`jwm-tool capabilities` text lists `get_gest -> get_gesture`"
+        ));
+    }
+
 }

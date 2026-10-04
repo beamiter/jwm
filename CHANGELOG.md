@@ -556,6 +556,8 @@ monorepo use independent Semantic Versions.
 
 - `tools/README.md` health text names compact `gesture`.
 
+- `jwm-tool capabilities` text lists `get_gest -> get_gesture`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
