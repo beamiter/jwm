@@ -20971,4 +20971,10 @@ mod tests {
         assert!(COMPAT.contains("evolve9h wave 189: Health compact `recording` is diagnosable through `jwm-tool health`."));
     }
 
+    #[test]
+    fn evolve9h_wave_190_compat_unique_pin_capture() {
+        const COMPAT: &str = include_str!("../../docs/compatibility.md");
+        assert!(COMPAT.contains("evolve9h wave 190: Health compact `capture` is diagnosable through `jwm-tool health`."));
+    }
+
 }
