@@ -1434,6 +1434,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 945: Upgrade notes keep health compact `power` beside `get_power`.
 
+- Wave 946: Compatibility tables name `get_lock` with health compact `session_lock`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

@@ -19436,4 +19436,10 @@ mod tests {
         assert!(DOCS.contains("Wave 945: Upgrade notes keep health compact `power` beside `get_power`."));
     }
 
+    #[test]
+    fn evolve8h_wave_946_monitor_lock_unique_pin_session_lock() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 946: Compatibility tables name `get_lock` with health compact `session_lock`."));
+    }
+
 }

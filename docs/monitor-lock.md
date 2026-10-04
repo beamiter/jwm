@@ -1082,3 +1082,4 @@ Wave 942: Upgrade notes keep health compact `hdr` beside `get_status.hdr`.
 Wave 943: Upgrade notes keep health compact `expose` beside `get_status.expose`.
 Wave 944: Upgrade notes keep health compact `media` beside `get_media`.
 Wave 945: Upgrade notes keep health compact `power` beside `get_power`.
+Wave 946: Compatibility tables name `get_lock` with health compact `session_lock`.
