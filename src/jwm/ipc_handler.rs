@@ -20539,4 +20539,10 @@ mod tests {
         assert!(COMPAT.contains("evolve9h wave 117: Nested smoke treats `window` as a read-only IPC probe."));
     }
 
+    #[test]
+    fn evolve9h_wave_118_compat_unique_pin_session_lock() {
+        const COMPAT: &str = include_str!("../../docs/compatibility.md");
+        assert!(COMPAT.contains("evolve9h wave 118: Nested smoke treats `session_lock` as a read-only IPC probe."));
+    }
+
 }
