@@ -860,6 +860,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 658: Health compact `monitors` is the operator twin of `get_mons`.
 
+- Wave 659: Health compact `workspaces` is the operator twin of `get_ws`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

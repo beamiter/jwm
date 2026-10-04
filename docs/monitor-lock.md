@@ -795,3 +795,4 @@ Wave 655: Health compact `struts` is the operator twin of `get_strut`.
 Wave 656: Health compact `scratchpads` is the operator twin of `get_pads`.
 Wave 657: Health compact `focused` is the operator twin of `get_fw`.
 Wave 658: Health compact `monitors` is the operator twin of `get_mons`.
+Wave 659: Health compact `workspaces` is the operator twin of `get_ws`.
