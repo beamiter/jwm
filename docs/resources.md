@@ -97,3 +97,5 @@ jwm-tool msg get_resources
 ```
 
 Parts the machine could not answer are `null`, never zero.
+
+`jwm-tool health` prints compact `resources` for resources operators.

@@ -17084,4 +17084,12 @@ mod tests {
         assert!(DOCS.contains("`docs/hdr.md` names compact `hdr` beside health"));
     }
 
+    #[test]
+    fn evolve8h_wave_577_doc_resources_names_compact_resources() {
+        const FEATURE: &str = include_str!("../../docs/resources.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(FEATURE.contains("compact `resources`"));
+        assert!(DOCS.contains("`docs/resources.md` names compact `resources` beside health"));
+    }
+
 }

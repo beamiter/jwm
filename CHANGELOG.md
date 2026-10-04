@@ -696,6 +696,8 @@ monorepo use independent Semantic Versions.
 
 - `docs/hdr.md` names compact `hdr` beside health.
 
+- `docs/resources.md` names compact `resources` beside health.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
