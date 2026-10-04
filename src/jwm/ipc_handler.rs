@@ -18386,4 +18386,10 @@ mod tests {
         assert!(DOCS.contains("Wave 770: Doctor bundles include health compact `closed_placement` from `get_cp`."));
     }
 
+    #[test]
+    fn evolve8h_wave_771_monitor_lock_unique_pin_prev_layout() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 771: Doctor bundles include health compact `prev_layout` from `get_pl`."));
+    }
+
 }
