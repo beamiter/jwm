@@ -5787,6 +5787,7 @@ fn capabilities_output_lines(capabilities: &serde_json::Value) -> Vec<String> {
         "query aliases: get_scrolling,get_scroll -> get_scrolling_status".to_string(),
         "query aliases: get_cm -> get_color_management_status".to_string(),
         "query aliases: get_nl -> get_night_light".to_string(),
+        "query aliases: get_mag -> get_magnifier".to_string(),
     ]
 }
 

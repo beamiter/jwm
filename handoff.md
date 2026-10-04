@@ -817,9 +817,15 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 494 | README health 点名 compact magnifier | ✓ |
 | 495 | tools/README health 点名 compact magnifier | ✓ |
 | 495 | tools/README health 点名 compact magnifier | ✓ |
+| 496 | capabilities 文本列出 get_mag -> get_magnifier | ✓ |
+| 496 | capabilities 文本列出 get_mag -> get_magnifier | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 496 — capabilities text lists magnifier alias
+
+选题 = evolve8h wave 496。`jwm-tool capabilities` 文本列出 `get_mag -> get_magnifier`。
 
 ## 2026-10-03：evolve8h wave 495 — tools/README health names compact magnifier
 

@@ -534,6 +534,8 @@ monorepo use independent Semantic Versions.
 
 - `tools/README.md` health text names compact `magnifier`.
 
+- `jwm-tool capabilities` text lists `get_mag -> get_magnifier`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
