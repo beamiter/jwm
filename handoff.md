@@ -440,9 +440,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 124 | compatibility 唯一 pin wave 124 peek | ✓ |
 | 125 | compatibility 唯一 pin wave 125 gesture | ✓ |
 | 126 | compatibility 唯一 pin wave 126 wayland | ✓ |
+| 127 | compatibility 唯一 pin wave 127 recording | ✓ |
 | … | evolve9h 进行中 |
 
 ---
+
+## 2026-10-04：evolve9h wave 127 — compatibility pin wave 127 recording
+
+选题 = evolve9h wave 127。compatibility 唯一句子 wave 127 `recording`。
 
 ## 2026-10-04：evolve9h wave 126 — compatibility pin wave 126 wayland
 
