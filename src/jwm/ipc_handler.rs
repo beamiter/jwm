@@ -17732,4 +17732,10 @@ mod tests {
         assert!(DOCS.contains("Wave 661: Health compact `effects` is the operator twin of `get_fx`."));
     }
 
+    #[test]
+    fn evolve8h_wave_662_monitor_lock_unique_pin_mic() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 662: Health compact `mic` is the operator twin of `get_mute`."));
+    }
+
 }

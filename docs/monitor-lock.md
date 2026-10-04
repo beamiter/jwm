@@ -798,3 +798,4 @@ Wave 658: Health compact `monitors` is the operator twin of `get_mons`.
 Wave 659: Health compact `workspaces` is the operator twin of `get_ws`.
 Wave 660: Health compact `windows` is the operator twin of `get_wins`.
 Wave 661: Health compact `effects` is the operator twin of `get_fx`.
+Wave 662: Health compact `mic` is the operator twin of `get_mute`.

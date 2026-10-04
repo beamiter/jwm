@@ -866,6 +866,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 661: Health compact `effects` is the operator twin of `get_fx`.
 
+- Wave 662: Health compact `mic` is the operator twin of `get_mute`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
