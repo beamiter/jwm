@@ -826,6 +826,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 641: Health compact `waterlily` is the operator twin of `get_wly`.
 
+- Wave 642: Health compact `audio` is the operator twin of `get_devices`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

@@ -17612,4 +17612,10 @@ mod tests {
         assert!(DOCS.contains("Wave 641: Health compact `waterlily` is the operator twin of `get_wly`."));
     }
 
+    #[test]
+    fn evolve8h_wave_642_monitor_lock_unique_pin_audio() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 642: Health compact `audio` is the operator twin of `get_devices`."));
+    }
+
 }
