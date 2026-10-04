@@ -20275,4 +20275,10 @@ mod tests {
         assert!(COMPAT.contains("evolve9h wave 73: `jwm-tool capabilities` remains the catalog for `power` query aliases."));
     }
 
+    #[test]
+    fn evolve9h_wave_74_compat_unique_pin_media() {
+        const COMPAT: &str = include_str!("../../docs/compatibility.md");
+        assert!(COMPAT.contains("evolve9h wave 74: `jwm-tool capabilities` remains the catalog for `media` query aliases."));
+    }
+
 }
