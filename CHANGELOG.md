@@ -906,6 +906,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 681: `get_lock` and health compact `session_lock` share one Status nest.
 
+- Wave 682: `get_th` and health compact `tearing` share one Status nest.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

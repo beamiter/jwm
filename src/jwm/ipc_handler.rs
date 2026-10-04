@@ -17852,4 +17852,10 @@ mod tests {
         assert!(DOCS.contains("Wave 681: `get_lock` and health compact `session_lock` share one Status nest."));
     }
 
+    #[test]
+    fn evolve8h_wave_682_monitor_lock_unique_pin_tearing() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 682: `get_th` and health compact `tearing` share one Status nest."));
+    }
+
 }
