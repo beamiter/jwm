@@ -18722,4 +18722,10 @@ mod tests {
         assert!(DOCS.contains("Wave 826: Support triage reads health compact `gaps` before `get_gap` dumps."));
     }
 
+    #[test]
+    fn evolve8h_wave_827_monitor_lock_unique_pin_mfact() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 827: Support triage reads health compact `mfact` before `get_mf` dumps."));
+    }
+
 }

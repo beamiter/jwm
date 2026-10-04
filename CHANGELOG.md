@@ -1196,6 +1196,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 826: Support triage reads health compact `gaps` before `get_gap` dumps.
 
+- Wave 827: Support triage reads health compact `mfact` before `get_mf` dumps.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
