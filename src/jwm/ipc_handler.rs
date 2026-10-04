@@ -18680,4 +18680,10 @@ mod tests {
         assert!(DOCS.contains("Wave 819: Support triage reads health compact `windows` before `get_wins` dumps."));
     }
 
+    #[test]
+    fn evolve8h_wave_820_monitor_lock_unique_pin_effects() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 820: Support triage reads health compact `effects` before `get_fx` dumps."));
+    }
+
 }

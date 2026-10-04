@@ -956,3 +956,4 @@ Wave 816: Support triage reads health compact `focused` before `get_fw` dumps.
 Wave 817: Support triage reads health compact `monitors` before `get_mons` dumps.
 Wave 818: Support triage reads health compact `workspaces` before `get_ws` dumps.
 Wave 819: Support triage reads health compact `windows` before `get_wins` dumps.
+Wave 820: Support triage reads health compact `effects` before `get_fx` dumps.
