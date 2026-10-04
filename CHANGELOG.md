@@ -2066,6 +2066,8 @@ monorepo use independent Semantic Versions.
 
 - evolve9h wave 261: Support bundles should include `clipboard` when health is degraded.
 
+- evolve9h wave 262: Support bundles should include `idle` when health is degraded.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
