@@ -1103,3 +1103,4 @@ Wave 963: Compatibility tables name `get_res` with health compact `resources`.
 Wave 964: Compatibility tables name `get_conn` with health compact `connectivity`.
 Wave 965: Compatibility tables name `get_clip` with health compact `clipboard`.
 Wave 966: Compatibility tables name `get_idl` with health compact `idle`.
+Wave 967: Compatibility tables name `get_notif` with health compact `notifications`.

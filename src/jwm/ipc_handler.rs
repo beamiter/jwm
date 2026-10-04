@@ -19562,4 +19562,10 @@ mod tests {
         assert!(DOCS.contains("Wave 966: Compatibility tables name `get_idl` with health compact `idle`."));
     }
 
+    #[test]
+    fn evolve8h_wave_967_monitor_lock_unique_pin_notifications() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 967: Compatibility tables name `get_notif` with health compact `notifications`."));
+    }
+
 }

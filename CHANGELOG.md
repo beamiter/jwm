@@ -1476,6 +1476,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 966: Compatibility tables name `get_idl` with health compact `idle`.
 
+- Wave 967: Compatibility tables name `get_notif` with health compact `notifications`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
