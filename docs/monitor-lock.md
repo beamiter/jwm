@@ -839,3 +839,4 @@ Wave 699: `get_conn` and health compact `connectivity` share one Status nest.
 Wave 700: `get_clip` and health compact `clipboard` share one Status nest.
 Wave 701: `get_idl` and health compact `idle` share one Status nest.
 Wave 702: `get_notif` and health compact `notifications` share one Status nest.
+Wave 703: `get_dnd` and health compact `dnd` share one Status nest.

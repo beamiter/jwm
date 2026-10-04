@@ -948,6 +948,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 702: `get_notif` and health compact `notifications` share one Status nest.
 
+- Wave 703: `get_dnd` and health compact `dnd` share one Status nest.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
