@@ -492,6 +492,7 @@ monorepo use independent Semantic Versions.
 - `tools/README.md` health text names compact `system_ui`.
 - `jwm-tool capabilities` text lists `get_ui -> get_system_ui`.
 - `jwm-tool health` prints compact `idle` beside occupancy.
+- README health text names compact `idle`.
 
 ### Changed
 

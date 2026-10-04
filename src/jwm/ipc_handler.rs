@@ -15940,4 +15940,13 @@ mod tests {
         ));
         assert!(DOCS.contains("`jwm-tool health` prints compact `idle` beside occupancy"));
     }
+
+    #[test]
+    fn evolve8h_wave_463_readme_health_names_compact_idle() {
+        const README: &str = include_str!("../../README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(README.contains("compact `idle` line"));
+        assert!(README.contains("get_status.idle"));
+        assert!(DOCS.contains("README health text names compact `idle`"));
+    }
 }
