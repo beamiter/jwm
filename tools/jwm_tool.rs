@@ -3985,6 +3985,24 @@ mod tests {
         assert!(scrolling_lines.iter().any(|line| {
             line == "scrolling: active_monitors=1 monitors=2"
         }));
+        assert!(!scrolling_lines
+            .iter()
+            .any(|line| line.starts_with("color_management:")));
+
+        let with_compact_color_management = serde_json::json!({
+            "health": {"status": "healthy", "reasons": []},
+            "counts": {"windows": 0, "monitors": 1, "workspaces": 1},
+            "config": {"path": "/tmp/config.toml", "diagnostics": {"error_count": 0, "warning_count": 0}},
+            "features": {},
+            "color_management": {
+                "surface_count": 4,
+                "hdr_surface_count": 1
+            }
+        });
+        let color_management_lines = health_output_lines(&with_compact_color_management);
+        assert!(color_management_lines.iter().any(|line| {
+            line == "color_management: surfaces=4 hdr_surfaces=1"
+        }));
 
         let capabilities = serde_json::json!({
             "schema_version": 1,
@@ -5601,6 +5619,25 @@ fn health_output_lines(status: &serde_json::Value) -> Vec<String> {
             .unwrap_or_else(|| "-".into());
         lines.push(format!(
             "scrolling: active_monitors={active_monitors} monitors={monitors}"
+        ));
+    }
+
+    if let Some(color_management) = status
+        .get("color_management")
+        .and_then(serde_json::Value::as_object)
+    {
+        let surfaces = color_management
+            .get("surface_count")
+            .and_then(|v| v.as_u64().or_else(|| v.as_i64().map(|n| n as u64)))
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".into());
+        let hdr_surfaces = color_management
+            .get("hdr_surface_count")
+            .and_then(|v| v.as_u64().or_else(|| v.as_i64().map(|n| n as u64)))
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".into());
+        lines.push(format!(
+            "color_management: surfaces={surfaces} hdr_surfaces={hdr_surfaces}"
         ));
     }
 

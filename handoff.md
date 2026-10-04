@@ -798,9 +798,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 482 | tools/README health 点名 compact scrolling | ✓ |
 | 483 | capabilities 文本列出 get_scrolling -> get_scrolling_status | ✓ |
 | 484 | 短 query 别名 get_scroll -> get_scrolling_status | ✓ |
+| 485 | health 打印 compact color_management | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 485 — health prints compact color_management
+
+选题 = evolve8h wave 485。`jwm-tool health` 打印 compact `color_management` 行。
 
 ## 2026-10-03：evolve8h wave 484 — short query alias get_scroll
 

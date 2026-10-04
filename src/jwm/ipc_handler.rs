@@ -16174,4 +16174,17 @@ mod tests {
         ));
         assert!(COMPAT.contains("`get_scroll`"));
     }
+
+    #[test]
+    fn evolve8h_wave_485_health_prints_compact_color_management() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains(
+            "color_management: surfaces={surfaces} hdr_surfaces={hdr_surfaces}"
+        ));
+        assert!(TOOL.contains("\"color_management: surfaces=4 hdr_surfaces=1\""));
+        assert!(DOCS.contains(
+            "`jwm-tool health` prints compact `color_management` beside occupancy"
+        ));
+    }
 }
