@@ -828,3 +828,4 @@ Wave 688: `get_pk` and health compact `peek` share one Status nest.
 Wave 689: `get_gest` and health compact `gesture` share one Status nest.
 Wave 690: `get_wl` and health compact `wayland` share one Status nest.
 Wave 691: `get_rec` and health compact `recording` share one Status nest.
+Wave 692: `get_arec` and health compact `audio_recording` share one Status nest.
