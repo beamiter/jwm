@@ -3782,6 +3782,25 @@ mod tests {
         assert!(pip_lines
             .iter()
             .any(|line| line == "pip: count=1 focused=66"));
+        assert!(!pip_lines
+            .iter()
+            .any(|line| line.starts_with("notifications:")));
+
+        let with_compact_notifications = serde_json::json!({
+            "health": {"status": "healthy", "reasons": []},
+            "counts": {"windows": 0, "monitors": 1, "workspaces": 1},
+            "config": {"path": "/tmp/config.toml", "diagnostics": {"error_count": 0, "warning_count": 0}},
+            "features": {},
+            "notifications": {
+                "count": 2,
+                "center_open": true,
+                "do_not_disturb": false
+            }
+        });
+        let notifications_lines = health_output_lines(&with_compact_notifications);
+        assert!(notifications_lines.iter().any(|line| {
+            line == "notifications: count=2 center_open=true dnd=false"
+        }));
 
         let capabilities = serde_json::json!({
             "schema_version": 1,
@@ -5154,6 +5173,30 @@ fn health_output_lines(status: &serde_json::Value) -> Vec<String> {
             .map(|value| value.to_string())
             .unwrap_or_else(|| "-".into());
         lines.push(format!("pip: count={count} focused={focused_id}"));
+    }
+
+    if let Some(notifications) = status
+        .get("notifications")
+        .and_then(serde_json::Value::as_object)
+    {
+        let count = notifications
+            .get("count")
+            .and_then(|v| v.as_u64().or_else(|| v.as_i64().map(|n| n as u64)))
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".into());
+        let center_open = notifications
+            .get("center_open")
+            .and_then(serde_json::Value::as_bool)
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".into());
+        let do_not_disturb = notifications
+            .get("do_not_disturb")
+            .and_then(serde_json::Value::as_bool)
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".into());
+        lines.push(format!(
+            "notifications: count={count} center_open={center_open} dnd={do_not_disturb}"
+        ));
     }
 
     if let Some(reasons) = status["health"]["reasons"].as_array() {

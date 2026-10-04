@@ -15768,4 +15768,19 @@ mod tests {
         assert!(TOOLS.contains("get_status.pip"));
         assert!(DOCS.contains("`tools/README.md` health text names compact `pip`"));
     }
+
+    #[test]
+    fn evolve8h_wave_446_health_prints_compact_notifications() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains(
+            "notifications: count={count} center_open={center_open} dnd={do_not_disturb}"
+        ));
+        assert!(TOOL.contains(
+            "\"notifications: count=2 center_open=true dnd=false\""
+        ));
+        assert!(DOCS.contains(
+            "`jwm-tool health` prints compact `notifications` beside occupancy"
+        ));
+    }
 }
