@@ -389,9 +389,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 73 | compatibility 唯一 pin wave 73 power | ✓ |
 | 74 | compatibility 唯一 pin wave 74 media | ✓ |
 | 75 | compatibility 唯一 pin wave 75 clipboard | ✓ |
+| 76 | compatibility 唯一 pin wave 76 idle | ✓ |
 | … | evolve9h 进行中 |
 
 ---
+
+## 2026-10-04：evolve9h wave 76 — compatibility pin wave 76 idle
+
+选题 = evolve9h wave 76。compatibility 唯一句子 wave 76 `idle`。
 
 ## 2026-10-04：evolve9h wave 75 — compatibility pin wave 75 clipboard
 
