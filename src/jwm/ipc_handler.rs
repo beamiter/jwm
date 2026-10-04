@@ -20791,4 +20791,10 @@ mod tests {
         assert!(COMPAT.contains("evolve9h wave 159: Upgrade notes keep `capture` beside occupancy on the health page."));
     }
 
+    #[test]
+    fn evolve9h_wave_160_compat_unique_pin_waterlily() {
+        const COMPAT: &str = include_str!("../../docs/compatibility.md");
+        assert!(COMPAT.contains("evolve9h wave 160: Upgrade notes keep `waterlily` beside occupancy on the health page."));
+    }
+
 }
