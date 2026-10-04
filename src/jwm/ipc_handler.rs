@@ -17172,4 +17172,12 @@ mod tests {
         assert!(DOCS.contains("`docs/startup.md` names compact `wayland` beside health"));
     }
 
+    #[test]
+    fn evolve8h_wave_588_doc_support_bundles_names_compact_bench() {
+        const FEATURE: &str = include_str!("../../docs/support-bundles.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(FEATURE.contains("compact `bench`"));
+        assert!(DOCS.contains("`docs/support-bundles.md` names compact `bench` beside health"));
+    }
+
 }

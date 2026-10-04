@@ -724,3 +724,4 @@ README health text names compact `media`.
 `docs/calendar.md` names compact `system_ui` beside health.
 `docs/remote-control.md` names compact `session_lock` beside health.
 `docs/startup.md` names compact `wayland` beside health.
+`docs/support-bundles.md` names compact `bench` beside health.

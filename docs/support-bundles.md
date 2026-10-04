@@ -93,3 +93,5 @@ desktop-session identifiers.
 the same startup doctor when a built or installed `jwm` binary is available,
 but its device, kernel, and group listings are not intended to replace the
 privacy-aware support bundle for public issues.
+
+`jwm-tool health` prints compact `bench` for support bundles operators.

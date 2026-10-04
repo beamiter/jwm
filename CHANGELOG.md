@@ -718,6 +718,8 @@ monorepo use independent Semantic Versions.
 
 - `docs/startup.md` names compact `wayland` beside health.
 
+- `docs/support-bundles.md` names compact `bench` beside health.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
