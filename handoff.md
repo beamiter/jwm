@@ -1227,9 +1227,15 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 699 | monitor-lock 唯一 pin wave 699 connectivity | ✓ |
 | 700 | monitor-lock 唯一 pin wave 700 clipboard | ✓ |
 | 700 | monitor-lock 唯一 pin wave 700 clipboard | ✓ |
+| 701 | monitor-lock 唯一 pin wave 701 idle | ✓ |
+| 701 | monitor-lock 唯一 pin wave 701 idle | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 701 — monitor-lock pin wave 701 idle
+
+选题 = evolve8h wave 701。monitor-lock 唯一句子 wave 701 `idle`。
 
 ## 2026-10-03：evolve8h wave 700 — monitor-lock pin wave 700 clipboard
 

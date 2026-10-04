@@ -837,3 +837,4 @@ Wave 697: `get_bt` and health compact `bluetooth` share one Status nest.
 Wave 698: `get_res` and health compact `resources` share one Status nest.
 Wave 699: `get_conn` and health compact `connectivity` share one Status nest.
 Wave 700: `get_clip` and health compact `clipboard` share one Status nest.
+Wave 701: `get_idl` and health compact `idle` share one Status nest.

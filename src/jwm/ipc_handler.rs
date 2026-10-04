@@ -17966,4 +17966,10 @@ mod tests {
         assert!(DOCS.contains("Wave 700: `get_clip` and health compact `clipboard` share one Status nest."));
     }
 
+    #[test]
+    fn evolve8h_wave_701_monitor_lock_unique_pin_idle() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 701: `get_idl` and health compact `idle` share one Status nest."));
+    }
+
 }
