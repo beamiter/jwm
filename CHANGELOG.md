@@ -794,6 +794,8 @@ monorepo use independent Semantic Versions.
 
 - README health text names `get_fx` beside compact `effects`.
 
+- README health text names `get_mute` beside compact `mic`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

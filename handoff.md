@@ -1077,9 +1077,15 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 624 | README health 点名 get_wins beside compact windows | ✓ |
 | 625 | README health 点名 get_fx beside compact effects | ✓ |
 | 625 | README health 点名 get_fx beside compact effects | ✓ |
+| 626 | README health 点名 get_mute beside compact mic | ✓ |
+| 626 | README health 点名 get_mute beside compact mic | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 626 — README health names get_mute for mic
+
+选题 = evolve8h wave 626。README health 文本点名 `get_mute` beside compact `mic`。
 
 ## 2026-10-03：evolve8h wave 625 — README health names get_fx for effects
 
