@@ -265,3 +265,4 @@ evolve9h wave 41: Health compact `connectivity` is diagnosable through `jwm-tool
 evolve9h wave 42: Health compact `power` is diagnosable through `jwm-tool health`.
 evolve9h wave 43: Health compact `media` is diagnosable through `jwm-tool health`.
 evolve9h wave 44: Health compact `clipboard` is diagnosable through `jwm-tool health`.
+evolve9h wave 45: Health compact `idle` is diagnosable through `jwm-tool health`.
