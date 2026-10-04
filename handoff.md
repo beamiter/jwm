@@ -1105,9 +1105,15 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 638 | monitor-lock 唯一 pin wave 638 recording | ✓ |
 | 639 | monitor-lock 唯一 pin wave 639 audio_recording | ✓ |
 | 639 | monitor-lock 唯一 pin wave 639 audio_recording | ✓ |
+| 640 | monitor-lock 唯一 pin wave 640 capture | ✓ |
+| 640 | monitor-lock 唯一 pin wave 640 capture | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 640 — monitor-lock pin wave 640 capture
+
+选题 = evolve8h wave 640。monitor-lock 唯一句子 wave 640 `capture`。
 
 ## 2026-10-03：evolve8h wave 639 — monitor-lock pin wave 639 audio_recording
 

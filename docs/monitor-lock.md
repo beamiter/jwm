@@ -776,3 +776,4 @@ Wave 636: Health compact `gesture` is the operator twin of `get_gest`.
 Wave 637: Health compact `wayland` is the operator twin of `get_wl`.
 Wave 638: Health compact `recording` is the operator twin of `get_rec`.
 Wave 639: Health compact `audio_recording` is the operator twin of `get_arec`.
+Wave 640: Health compact `capture` is the operator twin of `get_cap`.
