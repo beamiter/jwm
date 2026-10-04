@@ -977,9 +977,15 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 574 | docs/wallpaper.md 点名 compact wallpaper | ✓ |
 | 575 | docs/waterlily.md 点名 compact waterlily | ✓ |
 | 575 | docs/waterlily.md 点名 compact waterlily | ✓ |
+| 576 | docs/hdr.md 点名 compact hdr | ✓ |
+| 576 | docs/hdr.md 点名 compact hdr | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 576 — docs/hdr.md names compact hdr
+
+选题 = evolve8h wave 576。`docs/hdr.md` 点名 health compact `hdr`。
 
 ## 2026-10-03：evolve8h wave 575 — docs/waterlily.md names compact waterlily
 

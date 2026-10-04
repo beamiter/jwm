@@ -17076,4 +17076,12 @@ mod tests {
         assert!(DOCS.contains("`docs/waterlily.md` names compact `waterlily` beside health"));
     }
 
+    #[test]
+    fn evolve8h_wave_576_doc_hdr_names_compact_hdr() {
+        const FEATURE: &str = include_str!("../../docs/hdr.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(FEATURE.contains("compact `hdr`"));
+        assert!(DOCS.contains("`docs/hdr.md` names compact `hdr` beside health"));
+    }
+
 }

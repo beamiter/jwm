@@ -229,3 +229,5 @@ than carrying it forward, and reports `null` until a replacement frame lands.
 - [compatibility.md](compatibility.md) — VRR, tearing, and the per-output
   presentation policy.
 - [performance.md](performance.md) — direct scanout and the frame loop.
+
+`jwm-tool health` prints compact `hdr` for hdr operators.

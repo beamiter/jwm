@@ -712,3 +712,4 @@ README health text names compact `media`.
 `docs/audio-recording.md` names compact `audio_recording` beside health.
 `docs/wallpaper.md` names compact `wallpaper` beside health.
 `docs/waterlily.md` names compact `waterlily` beside health.
+`docs/hdr.md` names compact `hdr` beside health.
