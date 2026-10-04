@@ -20395,4 +20395,10 @@ mod tests {
         assert!(COMPAT.contains("evolve9h wave 93: Support bundles should include `peek` when health is degraded."));
     }
 
+    #[test]
+    fn evolve9h_wave_94_compat_unique_pin_gesture() {
+        const COMPAT: &str = include_str!("../../docs/compatibility.md");
+        assert!(COMPAT.contains("evolve9h wave 94: Support bundles should include `gesture` when health is degraded."));
+    }
+
 }
