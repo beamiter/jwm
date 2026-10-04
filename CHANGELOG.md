@@ -1044,6 +1044,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 750: Doctor bundles include health compact `bluetooth` from `get_bt`.
 
+- Wave 751: Doctor bundles include health compact `resources` from `get_res`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
