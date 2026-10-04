@@ -20881,4 +20881,10 @@ mod tests {
         assert!(COMPAT.contains("evolve9h wave 174: Health compact `metrics` is diagnosable through `jwm-tool health`."));
     }
 
+    #[test]
+    fn evolve9h_wave_175_compat_unique_pin_ipc_caps() {
+        const COMPAT: &str = include_str!("../../docs/compatibility.md");
+        assert!(COMPAT.contains("evolve9h wave 175: Health compact `ipc_caps` is diagnosable through `jwm-tool health`."));
+    }
+
 }

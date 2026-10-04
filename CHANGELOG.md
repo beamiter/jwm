@@ -1892,6 +1892,8 @@ monorepo use independent Semantic Versions.
 
 - evolve9h wave 174: Health compact `metrics` is diagnosable through `jwm-tool health`.
 
+- evolve9h wave 175: Health compact `ipc_caps` is diagnosable through `jwm-tool health`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
