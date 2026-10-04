@@ -19154,4 +19154,10 @@ mod tests {
         assert!(DOCS.contains("Wave 898: Upgrade notes keep health compact `night_light` beside `get_nl`."));
     }
 
+    #[test]
+    fn evolve8h_wave_899_monitor_lock_unique_pin_magnifier() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 899: Upgrade notes keep health compact `magnifier` beside `get_mag`."));
+    }
+
 }
