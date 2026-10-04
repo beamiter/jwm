@@ -1418,6 +1418,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 937: Upgrade notes keep health compact `sticky` beside `get_status.sticky`.
 
+- Wave 938: Upgrade notes keep health compact `urgent` beside `get_status.urgent`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
