@@ -1063,3 +1063,4 @@ Wave 923: Upgrade notes keep health compact `monitors` beside `get_mons`.
 Wave 924: Upgrade notes keep health compact `workspaces` beside `get_ws`.
 Wave 925: Upgrade notes keep health compact `windows` beside `get_wins`.
 Wave 926: Upgrade notes keep health compact `effects` beside `get_fx`.
+Wave 927: Upgrade notes keep health compact `mic` beside `get_mute`.

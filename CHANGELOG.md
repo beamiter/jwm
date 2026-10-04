@@ -1396,6 +1396,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 926: Upgrade notes keep health compact `effects` beside `get_fx`.
 
+- Wave 927: Upgrade notes keep health compact `mic` beside `get_mute`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
