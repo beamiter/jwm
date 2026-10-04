@@ -412,3 +412,4 @@ evolve9h wave 188: Health compact `wayland` is diagnosable through `jwm-tool hea
 evolve9h wave 189: Health compact `recording` is diagnosable through `jwm-tool health`.
 evolve9h wave 190: Health compact `capture` is diagnosable through `jwm-tool health`.
 evolve9h wave 191: Health compact `waterlily` is diagnosable through `jwm-tool health`.
+evolve9h wave 192: Health compact `audio` is diagnosable through `jwm-tool health`.
