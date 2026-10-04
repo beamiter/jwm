@@ -19550,4 +19550,10 @@ mod tests {
         assert!(DOCS.contains("Wave 964: Compatibility tables name `get_conn` with health compact `connectivity`."));
     }
 
+    #[test]
+    fn evolve8h_wave_965_monitor_lock_unique_pin_clipboard() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 965: Compatibility tables name `get_clip` with health compact `clipboard`."));
+    }
+
 }

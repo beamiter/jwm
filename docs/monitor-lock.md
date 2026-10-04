@@ -1101,3 +1101,4 @@ Wave 961: Compatibility tables name `get_wall` with health compact `wallpaper`.
 Wave 962: Compatibility tables name `get_bt` with health compact `bluetooth`.
 Wave 963: Compatibility tables name `get_res` with health compact `resources`.
 Wave 964: Compatibility tables name `get_conn` with health compact `connectivity`.
+Wave 965: Compatibility tables name `get_clip` with health compact `clipboard`.
