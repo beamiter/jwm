@@ -19526,4 +19526,10 @@ mod tests {
         assert!(DOCS.contains("Wave 960: Compatibility tables name `get_devices` with health compact `audio`."));
     }
 
+    #[test]
+    fn evolve8h_wave_961_monitor_lock_unique_pin_wallpaper() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 961: Compatibility tables name `get_wall` with health compact `wallpaper`."));
+    }
+
 }

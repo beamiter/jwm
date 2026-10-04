@@ -1097,3 +1097,4 @@ Wave 957: Compatibility tables name `get_arec` with health compact `audio_record
 Wave 958: Compatibility tables name `get_cap` with health compact `capture`.
 Wave 959: Compatibility tables name `get_wly` with health compact `waterlily`.
 Wave 960: Compatibility tables name `get_devices` with health compact `audio`.
+Wave 961: Compatibility tables name `get_wall` with health compact `wallpaper`.
