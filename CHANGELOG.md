@@ -1318,6 +1318,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 887: Nested smoke checks health compact `pip` after `get_status.pip`.
 
+- Wave 888: Nested smoke checks health compact `blur` after `get_status.blur`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
