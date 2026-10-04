@@ -1689,9 +1689,15 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 930 | monitor-lock 唯一 pin wave 930 prev_layout | ✓ |
 | 931 | monitor-lock 唯一 pin wave 931 cfact | ✓ |
 | 931 | monitor-lock 唯一 pin wave 931 cfact | ✓ |
+| 932 | monitor-lock 唯一 pin wave 932 gaps | ✓ |
+| 932 | monitor-lock 唯一 pin wave 932 gaps | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 932 — monitor-lock pin wave 932 gaps
+
+选题 = evolve8h wave 932。monitor-lock 唯一句子 wave 932 `gaps`。
 
 ## 2026-10-03：evolve8h wave 931 — monitor-lock pin wave 931 cfact
 

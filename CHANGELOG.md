@@ -1406,6 +1406,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 931: Upgrade notes keep health compact `cfact` beside `get_cf`.
 
+- Wave 932: Upgrade notes keep health compact `gaps` beside `get_gap`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
