@@ -542,9 +542,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 226 | compatibility 唯一 pin wave 226 resources | ✓ |
 | 227 | compatibility 唯一 pin wave 227 connectivity | ✓ |
 | 228 | compatibility 唯一 pin wave 228 power | ✓ |
+| 229 | compatibility 唯一 pin wave 229 media | ✓ |
 | … | evolve9h 进行中 |
 
 ---
+
+## 2026-10-04：evolve9h wave 229 — compatibility pin wave 229 media
+
+选题 = evolve9h wave 229。compatibility 唯一句子 wave 229 `media`。
 
 ## 2026-10-04：evolve9h wave 228 — compatibility pin wave 228 power
 
