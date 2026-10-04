@@ -620,9 +620,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 304 | compatibility 唯一 pin wave 304 session_lock | ✓ |
 | 305 | compatibility 唯一 pin wave 305 tearing | ✓ |
 | 306 | compatibility 唯一 pin wave 306 xwayland | ✓ |
+| 307 | compatibility 唯一 pin wave 307 scrolling | ✓ |
 | … | evolve9h 进行中 |
 
 ---
+
+## 2026-10-04：evolve9h wave 307 — compatibility pin wave 307 scrolling
+
+选题 = evolve9h wave 307。compatibility 唯一句子 wave 307 `scrolling`。
 
 ## 2026-10-04：evolve9h wave 306 — compatibility pin wave 306 xwayland
 
