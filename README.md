@@ -195,6 +195,7 @@ It also prints a compact `struts` line from `get_status.struts` (`get_strut`).
 It also prints a compact `scratchpads` line from `get_status.scratchpads` (`get_pads`).
 It also prints a compact `focused` line from `get_status.focused` (`get_fw`).
 It also prints a compact `monitors` line from `get_status.monitors` (`get_mons`).
+It also prints a compact `workspaces` line from `get_status.workspaces` (`get_ws`).
 
 Malformed JSON, invalid argument types, overflow, empty spawn commands, unknown
 commands, and `{ "success": false }` responses produce a non-zero exit status,

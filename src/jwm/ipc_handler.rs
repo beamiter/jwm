@@ -15389,4 +15389,13 @@ mod tests {
             "`jwm-tool health` prints compact `workspaces` beside occupancy"
         ));
     }
+
+    #[test]
+    fn evolve8h_wave_406_readme_health_names_compact_workspaces() {
+        const README: &str = include_str!("../../README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(README.contains("compact `workspaces` line"));
+        assert!(README.contains("get_status.workspaces"));
+        assert!(DOCS.contains("README health text names compact `workspaces`"));
+    }
 }
