@@ -594,9 +594,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 278 | compatibility 唯一 pin wave 278 magnifier | ✓ |
 | 279 | compatibility 唯一 pin wave 279 peek | ✓ |
 | 280 | compatibility 唯一 pin wave 280 gesture | ✓ |
+| 281 | compatibility 唯一 pin wave 281 wayland | ✓ |
 | … | evolve9h 进行中 |
 
 ---
+
+## 2026-10-04：evolve9h wave 281 — compatibility pin wave 281 wayland
+
+选题 = evolve9h wave 281。compatibility 唯一句子 wave 281 `wayland`。
 
 ## 2026-10-04：evolve9h wave 280 — compatibility pin wave 280 gesture
 
