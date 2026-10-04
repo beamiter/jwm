@@ -1116,6 +1116,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 786: Doctor bundles include health compact `power` from `get_power`.
 
+- Wave 787: Support triage reads health compact `session_lock` before `get_lock` dumps.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

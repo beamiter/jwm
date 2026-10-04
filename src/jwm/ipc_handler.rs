@@ -18482,4 +18482,10 @@ mod tests {
         assert!(DOCS.contains("Wave 786: Doctor bundles include health compact `power` from `get_power`."));
     }
 
+    #[test]
+    fn evolve8h_wave_787_monitor_lock_unique_pin_session_lock() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 787: Support triage reads health compact `session_lock` before `get_lock` dumps."));
+    }
+
 }
