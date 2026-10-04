@@ -20473,4 +20473,10 @@ mod tests {
         assert!(COMPAT.contains("evolve9h wave 106: Support bundles should include `clipboard` when health is degraded."));
     }
 
+    #[test]
+    fn evolve9h_wave_107_compat_unique_pin_idle() {
+        const COMPAT: &str = include_str!("../../docs/compatibility.md");
+        assert!(COMPAT.contains("evolve9h wave 107: Support bundles should include `idle` when health is degraded."));
+    }
+
 }

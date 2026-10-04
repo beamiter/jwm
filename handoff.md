@@ -420,9 +420,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 104 | compatibility 唯一 pin wave 104 power | ✓ |
 | 105 | compatibility 唯一 pin wave 105 media | ✓ |
 | 106 | compatibility 唯一 pin wave 106 clipboard | ✓ |
+| 107 | compatibility 唯一 pin wave 107 idle | ✓ |
 | … | evolve9h 进行中 |
 
 ---
+
+## 2026-10-04：evolve9h wave 107 — compatibility pin wave 107 idle
+
+选题 = evolve9h wave 107。compatibility 唯一句子 wave 107 `idle`。
 
 ## 2026-10-04：evolve9h wave 106 — compatibility pin wave 106 clipboard
 
