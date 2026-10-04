@@ -20725,4 +20725,10 @@ mod tests {
         assert!(COMPAT.contains("evolve9h wave 148: Upgrade notes keep `window` beside occupancy on the health page."));
     }
 
+    #[test]
+    fn evolve9h_wave_149_compat_unique_pin_session_lock() {
+        const COMPAT: &str = include_str!("../../docs/compatibility.md");
+        assert!(COMPAT.contains("evolve9h wave 149: Upgrade notes keep `session_lock` beside occupancy on the health page."));
+    }
+
 }
