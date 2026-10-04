@@ -2108,6 +2108,8 @@ monorepo use independent Semantic Versions.
 
 - evolve9h wave 282: Nested smoke treats `recording` as a read-only IPC probe.
 
+- evolve9h wave 283: Nested smoke treats `capture` as a read-only IPC probe.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
