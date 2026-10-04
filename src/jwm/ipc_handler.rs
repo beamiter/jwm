@@ -21229,4 +21229,10 @@ mod tests {
         assert!(COMPAT.contains("evolve9h wave 232: `jwm-tool capabilities` remains the catalog for `notifications` query aliases."));
     }
 
+    #[test]
+    fn evolve9h_wave_233_compat_unique_pin_dnd() {
+        const COMPAT: &str = include_str!("../../docs/compatibility.md");
+        assert!(COMPAT.contains("evolve9h wave 233: `jwm-tool capabilities` remains the catalog for `dnd` query aliases."));
+    }
+
 }
