@@ -16061,4 +16061,14 @@ mod tests {
         assert!(TOOLS.contains("get_status.tearing"));
         assert!(DOCS.contains("`tools/README.md` health text names compact `tearing`"));
     }
+
+    #[test]
+    fn evolve8h_wave_475_capabilities_text_lists_tearing_aliases() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("query aliases: get_tearing,get_th -> get_tearing_hints"));
+        assert!(DOCS.contains(
+            "`jwm-tool capabilities` text lists `get_tearing,get_th -> get_tearing_hints`"
+        ));
+    }
 }
