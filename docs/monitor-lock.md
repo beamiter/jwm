@@ -629,3 +629,4 @@ README health text names compact `color_management`.
 README health text names compact `night_light`.
 `tools/README.md` health text names compact `night_light`.
 `jwm-tool capabilities` text lists `get_nl -> get_night_light`.
+`jwm-tool health` prints compact `magnifier` beside occupancy.

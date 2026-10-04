@@ -528,6 +528,8 @@ monorepo use independent Semantic Versions.
 
 - `jwm-tool capabilities` text lists `get_nl -> get_night_light`.
 
+- `jwm-tool health` prints compact `magnifier` beside occupancy.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

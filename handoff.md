@@ -811,9 +811,15 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 491 | tools/README health 点名 compact night_light | ✓ |
 | 492 | capabilities 文本列出 get_nl -> get_night_light | ✓ |
 | 492 | capabilities 文本列出 get_nl -> get_night_light | ✓ |
+| 493 | health 打印 compact magnifier | ✓ |
+| 493 | health 打印 compact magnifier | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 493 — health prints compact magnifier
+
+选题 = evolve8h wave 493。`jwm-tool health` 打印 compact `magnifier` 行。
 
 ## 2026-10-03：evolve8h wave 492 — capabilities text lists night_light alias
 

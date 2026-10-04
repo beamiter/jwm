@@ -16258,4 +16258,17 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn evolve8h_wave_493_health_prints_compact_magnifier() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains(
+            "magnifier: enabled={enabled} zoom={zoom} radius={radius}"
+        ));
+        assert!(TOOL.contains(
+            "\"magnifier: enabled=true zoom=2.5 radius=120\""
+        ));
+        assert!(DOCS.contains("`jwm-tool health` prints compact `magnifier` beside occupancy"));
+    }
+
 }

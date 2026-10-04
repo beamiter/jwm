@@ -4024,6 +4024,26 @@ mod tests {
             line == "night_light: active=true override=on temp=4500"
         }));
 
+        assert!(!night_light_lines
+            .iter()
+            .any(|line| line.starts_with("magnifier:")));
+
+        let with_compact_magnifier = serde_json::json!({
+            "health": {"status": "healthy", "reasons": []},
+            "counts": {"windows": 0, "monitors": 1, "workspaces": 1},
+            "config": {"path": "/tmp/config.toml", "diagnostics": {"error_count": 0, "warning_count": 0}},
+            "features": {},
+            "magnifier": {
+                "enabled": true,
+                "zoom": 2.5,
+                "radius": 120
+            }
+        });
+        let magnifier_lines = health_output_lines(&with_compact_magnifier);
+        assert!(magnifier_lines.iter().any(|line| {
+            line == "magnifier: enabled=true zoom=2.5 radius=120"
+        }));
+
         let capabilities = serde_json::json!({
             "schema_version": 1,
             "commands": ["focusstack", "reload_config"],
@@ -5684,6 +5704,27 @@ fn health_output_lines(status: &serde_json::Value) -> Vec<String> {
             .unwrap_or_else(|| "-".into());
         lines.push(format!(
             "night_light: active={active} override={override_v} temp={temp}"
+        ));
+    }
+
+    if let Some(magnifier) = status.get("magnifier").and_then(serde_json::Value::as_object) {
+        let enabled = magnifier
+            .get("enabled")
+            .and_then(serde_json::Value::as_bool)
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".into());
+        let zoom = magnifier
+            .get("zoom")
+            .and_then(|v| v.as_f64())
+            .map(|value| format!("{value}"))
+            .unwrap_or_else(|| "-".into());
+        let radius = magnifier
+            .get("radius")
+            .and_then(|v| v.as_u64().or_else(|| v.as_i64().map(|n| n as u64)))
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".into());
+        lines.push(format!(
+            "magnifier: enabled={enabled} zoom={zoom} radius={radius}"
         ));
     }
 
