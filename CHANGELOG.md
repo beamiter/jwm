@@ -509,6 +509,7 @@ monorepo use independent Semantic Versions.
 - README health text names compact `xwayland`.
 - `tools/README.md` health text names compact `xwayland`.
 - `jwm-tool capabilities` text lists `get_xwayland,get_xw -> get_xwayland_status`.
+- `jwm-tool health` prints compact `scrolling` beside occupancy.
 
 ### Changed
 

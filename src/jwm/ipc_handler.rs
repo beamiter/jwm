@@ -16114,4 +16114,15 @@ mod tests {
             "`jwm-tool capabilities` text lists `get_xwayland,get_xw -> get_xwayland_status`"
         ));
     }
+
+    #[test]
+    fn evolve8h_wave_480_health_prints_compact_scrolling() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains(
+            "scrolling: active_monitors={active_monitors} monitors={monitors}"
+        ));
+        assert!(TOOL.contains("\"scrolling: active_monitors=1 monitors=2\""));
+        assert!(DOCS.contains("`jwm-tool health` prints compact `scrolling` beside occupancy"));
+    }
 }
