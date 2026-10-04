@@ -20935,4 +20935,10 @@ mod tests {
         assert!(COMPAT.contains("evolve9h wave 183: Health compact `scrolling` is diagnosable through `jwm-tool health`."));
     }
 
+    #[test]
+    fn evolve9h_wave_184_compat_unique_pin_night_light() {
+        const COMPAT: &str = include_str!("../../docs/compatibility.md");
+        assert!(COMPAT.contains("evolve9h wave 184: Health compact `night_light` is diagnosable through `jwm-tool health`."));
+    }
+
 }
