@@ -1294,6 +1294,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 875: Nested smoke checks health compact `bench` after `get_bm`.
 
+- Wave 876: Nested smoke checks health compact `closed_placement` after `get_cp`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
