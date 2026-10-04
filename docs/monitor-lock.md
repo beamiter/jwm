@@ -830,3 +830,4 @@ Wave 690: `get_wl` and health compact `wayland` share one Status nest.
 Wave 691: `get_rec` and health compact `recording` share one Status nest.
 Wave 692: `get_arec` and health compact `audio_recording` share one Status nest.
 Wave 693: `get_cap` and health compact `capture` share one Status nest.
+Wave 694: `get_wly` and health compact `waterlily` share one Status nest.

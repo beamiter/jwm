@@ -17924,4 +17924,10 @@ mod tests {
         assert!(DOCS.contains("Wave 693: `get_cap` and health compact `capture` share one Status nest."));
     }
 
+    #[test]
+    fn evolve8h_wave_694_monitor_lock_unique_pin_waterlily() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 694: `get_wly` and health compact `waterlily` share one Status nest."));
+    }
+
 }

@@ -930,6 +930,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 693: `get_cap` and health compact `capture` share one Status nest.
 
+- Wave 694: `get_wly` and health compact `waterlily` share one Status nest.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
