@@ -16803,4 +16803,13 @@ mod tests {
         assert!(DOCS.contains("README health text names compact `connectivity`"));
     }
 
+    #[test]
+    fn evolve8h_wave_546_tools_readme_health_names_compact_connectivity() {
+        const TOOLS: &str = include_str!("../../tools/README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOLS.contains("compact `connectivity` line"));
+        assert!(TOOLS.contains("get_status.connectivity"));
+        assert!(DOCS.contains("`tools/README.md` health text names compact `connectivity`"));
+    }
+
 }

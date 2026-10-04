@@ -682,3 +682,4 @@ README health text names compact `resources`.
 `jwm-tool capabilities` text lists `get_res -> get_resources`.
 `jwm-tool health` prints compact `connectivity` beside occupancy.
 README health text names compact `connectivity`.
+`tools/README.md` health text names compact `connectivity`.
