@@ -3946,6 +3946,27 @@ mod tests {
         assert!(tearing_lines.iter().any(|line| {
             line == "tearing: active_surfaces=1 tearing_outputs=1 outputs=2"
         }));
+        assert!(!tearing_lines
+            .iter()
+            .any(|line| line.starts_with("xwayland:")));
+
+        let with_compact_xwayland = serde_json::json!({
+            "health": {"status": "healthy", "reasons": []},
+            "counts": {"windows": 0, "monitors": 1, "workspaces": 1},
+            "config": {"path": "/tmp/config.toml", "diagnostics": {"error_count": 0, "warning_count": 0}},
+            "features": {},
+            "xwayland": {
+                "available": true,
+                "wm_ready": true,
+                "display": ":2",
+                "mapped_window_count": 3,
+                "pending_association_count": 1
+            }
+        });
+        let xwayland_lines = health_output_lines(&with_compact_xwayland);
+        assert!(xwayland_lines.iter().any(|line| {
+            line == "xwayland: available=true wm_ready=true display=:2 mapped=3 pending=1"
+        }));
 
         let capabilities = serde_json::json!({
             "schema_version": 1,
@@ -5511,6 +5532,41 @@ fn health_output_lines(status: &serde_json::Value) -> Vec<String> {
             .unwrap_or_else(|| "-".into());
         lines.push(format!(
             "tearing: active_surfaces={active_surfaces} tearing_outputs={tearing_outputs} outputs={outputs}"
+        ));
+    }
+
+    if let Some(xwayland) = status.get("xwayland").and_then(serde_json::Value::as_object) {
+        let flag = |name: &str| {
+            xwayland
+                .get(name)
+                .and_then(serde_json::Value::as_bool)
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "-".into())
+        };
+        let display = xwayland
+            .get("display")
+            .and_then(|v| {
+                if v.is_null() {
+                    None
+                } else {
+                    v.as_str()
+                }
+            })
+            .unwrap_or("-");
+        let mapped = xwayland
+            .get("mapped_window_count")
+            .and_then(|v| v.as_u64().or_else(|| v.as_i64().map(|n| n as u64)))
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".into());
+        let pending = xwayland
+            .get("pending_association_count")
+            .and_then(|v| v.as_u64().or_else(|| v.as_i64().map(|n| n as u64)))
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".into());
+        lines.push(format!(
+            "xwayland: available={} wm_ready={} display={display} mapped={mapped} pending={pending}",
+            flag("available"),
+            flag("wm_ready")
         ));
     }
 

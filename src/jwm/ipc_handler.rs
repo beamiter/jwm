@@ -16071,4 +16071,17 @@ mod tests {
             "`jwm-tool capabilities` text lists `get_tearing,get_th -> get_tearing_hints`"
         ));
     }
+
+    #[test]
+    fn evolve8h_wave_476_health_prints_compact_xwayland() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains(
+            "xwayland: available={} wm_ready={} display={display} mapped={mapped} pending={pending}"
+        ));
+        assert!(TOOL.contains(
+            "\"xwayland: available=true wm_ready=true display=:2 mapped=3 pending=1\""
+        ));
+        assert!(DOCS.contains("`jwm-tool health` prints compact `xwayland` beside occupancy"));
+    }
 }
