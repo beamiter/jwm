@@ -20689,4 +20689,10 @@ mod tests {
         assert!(COMPAT.contains("evolve9h wave 142: Upgrade notes keep `version_info` beside occupancy on the health page."));
     }
 
+    #[test]
+    fn evolve9h_wave_143_compat_unique_pin_metrics() {
+        const COMPAT: &str = include_str!("../../docs/compatibility.md");
+        assert!(COMPAT.contains("evolve9h wave 143: Upgrade notes keep `metrics` beside occupancy on the health page."));
+    }
+
 }
