@@ -21067,4 +21067,10 @@ mod tests {
         assert!(COMPAT.contains("evolve9h wave 205: `jwm-tool capabilities` remains the catalog for `metrics` query aliases."));
     }
 
+    #[test]
+    fn evolve9h_wave_206_compat_unique_pin_ipc_caps() {
+        const COMPAT: &str = include_str!("../../docs/compatibility.md");
+        assert!(COMPAT.contains("evolve9h wave 206: `jwm-tool capabilities` remains the catalog for `ipc_caps` query aliases."));
+    }
+
 }
