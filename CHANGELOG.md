@@ -904,6 +904,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 680: Health compact `power` is the operator twin of `get_power`.
 
+- Wave 681: `get_lock` and health compact `session_lock` share one Status nest.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

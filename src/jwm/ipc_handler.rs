@@ -17846,4 +17846,10 @@ mod tests {
         assert!(DOCS.contains("Wave 680: Health compact `power` is the operator twin of `get_power`."));
     }
 
+    #[test]
+    fn evolve8h_wave_681_monitor_lock_unique_pin_session_lock() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 681: `get_lock` and health compact `session_lock` share one Status nest."));
+    }
+
 }
