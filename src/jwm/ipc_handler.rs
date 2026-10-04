@@ -17164,4 +17164,12 @@ mod tests {
         assert!(DOCS.contains("`docs/remote-control.md` names compact `session_lock` beside health"));
     }
 
+    #[test]
+    fn evolve8h_wave_587_doc_startup_names_compact_wayland() {
+        const FEATURE: &str = include_str!("../../docs/startup.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(FEATURE.contains("compact `wayland`"));
+        assert!(DOCS.contains("`docs/startup.md` names compact `wayland` beside health"));
+    }
+
 }

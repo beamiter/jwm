@@ -716,6 +716,8 @@ monorepo use independent Semantic Versions.
 
 - `docs/remote-control.md` names compact `session_lock` beside health.
 
+- `docs/startup.md` names compact `wayland` beside health.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

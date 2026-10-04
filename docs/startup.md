@@ -159,3 +159,5 @@ A JWM restart re-executes the current executable with the original OS-native
 arguments. This preserves command-line backend and benchmark options, supports
 non-UTF-8 argument values and avoids rebuilding an argument vector on every
 in-process fallback restart.
+
+`jwm-tool health` prints compact `wayland` for startup operators.
