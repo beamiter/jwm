@@ -918,3 +918,4 @@ Wave 778: Doctor bundles include health compact `sticky` from `get_status.sticky
 Wave 779: Doctor bundles include health compact `urgent` from `get_status.urgent`.
 Wave 780: Doctor bundles include health compact `fullscreen` from `get_status.fullscreen`.
 Wave 781: Doctor bundles include health compact `pip` from `get_status.pip`.
+Wave 782: Doctor bundles include health compact `blur` from `get_status.blur`.

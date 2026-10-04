@@ -1106,6 +1106,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 781: Doctor bundles include health compact `pip` from `get_status.pip`.
 
+- Wave 782: Doctor bundles include health compact `blur` from `get_status.blur`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
