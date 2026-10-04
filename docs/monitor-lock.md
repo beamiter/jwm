@@ -1000,3 +1000,4 @@ Wave 860: Nested smoke checks health compact `idle` after `get_idl`.
 Wave 861: Nested smoke checks health compact `notifications` after `get_notif`.
 Wave 862: Nested smoke checks health compact `dnd` after `get_dnd`.
 Wave 863: Nested smoke checks health compact `system_ui` after `get_ui`.
+Wave 864: Nested smoke checks health compact `layout` after `get_lt`.
