@@ -1079,3 +1079,4 @@ Wave 939: Upgrade notes keep health compact `fullscreen` beside `get_status.full
 Wave 940: Upgrade notes keep health compact `pip` beside `get_status.pip`.
 Wave 941: Upgrade notes keep health compact `blur` beside `get_status.blur`.
 Wave 942: Upgrade notes keep health compact `hdr` beside `get_status.hdr`.
+Wave 943: Upgrade notes keep health compact `expose` beside `get_status.expose`.

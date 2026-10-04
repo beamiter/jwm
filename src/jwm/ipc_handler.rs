@@ -19418,4 +19418,10 @@ mod tests {
         assert!(DOCS.contains("Wave 942: Upgrade notes keep health compact `hdr` beside `get_status.hdr`."));
     }
 
+    #[test]
+    fn evolve8h_wave_943_monitor_lock_unique_pin_expose() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 943: Upgrade notes keep health compact `expose` beside `get_status.expose`."));
+    }
+
 }

@@ -1428,6 +1428,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 942: Upgrade notes keep health compact `hdr` beside `get_status.hdr`.
 
+- Wave 943: Upgrade notes keep health compact `expose` beside `get_status.expose`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
