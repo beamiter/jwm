@@ -495,6 +495,7 @@ monorepo use independent Semantic Versions.
 - README health text names compact `idle`.
 - `tools/README.md` health text names compact `idle`.
 - `jwm-tool health` prints compact `clipboard` beside occupancy.
+- README health text names compact `clipboard`.
 
 ### Changed
 

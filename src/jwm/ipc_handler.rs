@@ -15971,4 +15971,13 @@ mod tests {
             "`jwm-tool health` prints compact `clipboard` beside occupancy"
         ));
     }
+
+    #[test]
+    fn evolve8h_wave_466_readme_health_names_compact_clipboard() {
+        const README: &str = include_str!("../../README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(README.contains("compact `clipboard` line"));
+        assert!(README.contains("get_status.clipboard"));
+        assert!(DOCS.contains("README health text names compact `clipboard`"));
+    }
 }

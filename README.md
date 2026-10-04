@@ -213,6 +213,7 @@ It also prints a compact `hdr` line from `get_status.hdr`.
 It also prints a compact `dnd` line from `get_status.dnd`.
 It also prints a compact `system_ui` line from `get_status.system_ui` (`get_ui`).
 It also prints a compact `idle` line from `get_status.idle`.
+It also prints a compact `clipboard` line from `get_status.clipboard`.
 
 Malformed JSON, invalid argument types, overflow, empty spawn commands, unknown
 commands, and `{ "success": false }` responses produce a non-zero exit status,
