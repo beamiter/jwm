@@ -3678,6 +3678,24 @@ mod tests {
         });
         let bench_lines = health_output_lines(&with_compact_bench);
         assert!(bench_lines.iter().any(|line| line == "bench: ready=false"));
+        assert!(!bench_lines
+            .iter()
+            .any(|line| line.starts_with("floating:")));
+
+        let with_compact_floating = serde_json::json!({
+            "health": {"status": "healthy", "reasons": []},
+            "counts": {"windows": 0, "monitors": 1, "workspaces": 1},
+            "config": {"path": "/tmp/config.toml", "diagnostics": {"error_count": 0, "warning_count": 0}},
+            "features": {},
+            "floating": {
+                "count": 3,
+                "focused_id": 11
+            }
+        });
+        let floating_lines = health_output_lines(&with_compact_floating);
+        assert!(floating_lines
+            .iter()
+            .any(|line| line == "floating: count=3 focused=11"));
 
         let capabilities = serde_json::json!({
             "schema_version": 1,
@@ -4928,6 +4946,26 @@ fn health_output_lines(status: &serde_json::Value) -> Vec<String> {
             .map(|value| value.to_string())
             .unwrap_or_else(|| "-".into());
         lines.push(format!("bench: ready={ready}"));
+    }
+
+    if let Some(floating) = status.get("floating").and_then(serde_json::Value::as_object) {
+        let count = floating
+            .get("count")
+            .and_then(|v| v.as_u64().or_else(|| v.as_i64().map(|n| n as u64)))
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".into());
+        let focused_id = floating
+            .get("focused_id")
+            .and_then(|v| {
+                if v.is_null() {
+                    None
+                } else {
+                    v.as_u64().or_else(|| v.as_i64().map(|n| n as u64))
+                }
+            })
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".into());
+        lines.push(format!("floating: count={count} focused={focused_id}"));
     }
 
     if let Some(reasons) = status["health"]["reasons"].as_array() {

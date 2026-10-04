@@ -741,9 +741,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 425 | README health 点名 compact bench | ✓ |
 | 426 | tools/README health 点名 compact bench | ✓ |
 | 427 | capabilities 文本列出 get_bench,get_bm -> benchmark_report | ✓ |
+| 428 | health 打印 compact floating | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 428 — health prints compact floating
+
+选题 = evolve8h wave 428。`jwm-tool health` 打印 compact `floating` 行。
 
 ## 2026-10-03：evolve8h wave 427 — capabilities text lists bench aliases
 

@@ -15604,4 +15604,13 @@ mod tests {
             "`jwm-tool capabilities` text lists `get_bench,get_bm -> benchmark_report`"
         ));
     }
+
+    #[test]
+    fn evolve8h_wave_428_health_prints_compact_floating() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("floating: count={count} focused={focused_id}"));
+        assert!(TOOL.contains("\"floating: count=3 focused=11\""));
+        assert!(DOCS.contains("`jwm-tool health` prints compact `floating` beside occupancy"));
+    }
 }
