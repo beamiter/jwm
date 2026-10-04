@@ -21835,4 +21835,10 @@ mod tests {
         assert!(COMPAT.contains("evolve9h wave 333: Health compact `tree` is diagnosable through `jwm-tool health`."));
     }
 
+    #[test]
+    fn evolve9h_wave_334_compat_unique_pin_window() {
+        const COMPAT: &str = include_str!("../../docs/compatibility.md");
+        assert!(COMPAT.contains("evolve9h wave 334: Health compact `window` is diagnosable through `jwm-tool health`."));
+    }
+
 }
