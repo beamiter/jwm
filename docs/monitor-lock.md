@@ -888,3 +888,4 @@ Wave 748: Doctor bundles include health compact `audio` from `get_devices`.
 Wave 749: Doctor bundles include health compact `wallpaper` from `get_wall`.
 Wave 750: Doctor bundles include health compact `bluetooth` from `get_bt`.
 Wave 751: Doctor bundles include health compact `resources` from `get_res`.
+Wave 752: Doctor bundles include health compact `connectivity` from `get_conn`.

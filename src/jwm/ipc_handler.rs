@@ -18272,4 +18272,10 @@ mod tests {
         assert!(DOCS.contains("Wave 751: Doctor bundles include health compact `resources` from `get_res`."));
     }
 
+    #[test]
+    fn evolve8h_wave_752_monitor_lock_unique_pin_connectivity() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 752: Doctor bundles include health compact `connectivity` from `get_conn`."));
+    }
+
 }
