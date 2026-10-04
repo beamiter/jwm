@@ -146,6 +146,7 @@ It also prints a compact `bluetooth` line from `get_status.bluetooth`.
 It also prints a compact `resources` line from `get_status.resources`.
 It also prints a compact `connectivity` line from `get_status.connectivity`.
 It also prints a compact `power` line from `get_status.power`.
+It also prints a compact `media` line from `get_status.media`.
 
 IPC 使用换行分隔的 JSON。工具按块读取并保留同一批到达的后续消息，
 每条响应的正文上限为 1 MiB。普通响应和订阅确认须在开始读取后 5 秒内
