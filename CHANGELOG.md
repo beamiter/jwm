@@ -1190,6 +1190,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 823: Support triage reads health compact `closed_placement` before `get_cp` dumps.
 
+- Wave 824: Support triage reads health compact `prev_layout` before `get_pl` dumps.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

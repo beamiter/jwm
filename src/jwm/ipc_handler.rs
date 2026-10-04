@@ -18704,4 +18704,10 @@ mod tests {
         assert!(DOCS.contains("Wave 823: Support triage reads health compact `closed_placement` before `get_cp` dumps."));
     }
 
+    #[test]
+    fn evolve8h_wave_824_monitor_lock_unique_pin_prev_layout() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 824: Support triage reads health compact `prev_layout` before `get_pl` dumps."));
+    }
+
 }
