@@ -696,3 +696,4 @@ README health text names compact `media`.
 `jwm-tool capabilities` text lists `get_dnd -> get_do_not_disturb`.
 `jwm-tool capabilities` text lists `get_pair -> get_bluetooth`.
 `jwm-tool capabilities` text lists `get_conn -> get_connectivity`.
+`jwm-tool capabilities` text lists `get_power -> get_power_status`.

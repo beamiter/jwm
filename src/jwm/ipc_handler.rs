@@ -16944,4 +16944,14 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn evolve8h_wave_560_capabilities_text_lists_power_alias() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("query aliases: get_power -> get_power_status"));
+        assert!(DOCS.contains(
+            "`jwm-tool capabilities` text lists `get_power -> get_power_status`"
+        ));
+    }
+
 }
