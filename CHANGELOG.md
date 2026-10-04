@@ -1334,6 +1334,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 895: Upgrade notes keep health compact `xwayland` beside `get_xw`.
 
+- Wave 896: Upgrade notes keep health compact `scrolling` beside `get_scroll`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

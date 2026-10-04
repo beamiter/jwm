@@ -1032,3 +1032,4 @@ Wave 892: Nested smoke checks health compact `power` after `get_power`.
 Wave 893: Upgrade notes keep health compact `session_lock` beside `get_lock`.
 Wave 894: Upgrade notes keep health compact `tearing` beside `get_th`.
 Wave 895: Upgrade notes keep health compact `xwayland` beside `get_xw`.
+Wave 896: Upgrade notes keep health compact `scrolling` beside `get_scroll`.
