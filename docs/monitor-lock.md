@@ -808,3 +808,4 @@ Wave 668: Health compact `mfact` is the operator twin of `get_mf`.
 Wave 669: Health compact `nmaster` is the operator twin of `get_nm`.
 Wave 670: Health compact `floating` is the operator twin of `get_status.floating`.
 Wave 671: Health compact `minimized` is the operator twin of `get_status.minimized`.
+Wave 672: Health compact `sticky` is the operator twin of `get_status.sticky`.

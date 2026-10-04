@@ -17792,4 +17792,10 @@ mod tests {
         assert!(DOCS.contains("Wave 671: Health compact `minimized` is the operator twin of `get_status.minimized`."));
     }
 
+    #[test]
+    fn evolve8h_wave_672_monitor_lock_unique_pin_sticky() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 672: Health compact `sticky` is the operator twin of `get_status.sticky`."));
+    }
+
 }

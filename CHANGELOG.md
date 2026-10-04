@@ -886,6 +886,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 671: Health compact `minimized` is the operator twin of `get_status.minimized`.
 
+- Wave 672: Health compact `sticky` is the operator twin of `get_status.sticky`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
