@@ -464,3 +464,4 @@ evolve9h wave 240: Support bundles should include `tree` when health is degraded
 evolve9h wave 241: Support bundles should include `window` when health is degraded.
 evolve9h wave 242: Support bundles should include `session_lock` when health is degraded.
 evolve9h wave 243: Support bundles should include `tearing` when health is degraded.
+evolve9h wave 244: Support bundles should include `xwayland` when health is degraded.
