@@ -329,9 +329,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 13 | capabilities 文本列出 get_cfg -> get_config_status | ✓ |
 | 14 | capabilities 文本列出 get_conf -> get_config | ✓ |
 | 15 | capabilities 文本列出 get_st -> get_status | ✓ |
+| 16 | capabilities 文本列出 get_tr -> get_tree | ✓ |
 | … | evolve9h 进行中 |
 
 ---
+
+## 2026-10-04：evolve9h wave 16 — capabilities text lists tree alias
+
+选题 = evolve9h wave 16。`jwm-tool capabilities` 文本列出 `get_tr -> get_tree`。
 
 ## 2026-10-04：evolve9h wave 15 — capabilities text lists status alias
 

@@ -6456,6 +6456,7 @@ fn capabilities_output_lines(capabilities: &serde_json::Value) -> Vec<String> {
         "query aliases: get_cfg -> get_config_status".to_string(),
         "query aliases: get_conf -> get_config".to_string(),
         "query aliases: get_st -> get_status".to_string(),
+        "query aliases: get_tr -> get_tree".to_string(),
     ]
 }
 

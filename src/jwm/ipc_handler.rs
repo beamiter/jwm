@@ -19919,4 +19919,14 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn evolve9h_wave_16_capabilities_text_lists_tree_alias() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("query aliases: get_tr -> get_tree"));
+        assert!(DOCS.contains(
+            "`jwm-tool capabilities` text lists `get_tr -> get_tree`"
+        ));
+    }
+
 }
