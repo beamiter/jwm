@@ -21145,4 +21145,10 @@ mod tests {
         assert!(COMPAT.contains("evolve9h wave 218: `jwm-tool capabilities` remains the catalog for `gesture` query aliases."));
     }
 
+    #[test]
+    fn evolve9h_wave_219_compat_unique_pin_wayland() {
+        const COMPAT: &str = include_str!("../../docs/compatibility.md");
+        assert!(COMPAT.contains("evolve9h wave 219: `jwm-tool capabilities` remains the catalog for `wayland` query aliases."));
+    }
+
 }
