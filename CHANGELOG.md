@@ -792,6 +792,8 @@ monorepo use independent Semantic Versions.
 
 - README health text names `get_wins` beside compact `windows`.
 
+- README health text names `get_fx` beside compact `effects`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
