@@ -19052,4 +19052,10 @@ mod tests {
         assert!(DOCS.contains("Wave 881: Nested smoke checks health compact `nmaster` after `get_nm`."));
     }
 
+    #[test]
+    fn evolve8h_wave_882_monitor_lock_unique_pin_floating() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 882: Nested smoke checks health compact `floating` after `get_status.floating`."));
+    }
+
 }

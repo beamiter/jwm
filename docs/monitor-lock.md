@@ -1018,3 +1018,4 @@ Wave 878: Nested smoke checks health compact `cfact` after `get_cf`.
 Wave 879: Nested smoke checks health compact `gaps` after `get_gap`.
 Wave 880: Nested smoke checks health compact `mfact` after `get_mf`.
 Wave 881: Nested smoke checks health compact `nmaster` after `get_nm`.
+Wave 882: Nested smoke checks health compact `floating` after `get_status.floating`.
