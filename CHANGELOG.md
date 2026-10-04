@@ -618,6 +618,8 @@ monorepo use independent Semantic Versions.
 
 - README health text names compact `bluetooth`.
 
+- `tools/README.md` health text names compact `bluetooth`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
