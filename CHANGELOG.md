@@ -2004,6 +2004,8 @@ monorepo use independent Semantic Versions.
 
 - evolve9h wave 230: `jwm-tool capabilities` remains the catalog for `clipboard` query aliases.
 
+- evolve9h wave 231: `jwm-tool capabilities` remains the catalog for `idle` query aliases.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

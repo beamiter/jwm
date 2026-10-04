@@ -21217,4 +21217,10 @@ mod tests {
         assert!(COMPAT.contains("evolve9h wave 230: `jwm-tool capabilities` remains the catalog for `clipboard` query aliases."));
     }
 
+    #[test]
+    fn evolve9h_wave_231_compat_unique_pin_idle() {
+        const COMPAT: &str = include_str!("../../docs/compatibility.md");
+        assert!(COMPAT.contains("evolve9h wave 231: `jwm-tool capabilities` remains the catalog for `idle` query aliases."));
+    }
+
 }
