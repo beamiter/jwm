@@ -1502,6 +1502,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 979: Compatibility tables name `get_fx` with health compact `effects`.
 
+- Wave 980: Compatibility tables name `get_mute` with health compact `mic`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

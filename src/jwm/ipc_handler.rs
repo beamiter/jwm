@@ -19640,4 +19640,10 @@ mod tests {
         assert!(DOCS.contains("Wave 979: Compatibility tables name `get_fx` with health compact `effects`."));
     }
 
+    #[test]
+    fn evolve8h_wave_980_monitor_lock_unique_pin_mic() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 980: Compatibility tables name `get_mute` with health compact `mic`."));
+    }
+
 }

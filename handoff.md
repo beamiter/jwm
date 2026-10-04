@@ -1785,9 +1785,15 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 978 | monitor-lock 唯一 pin wave 978 windows | ✓ |
 | 979 | monitor-lock 唯一 pin wave 979 effects | ✓ |
 | 979 | monitor-lock 唯一 pin wave 979 effects | ✓ |
+| 980 | monitor-lock 唯一 pin wave 980 mic | ✓ |
+| 980 | monitor-lock 唯一 pin wave 980 mic | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 980 — monitor-lock pin wave 980 mic
+
+选题 = evolve8h wave 980。monitor-lock 唯一句子 wave 980 `mic`。
 
 ## 2026-10-03：evolve8h wave 979 — monitor-lock pin wave 979 effects
 
