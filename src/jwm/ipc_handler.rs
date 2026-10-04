@@ -16988,4 +16988,12 @@ mod tests {
         assert!(DOCS.contains("`docs/window-switcher.md` names compact `selected` beside health"));
     }
 
+    #[test]
+    fn evolve8h_wave_565_doc_layout_picker_names_compact_layout() {
+        const FEATURE: &str = include_str!("../../docs/layout-picker.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(FEATURE.contains("compact `layout`"));
+        assert!(DOCS.contains("`docs/layout-picker.md` names compact `layout` beside health"));
+    }
+
 }

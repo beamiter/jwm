@@ -111,3 +111,5 @@ which emits `monitor/bar` so occupancy subscribers see `layout` /
 - `backend/compositor_common/layout_strip.rs` — the strip's geometry, shared by
   both compositors and by the window manager's hit test, which is why a click
   lands on the cell it looks like it lands on.
+
+`jwm-tool health` prints compact `layout` for layout picker operators.

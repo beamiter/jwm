@@ -701,3 +701,4 @@ README health text names compact `media`.
 `docs/expose.md` names compact `expose` beside health.
 `docs/tags-overview.md` names compact `tabs` beside health.
 `docs/window-switcher.md` names compact `selected` beside health.
+`docs/layout-picker.md` names compact `layout` beside health.

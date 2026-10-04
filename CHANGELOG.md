@@ -672,6 +672,8 @@ monorepo use independent Semantic Versions.
 
 - `docs/window-switcher.md` names compact `selected` beside health.
 
+- `docs/layout-picker.md` names compact `layout` beside health.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
