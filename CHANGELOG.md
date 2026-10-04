@@ -524,6 +524,8 @@ monorepo use independent Semantic Versions.
 
 - README health text names compact `night_light`.
 
+- `tools/README.md` health text names compact `night_light`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

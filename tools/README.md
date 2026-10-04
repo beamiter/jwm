@@ -130,6 +130,7 @@ It also prints a compact `tearing` line from `get_status.tearing`.
 It also prints a compact `xwayland` line from `get_status.xwayland`.
 It also prints a compact `scrolling` line from `get_status.scrolling`.
 It also prints a compact `color_management` line from `get_status.color_management`.
+It also prints a compact `night_light` line from `get_status.night_light`.
 
 IPC 使用换行分隔的 JSON。工具按块读取并保留同一批到达的后续消息，
 每条响应的正文上限为 1 MiB。普通响应和订阅确认须在开始读取后 5 秒内

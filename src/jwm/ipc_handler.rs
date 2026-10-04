@@ -16239,4 +16239,13 @@ mod tests {
         assert!(DOCS.contains("README health text names compact `night_light`"));
     }
 
+    #[test]
+    fn evolve8h_wave_491_tools_readme_health_names_compact_night_light() {
+        const TOOLS: &str = include_str!("../../tools/README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOLS.contains("compact `night_light` line"));
+        assert!(TOOLS.contains("get_status.night_light"));
+        assert!(DOCS.contains("`tools/README.md` health text names compact `night_light`"));
+    }
+
 }
