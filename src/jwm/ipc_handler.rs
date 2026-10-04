@@ -18782,4 +18782,10 @@ mod tests {
         assert!(DOCS.contains("Wave 836: Support triage reads health compact `hdr` before `get_status.hdr` dumps."));
     }
 
+    #[test]
+    fn evolve8h_wave_837_monitor_lock_unique_pin_expose() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 837: Support triage reads health compact `expose` before `get_status.expose` dumps."));
+    }
+
 }

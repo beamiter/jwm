@@ -1216,6 +1216,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 836: Support triage reads health compact `hdr` before `get_status.hdr` dumps.
 
+- Wave 837: Support triage reads health compact `expose` before `get_status.expose` dumps.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
