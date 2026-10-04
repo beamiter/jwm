@@ -779,3 +779,4 @@ Wave 639: Health compact `audio_recording` is the operator twin of `get_arec`.
 Wave 640: Health compact `capture` is the operator twin of `get_cap`.
 Wave 641: Health compact `waterlily` is the operator twin of `get_wly`.
 Wave 642: Health compact `audio` is the operator twin of `get_devices`.
+Wave 643: Health compact `wallpaper` is the operator twin of `get_wall`.

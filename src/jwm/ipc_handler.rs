@@ -17618,4 +17618,10 @@ mod tests {
         assert!(DOCS.contains("Wave 642: Health compact `audio` is the operator twin of `get_devices`."));
     }
 
+    #[test]
+    fn evolve8h_wave_643_monitor_lock_unique_pin_wallpaper() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 643: Health compact `wallpaper` is the operator twin of `get_wall`."));
+    }
+
 }
