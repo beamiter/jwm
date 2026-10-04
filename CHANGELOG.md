@@ -1102,6 +1102,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 779: Doctor bundles include health compact `urgent` from `get_status.urgent`.
 
+- Wave 780: Doctor bundles include health compact `fullscreen` from `get_status.fullscreen`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
