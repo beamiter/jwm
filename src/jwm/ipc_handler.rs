@@ -18872,4 +18872,10 @@ mod tests {
         assert!(DOCS.contains("Wave 851: Nested smoke checks health compact `audio_recording` after `get_arec`."));
     }
 
+    #[test]
+    fn evolve8h_wave_852_monitor_lock_unique_pin_capture() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 852: Nested smoke checks health compact `capture` after `get_cap`."));
+    }
+
 }
