@@ -408,9 +408,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 92 | compatibility 唯一 pin wave 92 magnifier | ✓ |
 | 93 | compatibility 唯一 pin wave 93 peek | ✓ |
 | 94 | compatibility 唯一 pin wave 94 gesture | ✓ |
+| 95 | compatibility 唯一 pin wave 95 wayland | ✓ |
 | … | evolve9h 进行中 |
 
 ---
+
+## 2026-10-04：evolve9h wave 95 — compatibility pin wave 95 wayland
+
+选题 = evolve9h wave 95。compatibility 唯一句子 wave 95 `wayland`。
 
 ## 2026-10-04：evolve9h wave 94 — compatibility pin wave 94 gesture
 
