@@ -20377,4 +20377,10 @@ mod tests {
         assert!(COMPAT.contains("evolve9h wave 90: Support bundles should include `scrolling` when health is degraded."));
     }
 
+    #[test]
+    fn evolve9h_wave_91_compat_unique_pin_night_light() {
+        const COMPAT: &str = include_str!("../../docs/compatibility.md");
+        assert!(COMPAT.contains("evolve9h wave 91: Support bundles should include `night_light` when health is degraded."));
+    }
+
 }

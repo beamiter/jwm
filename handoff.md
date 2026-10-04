@@ -404,9 +404,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 88 | compatibility 唯一 pin wave 88 tearing | ✓ |
 | 89 | compatibility 唯一 pin wave 89 xwayland | ✓ |
 | 90 | compatibility 唯一 pin wave 90 scrolling | ✓ |
+| 91 | compatibility 唯一 pin wave 91 night_light | ✓ |
 | … | evolve9h 进行中 |
 
 ---
+
+## 2026-10-04：evolve9h wave 91 — compatibility pin wave 91 night_light
+
+选题 = evolve9h wave 91。compatibility 唯一句子 wave 91 `night_light`。
 
 ## 2026-10-04：evolve9h wave 90 — compatibility pin wave 90 scrolling
 
