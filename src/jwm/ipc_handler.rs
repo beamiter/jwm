@@ -17348,4 +17348,13 @@ mod tests {
         assert!(DOCS.contains("README health text names `get_wall` beside compact `wallpaper`"));
     }
 
+    #[test]
+    fn evolve8h_wave_608_readme_health_names_get_bt_for_bluetooth() {
+        const README: &str = include_str!("../../README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(README.contains("`get_bt`"));
+        assert!(README.contains("compact `bluetooth` line"));
+        assert!(DOCS.contains("README health text names `get_bt` beside compact `bluetooth`"));
+    }
+
 }
