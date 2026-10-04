@@ -1008,6 +1008,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 732: `get_media` and health compact `media` share one Status nest.
 
+- Wave 733: `get_power` and health compact `power` share one Status nest.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
