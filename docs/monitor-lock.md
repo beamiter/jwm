@@ -901,3 +901,4 @@ Wave 761: Doctor bundles include health compact `struts` from `get_strut`.
 Wave 762: Doctor bundles include health compact `scratchpads` from `get_pads`.
 Wave 763: Doctor bundles include health compact `focused` from `get_fw`.
 Wave 764: Doctor bundles include health compact `monitors` from `get_mons`.
+Wave 765: Doctor bundles include health compact `workspaces` from `get_ws`.
