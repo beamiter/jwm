@@ -16020,4 +16020,14 @@ mod tests {
         assert!(TOOLS.contains("get_status.session_lock"));
         assert!(DOCS.contains("`tools/README.md` health text names compact `session_lock`"));
     }
+
+    #[test]
+    fn evolve8h_wave_471_capabilities_text_lists_session_lock_aliases() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("query aliases: get_lock,get_sess -> get_session_lock"));
+        assert!(DOCS.contains(
+            "`jwm-tool capabilities` text lists `get_lock,get_sess -> get_session_lock`"
+        ));
+    }
 }
