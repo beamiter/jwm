@@ -19939,4 +19939,10 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn evolve9h_wave_18_compat_unique_pin_version_info() {
+        const COMPAT: &str = include_str!("../../docs/compatibility.md");
+        assert!(COMPAT.contains("evolve9h wave 18: Health compact `version_info` is diagnosable through `jwm-tool health`."));
+    }
+
 }

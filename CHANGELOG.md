@@ -1578,6 +1578,8 @@ monorepo use independent Semantic Versions.
 
 - `jwm-tool capabilities` text lists `get_win -> get_window`.
 
+- evolve9h wave 18: Health compact `version_info` is diagnosable through `jwm-tool health`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
