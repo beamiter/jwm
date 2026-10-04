@@ -640,9 +640,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 324 | compatibility 唯一 pin wave 324 idle | ✓ |
 | 325 | compatibility 唯一 pin wave 325 notifications | ✓ |
 | 326 | compatibility 唯一 pin wave 326 dnd | ✓ |
+| 327 | compatibility 唯一 pin wave 327 system_ui | ✓ |
 | … | evolve9h 进行中 |
 
 ---
+
+## 2026-10-04：evolve9h wave 327 — compatibility pin wave 327 system_ui
+
+选题 = evolve9h wave 327。compatibility 唯一句子 wave 327 `system_ui`。
 
 ## 2026-10-04：evolve9h wave 326 — compatibility pin wave 326 dnd
 

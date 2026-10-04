@@ -2196,6 +2196,8 @@ monorepo use independent Semantic Versions.
 
 - evolve9h wave 326: Upgrade notes keep `dnd` beside occupancy on the health page.
 
+- evolve9h wave 327: Upgrade notes keep `system_ui` beside occupancy on the health page.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
