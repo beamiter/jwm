@@ -1559,9 +1559,15 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 865 | monitor-lock 唯一 pin wave 865 tabs | ✓ |
 | 866 | monitor-lock 唯一 pin wave 866 selected | ✓ |
 | 866 | monitor-lock 唯一 pin wave 866 selected | ✓ |
+| 867 | monitor-lock 唯一 pin wave 867 struts | ✓ |
+| 867 | monitor-lock 唯一 pin wave 867 struts | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 867 — monitor-lock pin wave 867 struts
+
+选题 = evolve8h wave 867。monitor-lock 唯一句子 wave 867 `struts`。
 
 ## 2026-10-03：evolve8h wave 866 — monitor-lock pin wave 866 selected
 

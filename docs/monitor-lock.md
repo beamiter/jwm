@@ -1003,3 +1003,4 @@ Wave 863: Nested smoke checks health compact `system_ui` after `get_ui`.
 Wave 864: Nested smoke checks health compact `layout` after `get_lt`.
 Wave 865: Nested smoke checks health compact `tabs` after `get_tab`.
 Wave 866: Nested smoke checks health compact `selected` after `get_sel`.
+Wave 867: Nested smoke checks health compact `struts` after `get_strut`.
