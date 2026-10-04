@@ -17492,4 +17492,13 @@ mod tests {
         assert!(DOCS.contains("README health text names `get_ws` beside compact `workspaces`"));
     }
 
+    #[test]
+    fn evolve8h_wave_624_readme_health_names_get_wins_for_windows() {
+        const README: &str = include_str!("../../README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(README.contains("`get_wins`"));
+        assert!(README.contains("compact `windows` line"));
+        assert!(DOCS.contains("README health text names `get_wins` beside compact `windows`"));
+    }
+
 }

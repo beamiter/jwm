@@ -760,3 +760,4 @@ README health text names `get_pads` beside compact `scratchpads`.
 README health text names `get_fw` beside compact `focused`.
 README health text names `get_mons` beside compact `monitors`.
 README health text names `get_ws` beside compact `workspaces`.
+README health text names `get_wins` beside compact `windows`.
