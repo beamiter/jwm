@@ -17930,4 +17930,10 @@ mod tests {
         assert!(DOCS.contains("Wave 694: `get_wly` and health compact `waterlily` share one Status nest."));
     }
 
+    #[test]
+    fn evolve8h_wave_695_monitor_lock_unique_pin_audio() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 695: `get_devices` and health compact `audio` share one Status nest."));
+    }
+
 }

@@ -932,6 +932,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 694: `get_wly` and health compact `waterlily` share one Status nest.
 
+- Wave 695: `get_devices` and health compact `audio` share one Status nest.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
