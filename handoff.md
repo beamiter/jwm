@@ -1567,9 +1567,15 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 869 | monitor-lock 唯一 pin wave 869 focused | ✓ |
 | 870 | monitor-lock 唯一 pin wave 870 monitors | ✓ |
 | 870 | monitor-lock 唯一 pin wave 870 monitors | ✓ |
+| 871 | monitor-lock 唯一 pin wave 871 workspaces | ✓ |
+| 871 | monitor-lock 唯一 pin wave 871 workspaces | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 871 — monitor-lock pin wave 871 workspaces
+
+选题 = evolve8h wave 871。monitor-lock 唯一句子 wave 871 `workspaces`。
 
 ## 2026-10-03：evolve8h wave 870 — monitor-lock pin wave 870 monitors
 
