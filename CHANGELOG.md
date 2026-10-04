@@ -447,6 +447,7 @@ monorepo use independent Semantic Versions.
 - `tools/README.md` health text names compact `tree`.
 - `jwm-tool health` prints compact `effects` beside occupancy.
 - README health text names compact `effects`.
+- `tools/README.md` health text names compact `effects`.
 
 ### Changed
 

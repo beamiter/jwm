@@ -109,6 +109,7 @@ It also prints a compact `monitors` line from `get_status.monitors` (`get_mons`)
 It also prints a compact `workspaces` line from `get_status.workspaces` (`get_ws`).
 It also prints a compact `windows` line from `get_status.windows` (`get_wins`).
 It also prints a compact `tree` line from `get_status.tree` (`get_tree`).
+It also prints a compact `effects` line from `get_status.effects` (`get_fx`).
 
 IPC 使用换行分隔的 JSON。工具按块读取并保留同一批到达的后续消息，
 每条响应的正文上限为 1 MiB。普通响应和订阅确认须在开始读取后 5 秒内
