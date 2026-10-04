@@ -18860,4 +18860,10 @@ mod tests {
         assert!(DOCS.contains("Wave 849: Nested smoke checks health compact `wayland` after `get_wl`."));
     }
 
+    #[test]
+    fn evolve8h_wave_850_monitor_lock_unique_pin_recording() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 850: Nested smoke checks health compact `recording` after `get_rec`."));
+    }
+
 }

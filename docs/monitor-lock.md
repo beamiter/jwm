@@ -986,3 +986,4 @@ Wave 846: Nested smoke checks health compact `magnifier` after `get_mag`.
 Wave 847: Nested smoke checks health compact `peek` after `get_pk`.
 Wave 848: Nested smoke checks health compact `gesture` after `get_gest`.
 Wave 849: Nested smoke checks health compact `wayland` after `get_wl`.
+Wave 850: Nested smoke checks health compact `recording` after `get_rec`.
