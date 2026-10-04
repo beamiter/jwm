@@ -630,6 +630,8 @@ monorepo use independent Semantic Versions.
 
 - `jwm-tool capabilities` text lists `get_res -> get_resources`.
 
+- `jwm-tool health` prints compact `connectivity` beside occupancy.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

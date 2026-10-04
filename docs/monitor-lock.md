@@ -680,3 +680,4 @@ README health text names compact `bluetooth`.
 README health text names compact `resources`.
 `tools/README.md` health text names compact `resources`.
 `jwm-tool capabilities` text lists `get_res -> get_resources`.
+`jwm-tool health` prints compact `connectivity` beside occupancy.

@@ -4275,6 +4275,25 @@ mod tests {
             line == "resources: cpu_present=true cpu_percent=12.5"
         }));
 
+        assert!(!resources_lines
+            .iter()
+            .any(|line| line.starts_with("connectivity:")));
+
+        let with_compact_connectivity = serde_json::json!({
+            "health": {"status": "healthy", "reasons": []},
+            "counts": {"windows": 0, "monitors": 1, "workspaces": 1},
+            "config": {"path": "/tmp/config.toml", "diagnostics": {"error_count": 0, "warning_count": 0}},
+            "features": {},
+            "connectivity": {
+                "network": {"present": true, "wifi_enabled": true},
+                "bluetooth": {"powered": false}
+            }
+        });
+        let connectivity_lines = health_output_lines(&with_compact_connectivity);
+        assert!(connectivity_lines.iter().any(|line| {
+            line == "connectivity: wifi=true bt_powered=false"
+        }));
+
         let capabilities = serde_json::json!({
             "schema_version": 1,
             "commands": ["focusstack", "reload_config"],
@@ -6152,6 +6171,29 @@ fn health_output_lines(status: &serde_json::Value) -> Vec<String> {
             .unwrap_or_else(|| "-".into());
         lines.push(format!(
             "resources: cpu_present={cpu_present} cpu_percent={cpu_percent}"
+        ));
+    }
+
+    if let Some(connectivity) = status
+        .get("connectivity")
+        .and_then(serde_json::Value::as_object)
+    {
+        let wifi = connectivity
+            .get("network")
+            .and_then(|v| v.as_object())
+            .and_then(|n| n.get("wifi_enabled").or_else(|| n.get("present")))
+            .and_then(serde_json::Value::as_bool)
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".into());
+        let bt_powered = connectivity
+            .get("bluetooth")
+            .and_then(|v| v.as_object())
+            .and_then(|b| b.get("powered"))
+            .and_then(serde_json::Value::as_bool)
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".into());
+        lines.push(format!(
+            "connectivity: wifi={wifi} bt_powered={bt_powered}"
         ));
     }
 

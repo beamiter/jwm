@@ -16781,4 +16781,17 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn evolve8h_wave_544_health_prints_compact_connectivity() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains(
+            "connectivity: wifi={wifi} bt_powered={bt_powered}"
+        ));
+        assert!(TOOL.contains(
+            "\"connectivity: wifi=true bt_powered=false\""
+        ));
+        assert!(DOCS.contains("`jwm-tool health` prints compact `connectivity` beside occupancy"));
+    }
+
 }
