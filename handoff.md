@@ -535,9 +535,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 219 | compatibility 唯一 pin wave 219 wayland | ✓ |
 | 220 | compatibility 唯一 pin wave 220 recording | ✓ |
 | 221 | compatibility 唯一 pin wave 221 capture | ✓ |
+| 222 | compatibility 唯一 pin wave 222 waterlily | ✓ |
 | … | evolve9h 进行中 |
 
 ---
+
+## 2026-10-04：evolve9h wave 222 — compatibility pin wave 222 waterlily
+
+选题 = evolve9h wave 222。compatibility 唯一句子 wave 222 `waterlily`。
 
 ## 2026-10-04：evolve9h wave 221 — compatibility pin wave 221 capture
 
