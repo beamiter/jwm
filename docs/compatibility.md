@@ -256,3 +256,4 @@ evolve9h wave 32: Health compact `gesture` is diagnosable through `jwm-tool heal
 evolve9h wave 33: Health compact `wayland` is diagnosable through `jwm-tool health`.
 evolve9h wave 34: Health compact `recording` is diagnosable through `jwm-tool health`.
 evolve9h wave 35: Health compact `capture` is diagnosable through `jwm-tool health`.
+evolve9h wave 36: Health compact `waterlily` is diagnosable through `jwm-tool health`.
