@@ -15814,4 +15814,13 @@ mod tests {
         ));
         assert!(DOCS.contains("`jwm-tool health` prints compact `blur` beside occupancy"));
     }
+
+    #[test]
+    fn evolve8h_wave_450_readme_health_names_compact_blur() {
+        const README: &str = include_str!("../../README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(README.contains("compact `blur` line"));
+        assert!(README.contains("get_status.blur"));
+        assert!(DOCS.contains("README health text names compact `blur`"));
+    }
 }
