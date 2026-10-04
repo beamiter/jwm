@@ -665,3 +665,4 @@ README health text names compact `waterlily`.
 `tools/README.md` health text names compact `waterlily`.
 `jwm-tool capabilities` text lists `get_wly -> get_waterlily`.
 `jwm-tool health` prints compact `audio` beside occupancy.
+README health text names compact `audio`.

@@ -600,6 +600,8 @@ monorepo use independent Semantic Versions.
 
 - `jwm-tool health` prints compact `audio` beside occupancy.
 
+- README health text names compact `audio`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

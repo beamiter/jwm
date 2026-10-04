@@ -229,6 +229,7 @@ It also prints a compact `recording` line from `get_status.recording`.
 It also prints a compact `audio_recording` line from `get_status.audio_recording`.
 It also prints a compact `capture` line from `get_status.capture`.
 It also prints a compact `waterlily` line from `get_status.waterlily`.
+It also prints a compact `audio` line from `get_status.audio`.
 
 Malformed JSON, invalid argument types, overflow, empty spawn commands, unknown
 commands, and `{ "success": false }` responses produce a non-zero exit status,
