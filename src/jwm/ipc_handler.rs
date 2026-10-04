@@ -20149,4 +20149,10 @@ mod tests {
         assert!(COMPAT.contains("evolve9h wave 52: `jwm-tool capabilities` remains the catalog for `config` query aliases."));
     }
 
+    #[test]
+    fn evolve9h_wave_53_compat_unique_pin_status() {
+        const COMPAT: &str = include_str!("../../docs/compatibility.md");
+        assert!(COMPAT.contains("evolve9h wave 53: `jwm-tool capabilities` remains the catalog for `status` query aliases."));
+    }
+
 }
