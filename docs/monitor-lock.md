@@ -813,3 +813,4 @@ Wave 673: Health compact `urgent` is the operator twin of `get_status.urgent`.
 Wave 674: Health compact `fullscreen` is the operator twin of `get_status.fullscreen`.
 Wave 675: Health compact `pip` is the operator twin of `get_status.pip`.
 Wave 676: Health compact `blur` is the operator twin of `get_status.blur`.
+Wave 677: Health compact `hdr` is the operator twin of `get_status.hdr`.

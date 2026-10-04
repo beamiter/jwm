@@ -896,6 +896,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 676: Health compact `blur` is the operator twin of `get_status.blur`.
 
+- Wave 677: Health compact `hdr` is the operator twin of `get_status.hdr`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
