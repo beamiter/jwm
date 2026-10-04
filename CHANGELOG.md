@@ -1468,6 +1468,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 962: Compatibility tables name `get_bt` with health compact `bluetooth`.
 
+- Wave 963: Compatibility tables name `get_res` with health compact `resources`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

@@ -1099,3 +1099,4 @@ Wave 959: Compatibility tables name `get_wly` with health compact `waterlily`.
 Wave 960: Compatibility tables name `get_devices` with health compact `audio`.
 Wave 961: Compatibility tables name `get_wall` with health compact `wallpaper`.
 Wave 962: Compatibility tables name `get_bt` with health compact `bluetooth`.
+Wave 963: Compatibility tables name `get_res` with health compact `resources`.
