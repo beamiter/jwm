@@ -18692,4 +18692,10 @@ mod tests {
         assert!(DOCS.contains("Wave 821: Support triage reads health compact `mic` before `get_mute` dumps."));
     }
 
+    #[test]
+    fn evolve8h_wave_822_monitor_lock_unique_pin_bench() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 822: Support triage reads health compact `bench` before `get_bm` dumps."));
+    }
+
 }

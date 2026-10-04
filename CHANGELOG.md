@@ -1186,6 +1186,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 821: Support triage reads health compact `mic` before `get_mute` dumps.
 
+- Wave 822: Support triage reads health compact `bench` before `get_bm` dumps.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
