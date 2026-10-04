@@ -455,3 +455,4 @@ evolve9h wave 231: `jwm-tool capabilities` remains the catalog for `idle` query 
 evolve9h wave 232: `jwm-tool capabilities` remains the catalog for `notifications` query aliases.
 evolve9h wave 233: `jwm-tool capabilities` remains the catalog for `dnd` query aliases.
 evolve9h wave 234: `jwm-tool capabilities` remains the catalog for `system_ui` query aliases.
+evolve9h wave 235: Support bundles should include `version_info` when health is degraded.

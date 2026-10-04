@@ -21241,4 +21241,10 @@ mod tests {
         assert!(COMPAT.contains("evolve9h wave 234: `jwm-tool capabilities` remains the catalog for `system_ui` query aliases."));
     }
 
+    #[test]
+    fn evolve9h_wave_235_compat_unique_pin_version_info() {
+        const COMPAT: &str = include_str!("../../docs/compatibility.md");
+        assert!(COMPAT.contains("evolve9h wave 235: Support bundles should include `version_info` when health is degraded."));
+    }
+
 }
