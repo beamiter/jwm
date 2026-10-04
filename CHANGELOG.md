@@ -1766,6 +1766,8 @@ monorepo use independent Semantic Versions.
 
 - evolve9h wave 111: Nested smoke treats `version_info` as a read-only IPC probe.
 
+- evolve9h wave 112: Nested smoke treats `metrics` as a read-only IPC probe.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
