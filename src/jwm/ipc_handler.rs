@@ -16671,4 +16671,13 @@ mod tests {
         assert!(DOCS.contains("`jwm-tool health` prints compact `wallpaper` beside occupancy"));
     }
 
+    #[test]
+    fn evolve8h_wave_533_readme_health_names_compact_wallpaper() {
+        const README: &str = include_str!("../../README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(README.contains("compact `wallpaper` line"));
+        assert!(README.contains("get_status.wallpaper"));
+        assert!(DOCS.contains("README health text names compact `wallpaper`"));
+    }
+
 }
