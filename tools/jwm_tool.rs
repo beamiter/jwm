@@ -6410,6 +6410,7 @@ fn capabilities_output_lines(capabilities: &serde_json::Value) -> Vec<String> {
         "query aliases: get_power -> get_power_status".to_string(),
         "query aliases: get_media -> get_media_status".to_string(),
         "query aliases: get_ver -> get_version".to_string(),
+        "query aliases: get_perf -> get_metrics".to_string(),
     ]
 }
 

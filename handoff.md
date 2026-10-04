@@ -321,9 +321,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 5 | health 打印 compact metrics | ✓ |
 | 6 | README health 点名 compact metrics | ✓ |
 | 7 | tools/README health 点名 compact metrics | ✓ |
+| 8 | capabilities 文本列出 get_perf -> get_metrics | ✓ |
 | … | evolve9h 进行中 |
 
 ---
+
+## 2026-10-04：evolve9h wave 8 — capabilities text lists metrics alias
+
+选题 = evolve9h wave 8。`jwm-tool capabilities` 文本列出 `get_perf -> get_metrics`。
 
 ## 2026-10-04：evolve9h wave 7 — tools/README health names compact metrics
 

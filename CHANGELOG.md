@@ -1558,6 +1558,8 @@ monorepo use independent Semantic Versions.
 
 - `tools/README.md` health text names compact `metrics`.
 
+- `jwm-tool capabilities` text lists `get_perf -> get_metrics`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

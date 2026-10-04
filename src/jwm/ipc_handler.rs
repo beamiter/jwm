@@ -19838,4 +19838,14 @@ mod tests {
         assert!(DOCS.contains("`tools/README.md` health text names compact `metrics`"));
     }
 
+    #[test]
+    fn evolve9h_wave_8_capabilities_text_lists_metrics_alias() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("query aliases: get_perf -> get_metrics"));
+        assert!(DOCS.contains(
+            "`jwm-tool capabilities` text lists `get_perf -> get_metrics`"
+        ));
+    }
+
 }
