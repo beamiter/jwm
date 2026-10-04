@@ -1812,6 +1812,8 @@ monorepo use independent Semantic Versions.
 
 - evolve9h wave 134: Nested smoke treats `connectivity` as a read-only IPC probe.
 
+- evolve9h wave 135: Nested smoke treats `power` as a read-only IPC probe.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

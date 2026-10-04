@@ -20641,4 +20641,10 @@ mod tests {
         assert!(COMPAT.contains("evolve9h wave 134: Nested smoke treats `connectivity` as a read-only IPC probe."));
     }
 
+    #[test]
+    fn evolve9h_wave_135_compat_unique_pin_power() {
+        const COMPAT: &str = include_str!("../../docs/compatibility.md");
+        assert!(COMPAT.contains("evolve9h wave 135: Nested smoke treats `power` as a read-only IPC probe."));
+    }
+
 }
