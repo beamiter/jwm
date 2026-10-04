@@ -1148,3 +1148,4 @@ README health text names compact `metrics`.
 `jwm-tool health` prints compact `ipc_caps` beside occupancy.
 README health text names compact `ipc_caps`.
 `tools/README.md` health text names compact `ipc_caps`.
+`jwm-tool capabilities` text lists `get_caps -> get_capabilities`.

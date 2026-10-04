@@ -19879,4 +19879,14 @@ mod tests {
         assert!(DOCS.contains("`tools/README.md` health text names compact `ipc_caps`"));
     }
 
+    #[test]
+    fn evolve9h_wave_12_capabilities_text_lists_ipc_caps_alias() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("query aliases: get_caps -> get_capabilities"));
+        assert!(DOCS.contains(
+            "`jwm-tool capabilities` text lists `get_caps -> get_capabilities`"
+        ));
+    }
+
 }

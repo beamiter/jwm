@@ -325,9 +325,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 9 | health 打印 compact ipc_caps | ✓ |
 | 10 | README health 点名 compact ipc_caps | ✓ |
 | 11 | tools/README health 点名 compact ipc_caps | ✓ |
+| 12 | capabilities 文本列出 get_caps -> get_capabilities | ✓ |
 | … | evolve9h 进行中 |
 
 ---
+
+## 2026-10-04：evolve9h wave 12 — capabilities text lists ipc_caps alias
+
+选题 = evolve9h wave 12。`jwm-tool capabilities` 文本列出 `get_caps -> get_capabilities`。
 
 ## 2026-10-04：evolve9h wave 11 — tools/README health names compact ipc_caps
 
