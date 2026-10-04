@@ -540,6 +540,8 @@ monorepo use independent Semantic Versions.
 
 - README health text names compact `peek`.
 
+- `tools/README.md` health text names compact `peek`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
