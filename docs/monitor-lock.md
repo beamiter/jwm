@@ -1106,3 +1106,4 @@ Wave 966: Compatibility tables name `get_idl` with health compact `idle`.
 Wave 967: Compatibility tables name `get_notif` with health compact `notifications`.
 Wave 968: Compatibility tables name `get_dnd` with health compact `dnd`.
 Wave 969: Compatibility tables name `get_ui` with health compact `system_ui`.
+Wave 970: Compatibility tables name `get_lt` with health compact `layout`.

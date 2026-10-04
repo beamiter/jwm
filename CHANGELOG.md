@@ -1482,6 +1482,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 969: Compatibility tables name `get_ui` with health compact `system_ui`.
 
+- Wave 970: Compatibility tables name `get_lt` with health compact `layout`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

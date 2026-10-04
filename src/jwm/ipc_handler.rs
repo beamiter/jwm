@@ -19580,4 +19580,10 @@ mod tests {
         assert!(DOCS.contains("Wave 969: Compatibility tables name `get_ui` with health compact `system_ui`."));
     }
 
+    #[test]
+    fn evolve8h_wave_970_monitor_lock_unique_pin_layout() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 970: Compatibility tables name `get_lt` with health compact `layout`."));
+    }
+
 }
