@@ -854,6 +854,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 655: Health compact `struts` is the operator twin of `get_strut`.
 
+- Wave 656: Health compact `scratchpads` is the operator twin of `get_pads`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

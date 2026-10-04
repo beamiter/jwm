@@ -792,3 +792,4 @@ Wave 652: Health compact `layout` is the operator twin of `get_lt`.
 Wave 653: Health compact `tabs` is the operator twin of `get_tab`.
 Wave 654: Health compact `selected` is the operator twin of `get_sel`.
 Wave 655: Health compact `struts` is the operator twin of `get_strut`.
+Wave 656: Health compact `scratchpads` is the operator twin of `get_pads`.
