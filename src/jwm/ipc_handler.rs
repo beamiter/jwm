@@ -21499,4 +21499,10 @@ mod tests {
         assert!(COMPAT.contains("evolve9h wave 277: Nested smoke treats `night_light` as a read-only IPC probe."));
     }
 
+    #[test]
+    fn evolve9h_wave_278_compat_unique_pin_magnifier() {
+        const COMPAT: &str = include_str!("../../docs/compatibility.md");
+        assert!(COMPAT.contains("evolve9h wave 278: Nested smoke treats `magnifier` as a read-only IPC probe."));
+    }
+
 }
