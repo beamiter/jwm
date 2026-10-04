@@ -1273,9 +1273,15 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 722 | monitor-lock 唯一 pin wave 722 nmaster | ✓ |
 | 723 | monitor-lock 唯一 pin wave 723 floating | ✓ |
 | 723 | monitor-lock 唯一 pin wave 723 floating | ✓ |
+| 724 | monitor-lock 唯一 pin wave 724 minimized | ✓ |
+| 724 | monitor-lock 唯一 pin wave 724 minimized | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 724 — monitor-lock pin wave 724 minimized
+
+选题 = evolve8h wave 724。monitor-lock 唯一句子 wave 724 `minimized`。
 
 ## 2026-10-03：evolve8h wave 723 — monitor-lock pin wave 723 floating
 

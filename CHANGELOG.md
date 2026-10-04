@@ -990,6 +990,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 723: `get_status.floating` and health compact `floating` share one Status nest.
 
+- Wave 724: `get_status.minimized` and health compact `minimized` share one Status nest.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

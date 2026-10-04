@@ -860,3 +860,4 @@ Wave 720: `get_gap` and health compact `gaps` share one Status nest.
 Wave 721: `get_mf` and health compact `mfact` share one Status nest.
 Wave 722: `get_nm` and health compact `nmaster` share one Status nest.
 Wave 723: `get_status.floating` and health compact `floating` share one Status nest.
+Wave 724: `get_status.minimized` and health compact `minimized` share one Status nest.
