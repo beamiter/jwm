@@ -3665,6 +3665,19 @@ mod tests {
         });
         let mic_lines = health_output_lines(&with_compact_mic);
         assert!(mic_lines.iter().any(|line| line == "mic: muted=true"));
+        assert!(!mic_lines.iter().any(|line| line.starts_with("bench:")));
+
+        let with_compact_bench = serde_json::json!({
+            "health": {"status": "healthy", "reasons": []},
+            "counts": {"windows": 0, "monitors": 1, "workspaces": 1},
+            "config": {"path": "/tmp/config.toml", "diagnostics": {"error_count": 0, "warning_count": 0}},
+            "features": {},
+            "bench": {
+                "ready": false
+            }
+        });
+        let bench_lines = health_output_lines(&with_compact_bench);
+        assert!(bench_lines.iter().any(|line| line == "bench: ready=false"));
 
         let capabilities = serde_json::json!({
             "schema_version": 1,
@@ -4906,6 +4919,15 @@ fn health_output_lines(status: &serde_json::Value) -> Vec<String> {
             .map(|value| value.to_string())
             .unwrap_or_else(|| "-".into());
         lines.push(format!("mic: muted={muted}"));
+    }
+
+    if let Some(bench) = status.get("bench").and_then(serde_json::Value::as_object) {
+        let ready = bench
+            .get("ready")
+            .and_then(serde_json::Value::as_bool)
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".into());
+        lines.push(format!("bench: ready={ready}"));
     }
 
     if let Some(reasons) = status["health"]["reasons"].as_array() {
