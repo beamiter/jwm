@@ -1252,6 +1252,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 854: Nested smoke checks health compact `audio` after `get_devices`.
 
+- Wave 855: Nested smoke checks health compact `wallpaper` after `get_wall`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

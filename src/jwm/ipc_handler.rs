@@ -18890,4 +18890,10 @@ mod tests {
         assert!(DOCS.contains("Wave 854: Nested smoke checks health compact `audio` after `get_devices`."));
     }
 
+    #[test]
+    fn evolve8h_wave_855_monitor_lock_unique_pin_wallpaper() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 855: Nested smoke checks health compact `wallpaper` after `get_wall`."));
+    }
+
 }
