@@ -19610,4 +19610,10 @@ mod tests {
         assert!(DOCS.contains("Wave 974: Compatibility tables name `get_pads` with health compact `scratchpads`."));
     }
 
+    #[test]
+    fn evolve8h_wave_975_monitor_lock_unique_pin_focused() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 975: Compatibility tables name `get_fw` with health compact `focused`."));
+    }
+
 }

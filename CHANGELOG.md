@@ -1492,6 +1492,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 974: Compatibility tables name `get_pads` with health compact `scratchpads`.
 
+- Wave 975: Compatibility tables name `get_fw` with health compact `focused`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

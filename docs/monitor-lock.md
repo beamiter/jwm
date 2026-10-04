@@ -1111,3 +1111,4 @@ Wave 971: Compatibility tables name `get_tab` with health compact `tabs`.
 Wave 972: Compatibility tables name `get_sel` with health compact `selected`.
 Wave 973: Compatibility tables name `get_strut` with health compact `struts`.
 Wave 974: Compatibility tables name `get_pads` with health compact `scratchpads`.
+Wave 975: Compatibility tables name `get_fw` with health compact `focused`.
