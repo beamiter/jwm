@@ -1982,6 +1982,8 @@ monorepo use independent Semantic Versions.
 
 - evolve9h wave 219: `jwm-tool capabilities` remains the catalog for `wayland` query aliases.
 
+- evolve9h wave 220: `jwm-tool capabilities` remains the catalog for `recording` query aliases.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
