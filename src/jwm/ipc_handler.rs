@@ -19496,4 +19496,10 @@ mod tests {
         assert!(DOCS.contains("Wave 955: Compatibility tables name `get_wl` with health compact `wayland`."));
     }
 
+    #[test]
+    fn evolve8h_wave_956_monitor_lock_unique_pin_recording() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 956: Compatibility tables name `get_rec` with health compact `recording`."));
+    }
+
 }

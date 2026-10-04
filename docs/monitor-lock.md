@@ -1092,3 +1092,4 @@ Wave 952: Compatibility tables name `get_mag` with health compact `magnifier`.
 Wave 953: Compatibility tables name `get_pk` with health compact `peek`.
 Wave 954: Compatibility tables name `get_gest` with health compact `gesture`.
 Wave 955: Compatibility tables name `get_wl` with health compact `wayland`.
+Wave 956: Compatibility tables name `get_rec` with health compact `recording`.
