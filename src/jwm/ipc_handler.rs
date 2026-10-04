@@ -16598,4 +16598,13 @@ mod tests {
         assert!(DOCS.contains("README health text names compact `waterlily`"));
     }
 
+    #[test]
+    fn evolve8h_wave_526_tools_readme_health_names_compact_waterlily() {
+        const TOOLS: &str = include_str!("../../tools/README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOLS.contains("compact `waterlily` line"));
+        assert!(TOOLS.contains("get_status.waterlily"));
+        assert!(DOCS.contains("`tools/README.md` health text names compact `waterlily`"));
+    }
+
 }
