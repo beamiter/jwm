@@ -355,9 +355,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 39 | compatibility 唯一 pin wave 39 bluetooth | ✓ |
 | 40 | compatibility 唯一 pin wave 40 resources | ✓ |
 | 41 | compatibility 唯一 pin wave 41 connectivity | ✓ |
+| 42 | compatibility 唯一 pin wave 42 power | ✓ |
 | … | evolve9h 进行中 |
 
 ---
+
+## 2026-10-04：evolve9h wave 42 — compatibility pin wave 42 power
+
+选题 = evolve9h wave 42。compatibility 唯一句子 wave 42 `power`。
 
 ## 2026-10-04：evolve9h wave 41 — compatibility pin wave 41 connectivity
 
