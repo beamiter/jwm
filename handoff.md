@@ -1639,9 +1639,15 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 905 | monitor-lock 唯一 pin wave 905 capture | ✓ |
 | 906 | monitor-lock 唯一 pin wave 906 waterlily | ✓ |
 | 906 | monitor-lock 唯一 pin wave 906 waterlily | ✓ |
+| 907 | monitor-lock 唯一 pin wave 907 audio | ✓ |
+| 907 | monitor-lock 唯一 pin wave 907 audio | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 907 — monitor-lock pin wave 907 audio
+
+选题 = evolve8h wave 907。monitor-lock 唯一句子 wave 907 `audio`。
 
 ## 2026-10-03：evolve8h wave 906 — monitor-lock pin wave 906 waterlily
 

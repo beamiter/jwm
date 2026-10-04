@@ -1356,6 +1356,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 906: Upgrade notes keep health compact `waterlily` beside `get_wly`.
 
+- Wave 907: Upgrade notes keep health compact `audio` beside `get_devices`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
