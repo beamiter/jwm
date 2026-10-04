@@ -1279,9 +1279,15 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 725 | monitor-lock 唯一 pin wave 725 sticky | ✓ |
 | 726 | monitor-lock 唯一 pin wave 726 urgent | ✓ |
 | 726 | monitor-lock 唯一 pin wave 726 urgent | ✓ |
+| 727 | monitor-lock 唯一 pin wave 727 fullscreen | ✓ |
+| 727 | monitor-lock 唯一 pin wave 727 fullscreen | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 727 — monitor-lock pin wave 727 fullscreen
+
+选题 = evolve8h wave 727。monitor-lock 唯一句子 wave 727 `fullscreen`。
 
 ## 2026-10-03：evolve8h wave 726 — monitor-lock pin wave 726 urgent
 
