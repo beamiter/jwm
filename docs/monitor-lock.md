@@ -995,3 +995,4 @@ Wave 855: Nested smoke checks health compact `wallpaper` after `get_wall`.
 Wave 856: Nested smoke checks health compact `bluetooth` after `get_bt`.
 Wave 857: Nested smoke checks health compact `resources` after `get_res`.
 Wave 858: Nested smoke checks health compact `connectivity` after `get_conn`.
+Wave 859: Nested smoke checks health compact `clipboard` after `get_clip`.

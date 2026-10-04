@@ -1260,6 +1260,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 858: Nested smoke checks health compact `connectivity` after `get_conn`.
 
+- Wave 859: Nested smoke checks health compact `clipboard` after `get_clip`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
