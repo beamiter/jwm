@@ -17429,4 +17429,13 @@ mod tests {
         assert!(DOCS.contains("README health text names `get_lt` beside compact `layout`"));
     }
 
+    #[test]
+    fn evolve8h_wave_617_readme_health_names_get_tab_for_tabs() {
+        const README: &str = include_str!("../../README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(README.contains("`get_tab`"));
+        assert!(README.contains("compact `tabs` line"));
+        assert!(DOCS.contains("README health text names `get_tab` beside compact `tabs`"));
+    }
+
 }

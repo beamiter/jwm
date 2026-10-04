@@ -1059,9 +1059,15 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 615 | README health 点名 get_ui beside compact system_ui | ✓ |
 | 616 | README health 点名 get_lt beside compact layout | ✓ |
 | 616 | README health 点名 get_lt beside compact layout | ✓ |
+| 617 | README health 点名 get_tab beside compact tabs | ✓ |
+| 617 | README health 点名 get_tab beside compact tabs | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 617 — README health names get_tab for tabs
+
+选题 = evolve8h wave 617。README health 文本点名 `get_tab` beside compact `tabs`。
 
 ## 2026-10-03：evolve8h wave 616 — README health names get_lt for layout
 

@@ -753,3 +753,4 @@ README health text names `get_notif` beside compact `notifications`.
 README health text names `get_dnd` beside compact `dnd`.
 README health text names `get_ui` beside compact `system_ui`.
 README health text names `get_lt` beside compact `layout`.
+README health text names `get_tab` beside compact `tabs`.
