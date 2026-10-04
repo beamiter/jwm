@@ -2056,6 +2056,8 @@ monorepo use independent Semantic Versions.
 
 - evolve9h wave 256: Support bundles should include `bluetooth` when health is degraded.
 
+- evolve9h wave 257: Support bundles should include `resources` when health is degraded.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
