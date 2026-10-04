@@ -842,6 +842,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 649: Health compact `notifications` is the operator twin of `get_notif`.
 
+- Wave 650: Health compact `dnd` is the operator twin of `get_dnd`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

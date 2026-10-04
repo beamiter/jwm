@@ -17660,4 +17660,10 @@ mod tests {
         assert!(DOCS.contains("Wave 649: Health compact `notifications` is the operator twin of `get_notif`."));
     }
 
+    #[test]
+    fn evolve8h_wave_650_monitor_lock_unique_pin_dnd() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 650: Health compact `dnd` is the operator twin of `get_dnd`."));
+    }
+
 }
