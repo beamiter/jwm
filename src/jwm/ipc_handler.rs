@@ -17060,4 +17060,12 @@ mod tests {
         assert!(DOCS.contains("`docs/audio-recording.md` names compact `audio_recording` beside health"));
     }
 
+    #[test]
+    fn evolve8h_wave_574_doc_wallpaper_names_compact_wallpaper() {
+        const FEATURE: &str = include_str!("../../docs/wallpaper.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(FEATURE.contains("compact `wallpaper`"));
+        assert!(DOCS.contains("`docs/wallpaper.md` names compact `wallpaper` beside health"));
+    }
+
 }

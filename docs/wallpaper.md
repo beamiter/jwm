@@ -156,3 +156,5 @@ range, which is also how you put your own back without a reload:
 ```sh
 jwm-tool msg set_config --args '{"key": "behavior.border_gradient_color_a", "value": [0.24, 0.65, 1.0, 1.0]}'
 ```
+
+`jwm-tool health` prints compact `wallpaper` for wallpaper operators.

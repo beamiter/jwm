@@ -690,6 +690,8 @@ monorepo use independent Semantic Versions.
 
 - `docs/audio-recording.md` names compact `audio_recording` beside health.
 
+- `docs/wallpaper.md` names compact `wallpaper` beside health.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
