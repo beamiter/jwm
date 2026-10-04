@@ -16187,4 +16187,13 @@ mod tests {
             "`jwm-tool health` prints compact `color_management` beside occupancy"
         ));
     }
+
+    #[test]
+    fn evolve8h_wave_486_readme_health_names_compact_color_management() {
+        const README: &str = include_str!("../../README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(README.contains("compact `color_management` line"));
+        assert!(README.contains("get_status.color_management"));
+        assert!(DOCS.contains("README health text names compact `color_management`"));
+    }
 }

@@ -515,6 +515,7 @@ monorepo use independent Semantic Versions.
 - `jwm-tool capabilities` text lists `get_scrolling -> get_scrolling_status`.
 - IPC short query alias `get_scroll` reaches `get_scrolling_status`.
 - `jwm-tool health` prints compact `color_management` beside occupancy.
+- README health text names compact `color_management`.
 
 ### Changed
 
