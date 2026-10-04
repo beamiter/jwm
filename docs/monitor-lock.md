@@ -895,3 +895,4 @@ Wave 755: Doctor bundles include health compact `notifications` from `get_notif`
 Wave 756: Doctor bundles include health compact `dnd` from `get_dnd`.
 Wave 757: Doctor bundles include health compact `system_ui` from `get_ui`.
 Wave 758: Doctor bundles include health compact `layout` from `get_lt`.
+Wave 759: Doctor bundles include health compact `tabs` from `get_tab`.

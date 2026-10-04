@@ -18314,4 +18314,10 @@ mod tests {
         assert!(DOCS.contains("Wave 758: Doctor bundles include health compact `layout` from `get_lt`."));
     }
 
+    #[test]
+    fn evolve8h_wave_759_monitor_lock_unique_pin_tabs() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 759: Doctor bundles include health compact `tabs` from `get_tab`."));
+    }
+
 }
