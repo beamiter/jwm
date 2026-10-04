@@ -326,9 +326,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 10 | README health 点名 compact ipc_caps | ✓ |
 | 11 | tools/README health 点名 compact ipc_caps | ✓ |
 | 12 | capabilities 文本列出 get_caps -> get_capabilities | ✓ |
+| 13 | capabilities 文本列出 get_cfg -> get_config_status | ✓ |
 | … | evolve9h 进行中 |
 
 ---
+
+## 2026-10-04：evolve9h wave 13 — capabilities text lists config_status alias
+
+选题 = evolve9h wave 13。`jwm-tool capabilities` 文本列出 `get_cfg -> get_config_status`。
 
 ## 2026-10-04：evolve9h wave 12 — capabilities text lists ipc_caps alias
 
