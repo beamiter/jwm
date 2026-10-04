@@ -2084,6 +2084,8 @@ monorepo use independent Semantic Versions.
 
 - evolve9h wave 270: Nested smoke treats `status` as a read-only IPC probe.
 
+- evolve9h wave 271: Nested smoke treats `tree` as a read-only IPC probe.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
