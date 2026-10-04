@@ -15801,4 +15801,17 @@ mod tests {
         assert!(TOOLS.contains("get_status.notifications"));
         assert!(DOCS.contains("`tools/README.md` health text names compact `notifications`"));
     }
+
+    #[test]
+    fn evolve8h_wave_449_health_prints_compact_blur() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains(
+            "blur: enabled={config_enabled} strength={current_strength} temporal={temporal_enabled} frosted={status_bar_frosted}"
+        ));
+        assert!(TOOL.contains(
+            "\"blur: enabled=true strength=0.5 temporal=false frosted=true\""
+        ));
+        assert!(DOCS.contains("`jwm-tool health` prints compact `blur` beside occupancy"));
+    }
 }

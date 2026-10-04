@@ -3801,6 +3801,26 @@ mod tests {
         assert!(notifications_lines.iter().any(|line| {
             line == "notifications: count=2 center_open=true dnd=false"
         }));
+        assert!(!notifications_lines
+            .iter()
+            .any(|line| line.starts_with("blur:")));
+
+        let with_compact_blur = serde_json::json!({
+            "health": {"status": "healthy", "reasons": []},
+            "counts": {"windows": 0, "monitors": 1, "workspaces": 1},
+            "config": {"path": "/tmp/config.toml", "diagnostics": {"error_count": 0, "warning_count": 0}},
+            "features": {},
+            "blur": {
+                "config_enabled": true,
+                "current_strength": 0.5,
+                "temporal_enabled": false,
+                "status_bar_frosted": true
+            }
+        });
+        let blur_lines = health_output_lines(&with_compact_blur);
+        assert!(blur_lines.iter().any(|line| {
+            line == "blur: enabled=true strength=0.5 temporal=false frosted=true"
+        }));
 
         let capabilities = serde_json::json!({
             "schema_version": 1,
@@ -5196,6 +5216,38 @@ fn health_output_lines(status: &serde_json::Value) -> Vec<String> {
             .unwrap_or_else(|| "-".into());
         lines.push(format!(
             "notifications: count={count} center_open={center_open} dnd={do_not_disturb}"
+        ));
+    }
+
+    if let Some(blur) = status.get("blur").and_then(serde_json::Value::as_object) {
+        let config_enabled = blur
+            .get("config_enabled")
+            .and_then(serde_json::Value::as_bool)
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".into());
+        let current_strength = blur
+            .get("current_strength")
+            .and_then(|v| {
+                if v.is_null() {
+                    None
+                } else {
+                    v.as_f64().or_else(|| v.as_u64().map(|n| n as f64))
+                }
+            })
+            .map(|value| format!("{value}"))
+            .unwrap_or_else(|| "-".into());
+        let temporal_enabled = blur
+            .get("temporal_enabled")
+            .and_then(serde_json::Value::as_bool)
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".into());
+        let status_bar_frosted = blur
+            .get("status_bar_frosted")
+            .and_then(serde_json::Value::as_bool)
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".into());
+        lines.push(format!(
+            "blur: enabled={config_enabled} strength={current_strength} temporal={temporal_enabled} frosted={status_bar_frosted}"
         ));
     }
 
