@@ -21349,4 +21349,10 @@ mod tests {
         assert!(COMPAT.contains("evolve9h wave 252: Support bundles should include `capture` when health is degraded."));
     }
 
+    #[test]
+    fn evolve9h_wave_253_compat_unique_pin_waterlily() {
+        const COMPAT: &str = include_str!("../../docs/compatibility.md");
+        assert!(COMPAT.contains("evolve9h wave 253: Support bundles should include `waterlily` when health is degraded."));
+    }
+
 }
