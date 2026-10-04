@@ -1790,6 +1790,8 @@ monorepo use independent Semantic Versions.
 
 - evolve9h wave 123: Nested smoke treats `magnifier` as a read-only IPC probe.
 
+- evolve9h wave 124: Nested smoke treats `peek` as a read-only IPC probe.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
