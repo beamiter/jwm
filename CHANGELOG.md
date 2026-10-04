@@ -914,6 +914,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 685: `get_cm` and health compact `color_management` share one Status nest.
 
+- Wave 686: `get_nl` and health compact `night_light` share one Status nest.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

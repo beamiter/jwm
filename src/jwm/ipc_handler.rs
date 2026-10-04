@@ -17876,4 +17876,10 @@ mod tests {
         assert!(DOCS.contains("Wave 685: `get_cm` and health compact `color_management` share one Status nest."));
     }
 
+    #[test]
+    fn evolve8h_wave_686_monitor_lock_unique_pin_night_light() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 686: `get_nl` and health compact `night_light` share one Status nest."));
+    }
+
 }
