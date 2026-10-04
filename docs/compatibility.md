@@ -400,3 +400,4 @@ evolve9h wave 176: Health compact `config` is diagnosable through `jwm-tool heal
 evolve9h wave 177: Health compact `status` is diagnosable through `jwm-tool health`.
 evolve9h wave 178: Health compact `tree` is diagnosable through `jwm-tool health`.
 evolve9h wave 179: Health compact `window` is diagnosable through `jwm-tool health`.
+evolve9h wave 180: Health compact `session_lock` is diagnosable through `jwm-tool health`.
