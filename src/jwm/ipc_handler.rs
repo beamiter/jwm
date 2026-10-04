@@ -21355,4 +21355,10 @@ mod tests {
         assert!(COMPAT.contains("evolve9h wave 253: Support bundles should include `waterlily` when health is degraded."));
     }
 
+    #[test]
+    fn evolve9h_wave_254_compat_unique_pin_audio() {
+        const COMPAT: &str = include_str!("../../docs/compatibility.md");
+        assert!(COMPAT.contains("evolve9h wave 254: Support bundles should include `audio` when health is degraded."));
+    }
+
 }

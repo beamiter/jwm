@@ -474,3 +474,4 @@ evolve9h wave 250: Support bundles should include `wayland` when health is degra
 evolve9h wave 251: Support bundles should include `recording` when health is degraded.
 evolve9h wave 252: Support bundles should include `capture` when health is degraded.
 evolve9h wave 253: Support bundles should include `waterlily` when health is degraded.
+evolve9h wave 254: Support bundles should include `audio` when health is degraded.
