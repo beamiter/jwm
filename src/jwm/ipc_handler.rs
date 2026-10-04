@@ -15555,4 +15555,14 @@ mod tests {
         assert!(TOOLS.contains("get_status.mic"));
         assert!(DOCS.contains("`tools/README.md` health text names compact `mic`"));
     }
+
+    #[test]
+    fn evolve8h_wave_423_capabilities_text_lists_mic_aliases() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("query aliases: get_mic,get_mute -> get_mic_mute"));
+        assert!(DOCS.contains(
+            "`jwm-tool capabilities` text lists `get_mic,get_mute -> get_mic_mute`"
+        ));
+    }
 }

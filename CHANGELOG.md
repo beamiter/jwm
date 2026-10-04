@@ -452,6 +452,7 @@ monorepo use independent Semantic Versions.
 - `jwm-tool health` prints compact `mic` beside occupancy.
 - README health text names compact `mic`.
 - `tools/README.md` health text names compact `mic`.
+- `jwm-tool capabilities` text lists `get_mic,get_mute -> get_mic_mute`.
 
 ### Changed
 
