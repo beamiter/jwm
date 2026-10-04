@@ -750,9 +750,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 434 | health 打印 compact sticky | ✓ |
 | 435 | README health 点名 compact sticky | ✓ |
 | 436 | tools/README health 点名 compact sticky | ✓ |
+| 437 | health 打印 compact urgent | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 437 — health prints compact urgent
+
+选题 = evolve8h wave 437。`jwm-tool health` 打印 compact `urgent` 行。
 
 ## 2026-10-03：evolve8h wave 436 — tools/README health names compact sticky
 
