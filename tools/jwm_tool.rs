@@ -4044,6 +4044,25 @@ mod tests {
             line == "magnifier: enabled=true zoom=2.5 radius=120"
         }));
 
+        assert!(!magnifier_lines
+            .iter()
+            .any(|line| line.starts_with("peek:")));
+
+        let with_compact_peek = serde_json::json!({
+            "health": {"status": "healthy", "reasons": []},
+            "counts": {"windows": 0, "monitors": 1, "workspaces": 1},
+            "config": {"path": "/tmp/config.toml", "diagnostics": {"error_count": 0, "warning_count": 0}},
+            "features": {},
+            "peek": {
+                "active": true,
+                "compositor_active": true
+            }
+        });
+        let peek_lines = health_output_lines(&with_compact_peek);
+        assert!(peek_lines.iter().any(|line| {
+            line == "peek: active=true compositor=true"
+        }));
+
         let capabilities = serde_json::json!({
             "schema_version": 1,
             "commands": ["focusstack", "reload_config"],
@@ -5725,6 +5744,20 @@ fn health_output_lines(status: &serde_json::Value) -> Vec<String> {
             .unwrap_or_else(|| "-".into());
         lines.push(format!(
             "magnifier: enabled={enabled} zoom={zoom} radius={radius}"
+        ));
+    }
+
+    if let Some(peek) = status.get("peek").and_then(serde_json::Value::as_object) {
+        let flag = |name: &str| {
+            peek.get(name)
+                .and_then(serde_json::Value::as_bool)
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "-".into())
+        };
+        lines.push(format!(
+            "peek: active={} compositor={}",
+            flag("active"),
+            flag("compositor_active")
         ));
     }
 

@@ -16299,4 +16299,17 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn evolve8h_wave_497_health_prints_compact_peek() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains(
+            "peek: active={} compositor={}"
+        ));
+        assert!(TOOL.contains(
+            "\"peek: active=true compositor=true\""
+        ));
+        assert!(DOCS.contains("`jwm-tool health` prints compact `peek` beside occupancy"));
+    }
+
 }
