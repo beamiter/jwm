@@ -21289,4 +21289,10 @@ mod tests {
         assert!(COMPAT.contains("evolve9h wave 242: Support bundles should include `session_lock` when health is degraded."));
     }
 
+    #[test]
+    fn evolve9h_wave_243_compat_unique_pin_tearing() {
+        const COMPAT: &str = include_str!("../../docs/compatibility.md");
+        assert!(COMPAT.contains("evolve9h wave 243: Support bundles should include `tearing` when health is degraded."));
+    }
+
 }
