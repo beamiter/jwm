@@ -706,6 +706,8 @@ monorepo use independent Semantic Versions.
 
 - `docs/window-placement.md` names compact `closed_placement` beside health.
 
+- `docs/performance.md` names compact `bench` beside health.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

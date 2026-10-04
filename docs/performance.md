@@ -171,3 +171,5 @@ counting costs one atomic increment per heap allocation.
 The commented-out `[profile.release]` tuning block in `Cargo.toml` remains
 disabled; per the roadmap it may only be enabled together with benchmark
 evidence recorded through this contract.
+
+`jwm-tool health` prints compact `bench` for performance operators.

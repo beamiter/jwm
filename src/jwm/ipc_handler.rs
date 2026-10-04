@@ -17124,4 +17124,12 @@ mod tests {
         assert!(DOCS.contains("`docs/window-placement.md` names compact `closed_placement` beside health"));
     }
 
+    #[test]
+    fn evolve8h_wave_582_doc_performance_names_compact_bench() {
+        const FEATURE: &str = include_str!("../../docs/performance.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(FEATURE.contains("compact `bench`"));
+        assert!(DOCS.contains("`docs/performance.md` names compact `bench` beside health"));
+    }
+
 }
