@@ -1506,6 +1506,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 981: Compatibility tables name `get_bm` with health compact `bench`.
 
+- Wave 982: Compatibility tables name `get_cp` with health compact `closed_placement`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

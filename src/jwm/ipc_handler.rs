@@ -19652,4 +19652,10 @@ mod tests {
         assert!(DOCS.contains("Wave 981: Compatibility tables name `get_bm` with health compact `bench`."));
     }
 
+    #[test]
+    fn evolve8h_wave_982_monitor_lock_unique_pin_closed_placement() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 982: Compatibility tables name `get_cp` with health compact `closed_placement`."));
+    }
+
 }
