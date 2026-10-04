@@ -480,3 +480,4 @@ evolve9h wave 256: Support bundles should include `bluetooth` when health is deg
 evolve9h wave 257: Support bundles should include `resources` when health is degraded.
 evolve9h wave 258: Support bundles should include `connectivity` when health is degraded.
 evolve9h wave 259: Support bundles should include `power` when health is degraded.
+evolve9h wave 260: Support bundles should include `media` when health is degraded.
