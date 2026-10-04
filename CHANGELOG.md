@@ -598,6 +598,8 @@ monorepo use independent Semantic Versions.
 
 - `jwm-tool capabilities` text lists `get_wly -> get_waterlily`.
 
+- `jwm-tool health` prints compact `audio` beside occupancy.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

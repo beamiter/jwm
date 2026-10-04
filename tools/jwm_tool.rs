@@ -4199,6 +4199,26 @@ mod tests {
             line == "waterlily: enabled=true active=true worker=false"
         }));
 
+        assert!(!waterlily_lines
+            .iter()
+            .any(|line| line.starts_with("audio:")));
+
+        let with_compact_audio = serde_json::json!({
+            "health": {"status": "healthy", "reasons": []},
+            "counts": {"windows": 0, "monitors": 1, "workspaces": 1},
+            "config": {"path": "/tmp/config.toml", "diagnostics": {"error_count": 0, "warning_count": 0}},
+            "features": {},
+            "audio": {
+                "output_count": 2,
+                "input_count": 1,
+                "pending": false
+            }
+        });
+        let audio_lines = health_output_lines(&with_compact_audio);
+        assert!(audio_lines.iter().any(|line| {
+            line == "audio: outputs=2 inputs=1 pending=false"
+        }));
+
         let capabilities = serde_json::json!({
             "schema_version": 1,
             "commands": ["focusstack", "reload_config"],
@@ -6015,6 +6035,27 @@ fn health_output_lines(status: &serde_json::Value) -> Vec<String> {
             flag("enabled"),
             flag("active"),
             flag("worker_connected")
+        ));
+    }
+
+    if let Some(audio) = status.get("audio").and_then(serde_json::Value::as_object) {
+        let output_count = audio
+            .get("output_count")
+            .and_then(|v| v.as_u64().or_else(|| v.as_i64().map(|n| n as u64)))
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".into());
+        let input_count = audio
+            .get("input_count")
+            .and_then(|v| v.as_u64().or_else(|| v.as_i64().map(|n| n as u64)))
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".into());
+        let pending = audio
+            .get("pending")
+            .and_then(serde_json::Value::as_bool)
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".into());
+        lines.push(format!(
+            "audio: outputs={output_count} inputs={input_count} pending={pending}"
         ));
     }
 

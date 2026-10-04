@@ -16617,4 +16617,17 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn evolve8h_wave_528_health_prints_compact_audio() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains(
+            "audio: outputs={output_count} inputs={input_count} pending={pending}"
+        ));
+        assert!(TOOL.contains(
+            "\"audio: outputs=2 inputs=1 pending=false\""
+        ));
+        assert!(DOCS.contains("`jwm-tool health` prints compact `audio` beside occupancy"));
+    }
+
 }
