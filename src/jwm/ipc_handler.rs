@@ -20023,4 +20023,10 @@ mod tests {
         assert!(COMPAT.contains("evolve9h wave 31: Health compact `peek` is diagnosable through `jwm-tool health`."));
     }
 
+    #[test]
+    fn evolve9h_wave_32_compat_unique_pin_gesture() {
+        const COMPAT: &str = include_str!("../../docs/compatibility.md");
+        assert!(COMPAT.contains("evolve9h wave 32: Health compact `gesture` is diagnosable through `jwm-tool health`."));
+    }
+
 }
