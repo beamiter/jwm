@@ -754,6 +754,8 @@ monorepo use independent Semantic Versions.
 
 - README health text names `get_wly` beside compact `waterlily`.
 
+- README health text names `get_devices` beside compact `audio`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
