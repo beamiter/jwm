@@ -18074,4 +18074,10 @@ mod tests {
         assert!(DOCS.contains("Wave 718: `get_pl` and health compact `prev_layout` share one Status nest."));
     }
 
+    #[test]
+    fn evolve8h_wave_719_monitor_lock_unique_pin_cfact() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 719: `get_cf` and health compact `cfact` share one Status nest."));
+    }
+
 }
