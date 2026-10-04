@@ -21193,4 +21193,10 @@ mod tests {
         assert!(COMPAT.contains("evolve9h wave 226: `jwm-tool capabilities` remains the catalog for `resources` query aliases."));
     }
 
+    #[test]
+    fn evolve9h_wave_227_compat_unique_pin_connectivity() {
+        const COMPAT: &str = include_str!("../../docs/compatibility.md");
+        assert!(COMPAT.contains("evolve9h wave 227: `jwm-tool capabilities` remains the catalog for `connectivity` query aliases."));
+    }
+
 }
