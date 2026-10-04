@@ -222,6 +222,7 @@ It also prints a compact `color_management` line from `get_status.color_manageme
 It also prints a compact `night_light` line from `get_status.night_light`.
 It also prints a compact `magnifier` line from `get_status.magnifier`.
 It also prints a compact `peek` line from `get_status.peek`.
+It also prints a compact `expose` line from `get_status.expose`.
 
 Malformed JSON, invalid argument types, overflow, empty spawn commands, unknown
 commands, and `{ "success": false }` responses produce a non-zero exit status,

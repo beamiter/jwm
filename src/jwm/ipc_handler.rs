@@ -16353,4 +16353,13 @@ mod tests {
         assert!(DOCS.contains("`jwm-tool health` prints compact `expose` beside occupancy"));
     }
 
+    #[test]
+    fn evolve8h_wave_502_readme_health_names_compact_expose() {
+        const README: &str = include_str!("../../README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(README.contains("compact `expose` line"));
+        assert!(README.contains("get_status.expose"));
+        assert!(DOCS.contains("README health text names compact `expose`"));
+    }
+
 }
