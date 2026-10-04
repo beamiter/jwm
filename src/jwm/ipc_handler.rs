@@ -18560,4 +18560,10 @@ mod tests {
         assert!(DOCS.contains("Wave 799: Support triage reads health compact `capture` before `get_cap` dumps."));
     }
 
+    #[test]
+    fn evolve8h_wave_800_monitor_lock_unique_pin_waterlily() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 800: Support triage reads health compact `waterlily` before `get_wly` dumps."));
+    }
+
 }

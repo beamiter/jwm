@@ -1142,6 +1142,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 799: Support triage reads health compact `capture` before `get_cap` dumps.
 
+- Wave 800: Support triage reads health compact `waterlily` before `get_wly` dumps.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

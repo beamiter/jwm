@@ -1425,9 +1425,15 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 798 | monitor-lock 唯一 pin wave 798 audio_recording | ✓ |
 | 799 | monitor-lock 唯一 pin wave 799 capture | ✓ |
 | 799 | monitor-lock 唯一 pin wave 799 capture | ✓ |
+| 800 | monitor-lock 唯一 pin wave 800 waterlily | ✓ |
+| 800 | monitor-lock 唯一 pin wave 800 waterlily | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 800 — monitor-lock pin wave 800 waterlily
+
+选题 = evolve8h wave 800。monitor-lock 唯一句子 wave 800 `waterlily`。
 
 ## 2026-10-03：evolve8h wave 799 — monitor-lock pin wave 799 capture
 
