@@ -1083,9 +1083,15 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 627 | README health 点名 get_bm beside compact bench | ✓ |
 | 628 | monitor-lock 唯一 pin wave 628 session_lock | ✓ |
 | 628 | monitor-lock 唯一 pin wave 628 session_lock | ✓ |
+| 629 | monitor-lock 唯一 pin wave 629 tearing | ✓ |
+| 629 | monitor-lock 唯一 pin wave 629 tearing | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 629 — monitor-lock pin wave 629 tearing
+
+选题 = evolve8h wave 629。monitor-lock 唯一句子 wave 629 `tearing`。
 
 ## 2026-10-03：evolve8h wave 628 — monitor-lock pin wave 628 session_lock
 

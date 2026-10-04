@@ -800,6 +800,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 628: Health compact `session_lock` is the operator twin of `get_lock`.
 
+- Wave 629: Health compact `tearing` is the operator twin of `get_th`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
