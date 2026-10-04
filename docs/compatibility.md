@@ -301,3 +301,4 @@ evolve9h wave 77: `jwm-tool capabilities` remains the catalog for `notifications
 evolve9h wave 78: `jwm-tool capabilities` remains the catalog for `dnd` query aliases.
 evolve9h wave 79: `jwm-tool capabilities` remains the catalog for `system_ui` query aliases.
 evolve9h wave 80: Support bundles should include `version_info` when health is degraded.
+evolve9h wave 81: Support bundles should include `metrics` when health is degraded.
