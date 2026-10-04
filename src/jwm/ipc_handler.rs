@@ -20221,4 +20221,10 @@ mod tests {
         assert!(COMPAT.contains("evolve9h wave 64: `jwm-tool capabilities` remains the catalog for `wayland` query aliases."));
     }
 
+    #[test]
+    fn evolve9h_wave_65_compat_unique_pin_recording() {
+        const COMPAT: &str = include_str!("../../docs/compatibility.md");
+        assert!(COMPAT.contains("evolve9h wave 65: `jwm-tool capabilities` remains the catalog for `recording` query aliases."));
+    }
+
 }
