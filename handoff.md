@@ -352,9 +352,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 36 | compatibility 唯一 pin wave 36 waterlily | ✓ |
 | 37 | compatibility 唯一 pin wave 37 audio | ✓ |
 | 38 | compatibility 唯一 pin wave 38 wallpaper | ✓ |
+| 39 | compatibility 唯一 pin wave 39 bluetooth | ✓ |
 | … | evolve9h 进行中 |
 
 ---
+
+## 2026-10-04：evolve9h wave 39 — compatibility pin wave 39 bluetooth
+
+选题 = evolve9h wave 39。compatibility 唯一句子 wave 39 `bluetooth`。
 
 ## 2026-10-04：evolve9h wave 38 — compatibility pin wave 38 wallpaper
 

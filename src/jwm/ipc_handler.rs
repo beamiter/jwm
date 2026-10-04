@@ -20065,4 +20065,10 @@ mod tests {
         assert!(COMPAT.contains("evolve9h wave 38: Health compact `wallpaper` is diagnosable through `jwm-tool health`."));
     }
 
+    #[test]
+    fn evolve9h_wave_39_compat_unique_pin_bluetooth() {
+        const COMPAT: &str = include_str!("../../docs/compatibility.md");
+        assert!(COMPAT.contains("evolve9h wave 39: Health compact `bluetooth` is diagnosable through `jwm-tool health`."));
+    }
+
 }
