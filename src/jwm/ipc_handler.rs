@@ -18926,4 +18926,10 @@ mod tests {
         assert!(DOCS.contains("Wave 860: Nested smoke checks health compact `idle` after `get_idl`."));
     }
 
+    #[test]
+    fn evolve8h_wave_861_monitor_lock_unique_pin_notifications() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 861: Nested smoke checks health compact `notifications` after `get_notif`."));
+    }
+
 }

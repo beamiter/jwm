@@ -1264,6 +1264,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 860: Nested smoke checks health compact `idle` after `get_idl`.
 
+- Wave 861: Nested smoke checks health compact `notifications` after `get_notif`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

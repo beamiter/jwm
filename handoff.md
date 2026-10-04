@@ -1547,9 +1547,15 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 859 | monitor-lock 唯一 pin wave 859 clipboard | ✓ |
 | 860 | monitor-lock 唯一 pin wave 860 idle | ✓ |
 | 860 | monitor-lock 唯一 pin wave 860 idle | ✓ |
+| 861 | monitor-lock 唯一 pin wave 861 notifications | ✓ |
+| 861 | monitor-lock 唯一 pin wave 861 notifications | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 861 — monitor-lock pin wave 861 notifications
+
+选题 = evolve8h wave 861。monitor-lock 唯一句子 wave 861 `notifications`。
 
 ## 2026-10-03：evolve8h wave 860 — monitor-lock pin wave 860 idle
 

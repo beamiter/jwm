@@ -997,3 +997,4 @@ Wave 857: Nested smoke checks health compact `resources` after `get_res`.
 Wave 858: Nested smoke checks health compact `connectivity` after `get_conn`.
 Wave 859: Nested smoke checks health compact `clipboard` after `get_clip`.
 Wave 860: Nested smoke checks health compact `idle` after `get_idl`.
+Wave 861: Nested smoke checks health compact `notifications` after `get_notif`.
