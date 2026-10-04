@@ -1136,3 +1136,4 @@ Wave 996: Compatibility tables name `get_status.expose` with health compact `exp
 Wave 997: Compatibility tables name `get_media` with health compact `media`.
 Wave 998: Compatibility tables name `get_power` with health compact `power`.
 Wave 999: Bar occupancy sits beside health compact `session_lock` (`get_lock`).
+Wave 1000: Bar occupancy sits beside health compact `tearing` (`get_th`).

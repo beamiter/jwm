@@ -19760,4 +19760,10 @@ mod tests {
         assert!(DOCS.contains("Wave 999: Bar occupancy sits beside health compact `session_lock` (`get_lock`)."));
     }
 
+    #[test]
+    fn evolve8h_wave_1000_monitor_lock_unique_pin_tearing() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 1000: Bar occupancy sits beside health compact `tearing` (`get_th`)."));
+    }
+
 }

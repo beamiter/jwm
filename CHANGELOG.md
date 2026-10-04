@@ -1542,6 +1542,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 999: Bar occupancy sits beside health compact `session_lock` (`get_lock`).
 
+- Wave 1000: Bar occupancy sits beside health compact `tearing` (`get_th`).
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

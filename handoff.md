@@ -1825,9 +1825,15 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 998 | monitor-lock 唯一 pin wave 998 power | ✓ |
 | 999 | monitor-lock 唯一 pin wave 999 session_lock | ✓ |
 | 999 | monitor-lock 唯一 pin wave 999 session_lock | ✓ |
+| 1000 | monitor-lock 唯一 pin wave 1000 tearing | ✓ |
+| 1000 | monitor-lock 唯一 pin wave 1000 tearing | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 1000 — monitor-lock pin wave 1000 tearing
+
+选题 = evolve8h wave 1000。monitor-lock 唯一句子 wave 1000 `tearing`。
 
 ## 2026-10-03：evolve8h wave 999 — monitor-lock pin wave 999 session_lock
 
