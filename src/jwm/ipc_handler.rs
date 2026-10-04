@@ -19829,4 +19829,13 @@ mod tests {
         assert!(DOCS.contains("README health text names compact `metrics`"));
     }
 
+    #[test]
+    fn evolve9h_wave_7_tools_readme_health_names_compact_metrics() {
+        const TOOLS: &str = include_str!("../../tools/README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOLS.contains("compact `metrics` line"));
+        assert!(TOOLS.contains("get_status.metrics"));
+        assert!(DOCS.contains("`tools/README.md` health text names compact `metrics`"));
+    }
+
 }
