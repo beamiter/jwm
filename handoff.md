@@ -338,9 +338,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 22 | compatibility 唯一 pin wave 22 status | ✓ |
 | 23 | compatibility 唯一 pin wave 23 tree | ✓ |
 | 24 | compatibility 唯一 pin wave 24 window | ✓ |
+| 25 | compatibility 唯一 pin wave 25 session_lock | ✓ |
 | … | evolve9h 进行中 |
 
 ---
+
+## 2026-10-04：evolve9h wave 25 — compatibility pin wave 25 session_lock
+
+选题 = evolve9h wave 25。compatibility 唯一句子 wave 25 `session_lock`。
 
 ## 2026-10-04：evolve9h wave 24 — compatibility pin wave 24 window
 
