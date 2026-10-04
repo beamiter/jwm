@@ -1440,6 +1440,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 948: Compatibility tables name `get_xw` with health compact `xwayland`.
 
+- Wave 949: Compatibility tables name `get_scroll` with health compact `scrolling`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

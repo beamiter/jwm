@@ -1085,3 +1085,4 @@ Wave 945: Upgrade notes keep health compact `power` beside `get_power`.
 Wave 946: Compatibility tables name `get_lock` with health compact `session_lock`.
 Wave 947: Compatibility tables name `get_th` with health compact `tearing`.
 Wave 948: Compatibility tables name `get_xw` with health compact `xwayland`.
+Wave 949: Compatibility tables name `get_scroll` with health compact `scrolling`.

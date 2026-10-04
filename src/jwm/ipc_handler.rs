@@ -19454,4 +19454,10 @@ mod tests {
         assert!(DOCS.contains("Wave 948: Compatibility tables name `get_xw` with health compact `xwayland`."));
     }
 
+    #[test]
+    fn evolve8h_wave_949_monitor_lock_unique_pin_scrolling() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 949: Compatibility tables name `get_scroll` with health compact `scrolling`."));
+    }
+
 }
