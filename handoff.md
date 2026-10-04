@@ -509,9 +509,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 193 | compatibility 唯一 pin wave 193 wallpaper | ✓ |
 | 194 | compatibility 唯一 pin wave 194 bluetooth | ✓ |
 | 195 | compatibility 唯一 pin wave 195 resources | ✓ |
+| 196 | compatibility 唯一 pin wave 196 connectivity | ✓ |
 | … | evolve9h 进行中 |
 
 ---
+
+## 2026-10-04：evolve9h wave 196 — compatibility pin wave 196 connectivity
+
+选题 = evolve9h wave 196。compatibility 唯一句子 wave 196 `connectivity`。
 
 ## 2026-10-04：evolve9h wave 195 — compatibility pin wave 195 resources
 
