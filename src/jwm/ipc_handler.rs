@@ -17900,4 +17900,10 @@ mod tests {
         assert!(DOCS.contains("Wave 689: `get_gest` and health compact `gesture` share one Status nest."));
     }
 
+    #[test]
+    fn evolve8h_wave_690_monitor_lock_unique_pin_wayland() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 690: `get_wl` and health compact `wayland` share one Status nest."));
+    }
+
 }

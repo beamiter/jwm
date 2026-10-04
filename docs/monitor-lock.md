@@ -826,3 +826,4 @@ Wave 686: `get_nl` and health compact `night_light` share one Status nest.
 Wave 687: `get_mag` and health compact `magnifier` share one Status nest.
 Wave 688: `get_pk` and health compact `peek` share one Status nest.
 Wave 689: `get_gest` and health compact `gesture` share one Status nest.
+Wave 690: `get_wl` and health compact `wayland` share one Status nest.
