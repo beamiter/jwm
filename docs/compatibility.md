@@ -546,3 +546,4 @@ evolve9h wave 322: Upgrade notes keep `media` beside occupancy on the health pag
 evolve9h wave 323: Upgrade notes keep `clipboard` beside occupancy on the health page.
 evolve9h wave 324: Upgrade notes keep `idle` beside occupancy on the health page.
 evolve9h wave 325: Upgrade notes keep `notifications` beside occupancy on the health page.
+evolve9h wave 326: Upgrade notes keep `dnd` beside occupancy on the health page.

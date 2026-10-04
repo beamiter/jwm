@@ -21787,4 +21787,10 @@ mod tests {
         assert!(COMPAT.contains("evolve9h wave 325: Upgrade notes keep `notifications` beside occupancy on the health page."));
     }
 
+    #[test]
+    fn evolve9h_wave_326_compat_unique_pin_dnd() {
+        const COMPAT: &str = include_str!("../../docs/compatibility.md");
+        assert!(COMPAT.contains("evolve9h wave 326: Upgrade notes keep `dnd` beside occupancy on the health page."));
+    }
+
 }
