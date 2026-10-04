@@ -786,6 +786,8 @@ monorepo use independent Semantic Versions.
 
 - README health text names `get_fw` beside compact `focused`.
 
+- README health text names `get_mons` beside compact `monitors`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
