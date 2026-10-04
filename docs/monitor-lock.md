@@ -733,3 +733,4 @@ README health text names `get_th` beside compact `tearing`.
 README health text names `get_xw` beside compact `xwayland`.
 README health text names `get_scroll` beside compact `scrolling`.
 README health text names `get_cm` beside compact `color_management`.
+README health text names `get_nl` beside compact `night_light`.

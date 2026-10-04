@@ -17249,4 +17249,13 @@ mod tests {
         assert!(DOCS.contains("README health text names `get_cm` beside compact `color_management`"));
     }
 
+    #[test]
+    fn evolve8h_wave_597_readme_health_names_get_nl_for_night_light() {
+        const README: &str = include_str!("../../README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(README.contains("`get_nl`"));
+        assert!(README.contains("compact `night_light` line"));
+        assert!(DOCS.contains("README health text names `get_nl` beside compact `night_light`"));
+    }
+
 }

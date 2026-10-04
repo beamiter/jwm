@@ -736,6 +736,8 @@ monorepo use independent Semantic Versions.
 
 - README health text names `get_cm` beside compact `color_management`.
 
+- README health text names `get_nl` beside compact `night_light`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
