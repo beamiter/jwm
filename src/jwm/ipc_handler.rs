@@ -17546,4 +17546,10 @@ mod tests {
         assert!(DOCS.contains("Wave 630: Health compact `xwayland` is the operator twin of `get_xw`."));
     }
 
+    #[test]
+    fn evolve8h_wave_631_monitor_lock_unique_pin_scrolling() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 631: Health compact `scrolling` is the operator twin of `get_scroll`."));
+    }
+
 }

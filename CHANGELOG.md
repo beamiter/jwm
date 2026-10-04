@@ -804,6 +804,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 630: Health compact `xwayland` is the operator twin of `get_xw`.
 
+- Wave 631: Health compact `scrolling` is the operator twin of `get_scroll`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

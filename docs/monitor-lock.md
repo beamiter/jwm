@@ -767,3 +767,4 @@ README health text names `get_bm` beside compact `bench`.
 Wave 628: Health compact `session_lock` is the operator twin of `get_lock`.
 Wave 629: Health compact `tearing` is the operator twin of `get_th`.
 Wave 630: Health compact `xwayland` is the operator twin of `get_xw`.
+Wave 631: Health compact `scrolling` is the operator twin of `get_scroll`.
