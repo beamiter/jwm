@@ -16844,4 +16844,13 @@ mod tests {
         assert!(DOCS.contains("README health text names compact `power`"));
     }
 
+    #[test]
+    fn evolve8h_wave_550_tools_readme_health_names_compact_power() {
+        const TOOLS: &str = include_str!("../../tools/README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOLS.contains("compact `power` line"));
+        assert!(TOOLS.contains("get_status.power"));
+        assert!(DOCS.contains("`tools/README.md` health text names compact `power`"));
+    }
+
 }

@@ -642,6 +642,8 @@ monorepo use independent Semantic Versions.
 
 - README health text names compact `power`.
 
+- `tools/README.md` health text names compact `power`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
