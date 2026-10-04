@@ -1015,9 +1015,15 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 593 | README health 点名 get_th beside compact tearing | ✓ |
 | 594 | README health 点名 get_xw beside compact xwayland | ✓ |
 | 594 | README health 点名 get_xw beside compact xwayland | ✓ |
+| 595 | README health 点名 get_scroll beside compact scrolling | ✓ |
+| 595 | README health 点名 get_scroll beside compact scrolling | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 595 — README health names get_scroll for scrolling
+
+选题 = evolve8h wave 595。README health 文本点名 `get_scroll` beside compact `scrolling`。
 
 ## 2026-10-03：evolve8h wave 594 — README health names get_xw for xwayland
 

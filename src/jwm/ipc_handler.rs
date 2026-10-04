@@ -17231,4 +17231,13 @@ mod tests {
         assert!(DOCS.contains("README health text names `get_xw` beside compact `xwayland`"));
     }
 
+    #[test]
+    fn evolve8h_wave_595_readme_health_names_get_scroll_for_scrolling() {
+        const README: &str = include_str!("../../README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(README.contains("`get_scroll`"));
+        assert!(README.contains("compact `scrolling` line"));
+        assert!(DOCS.contains("README health text names `get_scroll` beside compact `scrolling`"));
+    }
+
 }
