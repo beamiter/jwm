@@ -1516,6 +1516,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 986: Compatibility tables name `get_mf` with health compact `mfact`.
 
+- Wave 987: Compatibility tables name `get_nm` with health compact `nmaster`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
