@@ -3890,6 +3890,25 @@ mod tests {
         assert!(idle_lines.iter().any(|line| {
             line == "idle: inhibited=false caffeine=true dimmed=false screen_off=false locked=false idle_for=12"
         }));
+        assert!(!idle_lines
+            .iter()
+            .any(|line| line.starts_with("clipboard:")));
+
+        let with_compact_clipboard = serde_json::json!({
+            "health": {"status": "healthy", "reasons": []},
+            "counts": {"windows": 0, "monitors": 1, "workspaces": 1},
+            "config": {"path": "/tmp/config.toml", "diagnostics": {"error_count": 0, "warning_count": 0}},
+            "features": {},
+            "clipboard": {
+                "enabled": true,
+                "count": 3,
+                "capacity": 50
+            }
+        });
+        let clipboard_lines = health_output_lines(&with_compact_clipboard);
+        assert!(clipboard_lines.iter().any(|line| {
+            line == "clipboard: enabled=true count=3 capacity=50"
+        }));
 
         let capabilities = serde_json::json!({
             "schema_version": 1,
@@ -5394,6 +5413,27 @@ fn health_output_lines(status: &serde_json::Value) -> Vec<String> {
             flag("screen_off"),
             flag("locked"),
             idle_for
+        ));
+    }
+
+    if let Some(clipboard) = status.get("clipboard").and_then(serde_json::Value::as_object) {
+        let enabled = clipboard
+            .get("enabled")
+            .and_then(serde_json::Value::as_bool)
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".into());
+        let count = clipboard
+            .get("count")
+            .and_then(|v| v.as_u64().or_else(|| v.as_i64().map(|n| n as u64)))
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".into());
+        let capacity = clipboard
+            .get("capacity")
+            .and_then(|v| v.as_u64().or_else(|| v.as_i64().map(|n| n as u64)))
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".into());
+        lines.push(format!(
+            "clipboard: enabled={enabled} count={count} capacity={capacity}"
         ));
     }
 

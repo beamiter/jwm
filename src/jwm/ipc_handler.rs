@@ -15958,4 +15958,17 @@ mod tests {
         assert!(TOOLS.contains("get_status.idle"));
         assert!(DOCS.contains("`tools/README.md` health text names compact `idle`"));
     }
+
+    #[test]
+    fn evolve8h_wave_465_health_prints_compact_clipboard() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains(
+            "clipboard: enabled={enabled} count={count} capacity={capacity}"
+        ));
+        assert!(TOOL.contains("\"clipboard: enabled=true count=3 capacity=50\""));
+        assert!(DOCS.contains(
+            "`jwm-tool health` prints compact `clipboard` beside occupancy"
+        ));
+    }
 }
