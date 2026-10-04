@@ -1109,3 +1109,4 @@ Wave 969: Compatibility tables name `get_ui` with health compact `system_ui`.
 Wave 970: Compatibility tables name `get_lt` with health compact `layout`.
 Wave 971: Compatibility tables name `get_tab` with health compact `tabs`.
 Wave 972: Compatibility tables name `get_sel` with health compact `selected`.
+Wave 973: Compatibility tables name `get_strut` with health compact `struts`.
