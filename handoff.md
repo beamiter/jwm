@@ -1475,9 +1475,15 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 823 | monitor-lock 唯一 pin wave 823 closed_placement | ✓ |
 | 824 | monitor-lock 唯一 pin wave 824 prev_layout | ✓ |
 | 824 | monitor-lock 唯一 pin wave 824 prev_layout | ✓ |
+| 825 | monitor-lock 唯一 pin wave 825 cfact | ✓ |
+| 825 | monitor-lock 唯一 pin wave 825 cfact | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 825 — monitor-lock pin wave 825 cfact
+
+选题 = evolve8h wave 825。monitor-lock 唯一句子 wave 825 `cfact`。
 
 ## 2026-10-03：evolve8h wave 824 — monitor-lock pin wave 824 prev_layout
 
