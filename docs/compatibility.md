@@ -242,3 +242,4 @@ evolve9h wave 18: Health compact `version_info` is diagnosable through `jwm-tool
 evolve9h wave 19: Health compact `metrics` is diagnosable through `jwm-tool health`.
 evolve9h wave 20: Health compact `ipc_caps` is diagnosable through `jwm-tool health`.
 evolve9h wave 21: Health compact `config` is diagnosable through `jwm-tool health`.
+evolve9h wave 22: Health compact `status` is diagnosable through `jwm-tool health`.

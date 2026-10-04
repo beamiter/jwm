@@ -19963,4 +19963,10 @@ mod tests {
         assert!(COMPAT.contains("evolve9h wave 21: Health compact `config` is diagnosable through `jwm-tool health`."));
     }
 
+    #[test]
+    fn evolve9h_wave_22_compat_unique_pin_status() {
+        const COMPAT: &str = include_str!("../../docs/compatibility.md");
+        assert!(COMPAT.contains("evolve9h wave 22: Health compact `status` is diagnosable through `jwm-tool health`."));
+    }
+
 }
