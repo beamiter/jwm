@@ -425,3 +425,4 @@ evolve9h wave 201: Health compact `notifications` is diagnosable through `jwm-to
 evolve9h wave 202: Health compact `dnd` is diagnosable through `jwm-tool health`.
 evolve9h wave 203: Health compact `system_ui` is diagnosable through `jwm-tool health`.
 evolve9h wave 204: `jwm-tool capabilities` remains the catalog for `version_info` query aliases.
+evolve9h wave 205: `jwm-tool capabilities` remains the catalog for `metrics` query aliases.
