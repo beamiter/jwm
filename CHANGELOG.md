@@ -1362,6 +1362,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 909: Upgrade notes keep health compact `bluetooth` beside `get_bt`.
 
+- Wave 910: Upgrade notes keep health compact `resources` beside `get_res`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

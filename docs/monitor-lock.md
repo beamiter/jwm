@@ -1046,3 +1046,4 @@ Wave 906: Upgrade notes keep health compact `waterlily` beside `get_wly`.
 Wave 907: Upgrade notes keep health compact `audio` beside `get_devices`.
 Wave 908: Upgrade notes keep health compact `wallpaper` beside `get_wall`.
 Wave 909: Upgrade notes keep health compact `bluetooth` beside `get_bt`.
+Wave 910: Upgrade notes keep health compact `resources` beside `get_res`.
