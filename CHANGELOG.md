@@ -2224,6 +2224,8 @@ monorepo use independent Semantic Versions.
 
 - evolve9h wave 340: Health compact `magnifier` is diagnosable through `jwm-tool health`.
 
+- evolve9h wave 341: Health compact `peek` is diagnosable through `jwm-tool health`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

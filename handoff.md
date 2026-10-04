@@ -654,9 +654,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 338 | compatibility 唯一 pin wave 338 scrolling | ✓ |
 | 339 | compatibility 唯一 pin wave 339 night_light | ✓ |
 | 340 | compatibility 唯一 pin wave 340 magnifier | ✓ |
+| 341 | compatibility 唯一 pin wave 341 peek | ✓ |
 | … | evolve9h 进行中 |
 
 ---
+
+## 2026-10-04：evolve9h wave 341 — compatibility pin wave 341 peek
+
+选题 = evolve9h wave 341。compatibility 唯一句子 wave 341 `peek`。
 
 ## 2026-10-04：evolve9h wave 340 — compatibility pin wave 340 magnifier
 
