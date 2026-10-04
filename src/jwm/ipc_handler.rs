@@ -17384,4 +17384,13 @@ mod tests {
         assert!(DOCS.contains("README health text names `get_clip` beside compact `clipboard`"));
     }
 
+    #[test]
+    fn evolve8h_wave_612_readme_health_names_get_idl_for_idle() {
+        const README: &str = include_str!("../../README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(README.contains("`get_idl`"));
+        assert!(README.contains("compact `idle` line"));
+        assert!(DOCS.contains("README health text names `get_idl` beside compact `idle`"));
+    }
+
 }

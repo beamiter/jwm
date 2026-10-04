@@ -212,7 +212,7 @@ It also prints a compact `blur` line from `get_status.blur`.
 It also prints a compact `hdr` line from `get_status.hdr`.
 It also prints a compact `dnd` line from `get_status.dnd`.
 It also prints a compact `system_ui` line from `get_status.system_ui` (`get_ui`).
-It also prints a compact `idle` line from `get_status.idle`.
+It also prints a compact `idle` line from `get_status.idle` (`get_idl`).
 It also prints a compact `clipboard` line from `get_status.clipboard` (`get_clip`).
 It also prints a compact `session_lock` line from `get_status.session_lock` (`get_lock`).
 It also prints a compact `tearing` line from `get_status.tearing` (`get_th`).

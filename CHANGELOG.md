@@ -766,6 +766,8 @@ monorepo use independent Semantic Versions.
 
 - README health text names `get_clip` beside compact `clipboard`.
 
+- README health text names `get_idl` beside compact `idle`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
