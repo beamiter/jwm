@@ -895,9 +895,15 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 533 | README health 点名 compact wallpaper | ✓ |
 | 534 | tools/README health 点名 compact wallpaper | ✓ |
 | 534 | tools/README health 点名 compact wallpaper | ✓ |
+| 535 | capabilities 文本列出 get_wall -> get_wallpaper | ✓ |
+| 535 | capabilities 文本列出 get_wall -> get_wallpaper | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 535 — capabilities text lists wallpaper alias
+
+选题 = evolve8h wave 535。`jwm-tool capabilities` 文本列出 `get_wall -> get_wallpaper`。
 
 ## 2026-10-03：evolve8h wave 534 — tools/README health names compact wallpaper
 

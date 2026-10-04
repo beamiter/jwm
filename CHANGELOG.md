@@ -612,6 +612,8 @@ monorepo use independent Semantic Versions.
 
 - `tools/README.md` health text names compact `wallpaper`.
 
+- `jwm-tool capabilities` text lists `get_wall -> get_wallpaper`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
