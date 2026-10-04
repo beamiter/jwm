@@ -888,6 +888,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 672: Health compact `sticky` is the operator twin of `get_status.sticky`.
 
+- Wave 673: Health compact `urgent` is the operator twin of `get_status.urgent`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
