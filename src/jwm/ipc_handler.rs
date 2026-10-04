@@ -21133,4 +21133,10 @@ mod tests {
         assert!(COMPAT.contains("evolve9h wave 216: `jwm-tool capabilities` remains the catalog for `magnifier` query aliases."));
     }
 
+    #[test]
+    fn evolve9h_wave_217_compat_unique_pin_peek() {
+        const COMPAT: &str = include_str!("../../docs/compatibility.md");
+        assert!(COMPAT.contains("evolve9h wave 217: `jwm-tool capabilities` remains the catalog for `peek` query aliases."));
+    }
+
 }
