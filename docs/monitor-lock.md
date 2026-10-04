@@ -636,3 +636,4 @@ README health text names compact `magnifier`.
 `jwm-tool health` prints compact `peek` beside occupancy.
 README health text names compact `peek`.
 `tools/README.md` health text names compact `peek`.
+`jwm-tool capabilities` text lists `get_pk -> get_peek`.
