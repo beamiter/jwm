@@ -1127,3 +1127,4 @@ Wave 987: Compatibility tables name `get_nm` with health compact `nmaster`.
 Wave 988: Compatibility tables name `get_status.floating` with health compact `floating`.
 Wave 989: Compatibility tables name `get_status.minimized` with health compact `minimized`.
 Wave 990: Compatibility tables name `get_status.sticky` with health compact `sticky`.
+Wave 991: Compatibility tables name `get_status.urgent` with health compact `urgent`.

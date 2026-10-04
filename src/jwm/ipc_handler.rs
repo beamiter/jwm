@@ -19706,4 +19706,10 @@ mod tests {
         assert!(DOCS.contains("Wave 990: Compatibility tables name `get_status.sticky` with health compact `sticky`."));
     }
 
+    #[test]
+    fn evolve8h_wave_991_monitor_lock_unique_pin_urgent() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 991: Compatibility tables name `get_status.urgent` with health compact `urgent`."));
+    }
+
 }
