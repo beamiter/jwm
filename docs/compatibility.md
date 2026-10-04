@@ -461,3 +461,4 @@ evolve9h wave 237: Support bundles should include `ipc_caps` when health is degr
 evolve9h wave 238: Support bundles should include `config` when health is degraded.
 evolve9h wave 239: Support bundles should include `status` when health is degraded.
 evolve9h wave 240: Support bundles should include `tree` when health is degraded.
+evolve9h wave 241: Support bundles should include `window` when health is degraded.
