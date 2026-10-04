@@ -543,3 +543,4 @@ evolve9h wave 319: Upgrade notes keep `resources` beside occupancy on the health
 evolve9h wave 320: Upgrade notes keep `connectivity` beside occupancy on the health page.
 evolve9h wave 321: Upgrade notes keep `power` beside occupancy on the health page.
 evolve9h wave 322: Upgrade notes keep `media` beside occupancy on the health page.
+evolve9h wave 323: Upgrade notes keep `clipboard` beside occupancy on the health page.
