@@ -346,3 +346,4 @@ evolve9h wave 122: Nested smoke treats `night_light` as a read-only IPC probe.
 evolve9h wave 123: Nested smoke treats `magnifier` as a read-only IPC probe.
 evolve9h wave 124: Nested smoke treats `peek` as a read-only IPC probe.
 evolve9h wave 125: Nested smoke treats `gesture` as a read-only IPC probe.
+evolve9h wave 126: Nested smoke treats `wayland` as a read-only IPC probe.
