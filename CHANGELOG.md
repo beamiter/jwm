@@ -1040,6 +1040,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 748: Doctor bundles include health compact `audio` from `get_devices`.
 
+- Wave 749: Doctor bundles include health compact `wallpaper` from `get_wall`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

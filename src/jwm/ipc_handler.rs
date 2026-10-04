@@ -18254,4 +18254,10 @@ mod tests {
         assert!(DOCS.contains("Wave 748: Doctor bundles include health compact `audio` from `get_devices`."));
     }
 
+    #[test]
+    fn evolve8h_wave_749_monitor_lock_unique_pin_wallpaper() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 749: Doctor bundles include health compact `wallpaper` from `get_wall`."));
+    }
+
 }
