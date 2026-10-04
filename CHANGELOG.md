@@ -1904,6 +1904,8 @@ monorepo use independent Semantic Versions.
 
 - evolve9h wave 180: Health compact `session_lock` is diagnosable through `jwm-tool health`.
 
+- evolve9h wave 181: Health compact `tearing` is diagnosable through `jwm-tool health`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
