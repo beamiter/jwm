@@ -1025,3 +1025,4 @@ Wave 885: Nested smoke checks health compact `urgent` after `get_status.urgent`.
 Wave 886: Nested smoke checks health compact `fullscreen` after `get_status.fullscreen`.
 Wave 887: Nested smoke checks health compact `pip` after `get_status.pip`.
 Wave 888: Nested smoke checks health compact `blur` after `get_status.blur`.
+Wave 889: Nested smoke checks health compact `hdr` after `get_status.hdr`.

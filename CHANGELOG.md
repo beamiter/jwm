@@ -1320,6 +1320,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 888: Nested smoke checks health compact `blur` after `get_status.blur`.
 
+- Wave 889: Nested smoke checks health compact `hdr` after `get_status.hdr`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
