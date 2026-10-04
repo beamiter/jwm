@@ -3909,6 +3909,24 @@ mod tests {
         assert!(clipboard_lines.iter().any(|line| {
             line == "clipboard: enabled=true count=3 capacity=50"
         }));
+        assert!(!clipboard_lines
+            .iter()
+            .any(|line| line.starts_with("session_lock:")));
+
+        let with_compact_session_lock = serde_json::json!({
+            "health": {"status": "healthy", "reasons": []},
+            "counts": {"windows": 0, "monitors": 1, "workspaces": 1},
+            "config": {"path": "/tmp/config.toml", "diagnostics": {"error_count": 0, "warning_count": 0}},
+            "features": {},
+            "session_lock": {
+                "locked": true,
+                "lock_surface_count": 2
+            }
+        });
+        let session_lock_lines = health_output_lines(&with_compact_session_lock);
+        assert!(session_lock_lines.iter().any(|line| {
+            line == "session_lock: locked=true surfaces=2"
+        }));
 
         let capabilities = serde_json::json!({
             "schema_version": 1,
@@ -5434,6 +5452,25 @@ fn health_output_lines(status: &serde_json::Value) -> Vec<String> {
             .unwrap_or_else(|| "-".into());
         lines.push(format!(
             "clipboard: enabled={enabled} count={count} capacity={capacity}"
+        ));
+    }
+
+    if let Some(session_lock) = status
+        .get("session_lock")
+        .and_then(serde_json::Value::as_object)
+    {
+        let locked = session_lock
+            .get("locked")
+            .and_then(serde_json::Value::as_bool)
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".into());
+        let lock_surface_count = session_lock
+            .get("lock_surface_count")
+            .and_then(|v| v.as_u64().or_else(|| v.as_i64().map(|n| n as u64)))
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".into());
+        lines.push(format!(
+            "session_lock: locked={locked} surfaces={lock_surface_count}"
         ));
     }
 

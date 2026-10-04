@@ -15989,4 +15989,17 @@ mod tests {
         assert!(TOOLS.contains("get_status.clipboard"));
         assert!(DOCS.contains("`tools/README.md` health text names compact `clipboard`"));
     }
+
+    #[test]
+    fn evolve8h_wave_468_health_prints_compact_session_lock() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains(
+            "session_lock: locked={locked} surfaces={lock_surface_count}"
+        ));
+        assert!(TOOL.contains("\"session_lock: locked=true surfaces=2\""));
+        assert!(DOCS.contains(
+            "`jwm-tool health` prints compact `session_lock` beside occupancy"
+        ));
+    }
 }
