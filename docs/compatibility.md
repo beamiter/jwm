@@ -356,3 +356,4 @@ evolve9h wave 132: Nested smoke treats `bluetooth` as a read-only IPC probe.
 evolve9h wave 133: Nested smoke treats `resources` as a read-only IPC probe.
 evolve9h wave 134: Nested smoke treats `connectivity` as a read-only IPC probe.
 evolve9h wave 135: Nested smoke treats `power` as a read-only IPC probe.
+evolve9h wave 136: Nested smoke treats `media` as a read-only IPC probe.
