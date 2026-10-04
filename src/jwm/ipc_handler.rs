@@ -16102,4 +16102,16 @@ mod tests {
         assert!(TOOLS.contains("get_status.xwayland"));
         assert!(DOCS.contains("`tools/README.md` health text names compact `xwayland`"));
     }
+
+    #[test]
+    fn evolve8h_wave_479_capabilities_text_lists_xwayland_aliases() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains(
+            "query aliases: get_xwayland,get_xw -> get_xwayland_status"
+        ));
+        assert!(DOCS.contains(
+            "`jwm-tool capabilities` text lists `get_xwayland,get_xw -> get_xwayland_status`"
+        ));
+    }
 }

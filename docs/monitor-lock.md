@@ -614,3 +614,4 @@ README health text names compact `tearing`.
 `jwm-tool health` prints compact `xwayland` beside occupancy.
 README health text names compact `xwayland`.
 `tools/README.md` health text names compact `xwayland`.
+`jwm-tool capabilities` text lists `get_xwayland,get_xw -> get_xwayland_status`.
