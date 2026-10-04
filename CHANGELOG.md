@@ -1070,6 +1070,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 763: Doctor bundles include health compact `focused` from `get_fw`.
 
+- Wave 764: Doctor bundles include health compact `monitors` from `get_mons`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
