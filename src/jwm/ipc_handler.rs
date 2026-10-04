@@ -18602,4 +18602,10 @@ mod tests {
         assert!(DOCS.contains("Wave 806: Support triage reads health compact `clipboard` before `get_clip` dumps."));
     }
 
+    #[test]
+    fn evolve8h_wave_807_monitor_lock_unique_pin_idle() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 807: Support triage reads health compact `idle` before `get_idl` dumps."));
+    }
+
 }
