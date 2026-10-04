@@ -838,6 +838,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 647: Health compact `clipboard` is the operator twin of `get_clip`.
 
+- Wave 648: Health compact `idle` is the operator twin of `get_idl`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

@@ -17648,4 +17648,10 @@ mod tests {
         assert!(DOCS.contains("Wave 647: Health compact `clipboard` is the operator twin of `get_clip`."));
     }
 
+    #[test]
+    fn evolve8h_wave_648_monitor_lock_unique_pin_idle() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 648: Health compact `idle` is the operator twin of `get_idl`."));
+    }
+
 }
