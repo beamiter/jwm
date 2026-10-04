@@ -21625,4 +21625,10 @@ mod tests {
         assert!(COMPAT.contains("evolve9h wave 298: Upgrade notes keep `metrics` beside occupancy on the health page."));
     }
 
+    #[test]
+    fn evolve9h_wave_299_compat_unique_pin_ipc_caps() {
+        const COMPAT: &str = include_str!("../../docs/compatibility.md");
+        assert!(COMPAT.contains("evolve9h wave 299: Upgrade notes keep `ipc_caps` beside occupancy on the health page."));
+    }
+
 }
