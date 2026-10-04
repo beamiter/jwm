@@ -276,3 +276,4 @@ evolve9h wave 52: `jwm-tool capabilities` remains the catalog for `config` query
 evolve9h wave 53: `jwm-tool capabilities` remains the catalog for `status` query aliases.
 evolve9h wave 54: `jwm-tool capabilities` remains the catalog for `tree` query aliases.
 evolve9h wave 55: `jwm-tool capabilities` remains the catalog for `window` query aliases.
+evolve9h wave 56: `jwm-tool capabilities` remains the catalog for `session_lock` query aliases.

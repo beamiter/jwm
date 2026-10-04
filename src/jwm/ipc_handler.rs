@@ -20167,4 +20167,10 @@ mod tests {
         assert!(COMPAT.contains("evolve9h wave 55: `jwm-tool capabilities` remains the catalog for `window` query aliases."));
     }
 
+    #[test]
+    fn evolve9h_wave_56_compat_unique_pin_session_lock() {
+        const COMPAT: &str = include_str!("../../docs/compatibility.md");
+        assert!(COMPAT.contains("evolve9h wave 56: `jwm-tool capabilities` remains the catalog for `session_lock` query aliases."));
+    }
+
 }
