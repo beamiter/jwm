@@ -15667,4 +15667,13 @@ mod tests {
         assert!(TOOL.contains("\"sticky: count=1 focused=33\""));
         assert!(DOCS.contains("`jwm-tool health` prints compact `sticky` beside occupancy"));
     }
+
+    #[test]
+    fn evolve8h_wave_435_readme_health_names_compact_sticky() {
+        const README: &str = include_str!("../../README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(README.contains("compact `sticky` line"));
+        assert!(README.contains("get_status.sticky"));
+        assert!(DOCS.contains("README health text names compact `sticky`"));
+    }
 }

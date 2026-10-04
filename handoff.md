@@ -748,9 +748,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 432 | README health 点名 compact minimized | ✓ |
 | 433 | tools/README health 点名 compact minimized | ✓ |
 | 434 | health 打印 compact sticky | ✓ |
+| 435 | README health 点名 compact sticky | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 435 — README health names compact sticky
+
+选题 = evolve8h wave 435。README health 文本点名 compact `sticky`。
 
 ## 2026-10-03：evolve8h wave 434 — health prints compact sticky
 
