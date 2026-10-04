@@ -18152,4 +18152,10 @@ mod tests {
         assert!(DOCS.contains("Wave 731: `get_status.expose` and health compact `expose` share one Status nest."));
     }
 
+    #[test]
+    fn evolve8h_wave_732_monitor_lock_unique_pin_media() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 732: `get_media` and health compact `media` share one Status nest."));
+    }
+
 }

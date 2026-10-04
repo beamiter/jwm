@@ -868,3 +868,4 @@ Wave 728: `get_status.pip` and health compact `pip` share one Status nest.
 Wave 729: `get_status.blur` and health compact `blur` share one Status nest.
 Wave 730: `get_status.hdr` and health compact `hdr` share one Status nest.
 Wave 731: `get_status.expose` and health compact `expose` share one Status nest.
+Wave 732: `get_media` and health compact `media` share one Status nest.
