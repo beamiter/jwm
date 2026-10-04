@@ -19256,4 +19256,10 @@ mod tests {
         assert!(DOCS.contains("Wave 915: Upgrade notes keep health compact `dnd` beside `get_dnd`."));
     }
 
+    #[test]
+    fn evolve8h_wave_916_monitor_lock_unique_pin_system_ui() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 916: Upgrade notes keep health compact `system_ui` beside `get_ui`."));
+    }
+
 }
