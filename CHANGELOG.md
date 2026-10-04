@@ -726,6 +726,8 @@ monorepo use independent Semantic Versions.
 
 - `docs/architecture.md` names compact `tree` beside health.
 
+- README health text names `get_lock` beside compact `session_lock`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

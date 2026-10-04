@@ -728,3 +728,4 @@ README health text names compact `media`.
 `docs/ui-theme.md` names compact `blur` beside health.
 `docs/daily-drive.md` names compact `idle` beside health.
 `docs/architecture.md` names compact `tree` beside health.
+README health text names `get_lock` beside compact `session_lock`.

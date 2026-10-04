@@ -17204,4 +17204,13 @@ mod tests {
         assert!(DOCS.contains("`docs/architecture.md` names compact `tree` beside health"));
     }
 
+    #[test]
+    fn evolve8h_wave_592_readme_health_names_get_lock_for_session_lock() {
+        const README: &str = include_str!("../../README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(README.contains("`get_lock`"));
+        assert!(README.contains("compact `session_lock` line"));
+        assert!(DOCS.contains("README health text names `get_lock` beside compact `session_lock`"));
+    }
+
 }
