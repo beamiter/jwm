@@ -274,3 +274,4 @@ evolve9h wave 50: `jwm-tool capabilities` remains the catalog for `metrics` quer
 evolve9h wave 51: `jwm-tool capabilities` remains the catalog for `ipc_caps` query aliases.
 evolve9h wave 52: `jwm-tool capabilities` remains the catalog for `config` query aliases.
 evolve9h wave 53: `jwm-tool capabilities` remains the catalog for `status` query aliases.
+evolve9h wave 54: `jwm-tool capabilities` remains the catalog for `tree` query aliases.
