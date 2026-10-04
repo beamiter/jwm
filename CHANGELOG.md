@@ -1822,6 +1822,8 @@ monorepo use independent Semantic Versions.
 
 - evolve9h wave 139: Nested smoke treats `notifications` as a read-only IPC probe.
 
+- evolve9h wave 140: Nested smoke treats `dnd` as a read-only IPC probe.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
