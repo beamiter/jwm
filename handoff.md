@@ -1605,9 +1605,15 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 888 | monitor-lock 唯一 pin wave 888 blur | ✓ |
 | 889 | monitor-lock 唯一 pin wave 889 hdr | ✓ |
 | 889 | monitor-lock 唯一 pin wave 889 hdr | ✓ |
+| 890 | monitor-lock 唯一 pin wave 890 expose | ✓ |
+| 890 | monitor-lock 唯一 pin wave 890 expose | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 890 — monitor-lock pin wave 890 expose
+
+选题 = evolve8h wave 890。monitor-lock 唯一句子 wave 890 `expose`。
 
 ## 2026-10-03：evolve8h wave 889 — monitor-lock pin wave 889 hdr
 

@@ -19100,4 +19100,10 @@ mod tests {
         assert!(DOCS.contains("Wave 889: Nested smoke checks health compact `hdr` after `get_status.hdr`."));
     }
 
+    #[test]
+    fn evolve8h_wave_890_monitor_lock_unique_pin_expose() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 890: Nested smoke checks health compact `expose` after `get_status.expose`."));
+    }
+
 }

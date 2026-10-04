@@ -1322,6 +1322,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 889: Nested smoke checks health compact `hdr` after `get_status.hdr`.
 
+- Wave 890: Nested smoke checks health compact `expose` after `get_status.expose`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
