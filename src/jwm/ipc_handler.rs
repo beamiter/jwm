@@ -18308,4 +18308,10 @@ mod tests {
         assert!(DOCS.contains("Wave 757: Doctor bundles include health compact `system_ui` from `get_ui`."));
     }
 
+    #[test]
+    fn evolve8h_wave_758_monitor_lock_unique_pin_layout() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 758: Doctor bundles include health compact `layout` from `get_lt`."));
+    }
+
 }

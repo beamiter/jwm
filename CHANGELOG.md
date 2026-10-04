@@ -1058,6 +1058,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 757: Doctor bundles include health compact `system_ui` from `get_ui`.
 
+- Wave 758: Doctor bundles include health compact `layout` from `get_lt`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
