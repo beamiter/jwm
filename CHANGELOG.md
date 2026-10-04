@@ -1580,6 +1580,8 @@ monorepo use independent Semantic Versions.
 
 - evolve9h wave 18: Health compact `version_info` is diagnosable through `jwm-tool health`.
 
+- evolve9h wave 19: Health compact `metrics` is diagnosable through `jwm-tool health`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

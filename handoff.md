@@ -332,9 +332,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 16 | capabilities 文本列出 get_tr -> get_tree | ✓ |
 | 17 | capabilities 文本列出 get_win -> get_window | ✓ |
 | 18 | compatibility 唯一 pin wave 18 version_info | ✓ |
+| 19 | compatibility 唯一 pin wave 19 metrics | ✓ |
 | … | evolve9h 进行中 |
 
 ---
+
+## 2026-10-04：evolve9h wave 19 — compatibility pin wave 19 metrics
+
+选题 = evolve9h wave 19。compatibility 唯一句子 wave 19 `metrics`。
 
 ## 2026-10-04：evolve9h wave 18 — compatibility pin wave 18 version_info
 
