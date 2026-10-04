@@ -2152,6 +2152,8 @@ monorepo use independent Semantic Versions.
 
 - evolve9h wave 304: Upgrade notes keep `session_lock` beside occupancy on the health page.
 
+- evolve9h wave 305: Upgrade notes keep `tearing` beside occupancy on the health page.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

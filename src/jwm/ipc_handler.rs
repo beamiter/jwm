@@ -21661,4 +21661,10 @@ mod tests {
         assert!(COMPAT.contains("evolve9h wave 304: Upgrade notes keep `session_lock` beside occupancy on the health page."));
     }
 
+    #[test]
+    fn evolve9h_wave_305_compat_unique_pin_tearing() {
+        const COMPAT: &str = include_str!("../../docs/compatibility.md");
+        assert!(COMPAT.contains("evolve9h wave 305: Upgrade notes keep `tearing` beside occupancy on the health page."));
+    }
+
 }
