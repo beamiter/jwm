@@ -19929,4 +19929,14 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn evolve9h_wave_17_capabilities_text_lists_window_alias() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("query aliases: get_win -> get_window"));
+        assert!(DOCS.contains(
+            "`jwm-tool capabilities` text lists `get_win -> get_window`"
+        ));
+    }
+
 }
