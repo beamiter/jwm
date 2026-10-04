@@ -17213,4 +17213,13 @@ mod tests {
         assert!(DOCS.contains("README health text names `get_lock` beside compact `session_lock`"));
     }
 
+    #[test]
+    fn evolve8h_wave_593_readme_health_names_get_th_for_tearing() {
+        const README: &str = include_str!("../../README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(README.contains("`get_th`"));
+        assert!(README.contains("compact `tearing` line"));
+        assert!(DOCS.contains("README health text names `get_th` beside compact `tearing`"));
+    }
+
 }

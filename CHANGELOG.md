@@ -728,6 +728,8 @@ monorepo use independent Semantic Versions.
 
 - README health text names `get_lock` beside compact `session_lock`.
 
+- README health text names `get_th` beside compact `tearing`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
