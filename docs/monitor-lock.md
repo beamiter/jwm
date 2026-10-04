@@ -703,3 +703,4 @@ README health text names compact `media`.
 `docs/window-switcher.md` names compact `selected` beside health.
 `docs/layout-picker.md` names compact `layout` beside health.
 `docs/launcher.md` names compact `system_ui` beside health.
+`docs/cube-effects.md` names compact `effects` beside health.

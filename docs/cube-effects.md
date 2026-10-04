@@ -215,3 +215,5 @@ lighting without restarting the compositor. Wayland owns a distinct
 `overview_skydome_program` in addition to the vignette program shared by Expose
 and Peek; both are constructed and released with the compositor's other raw
 GLES resources.
+
+`jwm-tool health` prints compact `effects` for cube effects operators.

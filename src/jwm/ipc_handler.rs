@@ -17004,4 +17004,12 @@ mod tests {
         assert!(DOCS.contains("`docs/launcher.md` names compact `system_ui` beside health"));
     }
 
+    #[test]
+    fn evolve8h_wave_567_doc_cube_effects_names_compact_effects() {
+        const FEATURE: &str = include_str!("../../docs/cube-effects.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(FEATURE.contains("compact `effects`"));
+        assert!(DOCS.contains("`docs/cube-effects.md` names compact `effects` beside health"));
+    }
+
 }

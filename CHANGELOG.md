@@ -676,6 +676,8 @@ monorepo use independent Semantic Versions.
 
 - `docs/launcher.md` names compact `system_ui` beside health.
 
+- `docs/cube-effects.md` names compact `effects` beside health.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
