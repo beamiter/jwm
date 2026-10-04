@@ -17036,4 +17036,12 @@ mod tests {
         assert!(DOCS.contains("`docs/clipboard.md` names compact `clipboard` beside health"));
     }
 
+    #[test]
+    fn evolve8h_wave_571_doc_idle_names_compact_idle() {
+        const FEATURE: &str = include_str!("../../docs/idle.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(FEATURE.contains("compact `idle`"));
+        assert!(DOCS.contains("`docs/idle.md` names compact `idle` beside health"));
+    }
+
 }

@@ -684,6 +684,8 @@ monorepo use independent Semantic Versions.
 
 - `docs/clipboard.md` names compact `clipboard` beside health.
 
+- `docs/idle.md` names compact `idle` beside health.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

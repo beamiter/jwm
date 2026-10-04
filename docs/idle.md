@@ -272,3 +272,5 @@ One consequence on the deferred scene-linear routes: while the screen is
 dimmed, HDR highlights above SDR white are clamped by that encoded round
 trip, just as they are while a postprocess filter (night light, saturation,
 contrast) is active. They come back as soon as the dim lifts.
+
+`jwm-tool health` prints compact `idle` for idle operators.
