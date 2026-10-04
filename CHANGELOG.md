@@ -1132,6 +1132,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 794: Support triage reads health compact `peek` before `get_pk` dumps.
 
+- Wave 795: Support triage reads health compact `gesture` before `get_gest` dumps.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

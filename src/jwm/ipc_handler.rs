@@ -18530,4 +18530,10 @@ mod tests {
         assert!(DOCS.contains("Wave 794: Support triage reads health compact `peek` before `get_pk` dumps."));
     }
 
+    #[test]
+    fn evolve8h_wave_795_monitor_lock_unique_pin_gesture() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 795: Support triage reads health compact `gesture` before `get_gest` dumps."));
+    }
+
 }
