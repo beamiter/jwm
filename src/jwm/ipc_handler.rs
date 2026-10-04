@@ -18002,4 +18002,10 @@ mod tests {
         assert!(DOCS.contains("Wave 706: `get_tab` and health compact `tabs` share one Status nest."));
     }
 
+    #[test]
+    fn evolve8h_wave_707_monitor_lock_unique_pin_selected() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 707: `get_sel` and health compact `selected` share one Status nest."));
+    }
+
 }
