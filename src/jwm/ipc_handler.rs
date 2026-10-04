@@ -18236,4 +18236,10 @@ mod tests {
         assert!(DOCS.contains("Wave 745: Doctor bundles include health compact `audio_recording` from `get_arec`."));
     }
 
+    #[test]
+    fn evolve8h_wave_746_monitor_lock_unique_pin_capture() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 746: Doctor bundles include health compact `capture` from `get_cap`."));
+    }
+
 }

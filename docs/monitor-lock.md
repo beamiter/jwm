@@ -882,3 +882,4 @@ Wave 742: Doctor bundles include health compact `gesture` from `get_gest`.
 Wave 743: Doctor bundles include health compact `wayland` from `get_wl`.
 Wave 744: Doctor bundles include health compact `recording` from `get_rec`.
 Wave 745: Doctor bundles include health compact `audio_recording` from `get_arec`.
+Wave 746: Doctor bundles include health compact `capture` from `get_cap`.
