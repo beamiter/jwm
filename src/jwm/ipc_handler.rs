@@ -18788,4 +18788,10 @@ mod tests {
         assert!(DOCS.contains("Wave 837: Support triage reads health compact `expose` before `get_status.expose` dumps."));
     }
 
+    #[test]
+    fn evolve8h_wave_838_monitor_lock_unique_pin_media() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 838: Support triage reads health compact `media` before `get_media` dumps."));
+    }
+
 }

@@ -1218,6 +1218,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 837: Support triage reads health compact `expose` before `get_status.expose` dumps.
 
+- Wave 838: Support triage reads health compact `media` before `get_media` dumps.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

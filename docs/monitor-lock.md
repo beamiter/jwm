@@ -974,3 +974,4 @@ Wave 834: Support triage reads health compact `pip` before `get_status.pip` dump
 Wave 835: Support triage reads health compact `blur` before `get_status.blur` dumps.
 Wave 836: Support triage reads health compact `hdr` before `get_status.hdr` dumps.
 Wave 837: Support triage reads health compact `expose` before `get_status.expose` dumps.
+Wave 838: Support triage reads health compact `media` before `get_media` dumps.
