@@ -1286,6 +1286,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 871: Nested smoke checks health compact `workspaces` after `get_ws`.
 
+- Wave 872: Nested smoke checks health compact `windows` after `get_wins`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

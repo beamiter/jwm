@@ -1008,3 +1008,4 @@ Wave 868: Nested smoke checks health compact `scratchpads` after `get_pads`.
 Wave 869: Nested smoke checks health compact `focused` after `get_fw`.
 Wave 870: Nested smoke checks health compact `monitors` after `get_mons`.
 Wave 871: Nested smoke checks health compact `workspaces` after `get_ws`.
+Wave 872: Nested smoke checks health compact `windows` after `get_wins`.

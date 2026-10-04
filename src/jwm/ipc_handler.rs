@@ -18992,4 +18992,10 @@ mod tests {
         assert!(DOCS.contains("Wave 871: Nested smoke checks health compact `workspaces` after `get_ws`."));
     }
 
+    #[test]
+    fn evolve8h_wave_872_monitor_lock_unique_pin_windows() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 872: Nested smoke checks health compact `windows` after `get_wins`."));
+    }
+
 }
