@@ -117,6 +117,7 @@ It also prints a compact `minimized` line from `get_status.minimized`.
 It also prints a compact `sticky` line from `get_status.sticky`.
 It also prints a compact `urgent` line from `get_status.urgent`.
 It also prints a compact `fullscreen` line from `get_status.fullscreen`.
+It also prints a compact `pip` line from `get_status.pip`.
 
 IPC 使用换行分隔的 JSON。工具按块读取并保留同一批到达的后续消息，
 每条响应的正文上限为 1 MiB。普通响应和订阅确认须在开始读取后 5 秒内
