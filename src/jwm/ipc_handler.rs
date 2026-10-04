@@ -19112,4 +19112,10 @@ mod tests {
         assert!(DOCS.contains("Wave 891: Nested smoke checks health compact `media` after `get_media`."));
     }
 
+    #[test]
+    fn evolve8h_wave_892_monitor_lock_unique_pin_power() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 892: Nested smoke checks health compact `power` after `get_power`."));
+    }
+
 }

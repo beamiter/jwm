@@ -1326,6 +1326,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 891: Nested smoke checks health compact `media` after `get_media`.
 
+- Wave 892: Nested smoke checks health compact `power` after `get_power`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
