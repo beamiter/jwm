@@ -16914,4 +16914,14 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn evolve8h_wave_557_capabilities_text_lists_dnd_alias() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("query aliases: get_dnd -> get_do_not_disturb"));
+        assert!(DOCS.contains(
+            "`jwm-tool capabilities` text lists `get_dnd -> get_do_not_disturb`"
+        ));
+    }
+
 }

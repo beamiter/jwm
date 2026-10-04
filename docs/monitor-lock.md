@@ -693,3 +693,4 @@ README health text names compact `media`.
 `jwm-tool capabilities` text lists `get_clip -> get_clipboard`.
 `jwm-tool capabilities` text lists `get_idl -> get_idle`.
 `jwm-tool capabilities` text lists `get_notif -> get_notifications`.
+`jwm-tool capabilities` text lists `get_dnd -> get_do_not_disturb`.
