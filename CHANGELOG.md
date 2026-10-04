@@ -518,6 +518,8 @@ monorepo use independent Semantic Versions.
 - README health text names compact `color_management`.
 - `tools/README.md` health text names compact `color_management`.
 
+- `jwm-tool capabilities` text lists `get_cm -> get_color_management_status`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

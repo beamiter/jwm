@@ -16207,4 +16207,14 @@ mod tests {
             "`tools/README.md` health text names compact `color_management`"
         ));
     }
+    #[test]
+    fn evolve8h_wave_488_capabilities_text_lists_color_management_alias() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("query aliases: get_cm -> get_color_management_status"));
+        assert!(DOCS.contains(
+            "`jwm-tool capabilities` text lists `get_cm -> get_color_management_status`"
+        ));
+    }
+
 }
