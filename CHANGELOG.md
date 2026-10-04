@@ -884,6 +884,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 670: Health compact `floating` is the operator twin of `get_status.floating`.
 
+- Wave 671: Health compact `minimized` is the operator twin of `get_status.minimized`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
