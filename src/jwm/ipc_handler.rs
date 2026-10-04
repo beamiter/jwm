@@ -18284,4 +18284,10 @@ mod tests {
         assert!(DOCS.contains("Wave 753: Doctor bundles include health compact `clipboard` from `get_clip`."));
     }
 
+    #[test]
+    fn evolve8h_wave_754_monitor_lock_unique_pin_idle() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 754: Doctor bundles include health compact `idle` from `get_idl`."));
+    }
+
 }

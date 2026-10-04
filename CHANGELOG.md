@@ -1050,6 +1050,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 753: Doctor bundles include health compact `clipboard` from `get_clip`.
 
+- Wave 754: Doctor bundles include health compact `idle` from `get_idl`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
