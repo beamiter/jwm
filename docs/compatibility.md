@@ -524,3 +524,4 @@ evolve9h wave 300: Upgrade notes keep `config` beside occupancy on the health pa
 evolve9h wave 301: Upgrade notes keep `status` beside occupancy on the health page.
 evolve9h wave 302: Upgrade notes keep `tree` beside occupancy on the health page.
 evolve9h wave 303: Upgrade notes keep `window` beside occupancy on the health page.
+evolve9h wave 304: Upgrade notes keep `session_lock` beside occupancy on the health page.
