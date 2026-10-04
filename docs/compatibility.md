@@ -352,3 +352,4 @@ evolve9h wave 128: Nested smoke treats `capture` as a read-only IPC probe.
 evolve9h wave 129: Nested smoke treats `waterlily` as a read-only IPC probe.
 evolve9h wave 130: Nested smoke treats `audio` as a read-only IPC probe.
 evolve9h wave 131: Nested smoke treats `wallpaper` as a read-only IPC probe.
+evolve9h wave 132: Nested smoke treats `bluetooth` as a read-only IPC probe.
