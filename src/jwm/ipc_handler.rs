@@ -21301,4 +21301,10 @@ mod tests {
         assert!(COMPAT.contains("evolve9h wave 244: Support bundles should include `xwayland` when health is degraded."));
     }
 
+    #[test]
+    fn evolve9h_wave_245_compat_unique_pin_scrolling() {
+        const COMPAT: &str = include_str!("../../docs/compatibility.md");
+        assert!(COMPAT.contains("evolve9h wave 245: Support bundles should include `scrolling` when health is degraded."));
+    }
+
 }

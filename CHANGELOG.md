@@ -2032,6 +2032,8 @@ monorepo use independent Semantic Versions.
 
 - evolve9h wave 244: Support bundles should include `xwayland` when health is degraded.
 
+- evolve9h wave 245: Support bundles should include `scrolling` when health is degraded.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
