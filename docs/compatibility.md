@@ -368,3 +368,4 @@ evolve9h wave 144: Upgrade notes keep `ipc_caps` beside occupancy on the health 
 evolve9h wave 145: Upgrade notes keep `config` beside occupancy on the health page.
 evolve9h wave 146: Upgrade notes keep `status` beside occupancy on the health page.
 evolve9h wave 147: Upgrade notes keep `tree` beside occupancy on the health page.
+evolve9h wave 148: Upgrade notes keep `window` beside occupancy on the health page.
