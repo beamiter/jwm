@@ -906,3 +906,4 @@ Wave 766: Doctor bundles include health compact `windows` from `get_wins`.
 Wave 767: Doctor bundles include health compact `effects` from `get_fx`.
 Wave 768: Doctor bundles include health compact `mic` from `get_mute`.
 Wave 769: Doctor bundles include health compact `bench` from `get_bm`.
+Wave 770: Doctor bundles include health compact `closed_placement` from `get_cp`.
