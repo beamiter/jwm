@@ -533,3 +533,4 @@ evolve9h wave 309: Upgrade notes keep `magnifier` beside occupancy on the health
 evolve9h wave 310: Upgrade notes keep `peek` beside occupancy on the health page.
 evolve9h wave 311: Upgrade notes keep `gesture` beside occupancy on the health page.
 evolve9h wave 312: Upgrade notes keep `wayland` beside occupancy on the health page.
+evolve9h wave 313: Upgrade notes keep `recording` beside occupancy on the health page.
