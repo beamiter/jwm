@@ -17140,4 +17140,12 @@ mod tests {
         assert!(DOCS.contains("`docs/debug-hud.md` names compact `wayland` beside health"));
     }
 
+    #[test]
+    fn evolve8h_wave_584_doc_output_layout_names_compact_monitors() {
+        const FEATURE: &str = include_str!("../../docs/output-layout.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(FEATURE.contains("compact `monitors`"));
+        assert!(DOCS.contains("`docs/output-layout.md` names compact `monitors` beside health"));
+    }
+
 }

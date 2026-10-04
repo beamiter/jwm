@@ -40,3 +40,5 @@ worse than asking the user to reinitialize.
 
 Tracked as gap 6 in [sota-gap-queue](sota-gap-queue.md). A real rebuild path
 is multi-session work (DRM + GLES + capture/recording sizes in one rollback).
+
+`jwm-tool health` prints compact `monitors` for output layout operators.

@@ -720,3 +720,4 @@ README health text names compact `media`.
 `docs/window-placement.md` names compact `closed_placement` beside health.
 `docs/performance.md` names compact `bench` beside health.
 `docs/debug-hud.md` names compact `wayland` beside health.
+`docs/output-layout.md` names compact `monitors` beside health.
