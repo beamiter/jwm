@@ -3870,6 +3870,26 @@ mod tests {
         assert!(system_ui_lines
             .iter()
             .any(|line| line == "system_ui: active=true kind=launcher"));
+        assert!(!system_ui_lines.iter().any(|line| line.starts_with("idle:")));
+
+        let with_compact_idle = serde_json::json!({
+            "health": {"status": "healthy", "reasons": []},
+            "counts": {"windows": 0, "monitors": 1, "workspaces": 1},
+            "config": {"path": "/tmp/config.toml", "diagnostics": {"error_count": 0, "warning_count": 0}},
+            "features": {},
+            "idle": {
+                "inhibited": false,
+                "caffeine": true,
+                "dimmed": false,
+                "screen_off": false,
+                "locked": false,
+                "idle_for": 12
+            }
+        });
+        let idle_lines = health_output_lines(&with_compact_idle);
+        assert!(idle_lines.iter().any(|line| {
+            line == "idle: inhibited=false caffeine=true dimmed=false screen_off=false locked=false idle_for=12"
+        }));
 
         let capabilities = serde_json::json!({
             "schema_version": 1,
@@ -5352,6 +5372,29 @@ fn health_output_lines(status: &serde_json::Value) -> Vec<String> {
             })
             .unwrap_or("-");
         lines.push(format!("system_ui: active={active} kind={kind}"));
+    }
+
+    if let Some(idle) = status.get("idle").and_then(serde_json::Value::as_object) {
+        let flag = |name: &str| {
+            idle.get(name)
+                .and_then(serde_json::Value::as_bool)
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "-".into())
+        };
+        let idle_for = idle
+            .get("idle_for")
+            .and_then(|v| v.as_u64().or_else(|| v.as_i64().map(|n| n as u64)))
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".into());
+        lines.push(format!(
+            "idle: inhibited={} caffeine={} dimmed={} screen_off={} locked={} idle_for={}",
+            flag("inhibited"),
+            flag("caffeine"),
+            flag("dimmed"),
+            flag("screen_off"),
+            flag("locked"),
+            idle_for
+        ));
     }
 
     if let Some(reasons) = status["health"]["reasons"].as_array() {

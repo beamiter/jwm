@@ -15927,4 +15927,17 @@ mod tests {
         assert!(TOOL.contains("query aliases: get_ui -> get_system_ui"));
         assert!(DOCS.contains("`jwm-tool capabilities` text lists `get_ui -> get_system_ui`"));
     }
+
+    #[test]
+    fn evolve8h_wave_462_health_prints_compact_idle() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains(
+            "idle: inhibited={} caffeine={} dimmed={} screen_off={} locked={} idle_for={}"
+        ));
+        assert!(TOOL.contains(
+            "\"idle: inhibited=false caffeine=true dimmed=false screen_off=false locked=false idle_for=12\""
+        ));
+        assert!(DOCS.contains("`jwm-tool health` prints compact `idle` beside occupancy"));
+    }
 }
