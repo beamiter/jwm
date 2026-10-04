@@ -549,9 +549,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 233 | compatibility 唯一 pin wave 233 dnd | ✓ |
 | 234 | compatibility 唯一 pin wave 234 system_ui | ✓ |
 | 235 | compatibility 唯一 pin wave 235 version_info | ✓ |
+| 236 | compatibility 唯一 pin wave 236 metrics | ✓ |
 | … | evolve9h 进行中 |
 
 ---
+
+## 2026-10-04：evolve9h wave 236 — compatibility pin wave 236 metrics
+
+选题 = evolve9h wave 236。compatibility 唯一句子 wave 236 `metrics`。
 
 ## 2026-10-04：evolve9h wave 235 — compatibility pin wave 235 version_info
 
