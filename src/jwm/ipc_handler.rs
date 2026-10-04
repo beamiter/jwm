@@ -18338,4 +18338,10 @@ mod tests {
         assert!(DOCS.contains("Wave 762: Doctor bundles include health compact `scratchpads` from `get_pads`."));
     }
 
+    #[test]
+    fn evolve8h_wave_763_monitor_lock_unique_pin_focused() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 763: Doctor bundles include health compact `focused` from `get_fw`."));
+    }
+
 }

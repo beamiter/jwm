@@ -1068,6 +1068,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 762: Doctor bundles include health compact `scratchpads` from `get_pads`.
 
+- Wave 763: Doctor bundles include health compact `focused` from `get_fw`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
