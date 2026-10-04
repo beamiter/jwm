@@ -878,6 +878,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 667: Health compact `gaps` is the operator twin of `get_gap`.
 
+- Wave 668: Health compact `mfact` is the operator twin of `get_mf`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
