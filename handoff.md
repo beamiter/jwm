@@ -399,9 +399,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 83 | compatibility 唯一 pin wave 83 config | ✓ |
 | 84 | compatibility 唯一 pin wave 84 status | ✓ |
 | 85 | compatibility 唯一 pin wave 85 tree | ✓ |
+| 86 | compatibility 唯一 pin wave 86 window | ✓ |
 | … | evolve9h 进行中 |
 
 ---
+
+## 2026-10-04：evolve9h wave 86 — compatibility pin wave 86 window
+
+选题 = evolve9h wave 86。compatibility 唯一句子 wave 86 `window`。
 
 ## 2026-10-04：evolve9h wave 85 — compatibility pin wave 85 tree
 

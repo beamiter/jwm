@@ -20347,4 +20347,10 @@ mod tests {
         assert!(COMPAT.contains("evolve9h wave 85: Support bundles should include `tree` when health is degraded."));
     }
 
+    #[test]
+    fn evolve9h_wave_86_compat_unique_pin_window() {
+        const COMPAT: &str = include_str!("../../docs/compatibility.md");
+        assert!(COMPAT.contains("evolve9h wave 86: Support bundles should include `window` when health is degraded."));
+    }
+
 }
