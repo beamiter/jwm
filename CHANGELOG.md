@@ -1120,6 +1120,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 788: Support triage reads health compact `tearing` before `get_th` dumps.
 
+- Wave 789: Support triage reads health compact `xwayland` before `get_xw` dumps.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
