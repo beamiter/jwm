@@ -1138,6 +1138,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 797: Support triage reads health compact `recording` before `get_rec` dumps.
 
+- Wave 798: Support triage reads health compact `audio_recording` before `get_arec` dumps.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
