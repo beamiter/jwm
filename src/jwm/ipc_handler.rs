@@ -19268,4 +19268,10 @@ mod tests {
         assert!(DOCS.contains("Wave 917: Upgrade notes keep health compact `layout` beside `get_lt`."));
     }
 
+    #[test]
+    fn evolve8h_wave_918_monitor_lock_unique_pin_tabs() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 918: Upgrade notes keep health compact `tabs` beside `get_tab`."));
+    }
+
 }
