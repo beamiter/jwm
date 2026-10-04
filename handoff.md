@@ -1779,9 +1779,15 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 975 | monitor-lock 唯一 pin wave 975 focused | ✓ |
 | 976 | monitor-lock 唯一 pin wave 976 monitors | ✓ |
 | 976 | monitor-lock 唯一 pin wave 976 monitors | ✓ |
+| 977 | monitor-lock 唯一 pin wave 977 workspaces | ✓ |
+| 977 | monitor-lock 唯一 pin wave 977 workspaces | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 977 — monitor-lock pin wave 977 workspaces
+
+选题 = evolve8h wave 977。monitor-lock 唯一句子 wave 977 `workspaces`。
 
 ## 2026-10-03：evolve8h wave 976 — monitor-lock pin wave 976 monitors
 

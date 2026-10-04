@@ -19622,4 +19622,10 @@ mod tests {
         assert!(DOCS.contains("Wave 976: Compatibility tables name `get_mons` with health compact `monitors`."));
     }
 
+    #[test]
+    fn evolve8h_wave_977_monitor_lock_unique_pin_workspaces() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 977: Compatibility tables name `get_ws` with health compact `workspaces`."));
+    }
+
 }
