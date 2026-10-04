@@ -418,9 +418,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 102 | compatibility 唯一 pin wave 102 resources | ✓ |
 | 103 | compatibility 唯一 pin wave 103 connectivity | ✓ |
 | 104 | compatibility 唯一 pin wave 104 power | ✓ |
+| 105 | compatibility 唯一 pin wave 105 media | ✓ |
 | … | evolve9h 进行中 |
 
 ---
+
+## 2026-10-04：evolve9h wave 105 — compatibility pin wave 105 media
+
+选题 = evolve9h wave 105。compatibility 唯一句子 wave 105 `media`。
 
 ## 2026-10-04：evolve9h wave 104 — compatibility pin wave 104 power
 

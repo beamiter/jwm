@@ -20461,4 +20461,10 @@ mod tests {
         assert!(COMPAT.contains("evolve9h wave 104: Support bundles should include `power` when health is degraded."));
     }
 
+    #[test]
+    fn evolve9h_wave_105_compat_unique_pin_media() {
+        const COMPAT: &str = include_str!("../../docs/compatibility.md");
+        assert!(COMPAT.contains("evolve9h wave 105: Support bundles should include `media` when health is degraded."));
+    }
+
 }
