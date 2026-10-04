@@ -17519,4 +17519,13 @@ mod tests {
         assert!(DOCS.contains("README health text names `get_mute` beside compact `mic`"));
     }
 
+    #[test]
+    fn evolve8h_wave_627_readme_health_names_get_bm_for_bench() {
+        const README: &str = include_str!("../../README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(README.contains("`get_bm`"));
+        assert!(README.contains("compact `bench` line"));
+        assert!(DOCS.contains("README health text names `get_bm` beside compact `bench`"));
+    }
+
 }

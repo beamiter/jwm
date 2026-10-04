@@ -763,3 +763,4 @@ README health text names `get_ws` beside compact `workspaces`.
 README health text names `get_wins` beside compact `windows`.
 README health text names `get_fx` beside compact `effects`.
 README health text names `get_mute` beside compact `mic`.
+README health text names `get_bm` beside compact `bench`.

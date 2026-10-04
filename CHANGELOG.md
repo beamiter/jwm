@@ -796,6 +796,8 @@ monorepo use independent Semantic Versions.
 
 - README health text names `get_mute` beside compact `mic`.
 
+- README health text names `get_bm` beside compact `bench`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

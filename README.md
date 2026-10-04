@@ -200,7 +200,7 @@ It also prints a compact `windows` line from `get_status.windows` (`get_wins`).
 It also prints a compact `tree` line from `get_status.tree` (`get_tree`).
 It also prints a compact `effects` line from `get_status.effects` (`get_fx`).
 It also prints a compact `mic` line from `get_status.mic` (`get_mute`).
-It also prints a compact `bench` line from `get_status.bench` (`get_bench`).
+It also prints a compact `bench` line from `get_status.bench` (`get_bench`, `get_bm`).
 It also prints a compact `floating` line from `get_status.floating`.
 It also prints a compact `minimized` line from `get_status.minimized`.
 It also prints a compact `sticky` line from `get_status.sticky`.
