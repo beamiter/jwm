@@ -19586,4 +19586,10 @@ mod tests {
         assert!(DOCS.contains("Wave 970: Compatibility tables name `get_lt` with health compact `layout`."));
     }
 
+    #[test]
+    fn evolve8h_wave_971_monitor_lock_unique_pin_tabs() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 971: Compatibility tables name `get_tab` with health compact `tabs`."));
+    }
+
 }

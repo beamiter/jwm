@@ -1484,6 +1484,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 970: Compatibility tables name `get_lt` with health compact `layout`.
 
+- Wave 971: Compatibility tables name `get_tab` with health compact `tabs`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
