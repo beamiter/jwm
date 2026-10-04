@@ -1528,6 +1528,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 992: Compatibility tables name `get_status.fullscreen` with health compact `fullscreen`.
 
+- Wave 993: Compatibility tables name `get_status.pip` with health compact `pip`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

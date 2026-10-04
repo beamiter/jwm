@@ -19718,4 +19718,10 @@ mod tests {
         assert!(DOCS.contains("Wave 992: Compatibility tables name `get_status.fullscreen` with health compact `fullscreen`."));
     }
 
+    #[test]
+    fn evolve8h_wave_993_monitor_lock_unique_pin_pip() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 993: Compatibility tables name `get_status.pip` with health compact `pip`."));
+    }
+
 }
