@@ -719,3 +719,4 @@ README health text names compact `media`.
 `docs/session-menu.md` names compact `session_lock` beside health.
 `docs/window-placement.md` names compact `closed_placement` beside health.
 `docs/performance.md` names compact `bench` beside health.
+`docs/debug-hud.md` names compact `wayland` beside health.

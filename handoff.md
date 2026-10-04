@@ -991,9 +991,15 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 581 | docs/window-placement.md 点名 compact closed_placement | ✓ |
 | 582 | docs/performance.md 点名 compact bench | ✓ |
 | 582 | docs/performance.md 点名 compact bench | ✓ |
+| 583 | docs/debug-hud.md 点名 compact wayland | ✓ |
+| 583 | docs/debug-hud.md 点名 compact wayland | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 583 — docs/debug-hud.md names compact wayland
+
+选题 = evolve8h wave 583。`docs/debug-hud.md` 点名 health compact `wayland`。
 
 ## 2026-10-03：evolve8h wave 582 — docs/performance.md names compact bench
 

@@ -56,3 +56,5 @@ debug_hud_extended = true
 
 `debug_hud_extended` also switches the frame profiler on, which costs a
 per-zone timer on every frame; leave it off for a long-running session.
+
+`jwm-tool health` prints compact `wayland` for debug hud operators.
