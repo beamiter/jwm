@@ -1098,6 +1098,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 777: Doctor bundles include health compact `minimized` from `get_status.minimized`.
 
+- Wave 778: Doctor bundles include health compact `sticky` from `get_status.sticky`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
