@@ -18572,4 +18572,10 @@ mod tests {
         assert!(DOCS.contains("Wave 801: Support triage reads health compact `audio` before `get_devices` dumps."));
     }
 
+    #[test]
+    fn evolve8h_wave_802_monitor_lock_unique_pin_wallpaper() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 802: Support triage reads health compact `wallpaper` before `get_wall` dumps."));
+    }
+
 }
