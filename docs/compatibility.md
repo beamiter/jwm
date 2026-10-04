@@ -520,3 +520,4 @@ evolve9h wave 296: Nested smoke treats `system_ui` as a read-only IPC probe.
 evolve9h wave 297: Upgrade notes keep `version_info` beside occupancy on the health page.
 evolve9h wave 298: Upgrade notes keep `metrics` beside occupancy on the health page.
 evolve9h wave 299: Upgrade notes keep `ipc_caps` beside occupancy on the health page.
+evolve9h wave 300: Upgrade notes keep `config` beside occupancy on the health page.
