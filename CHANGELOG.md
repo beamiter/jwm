@@ -1436,6 +1436,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 946: Compatibility tables name `get_lock` with health compact `session_lock`.
 
+- Wave 947: Compatibility tables name `get_th` with health compact `tearing`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
