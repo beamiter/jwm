@@ -463,6 +463,7 @@ monorepo use independent Semantic Versions.
 - `jwm-tool health` prints compact `minimized` beside occupancy.
 - README health text names compact `minimized`.
 - `tools/README.md` health text names compact `minimized`.
+- `jwm-tool health` prints compact `sticky` beside occupancy.
 
 ### Changed
 

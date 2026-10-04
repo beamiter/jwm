@@ -15658,4 +15658,13 @@ mod tests {
         assert!(TOOLS.contains("get_status.minimized"));
         assert!(DOCS.contains("`tools/README.md` health text names compact `minimized`"));
     }
+
+    #[test]
+    fn evolve8h_wave_434_health_prints_compact_sticky() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("sticky: count={count} focused={focused_id}"));
+        assert!(TOOL.contains("\"sticky: count=1 focused=33\""));
+        assert!(DOCS.contains("`jwm-tool health` prints compact `sticky` beside occupancy"));
+    }
 }

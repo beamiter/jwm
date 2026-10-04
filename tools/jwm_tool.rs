@@ -3714,6 +3714,24 @@ mod tests {
         assert!(minimized_lines
             .iter()
             .any(|line| line == "minimized: count=2 focused=22"));
+        assert!(!minimized_lines
+            .iter()
+            .any(|line| line.starts_with("sticky:")));
+
+        let with_compact_sticky = serde_json::json!({
+            "health": {"status": "healthy", "reasons": []},
+            "counts": {"windows": 0, "monitors": 1, "workspaces": 1},
+            "config": {"path": "/tmp/config.toml", "diagnostics": {"error_count": 0, "warning_count": 0}},
+            "features": {},
+            "sticky": {
+                "count": 1,
+                "focused_id": 33
+            }
+        });
+        let sticky_lines = health_output_lines(&with_compact_sticky);
+        assert!(sticky_lines
+            .iter()
+            .any(|line| line == "sticky: count=1 focused=33"));
 
         let capabilities = serde_json::json!({
             "schema_version": 1,
@@ -5004,6 +5022,26 @@ fn health_output_lines(status: &serde_json::Value) -> Vec<String> {
             .map(|value| value.to_string())
             .unwrap_or_else(|| "-".into());
         lines.push(format!("minimized: count={count} focused={focused_id}"));
+    }
+
+    if let Some(sticky) = status.get("sticky").and_then(serde_json::Value::as_object) {
+        let count = sticky
+            .get("count")
+            .and_then(|v| v.as_u64().or_else(|| v.as_i64().map(|n| n as u64)))
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".into());
+        let focused_id = sticky
+            .get("focused_id")
+            .and_then(|v| {
+                if v.is_null() {
+                    None
+                } else {
+                    v.as_u64().or_else(|| v.as_i64().map(|n| n as u64))
+                }
+            })
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".into());
+        lines.push(format!("sticky: count={count} focused={focused_id}"));
     }
 
     if let Some(reasons) = status["health"]["reasons"].as_array() {
