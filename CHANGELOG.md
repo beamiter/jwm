@@ -1302,6 +1302,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 879: Nested smoke checks health compact `gaps` after `get_gap`.
 
+- Wave 880: Nested smoke checks health compact `mfact` after `get_mf`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

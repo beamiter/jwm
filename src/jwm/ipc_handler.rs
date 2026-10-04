@@ -19040,4 +19040,10 @@ mod tests {
         assert!(DOCS.contains("Wave 879: Nested smoke checks health compact `gaps` after `get_gap`."));
     }
 
+    #[test]
+    fn evolve8h_wave_880_monitor_lock_unique_pin_mfact() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 880: Nested smoke checks health compact `mfact` after `get_mf`."));
+    }
+
 }
