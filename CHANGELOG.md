@@ -1000,6 +1000,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 728: `get_status.pip` and health compact `pip` share one Status nest.
 
+- Wave 729: `get_status.blur` and health compact `blur` share one Status nest.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

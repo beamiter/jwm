@@ -865,3 +865,4 @@ Wave 725: `get_status.sticky` and health compact `sticky` share one Status nest.
 Wave 726: `get_status.urgent` and health compact `urgent` share one Status nest.
 Wave 727: `get_status.fullscreen` and health compact `fullscreen` share one Status nest.
 Wave 728: `get_status.pip` and health compact `pip` share one Status nest.
+Wave 729: `get_status.blur` and health compact `blur` share one Status nest.

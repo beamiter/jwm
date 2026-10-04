@@ -18134,4 +18134,10 @@ mod tests {
         assert!(DOCS.contains("Wave 728: `get_status.pip` and health compact `pip` share one Status nest."));
     }
 
+    #[test]
+    fn evolve8h_wave_729_monitor_lock_unique_pin_blur() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 729: `get_status.blur` and health compact `blur` share one Status nest."));
+    }
+
 }
