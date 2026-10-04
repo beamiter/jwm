@@ -1178,6 +1178,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 817: Support triage reads health compact `monitors` before `get_mons` dumps.
 
+- Wave 818: Support triage reads health compact `workspaces` before `get_ws` dumps.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

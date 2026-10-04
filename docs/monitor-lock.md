@@ -954,3 +954,4 @@ Wave 814: Support triage reads health compact `struts` before `get_strut` dumps.
 Wave 815: Support triage reads health compact `scratchpads` before `get_pads` dumps.
 Wave 816: Support triage reads health compact `focused` before `get_fw` dumps.
 Wave 817: Support triage reads health compact `monitors` before `get_mons` dumps.
+Wave 818: Support triage reads health compact `workspaces` before `get_ws` dumps.
