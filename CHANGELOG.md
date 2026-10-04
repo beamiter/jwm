@@ -1370,6 +1370,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 913: Upgrade notes keep health compact `idle` beside `get_idl`.
 
+- Wave 914: Upgrade notes keep health compact `notifications` beside `get_notif`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

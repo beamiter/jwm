@@ -1050,3 +1050,4 @@ Wave 910: Upgrade notes keep health compact `resources` beside `get_res`.
 Wave 911: Upgrade notes keep health compact `connectivity` beside `get_conn`.
 Wave 912: Upgrade notes keep health compact `clipboard` beside `get_clip`.
 Wave 913: Upgrade notes keep health compact `idle` beside `get_idl`.
+Wave 914: Upgrade notes keep health compact `notifications` beside `get_notif`.

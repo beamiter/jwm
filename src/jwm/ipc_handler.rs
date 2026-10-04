@@ -19244,4 +19244,10 @@ mod tests {
         assert!(DOCS.contains("Wave 913: Upgrade notes keep health compact `idle` beside `get_idl`."));
     }
 
+    #[test]
+    fn evolve8h_wave_914_monitor_lock_unique_pin_notifications() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 914: Upgrade notes keep health compact `notifications` beside `get_notif`."));
+    }
+
 }
