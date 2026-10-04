@@ -910,6 +910,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 683: `get_xw` and health compact `xwayland` share one Status nest.
 
+- Wave 684: `get_scroll` and health compact `scrolling` share one Status nest.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

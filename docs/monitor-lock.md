@@ -820,3 +820,4 @@ Wave 680: Health compact `power` is the operator twin of `get_power`.
 Wave 681: `get_lock` and health compact `session_lock` share one Status nest.
 Wave 682: `get_th` and health compact `tearing` share one Status nest.
 Wave 683: `get_xw` and health compact `xwayland` share one Status nest.
+Wave 684: `get_scroll` and health compact `scrolling` share one Status nest.

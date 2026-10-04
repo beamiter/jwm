@@ -17864,4 +17864,10 @@ mod tests {
         assert!(DOCS.contains("Wave 683: `get_xw` and health compact `xwayland` share one Status nest."));
     }
 
+    #[test]
+    fn evolve8h_wave_684_monitor_lock_unique_pin_scrolling() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 684: `get_scroll` and health compact `scrolling` share one Status nest."));
+    }
+
 }
