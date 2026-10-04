@@ -303,3 +303,5 @@ tools/jwm_remote.rs         separate trusted-LAN X11 helper
 
 Each step should be behavior-preserving and land independently. Avoid moving a
 module and changing its behavior in the same change unless tests cover it.
+
+`jwm-tool health` prints compact `tree` for architecture operators.

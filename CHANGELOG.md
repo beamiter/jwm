@@ -724,6 +724,8 @@ monorepo use independent Semantic Versions.
 
 - `docs/daily-drive.md` names compact `idle` beside health.
 
+- `docs/architecture.md` names compact `tree` beside health.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

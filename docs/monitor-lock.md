@@ -727,3 +727,4 @@ README health text names compact `media`.
 `docs/support-bundles.md` names compact `bench` beside health.
 `docs/ui-theme.md` names compact `blur` beside health.
 `docs/daily-drive.md` names compact `idle` beside health.
+`docs/architecture.md` names compact `tree` beside health.

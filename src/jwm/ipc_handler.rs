@@ -17196,4 +17196,12 @@ mod tests {
         assert!(DOCS.contains("`docs/daily-drive.md` names compact `idle` beside health"));
     }
 
+    #[test]
+    fn evolve8h_wave_591_doc_architecture_names_compact_tree() {
+        const FEATURE: &str = include_str!("../../docs/architecture.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(FEATURE.contains("compact `tree`"));
+        assert!(DOCS.contains("`docs/architecture.md` names compact `tree` beside health"));
+    }
+
 }

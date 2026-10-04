@@ -1007,9 +1007,15 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 589 | docs/ui-theme.md 点名 compact blur | ✓ |
 | 590 | docs/daily-drive.md 点名 compact idle | ✓ |
 | 590 | docs/daily-drive.md 点名 compact idle | ✓ |
+| 591 | docs/architecture.md 点名 compact tree | ✓ |
+| 591 | docs/architecture.md 点名 compact tree | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 591 — docs/architecture.md names compact tree
+
+选题 = evolve8h wave 591。`docs/architecture.md` 点名 health compact `tree`。
 
 ## 2026-10-03：evolve8h wave 590 — docs/daily-drive.md names compact idle
 
