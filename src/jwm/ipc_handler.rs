@@ -19742,4 +19742,10 @@ mod tests {
         assert!(DOCS.contains("Wave 996: Compatibility tables name `get_status.expose` with health compact `expose`."));
     }
 
+    #[test]
+    fn evolve8h_wave_997_monitor_lock_unique_pin_media() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 997: Compatibility tables name `get_media` with health compact `media`."));
+    }
+
 }
