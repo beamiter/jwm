@@ -17984,4 +17984,10 @@ mod tests {
         assert!(DOCS.contains("Wave 703: `get_dnd` and health compact `dnd` share one Status nest."));
     }
 
+    #[test]
+    fn evolve8h_wave_704_monitor_lock_unique_pin_system_ui() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 704: `get_ui` and health compact `system_ui` share one Status nest."));
+    }
+
 }
