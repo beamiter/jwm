@@ -6335,6 +6335,7 @@ fn capabilities_output_lines(capabilities: &serde_json::Value) -> Vec<String> {
         "query aliases: get_idl -> get_idle".to_string(),
         "query aliases: get_notif -> get_notifications".to_string(),
         "query aliases: get_dnd -> get_do_not_disturb".to_string(),
+        "query aliases: get_pair -> get_bluetooth".to_string(),
     ]
 }
 

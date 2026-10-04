@@ -658,6 +658,8 @@ monorepo use independent Semantic Versions.
 
 - `jwm-tool capabilities` text lists `get_dnd -> get_do_not_disturb`.
 
+- `jwm-tool capabilities` text lists `get_pair -> get_bluetooth`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
