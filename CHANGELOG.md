@@ -1224,6 +1224,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 840: Nested smoke checks health compact `session_lock` after `get_lock`.
 
+- Wave 841: Nested smoke checks health compact `tearing` after `get_th`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

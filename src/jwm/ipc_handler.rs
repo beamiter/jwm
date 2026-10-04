@@ -18806,4 +18806,10 @@ mod tests {
         assert!(DOCS.contains("Wave 840: Nested smoke checks health compact `session_lock` after `get_lock`."));
     }
 
+    #[test]
+    fn evolve8h_wave_841_monitor_lock_unique_pin_tearing() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 841: Nested smoke checks health compact `tearing` after `get_th`."));
+    }
+
 }
