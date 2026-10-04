@@ -18662,4 +18662,10 @@ mod tests {
         assert!(DOCS.contains("Wave 816: Support triage reads health compact `focused` before `get_fw` dumps."));
     }
 
+    #[test]
+    fn evolve8h_wave_817_monitor_lock_unique_pin_monitors() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 817: Support triage reads health compact `monitors` before `get_mons` dumps."));
+    }
+
 }
