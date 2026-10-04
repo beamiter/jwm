@@ -969,3 +969,4 @@ Wave 829: Support triage reads health compact `floating` before `get_status.floa
 Wave 830: Support triage reads health compact `minimized` before `get_status.minimized` dumps.
 Wave 831: Support triage reads health compact `sticky` before `get_status.sticky` dumps.
 Wave 832: Support triage reads health compact `urgent` before `get_status.urgent` dumps.
+Wave 833: Support triage reads health compact `fullscreen` before `get_status.fullscreen` dumps.

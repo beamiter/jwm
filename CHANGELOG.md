@@ -1208,6 +1208,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 832: Support triage reads health compact `urgent` before `get_status.urgent` dumps.
 
+- Wave 833: Support triage reads health compact `fullscreen` before `get_status.fullscreen` dumps.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

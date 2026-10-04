@@ -18758,4 +18758,10 @@ mod tests {
         assert!(DOCS.contains("Wave 832: Support triage reads health compact `urgent` before `get_status.urgent` dumps."));
     }
 
+    #[test]
+    fn evolve8h_wave_833_monitor_lock_unique_pin_fullscreen() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 833: Support triage reads health compact `fullscreen` before `get_status.fullscreen` dumps."));
+    }
+
 }
