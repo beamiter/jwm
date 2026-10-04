@@ -15458,4 +15458,13 @@ mod tests {
             "`jwm-tool capabilities` text lists `get_wins,get_clients,get_cli -> get_windows`"
         ));
     }
+
+    #[test]
+    fn evolve8h_wave_413_health_prints_compact_tree() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("tree: monitors={monitor_count} windows={window_count}"));
+        assert!(TOOL.contains("\"tree: monitors=2 windows=7\""));
+        assert!(DOCS.contains("`jwm-tool health` prints compact `tree` beside occupancy"));
+    }
 }

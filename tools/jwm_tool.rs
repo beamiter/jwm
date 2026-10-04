@@ -3615,6 +3615,22 @@ mod tests {
         assert!(windows_lines
             .iter()
             .any(|line| line == "windows: count=5 focused=42"));
+        assert!(!windows_lines.iter().any(|line| line.starts_with("tree:")));
+
+        let with_compact_tree = serde_json::json!({
+            "health": {"status": "healthy", "reasons": []},
+            "counts": {"windows": 0, "monitors": 1, "workspaces": 1},
+            "config": {"path": "/tmp/config.toml", "diagnostics": {"error_count": 0, "warning_count": 0}},
+            "features": {},
+            "tree": {
+                "monitor_count": 2,
+                "window_count": 7
+            }
+        });
+        let tree_lines = health_output_lines(&with_compact_tree);
+        assert!(tree_lines
+            .iter()
+            .any(|line| line == "tree: monitors=2 windows=7"));
 
         let capabilities = serde_json::json!({
             "schema_version": 1,
@@ -4811,6 +4827,22 @@ fn health_output_lines(status: &serde_json::Value) -> Vec<String> {
             .map(|value| value.to_string())
             .unwrap_or_else(|| "-".into());
         lines.push(format!("windows: count={count} focused={focused_id}"));
+    }
+
+    if let Some(tree) = status.get("tree").and_then(serde_json::Value::as_object) {
+        let monitor_count = tree
+            .get("monitor_count")
+            .and_then(|v| v.as_u64().or_else(|| v.as_i64().map(|n| n as u64)))
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".into());
+        let window_count = tree
+            .get("window_count")
+            .and_then(|v| v.as_u64().or_else(|| v.as_i64().map(|n| n as u64)))
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".into());
+        lines.push(format!(
+            "tree: monitors={monitor_count} windows={window_count}"
+        ));
     }
 
     if let Some(reasons) = status["health"]["reasons"].as_array() {

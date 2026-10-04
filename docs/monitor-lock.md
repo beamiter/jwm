@@ -548,3 +548,4 @@ README health text names compact `workspaces`.
 README health text names compact `windows`.
 `tools/README.md` health text names compact `windows`.
 `jwm-tool capabilities` text lists `get_wins,get_clients,get_cli -> get_windows`.
+`jwm-tool health` prints compact `tree` beside occupancy.
