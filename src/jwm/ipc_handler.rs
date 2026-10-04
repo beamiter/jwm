@@ -19076,4 +19076,10 @@ mod tests {
         assert!(DOCS.contains("Wave 885: Nested smoke checks health compact `urgent` after `get_status.urgent`."));
     }
 
+    #[test]
+    fn evolve8h_wave_886_monitor_lock_unique_pin_fullscreen() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 886: Nested smoke checks health compact `fullscreen` after `get_status.fullscreen`."));
+    }
+
 }
