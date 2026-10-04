@@ -1984,6 +1984,8 @@ monorepo use independent Semantic Versions.
 
 - evolve9h wave 220: `jwm-tool capabilities` remains the catalog for `recording` query aliases.
 
+- evolve9h wave 221: `jwm-tool capabilities` remains the catalog for `capture` query aliases.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

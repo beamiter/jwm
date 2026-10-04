@@ -441,3 +441,4 @@ evolve9h wave 217: `jwm-tool capabilities` remains the catalog for `peek` query 
 evolve9h wave 218: `jwm-tool capabilities` remains the catalog for `gesture` query aliases.
 evolve9h wave 219: `jwm-tool capabilities` remains the catalog for `wayland` query aliases.
 evolve9h wave 220: `jwm-tool capabilities` remains the catalog for `recording` query aliases.
+evolve9h wave 221: `jwm-tool capabilities` remains the catalog for `capture` query aliases.
