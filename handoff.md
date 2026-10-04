@@ -350,9 +350,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 34 | compatibility 唯一 pin wave 34 recording | ✓ |
 | 35 | compatibility 唯一 pin wave 35 capture | ✓ |
 | 36 | compatibility 唯一 pin wave 36 waterlily | ✓ |
+| 37 | compatibility 唯一 pin wave 37 audio | ✓ |
 | … | evolve9h 进行中 |
 
 ---
+
+## 2026-10-04：evolve9h wave 37 — compatibility pin wave 37 audio
+
+选题 = evolve9h wave 37。compatibility 唯一句子 wave 37 `audio`。
 
 ## 2026-10-04：evolve9h wave 36 — compatibility pin wave 36 waterlily
 
