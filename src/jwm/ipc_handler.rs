@@ -18824,4 +18824,10 @@ mod tests {
         assert!(DOCS.contains("Wave 843: Nested smoke checks health compact `scrolling` after `get_scroll`."));
     }
 
+    #[test]
+    fn evolve8h_wave_844_monitor_lock_unique_pin_color_management() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 844: Nested smoke checks health compact `color_management` after `get_cm`."));
+    }
+
 }
