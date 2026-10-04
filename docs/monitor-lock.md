@@ -937,3 +937,4 @@ Wave 797: Support triage reads health compact `recording` before `get_rec` dumps
 Wave 798: Support triage reads health compact `audio_recording` before `get_arec` dumps.
 Wave 799: Support triage reads health compact `capture` before `get_cap` dumps.
 Wave 800: Support triage reads health compact `waterlily` before `get_wly` dumps.
+Wave 801: Support triage reads health compact `audio` before `get_devices` dumps.

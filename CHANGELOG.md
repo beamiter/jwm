@@ -1144,6 +1144,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 800: Support triage reads health compact `waterlily` before `get_wly` dumps.
 
+- Wave 801: Support triage reads health compact `audio` before `get_devices` dumps.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
