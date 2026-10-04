@@ -1244,6 +1244,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 850: Nested smoke checks health compact `recording` after `get_rec`.
 
+- Wave 851: Nested smoke checks health compact `audio_recording` after `get_arec`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
