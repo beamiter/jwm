@@ -217,6 +217,7 @@ It also prints a compact `clipboard` line from `get_status.clipboard`.
 It also prints a compact `session_lock` line from `get_status.session_lock`.
 It also prints a compact `tearing` line from `get_status.tearing`.
 It also prints a compact `xwayland` line from `get_status.xwayland`.
+It also prints a compact `scrolling` line from `get_status.scrolling`.
 
 Malformed JSON, invalid argument types, overflow, empty spawn commands, unknown
 commands, and `{ "success": false }` responses produce a non-zero exit status,

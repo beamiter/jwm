@@ -16125,4 +16125,13 @@ mod tests {
         assert!(TOOL.contains("\"scrolling: active_monitors=1 monitors=2\""));
         assert!(DOCS.contains("`jwm-tool health` prints compact `scrolling` beside occupancy"));
     }
+
+    #[test]
+    fn evolve8h_wave_481_readme_health_names_compact_scrolling() {
+        const README: &str = include_str!("../../README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(README.contains("compact `scrolling` line"));
+        assert!(README.contains("get_status.scrolling"));
+        assert!(DOCS.contains("README health text names compact `scrolling`"));
+    }
 }
