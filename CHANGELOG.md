@@ -596,6 +596,8 @@ monorepo use independent Semantic Versions.
 
 - `tools/README.md` health text names compact `waterlily`.
 
+- `jwm-tool capabilities` text lists `get_wly -> get_waterlily`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
