@@ -1325,9 +1325,15 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 748 | monitor-lock 唯一 pin wave 748 audio | ✓ |
 | 749 | monitor-lock 唯一 pin wave 749 wallpaper | ✓ |
 | 749 | monitor-lock 唯一 pin wave 749 wallpaper | ✓ |
+| 750 | monitor-lock 唯一 pin wave 750 bluetooth | ✓ |
+| 750 | monitor-lock 唯一 pin wave 750 bluetooth | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 750 — monitor-lock pin wave 750 bluetooth
+
+选题 = evolve8h wave 750。monitor-lock 唯一句子 wave 750 `bluetooth`。
 
 ## 2026-10-03：evolve8h wave 749 — monitor-lock pin wave 749 wallpaper
 

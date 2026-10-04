@@ -18260,4 +18260,10 @@ mod tests {
         assert!(DOCS.contains("Wave 749: Doctor bundles include health compact `wallpaper` from `get_wall`."));
     }
 
+    #[test]
+    fn evolve8h_wave_750_monitor_lock_unique_pin_bluetooth() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 750: Doctor bundles include health compact `bluetooth` from `get_bt`."));
+    }
+
 }

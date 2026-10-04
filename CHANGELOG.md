@@ -1042,6 +1042,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 749: Doctor bundles include health compact `wallpaper` from `get_wall`.
 
+- Wave 750: Doctor bundles include health compact `bluetooth` from `get_bt`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
