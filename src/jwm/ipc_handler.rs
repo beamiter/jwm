@@ -21535,4 +21535,10 @@ mod tests {
         assert!(COMPAT.contains("evolve9h wave 283: Nested smoke treats `capture` as a read-only IPC probe."));
     }
 
+    #[test]
+    fn evolve9h_wave_284_compat_unique_pin_waterlily() {
+        const COMPAT: &str = include_str!("../../docs/compatibility.md");
+        assert!(COMPAT.contains("evolve9h wave 284: Nested smoke treats `waterlily` as a read-only IPC probe."));
+    }
+
 }

@@ -597,9 +597,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 281 | compatibility 唯一 pin wave 281 wayland | ✓ |
 | 282 | compatibility 唯一 pin wave 282 recording | ✓ |
 | 283 | compatibility 唯一 pin wave 283 capture | ✓ |
+| 284 | compatibility 唯一 pin wave 284 waterlily | ✓ |
 | … | evolve9h 进行中 |
 
 ---
+
+## 2026-10-04：evolve9h wave 284 — compatibility pin wave 284 waterlily
+
+选题 = evolve9h wave 284。compatibility 唯一句子 wave 284 `waterlily`。
 
 ## 2026-10-04：evolve9h wave 283 — compatibility pin wave 283 capture
 
