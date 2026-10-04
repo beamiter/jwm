@@ -18362,4 +18362,10 @@ mod tests {
         assert!(DOCS.contains("Wave 766: Doctor bundles include health compact `windows` from `get_wins`."));
     }
 
+    #[test]
+    fn evolve8h_wave_767_monitor_lock_unique_pin_effects() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 767: Doctor bundles include health compact `effects` from `get_fx`."));
+    }
+
 }
