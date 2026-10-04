@@ -17483,4 +17483,13 @@ mod tests {
         assert!(DOCS.contains("README health text names `get_mons` beside compact `monitors`"));
     }
 
+    #[test]
+    fn evolve8h_wave_623_readme_health_names_get_ws_for_workspaces() {
+        const README: &str = include_str!("../../README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(README.contains("`get_ws`"));
+        assert!(README.contains("compact `workspaces` line"));
+        assert!(DOCS.contains("README health text names `get_ws` beside compact `workspaces`"));
+    }
+
 }

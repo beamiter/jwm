@@ -759,3 +759,4 @@ README health text names `get_strut` beside compact `struts`.
 README health text names `get_pads` beside compact `scratchpads`.
 README health text names `get_fw` beside compact `focused`.
 README health text names `get_mons` beside compact `monitors`.
+README health text names `get_ws` beside compact `workspaces`.

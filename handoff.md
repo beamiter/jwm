@@ -1071,9 +1071,15 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 621 | README health 点名 get_fw beside compact focused | ✓ |
 | 622 | README health 点名 get_mons beside compact monitors | ✓ |
 | 622 | README health 点名 get_mons beside compact monitors | ✓ |
+| 623 | README health 点名 get_ws beside compact workspaces | ✓ |
+| 623 | README health 点名 get_ws beside compact workspaces | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 623 — README health names get_ws for workspaces
+
+选题 = evolve8h wave 623。README health 文本点名 `get_ws` beside compact `workspaces`。
 
 ## 2026-10-03：evolve8h wave 622 — README health names get_mons for monitors
 
