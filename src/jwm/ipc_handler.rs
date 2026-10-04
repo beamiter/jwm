@@ -15783,4 +15783,13 @@ mod tests {
             "`jwm-tool health` prints compact `notifications` beside occupancy"
         ));
     }
+
+    #[test]
+    fn evolve8h_wave_447_readme_health_names_compact_notifications() {
+        const README: &str = include_str!("../../README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(README.contains("compact `notifications` line"));
+        assert!(README.contains("get_status.notifications"));
+        assert!(DOCS.contains("README health text names compact `notifications`"));
+    }
 }
