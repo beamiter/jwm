@@ -292,3 +292,4 @@ evolve9h wave 68: `jwm-tool capabilities` remains the catalog for `audio` query 
 evolve9h wave 69: `jwm-tool capabilities` remains the catalog for `wallpaper` query aliases.
 evolve9h wave 70: `jwm-tool capabilities` remains the catalog for `bluetooth` query aliases.
 evolve9h wave 71: `jwm-tool capabilities` remains the catalog for `resources` query aliases.
+evolve9h wave 72: `jwm-tool capabilities` remains the catalog for `connectivity` query aliases.
