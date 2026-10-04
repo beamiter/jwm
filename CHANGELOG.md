@@ -1036,6 +1036,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 746: Doctor bundles include health compact `capture` from `get_cap`.
 
+- Wave 747: Doctor bundles include health compact `waterlily` from `get_wly`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

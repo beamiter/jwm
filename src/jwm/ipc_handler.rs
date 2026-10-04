@@ -18242,4 +18242,10 @@ mod tests {
         assert!(DOCS.contains("Wave 746: Doctor bundles include health compact `capture` from `get_cap`."));
     }
 
+    #[test]
+    fn evolve8h_wave_747_monitor_lock_unique_pin_waterlily() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 747: Doctor bundles include health compact `waterlily` from `get_wly`."));
+    }
+
 }
