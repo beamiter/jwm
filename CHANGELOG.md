@@ -640,6 +640,8 @@ monorepo use independent Semantic Versions.
 
 - `jwm-tool health` prints compact `power` beside occupancy.
 
+- README health text names compact `power`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

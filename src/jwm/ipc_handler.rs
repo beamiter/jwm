@@ -16835,4 +16835,13 @@ mod tests {
         assert!(DOCS.contains("`jwm-tool health` prints compact `power` beside occupancy"));
     }
 
+    #[test]
+    fn evolve8h_wave_549_readme_health_names_compact_power() {
+        const README: &str = include_str!("../../README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(README.contains("compact `power` line"));
+        assert!(README.contains("get_status.power"));
+        assert!(DOCS.contains("README health text names compact `power`"));
+    }
+
 }
