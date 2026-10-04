@@ -840,6 +840,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 648: Health compact `idle` is the operator twin of `get_idl`.
 
+- Wave 649: Health compact `notifications` is the operator twin of `get_notif`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

@@ -17654,4 +17654,10 @@ mod tests {
         assert!(DOCS.contains("Wave 648: Health compact `idle` is the operator twin of `get_idl`."));
     }
 
+    #[test]
+    fn evolve8h_wave_649_monitor_lock_unique_pin_notifications() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 649: Health compact `notifications` is the operator twin of `get_notif`."));
+    }
+
 }

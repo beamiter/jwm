@@ -785,3 +785,4 @@ Wave 645: Health compact `resources` is the operator twin of `get_res`.
 Wave 646: Health compact `connectivity` is the operator twin of `get_conn`.
 Wave 647: Health compact `clipboard` is the operator twin of `get_clip`.
 Wave 648: Health compact `idle` is the operator twin of `get_idl`.
+Wave 649: Health compact `notifications` is the operator twin of `get_notif`.
