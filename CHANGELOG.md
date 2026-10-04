@@ -664,6 +664,8 @@ monorepo use independent Semantic Versions.
 
 - `jwm-tool capabilities` text lists `get_power -> get_power_status`.
 
+- `jwm-tool capabilities` text lists `get_media -> get_media_status`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

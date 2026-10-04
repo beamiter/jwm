@@ -6338,6 +6338,7 @@ fn capabilities_output_lines(capabilities: &serde_json::Value) -> Vec<String> {
         "query aliases: get_pair -> get_bluetooth".to_string(),
         "query aliases: get_conn -> get_connectivity".to_string(),
         "query aliases: get_power -> get_power_status".to_string(),
+        "query aliases: get_media -> get_media_status".to_string(),
     ]
 }
 

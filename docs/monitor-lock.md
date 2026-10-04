@@ -697,3 +697,4 @@ README health text names compact `media`.
 `jwm-tool capabilities` text lists `get_pair -> get_bluetooth`.
 `jwm-tool capabilities` text lists `get_conn -> get_connectivity`.
 `jwm-tool capabilities` text lists `get_power -> get_power_status`.
+`jwm-tool capabilities` text lists `get_media -> get_media_status`.

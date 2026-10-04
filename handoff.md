@@ -947,9 +947,15 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 559 | capabilities 文本列出 get_conn -> get_connectivity | ✓ |
 | 560 | capabilities 文本列出 get_power -> get_power_status | ✓ |
 | 560 | capabilities 文本列出 get_power -> get_power_status | ✓ |
+| 561 | capabilities 文本列出 get_media -> get_media_status | ✓ |
+| 561 | capabilities 文本列出 get_media -> get_media_status | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 561 — capabilities text lists media short alias
+
+选题 = evolve8h wave 561。`jwm-tool capabilities` 文本列出 `get_media -> get_media_status`。
 
 ## 2026-10-03：evolve8h wave 560 — capabilities text lists power short alias
 

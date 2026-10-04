@@ -16954,4 +16954,14 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn evolve8h_wave_561_capabilities_text_lists_media_alias() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("query aliases: get_media -> get_media_status"));
+        assert!(DOCS.contains(
+            "`jwm-tool capabilities` text lists `get_media -> get_media_status`"
+        ));
+    }
+
 }
