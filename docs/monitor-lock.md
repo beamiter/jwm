@@ -1030,3 +1030,4 @@ Wave 890: Nested smoke checks health compact `expose` after `get_status.expose`.
 Wave 891: Nested smoke checks health compact `media` after `get_media`.
 Wave 892: Nested smoke checks health compact `power` after `get_power`.
 Wave 893: Upgrade notes keep health compact `session_lock` beside `get_lock`.
+Wave 894: Upgrade notes keep health compact `tearing` beside `get_th`.

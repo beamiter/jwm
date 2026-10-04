@@ -1330,6 +1330,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 893: Upgrade notes keep health compact `session_lock` beside `get_lock`.
 
+- Wave 894: Upgrade notes keep health compact `tearing` beside `get_th`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

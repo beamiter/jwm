@@ -19124,4 +19124,10 @@ mod tests {
         assert!(DOCS.contains("Wave 893: Upgrade notes keep health compact `session_lock` beside `get_lock`."));
     }
 
+    #[test]
+    fn evolve8h_wave_894_monitor_lock_unique_pin_tearing() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 894: Upgrade notes keep health compact `tearing` beside `get_th`."));
+    }
+
 }
