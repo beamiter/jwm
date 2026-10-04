@@ -1611,9 +1611,15 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 891 | monitor-lock 唯一 pin wave 891 media | ✓ |
 | 892 | monitor-lock 唯一 pin wave 892 power | ✓ |
 | 892 | monitor-lock 唯一 pin wave 892 power | ✓ |
+| 893 | monitor-lock 唯一 pin wave 893 session_lock | ✓ |
+| 893 | monitor-lock 唯一 pin wave 893 session_lock | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 893 — monitor-lock pin wave 893 session_lock
+
+选题 = evolve8h wave 893。monitor-lock 唯一句子 wave 893 `session_lock`。
 
 ## 2026-10-03：evolve8h wave 892 — monitor-lock pin wave 892 power
 

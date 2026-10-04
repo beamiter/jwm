@@ -19118,4 +19118,10 @@ mod tests {
         assert!(DOCS.contains("Wave 892: Nested smoke checks health compact `power` after `get_power`."));
     }
 
+    #[test]
+    fn evolve8h_wave_893_monitor_lock_unique_pin_session_lock() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 893: Upgrade notes keep health compact `session_lock` beside `get_lock`."));
+    }
+
 }

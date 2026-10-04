@@ -1328,6 +1328,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 892: Nested smoke checks health compact `power` after `get_power`.
 
+- Wave 893: Upgrade notes keep health compact `session_lock` beside `get_lock`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
