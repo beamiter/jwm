@@ -220,6 +220,7 @@ It also prints a compact `xwayland` line from `get_status.xwayland`.
 It also prints a compact `scrolling` line from `get_status.scrolling`.
 It also prints a compact `color_management` line from `get_status.color_management`.
 It also prints a compact `night_light` line from `get_status.night_light`.
+It also prints a compact `magnifier` line from `get_status.magnifier`.
 
 Malformed JSON, invalid argument types, overflow, empty spawn commands, unknown
 commands, and `{ "success": false }` responses produce a non-zero exit status,

@@ -530,6 +530,8 @@ monorepo use independent Semantic Versions.
 
 - `jwm-tool health` prints compact `magnifier` beside occupancy.
 
+- README health text names compact `magnifier`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

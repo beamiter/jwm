@@ -16271,4 +16271,13 @@ mod tests {
         assert!(DOCS.contains("`jwm-tool health` prints compact `magnifier` beside occupancy"));
     }
 
+    #[test]
+    fn evolve8h_wave_494_readme_health_names_compact_magnifier() {
+        const README: &str = include_str!("../../README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(README.contains("compact `magnifier` line"));
+        assert!(README.contains("get_status.magnifier"));
+        assert!(DOCS.contains("README health text names compact `magnifier`"));
+    }
+
 }
