@@ -558,3 +558,4 @@ evolve9h wave 334: Health compact `window` is diagnosable through `jwm-tool heal
 evolve9h wave 335: Health compact `session_lock` is diagnosable through `jwm-tool health`.
 evolve9h wave 336: Health compact `tearing` is diagnosable through `jwm-tool health`.
 evolve9h wave 337: Health compact `xwayland` is diagnosable through `jwm-tool health`.
+evolve9h wave 338: Health compact `scrolling` is diagnosable through `jwm-tool health`.
