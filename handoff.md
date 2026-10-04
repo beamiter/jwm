@@ -909,9 +909,15 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 540 | health 打印 compact resources | ✓ |
 | 541 | README health 点名 compact resources | ✓ |
 | 541 | README health 点名 compact resources | ✓ |
+| 542 | tools/README health 点名 compact resources | ✓ |
+| 542 | tools/README health 点名 compact resources | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 542 — tools/README health names compact resources
+
+选题 = evolve8h wave 542。tools/README health 文本点名 compact `resources`。
 
 ## 2026-10-03：evolve8h wave 541 — README health names compact resources
 
