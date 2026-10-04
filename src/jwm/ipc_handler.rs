@@ -19730,4 +19730,10 @@ mod tests {
         assert!(DOCS.contains("Wave 994: Compatibility tables name `get_status.blur` with health compact `blur`."));
     }
 
+    #[test]
+    fn evolve8h_wave_995_monitor_lock_unique_pin_hdr() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 995: Compatibility tables name `get_status.hdr` with health compact `hdr`."));
+    }
+
 }
