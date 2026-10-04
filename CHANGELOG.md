@@ -572,6 +572,8 @@ monorepo use independent Semantic Versions.
 
 - `tools/README.md` health text names compact `recording`.
 
+- `jwm-tool capabilities` text lists `get_rec -> get_recording`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

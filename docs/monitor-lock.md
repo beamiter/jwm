@@ -651,3 +651,4 @@ README health text names compact `wayland`.
 `jwm-tool health` prints compact `recording` beside occupancy.
 README health text names compact `recording`.
 `tools/README.md` health text names compact `recording`.
+`jwm-tool capabilities` text lists `get_rec -> get_recording`.

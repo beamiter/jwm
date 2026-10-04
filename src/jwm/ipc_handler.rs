@@ -16484,4 +16484,14 @@ mod tests {
         assert!(DOCS.contains("`tools/README.md` health text names compact `recording`"));
     }
 
+    #[test]
+    fn evolve8h_wave_515_capabilities_text_lists_recording_alias() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains("query aliases: get_rec -> get_recording"));
+        assert!(DOCS.contains(
+            "`jwm-tool capabilities` text lists `get_rec -> get_recording`"
+        ));
+    }
+
 }
