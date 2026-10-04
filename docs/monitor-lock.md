@@ -1067,3 +1067,4 @@ Wave 927: Upgrade notes keep health compact `mic` beside `get_mute`.
 Wave 928: Upgrade notes keep health compact `bench` beside `get_bm`.
 Wave 929: Upgrade notes keep health compact `closed_placement` beside `get_cp`.
 Wave 930: Upgrade notes keep health compact `prev_layout` beside `get_pl`.
+Wave 931: Upgrade notes keep health compact `cfact` beside `get_cf`.
