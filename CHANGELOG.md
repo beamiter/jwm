@@ -1360,6 +1360,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 908: Upgrade notes keep health compact `wallpaper` beside `get_wall`.
 
+- Wave 909: Upgrade notes keep health compact `bluetooth` beside `get_bt`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
