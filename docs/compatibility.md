@@ -316,3 +316,4 @@ evolve9h wave 92: Support bundles should include `magnifier` when health is degr
 evolve9h wave 93: Support bundles should include `peek` when health is degraded.
 evolve9h wave 94: Support bundles should include `gesture` when health is degraded.
 evolve9h wave 95: Support bundles should include `wayland` when health is degraded.
+evolve9h wave 96: Support bundles should include `recording` when health is degraded.
