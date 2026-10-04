@@ -20191,4 +20191,10 @@ mod tests {
         assert!(COMPAT.contains("evolve9h wave 59: `jwm-tool capabilities` remains the catalog for `scrolling` query aliases."));
     }
 
+    #[test]
+    fn evolve9h_wave_60_compat_unique_pin_night_light() {
+        const COMPAT: &str = include_str!("../../docs/compatibility.md");
+        assert!(COMPAT.contains("evolve9h wave 60: `jwm-tool capabilities` remains the catalog for `night_light` query aliases."));
+    }
+
 }
