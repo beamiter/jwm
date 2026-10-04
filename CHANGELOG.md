@@ -810,6 +810,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 633: Health compact `night_light` is the operator twin of `get_nl`.
 
+- Wave 634: Health compact `magnifier` is the operator twin of `get_mag`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

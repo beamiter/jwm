@@ -770,3 +770,4 @@ Wave 630: Health compact `xwayland` is the operator twin of `get_xw`.
 Wave 631: Health compact `scrolling` is the operator twin of `get_scroll`.
 Wave 632: Health compact `color_management` is the operator twin of `get_cm`.
 Wave 633: Health compact `night_light` is the operator twin of `get_nl`.
+Wave 634: Health compact `magnifier` is the operator twin of `get_mag`.
