@@ -874,6 +874,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 665: Health compact `prev_layout` is the operator twin of `get_pl`.
 
+- Wave 666: Health compact `cfact` is the operator twin of `get_cf`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

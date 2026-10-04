@@ -802,3 +802,4 @@ Wave 662: Health compact `mic` is the operator twin of `get_mute`.
 Wave 663: Health compact `bench` is the operator twin of `get_bm`.
 Wave 664: Health compact `closed_placement` is the operator twin of `get_cp`.
 Wave 665: Health compact `prev_layout` is the operator twin of `get_pl`.
+Wave 666: Health compact `cfact` is the operator twin of `get_cf`.

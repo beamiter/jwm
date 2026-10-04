@@ -17756,4 +17756,10 @@ mod tests {
         assert!(DOCS.contains("Wave 665: Health compact `prev_layout` is the operator twin of `get_pl`."));
     }
 
+    #[test]
+    fn evolve8h_wave_666_monitor_lock_unique_pin_cfact() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 666: Health compact `cfact` is the operator twin of `get_cf`."));
+    }
+
 }
