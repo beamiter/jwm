@@ -657,9 +657,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 341 | compatibility 唯一 pin wave 341 peek | ✓ |
 | 342 | compatibility 唯一 pin wave 342 gesture | ✓ |
 | 343 | compatibility 唯一 pin wave 343 wayland | ✓ |
+| 344 | compatibility 唯一 pin wave 344 recording | ✓ |
 | … | evolve9h 进行中 |
 
 ---
+
+## 2026-10-04：evolve9h wave 344 — compatibility pin wave 344 recording
+
+选题 = evolve9h wave 344。compatibility 唯一句子 wave 344 `recording`。
 
 ## 2026-10-04：evolve9h wave 343 — compatibility pin wave 343 wayland
 
