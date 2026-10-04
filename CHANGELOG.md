@@ -606,6 +606,8 @@ monorepo use independent Semantic Versions.
 
 - `jwm-tool capabilities` text lists `get_devices -> get_audio`.
 
+- `jwm-tool health` prints compact `wallpaper` beside occupancy.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

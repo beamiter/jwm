@@ -4219,6 +4219,25 @@ mod tests {
             line == "audio: outputs=2 inputs=1 pending=false"
         }));
 
+        assert!(!audio_lines
+            .iter()
+            .any(|line| line.starts_with("wallpaper:")));
+
+        let with_compact_wallpaper = serde_json::json!({
+            "health": {"status": "healthy", "reasons": []},
+            "counts": {"windows": 0, "monitors": 1, "workspaces": 1},
+            "config": {"path": "/tmp/config.toml", "diagnostics": {"error_count": 0, "warning_count": 0}},
+            "features": {},
+            "wallpaper": {
+                "enabled": true,
+                "pending": false
+            }
+        });
+        let wallpaper_lines = health_output_lines(&with_compact_wallpaper);
+        assert!(wallpaper_lines.iter().any(|line| {
+            line == "wallpaper: enabled=true pending=false"
+        }));
+
         let capabilities = serde_json::json!({
             "schema_version": 1,
             "commands": ["focusstack", "reload_config"],
@@ -6056,6 +6075,21 @@ fn health_output_lines(status: &serde_json::Value) -> Vec<String> {
             .unwrap_or_else(|| "-".into());
         lines.push(format!(
             "audio: outputs={output_count} inputs={input_count} pending={pending}"
+        ));
+    }
+
+    if let Some(wallpaper) = status.get("wallpaper").and_then(serde_json::Value::as_object) {
+        let flag = |name: &str| {
+            wallpaper
+                .get(name)
+                .and_then(serde_json::Value::as_bool)
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "-".into())
+        };
+        lines.push(format!(
+            "wallpaper: enabled={} pending={}",
+            flag("enabled"),
+            flag("pending")
         ));
     }
 

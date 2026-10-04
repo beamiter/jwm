@@ -16658,4 +16658,17 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn evolve8h_wave_532_health_prints_compact_wallpaper() {
+        const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(TOOL.contains(
+            "wallpaper: enabled={} pending={}"
+        ));
+        assert!(TOOL.contains(
+            "\"wallpaper: enabled=true pending=false\""
+        ));
+        assert!(DOCS.contains("`jwm-tool health` prints compact `wallpaper` beside occupancy"));
+    }
+
 }
