@@ -19748,4 +19748,10 @@ mod tests {
         assert!(DOCS.contains("Wave 997: Compatibility tables name `get_media` with health compact `media`."));
     }
 
+    #[test]
+    fn evolve8h_wave_998_monitor_lock_unique_pin_power() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 998: Compatibility tables name `get_power` with health compact `power`."));
+    }
+
 }

@@ -1538,6 +1538,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 997: Compatibility tables name `get_media` with health compact `media`.
 
+- Wave 998: Compatibility tables name `get_power` with health compact `power`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
