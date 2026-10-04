@@ -442,9 +442,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 126 | compatibility 唯一 pin wave 126 wayland | ✓ |
 | 127 | compatibility 唯一 pin wave 127 recording | ✓ |
 | 128 | compatibility 唯一 pin wave 128 capture | ✓ |
+| 129 | compatibility 唯一 pin wave 129 waterlily | ✓ |
 | … | evolve9h 进行中 |
 
 ---
+
+## 2026-10-04：evolve9h wave 129 — compatibility pin wave 129 waterlily
+
+选题 = evolve9h wave 129。compatibility 唯一句子 wave 129 `waterlily`。
 
 ## 2026-10-04：evolve9h wave 128 — compatibility pin wave 128 capture
 
