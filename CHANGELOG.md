@@ -588,6 +588,8 @@ monorepo use independent Semantic Versions.
 
 - `tools/README.md` health text names compact `capture`.
 
+- `jwm-tool capabilities` text lists `get_cap -> get_capture`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
