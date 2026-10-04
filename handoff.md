@@ -985,9 +985,15 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 578 | docs/media-controls.md 点名 compact media | ✓ |
 | 579 | docs/control-center.md 点名 compact system_ui | ✓ |
 | 579 | docs/control-center.md 点名 compact system_ui | ✓ |
+| 580 | docs/session-menu.md 点名 compact session_lock | ✓ |
+| 580 | docs/session-menu.md 点名 compact session_lock | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 580 — docs/session-menu.md names compact session_lock
+
+选题 = evolve8h wave 580。`docs/session-menu.md` 点名 health compact `session_lock`。
 
 ## 2026-10-03：evolve8h wave 579 — docs/control-center.md names compact system_ui
 

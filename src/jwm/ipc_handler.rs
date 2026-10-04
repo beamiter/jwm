@@ -17108,4 +17108,12 @@ mod tests {
         assert!(DOCS.contains("`docs/control-center.md` names compact `system_ui` beside health"));
     }
 
+    #[test]
+    fn evolve8h_wave_580_doc_session_menu_names_compact_session_lock() {
+        const FEATURE: &str = include_str!("../../docs/session-menu.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(FEATURE.contains("compact `session_lock`"));
+        assert!(DOCS.contains("`docs/session-menu.md` names compact `session_lock` beside health"));
+    }
+
 }

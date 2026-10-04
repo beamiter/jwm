@@ -69,3 +69,5 @@ The override is in-memory: a restart returns to the configured schedule.
 jwm-tool msg session_menu
 jwm-tool msg toggle_night_light
 ```
+
+`jwm-tool health` prints compact `session_lock` for session menu operators.
