@@ -123,3 +123,5 @@ eligibility, the initial selection, row text, commit validation — unit
 tested without a display. The panel itself is an ordinary system-UI list,
 reusing the launcher's row format, so no switcher-specific rendering code
 exists.
+
+`jwm-tool health` prints compact `selected` for window switcher operators.

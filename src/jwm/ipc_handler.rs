@@ -16980,4 +16980,12 @@ mod tests {
         assert!(DOCS.contains("`docs/tags-overview.md` names compact `tabs` beside health"));
     }
 
+    #[test]
+    fn evolve8h_wave_564_doc_window_switcher_names_compact_selected() {
+        const FEATURE: &str = include_str!("../../docs/window-switcher.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(FEATURE.contains("compact `selected`"));
+        assert!(DOCS.contains("`docs/window-switcher.md` names compact `selected` beside health"));
+    }
+
 }

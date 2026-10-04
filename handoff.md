@@ -953,9 +953,15 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 562 | docs/expose.md 点名 compact expose | ✓ |
 | 563 | docs/tags-overview.md 点名 compact tabs | ✓ |
 | 563 | docs/tags-overview.md 点名 compact tabs | ✓ |
+| 564 | docs/window-switcher.md 点名 compact selected | ✓ |
+| 564 | docs/window-switcher.md 点名 compact selected | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 564 — docs/window-switcher.md names compact selected
+
+选题 = evolve8h wave 564。`docs/window-switcher.md` 点名 health compact `selected`。
 
 ## 2026-10-03：evolve8h wave 563 — docs/tags-overview.md names compact tabs
 

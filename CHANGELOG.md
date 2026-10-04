@@ -670,6 +670,8 @@ monorepo use independent Semantic Versions.
 
 - `docs/tags-overview.md` names compact `tabs` beside health.
 
+- `docs/window-switcher.md` names compact `selected` beside health.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

@@ -700,3 +700,4 @@ README health text names compact `media`.
 `jwm-tool capabilities` text lists `get_media -> get_media_status`.
 `docs/expose.md` names compact `expose` beside health.
 `docs/tags-overview.md` names compact `tabs` beside health.
+`docs/window-switcher.md` names compact `selected` beside health.
