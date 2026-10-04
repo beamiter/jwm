@@ -473,6 +473,7 @@ monorepo use independent Semantic Versions.
 - README health text names compact `fullscreen`.
 - `tools/README.md` health text names compact `fullscreen`.
 - `jwm-tool health` prints compact `pip` beside occupancy.
+- README health text names compact `pip`.
 
 ### Changed
 

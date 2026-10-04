@@ -579,3 +579,4 @@ README health text names compact `urgent`.
 README health text names compact `fullscreen`.
 `tools/README.md` health text names compact `fullscreen`.
 `jwm-tool health` prints compact `pip` beside occupancy.
+README health text names compact `pip`.

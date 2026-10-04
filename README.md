@@ -206,6 +206,7 @@ It also prints a compact `minimized` line from `get_status.minimized`.
 It also prints a compact `sticky` line from `get_status.sticky`.
 It also prints a compact `urgent` line from `get_status.urgent`.
 It also prints a compact `fullscreen` line from `get_status.fullscreen`.
+It also prints a compact `pip` line from `get_status.pip`.
 
 Malformed JSON, invalid argument types, overflow, empty spawn commands, unknown
 commands, and `{ "success": false }` responses produce a non-zero exit status,
