@@ -1375,9 +1375,15 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 773 | monitor-lock 唯一 pin wave 773 gaps | ✓ |
 | 774 | monitor-lock 唯一 pin wave 774 mfact | ✓ |
 | 774 | monitor-lock 唯一 pin wave 774 mfact | ✓ |
+| 775 | monitor-lock 唯一 pin wave 775 nmaster | ✓ |
+| 775 | monitor-lock 唯一 pin wave 775 nmaster | ✓ |
 | … | 进行中 | |
 
 ---
+
+## 2026-10-03：evolve8h wave 775 — monitor-lock pin wave 775 nmaster
+
+选题 = evolve8h wave 775。monitor-lock 唯一句子 wave 775 `nmaster`。
 
 ## 2026-10-03：evolve8h wave 774 — monitor-lock pin wave 774 mfact
 

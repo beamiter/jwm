@@ -1092,6 +1092,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 774: Doctor bundles include health compact `mfact` from `get_mf`.
 
+- Wave 775: Doctor bundles include health compact `nmaster` from `get_nm`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

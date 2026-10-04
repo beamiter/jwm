@@ -911,3 +911,4 @@ Wave 771: Doctor bundles include health compact `prev_layout` from `get_pl`.
 Wave 772: Doctor bundles include health compact `cfact` from `get_cf`.
 Wave 773: Doctor bundles include health compact `gaps` from `get_gap`.
 Wave 774: Doctor bundles include health compact `mfact` from `get_mf`.
+Wave 775: Doctor bundles include health compact `nmaster` from `get_nm`.

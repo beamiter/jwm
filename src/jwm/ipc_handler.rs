@@ -18410,4 +18410,10 @@ mod tests {
         assert!(DOCS.contains("Wave 774: Doctor bundles include health compact `mfact` from `get_mf`."));
     }
 
+    #[test]
+    fn evolve8h_wave_775_monitor_lock_unique_pin_nmaster() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 775: Doctor bundles include health compact `nmaster` from `get_nm`."));
+    }
+
 }
