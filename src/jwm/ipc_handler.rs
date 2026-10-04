@@ -18500,4 +18500,10 @@ mod tests {
         assert!(DOCS.contains("Wave 789: Support triage reads health compact `xwayland` before `get_xw` dumps."));
     }
 
+    #[test]
+    fn evolve8h_wave_790_monitor_lock_unique_pin_scrolling() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 790: Support triage reads health compact `scrolling` before `get_scroll` dumps."));
+    }
+
 }

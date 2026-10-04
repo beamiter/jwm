@@ -1122,6 +1122,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 789: Support triage reads health compact `xwayland` before `get_xw` dumps.
 
+- Wave 790: Support triage reads health compact `scrolling` before `get_scroll` dumps.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

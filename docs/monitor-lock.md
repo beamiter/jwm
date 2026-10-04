@@ -926,3 +926,4 @@ Wave 786: Doctor bundles include health compact `power` from `get_power`.
 Wave 787: Support triage reads health compact `session_lock` before `get_lock` dumps.
 Wave 788: Support triage reads health compact `tearing` before `get_th` dumps.
 Wave 789: Support triage reads health compact `xwayland` before `get_xw` dumps.
+Wave 790: Support triage reads health compact `scrolling` before `get_scroll` dumps.
