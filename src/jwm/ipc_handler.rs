@@ -19520,4 +19520,10 @@ mod tests {
         assert!(DOCS.contains("Wave 959: Compatibility tables name `get_wly` with health compact `waterlily`."));
     }
 
+    #[test]
+    fn evolve8h_wave_960_monitor_lock_unique_pin_audio() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 960: Compatibility tables name `get_devices` with health compact `audio`."));
+    }
+
 }

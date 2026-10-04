@@ -1462,6 +1462,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 959: Compatibility tables name `get_wly` with health compact `waterlily`.
 
+- Wave 960: Compatibility tables name `get_devices` with health compact `audio`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
