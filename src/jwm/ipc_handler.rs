@@ -17240,4 +17240,13 @@ mod tests {
         assert!(DOCS.contains("README health text names `get_scroll` beside compact `scrolling`"));
     }
 
+    #[test]
+    fn evolve8h_wave_596_readme_health_names_get_cm_for_color_management() {
+        const README: &str = include_str!("../../README.md");
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(README.contains("`get_cm`"));
+        assert!(README.contains("compact `color_management` line"));
+        assert!(DOCS.contains("README health text names `get_cm` beside compact `color_management`"));
+    }
+
 }

@@ -734,6 +734,8 @@ monorepo use independent Semantic Versions.
 
 - README health text names `get_scroll` beside compact `scrolling`.
 
+- README health text names `get_cm` beside compact `color_management`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after

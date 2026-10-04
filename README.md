@@ -218,7 +218,7 @@ It also prints a compact `session_lock` line from `get_status.session_lock` (`ge
 It also prints a compact `tearing` line from `get_status.tearing` (`get_th`).
 It also prints a compact `xwayland` line from `get_status.xwayland` (`get_xw`).
 It also prints a compact `scrolling` line from `get_status.scrolling` (`get_scroll`).
-It also prints a compact `color_management` line from `get_status.color_management`.
+It also prints a compact `color_management` line from `get_status.color_management` (`get_cm`).
 It also prints a compact `night_light` line from `get_status.night_light`.
 It also prints a compact `magnifier` line from `get_status.magnifier`.
 It also prints a compact `peek` line from `get_status.peek`.
