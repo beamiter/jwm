@@ -21055,4 +21055,10 @@ mod tests {
         assert!(COMPAT.contains("evolve9h wave 203: Health compact `system_ui` is diagnosable through `jwm-tool health`."));
     }
 
+    #[test]
+    fn evolve9h_wave_204_compat_unique_pin_version_info() {
+        const COMPAT: &str = include_str!("../../docs/compatibility.md");
+        assert!(COMPAT.contains("evolve9h wave 204: `jwm-tool capabilities` remains the catalog for `version_info` query aliases."));
+    }
+
 }

@@ -517,9 +517,14 @@ fixture 现使用私有 stdout 的 `-displayfd 1` 就绪通知（3 秒 / 16 字�
 | 201 | compatibility 唯一 pin wave 201 notifications | ✓ |
 | 202 | compatibility 唯一 pin wave 202 dnd | ✓ |
 | 203 | compatibility 唯一 pin wave 203 system_ui | ✓ |
+| 204 | compatibility 唯一 pin wave 204 version_info | ✓ |
 | … | evolve9h 进行中 |
 
 ---
+
+## 2026-10-04：evolve9h wave 204 — compatibility pin wave 204 version_info
+
+选题 = evolve9h wave 204。compatibility 唯一句子 wave 204 `version_info`。
 
 ## 2026-10-04：evolve9h wave 203 — compatibility pin wave 203 system_ui
 
