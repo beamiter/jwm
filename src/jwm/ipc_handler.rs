@@ -20581,4 +20581,10 @@ mod tests {
         assert!(COMPAT.contains("evolve9h wave 124: Nested smoke treats `peek` as a read-only IPC probe."));
     }
 
+    #[test]
+    fn evolve9h_wave_125_compat_unique_pin_gesture() {
+        const COMPAT: &str = include_str!("../../docs/compatibility.md");
+        assert!(COMPAT.contains("evolve9h wave 125: Nested smoke treats `gesture` as a read-only IPC probe."));
+    }
+
 }
