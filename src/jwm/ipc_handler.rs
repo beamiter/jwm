@@ -18968,4 +18968,10 @@ mod tests {
         assert!(DOCS.contains("Wave 867: Nested smoke checks health compact `struts` after `get_strut`."));
     }
 
+    #[test]
+    fn evolve8h_wave_868_monitor_lock_unique_pin_scratchpads() {
+        const DOCS: &str = include_str!("../../docs/monitor-lock.md");
+        assert!(DOCS.contains("Wave 868: Nested smoke checks health compact `scratchpads` after `get_pads`."));
+    }
+
 }

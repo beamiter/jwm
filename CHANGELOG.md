@@ -1278,6 +1278,8 @@ monorepo use independent Semantic Versions.
 
 - Wave 867: Nested smoke checks health compact `struts` after `get_strut`.
 
+- Wave 868: Nested smoke checks health compact `scratchpads` after `get_pads`.
+
 ### Changed
 
 - Support queries share one two-second request/response deadline after
