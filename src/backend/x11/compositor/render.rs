@@ -2447,11 +2447,12 @@ impl<C: CompositorConnection> Compositor<C> {
                 let pivot = film::center(cell.cell);
                 let cell_rect = film::scaled_about(cell.cell, pivot, scale);
                 let [tx, ty] = grid_layout::label_origin(cell, cell_rect, scale);
+                let max_w = grid_layout::label_max_width(cell_rect, scale);
                 self.gl.uniform_4_f32(
                     self.hud_text_uniforms.rect.as_ref(),
                     tx,
                     ty,
-                    w as f32,
+                    (w as f32).min(max_w),
                     h as f32,
                 );
                 self.gl.bind_texture(glow::TEXTURE_2D, Some(tex));

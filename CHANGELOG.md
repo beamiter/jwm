@@ -13,7 +13,9 @@ monorepo use independent Semantic Versions.
   tab-strip title chips off the REC/MIC stack. Tags overview and layout picker
   shrink on tiny outputs; capture holes use shared handles and a softer
   outline; volume-0 OSD no longer shows the mute glyph; glass OSD/toast ink
-  stays at least 3:1 contrast.
+  stays at least 3:1 contrast. A click on a system-UI scroll track jumps the
+  list; the search field stays inert. Tags-overview numbers clip before the
+  urgency badge.
 - X11 sessions without a compositor show the configured wallpaper on the root
   window (per-output fill/fit/stretch/center, `_XROOTPMAP_ID`) instead of a
   solid black desktop, and native window borders follow `appearance.ui_theme`

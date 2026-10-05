@@ -743,7 +743,14 @@ impl WMController for Jwm {
                     SystemUiHitTarget::Outside => {
                         self.dismiss_system_ui_from_pointer(backend);
                     }
-                    SystemUiHitTarget::Panel | SystemUiHitTarget::Unavailable => {}
+                    SystemUiHitTarget::Scrollbar(t) => {
+                        if self.features.system_ui.seek_scroll(t) {
+                            self.sync_system_ui(backend);
+                        }
+                    }
+                    SystemUiHitTarget::Query
+                    | SystemUiHitTarget::Panel
+                    | SystemUiHitTarget::Unavailable => {}
                 },
                 // List-picker middle-click forget / dismiss / apply. Clipboard
                 // and the notification center are one-shot (the twin of `d` /
@@ -4140,8 +4147,62 @@ mod tests {
             "Outside must still dismiss"
         );
         assert!(
-            system_ui.contains("SystemUiHitTarget::Panel|SystemUiHitTarget::Unavailable=>{}"),
+            system_ui.contains("SystemUiHitTarget::Panel|SystemUiHitTarget::Unavailable=>{}")
+                || system_ui.contains(
+                    "SystemUiHitTarget::Query|SystemUiHitTarget::Panel|SystemUiHitTarget::Unavailable=>{}",
+                ),
             "Panel chrome must stay inert"
+        );
+        assert!(
+            system_ui.contains("seek_scroll(t)"),
+            "a click on the scroll track must seek the list"
+        );
+    }
+
+    #[test]
+    fn a_click_on_the_scroll_track_jumps_the_list() {
+        use crate::jwm::features::system_ui::SystemUiState;
+
+        let mut jwm = empty_jwm();
+        let mut backend = RenderSpyBackend::new();
+        for i in 0..12 {
+            jwm.features.clipboard.record(&format!("clip-{i}"), i as u64);
+        }
+        jwm.features.system_ui = SystemUiState::clipboard_picker(&jwm.features.clipboard);
+        assert_eq!(jwm.features.system_ui.selected_clipboard(), Some(0));
+
+        backend.system_ui_hit = SystemUiHitTarget::Scrollbar(1.0);
+        <Jwm as WMController>::on_button_press(
+            &mut jwm,
+            &mut backend,
+            HitTarget::Background { output: None },
+            0,
+            1,
+            0,
+        );
+        assert_eq!(
+            jwm.features.system_ui.selected_clipboard(),
+            Some(11),
+            "the bottom of the track selects the last row"
+        );
+        assert!(
+            jwm.features.system_ui.is_clipboard_picker(),
+            "seeking must not dismiss the picker"
+        );
+
+        backend.system_ui_hit = SystemUiHitTarget::Query;
+        <Jwm as WMController>::on_button_press(
+            &mut jwm,
+            &mut backend,
+            HitTarget::Background { output: None },
+            0,
+            1,
+            0,
+        );
+        assert_eq!(
+            jwm.features.system_ui.selected_clipboard(),
+            Some(11),
+            "the search field is inert"
         );
     }
 

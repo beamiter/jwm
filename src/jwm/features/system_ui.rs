@@ -3650,6 +3650,110 @@ impl SystemUiState {
         true
     }
 
+    /// Jump the selection to a fraction `t` of the list (`0` = first, `1` =
+    /// last). Used by a click on the compositor-drawn scroll track. Returns
+    /// whether the selection moved.
+    pub fn seek_scroll(&mut self, t: f32) -> bool {
+        if !t.is_finite() {
+            return false;
+        }
+        let t = t.clamp(0.0, 1.0);
+        let pick = |len: usize| {
+            if len == 0 {
+                0
+            } else {
+                ((t * (len - 1) as f32).round() as usize).min(len - 1)
+            }
+        };
+        match self {
+            Self::Launcher {
+                matches, selected, ..
+            } => {
+                if matches.is_empty() {
+                    return false;
+                }
+                let next = pick(matches.len());
+                let changed = *selected != next;
+                *selected = next;
+                changed
+            }
+            Self::Info {
+                matches, offset, ..
+            } => {
+                let max = matches.len().saturating_sub(28);
+                let next = pick(max.saturating_add(1));
+                let changed = *offset != next;
+                *offset = next.min(max);
+                changed
+            }
+            Self::ControlCenter {
+                entries,
+                selected,
+                armed,
+                ..
+            } => {
+                if entries.is_empty() {
+                    return false;
+                }
+                *armed = false;
+                let next = pick(entries.len());
+                let changed = *selected != next;
+                *selected = next;
+                changed
+            }
+            Self::ListPanel { rows, selected, .. } => {
+                if rows.is_empty() {
+                    return false;
+                }
+                disarm_forget_rows(rows);
+                let next = pick(rows.len());
+                let changed = *selected != next;
+                *selected = next;
+                changed
+            }
+            Self::SessionMenu {
+                entries,
+                selected,
+                armed,
+            } => {
+                if entries.is_empty() {
+                    return false;
+                }
+                *armed = false;
+                let next = pick(entries.len());
+                let changed = *selected != next;
+                *selected = next;
+                changed
+            }
+            Self::MonitorLayout {
+                entries,
+                selected,
+                reference,
+                message,
+            } => {
+                if entries.is_empty() {
+                    return false;
+                }
+                let next = pick(entries.len());
+                if next == *selected {
+                    return false;
+                }
+                let previous = *selected;
+                *selected = next;
+                if *reference == *selected {
+                    *reference = previous;
+                }
+                message.clear();
+                true
+            }
+            Self::Inactive
+            | Self::LayoutPicker(_)
+            | Self::TagsOverview(_)
+            | Self::Locked { .. }
+            | Self::Calendar { .. } => false,
+        }
+    }
+
     /// Move by one visible page without wrapping at the ends. Arrow navigation
     /// intentionally wraps for fast repeated use; Page Up/Down should instead
     /// make the first and last rows reliably reachable.
@@ -5467,6 +5571,23 @@ mod tests {
             SystemUiState::info("T", vec!["a".into()]).panel_kind(),
             Some("keybindings")
         );
+    }
+
+    #[test]
+    fn seek_scroll_jumps_to_the_ends_of_a_list() {
+        let mut history = crate::jwm::features::ClipboardHistory::default();
+        for i in 0..8 {
+            history.record(&format!("row-{i}"), i as u64);
+        }
+        let mut panel = SystemUiState::clipboard_picker(&history);
+        assert!(panel.seek_scroll(1.0));
+        assert_eq!(panel.selected_clipboard(), Some(7));
+        assert!(panel.seek_scroll(0.0));
+        assert_eq!(panel.selected_clipboard(), Some(0));
+        assert!(!panel.seek_scroll(0.0));
+        assert!(!panel.seek_scroll(f32::NAN));
+        let mut empty = SystemUiState::Inactive;
+        assert!(!empty.seek_scroll(0.5));
     }
 
     #[test]

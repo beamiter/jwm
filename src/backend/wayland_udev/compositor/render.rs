@@ -6936,7 +6936,8 @@ impl WaylandCompositor {
                 let pivot = film::center(cell.cell);
                 let cell_rect = film::scaled_about(cell.cell, pivot, scale);
                 let [tx, ty] = grid_layout::label_origin(cell, cell_rect, scale);
-                gl.Uniform4f(text_rect, tx, ty, *w as f32, *h as f32);
+                let max_w = grid_layout::label_max_width(cell_rect, scale);
+                gl.Uniform4f(text_rect, tx, ty, (*w as f32).min(max_w), *h as f32);
                 gl.BindTexture(ffi::TEXTURE_2D, *tex);
                 self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
             }

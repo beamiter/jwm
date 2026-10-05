@@ -473,9 +473,9 @@ impl WaylandCompositor {
             .system_ui_hit_geometry
             .map(|geometry| geometry.hit_test(x, y))
         {
-            Some(Hit::Panel) | Some(Hit::Query) | Some(Hit::Scrollbar(_)) => {
-                SystemUiHitTarget::Panel
-            }
+            Some(Hit::Panel) => SystemUiHitTarget::Panel,
+            Some(Hit::Query) => SystemUiHitTarget::Query,
+            Some(Hit::Scrollbar(t)) => SystemUiHitTarget::Scrollbar(t),
             Some(Hit::Preview) => SystemUiHitTarget::Preview,
             Some(Hit::Item(row, text_x)) => SystemUiHitTarget::Item(row, text_x),
             Some(Hit::Outside) => SystemUiHitTarget::Outside,

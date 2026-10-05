@@ -1235,6 +1235,10 @@ pub enum SystemUiHitTarget {
     /// the rasterizer's margin kept) so a row can tell a press on its slider
     /// bar from one on its label. Consumers that only want the row ignore it.
     Item(usize, f32),
+    /// The search field. Not a row and not a dismiss: keep the caret there.
+    Query,
+    /// The windowed-list scroll track. `t` is `0.0..=1.0` along its height.
+    Scrollbar(f32),
 }
 
 impl SystemUiOverlay {

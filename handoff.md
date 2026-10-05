@@ -31,12 +31,13 @@
 | 52 | glass OSD/toast 对比度 ≥ 3:1 | ui_theme |
 | 53 | 标签号避让紧急点 | `label_max_width` |
 | 54 | 注意力脉冲 alpha 下限 | attention trough 不再到 0 |
+| 55 | 系统面板 Query / Scrollbar 真正上报 | 点滚动条按比例跳选；搜索框不关闭不选行 |
+| 56 | tags 格子号按 `label_max_width` 裁进紧急点 | X11/Wayland 画时 `min(texture, budget)` |
 
-**未做**：100 轮逐条独立 PR；Query/Scrollbar 仍映射为 Panel 点击而非独立动作。
-toast 点击保持闭区间，与 X11 overlay shape 对齐。
+**未做**：100 轮逐条独立 PR。toast 点击保持闭区间，与 X11 overlay shape 对齐。
 
 **验证**：`scripts/test.sh --offline --lib -- compositor_common::*` 通过；
-X11 overlay shape、相关 overlay 测试通过。全套 `--lib` 未在本批重跑。
+X11 overlay shape、scrollbar 跳选、相关 overlay 测试通过。全套 `--lib` 未在本批重跑。
 
 ---
 
