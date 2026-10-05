@@ -391,13 +391,13 @@ impl WaylandCompositor {
             return true;
         }
         // A rotating gradient border needs continuous frames while a border
-        // can actually be drawn (smart borders require >1 client window),
+        // can actually be drawn (a lone counted client still has a ring),
         // matching the X11 compositor's needs_render gate.
         if self.border_gradient_enabled
             && self.border_gradient_speed != 0.0
             && self.border_enabled
             && self.border_width > 0.0
-            && self.windows.len() > 1
+            && !self.windows.is_empty()
         {
             return true;
         }

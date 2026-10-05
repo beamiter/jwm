@@ -411,13 +411,10 @@ impl Jwm {
             .monitor_work_area(mon_key)
             .unwrap_or(Rect::new(wx, wy, ww, wh));
 
-        // Mirror apply_smart_borders for a single-window monitor.
+        // Mirror apply_smart_borders: a lone window still has a ring, but
+        // no inner/outer gap.
         let cfg = CONFIG.load();
-        let border_w = if count == 1 {
-            0
-        } else {
-            cfg.border_px() as i32
-        };
+        let border_w = cfg.border_px() as i32;
         let monitor_gap = self
             .state
             .monitors

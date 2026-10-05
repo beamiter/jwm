@@ -17,16 +17,15 @@ pub(crate) struct BorderStyle {
     pub(crate) ordinary_focused: bool,
 }
 
-/// Whether a window takes part in smart borders — both in the count that
-/// decides whether ordinary borders are drawn at all (more than one client)
-/// and as a candidate for a border.
+/// Whether a window takes part in ordinary compositor borders — both in the
+/// count that decides whether any client ring is drawn and as a candidate
+/// for a border. A lone counted client still gets all four sides.
 ///
 /// The status bar is chrome, and override-redirect windows are unmanaged
 /// overlays the WM never tiles: IME candidate lists and the input-method
 /// switcher (fcitx5 creates those with `override_redirect`), menus, tooltips
-/// and drag icons. Counting them would draw a border around the single client
-/// of a tag for as long as the popup is up — e.g. the whole time a user types
-/// Chinese — and drop it again when the popup closes.
+/// and drag icons. They never receive a ring, and they must not be the only
+/// reason a counted client is treated as present.
 pub(crate) fn counts_for_smart_borders(
     class_name: &str,
     status_bar_name: &str,
@@ -80,8 +79,8 @@ pub(crate) struct WindowBorderInputs {
     pub(crate) focus_highlight_progress: Option<f32>,
     /// The urgent-window pulse when it is active on this window.
     pub(crate) attention: Option<AttentionBorderStyle>,
-    /// Ordinary borders apply this frame: enabled, and (smart borders) more
-    /// than one counted client on screen.
+    /// Ordinary borders apply this frame: enabled, with a counted client
+    /// on screen (including a lone tiled window).
     pub(crate) ordinary_enabled: bool,
     pub(crate) ordinary_width: f32,
     pub(crate) focused_color: [f32; 4],
@@ -94,8 +93,8 @@ pub(crate) struct WindowBorderInputs {
 /// The border to draw around one window, or `None` when it gets none.
 ///
 /// Attention and picture-in-picture frames are signals and survive ordinary
-/// borders being off (disabled, or a lone client under smart borders); every
-/// other border needs ordinary borders on with a positive width.
+/// borders being off (disabled, or a zero configured width); every other
+/// border needs ordinary borders on with a positive width.
 pub(crate) fn window_border_style(inputs: &WindowBorderInputs) -> Option<BorderStyle> {
     let special = inputs.attention.is_some() || inputs.is_pip;
     let ordinary = inputs.ordinary_enabled && inputs.ordinary_width > 0.0;
@@ -168,9 +167,8 @@ mod tests {
 
     #[test]
     fn ime_popups_do_not_count_toward_smart_borders() {
-        // A lone tiled client is the only window that counts, so the smart
-        // border stays off while an fcitx5 candidate list or the input-method
-        // switcher (both override-redirect) is on screen.
+        // A lone tiled client still counts; IME popups, the bar, and other
+        // override-redirect overlays do not — they never take a ring.
         assert!(counts_for_smart_borders("Alacritty", "jwm-bar", false));
         assert!(!counts_for_smart_borders("fcitx", "jwm-bar", true));
         assert!(!counts_for_smart_borders("jwm-bar", "jwm-bar", false));
@@ -271,7 +269,11 @@ mod tests {
             focus_highlight_progress: Some(0.5),
             ..inputs()
         };
-        assert_eq!(window_border_style(&off), None, "a lone client has no ring");
+        assert_eq!(
+            window_border_style(&off),
+            None,
+            "disabled ordinary borders draw no ring"
+        );
         let pip = WindowBorderInputs {
             is_pip: true,
             ..off
@@ -291,9 +293,8 @@ mod tests {
             color: [1.0, 0.0, 0.0, 0.5],
             width: 4.0,
         };
-        // Borders disabled outright, and borders "on" but with a zero width
-        // (smart borders hand a lone client the same zero): both leave the
-        // pulse nothing to blend into.
+        // Borders disabled outright, and borders "on" but with a zero width:
+        // both leave the pulse nothing to blend into.
         for (ordinary_enabled, ordinary_width) in [(false, 2.0), (true, 0.0)] {
             for progress in [0.0, 0.25, 0.5, 1.0] {
                 let pip = WindowBorderInputs {

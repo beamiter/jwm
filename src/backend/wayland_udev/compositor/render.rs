@@ -3387,9 +3387,10 @@ impl WaylandCompositor {
             && scene
                 .iter()
                 .any(|&(win_id, ..)| self.windows.get(&win_id).map_or(false, |ws| ws.is_frosted));
-        // Smart borders, as on X11: ordinary borders only while more than one
-        // counted client is on screen. A flip changes the ring of windows no
-        // damage box covers, so the frame that flips is never a partial one.
+        // Ordinary borders whenever they are enabled and at least one counted
+        // client is on screen — a lone tiled window still gets all four sides.
+        // A flip changes the ring of windows no damage box covers, so the
+        // frame that flips is never a partial one.
         let ordinary_borders = {
             self.border_enabled
                 && scene
@@ -3404,7 +3405,7 @@ impl WaylandCompositor {
                         })
                     })
                     .count()
-                    > 1
+                    > 0
         };
         let smart_borders_flipped = ordinary_borders != self.prev_ordinary_borders;
         self.prev_ordinary_borders = ordinary_borders;

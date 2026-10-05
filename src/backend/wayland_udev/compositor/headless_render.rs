@@ -8507,9 +8507,9 @@ fn wayland_osd_rides_the_deferred_linear_route() {
     }
 }
 
-/// Wayland borders follow the shared table and X11's smart-border rule: a
-/// lone client has no ring; with two, the focused and the unfocused window
-/// each get their configured colour.
+/// Wayland borders follow the shared table: a lone counted client still
+/// gets all four sides; with two, the focused and the unfocused window
+/// each get their configured colour. Unmanaged overlays never take a ring.
 #[test]
 fn wayland_smart_borders_ring_focused_and_unfocused_windows() {
     let Some(_headless) = HeadlessGl::new(GlApi::Gles3) else {
@@ -8555,9 +8555,9 @@ fn wayland_smart_borders_ring_focused_and_unfocused_windows() {
         let lone = render(&mut compositor, &[(1, 20, 20, 40, 30)]);
         assert_pixel(
             ring(&lone, 20),
-            ring(&reference, 20),
-            1,
-            "a lone client has no ring",
+            [255, 0, 0, 255],
+            2,
+            "a lone client still has a focused ring",
         );
 
         let pair = render(
@@ -8568,7 +8568,7 @@ fn wayland_smart_borders_ring_focused_and_unfocused_windows() {
         assert_pixel(ring(&pair, 120), [0, 0, 255, 255], 2, "unfocused ring");
 
         // An override-redirect menu (or an xdg/IME popup) is an unmanaged
-        // overlay: it neither turns smart borders on nor takes a ring.
+        // overlay: it neither drops the client's ring nor takes one of its own.
         insert_opaque_test_window(&mut compositor, 3, tex, 40, 30);
         compositor.windows.get_mut(&3).unwrap().class_name = "menu".into();
         compositor.set_window_override_redirect(3, true);
@@ -8578,9 +8578,9 @@ fn wayland_smart_borders_ring_focused_and_unfocused_windows() {
         );
         assert_pixel(
             ring(&with_menu, 20),
-            ring(&reference, 20),
-            1,
-            "a popup does not give the lone client a ring",
+            [255, 0, 0, 255],
+            2,
+            "a popup does not drop the client's ring",
         );
         assert_pixel(
             ring(&with_menu, 120),

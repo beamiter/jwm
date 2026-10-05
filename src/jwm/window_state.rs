@@ -4567,6 +4567,29 @@ mod tests {
     }
 
     #[test]
+    fn a_lone_tiled_client_keeps_all_four_border_sides() {
+        let mut backend = MinimizeSpyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let monitor = jwm.state.monitor_order[0];
+        let (_, client) = add_mode_client(
+            &mut jwm,
+            WindowId::from_raw(0x5055),
+            Rect::new(80, 90, 720, 500),
+            false,
+            false,
+        );
+        jwm.state.clients[client].geometry.border_w = 0;
+
+        let tileable = jwm.collect_tileable_clients(monitor);
+        assert_eq!(tileable.len(), 1);
+        let (effective_border, effective_gap) = jwm.apply_smart_borders(monitor, &tileable);
+        let configured = crate::config::CONFIG.load().border_px() as i32;
+        assert_eq!(effective_border, configured);
+        assert_eq!(effective_gap, 0);
+        assert_eq!(jwm.state.clients[client].geometry.border_w, configured);
+    }
+
+    #[test]
     fn fullscreen_layout_exit_without_arrange_keeps_csd_borderless() {
         let mut backend = MinimizeSpyBackend::new();
         let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();

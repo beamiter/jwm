@@ -5149,12 +5149,12 @@ impl<C: CompositorConnection> Compositor<C> {
                 .values()
                 .any(|wt| wt.is_urgent && wt.w > 0 && wt.h > 0);
         // A rotating gradient border needs continuous frames while a border
-        // can actually be drawn (smart borders require >1 client window).
+        // can actually be drawn (a lone counted client still has a ring).
         let gradient_border_animating = self.border_gradient_enabled
             && self.border_gradient_speed != 0.0
             && self.border_enabled
             && self.border_width > 0.0
-            && self.windows.len() > 1;
+            && !self.windows.is_empty();
         let overview_animating = self.overview_animation_pending();
         // Toasts and the OSD still count as animation for the damage
         // tracker's thresholds while any card is visible. The frame pump
@@ -6312,10 +6312,9 @@ impl<C: CompositorConnection> Compositor<C> {
         // === Pass 2: Draw window textures ===
         let wm_border_px = frame_cfg.border_px() as f32;
 
-        // Count actual client windows to apply smart borders. Only windows
-        // that can carry a border themselves count, so transient overlays
-        // (IME candidate lists, menus, tooltips) cannot flip a lone tiled
-        // client into the bordered multi-window case.
+        // Count actual client windows. Only windows that can carry a border
+        // themselves count, so transient overlays (IME candidate lists, menus,
+        // tooltips) never receive a ring of their own.
         let status_bar_name = frame_status_bar_name;
         let client_window_count = visible_scene
             .iter()
@@ -6334,7 +6333,7 @@ impl<C: CompositorConnection> Compositor<C> {
             .count();
 
         let effective_border_enabled =
-            (self.border_enabled || wm_border_px > 0.0) && client_window_count > 1;
+            (self.border_enabled || wm_border_px > 0.0) && client_window_count > 0;
         let base_border_width = if self.border_enabled {
             self.border_width
         } else {
@@ -7018,7 +7017,7 @@ impl<C: CompositorConnection> Compositor<C> {
                     }
 
                     // Same predicate that fed `client_window_count`: only
-                    // windows counted for smart borders can receive one.
+                    // counted clients receive a ring, including a lone one.
                     if counts_for_smart_borders(
                         &wt.class_name,
                         status_bar_name_main,

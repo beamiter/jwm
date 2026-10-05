@@ -1803,12 +1803,12 @@ pub(crate) struct WaylandCompositor {
     /// linear target (a deferred route). Latched by `render_transition`
     /// for the per-mode draw helpers.
     transition_draws_linear: bool,
-    /// Whether last frame drew ordinary (smart) borders; the frame that
+    /// Whether last frame drew ordinary client rings; the frame that
     /// flips it repairs in full, since the rings lie outside any damage box.
     prev_ordinary_borders: bool,
     /// XWayland override-redirect windows (menus, tooltips, IME lists) in the
     /// scene. Like the synthetic xdg/IME popup ids they are unmanaged
-    /// overlays: no smart-border count, no ring.
+    /// overlays: no client-border count, no ring.
     override_redirect_windows: std::collections::HashSet<u64>,
 
     // --- Texture pool ---
@@ -4603,7 +4603,7 @@ impl WaylandCompositor {
     }
 
     /// Popups, IME candidate lists and override-redirect windows: overlays
-    /// the WM never manages, which take no part in smart borders.
+    /// the WM never manages, which take no part in client border counting.
     pub(crate) fn is_unmanaged_overlay(&self, window_id: u64) -> bool {
         is_auxiliary_window_id(window_id) || self.override_redirect_windows.contains(&window_id)
     }

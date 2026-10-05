@@ -89,8 +89,9 @@ impl Jwm {
         }
     }
 
-    /// Apply smart borders: single tiled window gets no border/gap;
-    /// multiple tiled windows get the configured border and gap.
+    /// Apply smart gaps: a single tiled window gets no gap so it fills the
+    /// work area aside from its ring. The configured border always applies,
+    /// including for a lone client, so all four sides remain visible.
     pub(crate) fn apply_smart_borders(
         &mut self,
         mon_key: MonitorKey,
@@ -105,13 +106,12 @@ impl Jwm {
             .get(mon_key)
             .map(|m| m.layout.gap)
             .unwrap_or_else(|| cfg.gap_px() as i32);
-        let effective_border = if is_single { 0 } else { default_border };
+        let effective_border = default_border;
         let effective_gap = if is_single { 0 } else { monitor_gap };
         for &(key, _, _) in clients {
             if let Some(client) = self.state.clients.get_mut(key) {
-                // A client-side frame owns the decoration permanently. Smart
-                // borders may remove a server border, but must never add one
-                // back merely because another tiled client appeared.
+                // A client-side frame owns the decoration permanently. The
+                // layout ring must never be added back onto a CSD client.
                 client.geometry.border_w = if client.state.no_decorations {
                     0
                 } else {

@@ -207,7 +207,7 @@ impl<C: CompositorConnection> Compositor<C> {
             && self.border_gradient_speed != 0.0
             && self.border_enabled
             && self.border_width > 0.0
-            && self.windows.len() > 1
+            && !self.windows.is_empty()
         {
             return true;
         }

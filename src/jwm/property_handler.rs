@@ -459,9 +459,8 @@ impl Jwm {
             return Ok(());
         }
 
-        // Tiled clients may have smart-border zero on a single-client tag;
-        // let the normal layout policy refine the configured return width
-        // before publishing the final native decoration.
+        // Layout policy still owns the live width (CSD stays zero; smart
+        // gaps do not drop the ring) before publishing native decoration.
         self.arrange(backend, monitor);
         let (border, focused) = self
             .state
