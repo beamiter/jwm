@@ -1127,6 +1127,7 @@ mod scratchpad_reveal_tests {
             tab_drag: None,
             control_slider_drag: None,
             system_ui_scroll_drag_x: None,
+            system_ui_scroll_drag_t: None,
             system_ui_query_replace: false,
             message: SharedMessage::default(),
             secondary_bars: HashMap::new(),

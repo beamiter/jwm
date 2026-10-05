@@ -745,9 +745,9 @@ impl WMController for Jwm {
                     }
                     SystemUiHitTarget::Scrollbar(t) => {
                         self.system_ui_scroll_drag_x = Some(x);
-                        if self.features.system_ui.seek_scroll(t) {
-                            self.sync_system_ui(backend);
-                        }
+                        self.system_ui_scroll_drag_t = Some(t);
+                        let _ = self.features.system_ui.seek_scroll(t);
+                        self.sync_system_ui(backend);
                     }
                     SystemUiHitTarget::Query => {
                         self.arm_system_ui_query_replace();
@@ -943,7 +943,11 @@ impl WMController for Jwm {
         // returns for the same reason as the tab drag: a modal entered
         // mid-drag must not leave it armed for a later release.
         self.control_slider_drag = None;
-        self.system_ui_scroll_drag_x = None;
+        let had_scroll_drag = self.system_ui_scroll_drag_x.take().is_some();
+        self.system_ui_scroll_drag_t = None;
+        if had_scroll_drag && self.features.system_ui.is_active() {
+            self.sync_system_ui(backend);
+        }
         if self.features.capture.take_swallowed_button_release() {
             return;
         }
@@ -1265,10 +1269,12 @@ impl WMController for Jwm {
                             crate::backend::api::SystemUiHitTarget::Scrollbar(t) => Some(t),
                             _ => None,
                         });
-                    if let Some(t) = t
-                        && self.features.system_ui.seek_scroll(t)
-                    {
-                        self.sync_system_ui(backend);
+                    if let Some(t) = t {
+                        let jumped = self.features.system_ui.seek_scroll(t);
+                        if jumped || self.system_ui_scroll_drag_t != Some(t) {
+                            self.system_ui_scroll_drag_t = Some(t);
+                            self.sync_system_ui(backend);
+                        }
                     }
                     return;
                 }
@@ -2980,6 +2986,7 @@ mod tests {
             tab_drag: None,
             control_slider_drag: None,
             system_ui_scroll_drag_x: None,
+            system_ui_scroll_drag_t: None,
             system_ui_query_replace: false,
             message: SharedMessage::default(),
             secondary_bars: HashMap::new(),
@@ -4191,6 +4198,10 @@ mod tests {
             "a press on the scroll track must arm a drag"
         );
         assert!(
+            system_ui.contains("system_ui_scroll_drag_t=Some(t)"),
+            "the drag publishes the thumb fraction"
+        );
+        assert!(
             system_ui.contains("seek_scroll(t)"),
             "a click on the scroll track must seek the list"
         );
@@ -4230,6 +4241,7 @@ mod tests {
             jwm.system_ui_scroll_drag_x.is_some(),
             "the press arms a scroll drag"
         );
+        assert_eq!(jwm.system_ui_scroll_drag_t, Some(1.0));
 
         backend.system_ui_hit = SystemUiHitTarget::Scrollbar(0.0);
         <Jwm as WMController>::on_motion_notify(

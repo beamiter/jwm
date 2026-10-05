@@ -5670,7 +5670,7 @@ impl WaylandCompositor {
         );
         let query_text = overlay.query.as_ref().map(|q| {
             crate::backend::compositor_font::fit_ui_text_tail(
-                &format!("\u{f002}  {q}_"),
+                &format!("\u{f002}  {q}"),
                 description,
                 size,
                 query_width,
@@ -7548,7 +7548,8 @@ impl WaylandCompositor {
                     visible: s.visible,
                     total: s.total,
                 }),
-            );
+            )
+            .with_scroll_drag_t(overlay.scroll_drag_t);
             let hover_row = self
                 .system_ui_hovered
                 .filter(|row| overlay.selected != Some(*row));
@@ -7809,6 +7810,31 @@ impl WaylandCompositor {
                     gl.Uniform4f(text_rect, ix, iy, iw, ih);
                     gl.BindTexture(ffi::TEXTURE_2D, tex);
                     self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
+                }
+            }
+            if overlay.query.is_some() {
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis())
+                    .unwrap_or(0);
+                if panel::query_caret_visible(now_ms, overlay.query_selected)
+                    && let (Some(field), Some(origin), Some((_, w, h))) =
+                        (layout.query_field, layout.query_text, self.sysui_textures[1])
+                {
+                    let [cx, cy, cw, ch] =
+                        panel::query_caret_rect(field, origin, w as f32, h as f32);
+                    self.sysui_fill_rounded(
+                        gl,
+                        cx,
+                        cy,
+                        cw,
+                        ch,
+                        0.0,
+                        UiPalette::ink(ui.query_ink, content_a),
+                    );
+                }
+                if !overlay.query_selected {
+                    self.needs_render = true;
                 }
             }
             gl.BindVertexArray(0);

@@ -156,6 +156,10 @@ pub struct Jwm {
     /// sideways. Disarmed on release.
     pub(crate) system_ui_scroll_drag_x: Option<f64>,
 
+    /// Last scroll-track fraction while [`Self::system_ui_scroll_drag_x`] is
+    /// armed, so the compositor can park the thumb under the pointer.
+    pub(crate) system_ui_scroll_drag_t: Option<f32>,
+
     /// A click in the search field armed "replace": the next typed character
     /// or BackSpace clears the current query first, like a selected field.
     pub(crate) system_ui_query_replace: bool,
@@ -1350,6 +1354,7 @@ impl Jwm {
             tab_drag: None,
             control_slider_drag: None,
             system_ui_scroll_drag_x: None,
+            system_ui_scroll_drag_t: None,
             system_ui_query_replace: false,
 
             ipc_server,

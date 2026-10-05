@@ -203,6 +203,56 @@ pub(crate) struct PanelContents {
     pub(crate) scroll_thumb: Option<Rect>,
 }
 
+impl PanelContents {
+    /// Place the scroll thumb at fraction `t` of the track (pointer drag).
+    /// `None` keeps the windowed-list position from [`contents`].
+    #[must_use]
+    pub(crate) fn with_scroll_drag_t(mut self, t: Option<f32>) -> Self {
+        let Some(t) = t else {
+            return self;
+        };
+        if let (Some(track), Some(thumb)) = (self.scroll_track, self.scroll_thumb) {
+            self.scroll_thumb = Some(scroll_thumb_at(track, thumb, t));
+        }
+        self
+    }
+}
+
+/// Thumb origin for a drag at fraction `t` of `track`.
+#[must_use]
+pub(crate) fn scroll_thumb_at(track: Rect, thumb: Rect, t: f32) -> Rect {
+    let t = if t.is_finite() { t.clamp(0.0, 1.0) } else { 0.0 };
+    let travel = (track[3] - thumb[3]).max(0.0);
+    [track[0], track[1] + t * travel, thumb[2], thumb[3]]
+}
+
+/// Half-period of the query caret blink, in milliseconds.
+pub(crate) const QUERY_CARET_MS: u128 = 530;
+
+/// Whether the query caret is drawn. A selected (replace) field keeps it
+/// on; an ordinary field blinks.
+#[must_use]
+pub(crate) fn query_caret_visible(now_ms: u128, selected: bool) -> bool {
+    selected || (now_ms / QUERY_CARET_MS) % 2 == 0
+}
+
+/// A 2 px bar at the end of the rasterized query line, clamped into `field`.
+#[must_use]
+pub(crate) fn query_caret_rect(
+    field: Rect,
+    text_origin: [f32; 2],
+    text_w: f32,
+    text_h: f32,
+) -> Rect {
+    let w = 2.0_f32.min(field[2].max(0.0));
+    let h = text_h.max(1.0).min(field[3].max(1.0));
+    let max_x = (field[0] + field[2] - w).max(field[0]);
+    let x = (text_origin[0] + text_w.max(0.0)).clamp(field[0], max_x);
+    let max_y = (field[1] + field[3] - h).max(field[1]);
+    let y = text_origin[1].clamp(field[1], max_y);
+    [x, y, w, h]
+}
+
 /// The input geometry paired with one painted card frame.
 ///
 /// This is cached by each compositor after layout. Pointer handling then asks
@@ -1137,5 +1187,47 @@ mod tests {
             query_field_fill(field, accent, 0.3, true),
             [0.2, 0.5, 1.0, 0.3]
         );
+    }
+
+    #[test]
+    fn a_scroll_drag_parks_the_thumb_on_the_pointer() {
+        let s = sizes((40.0, 24.0), (0.0, 0.0), (300.0, 240.0), (0.0, 0.0));
+        let panel = [0.0, 0.0, 600.0, 400.0];
+        let layout = contents(
+            panel,
+            &s,
+            12,
+            None,
+            Some(Scroll {
+                first: 0,
+                visible: 12,
+                total: 60,
+            }),
+        );
+        let track = layout.scroll_track.unwrap();
+        let top = layout.scroll_thumb.unwrap();
+        let dragged = layout.with_scroll_drag_t(Some(1.0)).scroll_thumb.unwrap();
+        assert!(
+            (dragged[1] + dragged[3] - (track[1] + track[3])).abs() < 0.001,
+            "t=1 sits on the bottom of the track"
+        );
+        assert_eq!(
+            layout.with_scroll_drag_t(Some(0.0)).scroll_thumb.unwrap()[1],
+            top[1]
+        );
+        let mid = scroll_thumb_at(track, top, 0.5);
+        assert!((mid[1] - (track[1] + (track[3] - top[3]) * 0.5)).abs() < 0.001);
+    }
+
+    #[test]
+    fn the_query_caret_blinks_unless_the_field_is_selected() {
+        assert!(query_caret_visible(0, false));
+        assert!(!query_caret_visible(QUERY_CARET_MS, false));
+        assert!(query_caret_visible(QUERY_CARET_MS, true));
+        let field = [10.0, 20.0, 200.0, 30.0];
+        let caret = query_caret_rect(field, [20.0, 24.0], 40.0, 16.0);
+        assert_eq!(caret[0], 60.0);
+        assert_eq!(caret[2], 2.0);
+        assert!(caret[0] + caret[2] <= field[0] + field[2]);
     }
 }

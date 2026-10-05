@@ -1210,6 +1210,9 @@ pub struct SystemUiOverlay {
     pub side_preview: Option<String>,
     /// The search field is selected for replace after a click in it.
     pub query_selected: bool,
+    /// While the pointer is dragging the list scroll track, the thumb sits
+    /// at this `0..=1` fraction instead of at the windowed-list position.
+    pub scroll_drag_t: Option<f32>,
 }
 
 /// What is under the pointer on the compositor-drawn system-UI card.
