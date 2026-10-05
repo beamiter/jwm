@@ -2179,6 +2179,51 @@ impl SystemUiState {
         self.rebuild_clipboard_rows(history);
     }
 
+    /// Whether the panel has a typed search/filter that a click in the query
+    /// field can select for replace.
+    #[must_use]
+    pub fn has_search_query(&self) -> bool {
+        match self {
+            Self::Launcher { query, .. } | Self::Info { query, .. } => !query.is_empty(),
+            Self::ListPanel {
+                kind: ListKind::Clipboard,
+                query,
+                prompt: None,
+                ..
+            } => !query.is_empty(),
+            _ => false,
+        }
+    }
+
+    /// Empty the launcher / keybindings search and rebuild matches.
+    /// Passphrases and the lock password are left alone.
+    pub fn clear_search_query(&mut self) {
+        match self {
+            Self::Launcher { query, .. } | Self::Info { query, .. } => {
+                if query.is_empty() {
+                    return;
+                }
+                query.clear();
+            }
+            _ => return,
+        }
+        self.refresh_matches();
+    }
+
+    /// Empty the clipboard picker's filter and rebuild from `history`.
+    pub fn clear_clipboard_query(&mut self, history: &crate::jwm::features::ClipboardHistory) {
+        {
+            let Self::ListPanel { kind, query, .. } = self else {
+                return;
+            };
+            if *kind != ListKind::Clipboard || query.is_empty() {
+                return;
+            }
+            query.clear();
+        }
+        self.rebuild_clipboard_rows(history);
+    }
+
     /// Rebuild the open clipboard picker after the history changed,
     /// reapplying the filter the user has typed.
     ///
@@ -5588,6 +5633,19 @@ mod tests {
         assert!(!panel.seek_scroll(f32::NAN));
         let mut empty = SystemUiState::Inactive;
         assert!(!empty.seek_scroll(0.5));
+    }
+
+    #[test]
+    fn a_search_query_can_be_cleared_for_replace() {
+        let mut history = crate::jwm::features::ClipboardHistory::default();
+        history.record("alpha", 1);
+        history.record("beta", 2);
+        let mut panel = SystemUiState::clipboard_picker(&history);
+        panel.push_clipboard_query('a', &history);
+        assert!(panel.has_search_query());
+        panel.clear_clipboard_query(&history);
+        assert!(!panel.has_search_query());
+        assert_eq!(panel.clipboard_query(), Some(""));
     }
 
     #[test]

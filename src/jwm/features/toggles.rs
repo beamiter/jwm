@@ -2537,6 +2537,8 @@ impl Jwm {
         // So does an armed control-center slider drag: once the pointer grab
         // is gone its release may never reach the WM.
         self.control_slider_drag = None;
+        self.system_ui_scroll_drag_x = None;
+        self.system_ui_query_replace = false;
         // A Bluetooth pairing session belongs to the Bluetooth picker; the
         // picker going away cancels the pairing before the panel drops.
         self.cancel_bluetooth_pairing();
@@ -2600,6 +2602,8 @@ impl Jwm {
         self.features.window_switcher_mods = Mods::empty();
         // And an armed slider drag: it belongs to the outgoing panel.
         self.control_slider_drag = None;
+        self.system_ui_scroll_drag_x = None;
+        self.system_ui_query_replace = false;
         // A Bluetooth pairing session belongs to the outgoing Bluetooth
         // picker; it is cancelled before the panel state drops.
         self.cancel_bluetooth_pairing();

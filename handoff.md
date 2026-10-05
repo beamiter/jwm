@@ -31,8 +31,10 @@
 | 52 | glass OSD/toast 对比度 ≥ 3:1 | ui_theme |
 | 53 | 标签号避让紧急点 | `label_max_width` |
 | 54 | 注意力脉冲 alpha 下限 | attention trough 不再到 0 |
-| 55 | 系统面板 Query / Scrollbar 真正上报 | 点滚动条按比例跳选；搜索框不关闭不选行 |
+| 55 | 系统面板 Query / Scrollbar 真正上报 | 点滚动条按比例跳选 |
 | 56 | tags 格子号按 `label_max_width` 裁进紧急点 | X11/Wayland 画时 `min(texture, budget)` |
+| 57 | 滚动条按住拖动跟手 | 用按下时的 x 持续 hit-test，松手解除 |
+| 58 | 搜索框点击后下一键替换查询 | 非空 query 才 arm；不影响密码格 |
 
 **未做**：100 轮逐条独立 PR。toast 点击保持闭区间，与 X11 overlay shape 对齐。
 

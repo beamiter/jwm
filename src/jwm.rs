@@ -151,6 +151,15 @@ pub struct Jwm {
     /// [`input_handler::ControlSliderDrag`].
     pub(crate) control_slider_drag: Option<input_handler::ControlSliderDrag>,
 
+    /// A press-drag on a system-UI list scroll track. Stores the press's x so
+    /// motion can keep hitting the 3 px track while the pointer leaves it
+    /// sideways. Disarmed on release.
+    pub(crate) system_ui_scroll_drag_x: Option<f64>,
+
+    /// A click in the search field armed "replace": the next typed character
+    /// or BackSpace clears the current query first, like a selected field.
+    pub(crate) system_ui_query_replace: bool,
+
     pub message: SharedMessage,
 
     // Per-monitor status bars
@@ -1340,6 +1349,8 @@ impl Jwm {
             drag_ctl: None,
             tab_drag: None,
             control_slider_drag: None,
+            system_ui_scroll_drag_x: None,
+            system_ui_query_replace: false,
 
             ipc_server,
             update_readiness,

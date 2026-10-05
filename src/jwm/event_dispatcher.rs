@@ -744,13 +744,15 @@ impl WMController for Jwm {
                         self.dismiss_system_ui_from_pointer(backend);
                     }
                     SystemUiHitTarget::Scrollbar(t) => {
+                        self.system_ui_scroll_drag_x = Some(x);
                         if self.features.system_ui.seek_scroll(t) {
                             self.sync_system_ui(backend);
                         }
                     }
-                    SystemUiHitTarget::Query
-                    | SystemUiHitTarget::Panel
-                    | SystemUiHitTarget::Unavailable => {}
+                    SystemUiHitTarget::Query => {
+                        self.arm_system_ui_query_replace();
+                    }
+                    SystemUiHitTarget::Panel | SystemUiHitTarget::Unavailable => {}
                 },
                 // List-picker middle-click forget / dismiss / apply. Clipboard
                 // and the notification center are one-shot (the twin of `d` /
@@ -938,6 +940,7 @@ impl WMController for Jwm {
         // returns for the same reason as the tab drag: a modal entered
         // mid-drag must not leave it armed for a later release.
         self.control_slider_drag = None;
+        self.system_ui_scroll_drag_x = None;
         if self.features.capture.take_swallowed_button_release() {
             return;
         }
@@ -1250,6 +1253,15 @@ impl WMController for Jwm {
                     if self.drag_control_center_slider(backend, root_x, text_x) {
                         return;
                     }
+                }
+                if let Some(track_x) = self.system_ui_scroll_drag_x {
+                    let track_hit = backend.compositor_system_ui_hit_test(track_x, root_y);
+                    if let crate::backend::api::SystemUiHitTarget::Scrollbar(t) = track_hit
+                        && self.features.system_ui.seek_scroll(t)
+                    {
+                        self.sync_system_ui(backend);
+                    }
+                    return;
                 }
                 // The hover wants the row and, for the notification action
                 // strip's chips, the pointer's x inside the row's text.
@@ -2949,6 +2961,8 @@ mod tests {
             drag_ctl: None,
             tab_drag: None,
             control_slider_drag: None,
+            system_ui_scroll_drag_x: None,
+            system_ui_query_replace: false,
             message: SharedMessage::default(),
             secondary_bars: HashMap::new(),
             secondary_bar_failures: HashMap::new(),
@@ -4147,11 +4161,16 @@ mod tests {
             "Outside must still dismiss"
         );
         assert!(
-            system_ui.contains("SystemUiHitTarget::Panel|SystemUiHitTarget::Unavailable=>{}")
-                || system_ui.contains(
-                    "SystemUiHitTarget::Query|SystemUiHitTarget::Panel|SystemUiHitTarget::Unavailable=>{}",
-                ),
+            system_ui.contains("SystemUiHitTarget::Panel|SystemUiHitTarget::Unavailable=>{}"),
             "Panel chrome must stay inert"
+        );
+        assert!(
+            system_ui.contains("arm_system_ui_query_replace"),
+            "a click in the search field must arm replace"
+        );
+        assert!(
+            system_ui.contains("system_ui_scroll_drag_x=Some(x)"),
+            "a press on the scroll track must arm a drag"
         );
         assert!(
             system_ui.contains("seek_scroll(t)"),
@@ -4189,7 +4208,38 @@ mod tests {
             jwm.features.system_ui.is_clipboard_picker(),
             "seeking must not dismiss the picker"
         );
+        assert!(
+            jwm.system_ui_scroll_drag_x.is_some(),
+            "the press arms a scroll drag"
+        );
 
+        backend.system_ui_hit = SystemUiHitTarget::Scrollbar(0.0);
+        <Jwm as WMController>::on_motion_notify(
+            &mut jwm,
+            &mut backend,
+            HitTarget::Background { output: None },
+            0.0,
+            10.0,
+            0,
+        );
+        assert_eq!(
+            jwm.features.system_ui.selected_clipboard(),
+            Some(0),
+            "dragging the track back to the top selects the first row"
+        );
+
+        <Jwm as WMController>::on_button_release(
+            &mut jwm,
+            &mut backend,
+            HitTarget::Background { output: None },
+            0,
+        );
+        assert!(jwm.system_ui_scroll_drag_x.is_none());
+
+        jwm.features
+            .system_ui
+            .push_clipboard_query('z', &jwm.features.clipboard);
+        assert!(jwm.features.system_ui.has_search_query());
         backend.system_ui_hit = SystemUiHitTarget::Query;
         <Jwm as WMController>::on_button_press(
             &mut jwm,
@@ -4199,10 +4249,13 @@ mod tests {
             1,
             0,
         );
-        assert_eq!(
-            jwm.features.system_ui.selected_clipboard(),
-            Some(11),
-            "the search field is inert"
+        assert!(
+            jwm.system_ui_query_replace,
+            "a click in a non-empty search field arms replace"
+        );
+        assert!(
+            jwm.features.system_ui.is_clipboard_picker(),
+            "the search field does not dismiss the picker"
         );
     }
 

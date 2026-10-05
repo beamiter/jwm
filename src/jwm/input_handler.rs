@@ -356,6 +356,24 @@ impl Jwm {
         self.close_system_ui(backend);
     }
 
+    pub(crate) fn arm_system_ui_query_replace(&mut self) {
+        self.system_ui_query_replace = self.features.system_ui.has_search_query();
+    }
+
+    fn consume_system_ui_query_replace(&mut self) {
+        if !self.system_ui_query_replace {
+            return;
+        }
+        self.system_ui_query_replace = false;
+        if self.features.system_ui.is_clipboard_picker() {
+            self.features
+                .system_ui
+                .clear_clipboard_query(&self.features.clipboard);
+        } else {
+            self.features.system_ui.clear_search_query();
+        }
+    }
+
     pub(crate) fn sync_system_ui(&mut self, backend: &mut dyn Backend) {
         self.system_ui_dirty = false;
         let active = self.features.system_ui.is_active();
@@ -2718,6 +2736,7 @@ impl Jwm {
                     self.clear_clipboard_history();
                     self.sync_system_ui(backend);
                 } else if keysym == keys::KEY_BackSpace {
+                    self.consume_system_ui_query_replace();
                     self.features
                         .system_ui
                         .pop_clipboard_query(&self.features.clipboard);
@@ -2729,6 +2748,7 @@ impl Jwm {
                     self.features.system_ui.move_selection(1);
                     self.sync_system_ui(backend);
                 } else if let Some(ch) = Self::system_ui_char(keysym, clean_state) {
+                    self.consume_system_ui_query_replace();
                     self.features
                         .system_ui
                         .push_clipboard_query(ch, &self.features.clipboard);
@@ -2781,6 +2801,7 @@ impl Jwm {
                 return Ok(());
             }
             if keysym == keys::KEY_BackSpace || keysym == keys::KEY_Delete {
+                self.consume_system_ui_query_replace();
                 self.features.system_ui.backspace();
             } else if keysym == keys::KEY_Up {
                 self.features.system_ui.move_selection(-1);
@@ -2793,6 +2814,7 @@ impl Jwm {
                     return Ok(());
                 }
             } else if let Some(ch) = Self::system_ui_char(keysym, char_mods) {
+                self.consume_system_ui_query_replace();
                 self.features.system_ui.push_char(ch);
             }
             self.sync_system_ui(backend);
