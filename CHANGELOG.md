@@ -21,7 +21,9 @@ monorepo use independent Semantic Versions.
   recompose the root picture; a configured `glass.wallpaper` file that cannot
   be read still frosts from the root pixmap. Tag switches recompose the
   native picture; missing files skip the worker and keep the letterbox;
-  PNG alpha blends over that fill; pixmap IDs of 0 are ignored.
+  PNG alpha blends over that fill; pixmap IDs of 0 are ignored. WM setup and
+  `updategeom` install the native picture as soon as outputs exist, not only
+  on the first animation tick.
 - `get_monitors` / `get_tree` monitor rows report `bar_visible`: whether the
   status-bar window currently occupies that output. Distinct from `show_bar`,
   which remains the per-tag preference and stays true during F11 fullscreen.

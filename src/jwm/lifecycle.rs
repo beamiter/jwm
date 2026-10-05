@@ -1624,22 +1624,13 @@ impl Jwm {
         }
 
         // 7. Hot-reload the cursor theme/size on backends that install a themed
-        // pointer (X11RB/XCB). When it changed, re-apply the default arrow to the
-        // root window so the new shape/size becomes visible immediately.
-        match backend.cursor_provider().reload_theme() {
-            Ok(true) => {
-                if let Some(root) = backend.root_window() {
-                    if let Err(e) = backend
-                        .cursor_provider()
-                        .apply(root, crate::backend::common_define::StdCursorKind::LeftPtr)
-                    {
-                        warn!("[config] re-applying root cursor failed: {e}");
-                    }
-                }
-            }
-            Ok(false) => {}
-            Err(e) => warn!("[config] cursor theme reload failed: {e}"),
+        // pointer (X11RB/XCB). Re-apply the default arrow to the root even when
+        // the theme file did not change: compositor-off sessions still need the
+        // pointer after overlay teardown or a config that only touched colours.
+        if let Err(e) = backend.cursor_provider().reload_theme() {
+            warn!("[config] cursor theme reload failed: {e}");
         }
+        crate::jwm::native_chrome::apply_root_cursor(backend);
 
         let client_keys: Vec<ClientKey> = self.state.client_order.clone();
         for ck in client_keys {

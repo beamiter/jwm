@@ -910,6 +910,7 @@ impl RootPixmapSource {
                 root,
                 &ChangeWindowAttributesAux::new().event_mask(EventMask::PROPERTY_CHANGE),
             );
+            let _ = conn.flush();
         }
         Self {
             conn,

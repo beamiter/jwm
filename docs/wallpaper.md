@@ -63,7 +63,8 @@ recompose the picture; turning the compositor off restores native borders
 and the themed root cursor instead of leaving overlay leftovers. Per-tag
 pictures follow `view` / `toggleview` on the native root as well; a file
 that changes on disk is picked up by its mtime, and translucent PNG pixels
-blend over the theme letterbox.
+blend over the theme letterbox. Setup and output layout changes install that
+picture as soon as the monitors exist.
 
 That also means the change is **in memory only**, like every other
 `set_config`: it lasts for the session and is not written back to

@@ -1472,6 +1472,7 @@ impl Jwm {
         // Outputs just moved, arrived or went away, so the rectangles the
         // lock shades were cut for may no longer describe anything.
         self.prune_monitor_locks(backend);
+        self.ensure_native_root_wallpaper(backend);
 
         dirty
     }

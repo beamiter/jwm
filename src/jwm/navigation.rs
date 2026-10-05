@@ -1063,6 +1063,7 @@ impl Jwm {
         // Theme from the wallpaper the session starts on, not only from the
         // next change. The decode runs on a worker thread.
         self.refresh_wallpaper_theme();
+        self.ensure_native_root_wallpaper(backend);
 
         backend.window_ops().flush()?;
         Ok(())
