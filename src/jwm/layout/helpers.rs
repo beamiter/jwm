@@ -89,15 +89,15 @@ impl Jwm {
         }
     }
 
-    /// Apply smart gaps: a single tiled window gets no gap so it fills the
-    /// work area aside from its ring. The configured border always applies,
-    /// including for a lone client, so all four sides remain visible.
+    /// Keep the configured border and gap on every tiled client, including a
+    /// lone window, so the compositor ring, glow and shadow have room on all
+    /// four sides. Client-side decorations stay borderless; they still sit
+    /// inside the gap.
     pub(crate) fn apply_smart_borders(
         &mut self,
         mon_key: MonitorKey,
         clients: &[(ClientKey, f32, i32)],
     ) -> (i32, i32) {
-        let is_single = clients.len() == 1;
         let cfg = CONFIG.load();
         let default_border = cfg.border_px() as i32;
         let monitor_gap = self
@@ -107,7 +107,7 @@ impl Jwm {
             .map(|m| m.layout.gap)
             .unwrap_or_else(|| cfg.gap_px() as i32);
         let effective_border = default_border;
-        let effective_gap = if is_single { 0 } else { monitor_gap };
+        let effective_gap = monitor_gap;
         for &(key, _, _) in clients {
             if let Some(client) = self.state.clients.get_mut(key) {
                 // A client-side frame owns the decoration permanently. The

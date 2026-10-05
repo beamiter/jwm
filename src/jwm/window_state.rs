@@ -4584,8 +4584,9 @@ mod tests {
         assert_eq!(tileable.len(), 1);
         let (effective_border, effective_gap) = jwm.apply_smart_borders(monitor, &tileable);
         let configured = crate::config::CONFIG.load().border_px() as i32;
+        let expected_gap = jwm.state.monitors[monitor].layout.gap;
         assert_eq!(effective_border, configured);
-        assert_eq!(effective_gap, 0);
+        assert_eq!(effective_gap, expected_gap);
         assert_eq!(jwm.state.clients[client].geometry.border_w, configured);
     }
 

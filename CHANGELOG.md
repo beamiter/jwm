@@ -2244,9 +2244,8 @@ monorepo use independent Semantic Versions.
 
 ### Changed
 
-- A lone tiled client keeps the configured compositor ring on all four
-  sides. Smart gaps still drop when only one window is tiled; the status
-  bar and unmanaged overlays still take no ring.
+- A lone tiled client keeps the configured compositor ring and gap on all
+  four sides. The status bar and unmanaged overlays still take no ring.
 
 - Support queries share one two-second request/response deadline after
   connection and require complete newline-delimited responses within 4 MiB.

@@ -411,8 +411,8 @@ impl Jwm {
             .monitor_work_area(mon_key)
             .unwrap_or(Rect::new(wx, wy, ww, wh));
 
-        // Mirror apply_smart_borders: a lone window still has a ring, but
-        // no inner/outer gap.
+        // Mirror apply_smart_borders: a lone window keeps both the ring and
+        // the outer gap so decorations are not clipped at the output edge.
         let cfg = CONFIG.load();
         let border_w = cfg.border_px() as i32;
         let monitor_gap = self
@@ -421,13 +421,11 @@ impl Jwm {
             .get(mon_key)
             .map(|m| m.layout.gap)
             .unwrap_or_else(|| cfg.gap_px() as i32);
-        let gap = if count == 1 { 0 } else { monitor_gap };
-
         let params = LayoutParams {
             screen_area,
             n_master,
             m_fact,
-            gap,
+            gap: monitor_gap,
         };
 
         let drag_factor = self

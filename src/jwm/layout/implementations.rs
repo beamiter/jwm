@@ -369,7 +369,8 @@ impl Jwm {
         if raw_clients.is_empty() {
             return;
         }
-        // Smart gaps still drop for a lone window. Monocle uses no gap by design.
+        // apply_smart_borders still sets each client's border_w. Monocle
+        // uses no gap by design.
         let (_effective_border, _gap) = self.apply_smart_borders(mon_key, &raw_clients);
 
         let layout_clients = self.to_layout_clients(&raw_clients);
