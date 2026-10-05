@@ -4,6 +4,42 @@
 
 ---
 
+## 2026-10-05：compositor UI/UX 第三十五批（overlay geometry 35–54）
+
+不是 100 个独立可验证全栈轮次。本批把 compositor overlay 的剩余高杠杆缺口
+收成一组共享几何，X11/Wayland 共用，避免两边各自漂移。
+
+| 轮次 | 实际改动 | 行为回归 |
+| --- | --- | --- |
+| 35 | toast 栈起点预留完整 OSD + debug HUD | `stack_start`；OSD 在时 toast 不再压住 OSD |
+| 36 | toast 紧急色条 | `urgency_accent` / `stripe_rect` 画在卡内 |
+| 37 | 音量 0 用 volume-down 而非 mute 字形 | `osd` labels_and_fill_follow_kind |
+| 38 | Caffeine/Bluetooth Off 用明确 off 图标 | 同测 |
+| 39 | 带标签 OSD 用 MEDIA_CARD_WIDTH | 同测 |
+| 40 | 截图 hint 写明 Tab/middle cycle | capture_hint labels |
+| 41 | capture hole 圆角 8 / 描边 2.5 / 把手 10 | capture_veil；两边 expose 共用 `handle_rects` |
+| 42 | REC 点脉冲有下限 | 点不会闪成全透明 |
+| 43 | Expose 标题 Untitled、超宽标签裁进缩略图 | expose layout |
+| 44 | debug HUD 超目标帧率 TONE_OVER、0 fps 空槽 | debug_hud |
+| 45 | HUD/OSD/toast/系统面板 `contained_rect` | 窄输出不再画出屏 |
+| 46 | 底栏 island 向上长、贴栏圆角对调 | `grows_up` |
+| 47 | tags/layout 小屏收缩、panel 夹进视口 | tags_grid 320×200、layout_strip |
+| 48 | 系统面板 Query / Scrollbar hit | 两边映射到 Panel |
+| 49 | 截图工具条避开底栏 hint | `place_avoiding` 接到 input_handler |
+| 50 | 标签条 tooltip 避开 REC/MIC | `tooltip_rect_avoiding` 接到两边 expose |
+| 51 | 注释 overlay 拒绝非有限半径 | annotation_overlay |
+| 52 | glass OSD/toast 对比度 ≥ 3:1 | ui_theme |
+| 53 | 标签号避让紧急点 | `label_max_width` |
+| 54 | 注意力脉冲 alpha 下限 | attention trough 不再到 0 |
+
+**未做**：100 轮逐条独立 PR；Query/Scrollbar 仍映射为 Panel 点击而非独立动作。
+toast 点击保持闭区间，与 X11 overlay shape 对齐。
+
+**验证**：`scripts/test.sh --offline --lib -- compositor_common::*` 通过；
+X11 overlay shape、相关 overlay 测试通过。全套 `--lib` 未在本批重跑。
+
+---
+
 ## 2026-09-30：第七批全面升级 10 轮（第 61–70 轮）
 
 继续由 sol6.1 子代理实施和交叉审查，优先处理用户提供的 release 安装错误，

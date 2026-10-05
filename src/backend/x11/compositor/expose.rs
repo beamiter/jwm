@@ -602,8 +602,10 @@ impl<C: CompositorConnection> Compositor<C> {
             self.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
 
             // Brighter outline.
-            self.gl
-                .uniform_1_f32(self.border_uniforms.border_width.as_ref(), 2.5);
+            self.gl.uniform_1_f32(
+                self.border_uniforms.border_width.as_ref(),
+                crate::backend::compositor_common::capture_veil::CAPTURE_OUTLINE_WIDTH,
+            );
             self.gl.uniform_4_f32(
                 self.border_uniforms.border_color.as_ref(),
                 outline_r,
@@ -614,31 +616,14 @@ impl<C: CompositorConnection> Compositor<C> {
             self.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
 
             if interactive {
-                let handle_size = 10.0;
-                for (handle_x, handle_y) in [
-                    (x, y),
-                    (x + width * 0.5, y),
-                    (x + width, y),
-                    (x, y + height * 0.5),
-                    (x + width, y + height * 0.5),
-                    (x, y + height),
-                    (x + width * 0.5, y + height),
-                    (x + width, y + height),
-                ] {
-                    self.gl.uniform_2_f32(
-                        self.border_uniforms.size.as_ref(),
-                        handle_size,
-                        handle_size,
-                    );
-                    self.gl.uniform_4_f32(
-                        self.border_uniforms.rect.as_ref(),
-                        handle_x - handle_size * 0.5,
-                        handle_y - handle_size * 0.5,
-                        handle_size,
-                        handle_size,
-                    );
+                use crate::backend::compositor_common::capture_veil::handle_rects;
+                for (hx, hy, hw, hh) in handle_rects((x, y, width, height)) {
                     self.gl
-                        .uniform_1_f32(self.border_uniforms.border_width.as_ref(), handle_size);
+                        .uniform_2_f32(self.border_uniforms.size.as_ref(), hw, hh);
+                    self.gl
+                        .uniform_4_f32(self.border_uniforms.rect.as_ref(), hx, hy, hw, hh);
+                    self.gl
+                        .uniform_1_f32(self.border_uniforms.border_width.as_ref(), hw.max(hh));
                     self.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
                 }
             }
@@ -1150,13 +1135,20 @@ impl<C: CompositorConnection> Compositor<C> {
 
         let chip_w = tw as f32 + 2.0 * window_tabs::TOOLTIP_PAD_X;
         let chip_h = th as f32 + 2.0 * window_tabs::TOOLTIP_PAD_Y;
-        let Some([x, y, w, h]) = window_tabs::tooltip_rect(
+        let avoid = crate::backend::compositor_common::recording_indicator::recording_chrome_union(
+            self.screen_w as f32,
+            self.screen_h as f32,
+            self.recording_started_at.is_some(),
+            self.mic_indicator_active,
+        );
+        let Some([x, y, w, h]) = window_tabs::tooltip_rect_avoiding(
             bar,
             cell,
             chip_w,
             chip_h,
             self.screen_w as f32,
             self.screen_h as f32,
+            avoid,
         ) else {
             return;
         };

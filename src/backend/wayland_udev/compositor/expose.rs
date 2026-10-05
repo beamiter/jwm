@@ -795,8 +795,14 @@ impl WaylandCompositor {
                 self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
             }
 
-            gl.Uniform1f(self.border_uniforms.radius, 8.0);
-            gl.Uniform1f(self.border_uniforms.radius_top, 8.0);
+            gl.Uniform1f(
+                self.border_uniforms.radius,
+                crate::backend::compositor_common::capture_veil::CAPTURE_HOLE_RADIUS,
+            );
+            gl.Uniform1f(
+                self.border_uniforms.radius_top,
+                crate::backend::compositor_common::capture_veil::CAPTURE_HOLE_RADIUS,
+            );
             gl.Uniform4f(self.border_uniforms.rect, x, y, width, height);
             gl.Uniform2f(self.border_uniforms.size, width, height);
             gl.Uniform1f(self.border_uniforms.border_width, width.max(height));
@@ -810,30 +816,18 @@ impl WaylandCompositor {
                 outline_color[2],
                 outline_color[3],
             );
-            gl.Uniform1f(self.border_uniforms.border_width, 2.5);
+            gl.Uniform1f(
+                self.border_uniforms.border_width,
+                crate::backend::compositor_common::capture_veil::CAPTURE_OUTLINE_WIDTH,
+            );
             self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
 
             if interactive {
-                let handle_size = 10.0;
-                for (handle_x, handle_y) in [
-                    (x, y),
-                    (x + width * 0.5, y),
-                    (x + width, y),
-                    (x, y + height * 0.5),
-                    (x + width, y + height * 0.5),
-                    (x, y + height),
-                    (x + width * 0.5, y + height),
-                    (x + width, y + height),
-                ] {
-                    gl.Uniform2f(self.border_uniforms.size, handle_size, handle_size);
-                    gl.Uniform4f(
-                        self.border_uniforms.rect,
-                        handle_x - handle_size * 0.5,
-                        handle_y - handle_size * 0.5,
-                        handle_size,
-                        handle_size,
-                    );
-                    gl.Uniform1f(self.border_uniforms.border_width, handle_size);
+                use crate::backend::compositor_common::capture_veil::handle_rects;
+                for (hx, hy, hw, hh) in handle_rects((x, y, width, height)) {
+                    gl.Uniform2f(self.border_uniforms.size, hw, hh);
+                    gl.Uniform4f(self.border_uniforms.rect, hx, hy, hw, hh);
+                    gl.Uniform1f(self.border_uniforms.border_width, hw.max(hh));
                     self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
                 }
             }
@@ -1441,13 +1435,20 @@ impl WaylandCompositor {
 
         let chip_w = tw as f32 + 2.0 * window_tabs::TOOLTIP_PAD_X;
         let chip_h = th as f32 + 2.0 * window_tabs::TOOLTIP_PAD_Y;
-        let Some([x, y, w, h]) = window_tabs::tooltip_rect(
+        let avoid = crate::backend::compositor_common::recording_indicator::recording_chrome_union(
+            self.screen_w as f32,
+            self.screen_h as f32,
+            self.recording.is_active(),
+            self.mic_indicator_active,
+        );
+        let Some([x, y, w, h]) = window_tabs::tooltip_rect_avoiding(
             bar,
             cell,
             chip_w,
             chip_h,
             self.screen_w as f32,
             self.screen_h as f32,
+            avoid,
         ) else {
             return;
         };

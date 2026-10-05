@@ -107,7 +107,7 @@ impl ActiveOsd {
         match self.kind {
             OsdKind::Volume => {
                 let icon = if self.percent == 0 {
-                    "\u{f026}" // fa-volume-off
+                    "\u{f027}" // fa-volume-down: zero is not mute
                 } else if self.percent < 50 {
                     "\u{f027}" // fa-volume-down
                 } else {
@@ -131,13 +131,13 @@ impl ActiveOsd {
             OsdKind::DoNotDisturb(true) => ("\u{f1f7}", "Do Not Disturb On".into()), // fa-bell-slash
             OsdKind::DoNotDisturb(false) => ("\u{f0f3}", "Do Not Disturb Off".into()), // fa-bell
             OsdKind::Caffeine(true) => ("\u{f0f4}", "Caffeine On".into()),           // fa-coffee
-            OsdKind::Caffeine(false) => ("\u{f0f4}", "Caffeine Off".into()),
-            OsdKind::NightLight(true) => ("\u{f186}", "Night Light On".into()), // fa-moon-o
-            OsdKind::NightLight(false) => ("\u{f185}", "Night Light Off".into()), // fa-sun
-            OsdKind::Wifi(true) => ("\u{f1eb}", "Wi-Fi On".into()),             // fa-wifi
-            OsdKind::Wifi(false) => ("\u{f05e}", "Wi-Fi Off".into()),           // fa-ban
-            OsdKind::Bluetooth(true) => ("\u{f293}", "Bluetooth On".into()),    // fa-bluetooth
-            OsdKind::Bluetooth(false) => ("\u{f293}", "Bluetooth Off".into()),
+            OsdKind::Caffeine(false) => ("\u{f236}", "Caffeine Off".into()),         // fa-bed
+            OsdKind::NightLight(true) => ("\u{f186}", "Night Light On".into()),      // fa-moon-o
+            OsdKind::NightLight(false) => ("\u{f185}", "Night Light Off".into()),    // fa-sun
+            OsdKind::Wifi(true) => ("\u{f1eb}", "Wi-Fi On".into()),                  // fa-wifi
+            OsdKind::Wifi(false) => ("\u{f05e}", "Wi-Fi Off".into()),                // fa-ban
+            OsdKind::Bluetooth(true) => ("\u{f293}", "Bluetooth On".into()),         // fa-bluetooth
+            OsdKind::Bluetooth(false) => ("\u{f05e}", "Bluetooth Off".into()),       // fa-ban
             // fa-microphone-slash / fa-microphone: both sit in the FA-4
             // range for the same reason as `VolumeMuted` above.
             OsdKind::MicMute(true) => ("\u{f131}", "Microphone Muted".into()),
@@ -181,8 +181,8 @@ impl ActiveOsd {
     /// out identically.
     pub(crate) fn card_width(&self) -> f32 {
         match self.kind {
-            OsdKind::Media => MEDIA_CARD_WIDTH,
-            _ => SLIDER_CARD_WIDTH,
+            OsdKind::Volume | OsdKind::VolumeMuted | OsdKind::Brightness => SLIDER_CARD_WIDTH,
+            _ => MEDIA_CARD_WIDTH,
         }
     }
 }
@@ -509,6 +509,11 @@ mod tests {
 
         slot.show(OsdKind::Brightness, 130, now);
         assert_eq!(slot.get().unwrap().fill(), Some(1.0));
+
+        slot.show(OsdKind::Volume, 0, now);
+        assert_eq!(slot.get().unwrap().icon_and_label().0, "\u{f027}");
+        slot.show(OsdKind::VolumeMuted, 0, now);
+        assert_eq!(slot.get().unwrap().icon_and_label().0, "\u{f026}");
     }
 
     #[test]
@@ -553,8 +558,8 @@ mod tests {
         let now = Instant::now();
         // Each kind carries its new state in the label, an icon in the
         // FontAwesome-4 range common Nerd Font builds actually carry (an
-        // f6xx glyph renders as a hollow box), no bar, and the slider
-        // card's width.
+        // f6xx glyph renders as a hollow box), no bar, and the media
+        // card's width so long names are not clipped by the slider.
         for (kind, icon, label) in [
             (OsdKind::DoNotDisturb(true), "\u{f1f7}", "Do Not Disturb On"),
             (
@@ -563,13 +568,13 @@ mod tests {
                 "Do Not Disturb Off",
             ),
             (OsdKind::Caffeine(true), "\u{f0f4}", "Caffeine On"),
-            (OsdKind::Caffeine(false), "\u{f0f4}", "Caffeine Off"),
+            (OsdKind::Caffeine(false), "\u{f236}", "Caffeine Off"),
             (OsdKind::NightLight(true), "\u{f186}", "Night Light On"),
             (OsdKind::NightLight(false), "\u{f185}", "Night Light Off"),
             (OsdKind::Wifi(true), "\u{f1eb}", "Wi-Fi On"),
             (OsdKind::Wifi(false), "\u{f05e}", "Wi-Fi Off"),
             (OsdKind::Bluetooth(true), "\u{f293}", "Bluetooth On"),
-            (OsdKind::Bluetooth(false), "\u{f293}", "Bluetooth Off"),
+            (OsdKind::Bluetooth(false), "\u{f05e}", "Bluetooth Off"),
             (OsdKind::MicMute(true), "\u{f131}", "Microphone Muted"),
             (OsdKind::MicMute(false), "\u{f130}", "Microphone Unmuted"),
             (
@@ -620,7 +625,7 @@ mod tests {
             let osd = slot.get().unwrap();
             assert_eq!(osd.icon_and_label(), (icon, label.to_string()), "{kind:?}");
             assert_eq!(osd.fill(), None, "{kind:?} draws no bar");
-            assert_eq!(osd.card_width(), SLIDER_CARD_WIDTH, "{kind:?}");
+            assert_eq!(osd.card_width(), MEDIA_CARD_WIDTH, "{kind:?}");
             for ch in icon
                 .chars()
                 .filter(|ch| ('\u{f000}'..'\u{f900}').contains(ch))
@@ -661,8 +666,8 @@ mod tests {
         );
     }
 
-    /// Long device descriptions truncate like Media labels so the card does
-    /// not grow past the slider width.
+    /// Long device descriptions truncate like Media labels; the card uses the
+    /// media width so the remaining text still fits.
     #[test]
     fn audio_device_osd_truncates_long_names() {
         let now = Instant::now();
@@ -681,6 +686,6 @@ mod tests {
         assert!(label.chars().count() <= MAX_MEDIA_LABEL_CHARS);
         assert!(label.ends_with('\u{2026}'));
         assert_eq!(osd.fill(), None);
-        assert_eq!(osd.card_width(), SLIDER_CARD_WIDTH);
+        assert_eq!(osd.card_width(), MEDIA_CARD_WIDTH);
     }
 }

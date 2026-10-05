@@ -1356,7 +1356,11 @@ impl XcbBackend {
         if reply.format() != 32 {
             return None;
         }
-        reply.value::<u32>().first().copied().filter(|pixmap| *pixmap != 0)
+        reply
+            .value::<u32>()
+            .first()
+            .copied()
+            .filter(|pixmap| *pixmap != 0)
     }
 
     fn publish_root_pixmap(&self, pixmap: u32) -> XcbResult<()> {

@@ -898,11 +898,7 @@ mod tests {
 
     fn contrast(a: [u8; 4], b: [u8; 4]) -> f32 {
         let (a, b) = (relative_luminance(a) + 0.05, relative_luminance(b) + 0.05);
-        if a > b {
-            a / b
-        } else {
-            b / a
-        }
+        if a > b { a / b } else { b / a }
     }
 
     /// The footer hint is the one line on the panel that tells a first-time
@@ -953,6 +949,44 @@ mod tests {
             let palette = theme.palette();
             let ratio = contrast(worst_case_panel(palette), palette.query_ink);
             assert!(ratio >= 4.5, "{theme:?} draws its query at {ratio:.1}:1");
+        }
+    }
+
+    fn worst_case_fill(fill: [f32; 4]) -> [u8; 4] {
+        let channel = |c: f32| (c * fill[3] * 255.0).clamp(0.0, 255.0) as u8;
+        [channel(fill[0]), channel(fill[1]), channel(fill[2]), 255]
+    }
+
+    #[test]
+    fn every_theme_keeps_osd_and_toast_ink_readable() {
+        for theme in [
+            UiTheme::Glass,
+            UiTheme::GlassDark,
+            UiTheme::Aurora,
+            UiTheme::Material,
+            UiTheme::Nord,
+            UiTheme::TokyoNight,
+            UiTheme::Paper,
+        ] {
+            let palette = theme.palette();
+            let osd_floor = match theme {
+                UiTheme::Glass | UiTheme::GlassDark | UiTheme::Aurora => 3.0,
+                _ => 4.5,
+            };
+            let osd_ratio = contrast(worst_case_fill(palette.osd), palette.osd_ink);
+            assert!(
+                osd_ratio >= osd_floor,
+                "{theme:?} draws OSD ink at {osd_ratio:.1}:1 (floor {osd_floor})"
+            );
+            let toast_floor = match theme {
+                UiTheme::Glass | UiTheme::GlassDark | UiTheme::Aurora => 3.0,
+                _ => 4.5,
+            };
+            let toast_ratio = contrast(worst_case_fill(palette.toast), palette.title_ink);
+            assert!(
+                toast_ratio >= toast_floor,
+                "{theme:?} draws toast titles at {toast_ratio:.1}:1 (floor {toast_floor})"
+            );
         }
     }
 

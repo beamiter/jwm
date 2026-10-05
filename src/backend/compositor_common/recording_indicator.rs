@@ -37,6 +37,19 @@ pub(crate) const CHIP_STACK_GAP: f32 = 10.0;
 /// shares the screenshot snap-preview blue instead — these chips stay red so
 /// "recording is live" remains distinct from "selecting a source".
 pub(crate) const DOT_COLOR: [f32; 4] = [1.0, 0.2, 0.12, 0.95];
+/// Slow pulse on the live dot so a static red pill is harder to miss against
+/// a matching wallpaper. The trough never goes fully out.
+const DOT_PULSE_HZ: f32 = 1.0;
+const DOT_ALPHA_FLOOR: f32 = 0.45;
+
+/// Opacity of the recording / mic dot at `elapsed`. Layout is independent of
+/// this — only the fill alpha moves.
+#[must_use]
+pub(crate) fn dot_alpha(elapsed: Duration) -> f32 {
+    let t = elapsed.as_secs_f32();
+    let pulse = (t * DOT_PULSE_HZ * std::f32::consts::TAU).sin() * 0.5 + 0.5;
+    DOT_COLOR[3] * pulse.max(DOT_ALPHA_FLOOR)
+}
 
 /// Rects the renderer draws, in screen coordinates (top-left origin).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -146,6 +159,41 @@ pub(crate) fn mic_indicator_layout(
         layout.text[1] -= lift;
     }
     layout
+}
+
+/// Conservative union of the live REC / MIC pills, for other chrome that
+/// must not sit on that corner (tab-strip tooltips). Uses a hours-long
+/// label width so a later clock tick cannot grow the chip under the chip
+/// we just avoided.
+#[must_use]
+pub(crate) fn recording_chrome_union(
+    screen_w: f32,
+    screen_h: f32,
+    rec: bool,
+    mic: bool,
+) -> Option<[f32; 4]> {
+    const TEXT_H: f32 = 14.0;
+    const REC_TEXT_W: f32 = 88.0;
+    const MIC_TEXT_W: f32 = 28.0;
+    let rec_chip =
+        rec.then(|| recording_indicator_layout(screen_w, screen_h, REC_TEXT_W, TEXT_H).chip);
+    let rec_h = rec_chip.map(|chip| chip[3]);
+    let mic_chip =
+        mic.then(|| mic_indicator_layout(screen_w, screen_h, MIC_TEXT_W, TEXT_H, rec_h).chip);
+    match (rec_chip, mic_chip) {
+        (None, None) => None,
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (Some(a), Some(b)) => Some(union_rect(a, b)),
+    }
+}
+
+fn union_rect(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
+    let x0 = a[0].min(b[0]);
+    let y0 = a[1].min(b[1]);
+    let x1 = (a[0] + a[2]).max(b[0] + b[2]);
+    let y1 = (a[1] + a[3]).max(b[1] + b[3]);
+    [x0, y0, x1 - x0, y1 - y0]
 }
 
 #[cfg(test)]
@@ -269,5 +317,33 @@ mod tests {
         // top edge (fully visible) instead of sliding off-screen.
         assert_eq!(mic.chip[1], 0.0);
         assert_eq!(mic.dot[1], (mic.chip[3] - CHIP_DOT) / 2.0);
+    }
+
+    #[test]
+    fn the_live_dot_pulses_but_never_vanishes() {
+        let a0 = dot_alpha(Duration::ZERO);
+        assert!(a0 > 0.0);
+        let mut min = a0;
+        let mut max = a0;
+        for ms in (0..1000).step_by(50) {
+            let a = dot_alpha(Duration::from_millis(ms));
+            min = min.min(a);
+            max = max.max(a);
+            assert!(a >= DOT_COLOR[3] * DOT_ALPHA_FLOOR - 1e-4);
+            assert!(a <= DOT_COLOR[3] + 1e-4);
+        }
+        assert!(max > min, "the pulse has a range");
+    }
+
+    #[test]
+    fn recording_chrome_union_covers_both_pills() {
+        assert_eq!(recording_chrome_union(1920.0, 1080.0, false, false), None);
+        let rec = recording_chrome_union(1920.0, 1080.0, true, false).unwrap();
+        let both = recording_chrome_union(1920.0, 1080.0, true, true).unwrap();
+        assert!(both[3] > rec[3], "both pills stack taller than REC alone");
+        assert!(
+            (rec[0] + rec[2] - 1920.0 + CHIP_MARGIN).abs() < 1e-3,
+            "union stays in the bottom-right slot"
+        );
     }
 }

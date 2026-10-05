@@ -829,7 +829,15 @@ impl Jwm {
             screen[2] - 2.0 * screenshot_toolbar::SCREEN_MARGIN,
         );
         let extent = screenshot_toolbar::track_extent(&buttons, button_size);
-        let bar = screenshot_toolbar::place(
+        let hint = crate::backend::compositor_common::capture_hint::capture_hint_layout(
+            screen[2],
+            screen[3],
+            (screen[2] * 0.55).min(720.0),
+            16.0,
+            0.0,
+        )
+        .chip;
+        let bar = screenshot_toolbar::place_avoiding(
             [
                 selection.x as f32,
                 selection.y as f32,
@@ -838,6 +846,7 @@ impl Jwm {
             ],
             screen,
             extent,
+            Some(hint),
         );
 
         let toolbar = ScreenshotToolbar {

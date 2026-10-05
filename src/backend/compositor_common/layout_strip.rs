@@ -118,8 +118,9 @@ pub fn strip_geometry(viewport: Rect, count: usize) -> StripGeometry {
     // width the panel is simply allowed to reach the screen edges, which only
     // happens on a screen far narrower than any the picker is aimed at.
     let outer = (screen_w * 0.94).min(1560.0).max(320.0);
-    let available = (outer - 2.0 * PAD - CELL_GAP * (n - 1.0)).max(CELL_W_MIN);
-    let cell_w = (available / n).clamp(CELL_W_MIN, CELL_W_MAX);
+    let min_cell = ((screen_w - 2.0 * PAD - CELL_GAP * (n - 1.0)).max(24.0) / n).min(CELL_W_MIN);
+    let available = (outer - 2.0 * PAD - CELL_GAP * (n - 1.0)).max(min_cell * n);
+    let cell_w = (available / n).clamp(min_cell, CELL_W_MAX);
     let margin = film_margin(cell_w);
     let frame_w = cell_w - 2.0 * margin;
     let frame_h = (frame_w * FRAME_ASPECT).round();
@@ -132,8 +133,12 @@ pub fn strip_geometry(viewport: Rect, count: usize) -> StripGeometry {
 
     let panel_x = viewport_x + ((screen_w - panel_w) * 0.5).round();
     // Slightly above centre: the strip is about the desktop behind it, and the
-    // eye reads a floating band better a little high.
-    let panel_y = viewport_y + ((screen_h - panel_h) * 0.42).round().max(16.0);
+    // eye reads a floating band better a little high. Clamp so a nested
+    // output never loses the close edge.
+    let panel_y = viewport_y
+        + ((screen_h - panel_h) * 0.42)
+            .round()
+            .clamp(0.0, (screen_h - panel_h).max(0.0));
 
     let strip_x = panel_x + PAD;
     let strip_y = panel_y + PAD + TITLE_H + GAP_Y;
@@ -160,6 +165,18 @@ pub fn strip_geometry(viewport: Rect, count: usize) -> StripGeometry {
         cells,
         countdown: [strip_x, countdown_y, strip_w, COUNTDOWN_H],
     }
+}
+
+/// Left-anchored fill of the auto-confirm track at fraction `t`.
+#[must_use]
+pub fn countdown_fill(track: Rect, t: f32) -> Rect {
+    let [x, y, w, h] = track;
+    let t = if t.is_finite() {
+        t.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    [x, y, w * t, h]
 }
 
 /// Sprocket holes: two rows of rounded slots at a fixed pitch, inset into the
@@ -310,6 +327,8 @@ mod tests {
             (1366.0, 768.0),
             (1920.0, 1080.0),
             (3840.0, 2160.0),
+            (800.0, 480.0),
+            (320.0, 200.0),
         ] {
             let g = strip_geometry([0.0, 0.0, w, h], 13);
             assert!(g.panel[0] >= 0.0, "{w}x{h}: panel starts off-screen");
@@ -545,5 +564,15 @@ mod tests {
         let quarter = window_rect(frame, [0.5, 0.5, 0.5, 0.5]);
         assert!(quarter[0] >= frame[0] && quarter[0] + quarter[2] <= frame[0] + frame[2] + 0.01);
         assert!(quarter[1] >= frame[1] && quarter[1] + quarter[3] <= frame[1] + frame[3] + 0.01);
+    }
+
+    #[test]
+    fn countdown_fill_is_left_anchored() {
+        let track = [10.0, 20.0, 200.0, 3.0];
+        assert_eq!(countdown_fill(track, 0.0), [10.0, 20.0, 0.0, 3.0]);
+        assert_eq!(countdown_fill(track, 1.0), track);
+        assert_eq!(countdown_fill(track, 0.5), [10.0, 20.0, 100.0, 3.0]);
+        assert_eq!(countdown_fill(track, 2.0)[2], 200.0);
+        assert_eq!(countdown_fill(track, f32::NAN)[2], 0.0);
     }
 }

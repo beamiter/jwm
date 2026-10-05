@@ -605,6 +605,46 @@ pub fn tooltip_rect(
     Some([x, y, chip_w, chip_h])
 }
 
+/// As [`tooltip_rect`], flipping to the other side of the strip when the
+/// preferred chip would overlap `avoid` (the REC / MIC stack).
+#[must_use]
+pub fn tooltip_rect_avoiding(
+    bar: Rect,
+    cell: Rect,
+    chip_w: f32,
+    chip_h: f32,
+    screen_w: f32,
+    screen_h: f32,
+    avoid: Option<Rect>,
+) -> Option<Rect> {
+    let preferred = tooltip_rect(bar, cell, chip_w, chip_h, screen_w, screen_h)?;
+    let Some(avoid) = avoid else {
+        return Some(preferred);
+    };
+    if !rects_overlap(preferred, avoid) {
+        return Some(preferred);
+    }
+    let [_, by, _, bh] = bar;
+    let above = by - TOOLTIP_GAP - preferred[3];
+    let below = by + bh + TOOLTIP_GAP;
+    let alt_y = if (preferred[1] - above).abs() < 0.5 {
+        below
+    } else {
+        above
+    };
+    let alt_y = alt_y.clamp(0.0, (screen_h - preferred[3]).max(0.0));
+    let alt = [preferred[0], alt_y, preferred[2], preferred[3]];
+    if !rects_overlap(alt, avoid) {
+        Some(alt)
+    } else {
+        Some(preferred)
+    }
+}
+
+fn rects_overlap(a: Rect, b: Rect) -> bool {
+    a[0] < b[0] + b[2] && b[0] < a[0] + a[2] && a[1] < b[1] + b[3] && b[1] < a[1] + a[3]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1068,6 +1108,22 @@ mod tests {
         // Already-fitting chips are untouched, even exactly screen-wide.
         let [x, _, w, _] = tooltip_rect(bar, cell, 400.0, 30.0, 400.0, 1080.0).expect("chip");
         assert_eq!([x, w], [0.0, 400.0]);
+    }
+
+    #[test]
+    fn a_tooltip_flips_to_clear_a_recording_chip() {
+        let bar: Rect = [100.0, 40.0, 900.0, 28.0];
+        let cell = cell_rect(bar, 2, 0).expect("cell");
+        let preferred = tooltip_rect(bar, cell, 120.0, 24.0, 1920.0, 1080.0).unwrap();
+        let flipped =
+            tooltip_rect_avoiding(bar, cell, 120.0, 24.0, 1920.0, 1080.0, Some(preferred)).unwrap();
+        assert_ne!(flipped[1], preferred[1]);
+        assert!(!rects_overlap(flipped, preferred));
+        let miss = [800.0, 800.0, 40.0, 20.0];
+        assert_eq!(
+            tooltip_rect_avoiding(bar, cell, 120.0, 24.0, 1920.0, 1080.0, Some(miss)),
+            Some(preferred)
+        );
     }
 
     #[test]

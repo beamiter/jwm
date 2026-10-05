@@ -252,13 +252,8 @@ fn decode_native_root(request: NativeRootRequest) -> Option<NativeRootPixels> {
         }
     }
     let remapped = request.monitors;
-    let mut rgba = compose_native_root(
-        request.root_w,
-        request.root_h,
-        request.fill,
-        &[],
-        &remapped,
-    )?;
+    let mut rgba =
+        compose_native_root(request.root_w, request.root_h, request.fill, &[], &remapped)?;
     for slot in &remapped {
         let Some(image) = decoded.get(&slot.image) else {
             continue;

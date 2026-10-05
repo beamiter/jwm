@@ -49,16 +49,52 @@ pub(crate) const ACTIONS_ROW_EXTRA_H: f32 = ACTION_ROW_TOP_GAP + ACTION_BUTTON_H
 /// first card.
 pub(crate) const STACK_GAP: f32 = 12.0;
 
-/// Offset below the dock where the first card starts. A visible OSD owns the
-/// slot directly under the bar, so the stack begins below its full reserved
-/// height rather than its current sprung height — otherwise every toast below
-/// would jitter while the OSD opens.
-pub(crate) fn stack_start(osd_visible: bool) -> f32 {
-    if osd_visible {
-        super::osd::OSD_CARD_HEIGHT + STACK_GAP
-    } else {
-        0.0
+/// Offset away from the dock where the first card starts.
+///
+/// `reserved_above` is a settled slot already hanging from the bar — the
+/// debug HUD — measured at its target height so the stack does not jitter
+/// while that card's spring is still travelling. A visible OSD then owns the
+/// next slot, again at its reserved height rather than its sprung one.
+pub(crate) fn stack_start(osd_visible: bool, reserved_above: f32) -> f32 {
+    let reserved_above = reserved_above.max(0.0);
+    let mut top = reserved_above;
+    if reserved_above > 0.0 {
+        top += STACK_GAP;
     }
+    if osd_visible {
+        top += super::osd::OSD_CARD_HEIGHT + STACK_GAP;
+    }
+    top
+}
+
+/// How far from the dock an OSD card sits when a HUD of `hud_h` is already
+/// occupying the flush slot. Zero when there is no HUD.
+#[must_use]
+pub(crate) fn osd_offset(hud_h: f32) -> f32 {
+    let hud_h = hud_h.max(0.0);
+    if hud_h > 0.0 { hud_h + STACK_GAP } else { 0.0 }
+}
+
+/// Urgency accent drawn as a hairline on the card's left. Critical is red,
+/// low is a quiet slate, normal rides the focused-window border.
+#[must_use]
+pub(crate) fn urgency_accent(urgency: u8) -> [f32; 4] {
+    match urgency {
+        2 => [0.95, 0.30, 0.30, 1.0],
+        0 => [0.45, 0.50, 0.62, 1.0],
+        _ => [0.55, 0.62, 0.90, 1.0],
+    }
+}
+
+/// Inset stripe on the left of `card`. `None` when the card is too short to
+/// hold the 13 px inset on both ends.
+#[must_use]
+pub(crate) fn stripe_rect(card: [f32; 4]) -> Option<[f32; 4]> {
+    let [x, y, _, h] = card;
+    if !(h.is_finite() && h > 26.0) {
+        return None;
+    }
+    Some([x + 13.0, y + 13.0, 3.0, h - 26.0])
 }
 
 /// Offset of the card below one whose target height is `target_h`. The target
@@ -1194,7 +1230,7 @@ mod tests {
         for heights in height_sets {
             assert!(heights.len() <= MAX_TOASTS);
             for osd_visible in [false, true] {
-                let mut top = stack_start(osd_visible);
+                let mut top = stack_start(osd_visible, 0.0);
                 let mut spans = Vec::with_capacity(heights.len());
                 for h in &heights {
                     spans.push((top, top + h));
@@ -1218,11 +1254,18 @@ mod tests {
 
     #[test]
     fn stack_start_reserves_the_full_osd_card() {
-        assert_eq!(stack_start(false), 0.0);
+        assert_eq!(stack_start(false, 0.0), 0.0);
         assert_eq!(
-            stack_start(true),
+            stack_start(true, 0.0),
             super::super::osd::OSD_CARD_HEIGHT + STACK_GAP
         );
+        assert_eq!(stack_start(false, 200.0), 200.0 + STACK_GAP);
+        assert_eq!(
+            stack_start(true, 200.0),
+            200.0 + STACK_GAP + super::super::osd::OSD_CARD_HEIGHT + STACK_GAP
+        );
+        assert_eq!(osd_offset(0.0), 0.0);
+        assert_eq!(osd_offset(200.0), 200.0 + STACK_GAP);
         // A zero-height card still advances the cursor by the gap, so two
         // cards mid-open can never sit on the same line.
         assert!(stack_next(0.0, 0.0) > 0.0);
@@ -1474,5 +1517,17 @@ mod tests {
         let card = &stack.iter().next().unwrap().notification;
         assert_eq!(card.title, "Alert");
         assert_eq!(card.body, "Disk almost full\nsecond");
+    }
+
+    #[test]
+    fn urgency_stripes_sit_inside_the_card_and_distinct_tones() {
+        let card = [100.0, 40.0, 300.0, 80.0];
+        let stripe = stripe_rect(card).expect("tall enough");
+        assert_eq!(stripe, [113.0, 53.0, 3.0, 54.0]);
+        assert!(stripe[0] > card[0] && stripe[0] + stripe[2] < card[0] + card[2]);
+        assert!(stripe_rect([100.0, 40.0, 300.0, 20.0]).is_none());
+        assert_ne!(urgency_accent(2), urgency_accent(1));
+        assert_ne!(urgency_accent(0), urgency_accent(1));
+        assert_ne!(urgency_accent(2), urgency_accent(0));
     }
 }

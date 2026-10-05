@@ -47,6 +47,8 @@ impl AnnotationQuad {
             && self.y.is_finite()
             && self.w.is_finite()
             && self.h.is_finite()
+            && self.radius.is_finite()
+            && self.radius >= 0.0
             && self.w > 0.0
             && self.h > 0.0
     }
@@ -111,6 +113,24 @@ mod tests {
             !AnnotationQuad {
                 x: f32::NAN,
                 w: 5.0,
+                ..bad
+            }
+            .is_drawable()
+        );
+        assert!(
+            !AnnotationQuad {
+                radius: f32::NAN,
+                w: 5.0,
+                h: 5.0,
+                ..bad
+            }
+            .is_drawable()
+        );
+        assert!(
+            !AnnotationQuad {
+                radius: -1.0,
+                w: 5.0,
+                h: 5.0,
                 ..bad
             }
             .is_drawable()

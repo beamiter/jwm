@@ -255,7 +255,7 @@ pub(crate) fn blit_rgba_clipped(
             if dest_x < 0 || dest_x >= root_w as i32 {
                 continue;
             }
-        let src = row as usize * src_stride + col as usize * 4;
+            let src = row as usize * src_stride + col as usize * 4;
             let dst = dest_y as usize * dst_stride + dest_x as usize * 4;
             let alpha = rgba[src + 3];
             if alpha == 0 {
@@ -463,16 +463,7 @@ mod tests {
     #[test]
     fn blit_rgba_clipped_copies_inside_the_canvas_and_ignores_overflow() {
         let mut canvas = vec![0u8; 2 * 2 * 4];
-        blit_rgba_clipped(
-            &mut canvas,
-            2,
-            2,
-            &[9, 8, 7, 255],
-            1,
-            1,
-            1,
-            1,
-        );
+        blit_rgba_clipped(&mut canvas, 2, 2, &[9, 8, 7, 255], 1, 1, 1, 1);
         assert_eq!(&canvas[12..16], &[9, 8, 7, 255]);
         blit_rgba_clipped(&mut canvas, 2, 2, &[1, 2, 3, 255], 1, 1, -1, 0);
         assert_eq!(&canvas[0..4], &[0, 0, 0, 0]);

@@ -46,14 +46,16 @@ pub(crate) fn capture_hint_label(
         if let Some(title) = probe.as_deref() {
             format!("Screenshot · {title} · click to pick · Esc")
         } else {
-            format!("Screenshot · {target} · click window · drag region · Esc")
+            format!("Screenshot · {target} · click window · drag region · Tab/middle cycle · Esc")
         }
     } else if armed {
         format!("Recording · {target} · Enter / Space / double-click · Esc")
     } else if let Some(title) = probe.as_deref() {
         format!("Recording · {title} · click to pick · Enter / Space · Esc")
     } else {
-        format!("Recording · {target} · click window · drag · Enter / Space · Esc")
+        format!(
+            "Recording · {target} · click window · drag · Tab/middle cycle · Enter / Space · Esc"
+        )
     }
 }
 
@@ -88,13 +90,15 @@ pub(crate) fn capture_hint_layout(
     text_h: f32,
     bottom_lift: f32,
 ) -> CaptureHintLayout {
-    let chip_w = text_w + 2.0 * HINT_PAD_X;
+    let chip_w = (text_w + 2.0 * HINT_PAD_X).min(screen_w.max(0.0));
     let chip_h = text_h + 2.0 * HINT_PAD_Y;
-    let x = ((screen_w - chip_w) * 0.5).max(0.0);
+    let x = ((screen_w - chip_w) * 0.5).clamp(0.0, (screen_w - chip_w).max(0.0));
     let y = (screen_h - HINT_MARGIN - bottom_lift.max(0.0) - chip_h).max(0.0);
+    let text_w = text_w.min((chip_w - 2.0 * HINT_PAD_X).max(0.0));
+    let text_x = x + HINT_PAD_X;
     CaptureHintLayout {
         chip: [x, y, chip_w, chip_h],
-        text: [x + HINT_PAD_X, y + HINT_PAD_Y, text_w, text_h],
+        text: [text_x, y + HINT_PAD_Y, text_w, text_h],
     }
 }
 
@@ -109,10 +113,12 @@ mod tests {
         assert!(shot.contains("Screenshot"));
         assert!(shot.contains("window"));
         assert!(shot.contains("Esc"));
+        assert!(shot.contains("Tab/middle cycle"));
 
         let rec = capture_hint_label(false, "region", false, None);
         assert!(rec.contains("Recording"));
         assert!(rec.contains("Enter"));
+        assert!(rec.contains("Tab/middle cycle"));
 
         let armed = capture_hint_label(false, "window", true, None);
         assert!(armed.contains("Enter"));
@@ -148,5 +154,14 @@ mod tests {
         let layout = capture_hint_layout(200.0, 100.0, 80.0, 12.0, lift);
         assert!((layout.chip[1] - (100.0 - HINT_MARGIN - lift - 28.0)).abs() < f32::EPSILON);
         assert_eq!(capture_hint_bottom_lift(None, None), 0.0);
+    }
+
+    #[test]
+    fn layout_clamps_a_chip_wider_than_the_output() {
+        let layout = capture_hint_layout(100.0, 80.0, 200.0, 12.0, 0.0);
+        assert!(layout.chip[2] <= 100.0);
+        assert!(layout.chip[0] >= 0.0);
+        assert!(layout.chip[0] + layout.chip[2] <= 100.0 + f32::EPSILON);
+        assert!(layout.text[2] <= layout.chip[2]);
     }
 }

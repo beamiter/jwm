@@ -27,7 +27,10 @@ pub(crate) fn attention_border_style(
     ordinary_border_enabled: bool,
     ordinary_border_width: f32,
 ) -> AttentionBorderStyle {
-    let pulse = (elapsed_seconds * 4.0).sin() * 0.5 + 0.5;
+    // Floor the trough so an urgent ring never vanishes for a beat — the
+    // pulse still reads, but the window keeps a visible claim on attention.
+    const ALPHA_FLOOR: f32 = 0.25;
+    let pulse = ((elapsed_seconds * 4.0).sin() * 0.5 + 0.5).max(ALPHA_FLOOR);
     color[3] *= pulse * opacity;
     let width = if ordinary_border_enabled {
         ordinary_border_width.max(2.0)
@@ -58,7 +61,7 @@ mod tests {
         assert_eq!(&start.color[..3], &configured[..3]);
         assert_close(start.color[3], 0.4);
         assert_close(peak.color[3], 0.8);
-        assert_close(trough.color[3], 0.0);
+        assert_close(trough.color[3], 0.2);
     }
 
     #[test]

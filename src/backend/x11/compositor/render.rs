@@ -1343,7 +1343,7 @@ impl<C: CompositorConnection> Compositor<C> {
         if self.hud_island.animating(layout.card.2, layout.card.3) {
             self.needs_render = true;
         }
-        let [cx, cy, ..] = dock.rect(card_w, card_h, 0.0);
+        let [cx, cy, ..] = dock.contained_rect(card_w, card_h, 0.0);
         let (radius_top, radius) = dock.radii(card_h, ui.card_radius, 0.0);
         let opened = (card_w / layout.card.2.max(1.0)).clamp(0.0, 1.0);
         let content_a = opened * opened;
@@ -2158,13 +2158,16 @@ impl<C: CompositorConnection> Compositor<C> {
             // Countdown to the automatic commit.
             let [cx, cy, cw, ch] = geometry.countdown;
             self.sysui_fill_rounded(cx, cy, cw, ch, ch * 0.5, UiPalette::faded(ui.track, 0.8));
-            let filled = cw * strip.countdown.clamp(0.0, 1.0);
-            if filled > 1.0 {
+            let [fx, fy, fw, fh] = crate::backend::compositor_common::layout_strip::countdown_fill(
+                geometry.countdown,
+                strip.countdown,
+            );
+            if fw > 1.0 {
                 self.sysui_fill_rounded(
-                    cx,
-                    cy,
-                    filled,
-                    ch,
+                    fx,
+                    fy,
+                    fw,
+                    fh,
                     ch * 0.5,
                     [accent[0], accent[1], accent[2], 0.9],
                 );
@@ -3495,7 +3498,6 @@ impl<C: CompositorConnection> Compositor<C> {
         let button_hover = self.toast_button_hover;
         let pad = 18.0;
         let pad_left = 30.0;
-        let stripe_w = 3.0;
 
         use crate::backend::compositor_common::toast;
 
@@ -3503,7 +3505,12 @@ impl<C: CompositorConnection> Compositor<C> {
         // reservation and the per-card offsets so both backends place the
         // stack identically.
         let dock = self.island_dock();
-        let mut top = toast::stack_start(self.osd_slot.get().is_some());
+        let hud_h = if self.debug_hud {
+            self.hud_island.size().1
+        } else {
+            0.0
+        };
+        let mut top = toast::stack_start(self.osd_slot.get().is_some(), hud_h);
 
         unsafe {
             self.gl.bind_vertex_array(Some(self.quad_vao));
@@ -3545,7 +3552,7 @@ impl<C: CompositorConnection> Compositor<C> {
                 let (card_w, card_h) =
                     self.toast_stack
                         .advance_motion(id, now, target_w, target_h, motion_enabled);
-                let [x, y, ..] = dock.rect(card_w, card_h, top);
+                let [x, y, ..] = dock.contained_rect(card_w, card_h, top);
                 // The chip row hangs under the text block, aligned with it.
                 let text_bottom = pad + title_h + if body_h > 0.0 { 6.0 + body_h } else { 0.0 };
                 let button_rects = toast::action_row_layout(
@@ -3560,20 +3567,20 @@ impl<C: CompositorConnection> Compositor<C> {
                 let opened = (card_w / target_w.max(1.0)).clamp(0.0, 1.0);
                 let content_a = a * opened * opened;
                 let accent = match urgency {
-                    2 => [0.95, 0.30, 0.30, 1.0],
-                    0 => [0.45, 0.50, 0.62, 1.0],
+                    2 => toast::urgency_accent(2),
+                    0 => toast::urgency_accent(0),
                     _ => self.border_gradient_color_a,
                 };
 
                 self.ui_fill_island(
                     proj, ui, x, y, card_w, card_h, radius, radius_top, ui.toast, a,
                 );
-                if card_h > 26.0 {
+                if let Some([sx, sy, sw, sh]) = toast::stripe_rect([x, y, card_w, card_h]) {
                     self.sysui_fill_rounded(
-                        x + 13.0,
-                        y + 13.0,
-                        stripe_w,
-                        card_h - 26.0,
+                        sx,
+                        sy,
+                        sw,
+                        sh,
                         1.5,
                         [accent[0], accent[1], accent[2], 0.9 * content_a],
                     );
@@ -3799,8 +3806,14 @@ impl<C: CompositorConnection> Compositor<C> {
             self.osd_slot
                 .motion_mut()
                 .advance_with_motion(now, target_w, target_h, motion_enabled);
-        let [x, y, ..] = dock.rect(card_w, card_h, 0.0);
-        let (radius_top, radius) = dock.radii(card_h, ui.osd_radius, 0.0);
+        let hud_h = if self.debug_hud {
+            self.hud_island.size().1
+        } else {
+            0.0
+        };
+        let y_off = crate::backend::compositor_common::toast::osd_offset(hud_h);
+        let [x, y, ..] = dock.contained_rect(card_w, card_h, y_off);
+        let (radius_top, radius) = dock.radii(card_h, ui.osd_radius, y_off);
         // Contents appear as the card makes room for them, rather than
         // overflowing a card that is still only a seed wide.
         let opened = (card_w / target_w.max(1.0)).clamp(0.0, 1.0);
@@ -3969,13 +3982,19 @@ impl<C: CompositorConnection> Compositor<C> {
             // whole recording, and a glass backdrop re-blurs the screen on
             // every one of those frames.
             self.sysui_fill_rounded(chip_x, chip_y, chip_w, chip_h, chip_h / 2.0, ui.osd);
+            let mut rec_dot = indicator::DOT_COLOR;
+            rec_dot[3] = indicator::dot_alpha(
+                self.recording_started_at
+                    .map(|started| started.elapsed())
+                    .unwrap_or_default(),
+            );
             self.sysui_fill_rounded(
                 layout.dot[0],
                 layout.dot[1],
                 layout.dot[2],
                 layout.dot[3],
                 indicator::CHIP_DOT / 2.0,
-                indicator::DOT_COLOR,
+                rec_dot,
             );
 
             self.gl.use_program(Some(self.hud_text_program));

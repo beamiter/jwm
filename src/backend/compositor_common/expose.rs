@@ -118,7 +118,9 @@ pub(crate) fn expose_label_origin(
         return None;
     }
     if text_w > thumb_w {
-        return None;
+        // Still flying in, or a thumbnail too narrow for the settled
+        // raster: keep the name visible, clipped to the pixels that exist.
+        return Some((thumb_x, thumb_y + EXPOSE_LABEL_TOP_INSET));
     }
     Some((
         thumb_x + (thumb_w - text_w) * 0.5,
@@ -206,6 +208,14 @@ pub fn build_expose_entries<Id: Copy>(
             let tx = cell_x + (cell_w - tw) * 0.5;
             let ty = cell_y + (cell_h - th) * 0.5;
 
+            let title = {
+                let trimmed = title.trim();
+                if trimmed.is_empty() {
+                    "Untitled".to_string()
+                } else {
+                    title
+                }
+            };
             ExposeEntry {
                 id,
                 title,
@@ -346,7 +356,7 @@ mod tests {
         let windows = vec![(u64::MAX, 0, 0, 640, 480, String::new())];
         let entries = build_expose_entries(1920.0, 1080.0, 20.0, windows);
         assert_eq!(entries[0].id, u64::MAX);
-        assert_eq!(entries[0].title, "");
+        assert_eq!(entries[0].title, "Untitled");
     }
 
     #[test]
@@ -372,11 +382,10 @@ mod tests {
     }
 
     #[test]
-    fn expose_label_origin_waits_for_cells_still_narrower_than_the_label() {
-        // The texture is fitted to the settled cell width, so a cell that is
-        // still flying in (or a thumbnail too narrow to carry text) draws no
-        // label rather than letting it spill over the neighbours.
-        assert_eq!(expose_label_origin(0.0, 0.0, 60.0, 61.0), None);
+    fn expose_label_origin_clips_while_the_cell_is_still_narrow() {
+        let (x, y) = expose_label_origin(10.0, 20.0, 50.0, 200.0).expect("name stays visible");
+        assert_eq!(x, 10.0);
+        assert_eq!(y, 20.0 + EXPOSE_LABEL_TOP_INSET);
         assert!(expose_label_origin(0.0, 0.0, 61.0, 60.0).is_some());
     }
 
@@ -690,5 +699,18 @@ mod tests {
             fast_opacity < slow_opacity,
             "settled geometry should fade faster ({fast_opacity} vs {slow_opacity})"
         );
+    }
+
+    #[test]
+    fn empty_titles_still_get_a_readable_placeholder() {
+        let windows = vec![
+            (1u32, 0, 0, 100, 100, String::new()),
+            (2u32, 0, 0, 100, 100, "   ".to_string()),
+            (3u32, 0, 0, 100, 100, "Firefox".to_string()),
+        ];
+        let entries = build_expose_entries(1920.0, 1080.0, 20.0, windows);
+        assert_eq!(entries[0].title, "Untitled");
+        assert_eq!(entries[1].title, "Untitled");
+        assert_eq!(entries[2].title, "Firefox");
     }
 }

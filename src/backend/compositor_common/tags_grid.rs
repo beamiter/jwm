@@ -67,9 +67,6 @@ const FRAME_PAD: f32 = 7.0;
 /// screen from turning into posters.
 const CELL_W_MIN: f32 = 96.0;
 const CELL_W_MAX: f32 = 260.0;
-/// Smallest cell height the vertical clamp may produce before the panel is
-/// allowed to reach toward the screen edges instead.
-const CELL_H_MIN: f32 = 64.0;
 
 /// Lay out an overview of `count` tags in `cols` columns inside a global
 /// output `viewport`. The returned rectangles remain in global compositor
@@ -105,17 +102,19 @@ pub fn grid_geometry(viewport: Rect, count: usize, cols: u32) -> TagsGridGeometr
     // should; extreme (or degenerate) viewports are pinned to a sane band.
     let aspect = (screen_w / screen_h).clamp(0.4, 3.0);
 
-    let outer = (screen_w * 0.94).min(1560.0).max(320.0);
-    let available_w = (outer - 2.0 * PAD - CELL_GAP * (cols as f32 - 1.0)).max(CELL_W_MIN);
-    let mut cell_w = (available_w / cols as f32).clamp(CELL_W_MIN, CELL_W_MAX);
+    let outer = (screen_w * 0.94).min(1560.0).max(screen_w.min(320.0));
+    let min_cell = ((screen_w - 2.0 * PAD - CELL_GAP * (cols as f32 - 1.0)).max(48.0)
+        / cols as f32)
+        .min(CELL_W_MIN);
+    let available_w = (outer - 2.0 * PAD - CELL_GAP * (cols as f32 - 1.0)).max(min_cell);
+    let mut cell_w = (available_w / cols as f32).clamp(min_cell, CELL_W_MAX);
     let mut cell_h = cell_w / aspect;
 
     // The grid must also leave room for the text bands; on short screens the
     // height, not the width, decides the cell size.
     let bands_h = 2.0 * PAD + TITLE_H + GAP_Y + CAPTION_H + GAP_Y + HINT_H;
-    let available_h =
-        (screen_h * 0.9 - bands_h - CELL_GAP * (rows as f32 - 1.0)).max(CELL_H_MIN * rows as f32);
-    let max_cell_h = (available_h / rows as f32).max(CELL_H_MIN);
+    let available_h = (screen_h - bands_h - CELL_GAP * (rows as f32 - 1.0) - GAP_Y).max(1.0);
+    let max_cell_h = (available_h / rows as f32).max(1.0);
     if cell_h > max_cell_h {
         cell_h = max_cell_h;
         cell_w = cell_h * aspect;
@@ -124,13 +123,15 @@ pub fn grid_geometry(viewport: Rect, count: usize, cols: u32) -> TagsGridGeometr
     let grid_w = cols as f32 * cell_w + (cols as f32 - 1.0) * CELL_GAP;
     let grid_h = rows as f32 * cell_h + (rows as f32 - 1.0) * CELL_GAP;
     let panel_w = grid_w + 2.0 * PAD;
-    let panel_h = bands_h + grid_h + GAP_Y;
+    let panel_h = (bands_h + grid_h + GAP_Y).min(screen_h);
 
     let panel_x = viewport_x + ((screen_w - panel_w) * 0.5).round();
-    // Slightly above centre, same reading as the film strip: the grid is
-    // about the desktop behind it, and a floating band reads better a little
-    // high.
-    let panel_y = viewport_y + ((screen_h - panel_h) * 0.42).round().max(16.0);
+    // Slightly above centre, same reading as the film strip. Clamp so a
+    // nested output never loses the close edge.
+    let panel_y = viewport_y
+        + ((screen_h - panel_h) * 0.42)
+            .round()
+            .clamp(0.0, (screen_h - panel_h).max(0.0));
 
     let grid_x = panel_x + PAD;
     let grid_y = panel_y + PAD + TITLE_H + GAP_Y;
@@ -256,6 +257,16 @@ pub fn label_origin(cell: &GridCell, scaled_cell: Rect, scale: f32) -> [f32; 2] 
 /// Diameter of a cell's urgency badge.
 const BADGE_D: f32 = 8.0;
 
+/// Pixel budget for the tag number so it ellipsizes before the urgency dot.
+#[must_use]
+pub fn label_max_width(scaled_cell: Rect, scale: f32) -> f32 {
+    let badge = urgent_badge_rect(scaled_cell, scale);
+    let left = scaled_cell[0] + FRAME_PAD * scale;
+    (badge[0] - FRAME_PAD * scale - left).max(TITLE_MIN_WIDTH)
+}
+
+const TITLE_MIN_WIDTH: f32 = 12.0;
+
 /// Where a cell's urgency badge goes: a dot at the label band's right end,
 /// vertically centred in the band, so it reads as part of the tag's title row
 /// and never covers a wireframe. Like the label it is placed from the scaled
@@ -320,6 +331,8 @@ mod tests {
             (1366.0, 768.0),
             (1920.0, 1080.0),
             (3840.0, 2160.0),
+            (800.0, 480.0),
+            (320.0, 200.0),
         ] {
             let g = grid_geometry([0.0, 0.0, w, h], 31, 7);
             assert!(g.panel[0] >= 0.0, "{w}x{h}: panel starts off-screen");
@@ -520,6 +533,9 @@ mod tests {
             );
             // Right-aligned against the same inset the frame uses.
             assert!((badge[0] + badge[2] - (x + w - FRAME_PAD)).abs() < 0.001);
+            let budget = label_max_width(cell.cell, 1.0);
+            assert!(budget > 0.0);
+            assert!(cell.label_offset[0] + budget <= badge[0] - cell.cell[0] + 0.01);
         }
     }
 

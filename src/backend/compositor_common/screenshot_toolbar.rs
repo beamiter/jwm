@@ -374,13 +374,22 @@ pub fn track_extent(buttons: &[ToolbarButton], button_size: f32) -> (f32, f32) {
 /// and matches Flameshot, so the muscle memory transfers.
 #[must_use]
 pub fn place(selection: Rect, screen: Rect, extent: (f32, f32)) -> Rect {
+    place_avoiding(selection, screen, extent, None)
+}
+
+/// As [`place`], but reject a candidate that intersects `avoid` (the capture
+/// hint chip) so the strip does not sit on the instruction pill.
+#[must_use]
+pub fn place_avoiding(
+    selection: Rect,
+    screen: Rect,
+    extent: (f32, f32),
+    avoid: Option<Rect>,
+) -> Rect {
     let (w, h) = extent;
     let [sx, sy, sw, sh] = selection;
     let [scx, scy, scw, sch] = screen;
 
-    // A screen narrower than the strip makes the clamp inverted; keeping the
-    // low bound in that case pins the strip to the left edge rather than
-    // pushing it off the right one.
     let min_x = scx + SCREEN_MARGIN;
     let max_x = (scx + scw - SCREEN_MARGIN - w).max(min_x);
     let x = (sx + sw * 0.5 - w * 0.5).clamp(min_x, max_x);
@@ -389,17 +398,22 @@ pub fn place(selection: Rect, screen: Rect, extent: (f32, f32)) -> Rect {
     let max_y = (scy + sch - SCREEN_MARGIN - h).max(min_y);
     let below = sy + sh + SELECTION_GAP;
     let above = sy - SELECTION_GAP - h;
-    let y = if below <= max_y {
-        below
-    } else if above >= min_y {
-        above
-    } else {
-        // Neither side has room: ride the selection's bottom edge from the
-        // inside, where the strip at least stays attached to what it edits.
-        (sy + sh - h - SELECTION_GAP).clamp(min_y, max_y)
-    };
+    let inside = (sy + sh - h - SELECTION_GAP).clamp(min_y, max_y);
+    let candidates = [below, above, inside];
+    let y = candidates
+        .into_iter()
+        .find(|&y| {
+            let in_bounds = y >= min_y && y <= max_y;
+            let overlaps = avoid.is_some_and(|a| rects_overlap([x, y, w, h], a));
+            in_bounds && !overlaps
+        })
+        .unwrap_or(inside);
 
     [x.round(), y.round(), w, h]
+}
+
+fn rects_overlap(a: Rect, b: Rect) -> bool {
+    a[0] < b[0] + b[2] && b[0] < a[0] + a[2] && a[1] < b[1] + b[3] && b[1] < a[1] + a[3]
 }
 
 /// The *slot* for `index`: its share of the track, split with its neighbours
@@ -1337,6 +1351,23 @@ mod tests {
         assert!(
             ((bar[0] + bar[2] * 0.5) - (selection[0] + selection[2] * 0.5)).abs() <= 1.0,
             "strip must be centred on the selection"
+        );
+    }
+
+    #[test]
+    fn the_strip_gives_way_to_a_bottom_hint_chip() {
+        let buttons = row(5);
+        let extent = track_extent(&buttons, BUTTON_SIZE);
+        let selection = [700.0, 900.0, 400.0, 80.0];
+        let hint = [760.0, 1000.0, 400.0, 28.0];
+        let below = place(selection, SCREEN, extent);
+        let avoided = place_avoiding(selection, SCREEN, extent, Some(hint));
+        assert!(
+            below[1] >= selection[1] + selection[3] || below[1] + below[3] <= hint[1] + hint[3]
+        );
+        assert!(
+            avoided[1] + avoided[3] <= hint[1] || avoided[1] >= hint[1] + hint[3],
+            "avoided strip {avoided:?} still overlaps hint {hint:?}"
         );
     }
 

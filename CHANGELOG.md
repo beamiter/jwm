@@ -7,6 +7,13 @@ monorepo use independent Semantic Versions.
 
 ### Added
 
+- Compositor overlays (X11 and Wayland, shared `compositor_common` geometry)
+  keep OSD/toast/HUD cards inside the output, grow island panels up from a
+  bottom bar, skip the capture-hint chip with the screenshot toolbar, and keep
+  tab-strip title chips off the REC/MIC stack. Tags overview and layout picker
+  shrink on tiny outputs; capture holes use shared handles and a softer
+  outline; volume-0 OSD no longer shows the mute glyph; glass OSD/toast ink
+  stays at least 3:1 contrast.
 - X11 sessions without a compositor show the configured wallpaper on the root
   window (per-output fill/fit/stretch/center, `_XROOTPMAP_ID`) instead of a
   solid black desktop, and native window borders follow `appearance.ui_theme`

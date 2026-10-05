@@ -221,6 +221,8 @@ pub(crate) struct HitGeometry {
     /// applies the highlighted wallpaper (the pointer twin of Enter) rather
     /// than picking a list row or dismissing like a scrim click.
     side_preview: Option<Rect>,
+    query_field: Option<Rect>,
+    scroll_track: Option<Rect>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -233,7 +235,12 @@ pub(crate) enum Hit {
     /// card's left padding removed, the rasterizer's own margin kept, so
     /// `compositor_font::measure_ui_text_width` numbers (pad included) line
     /// up with it directly. Consumers that only care about the row ignore it.
+    /// A visible row in the list.
     Item(usize, f32),
+    /// The search field — not a row and not a dismiss.
+    Query,
+    /// The windowed-list scroll track; `t` is 0..=1 along its height.
+    Scrollbar(f32),
 }
 
 impl HitGeometry {
@@ -254,6 +261,8 @@ impl HitGeometry {
             rows,
             row_icons: contents.row_icons,
             side_preview: None,
+            query_field: contents.query_field,
+            scroll_track: contents.scroll_track,
         }
     }
 
@@ -277,8 +286,24 @@ impl HitGeometry {
             };
         }
         let Some(items) = self.items else {
+            if let Some(query) = self.query_field {
+                if contains(query, x, y) {
+                    return Hit::Query;
+                }
+            }
             return Hit::Panel;
         };
+        if let Some(track) = self.scroll_track {
+            if contains(track, x, y) {
+                let t = ((y - track[1]) / track[3].max(1.0)).clamp(0.0, 1.0);
+                return Hit::Scrollbar(t);
+            }
+        }
+        if let Some(query) = self.query_field {
+            if contains(query, x, y) {
+                return Hit::Query;
+            }
+        }
         if !contains(items, x, y) {
             return Hit::Panel;
         }
@@ -819,6 +844,39 @@ mod tests {
         assert_eq!(hit.hit_test(101.0, items_y as f64), Hit::Panel);
         assert_eq!(hit.hit_test(99.0, 100.0), Hit::Outside);
         assert_eq!(hit.hit_test(700.0, 100.0), Hit::Outside);
+    }
+
+    #[test]
+    fn hit_testing_names_the_query_field_and_scrollbar() {
+        let s = sizes((40.0, 24.0), (200.0, 22.0), (300.0, 204.0), (40.0, 18.0));
+        let panel = [100.0, 50.0, 600.0, 500.0];
+        let contents = contents(
+            panel,
+            &s,
+            4,
+            Some(0),
+            Some(Scroll {
+                first: 0,
+                visible: 4,
+                total: 20,
+            }),
+        );
+        let hit = HitGeometry::new(panel, &contents, 4);
+        let query = contents.query_field.expect("query field");
+        assert_eq!(
+            hit.hit_test((query[0] + 4.0) as f64, (query[1] + 4.0) as f64),
+            Hit::Query
+        );
+        let track = contents.scroll_track.expect("overflowing list");
+        match hit.hit_test((track[0] + 1.0) as f64, (track[1] + track[3] * 0.5) as f64) {
+            Hit::Scrollbar(t) => assert!((t - 0.5).abs() < 0.15),
+            other => panic!("expected scrollbar, got {other:?}"),
+        }
+        let items_y = contents.items.unwrap()[1];
+        assert_eq!(
+            hit.hit_test(172.0, items_y as f64 + 1.0),
+            Hit::Item(0, 42.0)
+        );
     }
 
     #[test]

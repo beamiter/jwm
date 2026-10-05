@@ -16,12 +16,16 @@ use crate::backend::compositor_common::ui_theme::UiPalette;
 /// `(x, y, w, h)` in surface pixels, top-left origin.
 pub(crate) type Rect = (f32, f32, f32, f32);
 
-/// Meter fill at or above [`METER_GOOD`] of the refresh target.
+/// Meter fill at or above the refresh target, including overshoot.
 pub(crate) const TONE_GOOD: [f32; 4] = [0.31, 0.85, 0.55, 0.95];
 /// Meter fill between [`METER_WARN`] and [`METER_GOOD`].
 pub(crate) const TONE_WARN: [f32; 4] = [0.98, 0.75, 0.29, 0.95];
 /// Meter fill below [`METER_WARN`]: frames are being missed.
 pub(crate) const TONE_BAD: [f32; 4] = [0.95, 0.42, 0.45, 0.95];
+/// Meter fill when the compositor is producing more frames than the panel
+/// can show — the bar stays full, but the tone is a cooler cyan so 120 fps
+/// on a 60 Hz output does not look identical to a perfect lock.
+pub(crate) const TONE_OVER: [f32; 4] = [0.35, 0.78, 0.95, 0.95];
 
 const METER_GOOD: f32 = 0.90;
 const METER_WARN: f32 = 0.60;
@@ -88,15 +92,19 @@ impl HudRows {
 /// Meter fraction and tone for `fps` against the display's refresh target.
 pub(crate) fn fps_meter(fps: f32, target: f32) -> (f32, [f32; 4]) {
     let target = if target > 1.0 { target } else { 60.0 };
-    let ratio = (fps / target).clamp(0.0, 1.0);
-    let tone = if ratio >= METER_GOOD {
+    let ratio = if target > 0.0 { fps / target } else { 0.0 };
+    let tone = if !fps.is_finite() || fps < 0.0 {
+        TONE_BAD
+    } else if ratio > 1.0 + f32::EPSILON {
+        TONE_OVER
+    } else if ratio >= METER_GOOD {
         TONE_GOOD
     } else if ratio >= METER_WARN {
         TONE_WARN
     } else {
         TONE_BAD
     };
-    (ratio, tone)
+    (ratio.clamp(0.0, 1.0), tone)
 }
 
 /// Where every piece of the card lands. Sizes come from the rasterized text
@@ -166,7 +174,11 @@ impl HudLayout {
         let meter_track = (x + pad, meter_y, content_w, meter_h);
         // A rounded fill narrower than its own diameter renders as a sliver;
         // hold the minimum at one dot so a stalled compositor still shows one.
-        let fill_w = (content_w * meter.clamp(0.0, 1.0)).max(meter_h);
+        let fill_w = if meter <= 0.0 {
+            0.0
+        } else {
+            (content_w * meter.clamp(0.0, 1.0)).max(meter_h)
+        };
         let meter_fill = (x + pad, meter_y, fill_w, meter_h);
         let body_y = meter_y + meter_h + gap;
 
@@ -198,7 +210,7 @@ impl HudLayout {
         meter: f32,
     ) -> Self {
         let measured = Self::new(ui, (0.0, 0.0), title, chip, labels, values, meter);
-        let [x, y, ..] = dock.rect(measured.card.2, measured.card.3, 0.0);
+        let [x, y, ..] = dock.contained_rect(measured.card.2, measured.card.3, 0.0);
         Self::new(ui, (x, y), title, chip, labels, values, meter)
     }
 }
@@ -234,6 +246,10 @@ mod tests {
         assert!(same_tone(fps_meter(20.0, 60.0).1, TONE_BAD));
         // A missing or nonsense target falls back to 60 Hz.
         assert!((fps_meter(60.0, 0.0).0 - 1.0).abs() < 1e-6);
+        let (over_fill, over_tone) = fps_meter(120.0, 60.0);
+        assert!((over_fill - 1.0).abs() < 1e-6);
+        assert!(same_tone(over_tone, TONE_OVER));
+        assert!(!same_tone(over_tone, TONE_GOOD));
     }
 
     #[test]
@@ -316,5 +332,47 @@ mod tests {
         assert_eq!((card.2, card.3), (loose.card.2, loose.card.3));
         assert!((card.0 + card.2 * 0.5 - dock.centre_x).abs() < 0.01);
         assert_eq!(card.1, dock.top_y);
+        assert!(card.0 >= 0.0);
+        assert!(card.0 + card.2 <= 1600.0 + 0.01);
+    }
+
+    #[test]
+    fn a_stalled_meter_draws_an_empty_track() {
+        let ui = &crate::backend::compositor_common::ui_theme::MATERIAL;
+        let empty = HudLayout::new(
+            ui,
+            (0.0, 0.0),
+            (120.0, 20.0),
+            (40.0, 16.0),
+            (80.0, 40.0),
+            (40.0, 40.0),
+            0.0,
+        );
+        assert_eq!(empty.meter_fill.2, 0.0);
+        let sliver = HudLayout::new(
+            ui,
+            (0.0, 0.0),
+            (120.0, 20.0),
+            (40.0, 16.0),
+            (80.0, 40.0),
+            (40.0, 40.0),
+            0.01,
+        );
+        assert!(sliver.meter_fill.2 >= ui.meter_h);
+    }
+
+    #[test]
+    fn the_title_and_chip_do_not_overlap() {
+        let ui = &crate::backend::compositor_common::ui_theme::MATERIAL;
+        let layout = HudLayout::new(
+            ui,
+            (10.0, 10.0),
+            (250.0, 22.0),
+            (80.0, 16.0),
+            (100.0, 40.0),
+            (80.0, 40.0),
+            1.0,
+        );
+        assert!(layout.chip_pill.0 >= layout.title.0 + 250.0);
     }
 }
