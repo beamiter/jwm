@@ -272,6 +272,7 @@ struct App {
     opaque: bool,
     glass: Option<GlassBackdrop<OpaqueWallpaper>>,
     last_wallpaper_revision: Option<u64>,
+    started_at: Instant,
 }
 
 impl App {
@@ -316,6 +317,7 @@ impl App {
             opaque: !compositor_active,
             glass,
             last_wallpaper_revision: None,
+            started_at: Instant::now(),
         })
     }
 
@@ -468,6 +470,16 @@ impl App {
         }
         self.last_wallpaper_revision = Some(revision);
         true
+    }
+
+    fn wallpaper_poll_deadline(&self, now: Instant) -> Option<Instant> {
+        if !self.opaque {
+            return None;
+        }
+        if now.saturating_duration_since(self.started_at) >= Duration::from_secs(8) {
+            return None;
+        }
+        Some(now + Duration::from_millis(200))
     }
 
     fn sync_transport_wake(&mut self) {
@@ -850,7 +862,8 @@ impl WallpaperSource for OpaqueWallpaper {
 struct RootPixmapSource {
     conn: Rc<RustConnection>,
     root: u32,
-    atom: u32,
+    xrootpmap: u32,
+    esetroot: u32,
     pixmap: u32,
     revision: u64,
 }
@@ -858,41 +871,51 @@ struct RootPixmapSource {
 impl RootPixmapSource {
     fn new(conn: Rc<RustConnection>, screen_num: usize) -> Self {
         use x11rb::connection::Connection as _;
-        use x11rb::protocol::xproto::ConnectionExt as _;
         let root = conn
             .setup()
             .roots
             .get(screen_num)
             .map(|screen| screen.root)
             .unwrap_or(0);
-        let atom = conn
-            .intern_atom(false, b"_XROOTPMAP_ID")
-            .ok()
-            .and_then(|cookie| cookie.reply().ok())
-            .map(|reply| reply.atom)
-            .unwrap_or(0);
+        let xrootpmap = intern_atom(&conn, b"_XROOTPMAP_ID");
+        let esetroot = intern_atom(&conn, b"ESETROOT_PMAP_ID");
         Self {
             conn,
             root,
-            atom,
+            xrootpmap,
+            esetroot,
             pixmap: 0,
             revision: 0,
         }
     }
 
-    fn current_pixmap(&self) -> Option<u32> {
+    fn pixmap_atom(&self, atom: u32) -> Option<u32> {
         use x11rb::protocol::xproto::{AtomEnum, ConnectionExt as _};
-        if self.atom == 0 || self.root == 0 {
+        if atom == 0 || self.root == 0 {
             return None;
         }
         let reply = self
             .conn
-            .get_property(false, self.root, self.atom, AtomEnum::PIXMAP, 0, 1)
+            .get_property(false, self.root, atom, AtomEnum::PIXMAP, 0, 1)
             .ok()?
             .reply()
             .ok()?;
         reply.value32()?.next().filter(|pixmap| *pixmap != 0)
     }
+
+    fn current_pixmap(&self) -> Option<u32> {
+        self.pixmap_atom(self.xrootpmap)
+            .or_else(|| self.pixmap_atom(self.esetroot))
+    }
+}
+
+fn intern_atom(conn: &RustConnection, name: &[u8]) -> u32 {
+    use x11rb::protocol::xproto::ConnectionExt as _;
+    conn.intern_atom(false, name)
+        .ok()
+        .and_then(|cookie| cookie.reply().ok())
+        .map(|reply| reply.atom)
+        .unwrap_or(0)
 }
 
 impl WallpaperSource for RootPixmapSource {
@@ -1152,6 +1175,9 @@ fn main() -> Result<()> {
             }
             Event::MainEventsCleared => {
                 let now = Instant::now();
+                if app.opaque_wallpaper_changed() {
+                    app.request_redraw();
+                }
                 if app
                     .bar
                     .next_dock_deadline(now)
@@ -1161,8 +1187,16 @@ fn main() -> Result<()> {
                     app.handle_runtime_update(update);
                     app.sync_transport_wake();
                 }
-                if let Some(deadline) = app.bar.next_dock_deadline(Instant::now()) {
-                    *control_flow = ControlFlow::WaitUntil(deadline);
+                let dock = app.bar.next_dock_deadline(Instant::now());
+                let wallpaper = app.wallpaper_poll_deadline(Instant::now());
+                match (dock, wallpaper) {
+                    (Some(a), Some(b)) => {
+                        *control_flow = ControlFlow::WaitUntil(a.min(b));
+                    }
+                    (Some(deadline), None) | (None, Some(deadline)) => {
+                        *control_flow = ControlFlow::WaitUntil(deadline);
+                    }
+                    (None, None) => {}
                 }
             }
             _ => {}
