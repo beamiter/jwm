@@ -67,7 +67,6 @@ impl<C: CompositorConnection> Compositor<C> {
                     if let Some(owner) = self.selection_owner {
                         let _ = self.conn.destroy_window_resource(owner);
                     }
-                    let _ = self.conn.paint_root_solid_black(self.root);
                     let _ = self.conn.unredirect_subwindows_manual(self.root);
                     if self.overlay.is_some() {
                         let _ = self.conn.release_overlay_window(self.root);

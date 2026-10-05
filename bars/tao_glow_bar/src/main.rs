@@ -271,6 +271,7 @@ struct App {
     /// wallpaper instead of showing a solid slab.
     opaque: bool,
     glass: Option<GlassBackdrop<OpaqueWallpaper>>,
+    last_wallpaper_revision: Option<u64>,
 }
 
 impl App {
@@ -314,6 +315,7 @@ impl App {
             depth_check_pending: compositor_active,
             opaque: !compositor_active,
             glass,
+            last_wallpaper_revision: None,
         })
     }
 
@@ -448,6 +450,24 @@ impl App {
         update.merge(self.bar.poll_transport());
         self.handle_runtime_update(update);
         self.sync_transport_wake();
+        if self.opaque_wallpaper_changed() {
+            self.request_redraw();
+        }
+    }
+
+    fn opaque_wallpaper_changed(&mut self) -> bool {
+        if !self.opaque {
+            return false;
+        }
+        let Some(glass) = self.glass.as_mut() else {
+            return false;
+        };
+        let revision = glass.source_mut().revision();
+        if self.last_wallpaper_revision == Some(revision) {
+            return false;
+        }
+        self.last_wallpaper_revision = Some(revision);
+        true
     }
 
     fn sync_transport_wake(&mut self) {

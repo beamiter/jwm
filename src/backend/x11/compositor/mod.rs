@@ -1379,11 +1379,9 @@ impl<C: CompositorConnection> Drop for Compositor<C> {
         // Destroy the _NET_WM_CM_Sn selection owner window (releases ownership)
         let _ = self.conn.destroy_window_resource(self.cm_selection_owner);
         // The compositor owns wallpaper rendering while it is alive. After
-        // teardown the window manager restores the native root pixmap (or
-        // paints one) so gaps show the configured wallpaper instead of black.
-        if let Err(err) = self.conn.paint_root_solid_black(self.root) {
-            log::warn!("compositor: failed to paint root background black: {err}");
-        }
+        // teardown the window manager restores the native root pixmap. Do
+        // not paint the root black here: that flashed a blank desktop
+        // between unredirect and the pixmap restore.
         // Undo the MANUAL redirect so the X server renders windows normally again
         let _ = self.conn.unredirect_subwindows_manual(self.root);
         // Hand the shaped-in card regions back before letting go of the

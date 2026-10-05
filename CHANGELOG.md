@@ -13,7 +13,9 @@ monorepo use independent Semantic Versions.
   inks plus `behavior.border_color_*` / `attention_color`. Compositor-off
   startup no longer flashes a black root; wallpaper is Triangle-scaled onto
   each output; `tao_glow_bar` frosts `_XROOTPMAP_ID` (or `glass.wallpaper`)
-  when the bar is opaque.
+  when the bar is opaque. Disabling the compositor no longer paints the root
+  black first; a session with no wallpaper file gets the theme letterbox on
+  the same tick.
 - `get_monitors` / `get_tree` monitor rows report `bar_visible`: whether the
   status-bar window currently occupies that output. Distinct from `show_bar`,
   which remains the per-tag preference and stays true during F11 fullscreen.

@@ -55,6 +55,14 @@ impl Jwm {
             }
         }
         self.features.native_root_key = request.key.clone();
+        if request.images.is_empty() {
+            // A solid letterbox is a few kilobytes of fill — do it on this
+            // tick so compositor-off without `behavior.wallpaper` is themed
+            // immediately instead of waiting on a worker.
+            self.features.native_root_job = None;
+            install_native_root_pixels(backend, decode_native_root(request));
+            return;
+        }
         let job = BackgroundJob::spawn(move || decode_native_root(request));
         self.features.native_root_job = job.started().then(|| self.track_background_job(job));
         if self.features.native_root_job.is_none() {
@@ -84,15 +92,7 @@ impl Jwm {
         if backend.has_compositor() {
             return;
         }
-        let Some(pixels) = result else {
-            log::warn!("native root wallpaper: decode produced no image");
-            return;
-        };
-        if let Err(error) =
-            backend.install_root_wallpaper(pixels.width, pixels.height, &pixels.rgba)
-        {
-            log::warn!("native root wallpaper: {error}");
-        }
+        install_native_root_pixels(backend, result);
     }
 
     fn native_root_request(&self) -> Option<NativeRootRequest> {
@@ -158,6 +158,16 @@ impl Jwm {
             images,
             monitors,
         })
+    }
+}
+
+fn install_native_root_pixels(backend: &mut dyn Backend, pixels: Option<NativeRootPixels>) {
+    let Some(pixels) = pixels else {
+        log::warn!("native root wallpaper: decode produced no image");
+        return;
+    };
+    if let Err(error) = backend.install_root_wallpaper(pixels.width, pixels.height, &pixels.rgba) {
+        log::warn!("native root wallpaper: {error}");
     }
 }
 
@@ -247,5 +257,26 @@ mod tests {
         })
         .expect("letterbox canvas");
         assert_eq!(pixels.rgba, vec![1, 2, 3, 255, 1, 2, 3, 255]);
+    }
+
+    #[test]
+    fn an_empty_image_list_still_fills_the_letterbox() {
+        let pixels = decode_native_root(NativeRootRequest {
+            key: "fill".into(),
+            root_w: 1,
+            root_h: 1,
+            fill: [9, 8, 7],
+            images: vec![],
+            monitors: vec![NativeMonitorBlit {
+                x: 0,
+                y: 0,
+                w: 1,
+                h: 1,
+                image: usize::MAX,
+                mode: WallpaperMode::Fill,
+            }],
+        })
+        .expect("letterbox canvas");
+        assert_eq!(pixels.rgba, vec![9, 8, 7, 255]);
     }
 }
