@@ -199,6 +199,11 @@ impl X11rbBackend {
                 "native root wallpaper has empty geometry".into(),
             ));
         }
+        if width > u16::MAX as u32 || height > u16::MAX as u32 {
+            return Err(BackendError::Message(format!(
+                "native root wallpaper {width}x{height} exceeds the X11 pixmap axis"
+            )));
+        }
         let expected = width as usize * height as usize * 4;
         if rgba.len() != expected {
             return Err(BackendError::Message(format!(
@@ -241,6 +246,9 @@ impl X11rbBackend {
             let count = (height - y).min(rows);
             let start = y as usize * row_bytes;
             let end = start + count as usize * row_bytes;
+            let dest_y = i16::try_from(y).map_err(|_| {
+                BackendError::Message("native root wallpaper row is outside i16".into())
+            })?;
             self.conn.put_image(
                 ImageFormat::Z_PIXMAP,
                 pixmap,
@@ -248,7 +256,7 @@ impl X11rbBackend {
                 width as u16,
                 count as u16,
                 0,
-                y as i16,
+                dest_y,
                 0,
                 depth,
                 &packed[start..end],
@@ -293,7 +301,7 @@ impl X11rbBackend {
             .ok()?
             .reply()
             .ok()?;
-        reply.value32()?.next()
+        reply.value32()?.next().filter(|pixmap| *pixmap != 0)
     }
 
     fn publish_root_pixmap(&self, pixmap: u32) -> Result<(), BackendError> {

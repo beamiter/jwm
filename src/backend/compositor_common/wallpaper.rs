@@ -255,9 +255,23 @@ pub(crate) fn blit_rgba_clipped(
             if dest_x < 0 || dest_x >= root_w as i32 {
                 continue;
             }
-            let src = row as usize * src_stride + col as usize * 4;
+        let src = row as usize * src_stride + col as usize * 4;
             let dst = dest_y as usize * dst_stride + dest_x as usize * 4;
-            canvas[dst..dst + 4].copy_from_slice(&rgba[src..src + 4]);
+            let alpha = rgba[src + 3];
+            if alpha == 0 {
+                continue;
+            }
+            if alpha == 255 {
+                canvas[dst..dst + 4].copy_from_slice(&rgba[src..src + 4]);
+                continue;
+            }
+            let inv = 255 - alpha as u16;
+            for channel in 0..3 {
+                let over = rgba[src + channel] as u16 * alpha as u16;
+                let under = canvas[dst + channel] as u16 * inv;
+                canvas[dst + channel] = ((over + under + 127) / 255) as u8;
+            }
+            canvas[dst + 3] = 255;
         }
     }
 }
@@ -462,5 +476,13 @@ mod tests {
         assert_eq!(&canvas[12..16], &[9, 8, 7, 255]);
         blit_rgba_clipped(&mut canvas, 2, 2, &[1, 2, 3, 255], 1, 1, -1, 0);
         assert_eq!(&canvas[0..4], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn blit_rgba_clipped_blends_translucent_pixels_over_the_letterbox() {
+        let mut canvas = vec![0, 0, 0, 255];
+        blit_rgba_clipped(&mut canvas, 1, 1, &[255, 0, 0, 128], 1, 1, 0, 0);
+        assert_eq!(canvas[0], 128);
+        assert_eq!(canvas[3], 255);
     }
 }

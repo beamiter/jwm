@@ -873,9 +873,11 @@ impl Jwm {
         self.broadcast_visible_window_states_on_monitor(backend, sel_mon_key);
         self.broadcast_monitor_bar_ipc(backend, sel_mon_key);
         self.update_ewmh_desktop(backend)?;
-        // Tag changed: re-resolve per-tag wallpapers in the compositor.
+        // Tag changed: re-resolve per-tag wallpapers in the compositor and
+        // on the native root when the compositor is off.
         if old_tag_mask != new_tag_mask {
             self.refresh_compositor_monitors(backend);
+            self.ensure_native_root_wallpaper(backend);
         }
 
         self.broadcast_ipc_event(
@@ -945,6 +947,7 @@ impl Jwm {
         self.update_ewmh_desktop(backend)?;
         if old_tag_mask != new_tag_mask {
             self.refresh_compositor_monitors(backend);
+            self.ensure_native_root_wallpaper(backend);
         }
 
         Ok(())

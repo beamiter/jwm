@@ -19,7 +19,9 @@ monorepo use independent Semantic Versions.
   root pixmap until it appears (up to 30s). Disabling the compositor
   re-applies native borders and the root cursor; RandR layout changes
   recompose the root picture; a configured `glass.wallpaper` file that cannot
-  be read still frosts from the root pixmap.
+  be read still frosts from the root pixmap. Tag switches recompose the
+  native picture; missing files skip the worker and keep the letterbox;
+  PNG alpha blends over that fill; pixmap IDs of 0 are ignored.
 - `get_monitors` / `get_tree` monitor rows report `bar_visible`: whether the
   status-bar window currently occupies that output. Distinct from `show_bar`,
   which remains the per-tag preference and stays true during F11 fullscreen.

@@ -904,6 +904,13 @@ impl RootPixmapSource {
             .unwrap_or(0);
         let xrootpmap = intern_atom(&conn, b"_XROOTPMAP_ID");
         let esetroot = intern_atom(&conn, b"ESETROOT_PMAP_ID");
+        if root != 0 {
+            use x11rb::protocol::xproto::{ChangeWindowAttributesAux, ConnectionExt as _, EventMask};
+            let _ = conn.change_window_attributes(
+                root,
+                &ChangeWindowAttributesAux::new().event_mask(EventMask::PROPERTY_CHANGE),
+            );
+        }
         Self {
             conn,
             root,
@@ -998,6 +1005,12 @@ impl WallpaperSource for RootPixmapSource {
         } else {
             reply.data.len() / height as usize
         };
+        let row = width as usize * 4;
+        if stride < row || reply.data.len() < stride.saturating_mul(height as usize) {
+            return Err(GlassError::Unavailable(
+                "root wallpaper pixmap returned a short image".into(),
+            ));
+        }
         let mut image = GlassImage::from_bgra(width, height, stride, &reply.data)?;
         for pixel in image.data_mut().chunks_exact_mut(4) {
             pixel[3] = 255;
@@ -1160,6 +1173,10 @@ fn main() -> Result<()> {
                     new_inner_size,
                 } => {
                     app.scale_factor = scale_factor;
+                    if let Some(glass) = app.glass.as_mut() {
+                        glass.cache_mut().invalidate();
+                    }
+                    app.last_wallpaper_revision = None;
                     app.resize(*new_inner_size);
                     if let Some(geometry) = app.bar.runtime().view().geometry {
                         app.apply_monitor_geometry(geometry);

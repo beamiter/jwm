@@ -12,8 +12,8 @@ use std::path::PathBuf;
 use crate::backend::api::Backend;
 use crate::backend::compositor_common::ui_theme;
 use crate::backend::compositor_common::wallpaper::{
-    NativeMonitorBlit, blit_rgba_clipped, compose_native_root, compute_wallpaper_rect,
-    parse_wallpaper_mode, resolve_wallpaper_for_tag,
+    MAX_NATIVE_ROOT_BYTES, NativeMonitorBlit, blit_rgba_clipped, compose_native_root,
+    compute_wallpaper_rect, parse_wallpaper_mode, resolve_wallpaper_for_tag,
 };
 use crate::config::CONFIG;
 use crate::jwm::Jwm;
@@ -106,8 +106,7 @@ impl Jwm {
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
         let fill = ui_theme::palette().native_letterbox_rgb();
         let theme = cfg.ui_theme();
-        let root_w = self.s_w.max(1) as u32;
-        let root_h = self.s_h.max(1) as u32;
+        let (root_w, root_h) = native_root_canvas_size(self)?;
         let mut images: Vec<(String, PathBuf)> = Vec::new();
         let mut monitors = Vec::new();
         let mut key = format!("{root_w}x{root_h};theme={theme};fill={fill:?}");
@@ -118,14 +117,15 @@ impl Jwm {
             let (path, mode_str) =
                 resolve_wallpaper_for_tag(behavior, idx as u32, monitor.get_active_tags());
             let expanded = expand_home(path, &home);
+            let token = wallpaper_file_token(&expanded);
             key.push_str(&format!(
-                ";{idx}:{}x{}+{}+{}:{path}:{mode_str}",
+                ";{idx}:{}x{}+{}+{}:{token}:{mode_str}",
                 monitor.geometry.m_w,
                 monitor.geometry.m_h,
                 monitor.geometry.m_x,
                 monitor.geometry.m_y
             ));
-            if path.trim().is_empty() {
+            if path.trim().is_empty() || !expanded.is_file() {
                 continue;
             }
             let image_index =
@@ -167,6 +167,61 @@ impl Jwm {
     }
 }
 
+fn native_root_canvas_size(jwm: &Jwm) -> Option<(u32, u32)> {
+    let mut width = jwm.s_w.max(0) as u32;
+    let mut height = jwm.s_h.max(0) as u32;
+    for &mk in &jwm.state.monitor_order {
+        let Some(monitor) = jwm.state.monitors.get(mk) else {
+            continue;
+        };
+        let right = monitor
+            .geometry
+            .m_x
+            .saturating_add(monitor.geometry.m_w)
+            .max(0) as u32;
+        let bottom = monitor
+            .geometry
+            .m_y
+            .saturating_add(monitor.geometry.m_h)
+            .max(0) as u32;
+        width = width.max(right);
+        height = height.max(bottom);
+    }
+    if width == 0 || height == 0 {
+        return None;
+    }
+    if width > u16::MAX as u32 || height > u16::MAX as u32 {
+        return None;
+    }
+    Some((width, height))
+}
+
+fn wallpaper_file_token(path: &PathBuf) -> String {
+    match std::fs::metadata(path) {
+        Ok(meta) => {
+            let modified = meta
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|duration| duration.as_secs())
+                .unwrap_or(0);
+            format!("{}:{}:{modified}", path.display(), meta.len())
+        }
+        Err(_) => format!("{}:missing", path.display()),
+    }
+}
+
+fn load_native_wallpaper(path: &PathBuf) -> Option<image::RgbaImage> {
+    let mut reader = image::ImageReader::open(path).ok()?;
+    reader = reader.with_guessed_format().ok()?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(16_384);
+    limits.max_image_height = Some(16_384);
+    limits.max_alloc = Some(MAX_NATIVE_ROOT_BYTES);
+    reader.limits(limits);
+    reader.decode().ok().map(|image| image.into_rgba8())
+}
+
 fn install_native_root_pixels(
     backend: &mut dyn Backend,
     expected_key: &str,
@@ -187,12 +242,12 @@ fn install_native_root_pixels(
 fn decode_native_root(request: NativeRootRequest) -> Option<NativeRootPixels> {
     let mut decoded = HashMap::new();
     for (index, (_, path)) in request.images.iter().enumerate() {
-        match image::open(path) {
-            Ok(image) => {
-                decoded.insert(index, image.to_rgba8());
+        match load_native_wallpaper(path) {
+            Some(image) => {
+                decoded.insert(index, image);
             }
-            Err(error) => {
-                log::warn!("native root wallpaper: {}: {error}", path.display());
+            None => {
+                log::warn!("native root wallpaper: failed to decode {}", path.display());
             }
         }
     }
@@ -219,18 +274,37 @@ fn decode_native_root(request: NativeRootRequest) -> Option<NativeRootPixels> {
         }
         let tw = dw.round().max(1.0) as u32;
         let th = dh.round().max(1.0) as u32;
-        let placed = if tw == image.width() && th == image.height() {
-            image.clone()
+        if u64::from(tw)
+            .saturating_mul(u64::from(th))
+            .saturating_mul(4)
+            > MAX_NATIVE_ROOT_BYTES
+        {
+            continue;
+        }
+        let (pixels, width, height) = if tw == image.width() && th == image.height() {
+            (image.as_raw().as_slice(), image.width(), image.height())
         } else {
-            image::imageops::resize(image, tw, th, image::imageops::FilterType::Triangle)
+            let placed =
+                image::imageops::resize(image, tw, th, image::imageops::FilterType::Triangle);
+            blit_rgba_clipped(
+                &mut rgba,
+                request.root_w,
+                request.root_h,
+                placed.as_raw(),
+                placed.width(),
+                placed.height(),
+                dx.round() as i32,
+                dy.round() as i32,
+            );
+            continue;
         };
         blit_rgba_clipped(
             &mut rgba,
             request.root_w,
             request.root_h,
-            placed.as_raw(),
-            placed.width(),
-            placed.height(),
+            pixels,
+            width,
+            height,
             dx.round() as i32,
             dy.round() as i32,
         );
@@ -294,5 +368,13 @@ mod tests {
         .expect("letterbox canvas");
         assert_eq!(pixels.key, "fill");
         assert_eq!(pixels.rgba, vec![9, 8, 7, 255]);
+    }
+
+    #[test]
+    fn wallpaper_file_token_marks_a_missing_path() {
+        assert!(
+            super::wallpaper_file_token(&std::path::PathBuf::from("/no/such/wallpaper.png"))
+                .ends_with(":missing")
+        );
     }
 }

@@ -323,7 +323,9 @@ impl Jwm {
             self.replay_compositor_runtime_state(backend, now);
         }
         self.features.compositor_transition.succeed();
-        if !enabled {
+        if enabled {
+            self.features.native_root_job = None;
+        } else {
             self.refresh_native_presentation(backend);
             self.features.native_root_key.clear();
             self.ensure_native_root_wallpaper(backend);
