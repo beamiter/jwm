@@ -1231,6 +1231,7 @@ impl Jwm {
             backend.root_window()
         );
         crate::jwm::native_chrome::apply_native_color_schemes(backend)?;
+        crate::jwm::native_chrome::apply_root_cursor(backend);
         info!("[new] JWM initialization completed successfully");
         let outputs = backend.output_ops().enumerate_outputs();
         let config_revision = crate::config::Config::get_config_modified_time().ok();
@@ -1876,6 +1877,7 @@ impl Jwm {
         }
         self.focus(backend, None)?;
         self.arrange(backend, None);
+        self.ensure_native_root_wallpaper(backend);
         Ok(())
     }
 

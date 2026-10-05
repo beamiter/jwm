@@ -23,6 +23,7 @@ use crate::jwm::features::wallpaper::expand_home;
 /// RGBA8 canvas ready to upload as a native root pixmap.
 #[derive(Debug)]
 pub struct NativeRootPixels {
+    pub(crate) key: String,
     pub(crate) width: u32,
     pub(crate) height: u32,
     pub(crate) rgba: Vec<u8>,
@@ -60,7 +61,11 @@ impl Jwm {
             // tick so compositor-off without `behavior.wallpaper` is themed
             // immediately instead of waiting on a worker.
             self.features.native_root_job = None;
-            install_native_root_pixels(backend, decode_native_root(request));
+            install_native_root_pixels(
+                backend,
+                &self.features.native_root_key,
+                decode_native_root(request),
+            );
             return;
         }
         let job = BackgroundJob::spawn(move || decode_native_root(request));
@@ -92,7 +97,7 @@ impl Jwm {
         if backend.has_compositor() {
             return;
         }
-        install_native_root_pixels(backend, result);
+        install_native_root_pixels(backend, &self.features.native_root_key, result);
     }
 
     fn native_root_request(&self) -> Option<NativeRootRequest> {
@@ -100,11 +105,12 @@ impl Jwm {
         let behavior = cfg.behavior();
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
         let fill = ui_theme::palette().native_letterbox_rgb();
+        let theme = cfg.ui_theme();
         let root_w = self.s_w.max(1) as u32;
         let root_h = self.s_h.max(1) as u32;
         let mut images: Vec<(String, PathBuf)> = Vec::new();
         let mut monitors = Vec::new();
-        let mut key = format!("{root_w}x{root_h};fill={fill:?}");
+        let mut key = format!("{root_w}x{root_h};theme={theme};fill={fill:?}");
         for (idx, &mk) in self.state.monitor_order.iter().enumerate() {
             let Some(monitor) = self.state.monitors.get(mk) else {
                 continue;
@@ -161,11 +167,18 @@ impl Jwm {
     }
 }
 
-fn install_native_root_pixels(backend: &mut dyn Backend, pixels: Option<NativeRootPixels>) {
+fn install_native_root_pixels(
+    backend: &mut dyn Backend,
+    expected_key: &str,
+    pixels: Option<NativeRootPixels>,
+) {
     let Some(pixels) = pixels else {
         log::warn!("native root wallpaper: decode produced no image");
         return;
     };
+    if pixels.key != expected_key {
+        return;
+    }
     if let Err(error) = backend.install_root_wallpaper(pixels.width, pixels.height, &pixels.rgba) {
         log::warn!("native root wallpaper: {error}");
     }
@@ -223,6 +236,7 @@ fn decode_native_root(request: NativeRootRequest) -> Option<NativeRootPixels> {
         );
     }
     Some(NativeRootPixels {
+        key: request.key,
         width: request.root_w,
         height: request.root_h,
         rgba,
@@ -256,6 +270,7 @@ mod tests {
             }],
         })
         .expect("letterbox canvas");
+        assert_eq!(pixels.key, "test");
         assert_eq!(pixels.rgba, vec![1, 2, 3, 255, 1, 2, 3, 255]);
     }
 
@@ -277,6 +292,7 @@ mod tests {
             }],
         })
         .expect("letterbox canvas");
+        assert_eq!(pixels.key, "fill");
         assert_eq!(pixels.rgba, vec![9, 8, 7, 255]);
     }
 }

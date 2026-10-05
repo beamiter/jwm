@@ -273,6 +273,7 @@ struct App {
     glass: Option<GlassBackdrop<OpaqueWallpaper>>,
     last_wallpaper_revision: Option<u64>,
     started_at: Instant,
+    saw_root_pixmap: bool,
 }
 
 impl App {
@@ -315,9 +316,10 @@ impl App {
             x11,
             depth_check_pending: compositor_active,
             opaque: !compositor_active,
-            glass,
             last_wallpaper_revision: None,
             started_at: Instant::now(),
+            saw_root_pixmap: !compositor_active && glass.is_none(),
+            glass,
         })
     }
 
@@ -465,6 +467,9 @@ impl App {
             return false;
         };
         let revision = glass.source_mut().revision();
+        if glass.source_mut().has_root_pixmap() {
+            self.saw_root_pixmap = true;
+        }
         if self.last_wallpaper_revision == Some(revision) {
             return false;
         }
@@ -473,10 +478,10 @@ impl App {
     }
 
     fn wallpaper_poll_deadline(&self, now: Instant) -> Option<Instant> {
-        if !self.opaque {
+        if !self.opaque || self.saw_root_pixmap {
             return None;
         }
-        if now.saturating_duration_since(self.started_at) >= Duration::from_secs(8) {
+        if now.saturating_duration_since(self.started_at) >= Duration::from_secs(30) {
             return None;
         }
         Some(now + Duration::from_millis(200))
@@ -507,6 +512,11 @@ impl App {
             .set_outer_position(PhysicalPosition::new(placement.x, placement.y));
         self.window
             .set_inner_size(PhysicalSize::new(placement.width, placement.height));
+        if let Some(glass) = self.glass.as_mut() {
+            glass.cache_mut().invalidate();
+        }
+        self.last_wallpaper_revision = None;
+        self.request_redraw();
     }
 }
 
@@ -841,6 +851,19 @@ fn compositor_active(conn: &RustConnection, screen_num: usize) -> bool {
 enum OpaqueWallpaper {
     File(WallpaperFile),
     Root(RootPixmapSource),
+    FileThenRoot {
+        file: WallpaperFile,
+        root: RootPixmapSource,
+    },
+}
+
+impl OpaqueWallpaper {
+    fn has_root_pixmap(&self) -> bool {
+        match self {
+            Self::File(_) => true,
+            Self::Root(root) | Self::FileThenRoot { root, .. } => root.has_pixmap(),
+        }
+    }
 }
 
 impl WallpaperSource for OpaqueWallpaper {
@@ -848,6 +871,7 @@ impl WallpaperSource for OpaqueWallpaper {
         match self {
             Self::File(source) => source.revision(),
             Self::Root(source) => source.revision(),
+            Self::FileThenRoot { file, root } => file.revision().wrapping_add(root.revision()),
         }
     }
 
@@ -855,6 +879,7 @@ impl WallpaperSource for OpaqueWallpaper {
         match self {
             Self::File(source) => source.strip(request),
             Self::Root(source) => source.strip(request),
+            Self::FileThenRoot { file, root } => file.strip(request).or_else(|_| root.strip(request)),
         }
     }
 }
@@ -887,6 +912,10 @@ impl RootPixmapSource {
             pixmap: 0,
             revision: 0,
         }
+    }
+
+    fn has_pixmap(&self) -> bool {
+        self.pixmap != 0
     }
 
     fn pixmap_atom(&self, atom: u32) -> Option<u32> {
@@ -1072,7 +1101,17 @@ fn main() -> Result<()> {
             screen_size.height,
             tint,
         ) {
-            Some(GlassBackdrop::new(OpaqueWallpaper::File(file), params).with_fallback(tint))
+            Some(match x11.as_ref() {
+                Some(conn) => GlassBackdrop::new(
+                    OpaqueWallpaper::FileThenRoot {
+                        file,
+                        root: RootPixmapSource::new(Rc::clone(conn), screen_num),
+                    },
+                    params,
+                )
+                .with_fallback(tint),
+                None => GlassBackdrop::new(OpaqueWallpaper::File(file), params).with_fallback(tint),
+            })
         } else {
             x11.as_ref().map(|conn| {
                 GlassBackdrop::new(

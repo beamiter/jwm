@@ -57,7 +57,10 @@ same `fill` / `fit` / `stretch` / `center` rules. Startup no longer paints the
 root black first, so an existing `feh` / `esetroot` pixmap stays until JWM's
 own wallpaper lands. Tiling gaps then match the composited desktop instead of
 a solid black root. The default status bar (`tao_glow_bar`) frosts that same
-root pixmap when it cannot be translucent.
+root pixmap when it cannot be translucent. A `glass.wallpaper` path that
+cannot be read still falls back to that pixmap. Monitor layout changes
+recompose the picture; turning the compositor off restores native borders
+and the themed root cursor instead of leaving overlay leftovers.
 
 That also means the change is **in memory only**, like every other
 `set_config`: it lasts for the session and is not written back to

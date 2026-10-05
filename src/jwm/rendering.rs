@@ -324,6 +324,7 @@ impl Jwm {
         }
         self.features.compositor_transition.succeed();
         if !enabled {
+            self.refresh_native_presentation(backend);
             self.features.native_root_key.clear();
             self.ensure_native_root_wallpaper(backend);
         }
@@ -833,6 +834,26 @@ mod maintenance_tick_tests {
         assert!(
             body.contains(&shared_guard),
             "the tick no longer asks for a periodic connectivity read"
+        );
+    }
+
+    #[test]
+    fn disabling_the_compositor_refreshes_native_chrome_before_the_root_picture() {
+        const SOURCE: &str = include_str!("rendering.rs");
+        let body = SOURCE
+            .split_once("fn set_compositor_enabled_reconciled")
+            .expect("compositor hand-off")
+            .1
+            .split_once("fn sync_window_groups")
+            .expect("the function after it")
+            .0;
+        assert!(
+            body.contains("refresh_native_presentation(backend)"),
+            "compositor-off must re-apply BorderPixel and the root cursor"
+        );
+        assert!(
+            body.contains("ensure_native_root_wallpaper(backend)"),
+            "compositor-off must still install the native root picture"
         );
     }
 }

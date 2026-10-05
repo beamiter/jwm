@@ -16,8 +16,10 @@ monorepo use independent Semantic Versions.
   when the bar is opaque. Disabling the compositor no longer paints the root
   black first; a session with no wallpaper file gets the theme letterbox on
   the same tick. The default bar also reads `ESETROOT_PMAP_ID` and polls the
-  root pixmap for a few seconds after start so frost appears with the picture
-  instead of waiting on the clock tick.
+  root pixmap until it appears (up to 30s). Disabling the compositor
+  re-applies native borders and the root cursor; RandR layout changes
+  recompose the root picture; a configured `glass.wallpaper` file that cannot
+  be read still frosts from the root pixmap.
 - `get_monitors` / `get_tree` monitor rows report `bar_visible`: whether the
   status-bar window currently occupies that output. Distinct from `show_bar`,
   which remains the per-tag preference and stays true during F11 fullscreen.
