@@ -100,7 +100,7 @@ jobs:
           version: "1.12.6"
 
       - name: Cache Julia packages
-        uses: julia-actions/cache@a7bed9df697e5d7309d68afe7542a87621a8b6c8  # v3.3.0
+        uses: julia-actions/cache@e32267b41e0fa7df82a3d53e8c7273620d52c586  # v3.4.0
         with:
           delete-old-caches: "false"
 
@@ -153,7 +153,7 @@ jobs:
           version: "1.10.12"
 
       - name: Cache Julia packages
-        uses: julia-actions/cache@a7bed9df697e5d7309d68afe7542a87621a8b6c8  # v3.3.0
+        uses: julia-actions/cache@e32267b41e0fa7df82a3d53e8c7273620d52c586  # v3.4.0
         with:
           delete-old-caches: "false"
 
