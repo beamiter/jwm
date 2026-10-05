@@ -8212,6 +8212,7 @@ impl WaylandCompositor {
         let a = osd.alpha(now);
         let (icon, label) = osd.icon_and_label();
         let fill = osd.fill();
+        let fill_over = osd.fill_over_limit();
         let target_w = osd.card_width();
         let text = format!("{icon}  {label}");
         unsafe { self.update_osd_texture(gl, &text) };
@@ -8287,6 +8288,11 @@ impl WaylandCompositor {
                     UiPalette::faded(ui.slider_track, content_a),
                 );
                 if fill > 0.0 {
+                    let fill_rgb = if fill_over {
+                        crate::backend::compositor_common::osd::FILL_OVER
+                    } else {
+                        accent
+                    };
                     self.sysui_fill_rounded(
                         gl,
                         bar_x,
@@ -8294,7 +8300,7 @@ impl WaylandCompositor {
                         (bar_w * fill).max(bar_h),
                         bar_h,
                         bar_h / 2.0,
-                        [accent[0], accent[1], accent[2], 0.95 * content_a],
+                        [fill_rgb[0], fill_rgb[1], fill_rgb[2], 0.95 * content_a],
                     );
                 }
             }

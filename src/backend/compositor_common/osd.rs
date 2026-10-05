@@ -34,6 +34,9 @@ const SLIDER_CARD_WIDTH: f32 = 360.0;
 const MEDIA_CARD_WIDTH: f32 = 520.0;
 /// Longest track label drawn; the renderer does not wrap.
 const MAX_MEDIA_LABEL_CHARS: usize = 48;
+/// Slider fill past 100% (volume boost / over-bright): cooler than accent so
+/// a full bar is not mistaken for a capped 100%.
+pub(crate) const FILL_OVER: [f32; 4] = [0.35, 0.78, 0.95, 0.95];
 
 #[derive(Debug, Clone)]
 pub(crate) struct ActiveOsd {
@@ -175,6 +178,13 @@ impl ActiveOsd {
             OsdKind::VolumeMuted => Some(0.0),
             _ => Some(f32::from(self.percent.min(100)) / 100.0),
         }
+    }
+
+    /// Volume/brightness past 100% still fills the bar, but the fill uses
+    /// [`FILL_OVER`] so a boosted level does not look like a perfect 100%.
+    #[must_use]
+    pub(crate) fn fill_over_limit(&self) -> bool {
+        matches!(self.kind, OsdKind::Volume | OsdKind::Brightness) && self.percent > 100
     }
 
     /// Card width for this kind. Lives here so both compositors lay the card
@@ -509,6 +519,12 @@ mod tests {
 
         slot.show(OsdKind::Brightness, 130, now);
         assert_eq!(slot.get().unwrap().fill(), Some(1.0));
+        assert!(slot.get().unwrap().fill_over_limit());
+        slot.show(OsdKind::Volume, 100, now);
+        assert!(!slot.get().unwrap().fill_over_limit());
+        slot.show(OsdKind::Volume, 150, now);
+        assert_eq!(slot.get().unwrap().icon_and_label().1, "150%");
+        assert!(slot.get().unwrap().fill_over_limit());
 
         slot.show(OsdKind::Volume, 0, now);
         assert_eq!(slot.get().unwrap().icon_and_label().0, "\u{f027}");
