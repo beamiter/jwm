@@ -39,6 +39,8 @@
 | 60 | 选中的搜索框用 accent wash | `query_selected` + `query_field_fill` |
 | 61 | 滚动条拖动时拇指跟指针 | `scroll_drag_t` + `with_scroll_drag_t` |
 | 62 | 搜索框真实 caret，选中常亮否则 530ms 闪 | `query_caret_*`；去掉纹理里的 `_` |
+| 63 | 截图工具条一行放不下时折两行 | `wrap_at` / `track_extent_for` |
+| 64 | 颜色色块描对比描边 | `swatch_ring_ink` |
 
 **未做**：100 轮逐条独立 PR。toast 点击保持闭区间，与 X11 overlay shape 对齐。
 

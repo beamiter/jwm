@@ -844,11 +844,9 @@ impl Jwm {
         }
 
         let screen = [0.0, 0.0, self.s_w as f32, self.s_h as f32];
-        let button_size = screenshot_toolbar::fit_button_size(
-            &buttons,
-            screen[2] - 2.0 * screenshot_toolbar::SCREEN_MARGIN,
-        );
-        let extent = screenshot_toolbar::track_extent(&buttons, button_size);
+        let max_width = screen[2] - 2.0 * screenshot_toolbar::SCREEN_MARGIN;
+        let button_size = screenshot_toolbar::fit_button_size(&buttons, max_width);
+        let extent = screenshot_toolbar::track_extent_for(&buttons, button_size, max_width);
         let hint = crate::backend::compositor_common::capture_hint::capture_hint_layout(
             screen[2],
             screen[3],

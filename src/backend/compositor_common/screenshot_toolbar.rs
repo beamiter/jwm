@@ -338,32 +338,91 @@ pub fn track_units(buttons: &[ToolbarButton]) -> f32 {
     faces + gaps + 2.0 * PAD_X / BUTTON_SIZE
 }
 
-/// Height of the track in button units.
+/// Height of a one-row track in button units.
 #[must_use]
 pub fn track_height_units() -> f32 {
-    1.0 + 2.0 * PAD_Y / BUTTON_SIZE
+    track_height_units_n(1)
 }
 
-/// The largest button size whose track still fits `max_width`, never above the
-/// nominal size and never below the legibility floor. A strip that cannot fit
-/// even at the floor keeps the floor and is clamped into the screen by
-/// [`place`], which is the least-bad of the two ways to lose.
+fn track_height_units_n(rows: usize) -> f32 {
+    let rows = rows.max(1) as f32;
+    rows + 2.0 * PAD_Y / BUTTON_SIZE + (rows - 1.0) * BUTTON_GAP / BUTTON_SIZE
+}
+
+/// Units of one contiguous row (padding and gaps included).
+fn row_units(buttons: &[ToolbarButton]) -> f32 {
+    track_units(buttons)
+}
+
+/// Split into two rows when a single row at [`MIN_BUTTON_SIZE`] is still
+/// wider than `max_width`. Returns the first index of the second row.
+#[must_use]
+pub fn wrap_at(buttons: &[ToolbarButton], max_width: f32) -> Option<usize> {
+    if buttons.len() < 4 || !max_width.is_finite() || max_width <= 0.0 {
+        return None;
+    }
+    let one = row_units(buttons);
+    if one <= 0.0 || one * MIN_BUTTON_SIZE <= max_width {
+        return None;
+    }
+    let mut best_i = buttons.len() / 2;
+    let mut best = f32::MAX;
+    for i in 1..buttons.len() {
+        let m = row_units(&buttons[..i]).max(row_units(&buttons[i..]));
+        if m < best {
+            best = m;
+            best_i = i;
+        }
+    }
+    Some(best_i)
+}
+
+fn max_row_units(buttons: &[ToolbarButton], split: Option<usize>) -> f32 {
+    match split {
+        Some(i) if i > 0 && i < buttons.len() => {
+            row_units(&buttons[..i]).max(row_units(&buttons[i..]))
+        }
+        _ => row_units(buttons),
+    }
+}
+
+/// The largest button size whose (possibly wrapped) track still fits
+/// `max_width`, never above the nominal size and never below the
+/// legibility floor. A strip that cannot fit even wrapped at the floor
+/// keeps the floor and is clamped into the screen by [`place`].
 #[must_use]
 pub fn fit_button_size(buttons: &[ToolbarButton], max_width: f32) -> f32 {
-    let units = track_units(buttons);
+    let units = max_row_units(buttons, wrap_at(buttons, max_width));
     if !max_width.is_finite() || max_width <= 0.0 || units <= 0.0 {
         return BUTTON_SIZE;
     }
     (max_width / units).clamp(MIN_BUTTON_SIZE, BUTTON_SIZE)
 }
 
-/// The track's pixel size for a given button size.
+/// The track's pixel size for a given button size, as a single row.
 #[must_use]
 pub fn track_extent(buttons: &[ToolbarButton], button_size: f32) -> (f32, f32) {
     (
         track_units(buttons) * button_size,
         track_height_units() * button_size,
     )
+}
+
+/// As [`track_extent`], wrapping to two rows when a single row at the
+/// legibility floor would still overflow `max_width`.
+#[must_use]
+pub fn track_extent_for(
+    buttons: &[ToolbarButton],
+    button_size: f32,
+    max_width: f32,
+) -> (f32, f32) {
+    match wrap_at(buttons, max_width) {
+        Some(i) => (
+            max_row_units(buttons, Some(i)) * button_size,
+            track_height_units_n(2) * button_size,
+        ),
+        None => track_extent(buttons, button_size),
+    }
 }
 
 /// Where the track goes: centred on the selection, below it by preference,
@@ -416,6 +475,16 @@ fn rects_overlap(a: Rect, b: Rect) -> bool {
     a[0] < b[0] + b[2] && b[0] < a[0] + a[2] && a[1] < b[1] + b[3] && b[1] < a[1] + a[3]
 }
 
+/// First index of the second row when `bar` is tall enough to hold two rows
+/// and `bar`'s width still cannot take a single row at the size floor.
+fn split_for_bar(bar: Rect, buttons: &[ToolbarButton], button_size: f32) -> Option<usize> {
+    let one_h = track_height_units() * button_size;
+    if bar[3] + 0.5 < one_h + button_size {
+        return None;
+    }
+    wrap_at(buttons, bar[2])
+}
+
 /// The *slot* for `index`: its share of the track, split with its neighbours
 /// down the middle of the gap between them. Slots tile the track edge to edge,
 /// so [`button_at`] leaves no dead pixels between two buttons.
@@ -429,25 +498,33 @@ pub fn slot_rect(
     if index >= buttons.len() || !is_drawable(bar) || !is_positive(button_size) {
         return None;
     }
-    let [bx, by, bw, bh] = bar;
+    let split = split_for_bar(bar, buttons, button_size);
+    let (start, end, row_y, row_h) = match split {
+        Some(s) if index >= s => (s, buttons.len(), bar[1] + bar[3] * 0.5, bar[3] * 0.5),
+        Some(s) => (0, s, bar[1], bar[3] * 0.5),
+        None => (0, buttons.len(), bar[1], bar[3]),
+    };
+    let row = &buttons[start..end];
+    let index_in_row = index - start;
+    let [bx, _, bw, _] = bar;
     let gap = BUTTON_GAP / BUTTON_SIZE * button_size;
     let pad = PAD_X / BUTTON_SIZE * button_size;
 
     let mut cursor = bx + pad;
-    for button in &buttons[..index] {
+    for button in &row[..index_in_row] {
         cursor += face_units(&button.face) * button_size + gap;
     }
-    let width = face_units(&buttons[index].face) * button_size;
+    let width = face_units(&row[index_in_row].face) * button_size;
 
     // Outer slots absorb the padding, inner edges take half a gap, so the row
     // of slots covers the whole track without overlapping.
-    let left = if index == 0 { pad } else { gap * 0.5 };
-    let right = if index + 1 == buttons.len() {
+    let left = if index_in_row == 0 { pad } else { gap * 0.5 };
+    let right = if index_in_row + 1 == row.len() {
         pad
     } else {
         gap * 0.5
     };
-    let slot = [cursor - left, by, width + left + right, bh];
+    let slot = [cursor - left, row_y, width + left + right, row_h];
     // A slot that ran past the track (a strip wider than its own bar) is
     // clipped rather than allowed to hit-test outside the paint.
     let clipped_w = slot[2].min(bx + bw - slot[0]);
@@ -463,20 +540,25 @@ pub fn button_rect(
     button_size: f32,
     index: usize,
 ) -> Option<Rect> {
-    if index >= buttons.len() || !is_drawable(bar) || !is_positive(button_size) {
-        return None;
-    }
-    let [bx, by, _, bh] = bar;
+    let slot = slot_rect(bar, buttons, button_size, index)?;
+    let [_, sy, sw, sh] = slot;
     let gap = BUTTON_GAP / BUTTON_SIZE * button_size;
     let pad = PAD_X / BUTTON_SIZE * button_size;
-
-    let mut cursor = bx + pad;
-    for button in &buttons[..index] {
+    let split = split_for_bar(bar, buttons, button_size);
+    let (start, end) = match split {
+        Some(s) if index >= s => (s, buttons.len()),
+        Some(s) => (0, s),
+        None => (0, buttons.len()),
+    };
+    let row = &buttons[start..end];
+    let index_in_row = index - start;
+    let width = face_units(&row[index_in_row].face) * button_size;
+    let mut cursor = bar[0] + pad;
+    for button in &row[..index_in_row] {
         cursor += face_units(&button.face) * button_size + gap;
     }
-    let width = face_units(&buttons[index].face) * button_size;
-    let height = button_size.min(bh);
-    let rect = [cursor, by + (bh - height) * 0.5, width, height];
+    let height = button_size.min(sh);
+    let rect = [cursor, sy + (sh - height) * 0.5, width.min(sw), height];
     is_drawable(rect).then_some(rect)
 }
 
@@ -950,7 +1032,47 @@ pub fn icon_rgba(icon: ToolbarIcon, px: u32, ink: [u8; 4]) -> (Vec<u8>, u32, u32
             pixels[offset + 3] = alpha;
         }
     }
+    if icon == ToolbarIcon::Color {
+        overlay_swatch_ring(&mut pixels, px, swatch_ring_ink(ink));
+    }
     (pixels, px, px)
+}
+
+/// Hairline around a color swatch so a fill close to the track still reads.
+#[must_use]
+pub fn swatch_ring_ink(fill: [u8; 4]) -> [u8; 4] {
+    let y = 0.2126 * f32::from(fill[0]) + 0.7152 * f32::from(fill[1]) + 0.0722 * f32::from(fill[2]);
+    let a = fill[3];
+    if y >= 128.0 {
+        [28, 28, 32, a]
+    } else {
+        [245, 245, 248, a]
+    }
+}
+
+fn overlay_swatch_ring(pixels: &mut [u8], px: u32, ink: [u8; 4]) {
+    let side = px as f32;
+    let r = 0.30;
+    for y in 0..px {
+        for x in 0..px {
+            let dx = (x as f32 + 0.5) / side - 0.5;
+            let dy = (y as f32 + 0.5) / side - 0.5;
+            let d = (dx * dx + dy * dy).sqrt() - r;
+            let coverage = (0.5 - d.abs() * side).clamp(0.0, 1.0);
+            if coverage <= 0.0 {
+                continue;
+            }
+            let alpha = (f32::from(ink[3]) * coverage).round().clamp(0.0, 255.0) as u8;
+            if alpha == 0 {
+                continue;
+            }
+            let offset = ((y * px + x) * 4) as usize;
+            pixels[offset] = ink[0];
+            pixels[offset + 1] = ink[1];
+            pixels[offset + 2] = ink[2];
+            pixels[offset + 3] = alpha.max(pixels[offset + 3]);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1412,10 +1534,42 @@ mod tests {
         let buttons = row(20);
         assert_eq!(fit_button_size(&buttons, 10_000.0), BUTTON_SIZE);
         let narrow = fit_button_size(&buttons, 300.0);
-        assert_eq!(narrow, MIN_BUTTON_SIZE);
+        assert!(narrow > MIN_BUTTON_SIZE);
+        assert!(wrap_at(&buttons, 300.0).is_some());
+        let wrapped = track_extent_for(&buttons, narrow, 300.0);
+        assert!(wrapped.0 <= 300.0 + 1e-3);
+        assert!(wrapped.1 > track_height_units() * narrow);
         let middling = fit_button_size(&buttons, 600.0);
         assert!(middling > MIN_BUTTON_SIZE && middling < BUTTON_SIZE);
+        assert!(wrap_at(&buttons, 600.0).is_none());
         assert!(track_extent(&buttons, middling).0 <= 600.0 + 1e-3);
+    }
+
+    #[test]
+    fn a_strip_that_cannot_fit_one_row_wraps_and_still_hits() {
+        let buttons = row(20);
+        let max_w = 280.0;
+        let size = fit_button_size(&buttons, max_w);
+        let extent = track_extent_for(&buttons, size, max_w);
+        let bar = place([100.0, 100.0, 80.0, 80.0], [0.0, 0.0, 320.0, 400.0], extent);
+        let split = wrap_at(&buttons, bar[2]).expect("two rows");
+        let top = button_rect(bar, &buttons, size, 0).unwrap();
+        let bottom = button_rect(bar, &buttons, size, split).unwrap();
+        assert!(bottom[1] > top[1] + top[3] * 0.5, "second row sits below");
+        assert_eq!(
+            button_at(bar, &buttons, size, top[0] + top[2] * 0.5, top[1] + top[3] * 0.5),
+            Some(0)
+        );
+        assert_eq!(
+            button_at(
+                bar,
+                &buttons,
+                size,
+                bottom[0] + bottom[2] * 0.5,
+                bottom[1] + bottom[3] * 0.5
+            ),
+            Some(split)
+        );
     }
 
     #[test]
@@ -1436,6 +1590,17 @@ mod tests {
         );
         assert_eq!(fit_button_size(&buttons, f32::NAN), BUTTON_SIZE);
         assert_eq!(fit_button_size(&[], 500.0), BUTTON_SIZE);
+    }
+
+    #[test]
+    fn a_color_swatch_wears_a_contrasting_ring() {
+        let light = swatch_ring_ink([240, 240, 240, 255]);
+        let dark = swatch_ring_ink([20, 20, 20, 255]);
+        assert!(light[0] < 80, "light fill needs a dark ring");
+        assert!(dark[0] > 200, "dark fill needs a light ring");
+        let (pixels, ..) = icon_rgba(ToolbarIcon::Color, 32, [240, 240, 240, 255]);
+        let ringed = pixels.chunks_exact(4).filter(|p| p[3] > 200 && p[0] < 80).count();
+        assert!(ringed > 0, "the hairline must land on the swatch");
     }
 
     #[test]
@@ -1471,7 +1636,16 @@ mod tests {
                 // Ink is never written into a fully transparent pixel's color,
                 // and every covered pixel carries exactly the requested ink.
                 for p in pixels.chunks_exact(4).filter(|p| p[3] > 0) {
-                    assert_eq!([p[0], p[1], p[2]], [200, 40, 90], "{icon:?} tint");
+                    if icon == ToolbarIcon::Color {
+                        let rgb = [p[0], p[1], p[2]];
+                        let ring = swatch_ring_ink([200, 40, 90, 255]);
+                        assert!(
+                            rgb == [200, 40, 90] || rgb == [ring[0], ring[1], ring[2]],
+                            "{icon:?} tint"
+                        );
+                    } else {
+                        assert_eq!([p[0], p[1], p[2]], [200, 40, 90], "{icon:?} tint");
+                    }
                 }
             }
         }
