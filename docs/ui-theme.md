@@ -16,7 +16,9 @@ ui_theme = "glass"
 ```
 
 The setting touches JWM's own overlays and, when the X11 compositor is off,
-the native window border colour and the root wallpaper. The default status
+the native window border colour and the root wallpaper. Native `BorderPixel`
+is composited over the theme letterbox so unfocused rings stay visible on
+the wallpaper. The default status
 bar then frosts that root pixmap (or `glass.wallpaper` if the bar config
 sets one) instead of drawing a solid slab. Client windows keep
 their own corner radius, shadow, and per-window frost settings.

@@ -372,21 +372,16 @@ impl UiPalette {
     /// Opaque RGB for a native X11 root letterbox, matching the lock card's
     /// ground so compositor-off gaps do not flash a different black.
     pub(crate) fn native_letterbox_rgb(&self) -> [u8; 3] {
-        let (red, green, blue) = opaque_over(self.lock_backdrop, [0.0, 0.0, 0.0, 1.0]).rgb();
+        let (red, green, blue) = native_border_pixel(self.lock_backdrop).rgb();
         [red, green, blue]
     }
 }
 
 /// X11 `BorderPixel` cannot carry alpha, so a compositor colour that is
-/// translucent is composited over black before it becomes a colormap entry.
+/// translucent is composited over an opaque ground before it becomes a
+/// colormap entry.
 pub(crate) fn native_border_pixel(rgba: [f32; 4]) -> ArgbColor {
-    let alpha = finite01(rgba[3]);
-    ArgbColor::from_rgba_f32([
-        finite01(rgba[0]) * alpha,
-        finite01(rgba[1]) * alpha,
-        finite01(rgba[2]) * alpha,
-        1.0,
-    ])
+    opaque_over(rgba, [0.0, 0.0, 0.0, 1.0])
 }
 
 /// Native X11 colour schemes: the same inks as the theme's panels, the same
@@ -394,7 +389,9 @@ pub(crate) fn native_border_pixel(rgba: [f32; 4]) -> ArgbColor {
 ///
 /// Without a compositor those rings *are* the window manager's chrome — the
 /// historical mint/cyan `colors.*` hexes never tracked `appearance.ui_theme`
-/// or `behavior.border_color_*`.
+/// or `behavior.border_color_*`. Translucent rings composite over the theme
+/// letterbox rather than over black, so unfocused frames do not collapse to
+/// a muddy outline against the wallpaper.
 pub(crate) fn native_color_schemes(
     palette: &UiPalette,
     focused_border: [f32; 4],
@@ -403,9 +400,10 @@ pub(crate) fn native_color_schemes(
 ) -> (ColorScheme, ColorScheme, ColorScheme) {
     let fg = ink_argb(palette.item_ink);
     let bg = opaque_over(palette.panel, palette.lock_backdrop);
-    let norm = ColorScheme::new(fg, bg, native_border_pixel(unfocused_border));
-    let sel = ColorScheme::new(fg, bg, native_border_pixel(focused_border));
-    let urgent = ColorScheme::new(fg, bg, native_border_pixel(urgent_border));
+    let ground = palette.lock_backdrop;
+    let norm = ColorScheme::new(fg, bg, opaque_over(unfocused_border, ground));
+    let sel = ColorScheme::new(fg, bg, opaque_over(focused_border, ground));
+    let urgent = ColorScheme::new(fg, bg, opaque_over(urgent_border, ground));
     (norm, sel, urgent)
 }
 
@@ -1175,9 +1173,10 @@ mod tests {
         let unfocused = [0.3, 0.3, 0.3, 0.6];
         let urgent = [1.0, 0.3, 0.3, 1.0];
         let (norm, sel, urg) = native_color_schemes(&MATERIAL, focused, unfocused, urgent);
-        assert_eq!(sel.border, native_border_pixel(focused));
-        assert_eq!(norm.border, native_border_pixel(unfocused));
-        assert_eq!(urg.border, native_border_pixel(urgent));
+        assert_eq!(sel.border, opaque_over(focused, MATERIAL.lock_backdrop));
+        assert_eq!(norm.border, opaque_over(unfocused, MATERIAL.lock_backdrop));
+        assert_eq!(urg.border, opaque_over(urgent, MATERIAL.lock_backdrop));
+        assert_ne!(norm.border, native_border_pixel(unfocused));
         assert_ne!(sel.border, norm.border);
         assert_eq!(sel.fg, ink_argb(MATERIAL.item_ink));
         let paper = native_color_schemes(&PAPER, focused, unfocused, urgent);

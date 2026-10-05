@@ -23,7 +23,8 @@ monorepo use independent Semantic Versions.
   native picture; missing files skip the worker and keep the letterbox;
   PNG alpha blends over that fill; pixmap IDs of 0 are ignored. WM setup and
   `updategeom` install the native picture as soon as outputs exist, not only
-  on the first animation tick.
+  on the first animation tick. Unfocused native borders composite over the
+  theme letterbox instead of black, so they stay visible against the wallpaper.
 - `get_monitors` / `get_tree` monitor rows report `bar_visible`: whether the
   status-bar window currently occupies that output. Distinct from `show_bar`,
   which remains the per-tag preference and stays true during F11 fullscreen.
