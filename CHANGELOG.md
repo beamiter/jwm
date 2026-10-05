@@ -25,6 +25,8 @@ monorepo use independent Semantic Versions.
   `updategeom` install the native picture as soon as outputs exist, not only
   on the first animation tick. Unfocused native borders composite over the
   theme letterbox instead of black, so they stay visible against the wallpaper.
+  Native rings also follow compositor priority: urgent, then picture-in-picture,
+  then focused/unfocused.
 - `get_monitors` / `get_tree` monitor rows report `bar_visible`: whether the
   status-bar window currently occupies that output. Distinct from `show_bar`,
   which remains the per-tag preference and stays true during F11 fullscreen.

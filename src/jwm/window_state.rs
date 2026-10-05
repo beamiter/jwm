@@ -33,12 +33,16 @@ pub(super) const fn minimized_order_is_safe_to_recover(order: u64) -> bool {
 pub(super) const fn client_decoration_scheme(
     is_focused: bool,
     is_urgent: bool,
+    is_pip: bool,
     attention_enabled: bool,
 ) -> SchemeType {
-    if is_focused {
-        SchemeType::Sel
-    } else if is_urgent && attention_enabled {
+    // Same order as the compositor ring: attention, then PiP, then focus.
+    if is_urgent && attention_enabled {
         SchemeType::Urgent
+    } else if is_pip {
+        SchemeType::Pip
+    } else if is_focused {
+        SchemeType::Sel
     } else {
         SchemeType::Norm
     }
@@ -846,11 +850,17 @@ impl Jwm {
         client_key: ClientKey,
         is_focused: bool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let (win, border_w, is_urgent) = if let Some(client) = self.state.clients.get(client_key) {
-            (client.win, client.geometry.border_w, client.state.is_urgent)
-        } else {
-            return Err("Client not found".into());
-        };
+        let (win, border_w, is_urgent, is_pip) =
+            if let Some(client) = self.state.clients.get(client_key) {
+                (
+                    client.win,
+                    client.geometry.border_w,
+                    client.state.is_urgent,
+                    client.state.is_pip,
+                )
+            } else {
+                return Err("Client not found".into());
+            };
 
         let x11_bw = if backend.has_compositor() {
             0
@@ -861,6 +871,7 @@ impl Jwm {
         let scheme = client_decoration_scheme(
             is_focused,
             is_urgent,
+            is_pip,
             CONFIG.load().behavior().attention_animation,
         );
         if let Ok(pixel) = backend.color_allocator().get_border_pixel_of(scheme) {
@@ -2256,19 +2267,33 @@ mod urgency_tests {
     use crate::backend::common_define::SchemeType;
 
     #[test]
-    fn native_decoration_prioritizes_focus_then_urgency() {
-        assert_eq!(client_decoration_scheme(true, true, true), SchemeType::Sel);
-        assert_eq!(client_decoration_scheme(true, false, true), SchemeType::Sel);
+    fn native_decoration_matches_compositor_ring_priority() {
         assert_eq!(
-            client_decoration_scheme(false, true, true),
+            client_decoration_scheme(true, true, false, true),
             SchemeType::Urgent
         );
         assert_eq!(
-            client_decoration_scheme(false, false, true),
+            client_decoration_scheme(true, false, true, true),
+            SchemeType::Pip
+        );
+        assert_eq!(
+            client_decoration_scheme(false, false, true, true),
+            SchemeType::Pip
+        );
+        assert_eq!(
+            client_decoration_scheme(true, false, false, true),
+            SchemeType::Sel
+        );
+        assert_eq!(
+            client_decoration_scheme(false, true, true, true),
+            SchemeType::Urgent
+        );
+        assert_eq!(
+            client_decoration_scheme(false, false, false, true),
             SchemeType::Norm
         );
         assert_eq!(
-            client_decoration_scheme(false, true, false),
+            client_decoration_scheme(false, true, false, false),
             SchemeType::Norm
         );
     }

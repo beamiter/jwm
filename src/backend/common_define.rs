@@ -232,6 +232,7 @@ pub enum SchemeType {
     Urgent = 2,  // 紧急状态
     Warning = 3, // 警告状态
     Error = 4,   // 错误状态
+    Pip = 5,     // picture-in-picture ring
 }
 
 fn parse_hex_color(hex: &str) -> Result<(u8, u8, u8), Box<dyn std::error::Error>> {

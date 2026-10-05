@@ -96,6 +96,7 @@ impl Jwm {
                 let scheme = super::window_state::client_decoration_scheme(
                     focused == Some(client_key),
                     client.state.is_urgent,
+                    client.state.is_pip,
                     attention_enabled,
                 );
                 // Hidden/Iconic clients have already crossed the checked
@@ -784,6 +785,7 @@ impl Jwm {
             let scheme = super::window_state::client_decoration_scheme(
                 self.get_selected_client_key() == Some(client_key),
                 client.state.is_urgent,
+                client.state.is_pip,
                 CONFIG.load().behavior().attention_animation,
             );
             let border_color = backend.color_allocator().get_border_pixel_of(scheme)?;

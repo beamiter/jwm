@@ -385,7 +385,7 @@ pub(crate) fn native_border_pixel(rgba: [f32; 4]) -> ArgbColor {
 }
 
 /// Native X11 colour schemes: the same inks as the theme's panels, the same
-/// focused / unfocused / urgent rings as the compositor.
+/// focused / unfocused / urgent / PiP rings as the compositor.
 ///
 /// Without a compositor those rings *are* the window manager's chrome — the
 /// historical mint/cyan `colors.*` hexes never tracked `appearance.ui_theme`
@@ -397,14 +397,18 @@ pub(crate) fn native_color_schemes(
     focused_border: [f32; 4],
     unfocused_border: [f32; 4],
     urgent_border: [f32; 4],
-) -> (ColorScheme, ColorScheme, ColorScheme) {
+    pip_border: [f32; 4],
+) -> (ColorScheme, ColorScheme, ColorScheme, ColorScheme) {
     let fg = ink_argb(palette.item_ink);
     let bg = opaque_over(palette.panel, palette.lock_backdrop);
     let ground = palette.lock_backdrop;
-    let norm = ColorScheme::new(fg, bg, opaque_over(unfocused_border, ground));
-    let sel = ColorScheme::new(fg, bg, opaque_over(focused_border, ground));
-    let urgent = ColorScheme::new(fg, bg, opaque_over(urgent_border, ground));
-    (norm, sel, urgent)
+    let scheme = |border: [f32; 4]| ColorScheme::new(fg, bg, opaque_over(border, ground));
+    (
+        scheme(unfocused_border),
+        scheme(focused_border),
+        scheme(urgent_border),
+        scheme(pip_border),
+    )
 }
 
 fn finite01(value: f32) -> f32 {
@@ -894,7 +898,11 @@ mod tests {
 
     fn contrast(a: [u8; 4], b: [u8; 4]) -> f32 {
         let (a, b) = (relative_luminance(a) + 0.05, relative_luminance(b) + 0.05);
-        if a > b { a / b } else { b / a }
+        if a > b {
+            a / b
+        } else {
+            b / a
+        }
     }
 
     /// The footer hint is the one line on the panel that tells a first-time
@@ -1172,14 +1180,17 @@ mod tests {
         let focused = [0.4, 0.6, 0.9, 1.0];
         let unfocused = [0.3, 0.3, 0.3, 0.6];
         let urgent = [1.0, 0.3, 0.3, 1.0];
-        let (norm, sel, urg) = native_color_schemes(&MATERIAL, focused, unfocused, urgent);
+        let pip = [0.0, 0.8, 1.0, 0.8];
+        let (norm, sel, urg, pip_scheme) =
+            native_color_schemes(&MATERIAL, focused, unfocused, urgent, pip);
         assert_eq!(sel.border, opaque_over(focused, MATERIAL.lock_backdrop));
         assert_eq!(norm.border, opaque_over(unfocused, MATERIAL.lock_backdrop));
         assert_eq!(urg.border, opaque_over(urgent, MATERIAL.lock_backdrop));
+        assert_eq!(pip_scheme.border, opaque_over(pip, MATERIAL.lock_backdrop));
         assert_ne!(norm.border, native_border_pixel(unfocused));
         assert_ne!(sel.border, norm.border);
         assert_eq!(sel.fg, ink_argb(MATERIAL.item_ink));
-        let paper = native_color_schemes(&PAPER, focused, unfocused, urgent);
+        let paper = native_color_schemes(&PAPER, focused, unfocused, urgent, pip);
         assert_ne!(paper.0.fg, sel.fg);
         assert_ne!(paper.0.bg, sel.bg);
     }
