@@ -2,7 +2,7 @@
 
 use crate::Jwm;
 use crate::backend::api::{Backend, Geometry, ManagedUnmapReason, WindowChanges};
-use crate::backend::common_define::{ArgbColor, ColorScheme, EventMaskBits, SchemeType, WindowId};
+use crate::backend::common_define::{EventMaskBits, WindowId};
 use crate::config::CONFIG;
 use crate::core::models::{ClientKey, MonitorKey, WMClient};
 use crate::core::state::WMState;
@@ -1526,43 +1526,9 @@ impl Jwm {
         }
 
         // 2. Re-apply color schemes
-        let colors = cfg.colors();
-        let alloc = backend.color_allocator();
-        let _ = alloc.free_all_theme_pixels();
-        if let (Ok(norm_fg), Ok(norm_bg), Ok(norm_border)) = (
-            ArgbColor::from_hex(&colors.dark_sea_green1, colors.opaque),
-            ArgbColor::from_hex(&colors.light_sky_blue1, colors.opaque),
-            ArgbColor::from_hex(&colors.light_sky_blue1, colors.opaque),
-        ) {
-            alloc.set_scheme(
-                SchemeType::Norm,
-                ColorScheme::new(norm_fg, norm_bg, norm_border),
-            );
+        if let Err(error) = crate::jwm::native_chrome::apply_native_color_schemes(backend) {
+            warn!("[config] could not re-apply native colour schemes: {error}");
         }
-        if let (Ok(sel_fg), Ok(sel_bg), Ok(sel_border)) = (
-            ArgbColor::from_hex(&colors.dark_sea_green2, colors.opaque),
-            ArgbColor::from_hex(&colors.pale_turquoise1, colors.opaque),
-            ArgbColor::from_hex(&colors.cyan, colors.opaque),
-        ) {
-            alloc.set_scheme(
-                SchemeType::Sel,
-                ColorScheme::new(sel_fg, sel_bg, sel_border),
-            );
-        }
-        if let (Ok(urgent_fg), Ok(urgent_bg)) = (
-            ArgbColor::from_hex(&colors.dark_sea_green1, colors.opaque),
-            ArgbColor::from_hex(&colors.light_sky_blue1, colors.opaque),
-        ) {
-            alloc.set_scheme(
-                SchemeType::Urgent,
-                ColorScheme::new(
-                    urgent_fg,
-                    urgent_bg,
-                    ArgbColor::from_rgba_f32(cfg.behavior().attention_color),
-                ),
-            );
-        }
-        let _ = alloc.allocate_schemes_pixels();
 
         // 3. Keep per-tag slot vectors in lockstep with layout.tags_length.
         // Pertag is sized once at createmon; a live reload that grows the
@@ -1686,6 +1652,8 @@ impl Jwm {
         // 8. A new wallpaper means new accent colours, when the user asked for
         // them. The decode runs on a worker; the frame tick adopts the result.
         self.refresh_wallpaper_theme();
+        self.features.native_root_key.clear();
+        self.ensure_native_root_wallpaper(backend);
 
         // 9. Config application/recreation may resend configured brightness;
         // preserve an idle dim that is still meant to be in effect.

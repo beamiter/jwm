@@ -49,7 +49,15 @@ a symlink to an image is listed, one to a folder or a dangling one is not.
 The choice goes through the same path a `set_config` takes — it updates
 `behavior.wallpaper` in the live configuration and runs the normal
 apply-config step, so both compositors pick it up exactly as they would from a
-reload, crossfade included when `wallpaper_crossfade` is on.
+reload, crossfade included when `wallpaper_crossfade` is on. An X11 session
+running **without** the compositor still shows that picture: it is decoded off
+the event loop (Triangle-filtered to each output, not nearest-neighbour) and
+installed as the root pixmap (`_XROOTPMAP_ID`), laid out per output with the
+same `fill` / `fit` / `stretch` / `center` rules. Startup no longer paints the
+root black first, so an existing `feh` / `esetroot` pixmap stays until JWM's
+own wallpaper lands. Tiling gaps then match the composited desktop instead of
+a solid black root. The default status bar (`tao_glow_bar`) frosts that same
+root pixmap when it cannot be translucent.
 
 That also means the change is **in memory only**, like every other
 `set_config`: it lasts for the session and is not written back to

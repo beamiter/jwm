@@ -1378,9 +1378,9 @@ impl<C: CompositorConnection> Drop for Compositor<C> {
         }
         // Destroy the _NET_WM_CM_Sn selection owner window (releases ownership)
         let _ = self.conn.destroy_window_resource(self.cm_selection_owner);
-        // The compositor owns wallpaper rendering. Before exposing the native
-        // root again, discard any root pixmap left by the wallpaper path and
-        // repaint it solid black.
+        // The compositor owns wallpaper rendering while it is alive. After
+        // teardown the window manager restores the native root pixmap (or
+        // paints one) so gaps show the configured wallpaper instead of black.
         if let Err(err) = self.conn.paint_root_solid_black(self.root) {
             log::warn!("compositor: failed to paint root background black: {err}");
         }

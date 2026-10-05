@@ -26,6 +26,7 @@ pub mod layout_picker;
 pub mod magnifier;
 pub mod media;
 pub mod monitor_lock;
+pub mod native_root;
 pub mod notifications;
 pub mod overview;
 pub mod overview_plan;
@@ -217,6 +218,11 @@ pub struct FeatureStates {
     /// tick fills it in; a picker closed meanwhile drops the answer.
     pub wallpaper_listing:
         Option<connectivity::BackgroundJob<(std::path::PathBuf, Vec<std::path::PathBuf>)>>,
+    /// Compositor-off root wallpaper decode, if one is in flight.
+    pub native_root_job: Option<connectivity::BackgroundJob<Option<native_root::NativeRootPixels>>>,
+    /// Fingerprint of the native root picture last requested, so a still
+    /// desktop does not decode the same file every tick.
+    pub native_root_key: String,
     /// A page opened from the Shell Hub returns there on Escape. Directly
     /// opened panels still close normally.
     pub system_ui_return_to_hub: bool,

@@ -104,5 +104,7 @@ x11rb::atom_manager! {
 
         UTF8_STRING,
         COMPOUND_TEXT,
+        _XROOTPMAP_ID,
+        ESETROOT_PMAP_ID,
     }
 }

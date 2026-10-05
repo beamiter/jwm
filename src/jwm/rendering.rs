@@ -323,6 +323,10 @@ impl Jwm {
             self.replay_compositor_runtime_state(backend, now);
         }
         self.features.compositor_transition.succeed();
+        if !enabled {
+            self.features.native_root_key.clear();
+            self.ensure_native_root_wallpaper(backend);
+        }
         Ok(after != before)
     }
 
@@ -477,6 +481,8 @@ impl Jwm {
 
         // Wallpaper colour extraction decodes an image; the same applies.
         self.poll_wallpaper_theme(backend);
+        self.poll_native_root_wallpaper(backend);
+        self.ensure_native_root_wallpaper(backend);
 
         // Screenshot captures publish off-thread; push the completion toast
         // for any watcher whose PNG landed (or whose wait timed out).

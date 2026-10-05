@@ -3470,6 +3470,30 @@ pub trait RenderScheduler: Send {
     fn compositor_overlay_window(&self) -> Option<WindowId> {
         None
     }
+
+    /// Install a root-sized RGBA8 wallpaper on the native X11 root. Used when
+    /// the compositor is off so gaps show the configured picture instead of a
+    /// solid black root. Wayland compositors ignore this; they draw wallpaper
+    /// themselves.
+    fn install_root_wallpaper(
+        &mut self,
+        _width: u32,
+        _height: u32,
+        _rgba: &[u8],
+    ) -> Result<(), BackendError> {
+        Ok(())
+    }
+
+    /// Re-apply a previously installed native root pixmap after compositor
+    /// teardown. No-op when none has been installed this session.
+    fn restore_native_root_background(&mut self) {}
+
+    /// True when this backend can put a wallpaper on the native root. Dummy
+    /// and Wayland backends stay false so tests and nested sessions do not
+    /// decode `behavior.wallpaper` on every config apply.
+    fn native_root_wallpaper_supported(&self) -> bool {
+        false
+    }
 }
 
 pub trait EventHandler {

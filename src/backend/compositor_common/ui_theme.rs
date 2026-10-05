@@ -38,6 +38,8 @@
 //! and rounds its sheet through [`UiPalette::status_bar_sheet_radius`] rather
 //! than with the window radius its pixmap uses.
 
+use crate::backend::common_define::{ArgbColor, ColorScheme};
+
 /// Which design language the compositor's own surfaces follow.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum UiTheme {
@@ -366,6 +368,68 @@ impl UiPalette {
             (color[3] as f32 / 255.0) * alpha,
         ]
     }
+
+    /// Opaque RGB for a native X11 root letterbox, matching the lock card's
+    /// ground so compositor-off gaps do not flash a different black.
+    pub(crate) fn native_letterbox_rgb(&self) -> [u8; 3] {
+        let (red, green, blue) = opaque_over(self.lock_backdrop, [0.0, 0.0, 0.0, 1.0]).rgb();
+        [red, green, blue]
+    }
+}
+
+/// X11 `BorderPixel` cannot carry alpha, so a compositor colour that is
+/// translucent is composited over black before it becomes a colormap entry.
+pub(crate) fn native_border_pixel(rgba: [f32; 4]) -> ArgbColor {
+    let alpha = finite01(rgba[3]);
+    ArgbColor::from_rgba_f32([
+        finite01(rgba[0]) * alpha,
+        finite01(rgba[1]) * alpha,
+        finite01(rgba[2]) * alpha,
+        1.0,
+    ])
+}
+
+/// Native X11 colour schemes: the same inks as the theme's panels, the same
+/// focused / unfocused / urgent rings as the compositor.
+///
+/// Without a compositor those rings *are* the window manager's chrome — the
+/// historical mint/cyan `colors.*` hexes never tracked `appearance.ui_theme`
+/// or `behavior.border_color_*`.
+pub(crate) fn native_color_schemes(
+    palette: &UiPalette,
+    focused_border: [f32; 4],
+    unfocused_border: [f32; 4],
+    urgent_border: [f32; 4],
+) -> (ColorScheme, ColorScheme, ColorScheme) {
+    let fg = ink_argb(palette.item_ink);
+    let bg = opaque_over(palette.panel, palette.lock_backdrop);
+    let norm = ColorScheme::new(fg, bg, native_border_pixel(unfocused_border));
+    let sel = ColorScheme::new(fg, bg, native_border_pixel(focused_border));
+    let urgent = ColorScheme::new(fg, bg, native_border_pixel(urgent_border));
+    (norm, sel, urgent)
+}
+
+fn finite01(value: f32) -> f32 {
+    if value.is_finite() {
+        value.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
+fn ink_argb(ink: [u8; 4]) -> ArgbColor {
+    ArgbColor::new(ink[3], ink[0], ink[1], ink[2])
+}
+
+fn opaque_over(over: [f32; 4], under: [f32; 4]) -> ArgbColor {
+    let a = finite01(over[3]);
+    let inv = 1.0 - a;
+    ArgbColor::from_rgba_f32([
+        finite01(over[0]) * a + finite01(under[0]) * inv,
+        finite01(over[1]) * a + finite01(under[1]) * inv,
+        finite01(over[2]) * a + finite01(under[2]) * inv,
+        1.0,
+    ])
 }
 
 /// Material: elevated opaque surfaces on the 8dp grid. The original look.
@@ -1103,5 +1167,29 @@ mod tests {
         let faded = UiPalette::faded([0.1, 0.2, 0.3, 0.8], 0.5);
         assert_eq!(&faded[..3], &[0.1, 0.2, 0.3]);
         assert!((faded[3] - 0.4).abs() < 1e-6);
+    }
+
+    #[test]
+    fn native_x11_schemes_follow_the_compositor_rings_and_theme_inks() {
+        let focused = [0.4, 0.6, 0.9, 1.0];
+        let unfocused = [0.3, 0.3, 0.3, 0.6];
+        let urgent = [1.0, 0.3, 0.3, 1.0];
+        let (norm, sel, urg) = native_color_schemes(&MATERIAL, focused, unfocused, urgent);
+        assert_eq!(sel.border, native_border_pixel(focused));
+        assert_eq!(norm.border, native_border_pixel(unfocused));
+        assert_eq!(urg.border, native_border_pixel(urgent));
+        assert_ne!(sel.border, norm.border);
+        assert_eq!(sel.fg, ink_argb(MATERIAL.item_ink));
+        let paper = native_color_schemes(&PAPER, focused, unfocused, urgent);
+        assert_ne!(paper.0.fg, sel.fg);
+        assert_ne!(paper.0.bg, sel.bg);
+    }
+
+    #[test]
+    fn native_border_pixel_composites_translucency_over_black() {
+        let pixel = native_border_pixel([1.0, 1.0, 1.0, 0.5]);
+        let (_, red, green, blue) = pixel.components();
+        assert_eq!((red, green, blue), (128, 128, 128));
+        assert_eq!(pixel.alpha(), 255);
     }
 }

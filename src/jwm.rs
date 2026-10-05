@@ -31,6 +31,7 @@ pub(crate) mod update_readiness;
 pub mod visibility;
 
 pub mod monitor_management;
+pub(crate) mod native_chrome;
 pub mod positioning;
 pub mod process;
 pub mod rendering;
@@ -73,10 +74,7 @@ use crate::backend::api::StrutPartial;
 use crate::backend::api::WindowAttributes;
 use crate::backend::api::WindowChanges;
 use crate::backend::api::WindowType;
-use crate::backend::common_define::ArgbColor;
-use crate::backend::common_define::ColorScheme;
 use crate::backend::common_define::EventMaskBits;
-use crate::backend::common_define::SchemeType;
 use crate::backend::common_define::{KeySym, Mods};
 use crate::backend::error::BackendError;
 use crate::backend::update_notifier::AsyncUpdateNotifier;
@@ -1232,36 +1230,7 @@ impl Jwm {
             s_h,
             backend.root_window()
         );
-        let config = crate::config::CONFIG.load();
-        let colors = config.colors().clone();
-        let attention_color = config.behavior().attention_color;
-        drop(config);
-        let alloc = backend.color_allocator();
-        alloc.set_scheme(
-            SchemeType::Norm,
-            ColorScheme::new(
-                ArgbColor::from_hex(&colors.dark_sea_green1, colors.opaque)?,
-                ArgbColor::from_hex(&colors.light_sky_blue1, colors.opaque)?,
-                ArgbColor::from_hex(&colors.light_sky_blue1, colors.opaque)?,
-            ),
-        );
-        alloc.set_scheme(
-            SchemeType::Sel,
-            ColorScheme::new(
-                ArgbColor::from_hex(&colors.dark_sea_green2, colors.opaque)?,
-                ArgbColor::from_hex(&colors.pale_turquoise1, colors.opaque)?,
-                ArgbColor::from_hex(&colors.cyan, colors.opaque)?,
-            ),
-        );
-        alloc.set_scheme(
-            SchemeType::Urgent,
-            ColorScheme::new(
-                ArgbColor::from_hex(&colors.dark_sea_green1, colors.opaque)?,
-                ArgbColor::from_hex(&colors.light_sky_blue1, colors.opaque)?,
-                ArgbColor::from_rgba_f32(attention_color),
-            ),
-        );
-        backend.color_allocator().allocate_schemes_pixels()?;
+        crate::jwm::native_chrome::apply_native_color_schemes(backend)?;
         info!("[new] JWM initialization completed successfully");
         let outputs = backend.output_ops().enumerate_outputs();
         let config_revision = crate::config::Config::get_config_modified_time().ok();

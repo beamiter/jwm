@@ -18,7 +18,11 @@ use tao::{
 use glow::HasContext;
 use glutin::prelude::GlSurface;
 use x11rb::rust_connection::RustConnection;
-use xbar_core::glass::{DEFAULT_BACKGROUND_OPACITY, MAX_GLASS_IMAGE_BYTES};
+use xbar_core::glass::{
+    DEFAULT_BACKGROUND_OPACITY, GlassBackdrop, GlassError, GlassImage, MAX_GLASS_IMAGE_BYTES,
+    StripRequest, WallpaperSource, fallback_rgb,
+};
+use xbar_core::glass::wallpaper::WallpaperFile;
 use xbar_core::{
     AlignedWakeThread, BarPlacement, BarRuntime, RuntimeUpdate, TransportRecoveryConfig,
     TransportWakeSlot, WakeAck,
@@ -108,9 +112,23 @@ impl GlPresenter {
         })
     }
 
-    fn redraw(&mut self, bar: &mut CairoBar, width: u32, height: u32, scale: f64) -> Result<()> {
+    fn redraw(
+        &mut self,
+        bar: &mut CairoBar,
+        width: u32,
+        height: u32,
+        scale: f64,
+        backdrop: Option<&cairo::ImageSurface>,
+    ) -> Result<()> {
         let mut frame = allocate_bgra_frame(width, height)?;
-        bar.render_into_bgra(&mut frame, width, height, width.saturating_mul(4), scale)?;
+        bar.render_into_bgra_over(
+            &mut frame,
+            width,
+            height,
+            width.saturating_mul(4),
+            scale,
+            backdrop,
+        )?;
         let _ = bar.runtime_mut().take_changes();
 
         upload_bgra_frame(&self.gl, self.texture, width, height, &frame);
@@ -149,8 +167,17 @@ impl SoftwarePresenter {
         })
     }
 
-    fn redraw(&mut self, bar: &mut CairoBar, width: u32, height: u32, scale: f64) -> Result<()> {
-        let frame = self.canvas.render(bar, width, height, scale)?;
+    fn redraw(
+        &mut self,
+        bar: &mut CairoBar,
+        width: u32,
+        height: u32,
+        scale: f64,
+        backdrop: Option<&cairo::ImageSurface>,
+    ) -> Result<()> {
+        let frame = self
+            .canvas
+            .render_over(bar, width, height, scale, backdrop)?;
         let width = width as usize;
         let height = height as usize;
         let mut buffer = self
@@ -196,13 +223,20 @@ enum Presenter {
 }
 
 impl Presenter {
-    fn redraw(&mut self, bar: &mut CairoBar, width: u32, height: u32, scale: f64) -> Result<()> {
+    fn redraw(
+        &mut self,
+        bar: &mut CairoBar,
+        width: u32,
+        height: u32,
+        scale: f64,
+        backdrop: Option<&cairo::ImageSurface>,
+    ) -> Result<()> {
         // Validate before either the explicit GL buffer or CpuCanvas can
         // allocate from compositor-controlled dimensions.
         let _ = bgra_frame_len(width, height)?;
         match self {
-            Self::OpenGl(presenter) => presenter.redraw(bar, width, height, scale),
-            Self::Software(presenter) => presenter.redraw(bar, width, height, scale),
+            Self::OpenGl(presenter) => presenter.redraw(bar, width, height, scale, backdrop),
+            Self::Software(presenter) => presenter.redraw(bar, width, height, scale, backdrop),
         }
     }
 
@@ -228,11 +262,15 @@ struct App {
     effects: EffectRouter,
     /// Side connection for the window-depth check that completes the
     /// translucency decision.
-    x11: Option<RustConnection>,
+    x11: Option<Rc<RustConnection>>,
     /// True while a compositor was seen at startup but the window's depth has
     /// not been read yet — GTK realizes the native window lazily, so the
     /// check may have to wait for the first frame.
     depth_check_pending: bool,
+    /// Opaque windows (no compositor, or a 24-bit window) frost the root
+    /// wallpaper instead of showing a solid slab.
+    opaque: bool,
+    glass: Option<GlassBackdrop<OpaqueWallpaper>>,
 }
 
 impl App {
@@ -242,8 +280,9 @@ impl App {
         logical_size: LogicalSize<f64>,
         scale_factor: f64,
         proxy: EventLoopProxy<UserEvent>,
-        x11: Option<RustConnection>,
+        x11: Option<Rc<RustConnection>>,
         compositor_active: bool,
+        glass: Option<GlassBackdrop<OpaqueWallpaper>>,
     ) -> Result<Self> {
         let physical_size = window.inner_size();
         let _ = bgra_frame_len(physical_size.width, physical_size.height)
@@ -273,6 +312,8 @@ impl App {
             effects: EffectRouter::default(),
             x11,
             depth_check_pending: compositor_active,
+            opaque: !compositor_active,
+            glass,
         })
     }
 
@@ -291,7 +332,10 @@ impl App {
             .zip(self.x11.as_ref())
             .is_some_and(|(xid, conn)| window_is_argb(conn, xid));
         if !argb {
-            self.bar.renderer_mut().set_background_opacity(None);
+            self.opaque = true;
+            self.bar
+                .renderer_mut()
+                .set_background_opacity(Some(DEFAULT_BACKGROUND_OPACITY));
         }
     }
 
@@ -302,9 +346,26 @@ impl App {
         }
 
         self.resolve_translucency();
+        let scale = self.scale_factor;
+        let opaque = self.opaque;
+        let position = self.window.outer_position().ok();
+        let Self {
+            presenter,
+            bar,
+            glass,
+            ..
+        } = self;
+        let backdrop = if opaque {
+            position.and_then(|pos| {
+                glass
+                    .as_mut()
+                    .and_then(|glass| glass.ensure(pos.x, pos.y, width, height))
+            })
+        } else {
+            None
+        };
 
-        self.presenter
-            .redraw(&mut self.bar, width, height, self.scale_factor)?;
+        presenter.redraw(bar, width, height, scale, backdrop)?;
         let update = self.bar.take_pending_runtime();
         if !update.is_empty() {
             self.handle_runtime_update(update);
@@ -745,6 +806,134 @@ fn compositor_active(conn: &RustConnection, screen_num: usize) -> bool {
         .unwrap_or(false)
 }
 
+enum OpaqueWallpaper {
+    File(WallpaperFile),
+    Root(RootPixmapSource),
+}
+
+impl WallpaperSource for OpaqueWallpaper {
+    fn revision(&mut self) -> u64 {
+        match self {
+            Self::File(source) => source.revision(),
+            Self::Root(source) => source.revision(),
+        }
+    }
+
+    fn strip(&mut self, request: &StripRequest) -> Result<GlassImage, GlassError> {
+        match self {
+            Self::File(source) => source.strip(request),
+            Self::Root(source) => source.strip(request),
+        }
+    }
+}
+
+struct RootPixmapSource {
+    conn: Rc<RustConnection>,
+    root: u32,
+    atom: u32,
+    pixmap: u32,
+    revision: u64,
+}
+
+impl RootPixmapSource {
+    fn new(conn: Rc<RustConnection>, screen_num: usize) -> Self {
+        use x11rb::connection::Connection as _;
+        use x11rb::protocol::xproto::ConnectionExt as _;
+        let root = conn
+            .setup()
+            .roots
+            .get(screen_num)
+            .map(|screen| screen.root)
+            .unwrap_or(0);
+        let atom = conn
+            .intern_atom(false, b"_XROOTPMAP_ID")
+            .ok()
+            .and_then(|cookie| cookie.reply().ok())
+            .map(|reply| reply.atom)
+            .unwrap_or(0);
+        Self {
+            conn,
+            root,
+            atom,
+            pixmap: 0,
+            revision: 0,
+        }
+    }
+
+    fn current_pixmap(&self) -> Option<u32> {
+        use x11rb::protocol::xproto::{AtomEnum, ConnectionExt as _};
+        if self.atom == 0 || self.root == 0 {
+            return None;
+        }
+        let reply = self
+            .conn
+            .get_property(false, self.root, self.atom, AtomEnum::PIXMAP, 0, 1)
+            .ok()?
+            .reply()
+            .ok()?;
+        reply.value32()?.next().filter(|pixmap| *pixmap != 0)
+    }
+}
+
+impl WallpaperSource for RootPixmapSource {
+    fn revision(&mut self) -> u64 {
+        let pixmap = self.current_pixmap().unwrap_or(0);
+        if pixmap != self.pixmap {
+            self.pixmap = pixmap;
+            self.revision = self.revision.wrapping_add(1);
+        }
+        self.revision
+    }
+
+    fn strip(&mut self, request: &StripRequest) -> Result<GlassImage, GlassError> {
+        use x11rb::protocol::xproto::{ConnectionExt as _, ImageFormat};
+
+        let pixmap = self.current_pixmap().ok_or_else(|| {
+            GlassError::Unavailable("root wallpaper pixmap is not published yet".into())
+        })?;
+        let geometry = self
+            .conn
+            .get_geometry(pixmap)
+            .ok()
+            .and_then(|cookie| cookie.reply().ok())
+            .ok_or_else(|| GlassError::Unavailable("root wallpaper pixmap has no geometry".into()))?;
+        let pad = request.height.saturating_add(request.pad);
+        let x0 = request.x.max(0);
+        let y0 = request.y.max(0);
+        let x1 = request.x.saturating_add(request.width as i32).max(0);
+        let y1 = request.y.saturating_add(pad as i32).max(0);
+        let clip_x = x0.min(geometry.width as i32);
+        let clip_y = y0.min(geometry.height as i32);
+        let clip_right = x1.min(geometry.width as i32);
+        let clip_bottom = y1.min(geometry.height as i32);
+        if clip_x >= clip_right || clip_y >= clip_bottom {
+            return Err(GlassError::EmptyRegion);
+        }
+        let width = (clip_right - clip_x) as u32;
+        let height = (clip_bottom - clip_y) as u32;
+        let x = i16::try_from(clip_x).map_err(|_| GlassError::Overflow)?;
+        let y = i16::try_from(clip_y).map_err(|_| GlassError::Overflow)?;
+        let w = u16::try_from(width).map_err(|_| GlassError::Overflow)?;
+        let h = u16::try_from(height).map_err(|_| GlassError::Overflow)?;
+        let reply = self
+            .conn
+            .get_image(ImageFormat::Z_PIXMAP, pixmap, x, y, w, h, u32::MAX)
+            .map_err(|error| GlassError::Unavailable(error.to_string()))?
+            .reply()
+            .map_err(|error| GlassError::Unavailable(error.to_string()))?;
+        let stride = if height == 0 {
+            width as usize * 4
+        } else {
+            reply.data.len() / height as usize
+        };
+        let mut image = GlassImage::from_bgra(width, height, stride, &reply.data)?;
+        for pixel in image.data_mut().chunks_exact_mut(4) {
+            pixel[3] = 255;
+        }
+        Ok(image)
+    }
+}
+
 fn window_is_argb(conn: &impl x11rb::connection::Connection, xid: u32) -> bool {
     use x11rb::protocol::xproto::ConnectionExt as _;
     conn.get_geometry(xid)
@@ -779,12 +968,12 @@ fn main() -> Result<()> {
     let font = FontDescription::from_string(&app_config.font);
     let mut bar = CairoBar::new(runtime, presentation, font);
 
-    let (x11, compositor_active) = match x11rb::connect(None) {
+    let (x11, compositor_active, screen_num) = match x11rb::connect(None) {
         Ok((conn, screen_num)) => {
             let active = compositor_active(&conn, screen_num);
-            (Some(conn), active)
+            (Some(Rc::new(conn)), active, screen_num)
         }
-        Err(_) => (None, false),
+        Err(_) => (None, false, 0),
     };
     if compositor_active {
         bar.renderer_mut().set_background_opacity(Some(
@@ -793,7 +982,8 @@ fn main() -> Result<()> {
                 .unwrap_or(DEFAULT_BACKGROUND_OPACITY),
         ));
     } else {
-        bar.renderer_mut().set_background_opacity(None);
+        bar.renderer_mut()
+            .set_background_opacity(Some(DEFAULT_BACKGROUND_OPACITY));
     }
 
     let mut event_loop: EventLoop<UserEvent> = EventLoopBuilder::with_user_event().build();
@@ -831,6 +1021,26 @@ fn main() -> Result<()> {
             .context("failed to build tao window")?,
     );
 
+    let tint = fallback_rgb(app_config.theme);
+    let glass = {
+        let params = app_config.glass.params();
+        if let Some(file) = app_config.glass.file_source(
+            screen_size.width,
+            screen_size.height,
+            tint,
+        ) {
+            Some(GlassBackdrop::new(OpaqueWallpaper::File(file), params).with_fallback(tint))
+        } else {
+            x11.as_ref().map(|conn| {
+                GlassBackdrop::new(
+                    OpaqueWallpaper::Root(RootPixmapSource::new(Rc::clone(conn), screen_num)),
+                    params,
+                )
+                .with_fallback(tint)
+            })
+        }
+    };
+
     info!("creating OpenGL surface for tao window");
     let mut app = App::new(
         window,
@@ -840,6 +1050,7 @@ fn main() -> Result<()> {
         proxy,
         x11,
         compositor_active,
+        glass,
     )?;
 
     let update = app.bar.tick();

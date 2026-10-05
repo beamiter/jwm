@@ -15,8 +15,11 @@ with CJK and emoji fallback:
 ui_theme = "glass"
 ```
 
-The setting only touches JWM's own overlays. Client windows keep their own
-corner radius, shadow, border and per-window frost settings.
+The setting touches JWM's own overlays and, when the X11 compositor is off,
+the native window border colour and the root wallpaper. The default status
+bar then frosts that root pixmap (or `glass.wallpaper` if the bar config
+sets one) instead of drawing a solid slab. Client windows keep
+their own corner radius, shadow, and per-window frost settings.
 
 The themes split into two families: three **glass** themes that sample a
 blurred copy of the desktop behind each card, and four **flat** themes that

@@ -35,7 +35,6 @@ use crate::backend::api::{
     EwmhFacade, InputOps, KeyOps, OutputOps, PropertyOps, RenderScheduler, VrrCapabilities,
     WindowHandoffIdentity, WindowOps,
 };
-use crate::backend::x11::compositor_common::X11ConnectionOps;
 use crate::backend::x11::scheduling;
 use crate::backend::x11::wm::compositor_delegation::X11CompositorDesiredState;
 use crate::backend::x11::wm::event_bridge::{
@@ -114,6 +113,9 @@ pub struct X11rbBackend {
     /// Whether the X server has the XScreenSaver extension, learned on the
     /// first idle query and remembered: a server without it will not grow one.
     screensaver: Option<bool>,
+
+    /// Pixmap currently installed as the compositor-off root wallpaper.
+    native_root_pixmap: Option<u32>,
 }
 
 struct X11Interaction {
@@ -160,6 +162,153 @@ impl X11rbBackend {
 
     fn debug_drag_enabled() -> bool {
         drag_trace_enabled()
+    }
+
+    fn restore_installed_root_pixmap(&self) -> Result<(), BackendError> {
+        let Some(pixmap) = self.native_root_pixmap else {
+            return Ok(());
+        };
+        self.apply_root_background_pixmap(pixmap)
+    }
+
+    fn apply_root_background_pixmap(&self, pixmap: u32) -> Result<(), BackendError> {
+        use x11rb::protocol::xproto::{ChangeWindowAttributesAux, ConnectionExt};
+        self.conn.change_window_attributes(
+            self.root_x11,
+            &ChangeWindowAttributesAux::new().background_pixmap(pixmap),
+        )?;
+        self.conn.clear_area(false, self.root_x11, 0, 0, 0, 0)?;
+        self.conn.flush()?;
+        Ok(())
+    }
+
+    fn install_composed_root_wallpaper(
+        &mut self,
+        width: u32,
+        height: u32,
+        rgba: &[u8],
+    ) -> Result<(), BackendError> {
+        use crate::backend::x11::root_wallpaper::{put_image_rows, rgba_to_bgra_le};
+        use x11rb::connection::Connection as _;
+        use x11rb::protocol::xproto::{
+            ChangeWindowAttributesAux, ConnectionExt, CreateGCAux, ImageFormat, ImageOrder,
+        };
+
+        if width == 0 || height == 0 {
+            return Err(BackendError::Message(
+                "native root wallpaper has empty geometry".into(),
+            ));
+        }
+        let expected = width as usize * height as usize * 4;
+        if rgba.len() != expected {
+            return Err(BackendError::Message(format!(
+                "native root wallpaper is {0} bytes, expected {expected} for {width}x{height}",
+                rgba.len()
+            )));
+        }
+
+        let depth = self.screen.root_depth;
+        let bits_per_pixel = self
+            .conn
+            .setup()
+            .pixmap_formats
+            .iter()
+            .find(|format| format.depth == depth)
+            .map(|format| format.bits_per_pixel)
+            .unwrap_or(32);
+        if bits_per_pixel != 32 {
+            return Err(BackendError::Message(format!(
+                "native root wallpaper needs 32-bit pixmap packing, root depth {depth} is {bits_per_pixel} bpp"
+            )));
+        }
+
+        let mut packed = rgba_to_bgra_le(rgba);
+        if self.conn.setup().image_byte_order != ImageOrder::LSB_FIRST {
+            for pixel in packed.chunks_exact_mut(4) {
+                pixel.reverse();
+            }
+        }
+
+        let pixmap = self.conn.generate_id()?;
+        self.conn
+            .create_pixmap(depth, pixmap, self.root_x11, width as u16, height as u16)?;
+        let gc = self.conn.generate_id()?;
+        self.conn.create_gc(gc, pixmap, &CreateGCAux::new())?;
+        let rows = put_image_rows(self.conn.maximum_request_bytes(), width);
+        let row_bytes = width as usize * 4;
+        let mut y = 0u32;
+        while y < height {
+            let count = (height - y).min(rows);
+            let start = y as usize * row_bytes;
+            let end = start + count as usize * row_bytes;
+            self.conn.put_image(
+                ImageFormat::Z_PIXMAP,
+                pixmap,
+                gc,
+                width as u16,
+                count as u16,
+                0,
+                y as i16,
+                0,
+                depth,
+                &packed[start..end],
+            )?;
+            y += count;
+        }
+        self.conn.free_gc(gc)?;
+
+        let previous = self.native_root_pixmap;
+        let old_published = self.published_root_pixmap();
+        self.conn.change_window_attributes(
+            self.root_x11,
+            &ChangeWindowAttributesAux::new().background_pixmap(pixmap),
+        )?;
+        self.conn.clear_area(false, self.root_x11, 0, 0, 0, 0)?;
+        self.publish_root_pixmap(pixmap)?;
+        self.native_root_pixmap = Some(pixmap);
+        if let Some(old) = previous.filter(|old| *old != pixmap) {
+            let _ = self.conn.free_pixmap(old);
+        } else if let Some(old) = old_published.filter(|old| *old != pixmap) {
+            // ESETROOT: a previous wallpaper tool (feh, nitrogen) owned this
+            // pixmap. Never pass a pixmap we created — KillClient of our own
+            // resource would terminate JWM.
+            let _ = self.conn.kill_client(old);
+        }
+        self.conn.flush()?;
+        Ok(())
+    }
+
+    fn published_root_pixmap(&self) -> Option<u32> {
+        use x11rb::protocol::xproto::{AtomEnum, ConnectionExt};
+        let reply = self
+            .conn
+            .get_property(
+                false,
+                self.root_x11,
+                self.atoms._XROOTPMAP_ID,
+                AtomEnum::PIXMAP,
+                0,
+                1,
+            )
+            .ok()?
+            .reply()
+            .ok()?;
+        reply.value32()?.next()
+    }
+
+    fn publish_root_pixmap(&self, pixmap: u32) -> Result<(), BackendError> {
+        use x11rb::protocol::xproto::{AtomEnum, PropMode};
+        use x11rb::wrapper::ConnectionExt;
+        for atom in [self.atoms._XROOTPMAP_ID, self.atoms.ESETROOT_PMAP_ID] {
+            self.conn.change_property32(
+                PropMode::REPLACE,
+                self.root_x11,
+                atom,
+                AtomEnum::PIXMAP,
+                &[pixmap],
+            )?;
+        }
+        Ok(())
     }
 
     fn apply_compositor_window_metadata(
@@ -487,9 +636,10 @@ impl X11rbBackend {
             }
         } else {
             log::info!("Compositor disabled (set JWM_COMPOSITOR=1 to enable)");
-            if let Err(err) = conn.paint_root_solid_black(root_x11) {
-                log::warn!("Failed to paint non-composited root background black: {err}");
-            }
+            // Keep whatever is already on the root (a previous wallpaper
+            // tool, or the last session) until the native wallpaper path
+            // installs `behavior.wallpaper`. Painting black here used to
+            // flash a blank desktop for the whole decode.
             let _ = conn.flush();
             None
         };
@@ -536,6 +686,7 @@ impl X11rbBackend {
             benchmark_auto_exit: false,
             scratch_x11_scene: Vec::new(),
             screensaver: None,
+            native_root_pixmap: None,
         };
 
         // Watch CLIPBOARD on its own connection and thread. Failing here
@@ -850,6 +1001,25 @@ impl RenderScheduler for X11rbBackend {
             .as_ref()
             .map(|c| self.ids.intern(c.overlay_window()))
     }
+
+    fn install_root_wallpaper(
+        &mut self,
+        width: u32,
+        height: u32,
+        rgba: &[u8],
+    ) -> Result<(), BackendError> {
+        self.install_composed_root_wallpaper(width, height, rgba)
+    }
+
+    fn restore_native_root_background(&mut self) {
+        if let Err(error) = self.restore_installed_root_pixmap() {
+            log::warn!("native root wallpaper restore failed: {error}");
+        }
+    }
+
+    fn native_root_wallpaper_supported(&self) -> bool {
+        true
+    }
 }
 
 impl Backend for X11rbBackend {
@@ -994,6 +1164,7 @@ impl Backend for X11rbBackend {
             log::info!("Compositor disabled at runtime");
             self.compositor.take(); // Drop triggers cleanup
             self.event_overlay_x11.store(0, AtomicOrdering::Release);
+            self.restore_installed_root_pixmap()?;
             Ok(true)
         }
     }

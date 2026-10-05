@@ -7,6 +7,13 @@ monorepo use independent Semantic Versions.
 
 ### Added
 
+- X11 sessions without a compositor show the configured wallpaper on the root
+  window (per-output fill/fit/stretch/center, `_XROOTPMAP_ID`) instead of a
+  solid black desktop, and native window borders follow `appearance.ui_theme`
+  inks plus `behavior.border_color_*` / `attention_color`. Compositor-off
+  startup no longer flashes a black root; wallpaper is Triangle-scaled onto
+  each output; `tao_glow_bar` frosts `_XROOTPMAP_ID` (or `glass.wallpaper`)
+  when the bar is opaque.
 - `get_monitors` / `get_tree` monitor rows report `bar_visible`: whether the
   status-bar window currently occupies that output. Distinct from `show_bar`,
   which remains the per-tag preference and stays true during F11 fullscreen.

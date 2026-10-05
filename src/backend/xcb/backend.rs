@@ -21,7 +21,6 @@ use crate::backend::common_define::{
     StdCursorKind, WindowId,
 };
 use crate::backend::error::{BackendContextExt, BackendError};
-use crate::backend::x11::compositor_common::X11ConnectionOps;
 use crate::backend::x11::scheduling;
 use crate::backend::x11::wm::compositor_delegation::X11CompositorDesiredState;
 use crate::backend::x11::wm::event_bridge::{
@@ -527,6 +526,7 @@ pub struct XcbBackend {
     clipboard: Option<super::clipboard::Clipboard>,
     benchmark_auto_exit: bool,
     scratch_x11_scene: Vec<(u32, i32, i32, u32, u32)>,
+    native_root_pixmap: Option<u32>,
 }
 
 struct XcbInteraction {
@@ -1174,6 +1174,200 @@ impl XcbBackend {
         })
     }
 
+    fn restore_installed_root_pixmap(&self) -> XcbResult<()> {
+        let Some(pixmap) = self.native_root_pixmap else {
+            return Ok(());
+        };
+        self.apply_root_background_pixmap(pixmap)
+    }
+
+    fn apply_root_background_pixmap(&self, pixmap: u32) -> XcbResult<()> {
+        self.conn
+            .send_and_check_request(&x::ChangeWindowAttributes {
+                window: self.root,
+                value_list: &[x::Cw::BackPixmap(x::Pixmap::new(pixmap))],
+            })
+            .map_err(xcb_err)?;
+        self.conn
+            .send_and_check_request(&x::ClearArea {
+                exposures: false,
+                window: self.root,
+                x: 0,
+                y: 0,
+                width: 0,
+                height: 0,
+            })
+            .map_err(xcb_err)?;
+        self.conn.flush().map_err(xcb_err)
+    }
+
+    fn install_composed_root_wallpaper(
+        &mut self,
+        width: u32,
+        height: u32,
+        rgba: &[u8],
+    ) -> XcbResult<()> {
+        use crate::backend::x11::root_wallpaper::{put_image_rows, rgba_to_bgra_le};
+
+        if width == 0 || height == 0 {
+            return Err(BackendError::Message(
+                "native root wallpaper has empty geometry".into(),
+            ));
+        }
+        let expected = width as usize * height as usize * 4;
+        if rgba.len() != expected {
+            return Err(BackendError::Message(format!(
+                "native root wallpaper is {0} bytes, expected {expected} for {width}x{height}",
+                rgba.len()
+            )));
+        }
+
+        let (depth, bits_per_pixel, lsb_first) = {
+            let setup = self.conn.get_setup();
+            let screen = setup
+                .roots()
+                .find(|screen| screen.root() == self.root)
+                .ok_or(BackendError::NotFound("XCB screen"))?;
+            let depth = screen.root_depth();
+            let bits_per_pixel = setup
+                .pixmap_formats()
+                .iter()
+                .find(|format| format.depth() == depth)
+                .map(|format| format.bits_per_pixel())
+                .unwrap_or(32);
+            (
+                depth,
+                bits_per_pixel,
+                setup.image_byte_order() == x::ImageOrder::LsbFirst,
+            )
+        };
+        if bits_per_pixel != 32 {
+            return Err(BackendError::Message(format!(
+                "native root wallpaper needs 32-bit pixmap packing, root depth {depth} is {bits_per_pixel} bpp"
+            )));
+        }
+
+        let mut packed = rgba_to_bgra_le(rgba);
+        if !lsb_first {
+            for pixel in packed.chunks_exact_mut(4) {
+                pixel.reverse();
+            }
+        }
+
+        let pixmap: x::Pixmap = self.conn.generate_id();
+        self.conn
+            .send_and_check_request(&x::CreatePixmap {
+                depth,
+                pid: pixmap,
+                drawable: x::Drawable::Window(self.root),
+                width: width as u16,
+                height: height as u16,
+            })
+            .map_err(xcb_err)?;
+        let gc: x::Gcontext = self.conn.generate_id();
+        self.conn
+            .send_and_check_request(&x::CreateGc {
+                cid: gc,
+                drawable: x::Drawable::Pixmap(pixmap),
+                value_list: &[],
+            })
+            .map_err(xcb_err)?;
+        let max_bytes = usize::try_from(self.conn.get_maximum_request_length())
+            .unwrap_or(65535)
+            .saturating_mul(4);
+        let rows = put_image_rows(max_bytes, width);
+        let row_bytes = width as usize * 4;
+        let mut y = 0u32;
+        while y < height {
+            let count = (height - y).min(rows);
+            let start = y as usize * row_bytes;
+            let end = start + count as usize * row_bytes;
+            self.conn
+                .send_and_check_request(&x::PutImage {
+                    format: x::ImageFormat::ZPixmap,
+                    drawable: x::Drawable::Pixmap(pixmap),
+                    gc,
+                    width: width as u16,
+                    height: count as u16,
+                    dst_x: 0,
+                    dst_y: y as i16,
+                    left_pad: 0,
+                    depth,
+                    data: &packed[start..end],
+                })
+                .map_err(xcb_err)?;
+            y += count;
+        }
+        self.conn
+            .send_and_check_request(&x::FreeGc { gc })
+            .map_err(xcb_err)?;
+
+        let previous = self.native_root_pixmap;
+        let old_published = self.published_root_pixmap();
+        self.conn
+            .send_and_check_request(&x::ChangeWindowAttributes {
+                window: self.root,
+                value_list: &[x::Cw::BackPixmap(pixmap)],
+            })
+            .map_err(xcb_err)?;
+        self.conn
+            .send_and_check_request(&x::ClearArea {
+                exposures: false,
+                window: self.root,
+                x: 0,
+                y: 0,
+                width: 0,
+                height: 0,
+            })
+            .map_err(xcb_err)?;
+        self.publish_root_pixmap(pixmap.resource_id())?;
+        self.native_root_pixmap = Some(pixmap.resource_id());
+        if let Some(old) = previous.filter(|old| *old != pixmap.resource_id()) {
+            let _ = self.conn.send_and_check_request(&x::FreePixmap {
+                pixmap: x::Pixmap::new(old),
+            });
+        } else if let Some(old) = old_published.filter(|old| *old != pixmap.resource_id()) {
+            let _ = self
+                .conn
+                .send_and_check_request(&x::KillClient { resource: old });
+        }
+        self.conn.flush().map_err(xcb_err)
+    }
+
+    fn published_root_pixmap(&self) -> Option<u32> {
+        let atom = XcbAtoms::intern(&self.conn, b"_XROOTPMAP_ID").ok()?;
+        let cookie = self.conn.send_request(&x::GetProperty {
+            delete: false,
+            window: self.root,
+            property: atom,
+            r#type: x::ATOM_PIXMAP,
+            long_offset: 0,
+            long_length: 1,
+        });
+        let reply = self.conn.wait_for_reply(cookie).ok()?;
+        if reply.format() != 32 {
+            return None;
+        }
+        reply.value::<u32>().first().copied()
+    }
+
+    fn publish_root_pixmap(&self, pixmap: u32) -> XcbResult<()> {
+        let xroot = XcbAtoms::intern(&self.conn, b"_XROOTPMAP_ID")?;
+        let eset = XcbAtoms::intern(&self.conn, b"ESETROOT_PMAP_ID")?;
+        for property in [xroot, eset] {
+            self.conn
+                .send_and_check_request(&x::ChangeProperty {
+                    mode: x::PropMode::Replace,
+                    window: self.root,
+                    property,
+                    r#type: x::ATOM_PIXMAP,
+                    data: &[pixmap],
+                })
+                .map_err(xcb_err)?;
+        }
+        Ok(())
+    }
+
     pub fn new() -> XcbResult<Self> {
         // Before any worker thread exists: the compositor, clipboard and tray
         // threads started below must inherit a blocked SIGCHLD, or one of them
@@ -1318,10 +1512,8 @@ impl XcbBackend {
             }
         } else {
             log::info!("XCB backend: compositor disabled (set JWM_COMPOSITOR=1 to enable)");
-            let protocol = XcbCompositorProtocol::new(conn.as_ref());
-            if let Err(err) = protocol.paint_root_solid_black(root.resource_id()) {
-                log::warn!("XCB backend: failed to paint non-composited root black: {err}");
-            }
+            // Keep whatever is already on the root until the native wallpaper
+            // path installs `behavior.wallpaper`.
             let _ = conn.flush();
             None
         };
@@ -1353,6 +1545,7 @@ impl XcbBackend {
             clipboard: None,
             benchmark_auto_exit: false,
             scratch_x11_scene: Vec::new(),
+            native_root_pixmap: None,
         };
         // Watch CLIPBOARD on its own connection and thread. Failing here
         // costs the clipboard history, not the session.
@@ -2184,6 +2377,25 @@ impl RenderScheduler for XcbBackend {
             .as_ref()
             .map(|c| self.ids.intern_raw(c.overlay_window()))
     }
+
+    fn install_root_wallpaper(
+        &mut self,
+        width: u32,
+        height: u32,
+        rgba: &[u8],
+    ) -> Result<(), BackendError> {
+        self.install_composed_root_wallpaper(width, height, rgba)
+    }
+
+    fn restore_native_root_background(&mut self) {
+        if let Err(error) = self.restore_installed_root_pixmap() {
+            log::warn!("native root wallpaper restore failed: {error}");
+        }
+    }
+
+    fn native_root_wallpaper_supported(&self) -> bool {
+        true
+    }
 }
 
 impl Backend for XcbBackend {
@@ -2277,6 +2489,7 @@ impl Backend for XcbBackend {
             self.prepare_iconify_compositor_disable()?;
             log::info!("XCB backend: compositor disabled at runtime");
             self.compositor.take();
+            self.restore_installed_root_pixmap()?;
             return Ok(true);
         }
 

@@ -19,6 +19,7 @@ xbar_core = { path = "../../crates/xbar_core", default-features = false, feature
     "clock-chrono",
     "config-toml",
     "glass",
+    "glass-wallpaper",
     "logging-flexi",
     "provider-alsa",
     "provider-battery-sysfs",
