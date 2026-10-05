@@ -3579,19 +3579,22 @@ impl<C: CompositorConnection> Compositor<C> {
                     target_h += 6.0 + body_h;
                 }
                 if !button_widths.is_empty() {
-                    target_h += toast::ACTIONS_ROW_EXTRA_H;
+                    target_h += toast::action_row_extra_h(&button_widths, content_w);
                 }
 
                 let (card_w, card_h) =
                     self.toast_stack
                         .advance_motion(id, now, target_w, target_h, motion_enabled);
                 let [x, y, ..] = dock.contained_rect(card_w, card_h, top);
-                // The chip row hangs under the text block, aligned with it.
+                // The chip row hangs under the text block, aligned with it,
+                // wrapping to the placed card's inner width.
                 let text_bottom = pad + title_h + if body_h > 0.0 { 6.0 + body_h } else { 0.0 };
+                let inner_w = (card_w - pad_left - pad).max(0.0);
                 let button_rects = toast::action_row_layout(
                     &button_widths,
                     x + pad_left,
                     y + text_bottom + toast::ACTION_ROW_TOP_GAP,
+                    inner_w,
                 );
                 // Only the card actually touching the bar squares off; the
                 // dock also refuses to square anything when there is no bar.

@@ -61,28 +61,55 @@ pub(crate) fn outside_dim_rects(
 }
 
 /// Eight resize-handle rects around `hole`: corners then edge midpoints,
-/// clockwise from the top-left. Empty when the hole is degenerate.
+/// clockwise from the top-left. Empty when the hole is degenerate. On a
+/// hole smaller than eight full-size handles, the squares shrink so they
+/// no longer sit on top of each other; below a few pixels they drop out
+/// rather than becoming untouchable specks.
 #[must_use]
 pub(crate) fn handle_rects(hole: (f32, f32, f32, f32)) -> Vec<(f32, f32, f32, f32)> {
     let (x, y, w, h) = hole;
     if !(x.is_finite() && y.is_finite() && w.is_finite() && h.is_finite()) || w <= 0.0 || h <= 0.0 {
         return Vec::new();
     }
-    let s = CAPTURE_HANDLE_SIZE;
+    let s = handle_size(w, h);
+    if s <= 0.0 {
+        return Vec::new();
+    }
     let half = s * 0.5;
-    [
+    let mut pts = vec![
         (x, y),
-        (x + w * 0.5, y),
         (x + w, y),
-        (x + w, y + h * 0.5),
         (x + w, y + h),
-        (x + w * 0.5, y + h),
         (x, y + h),
-        (x, y + h * 0.5),
-    ]
-    .into_iter()
-    .map(|(hx, hy)| (hx - half, hy - half, s, s))
-    .collect()
+    ];
+    // Mid-edge grips need a clear gap from the corners; otherwise they
+    // land on the same pixels as a corner and steal the first hit.
+    if w >= 2.5 * s && h >= 2.5 * s {
+        pts = vec![
+            (x, y),
+            (x + w * 0.5, y),
+            (x + w, y),
+            (x + w, y + h * 0.5),
+            (x + w, y + h),
+            (x + w * 0.5, y + h),
+            (x, y + h),
+            (x, y + h * 0.5),
+        ];
+    }
+    pts.into_iter()
+        .map(|(hx, hy)| (hx - half, hy - half, s, s))
+        .collect()
+}
+
+#[must_use]
+fn handle_size(w: f32, h: f32) -> f32 {
+    let fitted = CAPTURE_HANDLE_SIZE.min(w / 3.0).min(h / 3.0);
+    if fitted >= 4.0 {
+        fitted
+    } else {
+        let corner = CAPTURE_HANDLE_SIZE.min(w * 0.45).min(h * 0.45);
+        if corner >= 3.0 { corner } else { 0.0 }
+    }
 }
 
 /// Which handle, if any, contains `(px, py)`. Interior of the hole that is
@@ -142,5 +169,27 @@ mod tests {
         );
         assert!(handle_rects((0.0, 0.0, 0.0, 10.0)).is_empty());
         let _ = (CAPTURE_HOLE_RADIUS, CAPTURE_OUTLINE_WIDTH);
+    }
+
+    #[test]
+    fn tiny_holes_shrink_handles_instead_of_stacking_them() {
+        let hole = (10.0, 10.0, 16.0, 16.0);
+        let handles = handle_rects(hole);
+        assert!(!handles.is_empty());
+        let s = handles[0].2;
+        assert!(s < CAPTURE_HANDLE_SIZE);
+        assert!(s >= 3.0);
+        for (i, a) in handles.iter().enumerate() {
+            for (j, b) in handles.iter().enumerate() {
+                if i >= j {
+                    continue;
+                }
+                let (ax, ay, aw, ah) = *a;
+                let (bx, by, bw, bh) = *b;
+                let overlap = ax < bx + bw && ax + aw > bx && ay < by + bh && ay + ah > by;
+                assert!(!overlap, "handle {i} overlaps {j}");
+            }
+        }
+        assert!(handle_rects((0.0, 0.0, 2.0, 2.0)).is_empty());
     }
 }

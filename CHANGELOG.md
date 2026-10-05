@@ -21,7 +21,9 @@ monorepo use independent Semantic Versions.
   pointer; the search field draws a blinking caret (steady while selected)
   instead of a baked-in underscore. The screenshot toolbar wraps to two
   rows on a narrow output, and the color swatch keeps a contrasting ring.
-  Tags-overview numbers clip before the urgency badge.
+  Capture handles shrink on a tiny pick instead of stacking; toast action
+  chips wrap inside a narrow card. Tags-overview numbers clip before the
+  urgency badge.
 - X11 sessions without a compositor show the configured wallpaper on the root
   window (per-output fill/fit/stretch/center, `_XROOTPMAP_ID`) instead of a
   solid black desktop, and native window borders follow `appearance.ui_theme`

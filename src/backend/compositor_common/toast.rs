@@ -454,15 +454,47 @@ pub(crate) fn action_row_width(label_widths: &[f32]) -> f32 {
 /// Chip rects for the action row: one chip per measured label width,
 /// left-aligned at `x` on the row at `y`. Index order matches the toast's
 /// action order, which is what click dispatch reports back.
-pub(crate) fn action_row_layout(label_widths: &[f32], x: f32, y: f32) -> Vec<[f32; 4]> {
+///
+/// `max_width` is the card's inner content width. Chips that would run past
+/// it wrap onto a new row instead of painting off the card.
+pub(crate) fn action_row_layout(
+    label_widths: &[f32],
+    x: f32,
+    y: f32,
+    max_width: f32,
+) -> Vec<[f32; 4]> {
+    let max_width = if max_width.is_finite() && max_width > 0.0 {
+        max_width
+    } else {
+        f32::MAX
+    };
     let mut rects = Vec::with_capacity(label_widths.len());
-    let mut chip_x = x;
-    for width in label_widths {
-        let chip_w = width + 2.0 * ACTION_BUTTON_PAD_X;
-        rects.push([chip_x, y, chip_w, ACTION_BUTTON_H]);
-        chip_x += chip_w + ACTION_BUTTON_GAP;
+    let mut row_x = 0.0;
+    let mut row_y = y;
+    for (i, width) in label_widths.iter().enumerate() {
+        let chip_w = (width + 2.0 * ACTION_BUTTON_PAD_X).min(max_width).max(0.0);
+        if i > 0 && row_x + chip_w > max_width + 0.5 {
+            row_x = 0.0;
+            row_y += ACTION_BUTTON_H + ACTION_BUTTON_GAP;
+        }
+        rects.push([x + row_x, row_y, chip_w, ACTION_BUTTON_H]);
+        row_x += chip_w + ACTION_BUTTON_GAP;
     }
     rects
+}
+
+/// Card height added for the action chips, wrapping at `max_width`.
+#[must_use]
+pub(crate) fn action_row_extra_h(label_widths: &[f32], max_width: f32) -> f32 {
+    if label_widths.is_empty() {
+        return 0.0;
+    }
+    let rects = action_row_layout(label_widths, 0.0, 0.0, max_width);
+    let bottom = rects
+        .iter()
+        .map(|r| r[1] + r[3])
+        .fold(0.0_f32, f32::max);
+    ACTION_ROW_TOP_GAP + bottom
 }
 
 #[derive(Debug, Default)]
@@ -1198,7 +1230,7 @@ mod tests {
     #[test]
     fn action_row_layout_sizes_and_spacing() {
         let widths = [40.0, 60.0, 30.0];
-        let rects = action_row_layout(&widths, 30.0, 100.0);
+        let rects = action_row_layout(&widths, 30.0, 100.0, f32::MAX);
         assert_eq!(rects.len(), 3);
         let chip_w = |i: usize| widths[i] + 2.0 * ACTION_BUTTON_PAD_X;
         assert_eq!(rects[0], [30.0, 100.0, chip_w(0), ACTION_BUTTON_H]);
@@ -1215,6 +1247,24 @@ mod tests {
         let right = rects[2][0] + rects[2][2];
         assert_eq!(right - 30.0, action_row_width(&widths));
         assert_eq!(action_row_width(&[]), 0.0);
+        assert_eq!(
+            action_row_extra_h(&widths, f32::MAX),
+            ACTIONS_ROW_EXTRA_H
+        );
+    }
+
+    #[test]
+    fn action_chips_wrap_when_the_card_is_narrower_than_the_row() {
+        let widths = [80.0, 80.0, 80.0];
+        let chip = 80.0 + 2.0 * ACTION_BUTTON_PAD_X;
+        let max_w = chip + 10.0;
+        let rects = action_row_layout(&widths, 0.0, 0.0, max_w);
+        assert_eq!(rects.len(), 3);
+        assert_eq!(rects[0][1], 0.0);
+        assert_eq!(rects[1][1], ACTION_BUTTON_H + ACTION_BUTTON_GAP);
+        assert_eq!(rects[2][1], 2.0 * (ACTION_BUTTON_H + ACTION_BUTTON_GAP));
+        assert!(rects.iter().all(|r| r[0] + r[2] <= max_w + 0.5));
+        assert!(action_row_extra_h(&widths, max_w) > ACTIONS_ROW_EXTRA_H);
     }
 
     #[test]
