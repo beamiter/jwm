@@ -35,6 +35,8 @@
 | 56 | tags 格子号按 `label_max_width` 裁进紧急点 | X11/Wayland 画时 `min(texture, budget)` |
 | 57 | 滚动条按住拖动跟手 | 用按下时的 x 持续 hit-test，松手解除 |
 | 58 | 搜索框点击后下一键替换查询 | 非空 query 才 arm；不影响密码格 |
+| 59 | 滚动条拖出轨道仍夹到 0/1 | `scroll_t_at`；Spy/两边 compositor |
+| 60 | 选中的搜索框用 accent wash | `query_selected` + `query_field_fill` |
 
 **未做**：100 轮逐条独立 PR。toast 点击保持闭区间，与 X11 overlay shape 对齐。
 

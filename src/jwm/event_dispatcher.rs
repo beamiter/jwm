@@ -751,6 +751,9 @@ impl WMController for Jwm {
                     }
                     SystemUiHitTarget::Query => {
                         self.arm_system_ui_query_replace();
+                        if self.system_ui_query_replace {
+                            self.sync_system_ui(backend);
+                        }
                     }
                     SystemUiHitTarget::Panel | SystemUiHitTarget::Unavailable => {}
                 },
@@ -1254,9 +1257,15 @@ impl WMController for Jwm {
                         return;
                     }
                 }
-                if let Some(track_x) = self.system_ui_scroll_drag_x {
-                    let track_hit = backend.compositor_system_ui_hit_test(track_x, root_y);
-                    if let crate::backend::api::SystemUiHitTarget::Scrollbar(t) = track_hit
+                if let Some(_track_x) = self.system_ui_scroll_drag_x {
+                    let t = backend
+                        .compositor_system_ui_scroll_t(root_y)
+                        .or_else(|| match backend.compositor_system_ui_hit_test(_track_x, root_y)
+                        {
+                            crate::backend::api::SystemUiHitTarget::Scrollbar(t) => Some(t),
+                            _ => None,
+                        });
+                    if let Some(t) = t
                         && self.features.system_ui.seek_scroll(t)
                     {
                         self.sync_system_ui(backend);
@@ -2693,6 +2702,7 @@ mod tests {
         dock_preview_updates: Vec<(Option<WindowId>, Option<CompositorRect>)>,
         window_groups_pushes: Vec<Vec<crate::backend::compositor_common::window_tabs::TabGroup>>,
         system_ui_hit: SystemUiHitTarget,
+        system_ui_scroll_t: Option<f32>,
         system_ui_hover_updates: Vec<Option<usize>>,
         /// Every lock-shade payload pushed, newest last.
         monitor_shade_pushes: Vec<Vec<crate::backend::api::MonitorShade>>,
@@ -2736,6 +2746,7 @@ mod tests {
                 dock_preview_updates: Vec::new(),
                 window_groups_pushes: Vec::new(),
                 system_ui_hit: SystemUiHitTarget::Unavailable,
+                system_ui_scroll_t: None,
                 system_ui_hover_updates: Vec::new(),
                 monitor_shade_pushes: Vec::new(),
                 x11_client_list: false,
@@ -2778,6 +2789,13 @@ mod tests {
 
         fn compositor_system_ui_hit_test(&self, _x: f64, _y: f64) -> SystemUiHitTarget {
             self.system_ui_hit
+        }
+
+        fn compositor_system_ui_scroll_t(&self, _y: f64) -> Option<f32> {
+            self.system_ui_scroll_t.or(match self.system_ui_hit {
+                SystemUiHitTarget::Scrollbar(t) => Some(t),
+                _ => None,
+            })
         }
     }
     impl CompositorWindowEffects for RenderSpyBackend {
@@ -4226,6 +4244,22 @@ mod tests {
             jwm.features.system_ui.selected_clipboard(),
             Some(0),
             "dragging the track back to the top selects the first row"
+        );
+
+        backend.system_ui_hit = SystemUiHitTarget::Query;
+        backend.system_ui_scroll_t = Some(1.0);
+        <Jwm as WMController>::on_motion_notify(
+            &mut jwm,
+            &mut backend,
+            HitTarget::Background { output: None },
+            0.0,
+            2000.0,
+            0,
+        );
+        assert_eq!(
+            jwm.features.system_ui.selected_clipboard(),
+            Some(11),
+            "dragging past the bottom of the track still seeks the last row"
         );
 
         <Jwm as WMController>::on_button_release(

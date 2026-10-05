@@ -315,6 +315,18 @@ impl HitGeometry {
         let text_x = x - self.panel[0] - PAD - self.row_icons;
         Hit::Item(row.min(self.rows.saturating_sub(1)), text_x)
     }
+
+    /// Scroll-track fraction for `y`, clamped to `0..=1` even when the
+    /// pointer has left the track vertically. `None` when this card has no
+    /// overflowing list.
+    #[must_use]
+    pub(crate) fn scroll_t_at(self, y: f64) -> Option<f32> {
+        let track = self.scroll_track?;
+        if !(track[3].is_finite() && track[3] > 0.0) {
+            return None;
+        }
+        Some(((y as f32 - track[1]) / track[3]).clamp(0.0, 1.0))
+    }
 }
 
 fn contains(rect: Rect, x: f32, y: f32) -> bool {
@@ -324,6 +336,27 @@ fn contains(rect: Rect, x: f32, y: f32) -> bool {
         && y >= rect[1]
         && x < rect[0] + rect[2]
         && y < rect[1] + rect[3]
+}
+
+/// Fill for the search field. A selected field (click-to-replace) wears the
+/// same accent wash as the list's selection pill so the two states agree.
+#[must_use]
+pub(crate) fn query_field_fill(
+    field: [f32; 4],
+    accent: [f32; 4],
+    selection_alpha: f32,
+    selected: bool,
+) -> [f32; 4] {
+    if selected {
+        [
+            accent[0],
+            accent[1],
+            accent[2],
+            selection_alpha.clamp(0.0, 1.0),
+        ]
+    } else {
+        field
+    }
 }
 
 /// The size the card wants for `sizes`, before the open/morph spring.
@@ -877,6 +910,18 @@ mod tests {
             hit.hit_test(172.0, items_y as f64 + 1.0),
             Hit::Item(0, 42.0)
         );
+        assert_eq!(hit.scroll_t_at(track[1] as f64), Some(0.0));
+        assert_eq!(hit.scroll_t_at((track[1] + track[3]) as f64), Some(1.0));
+        assert_eq!(
+            hit.scroll_t_at((track[1] - 80.0) as f64),
+            Some(0.0),
+            "above the track still seeks the start"
+        );
+        assert_eq!(
+            hit.scroll_t_at((track[1] + track[3] + 80.0) as f64),
+            Some(1.0),
+            "below the track still seeks the end"
+        );
     }
 
     #[test]
@@ -1081,5 +1126,16 @@ mod tests {
         let tiny = row_icon_frame(items, 12.0, 0);
         assert_eq!(tiny[2], 12.0 - 2.0 * ROW_ICON_PAD_Y);
         assert_eq!(tiny[1], 200.0 + ROW_ICON_PAD_Y);
+    }
+
+    #[test]
+    fn a_selected_query_field_wears_the_accent_wash() {
+        let field = [0.1, 0.1, 0.1, 0.4];
+        let accent = [0.2, 0.5, 1.0, 1.0];
+        assert_eq!(query_field_fill(field, accent, 0.3, false), field);
+        assert_eq!(
+            query_field_fill(field, accent, 0.3, true),
+            [0.2, 0.5, 1.0, 0.3]
+        );
     }
 }

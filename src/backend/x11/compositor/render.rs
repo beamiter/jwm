@@ -3116,7 +3116,15 @@ impl<C: CompositorConnection> Compositor<C> {
                     fw,
                     fh,
                     panel::QUERY_RADIUS,
-                    UiPalette::faded(ui.field, content_a),
+                    UiPalette::faded(
+                        panel::query_field_fill(
+                            ui.field,
+                            accent,
+                            ui.selection_alpha,
+                            overlay.query_selected,
+                        ),
+                        content_a,
+                    ),
                 );
             }
             // The quiet cue eases in where the pointer lands instead of

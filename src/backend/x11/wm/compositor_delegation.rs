@@ -642,6 +642,12 @@ macro_rules! delegate_compositor_capabilities {
                 )
             }
 
+            fn compositor_system_ui_scroll_t(&self, y: f64) -> Option<f32> {
+                self.compositor
+                    .as_ref()
+                    .and_then(|compositor| compositor.system_ui_scroll_t(y))
+            }
+
             fn compositor_push_toast(&mut self, toast: crate::backend::api::ToastNotification) {
                 if let Some(compositor) = self.compositor.as_mut() {
                     compositor.push_toast(toast);

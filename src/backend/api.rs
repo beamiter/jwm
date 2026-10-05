@@ -1208,6 +1208,8 @@ pub struct SystemUiOverlay {
     /// stay strings across this boundary — pixels never cross it. A payload
     /// without the field (any other panel, or none) retires the preview.
     pub side_preview: Option<String>,
+    /// The search field is selected for replace after a click in it.
+    pub query_selected: bool,
 }
 
 /// What is under the pointer on the compositor-drawn system-UI card.
@@ -3236,6 +3238,13 @@ pub trait CompositorWorkspaceEffects: Send {
     /// Hit-test the last system-UI frame at global screen coordinates.
     fn compositor_system_ui_hit_test(&self, _x: f64, _y: f64) -> SystemUiHitTarget {
         SystemUiHitTarget::Unavailable
+    }
+
+    /// Scroll-track fraction for `y` on the last system-UI frame, clamped to
+    /// `0..=1` even when the pointer has left the track. `None` when the
+    /// painted card has no overflowing list.
+    fn compositor_system_ui_scroll_t(&self, _y: f64) -> Option<f32> {
+        None
     }
 
     fn compositor_push_toast(&mut self, _toast: ToastNotification) {}

@@ -15,8 +15,9 @@ monorepo use independent Semantic Versions.
   outline; volume-0 OSD no longer shows the mute glyph; glass OSD/toast ink
   stays at least 3:1 contrast. A click on a system-UI scroll track jumps the
   list and can be dragged; a click in a non-empty search field selects it so
-  the next key replaces the query. Tags-overview numbers clip before the
-  urgency badge.
+  the next key replaces the query. Dragging the list track past its ends
+  still seeks the first or last row. A selected search field uses the
+  accent wash. Tags-overview numbers clip before the urgency badge.
 - X11 sessions without a compositor show the configured wallpaper on the root
   window (per-output fill/fit/stretch/center, `_XROOTPMAP_ID`) instead of a
   solid black desktop, and native window borders follow `appearance.ui_theme`

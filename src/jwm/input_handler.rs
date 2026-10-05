@@ -445,6 +445,7 @@ impl Jwm {
                     .system_ui
                     .selected_wallpaper()
                     .map(str::to_string),
+                query_selected: self.system_ui_query_replace,
             }
         }));
         backend.compositor_force_full_redraw();
