@@ -27,6 +27,14 @@ const OSD_FADE_IN: f32 = 0.12;
 /// Height of the docked card. Shared so the toast stack can reserve room for
 /// an OSD without waiting for its spring to arrive at a height.
 pub(crate) const OSD_CARD_HEIGHT: f32 = 64.0;
+/// Horizontal padding inside a slider card.
+pub(crate) const OSD_PAD: f32 = 24.0;
+/// Nominal width reserved for the icon+percent label on a slider card.
+pub(crate) const OSD_LABEL_ZONE: f32 = 118.0;
+/// Slider track height.
+pub(crate) const OSD_BAR_H: f32 = 6.0;
+/// Below this the bar is dropped so the label can use the whole card.
+const OSD_BAR_MIN_W: f32 = 12.0;
 /// Card width for the slider kinds: a fixed geometry so the bar does not
 /// jump as digits change.
 const SLIDER_CARD_WIDTH: f32 = 360.0;
@@ -195,6 +203,38 @@ impl ActiveOsd {
             _ => MEDIA_CARD_WIDTH,
         }
     }
+}
+
+/// Track and fill for a slider OSD inside `card`. `None` when the painted
+/// card is too narrow to hold a readable bar beside the label.
+#[must_use]
+pub(crate) fn slider_bar(card: [f32; 4], fill: f32) -> Option<([f32; 4], [f32; 4])> {
+    let [x, y, w, h] = card;
+    if !(w.is_finite() && h.is_finite() && w > 0.0 && h > 0.0) {
+        return None;
+    }
+    let label_zone = OSD_LABEL_ZONE.min(w * 0.45).max(OSD_PAD);
+    let bar_w = w - label_zone - OSD_PAD;
+    if bar_w < OSD_BAR_MIN_W {
+        return None;
+    }
+    let bar_h = OSD_BAR_H.min(h.max(0.0));
+    let bar_x = x + label_zone;
+    let bar_y = y + (h - bar_h) * 0.5;
+    let fill = if fill.is_finite() {
+        fill.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let fill_w = if fill <= 0.0 {
+        0.0
+    } else {
+        (bar_w * fill).max(bar_h)
+    };
+    Some((
+        [bar_x, bar_y, bar_w, bar_h],
+        [bar_x, bar_y, fill_w.min(bar_w), bar_h],
+    ))
 }
 
 /// Icon for a power-profile OSD card. Kept byte-identical to the Hub row's
@@ -703,5 +743,16 @@ mod tests {
         assert!(label.ends_with('\u{2026}'));
         assert_eq!(osd.fill(), None);
         assert_eq!(osd.card_width(), MEDIA_CARD_WIDTH);
+    }
+
+    #[test]
+    fn a_narrow_osd_card_drops_the_bar_instead_of_inverting_it() {
+        let wide = slider_bar([10.0, 20.0, SLIDER_CARD_WIDTH, OSD_CARD_HEIGHT], 0.5);
+        let (track, fill) = wide.expect("room for a bar");
+        assert!((fill[2] - track[2] * 0.5).abs() < 0.01);
+        assert!(track[0] >= 10.0 + OSD_PAD);
+        assert!(track[0] + track[2] <= 10.0 + SLIDER_CARD_WIDTH - OSD_PAD + 0.01);
+        assert!(slider_bar([0.0, 0.0, 50.0, OSD_CARD_HEIGHT], 1.0).is_none());
+        assert!(slider_bar([0.0, 0.0, 200.0, OSD_CARD_HEIGHT], 0.0).is_some());
     }
 }

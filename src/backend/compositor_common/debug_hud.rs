@@ -194,6 +194,67 @@ impl HudLayout {
         }
     }
 
+    /// Relayout into the rectangle the compositor actually paints (sprung
+    /// width, then contained to the output). The natural [`Self::docked`]
+    /// card is the spring's target; this pass keeps the chip, meter and
+    /// columns inside the pixels that exist.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn placed(
+        ui: &UiPalette,
+        card: Rect,
+        title: (f32, f32),
+        chip: (f32, f32),
+        labels: (f32, f32),
+        values: (f32, f32),
+        meter: f32,
+    ) -> Self {
+        let (pad, gap, gutter, meter_h) = (ui.pad, ui.gap, ui.gutter, ui.meter_h);
+        let (x, y, w, h) = card;
+        let content_w = (w - 2.0 * pad).max(0.0);
+        let mut chip_pill_w = if chip.0 > 0.0 && chip.1 > 0.0 {
+            chip.0 + 18.0
+        } else {
+            0.0
+        };
+        let mut chip_pill_h = if chip_pill_w > 0.0 { chip.1 + 8.0 } else { 0.0 };
+        if chip_pill_w > 0.0 && title.0 + gap + chip_pill_w > content_w {
+            chip_pill_w = 0.0;
+            chip_pill_h = 0.0;
+        }
+        let header_h = title.1.max(chip_pill_h);
+        let title_pos = (x + pad, y + pad + (header_h - title.1).max(0.0) * 0.5);
+        let chip_pill = if chip_pill_w > 0.0 {
+            (
+                x + w - pad - chip_pill_w,
+                y + pad + (header_h - chip_pill_h) * 0.5,
+                chip_pill_w,
+                chip_pill_h,
+            )
+        } else {
+            (0.0, 0.0, 0.0, 0.0)
+        };
+        let chip_text = (chip_pill.0 + 9.0, chip_pill.1 + 4.0);
+        let meter_y = y + pad + header_h + gap;
+        let meter_track = (x + pad, meter_y, content_w, meter_h.min((h - (meter_y - y)).max(0.0)));
+        let fill_w = if meter <= 0.0 || meter_track.2 <= 0.0 {
+            0.0
+        } else {
+            (meter_track.2 * meter.clamp(0.0, 1.0)).max(meter_h.min(meter_track.2))
+        };
+        let meter_fill = (meter_track.0, meter_track.1, fill_w, meter_track.3);
+        let body_y = meter_y + meter_track.3 + gap;
+        Self {
+            card,
+            title: title_pos,
+            chip_pill,
+            chip_text,
+            meter_track,
+            meter_fill,
+            labels: (x + pad, body_y),
+            values: (x + pad + labels.0.min(content_w) + gutter, body_y),
+        }
+    }
+
     /// Lay the card out hanging from `dock` instead of a screen corner.
     ///
     /// The width falls out of the content, so the card is laid out once at the
@@ -374,5 +435,25 @@ mod tests {
             1.0,
         );
         assert!(layout.chip_pill.0 >= layout.title.0 + 250.0);
+    }
+
+    #[test]
+    fn a_placed_card_keeps_chrome_inside_the_painted_box() {
+        let ui = &crate::backend::compositor_common::ui_theme::MATERIAL;
+        let box_ = (8.0, 4.0, 180.0, 120.0);
+        let layout = HudLayout::placed(
+            ui,
+            box_,
+            (200.0, 22.0),
+            (80.0, 16.0),
+            (140.0, 40.0),
+            (90.0, 40.0),
+            1.0,
+        );
+        assert_eq!(layout.card, box_);
+        assert_eq!(layout.chip_pill.2, 0.0, "the chip yields when the title cannot share the header");
+        assert!(layout.meter_track.0 >= box_.0);
+        assert!(layout.meter_track.0 + layout.meter_track.2 <= box_.0 + box_.2 + 0.01);
+        assert!(layout.meter_fill.2 <= layout.meter_track.2 + 0.01);
     }
 }

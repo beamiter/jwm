@@ -44,6 +44,8 @@
 | 65 | 小选区 capture 把手缩小且不叠 | `handle_size` |
 | 66 | toast 操作钮窄卡折行 | `action_row_layout(..., max_width)` |
 | 67 | 音量/亮度 >100% 进度条用 FILL_OVER | 满条不再看起来像刚好 100 |
+| 68 | HUD chrome 跟 painted 卡重排 | `HudLayout::placed` |
+| 69 | 窄 OSD 丢掉滑条，避免负宽 | `slider_bar` |
 
 **未做**：100 轮逐条独立 PR。toast 点击保持闭区间，与 X11 overlay shape 对齐。
 

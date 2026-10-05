@@ -5508,21 +5508,30 @@ impl WaylandCompositor {
                 .unwrap_or((0.0, 0.0))
         };
         let dock = self.island_dock();
-        let layout = hud::HudLayout::docked(ui, &dock, dims(0), dims(1), dims(2), dims(3), meter);
+        let natural = hud::HudLayout::docked(ui, &dock, dims(0), dims(1), dims(2), dims(3), meter);
         let motion_enabled = crate::config::CONFIG.load().motion_enabled();
         let (cw, ch) = self.hud_island.advance_with_motion(
             std::time::Instant::now(),
-            layout.card.2,
-            layout.card.3,
+            natural.card.2,
+            natural.card.3,
             motion_enabled,
         );
         // A static desktop produces no damage and therefore no frames, so the
         // spring has to keep asking for them until it settles — the HUD does
         // not redraw on its own just because it is on screen.
-        if self.hud_island.animating(layout.card.2, layout.card.3) {
+        if self.hud_island.animating(natural.card.2, natural.card.3) {
             self.needs_render = true;
         }
-        let [cx, cy, ..] = dock.contained_rect(cw, ch, 0.0);
+        let [cx, cy, cw, ch] = dock.contained_rect(cw, ch, 0.0);
+        let layout = hud::HudLayout::placed(
+            ui,
+            (cx, cy, cw, ch),
+            dims(0),
+            dims(1),
+            dims(2),
+            dims(3),
+            meter,
+        );
         let (radius_top, radius) = dock.radii(ch, ui.card_radius, 0.0);
 
         gl.BindVertexArray(self.quad_vao);
@@ -8225,9 +8234,7 @@ impl WaylandCompositor {
         let ui = ui_theme::palette();
         self.ensure_glass_backdrop(gl, ui, projection, scene_linear);
         let target_h = crate::backend::compositor_common::osd::OSD_CARD_HEIGHT;
-        let pad = 24.0;
-        // Fixed label zone so the bar does not shift as digits change.
-        let label_zone = 118.0;
+        let pad = crate::backend::compositor_common::osd::OSD_PAD;
         let accent = self.border_gradient_color_a;
 
         let dock = self.island_dock();
@@ -8242,8 +8249,8 @@ impl WaylandCompositor {
             0.0
         };
         let y_off = crate::backend::compositor_common::toast::osd_offset(hud_h);
-        let [x, y, ..] = dock.contained_rect(card_w, card_h, y_off);
-        let (radius_top, radius) = dock.radii(card_h, ui.osd_radius, y_off);
+        let [x, y, cw, ch] = dock.contained_rect(card_w, card_h, y_off);
+        let (radius_top, radius) = dock.radii(ch, ui.osd_radius, y_off);
         // Contents appear as the card makes room for them, rather than
         // overflowing a card that is still only a seed wide.
         let opened = (card_w / target_w.max(1.0)).clamp(0.0, 1.0);
@@ -8260,8 +8267,8 @@ impl WaylandCompositor {
                 ui,
                 x,
                 y,
-                card_w,
-                card_h,
+                cw,
+                ch,
                 radius,
                 radius_top,
                 ui.osd,
@@ -8271,23 +8278,20 @@ impl WaylandCompositor {
 
             // Progress bar: dim track + accent fill. Label-only kinds (media)
             // report no fill and give the whole card to the text.
-            let bar_w = card_w - label_zone - pad;
             if let Some(fill) = fill
-                && bar_w > 0.0
+                && let Some((track, fill_r)) =
+                    crate::backend::compositor_common::osd::slider_bar([x, y, cw, ch], fill)
             {
-                let bar_x = x + label_zone;
-                let bar_h = 6.0;
-                let bar_y = y + (card_h - bar_h) / 2.0;
                 self.sysui_fill_rounded(
                     gl,
-                    bar_x,
-                    bar_y,
-                    bar_w,
-                    bar_h,
-                    bar_h / 2.0,
+                    track[0],
+                    track[1],
+                    track[2],
+                    track[3],
+                    track[3] / 2.0,
                     UiPalette::faded(ui.slider_track, content_a),
                 );
-                if fill > 0.0 {
+                if fill_r[2] > 0.0 {
                     let fill_rgb = if fill_over {
                         crate::backend::compositor_common::osd::FILL_OVER
                     } else {
@@ -8295,11 +8299,11 @@ impl WaylandCompositor {
                     };
                     self.sysui_fill_rounded(
                         gl,
-                        bar_x,
-                        bar_y,
-                        (bar_w * fill).max(bar_h),
-                        bar_h,
-                        bar_h / 2.0,
+                        fill_r[0],
+                        fill_r[1],
+                        fill_r[2],
+                        fill_r[3],
+                        fill_r[3] / 2.0,
                         [fill_rgb[0], fill_rgb[1], fill_rgb[2], 0.95 * content_a],
                     );
                 }
@@ -8317,7 +8321,7 @@ impl WaylandCompositor {
             gl.Uniform4f(
                 text_rect,
                 x + pad,
-                y + (card_h - text_h as f32) / 2.0,
+                y + (ch - text_h as f32) / 2.0,
                 text_w as f32,
                 text_h as f32,
             );

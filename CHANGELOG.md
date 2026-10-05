@@ -23,8 +23,10 @@ monorepo use independent Semantic Versions.
   rows on a narrow output, and the color swatch keeps a contrasting ring.
   Capture handles shrink on a tiny pick instead of stacking; toast action
   chips wrap inside a narrow card. Volume and brightness past 100% keep a
-  full bar but in a cooler over-limit fill. Tags-overview numbers clip
-  before the urgency badge.
+  full bar but in a cooler over-limit fill. The debug HUD relayouts its
+  chip and meter into the painted island, and a too-narrow OSD drops the
+  slider instead of inverting it. Tags-overview numbers clip before the
+  urgency badge.
 - X11 sessions without a compositor show the configured wallpaper on the root
   window (per-output fill/fit/stretch/center, `_XROOTPMAP_ID`) instead of a
   solid black desktop, and native window borders follow `appearance.ui_theme`
