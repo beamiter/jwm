@@ -3363,9 +3363,11 @@ mod tests {
         assert!(bar_lines.iter().any(|line| {
             line == "show_bar: monitor=0 tag=1 prev_tag=2 selected=42 sel_tags=0 previous_tags=0x2 active_tags=0x1 windows=3 on_view=2 floating=1 minimized=1 sticky=1 urgent=1 fullscreen_count=1 pip=1 maximized=1 above=1 below=1 scratchpad=1 tabbed=2 dock=1 desktop=1 never_focus=1 skip_taskbar=1 skip_pager=1 no_decorations=1 drag_float=1 swallowed=1 demands_attention=1 fixed=1 strut=1 maximize_promoted=1 status_bar=1 closed_placement=1 layout=[]= prev_layout=||| gap=6 mfact=0.55 nmaster=1 preference=true visible=false fullscreen=true owns_output=1 connector=DP-1"
         }));
-        assert!(!bar_lines
-            .iter()
-            .any(|line| line.starts_with("closed_placement: monitor=")));
+        assert!(
+            !bar_lines
+                .iter()
+                .any(|line| line.starts_with("closed_placement: monitor="))
+        );
 
         let with_compact_cp = serde_json::json!({
             "health": {"status": "healthy", "reasons": []},
@@ -3379,12 +3381,16 @@ mod tests {
             }
         });
         let cp_lines = health_output_lines(&with_compact_cp);
-        assert!(cp_lines.iter().any(|line| {
-            line == "closed_placement: monitor=0 count=2 connector=DP-1"
-        }));
-        assert!(!cp_lines
-            .iter()
-            .any(|line| line.starts_with("prev_layout: monitor=")));
+        assert!(
+            cp_lines
+                .iter()
+                .any(|line| { line == "closed_placement: monitor=0 count=2 connector=DP-1" })
+        );
+        assert!(
+            !cp_lines
+                .iter()
+                .any(|line| line.starts_with("prev_layout: monitor="))
+        );
 
         let with_compact_prev = serde_json::json!({
             "health": {"status": "healthy", "reasons": []},
@@ -3398,9 +3404,11 @@ mod tests {
             }
         });
         let prev_lines = health_output_lines(&with_compact_prev);
-        assert!(prev_lines.iter().any(|line| {
-            line == "prev_layout: monitor=0 layout=||| connector=DP-1"
-        }));
+        assert!(
+            prev_lines
+                .iter()
+                .any(|line| { line == "prev_layout: monitor=0 layout=||| connector=DP-1" })
+        );
         assert!(!prev_lines.iter().any(|line| line.starts_with("cfact:")));
 
         let with_compact_cfact = serde_json::json!({
@@ -3415,9 +3423,11 @@ mod tests {
             }
         });
         let cfact_lines = health_output_lines(&with_compact_cfact);
-        assert!(cfact_lines.iter().any(|line| {
-            line == "cfact: id=42 client_fact=1.25 connector=DP-1"
-        }));
+        assert!(
+            cfact_lines
+                .iter()
+                .any(|line| { line == "cfact: id=42 client_fact=1.25 connector=DP-1" })
+        );
         assert!(!cfact_lines.iter().any(|line| line.starts_with("gaps:")));
 
         let with_compact_gaps = serde_json::json!({
@@ -3432,9 +3442,11 @@ mod tests {
             }
         });
         let gaps_lines = health_output_lines(&with_compact_gaps);
-        assert!(gaps_lines.iter().any(|line| {
-            line == "gaps: monitor=0 gap=8 connector=DP-1"
-        }));
+        assert!(
+            gaps_lines
+                .iter()
+                .any(|line| { line == "gaps: monitor=0 gap=8 connector=DP-1" })
+        );
         assert!(!gaps_lines.iter().any(|line| line.starts_with("mfact:")));
 
         let with_compact_mfact = serde_json::json!({
@@ -3449,9 +3461,11 @@ mod tests {
             }
         });
         let mfact_lines = health_output_lines(&with_compact_mfact);
-        assert!(mfact_lines.iter().any(|line| {
-            line == "mfact: monitor=0 m_fact=0.55 connector=DP-1"
-        }));
+        assert!(
+            mfact_lines
+                .iter()
+                .any(|line| { line == "mfact: monitor=0 m_fact=0.55 connector=DP-1" })
+        );
         assert!(!mfact_lines.iter().any(|line| line.starts_with("nmaster:")));
 
         let with_compact_nmaster = serde_json::json!({
@@ -3466,12 +3480,16 @@ mod tests {
             }
         });
         let nmaster_lines = health_output_lines(&with_compact_nmaster);
-        assert!(nmaster_lines.iter().any(|line| {
-            line == "nmaster: monitor=0 n_master=2 connector=DP-1"
-        }));
-        assert!(!nmaster_lines
-            .iter()
-            .any(|line| line.starts_with("layout: monitor=")));
+        assert!(
+            nmaster_lines
+                .iter()
+                .any(|line| { line == "nmaster: monitor=0 n_master=2 connector=DP-1" })
+        );
+        assert!(
+            !nmaster_lines
+                .iter()
+                .any(|line| line.starts_with("layout: monitor="))
+        );
 
         let with_compact_layout = serde_json::json!({
             "health": {"status": "healthy", "reasons": []},
@@ -3484,9 +3502,11 @@ mod tests {
             }
         });
         let layout_lines = health_output_lines(&with_compact_layout);
-        assert!(layout_lines.iter().any(|line| {
-            line == "layout: monitor=0 layout=[]="
-        }));
+        assert!(
+            layout_lines
+                .iter()
+                .any(|line| { line == "layout: monitor=0 layout=[]=" })
+        );
         assert!(!layout_lines.iter().any(|line| line.starts_with("tabs:")));
 
         let with_compact_tabs = serde_json::json!({
@@ -3502,9 +3522,11 @@ mod tests {
             }
         });
         let tabs_lines = health_output_lines(&with_compact_tabs);
-        assert!(tabs_lines.iter().any(|line| {
-            line == "tabs: monitor=0 reserved=28 windows=3 selected=42"
-        }));
+        assert!(
+            tabs_lines
+                .iter()
+                .any(|line| { line == "tabs: monitor=0 reserved=28 windows=3 selected=42" })
+        );
         assert!(!tabs_lines.iter().any(|line| line.starts_with("selected:")));
 
         let with_compact_selected = serde_json::json!({
@@ -3518,7 +3540,11 @@ mod tests {
         });
         let selected_lines = health_output_lines(&with_compact_selected);
         assert!(selected_lines.iter().any(|line| line == "selected: id=99"));
-        assert!(!selected_lines.iter().any(|line| line.starts_with("struts:")));
+        assert!(
+            !selected_lines
+                .iter()
+                .any(|line| line.starts_with("struts:"))
+        );
 
         let with_compact_struts = serde_json::json!({
             "health": {"status": "healthy", "reasons": []},
@@ -3531,7 +3557,11 @@ mod tests {
         });
         let struts_lines = health_output_lines(&with_compact_struts);
         assert!(struts_lines.iter().any(|line| line == "struts: monitors=2"));
-        assert!(!struts_lines.iter().any(|line| line.starts_with("scratchpads:")));
+        assert!(
+            !struts_lines
+                .iter()
+                .any(|line| line.starts_with("scratchpads:"))
+        );
 
         let with_compact_scratchpads = serde_json::json!({
             "health": {"status": "healthy", "reasons": []},
@@ -3543,12 +3573,16 @@ mod tests {
             }
         });
         let scratchpads_lines = health_output_lines(&with_compact_scratchpads);
-        assert!(scratchpads_lines
-            .iter()
-            .any(|line| line == "scratchpads: count=4"));
-        assert!(!scratchpads_lines
-            .iter()
-            .any(|line| line.starts_with("focused:")));
+        assert!(
+            scratchpads_lines
+                .iter()
+                .any(|line| line == "scratchpads: count=4")
+        );
+        assert!(
+            !scratchpads_lines
+                .iter()
+                .any(|line| line.starts_with("focused:"))
+        );
 
         let with_compact_focused = serde_json::json!({
             "health": {"status": "healthy", "reasons": []},
@@ -3561,9 +3595,11 @@ mod tests {
         });
         let focused_lines = health_output_lines(&with_compact_focused);
         assert!(focused_lines.iter().any(|line| line == "focused: id=77"));
-        assert!(!focused_lines
-            .iter()
-            .any(|line| line.starts_with("monitors:")));
+        assert!(
+            !focused_lines
+                .iter()
+                .any(|line| line.starts_with("monitors:"))
+        );
 
         let with_compact_monitors = serde_json::json!({
             "health": {"status": "healthy", "reasons": []},
@@ -3576,12 +3612,16 @@ mod tests {
             }
         });
         let monitors_lines = health_output_lines(&with_compact_monitors);
-        assert!(monitors_lines
-            .iter()
-            .any(|line| line == "monitors: count=2 focused=1"));
-        assert!(!monitors_lines
-            .iter()
-            .any(|line| line.starts_with("workspaces:")));
+        assert!(
+            monitors_lines
+                .iter()
+                .any(|line| line == "monitors: count=2 focused=1")
+        );
+        assert!(
+            !monitors_lines
+                .iter()
+                .any(|line| line.starts_with("workspaces:"))
+        );
 
         let with_compact_workspaces = serde_json::json!({
             "health": {"status": "healthy", "reasons": []},
@@ -3594,12 +3634,16 @@ mod tests {
             }
         });
         let workspaces_lines = health_output_lines(&with_compact_workspaces);
-        assert!(workspaces_lines
-            .iter()
-            .any(|line| line == "workspaces: count=9 focused=1"));
-        assert!(!workspaces_lines
-            .iter()
-            .any(|line| line.starts_with("windows: count=")));
+        assert!(
+            workspaces_lines
+                .iter()
+                .any(|line| line == "workspaces: count=9 focused=1")
+        );
+        assert!(
+            !workspaces_lines
+                .iter()
+                .any(|line| line.starts_with("windows: count="))
+        );
 
         let with_compact_windows = serde_json::json!({
             "health": {"status": "healthy", "reasons": []},
@@ -3612,9 +3656,11 @@ mod tests {
             }
         });
         let windows_lines = health_output_lines(&with_compact_windows);
-        assert!(windows_lines
-            .iter()
-            .any(|line| line == "windows: count=5 focused=42"));
+        assert!(
+            windows_lines
+                .iter()
+                .any(|line| line == "windows: count=5 focused=42")
+        );
         assert!(!windows_lines.iter().any(|line| line.starts_with("tree:")));
 
         let with_compact_tree = serde_json::json!({
@@ -3628,9 +3674,11 @@ mod tests {
             }
         });
         let tree_lines = health_output_lines(&with_compact_tree);
-        assert!(tree_lines
-            .iter()
-            .any(|line| line == "tree: monitors=2 windows=7"));
+        assert!(
+            tree_lines
+                .iter()
+                .any(|line| line == "tree: monitors=2 windows=7")
+        );
         assert!(!tree_lines.iter().any(|line| line.starts_with("effects:")));
 
         let with_compact_effects = serde_json::json!({
@@ -3678,9 +3726,7 @@ mod tests {
         });
         let bench_lines = health_output_lines(&with_compact_bench);
         assert!(bench_lines.iter().any(|line| line == "bench: ready=false"));
-        assert!(!bench_lines
-            .iter()
-            .any(|line| line.starts_with("floating:")));
+        assert!(!bench_lines.iter().any(|line| line.starts_with("floating:")));
 
         let with_compact_floating = serde_json::json!({
             "health": {"status": "healthy", "reasons": []},
@@ -3693,12 +3739,16 @@ mod tests {
             }
         });
         let floating_lines = health_output_lines(&with_compact_floating);
-        assert!(floating_lines
-            .iter()
-            .any(|line| line == "floating: count=3 focused=11"));
-        assert!(!floating_lines
-            .iter()
-            .any(|line| line.starts_with("minimized:")));
+        assert!(
+            floating_lines
+                .iter()
+                .any(|line| line == "floating: count=3 focused=11")
+        );
+        assert!(
+            !floating_lines
+                .iter()
+                .any(|line| line.starts_with("minimized:"))
+        );
 
         let with_compact_minimized = serde_json::json!({
             "health": {"status": "healthy", "reasons": []},
@@ -3711,12 +3761,16 @@ mod tests {
             }
         });
         let minimized_lines = health_output_lines(&with_compact_minimized);
-        assert!(minimized_lines
-            .iter()
-            .any(|line| line == "minimized: count=2 focused=22"));
-        assert!(!minimized_lines
-            .iter()
-            .any(|line| line.starts_with("sticky:")));
+        assert!(
+            minimized_lines
+                .iter()
+                .any(|line| line == "minimized: count=2 focused=22")
+        );
+        assert!(
+            !minimized_lines
+                .iter()
+                .any(|line| line.starts_with("sticky:"))
+        );
 
         let with_compact_sticky = serde_json::json!({
             "health": {"status": "healthy", "reasons": []},
@@ -3729,9 +3783,11 @@ mod tests {
             }
         });
         let sticky_lines = health_output_lines(&with_compact_sticky);
-        assert!(sticky_lines
-            .iter()
-            .any(|line| line == "sticky: count=1 focused=33"));
+        assert!(
+            sticky_lines
+                .iter()
+                .any(|line| line == "sticky: count=1 focused=33")
+        );
         assert!(!sticky_lines.iter().any(|line| line.starts_with("urgent:")));
 
         let with_compact_urgent = serde_json::json!({
@@ -3745,12 +3801,16 @@ mod tests {
             }
         });
         let urgent_lines = health_output_lines(&with_compact_urgent);
-        assert!(urgent_lines
-            .iter()
-            .any(|line| line == "urgent: count=4 focused=44"));
-        assert!(!urgent_lines
-            .iter()
-            .any(|line| line.starts_with("fullscreen:")));
+        assert!(
+            urgent_lines
+                .iter()
+                .any(|line| line == "urgent: count=4 focused=44")
+        );
+        assert!(
+            !urgent_lines
+                .iter()
+                .any(|line| line.starts_with("fullscreen:"))
+        );
 
         let with_compact_fullscreen = serde_json::json!({
             "health": {"status": "healthy", "reasons": []},
@@ -3763,9 +3823,11 @@ mod tests {
             }
         });
         let fullscreen_lines = health_output_lines(&with_compact_fullscreen);
-        assert!(fullscreen_lines
-            .iter()
-            .any(|line| line == "fullscreen: count=1 focused=55"));
+        assert!(
+            fullscreen_lines
+                .iter()
+                .any(|line| line == "fullscreen: count=1 focused=55")
+        );
         assert!(!fullscreen_lines.iter().any(|line| line.starts_with("pip:")));
 
         let with_compact_pip = serde_json::json!({
@@ -3779,12 +3841,16 @@ mod tests {
             }
         });
         let pip_lines = health_output_lines(&with_compact_pip);
-        assert!(pip_lines
-            .iter()
-            .any(|line| line == "pip: count=1 focused=66"));
-        assert!(!pip_lines
-            .iter()
-            .any(|line| line.starts_with("notifications:")));
+        assert!(
+            pip_lines
+                .iter()
+                .any(|line| line == "pip: count=1 focused=66")
+        );
+        assert!(
+            !pip_lines
+                .iter()
+                .any(|line| line.starts_with("notifications:"))
+        );
 
         let with_compact_notifications = serde_json::json!({
             "health": {"status": "healthy", "reasons": []},
@@ -3798,12 +3864,16 @@ mod tests {
             }
         });
         let notifications_lines = health_output_lines(&with_compact_notifications);
-        assert!(notifications_lines.iter().any(|line| {
-            line == "notifications: count=2 center_open=true dnd=false"
-        }));
-        assert!(!notifications_lines
-            .iter()
-            .any(|line| line.starts_with("blur:")));
+        assert!(
+            notifications_lines
+                .iter()
+                .any(|line| { line == "notifications: count=2 center_open=true dnd=false" })
+        );
+        assert!(
+            !notifications_lines
+                .iter()
+                .any(|line| line.starts_with("blur:"))
+        );
 
         let with_compact_blur = serde_json::json!({
             "health": {"status": "healthy", "reasons": []},
@@ -3818,9 +3888,11 @@ mod tests {
             }
         });
         let blur_lines = health_output_lines(&with_compact_blur);
-        assert!(blur_lines.iter().any(|line| {
-            line == "blur: enabled=true strength=0.5 temporal=false frosted=true"
-        }));
+        assert!(
+            blur_lines.iter().any(|line| {
+                line == "blur: enabled=true strength=0.5 temporal=false frosted=true"
+            })
+        );
         assert!(!blur_lines.iter().any(|line| line.starts_with("hdr:")));
 
         let with_compact_hdr = serde_json::json!({
@@ -3836,9 +3908,11 @@ mod tests {
             }
         });
         let hdr_lines = health_output_lines(&with_compact_hdr);
-        assert!(hdr_lines.iter().any(|line| {
-            line == "hdr: enabled=true peak_nits=1000 outputs=2 capable=1"
-        }));
+        assert!(
+            hdr_lines
+                .iter()
+                .any(|line| { line == "hdr: enabled=true peak_nits=1000 outputs=2 capable=1" })
+        );
         assert!(!hdr_lines.iter().any(|line| line.starts_with("dnd:")));
 
         let with_compact_dnd = serde_json::json!({
@@ -3852,9 +3926,7 @@ mod tests {
         });
         let dnd_lines = health_output_lines(&with_compact_dnd);
         assert!(dnd_lines.iter().any(|line| line == "dnd: enabled=true"));
-        assert!(!dnd_lines
-            .iter()
-            .any(|line| line.starts_with("system_ui:")));
+        assert!(!dnd_lines.iter().any(|line| line.starts_with("system_ui:")));
 
         let with_compact_system_ui = serde_json::json!({
             "health": {"status": "healthy", "reasons": []},
@@ -3867,9 +3939,11 @@ mod tests {
             }
         });
         let system_ui_lines = health_output_lines(&with_compact_system_ui);
-        assert!(system_ui_lines
-            .iter()
-            .any(|line| line == "system_ui: active=true kind=launcher"));
+        assert!(
+            system_ui_lines
+                .iter()
+                .any(|line| line == "system_ui: active=true kind=launcher")
+        );
         assert!(!system_ui_lines.iter().any(|line| line.starts_with("idle:")));
 
         let with_compact_idle = serde_json::json!({
@@ -3890,9 +3964,7 @@ mod tests {
         assert!(idle_lines.iter().any(|line| {
             line == "idle: inhibited=false caffeine=true dimmed=false screen_off=false locked=false idle_for=12"
         }));
-        assert!(!idle_lines
-            .iter()
-            .any(|line| line.starts_with("clipboard:")));
+        assert!(!idle_lines.iter().any(|line| line.starts_with("clipboard:")));
 
         let with_compact_clipboard = serde_json::json!({
             "health": {"status": "healthy", "reasons": []},
@@ -3906,12 +3978,16 @@ mod tests {
             }
         });
         let clipboard_lines = health_output_lines(&with_compact_clipboard);
-        assert!(clipboard_lines.iter().any(|line| {
-            line == "clipboard: enabled=true count=3 capacity=50"
-        }));
-        assert!(!clipboard_lines
-            .iter()
-            .any(|line| line.starts_with("session_lock:")));
+        assert!(
+            clipboard_lines
+                .iter()
+                .any(|line| { line == "clipboard: enabled=true count=3 capacity=50" })
+        );
+        assert!(
+            !clipboard_lines
+                .iter()
+                .any(|line| line.starts_with("session_lock:"))
+        );
 
         let with_compact_session_lock = serde_json::json!({
             "health": {"status": "healthy", "reasons": []},
@@ -3924,12 +4000,16 @@ mod tests {
             }
         });
         let session_lock_lines = health_output_lines(&with_compact_session_lock);
-        assert!(session_lock_lines.iter().any(|line| {
-            line == "session_lock: locked=true surfaces=2"
-        }));
-        assert!(!session_lock_lines
-            .iter()
-            .any(|line| line.starts_with("tearing:")));
+        assert!(
+            session_lock_lines
+                .iter()
+                .any(|line| { line == "session_lock: locked=true surfaces=2" })
+        );
+        assert!(
+            !session_lock_lines
+                .iter()
+                .any(|line| line.starts_with("tearing:"))
+        );
 
         let with_compact_tearing = serde_json::json!({
             "health": {"status": "healthy", "reasons": []},
@@ -3943,12 +4023,16 @@ mod tests {
             }
         });
         let tearing_lines = health_output_lines(&with_compact_tearing);
-        assert!(tearing_lines.iter().any(|line| {
-            line == "tearing: active_surfaces=1 tearing_outputs=1 outputs=2"
-        }));
-        assert!(!tearing_lines
-            .iter()
-            .any(|line| line.starts_with("xwayland:")));
+        assert!(
+            tearing_lines
+                .iter()
+                .any(|line| { line == "tearing: active_surfaces=1 tearing_outputs=1 outputs=2" })
+        );
+        assert!(
+            !tearing_lines
+                .iter()
+                .any(|line| line.starts_with("xwayland:"))
+        );
 
         let with_compact_xwayland = serde_json::json!({
             "health": {"status": "healthy", "reasons": []},
@@ -3967,9 +4051,11 @@ mod tests {
         assert!(xwayland_lines.iter().any(|line| {
             line == "xwayland: available=true wm_ready=true display=:2 mapped=3 pending=1"
         }));
-        assert!(!xwayland_lines
-            .iter()
-            .any(|line| line.starts_with("scrolling:")));
+        assert!(
+            !xwayland_lines
+                .iter()
+                .any(|line| line.starts_with("scrolling:"))
+        );
 
         let with_compact_scrolling = serde_json::json!({
             "health": {"status": "healthy", "reasons": []},
@@ -3982,12 +4068,16 @@ mod tests {
             }
         });
         let scrolling_lines = health_output_lines(&with_compact_scrolling);
-        assert!(scrolling_lines.iter().any(|line| {
-            line == "scrolling: active_monitors=1 monitors=2"
-        }));
-        assert!(!scrolling_lines
-            .iter()
-            .any(|line| line.starts_with("color_management:")));
+        assert!(
+            scrolling_lines
+                .iter()
+                .any(|line| { line == "scrolling: active_monitors=1 monitors=2" })
+        );
+        assert!(
+            !scrolling_lines
+                .iter()
+                .any(|line| line.starts_with("color_management:"))
+        );
 
         let with_compact_color_management = serde_json::json!({
             "health": {"status": "healthy", "reasons": []},
@@ -4000,13 +4090,17 @@ mod tests {
             }
         });
         let color_management_lines = health_output_lines(&with_compact_color_management);
-        assert!(color_management_lines.iter().any(|line| {
-            line == "color_management: surfaces=4 hdr_surfaces=1"
-        }));
+        assert!(
+            color_management_lines
+                .iter()
+                .any(|line| { line == "color_management: surfaces=4 hdr_surfaces=1" })
+        );
 
-        assert!(!color_management_lines
-            .iter()
-            .any(|line| line.starts_with("night_light:")));
+        assert!(
+            !color_management_lines
+                .iter()
+                .any(|line| line.starts_with("night_light:"))
+        );
 
         let with_compact_night_light = serde_json::json!({
             "health": {"status": "healthy", "reasons": []},
@@ -4020,13 +4114,17 @@ mod tests {
             }
         });
         let night_light_lines = health_output_lines(&with_compact_night_light);
-        assert!(night_light_lines.iter().any(|line| {
-            line == "night_light: active=true override=on temp=4500"
-        }));
+        assert!(
+            night_light_lines
+                .iter()
+                .any(|line| { line == "night_light: active=true override=on temp=4500" })
+        );
 
-        assert!(!night_light_lines
-            .iter()
-            .any(|line| line.starts_with("magnifier:")));
+        assert!(
+            !night_light_lines
+                .iter()
+                .any(|line| line.starts_with("magnifier:"))
+        );
 
         let with_compact_magnifier = serde_json::json!({
             "health": {"status": "healthy", "reasons": []},
@@ -4040,13 +4138,13 @@ mod tests {
             }
         });
         let magnifier_lines = health_output_lines(&with_compact_magnifier);
-        assert!(magnifier_lines.iter().any(|line| {
-            line == "magnifier: enabled=true zoom=2.5 radius=120"
-        }));
+        assert!(
+            magnifier_lines
+                .iter()
+                .any(|line| { line == "magnifier: enabled=true zoom=2.5 radius=120" })
+        );
 
-        assert!(!magnifier_lines
-            .iter()
-            .any(|line| line.starts_with("peek:")));
+        assert!(!magnifier_lines.iter().any(|line| line.starts_with("peek:")));
 
         let with_compact_peek = serde_json::json!({
             "health": {"status": "healthy", "reasons": []},
@@ -4059,13 +4157,13 @@ mod tests {
             }
         });
         let peek_lines = health_output_lines(&with_compact_peek);
-        assert!(peek_lines.iter().any(|line| {
-            line == "peek: active=true compositor=true"
-        }));
+        assert!(
+            peek_lines
+                .iter()
+                .any(|line| { line == "peek: active=true compositor=true" })
+        );
 
-        assert!(!peek_lines
-            .iter()
-            .any(|line| line.starts_with("expose:")));
+        assert!(!peek_lines.iter().any(|line| line.starts_with("expose:")));
 
         let with_compact_expose = serde_json::json!({
             "health": {"status": "healthy", "reasons": []},
@@ -4077,13 +4175,13 @@ mod tests {
             }
         });
         let expose_lines = health_output_lines(&with_compact_expose);
-        assert!(expose_lines.iter().any(|line| {
-            line == "expose: active=true"
-        }));
+        assert!(
+            expose_lines
+                .iter()
+                .any(|line| { line == "expose: active=true" })
+        );
 
-        assert!(!expose_lines
-            .iter()
-            .any(|line| line.starts_with("gesture:")));
+        assert!(!expose_lines.iter().any(|line| line.starts_with("gesture:")));
 
         let with_compact_gesture = serde_json::json!({
             "health": {"status": "healthy", "reasons": []},
@@ -4096,13 +4194,17 @@ mod tests {
             }
         });
         let gesture_lines = health_output_lines(&with_compact_gesture);
-        assert!(gesture_lines.iter().any(|line| {
-            line == "gesture: bindings=4 scrolling=2"
-        }));
+        assert!(
+            gesture_lines
+                .iter()
+                .any(|line| { line == "gesture: bindings=4 scrolling=2" })
+        );
 
-        assert!(!gesture_lines
-            .iter()
-            .any(|line| line.starts_with("wayland:")));
+        assert!(
+            !gesture_lines
+                .iter()
+                .any(|line| line.starts_with("wayland:"))
+        );
 
         let with_compact_wayland = serde_json::json!({
             "health": {"status": "healthy", "reasons": []},
@@ -4115,13 +4217,17 @@ mod tests {
             }
         });
         let wayland_lines = health_output_lines(&with_compact_wayland);
-        assert!(wayland_lines.iter().any(|line| {
-            line == "wayland: family=wayland-udev outputs=2"
-        }));
+        assert!(
+            wayland_lines
+                .iter()
+                .any(|line| { line == "wayland: family=wayland-udev outputs=2" })
+        );
 
-        assert!(!wayland_lines
-            .iter()
-            .any(|line| line.starts_with("recording:")));
+        assert!(
+            !wayland_lines
+                .iter()
+                .any(|line| line.starts_with("recording:"))
+        );
 
         let with_compact_recording = serde_json::json!({
             "health": {"status": "healthy", "reasons": []},
@@ -4135,13 +4241,17 @@ mod tests {
             }
         });
         let recording_lines = health_output_lines(&with_compact_recording);
-        assert!(recording_lines.iter().any(|line| {
-            line == "recording: active=true selecting=false elapsed=12.5"
-        }));
+        assert!(
+            recording_lines
+                .iter()
+                .any(|line| { line == "recording: active=true selecting=false elapsed=12.5" })
+        );
 
-        assert!(!recording_lines
-            .iter()
-            .any(|line| line.starts_with("audio_recording:")));
+        assert!(
+            !recording_lines
+                .iter()
+                .any(|line| line.starts_with("audio_recording:"))
+        );
 
         let with_compact_audio_recording = serde_json::json!({
             "health": {"status": "healthy", "reasons": []},
@@ -4159,9 +4269,11 @@ mod tests {
             line == "audio_recording: active=true finalizing=false elapsed_ms=900"
         }));
 
-        assert!(!audio_recording_lines
-            .iter()
-            .any(|line| line.starts_with("capture:")));
+        assert!(
+            !audio_recording_lines
+                .iter()
+                .any(|line| line.starts_with("capture:"))
+        );
 
         let with_compact_capture = serde_json::json!({
             "health": {"status": "healthy", "reasons": []},
@@ -4175,13 +4287,17 @@ mod tests {
             }
         });
         let capture_lines = health_output_lines(&with_compact_capture);
-        assert!(capture_lines.iter().any(|line| {
-            line == "capture: screencopy=true image_copy=false dmabuf=true"
-        }));
+        assert!(
+            capture_lines
+                .iter()
+                .any(|line| { line == "capture: screencopy=true image_copy=false dmabuf=true" })
+        );
 
-        assert!(!capture_lines
-            .iter()
-            .any(|line| line.starts_with("waterlily:")));
+        assert!(
+            !capture_lines
+                .iter()
+                .any(|line| line.starts_with("waterlily:"))
+        );
 
         let with_compact_waterlily = serde_json::json!({
             "health": {"status": "healthy", "reasons": []},
@@ -4195,13 +4311,17 @@ mod tests {
             }
         });
         let waterlily_lines = health_output_lines(&with_compact_waterlily);
-        assert!(waterlily_lines.iter().any(|line| {
-            line == "waterlily: enabled=true active=true worker=false"
-        }));
+        assert!(
+            waterlily_lines
+                .iter()
+                .any(|line| { line == "waterlily: enabled=true active=true worker=false" })
+        );
 
-        assert!(!waterlily_lines
-            .iter()
-            .any(|line| line.starts_with("audio:")));
+        assert!(
+            !waterlily_lines
+                .iter()
+                .any(|line| line.starts_with("audio:"))
+        );
 
         let with_compact_audio = serde_json::json!({
             "health": {"status": "healthy", "reasons": []},
@@ -4215,13 +4335,17 @@ mod tests {
             }
         });
         let audio_lines = health_output_lines(&with_compact_audio);
-        assert!(audio_lines.iter().any(|line| {
-            line == "audio: outputs=2 inputs=1 pending=false"
-        }));
+        assert!(
+            audio_lines
+                .iter()
+                .any(|line| { line == "audio: outputs=2 inputs=1 pending=false" })
+        );
 
-        assert!(!audio_lines
-            .iter()
-            .any(|line| line.starts_with("wallpaper:")));
+        assert!(
+            !audio_lines
+                .iter()
+                .any(|line| line.starts_with("wallpaper:"))
+        );
 
         let with_compact_wallpaper = serde_json::json!({
             "health": {"status": "healthy", "reasons": []},
@@ -4234,13 +4358,17 @@ mod tests {
             }
         });
         let wallpaper_lines = health_output_lines(&with_compact_wallpaper);
-        assert!(wallpaper_lines.iter().any(|line| {
-            line == "wallpaper: enabled=true pending=false"
-        }));
+        assert!(
+            wallpaper_lines
+                .iter()
+                .any(|line| { line == "wallpaper: enabled=true pending=false" })
+        );
 
-        assert!(!wallpaper_lines
-            .iter()
-            .any(|line| line.starts_with("bluetooth:")));
+        assert!(
+            !wallpaper_lines
+                .iter()
+                .any(|line| line.starts_with("bluetooth:"))
+        );
 
         let with_compact_bluetooth = serde_json::json!({
             "health": {"status": "healthy", "reasons": []},
@@ -4252,13 +4380,17 @@ mod tests {
             }
         });
         let bluetooth_lines = health_output_lines(&with_compact_bluetooth);
-        assert!(bluetooth_lines.iter().any(|line| {
-            line == "bluetooth: active=true"
-        }));
+        assert!(
+            bluetooth_lines
+                .iter()
+                .any(|line| { line == "bluetooth: active=true" })
+        );
 
-        assert!(!bluetooth_lines
-            .iter()
-            .any(|line| line.starts_with("resources:")));
+        assert!(
+            !bluetooth_lines
+                .iter()
+                .any(|line| line.starts_with("resources:"))
+        );
 
         let with_compact_resources = serde_json::json!({
             "health": {"status": "healthy", "reasons": []},
@@ -4271,13 +4403,17 @@ mod tests {
             }
         });
         let resources_lines = health_output_lines(&with_compact_resources);
-        assert!(resources_lines.iter().any(|line| {
-            line == "resources: cpu_present=true cpu_percent=12.5"
-        }));
+        assert!(
+            resources_lines
+                .iter()
+                .any(|line| { line == "resources: cpu_present=true cpu_percent=12.5" })
+        );
 
-        assert!(!resources_lines
-            .iter()
-            .any(|line| line.starts_with("connectivity:")));
+        assert!(
+            !resources_lines
+                .iter()
+                .any(|line| line.starts_with("connectivity:"))
+        );
 
         let with_compact_connectivity = serde_json::json!({
             "health": {"status": "healthy", "reasons": []},
@@ -4290,13 +4426,17 @@ mod tests {
             }
         });
         let connectivity_lines = health_output_lines(&with_compact_connectivity);
-        assert!(connectivity_lines.iter().any(|line| {
-            line == "connectivity: wifi=true bt_powered=false"
-        }));
+        assert!(
+            connectivity_lines
+                .iter()
+                .any(|line| { line == "connectivity: wifi=true bt_powered=false" })
+        );
 
-        assert!(!connectivity_lines
-            .iter()
-            .any(|line| line.starts_with("power:")));
+        assert!(
+            !connectivity_lines
+                .iter()
+                .any(|line| line.starts_with("power:"))
+        );
 
         let with_compact_power = serde_json::json!({
             "health": {"status": "healthy", "reasons": []},
@@ -4308,13 +4448,13 @@ mod tests {
             }
         });
         let power_lines = health_output_lines(&with_compact_power);
-        assert!(power_lines.iter().any(|line| {
-            line == "power: battery_present=true percent=88"
-        }));
+        assert!(
+            power_lines
+                .iter()
+                .any(|line| { line == "power: battery_present=true percent=88" })
+        );
 
-        assert!(!power_lines
-            .iter()
-            .any(|line| line.starts_with("media:")));
+        assert!(!power_lines.iter().any(|line| line.starts_with("media:")));
 
         let with_compact_media = serde_json::json!({
             "health": {"status": "healthy", "reasons": []},
@@ -4326,13 +4466,17 @@ mod tests {
             }
         });
         let media_lines = health_output_lines(&with_compact_media);
-        assert!(media_lines.iter().any(|line| {
-            line == "media: active=true"
-        }));
+        assert!(
+            media_lines
+                .iter()
+                .any(|line| { line == "media: active=true" })
+        );
 
-        assert!(!media_lines
-            .iter()
-            .any(|line| line.starts_with("version_info:")));
+        assert!(
+            !media_lines
+                .iter()
+                .any(|line| line.starts_with("version_info:"))
+        );
 
         let with_compact_version_info = serde_json::json!({
             "health": {"status": "healthy", "reasons": []},
@@ -4345,13 +4489,17 @@ mod tests {
             }
         });
         let version_info_lines = health_output_lines(&with_compact_version_info);
-        assert!(version_info_lines.iter().any(|line| {
-            line == "version_info: version=0.2.0 backend=wayland-udev"
-        }));
+        assert!(
+            version_info_lines
+                .iter()
+                .any(|line| { line == "version_info: version=0.2.0 backend=wayland-udev" })
+        );
 
-        assert!(!version_info_lines
-            .iter()
-            .any(|line| line.starts_with("metrics:")));
+        assert!(
+            !version_info_lines
+                .iter()
+                .any(|line| line.starts_with("metrics:"))
+        );
 
         let with_compact_metrics = serde_json::json!({
             "health": {"status": "healthy", "reasons": []},
@@ -4363,13 +4511,17 @@ mod tests {
             }
         });
         let metrics_lines = health_output_lines(&with_compact_metrics);
-        assert!(metrics_lines.iter().any(|line| {
-            line == "metrics: available=true"
-        }));
+        assert!(
+            metrics_lines
+                .iter()
+                .any(|line| { line == "metrics: available=true" })
+        );
 
-        assert!(!metrics_lines
-            .iter()
-            .any(|line| line.starts_with("ipc_caps:")));
+        assert!(
+            !metrics_lines
+                .iter()
+                .any(|line| line.starts_with("ipc_caps:"))
+        );
 
         let with_compact_ipc_caps = serde_json::json!({
             "health": {"status": "healthy", "reasons": []},
@@ -4383,9 +4535,11 @@ mod tests {
             }
         });
         let ipc_caps_lines = health_output_lines(&with_compact_ipc_caps);
-        assert!(ipc_caps_lines.iter().any(|line| {
-            line == "ipc_caps: schema=1 queries=3 commands=2"
-        }));
+        assert!(
+            ipc_caps_lines
+                .iter()
+                .any(|line| { line == "ipc_caps: schema=1 queries=3 commands=2" })
+        );
 
         let capabilities = serde_json::json!({
             "schema_version": 1,
@@ -5102,7 +5256,10 @@ fn health_output_lines(status: &serde_json::Value) -> Vec<String> {
         }
     }
 
-    if let Some(bar) = status.get("show_bar").and_then(serde_json::Value::as_object) {
+    if let Some(bar) = status
+        .get("show_bar")
+        .and_then(serde_json::Value::as_object)
+    {
         let preference = bar
             .get("show_bar")
             .and_then(serde_json::Value::as_bool)
@@ -5480,7 +5637,10 @@ fn health_output_lines(status: &serde_json::Value) -> Vec<String> {
         ));
     }
 
-    if let Some(selected) = status.get("selected").and_then(serde_json::Value::as_object) {
+    if let Some(selected) = status
+        .get("selected")
+        .and_then(serde_json::Value::as_object)
+    {
         let id = selected
             .get("id")
             .and_then(|v| {
@@ -5504,7 +5664,10 @@ fn health_output_lines(status: &serde_json::Value) -> Vec<String> {
         lines.push(format!("struts: monitors={monitor_count}"));
     }
 
-    if let Some(scratchpads) = status.get("scratchpads").and_then(serde_json::Value::as_object) {
+    if let Some(scratchpads) = status
+        .get("scratchpads")
+        .and_then(serde_json::Value::as_object)
+    {
         let count = scratchpads
             .get("count")
             .and_then(|v| v.as_u64().or_else(|| v.as_i64().map(|n| n as u64)))
@@ -5528,7 +5691,10 @@ fn health_output_lines(status: &serde_json::Value) -> Vec<String> {
         lines.push(format!("focused: id={id}"));
     }
 
-    if let Some(monitors) = status.get("monitors").and_then(serde_json::Value::as_object) {
+    if let Some(monitors) = status
+        .get("monitors")
+        .and_then(serde_json::Value::as_object)
+    {
         let count = monitors
             .get("count")
             .and_then(|v| v.as_u64().or_else(|| v.as_i64().map(|n| n as u64)))
@@ -5548,7 +5714,10 @@ fn health_output_lines(status: &serde_json::Value) -> Vec<String> {
         lines.push(format!("monitors: count={count} focused={focused}"));
     }
 
-    if let Some(workspaces) = status.get("workspaces").and_then(serde_json::Value::as_object) {
+    if let Some(workspaces) = status
+        .get("workspaces")
+        .and_then(serde_json::Value::as_object)
+    {
         let count = workspaces
             .get("count")
             .and_then(|v| v.as_u64().or_else(|| v.as_i64().map(|n| n as u64)))
@@ -5559,9 +5728,7 @@ fn health_output_lines(status: &serde_json::Value) -> Vec<String> {
             .and_then(|v| v.as_u64().or_else(|| v.as_i64().map(|n| n as u64)))
             .map(|value| value.to_string())
             .unwrap_or_else(|| "-".into());
-        lines.push(format!(
-            "workspaces: count={count} focused={focused_count}"
-        ));
+        lines.push(format!("workspaces: count={count} focused={focused_count}"));
     }
 
     if let Some(windows) = status.get("windows").and_then(serde_json::Value::as_object) {
@@ -5638,7 +5805,10 @@ fn health_output_lines(status: &serde_json::Value) -> Vec<String> {
         lines.push(format!("bench: ready={ready}"));
     }
 
-    if let Some(floating) = status.get("floating").and_then(serde_json::Value::as_object) {
+    if let Some(floating) = status
+        .get("floating")
+        .and_then(serde_json::Value::as_object)
+    {
         let count = floating
             .get("count")
             .and_then(|v| v.as_u64().or_else(|| v.as_i64().map(|n| n as u64)))
@@ -5658,7 +5828,10 @@ fn health_output_lines(status: &serde_json::Value) -> Vec<String> {
         lines.push(format!("floating: count={count} focused={focused_id}"));
     }
 
-    if let Some(minimized) = status.get("minimized").and_then(serde_json::Value::as_object) {
+    if let Some(minimized) = status
+        .get("minimized")
+        .and_then(serde_json::Value::as_object)
+    {
         let count = minimized
             .get("count")
             .and_then(|v| v.as_u64().or_else(|| v.as_i64().map(|n| n as u64)))
@@ -5718,7 +5891,10 @@ fn health_output_lines(status: &serde_json::Value) -> Vec<String> {
         lines.push(format!("urgent: count={count} focused={focused_id}"));
     }
 
-    if let Some(fullscreen) = status.get("fullscreen").and_then(serde_json::Value::as_object) {
+    if let Some(fullscreen) = status
+        .get("fullscreen")
+        .and_then(serde_json::Value::as_object)
+    {
         let count = fullscreen
             .get("count")
             .and_then(|v| v.as_u64().or_else(|| v.as_i64().map(|n| n as u64)))
@@ -5735,9 +5911,7 @@ fn health_output_lines(status: &serde_json::Value) -> Vec<String> {
             })
             .map(|value| value.to_string())
             .unwrap_or_else(|| "-".into());
-        lines.push(format!(
-            "fullscreen: count={count} focused={focused_id}"
-        ));
+        lines.push(format!("fullscreen: count={count} focused={focused_id}"));
     }
 
     if let Some(pip) = status.get("pip").and_then(serde_json::Value::as_object) {
@@ -5851,7 +6025,10 @@ fn health_output_lines(status: &serde_json::Value) -> Vec<String> {
         lines.push(format!("dnd: enabled={enabled}"));
     }
 
-    if let Some(system_ui) = status.get("system_ui").and_then(serde_json::Value::as_object) {
+    if let Some(system_ui) = status
+        .get("system_ui")
+        .and_then(serde_json::Value::as_object)
+    {
         let active = system_ui
             .get("active")
             .and_then(serde_json::Value::as_bool)
@@ -5859,13 +6036,7 @@ fn health_output_lines(status: &serde_json::Value) -> Vec<String> {
             .unwrap_or_else(|| "-".into());
         let kind = system_ui
             .get("kind")
-            .and_then(|v| {
-                if v.is_null() {
-                    None
-                } else {
-                    v.as_str()
-                }
-            })
+            .and_then(|v| if v.is_null() { None } else { v.as_str() })
             .unwrap_or("-");
         lines.push(format!("system_ui: active={active} kind={kind}"));
     }
@@ -5893,7 +6064,10 @@ fn health_output_lines(status: &serde_json::Value) -> Vec<String> {
         ));
     }
 
-    if let Some(clipboard) = status.get("clipboard").and_then(serde_json::Value::as_object) {
+    if let Some(clipboard) = status
+        .get("clipboard")
+        .and_then(serde_json::Value::as_object)
+    {
         let enabled = clipboard
             .get("enabled")
             .and_then(serde_json::Value::as_bool)
@@ -5954,7 +6128,10 @@ fn health_output_lines(status: &serde_json::Value) -> Vec<String> {
         ));
     }
 
-    if let Some(xwayland) = status.get("xwayland").and_then(serde_json::Value::as_object) {
+    if let Some(xwayland) = status
+        .get("xwayland")
+        .and_then(serde_json::Value::as_object)
+    {
         let flag = |name: &str| {
             xwayland
                 .get(name)
@@ -5964,13 +6141,7 @@ fn health_output_lines(status: &serde_json::Value) -> Vec<String> {
         };
         let display = xwayland
             .get("display")
-            .and_then(|v| {
-                if v.is_null() {
-                    None
-                } else {
-                    v.as_str()
-                }
-            })
+            .and_then(|v| if v.is_null() { None } else { v.as_str() })
             .unwrap_or("-");
         let mapped = xwayland
             .get("mapped_window_count")
@@ -5989,7 +6160,10 @@ fn health_output_lines(status: &serde_json::Value) -> Vec<String> {
         ));
     }
 
-    if let Some(scrolling) = status.get("scrolling").and_then(serde_json::Value::as_object) {
+    if let Some(scrolling) = status
+        .get("scrolling")
+        .and_then(serde_json::Value::as_object)
+    {
         let active_monitors = scrolling
             .get("active_monitor_count")
             .and_then(|v| v.as_u64().or_else(|| v.as_i64().map(|n| n as u64)))
@@ -6024,7 +6198,10 @@ fn health_output_lines(status: &serde_json::Value) -> Vec<String> {
         ));
     }
 
-    if let Some(night_light) = status.get("night_light").and_then(serde_json::Value::as_object) {
+    if let Some(night_light) = status
+        .get("night_light")
+        .and_then(serde_json::Value::as_object)
+    {
         let active = night_light
             .get("active")
             .and_then(serde_json::Value::as_bool)
@@ -6032,13 +6209,7 @@ fn health_output_lines(status: &serde_json::Value) -> Vec<String> {
             .unwrap_or_else(|| "-".into());
         let override_v = night_light
             .get("override")
-            .and_then(|v| {
-                if v.is_null() {
-                    None
-                } else {
-                    v.as_str()
-                }
-            })
+            .and_then(|v| if v.is_null() { None } else { v.as_str() })
             .unwrap_or("-");
         let temp = night_light
             .get("temp")
@@ -6050,7 +6221,10 @@ fn health_output_lines(status: &serde_json::Value) -> Vec<String> {
         ));
     }
 
-    if let Some(magnifier) = status.get("magnifier").and_then(serde_json::Value::as_object) {
+    if let Some(magnifier) = status
+        .get("magnifier")
+        .and_then(serde_json::Value::as_object)
+    {
         let enabled = magnifier
             .get("enabled")
             .and_then(serde_json::Value::as_bool)
@@ -6113,13 +6287,7 @@ fn health_output_lines(status: &serde_json::Value) -> Vec<String> {
     if let Some(wayland) = status.get("wayland").and_then(serde_json::Value::as_object) {
         let backend_family = wayland
             .get("backend_family")
-            .and_then(|v| {
-                if v.is_null() {
-                    None
-                } else {
-                    v.as_str()
-                }
-            })
+            .and_then(|v| if v.is_null() { None } else { v.as_str() })
             .unwrap_or("-");
         let outputs = wayland
             .get("outputs")
@@ -6131,7 +6299,10 @@ fn health_output_lines(status: &serde_json::Value) -> Vec<String> {
         ));
     }
 
-    if let Some(recording) = status.get("recording").and_then(serde_json::Value::as_object) {
+    if let Some(recording) = status
+        .get("recording")
+        .and_then(serde_json::Value::as_object)
+    {
         let flag = |name: &str| {
             recording
                 .get(name)
@@ -6190,7 +6361,10 @@ fn health_output_lines(status: &serde_json::Value) -> Vec<String> {
         ));
     }
 
-    if let Some(waterlily) = status.get("waterlily").and_then(serde_json::Value::as_object) {
+    if let Some(waterlily) = status
+        .get("waterlily")
+        .and_then(serde_json::Value::as_object)
+    {
         let flag = |name: &str| {
             waterlily
                 .get(name)
@@ -6227,7 +6401,10 @@ fn health_output_lines(status: &serde_json::Value) -> Vec<String> {
         ));
     }
 
-    if let Some(wallpaper) = status.get("wallpaper").and_then(serde_json::Value::as_object) {
+    if let Some(wallpaper) = status
+        .get("wallpaper")
+        .and_then(serde_json::Value::as_object)
+    {
         let flag = |name: &str| {
             wallpaper
                 .get(name)
@@ -6242,7 +6419,10 @@ fn health_output_lines(status: &serde_json::Value) -> Vec<String> {
         ));
     }
 
-    if let Some(bluetooth) = status.get("bluetooth").and_then(serde_json::Value::as_object) {
+    if let Some(bluetooth) = status
+        .get("bluetooth")
+        .and_then(serde_json::Value::as_object)
+    {
         let active = bluetooth
             .get("active")
             .and_then(serde_json::Value::as_bool)
@@ -6251,7 +6431,10 @@ fn health_output_lines(status: &serde_json::Value) -> Vec<String> {
         lines.push(format!("bluetooth: active={active}"));
     }
 
-    if let Some(resources) = status.get("resources").and_then(serde_json::Value::as_object) {
+    if let Some(resources) = status
+        .get("resources")
+        .and_then(serde_json::Value::as_object)
+    {
         let cpu_present = resources
             .get("cpu_present")
             .and_then(serde_json::Value::as_bool)
@@ -6285,9 +6468,7 @@ fn health_output_lines(status: &serde_json::Value) -> Vec<String> {
             .and_then(serde_json::Value::as_bool)
             .map(|value| value.to_string())
             .unwrap_or_else(|| "-".into());
-        lines.push(format!(
-            "connectivity: wifi={wifi} bt_powered={bt_powered}"
-        ));
+        lines.push(format!("connectivity: wifi={wifi} bt_powered={bt_powered}"));
     }
 
     if let Some(power) = status.get("power").and_then(serde_json::Value::as_object) {
@@ -6299,7 +6480,11 @@ fn health_output_lines(status: &serde_json::Value) -> Vec<String> {
             .unwrap_or_else(|| "-".into());
         let percent = battery
             .and_then(|b| b.get("percent"))
-            .and_then(|v| v.as_u64().or_else(|| v.as_i64().map(|n| n as u64)).or_else(|| v.as_f64().map(|n| n as u64)))
+            .and_then(|v| {
+                v.as_u64()
+                    .or_else(|| v.as_i64().map(|n| n as u64))
+                    .or_else(|| v.as_f64().map(|n| n as u64))
+            })
             .map(|value| value.to_string())
             .unwrap_or_else(|| "-".into());
         lines.push(format!(
@@ -6316,26 +6501,17 @@ fn health_output_lines(status: &serde_json::Value) -> Vec<String> {
         lines.push(format!("media: active={active}"));
     }
 
-    if let Some(version_info) = status.get("version_info").and_then(serde_json::Value::as_object) {
+    if let Some(version_info) = status
+        .get("version_info")
+        .and_then(serde_json::Value::as_object)
+    {
         let version = version_info
             .get("version")
-            .and_then(|v| {
-                if v.is_null() {
-                    None
-                } else {
-                    v.as_str()
-                }
-            })
+            .and_then(|v| if v.is_null() { None } else { v.as_str() })
             .unwrap_or("-");
         let backend = version_info
             .get("backend")
-            .and_then(|v| {
-                if v.is_null() {
-                    None
-                } else {
-                    v.as_str()
-                }
-            })
+            .and_then(|v| if v.is_null() { None } else { v.as_str() })
             .unwrap_or("-");
         lines.push(format!("version_info: version={version} backend={backend}"));
     }
@@ -6349,7 +6525,10 @@ fn health_output_lines(status: &serde_json::Value) -> Vec<String> {
         lines.push(format!("metrics: available={available}"));
     }
 
-    if let Some(ipc_caps) = status.get("capabilities").and_then(serde_json::Value::as_object) {
+    if let Some(ipc_caps) = status
+        .get("capabilities")
+        .and_then(serde_json::Value::as_object)
+    {
         let schema_version = ipc_caps
             .get("schema_version")
             .and_then(|v| v.as_u64().or_else(|| v.as_i64().map(|n| n as u64)))

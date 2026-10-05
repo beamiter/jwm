@@ -149,7 +149,11 @@ impl Jwm {
             .clients
             .get(client_key)
             .is_some_and(|client| client.is_status_bar(&status_bar_name));
-        let previous_mon = self.state.clients.get(client_key).and_then(|client| client.mon);
+        let previous_mon = self
+            .state
+            .clients
+            .get(client_key)
+            .and_then(|client| client.mon);
         let title_for_event;
         if let Some(client) = self.state.clients.get_mut(client_key) {
             if client.name == new_title {
@@ -320,7 +324,11 @@ impl Jwm {
             .clients
             .get(client_key)
             .is_some_and(|client| client.is_status_bar(&status_bar_name));
-        let previous_mon = self.state.clients.get(client_key).and_then(|client| client.mon);
+        let previous_mon = self
+            .state
+            .clients
+            .get(client_key)
+            .and_then(|client| client.mon);
         let changed = self
             .state
             .clients

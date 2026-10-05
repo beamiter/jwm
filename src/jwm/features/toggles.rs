@@ -2944,11 +2944,8 @@ impl Jwm {
         client_key: ClientKey,
         sticky: bool,
     ) {
-        let Some((win, mon, previous, was_fullscreen)) = self
-            .state
-            .clients
-            .get(client_key)
-            .map(|client| {
+        let Some((win, mon, previous, was_fullscreen)) =
+            self.state.clients.get(client_key).map(|client| {
                 (
                     client.win,
                     client.mon,

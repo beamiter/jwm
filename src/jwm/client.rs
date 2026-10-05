@@ -1638,7 +1638,12 @@ impl Jwm {
         self.focus(backend, None)?;
 
         if let Some(monitor_key) = new_monitor_key {
-            if let Some(num) = self.state.monitors.get(monitor_key).map(|monitor| monitor.num) {
+            if let Some(num) = self
+                .state
+                .monitors
+                .get(monitor_key)
+                .map(|monitor| monitor.num)
+            {
                 debug!("Switched to monitor {num} via mouse motion");
                 self.broadcast_ipc_event(
                     "monitor/focus",
@@ -1676,14 +1681,11 @@ impl Jwm {
         self.remove_strut_on_unmanage(backend, win);
 
         // Broadcast window/close event before removing the client
-        let close_event_data = self.state.clients.get(client_key).map(|c| {
-            (
-                c.win.raw(),
-                c.name.clone(),
-                c.mon,
-                c.state.is_fullscreen,
-            )
-        });
+        let close_event_data = self
+            .state
+            .clients
+            .get(client_key)
+            .map(|c| (c.win.raw(), c.name.clone(), c.mon, c.state.is_fullscreen));
         if let Some((id, name, _, _)) = &close_event_data {
             self.broadcast_ipc_event(
                 "window/close",

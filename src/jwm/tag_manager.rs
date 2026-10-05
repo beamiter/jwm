@@ -42,9 +42,11 @@ impl Jwm {
         if target_tag == 0 {
             return Ok(());
         }
-        let previous = self.state.clients.get(client_key).map(|client| {
-            (client.state.tags, client.state.is_fullscreen, client.mon)
-        });
+        let previous = self
+            .state
+            .clients
+            .get(client_key)
+            .map(|client| (client.state.tags, client.state.is_fullscreen, client.mon));
         if previous.map(|(tags, _, _)| tags) == Some(target_tag) {
             return Ok(());
         }

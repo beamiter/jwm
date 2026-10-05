@@ -2855,10 +2855,12 @@ impl Jwm {
             "get_nmaster" | "get_nm" => IpcResponse::ok(Some(self.query_focused_nmaster(backend))),
             "get_mfact" | "get_mf" => IpcResponse::ok(Some(self.query_focused_mfact(backend))),
             "get_cfact" | "get_cf" => IpcResponse::ok(Some(self.query_focused_cfact(backend))),
-            "get_show_bar" | "get_bar" | "get_bar_visible" | "get_owns_output"
-            | "get_visible_fullscreen" | "get_vf" => {
-                IpcResponse::ok(Some(self.query_focused_show_bar(backend)))
-            }
+            "get_show_bar"
+            | "get_bar"
+            | "get_bar_visible"
+            | "get_owns_output"
+            | "get_visible_fullscreen"
+            | "get_vf" => IpcResponse::ok(Some(self.query_focused_show_bar(backend))),
             "get_prev_layout" | "get_pl" => {
                 IpcResponse::ok(Some(self.query_focused_prev_layout(backend)))
             }
@@ -4307,8 +4309,7 @@ impl Jwm {
                     is_urgent: (urgent_tags_mask & tag_bit) != 0,
                     is_occupied: (occupied_tags_mask & tag_bit) != 0,
                     has_fullscreen: counts.fullscreen != 0,
-                    has_visible_fullscreen: is_active
-                        && self.monitor_has_visible_fullscreen(mk),
+                    has_visible_fullscreen: is_active && self.monitor_has_visible_fullscreen(mk),
                     connector: connector.clone(),
                     monitor_name: monitor_name.clone(),
                     show_bar,
@@ -4779,7 +4780,11 @@ impl Jwm {
         let prev_layout = mon
             .pertag
             .as_ref()
-            .and_then(|p| p.prev_lts.get(p.cur_tag).map(|layout| format!("{:?}", **layout)))
+            .and_then(|p| {
+                p.prev_lts
+                    .get(p.cur_tag)
+                    .map(|layout| format!("{:?}", **layout))
+            })
             .unwrap_or_else(|| format!("{:?}", *mon.prev_lt));
         let status_bar_name = CONFIG.load().status_bar_name().to_string();
         let mut value = serde_json::json!({
@@ -5266,12 +5271,7 @@ impl Jwm {
     ) -> serde_json::Value {
         match self.state.sel_mon {
             Some(mk) => {
-                let num = self
-                    .state
-                    .monitors
-                    .get(mk)
-                    .map(|mon| mon.num)
-                    .unwrap_or(0);
+                let num = self.state.monitors.get(mk).map(|mon| mon.num).unwrap_or(0);
                 let closed_placement_count = self
                     .state
                     .monitor_clients
@@ -11368,7 +11368,10 @@ mod tests {
             .0;
         assert!(minimize.contains("was_fullscreen"));
         assert!(minimize.contains("broadcast_monitor_bar_ipc(backend, mon_key)"));
-        assert!(DOCS.contains("minimizing a\nfullscreen client") || DOCS.contains("minimizing a fullscreen client"));
+        assert!(
+            DOCS.contains("minimizing a\nfullscreen client")
+                || DOCS.contains("minimizing a fullscreen client")
+        );
     }
 
     #[test]
@@ -11467,7 +11470,9 @@ mod tests {
         const STRUT: &str = include_str!("strut_manager.rs");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
         assert_eq!(
-            STRUT.matches("broadcast_monitor_bar_all_monitors(backend)").count(),
+            STRUT
+                .matches("broadcast_monitor_bar_all_monitors(backend)")
+                .count(),
             3
         );
         assert!(DOCS.contains("External strut"));
@@ -11537,7 +11542,9 @@ mod tests {
     fn evolve8h_wave_37_tree_owns_output_count_rustdoc() {
         const IPC: &str = include_str!("../ipc.rs");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(IPC.contains("documented on the tree row type") || IPC.contains("hide-bar occupancy"));
+        assert!(
+            IPC.contains("documented on the tree row type") || IPC.contains("hide-bar occupancy")
+        );
         assert!(DOCS.contains("documented on the tree row type"));
     }
 
@@ -11546,7 +11553,10 @@ mod tests {
         const IPC: &str = include_str!("../ipc.rs");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
         assert!(IPC.contains("swallowed terminals excluded"));
-        assert!(DOCS.contains("swallowed terminals\nexcluded") || DOCS.contains("swallowed terminals excluded"));
+        assert!(
+            DOCS.contains("swallowed terminals\nexcluded")
+                || DOCS.contains("swallowed terminals excluded")
+        );
     }
 
     #[test]
@@ -11645,7 +11655,10 @@ mod tests {
     fn evolve8h_wave_47_get_status_show_bar_names_visible_fullscreen_alias() {
         const IPC: &str = include_str!("../ipc.rs");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(IPC.contains("`get_visible_fullscreen` / `get_vf` (preference,") || IPC.contains("`get_visible_fullscreen` (preference, occupancy,"));
+        assert!(
+            IPC.contains("`get_visible_fullscreen` / `get_vf` (preference,")
+                || IPC.contains("`get_visible_fullscreen` (preference, occupancy,")
+        );
         assert!(DOCS.contains("including `get_visible_fullscreen`"));
     }
 
@@ -11771,7 +11784,9 @@ mod tests {
         const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
         assert!(TOOL.contains("query aliases: get_bar,get_bar_visible"));
-        assert!(DOCS.contains("occupancy\nquery aliases") || DOCS.contains("occupancy query aliases"));
+        assert!(
+            DOCS.contains("occupancy\nquery aliases") || DOCS.contains("occupancy query aliases")
+        );
     }
 
     #[test]
@@ -11804,7 +11819,10 @@ mod tests {
         const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
         assert!(TOOL.contains("monitor={monitor}"));
-        assert!(DOCS.contains("includes the monitor\nnumber") || DOCS.contains("includes the monitor number"));
+        assert!(
+            DOCS.contains("includes the monitor\nnumber")
+                || DOCS.contains("includes the monitor number")
+        );
     }
 
     #[test]
@@ -11858,7 +11876,10 @@ mod tests {
             .expect("setlayout follows")
             .0;
         assert!(apply.contains("broadcast_monitor_bar_ipc(backend, sel_mon_key)"));
-        assert!(DOCS.contains("Layout changes emit\n`monitor/bar` after `layout/set`") || DOCS.contains("Layout changes emit `monitor/bar` after `layout/set`"));
+        assert!(
+            DOCS.contains("Layout changes emit\n`monitor/bar` after `layout/set`")
+                || DOCS.contains("Layout changes emit `monitor/bar` after `layout/set`")
+        );
     }
 
     #[test]
@@ -11866,7 +11887,9 @@ mod tests {
         const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
         assert!(TOOL.contains("layout={layout}"));
-        assert!(DOCS.contains("and `layout`") || DOCS.contains("and the current `tag` and `layout`"));
+        assert!(
+            DOCS.contains("and `layout`") || DOCS.contains("and the current `tag` and `layout`")
+        );
     }
 
     #[test]
@@ -11995,7 +12018,10 @@ mod tests {
             .expect("attach mode follows")
             .0;
         assert!(set_width.contains("broadcast_monitor_bar_ipc(backend, mon_key)"));
-        assert!(DOCS.contains("column width) emits `monitor/bar`") || DOCS.contains("column-width `setmfact` emits"));
+        assert!(
+            DOCS.contains("column width) emits `monitor/bar`")
+                || DOCS.contains("column-width `setmfact` emits")
+        );
     }
 
     #[test]
@@ -12149,7 +12175,10 @@ mod tests {
         const README: &str = include_str!("../../README.md");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
         assert!(README.contains("`nmaster`, and `selected_id`"));
-        assert!(DOCS.contains("README occupancy JSON also names\n`selected_id`") || DOCS.contains("README occupancy JSON also names `selected_id`"));
+        assert!(
+            DOCS.contains("README occupancy JSON also names\n`selected_id`")
+                || DOCS.contains("README occupancy JSON also names `selected_id`")
+        );
     }
 
     #[test]
@@ -12353,7 +12382,10 @@ mod tests {
         const README: &str = include_str!("../../README.md");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
         assert!(README.contains("It also includes `window_count`."));
-        assert!(DOCS.contains("README occupancy JSON also names\n`window_count`") || DOCS.contains("README occupancy JSON also names `window_count`"));
+        assert!(
+            DOCS.contains("README occupancy JSON also names\n`window_count`")
+                || DOCS.contains("README occupancy JSON also names `window_count`")
+        );
     }
 
     #[test]
@@ -12472,7 +12504,10 @@ mod tests {
         const IPC: &str = include_str!("../ipc.rs");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
         assert!(IPC.contains("Also `floating_count`."));
-        assert!(DOCS.contains("`on_view_count` /\n`floating_count`") || DOCS.contains("`on_view_count` / `floating_count`"));
+        assert!(
+            DOCS.contains("`on_view_count` /\n`floating_count`")
+                || DOCS.contains("`on_view_count` / `floating_count`")
+        );
     }
 
     #[test]
@@ -12536,7 +12571,9 @@ mod tests {
             .0;
         assert!(minimize.contains("let _ = was_fullscreen"));
         assert!(minimize.contains("broadcast_monitor_bar_ipc(backend, mon_key)"));
-        assert!(DOCS.contains("Minimizing or restoring a client emits `monitor/bar` even when it was not fullscreen"));
+        assert!(DOCS.contains(
+            "Minimizing or restoring a client emits `monitor/bar` even when it was not fullscreen"
+        ));
     }
 
     #[test]
@@ -12608,7 +12645,9 @@ mod tests {
             .0;
         assert!(sticky.contains("let _ = was_fullscreen"));
         assert!(sticky.contains("broadcast_monitor_bar_ipc(backend, mk)"));
-        assert!(DOCS.contains("Toggling sticky emits `monitor/bar` even when the client was not fullscreen"));
+        assert!(DOCS.contains(
+            "Toggling sticky emits `monitor/bar` even when the client was not fullscreen"
+        ));
     }
 
     #[test]
@@ -13764,7 +13803,9 @@ mod tests {
         const IPC: &str = include_str!("../ipc.rs");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
         assert!(IPC.contains("Also `demands_attention_count`."));
-        assert!(DOCS.contains("`get_status.show_bar` rustdoc also names `demands_attention_count`"));
+        assert!(
+            DOCS.contains("`get_status.show_bar` rustdoc also names `demands_attention_count`")
+        );
     }
 
     #[test]
@@ -13932,7 +13973,9 @@ mod tests {
         const IPC: &str = include_str!("../ipc.rs");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
         assert!(IPC.contains("Also `maximize_promoted_count`."));
-        assert!(DOCS.contains("`get_status.show_bar` rustdoc also names `maximize_promoted_count`"));
+        assert!(
+            DOCS.contains("`get_status.show_bar` rustdoc also names `maximize_promoted_count`")
+        );
     }
 
     #[test]
@@ -14178,7 +14221,9 @@ mod tests {
             .0;
         assert!(strut.contains("broadcast_monitor_bar_all_monitors(backend)"));
         assert_eq!(
-            strut.matches("broadcast_monitor_bar_all_monitors(backend)").count(),
+            strut
+                .matches("broadcast_monitor_bar_all_monitors(backend)")
+                .count(),
             3
         );
         assert!(DOCS.contains("External strut property updates emit `monitor/bar`"));
@@ -14282,7 +14327,9 @@ mod tests {
             .split_once("fn accumulate_window_counts(")
             .expect("accumulate_window_counts follows")
             .0;
-        assert!(accumulate.contains("counts.closed_placement += usize::from(client.state.remembers_closed_placement)"));
+        assert!(accumulate.contains(
+            "counts.closed_placement += usize::from(client.state.remembers_closed_placement)"
+        ));
         let windows = SOURCE
             .split_once("fn accumulate_window_counts(")
             .expect("accumulate_window_counts")
@@ -14290,9 +14337,11 @@ mod tests {
             .split_once("fn tag_client_counts(")
             .expect("tag_client_counts follows")
             .0;
-        assert!(windows.contains(
-            "counts.closed_placement += usize::from(window.remembers_closed_placement)"
-        ));
+        assert!(
+            windows.contains(
+                "counts.closed_placement += usize::from(window.remembers_closed_placement)"
+            )
+        );
         assert!(SOURCE.contains("closed_placement: usize,"));
         assert!(DOCS.contains("Tag client counts accumulate `closed_placement`"));
     }
@@ -14338,7 +14387,9 @@ mod tests {
             .split_once("pub struct TreeNode {")
             .expect("TreeNode")
             .1
-            .split_once("// ---------------------------------------------------------------------------")
+            .split_once(
+                "// ---------------------------------------------------------------------------",
+            )
             .expect("command dispatch follows")
             .0;
         assert!(tree.contains("pub closed_placement_count: usize,"));
@@ -14748,12 +14799,12 @@ mod tests {
         const IPC: &str = include_str!("../ipc.rs");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
         assert!(IPC.contains("pub closed_placement: Option<Value>"));
-        assert!(SOURCE.contains(
-            "closed_placement: Some(self.query_focused_closed_placement(backend))"
-        ));
-        assert!(DOCS.contains(
-            "`get_status` nests compact `closed_placement` beside `prev_layout`"
-        ));
+        assert!(
+            SOURCE.contains("closed_placement: Some(self.query_focused_closed_placement(backend))")
+        );
+        assert!(
+            DOCS.contains("`get_status` nests compact `closed_placement` beside `prev_layout`")
+        );
     }
 
     #[test]
@@ -14761,9 +14812,7 @@ mod tests {
         const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
         assert!(TOOL.contains("get_closed_placement, get_cp"));
-        assert!(DOCS.contains(
-            "`jwm-tool msg` help lists `get_closed_placement` and `get_cp`"
-        ));
+        assert!(DOCS.contains("`jwm-tool msg` help lists `get_closed_placement` and `get_cp`"));
     }
 
     #[test]
@@ -14887,9 +14936,9 @@ mod tests {
         const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
         assert!(TOOL.contains("query aliases: get_cp -> get_closed_placement"));
-        assert!(DOCS.contains(
-            "`jwm-tool capabilities` text lists `get_cp -> get_closed_placement`"
-        ));
+        assert!(
+            DOCS.contains("`jwm-tool capabilities` text lists `get_cp -> get_closed_placement`")
+        );
     }
 
     #[test]
@@ -14898,9 +14947,9 @@ mod tests {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
         assert!(TOOL.contains("closed_placement: monitor={monitor} count={count}"));
         assert!(TOOL.contains("\"closed_placement: monitor=0 count=2 connector=DP-1\""));
-        assert!(DOCS.contains(
-            "`jwm-tool health` prints compact `closed_placement` beside occupancy"
-        ));
+        assert!(
+            DOCS.contains("`jwm-tool health` prints compact `closed_placement` beside occupancy")
+        );
     }
 
     #[test]
@@ -14954,9 +15003,7 @@ mod tests {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
         assert!(TOOL.contains("prev_layout: monitor={monitor} layout={prev_layout}"));
         assert!(TOOL.contains("\"prev_layout: monitor=0 layout=||| connector=DP-1\""));
-        assert!(DOCS.contains(
-            "`jwm-tool health` prints compact `prev_layout` beside occupancy"
-        ));
+        assert!(DOCS.contains("`jwm-tool health` prints compact `prev_layout` beside occupancy"));
     }
 
     #[test]
@@ -14982,9 +15029,7 @@ mod tests {
         const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
         assert!(TOOL.contains("query aliases: get_pl -> get_prev_layout"));
-        assert!(DOCS.contains(
-            "`jwm-tool capabilities` text lists `get_pl -> get_prev_layout`"
-        ));
+        assert!(DOCS.contains("`jwm-tool capabilities` text lists `get_pl -> get_prev_layout`"));
     }
 
     #[test]
@@ -15001,9 +15046,7 @@ mod tests {
         const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
         assert!(TOOL.contains("get_prev_layout, get_pl"));
-        assert!(DOCS.contains(
-            "`jwm-tool msg` help lists `get_prev_layout` and `get_pl`"
-        ));
+        assert!(DOCS.contains("`jwm-tool msg` help lists `get_prev_layout` and `get_pl`"));
     }
 
     #[test]
@@ -15071,9 +15114,11 @@ mod tests {
         const README: &str = include_str!("../../README.md");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
         assert!(README.contains("compact `cfact` / `gaps` / `mfact` / `nmaster`"));
-        assert!(DOCS.contains(
-            "README health text names compact `cfact` / `gaps` / `mfact` / `nmaster`"
-        ));
+        assert!(
+            DOCS.contains(
+                "README health text names compact `cfact` / `gaps` / `mfact` / `nmaster`"
+            )
+        );
     }
 
     #[test]
@@ -15187,9 +15232,9 @@ mod tests {
         const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
         assert!(TOOL.contains("query aliases: get_tab,get_tabs -> get_tab_bar"));
-        assert!(DOCS.contains(
-            "`jwm-tool capabilities` text lists `get_tab,get_tabs -> get_tab_bar`"
-        ));
+        assert!(
+            DOCS.contains("`jwm-tool capabilities` text lists `get_tab,get_tabs -> get_tab_bar`")
+        );
     }
 
     #[test]
@@ -15268,9 +15313,7 @@ mod tests {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
         assert!(TOOL.contains("scratchpads: count={count}"));
         assert!(TOOL.contains("\"scratchpads: count=4\""));
-        assert!(DOCS.contains(
-            "`jwm-tool health` prints compact `scratchpads` beside occupancy"
-        ));
+        assert!(DOCS.contains("`jwm-tool health` prints compact `scratchpads` beside occupancy"));
     }
 
     #[test]
@@ -15295,9 +15338,7 @@ mod tests {
     fn evolve8h_wave_396_capabilities_text_lists_scratchpad_aliases() {
         const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(TOOL.contains(
-            "query aliases: get_pads,get_scratch -> get_scratchpads"
-        ));
+        assert!(TOOL.contains("query aliases: get_pads,get_scratch -> get_scratchpads"));
         assert!(DOCS.contains(
             "`jwm-tool capabilities` text lists `get_pads,get_scratch -> get_scratchpads`"
         ));
@@ -15335,9 +15376,7 @@ mod tests {
         const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
         assert!(TOOL.contains("query aliases: get_fw -> get_focused_window"));
-        assert!(DOCS.contains(
-            "`jwm-tool capabilities` text lists `get_fw -> get_focused_window`"
-        ));
+        assert!(DOCS.contains("`jwm-tool capabilities` text lists `get_fw -> get_focused_window`"));
     }
 
     #[test]
@@ -15371,12 +15410,12 @@ mod tests {
     fn evolve8h_wave_404_capabilities_text_lists_monitor_aliases() {
         const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(TOOL.contains(
-            "query aliases: get_mons,get_outputs -> get_monitors"
-        ));
-        assert!(DOCS.contains(
-            "`jwm-tool capabilities` text lists `get_mons,get_outputs -> get_monitors`"
-        ));
+        assert!(TOOL.contains("query aliases: get_mons,get_outputs -> get_monitors"));
+        assert!(
+            DOCS.contains(
+                "`jwm-tool capabilities` text lists `get_mons,get_outputs -> get_monitors`"
+            )
+        );
     }
 
     #[test]
@@ -15385,9 +15424,7 @@ mod tests {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
         assert!(TOOL.contains("workspaces: count={count} focused={focused_count}"));
         assert!(TOOL.contains("\"workspaces: count=9 focused=1\""));
-        assert!(DOCS.contains(
-            "`jwm-tool health` prints compact `workspaces` beside occupancy"
-        ));
+        assert!(DOCS.contains("`jwm-tool health` prints compact `workspaces` beside occupancy"));
     }
 
     #[test]
@@ -15412,9 +15449,7 @@ mod tests {
     fn evolve8h_wave_408_capabilities_text_lists_workspace_aliases() {
         const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(TOOL.contains(
-            "query aliases: get_ws,get_tags,get_desktops -> get_workspaces"
-        ));
+        assert!(TOOL.contains("query aliases: get_ws,get_tags,get_desktops -> get_workspaces"));
         assert!(DOCS.contains(
             "`jwm-tool capabilities` text lists `get_ws,get_tags,get_desktops -> get_workspaces`"
         ));
@@ -15451,9 +15486,7 @@ mod tests {
     fn evolve8h_wave_412_capabilities_text_lists_window_aliases() {
         const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(TOOL.contains(
-            "query aliases: get_wins,get_clients,get_cli -> get_windows"
-        ));
+        assert!(TOOL.contains("query aliases: get_wins,get_clients,get_cli -> get_windows"));
         assert!(DOCS.contains(
             "`jwm-tool capabilities` text lists `get_wins,get_clients,get_cli -> get_windows`"
         ));
@@ -15521,9 +15554,7 @@ mod tests {
     fn evolve8h_wave_419_capabilities_text_lists_effect_aliases() {
         const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(TOOL.contains(
-            "query aliases: get_fx,get_effects -> get_effect_status"
-        ));
+        assert!(TOOL.contains("query aliases: get_fx,get_effects -> get_effect_status"));
         assert!(DOCS.contains(
             "`jwm-tool capabilities` text lists `get_fx,get_effects -> get_effect_status`"
         ));
@@ -15561,9 +15592,9 @@ mod tests {
         const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
         assert!(TOOL.contains("query aliases: get_mic,get_mute -> get_mic_mute"));
-        assert!(DOCS.contains(
-            "`jwm-tool capabilities` text lists `get_mic,get_mute -> get_mic_mute`"
-        ));
+        assert!(
+            DOCS.contains("`jwm-tool capabilities` text lists `get_mic,get_mute -> get_mic_mute`")
+        );
     }
 
     #[test]
@@ -15597,12 +15628,12 @@ mod tests {
     fn evolve8h_wave_427_capabilities_text_lists_bench_aliases() {
         const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(TOOL.contains(
-            "query aliases: get_bench,get_bm -> benchmark_report"
-        ));
-        assert!(DOCS.contains(
-            "`jwm-tool capabilities` text lists `get_bench,get_bm -> benchmark_report`"
-        ));
+        assert!(TOOL.contains("query aliases: get_bench,get_bm -> benchmark_report"));
+        assert!(
+            DOCS.contains(
+                "`jwm-tool capabilities` text lists `get_bench,get_bm -> benchmark_report`"
+            )
+        );
     }
 
     #[test]
@@ -15719,9 +15750,7 @@ mod tests {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
         assert!(TOOL.contains("fullscreen: count={count} focused={focused_id}"));
         assert!(TOOL.contains("\"fullscreen: count=1 focused=55\""));
-        assert!(DOCS.contains(
-            "`jwm-tool health` prints compact `fullscreen` beside occupancy"
-        ));
+        assert!(DOCS.contains("`jwm-tool health` prints compact `fullscreen` beside occupancy"));
     }
 
     #[test]
@@ -15776,12 +15805,8 @@ mod tests {
         assert!(TOOL.contains(
             "notifications: count={count} center_open={center_open} dnd={do_not_disturb}"
         ));
-        assert!(TOOL.contains(
-            "\"notifications: count=2 center_open=true dnd=false\""
-        ));
-        assert!(DOCS.contains(
-            "`jwm-tool health` prints compact `notifications` beside occupancy"
-        ));
+        assert!(TOOL.contains("\"notifications: count=2 center_open=true dnd=false\""));
+        assert!(DOCS.contains("`jwm-tool health` prints compact `notifications` beside occupancy"));
     }
 
     #[test]
@@ -15809,9 +15834,7 @@ mod tests {
         assert!(TOOL.contains(
             "blur: enabled={config_enabled} strength={current_strength} temporal={temporal_enabled} frosted={status_bar_frosted}"
         ));
-        assert!(TOOL.contains(
-            "\"blur: enabled=true strength=0.5 temporal=false frosted=true\""
-        ));
+        assert!(TOOL.contains("\"blur: enabled=true strength=0.5 temporal=false frosted=true\""));
         assert!(DOCS.contains("`jwm-tool health` prints compact `blur` beside occupancy"));
     }
 
@@ -15840,9 +15863,7 @@ mod tests {
         assert!(TOOL.contains(
             "hdr: enabled={config_enabled} peak_nits={config_peak_nits} outputs={outputs_total} capable={outputs_capable}"
         ));
-        assert!(TOOL.contains(
-            "\"hdr: enabled=true peak_nits=1000 outputs=2 capable=1\""
-        ));
+        assert!(TOOL.contains("\"hdr: enabled=true peak_nits=1000 outputs=2 capable=1\""));
         assert!(DOCS.contains("`jwm-tool health` prints compact `hdr` beside occupancy"));
     }
 
@@ -15897,9 +15918,7 @@ mod tests {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
         assert!(TOOL.contains("system_ui: active={active} kind={kind}"));
         assert!(TOOL.contains("\"system_ui: active=true kind=launcher\""));
-        assert!(DOCS.contains(
-            "`jwm-tool health` prints compact `system_ui` beside occupancy"
-        ));
+        assert!(DOCS.contains("`jwm-tool health` prints compact `system_ui` beside occupancy"));
     }
 
     #[test]
@@ -15963,13 +15982,9 @@ mod tests {
     fn evolve8h_wave_465_health_prints_compact_clipboard() {
         const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(TOOL.contains(
-            "clipboard: enabled={enabled} count={count} capacity={capacity}"
-        ));
+        assert!(TOOL.contains("clipboard: enabled={enabled} count={count} capacity={capacity}"));
         assert!(TOOL.contains("\"clipboard: enabled=true count=3 capacity=50\""));
-        assert!(DOCS.contains(
-            "`jwm-tool health` prints compact `clipboard` beside occupancy"
-        ));
+        assert!(DOCS.contains("`jwm-tool health` prints compact `clipboard` beside occupancy"));
     }
 
     #[test]
@@ -15994,13 +16009,9 @@ mod tests {
     fn evolve8h_wave_468_health_prints_compact_session_lock() {
         const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(TOOL.contains(
-            "session_lock: locked={locked} surfaces={lock_surface_count}"
-        ));
+        assert!(TOOL.contains("session_lock: locked={locked} surfaces={lock_surface_count}"));
         assert!(TOOL.contains("\"session_lock: locked=true surfaces=2\""));
-        assert!(DOCS.contains(
-            "`jwm-tool health` prints compact `session_lock` beside occupancy"
-        ));
+        assert!(DOCS.contains("`jwm-tool health` prints compact `session_lock` beside occupancy"));
     }
 
     #[test]
@@ -16038,9 +16049,7 @@ mod tests {
         assert!(TOOL.contains(
             "tearing: active_surfaces={active_surfaces} tearing_outputs={tearing_outputs} outputs={outputs}"
         ));
-        assert!(TOOL.contains(
-            "\"tearing: active_surfaces=1 tearing_outputs=1 outputs=2\""
-        ));
+        assert!(TOOL.contains("\"tearing: active_surfaces=1 tearing_outputs=1 outputs=2\""));
         assert!(DOCS.contains("`jwm-tool health` prints compact `tearing` beside occupancy"));
     }
 
@@ -16079,9 +16088,11 @@ mod tests {
         assert!(TOOL.contains(
             "xwayland: available={} wm_ready={} display={display} mapped={mapped} pending={pending}"
         ));
-        assert!(TOOL.contains(
-            "\"xwayland: available=true wm_ready=true display=:2 mapped=3 pending=1\""
-        ));
+        assert!(
+            TOOL.contains(
+                "\"xwayland: available=true wm_ready=true display=:2 mapped=3 pending=1\""
+            )
+        );
         assert!(DOCS.contains("`jwm-tool health` prints compact `xwayland` beside occupancy"));
     }
 
@@ -16107,9 +16118,7 @@ mod tests {
     fn evolve8h_wave_479_capabilities_text_lists_xwayland_aliases() {
         const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(TOOL.contains(
-            "query aliases: get_xwayland,get_xw -> get_xwayland_status"
-        ));
+        assert!(TOOL.contains("query aliases: get_xwayland,get_xw -> get_xwayland_status"));
         assert!(DOCS.contains(
             "`jwm-tool capabilities` text lists `get_xwayland,get_xw -> get_xwayland_status`"
         ));
@@ -16119,9 +16128,7 @@ mod tests {
     fn evolve8h_wave_480_health_prints_compact_scrolling() {
         const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(TOOL.contains(
-            "scrolling: active_monitors={active_monitors} monitors={monitors}"
-        ));
+        assert!(TOOL.contains("scrolling: active_monitors={active_monitors} monitors={monitors}"));
         assert!(TOOL.contains("\"scrolling: active_monitors=1 monitors=2\""));
         assert!(DOCS.contains("`jwm-tool health` prints compact `scrolling` beside occupancy"));
     }
@@ -16148,8 +16155,10 @@ mod tests {
     fn evolve8h_wave_483_capabilities_text_lists_scrolling_alias() {
         const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(TOOL.contains("query aliases: get_scrolling,get_scroll -> get_scrolling_status")
-            || TOOL.contains("query aliases: get_scrolling -> get_scrolling_status"));
+        assert!(
+            TOOL.contains("query aliases: get_scrolling,get_scroll -> get_scrolling_status")
+                || TOOL.contains("query aliases: get_scrolling -> get_scrolling_status")
+        );
         assert!(DOCS.contains(
             "`jwm-tool capabilities` text lists `get_scrolling -> get_scrolling_status`"
         ));
@@ -16162,16 +16171,10 @@ mod tests {
         const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(SOURCE.contains(
-            "\"get_scrolling_status\" | \"get_scrolling\" | \"get_scroll\""
-        ));
+        assert!(SOURCE.contains("\"get_scrolling_status\" | \"get_scrolling\" | \"get_scroll\""));
         assert!(IPC.contains("\"get_scroll\""));
-        assert!(TOOL.contains(
-            "query aliases: get_scrolling,get_scroll -> get_scrolling_status"
-        ));
-        assert!(DOCS.contains(
-            "IPC short query alias `get_scroll` reaches `get_scrolling_status`"
-        ));
+        assert!(TOOL.contains("query aliases: get_scrolling,get_scroll -> get_scrolling_status"));
+        assert!(DOCS.contains("IPC short query alias `get_scroll` reaches `get_scrolling_status`"));
         assert!(COMPAT.contains("`get_scroll`"));
     }
 
@@ -16179,13 +16182,11 @@ mod tests {
     fn evolve8h_wave_485_health_prints_compact_color_management() {
         const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(TOOL.contains(
-            "color_management: surfaces={surfaces} hdr_surfaces={hdr_surfaces}"
-        ));
+        assert!(TOOL.contains("color_management: surfaces={surfaces} hdr_surfaces={hdr_surfaces}"));
         assert!(TOOL.contains("\"color_management: surfaces=4 hdr_surfaces=1\""));
-        assert!(DOCS.contains(
-            "`jwm-tool health` prints compact `color_management` beside occupancy"
-        ));
+        assert!(
+            DOCS.contains("`jwm-tool health` prints compact `color_management` beside occupancy")
+        );
     }
 
     #[test]
@@ -16203,9 +16204,7 @@ mod tests {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
         assert!(TOOLS.contains("compact `color_management` line"));
         assert!(TOOLS.contains("get_status.color_management"));
-        assert!(DOCS.contains(
-            "`tools/README.md` health text names compact `color_management`"
-        ));
+        assert!(DOCS.contains("`tools/README.md` health text names compact `color_management`"));
     }
     #[test]
     fn evolve8h_wave_488_capabilities_text_lists_color_management_alias() {
@@ -16221,12 +16220,8 @@ mod tests {
     fn evolve8h_wave_489_health_prints_compact_night_light() {
         const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(TOOL.contains(
-            "night_light: active={active} override={override_v} temp={temp}"
-        ));
-        assert!(TOOL.contains(
-            "\"night_light: active=true override=on temp=4500\""
-        ));
+        assert!(TOOL.contains("night_light: active={active} override={override_v} temp={temp}"));
+        assert!(TOOL.contains("\"night_light: active=true override=on temp=4500\""));
         assert!(DOCS.contains("`jwm-tool health` prints compact `night_light` beside occupancy"));
     }
 
@@ -16253,21 +16248,15 @@ mod tests {
         const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
         assert!(TOOL.contains("query aliases: get_nl -> get_night_light"));
-        assert!(DOCS.contains(
-            "`jwm-tool capabilities` text lists `get_nl -> get_night_light`"
-        ));
+        assert!(DOCS.contains("`jwm-tool capabilities` text lists `get_nl -> get_night_light`"));
     }
 
     #[test]
     fn evolve8h_wave_493_health_prints_compact_magnifier() {
         const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(TOOL.contains(
-            "magnifier: enabled={enabled} zoom={zoom} radius={radius}"
-        ));
-        assert!(TOOL.contains(
-            "\"magnifier: enabled=true zoom=2.5 radius=120\""
-        ));
+        assert!(TOOL.contains("magnifier: enabled={enabled} zoom={zoom} radius={radius}"));
+        assert!(TOOL.contains("\"magnifier: enabled=true zoom=2.5 radius=120\""));
         assert!(DOCS.contains("`jwm-tool health` prints compact `magnifier` beside occupancy"));
     }
 
@@ -16294,21 +16283,15 @@ mod tests {
         const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
         assert!(TOOL.contains("query aliases: get_mag -> get_magnifier"));
-        assert!(DOCS.contains(
-            "`jwm-tool capabilities` text lists `get_mag -> get_magnifier`"
-        ));
+        assert!(DOCS.contains("`jwm-tool capabilities` text lists `get_mag -> get_magnifier`"));
     }
 
     #[test]
     fn evolve8h_wave_497_health_prints_compact_peek() {
         const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(TOOL.contains(
-            "peek: active={} compositor={}"
-        ));
-        assert!(TOOL.contains(
-            "\"peek: active=true compositor=true\""
-        ));
+        assert!(TOOL.contains("peek: active={} compositor={}"));
+        assert!(TOOL.contains("\"peek: active=true compositor=true\""));
         assert!(DOCS.contains("`jwm-tool health` prints compact `peek` beside occupancy"));
     }
 
@@ -16335,21 +16318,15 @@ mod tests {
         const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
         assert!(TOOL.contains("query aliases: get_pk -> get_peek"));
-        assert!(DOCS.contains(
-            "`jwm-tool capabilities` text lists `get_pk -> get_peek`"
-        ));
+        assert!(DOCS.contains("`jwm-tool capabilities` text lists `get_pk -> get_peek`"));
     }
 
     #[test]
     fn evolve8h_wave_501_health_prints_compact_expose() {
         const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(TOOL.contains(
-            "expose: active={active}"
-        ));
-        assert!(TOOL.contains(
-            "\"expose: active=true\""
-        ));
+        assert!(TOOL.contains("expose: active={active}"));
+        assert!(TOOL.contains("\"expose: active=true\""));
         assert!(DOCS.contains("`jwm-tool health` prints compact `expose` beside occupancy"));
     }
 
@@ -16375,12 +16352,10 @@ mod tests {
     fn evolve8h_wave_504_health_prints_compact_gesture() {
         const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(TOOL.contains(
-            "gesture: bindings={binding_count} scrolling={scrolling_binding_count}"
-        ));
-        assert!(TOOL.contains(
-            "\"gesture: bindings=4 scrolling=2\""
-        ));
+        assert!(
+            TOOL.contains("gesture: bindings={binding_count} scrolling={scrolling_binding_count}")
+        );
+        assert!(TOOL.contains("\"gesture: bindings=4 scrolling=2\""));
         assert!(DOCS.contains("`jwm-tool health` prints compact `gesture` beside occupancy"));
     }
 
@@ -16407,21 +16382,15 @@ mod tests {
         const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
         assert!(TOOL.contains("query aliases: get_gest -> get_gesture"));
-        assert!(DOCS.contains(
-            "`jwm-tool capabilities` text lists `get_gest -> get_gesture`"
-        ));
+        assert!(DOCS.contains("`jwm-tool capabilities` text lists `get_gest -> get_gesture`"));
     }
 
     #[test]
     fn evolve8h_wave_508_health_prints_compact_wayland() {
         const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(TOOL.contains(
-            "wayland: family={backend_family} outputs={outputs}"
-        ));
-        assert!(TOOL.contains(
-            "\"wayland: family=wayland-udev outputs=2\""
-        ));
+        assert!(TOOL.contains("wayland: family={backend_family} outputs={outputs}"));
+        assert!(TOOL.contains("\"wayland: family=wayland-udev outputs=2\""));
         assert!(DOCS.contains("`jwm-tool health` prints compact `wayland` beside occupancy"));
     }
 
@@ -16448,21 +16417,15 @@ mod tests {
         const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
         assert!(TOOL.contains("query aliases: get_wl -> get_wayland"));
-        assert!(DOCS.contains(
-            "`jwm-tool capabilities` text lists `get_wl -> get_wayland`"
-        ));
+        assert!(DOCS.contains("`jwm-tool capabilities` text lists `get_wl -> get_wayland`"));
     }
 
     #[test]
     fn evolve8h_wave_512_health_prints_compact_recording() {
         const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(TOOL.contains(
-            "recording: active={} selecting={} elapsed={elapsed_secs}"
-        ));
-        assert!(TOOL.contains(
-            "\"recording: active=true selecting=false elapsed=12.5\""
-        ));
+        assert!(TOOL.contains("recording: active={} selecting={} elapsed={elapsed_secs}"));
+        assert!(TOOL.contains("\"recording: active=true selecting=false elapsed=12.5\""));
         assert!(DOCS.contains("`jwm-tool health` prints compact `recording` beside occupancy"));
     }
 
@@ -16489,22 +16452,18 @@ mod tests {
         const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
         assert!(TOOL.contains("query aliases: get_rec -> get_recording"));
-        assert!(DOCS.contains(
-            "`jwm-tool capabilities` text lists `get_rec -> get_recording`"
-        ));
+        assert!(DOCS.contains("`jwm-tool capabilities` text lists `get_rec -> get_recording`"));
     }
 
     #[test]
     fn evolve8h_wave_516_health_prints_compact_audio_recording() {
         const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(TOOL.contains(
-            "audio_recording: active={} finalizing={} elapsed_ms={elapsed_ms}"
-        ));
-        assert!(TOOL.contains(
-            "\"audio_recording: active=true finalizing=false elapsed_ms=900\""
-        ));
-        assert!(DOCS.contains("`jwm-tool health` prints compact `audio_recording` beside occupancy"));
+        assert!(TOOL.contains("audio_recording: active={} finalizing={} elapsed_ms={elapsed_ms}"));
+        assert!(TOOL.contains("\"audio_recording: active=true finalizing=false elapsed_ms=900\""));
+        assert!(
+            DOCS.contains("`jwm-tool health` prints compact `audio_recording` beside occupancy")
+        );
     }
 
     #[test]
@@ -16530,21 +16489,17 @@ mod tests {
         const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
         assert!(TOOL.contains("query aliases: get_arec -> get_audio_recording"));
-        assert!(DOCS.contains(
-            "`jwm-tool capabilities` text lists `get_arec -> get_audio_recording`"
-        ));
+        assert!(
+            DOCS.contains("`jwm-tool capabilities` text lists `get_arec -> get_audio_recording`")
+        );
     }
 
     #[test]
     fn evolve8h_wave_520_health_prints_compact_capture() {
         const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(TOOL.contains(
-            "capture: screencopy={} image_copy={} dmabuf={}"
-        ));
-        assert!(TOOL.contains(
-            "\"capture: screencopy=true image_copy=false dmabuf=true\""
-        ));
+        assert!(TOOL.contains("capture: screencopy={} image_copy={} dmabuf={}"));
+        assert!(TOOL.contains("\"capture: screencopy=true image_copy=false dmabuf=true\""));
         assert!(DOCS.contains("`jwm-tool health` prints compact `capture` beside occupancy"));
     }
 
@@ -16571,21 +16526,15 @@ mod tests {
         const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
         assert!(TOOL.contains("query aliases: get_cap -> get_capture"));
-        assert!(DOCS.contains(
-            "`jwm-tool capabilities` text lists `get_cap -> get_capture`"
-        ));
+        assert!(DOCS.contains("`jwm-tool capabilities` text lists `get_cap -> get_capture`"));
     }
 
     #[test]
     fn evolve8h_wave_524_health_prints_compact_waterlily() {
         const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(TOOL.contains(
-            "waterlily: enabled={} active={} worker={}"
-        ));
-        assert!(TOOL.contains(
-            "\"waterlily: enabled=true active=true worker=false\""
-        ));
+        assert!(TOOL.contains("waterlily: enabled={} active={} worker={}"));
+        assert!(TOOL.contains("\"waterlily: enabled=true active=true worker=false\""));
         assert!(DOCS.contains("`jwm-tool health` prints compact `waterlily` beside occupancy"));
     }
 
@@ -16612,21 +16561,17 @@ mod tests {
         const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
         assert!(TOOL.contains("query aliases: get_wly -> get_waterlily"));
-        assert!(DOCS.contains(
-            "`jwm-tool capabilities` text lists `get_wly -> get_waterlily`"
-        ));
+        assert!(DOCS.contains("`jwm-tool capabilities` text lists `get_wly -> get_waterlily`"));
     }
 
     #[test]
     fn evolve8h_wave_528_health_prints_compact_audio() {
         const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(TOOL.contains(
-            "audio: outputs={output_count} inputs={input_count} pending={pending}"
-        ));
-        assert!(TOOL.contains(
-            "\"audio: outputs=2 inputs=1 pending=false\""
-        ));
+        assert!(
+            TOOL.contains("audio: outputs={output_count} inputs={input_count} pending={pending}")
+        );
+        assert!(TOOL.contains("\"audio: outputs=2 inputs=1 pending=false\""));
         assert!(DOCS.contains("`jwm-tool health` prints compact `audio` beside occupancy"));
     }
 
@@ -16653,21 +16598,15 @@ mod tests {
         const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
         assert!(TOOL.contains("query aliases: get_devices -> get_audio"));
-        assert!(DOCS.contains(
-            "`jwm-tool capabilities` text lists `get_devices -> get_audio`"
-        ));
+        assert!(DOCS.contains("`jwm-tool capabilities` text lists `get_devices -> get_audio`"));
     }
 
     #[test]
     fn evolve8h_wave_532_health_prints_compact_wallpaper() {
         const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(TOOL.contains(
-            "wallpaper: enabled={} pending={}"
-        ));
-        assert!(TOOL.contains(
-            "\"wallpaper: enabled=true pending=false\""
-        ));
+        assert!(TOOL.contains("wallpaper: enabled={} pending={}"));
+        assert!(TOOL.contains("\"wallpaper: enabled=true pending=false\""));
         assert!(DOCS.contains("`jwm-tool health` prints compact `wallpaper` beside occupancy"));
     }
 
@@ -16694,21 +16633,15 @@ mod tests {
         const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
         assert!(TOOL.contains("query aliases: get_wall -> get_wallpaper"));
-        assert!(DOCS.contains(
-            "`jwm-tool capabilities` text lists `get_wall -> get_wallpaper`"
-        ));
+        assert!(DOCS.contains("`jwm-tool capabilities` text lists `get_wall -> get_wallpaper`"));
     }
 
     #[test]
     fn evolve8h_wave_536_health_prints_compact_bluetooth() {
         const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(TOOL.contains(
-            "bluetooth: active={active}"
-        ));
-        assert!(TOOL.contains(
-            "\"bluetooth: active=true\""
-        ));
+        assert!(TOOL.contains("bluetooth: active={active}"));
+        assert!(TOOL.contains("\"bluetooth: active=true\""));
         assert!(DOCS.contains("`jwm-tool health` prints compact `bluetooth` beside occupancy"));
     }
 
@@ -16735,21 +16668,15 @@ mod tests {
         const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
         assert!(TOOL.contains("query aliases: get_bt -> get_bluetooth"));
-        assert!(DOCS.contains(
-            "`jwm-tool capabilities` text lists `get_bt -> get_bluetooth`"
-        ));
+        assert!(DOCS.contains("`jwm-tool capabilities` text lists `get_bt -> get_bluetooth`"));
     }
 
     #[test]
     fn evolve8h_wave_540_health_prints_compact_resources() {
         const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(TOOL.contains(
-            "resources: cpu_present={cpu_present} cpu_percent={cpu_percent}"
-        ));
-        assert!(TOOL.contains(
-            "\"resources: cpu_present=true cpu_percent=12.5\""
-        ));
+        assert!(TOOL.contains("resources: cpu_present={cpu_present} cpu_percent={cpu_percent}"));
+        assert!(TOOL.contains("\"resources: cpu_present=true cpu_percent=12.5\""));
         assert!(DOCS.contains("`jwm-tool health` prints compact `resources` beside occupancy"));
     }
 
@@ -16776,21 +16703,15 @@ mod tests {
         const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
         assert!(TOOL.contains("query aliases: get_res -> get_resources"));
-        assert!(DOCS.contains(
-            "`jwm-tool capabilities` text lists `get_res -> get_resources`"
-        ));
+        assert!(DOCS.contains("`jwm-tool capabilities` text lists `get_res -> get_resources`"));
     }
 
     #[test]
     fn evolve8h_wave_544_health_prints_compact_connectivity() {
         const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(TOOL.contains(
-            "connectivity: wifi={wifi} bt_powered={bt_powered}"
-        ));
-        assert!(TOOL.contains(
-            "\"connectivity: wifi=true bt_powered=false\""
-        ));
+        assert!(TOOL.contains("connectivity: wifi={wifi} bt_powered={bt_powered}"));
+        assert!(TOOL.contains("\"connectivity: wifi=true bt_powered=false\""));
         assert!(DOCS.contains("`jwm-tool health` prints compact `connectivity` beside occupancy"));
     }
 
@@ -16817,21 +16738,17 @@ mod tests {
         const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
         assert!(TOOL.contains("query aliases: get_network -> get_connectivity"));
-        assert!(DOCS.contains(
-            "`jwm-tool capabilities` text lists `get_network -> get_connectivity`"
-        ));
+        assert!(
+            DOCS.contains("`jwm-tool capabilities` text lists `get_network -> get_connectivity`")
+        );
     }
 
     #[test]
     fn evolve8h_wave_548_health_prints_compact_power() {
         const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(TOOL.contains(
-            "power: battery_present={battery_present} percent={percent}"
-        ));
-        assert!(TOOL.contains(
-            "\"power: battery_present=true percent=88\""
-        ));
+        assert!(TOOL.contains("power: battery_present={battery_present} percent={percent}"));
+        assert!(TOOL.contains("\"power: battery_present=true percent=88\""));
         assert!(DOCS.contains("`jwm-tool health` prints compact `power` beside occupancy"));
     }
 
@@ -16857,12 +16774,8 @@ mod tests {
     fn evolve8h_wave_551_health_prints_compact_media() {
         const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(TOOL.contains(
-            "media: active={active}"
-        ));
-        assert!(TOOL.contains(
-            "\"media: active=true\""
-        ));
+        assert!(TOOL.contains("media: active={active}"));
+        assert!(TOOL.contains("\"media: active=true\""));
         assert!(DOCS.contains("`jwm-tool health` prints compact `media` beside occupancy"));
     }
 
@@ -16889,9 +16802,7 @@ mod tests {
         const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
         assert!(TOOL.contains("query aliases: get_clip -> get_clipboard"));
-        assert!(DOCS.contains(
-            "`jwm-tool capabilities` text lists `get_clip -> get_clipboard`"
-        ));
+        assert!(DOCS.contains("`jwm-tool capabilities` text lists `get_clip -> get_clipboard`"));
     }
 
     #[test]
@@ -16899,9 +16810,7 @@ mod tests {
         const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
         assert!(TOOL.contains("query aliases: get_idl -> get_idle"));
-        assert!(DOCS.contains(
-            "`jwm-tool capabilities` text lists `get_idl -> get_idle`"
-        ));
+        assert!(DOCS.contains("`jwm-tool capabilities` text lists `get_idl -> get_idle`"));
     }
 
     #[test]
@@ -16909,9 +16818,9 @@ mod tests {
         const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
         assert!(TOOL.contains("query aliases: get_notif -> get_notifications"));
-        assert!(DOCS.contains(
-            "`jwm-tool capabilities` text lists `get_notif -> get_notifications`"
-        ));
+        assert!(
+            DOCS.contains("`jwm-tool capabilities` text lists `get_notif -> get_notifications`")
+        );
     }
 
     #[test]
@@ -16919,9 +16828,9 @@ mod tests {
         const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
         assert!(TOOL.contains("query aliases: get_dnd -> get_do_not_disturb"));
-        assert!(DOCS.contains(
-            "`jwm-tool capabilities` text lists `get_dnd -> get_do_not_disturb`"
-        ));
+        assert!(
+            DOCS.contains("`jwm-tool capabilities` text lists `get_dnd -> get_do_not_disturb`")
+        );
     }
 
     #[test]
@@ -16929,9 +16838,7 @@ mod tests {
         const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
         assert!(TOOL.contains("query aliases: get_pair -> get_bluetooth"));
-        assert!(DOCS.contains(
-            "`jwm-tool capabilities` text lists `get_pair -> get_bluetooth`"
-        ));
+        assert!(DOCS.contains("`jwm-tool capabilities` text lists `get_pair -> get_bluetooth`"));
     }
 
     #[test]
@@ -16939,9 +16846,7 @@ mod tests {
         const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
         assert!(TOOL.contains("query aliases: get_conn -> get_connectivity"));
-        assert!(DOCS.contains(
-            "`jwm-tool capabilities` text lists `get_conn -> get_connectivity`"
-        ));
+        assert!(DOCS.contains("`jwm-tool capabilities` text lists `get_conn -> get_connectivity`"));
     }
 
     #[test]
@@ -16949,9 +16854,9 @@ mod tests {
         const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
         assert!(TOOL.contains("query aliases: get_power -> get_power_status"));
-        assert!(DOCS.contains(
-            "`jwm-tool capabilities` text lists `get_power -> get_power_status`"
-        ));
+        assert!(
+            DOCS.contains("`jwm-tool capabilities` text lists `get_power -> get_power_status`")
+        );
     }
 
     #[test]
@@ -16959,9 +16864,9 @@ mod tests {
         const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
         assert!(TOOL.contains("query aliases: get_media -> get_media_status"));
-        assert!(DOCS.contains(
-            "`jwm-tool capabilities` text lists `get_media -> get_media_status`"
-        ));
+        assert!(
+            DOCS.contains("`jwm-tool capabilities` text lists `get_media -> get_media_status`")
+        );
     }
 
     #[test]
@@ -17049,7 +16954,9 @@ mod tests {
         const FEATURE: &str = include_str!("../../docs/notifications.md");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
         assert!(FEATURE.contains("compact `notifications`"));
-        assert!(DOCS.contains("`docs/notifications.md` names compact `notifications` beside health"));
+        assert!(
+            DOCS.contains("`docs/notifications.md` names compact `notifications` beside health")
+        );
     }
 
     #[test]
@@ -17057,7 +16964,11 @@ mod tests {
         const FEATURE: &str = include_str!("../../docs/audio-recording.md");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
         assert!(FEATURE.contains("compact `audio_recording`"));
-        assert!(DOCS.contains("`docs/audio-recording.md` names compact `audio_recording` beside health"));
+        assert!(
+            DOCS.contains(
+                "`docs/audio-recording.md` names compact `audio_recording` beside health"
+            )
+        );
     }
 
     #[test]
@@ -17121,7 +17032,11 @@ mod tests {
         const FEATURE: &str = include_str!("../../docs/window-placement.md");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
         assert!(FEATURE.contains("compact `closed_placement`"));
-        assert!(DOCS.contains("`docs/window-placement.md` names compact `closed_placement` beside health"));
+        assert!(
+            DOCS.contains(
+                "`docs/window-placement.md` names compact `closed_placement` beside health"
+            )
+        );
     }
 
     #[test]
@@ -17161,7 +17076,9 @@ mod tests {
         const FEATURE: &str = include_str!("../../docs/remote-control.md");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
         assert!(FEATURE.contains("compact `session_lock`"));
-        assert!(DOCS.contains("`docs/remote-control.md` names compact `session_lock` beside health"));
+        assert!(
+            DOCS.contains("`docs/remote-control.md` names compact `session_lock` beside health")
+        );
     }
 
     #[test]
@@ -17246,7 +17163,9 @@ mod tests {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
         assert!(README.contains("`get_cm`"));
         assert!(README.contains("compact `color_management` line"));
-        assert!(DOCS.contains("README health text names `get_cm` beside compact `color_management`"));
+        assert!(
+            DOCS.contains("README health text names `get_cm` beside compact `color_management`")
+        );
     }
 
     #[test]
@@ -17309,7 +17228,9 @@ mod tests {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
         assert!(README.contains("`get_arec`"));
         assert!(README.contains("compact `audio_recording` line"));
-        assert!(DOCS.contains("README health text names `get_arec` beside compact `audio_recording`"));
+        assert!(
+            DOCS.contains("README health text names `get_arec` beside compact `audio_recording`")
+        );
     }
 
     #[test]
@@ -17399,7 +17320,9 @@ mod tests {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
         assert!(README.contains("`get_notif`"));
         assert!(README.contains("compact `notifications` line"));
-        assert!(DOCS.contains("README health text names `get_notif` beside compact `notifications`"));
+        assert!(
+            DOCS.contains("README health text names `get_notif` beside compact `notifications`")
+        );
     }
 
     #[test]
@@ -17531,43 +17454,61 @@ mod tests {
     #[test]
     fn evolve8h_wave_628_monitor_lock_unique_pin_session_lock() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 628: Health compact `session_lock` is the operator twin of `get_lock`."));
+        assert!(DOCS.contains(
+            "Wave 628: Health compact `session_lock` is the operator twin of `get_lock`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_629_monitor_lock_unique_pin_tearing() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 629: Health compact `tearing` is the operator twin of `get_th`."));
+        assert!(
+            DOCS.contains("Wave 629: Health compact `tearing` is the operator twin of `get_th`.")
+        );
     }
 
     #[test]
     fn evolve8h_wave_630_monitor_lock_unique_pin_xwayland() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 630: Health compact `xwayland` is the operator twin of `get_xw`."));
+        assert!(
+            DOCS.contains("Wave 630: Health compact `xwayland` is the operator twin of `get_xw`.")
+        );
     }
 
     #[test]
     fn evolve8h_wave_631_monitor_lock_unique_pin_scrolling() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 631: Health compact `scrolling` is the operator twin of `get_scroll`."));
+        assert!(DOCS.contains(
+            "Wave 631: Health compact `scrolling` is the operator twin of `get_scroll`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_632_monitor_lock_unique_pin_color_management() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 632: Health compact `color_management` is the operator twin of `get_cm`."));
+        assert!(DOCS.contains(
+            "Wave 632: Health compact `color_management` is the operator twin of `get_cm`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_633_monitor_lock_unique_pin_night_light() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 633: Health compact `night_light` is the operator twin of `get_nl`."));
+        assert!(
+            DOCS.contains(
+                "Wave 633: Health compact `night_light` is the operator twin of `get_nl`."
+            )
+        );
     }
 
     #[test]
     fn evolve8h_wave_634_monitor_lock_unique_pin_magnifier() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 634: Health compact `magnifier` is the operator twin of `get_mag`."));
+        assert!(
+            DOCS.contains(
+                "Wave 634: Health compact `magnifier` is the operator twin of `get_mag`."
+            )
+        );
     }
 
     #[test]
@@ -17579,85 +17520,125 @@ mod tests {
     #[test]
     fn evolve8h_wave_636_monitor_lock_unique_pin_gesture() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 636: Health compact `gesture` is the operator twin of `get_gest`."));
+        assert!(
+            DOCS.contains("Wave 636: Health compact `gesture` is the operator twin of `get_gest`.")
+        );
     }
 
     #[test]
     fn evolve8h_wave_637_monitor_lock_unique_pin_wayland() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 637: Health compact `wayland` is the operator twin of `get_wl`."));
+        assert!(
+            DOCS.contains("Wave 637: Health compact `wayland` is the operator twin of `get_wl`.")
+        );
     }
 
     #[test]
     fn evolve8h_wave_638_monitor_lock_unique_pin_recording() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 638: Health compact `recording` is the operator twin of `get_rec`."));
+        assert!(
+            DOCS.contains(
+                "Wave 638: Health compact `recording` is the operator twin of `get_rec`."
+            )
+        );
     }
 
     #[test]
     fn evolve8h_wave_639_monitor_lock_unique_pin_audio_recording() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 639: Health compact `audio_recording` is the operator twin of `get_arec`."));
+        assert!(DOCS.contains(
+            "Wave 639: Health compact `audio_recording` is the operator twin of `get_arec`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_640_monitor_lock_unique_pin_capture() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 640: Health compact `capture` is the operator twin of `get_cap`."));
+        assert!(
+            DOCS.contains("Wave 640: Health compact `capture` is the operator twin of `get_cap`.")
+        );
     }
 
     #[test]
     fn evolve8h_wave_641_monitor_lock_unique_pin_waterlily() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 641: Health compact `waterlily` is the operator twin of `get_wly`."));
+        assert!(
+            DOCS.contains(
+                "Wave 641: Health compact `waterlily` is the operator twin of `get_wly`."
+            )
+        );
     }
 
     #[test]
     fn evolve8h_wave_642_monitor_lock_unique_pin_audio() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 642: Health compact `audio` is the operator twin of `get_devices`."));
+        assert!(
+            DOCS.contains(
+                "Wave 642: Health compact `audio` is the operator twin of `get_devices`."
+            )
+        );
     }
 
     #[test]
     fn evolve8h_wave_643_monitor_lock_unique_pin_wallpaper() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 643: Health compact `wallpaper` is the operator twin of `get_wall`."));
+        assert!(
+            DOCS.contains(
+                "Wave 643: Health compact `wallpaper` is the operator twin of `get_wall`."
+            )
+        );
     }
 
     #[test]
     fn evolve8h_wave_644_monitor_lock_unique_pin_bluetooth() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 644: Health compact `bluetooth` is the operator twin of `get_bt`."));
+        assert!(
+            DOCS.contains("Wave 644: Health compact `bluetooth` is the operator twin of `get_bt`.")
+        );
     }
 
     #[test]
     fn evolve8h_wave_645_monitor_lock_unique_pin_resources() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 645: Health compact `resources` is the operator twin of `get_res`."));
+        assert!(
+            DOCS.contains(
+                "Wave 645: Health compact `resources` is the operator twin of `get_res`."
+            )
+        );
     }
 
     #[test]
     fn evolve8h_wave_646_monitor_lock_unique_pin_connectivity() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 646: Health compact `connectivity` is the operator twin of `get_conn`."));
+        assert!(DOCS.contains(
+            "Wave 646: Health compact `connectivity` is the operator twin of `get_conn`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_647_monitor_lock_unique_pin_clipboard() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 647: Health compact `clipboard` is the operator twin of `get_clip`."));
+        assert!(
+            DOCS.contains(
+                "Wave 647: Health compact `clipboard` is the operator twin of `get_clip`."
+            )
+        );
     }
 
     #[test]
     fn evolve8h_wave_648_monitor_lock_unique_pin_idle() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 648: Health compact `idle` is the operator twin of `get_idl`."));
+        assert!(
+            DOCS.contains("Wave 648: Health compact `idle` is the operator twin of `get_idl`.")
+        );
     }
 
     #[test]
     fn evolve8h_wave_649_monitor_lock_unique_pin_notifications() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 649: Health compact `notifications` is the operator twin of `get_notif`."));
+        assert!(DOCS.contains(
+            "Wave 649: Health compact `notifications` is the operator twin of `get_notif`."
+        ));
     }
 
     #[test]
@@ -17669,457 +17650,649 @@ mod tests {
     #[test]
     fn evolve8h_wave_651_monitor_lock_unique_pin_system_ui() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 651: Health compact `system_ui` is the operator twin of `get_ui`."));
+        assert!(
+            DOCS.contains("Wave 651: Health compact `system_ui` is the operator twin of `get_ui`.")
+        );
     }
 
     #[test]
     fn evolve8h_wave_652_monitor_lock_unique_pin_layout() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 652: Health compact `layout` is the operator twin of `get_lt`."));
+        assert!(
+            DOCS.contains("Wave 652: Health compact `layout` is the operator twin of `get_lt`.")
+        );
     }
 
     #[test]
     fn evolve8h_wave_653_monitor_lock_unique_pin_tabs() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 653: Health compact `tabs` is the operator twin of `get_tab`."));
+        assert!(
+            DOCS.contains("Wave 653: Health compact `tabs` is the operator twin of `get_tab`.")
+        );
     }
 
     #[test]
     fn evolve8h_wave_654_monitor_lock_unique_pin_selected() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 654: Health compact `selected` is the operator twin of `get_sel`."));
+        assert!(
+            DOCS.contains("Wave 654: Health compact `selected` is the operator twin of `get_sel`.")
+        );
     }
 
     #[test]
     fn evolve8h_wave_655_monitor_lock_unique_pin_struts() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 655: Health compact `struts` is the operator twin of `get_strut`."));
+        assert!(
+            DOCS.contains("Wave 655: Health compact `struts` is the operator twin of `get_strut`.")
+        );
     }
 
     #[test]
     fn evolve8h_wave_656_monitor_lock_unique_pin_scratchpads() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 656: Health compact `scratchpads` is the operator twin of `get_pads`."));
+        assert!(DOCS.contains(
+            "Wave 656: Health compact `scratchpads` is the operator twin of `get_pads`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_657_monitor_lock_unique_pin_focused() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 657: Health compact `focused` is the operator twin of `get_fw`."));
+        assert!(
+            DOCS.contains("Wave 657: Health compact `focused` is the operator twin of `get_fw`.")
+        );
     }
 
     #[test]
     fn evolve8h_wave_658_monitor_lock_unique_pin_monitors() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 658: Health compact `monitors` is the operator twin of `get_mons`."));
+        assert!(
+            DOCS.contains(
+                "Wave 658: Health compact `monitors` is the operator twin of `get_mons`."
+            )
+        );
     }
 
     #[test]
     fn evolve8h_wave_659_monitor_lock_unique_pin_workspaces() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 659: Health compact `workspaces` is the operator twin of `get_ws`."));
+        assert!(
+            DOCS.contains(
+                "Wave 659: Health compact `workspaces` is the operator twin of `get_ws`."
+            )
+        );
     }
 
     #[test]
     fn evolve8h_wave_660_monitor_lock_unique_pin_windows() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 660: Health compact `windows` is the operator twin of `get_wins`."));
+        assert!(
+            DOCS.contains("Wave 660: Health compact `windows` is the operator twin of `get_wins`.")
+        );
     }
 
     #[test]
     fn evolve8h_wave_661_monitor_lock_unique_pin_effects() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 661: Health compact `effects` is the operator twin of `get_fx`."));
+        assert!(
+            DOCS.contains("Wave 661: Health compact `effects` is the operator twin of `get_fx`.")
+        );
     }
 
     #[test]
     fn evolve8h_wave_662_monitor_lock_unique_pin_mic() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 662: Health compact `mic` is the operator twin of `get_mute`."));
+        assert!(
+            DOCS.contains("Wave 662: Health compact `mic` is the operator twin of `get_mute`.")
+        );
     }
 
     #[test]
     fn evolve8h_wave_663_monitor_lock_unique_pin_bench() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 663: Health compact `bench` is the operator twin of `get_bm`."));
+        assert!(
+            DOCS.contains("Wave 663: Health compact `bench` is the operator twin of `get_bm`.")
+        );
     }
 
     #[test]
     fn evolve8h_wave_664_monitor_lock_unique_pin_closed_placement() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 664: Health compact `closed_placement` is the operator twin of `get_cp`."));
+        assert!(DOCS.contains(
+            "Wave 664: Health compact `closed_placement` is the operator twin of `get_cp`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_665_monitor_lock_unique_pin_prev_layout() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 665: Health compact `prev_layout` is the operator twin of `get_pl`."));
+        assert!(
+            DOCS.contains(
+                "Wave 665: Health compact `prev_layout` is the operator twin of `get_pl`."
+            )
+        );
     }
 
     #[test]
     fn evolve8h_wave_666_monitor_lock_unique_pin_cfact() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 666: Health compact `cfact` is the operator twin of `get_cf`."));
+        assert!(
+            DOCS.contains("Wave 666: Health compact `cfact` is the operator twin of `get_cf`.")
+        );
     }
 
     #[test]
     fn evolve8h_wave_667_monitor_lock_unique_pin_gaps() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 667: Health compact `gaps` is the operator twin of `get_gap`."));
+        assert!(
+            DOCS.contains("Wave 667: Health compact `gaps` is the operator twin of `get_gap`.")
+        );
     }
 
     #[test]
     fn evolve8h_wave_668_monitor_lock_unique_pin_mfact() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 668: Health compact `mfact` is the operator twin of `get_mf`."));
+        assert!(
+            DOCS.contains("Wave 668: Health compact `mfact` is the operator twin of `get_mf`.")
+        );
     }
 
     #[test]
     fn evolve8h_wave_669_monitor_lock_unique_pin_nmaster() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 669: Health compact `nmaster` is the operator twin of `get_nm`."));
+        assert!(
+            DOCS.contains("Wave 669: Health compact `nmaster` is the operator twin of `get_nm`.")
+        );
     }
 
     #[test]
     fn evolve8h_wave_670_monitor_lock_unique_pin_floating() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 670: Health compact `floating` is the operator twin of `get_status.floating`."));
+        assert!(DOCS.contains(
+            "Wave 670: Health compact `floating` is the operator twin of `get_status.floating`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_671_monitor_lock_unique_pin_minimized() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 671: Health compact `minimized` is the operator twin of `get_status.minimized`."));
+        assert!(DOCS.contains(
+            "Wave 671: Health compact `minimized` is the operator twin of `get_status.minimized`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_672_monitor_lock_unique_pin_sticky() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 672: Health compact `sticky` is the operator twin of `get_status.sticky`."));
+        assert!(DOCS.contains(
+            "Wave 672: Health compact `sticky` is the operator twin of `get_status.sticky`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_673_monitor_lock_unique_pin_urgent() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 673: Health compact `urgent` is the operator twin of `get_status.urgent`."));
+        assert!(DOCS.contains(
+            "Wave 673: Health compact `urgent` is the operator twin of `get_status.urgent`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_674_monitor_lock_unique_pin_fullscreen() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 674: Health compact `fullscreen` is the operator twin of `get_status.fullscreen`."));
+        assert!(DOCS.contains(
+            "Wave 674: Health compact `fullscreen` is the operator twin of `get_status.fullscreen`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_675_monitor_lock_unique_pin_pip() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 675: Health compact `pip` is the operator twin of `get_status.pip`."));
+        assert!(
+            DOCS.contains(
+                "Wave 675: Health compact `pip` is the operator twin of `get_status.pip`."
+            )
+        );
     }
 
     #[test]
     fn evolve8h_wave_676_monitor_lock_unique_pin_blur() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 676: Health compact `blur` is the operator twin of `get_status.blur`."));
+        assert!(DOCS.contains(
+            "Wave 676: Health compact `blur` is the operator twin of `get_status.blur`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_677_monitor_lock_unique_pin_hdr() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 677: Health compact `hdr` is the operator twin of `get_status.hdr`."));
+        assert!(
+            DOCS.contains(
+                "Wave 677: Health compact `hdr` is the operator twin of `get_status.hdr`."
+            )
+        );
     }
 
     #[test]
     fn evolve8h_wave_678_monitor_lock_unique_pin_expose() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 678: Health compact `expose` is the operator twin of `get_status.expose`."));
+        assert!(DOCS.contains(
+            "Wave 678: Health compact `expose` is the operator twin of `get_status.expose`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_679_monitor_lock_unique_pin_media() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 679: Health compact `media` is the operator twin of `get_media`."));
+        assert!(
+            DOCS.contains("Wave 679: Health compact `media` is the operator twin of `get_media`.")
+        );
     }
 
     #[test]
     fn evolve8h_wave_680_monitor_lock_unique_pin_power() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 680: Health compact `power` is the operator twin of `get_power`."));
+        assert!(
+            DOCS.contains("Wave 680: Health compact `power` is the operator twin of `get_power`.")
+        );
     }
 
     #[test]
     fn evolve8h_wave_681_monitor_lock_unique_pin_session_lock() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 681: `get_lock` and health compact `session_lock` share one Status nest."));
+        assert!(DOCS.contains(
+            "Wave 681: `get_lock` and health compact `session_lock` share one Status nest."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_682_monitor_lock_unique_pin_tearing() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 682: `get_th` and health compact `tearing` share one Status nest."));
+        assert!(
+            DOCS.contains("Wave 682: `get_th` and health compact `tearing` share one Status nest.")
+        );
     }
 
     #[test]
     fn evolve8h_wave_683_monitor_lock_unique_pin_xwayland() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 683: `get_xw` and health compact `xwayland` share one Status nest."));
+        assert!(
+            DOCS.contains(
+                "Wave 683: `get_xw` and health compact `xwayland` share one Status nest."
+            )
+        );
     }
 
     #[test]
     fn evolve8h_wave_684_monitor_lock_unique_pin_scrolling() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 684: `get_scroll` and health compact `scrolling` share one Status nest."));
+        assert!(DOCS.contains(
+            "Wave 684: `get_scroll` and health compact `scrolling` share one Status nest."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_685_monitor_lock_unique_pin_color_management() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 685: `get_cm` and health compact `color_management` share one Status nest."));
+        assert!(DOCS.contains(
+            "Wave 685: `get_cm` and health compact `color_management` share one Status nest."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_686_monitor_lock_unique_pin_night_light() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 686: `get_nl` and health compact `night_light` share one Status nest."));
+        assert!(DOCS.contains(
+            "Wave 686: `get_nl` and health compact `night_light` share one Status nest."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_687_monitor_lock_unique_pin_magnifier() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 687: `get_mag` and health compact `magnifier` share one Status nest."));
+        assert!(
+            DOCS.contains(
+                "Wave 687: `get_mag` and health compact `magnifier` share one Status nest."
+            )
+        );
     }
 
     #[test]
     fn evolve8h_wave_688_monitor_lock_unique_pin_peek() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 688: `get_pk` and health compact `peek` share one Status nest."));
+        assert!(
+            DOCS.contains("Wave 688: `get_pk` and health compact `peek` share one Status nest.")
+        );
     }
 
     #[test]
     fn evolve8h_wave_689_monitor_lock_unique_pin_gesture() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 689: `get_gest` and health compact `gesture` share one Status nest."));
+        assert!(
+            DOCS.contains(
+                "Wave 689: `get_gest` and health compact `gesture` share one Status nest."
+            )
+        );
     }
 
     #[test]
     fn evolve8h_wave_690_monitor_lock_unique_pin_wayland() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 690: `get_wl` and health compact `wayland` share one Status nest."));
+        assert!(
+            DOCS.contains("Wave 690: `get_wl` and health compact `wayland` share one Status nest.")
+        );
     }
 
     #[test]
     fn evolve8h_wave_691_monitor_lock_unique_pin_recording() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 691: `get_rec` and health compact `recording` share one Status nest."));
+        assert!(
+            DOCS.contains(
+                "Wave 691: `get_rec` and health compact `recording` share one Status nest."
+            )
+        );
     }
 
     #[test]
     fn evolve8h_wave_692_monitor_lock_unique_pin_audio_recording() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 692: `get_arec` and health compact `audio_recording` share one Status nest."));
+        assert!(DOCS.contains(
+            "Wave 692: `get_arec` and health compact `audio_recording` share one Status nest."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_693_monitor_lock_unique_pin_capture() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 693: `get_cap` and health compact `capture` share one Status nest."));
+        assert!(
+            DOCS.contains(
+                "Wave 693: `get_cap` and health compact `capture` share one Status nest."
+            )
+        );
     }
 
     #[test]
     fn evolve8h_wave_694_monitor_lock_unique_pin_waterlily() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 694: `get_wly` and health compact `waterlily` share one Status nest."));
+        assert!(
+            DOCS.contains(
+                "Wave 694: `get_wly` and health compact `waterlily` share one Status nest."
+            )
+        );
     }
 
     #[test]
     fn evolve8h_wave_695_monitor_lock_unique_pin_audio() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 695: `get_devices` and health compact `audio` share one Status nest."));
+        assert!(
+            DOCS.contains(
+                "Wave 695: `get_devices` and health compact `audio` share one Status nest."
+            )
+        );
     }
 
     #[test]
     fn evolve8h_wave_696_monitor_lock_unique_pin_wallpaper() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 696: `get_wall` and health compact `wallpaper` share one Status nest."));
+        assert!(DOCS.contains(
+            "Wave 696: `get_wall` and health compact `wallpaper` share one Status nest."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_697_monitor_lock_unique_pin_bluetooth() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 697: `get_bt` and health compact `bluetooth` share one Status nest."));
+        assert!(
+            DOCS.contains(
+                "Wave 697: `get_bt` and health compact `bluetooth` share one Status nest."
+            )
+        );
     }
 
     #[test]
     fn evolve8h_wave_698_monitor_lock_unique_pin_resources() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 698: `get_res` and health compact `resources` share one Status nest."));
+        assert!(
+            DOCS.contains(
+                "Wave 698: `get_res` and health compact `resources` share one Status nest."
+            )
+        );
     }
 
     #[test]
     fn evolve8h_wave_699_monitor_lock_unique_pin_connectivity() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 699: `get_conn` and health compact `connectivity` share one Status nest."));
+        assert!(DOCS.contains(
+            "Wave 699: `get_conn` and health compact `connectivity` share one Status nest."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_700_monitor_lock_unique_pin_clipboard() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 700: `get_clip` and health compact `clipboard` share one Status nest."));
+        assert!(DOCS.contains(
+            "Wave 700: `get_clip` and health compact `clipboard` share one Status nest."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_701_monitor_lock_unique_pin_idle() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 701: `get_idl` and health compact `idle` share one Status nest."));
+        assert!(
+            DOCS.contains("Wave 701: `get_idl` and health compact `idle` share one Status nest.")
+        );
     }
 
     #[test]
     fn evolve8h_wave_702_monitor_lock_unique_pin_notifications() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 702: `get_notif` and health compact `notifications` share one Status nest."));
+        assert!(DOCS.contains(
+            "Wave 702: `get_notif` and health compact `notifications` share one Status nest."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_703_monitor_lock_unique_pin_dnd() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 703: `get_dnd` and health compact `dnd` share one Status nest."));
+        assert!(
+            DOCS.contains("Wave 703: `get_dnd` and health compact `dnd` share one Status nest.")
+        );
     }
 
     #[test]
     fn evolve8h_wave_704_monitor_lock_unique_pin_system_ui() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 704: `get_ui` and health compact `system_ui` share one Status nest."));
+        assert!(
+            DOCS.contains(
+                "Wave 704: `get_ui` and health compact `system_ui` share one Status nest."
+            )
+        );
     }
 
     #[test]
     fn evolve8h_wave_705_monitor_lock_unique_pin_layout() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 705: `get_lt` and health compact `layout` share one Status nest."));
+        assert!(
+            DOCS.contains("Wave 705: `get_lt` and health compact `layout` share one Status nest.")
+        );
     }
 
     #[test]
     fn evolve8h_wave_706_monitor_lock_unique_pin_tabs() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 706: `get_tab` and health compact `tabs` share one Status nest."));
+        assert!(
+            DOCS.contains("Wave 706: `get_tab` and health compact `tabs` share one Status nest.")
+        );
     }
 
     #[test]
     fn evolve8h_wave_707_monitor_lock_unique_pin_selected() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 707: `get_sel` and health compact `selected` share one Status nest."));
+        assert!(
+            DOCS.contains(
+                "Wave 707: `get_sel` and health compact `selected` share one Status nest."
+            )
+        );
     }
 
     #[test]
     fn evolve8h_wave_708_monitor_lock_unique_pin_struts() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 708: `get_strut` and health compact `struts` share one Status nest."));
+        assert!(
+            DOCS.contains(
+                "Wave 708: `get_strut` and health compact `struts` share one Status nest."
+            )
+        );
     }
 
     #[test]
     fn evolve8h_wave_709_monitor_lock_unique_pin_scratchpads() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 709: `get_pads` and health compact `scratchpads` share one Status nest."));
+        assert!(DOCS.contains(
+            "Wave 709: `get_pads` and health compact `scratchpads` share one Status nest."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_710_monitor_lock_unique_pin_focused() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 710: `get_fw` and health compact `focused` share one Status nest."));
+        assert!(
+            DOCS.contains("Wave 710: `get_fw` and health compact `focused` share one Status nest.")
+        );
     }
 
     #[test]
     fn evolve8h_wave_711_monitor_lock_unique_pin_monitors() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 711: `get_mons` and health compact `monitors` share one Status nest."));
+        assert!(
+            DOCS.contains(
+                "Wave 711: `get_mons` and health compact `monitors` share one Status nest."
+            )
+        );
     }
 
     #[test]
     fn evolve8h_wave_712_monitor_lock_unique_pin_workspaces() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 712: `get_ws` and health compact `workspaces` share one Status nest."));
+        assert!(
+            DOCS.contains(
+                "Wave 712: `get_ws` and health compact `workspaces` share one Status nest."
+            )
+        );
     }
 
     #[test]
     fn evolve8h_wave_713_monitor_lock_unique_pin_windows() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 713: `get_wins` and health compact `windows` share one Status nest."));
+        assert!(
+            DOCS.contains(
+                "Wave 713: `get_wins` and health compact `windows` share one Status nest."
+            )
+        );
     }
 
     #[test]
     fn evolve8h_wave_714_monitor_lock_unique_pin_effects() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 714: `get_fx` and health compact `effects` share one Status nest."));
+        assert!(
+            DOCS.contains("Wave 714: `get_fx` and health compact `effects` share one Status nest.")
+        );
     }
 
     #[test]
     fn evolve8h_wave_715_monitor_lock_unique_pin_mic() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 715: `get_mute` and health compact `mic` share one Status nest."));
+        assert!(
+            DOCS.contains("Wave 715: `get_mute` and health compact `mic` share one Status nest.")
+        );
     }
 
     #[test]
     fn evolve8h_wave_716_monitor_lock_unique_pin_bench() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 716: `get_bm` and health compact `bench` share one Status nest."));
+        assert!(
+            DOCS.contains("Wave 716: `get_bm` and health compact `bench` share one Status nest.")
+        );
     }
 
     #[test]
     fn evolve8h_wave_717_monitor_lock_unique_pin_closed_placement() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 717: `get_cp` and health compact `closed_placement` share one Status nest."));
+        assert!(DOCS.contains(
+            "Wave 717: `get_cp` and health compact `closed_placement` share one Status nest."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_718_monitor_lock_unique_pin_prev_layout() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 718: `get_pl` and health compact `prev_layout` share one Status nest."));
+        assert!(DOCS.contains(
+            "Wave 718: `get_pl` and health compact `prev_layout` share one Status nest."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_719_monitor_lock_unique_pin_cfact() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 719: `get_cf` and health compact `cfact` share one Status nest."));
+        assert!(
+            DOCS.contains("Wave 719: `get_cf` and health compact `cfact` share one Status nest.")
+        );
     }
 
     #[test]
     fn evolve8h_wave_720_monitor_lock_unique_pin_gaps() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 720: `get_gap` and health compact `gaps` share one Status nest."));
+        assert!(
+            DOCS.contains("Wave 720: `get_gap` and health compact `gaps` share one Status nest.")
+        );
     }
 
     #[test]
     fn evolve8h_wave_721_monitor_lock_unique_pin_mfact() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 721: `get_mf` and health compact `mfact` share one Status nest."));
+        assert!(
+            DOCS.contains("Wave 721: `get_mf` and health compact `mfact` share one Status nest.")
+        );
     }
 
     #[test]
     fn evolve8h_wave_722_monitor_lock_unique_pin_nmaster() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 722: `get_nm` and health compact `nmaster` share one Status nest."));
+        assert!(
+            DOCS.contains("Wave 722: `get_nm` and health compact `nmaster` share one Status nest.")
+        );
     }
 
     #[test]
     fn evolve8h_wave_723_monitor_lock_unique_pin_floating() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 723: `get_status.floating` and health compact `floating` share one Status nest."));
+        assert!(DOCS.contains(
+            "Wave 723: `get_status.floating` and health compact `floating` share one Status nest."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_724_monitor_lock_unique_pin_minimized() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 724: `get_status.minimized` and health compact `minimized` share one Status nest."));
+        assert!(DOCS.contains(
+            "Wave 724: `get_status.minimized` and health compact `minimized` share one Status nest."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_725_monitor_lock_unique_pin_sticky() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 725: `get_status.sticky` and health compact `sticky` share one Status nest."));
+        assert!(DOCS.contains(
+            "Wave 725: `get_status.sticky` and health compact `sticky` share one Status nest."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_726_monitor_lock_unique_pin_urgent() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 726: `get_status.urgent` and health compact `urgent` share one Status nest."));
+        assert!(DOCS.contains(
+            "Wave 726: `get_status.urgent` and health compact `urgent` share one Status nest."
+        ));
     }
 
     #[test]
@@ -18131,295 +18304,413 @@ mod tests {
     #[test]
     fn evolve8h_wave_728_monitor_lock_unique_pin_pip() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 728: `get_status.pip` and health compact `pip` share one Status nest."));
+        assert!(DOCS.contains(
+            "Wave 728: `get_status.pip` and health compact `pip` share one Status nest."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_729_monitor_lock_unique_pin_blur() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 729: `get_status.blur` and health compact `blur` share one Status nest."));
+        assert!(DOCS.contains(
+            "Wave 729: `get_status.blur` and health compact `blur` share one Status nest."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_730_monitor_lock_unique_pin_hdr() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 730: `get_status.hdr` and health compact `hdr` share one Status nest."));
+        assert!(DOCS.contains(
+            "Wave 730: `get_status.hdr` and health compact `hdr` share one Status nest."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_731_monitor_lock_unique_pin_expose() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 731: `get_status.expose` and health compact `expose` share one Status nest."));
+        assert!(DOCS.contains(
+            "Wave 731: `get_status.expose` and health compact `expose` share one Status nest."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_732_monitor_lock_unique_pin_media() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 732: `get_media` and health compact `media` share one Status nest."));
+        assert!(
+            DOCS.contains(
+                "Wave 732: `get_media` and health compact `media` share one Status nest."
+            )
+        );
     }
 
     #[test]
     fn evolve8h_wave_733_monitor_lock_unique_pin_power() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 733: `get_power` and health compact `power` share one Status nest."));
+        assert!(
+            DOCS.contains(
+                "Wave 733: `get_power` and health compact `power` share one Status nest."
+            )
+        );
     }
 
     #[test]
     fn evolve8h_wave_734_monitor_lock_unique_pin_session_lock() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 734: Doctor bundles include health compact `session_lock` from `get_lock`."));
+        assert!(DOCS.contains(
+            "Wave 734: Doctor bundles include health compact `session_lock` from `get_lock`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_735_monitor_lock_unique_pin_tearing() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 735: Doctor bundles include health compact `tearing` from `get_th`."));
+        assert!(
+            DOCS.contains(
+                "Wave 735: Doctor bundles include health compact `tearing` from `get_th`."
+            )
+        );
     }
 
     #[test]
     fn evolve8h_wave_736_monitor_lock_unique_pin_xwayland() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 736: Doctor bundles include health compact `xwayland` from `get_xw`."));
+        assert!(
+            DOCS.contains(
+                "Wave 736: Doctor bundles include health compact `xwayland` from `get_xw`."
+            )
+        );
     }
 
     #[test]
     fn evolve8h_wave_737_monitor_lock_unique_pin_scrolling() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 737: Doctor bundles include health compact `scrolling` from `get_scroll`."));
+        assert!(DOCS.contains(
+            "Wave 737: Doctor bundles include health compact `scrolling` from `get_scroll`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_738_monitor_lock_unique_pin_color_management() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 738: Doctor bundles include health compact `color_management` from `get_cm`."));
+        assert!(DOCS.contains(
+            "Wave 738: Doctor bundles include health compact `color_management` from `get_cm`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_739_monitor_lock_unique_pin_night_light() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 739: Doctor bundles include health compact `night_light` from `get_nl`."));
+        assert!(DOCS.contains(
+            "Wave 739: Doctor bundles include health compact `night_light` from `get_nl`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_740_monitor_lock_unique_pin_magnifier() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 740: Doctor bundles include health compact `magnifier` from `get_mag`."));
+        assert!(DOCS.contains(
+            "Wave 740: Doctor bundles include health compact `magnifier` from `get_mag`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_741_monitor_lock_unique_pin_peek() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 741: Doctor bundles include health compact `peek` from `get_pk`."));
+        assert!(
+            DOCS.contains("Wave 741: Doctor bundles include health compact `peek` from `get_pk`.")
+        );
     }
 
     #[test]
     fn evolve8h_wave_742_monitor_lock_unique_pin_gesture() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 742: Doctor bundles include health compact `gesture` from `get_gest`."));
+        assert!(DOCS.contains(
+            "Wave 742: Doctor bundles include health compact `gesture` from `get_gest`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_743_monitor_lock_unique_pin_wayland() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 743: Doctor bundles include health compact `wayland` from `get_wl`."));
+        assert!(
+            DOCS.contains(
+                "Wave 743: Doctor bundles include health compact `wayland` from `get_wl`."
+            )
+        );
     }
 
     #[test]
     fn evolve8h_wave_744_monitor_lock_unique_pin_recording() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 744: Doctor bundles include health compact `recording` from `get_rec`."));
+        assert!(DOCS.contains(
+            "Wave 744: Doctor bundles include health compact `recording` from `get_rec`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_745_monitor_lock_unique_pin_audio_recording() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 745: Doctor bundles include health compact `audio_recording` from `get_arec`."));
+        assert!(DOCS.contains(
+            "Wave 745: Doctor bundles include health compact `audio_recording` from `get_arec`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_746_monitor_lock_unique_pin_capture() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 746: Doctor bundles include health compact `capture` from `get_cap`."));
+        assert!(
+            DOCS.contains(
+                "Wave 746: Doctor bundles include health compact `capture` from `get_cap`."
+            )
+        );
     }
 
     #[test]
     fn evolve8h_wave_747_monitor_lock_unique_pin_waterlily() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 747: Doctor bundles include health compact `waterlily` from `get_wly`."));
+        assert!(DOCS.contains(
+            "Wave 747: Doctor bundles include health compact `waterlily` from `get_wly`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_748_monitor_lock_unique_pin_audio() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 748: Doctor bundles include health compact `audio` from `get_devices`."));
+        assert!(DOCS.contains(
+            "Wave 748: Doctor bundles include health compact `audio` from `get_devices`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_749_monitor_lock_unique_pin_wallpaper() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 749: Doctor bundles include health compact `wallpaper` from `get_wall`."));
+        assert!(DOCS.contains(
+            "Wave 749: Doctor bundles include health compact `wallpaper` from `get_wall`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_750_monitor_lock_unique_pin_bluetooth() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 750: Doctor bundles include health compact `bluetooth` from `get_bt`."));
+        assert!(DOCS.contains(
+            "Wave 750: Doctor bundles include health compact `bluetooth` from `get_bt`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_751_monitor_lock_unique_pin_resources() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 751: Doctor bundles include health compact `resources` from `get_res`."));
+        assert!(DOCS.contains(
+            "Wave 751: Doctor bundles include health compact `resources` from `get_res`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_752_monitor_lock_unique_pin_connectivity() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 752: Doctor bundles include health compact `connectivity` from `get_conn`."));
+        assert!(DOCS.contains(
+            "Wave 752: Doctor bundles include health compact `connectivity` from `get_conn`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_753_monitor_lock_unique_pin_clipboard() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 753: Doctor bundles include health compact `clipboard` from `get_clip`."));
+        assert!(DOCS.contains(
+            "Wave 753: Doctor bundles include health compact `clipboard` from `get_clip`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_754_monitor_lock_unique_pin_idle() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 754: Doctor bundles include health compact `idle` from `get_idl`."));
+        assert!(
+            DOCS.contains("Wave 754: Doctor bundles include health compact `idle` from `get_idl`.")
+        );
     }
 
     #[test]
     fn evolve8h_wave_755_monitor_lock_unique_pin_notifications() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 755: Doctor bundles include health compact `notifications` from `get_notif`."));
+        assert!(DOCS.contains(
+            "Wave 755: Doctor bundles include health compact `notifications` from `get_notif`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_756_monitor_lock_unique_pin_dnd() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 756: Doctor bundles include health compact `dnd` from `get_dnd`."));
+        assert!(
+            DOCS.contains("Wave 756: Doctor bundles include health compact `dnd` from `get_dnd`.")
+        );
     }
 
     #[test]
     fn evolve8h_wave_757_monitor_lock_unique_pin_system_ui() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 757: Doctor bundles include health compact `system_ui` from `get_ui`."));
+        assert!(DOCS.contains(
+            "Wave 757: Doctor bundles include health compact `system_ui` from `get_ui`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_758_monitor_lock_unique_pin_layout() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 758: Doctor bundles include health compact `layout` from `get_lt`."));
+        assert!(
+            DOCS.contains(
+                "Wave 758: Doctor bundles include health compact `layout` from `get_lt`."
+            )
+        );
     }
 
     #[test]
     fn evolve8h_wave_759_monitor_lock_unique_pin_tabs() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 759: Doctor bundles include health compact `tabs` from `get_tab`."));
+        assert!(
+            DOCS.contains("Wave 759: Doctor bundles include health compact `tabs` from `get_tab`.")
+        );
     }
 
     #[test]
     fn evolve8h_wave_760_monitor_lock_unique_pin_selected() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 760: Doctor bundles include health compact `selected` from `get_sel`."));
+        assert!(DOCS.contains(
+            "Wave 760: Doctor bundles include health compact `selected` from `get_sel`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_761_monitor_lock_unique_pin_struts() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 761: Doctor bundles include health compact `struts` from `get_strut`."));
+        assert!(DOCS.contains(
+            "Wave 761: Doctor bundles include health compact `struts` from `get_strut`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_762_monitor_lock_unique_pin_scratchpads() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 762: Doctor bundles include health compact `scratchpads` from `get_pads`."));
+        assert!(DOCS.contains(
+            "Wave 762: Doctor bundles include health compact `scratchpads` from `get_pads`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_763_monitor_lock_unique_pin_focused() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 763: Doctor bundles include health compact `focused` from `get_fw`."));
+        assert!(
+            DOCS.contains(
+                "Wave 763: Doctor bundles include health compact `focused` from `get_fw`."
+            )
+        );
     }
 
     #[test]
     fn evolve8h_wave_764_monitor_lock_unique_pin_monitors() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 764: Doctor bundles include health compact `monitors` from `get_mons`."));
+        assert!(DOCS.contains(
+            "Wave 764: Doctor bundles include health compact `monitors` from `get_mons`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_765_monitor_lock_unique_pin_workspaces() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 765: Doctor bundles include health compact `workspaces` from `get_ws`."));
+        assert!(DOCS.contains(
+            "Wave 765: Doctor bundles include health compact `workspaces` from `get_ws`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_766_monitor_lock_unique_pin_windows() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 766: Doctor bundles include health compact `windows` from `get_wins`."));
+        assert!(DOCS.contains(
+            "Wave 766: Doctor bundles include health compact `windows` from `get_wins`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_767_monitor_lock_unique_pin_effects() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 767: Doctor bundles include health compact `effects` from `get_fx`."));
+        assert!(
+            DOCS.contains(
+                "Wave 767: Doctor bundles include health compact `effects` from `get_fx`."
+            )
+        );
     }
 
     #[test]
     fn evolve8h_wave_768_monitor_lock_unique_pin_mic() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 768: Doctor bundles include health compact `mic` from `get_mute`."));
+        assert!(
+            DOCS.contains("Wave 768: Doctor bundles include health compact `mic` from `get_mute`.")
+        );
     }
 
     #[test]
     fn evolve8h_wave_769_monitor_lock_unique_pin_bench() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 769: Doctor bundles include health compact `bench` from `get_bm`."));
+        assert!(
+            DOCS.contains("Wave 769: Doctor bundles include health compact `bench` from `get_bm`.")
+        );
     }
 
     #[test]
     fn evolve8h_wave_770_monitor_lock_unique_pin_closed_placement() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 770: Doctor bundles include health compact `closed_placement` from `get_cp`."));
+        assert!(DOCS.contains(
+            "Wave 770: Doctor bundles include health compact `closed_placement` from `get_cp`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_771_monitor_lock_unique_pin_prev_layout() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 771: Doctor bundles include health compact `prev_layout` from `get_pl`."));
+        assert!(DOCS.contains(
+            "Wave 771: Doctor bundles include health compact `prev_layout` from `get_pl`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_772_monitor_lock_unique_pin_cfact() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 772: Doctor bundles include health compact `cfact` from `get_cf`."));
+        assert!(
+            DOCS.contains("Wave 772: Doctor bundles include health compact `cfact` from `get_cf`.")
+        );
     }
 
     #[test]
     fn evolve8h_wave_773_monitor_lock_unique_pin_gaps() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 773: Doctor bundles include health compact `gaps` from `get_gap`."));
+        assert!(
+            DOCS.contains("Wave 773: Doctor bundles include health compact `gaps` from `get_gap`.")
+        );
     }
 
     #[test]
     fn evolve8h_wave_774_monitor_lock_unique_pin_mfact() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 774: Doctor bundles include health compact `mfact` from `get_mf`."));
+        assert!(
+            DOCS.contains("Wave 774: Doctor bundles include health compact `mfact` from `get_mf`.")
+        );
     }
 
     #[test]
     fn evolve8h_wave_775_monitor_lock_unique_pin_nmaster() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 775: Doctor bundles include health compact `nmaster` from `get_nm`."));
+        assert!(
+            DOCS.contains(
+                "Wave 775: Doctor bundles include health compact `nmaster` from `get_nm`."
+            )
+        );
     }
 
     #[test]
     fn evolve8h_wave_776_monitor_lock_unique_pin_floating() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 776: Doctor bundles include health compact `floating` from `get_status.floating`."));
+        assert!(DOCS.contains(
+            "Wave 776: Doctor bundles include health compact `floating` from `get_status.floating`."
+        ));
     }
 
     #[test]
@@ -18431,13 +18722,17 @@ mod tests {
     #[test]
     fn evolve8h_wave_778_monitor_lock_unique_pin_sticky() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 778: Doctor bundles include health compact `sticky` from `get_status.sticky`."));
+        assert!(DOCS.contains(
+            "Wave 778: Doctor bundles include health compact `sticky` from `get_status.sticky`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_779_monitor_lock_unique_pin_urgent() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 779: Doctor bundles include health compact `urgent` from `get_status.urgent`."));
+        assert!(DOCS.contains(
+            "Wave 779: Doctor bundles include health compact `urgent` from `get_status.urgent`."
+        ));
     }
 
     #[test]
@@ -18449,61 +18744,85 @@ mod tests {
     #[test]
     fn evolve8h_wave_781_monitor_lock_unique_pin_pip() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 781: Doctor bundles include health compact `pip` from `get_status.pip`."));
+        assert!(DOCS.contains(
+            "Wave 781: Doctor bundles include health compact `pip` from `get_status.pip`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_782_monitor_lock_unique_pin_blur() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 782: Doctor bundles include health compact `blur` from `get_status.blur`."));
+        assert!(DOCS.contains(
+            "Wave 782: Doctor bundles include health compact `blur` from `get_status.blur`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_783_monitor_lock_unique_pin_hdr() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 783: Doctor bundles include health compact `hdr` from `get_status.hdr`."));
+        assert!(DOCS.contains(
+            "Wave 783: Doctor bundles include health compact `hdr` from `get_status.hdr`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_784_monitor_lock_unique_pin_expose() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 784: Doctor bundles include health compact `expose` from `get_status.expose`."));
+        assert!(DOCS.contains(
+            "Wave 784: Doctor bundles include health compact `expose` from `get_status.expose`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_785_monitor_lock_unique_pin_media() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 785: Doctor bundles include health compact `media` from `get_media`."));
+        assert!(
+            DOCS.contains(
+                "Wave 785: Doctor bundles include health compact `media` from `get_media`."
+            )
+        );
     }
 
     #[test]
     fn evolve8h_wave_786_monitor_lock_unique_pin_power() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 786: Doctor bundles include health compact `power` from `get_power`."));
+        assert!(
+            DOCS.contains(
+                "Wave 786: Doctor bundles include health compact `power` from `get_power`."
+            )
+        );
     }
 
     #[test]
     fn evolve8h_wave_787_monitor_lock_unique_pin_session_lock() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 787: Support triage reads health compact `session_lock` before `get_lock` dumps."));
+        assert!(DOCS.contains(
+            "Wave 787: Support triage reads health compact `session_lock` before `get_lock` dumps."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_788_monitor_lock_unique_pin_tearing() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 788: Support triage reads health compact `tearing` before `get_th` dumps."));
+        assert!(DOCS.contains(
+            "Wave 788: Support triage reads health compact `tearing` before `get_th` dumps."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_789_monitor_lock_unique_pin_xwayland() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 789: Support triage reads health compact `xwayland` before `get_xw` dumps."));
+        assert!(DOCS.contains(
+            "Wave 789: Support triage reads health compact `xwayland` before `get_xw` dumps."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_790_monitor_lock_unique_pin_scrolling() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 790: Support triage reads health compact `scrolling` before `get_scroll` dumps."));
+        assert!(DOCS.contains(
+            "Wave 790: Support triage reads health compact `scrolling` before `get_scroll` dumps."
+        ));
     }
 
     #[test]
@@ -18515,37 +18834,49 @@ mod tests {
     #[test]
     fn evolve8h_wave_792_monitor_lock_unique_pin_night_light() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 792: Support triage reads health compact `night_light` before `get_nl` dumps."));
+        assert!(DOCS.contains(
+            "Wave 792: Support triage reads health compact `night_light` before `get_nl` dumps."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_793_monitor_lock_unique_pin_magnifier() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 793: Support triage reads health compact `magnifier` before `get_mag` dumps."));
+        assert!(DOCS.contains(
+            "Wave 793: Support triage reads health compact `magnifier` before `get_mag` dumps."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_794_monitor_lock_unique_pin_peek() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 794: Support triage reads health compact `peek` before `get_pk` dumps."));
+        assert!(DOCS.contains(
+            "Wave 794: Support triage reads health compact `peek` before `get_pk` dumps."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_795_monitor_lock_unique_pin_gesture() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 795: Support triage reads health compact `gesture` before `get_gest` dumps."));
+        assert!(DOCS.contains(
+            "Wave 795: Support triage reads health compact `gesture` before `get_gest` dumps."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_796_monitor_lock_unique_pin_wayland() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 796: Support triage reads health compact `wayland` before `get_wl` dumps."));
+        assert!(DOCS.contains(
+            "Wave 796: Support triage reads health compact `wayland` before `get_wl` dumps."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_797_monitor_lock_unique_pin_recording() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 797: Support triage reads health compact `recording` before `get_rec` dumps."));
+        assert!(DOCS.contains(
+            "Wave 797: Support triage reads health compact `recording` before `get_rec` dumps."
+        ));
     }
 
     #[test]
@@ -18557,55 +18888,73 @@ mod tests {
     #[test]
     fn evolve8h_wave_799_monitor_lock_unique_pin_capture() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 799: Support triage reads health compact `capture` before `get_cap` dumps."));
+        assert!(DOCS.contains(
+            "Wave 799: Support triage reads health compact `capture` before `get_cap` dumps."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_800_monitor_lock_unique_pin_waterlily() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 800: Support triage reads health compact `waterlily` before `get_wly` dumps."));
+        assert!(DOCS.contains(
+            "Wave 800: Support triage reads health compact `waterlily` before `get_wly` dumps."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_801_monitor_lock_unique_pin_audio() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 801: Support triage reads health compact `audio` before `get_devices` dumps."));
+        assert!(DOCS.contains(
+            "Wave 801: Support triage reads health compact `audio` before `get_devices` dumps."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_802_monitor_lock_unique_pin_wallpaper() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 802: Support triage reads health compact `wallpaper` before `get_wall` dumps."));
+        assert!(DOCS.contains(
+            "Wave 802: Support triage reads health compact `wallpaper` before `get_wall` dumps."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_803_monitor_lock_unique_pin_bluetooth() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 803: Support triage reads health compact `bluetooth` before `get_bt` dumps."));
+        assert!(DOCS.contains(
+            "Wave 803: Support triage reads health compact `bluetooth` before `get_bt` dumps."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_804_monitor_lock_unique_pin_resources() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 804: Support triage reads health compact `resources` before `get_res` dumps."));
+        assert!(DOCS.contains(
+            "Wave 804: Support triage reads health compact `resources` before `get_res` dumps."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_805_monitor_lock_unique_pin_connectivity() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 805: Support triage reads health compact `connectivity` before `get_conn` dumps."));
+        assert!(DOCS.contains(
+            "Wave 805: Support triage reads health compact `connectivity` before `get_conn` dumps."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_806_monitor_lock_unique_pin_clipboard() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 806: Support triage reads health compact `clipboard` before `get_clip` dumps."));
+        assert!(DOCS.contains(
+            "Wave 806: Support triage reads health compact `clipboard` before `get_clip` dumps."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_807_monitor_lock_unique_pin_idle() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 807: Support triage reads health compact `idle` before `get_idl` dumps."));
+        assert!(DOCS.contains(
+            "Wave 807: Support triage reads health compact `idle` before `get_idl` dumps."
+        ));
     }
 
     #[test]
@@ -18617,85 +18966,113 @@ mod tests {
     #[test]
     fn evolve8h_wave_809_monitor_lock_unique_pin_dnd() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 809: Support triage reads health compact `dnd` before `get_dnd` dumps."));
+        assert!(DOCS.contains(
+            "Wave 809: Support triage reads health compact `dnd` before `get_dnd` dumps."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_810_monitor_lock_unique_pin_system_ui() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 810: Support triage reads health compact `system_ui` before `get_ui` dumps."));
+        assert!(DOCS.contains(
+            "Wave 810: Support triage reads health compact `system_ui` before `get_ui` dumps."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_811_monitor_lock_unique_pin_layout() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 811: Support triage reads health compact `layout` before `get_lt` dumps."));
+        assert!(DOCS.contains(
+            "Wave 811: Support triage reads health compact `layout` before `get_lt` dumps."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_812_monitor_lock_unique_pin_tabs() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 812: Support triage reads health compact `tabs` before `get_tab` dumps."));
+        assert!(DOCS.contains(
+            "Wave 812: Support triage reads health compact `tabs` before `get_tab` dumps."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_813_monitor_lock_unique_pin_selected() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 813: Support triage reads health compact `selected` before `get_sel` dumps."));
+        assert!(DOCS.contains(
+            "Wave 813: Support triage reads health compact `selected` before `get_sel` dumps."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_814_monitor_lock_unique_pin_struts() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 814: Support triage reads health compact `struts` before `get_strut` dumps."));
+        assert!(DOCS.contains(
+            "Wave 814: Support triage reads health compact `struts` before `get_strut` dumps."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_815_monitor_lock_unique_pin_scratchpads() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 815: Support triage reads health compact `scratchpads` before `get_pads` dumps."));
+        assert!(DOCS.contains(
+            "Wave 815: Support triage reads health compact `scratchpads` before `get_pads` dumps."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_816_monitor_lock_unique_pin_focused() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 816: Support triage reads health compact `focused` before `get_fw` dumps."));
+        assert!(DOCS.contains(
+            "Wave 816: Support triage reads health compact `focused` before `get_fw` dumps."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_817_monitor_lock_unique_pin_monitors() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 817: Support triage reads health compact `monitors` before `get_mons` dumps."));
+        assert!(DOCS.contains(
+            "Wave 817: Support triage reads health compact `monitors` before `get_mons` dumps."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_818_monitor_lock_unique_pin_workspaces() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 818: Support triage reads health compact `workspaces` before `get_ws` dumps."));
+        assert!(DOCS.contains(
+            "Wave 818: Support triage reads health compact `workspaces` before `get_ws` dumps."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_819_monitor_lock_unique_pin_windows() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 819: Support triage reads health compact `windows` before `get_wins` dumps."));
+        assert!(DOCS.contains(
+            "Wave 819: Support triage reads health compact `windows` before `get_wins` dumps."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_820_monitor_lock_unique_pin_effects() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 820: Support triage reads health compact `effects` before `get_fx` dumps."));
+        assert!(DOCS.contains(
+            "Wave 820: Support triage reads health compact `effects` before `get_fx` dumps."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_821_monitor_lock_unique_pin_mic() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 821: Support triage reads health compact `mic` before `get_mute` dumps."));
+        assert!(DOCS.contains(
+            "Wave 821: Support triage reads health compact `mic` before `get_mute` dumps."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_822_monitor_lock_unique_pin_bench() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 822: Support triage reads health compact `bench` before `get_bm` dumps."));
+        assert!(DOCS.contains(
+            "Wave 822: Support triage reads health compact `bench` before `get_bm` dumps."
+        ));
     }
 
     #[test]
@@ -18707,31 +19084,41 @@ mod tests {
     #[test]
     fn evolve8h_wave_824_monitor_lock_unique_pin_prev_layout() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 824: Support triage reads health compact `prev_layout` before `get_pl` dumps."));
+        assert!(DOCS.contains(
+            "Wave 824: Support triage reads health compact `prev_layout` before `get_pl` dumps."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_825_monitor_lock_unique_pin_cfact() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 825: Support triage reads health compact `cfact` before `get_cf` dumps."));
+        assert!(DOCS.contains(
+            "Wave 825: Support triage reads health compact `cfact` before `get_cf` dumps."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_826_monitor_lock_unique_pin_gaps() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 826: Support triage reads health compact `gaps` before `get_gap` dumps."));
+        assert!(DOCS.contains(
+            "Wave 826: Support triage reads health compact `gaps` before `get_gap` dumps."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_827_monitor_lock_unique_pin_mfact() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 827: Support triage reads health compact `mfact` before `get_mf` dumps."));
+        assert!(DOCS.contains(
+            "Wave 827: Support triage reads health compact `mfact` before `get_mf` dumps."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_828_monitor_lock_unique_pin_nmaster() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 828: Support triage reads health compact `nmaster` before `get_nm` dumps."));
+        assert!(DOCS.contains(
+            "Wave 828: Support triage reads health compact `nmaster` before `get_nm` dumps."
+        ));
     }
 
     #[test]
@@ -18767,19 +19154,25 @@ mod tests {
     #[test]
     fn evolve8h_wave_834_monitor_lock_unique_pin_pip() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 834: Support triage reads health compact `pip` before `get_status.pip` dumps."));
+        assert!(DOCS.contains(
+            "Wave 834: Support triage reads health compact `pip` before `get_status.pip` dumps."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_835_monitor_lock_unique_pin_blur() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 835: Support triage reads health compact `blur` before `get_status.blur` dumps."));
+        assert!(DOCS.contains(
+            "Wave 835: Support triage reads health compact `blur` before `get_status.blur` dumps."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_836_monitor_lock_unique_pin_hdr() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 836: Support triage reads health compact `hdr` before `get_status.hdr` dumps."));
+        assert!(DOCS.contains(
+            "Wave 836: Support triage reads health compact `hdr` before `get_status.hdr` dumps."
+        ));
     }
 
     #[test]
@@ -18791,289 +19184,415 @@ mod tests {
     #[test]
     fn evolve8h_wave_838_monitor_lock_unique_pin_media() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 838: Support triage reads health compact `media` before `get_media` dumps."));
+        assert!(DOCS.contains(
+            "Wave 838: Support triage reads health compact `media` before `get_media` dumps."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_839_monitor_lock_unique_pin_power() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 839: Support triage reads health compact `power` before `get_power` dumps."));
+        assert!(DOCS.contains(
+            "Wave 839: Support triage reads health compact `power` before `get_power` dumps."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_840_monitor_lock_unique_pin_session_lock() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 840: Nested smoke checks health compact `session_lock` after `get_lock`."));
+        assert!(DOCS.contains(
+            "Wave 840: Nested smoke checks health compact `session_lock` after `get_lock`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_841_monitor_lock_unique_pin_tearing() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 841: Nested smoke checks health compact `tearing` after `get_th`."));
+        assert!(
+            DOCS.contains("Wave 841: Nested smoke checks health compact `tearing` after `get_th`.")
+        );
     }
 
     #[test]
     fn evolve8h_wave_842_monitor_lock_unique_pin_xwayland() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 842: Nested smoke checks health compact `xwayland` after `get_xw`."));
+        assert!(
+            DOCS.contains(
+                "Wave 842: Nested smoke checks health compact `xwayland` after `get_xw`."
+            )
+        );
     }
 
     #[test]
     fn evolve8h_wave_843_monitor_lock_unique_pin_scrolling() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 843: Nested smoke checks health compact `scrolling` after `get_scroll`."));
+        assert!(DOCS.contains(
+            "Wave 843: Nested smoke checks health compact `scrolling` after `get_scroll`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_844_monitor_lock_unique_pin_color_management() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 844: Nested smoke checks health compact `color_management` after `get_cm`."));
+        assert!(DOCS.contains(
+            "Wave 844: Nested smoke checks health compact `color_management` after `get_cm`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_845_monitor_lock_unique_pin_night_light() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 845: Nested smoke checks health compact `night_light` after `get_nl`."));
+        assert!(DOCS.contains(
+            "Wave 845: Nested smoke checks health compact `night_light` after `get_nl`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_846_monitor_lock_unique_pin_magnifier() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 846: Nested smoke checks health compact `magnifier` after `get_mag`."));
+        assert!(
+            DOCS.contains(
+                "Wave 846: Nested smoke checks health compact `magnifier` after `get_mag`."
+            )
+        );
     }
 
     #[test]
     fn evolve8h_wave_847_monitor_lock_unique_pin_peek() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 847: Nested smoke checks health compact `peek` after `get_pk`."));
+        assert!(
+            DOCS.contains("Wave 847: Nested smoke checks health compact `peek` after `get_pk`.")
+        );
     }
 
     #[test]
     fn evolve8h_wave_848_monitor_lock_unique_pin_gesture() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 848: Nested smoke checks health compact `gesture` after `get_gest`."));
+        assert!(
+            DOCS.contains(
+                "Wave 848: Nested smoke checks health compact `gesture` after `get_gest`."
+            )
+        );
     }
 
     #[test]
     fn evolve8h_wave_849_monitor_lock_unique_pin_wayland() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 849: Nested smoke checks health compact `wayland` after `get_wl`."));
+        assert!(
+            DOCS.contains("Wave 849: Nested smoke checks health compact `wayland` after `get_wl`.")
+        );
     }
 
     #[test]
     fn evolve8h_wave_850_monitor_lock_unique_pin_recording() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 850: Nested smoke checks health compact `recording` after `get_rec`."));
+        assert!(
+            DOCS.contains(
+                "Wave 850: Nested smoke checks health compact `recording` after `get_rec`."
+            )
+        );
     }
 
     #[test]
     fn evolve8h_wave_851_monitor_lock_unique_pin_audio_recording() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 851: Nested smoke checks health compact `audio_recording` after `get_arec`."));
+        assert!(DOCS.contains(
+            "Wave 851: Nested smoke checks health compact `audio_recording` after `get_arec`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_852_monitor_lock_unique_pin_capture() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 852: Nested smoke checks health compact `capture` after `get_cap`."));
+        assert!(
+            DOCS.contains(
+                "Wave 852: Nested smoke checks health compact `capture` after `get_cap`."
+            )
+        );
     }
 
     #[test]
     fn evolve8h_wave_853_monitor_lock_unique_pin_waterlily() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 853: Nested smoke checks health compact `waterlily` after `get_wly`."));
+        assert!(
+            DOCS.contains(
+                "Wave 853: Nested smoke checks health compact `waterlily` after `get_wly`."
+            )
+        );
     }
 
     #[test]
     fn evolve8h_wave_854_monitor_lock_unique_pin_audio() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 854: Nested smoke checks health compact `audio` after `get_devices`."));
+        assert!(
+            DOCS.contains(
+                "Wave 854: Nested smoke checks health compact `audio` after `get_devices`."
+            )
+        );
     }
 
     #[test]
     fn evolve8h_wave_855_monitor_lock_unique_pin_wallpaper() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 855: Nested smoke checks health compact `wallpaper` after `get_wall`."));
+        assert!(DOCS.contains(
+            "Wave 855: Nested smoke checks health compact `wallpaper` after `get_wall`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_856_monitor_lock_unique_pin_bluetooth() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 856: Nested smoke checks health compact `bluetooth` after `get_bt`."));
+        assert!(
+            DOCS.contains(
+                "Wave 856: Nested smoke checks health compact `bluetooth` after `get_bt`."
+            )
+        );
     }
 
     #[test]
     fn evolve8h_wave_857_monitor_lock_unique_pin_resources() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 857: Nested smoke checks health compact `resources` after `get_res`."));
+        assert!(
+            DOCS.contains(
+                "Wave 857: Nested smoke checks health compact `resources` after `get_res`."
+            )
+        );
     }
 
     #[test]
     fn evolve8h_wave_858_monitor_lock_unique_pin_connectivity() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 858: Nested smoke checks health compact `connectivity` after `get_conn`."));
+        assert!(DOCS.contains(
+            "Wave 858: Nested smoke checks health compact `connectivity` after `get_conn`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_859_monitor_lock_unique_pin_clipboard() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 859: Nested smoke checks health compact `clipboard` after `get_clip`."));
+        assert!(DOCS.contains(
+            "Wave 859: Nested smoke checks health compact `clipboard` after `get_clip`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_860_monitor_lock_unique_pin_idle() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 860: Nested smoke checks health compact `idle` after `get_idl`."));
+        assert!(
+            DOCS.contains("Wave 860: Nested smoke checks health compact `idle` after `get_idl`.")
+        );
     }
 
     #[test]
     fn evolve8h_wave_861_monitor_lock_unique_pin_notifications() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 861: Nested smoke checks health compact `notifications` after `get_notif`."));
+        assert!(DOCS.contains(
+            "Wave 861: Nested smoke checks health compact `notifications` after `get_notif`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_862_monitor_lock_unique_pin_dnd() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 862: Nested smoke checks health compact `dnd` after `get_dnd`."));
+        assert!(
+            DOCS.contains("Wave 862: Nested smoke checks health compact `dnd` after `get_dnd`.")
+        );
     }
 
     #[test]
     fn evolve8h_wave_863_monitor_lock_unique_pin_system_ui() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 863: Nested smoke checks health compact `system_ui` after `get_ui`."));
+        assert!(
+            DOCS.contains(
+                "Wave 863: Nested smoke checks health compact `system_ui` after `get_ui`."
+            )
+        );
     }
 
     #[test]
     fn evolve8h_wave_864_monitor_lock_unique_pin_layout() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 864: Nested smoke checks health compact `layout` after `get_lt`."));
+        assert!(
+            DOCS.contains("Wave 864: Nested smoke checks health compact `layout` after `get_lt`.")
+        );
     }
 
     #[test]
     fn evolve8h_wave_865_monitor_lock_unique_pin_tabs() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 865: Nested smoke checks health compact `tabs` after `get_tab`."));
+        assert!(
+            DOCS.contains("Wave 865: Nested smoke checks health compact `tabs` after `get_tab`.")
+        );
     }
 
     #[test]
     fn evolve8h_wave_866_monitor_lock_unique_pin_selected() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 866: Nested smoke checks health compact `selected` after `get_sel`."));
+        assert!(
+            DOCS.contains(
+                "Wave 866: Nested smoke checks health compact `selected` after `get_sel`."
+            )
+        );
     }
 
     #[test]
     fn evolve8h_wave_867_monitor_lock_unique_pin_struts() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 867: Nested smoke checks health compact `struts` after `get_strut`."));
+        assert!(
+            DOCS.contains(
+                "Wave 867: Nested smoke checks health compact `struts` after `get_strut`."
+            )
+        );
     }
 
     #[test]
     fn evolve8h_wave_868_monitor_lock_unique_pin_scratchpads() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 868: Nested smoke checks health compact `scratchpads` after `get_pads`."));
+        assert!(DOCS.contains(
+            "Wave 868: Nested smoke checks health compact `scratchpads` after `get_pads`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_869_monitor_lock_unique_pin_focused() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 869: Nested smoke checks health compact `focused` after `get_fw`."));
+        assert!(
+            DOCS.contains("Wave 869: Nested smoke checks health compact `focused` after `get_fw`.")
+        );
     }
 
     #[test]
     fn evolve8h_wave_870_monitor_lock_unique_pin_monitors() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 870: Nested smoke checks health compact `monitors` after `get_mons`."));
+        assert!(
+            DOCS.contains(
+                "Wave 870: Nested smoke checks health compact `monitors` after `get_mons`."
+            )
+        );
     }
 
     #[test]
     fn evolve8h_wave_871_monitor_lock_unique_pin_workspaces() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 871: Nested smoke checks health compact `workspaces` after `get_ws`."));
+        assert!(
+            DOCS.contains(
+                "Wave 871: Nested smoke checks health compact `workspaces` after `get_ws`."
+            )
+        );
     }
 
     #[test]
     fn evolve8h_wave_872_monitor_lock_unique_pin_windows() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 872: Nested smoke checks health compact `windows` after `get_wins`."));
+        assert!(
+            DOCS.contains(
+                "Wave 872: Nested smoke checks health compact `windows` after `get_wins`."
+            )
+        );
     }
 
     #[test]
     fn evolve8h_wave_873_monitor_lock_unique_pin_effects() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 873: Nested smoke checks health compact `effects` after `get_fx`."));
+        assert!(
+            DOCS.contains("Wave 873: Nested smoke checks health compact `effects` after `get_fx`.")
+        );
     }
 
     #[test]
     fn evolve8h_wave_874_monitor_lock_unique_pin_mic() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 874: Nested smoke checks health compact `mic` after `get_mute`."));
+        assert!(
+            DOCS.contains("Wave 874: Nested smoke checks health compact `mic` after `get_mute`.")
+        );
     }
 
     #[test]
     fn evolve8h_wave_875_monitor_lock_unique_pin_bench() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 875: Nested smoke checks health compact `bench` after `get_bm`."));
+        assert!(
+            DOCS.contains("Wave 875: Nested smoke checks health compact `bench` after `get_bm`.")
+        );
     }
 
     #[test]
     fn evolve8h_wave_876_monitor_lock_unique_pin_closed_placement() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 876: Nested smoke checks health compact `closed_placement` after `get_cp`."));
+        assert!(DOCS.contains(
+            "Wave 876: Nested smoke checks health compact `closed_placement` after `get_cp`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_877_monitor_lock_unique_pin_prev_layout() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 877: Nested smoke checks health compact `prev_layout` after `get_pl`."));
+        assert!(DOCS.contains(
+            "Wave 877: Nested smoke checks health compact `prev_layout` after `get_pl`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_878_monitor_lock_unique_pin_cfact() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 878: Nested smoke checks health compact `cfact` after `get_cf`."));
+        assert!(
+            DOCS.contains("Wave 878: Nested smoke checks health compact `cfact` after `get_cf`.")
+        );
     }
 
     #[test]
     fn evolve8h_wave_879_monitor_lock_unique_pin_gaps() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 879: Nested smoke checks health compact `gaps` after `get_gap`."));
+        assert!(
+            DOCS.contains("Wave 879: Nested smoke checks health compact `gaps` after `get_gap`.")
+        );
     }
 
     #[test]
     fn evolve8h_wave_880_monitor_lock_unique_pin_mfact() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 880: Nested smoke checks health compact `mfact` after `get_mf`."));
+        assert!(
+            DOCS.contains("Wave 880: Nested smoke checks health compact `mfact` after `get_mf`.")
+        );
     }
 
     #[test]
     fn evolve8h_wave_881_monitor_lock_unique_pin_nmaster() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 881: Nested smoke checks health compact `nmaster` after `get_nm`."));
+        assert!(
+            DOCS.contains("Wave 881: Nested smoke checks health compact `nmaster` after `get_nm`.")
+        );
     }
 
     #[test]
     fn evolve8h_wave_882_monitor_lock_unique_pin_floating() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 882: Nested smoke checks health compact `floating` after `get_status.floating`."));
+        assert!(DOCS.contains(
+            "Wave 882: Nested smoke checks health compact `floating` after `get_status.floating`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_883_monitor_lock_unique_pin_minimized() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 883: Nested smoke checks health compact `minimized` after `get_status.minimized`."));
+        assert!(DOCS.contains(
+            "Wave 883: Nested smoke checks health compact `minimized` after `get_status.minimized`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_884_monitor_lock_unique_pin_sticky() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 884: Nested smoke checks health compact `sticky` after `get_status.sticky`."));
+        assert!(DOCS.contains(
+            "Wave 884: Nested smoke checks health compact `sticky` after `get_status.sticky`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_885_monitor_lock_unique_pin_urgent() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 885: Nested smoke checks health compact `urgent` after `get_status.urgent`."));
+        assert!(DOCS.contains(
+            "Wave 885: Nested smoke checks health compact `urgent` after `get_status.urgent`."
+        ));
     }
 
     #[test]
@@ -19085,313 +19604,451 @@ mod tests {
     #[test]
     fn evolve8h_wave_887_monitor_lock_unique_pin_pip() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 887: Nested smoke checks health compact `pip` after `get_status.pip`."));
+        assert!(DOCS.contains(
+            "Wave 887: Nested smoke checks health compact `pip` after `get_status.pip`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_888_monitor_lock_unique_pin_blur() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 888: Nested smoke checks health compact `blur` after `get_status.blur`."));
+        assert!(DOCS.contains(
+            "Wave 888: Nested smoke checks health compact `blur` after `get_status.blur`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_889_monitor_lock_unique_pin_hdr() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 889: Nested smoke checks health compact `hdr` after `get_status.hdr`."));
+        assert!(DOCS.contains(
+            "Wave 889: Nested smoke checks health compact `hdr` after `get_status.hdr`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_890_monitor_lock_unique_pin_expose() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 890: Nested smoke checks health compact `expose` after `get_status.expose`."));
+        assert!(DOCS.contains(
+            "Wave 890: Nested smoke checks health compact `expose` after `get_status.expose`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_891_monitor_lock_unique_pin_media() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 891: Nested smoke checks health compact `media` after `get_media`."));
+        assert!(
+            DOCS.contains(
+                "Wave 891: Nested smoke checks health compact `media` after `get_media`."
+            )
+        );
     }
 
     #[test]
     fn evolve8h_wave_892_monitor_lock_unique_pin_power() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 892: Nested smoke checks health compact `power` after `get_power`."));
+        assert!(
+            DOCS.contains(
+                "Wave 892: Nested smoke checks health compact `power` after `get_power`."
+            )
+        );
     }
 
     #[test]
     fn evolve8h_wave_893_monitor_lock_unique_pin_session_lock() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 893: Upgrade notes keep health compact `session_lock` beside `get_lock`."));
+        assert!(DOCS.contains(
+            "Wave 893: Upgrade notes keep health compact `session_lock` beside `get_lock`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_894_monitor_lock_unique_pin_tearing() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 894: Upgrade notes keep health compact `tearing` beside `get_th`."));
+        assert!(
+            DOCS.contains("Wave 894: Upgrade notes keep health compact `tearing` beside `get_th`.")
+        );
     }
 
     #[test]
     fn evolve8h_wave_895_monitor_lock_unique_pin_xwayland() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 895: Upgrade notes keep health compact `xwayland` beside `get_xw`."));
+        assert!(
+            DOCS.contains(
+                "Wave 895: Upgrade notes keep health compact `xwayland` beside `get_xw`."
+            )
+        );
     }
 
     #[test]
     fn evolve8h_wave_896_monitor_lock_unique_pin_scrolling() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 896: Upgrade notes keep health compact `scrolling` beside `get_scroll`."));
+        assert!(DOCS.contains(
+            "Wave 896: Upgrade notes keep health compact `scrolling` beside `get_scroll`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_897_monitor_lock_unique_pin_color_management() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 897: Upgrade notes keep health compact `color_management` beside `get_cm`."));
+        assert!(DOCS.contains(
+            "Wave 897: Upgrade notes keep health compact `color_management` beside `get_cm`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_898_monitor_lock_unique_pin_night_light() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 898: Upgrade notes keep health compact `night_light` beside `get_nl`."));
+        assert!(DOCS.contains(
+            "Wave 898: Upgrade notes keep health compact `night_light` beside `get_nl`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_899_monitor_lock_unique_pin_magnifier() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 899: Upgrade notes keep health compact `magnifier` beside `get_mag`."));
+        assert!(
+            DOCS.contains(
+                "Wave 899: Upgrade notes keep health compact `magnifier` beside `get_mag`."
+            )
+        );
     }
 
     #[test]
     fn evolve8h_wave_900_monitor_lock_unique_pin_peek() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 900: Upgrade notes keep health compact `peek` beside `get_pk`."));
+        assert!(
+            DOCS.contains("Wave 900: Upgrade notes keep health compact `peek` beside `get_pk`.")
+        );
     }
 
     #[test]
     fn evolve8h_wave_901_monitor_lock_unique_pin_gesture() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 901: Upgrade notes keep health compact `gesture` beside `get_gest`."));
+        assert!(
+            DOCS.contains(
+                "Wave 901: Upgrade notes keep health compact `gesture` beside `get_gest`."
+            )
+        );
     }
 
     #[test]
     fn evolve8h_wave_902_monitor_lock_unique_pin_wayland() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 902: Upgrade notes keep health compact `wayland` beside `get_wl`."));
+        assert!(
+            DOCS.contains("Wave 902: Upgrade notes keep health compact `wayland` beside `get_wl`.")
+        );
     }
 
     #[test]
     fn evolve8h_wave_903_monitor_lock_unique_pin_recording() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 903: Upgrade notes keep health compact `recording` beside `get_rec`."));
+        assert!(
+            DOCS.contains(
+                "Wave 903: Upgrade notes keep health compact `recording` beside `get_rec`."
+            )
+        );
     }
 
     #[test]
     fn evolve8h_wave_904_monitor_lock_unique_pin_audio_recording() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 904: Upgrade notes keep health compact `audio_recording` beside `get_arec`."));
+        assert!(DOCS.contains(
+            "Wave 904: Upgrade notes keep health compact `audio_recording` beside `get_arec`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_905_monitor_lock_unique_pin_capture() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 905: Upgrade notes keep health compact `capture` beside `get_cap`."));
+        assert!(
+            DOCS.contains(
+                "Wave 905: Upgrade notes keep health compact `capture` beside `get_cap`."
+            )
+        );
     }
 
     #[test]
     fn evolve8h_wave_906_monitor_lock_unique_pin_waterlily() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 906: Upgrade notes keep health compact `waterlily` beside `get_wly`."));
+        assert!(
+            DOCS.contains(
+                "Wave 906: Upgrade notes keep health compact `waterlily` beside `get_wly`."
+            )
+        );
     }
 
     #[test]
     fn evolve8h_wave_907_monitor_lock_unique_pin_audio() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 907: Upgrade notes keep health compact `audio` beside `get_devices`."));
+        assert!(
+            DOCS.contains(
+                "Wave 907: Upgrade notes keep health compact `audio` beside `get_devices`."
+            )
+        );
     }
 
     #[test]
     fn evolve8h_wave_908_monitor_lock_unique_pin_wallpaper() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 908: Upgrade notes keep health compact `wallpaper` beside `get_wall`."));
+        assert!(DOCS.contains(
+            "Wave 908: Upgrade notes keep health compact `wallpaper` beside `get_wall`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_909_monitor_lock_unique_pin_bluetooth() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 909: Upgrade notes keep health compact `bluetooth` beside `get_bt`."));
+        assert!(
+            DOCS.contains(
+                "Wave 909: Upgrade notes keep health compact `bluetooth` beside `get_bt`."
+            )
+        );
     }
 
     #[test]
     fn evolve8h_wave_910_monitor_lock_unique_pin_resources() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 910: Upgrade notes keep health compact `resources` beside `get_res`."));
+        assert!(
+            DOCS.contains(
+                "Wave 910: Upgrade notes keep health compact `resources` beside `get_res`."
+            )
+        );
     }
 
     #[test]
     fn evolve8h_wave_911_monitor_lock_unique_pin_connectivity() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 911: Upgrade notes keep health compact `connectivity` beside `get_conn`."));
+        assert!(DOCS.contains(
+            "Wave 911: Upgrade notes keep health compact `connectivity` beside `get_conn`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_912_monitor_lock_unique_pin_clipboard() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 912: Upgrade notes keep health compact `clipboard` beside `get_clip`."));
+        assert!(DOCS.contains(
+            "Wave 912: Upgrade notes keep health compact `clipboard` beside `get_clip`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_913_monitor_lock_unique_pin_idle() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 913: Upgrade notes keep health compact `idle` beside `get_idl`."));
+        assert!(
+            DOCS.contains("Wave 913: Upgrade notes keep health compact `idle` beside `get_idl`.")
+        );
     }
 
     #[test]
     fn evolve8h_wave_914_monitor_lock_unique_pin_notifications() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 914: Upgrade notes keep health compact `notifications` beside `get_notif`."));
+        assert!(DOCS.contains(
+            "Wave 914: Upgrade notes keep health compact `notifications` beside `get_notif`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_915_monitor_lock_unique_pin_dnd() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 915: Upgrade notes keep health compact `dnd` beside `get_dnd`."));
+        assert!(
+            DOCS.contains("Wave 915: Upgrade notes keep health compact `dnd` beside `get_dnd`.")
+        );
     }
 
     #[test]
     fn evolve8h_wave_916_monitor_lock_unique_pin_system_ui() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 916: Upgrade notes keep health compact `system_ui` beside `get_ui`."));
+        assert!(
+            DOCS.contains(
+                "Wave 916: Upgrade notes keep health compact `system_ui` beside `get_ui`."
+            )
+        );
     }
 
     #[test]
     fn evolve8h_wave_917_monitor_lock_unique_pin_layout() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 917: Upgrade notes keep health compact `layout` beside `get_lt`."));
+        assert!(
+            DOCS.contains("Wave 917: Upgrade notes keep health compact `layout` beside `get_lt`.")
+        );
     }
 
     #[test]
     fn evolve8h_wave_918_monitor_lock_unique_pin_tabs() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 918: Upgrade notes keep health compact `tabs` beside `get_tab`."));
+        assert!(
+            DOCS.contains("Wave 918: Upgrade notes keep health compact `tabs` beside `get_tab`.")
+        );
     }
 
     #[test]
     fn evolve8h_wave_919_monitor_lock_unique_pin_selected() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 919: Upgrade notes keep health compact `selected` beside `get_sel`."));
+        assert!(
+            DOCS.contains(
+                "Wave 919: Upgrade notes keep health compact `selected` beside `get_sel`."
+            )
+        );
     }
 
     #[test]
     fn evolve8h_wave_920_monitor_lock_unique_pin_struts() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 920: Upgrade notes keep health compact `struts` beside `get_strut`."));
+        assert!(
+            DOCS.contains(
+                "Wave 920: Upgrade notes keep health compact `struts` beside `get_strut`."
+            )
+        );
     }
 
     #[test]
     fn evolve8h_wave_921_monitor_lock_unique_pin_scratchpads() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 921: Upgrade notes keep health compact `scratchpads` beside `get_pads`."));
+        assert!(DOCS.contains(
+            "Wave 921: Upgrade notes keep health compact `scratchpads` beside `get_pads`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_922_monitor_lock_unique_pin_focused() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 922: Upgrade notes keep health compact `focused` beside `get_fw`."));
+        assert!(
+            DOCS.contains("Wave 922: Upgrade notes keep health compact `focused` beside `get_fw`.")
+        );
     }
 
     #[test]
     fn evolve8h_wave_923_monitor_lock_unique_pin_monitors() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 923: Upgrade notes keep health compact `monitors` beside `get_mons`."));
+        assert!(
+            DOCS.contains(
+                "Wave 923: Upgrade notes keep health compact `monitors` beside `get_mons`."
+            )
+        );
     }
 
     #[test]
     fn evolve8h_wave_924_monitor_lock_unique_pin_workspaces() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 924: Upgrade notes keep health compact `workspaces` beside `get_ws`."));
+        assert!(
+            DOCS.contains(
+                "Wave 924: Upgrade notes keep health compact `workspaces` beside `get_ws`."
+            )
+        );
     }
 
     #[test]
     fn evolve8h_wave_925_monitor_lock_unique_pin_windows() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 925: Upgrade notes keep health compact `windows` beside `get_wins`."));
+        assert!(
+            DOCS.contains(
+                "Wave 925: Upgrade notes keep health compact `windows` beside `get_wins`."
+            )
+        );
     }
 
     #[test]
     fn evolve8h_wave_926_monitor_lock_unique_pin_effects() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 926: Upgrade notes keep health compact `effects` beside `get_fx`."));
+        assert!(
+            DOCS.contains("Wave 926: Upgrade notes keep health compact `effects` beside `get_fx`.")
+        );
     }
 
     #[test]
     fn evolve8h_wave_927_monitor_lock_unique_pin_mic() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 927: Upgrade notes keep health compact `mic` beside `get_mute`."));
+        assert!(
+            DOCS.contains("Wave 927: Upgrade notes keep health compact `mic` beside `get_mute`.")
+        );
     }
 
     #[test]
     fn evolve8h_wave_928_monitor_lock_unique_pin_bench() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 928: Upgrade notes keep health compact `bench` beside `get_bm`."));
+        assert!(
+            DOCS.contains("Wave 928: Upgrade notes keep health compact `bench` beside `get_bm`.")
+        );
     }
 
     #[test]
     fn evolve8h_wave_929_monitor_lock_unique_pin_closed_placement() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 929: Upgrade notes keep health compact `closed_placement` beside `get_cp`."));
+        assert!(DOCS.contains(
+            "Wave 929: Upgrade notes keep health compact `closed_placement` beside `get_cp`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_930_monitor_lock_unique_pin_prev_layout() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 930: Upgrade notes keep health compact `prev_layout` beside `get_pl`."));
+        assert!(DOCS.contains(
+            "Wave 930: Upgrade notes keep health compact `prev_layout` beside `get_pl`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_931_monitor_lock_unique_pin_cfact() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 931: Upgrade notes keep health compact `cfact` beside `get_cf`."));
+        assert!(
+            DOCS.contains("Wave 931: Upgrade notes keep health compact `cfact` beside `get_cf`.")
+        );
     }
 
     #[test]
     fn evolve8h_wave_932_monitor_lock_unique_pin_gaps() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 932: Upgrade notes keep health compact `gaps` beside `get_gap`."));
+        assert!(
+            DOCS.contains("Wave 932: Upgrade notes keep health compact `gaps` beside `get_gap`.")
+        );
     }
 
     #[test]
     fn evolve8h_wave_933_monitor_lock_unique_pin_mfact() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 933: Upgrade notes keep health compact `mfact` beside `get_mf`."));
+        assert!(
+            DOCS.contains("Wave 933: Upgrade notes keep health compact `mfact` beside `get_mf`.")
+        );
     }
 
     #[test]
     fn evolve8h_wave_934_monitor_lock_unique_pin_nmaster() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 934: Upgrade notes keep health compact `nmaster` beside `get_nm`."));
+        assert!(
+            DOCS.contains("Wave 934: Upgrade notes keep health compact `nmaster` beside `get_nm`.")
+        );
     }
 
     #[test]
     fn evolve8h_wave_935_monitor_lock_unique_pin_floating() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 935: Upgrade notes keep health compact `floating` beside `get_status.floating`."));
+        assert!(DOCS.contains(
+            "Wave 935: Upgrade notes keep health compact `floating` beside `get_status.floating`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_936_monitor_lock_unique_pin_minimized() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 936: Upgrade notes keep health compact `minimized` beside `get_status.minimized`."));
+        assert!(DOCS.contains(
+            "Wave 936: Upgrade notes keep health compact `minimized` beside `get_status.minimized`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_937_monitor_lock_unique_pin_sticky() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 937: Upgrade notes keep health compact `sticky` beside `get_status.sticky`."));
+        assert!(DOCS.contains(
+            "Wave 937: Upgrade notes keep health compact `sticky` beside `get_status.sticky`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_938_monitor_lock_unique_pin_urgent() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 938: Upgrade notes keep health compact `urgent` beside `get_status.urgent`."));
+        assert!(DOCS.contains(
+            "Wave 938: Upgrade notes keep health compact `urgent` beside `get_status.urgent`."
+        ));
     }
 
     #[test]
@@ -19403,289 +20060,407 @@ mod tests {
     #[test]
     fn evolve8h_wave_940_monitor_lock_unique_pin_pip() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 940: Upgrade notes keep health compact `pip` beside `get_status.pip`."));
+        assert!(DOCS.contains(
+            "Wave 940: Upgrade notes keep health compact `pip` beside `get_status.pip`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_941_monitor_lock_unique_pin_blur() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 941: Upgrade notes keep health compact `blur` beside `get_status.blur`."));
+        assert!(DOCS.contains(
+            "Wave 941: Upgrade notes keep health compact `blur` beside `get_status.blur`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_942_monitor_lock_unique_pin_hdr() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 942: Upgrade notes keep health compact `hdr` beside `get_status.hdr`."));
+        assert!(DOCS.contains(
+            "Wave 942: Upgrade notes keep health compact `hdr` beside `get_status.hdr`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_943_monitor_lock_unique_pin_expose() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 943: Upgrade notes keep health compact `expose` beside `get_status.expose`."));
+        assert!(DOCS.contains(
+            "Wave 943: Upgrade notes keep health compact `expose` beside `get_status.expose`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_944_monitor_lock_unique_pin_media() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 944: Upgrade notes keep health compact `media` beside `get_media`."));
+        assert!(
+            DOCS.contains(
+                "Wave 944: Upgrade notes keep health compact `media` beside `get_media`."
+            )
+        );
     }
 
     #[test]
     fn evolve8h_wave_945_monitor_lock_unique_pin_power() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 945: Upgrade notes keep health compact `power` beside `get_power`."));
+        assert!(
+            DOCS.contains(
+                "Wave 945: Upgrade notes keep health compact `power` beside `get_power`."
+            )
+        );
     }
 
     #[test]
     fn evolve8h_wave_946_monitor_lock_unique_pin_session_lock() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 946: Compatibility tables name `get_lock` with health compact `session_lock`."));
+        assert!(DOCS.contains(
+            "Wave 946: Compatibility tables name `get_lock` with health compact `session_lock`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_947_monitor_lock_unique_pin_tearing() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 947: Compatibility tables name `get_th` with health compact `tearing`."));
+        assert!(DOCS.contains(
+            "Wave 947: Compatibility tables name `get_th` with health compact `tearing`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_948_monitor_lock_unique_pin_xwayland() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 948: Compatibility tables name `get_xw` with health compact `xwayland`."));
+        assert!(DOCS.contains(
+            "Wave 948: Compatibility tables name `get_xw` with health compact `xwayland`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_949_monitor_lock_unique_pin_scrolling() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 949: Compatibility tables name `get_scroll` with health compact `scrolling`."));
+        assert!(DOCS.contains(
+            "Wave 949: Compatibility tables name `get_scroll` with health compact `scrolling`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_950_monitor_lock_unique_pin_color_management() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 950: Compatibility tables name `get_cm` with health compact `color_management`."));
+        assert!(DOCS.contains(
+            "Wave 950: Compatibility tables name `get_cm` with health compact `color_management`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_951_monitor_lock_unique_pin_night_light() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 951: Compatibility tables name `get_nl` with health compact `night_light`."));
+        assert!(DOCS.contains(
+            "Wave 951: Compatibility tables name `get_nl` with health compact `night_light`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_952_monitor_lock_unique_pin_magnifier() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 952: Compatibility tables name `get_mag` with health compact `magnifier`."));
+        assert!(DOCS.contains(
+            "Wave 952: Compatibility tables name `get_mag` with health compact `magnifier`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_953_monitor_lock_unique_pin_peek() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 953: Compatibility tables name `get_pk` with health compact `peek`."));
+        assert!(
+            DOCS.contains(
+                "Wave 953: Compatibility tables name `get_pk` with health compact `peek`."
+            )
+        );
     }
 
     #[test]
     fn evolve8h_wave_954_monitor_lock_unique_pin_gesture() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 954: Compatibility tables name `get_gest` with health compact `gesture`."));
+        assert!(DOCS.contains(
+            "Wave 954: Compatibility tables name `get_gest` with health compact `gesture`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_955_monitor_lock_unique_pin_wayland() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 955: Compatibility tables name `get_wl` with health compact `wayland`."));
+        assert!(DOCS.contains(
+            "Wave 955: Compatibility tables name `get_wl` with health compact `wayland`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_956_monitor_lock_unique_pin_recording() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 956: Compatibility tables name `get_rec` with health compact `recording`."));
+        assert!(DOCS.contains(
+            "Wave 956: Compatibility tables name `get_rec` with health compact `recording`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_957_monitor_lock_unique_pin_audio_recording() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 957: Compatibility tables name `get_arec` with health compact `audio_recording`."));
+        assert!(DOCS.contains(
+            "Wave 957: Compatibility tables name `get_arec` with health compact `audio_recording`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_958_monitor_lock_unique_pin_capture() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 958: Compatibility tables name `get_cap` with health compact `capture`."));
+        assert!(DOCS.contains(
+            "Wave 958: Compatibility tables name `get_cap` with health compact `capture`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_959_monitor_lock_unique_pin_waterlily() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 959: Compatibility tables name `get_wly` with health compact `waterlily`."));
+        assert!(DOCS.contains(
+            "Wave 959: Compatibility tables name `get_wly` with health compact `waterlily`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_960_monitor_lock_unique_pin_audio() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 960: Compatibility tables name `get_devices` with health compact `audio`."));
+        assert!(DOCS.contains(
+            "Wave 960: Compatibility tables name `get_devices` with health compact `audio`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_961_monitor_lock_unique_pin_wallpaper() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 961: Compatibility tables name `get_wall` with health compact `wallpaper`."));
+        assert!(DOCS.contains(
+            "Wave 961: Compatibility tables name `get_wall` with health compact `wallpaper`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_962_monitor_lock_unique_pin_bluetooth() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 962: Compatibility tables name `get_bt` with health compact `bluetooth`."));
+        assert!(DOCS.contains(
+            "Wave 962: Compatibility tables name `get_bt` with health compact `bluetooth`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_963_monitor_lock_unique_pin_resources() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 963: Compatibility tables name `get_res` with health compact `resources`."));
+        assert!(DOCS.contains(
+            "Wave 963: Compatibility tables name `get_res` with health compact `resources`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_964_monitor_lock_unique_pin_connectivity() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 964: Compatibility tables name `get_conn` with health compact `connectivity`."));
+        assert!(DOCS.contains(
+            "Wave 964: Compatibility tables name `get_conn` with health compact `connectivity`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_965_monitor_lock_unique_pin_clipboard() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 965: Compatibility tables name `get_clip` with health compact `clipboard`."));
+        assert!(DOCS.contains(
+            "Wave 965: Compatibility tables name `get_clip` with health compact `clipboard`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_966_monitor_lock_unique_pin_idle() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 966: Compatibility tables name `get_idl` with health compact `idle`."));
+        assert!(
+            DOCS.contains(
+                "Wave 966: Compatibility tables name `get_idl` with health compact `idle`."
+            )
+        );
     }
 
     #[test]
     fn evolve8h_wave_967_monitor_lock_unique_pin_notifications() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 967: Compatibility tables name `get_notif` with health compact `notifications`."));
+        assert!(DOCS.contains(
+            "Wave 967: Compatibility tables name `get_notif` with health compact `notifications`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_968_monitor_lock_unique_pin_dnd() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 968: Compatibility tables name `get_dnd` with health compact `dnd`."));
+        assert!(
+            DOCS.contains(
+                "Wave 968: Compatibility tables name `get_dnd` with health compact `dnd`."
+            )
+        );
     }
 
     #[test]
     fn evolve8h_wave_969_monitor_lock_unique_pin_system_ui() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 969: Compatibility tables name `get_ui` with health compact `system_ui`."));
+        assert!(DOCS.contains(
+            "Wave 969: Compatibility tables name `get_ui` with health compact `system_ui`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_970_monitor_lock_unique_pin_layout() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 970: Compatibility tables name `get_lt` with health compact `layout`."));
+        assert!(DOCS.contains(
+            "Wave 970: Compatibility tables name `get_lt` with health compact `layout`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_971_monitor_lock_unique_pin_tabs() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 971: Compatibility tables name `get_tab` with health compact `tabs`."));
+        assert!(
+            DOCS.contains(
+                "Wave 971: Compatibility tables name `get_tab` with health compact `tabs`."
+            )
+        );
     }
 
     #[test]
     fn evolve8h_wave_972_monitor_lock_unique_pin_selected() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 972: Compatibility tables name `get_sel` with health compact `selected`."));
+        assert!(DOCS.contains(
+            "Wave 972: Compatibility tables name `get_sel` with health compact `selected`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_973_monitor_lock_unique_pin_struts() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 973: Compatibility tables name `get_strut` with health compact `struts`."));
+        assert!(DOCS.contains(
+            "Wave 973: Compatibility tables name `get_strut` with health compact `struts`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_974_monitor_lock_unique_pin_scratchpads() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 974: Compatibility tables name `get_pads` with health compact `scratchpads`."));
+        assert!(DOCS.contains(
+            "Wave 974: Compatibility tables name `get_pads` with health compact `scratchpads`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_975_monitor_lock_unique_pin_focused() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 975: Compatibility tables name `get_fw` with health compact `focused`."));
+        assert!(DOCS.contains(
+            "Wave 975: Compatibility tables name `get_fw` with health compact `focused`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_976_monitor_lock_unique_pin_monitors() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 976: Compatibility tables name `get_mons` with health compact `monitors`."));
+        assert!(DOCS.contains(
+            "Wave 976: Compatibility tables name `get_mons` with health compact `monitors`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_977_monitor_lock_unique_pin_workspaces() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 977: Compatibility tables name `get_ws` with health compact `workspaces`."));
+        assert!(DOCS.contains(
+            "Wave 977: Compatibility tables name `get_ws` with health compact `workspaces`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_978_monitor_lock_unique_pin_windows() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 978: Compatibility tables name `get_wins` with health compact `windows`."));
+        assert!(DOCS.contains(
+            "Wave 978: Compatibility tables name `get_wins` with health compact `windows`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_979_monitor_lock_unique_pin_effects() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 979: Compatibility tables name `get_fx` with health compact `effects`."));
+        assert!(DOCS.contains(
+            "Wave 979: Compatibility tables name `get_fx` with health compact `effects`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_980_monitor_lock_unique_pin_mic() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 980: Compatibility tables name `get_mute` with health compact `mic`."));
+        assert!(
+            DOCS.contains(
+                "Wave 980: Compatibility tables name `get_mute` with health compact `mic`."
+            )
+        );
     }
 
     #[test]
     fn evolve8h_wave_981_monitor_lock_unique_pin_bench() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 981: Compatibility tables name `get_bm` with health compact `bench`."));
+        assert!(
+            DOCS.contains(
+                "Wave 981: Compatibility tables name `get_bm` with health compact `bench`."
+            )
+        );
     }
 
     #[test]
     fn evolve8h_wave_982_monitor_lock_unique_pin_closed_placement() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 982: Compatibility tables name `get_cp` with health compact `closed_placement`."));
+        assert!(DOCS.contains(
+            "Wave 982: Compatibility tables name `get_cp` with health compact `closed_placement`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_983_monitor_lock_unique_pin_prev_layout() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 983: Compatibility tables name `get_pl` with health compact `prev_layout`."));
+        assert!(DOCS.contains(
+            "Wave 983: Compatibility tables name `get_pl` with health compact `prev_layout`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_984_monitor_lock_unique_pin_cfact() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 984: Compatibility tables name `get_cf` with health compact `cfact`."));
+        assert!(
+            DOCS.contains(
+                "Wave 984: Compatibility tables name `get_cf` with health compact `cfact`."
+            )
+        );
     }
 
     #[test]
     fn evolve8h_wave_985_monitor_lock_unique_pin_gaps() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 985: Compatibility tables name `get_gap` with health compact `gaps`."));
+        assert!(
+            DOCS.contains(
+                "Wave 985: Compatibility tables name `get_gap` with health compact `gaps`."
+            )
+        );
     }
 
     #[test]
     fn evolve8h_wave_986_monitor_lock_unique_pin_mfact() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 986: Compatibility tables name `get_mf` with health compact `mfact`."));
+        assert!(
+            DOCS.contains(
+                "Wave 986: Compatibility tables name `get_mf` with health compact `mfact`."
+            )
+        );
     }
 
     #[test]
     fn evolve8h_wave_987_monitor_lock_unique_pin_nmaster() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 987: Compatibility tables name `get_nm` with health compact `nmaster`."));
+        assert!(DOCS.contains(
+            "Wave 987: Compatibility tables name `get_nm` with health compact `nmaster`."
+        ));
     }
 
     #[test]
@@ -19703,13 +20478,17 @@ mod tests {
     #[test]
     fn evolve8h_wave_990_monitor_lock_unique_pin_sticky() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 990: Compatibility tables name `get_status.sticky` with health compact `sticky`."));
+        assert!(DOCS.contains(
+            "Wave 990: Compatibility tables name `get_status.sticky` with health compact `sticky`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_991_monitor_lock_unique_pin_urgent() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 991: Compatibility tables name `get_status.urgent` with health compact `urgent`."));
+        assert!(DOCS.contains(
+            "Wave 991: Compatibility tables name `get_status.urgent` with health compact `urgent`."
+        ));
     }
 
     #[test]
@@ -19721,61 +20500,75 @@ mod tests {
     #[test]
     fn evolve8h_wave_993_monitor_lock_unique_pin_pip() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 993: Compatibility tables name `get_status.pip` with health compact `pip`."));
+        assert!(DOCS.contains(
+            "Wave 993: Compatibility tables name `get_status.pip` with health compact `pip`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_994_monitor_lock_unique_pin_blur() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 994: Compatibility tables name `get_status.blur` with health compact `blur`."));
+        assert!(DOCS.contains(
+            "Wave 994: Compatibility tables name `get_status.blur` with health compact `blur`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_995_monitor_lock_unique_pin_hdr() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 995: Compatibility tables name `get_status.hdr` with health compact `hdr`."));
+        assert!(DOCS.contains(
+            "Wave 995: Compatibility tables name `get_status.hdr` with health compact `hdr`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_996_monitor_lock_unique_pin_expose() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 996: Compatibility tables name `get_status.expose` with health compact `expose`."));
+        assert!(DOCS.contains(
+            "Wave 996: Compatibility tables name `get_status.expose` with health compact `expose`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_997_monitor_lock_unique_pin_media() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 997: Compatibility tables name `get_media` with health compact `media`."));
+        assert!(DOCS.contains(
+            "Wave 997: Compatibility tables name `get_media` with health compact `media`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_998_monitor_lock_unique_pin_power() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 998: Compatibility tables name `get_power` with health compact `power`."));
+        assert!(DOCS.contains(
+            "Wave 998: Compatibility tables name `get_power` with health compact `power`."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_999_monitor_lock_unique_pin_session_lock() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 999: Bar occupancy sits beside health compact `session_lock` (`get_lock`)."));
+        assert!(DOCS.contains(
+            "Wave 999: Bar occupancy sits beside health compact `session_lock` (`get_lock`)."
+        ));
     }
 
     #[test]
     fn evolve8h_wave_1000_monitor_lock_unique_pin_tearing() {
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(DOCS.contains("Wave 1000: Bar occupancy sits beside health compact `tearing` (`get_th`)."));
+        assert!(
+            DOCS.contains(
+                "Wave 1000: Bar occupancy sits beside health compact `tearing` (`get_th`)."
+            )
+        );
     }
 
     #[test]
     fn evolve9h_wave_1_health_prints_compact_version_info() {
         const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(TOOL.contains(
-            "version_info: version={version} backend={backend}"
-        ));
-        assert!(TOOL.contains(
-            "\"version_info: version=0.2.0 backend=wayland-udev\""
-        ));
+        assert!(TOOL.contains("version_info: version={version} backend={backend}"));
+        assert!(TOOL.contains("\"version_info: version=0.2.0 backend=wayland-udev\""));
         assert!(DOCS.contains("`jwm-tool health` prints compact `version_info` beside occupancy"));
     }
 
@@ -19802,21 +20595,15 @@ mod tests {
         const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
         assert!(TOOL.contains("query aliases: get_ver -> get_version"));
-        assert!(DOCS.contains(
-            "`jwm-tool capabilities` text lists `get_ver -> get_version`"
-        ));
+        assert!(DOCS.contains("`jwm-tool capabilities` text lists `get_ver -> get_version`"));
     }
 
     #[test]
     fn evolve9h_wave_5_health_prints_compact_metrics() {
         const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(TOOL.contains(
-            "metrics: available={available}"
-        ));
-        assert!(TOOL.contains(
-            "\"metrics: available=true\""
-        ));
+        assert!(TOOL.contains("metrics: available={available}"));
+        assert!(TOOL.contains("\"metrics: available=true\""));
         assert!(DOCS.contains("`jwm-tool health` prints compact `metrics` beside occupancy"));
     }
 
@@ -19843,21 +20630,19 @@ mod tests {
         const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
         assert!(TOOL.contains("query aliases: get_perf -> get_metrics"));
-        assert!(DOCS.contains(
-            "`jwm-tool capabilities` text lists `get_perf -> get_metrics`"
-        ));
+        assert!(DOCS.contains("`jwm-tool capabilities` text lists `get_perf -> get_metrics`"));
     }
 
     #[test]
     fn evolve9h_wave_9_health_prints_compact_ipc_caps() {
         const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
-        assert!(TOOL.contains(
-            "ipc_caps: schema={schema_version} queries={queries} commands={commands}"
-        ));
-        assert!(TOOL.contains(
-            "\"ipc_caps: schema=1 queries=3 commands=2\""
-        ));
+        assert!(
+            TOOL.contains(
+                "ipc_caps: schema={schema_version} queries={queries} commands={commands}"
+            )
+        );
+        assert!(TOOL.contains("\"ipc_caps: schema=1 queries=3 commands=2\""));
         assert!(DOCS.contains("`jwm-tool health` prints compact `ipc_caps` beside occupancy"));
     }
 
@@ -19884,9 +20669,7 @@ mod tests {
         const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
         assert!(TOOL.contains("query aliases: get_caps -> get_capabilities"));
-        assert!(DOCS.contains(
-            "`jwm-tool capabilities` text lists `get_caps -> get_capabilities`"
-        ));
+        assert!(DOCS.contains("`jwm-tool capabilities` text lists `get_caps -> get_capabilities`"));
     }
 
     #[test]
@@ -19894,9 +20677,7 @@ mod tests {
         const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
         assert!(TOOL.contains("query aliases: get_cfg -> get_config_status"));
-        assert!(DOCS.contains(
-            "`jwm-tool capabilities` text lists `get_cfg -> get_config_status`"
-        ));
+        assert!(DOCS.contains("`jwm-tool capabilities` text lists `get_cfg -> get_config_status`"));
     }
 
     #[test]
@@ -19904,9 +20685,7 @@ mod tests {
         const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
         assert!(TOOL.contains("query aliases: get_conf -> get_config"));
-        assert!(DOCS.contains(
-            "`jwm-tool capabilities` text lists `get_conf -> get_config`"
-        ));
+        assert!(DOCS.contains("`jwm-tool capabilities` text lists `get_conf -> get_config`"));
     }
 
     #[test]
@@ -19914,9 +20693,7 @@ mod tests {
         const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
         assert!(TOOL.contains("query aliases: get_st -> get_status"));
-        assert!(DOCS.contains(
-            "`jwm-tool capabilities` text lists `get_st -> get_status`"
-        ));
+        assert!(DOCS.contains("`jwm-tool capabilities` text lists `get_st -> get_status`"));
     }
 
     #[test]
@@ -19924,9 +20701,7 @@ mod tests {
         const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
         assert!(TOOL.contains("query aliases: get_tr -> get_tree"));
-        assert!(DOCS.contains(
-            "`jwm-tool capabilities` text lists `get_tr -> get_tree`"
-        ));
+        assert!(DOCS.contains("`jwm-tool capabilities` text lists `get_tr -> get_tree`"));
     }
 
     #[test]
@@ -19934,9 +20709,7 @@ mod tests {
         const TOOL: &str = include_str!("../../tools/jwm_tool.rs");
         const DOCS: &str = include_str!("../../docs/monitor-lock.md");
         assert!(TOOL.contains("query aliases: get_win -> get_window"));
-        assert!(DOCS.contains(
-            "`jwm-tool capabilities` text lists `get_win -> get_window`"
-        ));
+        assert!(DOCS.contains("`jwm-tool capabilities` text lists `get_win -> get_window`"));
     }
 
     #[test]
@@ -19948,37 +20721,49 @@ mod tests {
     #[test]
     fn evolve9h_wave_19_compat_unique_pin_metrics() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 19: Health compact `metrics` is diagnosable through `jwm-tool health`."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 19: Health compact `metrics` is diagnosable through `jwm-tool health`."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_20_compat_unique_pin_ipc_caps() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 20: Health compact `ipc_caps` is diagnosable through `jwm-tool health`."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 20: Health compact `ipc_caps` is diagnosable through `jwm-tool health`."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_21_compat_unique_pin_config() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 21: Health compact `config` is diagnosable through `jwm-tool health`."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 21: Health compact `config` is diagnosable through `jwm-tool health`."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_22_compat_unique_pin_status() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 22: Health compact `status` is diagnosable through `jwm-tool health`."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 22: Health compact `status` is diagnosable through `jwm-tool health`."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_23_compat_unique_pin_tree() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 23: Health compact `tree` is diagnosable through `jwm-tool health`."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 23: Health compact `tree` is diagnosable through `jwm-tool health`."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_24_compat_unique_pin_window() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 24: Health compact `window` is diagnosable through `jwm-tool health`."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 24: Health compact `window` is diagnosable through `jwm-tool health`."
+        ));
     }
 
     #[test]
@@ -19990,19 +20775,25 @@ mod tests {
     #[test]
     fn evolve9h_wave_26_compat_unique_pin_tearing() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 26: Health compact `tearing` is diagnosable through `jwm-tool health`."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 26: Health compact `tearing` is diagnosable through `jwm-tool health`."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_27_compat_unique_pin_xwayland() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 27: Health compact `xwayland` is diagnosable through `jwm-tool health`."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 27: Health compact `xwayland` is diagnosable through `jwm-tool health`."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_28_compat_unique_pin_scrolling() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 28: Health compact `scrolling` is diagnosable through `jwm-tool health`."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 28: Health compact `scrolling` is diagnosable through `jwm-tool health`."
+        ));
     }
 
     #[test]
@@ -20014,67 +20805,89 @@ mod tests {
     #[test]
     fn evolve9h_wave_30_compat_unique_pin_magnifier() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 30: Health compact `magnifier` is diagnosable through `jwm-tool health`."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 30: Health compact `magnifier` is diagnosable through `jwm-tool health`."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_31_compat_unique_pin_peek() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 31: Health compact `peek` is diagnosable through `jwm-tool health`."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 31: Health compact `peek` is diagnosable through `jwm-tool health`."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_32_compat_unique_pin_gesture() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 32: Health compact `gesture` is diagnosable through `jwm-tool health`."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 32: Health compact `gesture` is diagnosable through `jwm-tool health`."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_33_compat_unique_pin_wayland() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 33: Health compact `wayland` is diagnosable through `jwm-tool health`."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 33: Health compact `wayland` is diagnosable through `jwm-tool health`."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_34_compat_unique_pin_recording() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 34: Health compact `recording` is diagnosable through `jwm-tool health`."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 34: Health compact `recording` is diagnosable through `jwm-tool health`."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_35_compat_unique_pin_capture() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 35: Health compact `capture` is diagnosable through `jwm-tool health`."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 35: Health compact `capture` is diagnosable through `jwm-tool health`."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_36_compat_unique_pin_waterlily() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 36: Health compact `waterlily` is diagnosable through `jwm-tool health`."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 36: Health compact `waterlily` is diagnosable through `jwm-tool health`."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_37_compat_unique_pin_audio() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 37: Health compact `audio` is diagnosable through `jwm-tool health`."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 37: Health compact `audio` is diagnosable through `jwm-tool health`."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_38_compat_unique_pin_wallpaper() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 38: Health compact `wallpaper` is diagnosable through `jwm-tool health`."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 38: Health compact `wallpaper` is diagnosable through `jwm-tool health`."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_39_compat_unique_pin_bluetooth() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 39: Health compact `bluetooth` is diagnosable through `jwm-tool health`."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 39: Health compact `bluetooth` is diagnosable through `jwm-tool health`."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_40_compat_unique_pin_resources() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 40: Health compact `resources` is diagnosable through `jwm-tool health`."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 40: Health compact `resources` is diagnosable through `jwm-tool health`."
+        ));
     }
 
     #[test]
@@ -20086,25 +20899,33 @@ mod tests {
     #[test]
     fn evolve9h_wave_42_compat_unique_pin_power() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 42: Health compact `power` is diagnosable through `jwm-tool health`."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 42: Health compact `power` is diagnosable through `jwm-tool health`."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_43_compat_unique_pin_media() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 43: Health compact `media` is diagnosable through `jwm-tool health`."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 43: Health compact `media` is diagnosable through `jwm-tool health`."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_44_compat_unique_pin_clipboard() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 44: Health compact `clipboard` is diagnosable through `jwm-tool health`."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 44: Health compact `clipboard` is diagnosable through `jwm-tool health`."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_45_compat_unique_pin_idle() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 45: Health compact `idle` is diagnosable through `jwm-tool health`."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 45: Health compact `idle` is diagnosable through `jwm-tool health`."
+        ));
     }
 
     #[test]
@@ -20116,13 +20937,17 @@ mod tests {
     #[test]
     fn evolve9h_wave_47_compat_unique_pin_dnd() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 47: Health compact `dnd` is diagnosable through `jwm-tool health`."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 47: Health compact `dnd` is diagnosable through `jwm-tool health`."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_48_compat_unique_pin_system_ui() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 48: Health compact `system_ui` is diagnosable through `jwm-tool health`."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 48: Health compact `system_ui` is diagnosable through `jwm-tool health`."
+        ));
     }
 
     #[test]
@@ -20302,7 +21127,9 @@ mod tests {
     #[test]
     fn evolve9h_wave_78_compat_unique_pin_dnd() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 78: `jwm-tool capabilities` remains the catalog for `dnd` query aliases."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 78: `jwm-tool capabilities` remains the catalog for `dnd` query aliases."
+        ));
     }
 
     #[test]
@@ -20320,37 +21147,49 @@ mod tests {
     #[test]
     fn evolve9h_wave_81_compat_unique_pin_metrics() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 81: Support bundles should include `metrics` when health is degraded."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 81: Support bundles should include `metrics` when health is degraded."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_82_compat_unique_pin_ipc_caps() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 82: Support bundles should include `ipc_caps` when health is degraded."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 82: Support bundles should include `ipc_caps` when health is degraded."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_83_compat_unique_pin_config() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 83: Support bundles should include `config` when health is degraded."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 83: Support bundles should include `config` when health is degraded."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_84_compat_unique_pin_status() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 84: Support bundles should include `status` when health is degraded."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 84: Support bundles should include `status` when health is degraded."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_85_compat_unique_pin_tree() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 85: Support bundles should include `tree` when health is degraded."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 85: Support bundles should include `tree` when health is degraded."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_86_compat_unique_pin_window() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 86: Support bundles should include `window` when health is degraded."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 86: Support bundles should include `window` when health is degraded."
+        ));
     }
 
     #[test]
@@ -20362,19 +21201,25 @@ mod tests {
     #[test]
     fn evolve9h_wave_88_compat_unique_pin_tearing() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 88: Support bundles should include `tearing` when health is degraded."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 88: Support bundles should include `tearing` when health is degraded."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_89_compat_unique_pin_xwayland() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 89: Support bundles should include `xwayland` when health is degraded."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 89: Support bundles should include `xwayland` when health is degraded."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_90_compat_unique_pin_scrolling() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 90: Support bundles should include `scrolling` when health is degraded."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 90: Support bundles should include `scrolling` when health is degraded."
+        ));
     }
 
     #[test]
@@ -20386,67 +21231,89 @@ mod tests {
     #[test]
     fn evolve9h_wave_92_compat_unique_pin_magnifier() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 92: Support bundles should include `magnifier` when health is degraded."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 92: Support bundles should include `magnifier` when health is degraded."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_93_compat_unique_pin_peek() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 93: Support bundles should include `peek` when health is degraded."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 93: Support bundles should include `peek` when health is degraded."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_94_compat_unique_pin_gesture() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 94: Support bundles should include `gesture` when health is degraded."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 94: Support bundles should include `gesture` when health is degraded."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_95_compat_unique_pin_wayland() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 95: Support bundles should include `wayland` when health is degraded."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 95: Support bundles should include `wayland` when health is degraded."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_96_compat_unique_pin_recording() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 96: Support bundles should include `recording` when health is degraded."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 96: Support bundles should include `recording` when health is degraded."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_97_compat_unique_pin_capture() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 97: Support bundles should include `capture` when health is degraded."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 97: Support bundles should include `capture` when health is degraded."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_98_compat_unique_pin_waterlily() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 98: Support bundles should include `waterlily` when health is degraded."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 98: Support bundles should include `waterlily` when health is degraded."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_99_compat_unique_pin_audio() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 99: Support bundles should include `audio` when health is degraded."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 99: Support bundles should include `audio` when health is degraded."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_100_compat_unique_pin_wallpaper() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 100: Support bundles should include `wallpaper` when health is degraded."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 100: Support bundles should include `wallpaper` when health is degraded."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_101_compat_unique_pin_bluetooth() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 101: Support bundles should include `bluetooth` when health is degraded."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 101: Support bundles should include `bluetooth` when health is degraded."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_102_compat_unique_pin_resources() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 102: Support bundles should include `resources` when health is degraded."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 102: Support bundles should include `resources` when health is degraded."
+        ));
     }
 
     #[test]
@@ -20458,25 +21325,33 @@ mod tests {
     #[test]
     fn evolve9h_wave_104_compat_unique_pin_power() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 104: Support bundles should include `power` when health is degraded."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 104: Support bundles should include `power` when health is degraded."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_105_compat_unique_pin_media() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 105: Support bundles should include `media` when health is degraded."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 105: Support bundles should include `media` when health is degraded."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_106_compat_unique_pin_clipboard() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 106: Support bundles should include `clipboard` when health is degraded."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 106: Support bundles should include `clipboard` when health is degraded."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_107_compat_unique_pin_idle() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 107: Support bundles should include `idle` when health is degraded."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 107: Support bundles should include `idle` when health is degraded."
+        ));
     }
 
     #[test]
@@ -20488,199 +21363,284 @@ mod tests {
     #[test]
     fn evolve9h_wave_109_compat_unique_pin_dnd() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 109: Support bundles should include `dnd` when health is degraded."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 109: Support bundles should include `dnd` when health is degraded."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_110_compat_unique_pin_system_ui() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 110: Support bundles should include `system_ui` when health is degraded."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 110: Support bundles should include `system_ui` when health is degraded."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_111_compat_unique_pin_version_info() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 111: Nested smoke treats `version_info` as a read-only IPC probe."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 111: Nested smoke treats `version_info` as a read-only IPC probe."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_112_compat_unique_pin_metrics() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 112: Nested smoke treats `metrics` as a read-only IPC probe."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 112: Nested smoke treats `metrics` as a read-only IPC probe."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_113_compat_unique_pin_ipc_caps() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 113: Nested smoke treats `ipc_caps` as a read-only IPC probe."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 113: Nested smoke treats `ipc_caps` as a read-only IPC probe."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_114_compat_unique_pin_config() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 114: Nested smoke treats `config` as a read-only IPC probe."));
+        assert!(
+            COMPAT.contains(
+                "evolve9h wave 114: Nested smoke treats `config` as a read-only IPC probe."
+            )
+        );
     }
 
     #[test]
     fn evolve9h_wave_115_compat_unique_pin_status() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 115: Nested smoke treats `status` as a read-only IPC probe."));
+        assert!(
+            COMPAT.contains(
+                "evolve9h wave 115: Nested smoke treats `status` as a read-only IPC probe."
+            )
+        );
     }
 
     #[test]
     fn evolve9h_wave_116_compat_unique_pin_tree() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 116: Nested smoke treats `tree` as a read-only IPC probe."));
+        assert!(
+            COMPAT.contains(
+                "evolve9h wave 116: Nested smoke treats `tree` as a read-only IPC probe."
+            )
+        );
     }
 
     #[test]
     fn evolve9h_wave_117_compat_unique_pin_window() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 117: Nested smoke treats `window` as a read-only IPC probe."));
+        assert!(
+            COMPAT.contains(
+                "evolve9h wave 117: Nested smoke treats `window` as a read-only IPC probe."
+            )
+        );
     }
 
     #[test]
     fn evolve9h_wave_118_compat_unique_pin_session_lock() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 118: Nested smoke treats `session_lock` as a read-only IPC probe."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 118: Nested smoke treats `session_lock` as a read-only IPC probe."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_119_compat_unique_pin_tearing() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 119: Nested smoke treats `tearing` as a read-only IPC probe."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 119: Nested smoke treats `tearing` as a read-only IPC probe."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_120_compat_unique_pin_xwayland() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 120: Nested smoke treats `xwayland` as a read-only IPC probe."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 120: Nested smoke treats `xwayland` as a read-only IPC probe."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_121_compat_unique_pin_scrolling() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 121: Nested smoke treats `scrolling` as a read-only IPC probe."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 121: Nested smoke treats `scrolling` as a read-only IPC probe."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_122_compat_unique_pin_night_light() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 122: Nested smoke treats `night_light` as a read-only IPC probe."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 122: Nested smoke treats `night_light` as a read-only IPC probe."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_123_compat_unique_pin_magnifier() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 123: Nested smoke treats `magnifier` as a read-only IPC probe."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 123: Nested smoke treats `magnifier` as a read-only IPC probe."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_124_compat_unique_pin_peek() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 124: Nested smoke treats `peek` as a read-only IPC probe."));
+        assert!(
+            COMPAT.contains(
+                "evolve9h wave 124: Nested smoke treats `peek` as a read-only IPC probe."
+            )
+        );
     }
 
     #[test]
     fn evolve9h_wave_125_compat_unique_pin_gesture() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 125: Nested smoke treats `gesture` as a read-only IPC probe."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 125: Nested smoke treats `gesture` as a read-only IPC probe."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_126_compat_unique_pin_wayland() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 126: Nested smoke treats `wayland` as a read-only IPC probe."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 126: Nested smoke treats `wayland` as a read-only IPC probe."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_127_compat_unique_pin_recording() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 127: Nested smoke treats `recording` as a read-only IPC probe."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 127: Nested smoke treats `recording` as a read-only IPC probe."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_128_compat_unique_pin_capture() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 128: Nested smoke treats `capture` as a read-only IPC probe."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 128: Nested smoke treats `capture` as a read-only IPC probe."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_129_compat_unique_pin_waterlily() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 129: Nested smoke treats `waterlily` as a read-only IPC probe."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 129: Nested smoke treats `waterlily` as a read-only IPC probe."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_130_compat_unique_pin_audio() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 130: Nested smoke treats `audio` as a read-only IPC probe."));
+        assert!(
+            COMPAT.contains(
+                "evolve9h wave 130: Nested smoke treats `audio` as a read-only IPC probe."
+            )
+        );
     }
 
     #[test]
     fn evolve9h_wave_131_compat_unique_pin_wallpaper() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 131: Nested smoke treats `wallpaper` as a read-only IPC probe."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 131: Nested smoke treats `wallpaper` as a read-only IPC probe."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_132_compat_unique_pin_bluetooth() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 132: Nested smoke treats `bluetooth` as a read-only IPC probe."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 132: Nested smoke treats `bluetooth` as a read-only IPC probe."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_133_compat_unique_pin_resources() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 133: Nested smoke treats `resources` as a read-only IPC probe."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 133: Nested smoke treats `resources` as a read-only IPC probe."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_134_compat_unique_pin_connectivity() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 134: Nested smoke treats `connectivity` as a read-only IPC probe."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 134: Nested smoke treats `connectivity` as a read-only IPC probe."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_135_compat_unique_pin_power() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 135: Nested smoke treats `power` as a read-only IPC probe."));
+        assert!(
+            COMPAT.contains(
+                "evolve9h wave 135: Nested smoke treats `power` as a read-only IPC probe."
+            )
+        );
     }
 
     #[test]
     fn evolve9h_wave_136_compat_unique_pin_media() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 136: Nested smoke treats `media` as a read-only IPC probe."));
+        assert!(
+            COMPAT.contains(
+                "evolve9h wave 136: Nested smoke treats `media` as a read-only IPC probe."
+            )
+        );
     }
 
     #[test]
     fn evolve9h_wave_137_compat_unique_pin_clipboard() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 137: Nested smoke treats `clipboard` as a read-only IPC probe."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 137: Nested smoke treats `clipboard` as a read-only IPC probe."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_138_compat_unique_pin_idle() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 138: Nested smoke treats `idle` as a read-only IPC probe."));
+        assert!(
+            COMPAT.contains(
+                "evolve9h wave 138: Nested smoke treats `idle` as a read-only IPC probe."
+            )
+        );
     }
 
     #[test]
     fn evolve9h_wave_139_compat_unique_pin_notifications() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 139: Nested smoke treats `notifications` as a read-only IPC probe."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 139: Nested smoke treats `notifications` as a read-only IPC probe."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_140_compat_unique_pin_dnd() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 140: Nested smoke treats `dnd` as a read-only IPC probe."));
+        assert!(
+            COMPAT
+                .contains("evolve9h wave 140: Nested smoke treats `dnd` as a read-only IPC probe.")
+        );
     }
 
     #[test]
     fn evolve9h_wave_141_compat_unique_pin_system_ui() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 141: Nested smoke treats `system_ui` as a read-only IPC probe."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 141: Nested smoke treats `system_ui` as a read-only IPC probe."
+        ));
     }
 
     #[test]
@@ -20692,37 +21652,49 @@ mod tests {
     #[test]
     fn evolve9h_wave_143_compat_unique_pin_metrics() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 143: Upgrade notes keep `metrics` beside occupancy on the health page."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 143: Upgrade notes keep `metrics` beside occupancy on the health page."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_144_compat_unique_pin_ipc_caps() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 144: Upgrade notes keep `ipc_caps` beside occupancy on the health page."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 144: Upgrade notes keep `ipc_caps` beside occupancy on the health page."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_145_compat_unique_pin_config() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 145: Upgrade notes keep `config` beside occupancy on the health page."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 145: Upgrade notes keep `config` beside occupancy on the health page."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_146_compat_unique_pin_status() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 146: Upgrade notes keep `status` beside occupancy on the health page."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 146: Upgrade notes keep `status` beside occupancy on the health page."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_147_compat_unique_pin_tree() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 147: Upgrade notes keep `tree` beside occupancy on the health page."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 147: Upgrade notes keep `tree` beside occupancy on the health page."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_148_compat_unique_pin_window() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 148: Upgrade notes keep `window` beside occupancy on the health page."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 148: Upgrade notes keep `window` beside occupancy on the health page."
+        ));
     }
 
     #[test]
@@ -20734,19 +21706,25 @@ mod tests {
     #[test]
     fn evolve9h_wave_150_compat_unique_pin_tearing() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 150: Upgrade notes keep `tearing` beside occupancy on the health page."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 150: Upgrade notes keep `tearing` beside occupancy on the health page."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_151_compat_unique_pin_xwayland() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 151: Upgrade notes keep `xwayland` beside occupancy on the health page."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 151: Upgrade notes keep `xwayland` beside occupancy on the health page."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_152_compat_unique_pin_scrolling() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 152: Upgrade notes keep `scrolling` beside occupancy on the health page."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 152: Upgrade notes keep `scrolling` beside occupancy on the health page."
+        ));
     }
 
     #[test]
@@ -20758,67 +21736,89 @@ mod tests {
     #[test]
     fn evolve9h_wave_154_compat_unique_pin_magnifier() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 154: Upgrade notes keep `magnifier` beside occupancy on the health page."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 154: Upgrade notes keep `magnifier` beside occupancy on the health page."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_155_compat_unique_pin_peek() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 155: Upgrade notes keep `peek` beside occupancy on the health page."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 155: Upgrade notes keep `peek` beside occupancy on the health page."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_156_compat_unique_pin_gesture() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 156: Upgrade notes keep `gesture` beside occupancy on the health page."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 156: Upgrade notes keep `gesture` beside occupancy on the health page."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_157_compat_unique_pin_wayland() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 157: Upgrade notes keep `wayland` beside occupancy on the health page."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 157: Upgrade notes keep `wayland` beside occupancy on the health page."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_158_compat_unique_pin_recording() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 158: Upgrade notes keep `recording` beside occupancy on the health page."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 158: Upgrade notes keep `recording` beside occupancy on the health page."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_159_compat_unique_pin_capture() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 159: Upgrade notes keep `capture` beside occupancy on the health page."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 159: Upgrade notes keep `capture` beside occupancy on the health page."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_160_compat_unique_pin_waterlily() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 160: Upgrade notes keep `waterlily` beside occupancy on the health page."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 160: Upgrade notes keep `waterlily` beside occupancy on the health page."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_161_compat_unique_pin_audio() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 161: Upgrade notes keep `audio` beside occupancy on the health page."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 161: Upgrade notes keep `audio` beside occupancy on the health page."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_162_compat_unique_pin_wallpaper() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 162: Upgrade notes keep `wallpaper` beside occupancy on the health page."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 162: Upgrade notes keep `wallpaper` beside occupancy on the health page."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_163_compat_unique_pin_bluetooth() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 163: Upgrade notes keep `bluetooth` beside occupancy on the health page."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 163: Upgrade notes keep `bluetooth` beside occupancy on the health page."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_164_compat_unique_pin_resources() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 164: Upgrade notes keep `resources` beside occupancy on the health page."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 164: Upgrade notes keep `resources` beside occupancy on the health page."
+        ));
     }
 
     #[test]
@@ -20830,25 +21830,33 @@ mod tests {
     #[test]
     fn evolve9h_wave_166_compat_unique_pin_power() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 166: Upgrade notes keep `power` beside occupancy on the health page."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 166: Upgrade notes keep `power` beside occupancy on the health page."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_167_compat_unique_pin_media() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 167: Upgrade notes keep `media` beside occupancy on the health page."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 167: Upgrade notes keep `media` beside occupancy on the health page."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_168_compat_unique_pin_clipboard() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 168: Upgrade notes keep `clipboard` beside occupancy on the health page."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 168: Upgrade notes keep `clipboard` beside occupancy on the health page."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_169_compat_unique_pin_idle() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 169: Upgrade notes keep `idle` beside occupancy on the health page."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 169: Upgrade notes keep `idle` beside occupancy on the health page."
+        ));
     }
 
     #[test]
@@ -20860,13 +21868,17 @@ mod tests {
     #[test]
     fn evolve9h_wave_171_compat_unique_pin_dnd() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 171: Upgrade notes keep `dnd` beside occupancy on the health page."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 171: Upgrade notes keep `dnd` beside occupancy on the health page."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_172_compat_unique_pin_system_ui() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 172: Upgrade notes keep `system_ui` beside occupancy on the health page."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 172: Upgrade notes keep `system_ui` beside occupancy on the health page."
+        ));
     }
 
     #[test]
@@ -20878,37 +21890,49 @@ mod tests {
     #[test]
     fn evolve9h_wave_174_compat_unique_pin_metrics() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 174: Health compact `metrics` is diagnosable through `jwm-tool health`."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 174: Health compact `metrics` is diagnosable through `jwm-tool health`."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_175_compat_unique_pin_ipc_caps() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 175: Health compact `ipc_caps` is diagnosable through `jwm-tool health`."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 175: Health compact `ipc_caps` is diagnosable through `jwm-tool health`."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_176_compat_unique_pin_config() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 176: Health compact `config` is diagnosable through `jwm-tool health`."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 176: Health compact `config` is diagnosable through `jwm-tool health`."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_177_compat_unique_pin_status() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 177: Health compact `status` is diagnosable through `jwm-tool health`."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 177: Health compact `status` is diagnosable through `jwm-tool health`."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_178_compat_unique_pin_tree() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 178: Health compact `tree` is diagnosable through `jwm-tool health`."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 178: Health compact `tree` is diagnosable through `jwm-tool health`."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_179_compat_unique_pin_window() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 179: Health compact `window` is diagnosable through `jwm-tool health`."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 179: Health compact `window` is diagnosable through `jwm-tool health`."
+        ));
     }
 
     #[test]
@@ -20920,13 +21944,17 @@ mod tests {
     #[test]
     fn evolve9h_wave_181_compat_unique_pin_tearing() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 181: Health compact `tearing` is diagnosable through `jwm-tool health`."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 181: Health compact `tearing` is diagnosable through `jwm-tool health`."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_182_compat_unique_pin_xwayland() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 182: Health compact `xwayland` is diagnosable through `jwm-tool health`."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 182: Health compact `xwayland` is diagnosable through `jwm-tool health`."
+        ));
     }
 
     #[test]
@@ -20950,19 +21978,25 @@ mod tests {
     #[test]
     fn evolve9h_wave_186_compat_unique_pin_peek() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 186: Health compact `peek` is diagnosable through `jwm-tool health`."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 186: Health compact `peek` is diagnosable through `jwm-tool health`."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_187_compat_unique_pin_gesture() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 187: Health compact `gesture` is diagnosable through `jwm-tool health`."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 187: Health compact `gesture` is diagnosable through `jwm-tool health`."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_188_compat_unique_pin_wayland() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 188: Health compact `wayland` is diagnosable through `jwm-tool health`."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 188: Health compact `wayland` is diagnosable through `jwm-tool health`."
+        ));
     }
 
     #[test]
@@ -20974,7 +22008,9 @@ mod tests {
     #[test]
     fn evolve9h_wave_190_compat_unique_pin_capture() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 190: Health compact `capture` is diagnosable through `jwm-tool health`."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 190: Health compact `capture` is diagnosable through `jwm-tool health`."
+        ));
     }
 
     #[test]
@@ -20986,7 +22022,9 @@ mod tests {
     #[test]
     fn evolve9h_wave_192_compat_unique_pin_audio() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 192: Health compact `audio` is diagnosable through `jwm-tool health`."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 192: Health compact `audio` is diagnosable through `jwm-tool health`."
+        ));
     }
 
     #[test]
@@ -21016,13 +22054,17 @@ mod tests {
     #[test]
     fn evolve9h_wave_197_compat_unique_pin_power() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 197: Health compact `power` is diagnosable through `jwm-tool health`."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 197: Health compact `power` is diagnosable through `jwm-tool health`."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_198_compat_unique_pin_media() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 198: Health compact `media` is diagnosable through `jwm-tool health`."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 198: Health compact `media` is diagnosable through `jwm-tool health`."
+        ));
     }
 
     #[test]
@@ -21034,7 +22076,9 @@ mod tests {
     #[test]
     fn evolve9h_wave_200_compat_unique_pin_idle() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 200: Health compact `idle` is diagnosable through `jwm-tool health`."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 200: Health compact `idle` is diagnosable through `jwm-tool health`."
+        ));
     }
 
     #[test]
@@ -21046,7 +22090,9 @@ mod tests {
     #[test]
     fn evolve9h_wave_202_compat_unique_pin_dnd() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 202: Health compact `dnd` is diagnosable through `jwm-tool health`."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 202: Health compact `dnd` is diagnosable through `jwm-tool health`."
+        ));
     }
 
     #[test]
@@ -21250,37 +22296,49 @@ mod tests {
     #[test]
     fn evolve9h_wave_236_compat_unique_pin_metrics() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 236: Support bundles should include `metrics` when health is degraded."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 236: Support bundles should include `metrics` when health is degraded."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_237_compat_unique_pin_ipc_caps() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 237: Support bundles should include `ipc_caps` when health is degraded."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 237: Support bundles should include `ipc_caps` when health is degraded."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_238_compat_unique_pin_config() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 238: Support bundles should include `config` when health is degraded."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 238: Support bundles should include `config` when health is degraded."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_239_compat_unique_pin_status() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 239: Support bundles should include `status` when health is degraded."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 239: Support bundles should include `status` when health is degraded."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_240_compat_unique_pin_tree() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 240: Support bundles should include `tree` when health is degraded."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 240: Support bundles should include `tree` when health is degraded."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_241_compat_unique_pin_window() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 241: Support bundles should include `window` when health is degraded."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 241: Support bundles should include `window` when health is degraded."
+        ));
     }
 
     #[test]
@@ -21292,19 +22350,25 @@ mod tests {
     #[test]
     fn evolve9h_wave_243_compat_unique_pin_tearing() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 243: Support bundles should include `tearing` when health is degraded."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 243: Support bundles should include `tearing` when health is degraded."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_244_compat_unique_pin_xwayland() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 244: Support bundles should include `xwayland` when health is degraded."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 244: Support bundles should include `xwayland` when health is degraded."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_245_compat_unique_pin_scrolling() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 245: Support bundles should include `scrolling` when health is degraded."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 245: Support bundles should include `scrolling` when health is degraded."
+        ));
     }
 
     #[test]
@@ -21316,67 +22380,89 @@ mod tests {
     #[test]
     fn evolve9h_wave_247_compat_unique_pin_magnifier() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 247: Support bundles should include `magnifier` when health is degraded."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 247: Support bundles should include `magnifier` when health is degraded."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_248_compat_unique_pin_peek() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 248: Support bundles should include `peek` when health is degraded."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 248: Support bundles should include `peek` when health is degraded."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_249_compat_unique_pin_gesture() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 249: Support bundles should include `gesture` when health is degraded."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 249: Support bundles should include `gesture` when health is degraded."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_250_compat_unique_pin_wayland() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 250: Support bundles should include `wayland` when health is degraded."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 250: Support bundles should include `wayland` when health is degraded."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_251_compat_unique_pin_recording() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 251: Support bundles should include `recording` when health is degraded."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 251: Support bundles should include `recording` when health is degraded."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_252_compat_unique_pin_capture() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 252: Support bundles should include `capture` when health is degraded."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 252: Support bundles should include `capture` when health is degraded."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_253_compat_unique_pin_waterlily() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 253: Support bundles should include `waterlily` when health is degraded."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 253: Support bundles should include `waterlily` when health is degraded."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_254_compat_unique_pin_audio() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 254: Support bundles should include `audio` when health is degraded."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 254: Support bundles should include `audio` when health is degraded."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_255_compat_unique_pin_wallpaper() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 255: Support bundles should include `wallpaper` when health is degraded."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 255: Support bundles should include `wallpaper` when health is degraded."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_256_compat_unique_pin_bluetooth() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 256: Support bundles should include `bluetooth` when health is degraded."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 256: Support bundles should include `bluetooth` when health is degraded."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_257_compat_unique_pin_resources() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 257: Support bundles should include `resources` when health is degraded."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 257: Support bundles should include `resources` when health is degraded."
+        ));
     }
 
     #[test]
@@ -21388,25 +22474,33 @@ mod tests {
     #[test]
     fn evolve9h_wave_259_compat_unique_pin_power() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 259: Support bundles should include `power` when health is degraded."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 259: Support bundles should include `power` when health is degraded."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_260_compat_unique_pin_media() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 260: Support bundles should include `media` when health is degraded."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 260: Support bundles should include `media` when health is degraded."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_261_compat_unique_pin_clipboard() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 261: Support bundles should include `clipboard` when health is degraded."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 261: Support bundles should include `clipboard` when health is degraded."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_262_compat_unique_pin_idle() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 262: Support bundles should include `idle` when health is degraded."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 262: Support bundles should include `idle` when health is degraded."
+        ));
     }
 
     #[test]
@@ -21418,199 +22512,284 @@ mod tests {
     #[test]
     fn evolve9h_wave_264_compat_unique_pin_dnd() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 264: Support bundles should include `dnd` when health is degraded."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 264: Support bundles should include `dnd` when health is degraded."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_265_compat_unique_pin_system_ui() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 265: Support bundles should include `system_ui` when health is degraded."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 265: Support bundles should include `system_ui` when health is degraded."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_266_compat_unique_pin_version_info() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 266: Nested smoke treats `version_info` as a read-only IPC probe."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 266: Nested smoke treats `version_info` as a read-only IPC probe."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_267_compat_unique_pin_metrics() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 267: Nested smoke treats `metrics` as a read-only IPC probe."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 267: Nested smoke treats `metrics` as a read-only IPC probe."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_268_compat_unique_pin_ipc_caps() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 268: Nested smoke treats `ipc_caps` as a read-only IPC probe."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 268: Nested smoke treats `ipc_caps` as a read-only IPC probe."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_269_compat_unique_pin_config() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 269: Nested smoke treats `config` as a read-only IPC probe."));
+        assert!(
+            COMPAT.contains(
+                "evolve9h wave 269: Nested smoke treats `config` as a read-only IPC probe."
+            )
+        );
     }
 
     #[test]
     fn evolve9h_wave_270_compat_unique_pin_status() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 270: Nested smoke treats `status` as a read-only IPC probe."));
+        assert!(
+            COMPAT.contains(
+                "evolve9h wave 270: Nested smoke treats `status` as a read-only IPC probe."
+            )
+        );
     }
 
     #[test]
     fn evolve9h_wave_271_compat_unique_pin_tree() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 271: Nested smoke treats `tree` as a read-only IPC probe."));
+        assert!(
+            COMPAT.contains(
+                "evolve9h wave 271: Nested smoke treats `tree` as a read-only IPC probe."
+            )
+        );
     }
 
     #[test]
     fn evolve9h_wave_272_compat_unique_pin_window() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 272: Nested smoke treats `window` as a read-only IPC probe."));
+        assert!(
+            COMPAT.contains(
+                "evolve9h wave 272: Nested smoke treats `window` as a read-only IPC probe."
+            )
+        );
     }
 
     #[test]
     fn evolve9h_wave_273_compat_unique_pin_session_lock() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 273: Nested smoke treats `session_lock` as a read-only IPC probe."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 273: Nested smoke treats `session_lock` as a read-only IPC probe."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_274_compat_unique_pin_tearing() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 274: Nested smoke treats `tearing` as a read-only IPC probe."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 274: Nested smoke treats `tearing` as a read-only IPC probe."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_275_compat_unique_pin_xwayland() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 275: Nested smoke treats `xwayland` as a read-only IPC probe."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 275: Nested smoke treats `xwayland` as a read-only IPC probe."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_276_compat_unique_pin_scrolling() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 276: Nested smoke treats `scrolling` as a read-only IPC probe."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 276: Nested smoke treats `scrolling` as a read-only IPC probe."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_277_compat_unique_pin_night_light() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 277: Nested smoke treats `night_light` as a read-only IPC probe."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 277: Nested smoke treats `night_light` as a read-only IPC probe."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_278_compat_unique_pin_magnifier() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 278: Nested smoke treats `magnifier` as a read-only IPC probe."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 278: Nested smoke treats `magnifier` as a read-only IPC probe."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_279_compat_unique_pin_peek() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 279: Nested smoke treats `peek` as a read-only IPC probe."));
+        assert!(
+            COMPAT.contains(
+                "evolve9h wave 279: Nested smoke treats `peek` as a read-only IPC probe."
+            )
+        );
     }
 
     #[test]
     fn evolve9h_wave_280_compat_unique_pin_gesture() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 280: Nested smoke treats `gesture` as a read-only IPC probe."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 280: Nested smoke treats `gesture` as a read-only IPC probe."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_281_compat_unique_pin_wayland() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 281: Nested smoke treats `wayland` as a read-only IPC probe."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 281: Nested smoke treats `wayland` as a read-only IPC probe."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_282_compat_unique_pin_recording() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 282: Nested smoke treats `recording` as a read-only IPC probe."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 282: Nested smoke treats `recording` as a read-only IPC probe."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_283_compat_unique_pin_capture() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 283: Nested smoke treats `capture` as a read-only IPC probe."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 283: Nested smoke treats `capture` as a read-only IPC probe."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_284_compat_unique_pin_waterlily() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 284: Nested smoke treats `waterlily` as a read-only IPC probe."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 284: Nested smoke treats `waterlily` as a read-only IPC probe."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_285_compat_unique_pin_audio() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 285: Nested smoke treats `audio` as a read-only IPC probe."));
+        assert!(
+            COMPAT.contains(
+                "evolve9h wave 285: Nested smoke treats `audio` as a read-only IPC probe."
+            )
+        );
     }
 
     #[test]
     fn evolve9h_wave_286_compat_unique_pin_wallpaper() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 286: Nested smoke treats `wallpaper` as a read-only IPC probe."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 286: Nested smoke treats `wallpaper` as a read-only IPC probe."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_287_compat_unique_pin_bluetooth() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 287: Nested smoke treats `bluetooth` as a read-only IPC probe."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 287: Nested smoke treats `bluetooth` as a read-only IPC probe."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_288_compat_unique_pin_resources() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 288: Nested smoke treats `resources` as a read-only IPC probe."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 288: Nested smoke treats `resources` as a read-only IPC probe."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_289_compat_unique_pin_connectivity() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 289: Nested smoke treats `connectivity` as a read-only IPC probe."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 289: Nested smoke treats `connectivity` as a read-only IPC probe."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_290_compat_unique_pin_power() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 290: Nested smoke treats `power` as a read-only IPC probe."));
+        assert!(
+            COMPAT.contains(
+                "evolve9h wave 290: Nested smoke treats `power` as a read-only IPC probe."
+            )
+        );
     }
 
     #[test]
     fn evolve9h_wave_291_compat_unique_pin_media() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 291: Nested smoke treats `media` as a read-only IPC probe."));
+        assert!(
+            COMPAT.contains(
+                "evolve9h wave 291: Nested smoke treats `media` as a read-only IPC probe."
+            )
+        );
     }
 
     #[test]
     fn evolve9h_wave_292_compat_unique_pin_clipboard() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 292: Nested smoke treats `clipboard` as a read-only IPC probe."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 292: Nested smoke treats `clipboard` as a read-only IPC probe."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_293_compat_unique_pin_idle() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 293: Nested smoke treats `idle` as a read-only IPC probe."));
+        assert!(
+            COMPAT.contains(
+                "evolve9h wave 293: Nested smoke treats `idle` as a read-only IPC probe."
+            )
+        );
     }
 
     #[test]
     fn evolve9h_wave_294_compat_unique_pin_notifications() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 294: Nested smoke treats `notifications` as a read-only IPC probe."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 294: Nested smoke treats `notifications` as a read-only IPC probe."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_295_compat_unique_pin_dnd() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 295: Nested smoke treats `dnd` as a read-only IPC probe."));
+        assert!(
+            COMPAT
+                .contains("evolve9h wave 295: Nested smoke treats `dnd` as a read-only IPC probe.")
+        );
     }
 
     #[test]
     fn evolve9h_wave_296_compat_unique_pin_system_ui() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 296: Nested smoke treats `system_ui` as a read-only IPC probe."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 296: Nested smoke treats `system_ui` as a read-only IPC probe."
+        ));
     }
 
     #[test]
@@ -21622,37 +22801,49 @@ mod tests {
     #[test]
     fn evolve9h_wave_298_compat_unique_pin_metrics() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 298: Upgrade notes keep `metrics` beside occupancy on the health page."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 298: Upgrade notes keep `metrics` beside occupancy on the health page."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_299_compat_unique_pin_ipc_caps() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 299: Upgrade notes keep `ipc_caps` beside occupancy on the health page."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 299: Upgrade notes keep `ipc_caps` beside occupancy on the health page."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_300_compat_unique_pin_config() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 300: Upgrade notes keep `config` beside occupancy on the health page."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 300: Upgrade notes keep `config` beside occupancy on the health page."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_301_compat_unique_pin_status() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 301: Upgrade notes keep `status` beside occupancy on the health page."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 301: Upgrade notes keep `status` beside occupancy on the health page."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_302_compat_unique_pin_tree() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 302: Upgrade notes keep `tree` beside occupancy on the health page."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 302: Upgrade notes keep `tree` beside occupancy on the health page."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_303_compat_unique_pin_window() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 303: Upgrade notes keep `window` beside occupancy on the health page."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 303: Upgrade notes keep `window` beside occupancy on the health page."
+        ));
     }
 
     #[test]
@@ -21664,19 +22855,25 @@ mod tests {
     #[test]
     fn evolve9h_wave_305_compat_unique_pin_tearing() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 305: Upgrade notes keep `tearing` beside occupancy on the health page."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 305: Upgrade notes keep `tearing` beside occupancy on the health page."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_306_compat_unique_pin_xwayland() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 306: Upgrade notes keep `xwayland` beside occupancy on the health page."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 306: Upgrade notes keep `xwayland` beside occupancy on the health page."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_307_compat_unique_pin_scrolling() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 307: Upgrade notes keep `scrolling` beside occupancy on the health page."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 307: Upgrade notes keep `scrolling` beside occupancy on the health page."
+        ));
     }
 
     #[test]
@@ -21688,67 +22885,89 @@ mod tests {
     #[test]
     fn evolve9h_wave_309_compat_unique_pin_magnifier() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 309: Upgrade notes keep `magnifier` beside occupancy on the health page."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 309: Upgrade notes keep `magnifier` beside occupancy on the health page."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_310_compat_unique_pin_peek() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 310: Upgrade notes keep `peek` beside occupancy on the health page."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 310: Upgrade notes keep `peek` beside occupancy on the health page."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_311_compat_unique_pin_gesture() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 311: Upgrade notes keep `gesture` beside occupancy on the health page."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 311: Upgrade notes keep `gesture` beside occupancy on the health page."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_312_compat_unique_pin_wayland() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 312: Upgrade notes keep `wayland` beside occupancy on the health page."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 312: Upgrade notes keep `wayland` beside occupancy on the health page."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_313_compat_unique_pin_recording() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 313: Upgrade notes keep `recording` beside occupancy on the health page."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 313: Upgrade notes keep `recording` beside occupancy on the health page."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_314_compat_unique_pin_capture() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 314: Upgrade notes keep `capture` beside occupancy on the health page."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 314: Upgrade notes keep `capture` beside occupancy on the health page."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_315_compat_unique_pin_waterlily() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 315: Upgrade notes keep `waterlily` beside occupancy on the health page."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 315: Upgrade notes keep `waterlily` beside occupancy on the health page."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_316_compat_unique_pin_audio() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 316: Upgrade notes keep `audio` beside occupancy on the health page."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 316: Upgrade notes keep `audio` beside occupancy on the health page."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_317_compat_unique_pin_wallpaper() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 317: Upgrade notes keep `wallpaper` beside occupancy on the health page."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 317: Upgrade notes keep `wallpaper` beside occupancy on the health page."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_318_compat_unique_pin_bluetooth() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 318: Upgrade notes keep `bluetooth` beside occupancy on the health page."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 318: Upgrade notes keep `bluetooth` beside occupancy on the health page."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_319_compat_unique_pin_resources() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 319: Upgrade notes keep `resources` beside occupancy on the health page."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 319: Upgrade notes keep `resources` beside occupancy on the health page."
+        ));
     }
 
     #[test]
@@ -21760,25 +22979,33 @@ mod tests {
     #[test]
     fn evolve9h_wave_321_compat_unique_pin_power() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 321: Upgrade notes keep `power` beside occupancy on the health page."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 321: Upgrade notes keep `power` beside occupancy on the health page."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_322_compat_unique_pin_media() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 322: Upgrade notes keep `media` beside occupancy on the health page."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 322: Upgrade notes keep `media` beside occupancy on the health page."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_323_compat_unique_pin_clipboard() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 323: Upgrade notes keep `clipboard` beside occupancy on the health page."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 323: Upgrade notes keep `clipboard` beside occupancy on the health page."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_324_compat_unique_pin_idle() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 324: Upgrade notes keep `idle` beside occupancy on the health page."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 324: Upgrade notes keep `idle` beside occupancy on the health page."
+        ));
     }
 
     #[test]
@@ -21790,13 +23017,17 @@ mod tests {
     #[test]
     fn evolve9h_wave_326_compat_unique_pin_dnd() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 326: Upgrade notes keep `dnd` beside occupancy on the health page."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 326: Upgrade notes keep `dnd` beside occupancy on the health page."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_327_compat_unique_pin_system_ui() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 327: Upgrade notes keep `system_ui` beside occupancy on the health page."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 327: Upgrade notes keep `system_ui` beside occupancy on the health page."
+        ));
     }
 
     #[test]
@@ -21808,37 +23039,49 @@ mod tests {
     #[test]
     fn evolve9h_wave_329_compat_unique_pin_metrics() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 329: Health compact `metrics` is diagnosable through `jwm-tool health`."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 329: Health compact `metrics` is diagnosable through `jwm-tool health`."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_330_compat_unique_pin_ipc_caps() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 330: Health compact `ipc_caps` is diagnosable through `jwm-tool health`."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 330: Health compact `ipc_caps` is diagnosable through `jwm-tool health`."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_331_compat_unique_pin_config() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 331: Health compact `config` is diagnosable through `jwm-tool health`."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 331: Health compact `config` is diagnosable through `jwm-tool health`."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_332_compat_unique_pin_status() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 332: Health compact `status` is diagnosable through `jwm-tool health`."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 332: Health compact `status` is diagnosable through `jwm-tool health`."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_333_compat_unique_pin_tree() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 333: Health compact `tree` is diagnosable through `jwm-tool health`."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 333: Health compact `tree` is diagnosable through `jwm-tool health`."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_334_compat_unique_pin_window() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 334: Health compact `window` is diagnosable through `jwm-tool health`."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 334: Health compact `window` is diagnosable through `jwm-tool health`."
+        ));
     }
 
     #[test]
@@ -21850,13 +23093,17 @@ mod tests {
     #[test]
     fn evolve9h_wave_336_compat_unique_pin_tearing() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 336: Health compact `tearing` is diagnosable through `jwm-tool health`."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 336: Health compact `tearing` is diagnosable through `jwm-tool health`."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_337_compat_unique_pin_xwayland() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 337: Health compact `xwayland` is diagnosable through `jwm-tool health`."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 337: Health compact `xwayland` is diagnosable through `jwm-tool health`."
+        ));
     }
 
     #[test]
@@ -21880,19 +23127,25 @@ mod tests {
     #[test]
     fn evolve9h_wave_341_compat_unique_pin_peek() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 341: Health compact `peek` is diagnosable through `jwm-tool health`."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 341: Health compact `peek` is diagnosable through `jwm-tool health`."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_342_compat_unique_pin_gesture() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 342: Health compact `gesture` is diagnosable through `jwm-tool health`."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 342: Health compact `gesture` is diagnosable through `jwm-tool health`."
+        ));
     }
 
     #[test]
     fn evolve9h_wave_343_compat_unique_pin_wayland() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 343: Health compact `wayland` is diagnosable through `jwm-tool health`."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 343: Health compact `wayland` is diagnosable through `jwm-tool health`."
+        ));
     }
 
     #[test]
@@ -21904,7 +23157,9 @@ mod tests {
     #[test]
     fn evolve9h_wave_345_compat_unique_pin_capture() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 345: Health compact `capture` is diagnosable through `jwm-tool health`."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 345: Health compact `capture` is diagnosable through `jwm-tool health`."
+        ));
     }
 
     #[test]
@@ -21916,7 +23171,9 @@ mod tests {
     #[test]
     fn evolve9h_wave_347_compat_unique_pin_audio() {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
-        assert!(COMPAT.contains("evolve9h wave 347: Health compact `audio` is diagnosable through `jwm-tool health`."));
+        assert!(COMPAT.contains(
+            "evolve9h wave 347: Health compact `audio` is diagnosable through `jwm-tool health`."
+        ));
     }
 
     #[test]
@@ -21930,5 +23187,4 @@ mod tests {
         const COMPAT: &str = include_str!("../../docs/compatibility.md");
         assert!(COMPAT.contains("evolve9h wave 349: Health compact `bluetooth` is diagnosable through `jwm-tool health`."));
     }
-
 }
