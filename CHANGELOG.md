@@ -25,8 +25,10 @@ monorepo use independent Semantic Versions.
   chips wrap inside a narrow card. Volume and brightness past 100% keep a
   full bar but in a cooler over-limit fill. The debug HUD relayouts its
   chip and meter into the painted island, and a too-narrow OSD drops the
-  slider instead of inverting it. Tags-overview numbers clip before the
-  urgency badge.
+  slider instead of inverting it. The layout-picker film strip stays inside
+  a nested or tiny output instead of honouring a 320px floor, and OSD labels
+  clip to the painted card. Tags-overview numbers clip before the urgency
+  badge.
 - X11 sessions without a compositor show the configured wallpaper on the root
   window (per-output fill/fit/stretch/center, `_XROOTPMAP_ID`) instead of a
   solid black desktop, and native window borders follow `appearance.ui_theme`

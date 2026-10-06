@@ -251,7 +251,16 @@ impl HudLayout {
             meter_track,
             meter_fill,
             labels: (x + pad, body_y),
-            values: (x + pad + labels.0.min(content_w) + gutter, body_y),
+            values: {
+                let label_w = labels.0.min(content_w);
+                let value_w = values.0.min(content_w);
+                let x_val = if label_w + gutter + value_w > content_w {
+                    x + pad + (content_w - value_w).max(0.0)
+                } else {
+                    x + pad + label_w + gutter
+                };
+                (x_val, body_y)
+            },
         }
     }
 

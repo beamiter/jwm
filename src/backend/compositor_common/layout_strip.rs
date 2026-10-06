@@ -80,6 +80,7 @@ const COUNTDOWN_H: f32 = 3.0;
 /// Cell width bounds. The lower bound keeps a thumbnail readable on a small
 /// screen with many layouts; the upper one keeps a handful of layouts on a
 /// large screen from turning into posters.
+#[allow(dead_code)]
 const CELL_W_MIN: f32 = 54.0;
 const CELL_W_MAX: f32 = 148.0;
 /// Exposed frame aspect: a 16:10 screen.
@@ -114,22 +115,30 @@ pub fn strip_geometry(viewport: Rect, count: usize) -> StripGeometry {
     let count = count.max(1);
     let n = count as f32;
 
-    // Cells shrink until the whole strip fits the screen; below the minimum
-    // width the panel is simply allowed to reach the screen edges, which only
-    // happens on a screen far narrower than any the picker is aimed at.
-    let outer = (screen_w * 0.94).min(1560.0).max(320.0);
-    let min_cell = ((screen_w - 2.0 * PAD - CELL_GAP * (n - 1.0)).max(24.0) / n).min(CELL_W_MIN);
-    let available = (outer - 2.0 * PAD - CELL_GAP * (n - 1.0)).max(min_cell * n);
-    let cell_w = (available / n).clamp(min_cell, CELL_W_MAX);
+    // Cells shrink until the whole strip fits the screen. Never force a
+    // 320px floor on a narrower output — that is how the panel used to
+    // run off the right of a 280px nested viewport.
+    let outer = (screen_w * 0.94).min(1560.0).max(screen_w.min(320.0));
+    let inner = (outer - 2.0 * PAD - CELL_GAP * (n - 1.0)).max(0.0);
+    let fitted = (inner / n).max(1.0);
+    let cell_w = fitted.min(CELL_W_MAX);
     let margin = film_margin(cell_w);
-    let frame_w = cell_w - 2.0 * margin;
-    let frame_h = (frame_w * FRAME_ASPECT).round();
-    let cell_h = frame_h + 2.0 * margin;
+    let mut frame_w = (cell_w - 2.0 * margin).max(1.0);
+    let mut frame_h = (frame_w * FRAME_ASPECT).round().max(1.0);
+    let mut cell_h = frame_h + 2.0 * margin;
+
+    let bands_h =
+        2.0 * PAD + TITLE_H + GAP_Y + GAP_Y + CAPTION_H + COUNTDOWN_H + GAP_Y + HINT_H;
+    let max_cell_h = (screen_h - bands_h).max(1.0);
+    if cell_h > max_cell_h {
+        cell_h = max_cell_h;
+        frame_h = (cell_h - 2.0 * margin).max(1.0);
+        frame_w = (frame_h / FRAME_ASPECT).min(frame_w).max(1.0);
+    }
 
     let strip_w = n * cell_w + (n - 1.0) * CELL_GAP;
-    let panel_w = strip_w + 2.0 * PAD;
-    let panel_h =
-        2.0 * PAD + TITLE_H + GAP_Y + cell_h + GAP_Y + CAPTION_H + COUNTDOWN_H + GAP_Y + HINT_H;
+    let panel_w = (strip_w + 2.0 * PAD).min(screen_w);
+    let panel_h = (bands_h + cell_h).min(screen_h);
 
     let panel_x = viewport_x + ((screen_w - panel_w) * 0.5).round();
     // Slightly above centre: the strip is about the desktop behind it, and the
@@ -329,6 +338,7 @@ mod tests {
             (3840.0, 2160.0),
             (800.0, 480.0),
             (320.0, 200.0),
+            (280.0, 180.0),
         ] {
             let g = strip_geometry([0.0, 0.0, w, h], 13);
             assert!(g.panel[0] >= 0.0, "{w}x{h}: panel starts off-screen");

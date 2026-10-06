@@ -237,6 +237,26 @@ pub(crate) fn slider_bar(card: [f32; 4], fill: f32) -> Option<([f32; 4], [f32; 4
     ))
 }
 
+/// Where the icon+label texture sits inside a painted OSD card. The texture
+/// is clipped to the card's inner width so a media title cannot run off a
+/// contained island.
+#[must_use]
+pub(crate) fn label_rect(card: [f32; 4], text_w: f32, text_h: f32) -> [f32; 4] {
+    let [x, y, w, h] = card;
+    let max_w = (w - 2.0 * OSD_PAD).max(0.0);
+    let tw = if text_w.is_finite() {
+        text_w.min(max_w).max(0.0)
+    } else {
+        0.0
+    };
+    let th = if text_h.is_finite() {
+        text_h.min(h.max(0.0)).max(0.0)
+    } else {
+        0.0
+    };
+    [x + OSD_PAD, y + (h - th) * 0.5, tw, th]
+}
+
 /// Icon for a power-profile OSD card. Kept byte-identical to the Hub row's
 /// `profile_icon` (pinned below) so the Hub row and this card cannot pick
 /// different glyphs for the same name.
@@ -754,5 +774,8 @@ mod tests {
         assert!(track[0] + track[2] <= 10.0 + SLIDER_CARD_WIDTH - OSD_PAD + 0.01);
         assert!(slider_bar([0.0, 0.0, 50.0, OSD_CARD_HEIGHT], 1.0).is_none());
         assert!(slider_bar([0.0, 0.0, 200.0, OSD_CARD_HEIGHT], 0.0).is_some());
+        let [lx, _, lw, _] = label_rect([0.0, 0.0, 120.0, OSD_CARD_HEIGHT], 400.0, 20.0);
+        assert_eq!(lx, OSD_PAD);
+        assert!(lw <= 120.0 - 2.0 * OSD_PAD + 0.01);
     }
 }

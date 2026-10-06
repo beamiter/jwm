@@ -46,6 +46,8 @@
 | 67 | 音量/亮度 >100% 进度条用 FILL_OVER | 满条不再看起来像刚好 100 |
 | 68 | HUD chrome 跟 painted 卡重排 | `HudLayout::placed` |
 | 69 | 窄 OSD 丢掉滑条，避免负宽 | `slider_bar` |
+| 70 | layout 胶片条夹进视口，不再 320 地板撑破窄屏 | `strip_geometry` outer |
+| 71 | OSD 标签裁进 painted 卡 | `label_rect` |
 
 **未做**：100 轮逐条独立 PR。toast 点击保持闭区间，与 X11 overlay shape 对齐。
 

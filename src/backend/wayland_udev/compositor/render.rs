@@ -8234,7 +8234,6 @@ impl WaylandCompositor {
         let ui = ui_theme::palette();
         self.ensure_glass_backdrop(gl, ui, projection, scene_linear);
         let target_h = crate::backend::compositor_common::osd::OSD_CARD_HEIGHT;
-        let pad = crate::backend::compositor_common::osd::OSD_PAD;
         let accent = self.border_gradient_color_a;
 
         let dock = self.island_dock();
@@ -8318,13 +8317,12 @@ impl WaylandCompositor {
             gl.Uniform1i(text_tex, 0);
             gl.Uniform1f(text_opacity, content_a);
             gl.ActiveTexture(ffi::TEXTURE0);
-            gl.Uniform4f(
-                text_rect,
-                x + pad,
-                y + (ch - text_h as f32) / 2.0,
+            let [lx, ly, lw, lh] = crate::backend::compositor_common::osd::label_rect(
+                [x, y, cw, ch],
                 text_w as f32,
                 text_h as f32,
             );
+            gl.Uniform4f(text_rect, lx, ly, lw, lh);
             gl.BindTexture(ffi::TEXTURE_2D, tex);
             self.draw_arrays(gl, ffi::TRIANGLE_STRIP, 0, 4);
 

@@ -3840,7 +3840,6 @@ impl<C: CompositorConnection> Compositor<C> {
         // The very target `OsdSlot::spring_animating` derives, so the pump
         // query and this advance can never drift apart.
         let target_h = crate::backend::compositor_common::osd::OSD_CARD_HEIGHT;
-        let pad = crate::backend::compositor_common::osd::OSD_PAD;
         let accent = self.border_gradient_color_a;
 
         let dock = self.island_dock();
@@ -3911,12 +3910,17 @@ impl<C: CompositorConnection> Compositor<C> {
             self.gl
                 .uniform_1_f32(self.hud_text_uniforms.opacity.as_ref(), content_a);
             self.gl.active_texture(glow::TEXTURE0);
-            self.gl.uniform_4_f32(
-                self.hud_text_uniforms.rect.as_ref(),
-                x + pad,
-                y + (ch - text_h as f32) / 2.0,
+            let [lx, ly, lw, lh] = crate::backend::compositor_common::osd::label_rect(
+                [x, y, cw, ch],
                 text_w as f32,
                 text_h as f32,
+            );
+            self.gl.uniform_4_f32(
+                self.hud_text_uniforms.rect.as_ref(),
+                lx,
+                ly,
+                lw,
+                lh,
             );
             self.gl.bind_texture(glow::TEXTURE_2D, Some(tex));
             self.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
