@@ -301,8 +301,12 @@ impl HudLayout {
         meter: f32,
     ) -> Self {
         let measured = Self::new(ui, (0.0, 0.0), title, chip, labels, values, meter);
-        let [x, y, ..] = dock.contained_rect(measured.card.2, measured.card.3, 0.0);
-        Self::new(ui, (x, y), title, chip, labels, values, meter)
+        let [x, y, w, h] = dock.contained_rect(measured.card.2, measured.card.3, 0.0);
+        if (w - measured.card.2).abs() > 0.01 || (h - measured.card.3).abs() > 0.01 {
+            Self::placed(ui, (x, y, w, h), title, chip, labels, values, meter)
+        } else {
+            Self::new(ui, (x, y), title, chip, labels, values, meter)
+        }
     }
 
     /// Painted quad for HUD text slot `0..=3` (title, chip, labels, values),
@@ -457,6 +461,14 @@ mod tests {
         assert_eq!(card.1, dock.top_y);
         assert!(card.0 >= 0.0);
         assert!(card.0 + card.2 <= 1600.0 + 0.01);
+
+        let nested = IslandDock::for_bar(Some([0.0, 0.0, 200.0, 24.0]), [0.0, 0.0, 200.0, 160.0]);
+        let fitted =
+            HudLayout::docked(&MATERIAL, &nested, sizes.0, sizes.1, sizes.2, sizes.3, 1.0).card;
+        assert!(fitted.2 <= 200.0 + 0.01);
+        assert!(fitted.3 <= 160.0 + 0.01);
+        assert!(fitted.0 >= 0.0);
+        assert!(fitted.1 >= 0.0);
     }
 
     #[test]

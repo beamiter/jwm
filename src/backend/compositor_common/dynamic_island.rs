@@ -26,6 +26,13 @@ pub(crate) const DOCK_GAP: f32 = 0.0;
 
 /// Fallback distance from the top of the screen when no bar is on screen.
 const NO_BAR_TOP_MARGIN: f32 = 12.0;
+fn no_bar_margin(viewport_h: f32) -> f32 {
+    if viewport_h.is_finite() && viewport_h > 0.0 && viewport_h < 8.0 * NO_BAR_TOP_MARGIN {
+        NO_BAR_TOP_MARGIN.min(viewport_h * 0.04).max(0.0)
+    } else {
+        NO_BAR_TOP_MARGIN
+    }
+}
 
 /// Width the panel springs open from.
 ///
@@ -106,7 +113,7 @@ impl IslandDock {
                             y + h + DOCK_GAP,
                             viewport_y,
                             viewport_y + viewport_h,
-                            viewport_y + NO_BAR_TOP_MARGIN,
+                            viewport_y + no_bar_margin(viewport_h),
                         )
                     },
                     merges_with_bar: true,
@@ -116,7 +123,7 @@ impl IslandDock {
             }
             _ => Self {
                 centre_x: viewport_x + viewport_w * 0.5,
-                top_y: (viewport_y + NO_BAR_TOP_MARGIN).min(viewport_y + viewport_h),
+                top_y: (viewport_y + no_bar_margin(viewport_h)).min(viewport_y + viewport_h),
                 merges_with_bar: false,
                 grows_up: false,
                 viewport,
@@ -630,6 +637,10 @@ mod tests {
             assert_eq!(dock.centre_x, 800.0);
             assert_eq!(dock.top_y, NO_BAR_TOP_MARGIN);
         }
+        let tiny = IslandDock::for_bar(None, [0.0, 0.0, 80.0, 40.0]);
+        assert!(tiny.top_y < NO_BAR_TOP_MARGIN);
+        assert!(tiny.top_y >= 0.0);
+        assert!(tiny.top_y <= 40.0);
     }
 
     #[test]

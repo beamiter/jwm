@@ -295,14 +295,22 @@ pub(crate) fn preview_rect(
     let height = (source_height * fit * scale)
         .max(1.0)
         .min(output_bounds.height.max(1.0));
+    let gap = if output_bounds.height.is_finite()
+        && output_bounds.height > 0.0
+        && output_bounds.height < 8.0 * PREVIEW_GAP
+    {
+        PREVIEW_GAP.min(output_bounds.height * 0.04).max(2.0)
+    } else {
+        PREVIEW_GAP
+    };
     let center_x = anchor.x + anchor.width * 0.5;
-    let below_y = anchor.y + anchor.height + PREVIEW_GAP;
+    let below_y = anchor.y + anchor.height + gap;
     let output_right = output_bounds.x + output_bounds.width;
     let output_bottom = output_bounds.y + output_bounds.height;
     let y = if below_y + height <= output_bottom {
         below_y
     } else {
-        (anchor.y - PREVIEW_GAP - height).max(output_bounds.y)
+        (anchor.y - gap - height).max(output_bounds.y)
     };
     let max_x = (output_right - width).max(output_bounds.x);
     let max_y = (output_bottom - height).max(output_bounds.y);
@@ -435,6 +443,17 @@ mod tests {
         )
         .unwrap();
         assert!(bottom.y < 1040.0);
+
+        let nested = preview_rect(
+            CompositorRect::new(10.0, 8.0, 20.0, 16.0),
+            1600.0,
+            900.0,
+            CompositorRect::new(0.0, 0.0, 80.0, 48.0),
+            1.0,
+        )
+        .unwrap();
+        assert!(nested.x >= 0.0 && nested.x + nested.width <= 80.0 + 1e-3);
+        assert!(nested.y >= 0.0 && nested.y + nested.height <= 48.0 + 1e-3);
     }
 
     #[test]

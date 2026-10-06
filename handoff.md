@@ -77,6 +77,9 @@
 | 98 | 标签条 tooltip 高度夹进屏幕 | `tooltip_rect` |
 | 99 | 矮 HUD 内边距随绘制卡缩小 | `HudLayout::placed` |
 | 100 | 壁纸侧预览 gap/边距/最小尺寸随窄视口缩小 | `side_preview_frame` |
+| 101 | HUD docked 目标跟 contained 卡走 | `HudLayout::docked` |
+| 102 | 无栏时顶距随矮输出缩小 | `no_bar_margin` |
+| 103 | 最小化预览 gap 随矮输出缩小 | `genie::preview_rect` |
 
 **未做**：100 轮逐条独立 PR。toast 点击保持闭区间，与 X11 overlay shape 对齐。
 
