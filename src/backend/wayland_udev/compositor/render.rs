@@ -8018,7 +8018,7 @@ impl WaylandCompositor {
                 let target_w = content_w + pad_left + pad;
                 let mut target_h = 2.0 * pad + title_h;
                 if body_h > 0.0 {
-                    target_h += 6.0 + body_h;
+                    target_h += toast::body_gap(self.screen_h as f32) + body_h;
                 }
                 if button_count > 0 {
                     target_h += toast::action_row_extra_h(button_widths, content_w);
@@ -8033,12 +8033,18 @@ impl WaylandCompositor {
                 let [x, y, ..] = dock.contained_rect(card_w, card_h, top);
                 // The chip row hangs under the text block, aligned with it,
                 // wrapping to the placed card's inner width.
-                let text_bottom = pad + title_h + if body_h > 0.0 { 6.0 + body_h } else { 0.0 };
+                let text_bottom = pad
+                    + title_h
+                    + if body_h > 0.0 {
+                        toast::body_gap(self.screen_h as f32) + body_h
+                    } else {
+                        0.0
+                    };
                 let inner_w = (card_w - pad_left - pad).max(0.0);
                 let button_rects = toast::action_row_layout(
                     button_widths,
                     x + pad_left,
-                    y + text_bottom + toast::ACTION_ROW_TOP_GAP,
+                    y + text_bottom + toast::action_row_top_gap(content_w),
                     inner_w,
                 );
                 // Only the card actually touching the bar squares off; the

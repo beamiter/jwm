@@ -519,9 +519,14 @@ pub fn place_avoiding(
 
     let min_y = scy + SCREEN_MARGIN;
     let max_y = (scy + sch - SCREEN_MARGIN - h).max(min_y);
-    let below = sy + sh + SELECTION_GAP;
-    let above = sy - SELECTION_GAP - h;
-    let inside = (sy + sh - h - SELECTION_GAP).clamp(min_y, max_y);
+    let sel_gap = if sh.is_finite() && sh > 0.0 && sh < 8.0 * SELECTION_GAP {
+        SELECTION_GAP.min(sh * 0.2).max(2.0)
+    } else {
+        SELECTION_GAP
+    };
+    let below = sy + sh + sel_gap;
+    let above = sy - sel_gap - h;
+    let inside = (sy + sh - h - sel_gap).clamp(min_y, max_y);
     let candidates = [below, above, inside];
     let y = candidates
         .into_iter()
@@ -1860,5 +1865,19 @@ mod tests {
         assert!(label_font_size(MIN_BUTTON_SIZE) >= 7.0);
         assert_eq!(pill_radius(30.0), 15.0);
         assert_eq!(pill_radius(f32::NAN), 0.0);
+    }
+
+    #[test]
+    fn a_tiny_selection_pulls_the_toolbar_closer() {
+        let buttons = row(3);
+        let extent = track_extent(&buttons, BUTTON_SIZE);
+        let large = place([100.0, 100.0, 400.0, 300.0], SCREEN, extent);
+        let tiny = place([100.0, 100.0, 80.0, 40.0], SCREEN, extent);
+        let large_gap = large[1] - 400.0;
+        let tiny_gap = tiny[1] - 140.0;
+        assert!(tiny_gap < large_gap);
+        assert!(tiny_gap < SELECTION_GAP);
+        assert!(tiny_gap >= 2.0);
+        assert_eq!(large_gap, SELECTION_GAP);
     }
 }

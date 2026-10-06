@@ -60,6 +60,12 @@ monorepo use independent Semantic Versions.
   drop below 15px buttons when three rows still overflow; tab tooltips
   tighten their gap on a short screen. REC and MIC pills stack with a
   shorter gap on a short output; toast action chips shrink on a narrow card.
+  Toast title/body and action-row gaps shrink on a cramped output; HUD
+  FPS-chip chrome and label insets follow the pill; a short OSD thins its
+  slider; layout/tags cell gaps and the film countdown shrink on a nested
+  viewport; a short system-UI list keeps a thumb that fits its track and a
+  tiny query field tightens its lead; tab cells close their gap on a short
+  strip; the screenshot toolbar sits closer to a tiny selection.
 - X11 sessions without a compositor show the configured wallpaper on the root
   window (per-output fill/fit/stretch/center, `_XROOTPMAP_ID`) instead of a
   solid black desktop, and native window borders follow `appearance.ui_theme`

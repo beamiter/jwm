@@ -56,6 +56,8 @@ pub(crate) const ACTION_BUTTON_PAD_X: f32 = 10.0;
 pub(crate) const ACTION_BUTTON_GAP: f32 = 8.0;
 /// Gap between the text block and the action row.
 pub(crate) const ACTION_ROW_TOP_GAP: f32 = 10.0;
+/// Gap between title and body inside a toast card.
+pub(crate) const BODY_GAP: f32 = 6.0;
 /// Extra card height when an action row is present.
 pub(crate) const ACTIONS_ROW_EXTRA_H: f32 = ACTION_ROW_TOP_GAP + ACTION_BUTTON_H;
 
@@ -87,6 +89,24 @@ pub(crate) fn card_pad(width: f32) -> (f32, f32) {
         CARD_PAD_LEFT
     };
     (pad, pad_left)
+}
+
+#[must_use]
+pub(crate) fn body_gap(height: f32) -> f32 {
+    if height.is_finite() && height > 0.0 && height < 12.0 * BODY_GAP {
+        BODY_GAP.min(height * 0.05).max(2.0)
+    } else {
+        BODY_GAP
+    }
+}
+
+#[must_use]
+pub(crate) fn action_row_top_gap(width: f32) -> f32 {
+    if width.is_finite() && width > 0.0 && width < 8.0 * ACTION_ROW_TOP_GAP {
+        ACTION_ROW_TOP_GAP.min(width * 0.04).max(3.0)
+    } else {
+        ACTION_ROW_TOP_GAP
+    }
 }
 
 /// Gap between stacked island cards. Shrinks when the remaining travel from
@@ -594,7 +614,7 @@ pub(crate) fn action_row_extra_h(label_widths: &[f32], max_width: f32) -> f32 {
         .iter()
         .map(|r| r[1] + r[3])
         .fold(0.0_f32, f32::max);
-    ACTION_ROW_TOP_GAP + bottom
+    action_row_top_gap(max_width) + bottom
 }
 
 #[derive(Debug, Default)]
@@ -1699,5 +1719,17 @@ mod tests {
         assert_ne!(urgency_accent(2), urgency_accent(1));
         assert_ne!(urgency_accent(0), urgency_accent(1));
         assert_ne!(urgency_accent(2), urgency_accent(0));
+    }
+
+    #[test]
+    fn body_and_action_gaps_shrink_on_a_cramped_card() {
+        assert_eq!(body_gap(1080.0), BODY_GAP);
+        assert!(body_gap(40.0) < BODY_GAP);
+        assert!(body_gap(40.0) >= 2.0);
+        assert_eq!(action_row_top_gap(400.0), ACTION_ROW_TOP_GAP);
+        assert!(action_row_top_gap(70.0) < ACTION_ROW_TOP_GAP);
+        assert!(action_row_top_gap(70.0) >= 2.0);
+        assert_eq!(body_gap(f32::NAN), BODY_GAP);
+        assert_eq!(action_row_top_gap(f32::INFINITY), ACTION_ROW_TOP_GAP);
     }
 }

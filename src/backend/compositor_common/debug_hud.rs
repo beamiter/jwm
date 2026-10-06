@@ -135,11 +135,7 @@ impl HudLayout {
     ) -> Self {
         let (pad, gap, gutter, meter_h) = (ui.pad, ui.gap, ui.gutter, ui.meter_h);
         let (x, y) = origin;
-        let (chip_pill_w, chip_pill_h) = if chip.0 > 0.0 && chip.1 > 0.0 {
-            (chip.0 + 18.0, chip.1 + 8.0)
-        } else {
-            (0.0, 0.0)
-        };
+        let (chip_pill_w, chip_pill_h) = chip_pill_chrome(chip);
         let header_h = title.1.max(chip_pill_h);
         let header_w = title.0
             + if chip_pill_w > 0.0 {
@@ -169,7 +165,7 @@ impl HudLayout {
             chip_pill_w,
             chip_pill_h,
         );
-        let chip_text = (chip_pill.0 + 9.0, chip_pill.1 + 4.0);
+        let chip_text = chip_text_origin(chip_pill);
         let meter_y = y + pad + header_h + gap;
         let meter_track = (x + pad, meter_y, content_w, meter_h);
         // A rounded fill narrower than its own diameter renders as a sliver;
@@ -218,12 +214,8 @@ impl HudLayout {
             pad
         };
         let content_w = (w - 2.0 * pad).max(0.0);
-        let mut chip_pill_w = if chip.0 > 0.0 && chip.1 > 0.0 {
-            chip.0 + 18.0
-        } else {
-            0.0
-        };
-        let mut chip_pill_h = if chip_pill_w > 0.0 { chip.1 + 8.0 } else { 0.0 };
+        let mut chip_pill_w = chip_pill_chrome(chip).0;
+        let mut chip_pill_h = chip_pill_chrome(chip).1;
         if chip_pill_w > 0.0 && title.0 + gap + chip_pill_w > content_w {
             chip_pill_w = 0.0;
             chip_pill_h = 0.0;
@@ -241,7 +233,7 @@ impl HudLayout {
             (0.0, 0.0, 0.0, 0.0)
         };
         let chip_text = if chip_pill.2 > 0.0 {
-            (chip_pill.0 + 9.0, chip_pill.1 + 4.0)
+            chip_text_origin(chip_pill)
         } else {
             (0.0, 0.0)
         };
@@ -329,6 +321,29 @@ impl HudLayout {
         }
         clip_quad([px, py, tex_w, tex_h], self.card)
     }
+}
+
+fn chip_pill_chrome(chip: (f32, f32)) -> (f32, f32) {
+    if chip.0 <= 0.0 || chip.1 <= 0.0 {
+        return (0.0, 0.0);
+    }
+    let pad_x = if chip.0 < 36.0 {
+        18.0_f32.min(chip.0 * 0.45).max(4.0)
+    } else {
+        18.0
+    };
+    let pad_y = if chip.1 < 16.0 {
+        8.0_f32.min(chip.1 * 0.4).max(2.0)
+    } else {
+        8.0
+    };
+    (chip.0 + pad_x, chip.1 + pad_y)
+}
+
+fn chip_text_origin(pill: Rect) -> (f32, f32) {
+    let inset_x = 9.0_f32.min(pill.2 * 0.2).max(2.0);
+    let inset_y = 4.0_f32.min(pill.3 * 0.25).max(1.0);
+    (pill.0 + inset_x.min(pill.2), pill.1 + inset_y.min(pill.3))
 }
 
 fn clip_quad(quad: [f32; 4], into: Rect) -> Option<[f32; 4]> {
@@ -551,5 +566,18 @@ mod tests {
             assert!(title[0] + title[2] <= 200.0 + 0.01);
             assert!(title[1] + title[3] <= 18.0 + 0.01);
         }
+    }
+
+    #[test]
+    fn chip_label_inset_shrinks_with_the_pill() {
+        let tiny = chip_text_origin((10.0, 10.0, 18.0, 8.0));
+        assert!(tiny.0 - 10.0 < 9.0);
+        assert!(tiny.1 - 10.0 < 4.0);
+        let wide = chip_text_origin((10.0, 10.0, 80.0, 22.0));
+        assert_eq!(wide, (19.0, 14.0));
+        let (pw, ph) = chip_pill_chrome((20.0, 10.0));
+        assert!(pw - 20.0 < 18.0);
+        assert!(ph - 10.0 < 8.0);
+        assert_eq!(chip_pill_chrome((40.0, 16.0)), (58.0, 24.0));
     }
 }

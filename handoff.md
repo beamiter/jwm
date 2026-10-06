@@ -89,6 +89,17 @@
 | 110 | 标签 tooltip gap/pad 随矮窄屏缩小 | `tooltip_gap` |
 | 111 | REC/MIC 叠放间距随矮屏缩小 | `CHIP_STACK_GAP` |
 | 112 | 窄 toast 操作钮高度随卡宽缩小 | `action_row_layout` |
+| 113 | 矮 toast 标题/正文间距随输出缩小 | `body_gap`；两边 render |
+| 114 | 窄 toast 操作行顶距随内容宽缩小 | `action_row_top_gap` |
+| 115 | HUD chip 标签 inset 随 pill 缩小 | `chip_text_origin` |
+| 116 | HUD chip 外壳随短纹理收紧 | `chip_pill_chrome` |
+| 117 | 矮 OSD 滑条变细 | `slider_bar` bar_h |
+| 118 | layout/tags 格间距随窄输出缩小 | `cell_gap` |
+| 119 | 胶片条 countdown 在极矮输出变细 | `countdown_h` |
+| 120 | 短列表滚动条拇指随轨道缩小 | `scroll_thumb` |
+| 121 | 矮查询框收紧 lead / 文字 inset | `query_field_h` / `QUERY_TEXT_LEAD` |
+| 122 | 矮标签条相邻格间距缩小 | `window_tabs::cell_gap` |
+| 123 | 小选区截图工具条贴得更近 | `SELECTION_GAP` |
 
 **未做**：100 轮逐条独立 PR。toast 点击保持闭区间，与 X11 overlay shape 对齐。
 

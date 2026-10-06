@@ -79,6 +79,13 @@ fn gap_y(screen_h: f32) -> f32 {
 }
 /// Gap between two cells.
 const CELL_GAP: f32 = 10.0;
+fn cell_gap(screen_w: f32) -> f32 {
+    if screen_w.is_finite() && screen_w > 0.0 && screen_w < 24.0 * CELL_GAP {
+        CELL_GAP.min(screen_w * 0.02).max(2.0)
+    } else {
+        CELL_GAP
+    }
+}
 /// Band at the top of a cell holding the tag number.
 const LABEL_H: f32 = 20.0;
 /// Inset between a cell's edge and its wireframe frame.
@@ -129,8 +136,9 @@ pub fn grid_geometry(viewport: Rect, count: usize, cols: u32) -> TagsGridGeometr
     // Never honour a 320px / CELL_W_MIN floor on a narrower nested output —
     // padding plus a min cell used to push the panel off the right edge.
     let pad = panel_pad(screen_w, screen_h);
+    let cg = cell_gap(screen_w);
     let outer = (screen_w * 0.94).min(1560.0).max(screen_w.min(320.0));
-    let inner = (outer - 2.0 * pad - CELL_GAP * (cols as f32 - 1.0)).max(0.0);
+    let inner = (outer - 2.0 * pad - cg * (cols as f32 - 1.0)).max(0.0);
     let fitted = (inner / cols as f32).max(1.0);
     let mut cell_w = fitted.min(CELL_W_MAX);
     let mut cell_h = cell_w / aspect;
@@ -142,22 +150,22 @@ pub fn grid_geometry(viewport: Rect, count: usize, cols: u32) -> TagsGridGeometr
     let hint_h = text_band(HINT_H, screen_h);
     let gap_y = gap_y(screen_h);
     let bands_h = 2.0 * pad + title_h + gap_y + caption_h + gap_y + hint_h;
-    let available_h = (screen_h - bands_h - CELL_GAP * (rows as f32 - 1.0) - gap_y).max(1.0);
+    let available_h = (screen_h - bands_h - cg * (rows as f32 - 1.0) - gap_y).max(1.0);
     let max_cell_h = (available_h / rows as f32).max(1.0);
     if cell_h > max_cell_h {
         cell_h = max_cell_h;
         cell_w = (cell_h * aspect).min(cell_w).max(1.0);
     }
 
-    let grid_w = cols as f32 * cell_w + (cols as f32 - 1.0) * CELL_GAP;
-    let mut grid_h = rows as f32 * cell_h + (rows as f32 - 1.0) * CELL_GAP;
+    let grid_w = cols as f32 * cell_w + (cols as f32 - 1.0) * cg;
+    let mut grid_h = rows as f32 * cell_h + (rows as f32 - 1.0) * cg;
     let panel_w = (grid_w + 2.0 * pad).min(screen_w);
     let panel_h = (bands_h + grid_h + gap_y).min(screen_h);
-    let inner_w = (panel_w - 2.0 * pad - CELL_GAP * (cols as f32 - 1.0)).max(0.0);
+    let inner_w = (panel_w - 2.0 * pad - cg * (cols as f32 - 1.0)).max(0.0);
     cell_w = (inner_w / cols as f32).max(1.0).min(cell_w);
-    let inner_h = (panel_h - bands_h - gap_y - CELL_GAP * (rows as f32 - 1.0)).max(1.0);
+    let inner_h = (panel_h - bands_h - gap_y - cg * (rows as f32 - 1.0)).max(1.0);
     cell_h = (inner_h / rows as f32).max(1.0).min(cell_h);
-    grid_h = rows as f32 * cell_h + (rows as f32 - 1.0) * CELL_GAP;
+    grid_h = rows as f32 * cell_h + (rows as f32 - 1.0) * cg;
 
     let panel_x = viewport_x + ((screen_w - panel_w) * 0.5).round();
     // Slightly above centre, same reading as the film strip. Clamp so a
@@ -174,8 +182,8 @@ pub fn grid_geometry(viewport: Rect, count: usize, cols: u32) -> TagsGridGeometr
     for i in 0..count {
         let col = (i % cols) as f32;
         let row = (i / cols) as f32;
-        let x = grid_x + col * (cell_w + CELL_GAP);
-        let y = grid_y + row * (cell_h + CELL_GAP);
+        let x = grid_x + col * (cell_w + cg);
+        let y = grid_y + row * (cell_h + cg);
         let label_h = LABEL_H.min(cell_h * 0.4).max(1.0).min(cell_h);
         let frame_pad = FRAME_PAD
             .min(cell_w * 0.2)
@@ -686,5 +694,20 @@ mod tests {
             None,
             "past the clamped outline"
         );
+    }
+
+    #[test]
+    fn cell_gap_shrinks_on_a_narrow_grid() {
+        assert_eq!(cell_gap(1920.0), CELL_GAP);
+        assert!(cell_gap(200.0) < CELL_GAP);
+        let g = grid_geometry([0.0, 0.0, 200.0, 160.0], 2, 4);
+        let a = g.cells[0].cell;
+        let b = g.cells[1].cell;
+        assert!(b[0] - (a[0] + a[2]) < CELL_GAP);
+        assert!(b[0] >= a[0] + a[2]);
+        for cell in &g.cells {
+            assert!(cell.cell[0] + cell.cell[2] <= 200.0 + 0.01);
+            assert!(cell.cell[1] + cell.cell[3] <= 160.0 + 0.01);
+        }
     }
 }

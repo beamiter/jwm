@@ -200,7 +200,12 @@ pub(crate) struct SectionSizes {
 impl SectionSizes {
     fn query_field_h(&self) -> f32 {
         if self.query.1 > 0.0 {
-            self.query.1 + QUERY_LEAD
+            let lead = if self.query.1 < QUERY_LEAD {
+                QUERY_LEAD.min(self.query.1 * 0.8).max(4.0)
+            } else {
+                QUERY_LEAD
+            };
+            self.query.1 + lead
         } else {
             0.0
         }
@@ -512,7 +517,10 @@ pub(crate) fn contents(
     if query_field_h > 0.0 {
         cy += gap;
         out.query_field = Some([x + pad, cy, inner_w, query_field_h]);
-        out.query_text = Some([x + pad + qpad, cy + QUERY_TEXT_LEAD]);
+        out.query_text = Some([
+            x + pad + qpad,
+            cy + QUERY_TEXT_LEAD.min(query_field_h * 0.35).max(1.0),
+        ]);
         cy += query_field_h;
     }
 
@@ -545,7 +553,12 @@ pub(crate) fn contents(
             let track_x = x + panel_w - pad * 0.5 - SCROLLBAR_W * 0.5;
             let track = [track_x, items_y, SCROLLBAR_W, items_h];
             let span = (scroll.visible as f32 / scroll.total as f32) * items_h;
-            let thumb_h = span.clamp(SCROLLBAR_MIN_THUMB.min(items_h), items_h);
+            let min_thumb = if items_h < 2.0 * SCROLLBAR_MIN_THUMB {
+                SCROLLBAR_MIN_THUMB.min(items_h * 0.4).max(6.0).min(items_h)
+            } else {
+                SCROLLBAR_MIN_THUMB.min(items_h)
+            };
+            let thumb_h = span.clamp(min_thumb, items_h);
             let last = scroll.total.saturating_sub(scroll.visible).max(1) as f32;
             let progress = (scroll.first as f32 / last).clamp(0.0, 1.0);
             out.scroll_track = Some(track);
@@ -962,6 +975,45 @@ mod tests {
         .scroll_thumb
         .unwrap();
         assert_eq!(thumb[3], SCROLLBAR_MIN_THUMB);
+    }
+
+    #[test]
+    fn a_short_list_keeps_a_thumb_that_fits_the_track() {
+        let s = sizes((40.0, 24.0), (0.0, 0.0), (300.0, 24.0), (0.0, 0.0));
+        let panel = [0.0, 0.0, 600.0, 80.0];
+        let layout = contents(
+            panel,
+            &s,
+            2,
+            None,
+            Some(Scroll {
+                first: 0,
+                visible: 1,
+                total: 20,
+            }),
+        );
+        let track = layout.scroll_track.unwrap();
+        let thumb = layout.scroll_thumb.unwrap();
+        assert!(thumb[3] < SCROLLBAR_MIN_THUMB);
+        assert!(thumb[3] >= 6.0);
+        assert!(thumb[3] <= track[3] + 0.001);
+    }
+
+    #[test]
+    fn a_tiny_query_texture_tightens_the_field_lead() {
+        let tight = sizes((40.0, 24.0), (80.0, 10.0), (0.0, 0.0), (0.0, 0.0));
+        let (_, h) = target_size(&tight, SCREEN_W, 0.0);
+        let natural = sizes((40.0, 24.0), (80.0, 22.0), (0.0, 0.0), (0.0, 0.0));
+        let (_, natural_h) = target_size(&natural, SCREEN_W, 0.0);
+        assert!(h < natural_h);
+        assert!(h > 2.0 * PAD + 24.0);
+        let (w, _) = target_size(&tight, SCREEN_W, 0.0);
+        let c = contents([0.0, 0.0, w, h], &tight, 0, None, None);
+        let field = c.query_field.unwrap();
+        let text = c.query_text.unwrap();
+        assert!(text[1] > field[1]);
+        assert!(text[1] < field[1] + field[3]);
+        assert!(text[1] - field[1] < QUERY_TEXT_LEAD);
     }
 
     #[test]

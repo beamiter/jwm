@@ -90,6 +90,13 @@ fn gap_y(screen_h: f32) -> f32 {
 }
 /// Gap between two cells.
 const CELL_GAP: f32 = 10.0;
+fn cell_gap(screen_w: f32) -> f32 {
+    if screen_w.is_finite() && screen_w > 0.0 && screen_w < 24.0 * CELL_GAP {
+        CELL_GAP.min(screen_w * 0.02).max(2.0)
+    } else {
+        CELL_GAP
+    }
+}
 /// Film margin above and below a cell's exposed frame, where the sprocket
 /// holes live. Proportional to the cell so the perforation keeps its look
 /// from a crowded 1024px screen up to a 4K one.
@@ -100,6 +107,13 @@ fn film_margin(cell_w: f32) -> f32 {
 }
 /// Height of the countdown track.
 const COUNTDOWN_H: f32 = 3.0;
+fn countdown_h(screen_h: f32) -> f32 {
+    if screen_h.is_finite() && screen_h > 0.0 && screen_h < 80.0 {
+        COUNTDOWN_H.min(screen_h * 0.02).max(1.0)
+    } else {
+        COUNTDOWN_H
+    }
+}
 
 /// Cell width bounds. The lower bound keeps a thumbnail readable on a small
 /// screen with many layouts; the upper one keeps a handful of layouts on a
@@ -144,7 +158,8 @@ pub fn strip_geometry(viewport: Rect, count: usize) -> StripGeometry {
     // run off the right of a 280px nested viewport.
     let outer = (screen_w * 0.94).min(1560.0).max(screen_w.min(320.0));
     let pad = panel_pad(screen_w, screen_h);
-    let inner = (outer - 2.0 * pad - CELL_GAP * (n - 1.0)).max(0.0);
+    let gap = cell_gap(screen_w);
+    let inner = (outer - 2.0 * pad - gap * (n - 1.0)).max(0.0);
     let fitted = (inner / n).max(1.0);
     let cell_w = fitted.min(CELL_W_MAX);
     let margin = film_margin(cell_w);
@@ -156,8 +171,9 @@ pub fn strip_geometry(viewport: Rect, count: usize) -> StripGeometry {
     let caption_h = text_band(CAPTION_H, screen_h);
     let hint_h = text_band(HINT_H, screen_h);
     let gap_y = gap_y(screen_h);
+    let cd_h = countdown_h(screen_h);
     let bands_h =
-        2.0 * pad + title_h + gap_y + gap_y + caption_h + COUNTDOWN_H + gap_y + hint_h;
+        2.0 * pad + title_h + gap_y + gap_y + caption_h + cd_h + gap_y + hint_h;
     let max_cell_h = (screen_h - bands_h).max(1.0);
     if cell_h > max_cell_h {
         cell_h = max_cell_h;
@@ -165,7 +181,7 @@ pub fn strip_geometry(viewport: Rect, count: usize) -> StripGeometry {
         frame_w = (frame_h / FRAME_ASPECT).min(frame_w).max(1.0);
     }
 
-    let strip_w = n * cell_w + (n - 1.0) * CELL_GAP;
+    let strip_w = n * cell_w + (n - 1.0) * gap;
     let panel_w = (strip_w + 2.0 * pad).min(screen_w);
     let panel_h = (bands_h + cell_h).min(screen_h);
 
@@ -183,7 +199,7 @@ pub fn strip_geometry(viewport: Rect, count: usize) -> StripGeometry {
 
     let mut cells = Vec::with_capacity(count);
     for i in 0..count {
-        let x = strip_x + i as f32 * (cell_w + CELL_GAP);
+        let x = strip_x + i as f32 * (cell_w + gap);
         cells.push(Cell {
             cell: [x, strip_y, cell_w, cell_h],
             frame: [x + margin, strip_y + margin, frame_w, frame_h],
@@ -197,11 +213,11 @@ pub fn strip_geometry(viewport: Rect, count: usize) -> StripGeometry {
         panel: [panel_x, panel_y, panel_w, panel_h],
         title: [panel_x + pad, panel_y + pad],
         caption_center: [panel_x + panel_w * 0.5, caption_y + caption_h * 0.5],
-        hint: [panel_x + pad, countdown_y + COUNTDOWN_H + gap_y],
+        hint: [panel_x + pad, countdown_y + cd_h + gap_y],
         strip: [strip_x, strip_y, strip_w, cell_h],
         sprockets: sprockets(strip_x, strip_y, strip_w, cell_h, margin),
         cells,
-        countdown: [strip_x, countdown_y, strip_w, COUNTDOWN_H],
+        countdown: [strip_x, countdown_y, strip_w, cd_h],
     }
 }
 
@@ -628,5 +644,20 @@ mod tests {
         assert_eq!(countdown_fill(track, 0.5), [10.0, 20.0, 100.0, 3.0]);
         assert_eq!(countdown_fill(track, 2.0)[2], 200.0);
         assert_eq!(countdown_fill(track, f32::NAN)[2], 0.0);
+    }
+
+    #[test]
+    fn cell_gap_shrinks_on_a_narrow_strip() {
+        assert_eq!(cell_gap(1920.0), CELL_GAP);
+        assert!(cell_gap(200.0) < CELL_GAP);
+        assert!(cell_gap(200.0) >= 2.0);
+        let g = strip_geometry([0.0, 0.0, 200.0, 160.0], 3);
+        assert!(g.cells[1].cell[0] - (g.cells[0].cell[0] + g.cells[0].cell[2]) < CELL_GAP);
+        assert!(g.cells[1].cell[0] >= g.cells[0].cell[0] + g.cells[0].cell[2]);
+        assert_eq!(countdown_h(1080.0), COUNTDOWN_H);
+        assert!(countdown_h(60.0) < COUNTDOWN_H);
+        let squat = strip_geometry([0.0, 0.0, 200.0, 60.0], 2);
+        assert!(squat.countdown[3] < COUNTDOWN_H);
+        assert!(squat.countdown[3] >= 1.0);
     }
 }

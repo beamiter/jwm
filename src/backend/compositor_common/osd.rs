@@ -228,7 +228,11 @@ pub(crate) fn slider_bar(card: [f32; 4], fill: f32) -> Option<([f32; 4], [f32; 4
     if bar_w < OSD_BAR_MIN_W {
         return None;
     }
-    let bar_h = OSD_BAR_H.min(h.max(0.0));
+    let bar_h = if h.is_finite() && h > 0.0 && h < 8.0 * OSD_BAR_H {
+        OSD_BAR_H.min(h * 0.12).max(2.0).min(h)
+    } else {
+        OSD_BAR_H.min(h.max(0.0))
+    };
     let bar_x = x + label_zone;
     let bar_y = y + (h - bar_h) * 0.5;
     let fill = if fill.is_finite() {
@@ -804,5 +808,15 @@ mod tests {
         let [lx, _, lw, _] = label_rect(slider, 400.0, 20.0, true);
         let (track, _) = slider_bar(slider, 0.5).unwrap();
         assert!(lx + lw <= track[0] + 0.01, "label must not cover the bar");
+    }
+
+    #[test]
+    fn a_short_osd_card_thins_the_slider_bar() {
+        let short = slider_bar([0.0, 0.0, SLIDER_CARD_WIDTH, 32.0], 0.5);
+        let (track, _) = short.expect("width still fits a bar");
+        assert!(track[3] < OSD_BAR_H);
+        assert!(track[3] >= 2.0);
+        let full = slider_bar([0.0, 0.0, SLIDER_CARD_WIDTH, OSD_CARD_HEIGHT], 0.5).unwrap();
+        assert_eq!(full.0[3], OSD_BAR_H);
     }
 }

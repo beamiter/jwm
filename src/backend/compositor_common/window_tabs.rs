@@ -115,6 +115,14 @@ pub const CELL_INSET_X: f32 = 2.0;
 pub const CELL_INSET_Y: f32 = 2.0;
 /// Gap between two neighbouring cells.
 pub const CELL_GAP: f32 = 4.0;
+fn cell_gap(bar: Rect) -> f32 {
+    let h = bar[3];
+    if h.is_finite() && h > 0.0 && h < 8.0 * CELL_GAP {
+        CELL_GAP.min(h * 0.2).max(1.0)
+    } else {
+        CELL_GAP
+    }
+}
 
 /// Air around the tooltip chip's one line of text.
 pub const TOOLTIP_PAD_X: f32 = 10.0;
@@ -187,11 +195,12 @@ pub fn cell_rect(bar: Rect, count: usize, index: usize) -> Option<Rect> {
     // Outer edges follow the track; inner edges share a gap with the
     // neighbour they face.
     let outer = inset_x + CELL_INSET_X;
-    let left = if index == 0 { outer } else { CELL_GAP * 0.5 };
+    let gap = cell_gap(bar);
+    let left = if index == 0 { outer } else { gap * 0.5 };
     let right = if index + 1 == count {
         outer
     } else {
-        CELL_GAP * 0.5
+        gap * 0.5
     };
     // A slot too narrow for both margins keeps half its width regardless.
     let margins = left + right;
@@ -1389,5 +1398,19 @@ mod tests {
             points.map(|(px, py)| tab_hover_at(&groups, px, py)),
             baseline
         );
+    }
+
+    #[test]
+    fn neighbouring_cells_close_their_gap_on_a_short_strip() {
+        let bar = [0.0, 0.0, 240.0, 16.0];
+        let a = cell_rect(bar, 2, 0).unwrap();
+        let b = cell_rect(bar, 2, 1).unwrap();
+        let gap = b[0] - (a[0] + a[2]);
+        assert!(gap < CELL_GAP);
+        assert!(gap > 0.0);
+        let tall = [0.0, 0.0, 240.0, 28.0];
+        let ta = cell_rect(tall, 2, 0).unwrap();
+        let tb = cell_rect(tall, 2, 1).unwrap();
+        assert!((tb[0] - (ta[0] + ta[2]) - CELL_GAP).abs() < 0.01);
     }
 }
