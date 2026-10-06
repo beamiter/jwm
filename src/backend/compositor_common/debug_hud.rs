@@ -210,6 +210,13 @@ impl HudLayout {
     ) -> Self {
         let (pad, gap, gutter, meter_h) = (ui.pad, ui.gap, ui.gutter, ui.meter_h);
         let (x, y, w, h) = card;
+        let pad = if w.is_finite() && w > 0.0 && w < 2.0 * pad {
+            pad.min(w * 0.12).max(2.0)
+        } else if !(w.is_finite() && w > 0.0) {
+            0.0
+        } else {
+            pad
+        };
         let content_w = (w - 2.0 * pad).max(0.0);
         let mut chip_pill_w = if chip.0 > 0.0 && chip.1 > 0.0 {
             chip.0 + 18.0

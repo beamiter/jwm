@@ -594,6 +594,7 @@ pub fn tooltip_rect(
     // would hang off. Narrow first, then the same clamp pins the chip to
     // the left edge.
     let chip_w = chip_w.min(screen_w);
+    let chip_h = chip_h.min(screen_h);
     let x = (cx + cw * 0.5 - chip_w * 0.5).clamp(0.0, (screen_w - chip_w).max(0.0));
     let above = by - TOOLTIP_GAP - chip_h;
     let y = if above >= 0.0 {
@@ -1094,13 +1095,11 @@ mod tests {
         // A screen shorter than the chip keeps it on the screen as a last
         // resort instead of returning an unpaintable rectangle.
         let [_, y, _, h] = tooltip_rect(bar, cell, chip_w, chip_h, 1920.0, 20.0).expect("chip");
-        assert_eq!([y, h], [0.0, chip_h]);
+        assert_eq!([y, h], [0.0, 20.0]);
     }
 
     /// A chip whose line was fitted against a wider screen than the one it
     /// lands on narrows to the screen instead of overflowing the right edge.
-    /// (The height is never narrowed: a short screen slides the chip, as the
-    /// 20px-tall case above pins.)
     #[test]
     fn a_chip_wider_than_the_screen_is_narrowed_to_it() {
         let bar: Rect = [0.0, 100.0, 400.0, 28.0];

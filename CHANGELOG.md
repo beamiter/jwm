@@ -44,7 +44,10 @@ monorepo use independent Semantic Versions.
   an empty search field draws no caret; the list thumb cannot outgrow its
   track; a tiny OSD shrinks its padding; row icons stay at x ≥ 0. Toasts on a
   nested output drop the 220px inner-width floor; the layout picker and tags
-  overview shrink their panel padding with the viewport.
+  overview shrink their panel padding with the viewport. Capture-hint and
+  REC/MIC pills shrink their padding on a cramped chip; the system-UI card
+  and a short HUD drop desktop padding instead of leaving a zero-width
+  column; a tab tooltip taller than the output is clipped to it.
 - X11 sessions without a compositor show the configured wallpaper on the root
   window (per-output fill/fit/stretch/center, `_XROOTPMAP_ID`) instead of a
   solid black desktop, and native window borders follow `appearance.ui_theme`

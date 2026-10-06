@@ -59,6 +59,39 @@ pub(crate) fn capture_hint_label(
     }
 }
 
+fn hint_pad_x(chip_w: f32) -> f32 {
+    if !(chip_w.is_finite() && chip_w > 0.0) {
+        return 0.0;
+    }
+    if chip_w < 2.0 * HINT_PAD_X {
+        HINT_PAD_X.min(chip_w * 0.12).max(2.0)
+    } else {
+        HINT_PAD_X
+    }
+}
+
+fn hint_pad_y(chip_h: f32) -> f32 {
+    if !(chip_h.is_finite() && chip_h > 0.0) {
+        return 0.0;
+    }
+    if chip_h < 2.0 * HINT_PAD_Y {
+        HINT_PAD_Y.min(chip_h * 0.2).max(1.0)
+    } else {
+        HINT_PAD_Y
+    }
+}
+
+fn hint_margin(screen_h: f32) -> f32 {
+    if !(screen_h.is_finite() && screen_h > 0.0) {
+        return 0.0;
+    }
+    if screen_h < 4.0 * HINT_MARGIN {
+        HINT_MARGIN.min(screen_h * 0.08).max(0.0)
+    } else {
+        HINT_MARGIN
+    }
+}
+
 /// Extra lift so the center hint clears the bottom-right REC / MIC stack.
 /// `rec_h` / `mic_h` are the chip heights drawn this frame (`None` when absent).
 #[must_use]
@@ -92,13 +125,16 @@ pub(crate) fn capture_hint_layout(
 ) -> CaptureHintLayout {
     let chip_w = (text_w + 2.0 * HINT_PAD_X).min(screen_w.max(0.0));
     let chip_h = (text_h + 2.0 * HINT_PAD_Y).min(screen_h.max(0.0));
+    let pad_x = hint_pad_x(chip_w);
+    let pad_y = hint_pad_y(chip_h);
+    let margin = hint_margin(screen_h);
     let x = ((screen_w - chip_w) * 0.5).clamp(0.0, (screen_w - chip_w).max(0.0));
-    let y = (screen_h - HINT_MARGIN - bottom_lift.max(0.0) - chip_h)
+    let y = (screen_h - margin - bottom_lift.max(0.0) - chip_h)
         .clamp(0.0, (screen_h - chip_h).max(0.0));
-    let text_w = text_w.min((chip_w - 2.0 * HINT_PAD_X).max(0.0));
-    let text_h = text_h.min((chip_h - 2.0 * HINT_PAD_Y).max(0.0));
-    let text_x = x + HINT_PAD_X.min(chip_w);
-    let text_y = y + HINT_PAD_Y.min(chip_h);
+    let text_w = text_w.min((chip_w - 2.0 * pad_x).max(0.0));
+    let text_h = text_h.min((chip_h - 2.0 * pad_y).max(0.0));
+    let text_x = x + pad_x.min(chip_w);
+    let text_y = y + pad_y.min(chip_h);
     CaptureHintLayout {
         chip: [x, y, chip_w, chip_h],
         text: [text_x, text_y, text_w, text_h],
@@ -171,5 +207,9 @@ mod tests {
         assert!(tall.chip[1] >= 0.0);
         assert!(tall.chip[1] + tall.chip[3] <= 20.0 + f32::EPSILON);
         assert!(tall.text[3] <= tall.chip[3]);
+        let cramped = capture_hint_layout(40.0, 24.0, 80.0, 20.0, 0.0);
+        assert!(cramped.text[2] > 0.0, "padding ate the label");
+        assert!(cramped.text[0] >= cramped.chip[0]);
+        assert!(cramped.text[0] + cramped.text[2] <= cramped.chip[0] + cramped.chip[2] + 1e-3);
     }
 }

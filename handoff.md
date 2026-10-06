@@ -71,6 +71,11 @@
 | 92 | 行图标不再画到 x<0 | `row_icon_frame` |
 | 93 | 窄输出 toast 不再坚持 220 内宽 | `min_text_width` |
 | 94 | layout/tags 面板 padding 随视口缩小 | `panel_pad` |
+| 95 | 窄 capture hint 内边距随芯片缩小 | `hint_pad_x` |
+| 96 | REC/MIC 内边距与边距随芯片/输出缩小 | `rec_pad_x` / `rec_margin` |
+| 97 | 系统面板 padding / 查询 inset / 屏边距随窄输出缩小 | `card_pad` / `query_inset` |
+| 98 | 标签条 tooltip 高度夹进屏幕 | `tooltip_rect` |
+| 99 | 矮 HUD 内边距随绘制卡缩小 | `HudLayout::placed` |
 
 **未做**：100 轮逐条独立 PR。toast 点击保持闭区间，与 X11 overlay shape 对齐。
 

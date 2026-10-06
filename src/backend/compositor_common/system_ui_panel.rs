@@ -33,10 +33,26 @@ pub(crate) type Size = (f32, f32);
 
 /// Padding between the card edge and its contents.
 const PAD: f32 = 30.0;
+fn card_pad(w: f32) -> f32 {
+    if !(w.is_finite() && w > 0.0) {
+        return 0.0;
+    }
+    PAD.min(w * 0.08).max(4.0).min(w * 0.2)
+}
 /// Vertical breathing room between bands.
 const GAP: f32 = 16.0;
 /// Inset of the query text inside its field.
 const QUERY_PAD: f32 = 12.0;
+fn query_inset(inner_w: f32) -> f32 {
+    if !(inner_w.is_finite() && inner_w > 0.0) {
+        return 0.0;
+    }
+    if inner_w < 2.0 * QUERY_PAD {
+        QUERY_PAD.min(inner_w * 0.08).max(2.0)
+    } else {
+        QUERY_PAD
+    }
+}
 /// Height the query field carries over its text.
 const QUERY_LEAD: f32 = 16.0;
 /// Baseline offset of the query text inside its field.
@@ -110,7 +126,12 @@ const ROW_ICON_PAD_Y: f32 = 2.0;
 /// unreachable.
 #[must_use]
 pub(crate) fn max_panel_width(screen_w: f32) -> f32 {
-    (screen_w.max(1.0) - SCREEN_MARGIN).max(1.0)
+    let margin = if screen_w.is_finite() && screen_w > 0.0 && screen_w < 2.0 * SCREEN_MARGIN {
+        SCREEN_MARGIN.min(screen_w * 0.2).max(0.0)
+    } else {
+        SCREEN_MARGIN
+    };
+    (screen_w.max(1.0) - margin).max(1.0)
 }
 
 /// Pixel budget available to each rasterized text line inside a card.
@@ -120,13 +141,15 @@ pub(crate) fn max_panel_width(screen_w: f32) -> f32 {
 /// a texture thousands of pixels wide.
 #[must_use]
 pub(crate) fn max_content_width(screen_w: f32) -> u32 {
-    (max_panel_width(screen_w) - 2.0 * PAD).max(0.0).floor() as u32
+    let panel = max_panel_width(screen_w);
+    (panel - 2.0 * card_pad(panel)).max(0.0).floor() as u32
 }
 
 /// The query text sits inside the content column's own inset field.
 #[must_use]
 pub(crate) fn max_query_text_width(screen_w: f32) -> u32 {
-    max_content_width(screen_w).saturating_sub((2.0 * QUERY_PAD) as u32)
+    let inner = max_content_width(screen_w) as f32;
+    max_content_width(screen_w).saturating_sub((2.0 * query_inset(inner)) as u32)
 }
 
 /// Where a windowed list currently sits, for the scroll indicator.
@@ -299,11 +322,13 @@ pub(crate) enum Hit {
 impl HitGeometry {
     #[must_use]
     pub(crate) fn new(panel: Rect, contents: &PanelContents, rows: usize) -> Self {
+        let pad = card_pad(panel[2]);
+        let bleed = SELECTION_BLEED.min(pad);
         let items = contents.items.and_then(|[_, y]| {
             (rows > 0 && contents.row_height > 0.0).then_some([
-                panel[0] + PAD - SELECTION_BLEED,
+                panel[0] + pad - bleed,
                 y,
-                (panel[2] - 2.0 * PAD + 2.0 * SELECTION_BLEED).max(0.0),
+                (panel[2] - 2.0 * pad + 2.0 * bleed).max(0.0),
                 contents.row_height * rows as f32 + 2.0 * TEXT_PAD,
             ])
         });
@@ -365,7 +390,7 @@ impl HitGeometry {
         // offset into it is what a row consumer (a slider bar at a known text
         // position) wants. Text-only panels reserve no column, so their offset
         // is unchanged.
-        let text_x = x - self.panel[0] - PAD - self.row_icons;
+        let text_x = x - self.panel[0] - card_pad(self.panel[2]) - self.row_icons;
         Hit::Item(row.min(self.rows.saturating_sub(1)), text_x)
     }
 
@@ -430,11 +455,13 @@ pub(crate) fn target_size(sizes: &SectionSizes, screen_w: f32, width_floor: f32)
     // Round up to the step before the floor is applied, so a panel that grows
     // by a few pixels a keystroke crosses a step at most once.
     let content = (content / WIDTH_STEP).ceil() * WIDTH_STEP;
-    let width = (content + 2.0 * PAD)
+    let cap = max_panel_width(screen_w);
+    let pad = card_pad(cap);
+    let width = (content + 2.0 * pad)
         .max(width_floor)
-        .min(max_panel_width(screen_w));
+        .min(cap);
 
-    let mut height = 2.0 * PAD + sizes.title.1;
+    let mut height = 2.0 * pad + sizes.title.1;
     let query_field_h = sizes.query_field_h();
     if query_field_h > 0.0 {
         height += GAP + query_field_h;
@@ -462,19 +489,22 @@ pub(crate) fn contents(
     scroll: Option<Scroll>,
 ) -> PanelContents {
     let [x, y, panel_w, _] = panel;
-    let inner_w = (panel_w - 2.0 * PAD).max(0.0);
+    let pad = card_pad(panel_w);
+    let bleed = SELECTION_BLEED.min(pad);
+    let inner_w = (panel_w - 2.0 * pad).max(0.0);
+    let qpad = query_inset(inner_w);
     let mut out = PanelContents {
-        title: [x + PAD, y + PAD],
+        title: [x + pad, y + pad],
         ..PanelContents::default()
     };
 
-    let mut cy = y + PAD + sizes.title.1;
+    let mut cy = y + pad + sizes.title.1;
 
     let query_field_h = sizes.query_field_h();
     if query_field_h > 0.0 {
         cy += GAP;
-        out.query_field = Some([x + PAD, cy, inner_w, query_field_h]);
-        out.query_text = Some([x + PAD + QUERY_PAD, cy + QUERY_TEXT_LEAD]);
+        out.query_field = Some([x + pad, cy, inner_w, query_field_h]);
+        out.query_text = Some([x + pad + qpad, cy + QUERY_TEXT_LEAD]);
         cy += query_field_h;
     }
 
@@ -485,7 +515,7 @@ pub(crate) fn contents(
         // The icon column sits between the card's padding and the text; the
         // whole block moves right by the reserved slot, so a panel without
         // icons (slot 0.0) lays out exactly as before.
-        out.items = Some([x + PAD + sizes.row_icons, items_y]);
+        out.items = Some([x + pad + sizes.row_icons, items_y]);
         out.row_icons = sizes.row_icons;
         if rows > 0 {
             // The list is one texture, so a row's height is only recoverable
@@ -494,9 +524,9 @@ pub(crate) fn contents(
             out.row_height = row_h;
             if let Some(sel) = selected.filter(|sel| *sel < rows) {
                 out.selection = Some([
-                    x + PAD - SELECTION_BLEED,
+                    x + pad - bleed,
                     items_y + sel as f32 * row_h,
-                    inner_w + 2.0 * SELECTION_BLEED,
+                    inner_w + 2.0 * bleed,
                     row_h + 2.0 * TEXT_PAD,
                 ]);
             }
@@ -504,7 +534,7 @@ pub(crate) fn contents(
         if let Some(scroll) = scroll.filter(Scroll::overflows) {
             // Centred in the right-hand padding, clear of the selection pill's
             // bleed, so the list itself keeps its full width.
-            let track_x = x + panel_w - PAD * 0.5 - SCROLLBAR_W * 0.5;
+            let track_x = x + panel_w - pad * 0.5 - SCROLLBAR_W * 0.5;
             let track = [track_x, items_y, SCROLLBAR_W, items_h];
             let span = (scroll.visible as f32 / scroll.total as f32) * items_h;
             let thumb_h = span.clamp(SCROLLBAR_MIN_THUMB.min(items_h), items_h);
@@ -523,11 +553,11 @@ pub(crate) fn contents(
 
     if sizes.hint.1 > 0.0 {
         cy += GAP;
-        out.hint = Some([x + PAD, cy]);
+        out.hint = Some([x + pad, cy]);
         // A rule only where there is a list to separate the footer *from*.
         // On a card that is title-and-hint alone it would just be a line.
         if items_h > 0.0 {
-            out.divider = Some([x + PAD, cy - GAP * 0.5, inner_w, DIVIDER_H]);
+            out.divider = Some([x + pad, cy - GAP * 0.5, inner_w, DIVIDER_H]);
         }
     }
 
@@ -693,7 +723,10 @@ mod tests {
             let (w, _) = target_size(&huge, screen_w, 5000.0);
             assert_eq!(w, max_panel_width(screen_w));
             assert!(w <= screen_w, "{w} overflowed a {screen_w} px output");
-            assert_eq!(max_content_width(screen_w), (w - 2.0 * PAD).max(0.0) as u32);
+            assert_eq!(
+                max_content_width(screen_w),
+                (w - 2.0 * card_pad(w)).max(0.0).floor() as u32
+            );
         }
     }
 
@@ -896,7 +929,7 @@ mod tests {
         let c = contents(seed, &s, 8, Some(0), None);
         let field = c.query_field.unwrap();
         assert!(field[0] + field[2] <= seed[2]);
-        assert_eq!(field[2], (seed[2] - 2.0 * PAD).max(0.0));
+        assert_eq!(field[2], (seed[2] - 2.0 * card_pad(seed[2])).max(0.0));
     }
 
     #[test]
@@ -913,7 +946,10 @@ mod tests {
                 total: 40,
             }),
         );
-        assert_eq!(c.query_field.unwrap()[2], 0.0);
+        assert_eq!(
+            c.query_field.unwrap()[2],
+            (4.0 - 2.0 * card_pad(4.0)).max(0.0)
+        );
         assert!(c.selection.unwrap()[2] >= 0.0);
         assert!(c.divider.unwrap()[2] >= 0.0);
     }
@@ -1245,5 +1281,18 @@ mod tests {
         let empty = query_caret_rect([10.0, 20.0, 0.0, 0.0], [20.0, 24.0], 40.0, 16.0);
         assert_eq!(empty[2], 0.0);
         assert_eq!(empty[3], 0.0);
+    }
+
+    #[test]
+    fn a_tiny_output_keeps_a_content_column() {
+        for screen_w in [80.0, 120.0, 200.0] {
+            let inner = max_content_width(screen_w);
+            assert!(inner > 0, "{screen_w}px left no column");
+            let panel = max_panel_width(screen_w);
+            assert!(panel <= screen_w);
+            assert!(2.0 * card_pad(panel) < panel);
+        }
+        let field_w = max_content_width(80.0) as f32;
+        assert!(query_inset(field_w) * 2.0 < field_w);
     }
 }

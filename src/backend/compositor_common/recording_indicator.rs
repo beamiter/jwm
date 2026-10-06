@@ -33,6 +33,39 @@ pub(crate) const CHIP_DOT_GAP: f32 = 8.0;
 /// audio recording share the bottom-right corner.
 pub(crate) const CHIP_STACK_GAP: f32 = 10.0;
 
+fn rec_pad_x(chip_w: f32) -> f32 {
+    if !(chip_w.is_finite() && chip_w > 0.0) {
+        return 0.0;
+    }
+    if chip_w < 2.0 * CHIP_PAD_X {
+        CHIP_PAD_X.min(chip_w * 0.12).max(2.0)
+    } else {
+        CHIP_PAD_X
+    }
+}
+
+fn rec_pad_y(chip_h: f32) -> f32 {
+    if !(chip_h.is_finite() && chip_h > 0.0) {
+        return 0.0;
+    }
+    if chip_h < 2.0 * CHIP_PAD_Y {
+        CHIP_PAD_Y.min(chip_h * 0.2).max(1.0)
+    } else {
+        CHIP_PAD_Y
+    }
+}
+
+fn rec_margin(screen: f32) -> f32 {
+    if !(screen.is_finite() && screen > 0.0) {
+        return 0.0;
+    }
+    if screen < 4.0 * CHIP_MARGIN {
+        CHIP_MARGIN.min(screen * 0.08).max(0.0)
+    } else {
+        CHIP_MARGIN
+    }
+}
+
 /// The recording red used by the REC / MIC chips. The interactive crop cue
 /// shares the screenshot snap-preview blue instead — these chips stay red so
 /// "recording is live" remains distinct from "selecting a source".
@@ -109,25 +142,29 @@ pub(crate) fn recording_indicator_layout(
     let natural_h = (text_h + 2.0 * CHIP_PAD_Y).max(CHIP_DOT + 2.0 * CHIP_PAD_Y);
     let chip_w = natural_w.min(screen_w);
     let chip_h = natural_h.min(screen_h);
-    let x = (screen_w - CHIP_MARGIN - chip_w).max(0.0);
-    let y = (screen_h - CHIP_MARGIN - chip_h).max(0.0);
-    let inner_w = (chip_w - 2.0 * CHIP_PAD_X).max(0.0);
+    let pad_x = rec_pad_x(chip_w);
+    let pad_y = rec_pad_y(chip_h);
+    let margin_x = rec_margin(screen_w);
+    let margin_y = rec_margin(screen_h);
+    let x = (screen_w - margin_x - chip_w).max(0.0);
+    let y = (screen_h - margin_y - chip_h).max(0.0);
+    let inner_w = (chip_w - 2.0 * pad_x).max(0.0);
     let (dot_w, text_draw_w, text_x_off) = if inner_w >= CHIP_DOT + CHIP_DOT_GAP {
         (
             CHIP_DOT.min(chip_h),
             (inner_w - CHIP_DOT - CHIP_DOT_GAP).min(text_w),
-            CHIP_PAD_X + CHIP_DOT + CHIP_DOT_GAP,
+            pad_x + CHIP_DOT + CHIP_DOT_GAP,
         )
     } else if inner_w >= CHIP_DOT * 0.5 {
-        (inner_w.min(chip_h).min(CHIP_DOT), 0.0, CHIP_PAD_X)
+        (inner_w.min(chip_h).min(CHIP_DOT), 0.0, pad_x)
     } else {
-        (0.0, inner_w.min(text_w), CHIP_PAD_X)
+        (0.0, inner_w.min(text_w), pad_x)
     };
-    let text_draw_h = text_h.min((chip_h - 2.0 * CHIP_PAD_Y).max(0.0)).min(chip_h);
+    let text_draw_h = text_h.min((chip_h - 2.0 * pad_y).max(0.0)).min(chip_h);
     RecordingIndicatorLayout {
         chip: [x, y, chip_w, chip_h],
         dot: [
-            x + CHIP_PAD_X,
+            x + pad_x,
             y + (chip_h - dot_w) / 2.0,
             dot_w,
             dot_w,
@@ -297,6 +334,10 @@ mod tests {
         assert!(tiny.chip[3] <= 8.0);
         assert!(tiny.text[2] <= tiny.chip[2]);
         assert!(tiny.dot[2] <= tiny.chip[2]);
+        let cramped = recording_indicator_layout(36.0, 28.0, 60.0, 19.0);
+        assert!(cramped.text[2] + cramped.dot[2] <= cramped.chip[2] + 1e-3);
+        assert!(cramped.text[0] >= cramped.chip[0]);
+        assert!(cramped.dot[0] >= cramped.chip[0]);
     }
 
     #[test]
