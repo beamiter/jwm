@@ -58,6 +58,14 @@ pub const SELECTED_SCALE: f32 = 1.12;
 
 /// Padding between the panel edge and its contents.
 const PAD: f32 = 26.0;
+fn panel_pad(screen_w: f32, screen_h: f32) -> f32 {
+    let cap = screen_w.min(screen_h);
+    if cap.is_finite() && cap > 0.0 {
+        PAD.min(cap * 0.08).max(4.0)
+    } else {
+        PAD
+    }
+}
 /// Band reserved for the title line.
 const TITLE_H: f32 = 30.0;
 /// Band reserved for the selected layout's name, under the strip.
@@ -121,7 +129,8 @@ pub fn strip_geometry(viewport: Rect, count: usize) -> StripGeometry {
     // 320px floor on a narrower output — that is how the panel used to
     // run off the right of a 280px nested viewport.
     let outer = (screen_w * 0.94).min(1560.0).max(screen_w.min(320.0));
-    let inner = (outer - 2.0 * PAD - CELL_GAP * (n - 1.0)).max(0.0);
+    let pad = panel_pad(screen_w, screen_h);
+    let inner = (outer - 2.0 * pad - CELL_GAP * (n - 1.0)).max(0.0);
     let fitted = (inner / n).max(1.0);
     let cell_w = fitted.min(CELL_W_MAX);
     let margin = film_margin(cell_w);
@@ -130,7 +139,7 @@ pub fn strip_geometry(viewport: Rect, count: usize) -> StripGeometry {
     let mut cell_h = frame_h + 2.0 * margin;
 
     let bands_h =
-        2.0 * PAD + TITLE_H + GAP_Y + GAP_Y + CAPTION_H + COUNTDOWN_H + GAP_Y + HINT_H;
+        2.0 * pad + TITLE_H + GAP_Y + GAP_Y + CAPTION_H + COUNTDOWN_H + GAP_Y + HINT_H;
     let max_cell_h = (screen_h - bands_h).max(1.0);
     if cell_h > max_cell_h {
         cell_h = max_cell_h;
@@ -139,7 +148,7 @@ pub fn strip_geometry(viewport: Rect, count: usize) -> StripGeometry {
     }
 
     let strip_w = n * cell_w + (n - 1.0) * CELL_GAP;
-    let panel_w = (strip_w + 2.0 * PAD).min(screen_w);
+    let panel_w = (strip_w + 2.0 * pad).min(screen_w);
     let panel_h = (bands_h + cell_h).min(screen_h);
 
     let panel_x = viewport_x + ((screen_w - panel_w) * 0.5).round();
@@ -151,8 +160,8 @@ pub fn strip_geometry(viewport: Rect, count: usize) -> StripGeometry {
             .round()
             .clamp(0.0, (screen_h - panel_h).max(0.0));
 
-    let strip_x = panel_x + PAD;
-    let strip_y = panel_y + PAD + TITLE_H + GAP_Y;
+    let strip_x = panel_x + pad;
+    let strip_y = panel_y + pad + TITLE_H + GAP_Y;
 
     let mut cells = Vec::with_capacity(count);
     for i in 0..count {
@@ -168,9 +177,9 @@ pub fn strip_geometry(viewport: Rect, count: usize) -> StripGeometry {
 
     StripGeometry {
         panel: [panel_x, panel_y, panel_w, panel_h],
-        title: [panel_x + PAD, panel_y + PAD],
+        title: [panel_x + pad, panel_y + pad],
         caption_center: [panel_x + panel_w * 0.5, caption_y + CAPTION_H * 0.5],
-        hint: [panel_x + PAD, countdown_y + COUNTDOWN_H + GAP_Y],
+        hint: [panel_x + pad, countdown_y + COUNTDOWN_H + GAP_Y],
         strip: [strip_x, strip_y, strip_w, cell_h],
         sprockets: sprockets(strip_x, strip_y, strip_w, cell_h, margin),
         cells,

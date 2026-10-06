@@ -69,6 +69,8 @@
 | 90 | 滚动条拇指夹进轨道 | `scroll_thumb_at` |
 | 91 | 窄 OSD 内边距随卡宽缩小 | `card_pad` |
 | 92 | 行图标不再画到 x<0 | `row_icon_frame` |
+| 93 | 窄输出 toast 不再坚持 220 内宽 | `min_text_width` |
+| 94 | layout/tags 面板 padding 随视口缩小 | `panel_pad` |
 
 **未做**：100 轮逐条独立 PR。toast 点击保持闭区间，与 X11 overlay shape 对齐。
 

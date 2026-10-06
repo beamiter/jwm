@@ -47,6 +47,14 @@ pub struct TagsGridGeometry {
 
 /// Padding between the panel edge and its contents.
 const PAD: f32 = 26.0;
+fn panel_pad(screen_w: f32, screen_h: f32) -> f32 {
+    let cap = screen_w.min(screen_h);
+    if cap.is_finite() && cap > 0.0 {
+        PAD.min(cap * 0.08).max(4.0)
+    } else {
+        PAD
+    }
+}
 /// Band reserved for the title line.
 const TITLE_H: f32 = 30.0;
 /// Band reserved for the selected tag's name, under the grid.
@@ -106,15 +114,16 @@ pub fn grid_geometry(viewport: Rect, count: usize, cols: u32) -> TagsGridGeometr
 
     // Never honour a 320px / CELL_W_MIN floor on a narrower nested output —
     // padding plus a min cell used to push the panel off the right edge.
+    let pad = panel_pad(screen_w, screen_h);
     let outer = (screen_w * 0.94).min(1560.0).max(screen_w.min(320.0));
-    let inner = (outer - 2.0 * PAD - CELL_GAP * (cols as f32 - 1.0)).max(0.0);
+    let inner = (outer - 2.0 * pad - CELL_GAP * (cols as f32 - 1.0)).max(0.0);
     let fitted = (inner / cols as f32).max(1.0);
     let mut cell_w = fitted.min(CELL_W_MAX);
     let mut cell_h = cell_w / aspect;
 
     // The grid must also leave room for the text bands; on short screens the
     // height, not the width, decides the cell size.
-    let bands_h = 2.0 * PAD + TITLE_H + GAP_Y + CAPTION_H + GAP_Y + HINT_H;
+    let bands_h = 2.0 * pad + TITLE_H + GAP_Y + CAPTION_H + GAP_Y + HINT_H;
     let available_h = (screen_h - bands_h - CELL_GAP * (rows as f32 - 1.0) - GAP_Y).max(1.0);
     let max_cell_h = (available_h / rows as f32).max(1.0);
     if cell_h > max_cell_h {
@@ -124,9 +133,9 @@ pub fn grid_geometry(viewport: Rect, count: usize, cols: u32) -> TagsGridGeometr
 
     let grid_w = cols as f32 * cell_w + (cols as f32 - 1.0) * CELL_GAP;
     let mut grid_h = rows as f32 * cell_h + (rows as f32 - 1.0) * CELL_GAP;
-    let panel_w = (grid_w + 2.0 * PAD).min(screen_w);
+    let panel_w = (grid_w + 2.0 * pad).min(screen_w);
     let panel_h = (bands_h + grid_h + GAP_Y).min(screen_h);
-    let inner_w = (panel_w - 2.0 * PAD - CELL_GAP * (cols as f32 - 1.0)).max(0.0);
+    let inner_w = (panel_w - 2.0 * pad - CELL_GAP * (cols as f32 - 1.0)).max(0.0);
     cell_w = (inner_w / cols as f32).max(1.0).min(cell_w);
     let inner_h = (panel_h - bands_h - GAP_Y - CELL_GAP * (rows as f32 - 1.0)).max(1.0);
     cell_h = (inner_h / rows as f32).max(1.0).min(cell_h);
@@ -140,8 +149,8 @@ pub fn grid_geometry(viewport: Rect, count: usize, cols: u32) -> TagsGridGeometr
             .round()
             .clamp(0.0, (screen_h - panel_h).max(0.0));
 
-    let grid_x = panel_x + PAD;
-    let grid_y = panel_y + PAD + TITLE_H + GAP_Y;
+    let grid_x = panel_x + pad;
+    let grid_y = panel_y + pad + TITLE_H + GAP_Y;
 
     let mut cells = Vec::with_capacity(count);
     for i in 0..count {
@@ -170,9 +179,9 @@ pub fn grid_geometry(viewport: Rect, count: usize, cols: u32) -> TagsGridGeometr
 
     TagsGridGeometry {
         panel: [panel_x, panel_y, panel_w, panel_h],
-        title: [panel_x + PAD, panel_y + PAD],
+        title: [panel_x + pad, panel_y + pad],
         caption_center: [panel_x + panel_w * 0.5, caption_y + CAPTION_H * 0.5],
-        hint: [panel_x + PAD, hint_y],
+        hint: [panel_x + pad, hint_y],
         cells,
         cols: cols as u32,
         rows: rows as u32,

@@ -26,6 +26,20 @@ const MAX_BODY_LINES: usize = 3;
 /// fitting before upload avoids allocating a giant texture only to draw it
 /// outside a 440 px card.
 pub(crate) const MAX_TEXT_WIDTH_PX: u32 = 440;
+/// Ordinary floor for the inner text column. Nested outputs may go lower.
+pub(crate) const MIN_TEXT_WIDTH_PX: f32 = 220.0;
+
+/// Inner text width floor for this output: 220 px on a desktop, down to 40 px
+/// on a nested viewport that cannot honour the desktop floor.
+#[must_use]
+pub(crate) fn min_text_width(screen_w: f32) -> f32 {
+    let screen_w = if screen_w.is_finite() {
+        screen_w.max(0.0)
+    } else {
+        0.0
+    };
+    MIN_TEXT_WIDTH_PX.min((screen_w - 48.0).max(40.0))
+}
 
 /// Action buttons a card shows at most: one row of chips must stay readable.
 pub(crate) const MAX_TOAST_ACTIONS: usize = 3;
@@ -1340,6 +1354,9 @@ mod tests {
         assert!(stack_room(0.0, 80.0, 200.0));
         assert!(!stack_room(150.0, 80.0, 200.0));
         assert!(!stack_room(0.0, 80.0, f32::NAN));
+        assert_eq!(min_text_width(1920.0), MIN_TEXT_WIDTH_PX);
+        assert!(min_text_width(200.0) < MIN_TEXT_WIDTH_PX);
+        assert_eq!(min_text_width(20.0), 40.0);
     }
 
     #[test]

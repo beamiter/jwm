@@ -8013,7 +8013,7 @@ impl WaylandCompositor {
                     .max(body_w)
                     .max(toast::action_row_width(button_widths))
                     .clamp(
-                        220.0,
+                        toast::min_text_width(self.screen_w as f32),
                         crate::backend::compositor_common::toast::MAX_TEXT_WIDTH_PX as f32,
                     );
                 let target_w = content_w + pad_left + pad;

@@ -42,7 +42,9 @@ monorepo use independent Semantic Versions.
   stay on screen. The screenshot toolbar wraps to a third row when two
   still overflow a narrow output. Annotation labels clamp onto the output;
   an empty search field draws no caret; the list thumb cannot outgrow its
-  track; a tiny OSD shrinks its padding; row icons stay at x ≥ 0.
+  track; a tiny OSD shrinks its padding; row icons stay at x ≥ 0. Toasts on a
+  nested output drop the 220px inner-width floor; the layout picker and tags
+  overview shrink their panel padding with the viewport.
 - X11 sessions without a compositor show the configured wallpaper on the root
   window (per-output fill/fit/stretch/center, `_XROOTPMAP_ID`) instead of a
   solid black desktop, and native window borders follow `appearance.ui_theme`
